@@ -1,8 +1,8 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Capabilities for the main window",
-  "windows": ["main"],
+  "description": "Capabilities for the main and overlay windows",
+  "windows": ["main", "ask"],
   "permissions": [
     "core:default",
     "core:window:allow-start-dragging",
@@ -11,7 +11,12 @@
     "core:window:allow-unmaximize",
     "core:window:allow-toggle-maximize",
     "core:window:allow-close",
+    "core:window:allow-hide",
+    "core:window:allow-show",
+    "core:window:allow-set-focus",
     "core:window:allow-is-maximized",
-    "opener:default"
+    "opener:default",
+    "dialog:default",
+    "notification:default"
   ]
 }

@@ -1,0 +1,23 @@
+[package]
+name = "loom-setup"
+version = "0.1.0"
+edition = "2021"
+description = "Loom Setup — bespoke glass installer"
+
+[lib]
+name = "loom_setup_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-dialog = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+zip = { version = "4", default-features = false, features = ["deflate"] }
+
+[target.'cfg(windows)'.dependencies]
+winreg = "0.55"

@@ -1,0 +1,115 @@
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ". -> target"
+
+      - name: Install frontend deps
+        run: bun install --frozen-lockfile
+
+      - name: Build Loom (portable)
+        run: bun run tauri build --no-bundle
+
+      # Optional: set WINDOWS_CERT_BASE64 + WINDOWS_CERT_PASSWORD to sign.
+      # Signing happens before the payload is hashed so the manifest matches.
+      - name: Sign the app binary (optional)
+        if: ${{ secrets.WINDOWS_CERT_BASE64 != '' }}
+        shell: pwsh
+        run: |
+          $pfx = Join-Path $env:RUNNER_TEMP "loom.pfx"
+          [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String("${{ secrets.WINDOWS_CERT_BASE64 }}"))
+          $signtool = Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\bin\*\x64\signtool.exe" |
+            Sort-Object FullName -Descending | Select-Object -First 1
+          & $signtool.FullName sign /f $pfx /p "${{ secrets.WINDOWS_CERT_PASSWORD }}" `
+            /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 "target\release\loom.exe"
+          Remove-Item $pfx -Force
+
+      - name: Package payload
+        run: node scripts/make-payload.mjs
+
+      - name: Build Setup (portable, payload embedded)
+        run: |
+          cd setup
+          bun install --frozen-lockfile
+          bun run tauri build --no-bundle
+
+      - name: Sign the installer (optional)
+        if: ${{ secrets.WINDOWS_CERT_BASE64 != '' }}
+        shell: pwsh
+        run: |
+          $pfx = Join-Path $env:RUNNER_TEMP "loom.pfx"
+          [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String("${{ secrets.WINDOWS_CERT_BASE64 }}"))
+          $signtool = Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\bin\*\x64\signtool.exe" |
+            Sort-Object FullName -Descending | Select-Object -First 1
+          & $signtool.FullName sign /f $pfx /p "${{ secrets.WINDOWS_CERT_PASSWORD }}" `
+            /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 "target\release\loom-setup.exe"
+          Remove-Item $pfx -Force
+
+      - name: Collect artifacts + manifest
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path release | Out-Null
+          $tag = "${{ github.ref_name }}"
+          $version = $tag.TrimStart("v")
+
+          Copy-Item "setup\src-tauri\payload.zip" "release\loom-$tag-payload.zip" -Force
+          Copy-Item "target\release\loom-setup.exe" "release\Loom-Setup-$tag.exe" -Force
+
+          $zip = "release\loom-$tag-payload.zip"
+          $hash = (Get-FileHash $zip -Algorithm SHA256).Hash.ToLower()
+
+          $manifest = [ordered]@{
+            version  = $version
+            notes    = "Loom $tag"
+            payload  = "https://github.com/aaen-studios/loom/releases/download/$tag/loom-$tag-payload.zip"
+            sha256   = $hash
+          }
+
+          # Sign the payload when the signing key is configured. The matching
+          # public key is compiled into the app (crates/loom-core/src/updater.rs).
+          if ("${{ secrets.LOOM_MINISIGN_KEY }}" -ne "") {
+            $minisign = "minisign\minisign-win64\x86_64\minisign.exe"
+            if (-not (Test-Path $minisign)) {
+              Invoke-WebRequest -Uri "https://github.com/jedisct1/minisign/releases/download/0.12/minisign-0.12-win64.zip" -OutFile "minisign.zip"
+              Expand-Archive -Path "minisign.zip" -DestinationPath "minisign" -Force
+            }
+            Set-Content -Path "loom-release.key" -Value "${{ secrets.LOOM_MINISIGN_KEY }}" -NoNewline
+            & $minisign -S -s "loom-release.key" -m $zip -c "loom $tag payload"
+            Remove-Item "loom-release.key" -Force
+            $manifest.signature = (Get-Content -Raw "$zip.minisig").Trim()
+            Write-Host "payload signed"
+          } else {
+            Write-Host "LOOM_MINISIGN_KEY not set - publishing without a signature"
+          }
+
+          $manifest | ConvertTo-Json | Set-Content "release\update.json" -Encoding UTF8
+
+          Get-ChildItem release | Select-Object Name, Length
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            release/update.json
+            release/*payload.zip
+            release/Loom-Setup-*.exe
+          generate_release_notes: true

@@ -24,14 +24,27 @@ jobs:
       - name: Install frontend deps
         run: bun install --frozen-lockfile
 
+      - name: Encoding check
+        run: node scripts/check-encoding.mjs
+
       - name: Typecheck
         run: bun run typecheck
+
+      - name: Frontend tests
+        run: bun run test
 
       - name: Build frontend
         run: bun run build
 
+      - name: Setup app typecheck + build
+        run: |
+          cd setup
+          bun install --frozen-lockfile
+          bun run typecheck
+          bun run build
+
       - name: Test engine
         run: cargo test -p loom-core
 
-      - name: Check app crate
-        run: cargo check -p loom
+      - name: Check app crates
+        run: cargo check -p loom -p loom-setup

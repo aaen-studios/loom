@@ -1,27 +1,41 @@
 import { create } from "zustand";
 import type { AppConfig, BackgroundConfig, Theme } from "../types";
-import { call } from "../lib/tauri";
+import { ipc } from "../lib/ipc";
 
 export const DEFAULT_CONFIG: AppConfig = {
   schemaVersion: 1,
-  theme: "light",
+  theme: "dark",
   background: {
     kind: "builtin",
-    preset: "aurora",
+    preset: "rei",
     path: null,
-    dim: 26,
+    dim: 30,
     blur: 0,
   },
   sidebarCollapsed: false,
+  providers: {},
+  personas: [],
+  mcpServers: {},
+  chat: {
+    providerId: null,
+    modelId: null,
+    variant: null,
+    lite: null,
+    imageModel: null,
+    embeddingModel: null,
+    permissionMode: "ask",
+    historyLimit: 40,
+    maxOutputTokens: 8192,
+  },
 };
 
 interface SettingsState {
   config: AppConfig;
   loaded: boolean;
   load: () => Promise<void>;
+  applyRemote: (config: AppConfig) => void;
   setTheme: (theme: Theme) => void;
   setBackground: (patch: Partial<BackgroundConfig>) => void;
-  toggleSidebar: () => void;
 }
 
 let saveTimer: number | undefined;
@@ -31,7 +45,7 @@ function scheduleSave(get: () => SettingsState): void {
   if (saveTimer !== undefined) window.clearTimeout(saveTimer);
   saveTimer = window.setTimeout(() => {
     saveTimer = undefined;
-    void call("save_config", { config: get().config });
+    void ipc.saveConfig(get().config);
   }, 250);
 }
 
@@ -40,9 +54,11 @@ export const useSettings = create<SettingsState>((set, get) => ({
   loaded: false,
 
   load: async () => {
-    const remote = await call<AppConfig>("get_config");
+    const remote = await ipc.getConfig();
     set({ config: remote ?? DEFAULT_CONFIG, loaded: true });
   },
+
+  applyRemote: (config) => set({ config }),
 
   setTheme: (theme) => {
     set((state) => ({ config: { ...state.config, theme } }));
@@ -54,16 +70,6 @@ export const useSettings = create<SettingsState>((set, get) => ({
       config: {
         ...state.config,
         background: { ...state.config.background, ...patch },
-      },
-    }));
-    scheduleSave(get);
-  },
-
-  toggleSidebar: () => {
-    set((state) => ({
-      config: {
-        ...state.config,
-        sidebarCollapsed: !state.config.sidebarCollapsed,
       },
     }));
     scheduleSave(get);

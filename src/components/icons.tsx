@@ -149,6 +149,93 @@ export function GitBranchIcon(props: IconProps) {
   );
 }
 
+export function CheckIcon(props: IconProps) {
+  return (
+    <Icon {...props} strokeWidth={2}>
+      <path d="M5 12.5l4.5 4.5L19 7.5" />
+    </Icon>
+  );
+}
+
+export function PersonIcon(props: IconProps) {
+  return (
+    <Icon {...props}>
+      <circle cx="12" cy="8.5" r="3.6" />
+      <path d="M5 19.5a7 7 0 0 1 14 0" />
+    </Icon>
+  );
+}
+
+export function StopIcon(props: IconProps) {
+  return (
+    <Icon {...props} strokeWidth={1.6}>
+      <rect x="7" y="7" width="10" height="10" rx="2.4" fill="currentColor" stroke="none" />
+    </Icon>
+  );
+}
+
+export function TrashIcon(props: IconProps) {
+  return (
+    <Icon {...props}>
+      <path d="M5.5 7.5h13M10 7.5V5.8A1.3 1.3 0 0 1 11.3 4.5h1.4A1.3 1.3 0 0 1 14 5.8v1.7M8 7.5l.7 10a1.4 1.4 0 0 0 1.4 1.3h3.8a1.4 1.4 0 0 0 1.4-1.3l.7-10" />
+    </Icon>
+  );
+}
+
+export function RefreshIcon(props: IconProps) {
+  return (
+    <Icon {...props}>
+      <path d="M20 11.5a8 8 0 1 0-2.4 5.7" />
+      <path d="M20 5.5v6h-6" />
+    </Icon>
+  );
+}
+
+export function KeyIcon(props: IconProps) {
+  return (
+    <Icon {...props}>
+      <circle cx="8" cy="14.5" r="3.5" />
+      <path d="M10.6 11.9l7.4-7.4M15 7.5l2.2 2.2M17.2 5.3l2.2 2.2" />
+    </Icon>
+  );
+}
+
+export function BrainIcon(props: IconProps) {
+  return (
+    <Icon {...props}>
+      <path d="M9.5 4.8a3 3 0 0 0-3 3 3 3 0 0 0-1.4 5.4A3 3 0 0 0 7.6 18a2.8 2.8 0 0 0 4.9-1.6V7.8a3 3 0 0 0-3-3z" />
+      <path d="M14.5 4.8a3 3 0 0 1 3 3 3 3 0 0 1 1.4 5.4A3 3 0 0 1 16.4 18a2.8 2.8 0 0 1-4.9-1.6" />
+    </Icon>
+  );
+}
+
+export function FileIcon(props: IconProps) {
+  return (
+    <Icon {...props}>
+      <path d="M13.5 3.5H7.5A2 2 0 0 0 5.5 5.5v13a2 2 0 0 0 2 2h9a2 2 0 0 0 2-2V8.5z" />
+      <path d="M13.5 3.5v5h5" />
+    </Icon>
+  );
+}
+
+export function WrenchIcon(props: IconProps) {
+  return (
+    <Icon {...props}>
+      <path d="M14.7 6.3a4.5 4.5 0 0 1 5.9 5.9l-8.4 8.4a2.2 2.2 0 0 1-3.1 0l-2.8-2.8a2.2 2.2 0 0 1 0-3.1z" />
+      <path d="M6.2 5.2l3.1 3.1" />
+    </Icon>
+  );
+}
+
+export function DownloadIcon(props: IconProps) {
+  return (
+    <Icon {...props}>
+      <path d="M12 4.5v10M7.5 10.5L12 15l4.5-4.5" />
+      <path d="M5 19.5h14" />
+    </Icon>
+  );
+}
+
 /** Brand glyph: three woven threads. */
 export function LoomMark(props: IconProps) {
   return (

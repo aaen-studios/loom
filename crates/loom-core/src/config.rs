@@ -1,15 +1,18 @@
 //! App configuration (`~/.loom/config.json`).
 //!
-//! The schema is intentionally forward compatible: every field has a default,
-//! unknown fields are preserved on rewrite, and `schemaVersion` gates future
-//! migrations. Provider/model configuration joins this file in M1.
+//! Forward compatible by design: every field has a default, unknown fields are
+//! preserved on rewrite, and `schemaVersion` gates future migrations. Provider
+//! and persona configuration lives here; API keys do not (see `secrets`).
 
+use std::collections::BTreeMap;
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::fsutil::atomic_write;
+use crate::persona::Persona;
+use crate::provider::ProviderConfig;
 use crate::{paths, Error, Result};
 
 pub const SCHEMA_VERSION: u32 = 1;
@@ -21,6 +24,10 @@ pub struct AppConfig {
     pub theme: Theme,
     pub background: BackgroundConfig,
     pub sidebar_collapsed: bool,
+    pub providers: BTreeMap<String, ProviderConfig>,
+    pub personas: Vec<Persona>,
+    pub mcp_servers: BTreeMap<String, crate::mcp::McpServerConfig>,
+    pub chat: ChatDefaults,
     #[serde(flatten)]
     pub extra: serde_json::Map<String, Value>,
 }
@@ -29,9 +36,13 @@ impl Default for AppConfig {
     fn default() -> Self {
         Self {
             schema_version: SCHEMA_VERSION,
-            theme: Theme::Light,
+            theme: Theme::Dark,
             background: BackgroundConfig::default(),
             sidebar_collapsed: false,
+            providers: BTreeMap::new(),
+            personas: Vec::new(),
+            mcp_servers: BTreeMap::new(),
+            chat: ChatDefaults::default(),
             extra: serde_json::Map::new(),
         }
     }
@@ -40,8 +51,8 @@ impl Default for AppConfig {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Theme {
-    #[default]
     Light,
+    #[default]
     Dark,
 }
 
@@ -72,10 +83,74 @@ impl Default for BackgroundConfig {
     fn default() -> Self {
         Self {
             kind: BackgroundKind::Builtin,
-            preset: "aurora".to_string(),
+            preset: "rei".to_string(),
             path: None,
-            dim: 26,
+            dim: 30,
             blur: 0,
+        }
+    }
+}
+
+/// A `provider/model` pair.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelRef {
+    pub provider_id: String,
+    pub model_id: String,
+}
+
+impl ModelRef {
+    pub fn new(provider_id: impl Into<String>, model_id: impl Into<String>) -> Self {
+        Self {
+            provider_id: provider_id.into(),
+            model_id: model_id.into(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum PermissionMode {
+    /// Confirm every tool call.
+    #[default]
+    Ask,
+    /// Read-only tools run silently; anything that writes or executes asks.
+    AutoReadOnly,
+    /// Everything runs without prompting.
+    AutoAll,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct ChatDefaults {
+    pub provider_id: Option<String>,
+    pub model_id: Option<String>,
+    pub variant: Option<String>,
+    /// Cheap model used for chat titles and small background jobs.
+    pub lite: Option<ModelRef>,
+    /// Model used by the `generate_image` tool (chat provider is used).
+    pub image_model: Option<String>,
+    /// Embedding model used by the workspace index.
+    pub embedding_model: Option<String>,
+    /// Global default for the tool permission mode (per-chat override exists).
+    pub permission_mode: PermissionMode,
+    /// How many past messages to send as context.
+    pub history_limit: u32,
+    pub max_output_tokens: u32,
+}
+
+impl Default for ChatDefaults {
+    fn default() -> Self {
+        Self {
+            provider_id: None,
+            model_id: None,
+            variant: None,
+            lite: None,
+            image_model: None,
+            embedding_model: None,
+            permission_mode: PermissionMode::Ask,
+            history_limit: 40,
+            max_output_tokens: 8_192,
         }
     }
 }
@@ -102,8 +177,7 @@ pub fn load_from(path: &Path) -> Result<AppConfig> {
 
 /// Path-explicit variant used by tests and portable setups.
 pub fn save_to(path: &Path, config: &AppConfig) -> Result<()> {
-    let mut json =
-        serde_json::to_string_pretty(config).map_err(|e| Error::json(path, e))?;
+    let mut json = serde_json::to_string_pretty(config).map_err(|e| Error::json(path, e))?;
     json.push('\n');
     atomic_write(path, json.as_bytes())
 }
@@ -111,6 +185,7 @@ pub fn save_to(path: &Path, config: &AppConfig) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::provider::{Modality, ModelSpec, ProviderKind};
 
     fn temp_config_path(dir: &tempfile::TempDir) -> std::path::PathBuf {
         dir.path().join("config.json")
@@ -121,8 +196,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let config = load_from(&temp_config_path(&dir)).unwrap();
         assert_eq!(config, AppConfig::default());
-        assert_eq!(config.theme, Theme::Light);
-        assert_eq!(config.background.preset, "aurora");
+        assert_eq!(config.theme, Theme::Dark);
+        assert_eq!(config.background.preset, "rei");
+        assert_eq!(config.chat.permission_mode, PermissionMode::Ask);
     }
 
     #[test]
@@ -131,12 +207,26 @@ mod tests {
         let path = temp_config_path(&dir);
 
         let mut config = AppConfig::default();
-        config.theme = Theme::Dark;
+        config.theme = Theme::Light;
         config.sidebar_collapsed = true;
         config.background.kind = BackgroundKind::Video;
         config.background.path = Some("C:/art/loop.webm".to_string());
         config.background.dim = 55;
         config.background.blur = 18;
+        config.chat.lite = Some(ModelRef::new("openai", "gpt-4o-mini"));
+        config.personas.push(Persona::new("Coder", "You write Rust."));
+
+        let mut provider = ProviderConfig {
+            name: "Local".into(),
+            kind: ProviderKind::OpenaiCompatible,
+            base_url: "http://localhost:11434/v1".into(),
+            key_required: false,
+            ..Default::default()
+        };
+        provider
+            .models
+            .insert("qwen3:8b".into(), ModelSpec::with_modalities(&[Modality::Text]));
+        config.providers.insert("ollama".into(), provider);
 
         save_to(&path, &config).unwrap();
         let loaded = load_from(&path).unwrap();
@@ -150,14 +240,15 @@ mod tests {
 
         std::fs::write(
             &path,
-            r#"{ "theme": "dark", "futureFeature": { "enabled": true } }"#,
+            r#"{ "theme": "light", "futureFeature": { "enabled": true } }"#,
         )
         .unwrap();
 
         let config = load_from(&path).unwrap();
-        assert_eq!(config.theme, Theme::Dark);
+        assert_eq!(config.theme, Theme::Light);
         assert_eq!(config.background, BackgroundConfig::default());
         assert_eq!(config.schema_version, SCHEMA_VERSION);
+        assert!(config.providers.is_empty());
         assert!(config.extra.contains_key("futureFeature"));
 
         save_to(&path, &config).unwrap();
@@ -171,6 +262,7 @@ mod tests {
         let raw = serde_json::to_string(&config).unwrap();
         assert!(raw.contains("schemaVersion"));
         assert!(raw.contains("sidebarCollapsed"));
+        assert!(raw.contains("permissionMode"));
     }
 
     #[test]
@@ -182,4 +274,16 @@ mod tests {
         let err = load_from(&path).unwrap_err();
         assert!(matches!(err, Error::Json { .. }));
     }
+
+    #[test]
+    fn provider_kind_round_trips_as_kebab_case() {
+        let provider = ProviderConfig {
+            kind: ProviderKind::Anthropic,
+            ..Default::default()
+        };
+        let raw = serde_json::to_string(&provider).unwrap();
+        assert!(raw.contains("\"anthropic\""));
+    }
 }
+
+

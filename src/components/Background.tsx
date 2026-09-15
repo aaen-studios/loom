@@ -1,19 +1,18 @@
 import { cn } from "../lib/cn";
 import { assetUrl } from "../lib/tauri";
-import { backgroundStyle } from "../lib/background";
+import { backgroundStyle, presetById } from "../lib/background";
 import { useSettings } from "../stores/settings";
 
 const GRAIN =
   "url(\"data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='180' height='180'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2' stitchTiles='stitch'/></filter><rect width='100%25' height='100%25' filter='url(%23n)' opacity='0.55'/></svg>\")";
 
 /**
- * The app's own background layer. Sits below every glass surface, which is
- * what makes the backdrop blur read as "glass over something" rather than
- * flat translucency. Built-in presets are pure CSS; image/video kinds render
- * user-picked media from disk (wired in M2).
+ * Full-bleed background layer. Every glass surface blurs it, which is what
+ * makes the panels read as frosted glass instead of flat translucency.
  */
 export function Background() {
   const config = useSettings((state) => state.config.background);
+  const preset = presetById(config.preset);
   const usesMedia = config.kind !== "builtin" && !!config.path;
 
   const mediaStyle = {
@@ -49,10 +48,7 @@ export function Background() {
 
       {!usesMedia && (
         <div
-          className={cn(
-            "absolute inset-[-8%]",
-            config.kind === "builtin" && "animate-drift",
-          )}
+          className={cn("absolute inset-[-6%]", !preset.still && "animate-drift")}
           style={{
             ...backgroundStyle(config),
             filter: config.blur > 0 ? `blur(${config.blur}px)` : undefined,
@@ -60,15 +56,14 @@ export function Background() {
         />
       )}
 
-      {/* dim veil keeps glass text legible over bright backgrounds */}
+      {/* dim veil keeps glass text legible over bright art */}
       <div
         className="absolute inset-0"
-        style={{ backgroundColor: `rgb(4 8 18 / ${config.dim / 100})` }}
+        style={{ backgroundColor: `rgb(3 6 14 / ${config.dim / 100})` }}
       />
 
-      {/* fine grain, barely visible, adds depth to flat gradients */}
       <div
-        className="absolute inset-0 opacity-[0.045] mix-blend-overlay"
+        className="absolute inset-0 opacity-[0.04] mix-blend-overlay"
         style={{ backgroundImage: GRAIN, backgroundSize: "180px 180px" }}
       />
     </div>

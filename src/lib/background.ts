@@ -4,19 +4,29 @@ import type { BackgroundConfig } from "../types";
 export interface BackgroundPreset {
   id: string;
   name: string;
-  /** Base fill underneath the gradient layers. */
+  /** Base fill underneath the layers. */
   base: string;
-  /** Layered gradients painted across the background layer. */
+  /** Layers painted across the background area. */
   layers: string;
   /** Swatch preview for the settings grid. */
   swatch: string;
+  /** Photographic presets stay still; gradients drift slowly. */
+  still?: boolean;
 }
 
 /**
- * Built-in backgrounds. Each is pure CSS so it scales to any window size and
- * costs nothing to load. User images/videos arrive in M2.
+ * Built-in backgrounds. The default is the bundled art; the gradients are
+ * cheap alternatives. User-picked images/videos arrive in M2.
  */
 export const BACKGROUND_PRESETS: BackgroundPreset[] = [
+  {
+    id: "rei",
+    name: "Rei",
+    base: "#0a1420",
+    layers: 'url("/backgrounds/rei.jpg") center / cover no-repeat',
+    swatch: 'url("/backgrounds/rei.jpg") center 20% / cover no-repeat',
+    still: true,
+  },
   {
     id: "aurora",
     name: "Aurora",
@@ -25,7 +35,6 @@ export const BACKGROUND_PRESETS: BackgroundPreset[] = [
       "radial-gradient(120% 90% at 12% 8%, #3d5bd9 0%, transparent 55%)",
       "radial-gradient(100% 80% at 88% 16%, #7b4bd9 0%, transparent 60%)",
       "radial-gradient(110% 90% at 78% 92%, #1f9bb5 0%, transparent 58%)",
-      "radial-gradient(90% 70% at 18% 88%, #14235c 0%, transparent 65%)",
       "linear-gradient(160deg, #0a1026 0%, #101a3d 60%, #0b1226 100%)",
     ].join(", "),
     swatch: "linear-gradient(135deg, #3d5bd9, #7b4bd9 55%, #1f9bb5)",
@@ -41,18 +50,6 @@ export const BACKGROUND_PRESETS: BackgroundPreset[] = [
       "linear-gradient(155deg, #2b1233 0%, #3c1650 55%, #241029 100%)",
     ].join(", "),
     swatch: "linear-gradient(135deg, #f2a8c8, #b56bd9 55%, #6d3fb5)",
-  },
-  {
-    id: "meadow",
-    name: "Meadow",
-    base: "#eaf3e4",
-    layers: [
-      "radial-gradient(90% 70% at 18% 12%, #fdf6c9 0%, transparent 58%)",
-      "radial-gradient(110% 80% at 84% 18%, #9fd8b4 0%, transparent 60%)",
-      "radial-gradient(120% 90% at 62% 96%, #7fc3e0 0%, transparent 62%)",
-      "linear-gradient(160deg, #eef7ea 0%, #e2efe6 55%, #dcebf2 100%)",
-    ].join(", "),
-    swatch: "linear-gradient(135deg, #fdf6c9, #9fd8b4 55%, #7fc3e0)",
   },
   {
     id: "dusk",
@@ -101,5 +98,5 @@ export function backgroundStyle(config: BackgroundConfig): CSSProperties {
     return { background: "transparent" };
   }
   const preset = presetById(config.preset);
-  return { background: `${preset.layers}`, backgroundColor: preset.base };
+  return { background: preset.layers, backgroundColor: preset.base };
 }

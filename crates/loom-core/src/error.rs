@@ -22,6 +22,21 @@ pub enum Error {
 
     #[error("could not resolve a home directory for the current user")]
     NoHomeDir,
+
+    #[error("provider not found: {0}")]
+    UnknownProvider(String),
+
+    #[error("session not found: {0}")]
+    UnknownSession(String),
+
+    #[error("provider request failed: {0}")]
+    Http(String),
+
+    #[error("provider returned an error: {0}")]
+    Provider(String),
+
+    #[error("{0}")]
+    Other(String),
 }
 
 impl Error {
@@ -37,5 +52,9 @@ impl Error {
             path: path.into(),
             source,
         }
+    }
+
+    pub fn other(message: impl Into<String>) -> Self {
+        Self::Other(message.into())
     }
 }

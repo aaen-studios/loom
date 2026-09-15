@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/loom-core", "src-tauri"]
+members = ["crates/loom-core", "src-tauri", "setup/src-tauri"]
 
 [workspace.package]
 version = "0.1.0"

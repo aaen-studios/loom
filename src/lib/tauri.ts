@@ -1,4 +1,4 @@
-import { invoke, convertFileSrc } from "@tauri-apps/api/core";
+import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 
 /** True when running inside the Tauri webview (false in a plain browser tab). */
 export const isTauri =
@@ -19,6 +19,18 @@ export async function call<T>(
     return await invoke<T>(cmd, args);
   } catch (error) {
     console.error(`[loom] command "${cmd}" failed:`, error);
+    throw error instanceof Error ? error : new Error(String(error));
+  }
+}
+
+/** Same as `call`, but swallows errors (for best-effort UI actions). */
+export async function tryCall<T>(
+  cmd: string,
+  args?: Record<string, unknown>,
+): Promise<T | null> {
+  try {
+    return await call<T>(cmd, args);
+  } catch {
     return null;
   }
 }
