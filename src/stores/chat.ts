@@ -423,19 +423,11 @@ export const useChat = create<ChatState>((set, get) => ({
           delete busy[event.sessionId];
           const live = { ...state.live };
           delete live[event.sessionId];
-          return {
-            busy,
-            live,
-            error: event.error,
-            messages:
-              state.activeId === event.sessionId
-                ? state.messages.filter(
-                    (message) =>
-                      message.id !== event.messageId || message.content.length > 0,
-                  )
-                : state.messages,
-          };
+          return { busy, live, error: event.error };
         });
+        // Reload so the reason recorded on the message shows (and survives a
+        // restart) rather than leaving an empty bubble.
+        if (isActive) void get().openSession(event.sessionId);
         break;
       }
 

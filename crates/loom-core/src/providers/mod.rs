@@ -137,6 +137,8 @@ pub struct ChatRequest<'a> {
     pub max_output_tokens: Option<u32>,
     pub stream: bool,
     pub tools: Vec<ToolDef>,
+    /// Stable per-conversation id, sent when the provider asks for one.
+    pub session_id: Option<&'a str>,
 }
 
 impl ChatRequest<'_> {
@@ -160,9 +162,86 @@ impl ChatRequest<'_> {
                 }
             }
         }
+
+        // Gateways such as OpenCode Go require a stable conversation id so they
+        // can route requests and cache prompts; without it they reject the call.
+        if let (Some(name), Some(session)) = (self.provider.session_header.as_deref(), self.session_id)
+        {
+            if !name.trim().is_empty() && !session.trim().is_empty() {
+                headers.push((name.to_string(), session.to_string()));
+            }
+        }
+
         for (name, value) in &self.provider.headers {
             headers.push((name.clone(), value.clone()));
         }
         headers
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::provider::{ProviderConfig, ProviderKind};
+
+    fn request<'a>(provider: &'a ProviderConfig, session: Option<&'a str>) -> ChatRequest<'a> {
+        ChatRequest {
+            provider,
+            model: "model",
+            system: None,
+            messages: vec![WireMessage::text("user", "hi")],
+            variant: None,
+            max_output_tokens: None,
+            stream: true,
+            tools: Vec::new(),
+            session_id: session,
+        }
+    }
+
+    fn header<'a>(headers: &'a [(String, String)], name: &str) -> Option<&'a str> {
+        headers
+            .iter()
+            .find(|(key, _)| key.eq_ignore_ascii_case(name))
+            .map(|(_, value)| value.as_str())
+    }
+
+    #[test]
+    fn session_header_is_sent_when_the_provider_asks_for_one() {
+        let provider = ProviderConfig {
+            base_url: "https://opencode.ai/zen/go/v1".into(),
+            session_header: Some("x-opencode-session".into()),
+            ..Default::default()
+        };
+
+        let headers = request(&provider, Some("chat-123")).headers(Some("key"));
+        assert_eq!(header(&headers, "x-opencode-session"), Some("chat-123"));
+        assert_eq!(header(&headers, "authorization"), Some("Bearer key"));
+
+        // Without a session id the header is omitted rather than sent empty.
+        let headers = request(&provider, None).headers(Some("key"));
+        assert_eq!(header(&headers, "x-opencode-session"), None);
+    }
+
+    #[test]
+    fn session_header_is_not_added_for_ordinary_providers() {
+        let provider = ProviderConfig {
+            base_url: "https://api.openai.com/v1".into(),
+            ..Default::default()
+        };
+        let headers = request(&provider, Some("chat-123")).headers(Some("key"));
+        assert_eq!(header(&headers, "x-opencode-session"), None);
+    }
+
+    #[test]
+    fn anthropic_uses_its_own_auth_headers() {
+        let provider = ProviderConfig {
+            kind: ProviderKind::Anthropic,
+            base_url: "https://api.anthropic.com".into(),
+            ..Default::default()
+        };
+        let headers = request(&provider, None).headers(Some("key"));
+        assert_eq!(header(&headers, "x-api-key"), Some("key"));
+        assert_eq!(header(&headers, "anthropic-version"), Some("2023-06-01"));
+        assert_eq!(header(&headers, "authorization"), None);
     }
 }

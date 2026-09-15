@@ -140,8 +140,17 @@ pub fn run() {
             loom_core::paths::ensure_home()
                 .map_err(|e| Box::<dyn std::error::Error>::from(e.to_string()))?;
 
-            let app_config = loom_core::config::load()
+            let mut app_config = loom_core::config::load()
                 .map_err(|e| Box::<dyn std::error::Error>::from(e.to_string()))?;
+
+            // Bring configs written by older builds up to date (for example,
+            // providers that now need a session header).
+            if loom_core::config::apply_preset_defaults(&mut app_config) {
+                if let Err(error) = loom_core::config::save(&app_config) {
+                    eprintln!("[loom] could not upgrade config: {error}");
+                }
+            }
+
             let shared: SharedConfig = Arc::new(std::sync::Mutex::new(app_config));
 
             let db = Database::open_default()
@@ -169,6 +178,35 @@ pub fn run() {
             });
 
             let engine = Engine::new(db, Arc::clone(&shared), emit);
+
+            // A development build loads the Vite dev server. If that server is
+            // not running the window would stay blank, which looks like the app
+            // is broken; fall back to the frontend bundled in the binary.
+            if cfg!(dev) {
+                let handle = app.handle().clone();
+                tauri::async_runtime::spawn(async move {
+                    tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+                    let reachable = tokio::net::TcpStream::connect("127.0.0.1:1420")
+                        .await
+                        .is_ok();
+                    if reachable {
+                        return;
+                    }
+                    if let Some(window) = handle.get_webview_window("main") {
+                        eprintln!(
+                            "[loom] dev server is not running; loading the bundled frontend instead"
+                        );
+                        match tauri::Url::parse("tauri://localhost/index.html") {
+                            Ok(url) => {
+                                if let Err(error) = window.navigate(url) {
+                                    eprintln!("[loom] fallback navigation failed: {error}");
+                                }
+                            }
+                            Err(error) => eprintln!("[loom] bad fallback url: {error}"),
+                        }
+                    }
+                });
+            }
 
             app.manage(AppState::new(engine, shared));
             build_tray(app)?;

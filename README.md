@@ -32,6 +32,25 @@ cargo test -p loom-core    # engine
 cargo check -p loom -p loom-setup
 ```
 
+## Diagnosing the running app
+
+Start the app with the DevTools protocol enabled, then use the helper scripts:
+
+```powershell
+$env:WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS="--remote-debugging-port=9333"
+.\target\debug\loom.exe
+```
+
+```bash
+node scripts/inspect-webview.mjs 9333 target/shot.png --reload  # console errors + screenshot
+node scripts/inspect-dom.mjs 9333                               # what is actually on screen
+node scripts/drive-ui.mjs 9333 "hello"                          # sends a message through the real UI
+```
+
+`inspect-webview` prints uncaught exceptions and console output (this is how the
+React render loop and the Tokio runtime panic were found), and the screenshot is
+written to disk so it can be inspected directly.
+
 ## Layout
 
 ```

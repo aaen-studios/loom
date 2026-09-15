@@ -83,6 +83,9 @@ pub struct ProviderConfig {
     pub last_fetched_at: Option<i64>,
     /// Empty means no key required (Ollama, LM Studio).
     pub key_required: bool,
+    /// Header the gateway wants filled with a stable per-conversation id
+    /// (OpenCode Go uses `x-opencode-session` for routing and prompt caching).
+    pub session_header: Option<String>,
 }
 
 impl Default for ProviderConfig {
@@ -97,6 +100,7 @@ impl Default for ProviderConfig {
             models_source: ModelsSource::Manual,
             last_fetched_at: None,
             key_required: true,
+            session_header: None,
         }
     }
 }
@@ -130,6 +134,8 @@ pub struct ProviderPreset {
     pub base_url: &'static str,
     pub key_required: bool,
     pub note: &'static str,
+    /// Set when the gateway requires a session identifier header.
+    pub session_header: Option<&'static str>,
 }
 
 pub const PRESETS: &[ProviderPreset] = &[
@@ -140,6 +146,7 @@ pub const PRESETS: &[ProviderPreset] = &[
         base_url: "https://api.openai.com/v1",
         key_required: true,
         note: "Official OpenAI API",
+        session_header: None,
     },
     ProviderPreset {
         id: "anthropic",
@@ -148,6 +155,7 @@ pub const PRESETS: &[ProviderPreset] = &[
         base_url: "https://api.anthropic.com",
         key_required: true,
         note: "Claude models, native Messages API",
+        session_header: None,
     },
     ProviderPreset {
         id: "openrouter",
@@ -156,6 +164,7 @@ pub const PRESETS: &[ProviderPreset] = &[
         base_url: "https://openrouter.ai/api/v1",
         key_required: true,
         note: "One key for most models",
+        session_header: None,
     },
     ProviderPreset {
         id: "deepseek",
@@ -164,6 +173,7 @@ pub const PRESETS: &[ProviderPreset] = &[
         base_url: "https://api.deepseek.com/v1",
         key_required: true,
         note: "DeepSeek chat and reasoner",
+        session_header: None,
     },
     ProviderPreset {
         id: "zai",
@@ -172,6 +182,7 @@ pub const PRESETS: &[ProviderPreset] = &[
         base_url: "https://api.z.ai/api/paas/v4",
         key_required: true,
         note: "GLM family",
+        session_header: None,
     },
     ProviderPreset {
         id: "groq",
@@ -180,6 +191,7 @@ pub const PRESETS: &[ProviderPreset] = &[
         base_url: "https://api.groq.com/openai/v1",
         key_required: true,
         note: "Very fast inference",
+        session_header: None,
     },
     ProviderPreset {
         id: "xai",
@@ -188,6 +200,7 @@ pub const PRESETS: &[ProviderPreset] = &[
         base_url: "https://api.x.ai/v1",
         key_required: true,
         note: "Grok models",
+        session_header: None,
     },
     ProviderPreset {
         id: "google",
@@ -196,6 +209,7 @@ pub const PRESETS: &[ProviderPreset] = &[
         base_url: "https://generativelanguage.googleapis.com/v1beta/openai",
         key_required: true,
         note: "Gemini via the OpenAI-compatible endpoint",
+        session_header: None,
     },
     ProviderPreset {
         id: "opencode-go",
@@ -204,6 +218,7 @@ pub const PRESETS: &[ProviderPreset] = &[
         base_url: "https://opencode.ai/zen/go/v1",
         key_required: true,
         note: "OpenCode Go subscription (same key as Zen)",
+        session_header: Some("x-opencode-session"),
     },
     ProviderPreset {
         id: "opencode-zen",
@@ -212,6 +227,7 @@ pub const PRESETS: &[ProviderPreset] = &[
         base_url: "https://opencode.ai/zen/v1",
         key_required: true,
         note: "Pay-as-you-go gateway from the OpenCode team",
+        session_header: None,
     },
     ProviderPreset {
         id: "ollama",
@@ -220,6 +236,7 @@ pub const PRESETS: &[ProviderPreset] = &[
         base_url: "http://localhost:11434/v1",
         key_required: false,
         note: "Local models, no key",
+        session_header: None,
     },
     ProviderPreset {
         id: "lmstudio",
@@ -228,6 +245,7 @@ pub const PRESETS: &[ProviderPreset] = &[
         base_url: "http://localhost:1234/v1",
         key_required: false,
         note: "Local models, no key",
+        session_header: None,
     },
 ];
 

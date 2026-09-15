@@ -42,6 +42,8 @@ export interface ProviderConfig {
   modelsSource: ModelsSource;
   lastFetchedAt: number | null;
   keyRequired: boolean;
+  /** Header the gateway wants filled with a stable per-chat id. */
+  sessionHeader: string | null;
 }
 
 export interface ProviderPreset {
@@ -51,6 +53,7 @@ export interface ProviderPreset {
   baseUrl: string;
   keyRequired: boolean;
   note: string;
+  sessionHeader: string | null;
 }
 
 export interface ModelEntry {

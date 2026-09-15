@@ -94,11 +94,16 @@ function prettify(raw: string): string {
   }
 }
 
+/** Shared empty list so selectors keep a stable reference. */
+const NO_CALLS: ToolCallRecord[] = [];
+
 /** Tool cards for one assistant message, live calls merged over stored ones. */
 export function ToolCallList({ messageId, extra }: { messageId: string; extra: string | null }) {
-  const live = useChat((state) => state.liveTools[messageId] ?? []);
+  // The selector must not allocate: returning a fresh `[]` makes React's
+  // getSnapshot check fail on every render and loops the component forever.
+  const live = useChat((state) => state.liveTools[messageId]);
   const stored = parseToolCalls(extra);
-  const merged = mergeCalls(stored, live);
+  const merged = mergeCalls(stored, live ?? NO_CALLS);
 
   if (merged.length === 0) return null;
   return (

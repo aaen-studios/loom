@@ -54,6 +54,33 @@ loom/
 - Windows code signing needs a certificate; the workflow is wired and skips
   cleanly without one.
 
+## Reliability fixes (found by diagnosing the running app)
+
+Three bugs made the app look "broken and white", all confirmed with evidence
+rather than inspection alone:
+
+1. **Infinite render loop** — `ToolCallList` selected `state.liveTools[id] ?? []`
+   from zustand, allocating a new array per render, so React's snapshot check
+   failed forever and the tree died. The selector now returns the stored
+   reference. An `ErrorBoundary` and a pre-mount reporter mean a failure like
+   this shows a message instead of a blank window.
+2. **Process abort on send** — `send_message` was a *synchronous* Tauri command,
+   so it ran on the event-loop thread where `tokio::spawn` panics ("there is no
+   reactor running"); a panic in an IPC handler aborts the process
+   (`0xc0000409`). It is now an async command, and `Engine::send` returns an
+   error instead of panicking when called without a runtime — both covered by
+   tests.
+3. **Gateway rejection** — OpenCode Go requires a stable `x-opencode-session`
+   header per conversation (confirmed against the live endpoint: without it,
+   `400 MissingSessionID`; with it, `200` and a real completion). Providers can
+   declare `sessionHeader`, the preset sets it, and configs written by older
+   builds are upgraded on load.
+
+Also: a failed turn now records its reason on the message (visible, retryable,
+survives a reload), a development build with no dev server falls back to the
+bundled frontend instead of a blank window, and the payload script no longer
+claims a false dev/release check.
+
 ## Done since the first pass
 
 - Markdown/streamdown is code-split (main chunk ~316 kB; the 486 kB markdown

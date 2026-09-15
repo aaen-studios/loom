@@ -27,6 +27,18 @@ export function parseToolCalls(extra: string | null): ToolCallRecord[] {
   return [];
 }
 
+/** Why a turn failed, recorded on the assistant message by the engine. */
+export function parseError(extra: string | null): string | null {
+  if (!extra) return null;
+  try {
+    const parsed = JSON.parse(extra);
+    const error = parsed?.error;
+    return typeof error === "string" && error.trim() ? error : null;
+  } catch {
+    return null;
+  }
+}
+
 export function parseUsage(extra: string | null): Usage | null {
   if (!extra) return null;
   try {

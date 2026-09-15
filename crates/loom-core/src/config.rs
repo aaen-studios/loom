@@ -155,6 +155,30 @@ impl Default for ChatDefaults {
     }
 }
 
+/// Fills in settings that a newer release requires but an existing config file
+/// cannot have — today, the session header that gateways such as OpenCode Go
+/// need. Returns `true` when the config changed and should be saved.
+///
+/// Only fields that are still at their default are touched, so user choices are
+/// never overwritten.
+pub fn apply_preset_defaults(config: &mut AppConfig) -> bool {
+    let mut changed = false;
+
+    for (id, provider) in config.providers.iter_mut() {
+        let Some(preset) = crate::provider::preset(id) else {
+            continue;
+        };
+        if provider.session_header.is_none() {
+            if let Some(header) = preset.session_header {
+                provider.session_header = Some(header.to_string());
+                changed = true;
+            }
+        }
+    }
+
+    changed
+}
+
 /// Loads configuration from the standard location, falling back to defaults
 /// when the file does not exist yet.
 pub fn load() -> Result<AppConfig> {
@@ -283,6 +307,44 @@ mod tests {
         };
         let raw = serde_json::to_string(&provider).unwrap();
         assert!(raw.contains("\"anthropic\""));
+    }
+
+    #[test]
+    fn preset_defaults_upgrade_existing_providers() {
+        let mut config = AppConfig::default();
+        // A provider saved by an older build, before session headers existed.
+        let legacy = ProviderConfig {
+            name: "OpenCode Go".into(),
+            base_url: "https://opencode.ai/zen/go/v1".into(),
+            session_header: None,
+            ..Default::default()
+        };
+        config.providers.insert("opencode-go".into(), legacy);
+
+        assert!(apply_preset_defaults(&mut config));
+        assert_eq!(
+            config.providers["opencode-go"].session_header.as_deref(),
+            Some("x-opencode-session")
+        );
+
+        // Running again is a no-op.
+        assert!(!apply_preset_defaults(&mut config));
+    }
+
+    #[test]
+    fn preset_defaults_leave_custom_providers_alone() {
+        let mut config = AppConfig::default();
+        config.providers.insert(
+            "my-local".into(),
+            ProviderConfig {
+                name: "Local".into(),
+                base_url: "http://localhost:11434/v1".into(),
+                ..Default::default()
+            },
+        );
+
+        assert!(!apply_preset_defaults(&mut config));
+        assert!(config.providers["my-local"].session_header.is_none());
     }
 }
 

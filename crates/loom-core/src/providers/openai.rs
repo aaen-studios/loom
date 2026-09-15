@@ -254,6 +254,7 @@ mod tests {
             max_output_tokens: Some(1024),
             stream: true,
             tools: Vec::new(),
+            session_id: None,
         }
     }
 

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { cn } from "../lib/cn";
-import { formatUsage, parseAttachments, parseUsage } from "../lib/messageExtra";
+import { formatUsage, parseAttachments, parseError, parseUsage } from "../lib/messageExtra";
 import type { Message, ToolCallRecord } from "../types";
 import { useChat } from "../stores/chat";
 import { useProviders } from "../stores/providers";
@@ -49,6 +49,7 @@ function MessageRow({
 }) {
   const attachments = parseAttachments(message.extra);
   const usage = parseUsage(message.extra);
+  const failure = parseError(message.extra);
 
   if (message.role === "user") {
     return (
@@ -79,7 +80,9 @@ function MessageRow({
           <Reasoning text={message.reasoning} streaming={streaming} />
         )}
         <ToolCallList messageId={message.id} extra={message.extra} />
-        {message.content ? (
+        {failure ? (
+          <FailedTurn message={failure} />
+        ) : message.content ? (
           <Markdown content={message.content} />
         ) : (
           streaming &&
@@ -87,10 +90,29 @@ function MessageRow({
             <span className="cursor-blink inline-block h-4 w-[7px] translate-y-[3px] rounded-[2px] bg-[var(--ink-soft)]" />
           )
         )}
-        {!streaming && usage && (
+        {!streaming && !failure && usage && (
           <p className="mt-1.5 text-[11.5px] text-faint">{formatUsage(usage)}</p>
         )}
       </div>
+    </div>
+  );
+}
+
+/** A turn that failed: the reason is stored on the message, so it survives a reload. */
+function FailedTurn({ message }: { message: string }) {
+  const retryLast = useChat((state) => state.retryLast);
+  return (
+    <div className="mt-1.5 rounded-control border border-[var(--danger)]/40 bg-[var(--danger)]/10 px-3 py-2">
+      <p className="text-[12.5px] leading-5 break-words text-[var(--ink)]">
+        This reply failed: {message}
+      </p>
+      <button
+        type="button"
+        onClick={() => void retryLast()}
+        className="mt-1.5 text-[12.5px] font-medium text-[var(--accent)] hover:underline"
+      >
+        Try again
+      </button>
     </div>
   );
 }

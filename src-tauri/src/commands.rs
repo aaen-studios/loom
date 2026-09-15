@@ -440,8 +440,12 @@ pub fn set_session_persona(
 // Chat
 // ---------------------------------------------------------------------------
 
+/// Async on purpose: Tauri runs async commands on its Tokio runtime, which
+/// `Engine::send` needs in order to spawn the streaming task. A synchronous
+/// command runs on the event-loop thread, where `tokio::spawn` panics and takes
+/// the process down.
 #[tauri::command]
-pub fn send_message(
+pub async fn send_message(
     state: State<'_, AppState>,
     session_id: String,
     text: String,

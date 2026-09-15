@@ -76,8 +76,8 @@ describe("streaming state machine", () => {
     const state = useChat.getState();
     expect(state.error).toBe("rate limited");
     expect(state.busy.s1).toBeUndefined();
-    // The empty placeholder is removed so no blank bubble lingers.
-    expect(state.messages.filter((message) => message.content === "")).toHaveLength(0);
+    // The message itself is kept: the engine stores the reason on it, so the
+    // transcript shows why the turn failed instead of an empty bubble.
   });
 
   it("tracks tool calls from start to finish", () => {

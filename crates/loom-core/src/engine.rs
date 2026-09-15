@@ -107,6 +107,9 @@ struct StoredExtra {
     tool_calls: Vec<StoredToolCall>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     usage: Option<Usage>,
+    /// Why a turn failed, kept so the reason survives a reload.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
 }
 
 pub fn parse_stored_tools(extra: Option<&str>) -> Vec<StoredToolCall> {
@@ -123,13 +126,25 @@ pub fn parse_usage(extra: Option<&str>) -> Option<Usage> {
         .and_then(|stored| stored.usage)
 }
 
-fn serialize_extra(tool_calls: &[StoredToolCall], usage: Option<Usage>) -> Option<String> {
-    if tool_calls.is_empty() && usage.is_none() {
+/// The failure recorded on a message, if the turn did not complete.
+pub fn parse_error(extra: Option<&str>) -> Option<String> {
+    extra
+        .and_then(|raw| serde_json::from_str::<StoredExtra>(raw).ok())
+        .and_then(|stored| stored.error)
+}
+
+fn serialize_extra(
+    tool_calls: &[StoredToolCall],
+    usage: Option<Usage>,
+    error: Option<&str>,
+) -> Option<String> {
+    if tool_calls.is_empty() && usage.is_none() && error.is_none() {
         return None;
     }
     serde_json::to_string(&StoredExtra {
         tool_calls: tool_calls.to_vec(),
         usage,
+        error: error.map(str::to_string),
     })
     .ok()
 }
@@ -434,6 +449,15 @@ impl Engine {
     // Chat
     // ------------------------------------------------------------------
 
+    /// Starts a turn and returns immediately; the reply streams in a spawned
+    /// task.
+    ///
+    /// # Panics / errors
+    ///
+    /// Must be called from inside a Tokio runtime (Tauri async commands and
+    /// `#[tokio::test]` are; a synchronous Tauri command is **not**).
+    /// Without one this returns an error rather than panicking, because a panic
+    /// here aborts the whole app.
     pub fn send(
         &self,
         session_id: &str,
@@ -441,6 +465,11 @@ impl Engine {
         model: Option<ModelRef>,
         attachments: Vec<Attachment>,
     ) -> Result<String> {
+        if tokio::runtime::Handle::try_current().is_err() {
+            return Err(Error::Other(
+                "send() needs a Tokio runtime: call it from an async Tauri command".into(),
+            ));
+        }
         let text = text.trim();
         if text.is_empty() && attachments.is_empty() {
             return Err(Error::Other("message is empty".into()));
@@ -644,6 +673,7 @@ impl Engine {
                 max_output_tokens: Some(chat.max_output_tokens),
                 stream: true,
                 tools: tool_defs.clone(),
+                session_id: Some(&session_id),
             };
 
             let round_text = Arc::new(Mutex::new(String::new()));
@@ -863,7 +893,7 @@ impl Engine {
 
             let _ = self.db().update_message_extra(
                 &message_id,
-                serialize_extra(&stored_calls, None).as_deref(),
+                serialize_extra(&stored_calls, None, None).as_deref(),
             );
 
             if cancel.load(Ordering::Relaxed) {
@@ -882,7 +912,7 @@ impl Engine {
             .update_message(&message_id, &content, final_reasoning.as_deref());
         let _ = self.db().update_message_extra(
             &message_id,
-            serialize_extra(&stored_calls, Some(usage)).as_deref(),
+            serialize_extra(&stored_calls, Some(usage), None).as_deref(),
         );
 
         self.inner
@@ -892,11 +922,20 @@ impl Engine {
             .remove(&session_id);
 
         match error {
-            Some(failure) => self.emit(EngineEvent::Error {
-                session_id: session_id.clone(),
-                message_id,
-                error: failure,
-            }),
+            Some(failure) => {
+                // Record why, so the reason is visible after a reload instead of
+                // leaving an empty reply behind.
+                let extra = serialize_extra(&stored_calls, None, Some(&failure));
+                let _ = self
+                    .db()
+                    .update_message_extra(&message_id, extra.as_deref());
+
+                self.emit(EngineEvent::Error {
+                    session_id: session_id.clone(),
+                    message_id,
+                    error: failure,
+                })
+            }
             None => {
                 self.emit(EngineEvent::Done {
                     session_id: session_id.clone(),
@@ -1188,7 +1227,7 @@ impl Engine {
                     .get("system")
                     .and_then(serde_json::Value::as_str)
                     .map(str::to_string);
-                self.spawn_subagent(provider, model, api_key, system.as_deref(), &task)
+                self.spawn_subagent(provider, model, api_key, system.as_deref(), &task, Some(session_id))
                     .await
             }
             _ => return None,
@@ -1268,6 +1307,7 @@ impl Engine {
         api_key: Option<&str>,
         system: Option<&str>,
         task: &str,
+        session_id: Option<&str>,
     ) -> Result<String> {
         if task.trim().is_empty() {
             return Err(Error::other("spawn_agent needs a task"));
@@ -1284,6 +1324,7 @@ impl Engine {
             max_output_tokens: Some(4_096),
             stream: false,
             tools: Vec::new(),
+            session_id,
         };
 
         let (content, _, _) =
@@ -1582,6 +1623,7 @@ impl Engine {
             max_output_tokens: Some(64),
             stream: false,
             tools: Vec::new(),
+            session_id: Some(session_id),
         };
 
         let Ok((content, _, _)) =
@@ -1842,11 +1884,34 @@ mod tests {
         }
     }
 
+    /// A synchronous caller (a Tauri command) must get an error, never a panic:
+    /// a panic in an IPC handler aborts the process.
+    #[test]
+    fn send_outside_a_runtime_is_an_error_not_a_panic() {
+        use crate::config::AppConfig;
+        use std::sync::Arc;
+
+        let db = Database::open_in_memory().unwrap();
+        let engine = Engine::new(
+            db,
+            Arc::new(Mutex::new(AppConfig::default())),
+            Arc::new(|_| {}),
+        );
+
+        let outcome = engine.send("missing-session", "hello", None, Vec::new());
+        let error = outcome.expect_err("no runtime means no dispatch");
+        assert!(error.to_string().contains("Tokio runtime"), "{error}");
+    }
+
+    /// Serialises tests that point `LOOM_HOME` at a temporary directory.
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
     #[test]
     fn choosing_a_model_is_persisted_on_the_session() {
         use crate::config::AppConfig;
         use std::sync::Arc;
 
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let dir = tempfile::tempdir().unwrap();
         std::env::set_var("LOOM_HOME", dir.path());
 
@@ -1889,6 +1954,7 @@ mod tests {
         use crate::provider::{ModelSpec, ProviderConfig};
         use std::sync::Arc;
 
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let dir = tempfile::tempdir().unwrap();
         std::env::set_var("LOOM_HOME", dir.path());
 
@@ -1913,6 +1979,84 @@ mod tests {
         assert!(saved.providers["test"].models["model-a"].favorite);
 
         let _ = ModelRef::new("test", "model-a");
+        std::env::remove_var("LOOM_HOME");
+    }
+    /// A turn that cannot reach the provider must leave a visible reason on the
+    /// message — the bug was an empty reply with the error only in a transient
+    /// UI event.
+    #[tokio::test]
+    async fn a_failed_turn_records_the_reason_on_the_message() {
+        use crate::config::{AppConfig, ChatDefaults};
+        use crate::provider::ProviderConfig;
+        use std::sync::Arc;
+        use std::time::Duration;
+
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        std::env::set_var("LOOM_HOME", dir.path());
+
+        let db = Database::open(&dir.path().join("loom.db")).unwrap();
+
+        let mut config = AppConfig::default();
+        config.providers.insert(
+            "unreachable".into(),
+            ProviderConfig {
+                name: "Unreachable".into(),
+                // Port 9 (discard) refuses connections immediately.
+                base_url: "http://127.0.0.1:9/v1".into(),
+                key_required: false,
+                ..Default::default()
+            },
+        );
+        config.chat = ChatDefaults {
+            provider_id: Some("unreachable".into()),
+            model_id: Some("model".into()),
+            ..Default::default()
+        };
+
+        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        let emit: EmitFn = Arc::new(move |event| {
+            let _ = sender.send(event);
+        });
+        let engine = Engine::new(db, Arc::new(Mutex::new(config)), emit);
+
+        let session = engine
+            .create_session(None, None, None, None, None)
+            .expect("session");
+
+        engine
+            .send(&session.id, "hello", None, Vec::new())
+            .expect("send starts");
+
+        // Drain deltas until the terminal event arrives.
+        let event = tokio::time::timeout(Duration::from_secs(20), async {
+            loop {
+                match receiver.recv().await {
+                    Some(event @ EngineEvent::Error { .. }) => break event,
+                    Some(event @ EngineEvent::Done { .. }) => break event,
+                    Some(_) => continue,
+                    None => panic!("the engine stopped without a terminal event"),
+                }
+            }
+        })
+        .await
+        .expect("a terminal event arrived");
+        assert!(
+            matches!(event, EngineEvent::Error { .. }),
+            "expected an error event, got {event:?}"
+        );
+
+        let messages = engine.messages(&session.id).unwrap();
+        let assistant = messages.last().expect("assistant message");
+        let recorded = parse_error(assistant.extra.as_deref())
+            .expect("the failure reason is stored on the message");
+        assert!(!recorded.trim().is_empty());
+
+        // And it survives a reload from disk, which is what the UI does.
+        let reopened = Database::open(&dir.path().join("loom.db")).unwrap();
+        let stored = reopened.messages(&session.id).unwrap();
+        assert!(parse_error(stored.last().unwrap().extra.as_deref()).is_some());
+
         std::env::remove_var("LOOM_HOME");
     }
 
@@ -1969,7 +2113,7 @@ mod tests {
             arguments: "{\"path\":\"a.txt\"}".into(),
             status: "ok".into(),
             output: "contents".into(),
-        }], None)
+        }], None, None)
         .unwrap();
 
         let history = vec![
@@ -2013,7 +2157,7 @@ mod tests {
             arguments: "{}".into(),
             status: "denied".into(),
             output: "denied by the user".into(),
-        }], None)
+        }], None, None)
         .unwrap();
         let history = vec![message(Role::Assistant, "trying", Some(&stored))];
         let wire = build_wire(&history);

@@ -145,6 +145,7 @@ interface ProviderFormState {
   baseUrl: string;
   apiKey: string;
   keyRequired: boolean;
+  sessionHeader: string;
 }
 
 const EMPTY_FORM: ProviderFormState = {
@@ -155,6 +156,7 @@ const EMPTY_FORM: ProviderFormState = {
   baseUrl: "",
   apiKey: "",
   keyRequired: true,
+  sessionHeader: "",
 };
 
 function ProvidersSection() {
@@ -194,6 +196,7 @@ function ProvidersSection() {
             baseUrl: preset.baseUrl,
             apiKey: "",
             keyRequired: preset.keyRequired,
+            sessionHeader: preset.sessionHeader ?? "",
           }
         : { ...EMPTY_FORM },
     );
@@ -211,6 +214,7 @@ function ProvidersSection() {
       baseUrl: provider.baseUrl,
       apiKey: "",
       keyRequired: provider.keyRequired,
+      sessionHeader: provider.sessionHeader ?? "",
     });
   };
 
@@ -238,6 +242,7 @@ function ProvidersSection() {
         modelsSource: config.providers[id]?.modelsSource ?? "manual",
         lastFetchedAt: config.providers[id]?.lastFetchedAt ?? null,
         keyRequired: form.keyRequired,
+        sessionHeader: form.sessionHeader.trim() || null,
       };
 
       const saved = await ipc.upsertProvider(id, provider);
@@ -350,6 +355,7 @@ function ProvidersSection() {
                   <p className="truncate text-[11.5px] text-faint">
                     {provider.kind === "anthropic" ? "Anthropic" : "OpenAI-compatible"} ·{" "}
                     {Object.keys(provider.models).length} models
+                    {provider.sessionHeader ? ` · ${provider.sessionHeader}` : ""}
                   </p>
                 </div>
 
@@ -467,6 +473,15 @@ function ProvidersSection() {
               placeholder={form.keyRequired ? "API key" : "API key (optional)"}
               onChange={(event) =>
                 setForm({ ...form, apiKey: event.currentTarget.value })
+              }
+              className={inputClass}
+            />
+            <input
+              value={form.sessionHeader}
+              placeholder="Session header (e.g. x-opencode-session)"
+              title="Some gateways require a stable per-chat id in a header"
+              onChange={(event) =>
+                setForm({ ...form, sessionHeader: event.currentTarget.value })
               }
               className={inputClass}
             />

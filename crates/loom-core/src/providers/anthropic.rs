@@ -272,6 +272,7 @@ mod tests {
             max_output_tokens: None,
             stream: true,
             tools: Vec::new(),
+            session_id: None,
         }
     }
 
