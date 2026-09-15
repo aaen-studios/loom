@@ -1,0 +1,27 @@
+<svg width="1024" height="1024" viewBox="0 0 1024 1024" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#141a30"/>
+      <stop offset="1" stop-color="#0a0d18"/>
+    </linearGradient>
+    <linearGradient id="thread" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#9cc4ff"/>
+      <stop offset="0.55" stop-color="#8ea2ff"/>
+      <stop offset="1" stop-color="#b78cff"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="0.28" cy="0.18" r="0.95">
+      <stop offset="0" stop-color="#5b7cff" stop-opacity="0.5"/>
+      <stop offset="1" stop-color="#5b7cff" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+
+  <rect width="1024" height="1024" rx="232" fill="url(#bg)"/>
+  <rect width="1024" height="1024" rx="232" fill="url(#glow)"/>
+  <rect x="12" y="12" width="1000" height="1000" rx="222" fill="none" stroke="#ffffff" stroke-opacity="0.08" stroke-width="8"/>
+
+  <g fill="none" stroke="url(#thread)" stroke-width="64" stroke-linecap="round">
+    <path d="M300 268c0 244 212 244 212 488"/>
+    <path d="M512 268c0 244 212 244 212 488"/>
+    <path d="M300 756h424" stroke-opacity="0.35"/>
+  </g>
+</svg>
