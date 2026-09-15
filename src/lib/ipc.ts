@@ -8,6 +8,7 @@ import type {
   ModelRef,
   PermissionMode,
   Persona,
+  Prompt,
   ProviderConfig,
   ProviderPreset,
   Session,
@@ -98,6 +99,8 @@ export const ipc = {
   setHotkey: (enabled: boolean, keys: string) =>
     call<void>("set_hotkey", { enabled, keys }),
 
+  upsertPrompt: (prompt: Prompt) => call<AppConfig>("upsert_prompt", { prompt }),
+  deletePrompt: (id: string) => call<AppConfig>("delete_prompt", { id }),
   upsertPersona: (persona: Persona) =>
     call<AppConfig>("upsert_persona", { persona }),
   deletePersona: (id: string) => call<AppConfig>("delete_persona", { id }),

@@ -258,6 +258,31 @@ pub fn set_default_model(
 // ---------------------------------------------------------------------------
 
 #[tauri::command]
+pub fn upsert_prompt(
+    state: State<'_, AppState>,
+    prompt: loom_core::config::Prompt,
+) -> Result<AppConfig, String> {
+    if prompt.title.trim().is_empty() {
+        return Err("a prompt needs a title".into());
+    }
+    state.mutate(move |config| {
+        let mut prompt = prompt;
+        if prompt.id.trim().is_empty() {
+            prompt.id = uuid::Uuid::new_v4().to_string();
+        }
+        match config.prompts.iter_mut().find(|entry| entry.id == prompt.id) {
+            Some(existing) => *existing = prompt,
+            None => config.prompts.push(prompt),
+        }
+    })
+}
+
+#[tauri::command]
+pub fn delete_prompt(state: State<'_, AppState>, id: String) -> Result<AppConfig, String> {
+    state.mutate(move |config| config.prompts.retain(|entry| entry.id != id))
+}
+
+#[tauri::command]
 pub fn upsert_persona(state: State<'_, AppState>, persona: Persona) -> Result<AppConfig, String> {
     state.mutate(move |config| match config.personas.iter_mut().find(|p| p.id == persona.id) {
         Some(existing) => *existing = persona,

@@ -29,6 +29,8 @@ pub struct AppConfig {
     pub mcp_servers: BTreeMap<String, crate::mcp::McpServerConfig>,
     pub chat: ChatDefaults,
     pub interface: InterfaceConfig,
+    /// Reusable prompt snippets offered in the composer's slash menu.
+    pub prompts: Vec<Prompt>,
     #[serde(flatten)]
     pub extra: serde_json::Map<String, Value>,
 }
@@ -45,6 +47,7 @@ impl Default for AppConfig {
             mcp_servers: BTreeMap::new(),
             chat: ChatDefaults::default(),
             interface: InterfaceConfig::default(),
+            prompts: Vec::new(),
             extra: serde_json::Map::new(),
         }
     }
@@ -184,6 +187,16 @@ pub fn apply_preset_defaults(config: &mut AppConfig) -> bool {
     changed
 }
 
+/// A reusable prompt snippet, managed in the settings and offered in the
+/// composer alongside skills.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct Prompt {
+    pub id: String,
+    pub title: String,
+    pub body: String,
+}
+
 /// How much of a reasoning model''s thinking to show.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -220,6 +233,8 @@ pub struct InterfaceConfig {
     /// Keep the transcript pinned to the newest text even while reading older
     /// messages.
     pub always_follow: bool,
+    /// Keep the chats popup open until it is explicitly closed.
+    pub sidebar_pinned: bool,
     /// Denser transcript and smaller text.
     pub compact: bool,
 }
@@ -233,6 +248,7 @@ impl Default for InterfaceConfig {
             hotkey_enabled: true,
             hotkey: "Ctrl+Shift+Space".to_string(),
             always_follow: false,
+            sidebar_pinned: false,
             compact: false,
         }
     }

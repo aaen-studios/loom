@@ -5,6 +5,7 @@ import { relativeTime } from "../lib/format";
 import { ipc } from "../lib/ipc";
 import { isTauri } from "../lib/tauri";
 import { useChat } from "../stores/chat";
+import { useSettings } from "../stores/settings";
 import { useUi } from "../stores/ui";
 import { DownloadIcon, LoomMark, PlusIcon, SettingsIcon, TrashIcon } from "./icons";
 
@@ -27,6 +28,18 @@ export function SidebarPopup() {
   const [query, setQuery] = useState("");
   const [renaming, setRenaming] = useState<string | null>(null);
   const [draft, setDraft] = useState("");
+  const config = useSettings((state) => state.config);
+  const applyRemote = useSettings((state) => state.applyRemote);
+  const pinned = config.interface.sidebarPinned;
+
+  /** Pinning keeps the popup open until it is closed explicitly. */
+  const togglePin = async () => {
+    const updated = await ipc.setInterfaceSettings({
+      ...config.interface,
+      sidebarPinned: !pinned,
+    });
+    if (updated) applyRemote(updated);
+  };
 
   useEffect(() => {
     if (!open) return;
@@ -74,12 +87,15 @@ export function SidebarPopup() {
 
   return (
     <div className="absolute inset-0 z-30 animate-fade-in">
-      <button
-        type="button"
-        aria-label="Close chats"
-        onClick={() => setOpen(false)}
-        className="absolute inset-0 cursor-default"
-      />
+      {/* Pinned means the popup behaves like a panel: no click-away, no scrim. */}
+      {!pinned && (
+        <button
+          type="button"
+          aria-label="Close chats"
+          onClick={() => setOpen(false)}
+          className="absolute inset-0 cursor-default"
+        />
+      )}
 
       <aside className="panel-strong animate-fade-up absolute bottom-3 left-3 top-16 flex w-[300px] flex-col overflow-hidden rounded-sheet">
         <div className="flex items-center gap-2 px-3 py-2.5 text-soft">
@@ -87,9 +103,21 @@ export function SidebarPopup() {
           <span className="text-[13px] font-semibold tracking-[0.01em]">Chats</span>
           <button
             type="button"
+            title={pinned ? "Unpin (closes when you click away)" : "Pin open"}
+            aria-label={pinned ? "Unpin chats" : "Pin chats open"}
+            onClick={() => void togglePin()}
+            className={cn(
+              "ml-auto grid h-7 w-7 place-items-center rounded-control hover:bg-[var(--hover-bg)]",
+              pinned ? "text-[var(--accent)]" : "text-faint hover:text-[var(--ink)]",
+            )}
+          >
+            {pinned ? "Pinned" : "Pin"}
+          </button>
+          <button
+            type="button"
             aria-label="Close"
             onClick={() => setOpen(false)}
-            className="ml-auto grid h-7 w-7 place-items-center rounded-control text-faint hover:bg-[var(--hover-bg)] hover:text-[var(--ink)]"
+            className="grid h-7 w-7 place-items-center rounded-control text-faint hover:bg-[var(--hover-bg)] hover:text-[var(--ink)]"
           >
             ✕
           </button>
@@ -154,7 +182,7 @@ export function SidebarPopup() {
                     type="button"
                     onClick={() => {
                       void openSession(session.id);
-                      setOpen(false);
+                      if (!pinned) setOpen(false);
                     }}
                     onDoubleClick={() => {
                       setRenaming(session.id);

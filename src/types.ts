@@ -111,7 +111,14 @@ export interface InterfaceConfig {
   hotkeyEnabled: boolean;
   hotkey: string;
   alwaysFollow: boolean;
+  sidebarPinned: boolean;
   compact: boolean;
+}
+
+export interface Prompt {
+  id: string;
+  title: string;
+  body: string;
 }
 
 export interface AppConfig {
@@ -124,6 +131,7 @@ export interface AppConfig {
   mcpServers: Record<string, McpServerConfig>;
   chat: ChatDefaults;
   interface: InterfaceConfig;
+  prompts: Prompt[];
 }
 
 export interface AppInfo {

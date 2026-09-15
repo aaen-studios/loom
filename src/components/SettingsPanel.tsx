@@ -226,6 +226,111 @@ function Segmented<T extends string>({
 
 // ------------------------------------------------------------------ sections
 
+/** Reusable prompt snippets, offered from the composer's slash menu. */
+function PromptsEditor() {
+  const prompts = useSettings((state) => state.config.prompts);
+  const applyRemote = useSettings((state) => state.applyRemote);
+  const [editing, setEditing] = useState<{ id: string; title: string; body: string } | null>(null);
+
+  const save = async () => {
+    if (!editing) return;
+    const updated = await ipc.upsertPrompt({
+      id: editing.id,
+      title: editing.title.trim(),
+      body: editing.body,
+    });
+    if (updated) applyRemote(updated);
+    setEditing(null);
+  };
+
+  const remove = async (id: string) => {
+    const updated = await ipc.deletePrompt(id);
+    if (updated) applyRemote(updated);
+  };
+
+  return (
+    <Section title="Prompts">
+      <div className="space-y-1.5">
+        {prompts.map((prompt) => (
+          <div
+            key={prompt.id}
+            className="flex items-center gap-2 rounded-row border border-[var(--glass-border)] px-2.5 py-1.5"
+          >
+            <span className="min-w-0 flex-1">
+              <span className="block truncate text-[13px]">{prompt.title}</span>
+              <span className="block truncate text-[11.5px] text-faint">
+                {prompt.body.slice(0, 60)}
+              </span>
+            </span>
+            <button
+              type="button"
+              onClick={() => setEditing({ ...prompt })}
+              className="text-[12px] text-faint hover:text-[var(--ink)]"
+            >
+              Edit
+            </button>
+            <button
+              type="button"
+              onClick={() => void remove(prompt.id)}
+              className="text-faint hover:text-[var(--danger)]"
+            >
+              <TrashIcon size={14} />
+            </button>
+          </div>
+        ))}
+        {prompts.length === 0 && !editing && (
+          <p className="text-[12.5px] leading-5 text-faint">
+            Snippets you use often. They appear in the composer's / menu next to
+            your skills.
+          </p>
+        )}
+      </div>
+
+      {editing ? (
+        <div className="mt-2 space-y-2 rounded-row border border-[var(--glass-border)] p-2.5">
+          <input
+            value={editing.title}
+            placeholder="Title"
+            onChange={(event) => setEditing({ ...editing, title: event.currentTarget.value })}
+            className={inputClass}
+          />
+          <textarea
+            value={editing.body}
+            placeholder="Prompt text"
+            rows={4}
+            onChange={(event) => setEditing({ ...editing, body: event.currentTarget.value })}
+            className={cn(inputClass, "resize-none")}
+          />
+          <div className="flex gap-2">
+            <button
+              type="button"
+              onClick={() => void save()}
+              className="flex-1 rounded-control bg-[var(--control-bg)] px-3 py-1.5 text-[12.5px] font-medium text-[var(--control-ink)]"
+            >
+              Save
+            </button>
+            <button
+              type="button"
+              onClick={() => setEditing(null)}
+              className="rounded-control border border-[var(--glass-border)] px-3 py-1.5 text-[12.5px] text-soft"
+            >
+              Cancel
+            </button>
+          </div>
+        </div>
+      ) : (
+        <button
+          type="button"
+          onClick={() => setEditing({ id: "", title: "", body: "" })}
+          className="mt-2 flex items-center gap-1.5 rounded-capsule border border-[var(--glass-border)] px-2.5 py-1 text-[12px] text-soft hover:text-[var(--ink)]"
+        >
+          <PlusIcon size={13} />
+          New prompt
+        </button>
+      )}
+    </Section>
+  );
+}
 // ---------------------------------------------------------------------------
 // Providers
 // ---------------------------------------------------------------------------
@@ -1594,7 +1699,12 @@ export function SettingsPanel() {
                 {category === "providers" && <ProvidersSection />}
                 {category === "personas" && <PersonasSection />}
                 {category === "mcp" && <McpSection />}
-                {category === "skills" && <SkillsSection />}
+                {category === "skills" && (
+                  <>
+                    <SkillsSection />
+                    <PromptsEditor />
+                  </>
+                )}
                 {category === "data" && <AppearanceSection info={info} />}
                 {category === "updates" && <UpdatesSection version={info?.version} />}
               </>

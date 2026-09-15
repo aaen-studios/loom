@@ -3,6 +3,13 @@ import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { cn } from "../lib/cn";
 import { ipc, type Skill } from "../lib/ipc";
+
+interface SlashEntry {
+  id: string;
+  name: string;
+  description: string;
+  body: string;
+}
 import { isTauri } from "../lib/tauri";
 import type { Attachment } from "../types";
 import { useChat } from "../stores/chat";
@@ -38,6 +45,7 @@ export function Composer({ variant = "docked" }: ComposerProps) {
   const [attachments, setAttachments] = useState<Attachment[]>([]);
   const [attachError, setAttachError] = useState<string | null>(null);
   const [skills, setSkills] = useState<Skill[]>([]);
+  const prompts = useSettings((state) => state.config.prompts);
   const [slashOpen, setSlashOpen] = useState(true);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
@@ -145,17 +153,34 @@ export function Composer({ variant = "docked" }: ComposerProps) {
     value.startsWith("/") && !value.includes(" ") && !value.includes("\n")
       ? value.slice(1).toLowerCase()
       : null;
+  // Skills come from markdown files, prompts from the settings, and both are
+  // offered from the same slash menu.
+  const slashEntries: SlashEntry[] = [
+    ...skills.map((skill) => ({
+      id: skill.id,
+      name: skill.name,
+      description: skill.description,
+      body: skill.prompt,
+    })),
+    ...prompts.map((prompt) => ({
+      id: prompt.title.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, ""),
+      name: prompt.title,
+      description: prompt.body.slice(0, 70),
+      body: prompt.body,
+    })),
+  ];
+
   const slashMatches =
     slashQuery === null
       ? []
-      : skills.filter(
-          (skill) =>
-            skill.id.toLowerCase().includes(slashQuery) ||
-            skill.name.toLowerCase().includes(slashQuery),
+      : slashEntries.filter(
+          (entry) =>
+            entry.id.toLowerCase().includes(slashQuery) ||
+            entry.name.toLowerCase().includes(slashQuery),
         );
 
-  const applySkill = (skill: Skill) => {
-    setValue(skill.prompt);
+  const applySkill = (entry: SlashEntry) => {
+    setValue(entry.body);
     setSlashOpen(false);
     textareaRef.current?.focus();
   };

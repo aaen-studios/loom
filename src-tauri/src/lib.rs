@@ -299,6 +299,8 @@ pub fn run() {
             commands::set_chat_settings,
             commands::set_interface_settings,
             commands::set_hotkey,
+            commands::upsert_prompt,
+            commands::delete_prompt,
             commands::upsert_persona,
             commands::delete_persona,
             commands::create_session,

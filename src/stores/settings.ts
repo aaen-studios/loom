@@ -35,8 +35,10 @@ export const DEFAULT_CONFIG: AppConfig = {
     hotkeyEnabled: true,
     hotkey: "Ctrl+Shift+Space",
     alwaysFollow: false,
+    sidebarPinned: false,
     compact: false,
   },
+  prompts: [],
 };
 
 interface SettingsState {
