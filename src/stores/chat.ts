@@ -503,6 +503,9 @@ export const useChat = create<ChatState>((set, get) => ({
         });
         if (isActive) void get().openSession(event.sessionId);
         void get().loadSessions();
+        // The engine records recent models and titles while replying, so pull
+        // the config back to keep the picker and settings in step.
+        void useSettings.getState().load();
         break;
       }
 

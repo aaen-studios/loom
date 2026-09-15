@@ -24,6 +24,7 @@ export const DEFAULT_CONFIG: AppConfig = {
     imageModel: null,
     embeddingModel: null,
     autoTitle: true,
+    recentModels: [],
     permissionMode: "ask",
     historyLimit: 40,
     maxOutputTokens: 8192,

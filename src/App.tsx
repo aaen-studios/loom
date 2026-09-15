@@ -4,6 +4,7 @@ import { AskOverlay } from "./components/AskOverlay";
 import { Background } from "./components/Background";
 import { ChatCanvas } from "./components/ChatCanvas";
 import { SettingsPanel } from "./components/SettingsPanel";
+import { ShortcutsSheet } from "./components/ShortcutsSheet";
 import { SidebarPopup } from "./components/Sidebar";
 import { TitleBar } from "./components/TitleBar";
 import { UpdateToast } from "./components/UpdateToast";
@@ -64,6 +65,7 @@ function MainShell() {
 
       <SidebarPopup />
       <SettingsPanel />
+      <ShortcutsSheet />
       <UpdateToast />
     </div>
   );

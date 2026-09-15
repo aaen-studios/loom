@@ -139,6 +139,8 @@ pub struct ChatDefaults {
     pub embedding_model: Option<String>,
     /// Generate a chat title with the lite model after the first reply.
     pub auto_title: bool,
+    /// Models used recently, newest first (the picker lists them on top).
+    pub recent_models: Vec<ModelRef>,
     /// Global default for the tool permission mode (per-chat override exists).
     pub permission_mode: PermissionMode,
     /// How many past messages to send as context.
@@ -156,6 +158,7 @@ impl Default for ChatDefaults {
             image_model: None,
             embedding_model: None,
             auto_title: true,
+            recent_models: Vec::new(),
             permission_mode: PermissionMode::Ask,
             history_limit: 40,
             max_output_tokens: 8_192,

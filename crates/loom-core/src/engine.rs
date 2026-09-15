@@ -441,6 +441,21 @@ impl Engine {
         Err(Error::UnknownProvider(provider_id.to_string()))
     }
 
+    /// Records a model as recently used (newest first, capped) so the picker
+    /// can offer it without a search.
+    fn remember_model(&self, model: &ModelRef) {
+        let snapshot = {
+            let mut config = self.inner.config.lock().expect("config mutex poisoned");
+            config.chat.recent_models.retain(|entry| entry != model);
+            config.chat.recent_models.insert(0, model.clone());
+            config.chat.recent_models.truncate(5);
+            config.clone()
+        };
+        if let Err(error) = crate::config::save(&snapshot) {
+            eprintln!("[loom] could not save recent models: {error}");
+        }
+    }
+
     pub fn effective_model(&self, session: &Session) -> Result<ModelRef> {
         session
             .provider_id
@@ -527,6 +542,9 @@ impl Engine {
                 provider.name
             )));
         }
+
+        // Remember the model for the picker's "recent" list.
+        self.remember_model(&model);
 
         let now = now_ms();
         self.db().add_message(&Message {

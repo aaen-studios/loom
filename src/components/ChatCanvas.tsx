@@ -218,12 +218,14 @@ function MessageRow({
   runningTools,
   revealThinking,
   onRevealThinking,
+  selected,
 }: {
   message: Message;
   streaming: boolean;
   runningTools: boolean;
   revealThinking: boolean;
   onRevealThinking: () => void;
+  selected: boolean;
 }) {
   const attachments = parseAttachments(message.extra);
   const usage = parseUsage(message.extra);
@@ -231,7 +233,13 @@ function MessageRow({
 
   if (message.role === "user") {
     return (
-      <div className="group flex flex-col items-end gap-1.5">
+      <div
+        data-message-id={message.id}
+        className={cn(
+          "group flex flex-col items-end gap-1.5 rounded-control transition",
+          selected && "ring-1 ring-[var(--accent)]",
+        )}
+      >
         <MessageActions message={message} onRevealThinking={onRevealThinking} />
         <div className="flex max-w-[85%] flex-col items-end">
           {attachments.length > 0 && (
@@ -240,7 +248,10 @@ function MessageRow({
             </div>
           )}
           {message.content && (
-            <div className="message-body panel-strong max-w-full select-text rounded-sheet px-3.5 py-2.5 text-[14.5px] leading-6 whitespace-pre-wrap">
+            <div
+              className="message-body panel-strong max-w-full select-text rounded-sheet px-3.5 py-2.5 text-[14.5px] leading-6 whitespace-pre-wrap"
+              title={new Date(message.createdAt).toLocaleString()}
+            >
               {message.content}
             </div>
           )}
@@ -250,7 +261,13 @@ function MessageRow({
   }
 
   return (
-    <div className="group flex gap-3">
+    <div
+      data-message-id={message.id}
+      className={cn(
+        "group flex gap-3 rounded-control transition",
+        selected && "ring-1 ring-[var(--accent)]",
+      )}
+    >
       <div className="mt-0.5 grid h-7 w-7 shrink-0 place-items-center rounded-full border border-[var(--glass-border)] text-soft">
         <LoomMark size={15} />
       </div>
@@ -330,6 +347,12 @@ export function ChatCanvas() {
   const compact = useSettings((state) => state.config.interface.compact);
   const [query, setQuery] = useState("");
   const [revealed, setRevealed] = useState<Record<string, boolean>>({});
+  const [selected, setSelected] = useState<string | null>(null);
+  const stop = useChat((state) => state.stop);
+  const regenerate = useChat((state) => state.regenerate);
+  const editFrom = useChat((state) => state.editFrom);
+  const removeMessage = useChat((state) => state.removeMessage);
+  const setDraft = useChat((state) => state.setDraft);
 
   const needle = query.trim().toLowerCase();
   const visible = needle
@@ -358,6 +381,75 @@ export function ChatCanvas() {
     setPinned(true);
     endRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
   };
+
+  /** Moves the message selection and brings it into view. */
+  const moveSelection = (delta: number) => {
+    if (messages.length === 0) return;
+    const currentIndex = selected
+      ? messages.findIndex((message) => message.id === selected)
+      : delta > 0
+        ? -1
+        : messages.length;
+    const nextIndex = Math.min(messages.length - 1, Math.max(0, currentIndex + delta));
+    const next = messages[nextIndex];
+    setSelected(next.id);
+    // Wait for the ring to render before scrolling it into view.
+    window.setTimeout(() => {
+      document
+        .querySelector('[data-message-id="' + next.id + '"]')
+        ?.scrollIntoView({ behavior: "smooth", block: "center" });
+    }, 0);
+  };
+
+  /** Keyboard control of the transcript: a chat is usable without a mouse. */
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      const target = event.target as HTMLElement | null;
+      const typing =
+        !!target &&
+        (target.tagName === "INPUT" ||
+          target.tagName === "TEXTAREA" ||
+          target.isContentEditable);
+      if (typing) return;
+
+      if (event.altKey && (event.key === "ArrowDown" || event.key === "ArrowUp")) {
+        event.preventDefault();
+        moveSelection(event.key === "ArrowDown" ? 1 : -1);
+        return;
+      }
+
+      if (event.key === "Escape") {
+        if (busy) {
+          event.preventDefault();
+          void stop();
+        } else if (selected) {
+          setSelected(null);
+        }
+        return;
+      }
+
+      if (!selected) return;
+      const message = messages.find((entry) => entry.id === selected);
+      if (!message || event.ctrlKey || event.metaKey) return;
+
+      const key = event.key.toLowerCase();
+      if (key === "c") {
+        void navigator.clipboard.writeText(message.content).catch(() => {});
+      } else if (key === "e" && message.role === "user") {
+        void editFrom(message.id).then((text) => {
+          if (text !== null) setDraft(text);
+        });
+      } else if (key === "r" && message.role === "assistant") {
+        void regenerate(message.id);
+      } else if (event.key === "Delete" && event.shiftKey) {
+        void removeMessage(message.id);
+        setSelected(null);
+      }
+    };
+
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [messages, selected, busy, stop, editFrom, regenerate, removeMessage, setDraft]);
 
   if (messages.length === 0) {
     return (
@@ -422,9 +514,10 @@ export function ChatCanvas() {
                 onRevealThinking={() =>
                   setRevealed((current) => ({ ...current, [message.id]: true }))
                 }
+                selected={selected === message.id}
               />
             ))}
-            <div ref={endRef} />
+            <div ref={endRef} data-latest />
           </div>
         </div>
 

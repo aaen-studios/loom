@@ -3,7 +3,7 @@ import { cn } from "../lib/cn";
 import { compactTokens, shortModelName } from "../lib/format";
 import { ipc } from "../lib/ipc";
 import type { ModelEntry, ModelRef } from "../types";
-import { currentModel, useProviders } from "../stores/providers";
+import { currentModel, findModel, useProviders } from "../stores/providers";
 import { useChat } from "../stores/chat";
 import { useSettings } from "../stores/settings";
 import { ChevronDownIcon, PlusIcon, SparkIcon } from "./icons";
@@ -37,6 +37,9 @@ export function ModelPicker() {
   const containerRef = useRef<HTMLDivElement>(null);
 
   const providerIds = Object.keys(providers);
+  const recents = chatDefaults.recentModels
+    .map((model) => findModel(models, model.providerId, model.modelId))
+    .filter((entry): entry is ModelEntry => !!entry && entry.enabled);
   const current = currentModel(models, session, chatDefaults);
   const variant = session?.variant ?? chatDefaults.variant ?? null;
 
@@ -242,6 +245,43 @@ export function ModelPicker() {
                       ? "No models yet. Add a provider in Settings, or type a model id below if you already know it."
                       : "No models match that search."}
                   </p>
+                )}
+
+                {/* Recently used models first: no search needed for the usual
+                    suspects. */}
+                {!query.trim() && recents.length > 0 && (
+                  <div className="mb-1">
+                    <p className="px-2 py-1 text-[11px] font-semibold tracking-[0.06em] text-faint uppercase">
+                      Recent
+                    </p>
+                    {recents.map((entry) => (
+                      <div
+                        key={`recent-${entry.providerId}/${entry.modelId}`}
+                        className="hover-surface group flex items-center rounded-row pr-1"
+                      >
+                        <button
+                          type="button"
+                          disabled={busy}
+                          onClick={() => void choose(entry)}
+                          className="flex min-w-0 flex-1 items-center gap-2 px-2 py-1.5 text-left disabled:opacity-60"
+                        >
+                          <span
+                            className={cn(
+                              "truncate text-[13px]",
+                              current?.providerId === entry.providerId &&
+                                current?.modelId === entry.modelId &&
+                                "font-medium text-[var(--accent)]",
+                            )}
+                          >
+                            {shortModelName(entry.providerName, entry.modelId)}
+                          </span>
+                          <span className="ml-auto shrink-0 text-[11px] text-faint">
+                            {entry.providerName}
+                          </span>
+                        </button>
+                      </div>
+                    ))}
+                  </div>
                 )}
 
                 {grouped.map(([providerId, entries]) => (

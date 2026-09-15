@@ -1357,6 +1357,7 @@ function UpdatesSection({ version }: { version: string | undefined }) {
 function GeneralSection() {
   const config = useSettings((state) => state.config);
   const applyRemote = useSettings((state) => state.applyRemote);
+  const setShortcutsOpen = useUi((state) => state.setShortcutsOpen);
   const [hotkeyDraft, setHotkeyDraft] = useState(config.interface.hotkey);
   const [hotkeyNote, setHotkeyNote] = useState<string | null>(null);
 
@@ -1410,6 +1411,16 @@ function GeneralSection() {
         </div>
       )}
       {hotkeyNote && <p className="pt-1 text-[12px] text-faint">{hotkeyNote}</p>}
+
+      <Row label="Keyboard shortcuts">
+        <button
+          type="button"
+          onClick={() => setShortcutsOpen(true)}
+          className="rounded-capsule border border-[var(--glass-border)] px-2.5 py-1 text-[12px] text-soft hover:text-[var(--ink)]"
+        >
+          Show all
+        </button>
+      </Row>
 
       <div className="mt-2">
         <Toggle

@@ -80,6 +80,7 @@ export interface ChatDefaults {
   imageModel: string | null;
   embeddingModel: string | null;
   autoTitle: boolean;
+  recentModels: ModelRef[];
   permissionMode: PermissionMode;
   historyLimit: number;
   maxOutputTokens: number;

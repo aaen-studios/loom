@@ -8,6 +8,8 @@ interface UiState {
   setSidebarOpen: (open: boolean) => void;
   availableUpdate: UpdateManifest | null;
   setAvailableUpdate: (manifest: UpdateManifest | null) => void;
+  shortcutsOpen: boolean;
+  setShortcutsOpen: (open: boolean) => void;
 }
 
 export const useUi = create<UiState>((set) => ({
@@ -17,4 +19,6 @@ export const useUi = create<UiState>((set) => ({
   setSidebarOpen: (sidebarOpen) => set({ sidebarOpen }),
   availableUpdate: null,
   setAvailableUpdate: (availableUpdate) => set({ availableUpdate }),
+  shortcutsOpen: false,
+  setShortcutsOpen: (shortcutsOpen) => set({ shortcutsOpen }),
 }));
