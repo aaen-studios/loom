@@ -58,11 +58,7 @@ const THEME_OPTIONS: { id: Theme; label: string; icon: ReactNode }[] = [
   { id: "dark", label: "Dark", icon: <MoonIcon size={15} /> },
 ];
 
-const PERMISSION_OPTIONS: { id: PermissionMode; label: string; help: string }[] = [
-  { id: "ask", label: "Ask", help: "Confirm every tool call (M3)" },
-  { id: "auto-read-only", label: "Auto read", help: "Read-only tools run silently" },
-  { id: "auto-all", label: "Auto all", help: "Run everything without prompting" },
-];
+
 
 function ModelMetaList({
   providerId,
@@ -132,6 +128,103 @@ function ModelMetaList({
     </details>
   );
 }
+
+/**
+ * Settings categories. Each section registers itself here so the search box
+ * can find a setting by name ("hotkey", "thinking", "theme") rather than
+ * making you hunt through tabs.
+ */
+export const SETTINGS_CATEGORIES = [
+  { id: "general", label: "General", keywords: "notification toast hotkey shortcut density compact scroll" },
+  { id: "appearance", label: "Appearance", keywords: "theme dark light background wallpaper dim blur" },
+  { id: "chat", label: "Chat", keywords: "thinking reasoning effort send key enter title token models context" },
+  { id: "tools", label: "Tools", keywords: "permission ask auto approve workspace index search" },
+  { id: "providers", label: "Providers", keywords: "api key base url openai anthropic opencode ollama model" },
+  { id: "personas", label: "Personas", keywords: "system prompt role character" },
+  { id: "mcp", label: "MCP", keywords: "server tools stdio external" },
+  { id: "skills", label: "Skills", keywords: "markdown slash prompts snippets" },
+  { id: "data", label: "Data", keywords: "folder database files version" },
+  { id: "updates", label: "Updates", keywords: "version release download restart" },
+] as const;
+
+export type SettingsCategoryId = (typeof SETTINGS_CATEGORIES)[number]["id"];
+
+/** Small switch used across the sections. */
+function Toggle({
+  checked,
+  onChange,
+  label,
+  hint,
+}: {
+  checked: boolean;
+  onChange: (value: boolean) => void;
+  label: string;
+  hint?: string;
+}) {
+  return (
+    <button
+      type="button"
+      role="switch"
+      aria-checked={checked}
+      onClick={() => onChange(!checked)}
+      className="flex w-full items-start justify-between gap-4 rounded-control px-1 py-1.5 text-left"
+    >
+      <span className="min-w-0">
+        <span className="block text-[13px] text-soft">{label}</span>
+        {hint && <span className="block text-[11.5px] leading-4 text-faint">{hint}</span>}
+      </span>
+      <span
+        className={cn(
+          "mt-0.5 flex h-5 w-9 shrink-0 items-center rounded-capsule border p-0.5 transition",
+          checked
+            ? "justify-end border-[var(--accent)] bg-[var(--accent-soft)]"
+            : "justify-start border-[var(--glass-border)]",
+        )}
+      >
+        <span
+          className={cn(
+            "h-3.5 w-3.5 rounded-capsule transition",
+            checked ? "bg-[var(--accent)]" : "bg-[var(--ink-faint)]",
+          )}
+        />
+      </span>
+    </button>
+  );
+}
+
+/** Two or three mutually exclusive options, e.g. thinking display. */
+function Segmented<T extends string>({
+  value,
+  options,
+  onChange,
+}: {
+  value: T;
+  options: { id: T; label: string; title?: string }[];
+  onChange: (value: T) => void;
+}) {
+  return (
+    <div className="flex rounded-capsule border border-[var(--glass-border)] p-0.5">
+      {options.map((option) => (
+        <button
+          key={option.id}
+          type="button"
+          title={option.title}
+          onClick={() => onChange(option.id)}
+          className={cn(
+            "rounded-capsule px-2.5 py-1 text-[12px] transition",
+            value === option.id
+              ? "bg-[var(--control-bg)] text-[var(--control-ink)]"
+              : "text-soft hover:text-[var(--ink)]",
+          )}
+        >
+          {option.label}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+// ------------------------------------------------------------------ sections
 
 // ---------------------------------------------------------------------------
 // Providers
@@ -664,6 +757,11 @@ function ChatSection() {
   const applyRemote = useSettings((state) => state.applyRemote);
   const models = useProviders((state) => state.models);
 
+  const saveInterface = async (patch: Partial<typeof config.interface>) => {
+    const updated = await ipc.setInterfaceSettings({ ...config.interface, ...patch });
+    if (updated) applyRemote(updated);
+  };
+
   const setChatSettings = async (args: {
     permissionMode?: PermissionMode;
     historyLimit?: number;
@@ -692,6 +790,57 @@ function ChatSection() {
 
   return (
     <Section title="Chat">
+      <Row label="Model thinking">
+        <Segmented
+          value={config.interface.showThinking}
+          options={[
+            { id: "collapsed", label: "Collapsed", title: "A header you expand when you want it" },
+            { id: "hidden", label: "Hidden", title: "Never rendered unless opened from the message actions" },
+            { id: "expanded", label: "Expanded", title: "Open from the start" },
+          ]}
+          onChange={(value) => void saveInterface({ showThinking: value })}
+        />
+      </Row>
+
+      <Row label="Send with">
+        <Segmented
+          value={config.interface.sendKey}
+          options={[
+            { id: "enter", label: "Enter" },
+            { id: "ctrl-enter", label: "Ctrl+Enter" },
+          ]}
+          onChange={(value) => void saveInterface({ sendKey: value })}
+        />
+      </Row>
+
+      <Row label="Auto-title chats">
+        <button
+          type="button"
+          role="switch"
+          aria-checked={config.chat.autoTitle}
+          onClick={() =>
+            void ipc
+              .setChatSettings({ autoTitle: !config.chat.autoTitle })
+              .then((updated) => {
+                if (updated) applyRemote(updated);
+              })
+          }
+          className={cn(
+            "flex h-5 w-9 items-center rounded-capsule border p-0.5 transition",
+            config.chat.autoTitle
+              ? "justify-end border-[var(--accent)] bg-[var(--accent-soft)]"
+              : "justify-start border-[var(--glass-border)]",
+          )}
+        >
+          <span
+            className={cn(
+              "h-3.5 w-3.5 rounded-capsule",
+              config.chat.autoTitle ? "bg-[var(--accent)]" : "bg-[var(--ink-faint)]",
+            )}
+          />
+        </button>
+      </Row>
+
       <Row label="Titles model">
         <select
           value={liteValue}
@@ -739,26 +888,7 @@ function ChatSection() {
         />
       </Row>
 
-      <Row label="Tool permissions">
-        <div className="flex rounded-full border border-[var(--glass-border)] p-0.5">
-          {PERMISSION_OPTIONS.map((option) => (
-            <button
-              key={option.id}
-              type="button"
-              title={option.help}
-              onClick={() => void setChatSettings({ permissionMode: option.id })}
-              className={cn(
-                "rounded-full px-2.5 py-1 text-[12px] transition",
-                config.chat.permissionMode === option.id
-                  ? "bg-[var(--control-bg)] text-[var(--control-ink)]"
-                  : "text-soft hover:text-[var(--ink)]",
-              )}
-            >
-              {option.label}
-            </button>
-          ))}
-        </div>
-      </Row>
+
 
       <Row label="Image model">
         <input
@@ -1118,18 +1248,242 @@ function UpdatesSection({ version }: { version: string | undefined }) {
   );
 }
 
+
+function GeneralSection() {
+  const config = useSettings((state) => state.config);
+  const applyRemote = useSettings((state) => state.applyRemote);
+  const [hotkeyDraft, setHotkeyDraft] = useState(config.interface.hotkey);
+  const [hotkeyNote, setHotkeyNote] = useState<string | null>(null);
+
+  const saveInterface = async (patch: Partial<typeof config.interface>) => {
+    const updated = await ipc.setInterfaceSettings({ ...config.interface, ...patch });
+    if (updated) applyRemote(updated);
+  };
+
+  const applyHotkey = async () => {
+    try {
+      await ipc.setHotkey(config.interface.hotkeyEnabled, hotkeyDraft);
+      await saveInterface({ hotkey: hotkeyDraft });
+      setHotkeyNote("Hotkey active.");
+    } catch (error) {
+      setHotkeyNote(error instanceof Error ? error.message : String(error));
+    }
+  };
+
+  return (
+    <Section title="General">
+      <Toggle
+        label="Notify when a reply finishes"
+        hint="Windows toast when the window is not focused."
+        checked={config.interface.notifyOnCompletion}
+        onChange={(value) => void saveInterface({ notifyOnCompletion: value })}
+      />
+      <Toggle
+        label="Quick-ask overlay hotkey"
+        hint="Ctrl+Shift+Space summons the overlay from anywhere in Windows."
+        checked={config.interface.hotkeyEnabled}
+        onChange={(value) => void saveInterface({ hotkeyEnabled: value })}
+      />
+      {config.interface.hotkeyEnabled && (
+        <div className="flex items-center gap-1.5 pt-1">
+          <input
+            value={hotkeyDraft}
+            onChange={(event) => setHotkeyDraft(event.currentTarget.value)}
+            onKeyDown={(event) => {
+              if (event.key === "Enter") void applyHotkey();
+            }}
+            placeholder="Ctrl+Shift+Space"
+            className={inputClass}
+          />
+          <button
+            type="button"
+            onClick={() => void applyHotkey()}
+            className="shrink-0 rounded-control border border-[var(--glass-border)] px-2.5 py-1.5 text-[12px] text-soft"
+          >
+            Apply
+          </button>
+        </div>
+      )}
+      {hotkeyNote && <p className="pt-1 text-[12px] text-faint">{hotkeyNote}</p>}
+
+      <div className="mt-2">
+        <Toggle
+          label="Always follow new text"
+          hint="Keep the transcript pinned even while you read older messages."
+          checked={config.interface.alwaysFollow}
+          onChange={(value) => void saveInterface({ alwaysFollow: value })}
+        />
+        <Toggle
+          label="Compact density"
+          hint="Tighter spacing and smaller text for long sessions."
+          checked={config.interface.compact}
+          onChange={(value) => void saveInterface({ compact: value })}
+        />
+      </div>
+    </Section>
+  );
+}
+
+// ------------------------------------------------------------------ sections
+
 // ---------------------------------------------------------------------------
 // Panel
 // ---------------------------------------------------------------------------
 
+function AppearanceSection({ info }: { info: AppInfo | null }) {
+  const config = useSettings((state) => state.config);
+  const setTheme = useSettings((state) => state.setTheme);
+  const setBackground = useSettings((state) => state.setBackground);
+  const applyRemote = useSettings((state) => state.applyRemote);
+
+  const pickBackground = async (kind: "image" | "video") => {
+    if (!isTauri) return;
+    const filters =
+      kind === "image"
+        ? [{ name: "Images", extensions: ["png", "jpg", "jpeg", "webp", "gif", "bmp"] }]
+        : [{ name: "Video", extensions: ["mp4", "webm", "mkv", "mov"] }];
+    const picked = await openDialog({ multiple: false, filters });
+    if (!picked || typeof picked !== "string") return;
+    const updated = await ipc.setBackgroundFile(kind, picked);
+    if (updated) applyRemote(updated);
+  };
+
+  return (
+    <>
+      <Section title="Appearance">
+        <Row label="Theme">
+          <div className="flex rounded-capsule border border-[var(--glass-border)] p-0.5">
+            {THEME_OPTIONS.map((option) => (
+              <button
+                key={option.id}
+                type="button"
+                onClick={() => setTheme(option.id)}
+                className={cn(
+                  "flex items-center gap-1.5 rounded-capsule px-3 py-1 text-[12.5px] transition",
+                  config.theme === option.id
+                    ? "bg-[var(--control-bg)] text-[var(--control-ink)]"
+                    : "text-soft hover:text-[var(--ink)]",
+                )}
+              >
+                {option.icon}
+                {option.label}
+              </button>
+            ))}
+          </div>
+        </Row>
+
+        <div className="mt-3 grid grid-cols-3 gap-2">
+          {BACKGROUND_PRESETS.map((preset) => (
+            <button
+              key={preset.id}
+              type="button"
+              title={preset.name}
+              onClick={() =>
+                setBackground({ kind: "builtin", preset: preset.id, path: null })
+              }
+              className={cn(
+                "group relative h-16 overflow-hidden rounded-row border transition",
+                config.background.preset === preset.id &&
+                  config.background.kind === "builtin"
+                  ? "border-[var(--accent)] ring-2 ring-[var(--accent-soft)]"
+                  : "border-[var(--glass-border)] hover:border-[var(--ink-faint)]",
+              )}
+              style={{ background: preset.swatch }}
+            >
+              <span className="absolute inset-x-0 bottom-0 bg-black/25 py-0.5 text-[10.5px] text-white/90 opacity-0 transition group-hover:opacity-100">
+                {preset.name}
+              </span>
+            </button>
+          ))}
+        </div>
+
+        <div className="mt-3 flex flex-wrap gap-1.5">
+          <button
+            type="button"
+            onClick={() => void pickBackground("image")}
+            className="rounded-capsule border border-[var(--glass-border)] px-2.5 py-1 text-[12px] text-soft hover:text-[var(--ink)]"
+          >
+            Choose image…
+          </button>
+          <button
+            type="button"
+            onClick={() => void pickBackground("video")}
+            className="rounded-capsule border border-[var(--glass-border)] px-2.5 py-1 text-[12px] text-soft hover:text-[var(--ink)]"
+          >
+            Choose video…
+          </button>
+          {config.background.kind !== "builtin" && (
+            <button
+              type="button"
+              onClick={() => setBackground({ kind: "builtin", path: null })}
+              className="rounded-capsule border border-[var(--glass-border)] px-2.5 py-1 text-[12px] text-faint hover:text-[var(--danger)]"
+            >
+              Remove custom
+            </button>
+          )}
+        </div>
+
+        {config.background.kind !== "builtin" && config.background.path && (
+          <p
+            className="mt-2 truncate font-mono text-[11px] text-faint"
+            title={config.background.path}
+          >
+            {config.background.path}
+          </p>
+        )}
+
+        <div className="mt-3">
+          <Row label="Dim">
+            <input
+              type="range"
+              min={0}
+              max={100}
+              value={config.background.dim}
+              onChange={(event) =>
+                setBackground({ dim: Number(event.currentTarget.value) })
+              }
+              className="w-40"
+            />
+          </Row>
+          <Row label="Blur">
+            <input
+              type="range"
+              min={0}
+              max={64}
+              value={config.background.blur}
+              onChange={(event) =>
+                setBackground({ blur: Number(event.currentTarget.value) })
+              }
+              className="w-40"
+            />
+          </Row>
+        </div>
+      </Section>
+
+      <Section title="Data">
+        <Row label="App version">
+          <span className="text-[13px] text-soft">{info?.version ?? "—"}</span>
+        </Row>
+        <div className="pt-1.5">
+          <p className="text-[13px] text-soft">Data folder</p>
+          <p
+            className="mt-1 truncate font-mono text-[11.5px] text-faint"
+            title={info?.loomHome ?? ""}
+          >
+            {info?.loomHome ?? "—"}
+          </p>
+        </div>
+      </Section>
+    </>
+  );
+}
+
 export function SettingsPanel() {
   const open = useUi((state) => state.settingsOpen);
   const setOpen = useUi((state) => state.setSettingsOpen);
-  const config = useSettings((state) => state.config);
-  const applyRemote = useSettings((state) => state.applyRemote);
-  const setTheme = useSettings((state) => state.setTheme);
-  const setBackground = useSettings((state) => state.setBackground);
   const [info, setInfo] = useState<AppInfo | null>(null);
+  const [category, setCategory] = useState<SettingsCategoryId>("general");
+  const [query, setQuery] = useState("");
 
   useEffect(() => {
     if (open && !info) {
@@ -1150,17 +1504,16 @@ export function SettingsPanel() {
 
   if (!open) return null;
 
-  const pickBackground = async (kind: "image" | "video") => {
-    if (!isTauri) return;
-    const filters =
-      kind === "image"
-        ? [{ name: "Images", extensions: ["png", "jpg", "jpeg", "webp", "gif", "bmp"] }]
-        : [{ name: "Video", extensions: ["mp4", "webm", "mkv", "mov"] }];
-    const picked = await openDialog({ multiple: false, filters });
-    if (!picked || typeof picked !== "string") return;
-    const updated = await ipc.setBackgroundFile(kind, picked);
-    if (updated) applyRemote(updated);
+  const needle = query.trim().toLowerCase();
+  const matches = (id: SettingsCategoryId) => {
+    if (!needle) return id === category;
+    const entry = SETTINGS_CATEGORIES.find((item) => item.id === id);
+    return (
+      (entry?.label.toLowerCase().includes(needle) ?? false) ||
+      (entry?.keywords.includes(needle) ?? false)
+    );
   };
+  const searching = needle.length > 0;
 
   return (
     <div className="absolute inset-0 z-40 flex justify-end p-3 pt-16">
@@ -1171,9 +1524,15 @@ export function SettingsPanel() {
         className="absolute inset-0 cursor-default bg-black/10"
       />
 
-      <div className="animate-fade-up panel-strong relative flex h-full w-[420px] flex-col overflow-hidden rounded-sheet">
-        <div className="flex items-center justify-between px-4 py-3">
+      <div className="animate-fade-up panel-strong relative flex h-full w-[620px] flex-col overflow-hidden rounded-sheet">
+        <div className="flex items-center gap-3 px-4 py-3">
           <h2 className="text-[14.5px] font-semibold">Settings</h2>
+          <input
+            value={query}
+            onChange={(event) => setQuery(event.currentTarget.value)}
+            placeholder="Search settings…"
+            className="min-w-0 flex-1 rounded-control border border-[var(--glass-border)] bg-[var(--hover-bg)] px-2.5 py-1.5 text-[12.5px] placeholder:text-[var(--ink-faint)]"
+          />
           <button
             type="button"
             aria-label="Close settings"
@@ -1184,146 +1543,63 @@ export function SettingsPanel() {
           </button>
         </div>
 
-        <div className="min-h-0 flex-1 overflow-y-auto">
-          <ProvidersSection />
-
-          <Section title="Appearance">
-            <Row label="Theme">
-              <div className="flex rounded-full border border-[var(--glass-border)] p-0.5">
-                {THEME_OPTIONS.map((option) => (
-                  <button
-                    key={option.id}
-                    type="button"
-                    onClick={() => setTheme(option.id)}
-                    className={cn(
-                      "flex items-center gap-1.5 rounded-full px-3 py-1 text-[12.5px] transition",
-                      config.theme === option.id
-                        ? "bg-[var(--control-bg)] text-[var(--control-ink)]"
-                        : "text-soft hover:text-[var(--ink)]",
-                    )}
-                  >
-                    {option.icon}
-                    {option.label}
-                  </button>
-                ))}
-              </div>
-            </Row>
-
-            <div className="mt-3 grid grid-cols-3 gap-2">
-              {BACKGROUND_PRESETS.map((preset) => (
-                <button
-                  key={preset.id}
-                  type="button"
-                  title={preset.name}
-                  onClick={() =>
-                    setBackground({
-                      kind: "builtin",
-                      preset: preset.id,
-                      path: null,
-                    })
-                  }
-                  className={cn(
-                    "group relative h-16 overflow-hidden rounded-row border transition",
-                    config.background.preset === preset.id &&
-                      config.background.kind === "builtin"
-                      ? "border-[var(--accent)] ring-2 ring-[var(--accent-soft)]"
-                      : "border-[var(--glass-border)] hover:border-[var(--ink-faint)]",
-                  )}
-                  style={{ background: preset.swatch }}
-                >
-                  <span className="absolute inset-x-0 bottom-0 bg-black/25 py-0.5 text-[10.5px] text-white/90 opacity-0 transition group-hover:opacity-100">
-                    {preset.name}
-                  </span>
-                </button>
-              ))}
-            </div>
-
-            <div className="mt-3 flex flex-wrap gap-1.5">
+        <div className="flex min-h-0 flex-1">
+          <nav className="w-[160px] shrink-0 overflow-y-auto border-r border-[var(--glass-border)] p-2">
+            {SETTINGS_CATEGORIES.map((entry) => (
               <button
+                key={entry.id}
                 type="button"
-                onClick={() => void pickBackground("image")}
-                className="rounded-full border border-[var(--glass-border)] px-2.5 py-1 text-[12px] text-soft hover:text-[var(--ink)]"
+                onClick={() => {
+                  setCategory(entry.id);
+                  setQuery("");
+                }}
+                className={cn(
+                  "hover-surface w-full rounded-row px-2.5 py-1.5 text-left text-[13px]",
+                  entry.id === category && !searching
+                    ? "bg-[var(--hover-bg)] text-[var(--ink)]"
+                    : "text-soft",
+                  searching && matches(entry.id) && "text-[var(--accent)]",
+                )}
               >
-                Choose image…
+                {entry.label}
               </button>
-              <button
-                type="button"
-                onClick={() => void pickBackground("video")}
-                className="rounded-full border border-[var(--glass-border)] px-2.5 py-1 text-[12px] text-soft hover:text-[var(--ink)]"
-              >
-                Choose video…
-              </button>
-              {config.background.kind !== "builtin" && (
-                <button
-                  type="button"
-                  onClick={() =>
-                    setBackground({ kind: "builtin", path: null })
-                  }
-                  className="rounded-full border border-[var(--glass-border)] px-2.5 py-1 text-[12px] text-faint hover:text-[var(--danger)]"
-                >
-                  Remove custom
-                </button>
-              )}
-            </div>
+            ))}
+          </nav>
 
-            {config.background.kind !== "builtin" && config.background.path && (
-              <p
-                className="mt-2 truncate font-mono text-[11px] text-faint"
-                title={config.background.path}
-              >
-                {config.background.path}
-              </p>
+          <div className="min-h-0 flex-1 overflow-y-auto">
+            {searching ? (
+              <>
+                {SETTINGS_CATEGORIES.filter((entry) => matches(entry.id)).map(
+                  (entry) => (
+                    <p
+                      key={entry.id}
+                      className="px-4 pt-3 text-[11.5px] tracking-[0.06em] text-faint uppercase"
+                    >
+                      {entry.label}
+                    </p>
+                  ),
+                )}
+                <p className="px-4 py-6 text-[12.5px] text-faint">
+                  {SETTINGS_CATEGORIES.some((entry) => matches(entry.id))
+                      ? "Open the highlighted category to change it."
+                      : "Nothing matches your search."}
+                </p>
+              </>
+            ) : (
+              <>
+                {category === "general" && <GeneralSection />}
+                {category === "appearance" && <AppearanceSection info={info} />}
+                {category === "chat" && <ChatSection />}
+                {category === "tools" && <ToolsSection />}
+                {category === "providers" && <ProvidersSection />}
+                {category === "personas" && <PersonasSection />}
+                {category === "mcp" && <McpSection />}
+                {category === "skills" && <SkillsSection />}
+                {category === "data" && <AppearanceSection info={info} />}
+                {category === "updates" && <UpdatesSection version={info?.version} />}
+              </>
             )}
-
-            <div className="mt-3">
-              <Row label="Dim">
-                <input
-                  type="range"
-                  min={0}
-                  max={100}
-                  value={config.background.dim}
-                  onChange={(event) =>
-                    setBackground({ dim: Number(event.currentTarget.value) })
-                  }
-                  className="w-40"
-                />
-              </Row>
-              <Row label="Blur">
-                <input
-                  type="range"
-                  min={0}
-                  max={64}
-                  value={config.background.blur}
-                  onChange={(event) =>
-                    setBackground({ blur: Number(event.currentTarget.value) })
-                  }
-                  className="w-40"
-                />
-              </Row>
-            </div>
-          </Section>
-
-          <ChatSection />
-          <PersonasSection />
-          <McpSection />
-          <SkillsSection />
-
-          <Section title="Data">
-            <Row label="App version">
-              <span className="text-[13px] text-soft">{info?.version ?? "—"}</span>
-            </Row>
-            <div className="pt-1.5">
-              <p className="text-[13px] text-soft">Data folder</p>
-              <p
-                className="mt-1 truncate font-mono text-[11.5px] text-faint"
-                title={info?.loomHome ?? ""}
-              >
-                {info?.loomHome ?? "—"}
-              </p>
-            </div>
-          </Section>
-
-          <UpdatesSection version={info?.version} />
+          </div>
         </div>
       </div>
     </div>
@@ -1341,4 +1617,63 @@ function slugify(name: string): string {
 function messageOf(error: unknown): string {
   if (error instanceof Error) return error.message;
   return String(error);
+}
+
+/** Tool permissions and the tools the model can actually call. */
+function ToolsSection() {
+  const config = useSettings((state) => state.config);
+  const applyRemote = useSettings((state) => state.applyRemote);
+  const [tools, setTools] = useState<{ name: string; description: string; readOnly: boolean }[]>([]);
+
+  useEffect(() => {
+    void ipc.listTools().then((result) => setTools(result ?? []));
+  }, []);
+
+  const setMode = async (mode: PermissionMode) => {
+    const updated = await ipc.setChatSettings({ permissionMode: mode });
+    if (updated) applyRemote(updated);
+  };
+
+  return (
+    <>
+      <Section title="Permissions">
+        <Row label="Default mode">
+          <Segmented
+            value={config.chat.permissionMode}
+            options={[
+              { id: "ask", label: "Ask", title: "Confirm every tool call" },
+              { id: "auto-read-only", label: "Auto read", title: "Read-only tools run silently" },
+              { id: "auto-all", label: "Auto all", title: "Run every tool without asking" },
+            ]}
+            onChange={(value) => void setMode(value)}
+          />
+        </Row>
+        <p className="pt-1.5 text-[12px] leading-5 text-faint">
+          Each chat can override this from the composer. Write-file and command
+          tools always ask unless the mode is “Auto all”.
+        </p>
+      </Section>
+
+      <Section title="Tools">
+        <div className="space-y-1.5">
+          {tools.map((tool) => (
+            <div key={tool.name} className="rounded-row border border-[var(--glass-border)] px-2.5 py-1.5">
+              <p className="font-mono text-[12px] text-soft">
+                {tool.name}
+                {tool.readOnly && (
+                  <span className="ml-2 rounded-capsule border border-[var(--glass-border)] px-1.5 py-0.5 text-[10px] text-faint">
+                    read-only
+                  </span>
+                )}
+              </p>
+              <p className="text-[11.5px] leading-4 text-faint">{tool.description}</p>
+            </div>
+          ))}
+          {tools.length === 0 && (
+            <p className="text-[12.5px] text-faint">No tools reported.</p>
+          )}
+        </div>
+      </Section>
+    </>
+  );
 }

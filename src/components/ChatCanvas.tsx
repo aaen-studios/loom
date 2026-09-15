@@ -1,8 +1,10 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { cn } from "../lib/cn";
 import { formatUsage, parseAttachments, parseError, parseUsage } from "../lib/messageExtra";
 import type { Message, ToolCallRecord } from "../types";
 import { useChat } from "../stores/chat";
 import { useProviders } from "../stores/providers";
+import { useSettings } from "../stores/settings";
 import { useUi } from "../stores/ui";
 import { AttachmentStrip } from "./AttachmentChips";
 import { Composer } from "./Composer";
@@ -10,12 +12,27 @@ import { Markdown } from "./Markdown";
 import { PermissionCard, ToolCallList } from "./ToolCalls";
 import { BrainIcon, LoomMark } from "./icons";
 
-function Reasoning({ text, streaming }: { text: string; streaming: boolean }) {
-  const [open, setOpen] = useState(true);
+function Reasoning({
+  text,
+  streaming,
+  hasContent,
+}: {
+  text: string;
+  streaming: boolean;
+  hasContent: boolean;
+}) {
+  const showThinking = useSettings((state) => state.config.interface.showThinking);
+  const [open, setOpen] = useState(showThinking === "expanded");
 
   useEffect(() => {
-    if (streaming) setOpen(true);
-  }, [streaming]);
+    setOpen(showThinking === "expanded");
+  }, [showThinking]);
+
+  // Never rendered unless the user asks for it.
+  if (showThinking === "hidden") return null;
+  // While the model is still thinking, the transcript shows a small indicator
+  // instead of the running commentary.
+  if (streaming && !hasContent) return null;
 
   return (
     <div className="mb-2">
@@ -60,7 +77,7 @@ function MessageRow({
             </div>
           )}
           {message.content && (
-            <div className="panel-strong max-w-full select-text rounded-sheet px-3.5 py-2.5 text-[14.5px] leading-6 whitespace-pre-wrap">
+            <div className="message-body panel-strong max-w-full select-text rounded-sheet px-3.5 py-2.5 text-[14.5px] leading-6 whitespace-pre-wrap">
               {message.content}
             </div>
           )}
@@ -74,9 +91,13 @@ function MessageRow({
       <div className="mt-0.5 grid h-7 w-7 shrink-0 place-items-center rounded-full border border-[var(--glass-border)] text-soft">
         <LoomMark size={15} />
       </div>
-      <div className="min-w-0 flex-1 select-text pt-0.5">
+      <div className="message-body min-w-0 flex-1 select-text pt-0.5">
         {message.reasoning && (
-          <Reasoning text={message.reasoning} streaming={streaming} />
+          <Reasoning
+            text={message.reasoning}
+            streaming={streaming}
+            hasContent={message.content.length > 0}
+          />
         )}
         <ToolCallList messageId={message.id} extra={message.extra} />
         {failure ? (
@@ -140,6 +161,8 @@ export function ChatCanvas() {
   const retryLast = useChat((state) => state.retryLast);
   const modelCount = useProviders((state) => state.models.length);
   const setSettingsOpen = useUi((state) => state.setSettingsOpen);
+  const alwaysFollow = useSettings((state) => state.config.interface.alwaysFollow);
+  const compact = useSettings((state) => state.config.interface.compact);
 
   const scrollRef = useRef<HTMLDivElement>(null);
   const endRef = useRef<HTMLDivElement>(null);
@@ -154,10 +177,10 @@ export function ChatCanvas() {
   }, []);
 
   useEffect(() => {
-    if (pinned) {
+    if (pinned || alwaysFollow) {
       endRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
     }
-  }, [messages, pinned]);
+  }, [messages, pinned, alwaysFollow]);
 
   const jumpToLatest = () => {
     setPinned(true);
@@ -205,9 +228,17 @@ export function ChatCanvas() {
         <div
           ref={scrollRef}
           onScroll={onScroll}
-          className="min-h-0 flex-1 overflow-y-auto px-8 pb-2 pt-7"
+          className={cn(
+            "min-h-0 flex-1 overflow-y-auto px-8 pb-2 pt-7",
+            compact && "density-compact",
+          )}
         >
-          <div className="mx-auto flex w-full max-w-3xl flex-col gap-6">
+          <div
+            className={cn(
+              "mx-auto flex w-full max-w-3xl flex-col",
+              compact ? "gap-4" : "gap-6",
+            )}
+          >
             {messages.map((message) => (
               <MessageRow
                 key={message.id}

@@ -216,6 +216,17 @@ body {
   color: var(--ink-faint);
 }
 
+/* Compact density: a smaller reading size without changing any component. */
+.density-compact .message-body {
+  font-size: 13.25px;
+  line-height: 1.6;
+}
+
+.density-compact .loom-markdown {
+  font-size: 13.25px;
+  line-height: 1.62;
+}
+
 /* ---------------------------------------------------------------------------
    Motion
 --------------------------------------------------------------------------- */

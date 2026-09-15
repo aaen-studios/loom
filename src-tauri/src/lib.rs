@@ -20,9 +20,33 @@ use loom_core::engine::{Engine, EngineEvent, SharedConfig};
 
 use commands::AppState;
 
-/// Ctrl+Shift+Space summons the quick-ask overlay.
+/// Default quick-ask hotkey. Replaced at runtime by the configured value.
 fn ask_shortcut() -> Shortcut {
     Shortcut::new(Some(Modifiers::CONTROL | Modifiers::SHIFT), Code::Space)
+}
+
+/// Parses a hotkey string such as `Ctrl+Shift+Space`.
+fn parse_shortcut(keys: &str) -> Result<Shortcut, String> {
+    keys.trim()
+        .parse::<Shortcut>()
+        .map_err(|error| format!("unusable hotkey \"{keys}\": {error}"))
+}
+
+/// Applies the configured hotkey: unregisters whatever was registered and
+/// registers the new one, or nothing at all when disabled.
+fn apply_hotkey(app: &AppHandle, enabled: bool, keys: &str) -> Result<(), String> {
+    let manager = app.global_shortcut();
+    manager.unregister_all().map_err(|e| e.to_string())?;
+    if !enabled {
+        return Ok(());
+    }
+    let shortcut = parse_shortcut(keys)?;
+    manager.register(shortcut).map_err(|e| e.to_string())
+}
+
+/// Used by the settings command; kept here because it owns the plugin handle.
+pub(crate) fn set_hotkey_now(app: &AppHandle, enabled: bool, keys: &str) -> Result<(), String> {
+    apply_hotkey(app, enabled, keys)
 }
 
 fn show_main_window(app: &AppHandle) {
@@ -67,6 +91,14 @@ fn toggle_overlay(app: &AppHandle) {
             let _ = window.set_focus();
         }
         Err(error) => eprintln!("[loom] failed to create overlay window: {error}"),
+    }
+}
+
+/// Reads `(hotkey_enabled, hotkey)` without needing managed state yet.
+fn shared_interface(_app: &AppHandle) -> (bool, String) {
+    match loom_core::config::load() {
+        Ok(config) => (config.interface.hotkey_enabled, config.interface.hotkey),
+        Err(_) => (true, "Ctrl+Shift+Space".to_string()),
     }
 }
 
@@ -157,6 +189,7 @@ pub fn run() {
                 .map_err(|e| Box::<dyn std::error::Error>::from(e.to_string()))?;
 
             let handle = app.handle().clone();
+            let notify_config = Arc::clone(&shared);
             let emit: loom_core::engine::EmitFn = Arc::new(move |event: EngineEvent| {
                 // Reported to stderr so `loom.exe > log` shows exactly which
                 // events the UI is sent while diagnosing.
@@ -166,11 +199,15 @@ pub fn run() {
                 }
 
                 if let EngineEvent::Done { session_id, .. } = &event {
+                    let wanted = notify_config
+                        .lock()
+                        .map(|config| config.interface.notify_on_completion)
+                        .unwrap_or(true);
                     let focused = handle
                         .get_webview_window("main")
                         .and_then(|window| window.is_focused().ok())
                         .unwrap_or(false);
-                    if !focused {
+                    if wanted && !focused {
                         let _ = handle
                             .notification()
                             .builder()
@@ -216,7 +253,10 @@ pub fn run() {
             app.manage(AppState::new(engine, shared));
             build_tray(app)?;
 
-            app.global_shortcut().register(ask_shortcut())?;
+            let interface = shared_interface(&app.handle().clone());
+            if let Err(error) = apply_hotkey(&app.handle().clone(), interface.0, &interface.1) {
+                eprintln!("[loom] hotkey not registered: {error}");
+            }
 
             // Quietly check for a new release a few seconds after launch and
             // let the UI offer it.
@@ -257,6 +297,8 @@ pub fn run() {
             commands::list_models,
             commands::set_default_model,
             commands::set_chat_settings,
+            commands::set_interface_settings,
+            commands::set_hotkey,
             commands::upsert_persona,
             commands::delete_persona,
             commands::create_session,

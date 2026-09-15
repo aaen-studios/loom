@@ -116,14 +116,34 @@ pub fn delete_provider(state: State<'_, AppState>, id: String) -> Result<AppConf
     })
 }
 
+/// Applies the configured hotkey immediately (register, re-register, or none).
+#[tauri::command]
+pub fn set_hotkey(app: AppHandle, enabled: bool, keys: String) -> Result<(), String> {
+    crate::set_hotkey_now(&app, enabled, &keys)
+}
+
+/// Replaces the whole interface section (thinking display, send key,
+/// notifications, hotkey, density) in one call.
+#[tauri::command]
+pub fn set_interface_settings(
+    state: State<'_, AppState>,
+    interface: loom_core::config::InterfaceConfig,
+) -> Result<AppConfig, String> {
+    state.mutate(move |config| config.interface = interface)
+}
+
 #[tauri::command]
 pub fn set_chat_settings(
     state: State<'_, AppState>,
     permission_mode: Option<loom_core::config::PermissionMode>,
     history_limit: Option<u32>,
     max_output_tokens: Option<u32>,
+    auto_title: Option<bool>,
 ) -> Result<AppConfig, String> {
     state.mutate(move |config| {
+        if let Some(auto) = auto_title {
+            config.chat.auto_title = auto;
+        }
         if let Some(mode) = permission_mode {
             config.chat.permission_mode = mode;
         }

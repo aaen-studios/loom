@@ -23,9 +23,19 @@ export const DEFAULT_CONFIG: AppConfig = {
     lite: null,
     imageModel: null,
     embeddingModel: null,
+    autoTitle: true,
     permissionMode: "ask",
     historyLimit: 40,
     maxOutputTokens: 8192,
+  },
+  interface: {
+    showThinking: "collapsed",
+    sendKey: "enter",
+    notifyOnCompletion: true,
+    hotkeyEnabled: true,
+    hotkey: "Ctrl+Shift+Space",
+    alwaysFollow: false,
+    compact: false,
   },
 };
 

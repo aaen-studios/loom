@@ -2,6 +2,7 @@ import type {
   AppConfig,
   AppInfo,
   Attachment,
+  InterfaceConfig,
   Message,
   ModelEntry,
   ModelRef,
@@ -89,7 +90,13 @@ export const ipc = {
     permissionMode?: PermissionMode | null;
     historyLimit?: number | null;
     maxOutputTokens?: number | null;
+    autoTitle?: boolean | null;
   }) => call<AppConfig>("set_chat_settings", args),
+
+  setInterfaceSettings: (interface_: InterfaceConfig) =>
+    call<AppConfig>("set_interface_settings", { interface: interface_ }),
+  setHotkey: (enabled: boolean, keys: string) =>
+    call<void>("set_hotkey", { enabled, keys }),
 
   upsertPersona: (persona: Persona) =>
     call<AppConfig>("upsert_persona", { persona }),

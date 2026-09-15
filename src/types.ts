@@ -79,6 +79,7 @@ export interface ChatDefaults {
   lite: ModelRef | null;
   imageModel: string | null;
   embeddingModel: string | null;
+  autoTitle: boolean;
   permissionMode: PermissionMode;
   historyLimit: number;
   maxOutputTokens: number;
@@ -100,6 +101,19 @@ export interface McpServerConfig {
   enabled: boolean;
 }
 
+export type ThinkingDisplay = "collapsed" | "hidden" | "expanded";
+export type SendKey = "enter" | "ctrl-enter";
+
+export interface InterfaceConfig {
+  showThinking: ThinkingDisplay;
+  sendKey: SendKey;
+  notifyOnCompletion: boolean;
+  hotkeyEnabled: boolean;
+  hotkey: string;
+  alwaysFollow: boolean;
+  compact: boolean;
+}
+
 export interface AppConfig {
   schemaVersion: number;
   theme: Theme;
@@ -109,6 +123,7 @@ export interface AppConfig {
   personas: Persona[];
   mcpServers: Record<string, McpServerConfig>;
   chat: ChatDefaults;
+  interface: InterfaceConfig;
 }
 
 export interface AppInfo {

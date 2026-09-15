@@ -169,6 +169,8 @@ pub fn strip_tags(html: &str) -> String {
     let mut in_tag = false;
     let mut skip_until: Option<&'static str> = None;
 
+    // Compared and sliced as bytes: byte offsets into a `&str` are not valid
+    // slice indices (a panic on multi-byte characters), bytes always are.
     let lower = html.to_ascii_lowercase();
     let source = html.as_bytes();
     let bytes = lower.as_bytes();
@@ -176,7 +178,7 @@ pub fn strip_tags(html: &str) -> String {
 
     while index < bytes.len() {
         if let Some(closing) = skip_until {
-            if lower[index..].starts_with(closing) {
+            if bytes[index..].starts_with(closing.as_bytes()) {
                 index += closing.len();
                 skip_until = None;
                 in_tag = false;
@@ -195,7 +197,7 @@ pub fn strip_tags(html: &str) -> String {
                     ("<noscript", "</noscript>"),
                     ("<head", "</head>"),
                 ] {
-                    if lower[index..].starts_with(open) {
+                    if bytes[index..].starts_with(open.as_bytes()) {
                         skip_until = Some(close);
                         index += open.len();
                         skipped = true;
@@ -305,5 +307,32 @@ mod tests {
     #[test]
     fn entities_are_decoded() {
         assert_eq!(entity_decode("a &amp; b &lt;c&gt;"), "a & b <c>");
+    }
+
+    /// Regression: byte offsets into a &str are not slice indices, and a wiki
+    /// page with multi-byte characters used to panic the tool task.
+    #[test]
+    fn multi_byte_characters_do_not_panic() {
+        let html = "<p>Ünïcodé — em dash, ellipsis …, CJK 漢字, emoji 🌸 inside markup</p>\
+                    <script>var x = \"漢\";</script><p>tail</p>";
+        let text = strip_tags(html);
+        assert!(text.contains("漢字"));
+        assert!(text.contains("tail"));
+        assert!(!text.contains("var x"));
+
+        // A long page of multi-byte text, as produced by a real fetch.
+        let long = "漢字とひらがなとカタカナと絵文字🌸".repeat(2_000);
+        let wrapped = format!("<div>{long}</div>");
+        let text = html_to_text(&wrapped);
+        assert!(!text.is_empty());
+        assert!(text.len() < wrapped.len());
+    }
+
+    #[test]
+    fn truncation_respects_char_boundaries() {
+        let text = "漢".repeat(10_000);
+        let html = format!("<p>{text}</p>");
+        let fetched = html_to_text(&html);
+        assert!(fetched.chars().count() <= 20_000);
     }
 }

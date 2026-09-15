@@ -6,6 +6,7 @@ import { ipc, type Skill } from "../lib/ipc";
 import { isTauri } from "../lib/tauri";
 import type { Attachment } from "../types";
 import { useChat } from "../stores/chat";
+import { useSettings } from "../stores/settings";
 import { ArrowUpIcon, PaperclipIcon, StopIcon } from "./icons";
 import { AttachmentChips } from "./AttachmentChips";
 import { ModelPicker } from "./ModelPicker";
@@ -50,6 +51,7 @@ export function Composer({ variant = "docked" }: ComposerProps) {
   const busy = useChat(
     (state) => (state.activeId ? state.busy[state.activeId] : false) ?? false,
   );
+  const sendKey = useSettings((state) => state.config.interface.sendKey);
 
   useEffect(() => {
     const el = textareaRef.current;
@@ -198,6 +200,10 @@ export function Composer({ variant = "docked" }: ComposerProps) {
         onChange={(event) => setValue(event.currentTarget.value)}
         onPaste={(event) => void onPaste(event)}
         onKeyDown={(event) => {
+          const withModifier = event.ctrlKey || event.metaKey;
+          const wantsSend =
+            sendKey === "ctrl-enter" ? withModifier : !event.shiftKey && !withModifier;
+
           if (slashQuery !== null && slashMatches.length > 0) {
             if (event.key === "Tab" || event.key === "Enter") {
               event.preventDefault();
@@ -209,11 +215,7 @@ export function Composer({ variant = "docked" }: ComposerProps) {
               return;
             }
           }
-          if (
-            event.key === "Enter" &&
-            !event.shiftKey &&
-            !event.nativeEvent.isComposing
-          ) {
+          if (event.key === "Enter" && !event.nativeEvent.isComposing && wantsSend) {
             event.preventDefault();
             submit();
           }

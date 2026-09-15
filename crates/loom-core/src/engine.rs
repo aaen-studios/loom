@@ -607,27 +607,65 @@ impl Engine {
         });
 
         let engine = self.clone();
+        let supervisor = self.clone();
         let session_id_owned = session_id.to_string();
         let assistant_id_for_task = assistant_id.clone();
+        let supervised_session = session_id.to_string();
+        let supervised_message = assistant_id.clone();
+
+        // The turn runs in its own task so the UI thread is never blocked; the
+        // outer task watches it so a panic inside a tool or provider call still
+        // produces a terminal event instead of stranding the chat on "stop".
         tokio::spawn(async move {
-            engine
-                .run_completion(
-                    session_id_owned,
-                    assistant_id_for_task,
-                    provider,
-                    model,
-                    variant,
-                    system,
-                    chat,
-                    api_key,
-                    cancel,
-                    permission_mode,
-                    tool_context,
-                )
-                .await;
+            let turn = tokio::spawn(async move {
+                engine
+                    .run_completion(
+                        session_id_owned,
+                        assistant_id_for_task,
+                        provider,
+                        model,
+                        variant,
+                        system,
+                        chat,
+                        api_key,
+                        cancel,
+                        permission_mode,
+                        tool_context,
+                    )
+                    .await;
+            });
+
+            if let Err(join_error) = turn.await {
+                let reason = if join_error.is_panic() {
+                    "the turn crashed while running a tool or provider call — nothing was lost, try again"
+                } else {
+                    "the turn was interrupted"
+                };
+                supervisor.report_task_failure(&supervised_session, &supervised_message, reason);
+            }
         });
 
         Ok(assistant_id)
+    }
+
+    /// Terminal event for a task that died without one: records the reason and
+    /// clears the busy flag so the UI cannot hang.
+    fn report_task_failure(&self, session_id: &str, message_id: &str, reason: &str) {
+        eprintln!("[loom] turn failed without a terminal event: {reason}");
+        let extra = serialize_extra(&[], None, Some(reason));
+        let _ = self
+            .db()
+            .update_message_extra(message_id, extra.as_deref());
+        self.inner
+            .cancels
+            .lock()
+            .expect("cancels mutex poisoned")
+            .remove(session_id);
+        self.emit(EngineEvent::Error {
+            session_id: session_id.to_string(),
+            message_id: message_id.to_string(),
+            error: reason.to_string(),
+        });
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -911,6 +949,11 @@ impl Engine {
                 });
             }
 
+            // Persist what we have so far: a tool round that follows needs the
+            // reasoning echoed back, and a crash should not lose the text.
+            let _ = self
+                .db()
+                .update_message(&message_id, &content, Some(&reasoning));
             let _ = self.db().update_message_extra(
                 &message_id,
                 serialize_extra(&stored_calls, None, None).as_deref(),
@@ -1776,6 +1819,7 @@ fn build_wire(history: &[Message]) -> Vec<WireMessage> {
                 parts: message_parts(message, is_last_user),
                 tool_calls: Vec::new(),
                 tool_call_id: None,
+                reasoning: None,
             }),
             Role::Assistant => {
                 wire.push(WireMessage {
@@ -1790,6 +1834,9 @@ fn build_wire(history: &[Message]) -> Vec<WireMessage> {
                         })
                         .collect(),
                     tool_call_id: None,
+                    // Reasoning models (DeepSeek and friends) reject requests
+                    // that omit the thinking they produced earlier.
+                    reasoning: message.reasoning.clone().filter(|text| !text.trim().is_empty()),
                 });
 
                 for call in &stored_tools {
@@ -1916,6 +1963,55 @@ mod tests {
             extra: extra.map(str::to_string),
             created_at: 0,
         }
+    }
+
+    /// A task that dies without a terminal event must still clear the busy flag
+    /// and report why, or the chat hangs on "stop" forever.
+    #[test]
+    fn a_dead_task_reports_a_terminal_error() {
+        use crate::config::AppConfig;
+        use std::sync::Arc;
+
+        let db = Database::open_in_memory().unwrap();
+        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        let emit: EmitFn = Arc::new(move |event| {
+            let _ = sender.send(event);
+        });
+        let engine = Engine::new(db, Arc::new(Mutex::new(AppConfig::default())), emit);
+
+        let session = engine
+            .create_session(None, None, None, None, None)
+            .expect("session");
+        let message_id = uuid::Uuid::new_v4().to_string();
+        engine
+            .db()
+            .add_message(&Message {
+                id: message_id.clone(),
+                session_id: session.id.clone(),
+                role: Role::Assistant,
+                content: String::new(),
+                reasoning: None,
+                extra: None,
+                created_at: now_ms(),
+            })
+            .unwrap();
+        engine
+            .db()
+            .update_message(&message_id, &"", None)
+            .unwrap();
+
+        engine.report_task_failure(&session.id, &message_id, "the turn crashed");
+
+        let event = receiver.try_recv().expect("a terminal event");
+        assert!(matches!(event, EngineEvent::Error { .. }), "{event:?}");
+
+        let stored = engine.messages(&session.id).unwrap();
+        let assistant = stored.iter().find(|m| m.id == message_id).unwrap();
+        assert_eq!(
+            parse_error(assistant.extra.as_deref()).as_deref(),
+            Some("the turn crashed")
+        );
+        assert!(engine.busy_sessions().is_empty());
     }
 
     /// A synchronous caller (a Tauri command) must get an error, never a panic:
@@ -2268,6 +2364,7 @@ mod tests {
         assert_eq!(parse_permission_mode("nonsense"), None);
     }
 }
+
 
 
 

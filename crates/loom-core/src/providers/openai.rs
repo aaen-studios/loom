@@ -85,6 +85,18 @@ fn message_json(message: &super::WireMessage) -> Value {
         json!({ "role": message.role, "content": parts })
     };
 
+    // DeepSeek-family gateways require the assistant's own thinking back:
+    // "The `reasoning_content` in the thinking mode must be passed back".
+    if message.role == "assistant" {
+        if let Some(reasoning) = message
+            .reasoning
+            .as_deref()
+            .filter(|text| !text.trim().is_empty())
+        {
+            object["reasoning_content"] = json!(reasoning);
+        }
+    }
+
     if !message.tool_calls.is_empty() {
         object["tool_calls"] = json!(message
             .tool_calls
@@ -283,6 +295,54 @@ mod tests {
     }
 
     #[test]
+    fn assistant_reasoning_is_echoed_back() {
+        let provider = ProviderConfig::default();
+        let assistant = super::super::WireMessage {
+            role: "assistant".into(),
+            parts: vec![super::super::ContentPart::Text {
+                text: "Oslo.".into(),
+            }],
+            tool_calls: Vec::new(),
+            tool_call_id: None,
+            reasoning: Some("The user asked about Norway.".into()),
+        };
+        let user = super::super::WireMessage::text("user", "capital of Norway?");
+
+        let mut req = request(&provider);
+        req.messages = vec![user, assistant];
+        let body = build_body(&req);
+
+        // The request helper includes a system message, so the assistant turn
+        // is the last entry.
+        let sent = body["messages"].as_array().expect("messages");
+        let last = sent.last().expect("an assistant message");
+        assert_eq!(last["role"], "assistant");
+        // DeepSeek-family gateways reject the request without this field.
+        assert_eq!(last["reasoning_content"], "The user asked about Norway.");
+        assert_eq!(last["content"], "Oslo.");
+        // Plain user turns carry no reasoning field at all.
+        assert!(sent[1].get("reasoning_content").is_none());
+    }
+
+    #[test]
+    fn empty_reasoning_is_omitted() {
+        let provider = ProviderConfig::default();
+        let assistant = super::super::WireMessage {
+            role: "assistant".into(),
+            parts: vec![super::super::ContentPart::Text {
+                text: "hi".into(),
+            }],
+            tool_calls: Vec::new(),
+            tool_call_id: None,
+            reasoning: Some("   ".into()),
+        };
+        let mut req = request(&provider);
+        req.messages = vec![assistant];
+        let body = build_body(&req);
+        assert!(body["messages"][0].get("reasoning_content").is_none());
+    }
+
+    #[test]
     fn parses_text_and_reasoning_deltas() {
         let chunk = r#"{"choices":[{"delta":{"content":"Hel","reasoning_content":"hmm"}}]}"#;
         let deltas = parse_chunk(chunk).unwrap().unwrap();
@@ -333,5 +393,7 @@ mod tests {
         assert_eq!(endpoint(&provider), "https://api.example.com/v1/chat/completions");
     }
 }
+
+
 
 

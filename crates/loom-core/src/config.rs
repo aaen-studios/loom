@@ -28,6 +28,7 @@ pub struct AppConfig {
     pub personas: Vec<Persona>,
     pub mcp_servers: BTreeMap<String, crate::mcp::McpServerConfig>,
     pub chat: ChatDefaults,
+    pub interface: InterfaceConfig,
     #[serde(flatten)]
     pub extra: serde_json::Map<String, Value>,
 }
@@ -43,6 +44,7 @@ impl Default for AppConfig {
             personas: Vec::new(),
             mcp_servers: BTreeMap::new(),
             chat: ChatDefaults::default(),
+            interface: InterfaceConfig::default(),
             extra: serde_json::Map::new(),
         }
     }
@@ -132,6 +134,8 @@ pub struct ChatDefaults {
     pub image_model: Option<String>,
     /// Embedding model used by the workspace index.
     pub embedding_model: Option<String>,
+    /// Generate a chat title with the lite model after the first reply.
+    pub auto_title: bool,
     /// Global default for the tool permission mode (per-chat override exists).
     pub permission_mode: PermissionMode,
     /// How many past messages to send as context.
@@ -148,6 +152,7 @@ impl Default for ChatDefaults {
             lite: None,
             image_model: None,
             embedding_model: None,
+            auto_title: true,
             permission_mode: PermissionMode::Ask,
             history_limit: 40,
             max_output_tokens: 8_192,
@@ -177,6 +182,60 @@ pub fn apply_preset_defaults(config: &mut AppConfig) -> bool {
     }
 
     changed
+}
+
+/// How much of a reasoning model''s thinking to show.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ThinkingDisplay {
+    /// A one-line header you expand when you want it.
+    #[default]
+    Collapsed,
+    /// Not rendered unless opened from the message actions.
+    Hidden,
+    /// Open from the start.
+    Expanded,
+}
+
+/// Which keystroke sends a message.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum SendKey {
+    #[default]
+    Enter,
+    CtrlEnter,
+}
+
+/// Interface behaviour that is not tied to a single chat.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct InterfaceConfig {
+    pub show_thinking: ThinkingDisplay,
+    pub send_key: SendKey,
+    pub notify_on_completion: bool,
+    /// Register the quick-ask overlay hotkey at all.
+    pub hotkey_enabled: bool,
+    /// Hotkey string understood by the global-shortcut plugin.
+    pub hotkey: String,
+    /// Keep the transcript pinned to the newest text even while reading older
+    /// messages.
+    pub always_follow: bool,
+    /// Denser transcript and smaller text.
+    pub compact: bool,
+}
+
+impl Default for InterfaceConfig {
+    fn default() -> Self {
+        Self {
+            show_thinking: ThinkingDisplay::Collapsed,
+            send_key: SendKey::Enter,
+            notify_on_completion: true,
+            hotkey_enabled: true,
+            hotkey: "Ctrl+Shift+Space".to_string(),
+            always_follow: false,
+            compact: false,
+        }
+    }
 }
 
 /// Loads configuration from the standard location, falling back to defaults
@@ -347,5 +406,7 @@ mod tests {
         assert!(config.providers["my-local"].session_header.is_none());
     }
 }
+
+
 
 

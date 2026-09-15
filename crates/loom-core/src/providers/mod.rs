@@ -82,6 +82,10 @@ pub struct WireMessage {
     /// Set on tool-result turns (role `tool`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_call_id: Option<String>,
+    /// The assistant''s own thinking, echoed back for providers that require it
+    /// (DeepSeek-family gateways reject the request otherwise).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning: Option<String>,
 }
 
 impl WireMessage {
@@ -93,6 +97,7 @@ impl WireMessage {
             }],
             tool_calls: Vec::new(),
             tool_call_id: None,
+            reasoning: None,
         }
     }
 
@@ -104,6 +109,7 @@ impl WireMessage {
             }],
             tool_calls: Vec::new(),
             tool_call_id: Some(call_id.into()),
+            reasoning: None,
         }
     }
 
@@ -245,3 +251,4 @@ mod tests {
         assert_eq!(header(&headers, "authorization"), None);
     }
 }
+
