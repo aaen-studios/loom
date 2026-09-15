@@ -60,7 +60,7 @@ function MessageRow({
             </div>
           )}
           {message.content && (
-            <div className="panel-strong max-w-full select-text rounded-2xl px-3.5 py-2.5 text-[14.5px] leading-6 whitespace-pre-wrap">
+            <div className="panel-strong max-w-full select-text rounded-sheet px-3.5 py-2.5 text-[14.5px] leading-6 whitespace-pre-wrap">
               {message.content}
             </div>
           )}
@@ -202,7 +202,7 @@ export function ChatCanvas() {
 
       {error && (
         <div className="mx-auto w-full max-w-3xl px-6">
-          <div className="flex items-start gap-2 rounded-xl border border-[var(--danger)]/40 bg-[var(--danger)]/10 px-3 py-2 text-[13px]">
+          <div className="flex items-start gap-2 rounded-row border border-[var(--danger)]/40 bg-[var(--danger)]/10 px-3 py-2 text-[13px]">
             <span className="min-w-0 flex-1 break-words">{error}</span>
             <button
               type="button"

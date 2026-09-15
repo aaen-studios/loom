@@ -10,6 +10,7 @@ import type {
 } from "../types";
 import { ipc } from "../lib/ipc";
 import { parseAttachments } from "../lib/messageExtra";
+import { useSettings } from "./settings";
 
 interface LiveBuffer {
   messageId: string;
@@ -210,13 +211,17 @@ export const useChat = create<ChatState>((set, get) => ({
         ),
       }));
     }
-    await ipc.setDefaultModel({
+
+    // Keep the titles model: choosing a chat model must not clear it.
+    const lite = useSettings.getState().config.chat.lite;
+    const updated = await ipc.setDefaultModel({
       providerId: model.providerId,
       modelId: model.modelId,
       variant,
-      liteProviderId: null,
-      liteModelId: null,
+      liteProviderId: lite?.providerId ?? null,
+      liteModelId: lite?.modelId ?? null,
     });
+    if (updated) useSettings.getState().applyRemote(updated);
     void get().loadSessions();
   },
 

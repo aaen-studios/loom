@@ -6,12 +6,15 @@ import type { ModelEntry, ModelRef } from "../types";
 import { findModel, useProviders } from "../stores/providers";
 import { useChat } from "../stores/chat";
 import { useSettings } from "../stores/settings";
-import { ChevronDownIcon, SparkIcon } from "./icons";
+import { ChevronDownIcon, PlusIcon, SparkIcon } from "./icons";
 
 /**
  * Model chip + picker. Selecting a model sets it for the active chat and as
  * the default; models with reasoning variants offer a second step to choose
  * the effort variant.
+ *
+ * Providers whose `/models` endpoint fails can still be used: type a model id
+ * at the bottom of the list and it is added by hand.
  */
 export function ModelPicker() {
   const models = useProviders((state) => state.models);
@@ -19,14 +22,20 @@ export function ModelPicker() {
   const session = useChat((state) =>
     state.sessions.find((item) => item.id === state.activeId),
   );
+  const providers = useSettings((state) => state.config.providers);
   const applyRemote = useSettings((state) => state.applyRemote);
   const refreshModels = useProviders((state) => state.refresh);
 
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
   const [variantTarget, setVariantTarget] = useState<ModelEntry | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [draftModel, setDraftModel] = useState("");
+  const [draftProvider, setDraftProvider] = useState("");
+  const [busy, setBusy] = useState(false);
   const containerRef = useRef<HTMLDivElement>(null);
 
+  const providerIds = Object.keys(providers);
   const current = findModel(models, session?.providerId, session?.modelId);
 
   useEffect(() => {
@@ -50,6 +59,15 @@ export function ModelPicker() {
       window.removeEventListener("keydown", onKey);
     };
   }, [open]);
+
+  useEffect(() => {
+    if (!open || draftProvider || providerIds.length === 0) return;
+    setDraftProvider(
+      session?.providerId && providers[session.providerId]
+        ? session.providerId
+        : providerIds[0],
+    );
+  }, [open, draftProvider, providerIds, providers, session?.providerId]);
 
   const grouped = useMemo(() => {
     const needle = query.trim().toLowerCase();
@@ -79,30 +97,58 @@ export function ModelPicker() {
     return [...map.entries()];
   }, [models, query]);
 
-  const choose = async (entry: ModelEntry) => {
-    if (entry.spec.reasoning?.variants.length) {
-      setVariantTarget(entry);
-      return;
+  /** Every async action goes through here so failures are visible. */
+  const guard = async (action: () => Promise<void>) => {
+    setBusy(true);
+    setError(null);
+    try {
+      await action();
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setBusy(false);
     }
-    await setModel(modelRef(entry));
-    setOpen(false);
   };
 
-  const chooseVariant = async (entry: ModelEntry, variant: string | null) => {
-    await setModel(modelRef(entry), variant);
-    setVariantTarget(null);
-    setOpen(false);
-  };
+  const choose = (entry: ModelEntry) =>
+    guard(async () => {
+      if (entry.spec.reasoning?.variants.length) {
+        setVariantTarget(entry);
+        return;
+      }
+      await setModel(modelRef(entry));
+      setOpen(false);
+    });
 
-  const toggleFavorite = async (entry: ModelEntry) => {
-    const updated = await ipc.setModelFavorite(
-      entry.providerId,
-      entry.modelId,
-      !entry.spec.favorite,
-    );
-    if (updated) applyRemote(updated);
-    await refreshModels();
-  };
+  const chooseVariant = (entry: ModelEntry, variant: string | null) =>
+    guard(async () => {
+      await setModel(modelRef(entry), variant);
+      setVariantTarget(null);
+      setOpen(false);
+    });
+
+  const toggleFavorite = (entry: ModelEntry) =>
+    guard(async () => {
+      const updated = await ipc.setModelFavorite(
+        entry.providerId,
+        entry.modelId,
+        !entry.spec.favorite,
+      );
+      if (updated) applyRemote(updated);
+      await refreshModels();
+    });
+
+  const addManual = () =>
+    guard(async () => {
+      const modelId = draftModel.trim();
+      if (!modelId || !draftProvider) return;
+      const updated = await ipc.addModel(draftProvider, modelId);
+      if (updated) applyRemote(updated);
+      await refreshModels();
+      setDraftModel("");
+      setQuery(modelId);
+      setError(null);
+    });
 
   const label = current
     ? shortModelName(current.providerName, current.modelId)
@@ -116,8 +162,11 @@ export function ModelPicker() {
           setOpen((value) => !value);
           setVariantTarget(null);
           setQuery("");
+          setError(null);
         }}
-        title={current ? `${current.providerName} · ${current.modelId}` : "Choose a model"}
+        title={
+          current ? `${current.providerName} · ${current.modelId}` : "Choose a model"
+        }
         className={cn(
           "flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-[12.5px] transition",
           current
@@ -131,7 +180,7 @@ export function ModelPicker() {
       </button>
 
       {open && (
-        <div className="panel-strong absolute bottom-full left-0 z-40 mb-2 w-[420px] overflow-hidden rounded-2xl">
+        <div className="panel-strong absolute bottom-full left-0 z-50 mb-2 w-[420px] overflow-hidden rounded-sheet">
           {variantTarget ? (
             <div className="p-3">
               <button
@@ -147,8 +196,9 @@ export function ModelPicker() {
               <div className="flex flex-wrap gap-1.5">
                 <button
                   type="button"
+                  disabled={busy}
                   onClick={() => void chooseVariant(variantTarget, null)}
-                  className="rounded-full border border-[var(--glass-border)] px-3 py-1 text-[12.5px] text-soft hover:text-[var(--ink)]"
+                  className="rounded-full border border-[var(--glass-border)] px-3 py-1 text-[12.5px] text-soft hover:text-[var(--ink)] disabled:opacity-50"
                 >
                   Model default
                 </button>
@@ -156,8 +206,14 @@ export function ModelPicker() {
                   <button
                     key={variant}
                     type="button"
+                    disabled={busy}
                     onClick={() => void chooseVariant(variantTarget, variant)}
-                    className="rounded-full border border-[var(--glass-border)] px-3 py-1 text-[12.5px] text-soft hover:text-[var(--ink)]"
+                    className={cn(
+                      "rounded-full border px-3 py-1 text-[12.5px] disabled:opacity-50",
+                      session?.variant === variant
+                        ? "border-[var(--accent)] text-[var(--ink)]"
+                        : "border-[var(--glass-border)] text-soft hover:text-[var(--ink)]",
+                    )}
                   >
                     {variant}
                   </button>
@@ -178,9 +234,10 @@ export function ModelPicker() {
 
               <div className="max-h-[320px] overflow-y-auto p-1.5">
                 {grouped.length === 0 && (
-                  <p className="px-2 py-3 text-[12.5px] text-faint">
-                    No models yet. Add a provider in Settings and fetch its
-                    models.
+                  <p className="px-2 py-3 text-[12.5px] leading-5 text-faint">
+                    {models.length === 0
+                      ? "No models yet. Add a provider in Settings, or type a model id below if you already know it."
+                      : "No models match that search."}
                   </p>
                 )}
 
@@ -197,12 +254,13 @@ export function ModelPicker() {
                     {entries.map((entry) => (
                       <div
                         key={`${entry.providerId}/${entry.modelId}`}
-                        className="hover-surface group flex items-center rounded-xl pr-1"
+                        className="hover-surface group flex items-center rounded-row pr-1"
                       >
                         <button
                           type="button"
+                          disabled={busy}
                           onClick={() => void choose(entry)}
-                          className="flex min-w-0 flex-1 items-center gap-2 px-2 py-1.5 text-left"
+                          className="flex min-w-0 flex-1 items-center gap-2 px-2 py-1.5 text-left disabled:opacity-60"
                         >
                           <span className="truncate text-[13px]">
                             {shortModelName(entry.providerName, entry.modelId)}
@@ -229,7 +287,7 @@ export function ModelPicker() {
                           aria-label="Toggle favourite"
                           onClick={() => void toggleFavorite(entry)}
                           className={cn(
-                            "grid h-7 w-7 shrink-0 place-items-center rounded-lg",
+                            "grid h-7 w-7 shrink-0 place-items-center rounded-control",
                             entry.spec.favorite
                               ? "text-[var(--accent)]"
                               : "text-faint opacity-0 group-hover:opacity-100 hover:text-[var(--ink)]",
@@ -242,6 +300,54 @@ export function ModelPicker() {
                   </div>
                 ))}
               </div>
+
+              {providerIds.length > 0 && (
+                <div className="border-t border-[var(--glass-border)] p-2">
+                  <p className="mb-1.5 px-1 text-[11px] tracking-[0.06em] text-faint uppercase">
+                    Add a model id
+                  </p>
+                  <div className="flex items-center gap-1.5">
+                    <select
+                      value={draftProvider}
+                      onChange={(event) => setDraftProvider(event.currentTarget.value)}
+                      className="min-w-0 rounded-control border border-[var(--glass-border)] bg-[var(--hover-bg)] px-1.5 py-1 text-[12px]"
+                    >
+                      {providerIds.map((id) => (
+                        <option key={id} value={id}>
+                          {providers[id].name || id}
+                        </option>
+                      ))}
+                    </select>
+                    <input
+                      value={draftModel}
+                      placeholder="model id"
+                      onChange={(event) => setDraftModel(event.currentTarget.value)}
+                      onKeyDown={(event) => {
+                        if (event.key === "Enter") {
+                          event.preventDefault();
+                          void addManual();
+                        }
+                      }}
+                      className="min-w-0 flex-1 rounded-control border border-[var(--glass-border)] bg-[var(--hover-bg)] px-2 py-1 text-[12px] placeholder:text-[var(--ink-faint)]"
+                    />
+                    <button
+                      type="button"
+                      disabled={busy || !draftModel.trim()}
+                      onClick={() => void addManual()}
+                      aria-label="Add model"
+                      className="grid h-7 w-7 shrink-0 place-items-center rounded-control border border-[var(--glass-border)] text-soft disabled:opacity-40"
+                    >
+                      <PlusIcon size={14} />
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              {error && (
+                <p className="border-t border-[var(--glass-border)] px-3 py-2 text-[12px] leading-5 text-[var(--danger)]">
+                  {error}
+                </p>
+              )}
             </>
           )}
         </div>

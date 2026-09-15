@@ -151,18 +151,18 @@ export function Composer({ variant = "docked" }: ComposerProps) {
   return (
     <div
       className={cn(
-        "panel-strong relative w-full rounded-[24px] p-2.5",
+        "panel-strong relative w-full rounded-sheet p-2.5",
         variant === "hero" && "animate-fade-up",
       )}
     >
       {slashOpen && slashQuery !== null && slashMatches.length > 0 && (
-        <div className="panel-strong absolute bottom-full left-0 z-40 mb-2 w-[320px] overflow-hidden rounded-2xl p-1.5">
+        <div className="panel-strong absolute bottom-full left-0 z-40 mb-2 w-[320px] overflow-hidden rounded-sheet p-1.5">
           {slashMatches.slice(0, 6).map((skill) => (
             <button
               key={skill.id}
               type="button"
               onClick={() => applySkill(skill)}
-              className="hover-surface flex w-full flex-col items-start rounded-xl px-2 py-1.5 text-left"
+              className="hover-surface flex w-full flex-col items-start rounded-row px-2 py-1.5 text-left"
             >
               <span className="text-[13px] text-soft">
                 <span className="font-mono text-[12px] text-faint">

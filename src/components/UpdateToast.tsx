@@ -16,7 +16,7 @@ export function UpdateToast() {
   return (
     <div
       className={cn(
-        "panel-strong animate-fade-up absolute bottom-4 left-1/2 z-40 flex -translate-x-1/2 items-center gap-3 rounded-2xl px-3.5 py-2.5",
+        "panel-strong animate-fade-up absolute bottom-4 left-1/2 z-40 flex -translate-x-1/2 items-center gap-3 rounded-capsule px-3.5 py-2.5",
       )}
     >
       <span className="grid h-7 w-7 place-items-center rounded-full bg-[var(--accent-soft)] text-[var(--accent)]">

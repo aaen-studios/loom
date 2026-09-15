@@ -240,6 +240,7 @@ pub fn run() {
             commands::workspace_index_status,
             commands::clear_workspace_index,
             commands::set_embedding_model,
+            commands::add_model,
             commands::set_model_spec,
             commands::check_for_updates,
             commands::download_update,

@@ -501,6 +501,19 @@ pub fn set_embedding_model(
 }
 
 #[tauri::command]
+pub fn add_model(
+    state: State<'_, AppState>,
+    provider_id: String,
+    model_id: String,
+) -> Result<AppConfig, String> {
+    state
+        .engine
+        .add_model(&provider_id, &model_id)
+        .map_err(to_string)?;
+    Ok(state.snapshot())
+}
+
+#[tauri::command]
 pub fn set_model_spec(
     state: State<'_, AppState>,
     provider_id: String,

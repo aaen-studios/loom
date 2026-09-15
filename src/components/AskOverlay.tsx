@@ -31,7 +31,7 @@ export function AskOverlay() {
 
   return (
     <div className="chrome h-screen w-screen overflow-hidden bg-transparent p-2">
-      <div className="panel-strong flex h-full w-full items-center gap-3 rounded-2xl px-3.5">
+      <div className="panel-strong flex h-full w-full items-center gap-3 rounded-sheet px-3.5">
         <span className="text-soft">
           <LoomMark size={18} />
         </span>

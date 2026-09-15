@@ -41,7 +41,7 @@ export function AttachmentChips({
       {attachments.map((attachment) => (
         <span
           key={attachment.id}
-          className="flex items-center gap-2 rounded-xl border border-[var(--glass-border)] py-1 pl-1 pr-1.5"
+          className="flex items-center gap-2 rounded-row border border-[var(--glass-border)] py-1 pl-1 pr-1.5"
         >
           <AttachmentIcon attachment={attachment} />
           <span className="max-w-[160px]">
@@ -77,13 +77,13 @@ export function AttachmentStrip({ attachments }: { attachments: Attachment[] }) 
             src={assetUrl(attachment.path)}
             alt={attachment.name}
             title={attachment.name}
-            className="max-h-52 rounded-xl border border-[var(--glass-border)] object-cover"
+            className="max-h-52 rounded-row border border-[var(--glass-border)] object-cover"
           />
         ) : (
           <span
             key={attachment.id}
             title={attachment.name}
-            className="flex items-center gap-2 rounded-xl border border-[var(--glass-border)] px-2.5 py-1.5 text-[12px] text-soft"
+            className="flex items-center gap-2 rounded-row border border-[var(--glass-border)] px-2.5 py-1.5 text-[12px] text-soft"
           >
             <FileIcon size={14} />
             {attachment.name}

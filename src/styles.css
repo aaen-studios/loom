@@ -10,6 +10,48 @@
 }
 
 /* ---------------------------------------------------------------------------
+   Corner radii
+
+   Apple's rules, applied here:
+   1. Corners are continuous (squircles), not circular arcs.
+   2. Nested radii are concentric: an inner surface uses `outer − inset`, so the
+      curves share a centre. A sheet (18px) with 8px padding holds 10px rows.
+   3. Controls that are not nested inside a rounded container cap out at 12px;
+      anything pill-shaped uses the capsule radius.
+--------------------------------------------------------------------------- */
+:root {
+  --radius-window: 20px; /* the workspace panel: the outermost app surface */
+  --radius-sheet: 18px; /* composer, popovers, drawer, toast */
+  --radius-row: 10px; /* rows and inputs inside a sheet (sheet − padding) */
+  --radius-control: 12px; /* standalone buttons, cards, chips with borders */
+  --radius-capsule: 999px;
+}
+
+@utility rounded-window {
+  border-radius: var(--radius-window);
+  corner-shape: squircle;
+}
+
+@utility rounded-sheet {
+  border-radius: var(--radius-sheet);
+  corner-shape: squircle;
+}
+
+@utility rounded-row {
+  border-radius: var(--radius-row);
+  corner-shape: squircle;
+}
+
+@utility rounded-control {
+  border-radius: var(--radius-control);
+  corner-shape: squircle;
+}
+
+@utility rounded-capsule {
+  border-radius: var(--radius-capsule);
+}
+
+/* ---------------------------------------------------------------------------
    Design tokens
    Dark is the default (the app ships with a photographic background), light
    is a full alternative. Values are explicit rgba â€” no color-mix â€” so the

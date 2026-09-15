@@ -1443,6 +1443,29 @@ impl Engine {
         Ok(out)
     }
 
+    /// Adds a model id by hand (for providers whose `/models` endpoint is
+    /// unavailable). Metadata comes from the bundled catalog when known.
+    pub fn add_model(&self, provider_id: &str, model_id: &str) -> Result<()> {
+        let model_id = model_id.trim();
+        if model_id.is_empty() {
+            return Err(Error::Other("model id must not be empty".into()));
+        }
+
+        let snapshot = {
+            let mut config = self.inner.config.lock().expect("config mutex poisoned");
+            let provider = config
+                .providers
+                .get_mut(provider_id)
+                .ok_or_else(|| Error::UnknownProvider(provider_id.to_string()))?;
+            provider
+                .models
+                .entry(model_id.to_string())
+                .or_insert_with(|| catalog::lookup(model_id).unwrap_or_else(catalog::fallback));
+            config.clone()
+        };
+        crate::config::save(&snapshot)
+    }
+
     /// Edits the metadata the picker shows for one model.
     pub fn set_model_spec(
         &self,
@@ -1817,6 +1840,80 @@ mod tests {
             extra: extra.map(str::to_string),
             created_at: 0,
         }
+    }
+
+    #[test]
+    fn choosing_a_model_is_persisted_on_the_session() {
+        use crate::config::AppConfig;
+        use std::sync::Arc;
+
+        let dir = tempfile::tempdir().unwrap();
+        std::env::set_var("LOOM_HOME", dir.path());
+
+        let db = Database::open(&dir.path().join("loom.db")).unwrap();
+        let config: SharedConfig = Arc::new(Mutex::new(AppConfig::default()));
+        let engine = Engine::new(db, config, Arc::new(|_| {}));
+
+        let session = engine
+            .create_session(None, Some("provider-a".into()), Some("model-a".into()), None, None)
+            .unwrap();
+        assert_eq!(session.model_id.as_deref(), Some("model-a"));
+
+        // What the picker does when a model is chosen.
+        engine
+            .set_session_model(&session.id, "provider-b", "model-b", Some("high".into()))
+            .unwrap();
+
+        let stored = engine.session(&session.id).unwrap().unwrap();
+        assert_eq!(stored.provider_id.as_deref(), Some("provider-b"));
+        assert_eq!(stored.model_id.as_deref(), Some("model-b"));
+        assert_eq!(stored.variant.as_deref(), Some("high"));
+
+        // The chat-level default survives a restart of the process.
+        let reloaded = crate::db::Database::open(&dir.path().join("loom.db")).unwrap();
+        let stored = reloaded.get_session(&session.id).unwrap().unwrap();
+        assert_eq!(stored.model_id.as_deref(), Some("model-b"));
+
+        // And the effective model resolves for sending.
+        assert_eq!(
+            engine.effective_model(&stored).unwrap().model_id,
+            "model-b"
+        );
+
+        std::env::remove_var("LOOM_HOME");
+    }
+
+    #[test]
+    fn favourites_toggle_and_persist_in_config() {
+        use crate::config::{AppConfig, ModelRef};
+        use crate::provider::{ModelSpec, ProviderConfig};
+        use std::sync::Arc;
+
+        let dir = tempfile::tempdir().unwrap();
+        std::env::set_var("LOOM_HOME", dir.path());
+
+        let db = Database::open(&dir.path().join("loom.db")).unwrap();
+        let mut config = AppConfig::default();
+        let mut provider = ProviderConfig {
+            name: "Test".into(),
+            base_url: "https://example.com/v1".into(),
+            ..Default::default()
+        };
+        provider.models.insert("model-a".into(), ModelSpec::default());
+        config.providers.insert("test".into(), provider);
+        let shared: SharedConfig = Arc::new(Mutex::new(config));
+        let engine = Engine::new(db, shared, Arc::new(|_| {}));
+
+        engine.set_model_favorite("test", "model-a", true).unwrap();
+        let toggled = engine.config().providers["test"].models["model-a"].favorite;
+        assert!(toggled);
+
+        // The saved config file is what the next launch reads.
+        let saved = crate::config::load().unwrap();
+        assert!(saved.providers["test"].models["model-a"].favorite);
+
+        let _ = ModelRef::new("test", "model-a");
+        std::env::remove_var("LOOM_HOME");
     }
 
     #[test]

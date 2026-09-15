@@ -41,7 +41,7 @@ function ToolCallCard({ call }: { call: ToolCallRecord }) {
   const running = call.status === "running";
   return (
     <details
-      className="group rounded-xl border border-[var(--glass-border)] bg-[var(--hover-bg)]"
+      className="group rounded-row border border-[var(--glass-border)] bg-[var(--hover-bg)]"
       open={running}
     >
       <summary className="flex cursor-pointer list-none items-center gap-2 px-2.5 py-1.5 text-[12.5px]">
@@ -68,7 +68,7 @@ function ToolCallCard({ call }: { call: ToolCallRecord }) {
           <img
             src={assetUrl(call.output.trim())}
             alt="Generated"
-            className="mb-2 max-h-80 rounded-xl border border-[var(--glass-border)]"
+            className="mb-2 max-h-80 rounded-row border border-[var(--glass-border)]"
           />
         )}
         {call.arguments && (
@@ -134,7 +134,7 @@ export function PermissionCard({ permission }: { permission: PendingPermission }
   }, [permission.name]);
 
   return (
-    <div className="panel-strong animate-fade-up mx-auto w-full max-w-3xl rounded-2xl p-3">
+    <div className="panel-strong animate-fade-up mx-auto w-full max-w-3xl rounded-sheet p-3">
       <p className="text-[13px]">
         Loom wants to run{" "}
         <span className="font-semibold">{permission.name}</span>
@@ -145,7 +145,7 @@ export function PermissionCard({ permission }: { permission: PendingPermission }
         )}
       </p>
       {permission.arguments && (
-        <pre className="mt-2 max-h-32 overflow-auto rounded-lg border border-[var(--glass-border)] bg-[var(--hover-bg)] p-2 font-mono text-[11.5px] text-soft">
+        <pre className="mt-2 max-h-32 overflow-auto rounded-control border border-[var(--glass-border)] bg-[var(--hover-bg)] p-2 font-mono text-[11.5px] text-soft">
           {prettify(permission.arguments)}
         </pre>
       )}

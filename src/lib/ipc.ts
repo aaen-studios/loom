@@ -137,6 +137,8 @@ export const ipc = {
     call<AppConfig>("set_image_model", { model }),
   setEmbeddingModel: (model: string | null) =>
     call<AppConfig>("set_embedding_model", { model }),
+  addModel: (providerId: string, modelId: string) =>
+    call<AppConfig>("add_model", { providerId, modelId }),
   setModelSpec: (
     providerId: string,
     modelId: string,

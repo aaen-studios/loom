@@ -62,11 +62,11 @@ export function PersonaMenu() {
       </button>
 
       {open && (
-        <div className="panel-strong absolute bottom-full left-0 z-40 mb-2 w-[280px] overflow-hidden rounded-2xl p-1.5">
+        <div className="panel-strong absolute bottom-full left-0 z-40 mb-2 w-[280px] overflow-hidden rounded-sheet p-1.5">
           <button
             type="button"
             onClick={() => void select(null)}
-            className="hover-surface flex w-full items-center gap-2 rounded-xl px-2 py-1.5 text-left text-[13px] text-soft"
+            className="hover-surface flex w-full items-center gap-2 rounded-row px-2 py-1.5 text-left text-[13px] text-soft"
           >
             <span className="flex-1">No persona</span>
             {!session?.personaId && <CheckIcon size={14} />}
@@ -84,7 +84,7 @@ export function PersonaMenu() {
               type="button"
               onClick={() => void select(item.id)}
               className={cn(
-                "hover-surface flex w-full items-center gap-2 rounded-xl px-2 py-1.5 text-left text-[13px]",
+                "hover-surface flex w-full items-center gap-2 rounded-row px-2 py-1.5 text-left text-[13px]",
                 session?.personaId === item.id
                   ? "text-[var(--ink)]"
                   : "text-soft",

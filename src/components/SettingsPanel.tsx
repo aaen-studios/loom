@@ -51,7 +51,7 @@ function Row({ label, children }: { label: string; children: ReactNode }) {
 }
 
 const inputClass =
-  "w-full rounded-xl border border-[var(--glass-border)] bg-[var(--hover-bg)] px-2.5 py-1.5 text-[13px] text-[var(--ink)] placeholder:text-[var(--ink-faint)] focus:border-[var(--accent)]";
+  "w-full rounded-row border border-[var(--glass-border)] bg-[var(--hover-bg)] px-2.5 py-1.5 text-[13px] text-[var(--ink)] placeholder:text-[var(--ink-faint)] focus:border-[var(--accent)]";
 
 const THEME_OPTIONS: { id: Theme; label: string; icon: ReactNode }[] = [
   { id: "light", label: "Light", icon: <SunIcon size={15} /> },
@@ -115,7 +115,7 @@ function ModelMetaList({
               onBlur={(event) =>
                 void save(modelId, spec, event.currentTarget.value, String(spec.output ?? ""))
               }
-              className="w-20 rounded-lg border border-[var(--glass-border)] bg-[var(--hover-bg)] px-1.5 py-0.5 text-[11.5px]"
+              className="w-20 rounded-control border border-[var(--glass-border)] bg-[var(--hover-bg)] px-1.5 py-0.5 text-[11.5px]"
             />
             <input
               defaultValue={spec.output ?? ""}
@@ -124,7 +124,7 @@ function ModelMetaList({
               onBlur={(event) =>
                 void save(modelId, spec, String(spec.context ?? ""), event.currentTarget.value)
               }
-              className="w-20 rounded-lg border border-[var(--glass-border)] bg-[var(--hover-bg)] px-1.5 py-0.5 text-[11.5px]"
+              className="w-20 rounded-control border border-[var(--glass-border)] bg-[var(--hover-bg)] px-1.5 py-0.5 text-[11.5px]"
             />
           </div>
         ))}
@@ -321,7 +321,7 @@ function ProvidersSection() {
           return (
             <div
               key={id}
-              className="rounded-xl border border-[var(--glass-border)] p-2.5"
+              className="rounded-row border border-[var(--glass-border)] p-2.5"
             >
               <div className="flex items-center gap-2">
                 <button
@@ -358,7 +358,7 @@ function ProvidersSection() {
                   title="Fetch models"
                   onClick={() => void fetchModels(id)}
                   disabled={busy === id}
-                  className="grid h-7 w-7 place-items-center rounded-lg text-faint hover:text-[var(--ink)]"
+                  className="grid h-7 w-7 place-items-center rounded-control text-faint hover:text-[var(--ink)]"
                 >
                   <RefreshIcon size={15} className={busy === id ? "animate-spin" : ""} />
                 </button>
@@ -366,7 +366,7 @@ function ProvidersSection() {
                   type="button"
                   title="Edit"
                   onClick={() => startEdit(id)}
-                  className="grid h-7 w-7 place-items-center rounded-lg text-faint hover:text-[var(--ink)]"
+                  className="grid h-7 w-7 place-items-center rounded-control text-faint hover:text-[var(--ink)]"
                 >
                   <ChevronDownIcon size={15} />
                 </button>
@@ -374,7 +374,7 @@ function ProvidersSection() {
                   type="button"
                   title="Delete provider"
                   onClick={() => void remove(id)}
-                  className="grid h-7 w-7 place-items-center rounded-lg text-faint hover:text-[var(--danger)]"
+                  className="grid h-7 w-7 place-items-center rounded-control text-faint hover:text-[var(--danger)]"
                 >
                   <TrashIcon size={15} />
                 </button>
@@ -404,7 +404,7 @@ function ProvidersSection() {
                   <button
                     type="button"
                     onClick={() => void saveKey(id)}
-                    className="shrink-0 rounded-lg border border-[var(--glass-border)] px-2 py-1 text-[12px] text-soft"
+                    className="shrink-0 rounded-control border border-[var(--glass-border)] px-2 py-1 text-[12px] text-soft"
                   >
                     Save
                   </button>
@@ -418,7 +418,7 @@ function ProvidersSection() {
       </div>
 
       {form ? (
-        <div className="mt-3 rounded-xl border border-[var(--glass-border)] p-3">
+        <div className="mt-3 rounded-row border border-[var(--glass-border)] p-3">
           <div className="mb-2 flex items-center justify-between">
             <p className="text-[13px] font-medium">
               {form.id && config.providers[form.id] ? "Edit provider" : "New provider"}
@@ -486,7 +486,7 @@ function ProvidersSection() {
             type="button"
             onClick={() => void save()}
             disabled={busy !== null}
-            className="mt-3 w-full rounded-xl bg-[var(--control-bg)] px-3 py-2 text-[13px] font-medium text-[var(--control-ink)] disabled:opacity-50"
+            className="mt-3 w-full rounded-row bg-[var(--control-bg)] px-3 py-2 text-[13px] font-medium text-[var(--control-ink)] disabled:opacity-50"
           >
             {busy ? "Working…" : "Save & test connection"}
           </button>
@@ -559,7 +559,7 @@ function PersonasSection() {
         {config.personas.map((persona) => (
           <div
             key={persona.id}
-            className="flex items-center gap-2 rounded-xl border border-[var(--glass-border)] px-2.5 py-1.5"
+            className="flex items-center gap-2 rounded-row border border-[var(--glass-border)] px-2.5 py-1.5"
           >
             <span className="min-w-0 flex-1 truncate text-[13px]">
               {persona.name}
@@ -583,7 +583,7 @@ function PersonasSection() {
       </div>
 
       {editing ? (
-        <div className="mt-2 space-y-2 rounded-xl border border-[var(--glass-border)] p-2.5">
+        <div className="mt-2 space-y-2 rounded-row border border-[var(--glass-border)] p-2.5">
           <input
             value={editing.name}
             placeholder="Persona name"
@@ -605,14 +605,14 @@ function PersonasSection() {
             <button
               type="button"
               onClick={() => void save()}
-              className="flex-1 rounded-xl bg-[var(--control-bg)] px-3 py-1.5 text-[12.5px] font-medium text-[var(--control-ink)]"
+              className="flex-1 rounded-row bg-[var(--control-bg)] px-3 py-1.5 text-[12.5px] font-medium text-[var(--control-ink)]"
             >
               Save
             </button>
             <button
               type="button"
               onClick={() => setEditing(null)}
-              className="rounded-xl border border-[var(--glass-border)] px-3 py-1.5 text-[12.5px] text-soft"
+              className="rounded-row border border-[var(--glass-border)] px-3 py-1.5 text-[12.5px] text-soft"
             >
               Cancel
             </button>
@@ -840,7 +840,7 @@ function McpSection() {
         {Object.entries(config.mcpServers ?? {}).map(([id, server]) => (
           <div
             key={id}
-            className="flex items-center gap-2 rounded-xl border border-[var(--glass-border)] px-2.5 py-1.5"
+            className="flex items-center gap-2 rounded-row border border-[var(--glass-border)] px-2.5 py-1.5"
           >
             <span className="min-w-0 flex-1">
               <span className="block truncate text-[13px]">{server.name || id}</span>
@@ -865,7 +865,7 @@ function McpSection() {
       </div>
 
       {form ? (
-        <div className="mt-2 space-y-2 rounded-xl border border-[var(--glass-border)] p-2.5">
+        <div className="mt-2 space-y-2 rounded-row border border-[var(--glass-border)] p-2.5">
           <input
             value={form.id}
             placeholder="Server id (e.g. filesystem)"
@@ -904,14 +904,14 @@ function McpSection() {
               type="button"
               disabled={busy}
               onClick={() => void save()}
-              className="flex-1 rounded-xl bg-[var(--control-bg)] px-3 py-1.5 text-[12.5px] font-medium text-[var(--control-ink)] disabled:opacity-50"
+              className="flex-1 rounded-row bg-[var(--control-bg)] px-3 py-1.5 text-[12.5px] font-medium text-[var(--control-ink)] disabled:opacity-50"
             >
               {busy ? "Connecting…" : "Save & connect"}
             </button>
             <button
               type="button"
               onClick={() => setForm(null)}
-              className="rounded-xl border border-[var(--glass-border)] px-3 py-1.5 text-[12.5px] text-soft"
+              className="rounded-row border border-[var(--glass-border)] px-3 py-1.5 text-[12.5px] text-soft"
             >
               Cancel
             </button>
@@ -990,7 +990,7 @@ function SkillsSection() {
           {skills.map((skill) => (
             <div
               key={skill.id}
-              className="rounded-xl border border-[var(--glass-border)] px-2.5 py-1.5"
+              className="rounded-row border border-[var(--glass-border)] px-2.5 py-1.5"
             >
               <p className="text-[13px]">
                 <span className="font-mono text-[12px] text-faint">/{skill.id}</span>{" "}
@@ -1156,14 +1156,14 @@ export function SettingsPanel() {
         className="absolute inset-0 cursor-default bg-black/10"
       />
 
-      <div className="animate-fade-up panel-strong relative flex h-full w-[420px] flex-col overflow-hidden rounded-2xl">
+      <div className="animate-fade-up panel-strong relative flex h-full w-[420px] flex-col overflow-hidden rounded-sheet">
         <div className="flex items-center justify-between px-4 py-3">
           <h2 className="text-[14.5px] font-semibold">Settings</h2>
           <button
             type="button"
             aria-label="Close settings"
             onClick={() => setOpen(false)}
-            className="hover-surface grid h-8 w-8 place-items-center rounded-lg text-soft"
+            className="hover-surface grid h-8 w-8 place-items-center rounded-control text-soft"
           >
             <CloseIcon size={16} />
           </button>
@@ -1208,7 +1208,7 @@ export function SettingsPanel() {
                     })
                   }
                   className={cn(
-                    "group relative h-16 overflow-hidden rounded-xl border transition",
+                    "group relative h-16 overflow-hidden rounded-row border transition",
                     config.background.preset === preset.id &&
                       config.background.kind === "builtin"
                       ? "border-[var(--accent)] ring-2 ring-[var(--accent-soft)]"

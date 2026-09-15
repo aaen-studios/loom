@@ -87,11 +87,11 @@ export function WorkspaceChip() {
       </button>
 
       {open && (
-        <div className="panel-strong absolute bottom-full left-0 z-40 mb-2 w-[300px] overflow-hidden rounded-2xl p-1.5">
+        <div className="panel-strong absolute bottom-full left-0 z-40 mb-2 w-[300px] overflow-hidden rounded-sheet p-1.5">
           <button
             type="button"
             onClick={() => void pick()}
-            className="hover-surface flex w-full items-center gap-2 rounded-xl px-2 py-1.5 text-left text-[13px] text-soft"
+            className="hover-surface flex w-full items-center gap-2 rounded-row px-2 py-1.5 text-left text-[13px] text-soft"
           >
             <FolderIcon size={15} />
             {folderName ? "Change folder…" : "Choose folder…"}
@@ -103,7 +103,7 @@ export function WorkspaceChip() {
                 setOpen(false);
                 void setWorkdir(null);
               }}
-              className="hover-surface flex w-full items-center gap-2 rounded-xl px-2 py-1.5 text-left text-[13px] text-soft"
+              className="hover-surface flex w-full items-center gap-2 rounded-row px-2 py-1.5 text-left text-[13px] text-soft"
             >
               Clear workspace
             </button>
@@ -115,7 +115,7 @@ export function WorkspaceChip() {
                 type="button"
                 disabled={indexing}
                 onClick={() => void indexNow()}
-                className="hover-surface flex w-full items-center gap-2 rounded-xl px-2 py-1.5 text-left text-[13px] text-soft disabled:opacity-50"
+                className="hover-surface flex w-full items-center gap-2 rounded-row px-2 py-1.5 text-left text-[13px] text-soft disabled:opacity-50"
               >
                 {indexing ? "Indexing…" : "Index workspace"}
               </button>
@@ -128,7 +128,7 @@ export function WorkspaceChip() {
                       setIndexNote("Index cleared.");
                     });
                   }}
-                  className="hover-surface flex w-full items-center justify-between gap-2 rounded-xl px-2 py-1.5 text-left text-[13px] text-soft"
+                  className="hover-surface flex w-full items-center justify-between gap-2 rounded-row px-2 py-1.5 text-left text-[13px] text-soft"
                 >
                   <span>Clear index</span>
                   <span className="text-[11.5px] text-faint">
@@ -195,7 +195,7 @@ export function PermissionChip() {
       </button>
 
       {open && (
-        <div className="panel-strong absolute bottom-full left-0 z-40 mb-2 w-[280px] overflow-hidden rounded-2xl p-1.5">
+        <div className="panel-strong absolute bottom-full left-0 z-40 mb-2 w-[280px] overflow-hidden rounded-sheet p-1.5">
           {MODES.map((mode) => (
             <button
               key={mode.id}
@@ -207,7 +207,7 @@ export function PermissionChip() {
                 );
               }}
               className={cn(
-                "hover-surface flex w-full flex-col items-start rounded-xl px-2 py-1.5 text-left",
+                "hover-surface flex w-full flex-col items-start rounded-row px-2 py-1.5 text-left",
                 effective === mode.id ? "text-[var(--ink)]" : "text-soft",
               )}
             >

@@ -36,7 +36,7 @@ function PillButton({
       aria-label={label}
       onClick={onClick}
       className={cn(
-        "hover-surface grid h-8 w-9 place-items-center rounded-xl text-soft",
+        "hover-surface grid h-8 w-9 place-items-center rounded-row text-soft",
         "focus-visible:outline focus-visible:outline-2 focus-visible:outline-[var(--accent)]",
         danger && "hover:!bg-[var(--danger)] hover:!text-white",
       )}
@@ -68,7 +68,7 @@ export function TitleBar() {
       <div className="absolute inset-0 -z-10" data-tauri-drag-region />
 
       <div className="flex items-center gap-2">
-        <div className="pill flex h-10 items-center gap-0.5 rounded-2xl p-1">
+        <div className="pill flex h-10 items-center gap-0.5 rounded-capsule p-1">
           <PillButton
             label="Chats"
             onClick={() => setSidebarOpen(true)}
@@ -86,7 +86,7 @@ export function TitleBar() {
         </div>
       </div>
 
-      <div className="pill flex h-10 items-center gap-0.5 rounded-2xl p-1">
+      <div className="pill flex h-10 items-center gap-0.5 rounded-capsule p-1">
         <PillButton label="Minimize" onClick={() => void minimizeWindow()}>
           <MinimizeIcon size={16} />
         </PillButton>

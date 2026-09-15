@@ -14,6 +14,7 @@ day-to-day polish (see "Open work" at the bottom).
 | Stack | Tauri v2 + Vite + React 19 + TS + Tailwind v4, Bun. Rust engine in its own crate (`crates/loom-core`). |
 | Layout | Full-bleed background, centered full-width canvas. **No permanent sidebar** — chats live in a popup summoned from the titlebar. No big blurred panel around the workspace. |
 | Chrome | Frameless window, two floating pills (navigation left, window controls right), custom-drawn glyphs. Inter font. Dark by default. |
+| Corners | Continuous (squircle) corners via `corner-shape`, on a concentric radius scale: window 20px, sheet 18px (composer, popovers, drawer, toast), row 10px (sheet − padding), control 12px, capsule for chrome bars and chips. The model picker also allows adding a model id by hand when `/models` is unavailable. |
 | Glass | The app renders its own background (built-in presets + user images/videos) and uses CSS `backdrop-filter` only on small surfaces (composer, popups, cards). |
 | Streaming | Rust-owned streams: concurrent across chats, survive window switches and backgrounding. Toast when a reply finishes unfocused. |
 | Overlay | Tray icon + `Ctrl+Shift+Space` quick-ask overlay (new chat, then reveals the main window). |
@@ -75,3 +76,9 @@ loom/
   metadata editable in Settings → Providers.
 - Frontend tests (vitest): streaming state machine + pure helpers; CI runs
   encoding checks, both typechecks, vitest, engine tests, and both crates.
+- Model selection: engine-level tests prove the choice persists on the session
+  and survives a reopen; the picker surfaces command errors instead of failing
+  silently, preserves the titles model when switching, and can add a model id
+  by hand for providers whose `/models` endpoint is unavailable.
+- Corners follow Apple's rules: squircle (continuous) corners on a concentric
+  radius scale, with capsules for chrome bars, chips and notices.

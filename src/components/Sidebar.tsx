@@ -81,7 +81,7 @@ export function SidebarPopup() {
         className="absolute inset-0 cursor-default"
       />
 
-      <aside className="panel-strong animate-fade-up absolute bottom-3 left-3 top-16 flex w-[300px] flex-col overflow-hidden rounded-2xl">
+      <aside className="panel-strong animate-fade-up absolute bottom-3 left-3 top-16 flex w-[300px] flex-col overflow-hidden rounded-sheet">
         <div className="flex items-center gap-2 px-3 py-2.5 text-soft">
           <LoomMark size={16} />
           <span className="text-[13px] font-semibold tracking-[0.01em]">Chats</span>
@@ -89,7 +89,7 @@ export function SidebarPopup() {
             type="button"
             aria-label="Close"
             onClick={() => setOpen(false)}
-            className="ml-auto grid h-7 w-7 place-items-center rounded-lg text-faint hover:bg-[var(--hover-bg)] hover:text-[var(--ink)]"
+            className="ml-auto grid h-7 w-7 place-items-center rounded-control text-faint hover:bg-[var(--hover-bg)] hover:text-[var(--ink)]"
           >
             ✕
           </button>
@@ -102,7 +102,7 @@ export function SidebarPopup() {
               void newSession();
               setOpen(false);
             }}
-            className="hover-surface flex w-full items-center gap-2 rounded-xl border border-[var(--glass-border)] px-3 py-2 text-left text-[13.5px] font-medium text-soft"
+            className="hover-surface flex w-full items-center gap-2 rounded-row border border-[var(--glass-border)] px-3 py-2 text-left text-[13.5px] font-medium text-soft"
           >
             <PlusIcon size={16} />
             New chat
@@ -114,7 +114,7 @@ export function SidebarPopup() {
             value={query}
             placeholder="Search chats…"
             onChange={(event) => setQuery(event.currentTarget.value)}
-            className="w-full rounded-xl border border-[var(--glass-border)] bg-[var(--hover-bg)] px-2.5 py-1.5 text-[12.5px] placeholder:text-[var(--ink-faint)]"
+            className="w-full rounded-row border border-[var(--glass-border)] bg-[var(--hover-bg)] px-2.5 py-1.5 text-[12.5px] placeholder:text-[var(--ink-faint)]"
           />
         </div>
 
@@ -133,7 +133,7 @@ export function SidebarPopup() {
               <div
                 key={session.id}
                 className={cn(
-                  "group relative flex items-center rounded-xl",
+                  "group relative flex items-center rounded-row",
                   isActive ? "bg-[var(--hover-bg)]" : "hover:bg-[var(--hover-bg)]",
                 )}
               >
@@ -147,7 +147,7 @@ export function SidebarPopup() {
                       if (event.key === "Enter") void commitRename(session.id);
                       if (event.key === "Escape") setRenaming(null);
                     }}
-                    className="m-1 min-w-0 flex-1 rounded-lg border border-[var(--accent)] bg-transparent px-2 py-1 text-[13px]"
+                    className="m-1 min-w-0 flex-1 rounded-control border border-[var(--accent)] bg-transparent px-2 py-1 text-[13px]"
                   />
                 ) : (
                   <button
@@ -187,7 +187,7 @@ export function SidebarPopup() {
                       title="Export as markdown"
                       aria-label="Export chat"
                       onClick={() => void exportSession(session.id)}
-                      className="grid h-7 w-7 place-items-center rounded-lg text-faint hover:text-[var(--ink)]"
+                      className="grid h-7 w-7 place-items-center rounded-control text-faint hover:text-[var(--ink)]"
                     >
                       <DownloadIcon size={15} />
                     </button>
@@ -196,7 +196,7 @@ export function SidebarPopup() {
                       title="Delete chat"
                       aria-label="Delete chat"
                       onClick={() => void deleteSession(session.id)}
-                      className="grid h-7 w-7 place-items-center rounded-lg text-faint hover:text-[var(--danger)]"
+                      className="grid h-7 w-7 place-items-center rounded-control text-faint hover:text-[var(--danger)]"
                     >
                       <TrashIcon size={15} />
                     </button>
@@ -214,7 +214,7 @@ export function SidebarPopup() {
               setOpen(false);
               setSettingsOpen(true);
             }}
-            className="hover-surface flex w-full items-center gap-2 rounded-xl px-2.5 py-2 text-left text-[13.5px] text-soft"
+            className="hover-surface flex w-full items-center gap-2 rounded-row px-2.5 py-2 text-left text-[13.5px] text-soft"
           >
             <SettingsIcon size={16} />
             Settings

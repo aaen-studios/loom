@@ -71,7 +71,7 @@ export default function App() {
         </button>
       </header>
 
-      <main className="panel mt-2 flex min-h-0 flex-1 flex-col rounded-2xl p-6">
+      <main className="panel mt-2 flex min-h-0 flex-1 flex-col rounded-sheet p-6">
         {step === "welcome" && (
           <>
             <h1 className="text-[19px] font-semibold tracking-tight">
@@ -93,12 +93,12 @@ export default function App() {
                 <input
                   value={dir}
                   onChange={(event) => setDir(event.currentTarget.value)}
-                  className="min-w-0 flex-1 rounded-xl border border-[var(--border)] bg-white/5 px-3 py-2 font-mono text-[12px]"
+                  className="min-w-0 flex-1 rounded-row border border-[var(--border)] bg-white/5 px-3 py-2 font-mono text-[12px]"
                 />
                 <button
                   type="button"
                   onClick={() => void browse()}
-                  className="rounded-xl border border-[var(--border)] px-3 py-2 text-[12.5px] text-[var(--ink-soft)] hover:text-[var(--ink)]"
+                  className="rounded-row border border-[var(--border)] px-3 py-2 text-[12.5px] text-[var(--ink-soft)] hover:text-[var(--ink)]"
                 >
                   Browse…
                 </button>
@@ -124,7 +124,7 @@ export default function App() {
               <button
                 type="button"
                 onClick={() => void getCurrentWindow().close()}
-                className="rounded-xl border border-[var(--border)] px-4 py-2 text-[13px] text-[var(--ink-soft)]"
+                className="rounded-row border border-[var(--border)] px-4 py-2 text-[13px] text-[var(--ink-soft)]"
               >
                 Cancel
               </button>
@@ -132,7 +132,7 @@ export default function App() {
                 type="button"
                 disabled={!info?.payload}
                 onClick={() => void install()}
-                className="rounded-xl bg-[var(--control-bg)] px-4 py-2 text-[13px] font-medium text-[var(--control-ink)] disabled:opacity-40"
+                className="rounded-row bg-[var(--control-bg)] px-4 py-2 text-[13px] font-medium text-[var(--control-ink)] disabled:opacity-40"
               >
                 {info?.installedVersion ? "Update" : "Install"}
               </button>
@@ -161,14 +161,14 @@ export default function App() {
               <button
                 type="button"
                 onClick={() => void getCurrentWindow().close()}
-                className="rounded-xl border border-[var(--border)] px-4 py-2 text-[13px] text-[var(--ink-soft)]"
+                className="rounded-row border border-[var(--border)] px-4 py-2 text-[13px] text-[var(--ink-soft)]"
               >
                 Close
               </button>
               <button
                 type="button"
                 onClick={() => void launch()}
-                className="rounded-xl bg-[var(--control-bg)] px-4 py-2 text-[13px] font-medium text-[var(--control-ink)]"
+                className="rounded-row bg-[var(--control-bg)] px-4 py-2 text-[13px] font-medium text-[var(--control-ink)]"
               >
                 Launch Loom
               </button>
@@ -188,7 +188,7 @@ export default function App() {
               <button
                 type="button"
                 onClick={() => setStep("welcome")}
-                className="rounded-xl border border-[var(--border)] px-4 py-2 text-[13px] text-[var(--ink-soft)]"
+                className="rounded-row border border-[var(--border)] px-4 py-2 text-[13px] text-[var(--ink-soft)]"
               >
                 Back
               </button>
