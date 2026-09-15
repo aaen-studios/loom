@@ -236,6 +236,33 @@ export function DownloadIcon(props: IconProps) {
   );
 }
 
+export function CopyIcon(props: IconProps) {
+  return (
+    <Icon {...props}>
+      <rect x="9" y="9" width="10.5" height="10.5" rx="2.4" />
+      <path d="M15 6.5V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v7a2 2 0 0 0 2 2h.5" />
+    </Icon>
+  );
+}
+
+export function EditIcon(props: IconProps) {
+  return (
+    <Icon {...props}>
+      <path d="M16.5 4.5l3 3L8 19l-4 1 1-4z" />
+      <path d="M13.5 7.5l3 3" />
+    </Icon>
+  );
+}
+
+export function SearchIcon(props: IconProps) {
+  return (
+    <Icon {...props}>
+      <circle cx="11" cy="11" r="6" />
+      <path d="M15.5 15.5L20 20" />
+    </Icon>
+  );
+}
+
 /** Brand glyph: three woven threads. */
 export function LoomMark(props: IconProps) {
   return (

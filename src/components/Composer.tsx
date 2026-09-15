@@ -52,6 +52,16 @@ export function Composer({ variant = "docked" }: ComposerProps) {
     (state) => (state.activeId ? state.busy[state.activeId] : false) ?? false,
   );
   const sendKey = useSettings((state) => state.config.interface.sendKey);
+  const draft = useChat((state) => state.draft);
+  const setDraft = useChat((state) => state.setDraft);
+
+  // "Edit and resend" hands the message back to the composer.
+  useEffect(() => {
+    if (draft === null) return;
+    setValue(draft);
+    setDraft(null);
+    textareaRef.current?.focus();
+  }, [draft, setDraft]);
 
   useEffect(() => {
     const el = textareaRef.current;

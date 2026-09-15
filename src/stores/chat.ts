@@ -51,6 +51,16 @@ interface ChatState {
     remember?: "read-only" | "all" | null,
   ) => Promise<void>;
   retryLast: () => Promise<void>;
+  /** Drops this reply and asks again from the user message before it. */
+  regenerate: (messageId: string) => Promise<void>;
+  /** Drops this user message and everything after it, returning its text so
+   *  the composer can take over. */
+  editFrom: (messageId: string) => Promise<string | null>;
+  removeMessage: (messageId: string) => Promise<void>;
+  /** Text the composer should adopt (set by editFrom). */
+  draft: string | null;
+  setDraft: (draft: string | null) => void;
+  truncateFrom: (index: number) => Promise<Message | null>;
   applyEvent: (event: EngineEvent) => void;
   clearError: () => void;
 }
@@ -93,6 +103,7 @@ export const useChat = create<ChatState>((set, get) => ({
   permission: null,
   error: null,
   loaded: false,
+  draft: null,
 
   loadSessions: async () => {
     const sessions = (await ipc.listSessions()) ?? [];
@@ -279,6 +290,23 @@ export const useChat = create<ChatState>((set, get) => ({
   },
 
   /**
+   * Drops everything from `index` onwards, in the database and in memory.
+   * Returns the user message that started the tail, when there is one.
+   */
+  truncateFrom: async (index) => {
+    const messages = get().messages;
+    if (index < 0 || index >= messages.length) return null;
+
+    for (const message of messages.slice(index)) {
+      if (!message.id.startsWith("local-")) {
+        await ipc.deleteMessage(message.id);
+      }
+    }
+    set((state) => ({ messages: state.messages.slice(0, index) }));
+    return messages[index];
+  },
+
+  /**
    * Drops the failed turn and re-sends the last user message, so a retry does
    * not leave half a conversation behind.
    */
@@ -292,19 +320,58 @@ export const useChat = create<ChatState>((set, get) => ({
     if (lastUserIndex < 0) return;
 
     const user = messages[lastUserIndex];
-    for (const message of messages.slice(lastUserIndex)) {
-      if (!message.id.startsWith("local-")) {
-        await ipc.deleteMessage(message.id);
-      }
-    }
-
     const attachments = parseAttachments(user.extra);
-    set((state) => ({
-      messages: state.messages.slice(0, lastUserIndex),
-      error: null,
-    }));
+    await get().truncateFrom(lastUserIndex);
+    set({ error: null });
     await get().send(user.content, { attachments });
   },
+
+  /** Ask again for one reply, keeping everything before it. */
+  regenerate: async (messageId) => {
+    const { messages, activeId } = get();
+    if (!activeId || get().busy[activeId]) return;
+
+    const index = messages.findIndex((message) => message.id === messageId);
+    if (index < 0) return;
+
+    let userIndex = -1;
+    for (let cursor = index - 1; cursor >= 0; cursor -= 1) {
+      if (messages[cursor].role === "user") {
+        userIndex = cursor;
+        break;
+      }
+    }
+    if (userIndex < 0) return;
+
+    const user = messages[userIndex];
+    const attachments = parseAttachments(user.extra);
+    await get().truncateFrom(userIndex);
+    set({ error: null });
+    await get().send(user.content, { attachments });
+  },
+
+  /** Take a message back into the composer, dropping it and everything after. */
+  editFrom: async (messageId) => {
+    const index = get().messages.findIndex((message) => message.id === messageId);
+    if (index < 0) return null;
+    const message = get().messages[index];
+    if (message.role !== "user") return null;
+
+    await get().truncateFrom(index);
+    return message.content;
+  },
+
+  removeMessage: async (messageId) => {
+    if (!messageId.startsWith("local-")) {
+      await ipc.deleteMessage(messageId);
+    }
+    set((state) => ({
+      messages: state.messages.filter((message) => message.id !== messageId),
+    }));
+  },
+
+  setDraft: (draft) => set({ draft }),
+
 
   applyEvent: (event) => {
     // A payload missing its ids would otherwise be filed under "undefined"

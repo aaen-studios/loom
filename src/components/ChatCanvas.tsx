@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { cn } from "../lib/cn";
+import { compactTokens } from "../lib/format";
 import { formatUsage, parseAttachments, parseError, parseUsage } from "../lib/messageExtra";
 import type { Message, ToolCallRecord } from "../types";
 import { useChat } from "../stores/chat";
@@ -10,16 +11,26 @@ import { AttachmentStrip } from "./AttachmentChips";
 import { Composer } from "./Composer";
 import { Markdown } from "./Markdown";
 import { PermissionCard, ToolCallList } from "./ToolCalls";
-import { BrainIcon, LoomMark } from "./icons";
+import {
+  BrainIcon,
+  CopyIcon,
+  EditIcon,
+  LoomMark,
+  RefreshIcon,
+  SearchIcon,
+  TrashIcon,
+} from "./icons";
 
 function Reasoning({
   text,
   streaming,
   hasContent,
+  revealed,
 }: {
   text: string;
   streaming: boolean;
   hasContent: boolean;
+  revealed: boolean;
 }) {
   const showThinking = useSettings((state) => state.config.interface.showThinking);
   const [open, setOpen] = useState(showThinking === "expanded");
@@ -28,8 +39,8 @@ function Reasoning({
     setOpen(showThinking === "expanded");
   }, [showThinking]);
 
-  // Never rendered unless the user asks for it.
-  if (showThinking === "hidden") return null;
+  // Hidden by default, unless this reply was opened from its actions.
+  if (showThinking === "hidden" && !revealed) return null;
   // While the model is still thinking, the transcript shows a small indicator
   // instead of the running commentary.
   if (streaming && !hasContent) return null;
@@ -54,14 +65,165 @@ function Reasoning({
   );
 }
 
+
+/** Title, token totals for this chat, and a search box for the transcript. */
+function ChatHeader({
+  query,
+  onQuery,
+  matches,
+}: {
+  query: string;
+  onQuery: (value: string) => void;
+  matches: number;
+}) {
+  const session = useChat((state) =>
+    state.sessions.find((item) => item.id === state.activeId),
+  );
+  const messages = useChat((state) => state.messages);
+
+  const totals = messages.reduce(
+    (sum, message) => {
+      const usage = parseUsage(message.extra);
+      return {
+        input: sum.input + (usage?.inputTokens ?? 0),
+        output: sum.output + (usage?.outputTokens ?? 0),
+      };
+    },
+    { input: 0, output: 0 },
+  );
+
+  return (
+    <div className="flex h-11 shrink-0 items-center gap-3 border-b border-[var(--glass-border)] px-5">
+      <span className="min-w-0 truncate text-[13px] text-soft">
+        {session?.title || "New chat"}
+      </span>
+      {(totals.input > 0 || totals.output > 0) && (
+        <span
+          className="shrink-0 text-[11.5px] text-faint"
+          title="Tokens used in this chat"
+        >
+          {compactTokens(totals.input) ?? 0} in · {compactTokens(totals.output) ?? 0} out
+        </span>
+      )}
+      <div className="flex-1" />
+      <div className="flex items-center gap-1.5">
+        <SearchIcon size={14} className="shrink-0 text-faint" />
+        <input
+          value={query}
+          placeholder="Search chat"
+          onChange={(event) => onQuery(event.currentTarget.value)}
+          onKeyDown={(event) => {
+            if (event.key === "Escape") onQuery("");
+          }}
+          className="w-40 rounded-control border border-[var(--glass-border)] bg-[var(--hover-bg)] px-2 py-1 text-[12px] placeholder:text-[var(--ink-faint)]"
+        />
+        {query.trim() && (
+          <span className="shrink-0 text-[11.5px] text-faint">
+            {matches} match{matches === 1 ? "" : "es"}
+          </span>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/** Actions revealed when hovering a message. */
+function MessageActions({
+  message,
+  onRevealThinking,
+}: {
+  message: Message;
+  onRevealThinking: () => void;
+}) {
+  const regenerate = useChat((state) => state.regenerate);
+  const editFrom = useChat((state) => state.editFrom);
+  const removeMessage = useChat((state) => state.removeMessage);
+  const setDraft = useChat((state) => state.setDraft);
+  const showThinking = useSettings((state) => state.config.interface.showThinking);
+  const [copied, setCopied] = useState(false);
+
+  const copy = async () => {
+    try {
+      await navigator.clipboard.writeText(message.content);
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 1200);
+    } catch {
+      // clipboard denied: nothing to do but stay quiet
+    }
+  };
+
+  return (
+    <div className="ml-1 flex shrink-0 items-start gap-0.5 opacity-0 transition group-hover:opacity-100 focus-within:opacity-100">
+      <button
+        type="button"
+        title={copied ? "Copied" : "Copy"}
+        aria-label="Copy message"
+        onClick={() => void copy()}
+        className="hover-surface grid h-7 w-7 place-items-center rounded-control text-faint hover:text-[var(--ink)]"
+      >
+        <CopyIcon size={14} />
+      </button>
+      {message.role === "user" ? (
+        <button
+          type="button"
+          title="Edit and resend from here"
+          aria-label="Edit message"
+          onClick={() => {
+            void editFrom(message.id).then((text) => {
+              if (text !== null) setDraft(text);
+            });
+          }}
+          className="hover-surface grid h-7 w-7 place-items-center rounded-control text-faint hover:text-[var(--ink)]"
+        >
+          <EditIcon size={14} />
+        </button>
+      ) : (
+        <button
+          type="button"
+          title="Regenerate this reply"
+          aria-label="Regenerate"
+          onClick={() => void regenerate(message.id)}
+          className="hover-surface grid h-7 w-7 place-items-center rounded-control text-faint hover:text-[var(--ink)]"
+        >
+          <RefreshIcon size={14} />
+        </button>
+      )}
+      {message.role === "assistant" && message.reasoning && showThinking === "hidden" && (
+        <button
+          type="button"
+          title="Show thinking for this reply"
+          aria-label="Show thinking"
+          onClick={onRevealThinking}
+          className="hover-surface grid h-7 w-7 place-items-center rounded-control text-faint hover:text-[var(--ink)]"
+        >
+          <BrainIcon size={14} />
+        </button>
+      )}
+      <button
+        type="button"
+        title="Delete message"
+        aria-label="Delete message"
+        onClick={() => void removeMessage(message.id)}
+        className="hover-surface grid h-7 w-7 place-items-center rounded-control text-faint hover:text-[var(--danger)]"
+      >
+        <TrashIcon size={14} />
+      </button>
+    </div>
+  );
+}
+
 function MessageRow({
   message,
   streaming,
   runningTools,
+  revealThinking,
+  onRevealThinking,
 }: {
   message: Message;
   streaming: boolean;
   runningTools: boolean;
+  revealThinking: boolean;
+  onRevealThinking: () => void;
 }) {
   const attachments = parseAttachments(message.extra);
   const usage = parseUsage(message.extra);
@@ -69,7 +231,8 @@ function MessageRow({
 
   if (message.role === "user") {
     return (
-      <div className="flex flex-col items-end gap-1.5">
+      <div className="group flex flex-col items-end gap-1.5">
+        <MessageActions message={message} onRevealThinking={onRevealThinking} />
         <div className="flex max-w-[85%] flex-col items-end">
           {attachments.length > 0 && (
             <div className="mb-1.5 flex flex-wrap justify-end gap-2">
@@ -87,7 +250,7 @@ function MessageRow({
   }
 
   return (
-    <div className="flex gap-3">
+    <div className="group flex gap-3">
       <div className="mt-0.5 grid h-7 w-7 shrink-0 place-items-center rounded-full border border-[var(--glass-border)] text-soft">
         <LoomMark size={15} />
       </div>
@@ -97,6 +260,7 @@ function MessageRow({
             text={message.reasoning}
             streaming={streaming}
             hasContent={message.content.length > 0}
+            revealed={revealThinking}
           />
         )}
         <ToolCallList messageId={message.id} extra={message.extra} />
@@ -114,6 +278,7 @@ function MessageRow({
           <p className="mt-1.5 text-[11.5px] text-faint">{formatUsage(usage)}</p>
         )}
       </div>
+      <MessageActions message={message} onRevealThinking={onRevealThinking} />
     </div>
   );
 }
@@ -163,6 +328,13 @@ export function ChatCanvas() {
   const setSettingsOpen = useUi((state) => state.setSettingsOpen);
   const alwaysFollow = useSettings((state) => state.config.interface.alwaysFollow);
   const compact = useSettings((state) => state.config.interface.compact);
+  const [query, setQuery] = useState("");
+  const [revealed, setRevealed] = useState<Record<string, boolean>>({});
+
+  const needle = query.trim().toLowerCase();
+  const visible = needle
+    ? messages.filter((message) => message.content.toLowerCase().includes(needle))
+    : messages;
 
   const scrollRef = useRef<HTMLDivElement>(null);
   const endRef = useRef<HTMLDivElement>(null);
@@ -225,6 +397,7 @@ export function ChatCanvas() {
       {/* The reading surface: messages and composer sit on this panel, so text
           stays legible over whatever the background art is doing. */}
       <div className="panel relative mx-auto flex h-full w-full max-w-4xl flex-col overflow-hidden rounded-window">
+        <ChatHeader query={query} onQuery={setQuery} matches={visible.length} />
         <div
           ref={scrollRef}
           onScroll={onScroll}
@@ -239,12 +412,16 @@ export function ChatCanvas() {
               compact ? "gap-4" : "gap-6",
             )}
           >
-            {messages.map((message) => (
+            {visible.map((message) => (
               <MessageRow
                 key={message.id}
                 message={message}
                 streaming={busy && message.role === "assistant"}
                 runningTools={hasRunningTools(message.id, liveTools)}
+                revealThinking={revealed[message.id] ?? false}
+                onRevealThinking={() =>
+                  setRevealed((current) => ({ ...current, [message.id]: true }))
+                }
               />
             ))}
             <div ref={endRef} />
