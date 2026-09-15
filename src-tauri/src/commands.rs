@@ -578,6 +578,83 @@ pub fn set_model_spec(
 }
 
 // ---------------------------------------------------------------------------
+// Storage
+// ---------------------------------------------------------------------------
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StorageUsage {
+    pub data_dir: String,
+    pub database: u64,
+    pub attachments: u64,
+    pub generated: u64,
+    pub backgrounds: u64,
+    pub cache: u64,
+    pub total: u64,
+}
+
+fn dir_size(path: &std::path::Path) -> u64 {
+    let Ok(reader) = std::fs::read_dir(path) else {
+        return 0;
+    };
+    reader
+        .flatten()
+        .map(|entry| match entry.metadata() {
+            Ok(meta) if meta.is_dir() => dir_size(&entry.path()),
+            Ok(meta) => meta.len(),
+            Err(_) => 0,
+        })
+        .sum()
+}
+
+#[tauri::command]
+pub fn storage_usage() -> Result<StorageUsage, String> {
+    let home = loom_core::paths::loom_home().map_err(to_string)?;
+    let database = std::fs::metadata(home.join("loom.db"))
+        .map(|meta| meta.len())
+        .unwrap_or(0);
+    let attachments = dir_size(&home.join("attachments"));
+    let generated = dir_size(&home.join("generated"));
+    let backgrounds = dir_size(&home.join("backgrounds"));
+    let cache = dir_size(&home.join("cache"));
+
+    Ok(StorageUsage {
+        data_dir: home.to_string_lossy().into_owned(),
+        database,
+        attachments,
+        generated,
+        backgrounds,
+        cache,
+        total: database + attachments + generated + backgrounds + cache,
+    })
+}
+
+/// Removes downloaded update payloads; nothing else is touched.
+#[tauri::command]
+pub fn clear_cache() -> Result<u64, String> {
+    let directory = loom_core::paths::cache_dir().map_err(to_string)?;
+    let freed = dir_size(&directory);
+    if directory.exists() {
+        std::fs::remove_dir_all(&directory).map_err(|e| e.to_string())?;
+    }
+    std::fs::create_dir_all(&directory).map_err(|e| e.to_string())?;
+    Ok(freed)
+}
+
+/// Removes generated images (they stay viewable in the chat as references).
+#[tauri::command]
+pub fn clear_generated() -> Result<u64, String> {
+    let directory = loom_core::paths::loom_home()
+        .map_err(to_string)?
+        .join("generated");
+    let freed = dir_size(&directory);
+    if directory.exists() {
+        std::fs::remove_dir_all(&directory).map_err(|e| e.to_string())?;
+    }
+    Ok(freed)
+}
+
+// ---------------------------------------------------------------------------
 // Skills, updates
 // ---------------------------------------------------------------------------
 

@@ -58,12 +58,12 @@ function MainShell() {
 
       <div className="relative z-10 flex h-full flex-col">
         <TitleBar />
-        <main className="min-h-0 flex-1">
+        <main className="flex min-h-0 flex-1">
+          <SidebarPopup />
           <ChatCanvas />
         </main>
       </div>
 
-      <SidebarPopup />
       <SettingsPanel />
       <ShortcutsSheet />
       <UpdateToast />

@@ -12,6 +12,7 @@ import type {
   ProviderConfig,
   ProviderPreset,
   Session,
+  StorageUsage,
   WorkspaceInfo,
 } from "../types";
 
@@ -36,6 +37,7 @@ export interface McpToolView {
   description: string;
   modelName: string;
 }
+
 
 export interface Skill {
   id: string;
@@ -96,6 +98,9 @@ export const ipc = {
 
   setInterfaceSettings: (interface_: InterfaceConfig) =>
     call<AppConfig>("set_interface_settings", { interface: interface_ }),
+  storageUsage: () => call<StorageUsage>("storage_usage"),
+  clearCache: () => call<number>("clear_cache"),
+  clearGenerated: () => call<number>("clear_generated"),
   setHotkey: (enabled: boolean, keys: string) =>
     call<void>("set_hotkey", { enabled, keys }),
 

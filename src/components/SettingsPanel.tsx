@@ -7,6 +7,7 @@ import { ipc } from "../lib/ipc";
 import type {
   AppInfo,
   ModelEntry,
+  StorageUsage,
   ModelSpec,
   Persona,
   PermissionMode,
@@ -331,6 +332,97 @@ function PromptsEditor() {
     </Section>
   );
 }
+function DataSection({ info }: { info: AppInfo | null }) {
+  return (
+        <Section title="Data">
+          <Row label="App version">
+            <span className="text-[13px] text-soft">{info?.version ?? "—"}</span>
+          </Row>
+          <div className="pt-1.5">
+            <p className="text-[13px] text-soft">Data folder</p>
+            <p
+              className="mt-1 truncate font-mono text-[11.5px] text-faint"
+              title={info?.loomHome ?? ""}
+            >
+              {info?.loomHome ?? "—"}
+            </p>
+          </div>
+        </Section>
+  );
+}
+
+function formatBytes(bytes: number): string {
+  if (bytes < 1024) return bytes + " B";
+  if (bytes < 1024 * 1024) return Math.round(bytes / 1024) + " KB";
+  if (bytes < 1024 * 1024 * 1024) return (bytes / (1024 * 1024)).toFixed(1) + " MB";
+  return (bytes / (1024 * 1024 * 1024)).toFixed(2) + " GB";
+}
+
+/** Disk usage for the Loom home folder, with the two safe cleanups. */
+function StorageSection() {
+  const [usage, setUsage] = useState<StorageUsage | null>(null);
+  const [note, setNote] = useState<string | null>(null);
+
+  const refresh = () => {
+    void ipc.storageUsage().then((result) => {
+      if (result) setUsage(result);
+    });
+  };
+
+  useEffect(refresh, []);
+
+  const act = async (what: "cache" | "generated") => {
+    const freed = what === "cache" ? await ipc.clearCache() : await ipc.clearGenerated();
+    setNote(freed ? "Freed " + formatBytes(freed) + "." : "Nothing to remove.");
+    refresh();
+  };
+
+  const rows: { label: string; value: number }[] = usage
+    ? [
+        { label: "Database", value: usage.database },
+        { label: "Attachments", value: usage.attachments },
+        { label: "Generated images", value: usage.generated },
+        { label: "Backgrounds", value: usage.backgrounds },
+        { label: "Update cache", value: usage.cache },
+      ]
+    : [];
+
+  return (
+    <Section title="Storage">
+      <Row label="Total">
+        <span className="text-[13px] text-soft">
+          {usage ? formatBytes(usage.total) : "…"}
+        </span>
+      </Row>
+      <div className="mt-1 space-y-1">
+        {rows.map((row) => (
+          <div key={row.label} className="flex items-center justify-between py-0.5">
+            <span className="text-[12.5px] text-faint">{row.label}</span>
+            <span className="text-[12.5px] text-soft">{formatBytes(row.value)}</span>
+          </div>
+        ))}
+      </div>
+      <div className="mt-2 flex flex-wrap gap-1.5">
+        <button
+          type="button"
+          onClick={() => void act("cache")}
+          className="rounded-capsule border border-[var(--glass-border)] px-2.5 py-1 text-[12px] text-soft hover:text-[var(--ink)]"
+        >
+          Clear update cache
+        </button>
+        <button
+          type="button"
+          onClick={() => void act("generated")}
+          className="rounded-capsule border border-[var(--glass-border)] px-2.5 py-1 text-[12px] text-soft hover:text-[var(--ink)]"
+        >
+          Clear generated images
+        </button>
+      </div>
+      {note && <p className="mt-1.5 text-[12px] text-[var(--accent)]">{note}</p>}
+    </Section>
+  );
+}
+
 // ---------------------------------------------------------------------------
 // Providers
 // ---------------------------------------------------------------------------
@@ -1446,7 +1538,7 @@ function GeneralSection() {
 // Panel
 // ---------------------------------------------------------------------------
 
-function AppearanceSection({ info }: { info: AppInfo | null }) {
+function AppearanceSection() {
   const config = useSettings((state) => state.config);
   const setTheme = useSettings((state) => state.setTheme);
   const setBackground = useSettings((state) => state.setBackground);
@@ -1576,20 +1668,6 @@ function AppearanceSection({ info }: { info: AppInfo | null }) {
         </div>
       </Section>
 
-      <Section title="Data">
-        <Row label="App version">
-          <span className="text-[13px] text-soft">{info?.version ?? "—"}</span>
-        </Row>
-        <div className="pt-1.5">
-          <p className="text-[13px] text-soft">Data folder</p>
-          <p
-            className="mt-1 truncate font-mono text-[11.5px] text-faint"
-            title={info?.loomHome ?? ""}
-          >
-            {info?.loomHome ?? "—"}
-          </p>
-        </div>
-      </Section>
     </>
   );
 }
@@ -1704,7 +1782,7 @@ export function SettingsPanel() {
             ) : (
               <>
                 {category === "general" && <GeneralSection />}
-                {category === "appearance" && <AppearanceSection info={info} />}
+                {category === "appearance" && <AppearanceSection />}
                 {category === "chat" && <ChatSection />}
                 {category === "tools" && <ToolsSection />}
                 {category === "providers" && <ProvidersSection />}
@@ -1716,7 +1794,12 @@ export function SettingsPanel() {
                     <PromptsEditor />
                   </>
                 )}
-                {category === "data" && <AppearanceSection info={info} />}
+                {category === "data" && (
+                  <>
+                    <DataSection info={info} />
+                    <StorageSection />
+                  </>
+                )}
                 {category === "updates" && <UpdatesSection version={info?.version} />}
               </>
             )}

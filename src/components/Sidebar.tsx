@@ -15,6 +15,7 @@ import { DownloadIcon, LoomMark, PlusIcon, SettingsIcon, TrashIcon } from "./ico
  */
 export function SidebarPopup() {
   const open = useUi((state) => state.sidebarOpen);
+  const [resizing, setResizing] = useState(false);
   const setOpen = useUi((state) => state.setSidebarOpen);
   const setSettingsOpen = useUi((state) => state.setSettingsOpen);
   const sessions = useChat((state) => state.sessions);
@@ -50,7 +51,7 @@ export function SidebarPopup() {
     return () => window.removeEventListener("keydown", onKey);
   }, [open, setOpen]);
 
-  if (!open) return null;
+  if (!open && !pinned) return null;
 
   const needle = query.trim().toLowerCase();
   const visible = needle
@@ -86,7 +87,15 @@ export function SidebarPopup() {
   };
 
   return (
-    <div className="absolute inset-0 z-30 animate-fade-in">
+    <div
+      className={cn(
+        // Docked: part of the layout, so the chat narrows instead of being
+        // covered. Floating: an overlay above the transcript.
+        pinned
+          ? "relative z-10 flex h-full shrink-0"
+          : "absolute inset-0 z-30 animate-fade-in",
+      )}
+    >
       {/* Pinned means the popup behaves like a panel: no click-away, no scrim. */}
       {!pinned && (
         <button
@@ -97,7 +106,15 @@ export function SidebarPopup() {
         />
       )}
 
-      <aside className="panel-strong animate-fade-up absolute bottom-3 left-3 top-16 flex w-[300px] flex-col overflow-hidden rounded-sheet">
+      <aside
+        style={pinned ? { width: config.interface.sidebarWidth } : undefined}
+        className={cn(
+          "flex flex-col overflow-hidden",
+          pinned
+            ? "border-r border-[var(--glass-border)] bg-[var(--hover-bg)]"
+            : "panel-strong animate-fade-up absolute bottom-3 left-3 top-16 w-[300px] rounded-sheet",
+        )}
+      >
         <div className="flex items-center gap-2 px-3 py-2.5 text-soft">
           <LoomMark size={16} />
           <span className="text-[13px] font-semibold tracking-[0.01em]">Chats</span>
@@ -111,7 +128,7 @@ export function SidebarPopup() {
               pinned ? "text-[var(--accent)]" : "text-faint hover:text-[var(--ink)]",
             )}
           >
-            {pinned ? "Pinned" : "Pin"}
+            Pin
           </button>
           <button
             type="button"
@@ -249,6 +266,40 @@ export function SidebarPopup() {
           </button>
         </div>
       </aside>
+
+      {pinned && (
+        <button
+          type="button"
+          aria-label="Resize chats"
+          title="Drag to resize"
+          onPointerDown={(event) => {
+            event.preventDefault();
+            setResizing(true);
+            const startX = event.clientX;
+            const startWidth = config.interface.sidebarWidth;
+            const onMove = (move: PointerEvent) => {
+              const next = Math.min(420, Math.max(200, startWidth + move.clientX - startX));
+              void ipc.setInterfaceSettings({
+                ...config.interface,
+                sidebarWidth: next,
+              }).then((updated) => {
+                if (updated) applyRemote(updated);
+              });
+            };
+            const onUp = () => {
+              setResizing(false);
+              window.removeEventListener("pointermove", onMove);
+              window.removeEventListener("pointerup", onUp);
+            };
+            window.addEventListener("pointermove", onMove);
+            window.addEventListener("pointerup", onUp);
+          }}
+          className={cn(
+            "w-1 shrink-0 cursor-col-resize transition",
+            resizing ? "bg-[var(--accent)]" : "hover:bg-[var(--accent-soft)]",
+          )}
+        />
+      )}
     </div>
   );
 }

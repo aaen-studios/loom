@@ -113,7 +113,18 @@ export interface InterfaceConfig {
   hotkey: string;
   alwaysFollow: boolean;
   sidebarPinned: boolean;
+  sidebarWidth: number;
   compact: boolean;
+}
+
+export interface StorageUsage {
+  dataDir: string;
+  database: number;
+  attachments: number;
+  generated: number;
+  backgrounds: number;
+  cache: number;
+  total: number;
 }
 
 export interface Prompt {

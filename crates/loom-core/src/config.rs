@@ -236,8 +236,10 @@ pub struct InterfaceConfig {
     /// Keep the transcript pinned to the newest text even while reading older
     /// messages.
     pub always_follow: bool,
-    /// Keep the chats popup open until it is explicitly closed.
+    /// Keep the chats list docked beside the chat instead of floating over it.
     pub sidebar_pinned: bool,
+    /// Width in pixels of the docked sidebar.
+    pub sidebar_width: u32,
     /// Denser transcript and smaller text.
     pub compact: bool,
 }
@@ -252,6 +254,7 @@ impl Default for InterfaceConfig {
             hotkey: "Ctrl+Shift+Space".to_string(),
             always_follow: false,
             sidebar_pinned: false,
+            sidebar_width: 264,
             compact: false,
         }
     }
