@@ -3,7 +3,7 @@ import { cn } from "../lib/cn";
 import { compactTokens, shortModelName } from "../lib/format";
 import { ipc } from "../lib/ipc";
 import type { ModelEntry, ModelRef } from "../types";
-import { findModel, useProviders } from "../stores/providers";
+import { currentModel, useProviders } from "../stores/providers";
 import { useChat } from "../stores/chat";
 import { useSettings } from "../stores/settings";
 import { ChevronDownIcon, PlusIcon, SparkIcon } from "./icons";
@@ -23,6 +23,7 @@ export function ModelPicker() {
     state.sessions.find((item) => item.id === state.activeId),
   );
   const providers = useSettings((state) => state.config.providers);
+  const chatDefaults = useSettings((state) => state.config.chat);
   const applyRemote = useSettings((state) => state.applyRemote);
   const refreshModels = useProviders((state) => state.refresh);
 
@@ -36,7 +37,8 @@ export function ModelPicker() {
   const containerRef = useRef<HTMLDivElement>(null);
 
   const providerIds = Object.keys(providers);
-  const current = findModel(models, session?.providerId, session?.modelId);
+  const current = currentModel(models, session, chatDefaults);
+  const variant = session?.variant ?? chatDefaults.variant ?? null;
 
   useEffect(() => {
     if (!open) return;
@@ -153,6 +155,7 @@ export function ModelPicker() {
   const label = current
     ? shortModelName(current.providerName, current.modelId)
     : "Select model";
+  const chipLabel = current && variant ? `${label} · ${variant}` : label;
 
   return (
     <div className="relative" ref={containerRef}>
@@ -175,7 +178,7 @@ export function ModelPicker() {
         )}
       >
         <SparkIcon size={14} />
-        <span className="max-w-[180px] truncate">{label}</span>
+        <span className="max-w-[200px] truncate">{chipLabel}</span>
         <ChevronDownIcon size={13} />
       </button>
 
@@ -210,7 +213,7 @@ export function ModelPicker() {
                     onClick={() => void chooseVariant(variantTarget, variant)}
                     className={cn(
                       "rounded-full border px-3 py-1 text-[12.5px] disabled:opacity-50",
-                      session?.variant === variant
+                      variant === variant
                         ? "border-[var(--accent)] text-[var(--ink)]"
                         : "border-[var(--glass-border)] text-soft hover:text-[var(--ink)]",
                     )}
@@ -262,8 +265,18 @@ export function ModelPicker() {
                           onClick={() => void choose(entry)}
                           className="flex min-w-0 flex-1 items-center gap-2 px-2 py-1.5 text-left disabled:opacity-60"
                         >
-                          <span className="truncate text-[13px]">
+                          <span
+                            className={cn(
+                              "truncate text-[13px]",
+                              current?.providerId === entry.providerId &&
+                                current?.modelId === entry.modelId &&
+                                "font-medium text-[var(--accent)]",
+                            )}
+                          >
                             {shortModelName(entry.providerName, entry.modelId)}
+                            {current?.providerId === entry.providerId &&
+                              current?.modelId === entry.modelId &&
+                              " ✓"}
                           </span>
                           <span className="ml-auto flex shrink-0 items-center gap-1.5 text-[11px] text-faint">
                             {entry.spec.inputModalities.includes("image") && (

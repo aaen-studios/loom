@@ -62,3 +62,21 @@ export function findModel(
     (entry) => entry.providerId === providerId && entry.modelId === modelId,
   );
 }
+
+/**
+ * The model the composer should show.
+ *
+ * A chat's own choice wins; otherwise the app-wide default (which is what a
+ * brand-new chat will use). Without that fallback the chip stays on "Select
+ * model" until a session exists, even though a model *was* chosen.
+ */
+export function currentModel(
+  models: ModelEntry[],
+  session: { providerId: string | null; modelId: string | null } | undefined,
+  defaults: { providerId: string | null; modelId: string | null },
+): ModelEntry | undefined {
+  return (
+    findModel(models, session?.providerId, session?.modelId) ??
+    findModel(models, defaults.providerId, defaults.modelId)
+  );
+}
