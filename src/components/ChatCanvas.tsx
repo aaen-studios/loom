@@ -1,5 +1,4 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { cn } from "../lib/cn";
 import { formatUsage, parseAttachments, parseError, parseUsage } from "../lib/messageExtra";
 import type { Message, ToolCallRecord } from "../types";
 import { useChat } from "../stores/chat";
@@ -169,7 +168,13 @@ export function ChatCanvas() {
     return (
       <section className="relative flex h-full min-w-0 items-center justify-center px-6 pb-16">
         <div className="w-full max-w-2xl -translate-y-8">
-          <Composer variant="hero" />
+          <div className="panel rounded-window p-4 pb-3">
+            <p className="mb-3 px-1 text-center text-[13px] text-soft">
+              Ask anything. Attach files with the paperclip, drop them on the
+              window, or paste an image.
+            </p>
+            <Composer variant="hero" />
+          </div>
           {modelCount === 0 ? (
             <p className="mt-3 text-center text-[12.5px] text-faint">
               No models yet.{" "}
@@ -193,69 +198,72 @@ export function ChatCanvas() {
   }
 
   return (
-    <section className="relative flex h-full min-w-0 flex-col">
-      <div
-        ref={scrollRef}
-        onScroll={onScroll}
-        className="min-h-0 flex-1 overflow-y-auto px-6 pb-6 pt-2"
-      >
-        <div className="mx-auto flex w-full max-w-3xl flex-col gap-5">
-          {messages.map((message) => (
-            <MessageRow
-              key={message.id}
-              message={message}
-              streaming={busy && message.role === "assistant"}
-              runningTools={hasRunningTools(message.id, liveTools)}
-            />
-          ))}
-          <div ref={endRef} />
-        </div>
-      </div>
-
-      {!pinned && (
-        <button
-          type="button"
-          onClick={jumpToLatest}
-          className="panel-strong absolute bottom-32 left-1/2 z-20 -translate-x-1/2 rounded-full px-3 py-1.5 text-[12px] text-soft"
+    <section className="relative flex h-full min-w-0 flex-col px-4 pb-4">
+      {/* The reading surface: messages and composer sit on this panel, so text
+          stays legible over whatever the background art is doing. */}
+      <div className="panel relative mx-auto flex h-full w-full max-w-4xl flex-col overflow-hidden rounded-window">
+        <div
+          ref={scrollRef}
+          onScroll={onScroll}
+          className="min-h-0 flex-1 overflow-y-auto px-8 pb-2 pt-7"
         >
-          Jump to latest ↓
-        </button>
-      )}
-
-      {error && (
-        <div className="mx-auto w-full max-w-3xl px-6">
-          <div className="flex items-start gap-2 rounded-row border border-[var(--danger)]/40 bg-[var(--danger)]/10 px-3 py-2 text-[13px]">
-            <span className="min-w-0 flex-1 break-words">{error}</span>
-            <button
-              type="button"
-              onClick={() => void retryLast()}
-              className="shrink-0 font-medium text-[var(--accent)] hover:underline"
-            >
-              Retry
-            </button>
-            <button
-              type="button"
-              onClick={clearError}
-              className="shrink-0 text-faint hover:text-[var(--ink)]"
-            >
-              Dismiss
-            </button>
+          <div className="mx-auto flex w-full max-w-3xl flex-col gap-6">
+            {messages.map((message) => (
+              <MessageRow
+                key={message.id}
+                message={message}
+                streaming={busy && message.role === "assistant"}
+                runningTools={hasRunningTools(message.id, liveTools)}
+              />
+            ))}
+            <div ref={endRef} />
           </div>
         </div>
-      )}
 
-      {permission && (
-        <div className="px-6 pb-2">
-          <PermissionCard permission={permission} />
-        </div>
-      )}
+        {!pinned && (
+          <button
+            type="button"
+            onClick={jumpToLatest}
+            className="panel-strong rounded-capsule absolute bottom-28 left-1/2 z-20 -translate-x-1/2 px-3 py-1.5 text-[12px] text-soft"
+          >
+            Jump to latest ↓
+          </button>
+        )}
 
-      <div className={cn("px-6 pb-5 pt-3")}>
-        <div className="mx-auto w-full max-w-3xl">
-          <Composer />
+        {error && (
+          <div className="mx-auto w-full max-w-3xl px-8">
+            <div className="flex items-start gap-2 rounded-control border border-[var(--danger)]/40 bg-[var(--danger)]/10 px-3 py-2 text-[13px]">
+              <span className="min-w-0 flex-1 break-words">{error}</span>
+              <button
+                type="button"
+                onClick={() => void retryLast()}
+                className="shrink-0 font-medium text-[var(--accent)] hover:underline"
+              >
+                Retry
+              </button>
+              <button
+                type="button"
+                onClick={clearError}
+                className="shrink-0 text-faint hover:text-[var(--ink)]"
+              >
+                Dismiss
+              </button>
+            </div>
+          </div>
+        )}
+
+        {permission && (
+          <div className="px-8 pb-2">
+            <PermissionCard permission={permission} />
+          </div>
+        )}
+
+        <div className="px-8 pb-6 pt-3">
+          <div className="mx-auto w-full max-w-3xl">
+            <Composer />
+          </div>
         </div>
       </div>
     </section>
   );
 }
-

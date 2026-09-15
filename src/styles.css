@@ -60,19 +60,21 @@
 :root {
   color-scheme: dark;
 
-  --panel-bg: rgb(10 12 19 / 0.52);
-  --panel-bg-strong: rgb(10 12 19 / 0.7);
-  --pill-bg: rgb(12 14 22 / 0.62);
-  --hover-bg: rgb(255 255 255 / 0.07);
-  --glass-border: rgb(255 255 255 / 0.09);
-  --glass-border-strong: rgb(255 255 255 / 0.14);
-  --glass-highlight: inset 0 1px 0 rgb(255 255 255 / 0.06);
+  /* Panels are opaque enough that text always sits on a readable surface,
+     whatever the background art is doing behind them. */
+  --panel-bg: rgb(9 11 17 / 0.66);
+  --panel-bg-strong: rgb(9 11 17 / 0.82);
+  --pill-bg: rgb(10 12 20 / 0.74);
+  --hover-bg: rgb(255 255 255 / 0.08);
+  --glass-border: rgb(255 255 255 / 0.12);
+  --glass-border-strong: rgb(255 255 255 / 0.18);
+  --glass-highlight: inset 0 1px 0 rgb(255 255 255 / 0.07);
   --panel-shadow: 0 30px 80px -30px rgb(0 0 0 / 0.75);
 
-  --ink: #eef1f8;
-  --ink-soft: rgb(238 241 248 / 0.66);
-  --ink-faint: rgb(238 241 248 / 0.4);
-  --ink-ghost: rgb(238 241 248 / 0.09);
+  --ink: #f4f6fc;
+  --ink-soft: rgb(244 246 252 / 0.76);
+  --ink-faint: rgb(244 246 252 / 0.54);
+  --ink-ghost: rgb(244 246 252 / 0.1);
 
   --accent: #8ea2ff;
   --accent-soft: rgb(142 162 255 / 0.16);
@@ -80,6 +82,10 @@
 
   --control-bg: rgb(244 246 252 / 0.94);
   --control-ink: #0b0e15;
+
+  /* A light background preset under the dark theme looks like fog unless the
+     veil is lifted, so dark mode keeps a floor. */
+  --bg-dim-floor: 48;
 }
 
 .dark {
@@ -89,18 +95,19 @@
 html:not(.dark) {
   color-scheme: light;
 
-  --panel-bg: rgb(255 255 255 / 0.72);
-  --panel-bg-strong: rgb(255 255 255 / 0.86);
-  --pill-bg: rgb(255 255 255 / 0.78);
+  /* Readable on the lightest background presets too. */
+  --panel-bg: rgb(255 255 255 / 0.88);
+  --panel-bg-strong: rgb(255 255 255 / 0.95);
+  --pill-bg: rgb(255 255 255 / 0.9);
   --hover-bg: rgb(16 19 34 / 0.06);
-  --glass-border: rgb(255 255 255 / 0.65);
-  --glass-border-strong: rgb(255 255 255 / 0.85);
-  --glass-highlight: inset 0 1px 0 rgb(255 255 255 / 0.8);
-  --panel-shadow: 0 30px 70px -34px rgb(15 23 42 / 0.55);
+  --glass-border: rgb(15 23 42 / 0.1);
+  --glass-border-strong: rgb(15 23 42 / 0.16);
+  --glass-highlight: inset 0 1px 0 rgb(255 255 255 / 0.9);
+  --panel-shadow: 0 30px 70px -34px rgb(15 23 42 / 0.5);
 
-  --ink: #0d1020;
-  --ink-soft: rgb(13 16 32 / 0.7);
-  --ink-faint: rgb(13 16 32 / 0.52);
+  --ink: #0a0c16;
+  --ink-soft: rgb(10 12 22 / 0.82);
+  --ink-faint: rgb(10 12 22 / 0.64);
   --ink-ghost: rgb(16 19 36 / 0.09);
 
   --accent: #4f5bd5;

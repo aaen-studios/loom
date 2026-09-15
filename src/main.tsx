@@ -39,6 +39,24 @@ window.addEventListener("unhandledrejection", (event) => {
   );
 });
 
+// Diagnostics: `localStorage.setItem("loomDebug","1")` exposes the stores on
+// window so the DevTools protocol can inspect real state.
+if (localStorage.getItem("loomDebug") === "1") {
+  void Promise.all([
+    import("./stores/chat"),
+    import("./stores/providers"),
+    import("./stores/settings"),
+    import("./stores/ui"),
+  ]).then(([chat, providers, settings, ui]) => {
+    (window as unknown as Record<string, unknown>).__loom = {
+      chat: chat.useChat,
+      providers: providers.useProviders,
+      settings: settings.useSettings,
+      ui: ui.useUi,
+    };
+  });
+}
+
 ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
   <React.StrictMode>
     <ErrorBoundary>

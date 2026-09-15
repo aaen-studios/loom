@@ -5,6 +5,15 @@ import { isTauri } from "./tauri";
 import { useChat } from "../stores/chat";
 import { useUi } from "../stores/ui";
 
+/** Diagnostics switch: `localStorage.setItem("loomDebug", "1")`. */
+function debugEnabled(): boolean {
+  try {
+    return localStorage.getItem("loomDebug") === "1";
+  } catch {
+    return false;
+  }
+}
+
 /** Subscribes the chat store to engine events for the app's lifetime. */
 export function useEngineEvents(): void {
   const applyEvent = useChat((state) => state.applyEvent);
@@ -13,10 +22,14 @@ export function useEngineEvents(): void {
     if (!isTauri) return;
     let dispose: (() => void) | undefined;
     void listen<EngineEvent>("loom://event", (event) => {
+      // Visible in the DevTools console when loomDebug is set.
+      if (debugEnabled()) console.debug("[loom] <-", event.payload.type);
       applyEvent(event.payload);
-    }).then((unlisten) => {
-      dispose = unlisten;
-    });
+    })
+      .then((unlisten) => {
+        dispose = unlisten;
+      })
+      .catch((error) => console.error("[loom] event listener failed:", error));
     return () => dispose?.();
   }, [applyEvent]);
 }

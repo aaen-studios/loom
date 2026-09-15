@@ -158,7 +158,12 @@ pub fn run() {
 
             let handle = app.handle().clone();
             let emit: loom_core::engine::EmitFn = Arc::new(move |event: EngineEvent| {
-                let _ = handle.emit("loom://event", &event);
+                // Reported to stderr so `loom.exe > log` shows exactly which
+                // events the UI is sent while diagnosing.
+                eprintln!("[loom] -> {}", event.label());
+                if let Err(error) = handle.emit("loom://event", &event) {
+                    eprintln!("[loom] emit failed: {error}");
+                }
 
                 if let EngineEvent::Done { session_id, .. } = &event {
                     let focused = handle

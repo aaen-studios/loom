@@ -55,6 +55,17 @@ interface ChatState {
   clearError: () => void;
 }
 
+/** Diagnostics: enable with `localStorage.setItem("loomDebug","1")`. */
+function debugLog(message: string): void {
+  try {
+    if (localStorage.getItem("loomDebug") === "1") {
+      console.debug(`[loom] ${message}`);
+    }
+  } catch {
+    // no storage (tests)
+  }
+}
+
 function placeholderFor(live: LiveBuffer, sessionId: string): Message {  return {
     id: live.messageId,
     sessionId,
@@ -296,6 +307,16 @@ export const useChat = create<ChatState>((set, get) => ({
   },
 
   applyEvent: (event) => {
+    // A payload missing its ids would otherwise be filed under "undefined"
+    // and silently strand the UI in a busy state.
+    if (event.type === "title") {
+      if (!event.sessionId) return;
+    } else if (!event.sessionId || !event.messageId) {
+      debugLog(`dropped malformed ${event.type} event`);
+      return;
+    }
+
+    debugLog(`apply ${event.type}`);
     const { activeId } = get();
     const isActive = event.sessionId === activeId;
 
@@ -387,6 +408,7 @@ export const useChat = create<ChatState>((set, get) => ({
       }
 
       case "done": {
+        debugLog(`done for active=${isActive}, busy before=${Object.keys(get().busy).join(",")}`);
         set((state) => {
           const live = { ...state.live };
           delete live[event.sessionId];
@@ -418,6 +440,7 @@ export const useChat = create<ChatState>((set, get) => ({
       }
 
       case "error": {
+        debugLog(`error for active=${isActive}: ${event.error}`);
         set((state) => {
           const busy = { ...state.busy };
           delete busy[event.sessionId];
@@ -442,6 +465,8 @@ export const useChat = create<ChatState>((set, get) => ({
         break;
       }
     }
+
+    debugLog(`  -> busy=[${Object.keys(get().busy).join(",")}] live=[${Object.keys(get().live).join(",")}] messages=${get().messages.length}`);
   },
 
   clearError: () => set({ error: null }),

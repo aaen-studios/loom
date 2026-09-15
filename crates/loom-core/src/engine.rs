@@ -32,7 +32,10 @@ pub type SharedConfig = Arc<Mutex<AppConfig>>;
 pub type EmitFn = Arc<dyn Fn(EngineEvent) + Send + Sync + 'static>;
 
 #[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase", tag = "type")]
+// `rename_all` renames the *variants* (Started -> "started"); the fields of an
+// enum variant need `rename_all_fields`, otherwise the wire carries
+// `session_id` while the frontend reads `sessionId` and every event is dropped.
+#[serde(rename_all = "camelCase", rename_all_fields = "camelCase", tag = "type")]
 pub enum EngineEvent {
     Started {
         session_id: String,
@@ -86,6 +89,23 @@ pub enum EngineEvent {
         session_id: String,
         title: String,
     },
+}
+
+impl EngineEvent {
+    /// Short name used for diagnostics (`[loom] -> delta`).
+    pub fn label(&self) -> &'static str {
+        match self {
+            EngineEvent::Started { .. } => "started",
+            EngineEvent::Delta { .. } => "delta",
+            EngineEvent::Reasoning { .. } => "reasoning",
+            EngineEvent::ToolCallStarted { .. } => "tool-call-started",
+            EngineEvent::ToolCallFinished { .. } => "tool-call-finished",
+            EngineEvent::ToolPermissionRequest { .. } => "tool-permission",
+            EngineEvent::Done { .. } => "done",
+            EngineEvent::Error { .. } => "error",
+            EngineEvent::Title { .. } => "title",
+        }
+    }
 }
 
 /// Tool call record stored in a message's `extra` column.
@@ -1620,20 +1640,34 @@ impl Engine {
             system: Some("Write a title for this conversation. Reply with the title only: at most 6 words, no quotes, no trailing punctuation."),
             messages: vec![WireMessage::text("user", prompt)],
             variant: None,
-            max_output_tokens: Some(64),
+            // Generous on purpose: reasoning models spend the first tokens
+            // thinking, and a tight cap leaves `content` empty so no title is
+            // ever produced.
+            max_output_tokens: Some(512),
             stream: false,
             tools: Vec::new(),
             session_id: Some(session_id),
         };
 
-        let Ok((content, _, _)) =
-            stream::run_once(&self.inner.client, &request, title_key.as_deref()).await
-        else {
-            return;
-        };
+        let (content, reasoning) =
+            match stream::run_once(&self.inner.client, &request, title_key.as_deref()).await {
+                Ok((content, reasoning, _)) => (content, reasoning),
+                Err(error) => {
+                    eprintln!("[loom] title generation failed: {error}");
+                    return;
+                }
+            };
 
-        let title = clean_title(&content);
+        // Fall back to the tail of the model's thinking when it never got to
+        // writing a title.
+        let candidate = if content.trim().is_empty() {
+            reasoning.unwrap_or_default()
+        } else {
+            content
+        };
+        let title = clean_title(candidate.lines().last().unwrap_or_default());
         if title.is_empty() {
+            eprintln!("[loom] title generation produced nothing usable");
             return;
         }
 
@@ -2061,6 +2095,50 @@ mod tests {
     }
 
     #[test]
+    fn events_serialize_with_the_ids_the_frontend_reads() {
+        let started = EngineEvent::Started {
+            session_id: "s1".into(),
+            message_id: "m1".into(),
+        };
+        let json = serde_json::to_string(&started).unwrap();
+        assert!(json.contains("\"type\":\"started\""), "{json}");
+        assert!(json.contains("\"sessionId\":\"s1\""), "{json}");
+        assert!(json.contains("\"messageId\":\"m1\""), "{json}");
+
+        let delta = EngineEvent::Delta {
+            session_id: "s1".into(),
+            message_id: "m1".into(),
+            text: "hi".into(),
+        };
+        let json = serde_json::to_string(&delta).unwrap();
+        assert!(json.contains("\"sessionId\":\"s1\""), "{json}");
+        assert!(json.contains("\"messageId\":\"m1\""), "{json}");
+
+        let done = EngineEvent::Done {
+            session_id: "s1".into(),
+            message_id: "m1".into(),
+            content: "x".into(),
+            reasoning: None,
+            usage: Usage::default(),
+        };
+        let json = serde_json::to_string(&done).unwrap();
+        assert!(json.contains("\"sessionId\":\"s1\""), "{json}");
+        assert!(json.contains("\"inputTokens\""), "{json}");
+
+        let permission = EngineEvent::ToolPermissionRequest {
+            session_id: "s1".into(),
+            message_id: "m1".into(),
+            call_id: "c1".into(),
+            name: "read_file".into(),
+            arguments: "{}".into(),
+            read_only: true,
+        };
+        let json = serde_json::to_string(&permission).unwrap();
+        assert!(json.contains("\"callId\":\"c1\""), "{json}");
+        assert!(json.contains("\"readOnly\":true"), "{json}");
+    }
+
+    #[test]
     fn coalescer_holds_small_chunks_and_flushes_on_threshold() {
         let mut coalescer = DeltaCoalescer::new(10);
         assert_eq!(coalescer.push("abc"), None);
@@ -2075,6 +2153,20 @@ mod tests {
     fn coalescer_flush_is_empty_when_nothing_pending() {
         let mut coalescer = DeltaCoalescer::new(10);
         assert_eq!(coalescer.flush(), None);
+    }
+
+    #[test]
+    fn title_falls_back_to_the_thinking_tail() {
+        // Reasoning models sometimes return empty content; the last line of the
+        // thinking is still a usable title.
+        let content = "";
+        let reasoning = Some("The user asks about Norway.\nCapital of Norway");
+        let candidate = if content.trim().is_empty() {
+            reasoning.unwrap_or_default()
+        } else {
+            content
+        };
+        assert_eq!(clean_title(candidate.lines().last().unwrap_or_default()), "Capital of Norway");
     }
 
     #[test]

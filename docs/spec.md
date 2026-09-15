@@ -54,6 +54,18 @@ loom/
 - Windows code signing needs a certificate; the workflow is wired and skips
   cleanly without one.
 
+## Streaming fix (the important one)
+
+Rust''s `#[serde(rename_all = "camelCase", tag = "type")]` on an *enum* renames
+the **variants**, not the variant **fields**. Events therefore arrived as
+`session_id`/`message_id` while the frontend read `sessionId`/`messageId`, so
+every `started`/`delta`/`done` was filed under an `"undefined"` key: text only
+appeared when the session was reloaded from the database (which is why replies
+looked like they arrived in one chunk, and why the composer could stay stuck on
+"stop"). Fixed with `rename_all_fields = "camelCase"`, a test that asserts the
+serialized wire format, and a frontend guard that drops malformed events instead
+of inventing undefined entries.
+
 ## Reliability fixes (found by diagnosing the running app)
 
 Three bugs made the app look "broken and white", all confirmed with evidence

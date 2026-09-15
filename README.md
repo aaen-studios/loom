@@ -45,11 +45,19 @@ $env:WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS="--remote-debugging-port=9333"
 node scripts/inspect-webview.mjs 9333 target/shot.png --reload  # console errors + screenshot
 node scripts/inspect-dom.mjs 9333                               # what is actually on screen
 node scripts/drive-ui.mjs 9333 "hello"                          # sends a message through the real UI
+node scripts/probe-streaming.mjs 9333 "write a paragraph"       # is text rendering progressively?
+node scripts/probe-newchat.mjs 9333                             # new chat: streaming + auto title
+node scripts/probe-state.mjs 9333                               # real store state during a turn
+node scripts/probe-appearance.mjs 9333                          # screenshots of both themes
 ```
 
 `inspect-webview` prints uncaught exceptions and console output (this is how the
-React render loop and the Tokio runtime panic were found), and the screenshot is
-written to disk so it can be inspected directly.
+React render loop, the Tokio runtime panic, and the event-format mismatch were
+found), and the screenshot is written to disk so it can be inspected directly.
+
+Frontend diagnostics (`[loom] <- delta`, `[loom] apply delta`) turn on with
+`localStorage.setItem("loomDebug","1")` — that also exposes the stores as
+`window.__loom` for inspection.
 
 ## Layout
 
