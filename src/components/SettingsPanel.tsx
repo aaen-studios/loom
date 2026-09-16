@@ -3197,6 +3197,7 @@ function UsageSection() {
 export function SettingsPanel() {
   const open = useUi((state) => state.settingsOpen);
   const setOpen = useUi((state) => state.setSettingsOpen);
+  const sidebarOpen = useUi((state) => state.sidebarOpen);
   const category = useUi((state) => state.settingsCategory);
   const setCategory = useUi((state) => state.setSettingsCategory);
   const [info, setInfo] = useState<AppInfo | null>(null);
@@ -3243,15 +3244,27 @@ export function SettingsPanel() {
   };
 
   return (
-    <div className="absolute inset-0 z-40 flex justify-end p-3 pt-16">
+    <div
+      className={cn(
+        "absolute inset-0 z-40 flex justify-end p-3 pt-16",
+        // The chats popup sits at the left edge; leave its column alone so the
+        // two panes read as side by side rather than stacked.
+        sidebarOpen && "pl-[332px]",
+      )}
+    >
       <button
         type="button"
         aria-label="Close settings"
         onClick={() => setOpen(false)}
-        className="absolute inset-0 cursor-default bg-black/10"
+        // Not `inset-0`: the scrim must not dim or swallow clicks over the
+        // chats popup while that is open.
+        className={cn(
+          "absolute top-0 right-0 bottom-0 cursor-default bg-black/10",
+          sidebarOpen ? "left-[332px]" : "left-0",
+        )}
       />
 
-      <div className="animate-fade-up panel-strong relative flex h-full w-[720px] flex-col overflow-hidden rounded-sheet">
+      <div className="animate-fade-up panel-strong relative flex h-full w-[720px] max-w-full flex-col overflow-hidden rounded-sheet">
         <div className="flex items-center gap-3 px-4 pt-3 pb-1">
           <h2 className="text-[14.5px] font-semibold">Settings</h2>
           <SearchField

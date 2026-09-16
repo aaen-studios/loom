@@ -191,13 +191,34 @@ export function segmentMessage(
   return segments;
 }
 
-/** Why a turn failed, recorded on the assistant message by the engine. */
-export function parseError(extra: string | null): string | null {
+/** Why a turn stopped early, as recorded on the assistant message. */
+export interface Notice {
+  /** The one line the transcript shows. */
+  text: string;
+  /** The provider's own words, behind a Details toggle. */
+  detail: string | null;
+}
+
+/**
+ * Why a turn stopped early, if it did. Reads the current field, and upgrades a
+ * reply written by a build that only had `error`.
+ */
+export function parseNotice(extra: string | null): Notice | null {
   if (!extra) return null;
   try {
     const parsed = JSON.parse(extra);
-    const error = parsed?.error;
-    return typeof error === "string" && error.trim() ? error : null;
+    const notice = parsed?.notice;
+    if (notice && typeof notice.text === "string" && notice.text.trim()) {
+      return {
+        text: notice.text,
+        detail: typeof notice.detail === "string" ? notice.detail : null,
+      };
+    }
+    // Older replies stored the reason as a bare string under `error`.
+    const legacy = parsed?.error;
+    return typeof legacy === "string" && legacy.trim()
+      ? { text: legacy, detail: null }
+      : null;
   } catch {
     return null;
   }

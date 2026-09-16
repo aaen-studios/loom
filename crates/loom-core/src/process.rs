@@ -149,6 +149,20 @@ pub struct Running {
     readers: Vec<tokio::task::JoinHandle<()>>,
 }
 
+/// What a wait saw happen.
+///
+/// Three states rather than "an exit, or not": a failed wait is not the same
+/// as a live process. Reporting it as one made `run_command` tell the model
+/// "still running" and adopt a command that had already been reaped.
+pub enum Wait {
+    /// The process ended, with this status.
+    Exited(std::process::ExitStatus),
+    /// The limit passed and the process is still going.
+    Running,
+    /// The wait itself failed, so whether it is alive is no longer known.
+    Unknown,
+}
+
 impl Running {
     /// Spawns `command` through the platform shell, hidden, with both streams
     /// piped into `log_path`.
@@ -171,13 +185,24 @@ impl Running {
             .map_err(|e| Error::io(log_path, e))?;
 
         let (shell, flag) = shell();
-        let mut child = hidden_tokio(shell)
+        let mut command_line = hidden_tokio(shell);
+        command_line
             .arg(flag)
             .arg(command)
             .current_dir(cwd)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
+            .stderr(Stdio::piped());
+        // On Unix the child gets its own process group, so `kill_tree` can
+        // signal the whole tree instead of only the `sh -c` wrapper that
+        // leaves everything it started reparented and still running. Windows
+        // gets the equivalent from `taskkill /T`.
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt;
+            command_line.as_std_mut().process_group(0);
+        }
+        let mut child = command_line
             .spawn()
             .map_err(|e| Error::other(format!("failed to run command: {e}")))?;
 
@@ -190,8 +215,7 @@ impl Running {
             truncated: false,
         }));
 
-        let mut readers = Vec::new();
-        if let Some(stdout) = child.stdout.take() {
+        let mut readers = Vec::new();        if let Some(stdout) = child.stdout.take() {
             readers.push(tokio::spawn(pump(stdout, Arc::clone(&sink), Stream::Out)));
         }
         if let Some(stderr) = child.stderr.take() {
@@ -221,13 +245,12 @@ impl Running {
         self.sink.lock().map(|sink| sink.truncated).unwrap_or(false)
     }
 
-    /// Waits up to `limit`; `None` means the process is still running.
-    pub async fn wait_timeout(&mut self, limit: Duration) -> Option<std::process::ExitStatus> {
+    /// Waits up to `limit`, and says which of the three things happened.
+    pub async fn wait_timeout(&mut self, limit: Duration) -> Wait {
         match tokio::time::timeout(limit, self.child.wait()).await {
-            Ok(Ok(status)) => Some(status),
-            // A wait that errors (or a process killed underneath us) is
-            // reported the same way: we no longer know, so it is "not exited".
-            _ => None,
+            Ok(Ok(status)) => Wait::Exited(status),
+            Ok(Err(_)) => Wait::Unknown,
+            Err(_) => Wait::Running,
         }
     }
 
@@ -244,6 +267,17 @@ impl Running {
             .unwrap_or_else(|poisoned| poisoned.into_inner().tails())
     }
 
+    /// A handle to the captured output alone, without the child.
+    ///
+    /// Lets a caller read what a running command has produced while another
+    /// task owns the process and is waiting on it — which is exactly what the
+    /// engine's watcher does.
+    pub fn tail_handle(&self) -> TailHandle {
+        TailHandle {
+            sink: Arc::clone(&self.sink),
+        }
+    }
+
     /// Waits for the reader tasks to drain — they end when the pipes close —
     /// then returns the captured streams. The wait is bounded, because a
     /// grandchild that inherited the pipe can hold it open past its parent.
@@ -252,6 +286,23 @@ impl Running {
             let _ = tokio::time::timeout(Duration::from_millis(500), reader).await;
         }
         self.tails()
+    }
+}
+
+/// Read-only access to a command's captured output, independent of whoever is
+/// waiting on the process.
+#[derive(Clone)]
+pub struct TailHandle {
+    sink: Arc<Mutex<LogSink>>,
+}
+
+impl TailHandle {
+    /// Everything captured so far: (stdout, stderr).
+    pub fn tails(&self) -> (String, String) {
+        self.sink
+            .lock()
+            .map(|sink| sink.tails())
+            .unwrap_or_else(|poisoned| poisoned.into_inner().tails())
     }
 }
 
@@ -281,33 +332,69 @@ where
 // stopping and inspecting
 // ------------------------------------------------------------------
 
-/// Ends a process and everything it spawned. Best effort: a process that
-/// deliberately reparents its workers can still slip away, and the row then
-/// reads `orphaned` on the next launch.
-pub fn kill_tree(pid: u32) {
+/// Ends a process and everything it spawned, and says whether the signal
+/// landed. `stop_command` reports that, so the panel never claims a stop that
+/// did not happen.
+///
+/// Best effort either way: a process that deliberately reparents its workers
+/// can still slip away, and the row then reads `orphaned` on the next launch.
+pub fn kill_tree(pid: u32) -> bool {
     if pid == 0 {
-        return;
+        return false;
     }
     #[cfg(windows)]
     {
-        let _ = hidden_std("taskkill")
+        return hidden_std("taskkill")
             .args(["/PID", &pid.to_string(), "/T", "/F"])
             .stdout(Stdio::null())
             .stderr(Stdio::null())
-            .status();
+            .status()
+            .map(|status| status.success())
+            .unwrap_or(false);
     }
-    #[cfg(not(windows))]
+    #[cfg(unix)]
     {
-        let _ = hidden_std("kill")
-            .arg(pid.to_string())
+        // A negative pid means the *process group*, which is why `Running::spawn`
+        // puts the child in one: killing the pid alone killed only the `sh -c`
+        // wrapper and left `npm test`'s workers running with the log held open.
+        let group = format!("-{pid}");
+        let signalled = hidden_std("kill")
+            .args(["-TERM", &group])
             .stdout(Stdio::null())
             .stderr(Stdio::null())
-            .status();
+            .status()
+            .map(|status| status.success())
+            .unwrap_or(false);
+
+        // A process that traps SIGTERM (a build tool with its own handler)
+        // would otherwise survive the Stop button, so escalate once. The pause
+        // costs nothing: this runs off the event loop.
+        std::thread::sleep(Duration::from_millis(250));
+        if is_alive(pid) {
+            let _ = hidden_std("kill")
+                .args(["-KILL", &group])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status();
+        }
+        signalled
+    }
+    #[cfg(not(any(windows, unix)))]
+    {
+        false
     }
 }
 
 /// Whether a pid is still running. Used to stop a command Loom tracked in an
 /// earlier session, when there is no child handle left to wait on.
+///
+/// Best effort, and it errs towards "gone": `OpenProcess` fails for an elevated
+/// or other-user process, which reports a live orphan as dead, and pids are
+/// reused, so a pid recorded in an earlier session may now belong to something
+/// else entirely. That is tolerable for the one log line it feeds
+/// (`mark_interrupted_commands`) and would not be for anything that decides
+/// whether to signal the process — which is why `stop_command` signals the pid
+/// recorded on the row without asking this first.
 #[cfg(windows)]
 pub fn is_alive(pid: u32) -> bool {
     use windows::Win32::Foundation::CloseHandle;
@@ -334,9 +421,18 @@ pub fn is_alive(pid: u32) -> bool {
 
 #[cfg(not(windows))]
 pub fn is_alive(pid: u32) -> bool {
-    // No cheap, dependency-free probe here; assume it is. Stopping it is still
-    // attempted, and `kill` on a dead pid simply does nothing.
-    pid != 0
+    // `kill -0` asks "may I signal this process?" without signalling it: exit 0
+    // means it exists, anything else means it does not (or is not ours).
+    if pid == 0 {
+        return false;
+    }
+    hidden_std("kill")
+        .args(["-0", &pid.to_string()])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false)
 }
 
 /// The last `lines` lines of a command's log, reading only the tail of the
@@ -432,7 +528,10 @@ mod tests {
             let mut running = Running::spawn("echo loom", dir.path(), &log).expect("spawn");
 
             let status = running.wait_timeout(Duration::from_secs(30)).await;
-            assert_eq!(status.and_then(|status| status.code()), Some(0));
+            assert!(
+                matches!(status, Wait::Exited(status) if status.code() == Some(0)),
+                "a command that finished should report its exit"
+            );
 
             let (stdout, _) = running.finish().await;
             assert!(stdout.contains("loom"), "{stdout}");
@@ -455,13 +554,60 @@ mod tests {
             // Past the cap: still running, and reported as such rather than as
             // an exit. This is the behaviour the user chose.
             let timed_out = running.wait_timeout(Duration::from_millis(50)).await;
-            assert!(timed_out.is_none(), "a running command must not report an exit");
+            assert!(
+                matches!(timed_out, Wait::Running),
+                "a running command must not report an exit"
+            );
             assert!(is_alive(pid), "the command must still be alive");
 
-            kill_tree(pid);
+            assert!(kill_tree(pid), "the kill should be reported as delivered");
             let ended = running.wait_timeout(Duration::from_secs(30)).await;
-            assert!(ended.is_some(), "the killed command should exit");
+            assert!(
+                matches!(ended, Wait::Exited(_)),
+                "the killed command should exit"
+            );
             assert!(!is_alive(pid), "kill_tree should end the process");
+        });
+    }
+
+    /// The tree, not just the shell: `sh -c "sleep 60"` puts the sleep in the
+    /// same process group, and that is what Stop has to reach. Before the fix
+    /// this left the grandchild running with the log still open.
+    #[cfg(unix)]
+    #[test]
+    fn kill_tree_reaches_what_the_shell_started() {
+        runtime().block_on(async {
+            let dir = tempfile::tempdir().unwrap();
+            let log = dir.path().join("logs/cmd-tree.log");
+            let mut running =
+                Running::spawn("sleep 60 & echo $!; wait", dir.path(), &log).expect("spawn");
+            let pid = running.pid();
+
+            // Let the shell print its child's pid before killing anything.
+            let mut waited = 0;
+            let child_pid = loop {
+                let text = std::fs::read_to_string(&log).unwrap_or_default();
+                if let Some(line) = text.lines().next().and_then(|l| l.trim().parse::<u32>().ok()) {
+                    break line;
+                }
+                assert!(waited < 5_000, "the shell never started its child");
+                tokio::time::sleep(Duration::from_millis(50)).await;
+                waited += 50;
+            };
+            assert!(is_alive(child_pid), "the grandchild should be running");
+
+            kill_tree(pid);
+            let _ = running.wait_timeout(Duration::from_secs(10)).await;
+            // SIGTERM may take a moment to reap.
+            let mut waited = 0;
+            while is_alive(child_pid) && waited < 2_000 {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+                waited += 50;
+            }
+            assert!(
+                !is_alive(child_pid),
+                "kill_tree must end the shell's children too (pid {child_pid})"
+            );
         });
     }
 

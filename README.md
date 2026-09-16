@@ -222,8 +222,49 @@ Uninstalling: add/remove programs, or run
 
 ## Icons
 
-Replace `src-tauri/icons/icon.svg` and run:
+`src-tauri/icons/icon.svg` is the single source of truth for the app mark — the
+three thread paths, the 1.9 stroke width, the 0.55 weft opacity. Redraw that file
+and run:
 
 ```bash
 bun run icons
 ```
+
+That one command:
+
+1. rasterises the source to `icon-1024.png`, and bails if the source has drifted
+   from the shape the rest of the project assumes (a missing thread, a changed
+   stroke, or an `rx` on the OS icon);
+2. derives `icon-round.svg`, `index.html`'s favicon data URI, and
+   `site/src/app/icon.svg` from it, so no browser icon is hand-maintained;
+3. runs `tauri icon` to regenerate every raster, the `.ico`, and the `.icns`;
+4. copies the `.ico` into `setup/`, verifies the copy byte-for-byte, and touches
+   both `tauri.conf.json` files so the build re-embeds the Windows resources.
+
+Two shapes are deliberate. The **OS** icons — desktop shortcut, taskbar, tray,
+Alt-Tab, the installer — are full-bleed squares, because Windows and macOS supply
+their own corner radius. The **browser** icons (the dev favicon, the site icon)
+carry the window radius themselves. `src/lib/iconConsistency.test.ts` asserts
+both, and that every shipped raster is greyscale.
+
+Three React copies of the mark remain by hand — `src/components/icons.tsx`,
+`setup/src/App.tsx`, and `site/src/components/loom-mark.tsx`. A regeneration
+cannot reach them, so the same test checks their geometry too.
+
+### A stale logo on a shortcut
+
+The icon is embedded into `loom.exe` at link time, so rebuilding the artwork
+alone does not change a binary that was already linked. Two guards exist:
+
+- `scripts/make-payload.mjs` refuses to pack a payload whose `loom.exe` is older
+  than `icon.svg`, `icon.ico`, or the app's `tauri.conf.json`, and refuses if the
+  app's `.ico` and Setup's differ.
+- Setup writes a dedicated `loom.ico` into the install folder and points each
+  shortcut's `IconLocation` and the uninstall entry's `DisplayIcon` at it, rather
+  than at `loom.exe`. Explorer caches an icon per file path, and a path an update
+  rewrites is exactly the one it is free to keep serving from cache; a fresh path
+  has no entry to inherit. Setup then nudges the shell cache, best-effort.
+
+An already-pinned shortcut may still need one unpin/repin. The icon of the
+installer exe sitting in your downloads folder is Explorer's cache keyed to that
+path, which no installer can reach backwards into.

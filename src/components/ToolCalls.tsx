@@ -850,8 +850,10 @@ export function PermissionCard({ permission }: { permission: PendingPermission }
 
   // In Atelier "Always allow" would persist Auto all globally, dropping both
   // the harness tools and the mode itself; the mode already is the standing
-  // consent, so the card offers no way to lose it.
-  const allowAlways = canAlwaysAllow(session?.permissionMode);
+  // consent, so the card offers no way to lose it. A delete is the other case:
+  // the card only exists because the loss would be real, so it may not offer to
+  // stop asking.
+  const allowAlways = canAlwaysAllow(session?.permissionMode, permission.name);
 
   return (
     <div className="panel-strong animate-fade-up mx-auto w-full max-w-3xl rounded-sheet p-3">
@@ -872,6 +874,11 @@ export function PermissionCard({ permission }: { permission: PendingPermission }
           </span>
         ) : null}
       </p>
+      {permission.reason && (
+        <p className="mt-1.5 rounded-control border border-[var(--danger)]/30 bg-[var(--hover-bg)] px-2.5 py-1.5 text-[12.5px] leading-5 text-soft">
+          {permission.reason}
+        </p>
+      )}
       {permission.arguments && (
         <pre className="mt-2 max-h-32 overflow-auto rounded-control border border-[var(--glass-border)] bg-[var(--hover-bg)] p-2 font-mono text-[11.5px] text-soft">
           {prettify(permission.arguments)}
@@ -904,8 +911,9 @@ export function PermissionCard({ permission }: { permission: PendingPermission }
           </button>
         ) : (
           <span className="text-[11.5px] leading-5 text-faint">
-            Atelier already allows every tool; a deletion is the only step that
-            asks.
+            {permission.name === "delete_path"
+              ? "This one still asks: the loss here would be real."
+              : "Atelier already allows every tool; the harness deletes are the only step that asks."}
           </span>
         )}
       </div>

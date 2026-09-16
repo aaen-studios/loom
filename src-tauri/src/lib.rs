@@ -329,8 +329,21 @@ pub fn run() {
             let notify_config = Arc::clone(&shared);
             let emit: loom_core::engine::EmitFn = Arc::new(move |event: EngineEvent| {
                 // Reported to stderr so `loom.exe > log` shows exactly which
-                // events the UI is sent while diagnosing.
-                eprintln!("[loom] -> {}", event.label());
+                // events the UI is sent while diagnosing — but opt-in, and never
+                // for the per-token events. `Delta` and `Reasoning` fire hundreds
+                // of times a turn, so logging them is both a log that grows by
+                // hundreds of megabytes and, when stderr is a pipe nobody drains
+                // (a parent process spawning loom.exe), a permanent stall: the
+                // pipe's buffer fills and `eprintln!` blocks *inside this
+                // callback*, on the engine task, for ever.
+                if std::env::var_os("LOOM_EVENT_LOG").is_some() {
+                    if !matches!(
+                        &event,
+                        EngineEvent::Delta { .. } | EngineEvent::Reasoning { .. }
+                    ) {
+                        eprintln!("[loom] -> {}", event.label());
+                    }
+                }
                 if let Err(error) = handle.emit("loom://event", &event) {
                     eprintln!("[loom] emit failed: {error}");
                 }
@@ -343,7 +356,9 @@ pub fn run() {
                     {
                         show_computer_pill(&handle);
                     }
-                    EngineEvent::Done { .. } | EngineEvent::Error { .. } => {
+                    // A stop ends the turn just as much as a Done does, so the
+                    // pill comes down either way.
+                    EngineEvent::Done { .. } | EngineEvent::Notice { .. } => {
                         hide_computer_pill(&handle);
                     }
                     EngineEvent::ComputerPaused { .. } => {

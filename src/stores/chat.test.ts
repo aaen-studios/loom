@@ -87,29 +87,50 @@ describe("streaming state machine", () => {
     expect(state.messages[0].content).toBe("complete answer");
   });
 
-  it("surfaces errors and stops the spinner", () => {
+  it("surfaces a stop and hands the chat back", () => {
     useChat.getState().applyEvent({ type: "started", sessionId: "s1", messageId: "m1" });
     useChat.getState().applyEvent({
-      type: "error",
+      type: "notice",
       sessionId: "s1",
       messageId: "m1",
-      error: "rate limited",
+      text: "This turn ended early.",
+      detail: "http 429",
     });
 
     const state = useChat.getState();
-    expect(state.errors.s1).toBe("rate limited");
+    expect(state.errors.s1).toBe("This turn ended early.");
     expect(state.busy.s1).toBeUndefined();
     // The message itself is kept: the engine stores the reason on it, so the
-    // transcript shows why the turn failed instead of an empty bubble.
+    // transcript shows why the turn stopped instead of an empty bubble.
   });
 
-  it("files a background chat's failure under that chat", () => {
+  /// The engine's `Notice` carries no message id when there is no message to
+  /// attach it to. Dropping it as "malformed" left the chat busy for ever —
+  /// the composer disabled and the queue never draining.
+  it("clears the turn for a notice with no message id", () => {
+    useChat.getState().applyEvent({ type: "started", sessionId: "s1", messageId: "m1" });
+    useChat.getState().applyEvent({
+      type: "notice",
+      sessionId: "s1",
+      messageId: null,
+      text: "The computer stayed paused for 15 minutes, so Loom stopped.",
+      detail: null,
+    });
+
+    const state = useChat.getState();
+    expect(state.busy.s1).toBeUndefined();
+    expect(state.live.s1).toBeUndefined();
+    expect(state.errors.s1).toContain("15 minutes");
+  });
+
+  it("files a background chat's stop under that chat", () => {
     useChat.getState().applyEvent({ type: "started", sessionId: "other", messageId: "m2" });
     useChat.getState().applyEvent({
-      type: "error",
+      type: "notice",
       sessionId: "other",
       messageId: "m2",
-      error: "no connection",
+      text: "no connection",
+      detail: null,
     });
 
     expect(useChat.getState().errors.other).toBe("no connection");
@@ -236,10 +257,11 @@ describe("streaming state machine", () => {
       },
     });
     useChat.getState().applyEvent({
-      type: "error",
+      type: "notice",
       sessionId: "s1",
       messageId: "m1",
-      error: "the question timed out",
+      text: "the question timed out",
+      detail: null,
     });
 
     // The card replaces the composer, so it must not outlive the turn.

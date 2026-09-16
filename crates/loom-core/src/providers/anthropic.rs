@@ -14,7 +14,14 @@ pub fn models_endpoint(provider: &crate::provider::ProviderConfig) -> String {
 }
 
 /// Thinking budget per variant, in tokens.
-fn thinking_budget(variant: &str) -> Option<u32> {
+///
+/// Public because the engine computes the declared `max_tokens` from it: the
+/// budget lives inside `max_tokens`, so the number reserved for the reply and
+/// the number sent on the wire have to account for it together. The adapter
+/// used to inflate `max_tokens` on its own, which is exactly the kind of
+/// behind-the-budget's-back arithmetic that let a request go out 34k tokens
+/// larger than Loom had reserved for it.
+pub fn thinking_budget(variant: &str) -> Option<u32> {
     match variant {
         "low" => Some(2_048),
         "medium" => Some(8_192),
@@ -90,9 +97,11 @@ pub fn build_body(request: &ChatRequest<'_>) -> Value {
         })
         .collect();
 
-    // Anthropic requires `max_tokens`. The engine normally supplies the
-    // model's own limit; this fallback only covers unknown models.
-    let max_tokens = request.max_output_tokens.unwrap_or(8_192);
+    // Anthropic requires `max_tokens`, and the engine always supplies it. The
+    // fallback only covers a request built outside a turn (a test, a probe).
+    let max_tokens = request
+        .max_output_tokens
+        .unwrap_or(crate::context::DEFAULT_OUTPUT_TOKENS);
     let mut body = json!({
         "model": request.model,
         "max_tokens": max_tokens,
@@ -112,10 +121,16 @@ pub fn build_body(request: &ChatRequest<'_>) -> Value {
     }
 
     if let Some(variant) = request.variant {
-        if let Some(budget) = thinking_budget(variant) {
-            body["thinking"] = json!({ "type": "enabled", "budget_tokens": budget });
-            // The API requires max_tokens to exceed the thinking budget.
-            body["max_tokens"] = json!(budget + max_tokens.max(4_096));
+        // Thinking lives *inside* `max_tokens`, and the API requires
+        // max_tokens to exceed the thinking budget. The engine already added
+        // room for it when it chose the number it sent, so this only trims the
+        // budget for a model whose window cannot hold the configured effort —
+        // it never inflates the declared number behind the budget's back.
+        if let Some(requested) = thinking_budget(variant) {
+            let budget = requested.min(max_tokens.saturating_sub(1_024));
+            if budget >= 1_024 {
+                body["thinking"] = json!({ "type": "enabled", "budget_tokens": budget });
+            }
         }
     }
 
@@ -336,16 +351,41 @@ mod tests {
     }
 
     #[test]
-    fn high_variant_enables_thinking_with_room_to_spare() {
+    fn high_variant_enables_thinking_inside_the_declared_budget() {
         let provider = ProviderConfig {
             kind: ProviderKind::Anthropic,
             ..Default::default()
         };
         let mut req = request(&provider);
         req.variant = Some("high");
+        req.max_output_tokens = Some(32_000);
         let body = build_body(&req);
+        // max_tokens is what the engine reserved, unchanged: the thinking
+        // budget fits inside it rather than inflating it.
+        assert_eq!(body["max_tokens"], 32_000);
         assert_eq!(body["thinking"]["budget_tokens"], 24_000);
-        assert!(body["max_tokens"].as_u64().unwrap() > 24_000);
+
+        // A model whose window cannot hold the configured effort gets a
+        // smaller budget, never a bigger declared max_tokens.
+        let mut cramped = request(&provider);
+        cramped.variant = Some("high");
+        cramped.max_output_tokens = Some(8_192);
+        let body = build_body(&cramped);
+        assert_eq!(body["max_tokens"], 8_192);
+        assert_eq!(body["thinking"]["budget_tokens"], 7_168);
+    }
+
+    /// Without a variant there is no thinking block, and the declared budget is
+    /// always present so no gateway has to guess one.
+    #[test]
+    fn max_tokens_is_always_declared() {
+        let provider = ProviderConfig {
+            kind: ProviderKind::Anthropic,
+            ..Default::default()
+        };
+        let body = build_body(&request(&provider));
+        assert_eq!(body["max_tokens"], crate::context::DEFAULT_OUTPUT_TOKENS);
+        assert!(body.get("thinking").is_none());
     }
 
     #[test]

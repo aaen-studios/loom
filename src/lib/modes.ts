@@ -56,11 +56,22 @@ export const AGENT_MODES: ModeOption<AgentMode>[] = [
 ];
 
 /**
- * Whether the permission card may offer "Always allow". In Atelier that
- * button would persist Auto all as the global default, which both drops the
- * harness tools and silently discards the mode; the mode already is the
- * standing consent, so the card offers Deny and Allow once only.
+ * Whether the permission card may offer "Always allow".
+ *
+ * Two cases say no. In Atelier the button would persist Auto all as the global
+ * default, which both drops the harness tools and silently discards the mode;
+ * the mode already is the standing consent, so the card offers Deny and Allow
+ * once only.
+ *
+ * `delete_path` is the other. Under Auto all it only produces a card when
+ * losing the path would be real, so "Always allow" is the one answer that must
+ * not be on offer: it would spend a single click on silencing exactly the
+ * question worth asking. The other two buttons cover it.
  */
-export function canAlwaysAllow(mode: PermissionMode | null | undefined): boolean {
-  return mode !== "atelier";
+export function canAlwaysAllow(
+  mode: PermissionMode | null | undefined,
+  name?: string,
+): boolean {
+  if (mode === "atelier") return false;
+  return name !== "delete_path";
 }

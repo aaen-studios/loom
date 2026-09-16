@@ -18,7 +18,7 @@ use crate::db::{
     now_ms, CommandRun, Database, MemoryEntry, Message, Role, Session, SessionUpdate, Todo,
 };
 use crate::persona::{Persona, PersonaVars};
-use crate::process::Running;
+use crate::process::{Running, TailHandle, Wait};
 use crate::provider::{MetadataSource, Modality, ModelSpec, ProviderConfig, ReasoningSpec};
 use crate::providers::stream::{self, Cancellation};
 use crate::providers::{
@@ -65,6 +65,55 @@ const TAKEOVER_RESUME_NOTE: &str = "The user took over the computer and has now 
 
 /// Why a paused computer turn ended.
 const TAKEOVER_TIMEOUT: &str = "The computer stayed paused for 15 minutes, so Loom stopped.";
+
+/// Largest reply budget a persona may set. The global default is capped at
+/// 200k by the settings writer; a persona is not, so it is capped here.
+const MAX_PERSONA_OUTPUT_TOKENS: u32 = 200_000;
+
+/// Waits before re-sending a round the transport refused. Short: the user is
+/// watching a chat, and a provider that is merely busy recovers in seconds.
+const RETRY_BACKOFF: [std::time::Duration; 3] = [
+    std::time::Duration::from_millis(500),
+    std::time::Duration::from_millis(1_500),
+    std::time::Duration::from_millis(3_000),
+];
+
+/// How many times one round may re-send after a transport refusal.
+const MAX_TRANSPORT_RETRIES: usize = 3;
+
+/// How many times a turn tells the model that an identical repeat changed
+/// nothing before it takes the tools away for a wrap-up round.
+const MAX_NUDGES: usize = 2;
+
+/// Whether a provider failure is worth re-sending: a busy or briefly broken
+/// gateway, not a bad request, a bad key, or a refusal.
+fn is_transient_error(message: &str) -> bool {
+    let haystack = message.to_ascii_lowercase();
+    const PATTERNS: &[&str] = &[
+        "http 429",
+        "http 500",
+        "http 502",
+        "http 503",
+        "http 504",
+        "http 529",
+        "rate limit",
+        "rate_limit",
+        "overloaded",
+        "server error",
+        "service unavailable",
+        "bad gateway",
+        "gateway timeout",
+        "timed out",
+        "timeout",
+        "connection reset",
+        "connection refused",
+        "connection closed",
+        "error sending request",
+        "broken pipe",
+        "temporarily",
+    ];
+    PATTERNS.iter().any(|pattern| haystack.contains(pattern))
+}
 
 /// Releases a computer turn's global state (input hooks, the single-turn lock,
 /// a pending pause, held keys, screenshot retention) on every exit path,
@@ -154,6 +203,12 @@ pub enum EngineEvent {
         name: String,
         arguments: String,
         read_only: bool,
+        /// Why this call is asking, when the mode would otherwise have let it
+        /// through. A delete that only cards because of what it would destroy
+        /// says so here; the card shows it, because "delete_path" on its own
+        /// tells the user nothing about what they are being asked to approve.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
     },
     /// The model called `ask_user`: the turn is paused until the user answers.
     QuestionRequest {
@@ -169,10 +224,15 @@ pub enum EngineEvent {
         reasoning: Option<String>,
         usage: Usage,
     },
-    Error {
+    /// The turn ended early — a limit, a provider refusal, a loop. Not an
+    /// error: the transcript shows a neutral note, and any partial reply
+    /// already streamed stays where it is.
+    Notice {
         session_id: String,
-        message_id: String,
-        error: String,
+        /// The turn that stopped, when it is a turn in a chat.
+        message_id: Option<String>,
+        text: String,
+        detail: Option<String>,
     },
     Title {
         session_id: String,
@@ -226,7 +286,7 @@ impl EngineEvent {
             EngineEvent::ToolPermissionRequest { .. } => "tool-permission",
             EngineEvent::QuestionRequest { .. } => "question-request",
             EngineEvent::Done { .. } => "done",
-            EngineEvent::Error { .. } => "error",
+            EngineEvent::Notice { .. } => "notice",
             EngineEvent::Title { .. } => "title",
             EngineEvent::HarnessChanged { .. } => "harness-changed",
             EngineEvent::TaskChanged { .. } => "task-changed",
@@ -260,6 +320,15 @@ pub struct StoredToolCall {
     /// Screenshots and other images the call produced, kept on disk.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub images: Vec<tools::ToolImage>,
+    /// Set when this call repeated the previous one exactly, arguments and
+    /// result both. The call still ran; the transcript just explains why the
+    /// model was told nothing had changed.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub repeated: bool,
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 /// One spell of thinking, with the reply-text offset it preceded. The
@@ -275,6 +344,45 @@ pub struct StoredReasoningBlock {
     pub seq: usize,
 }
 
+/// Why a turn ended before the model was finished.
+///
+/// Deliberately not called an error. A stop usually means the turn hit a
+/// limit, the provider refused one request, or the model looped, and the
+/// partial reply is still the user's to read: showing that as a red failure
+/// misrepresents what happened and hides work worth keeping. `detail` carries
+/// the raw provider text for a Details toggle; `text` is the one line the
+/// transcript shows.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Notice {
+    pub text: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+}
+
+impl Notice {
+    pub fn new(text: impl Into<String>) -> Self {
+        Self {
+            text: text.into(),
+            detail: None,
+        }
+    }
+
+    /// A stop caused by a provider failure: a plain-language line plus the
+    /// provider's own words, kept for the details toggle.
+    pub fn provider(summary: impl Into<String>, detail: impl Into<String>) -> Self {
+        Self {
+            text: summary.into(),
+            detail: Some(detail.into()),
+        }
+    }
+
+    pub fn with_detail(mut self, detail: impl Into<String>) -> Self {
+        self.detail = Some(detail.into());
+        self
+    }
+}
+
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct StoredExtra {
@@ -284,7 +392,11 @@ struct StoredExtra {
     reasoning_blocks: Vec<StoredReasoningBlock>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     usage: Option<Usage>,
-    /// Why a turn failed, kept so the reason survives a reload.
+    /// Why a turn stopped early, kept so the reason survives a reload.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    notice: Option<Notice>,
+    /// Why a turn failed, written by builds before stops had their own field.
+    /// Still parsed so an older reply's card renders (and upgrades) on read.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     error: Option<String>,
     /// Which model produced this reply (for cost attribution).
@@ -314,33 +426,43 @@ pub fn parse_usage(extra: Option<&str>) -> Option<Usage> {
         .and_then(|stored| stored.usage)
 }
 
-/// The failure recorded on a message, if the turn did not complete.
-pub fn parse_error(extra: Option<&str>) -> Option<String> {
-    extra
-        .and_then(|raw| serde_json::from_str::<StoredExtra>(raw).ok())
-        .and_then(|stored| stored.error)
+/// Why a turn stopped early, if it did. Reads the current field, and upgrades
+/// a reply written by a build that only had `error`.
+pub fn parse_notice(extra: Option<&str>) -> Option<Notice> {
+    let stored: StoredExtra = serde_json::from_str(extra?).ok()?;
+    stored
+        .notice
+        .or_else(|| stored.error.map(Notice::new))
 }
 
-fn serialize_extra(
-    tool_calls: &[StoredToolCall],
+/// How a turn ended, as recorded on its message. Bundled rather than passed as
+/// five positional arguments so a new field cannot be silently dropped at one
+/// call site and honoured at another.
+#[derive(Default)]
+struct TurnOutcome<'a> {
     usage: Option<Usage>,
-    error: Option<&str>,
-    model: Option<&ModelRef>,
-) -> Option<String> {
-    serialize_extra_reasoning(tool_calls, &[], usage, error, model)
+    notice: Option<&'a Notice>,
+    model: Option<&'a ModelRef>,
+}
+
+fn serialize_extra(tool_calls: &[StoredToolCall], outcome: TurnOutcome<'_>) -> Option<String> {
+    serialize_extra_reasoning(tool_calls, &[], outcome)
 }
 
 fn serialize_extra_reasoning(
     tool_calls: &[StoredToolCall],
     reasoning_blocks: &[StoredReasoningBlock],
-    usage: Option<Usage>,
-    error: Option<&str>,
-    model: Option<&ModelRef>,
+    outcome: TurnOutcome<'_>,
 ) -> Option<String> {
+    let TurnOutcome {
+        usage,
+        notice,
+        model,
+    } = outcome;
     if tool_calls.is_empty()
         && reasoning_blocks.is_empty()
         && usage.is_none()
-        && error.is_none()
+        && notice.is_none()
         && model.is_none()
     {
         return None;
@@ -349,10 +471,53 @@ fn serialize_extra_reasoning(
         tool_calls: tool_calls.to_vec(),
         reasoning_blocks: reasoning_blocks.to_vec(),
         usage,
-        error: error.map(str::to_string),
+        notice: notice.cloned(),
+        // Never written again; the field exists so older replies still parse.
+        error: None,
         model: model.cloned(),
     })
     .ok()
+}
+
+/// Drops a message's tool images, folding each into the text breadcrumb the
+/// wire already uses for an older screenshot, and leaves everything else
+/// alone.
+///
+/// The context budget needs this because an inlined screenshot is the one
+/// piece of a request nothing else can shrink: `elide_outputs` only rewrites
+/// text, so without this a native-resolution frame on a small-window model is
+/// over budget on its own and no amount of eliding can rescue the request.
+pub(crate) fn clear_tool_images(message: &Message) -> Message {
+    let Some(extra) = message.extra.as_deref() else {
+        return message.clone();
+    };
+    let Ok(mut stored) = serde_json::from_str::<StoredExtra>(extra) else {
+        return message.clone();
+    };
+    let mut changed = false;
+    for call in &mut stored.tool_calls {
+        if call.images.is_empty() {
+            continue;
+        }
+        call.output.push('\n');
+        call.output.push_str(
+            &call
+                .images
+                .iter()
+                .map(|image| format!("[screenshot omitted to fit the model's context window: {}]", image.name))
+                .collect::<Vec<_>>()
+                .join(" "),
+        );
+        call.images.clear();
+        changed = true;
+    }
+    if !changed {
+        return message.clone();
+    }
+    Message {
+        extra: serde_json::to_string(&stored).ok(),
+        ..message.clone()
+    }
 }
 
 /// Rewrites every stored tool output through `map`, leaving usage, error, and
@@ -472,12 +637,28 @@ struct Inner {
     takeover: Mutex<Option<Arc<crate::computer::TakeoverWatch>>>,
     /// Detached runs: how many are running, and which tasks wait for a slot.
     task_queue: Mutex<TaskQueue>,
-    /// Live shell commands, keyed by command id. Only handles live here; the
-    /// database is the durable record, and a missing handle just means there
-    /// is nothing left to wait on.
-    commands: Mutex<HashMap<String, Arc<tokio::sync::Mutex<Running>>>>,
+    /// Live shell commands, plus the slots being started right now.
+    commands: Mutex<CommandTracker>,
     /// Per-session watermark (epoch ms) for the memory extraction pass.
     memory_scan: Mutex<HashMap<String, i64>>,
+    /// How far this model's tokeniser runs from the character estimate, keyed
+    /// by `provider/model`. Learned from the counts providers report, so the
+    /// fit converges instead of trusting four characters per token.
+    calibration: Mutex<HashMap<String, context::Calibration>>,
+}
+
+/// The live shell commands, keyed by command id, holding only their captured
+/// output. The child handle itself lives in that command's watcher task, so
+/// reading a running command's output never waits on the waiter. The database
+/// stays the durable record; no entry here means the command is no longer ours.
+///
+/// `starting` is what makes [`MAX_BACKGROUND_COMMANDS`] a real cap: a start
+/// claims a slot before it spawns, so two concurrent `background: true` calls
+/// cannot both read "7 running" and both proceed.
+#[derive(Default)]
+struct CommandTracker {
+    handles: HashMap<String, TailHandle>,
+    starting: usize,
 }
 
 /// Detached runs are capped; extras queue FIFO.
@@ -591,12 +772,23 @@ impl Engine {
                 paused: Mutex::new(HashMap::new()),
                 takeover: Mutex::new(None),
                 task_queue: Mutex::new(TaskQueue::default()),
-                commands: Mutex::new(HashMap::new()),
+                commands: Mutex::new(CommandTracker::default()),
                 memory_scan: Mutex::new(HashMap::new()),
+                calibration: Mutex::new(HashMap::new()),
             }),
         }
     }
 
+    /// The one database lock.
+    ///
+    /// **Never call this twice in one expression, or hold the guard across
+    /// another `self.db()` call.** `Mutex` is not reentrant: the second lock on
+    /// the same thread blocks forever, holding the first, and every other
+    /// database user in the process queues behind it. That is a total freeze,
+    /// not a slow path. In particular a guard bound by an `if let Ok(Some(..))
+    /// = self.db().…` scrutinee lives to the end of the block, so read the row
+    /// into a local first and let the guard drop. See `finish_command` and
+    /// `complete_task` for the shape that caused it.
     fn db(&self) -> std::sync::MutexGuard<'_, Database> {
         self.inner.db.lock().expect("db mutex poisoned")
     }
@@ -1475,9 +1667,11 @@ impl Engine {
             agent_mode,
             temperature: persona.as_ref().and_then(|p| p.capabilities.temperature),
             top_p: persona.as_ref().and_then(|p| p.capabilities.top_p),
-            max_output_tokens: persona
-                .as_ref()
-                .and_then(|p| p.capabilities.max_output_tokens),
+            max_output_tokens: Self::persona_output_cap(
+                persona
+                    .as_ref()
+                    .and_then(|p| p.capabilities.max_output_tokens),
+            ),
             tool_allow: persona
                 .as_ref()
                 .map(|p| p.capabilities.tools.clone())
@@ -1577,6 +1771,17 @@ impl Engine {
             .remove(session_id)
     }
 
+    /// A persona's reply cap comes from a settings field, or from the harness.
+    /// Neither can exceed a quarter of the window once the budget is spent:
+    /// declaring more than the window reserves is the one thing that makes a
+    /// request impossible to fit.
+    fn persona_output_cap(value: Option<u32>) -> Option<u32> {
+        // Bounded here rather than at each call site so a new one cannot
+        // forget: the budget clamps again against the real window, and this
+        // only stops nonsense before it reaches it.
+        value.map(|cap| cap.clamp(1, MAX_PERSONA_OUTPUT_TOKENS))
+    }
+
     /// Renders the persona's stored memory into a system-prompt note, newest
     /// entries first until the token budget runs out.
     fn memory_note(&self, persona: &Persona) -> Option<String> {
@@ -1613,9 +1818,24 @@ impl Engine {
 
     /// Terminal event for a task that died without one: records the reason and
     /// clears the busy flag so the UI cannot hang.
+    ///
+    /// A crashed turn is bad news but it is not the user's mistake and it is
+    /// not a "failure" of their reply: the partial text is kept and the card
+    /// reads as a stop.
     fn report_task_failure(&self, session_id: &str, message_id: &str, reason: &str) {
-        eprintln!("[loom] turn failed without a terminal event: {reason}");
-        let extra = serialize_extra(&[], None, Some(reason), None);
+        eprintln!("[loom] turn ended without a terminal event: {reason}");
+        let notice = Notice::new(
+            "This turn ended early — the reply above is everything that arrived. \
+             Sending again usually works.",
+        )
+        .with_detail(reason);
+        let extra = serialize_extra(
+            &[],
+            TurnOutcome {
+                notice: Some(&notice),
+                ..Default::default()
+            },
+        );
         let _ = self.db().update_message_extra(message_id, extra.as_deref());
         self.inner
             .cancels
@@ -1638,17 +1858,25 @@ impl Engine {
         {
             self.release_computer_turn(session_id);
         }
-        self.emit(EngineEvent::Error {
+        self.emit(EngineEvent::Notice {
             session_id: session_id.to_string(),
-            message_id: message_id.to_string(),
-            error: reason.to_string(),
+            message_id: Some(message_id.to_string()),
+            text: notice.text.clone(),
+            detail: notice.detail.clone(),
         });
 
         // A detached run whose turn died must still release its queue slot.
-        if let Ok(Some(task)) = self.db().task_for_session(session_id) {
-            if task.status == "running" {
-                self.complete_task(&task.id, "failed", Some(reason), None);
-            }
+        // Read the row, drop the guard, *then* call: `complete_task` takes the
+        // database lock again, so doing it inline would self-deadlock.
+        let stalled = self
+            .db()
+            .task_for_session(session_id)
+            .ok()
+            .flatten()
+            .filter(|task| task.status == "running")
+            .map(|task| task.id);
+        if let Some(task_id) = stalled {
+            self.complete_task(&task_id, "stopped", Some(reason), None);
         }
     }
 
@@ -1769,7 +1997,10 @@ impl Engine {
         let mut reasoning_blocks: Vec<StoredReasoningBlock> = Vec::new();
         let mut usage = Usage::default();
         let mut stored_calls: Vec<StoredToolCall> = Vec::new();
-        let mut error: Option<String> = None;
+        // Why the turn stopped early, if it did. Every path that used to set a
+        // fatal error sets one of these instead: a partial reply is still worth
+        // reading, and "This reply failed" is never the truth of what happened.
+        let mut notice: Option<Notice> = None;
         // Stream order across thinking spells and tool calls, so the
         // transcript can interleave them even when no text separates them.
         let mut seq = 0usize;
@@ -1777,22 +2008,43 @@ impl Engine {
         // Budget the request against the model's own context window instead of
         // a message count: tool output ranges from a few tokens to hundreds of
         // thousands, so only a token budget keeps the wire inside the window.
+        //
+        // The reply budget below is the *same number* the adapters put on the
+        // wire. Reserving a different one is how a request Loom believed had
+        // 375k tokens to spare was rejected: `max_tokens` was omitted, the
+        // gateway reserved 384k of its own, and the difference came out of the
+        // safety margin.
         let spec = context::model_spec(&provider, &model.model_id);
-        let max_output = context::output_limit(persona_max_output.unwrap_or(chat.max_output_tokens), &spec);
+        let window = context::context_window(&provider, &model.model_id);
+        let configured = persona_max_output.unwrap_or(chat.max_output_tokens);
+        // Thinking tokens count inside `max_tokens` on the Anthropic dialect,
+        // and the API requires max_tokens to exceed the thinking budget, so ask
+        // for room for both. The adapter then trims the budget to whatever fits
+        // rather than inflating the declared number behind the budget's back.
+        let thinking = (provider.kind == crate::provider::ProviderKind::Anthropic)
+            .then(|| variant.as_deref().and_then(crate::providers::anthropic::thinking_budget))
+            .flatten();
+        let max_output = match thinking {
+            Some(budget) => {
+                context::output_limit(configured.max(budget + 1_024), &spec, window)
+            }
+            None => context::output_limit(configured, &spec, window),
+        };
         let fixed = system
             .as_deref()
             .map(context::tokens_for)
             .unwrap_or(0)
             .saturating_add(
                 serde_json::to_string(&tool_defs)
-                    .map(|schema| context::tokens_for(&schema))
+                    // Schemas are JSON: punctuation-dense, so the prose ratio
+                    // under-counts them.
+                    .map(|schema| context::tokens_for_json(&schema))
                     .unwrap_or(0),
             );
-        let budget = context::input_budget(
-            context::context_window(&provider, &model.model_id),
-            max_output,
-            fixed,
-        );
+        let root_budget = context::input_budget(window, max_output, fixed);
+        // Set when the fit had to compress the conversation, so the user is
+        // told their older context was dropped rather than left wondering.
+        let mut trimmed_context = false;
 
         let max_rounds = (max_steps.unwrap_or(if computer_access {
             chat.max_tool_rounds.max(80)
@@ -1805,6 +2057,22 @@ impl Engine {
         let mut last_call: Option<(String, String)> = None;
         let mut last_result: Option<(bool, String)> = None;
         let mut spent_usd = 0.0f64;
+        // How many times this turn has told the model that an identical repeat
+        // changed nothing.
+        let mut nudges = 0usize;
+
+        // How far this model's tokeniser runs from the character estimate. The
+        // provider reports the real count on every round, so the fit can be
+        // corrected instead of hoping four characters per token holds.
+        let calibration_key = format!("{}/{}", model.provider_id, model.model_id);
+        let mut calibration = self
+            .inner
+            .calibration
+            .lock()
+            .expect("calibration mutex poisoned")
+            .get(&calibration_key)
+            .copied()
+            .unwrap_or_default();
 
         // Computer turns own global state (hooks, the single-turn lock, a
         // pending pause, held keys). The guard hands it all back on every
@@ -1863,41 +2131,36 @@ impl Engine {
                     after: content.chars().count(),
                     seq,
                     images: Vec::new(),
+                    repeated: false,
                 });
                 let _ = self.db().update_message_extra(
                     &message_id,
-                    serialize_extra(&stored_calls, None, None, None).as_deref(),
+                    serialize_extra(&stored_calls, TurnOutcome::default()).as_deref(),
                 );
             }
             round += 1;
 
             let history = match self.db().messages(&session_id) {
-                Ok(history) => context::fit(&history, budget),
+                Ok(history) => history,
                 Err(failure) => {
-                    error = Some(failure.to_string());
+                    notice = Some(Notice::provider(
+                        "This turn stopped: Loom could not read the conversation back from its \
+                         database. Nothing was lost — sending again should work.",
+                        failure.to_string(),
+                    ));
                     break;
                 }
             };
-
-            let request = ChatRequest {
-                provider: &provider,
-                model: &model.model_id,
-                system: system.as_deref(),
-                messages: build_wire(&history),
-                variant: variant.as_deref(),
-                max_output_tokens: max_output,
-                temperature,
-                top_p,
-                stream: true,
-                // The wrap-up round offers no tools, so the model has nothing
-                // to call and must write its summary.
-                tools: if wrapping_up {
-                    Vec::new()
-                } else {
-                    tool_defs.clone()
-                },
-                session_id: Some(&session_id),
-            };
+            // Every round starts from the untightened budget and re-tightens if
+            // it meets another refusal; otherwise one cramped round would leave
+            // the rest of the turn needlessly amnesiac.
+            let mut history_budget = root_budget;
+            // Cleared for the one retry after a length rejection: a screenshot
+            // is the only part of a request that eliding cannot shrink.
+            let mut allow_images = true;
+            // One length retry per round, so a provider that rejects the
+            // smaller request too does not loop.
+            let mut length_retried = false;
 
             // Everything this round thinks or calls comes after the text the
             // previous rounds produced; thinking shares the reply-text offset
@@ -1913,68 +2176,149 @@ impl Engine {
             let text_buffer = Arc::new(Mutex::new(DeltaCoalescer::new(96)));
             let reasoning_buffer = Arc::new(Mutex::new(DeltaCoalescer::new(256)));
 
-            let result = {
-                let round_text = Arc::clone(&round_text);
-                let round_reasoning = Arc::clone(&round_reasoning);
-                let round_calls = Arc::clone(&round_calls);
-                let text_buffer = Arc::clone(&text_buffer);
-                let reasoning_buffer = Arc::clone(&reasoning_buffer);
-                let session = session_id.clone();
-                let message = message_id.clone();
-                stream::run_stream(
-                    &self.inner.client,
-                    &request,
-                    api_key.as_deref(),
-                    &cancel,
-                    move |delta| match delta {
-                        Delta::Text { text } => {
-                            round_text.lock().expect("text mutex").push_str(&text);
-                            let flush = text_buffer.lock().expect("text buffer").push(&text);
-                            if let Some(batch) = flush {
-                                self.emit(EngineEvent::Delta {
-                                    session_id: session.clone(),
-                                    message_id: message.clone(),
-                                    text: batch,
-                                });
+            // One round may take more than one attempt at the wire, but only
+            // before the model has produced anything. A request refused for
+            // length gets one smaller, image-free resend; a transport refusal
+            // gets a short backoff. Re-sending after text has streamed would
+            // repeat or restart a reply the user is already reading, so that
+            // never happens — a partial reply and a note beat a duplicate.
+            let mut transport_retries = 0usize;
+            let mut pushback: Option<String> = None;
+
+            let (result, sent_estimate) = loop {
+                let fitted = context::fit_report(&history, history_budget, allow_images);
+                let sent_estimate = fitted.estimate;
+                if fitted.trimmed {
+                    trimmed_context = true;
+                }
+
+                let request = ChatRequest {
+                    provider: &provider,
+                    model: &model.model_id,
+                    system: system.as_deref(),
+                    messages: build_wire(&fitted.messages),
+                    variant: variant.as_deref(),
+                    max_output_tokens: Some(max_output),
+                    temperature,
+                    top_p,
+                    stream: true,
+                    // The wrap-up round offers no tools, so the model has
+                    // nothing to call and must write its summary.
+                    tools: if wrapping_up {
+                        Vec::new()
+                    } else {
+                        tool_defs.clone()
+                    },
+                    session_id: Some(&session_id),
+                };
+
+                let attempt = {
+                    let round_text = Arc::clone(&round_text);
+                    let round_reasoning = Arc::clone(&round_reasoning);
+                    let round_calls = Arc::clone(&round_calls);
+                    let text_buffer = Arc::clone(&text_buffer);
+                    let reasoning_buffer = Arc::clone(&reasoning_buffer);
+                    let session = session_id.clone();
+                    let message = message_id.clone();
+                    stream::run_stream(
+                        &self.inner.client,
+                        &request,
+                        api_key.as_deref(),
+                        &cancel,
+                        move |delta| match delta {
+                            Delta::Text { text } => {
+                                round_text.lock().expect("text mutex").push_str(&text);
+                                let flush = text_buffer.lock().expect("text buffer").push(&text);
+                                if let Some(batch) = flush {
+                                    self.emit(EngineEvent::Delta {
+                                        session_id: session.clone(),
+                                        message_id: message.clone(),
+                                        text: batch,
+                                    });
+                                }
                             }
-                        }
-                        Delta::Reasoning { text } => {
-                            round_reasoning
-                                .lock()
-                                .expect("reasoning mutex")
-                                .push_str(&text);
-                            let flush = reasoning_buffer
-                                .lock()
-                                .expect("reasoning buffer")
-                                .push(&text);
-                            if let Some(batch) = flush {
-                                self.emit(EngineEvent::Reasoning {
-                                    session_id: session.clone(),
-                                    message_id: message.clone(),
-                                    text: batch,
-                                    after: round_after,
-                                    seq: reasoning_seq,
-                                });
+                            Delta::Reasoning { text } => {
+                                round_reasoning
+                                    .lock()
+                                    .expect("reasoning mutex")
+                                    .push_str(&text);
+                                let flush = reasoning_buffer
+                                    .lock()
+                                    .expect("reasoning buffer")
+                                    .push(&text);
+                                if let Some(batch) = flush {
+                                    self.emit(EngineEvent::Reasoning {
+                                        session_id: session.clone(),
+                                        message_id: message.clone(),
+                                        text: batch,
+                                        after: round_after,
+                                        seq: reasoning_seq,
+                                    });
+                                }
                             }
-                        }
-                        Delta::ToolCall {
-                            index,
-                            id,
-                            name,
-                            argument_fragment,
-                        } => {
-                            merge_tool_delta(
-                                &mut round_calls.lock().expect("calls mutex"),
+                            Delta::ToolCall {
                                 index,
                                 id,
                                 name,
                                 argument_fragment,
-                            );
+                            } => {
+                                merge_tool_delta(
+                                    &mut round_calls.lock().expect("calls mutex"),
+                                    index,
+                                    id,
+                                    name,
+                                    argument_fragment,
+                                );
+                            }
+                            Delta::Usage { .. } => {}
+                        },
+                    )
+                    .await
+                };
+
+                match attempt {
+                    Ok(round_usage) => break (Ok(round_usage), sent_estimate),
+                    Err(failure) => {
+                        let reason = failure.to_string();
+                        // Anything already streamed makes a resend a duplicate,
+                        // so retries stop the moment the model has spoken.
+                        let started = !round_text.lock().expect("text mutex").is_empty()
+                            || !round_reasoning
+                                .lock()
+                                .expect("reasoning mutex")
+                                .is_empty()
+                            || !round_calls.lock().expect("calls mutex").is_empty();
+
+                        if !started && !cancel.load(Ordering::Relaxed) {
+                            if context::is_context_length_error(&reason) && !length_retried {
+                                length_retried = true;
+                                history_budget = context::retry_budget(
+                                    window,
+                                    max_output,
+                                    fixed,
+                                    history_budget,
+                                );
+                                // The inlined screenshot is the one part of the
+                                // request nothing else can shrink.
+                                allow_images = false;
+                                pushback = Some(reason);
+                                continue;
+                            }
+                            if is_transient_error(&reason)
+                                && transport_retries < MAX_TRANSPORT_RETRIES
+                            {
+                                let delay = RETRY_BACKOFF
+                                    .get(transport_retries)
+                                    .copied()
+                                    .unwrap_or(RETRY_BACKOFF[RETRY_BACKOFF.len() - 1]);
+                                transport_retries += 1;
+                                tokio::time::sleep(delay).await;
+                                continue;
+                            }
                         }
-                        Delta::Usage { .. } => {}
-                    },
-                )
-                .await
+                        break (Err(failure), sent_estimate);
+                    }
+                }
             };
 
             // Flush whatever the coalescers are still holding.
@@ -2017,20 +2361,51 @@ impl Engine {
                     if round_usage.output_tokens.is_some() {
                         usage.output_tokens = round_usage.output_tokens;
                     }
+                    // Learn from what the provider actually charged. Its count
+                    // covers the system prompt and tool schemas too, so add
+                    // those to the estimate before comparing — otherwise every
+                    // round would look like an over-count and the correction
+                    // would never engage.
+                    if let Some(reported) = round_usage.input_tokens {
+                        calibration.observe(reported, sent_estimate.saturating_add(fixed));
+                        self.inner
+                            .calibration
+                            .lock()
+                            .expect("calibration mutex poisoned")
+                            .insert(calibration_key.clone(), calibration);
+                    }
                     // Detached runs carry a spend cap; stop cleanly once the
                     // estimated cost of the whole run reaches it.
                     if let Some(cap) = max_cost_usd {
                         spent_usd += round_cost(&round_usage, &spec);
                         if spent_usd >= cap {
-                            error = Some(format!(
-                                "stopped: this run reached its ${cap:.2} spend cap \
-                                 (~${spent_usd:.2} so far). Partial results are kept."
-                            ));
+                            notice = Some(Notice::new(format!(
+                                "This run reached its ${cap:.2} spend cap after about \
+                                 ${spent_usd:.2}. Everything it produced so far is above."
+                            )));
                         }
                     }
                 }
                 Err(failure) => {
-                    error = Some(failure.to_string());
+                    let reason = failure.to_string();
+                    notice = Some(match &pushback {
+                        // The retry already ran and was refused as well, so say
+                        // what Loom did about it rather than showing the raw
+                        // rejection twice.
+                        Some(first) if context::is_context_length_error(&reason) => {
+                            Notice::provider(
+                                "This reply stopped: even after trimming the conversation, the \
+                                 model's context window was too small for this request. The \
+                                 reply above is everything that arrived.",
+                                format!("{first}\n\nAfter trimming:\n{reason}"),
+                            )
+                        }
+                        _ => Notice::provider(
+                            "This reply stopped early — the provider refused the request. Any \
+                             text above is everything that arrived before it did.",
+                            reason,
+                        ),
+                    });
                     break;
                 }
             }
@@ -2072,17 +2447,18 @@ impl Engine {
                             after: content.chars().count(),
                             seq,
                             images: Vec::new(),
+                            repeated: false,
                         });
                         let _ = self.db().update_message_extra(
                             &message_id,
-                            serialize_extra(&stored_calls, None, None, None).as_deref(),
+                            serialize_extra(&stored_calls, TurnOutcome::default()).as_deref(),
                         );
                         self.emit(EngineEvent::ComputerResumed {
                             session_id: session_id.clone(),
                         });
                     }
                     PauseExit::TimedOut => {
-                        error = Some(TAKEOVER_TIMEOUT.to_string());
+                        notice = Some(Notice::new(TAKEOVER_TIMEOUT));
                         break;
                     }
                     PauseExit::Cancelled => break,
@@ -2153,8 +2529,14 @@ impl Engine {
                 } else if computer_allowed {
                     true
                 } else {
-                    self.request_permission(&session_id, &message_id, &call, permission_mode)
-                        .await
+                    self.request_permission(
+                        &session_id,
+                        &message_id,
+                        &call,
+                        permission_mode,
+                        &tool_context,
+                    )
+                    .await
                 };
 
                 let outcome = if call.name == tools::ASK_USER {
@@ -2236,23 +2618,52 @@ impl Engine {
                     }
                 };
 
+                // The same call with byte-identical arguments returning the
+                // same result twice in a row is a loop, not progress. The call
+                // still runs — running the same command again after an edit is
+                // most of what any of this work is, and only a *changed* result
+                // proves anything — but the model is told plainly that nothing
+                // moved, because it evidently expects something to. A fresh
+                // screenshot or a wait is exempt: looking again after a pause
+                // is not a loop.
+                let signature = (call.name.clone(), call.arguments.clone());
+                let result = (outcome.ok, outcome.output.clone());
+                let repeated = !matches!(call.name.as_str(), "screenshot" | "wait")
+                    && last_call.as_ref() == Some(&signature)
+                    && last_result.as_ref() == Some(&result);
+                let status = if allowed {
+                    if outcome.ok {
+                        "ok".to_string()
+                    } else {
+                        "error".to_string()
+                    }
+                } else {
+                    "denied".to_string()
+                };
+                let mut stored_output = outcome.output.clone();
+                if repeated && nudges < MAX_NUDGES {
+                    nudges += 1;
+                    stored_output.push_str(&format!(
+                        "\n\n[You called `{}` with exactly these arguments and got exactly this \
+                         result twice in a row, so nothing has changed since. Repeating it will \
+                         not help: verify the current state, change the arguments, or tell the \
+                         user what is blocking you.]",
+                        call.name
+                    ));
+                }
+                last_call = Some(signature);
+                last_result = Some(result);
+
                 stored_calls.push(StoredToolCall {
                     id: outcome.id.clone(),
                     name: outcome.name.clone(),
                     arguments: call.arguments.clone(),
-                    status: if allowed {
-                        if outcome.ok {
-                            "ok".to_string()
-                        } else {
-                            "error".to_string()
-                        }
-                    } else {
-                        "denied".to_string()
-                    },
-                    output: outcome.output.clone(),
+                    status,
+                    output: stored_output,
                     after: call_offset,
                     seq: call_seq,
                     images: outcome.images.clone(),
+                    repeated,
                 });
 
                 self.emit(EngineEvent::ToolCallFinished {
@@ -2263,29 +2674,17 @@ impl Engine {
                     output: outcome.output.clone(),
                     images: outcome.images.clone(),
                 });
-
-                // The same call with byte-identical arguments returning the
-                // same result twice in a row is a loop, not progress. A fresh
-                // screenshot is exempt: waiting for a page and looking again
-                // is not a loop.
-                let signature = (call.name.clone(), call.arguments.clone());
-                let result = (outcome.ok, outcome.output.clone());
-                if call.name != "screenshot"
-                    && last_call.as_ref() == Some(&signature)
-                    && last_result.as_ref() == Some(&result)
-                {
-                    error = Some(format!(
-                        "no progress: `{}` was called twice in a row with identical arguments \
-                         and returned the same result. Stopped so a different approach can be \
-                         tried.",
-                        call.name
-                    ));
-                }
-                last_call = Some(signature);
-                last_result = Some(result);
             }
 
-            if error.is_some() {
+            // Two nudges is the model's cue to try something else. If it
+            // repeats itself anyway, take the tools away for one round so it
+            // explains what is stuck instead of looping until the step budget
+            // runs out — the user gets a reply either way.
+            if nudges >= MAX_NUDGES && !wrapping_up {
+                wrapping_up = true;
+            }
+
+            if cancel.load(Ordering::Relaxed) {
                 break;
             }
 
@@ -2296,7 +2695,7 @@ impl Engine {
                 .update_message(&message_id, &content, Some(&reasoning));
             let _ = self.db().update_message_extra(
                 &message_id,
-                serialize_extra_reasoning(&stored_calls, &reasoning_blocks, None, None, None)
+                serialize_extra_reasoning(&stored_calls, &reasoning_blocks, TurnOutcome::default())
                     .as_deref(),
             );
 
@@ -2325,8 +2724,16 @@ impl Engine {
             .update_message(&message_id, &content, final_reasoning.as_deref());
         let _ = self.db().update_message_extra(
             &message_id,
-            serialize_extra_reasoning(&stored_calls, &reasoning_blocks, Some(usage), None, Some(&model))
-                .as_deref(),
+            serialize_extra_reasoning(
+                &stored_calls,
+                &reasoning_blocks,
+                TurnOutcome {
+                    usage: Some(usage),
+                    notice: notice.as_ref(),
+                    model: Some(&model),
+                },
+            )
+            .as_deref(),
         );
 
         self.inner
@@ -2344,33 +2751,48 @@ impl Engine {
             let cancelled = cancel.load(Ordering::Relaxed);
             let (status, detail) = if cancelled {
                 ("cancelled", "stopped".to_string())
-            } else if let Some(failure) = &error {
-                ("failed", failure.clone())
+            } else if let Some(stopped) = &notice {
+                // "stopped", not "failed": the run ended before its own end,
+                // and the notification says so in the same words.
+                ("stopped", stopped.text.clone())
             } else {
                 ("done", "finished".to_string())
             };
             self.complete_task(task_id, status, Some(&detail), Some(&content));
         }
 
-        match error {
-            Some(failure) => {
+        // The conversation was compressed to fit: worth saying once, so the
+        // model's thin memory of earlier turns has an explanation. Only when
+        // there is no more specific stop to report.
+        if notice.is_none() && trimmed_context {
+            notice = Some(Notice::new(
+                "Older messages were left out of this request to fit the model's context window. \
+                 Loom kept the most recent turns and the current one.",
+            ));
+        }
+
+        match notice {
+            Some(stopped) => {
                 // Record why, so the reason is visible after a reload instead of
                 // leaving an empty reply behind.
                 let extra = serialize_extra_reasoning(
                     &stored_calls,
                     &reasoning_blocks,
-                    None,
-                    Some(&failure),
-                    Some(&model),
+                    TurnOutcome {
+                        notice: Some(&stopped),
+                        model: Some(&model),
+                        ..Default::default()
+                    },
                 );
                 let _ = self
                     .db()
                     .update_message_extra(&message_id, extra.as_deref());
 
-                self.emit(EngineEvent::Error {
+                self.emit(EngineEvent::Notice {
                     session_id: session_id.clone(),
-                    message_id,
-                    error: failure,
+                    message_id: Some(message_id),
+                    text: stopped.text,
+                    detail: stopped.detail,
                 })
             }
             None => {
@@ -2398,8 +2820,20 @@ impl Engine {
         message_id: &str,
         call: &ToolCall,
         mode: PermissionMode,
+        context: &ToolContext,
     ) -> bool {
-        if !tools::requires_confirmation(mode, &call.name) {
+        let gated = tools::requires_confirmation(mode, &call.name);
+        // The mode judges a tool by its *name*, which is all `Ask` and
+        // `AutoReadOnly` need — they gate whole classes of call. `Auto all` and
+        // Atelier run everything, so a delete has to be judged by what this
+        // particular call would destroy instead. That needs the arguments and
+        // the filesystem, so it cannot live in `requires_confirmation`.
+        let reason = if !gated && call.name == tools::DELETE_PATH {
+            tools::delete_risk(&call.arguments, context)
+        } else {
+            None
+        };
+        if !gated && reason.is_none() {
             return true;
         }
 
@@ -2417,6 +2851,7 @@ impl Engine {
             name: call.name.clone(),
             arguments: call.arguments.clone(),
             read_only: tools::is_read_only(&call.name),
+            reason,
         });
 
         // A detached run that needs approval says so in the Runs popup, and
@@ -3135,12 +3570,23 @@ impl Engine {
                     .and_then(serde_json::Value::as_str)
                     .unwrap_or_default()
                     .to_string();
-                self.stop_command(&id).map(|command| {
-                    format!(
-                        "stopped \"{}\" (id {}, pid {})",
-                        command.label, command.id, command.pid
-                    )
-                })
+                // `stop_command` waits on `taskkill`/`kill` with a blocking
+                // call, so it goes to the blocking pool rather than stalling a
+                // Tokio worker the rest of the turn needs. No `?` here: this
+                // function returns `Option`, so a join error is turned into an
+                // engine error explicitly.
+                let engine = self.clone();
+                match tokio::task::spawn_blocking(move || engine.stop_command(&id)).await {
+                    Ok(result) => result.map(|command| {
+                        format!(
+                            "stopped \"{}\" (id {}, pid {})",
+                            command.label, command.id, command.pid
+                        )
+                    }),
+                    Err(error) => Err(Error::other(format!(
+                        "stopping that command did not finish: {error}"
+                    ))),
+                }
             }
             "generate_image" => {
                 let prompt = arguments
@@ -3563,7 +4009,11 @@ impl Engine {
             )),
             messages: vec![WireMessage::text("user", task)],
             variant: None,
-            max_output_tokens: context::output_limit(0, &spec),
+            max_output_tokens: Some(context::output_limit(
+                0,
+                &spec,
+                context::context_window(provider, &model.model_id),
+            )),
             temperature: None,
             top_p: None,
             stream: false,
@@ -4010,27 +4460,25 @@ impl Engine {
         match crate::process::log_tail(&path, lines) {
             Ok(text) if text != "(no output yet)" => Ok(text),
             // Nothing on disk yet: the process may not have written its first
-            // line, or the file could not be written at all. The handle still
-            // holds what arrived, so fall back to that.
+            // line, or its log could not be opened. The handle holds what
+            // arrived, so fall back to that before reporting nothing.
             other => {
                 if let Some(handle) = self.command_handle(id) {
-                    if let Ok(handle) = handle.try_lock() {
-                        let (stdout, stderr) = handle.tails();
-                        let mut text = String::new();
-                        if !stdout.trim().is_empty() {
-                            text.push_str("stdout:\n");
-                            text.push_str(&stdout);
+                    let (stdout, stderr) = handle.tails();
+                    let mut text = String::new();
+                    if !stdout.trim().is_empty() {
+                        text.push_str("stdout:\n");
+                        text.push_str(&stdout);
+                    }
+                    if !stderr.trim().is_empty() {
+                        if !text.is_empty() {
+                            text.push('\n');
                         }
-                        if !stderr.trim().is_empty() {
-                            if !text.is_empty() {
-                                text.push('\n');
-                            }
-                            text.push_str("stderr:\n");
-                            text.push_str(&stderr);
-                        }
-                        if !text.trim().is_empty() {
-                            return Ok(tools::truncate_output(&text));
-                        }
+                        text.push_str("stderr:\n");
+                        text.push_str(&stderr);
+                    }
+                    if !text.trim().is_empty() {
+                        return Ok(tools::truncate_output(&text));
                     }
                 }
                 other
@@ -4051,21 +4499,32 @@ impl Engine {
         if tokio::runtime::Handle::try_current().is_err() {
             return Err(Error::other("running a command needs a Tokio runtime"));
         }
-        let running_now = self
-            .inner
-            .commands
-            .lock()
-            .expect("commands mutex poisoned")
-            .len();
-        if running_now >= MAX_BACKGROUND_COMMANDS {
-            return Err(Error::other(format!(
-                "{MAX_BACKGROUND_COMMANDS} commands are already running — wait for one to \
-                 finish, or stop one with stop_command"
-            )));
+        // Claim the slot while the count is held, so the check and the claim
+        // cannot be torn apart by another start. Released below if the spawn
+        // fails, and consumed by `track_command` when the row is written.
+        {
+            let mut tracker = self.inner.commands.lock().expect("commands mutex poisoned");
+            if tracker.handles.len() + tracker.starting >= MAX_BACKGROUND_COMMANDS {
+                return Err(Error::other(format!(
+                    "{MAX_BACKGROUND_COMMANDS} commands are already running — wait for one to \
+                     finish, or stop one with stop_command"
+                )));
+            }
+            tracker.starting += 1;
         }
 
         let log_path = crate::process::command_log_path(&uuid::Uuid::new_v4().to_string())?;
-        let running = Running::spawn(command, cwd, &log_path)?;
+        let running = match Running::spawn(command, cwd, &log_path) {
+            Ok(running) => running,
+            Err(error) => {
+                // Give the claimed slot back, or a failed spawn would quietly
+                // shrink the cap.
+                if let Ok(mut tracker) = self.inner.commands.lock() {
+                    tracker.starting = tracker.starting.saturating_sub(1);
+                }
+                return Err(error);
+            }
+        };
         self.track_command(
             session_id,
             cwd,
@@ -4074,14 +4533,19 @@ impl Engine {
             background,
             log_path,
             running,
+            true,
         )
     }
 
     /// Records an already-spawned process and watches it to completion.
     ///
-    /// Deliberately not subject to [`MAX_BACKGROUND_COMMANDS`]: the process
-    /// exists either way, and refusing to track it would leave it invisible
-    /// and unstoppable.
+    /// `claimed` says whether the caller reserved a slot for it: `true` from
+    /// `start_command`, which counted it against [`MAX_BACKGROUND_COMMANDS`],
+    /// and `false` for an adopted command — a foreground one that outlived its
+    /// cap. Adopting is deliberately exempt from the cap, because the process
+    /// exists either way and refusing to track it would leave it invisible and
+    /// unstoppable.
+    #[allow(clippy::too_many_arguments)]
     fn track_command(
         &self,
         session_id: Option<&str>,
@@ -4091,6 +4555,7 @@ impl Engine {
         background: bool,
         log_path: std::path::PathBuf,
         running: Running,
+        claimed: bool,
     ) -> Result<CommandRun> {
         let record = CommandRun {
             id: uuid::Uuid::new_v4().to_string(),
@@ -4112,19 +4577,24 @@ impl Engine {
         };
         self.db().insert_command(&record)?;
 
-        let handle = Arc::new(tokio::sync::Mutex::new(running));
-        self.inner
-            .commands
-            .lock()
-            .expect("commands mutex poisoned")
-            .insert(record.id.clone(), Arc::clone(&handle));
+        {
+            let mut tracker = self.inner.commands.lock().expect("commands mutex poisoned");
+            tracker.handles.insert(record.id.clone(), running.tail_handle());
+            if claimed {
+                tracker.starting = tracker.starting.saturating_sub(1);
+            }
+        }
 
-        // One watcher per command: it ends when the process does, whatever
-        // ended it (exit, stop_command, or a crash).
+        // One watcher per command: it owns the child, and ends when the
+        // process does, whatever ended it (exit, stop_command, or a crash).
         let engine = self.clone();
         let watched = record.id.clone();
         tokio::spawn(async move {
-            let status = handle.lock().await.wait().await;
+            let mut running = running;
+            let status = running.wait().await;
+            // Drain the pipes last, so the log holds the final lines before
+            // anything reads it back.
+            running.finish().await;
             engine.finish_command(&watched, status.and_then(|status| status.code()));
         });
 
@@ -4184,23 +4654,19 @@ impl Engine {
             .wait_timeout(crate::process::COMMAND_TIMEOUT)
             .await
         {
-            Some(status) => {
+            Wait::Exited(status) => {
                 let (stdout, stderr) = running.finish().await;
                 drop(running);
                 // A command that finished inside the cap is reported in the
                 // transcript like any other tool; there is nothing to track,
                 // so the log goes with it.
                 let _ = std::fs::remove_file(&log_path);
-                Ok(format_command_report(
-                    status.code(),
-                    &stdout,
-                    &stderr,
-                ))
+                Ok(format_command_report(status.code(), &stdout, &stderr))
             }
-            None => {
-                // Still going after two minutes. Adopt it: the row is what
-                // makes it visible in the Runs panel and stoppable, and the
-                // log keeps filling either way.
+            Wait::Running | Wait::Unknown => {
+                // Still going after two minutes (or the wait itself failed, so
+                // we no longer know: adopting it is the safe reading, since
+                // the process is not ours to declare dead).
                 let record = self.track_command(
                     Some(session_id),
                     &root,
@@ -4209,6 +4675,7 @@ impl Engine {
                     false,
                     log_path.clone(),
                     running,
+                    false,
                 )?;
                 let tail = crate::process::log_tail(&log_path, 40).unwrap_or_default();
                 let mut report = format!(
@@ -4228,39 +4695,46 @@ impl Engine {
         }
     }
 
-    fn command_handle(&self, id: &str) -> Option<Arc<tokio::sync::Mutex<Running>>> {
+    fn command_handle(&self, id: &str) -> Option<TailHandle> {
         self.inner
             .commands
             .lock()
             .ok()?
+            .handles
             .get(id)
-            .map(Arc::clone)
+            .cloned()
     }
 
-    /// Records a command's exit and drops its handle. A command the user
-    /// stopped keeps the word "stopped", whatever its exit code says.
+    /// Records a command's exit and drops its handle.
+    ///
+    /// Only writes when the row still says `running`: if anything else already
+    /// ended it — the user pressed Stop, or the row was deleted — that account
+    /// of what happened stands, and "stopped" outranks the exit code of a
+    /// process that was killed on purpose.
     fn finish_command(&self, id: &str, exit_code: Option<i32>) {
-        let stopped = self
-            .db()
-            .command(id)
-            .ok()
-            .flatten()
-            .map(|record| record.status == "stopped")
-            .unwrap_or(false);
-        let status = match (stopped, exit_code) {
-            (true, _) => "stopped",
-            (false, Some(0)) => "done",
-            (false, _) => "failed",
-        };
-        if let Err(error) = self.db().set_command_status(id, status, exit_code) {
-            eprintln!("[loom] could not update command {id}: {error}");
+        // The row is read and the guard let go *before* `set_command_status`,
+        // which takes the same lock. Binding the read instead of writing it
+        // inline as an `if let` scrutinee is the whole point: a `MutexGuard`
+        // held there lives to the end of the block, so a second `self.db()`
+        // inside it re-locks the same non-reentrant mutex and hangs the
+        // thread — with the lock still held, so every other database user
+        // blocks behind it and Loom freezes for good.
+        let current = self.db().command(id).ok().flatten();
+        if let Some(record) = current {
+            if record.status == "running" {
+                let status = if exit_code == Some(0) { "done" } else { "failed" };
+                if let Err(error) = self.db().set_command_status(id, status, exit_code) {
+                    eprintln!("[loom] could not update command {id}: {error}");
+                }
+            }
         }
-        if let Ok(mut commands) = self.inner.commands.lock() {
-            commands.remove(id);
+        if let Ok(mut tracker) = self.inner.commands.lock() {
+            tracker.handles.remove(id);
         }
         // Only announce it if the row is still there (it may have been deleted
         // while the process was winding down).
-        if let Ok(Some(command)) = self.db().command(id) {
+        let current = self.db().command(id).ok().flatten();
+        if let Some(command) = current {
             self.emit(EngineEvent::CommandChanged { command });
         }
     }
@@ -4277,9 +4751,22 @@ impl Engine {
                 record.status
             )));
         }
-        crate::process::kill_tree(record.pid);
+        // `false` means the signal could not be delivered at all — usually
+        // because the process had already exited, occasionally because it
+        // refused. The row still moves to `stopped`: the user asked for it to
+        // end and Loom is no longer waiting on it, so leaving it `running`
+        // would be a lie the Stop button could never correct.
+        let delivered = crate::process::kill_tree(record.pid);
         self.db().set_command_status(id, "stopped", None)?;
         let updated = self.db().command(id)?.unwrap_or(record);
+        if !delivered {
+            // Not an error to the user: the commonest cause is that the
+            // process had already exited. Worth a log line, because the other
+            // cause is a tree that resisted and is still running.
+            eprintln!(
+                "[loom] command {id} was marked stopped but the signal was not delivered"
+            );
+        }
         self.emit(EngineEvent::CommandChanged {
             command: updated.clone(),
         });
@@ -4289,14 +4776,30 @@ impl Engine {
     /// Forgets a command, stopping it first: deleting the row of a live
     /// process would leave a process nobody can find again.
     pub fn delete_command(&self, id: &str) -> Result<()> {
-        if let Some(record) = self.db().command(id)? {
-            if record.status == "running" {
-                crate::process::kill_tree(record.pid);
-            }
-            let _ = std::fs::remove_file(&record.log_path);
+        // Nothing blocking happens with the database lock held: `kill_tree`
+        // waits on a process, and this runs from an IPC handler the user is
+        // looking at, so holding it would stall every other reader.
+        let live = self
+            .db()
+            .command(id)?
+            .filter(|record| record.status == "running")
+            .map(|record| record.pid);
+        if let Some(pid) = live {
+            crate::process::kill_tree(pid);
         }
-        if let Ok(mut commands) = self.inner.commands.lock() {
-            commands.remove(id);
+        // Re-read for the log path: the row may have gone while we killed it.
+        let log_path = self.db().command(id)?.and_then(|record| {
+            if record.log_path.trim().is_empty() {
+                None
+            } else {
+                Some(record.log_path)
+            }
+        });
+        if let Some(log_path) = log_path {
+            let _ = std::fs::remove_file(&log_path);
+        }
+        if let Ok(mut tracker) = self.inner.commands.lock() {
+            tracker.handles.remove(id);
         }
         self.db().delete_command(id)
     }
@@ -4566,29 +5069,36 @@ impl Engine {
         // Post the outcome into the chat that asked for the run, so the result
         // lands in that conversation's context, not only the Runs panel.
         if matches!(status, "done" | "failed") {
-            if let Ok(Some(task)) = self.db().task(task_id) {
-                if let Some(origin) = task.origin_session.clone() {
-                    let text = match (status, result) {
-                        ("done", Some(result)) if !result.trim().is_empty() => {
-                            format!("Background run \"{}\" finished:\n\n{}", task.title, result)
-                        }
-                        ("done", _) => format!("Background run \"{}\" finished.", task.title),
-                        (_, Some(detail)) if !detail.trim().is_empty() => {
-                            format!("Background run \"{}\" failed: {detail}", task.title)
-                        }
-                        _ => format!("Background run \"{}\" failed.", task.title),
-                    };
-                    let _ = self.db().add_message(&Message {
-                        id: uuid::Uuid::new_v4().to_string(),
-                        session_id: origin,
-                        role: Role::Assistant,
-                        content: text,
-                        reasoning: None,
-                        extra: None,
-                        persona_id: None,
-                        created_at: now_ms(),
-                    });
-                }
+            // Bind the row and drop the guard before `add_message`, which locks
+            // the database again: inline, this froze the app on every
+            // background run that finished with a chat behind it.
+            let origin = self
+                .db()
+                .task(task_id)
+                .ok()
+                .flatten()
+                .and_then(|task| task.origin_session.clone().map(|origin| (origin, task.title)));
+            if let Some((origin, title)) = origin {
+                let text = match (status, result) {
+                    ("done", Some(result)) if !result.trim().is_empty() => {
+                        format!("Background run \"{title}\" finished:\n\n{result}")
+                    }
+                    ("done", _) => format!("Background run \"{title}\" finished."),
+                    (_, Some(detail)) if !detail.trim().is_empty() => {
+                        format!("Background run \"{title}\" failed: {detail}")
+                    }
+                    _ => format!("Background run \"{title}\" failed."),
+                };
+                let _ = self.db().add_message(&Message {
+                    id: uuid::Uuid::new_v4().to_string(),
+                    session_id: origin,
+                    role: Role::Assistant,
+                    content: text,
+                    reasoning: None,
+                    extra: None,
+                    persona_id: None,
+                    created_at: now_ms(),
+                });
             }
         }
 
@@ -5139,7 +5649,8 @@ impl Engine {
     }
 
     /// `schedule_job`: create or update a job from the model, always behind a
-    /// confirmation card (see `tools::always_asks`).
+    /// confirmation card, because it changes what Loom does while nobody is
+    /// watching (see `tools::always_asks`).
     fn schedule_job_from_tool(
         &self,
         arguments: &serde_json::Value,
@@ -5440,7 +5951,12 @@ fn merge_tool_delta(
 /// task ballooned into tens of near-identical spells (one message reached 31
 /// blocks and 390k characters of reasoning). Completed turns' thinking is not
 /// required back, and handing it over just invites the model to repeat itself.
-fn reasoning_echo(message: &Message, index: usize, history: &[Message]) -> Option<String> {
+///
+/// The context budget calls this too: it must charge for exactly the thinking
+/// that goes on the wire, no more. Counting the whole `reasoning` column
+/// instead over-estimated long reasoning turns badly enough to drop history
+/// that would have fitted.
+pub(crate) fn reasoning_echo(message: &Message, index: usize, history: &[Message]) -> Option<String> {
     if history[index + 1..]
         .iter()
         .any(|later| later.role == Role::User)
@@ -6095,15 +6611,19 @@ mod tests {
 
         engine.report_task_failure(&session.id, &message_id, "the turn crashed");
 
+        // A dead turn reports a stop, never a failure: the same event carries
+        // the reason, and the UI reads it as a note.
         let event = receiver.try_recv().expect("a terminal event");
-        assert!(matches!(event, EngineEvent::Error { .. }), "{event:?}");
+        assert!(matches!(event, EngineEvent::Notice { .. }), "{event:?}");
 
         let stored = engine.messages(&session.id).unwrap();
         let assistant = stored.iter().find(|m| m.id == message_id).unwrap();
-        assert_eq!(
-            parse_error(assistant.extra.as_deref()).as_deref(),
-            Some("the turn crashed")
-        );
+        let notice = parse_notice(assistant.extra.as_deref()).expect("the reason is kept");
+        // `text` is the one line the transcript shows; the reason the engine was
+        // handed is kept for the Details toggle, which is where it belongs. A
+        // crashed turn reads as a stop, not as the user's mistake.
+        assert_eq!(notice.detail.as_deref(), Some("the turn crashed"));
+        assert!(notice.text.contains("ended early"), "{}", notice.text);
         assert!(engine.busy_sessions().is_empty());
     }
 
@@ -6261,7 +6781,7 @@ mod tests {
         let event = tokio::time::timeout(Duration::from_secs(20), async {
             loop {
                 match receiver.recv().await {
-                    Some(event @ EngineEvent::Error { .. }) => break event,
+                    Some(event @ EngineEvent::Notice { .. }) => break event,
                     Some(event @ EngineEvent::Done { .. }) => break event,
                     Some(_) => continue,
                     None => panic!("the engine stopped without a terminal event"),
@@ -6271,20 +6791,20 @@ mod tests {
         .await
         .expect("a terminal event arrived");
         assert!(
-            matches!(event, EngineEvent::Error { .. }),
-            "expected an error event, got {event:?}"
+            matches!(event, EngineEvent::Notice { .. }),
+            "expected a stop event, got {event:?}"
         );
 
         let messages = engine.messages(&session.id).unwrap();
         let assistant = messages.last().expect("assistant message");
-        let recorded = parse_error(assistant.extra.as_deref())
-            .expect("the failure reason is stored on the message");
-        assert!(!recorded.trim().is_empty());
+        let recorded = parse_notice(assistant.extra.as_deref())
+            .expect("the stop reason is stored on the message");
+        assert!(!recorded.text.trim().is_empty());
 
         // And it survives a reload from disk, which is what the UI does.
         let reopened = Database::open(&dir.path().join("loom.db")).unwrap();
         let stored = reopened.messages(&session.id).unwrap();
-        assert!(parse_error(stored.last().unwrap().extra.as_deref()).is_some());
+        assert!(parse_notice(stored.last().unwrap().extra.as_deref()).is_some());
 
         std::env::remove_var("LOOM_HOME");
     }
@@ -6327,10 +6847,29 @@ mod tests {
             name: "read_file".into(),
             arguments: "{}".into(),
             read_only: true,
+            reason: None,
         };
         let json = serde_json::to_string(&permission).unwrap();
         assert!(json.contains("\"callId\":\"c1\""), "{json}");
         assert!(json.contains("\"readOnly\":true"), "{json}");
+        // Absent, not null: the card falls back to the plain prompt when the
+        // mode is what gated the call.
+        assert!(!json.contains("\"reason\""), "{json}");
+
+        let risky = EngineEvent::ToolPermissionRequest {
+            session_id: "s1".into(),
+            message_id: "m1".into(),
+            call_id: "c1".into(),
+            name: "delete_path".into(),
+            arguments: r#"{"path":"src"}"#.into(),
+            read_only: false,
+            reason: Some("3 of the 40 entries under src are uncommitted".into()),
+        };
+        let json = serde_json::to_string(&risky).unwrap();
+        assert!(
+            json.contains("\"reason\":\"3 of the 40 entries under src are uncommitted\""),
+            "{json}"
+        );
 
         let question = EngineEvent::QuestionRequest {
             session_id: "s1".into(),
@@ -6466,12 +7005,14 @@ mod tests {
         // One reply with 1M input and 1M output tokens: 1 * 1.0 + 1 * 2.0.
         let extra = serialize_extra(
             &[],
-            Some(Usage {
-                input_tokens: Some(1_000_000),
-                output_tokens: Some(1_000_000),
-            }),
-            None,
-            Some(&ModelRef::new("priced", "priced-model")),
+            TurnOutcome {
+                usage: Some(Usage {
+                    input_tokens: Some(1_000_000),
+                    output_tokens: Some(1_000_000),
+                }),
+                model: Some(&ModelRef::new("priced", "priced-model")),
+                ..Default::default()
+            },
         );
         engine
             .db()
@@ -6497,6 +7038,369 @@ mod tests {
         );
     }
 
+    /// A command line that prints, waits, then prints — enough to prove the
+    /// log is readable while the process is still going.
+    fn slow_command() -> &'static str {
+        if cfg!(windows) {
+            "echo first && ping -n 4 127.0.0.1 >nul && echo last"
+        } else {
+            "echo first; sleep 3; echo last"
+        }
+    }
+
+    /// The watcher must not hang when a tracked command ends on its own.
+    ///
+    /// Before the fix this test never returned: `finish_command` re-locked the
+    /// database mutex it was already holding, on a multi-threaded runtime where
+    /// the watcher genuinely runs. A current-thread runtime hid it, because
+    /// `stop_command` had already written `stopped` before the watcher was ever
+    /// polled.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_background_command_that_ends_on_its_own_is_marked_done() {
+        use crate::config::AppConfig;
+        use std::sync::Arc;
+
+        let _guard = crate::paths::env_lock();
+        let home = tempfile::tempdir().unwrap();
+        std::env::set_var("LOOM_HOME", home.path());
+
+        let db = Database::open_in_memory().unwrap();
+        let engine = Engine::new(
+            db,
+            Arc::new(Mutex::new(AppConfig::default())),
+            Arc::new(|_| {}),
+        );
+        let workdir = tempfile::tempdir().unwrap();
+
+        let record = engine
+            .start_command(Some("session-1"), workdir.path(), "echo hi", None, true)
+            .unwrap();
+
+        // A hang here is the deadlock, so bound the wait rather than the test.
+        let status = tokio::time::timeout(Duration::from_secs(15), async {
+            loop {
+                let row = engine.command(&record.id).unwrap().unwrap();
+                if row.status != "running" {
+                    break row.status;
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        })
+        .await
+        .expect("the watcher must finish; a timeout here is the database deadlock");
+
+        assert_eq!(status, "done");
+
+        // And the engine still answers: the lock is free, which is the real
+        // symptom — a frozen app rather than a wrong status.
+        assert!(engine.commands(None).is_ok());
+
+        std::env::remove_var("LOOM_HOME");
+    }
+
+    /// Stop races the watcher. Whichever wins, the row settles and the engine
+    /// keeps answering.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn stopping_a_command_races_the_watcher_without_deadlocking() {
+        use crate::config::AppConfig;
+        use std::sync::Arc;
+
+        let _guard = crate::paths::env_lock();
+        let home = tempfile::tempdir().unwrap();
+        std::env::set_var("LOOM_HOME", home.path());
+
+        let db = Database::open_in_memory().unwrap();
+        let engine = Engine::new(
+            db,
+            Arc::new(Mutex::new(AppConfig::default())),
+            Arc::new(|_| {}),
+        );
+        let workdir = tempfile::tempdir().unwrap();
+
+        let record = engine
+            .start_command(Some("session-1"), workdir.path(), slow_command(), None, true)
+            .unwrap();
+
+        // Let it write something first, so the watcher has real work to drain.
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        let _ = engine.stop_command(&record.id).unwrap();
+
+        let status = tokio::time::timeout(Duration::from_secs(15), async {
+            loop {
+                let row = engine.command(&record.id).unwrap().unwrap();
+                if row.status != "running" {
+                    break row.status;
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        })
+        .await
+        .expect("stopping must not deadlock the watcher");
+
+        assert!(
+            status == "stopped" || status == "done",
+            "unexpected status {status}"
+        );
+        assert!(engine.commands(None).is_ok());
+
+        std::env::remove_var("LOOM_HOME");
+    }
+
+    /// A finished detached run posts into the chat that asked for it. Before
+    /// the fix, any background run with an origin chat froze Loom here.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_finished_run_posts_into_its_origin_chat() {
+        use crate::config::AppConfig;
+        use crate::db::Task;
+        use std::sync::Arc;
+
+        let db = Database::open_in_memory().unwrap();
+        let engine = Engine::new(
+            db,
+            Arc::new(Mutex::new(AppConfig::default())),
+            Arc::new(|_| {}),
+        );
+
+        let origin = engine
+            .create_session(None, None, None, None, None, None)
+            .unwrap();
+        let run_session = engine
+            .create_session(None, None, None, None, None, None)
+            .unwrap();
+
+        let task = Task {
+            id: "task-1".to_string(),
+            session_id: run_session.id.clone(),
+            origin_session: Some(origin.id.clone()),
+            job_id: None,
+            title: "a run".to_string(),
+            prompt: "do something".to_string(),
+            provider_id: None,
+            model_id: None,
+            status: "running".to_string(),
+            detail: None,
+            result: None,
+            notify: false,
+            created_at: now_ms(),
+            started_at: Some(now_ms()),
+            finished_at: None,
+        };
+        engine.db().create_task(&task).unwrap();
+
+        // Bounded: the deadlock is a hang, not an error.
+        tokio::time::timeout(Duration::from_secs(15), async {
+            engine.complete_task("task-1", "done", Some("finished"), Some("the answer"));
+        })
+        .await
+        .expect("completing a run with an origin chat must not deadlock");
+
+        let posted = engine.messages(&origin.id).unwrap();
+        assert_eq!(posted.len(), 1, "the origin chat gains the result");
+        assert!(posted[0].content.contains("the answer"), "{}", posted[0].content);
+
+        // The lock is free again.
+        assert!(engine.commands(None).is_ok());
+    }
+
+    /// `report_task_failure` against a session that really has a running run
+    /// row — the path the existing test never reached, because its session had
+    /// no task.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_crashed_run_releases_its_slot() {
+        use crate::config::AppConfig;
+        use crate::db::Task;
+        use std::sync::Arc;
+
+        let db = Database::open_in_memory().unwrap();
+        let engine = Engine::new(
+            db,
+            Arc::new(Mutex::new(AppConfig::default())),
+            Arc::new(|_| {}),
+        );
+
+        let session = engine
+            .create_session(None, None, None, None, None, None)
+            .unwrap();
+        // `add_message` returns `()`, so the id is kept in its own binding.
+        let message_id = uuid::Uuid::new_v4().to_string();
+        engine
+            .db()
+            .add_message(&Message {
+                id: message_id.clone(),
+                session_id: session.id.clone(),
+                role: Role::Assistant,
+                content: String::new(),
+                reasoning: None,
+                extra: None,
+                persona_id: None,
+                created_at: now_ms(),
+            })
+            .unwrap();
+
+        let task = Task {
+            id: "task-2".to_string(),
+            session_id: session.id.clone(),
+            origin_session: None,
+            job_id: None,
+            title: "a run".to_string(),
+            prompt: "do something".to_string(),
+            provider_id: None,
+            model_id: None,
+            status: "running".to_string(),
+            detail: None,
+            result: None,
+            notify: false,
+            created_at: now_ms(),
+            started_at: Some(now_ms()),
+            finished_at: None,
+        };
+        engine.db().create_task(&task).unwrap();
+
+        tokio::time::timeout(Duration::from_secs(15), async {
+            engine.report_task_failure(&session.id, &message_id, "the turn crashed");
+        })
+        .await
+        .expect("reporting a dead run must not deadlock");
+
+        let row = engine.task("task-2").unwrap().unwrap();
+        assert_eq!(row.status, "stopped", "the slot is released");
+    }
+
+    #[tokio::test]
+    async fn a_background_command_is_tracked_read_and_stopped() {
+        use crate::config::AppConfig;
+        use std::sync::Arc;
+
+        // The log lives under LOOM_HOME, so this test takes the crate lock.
+        let _guard = crate::paths::env_lock();
+        let home = tempfile::tempdir().unwrap();
+        std::env::set_var("LOOM_HOME", home.path());
+
+        let db = Database::open_in_memory().unwrap();
+        let engine = Engine::new(
+            db,
+            Arc::new(Mutex::new(AppConfig::default())),
+            Arc::new(|_| {}),
+        );
+        let workdir = tempfile::tempdir().unwrap();
+
+        let record = engine
+            .start_command(
+                Some("session-1"),
+                workdir.path(),
+                slow_command(),
+                Some("  a slow one  "),
+                true,
+            )
+            .unwrap();
+
+        assert_eq!(record.status, "running");
+        assert_eq!(record.label, "a slow one", "the label is trimmed");
+        assert!(
+            record.pid != 0,
+            "a started command knows its pid so it can be stopped"
+        );
+        assert!(record.background);
+        assert_eq!(record.session_id.as_deref(), Some("session-1"));
+        assert!(record.log_path.contains("cmd-"));
+        assert!(engine.command(&record.id).unwrap().is_some());
+
+        // Output is readable while it is still running.
+        tokio::time::sleep(Duration::from_millis(600)).await;
+        let output = engine.command_output(&record.id, 50).unwrap();
+        assert!(output.contains("first"), "{output}");
+
+        let stopped = engine.stop_command(&record.id).unwrap();
+        assert_eq!(stopped.status, "stopped");
+        assert!(stopped.finished_at.is_some());
+        // Stopping twice is a clear error rather than a second kill.
+        assert!(engine.stop_command(&record.id).is_err());
+
+        // The watcher must not overwrite "stopped" with an exit-code verdict.
+        tokio::time::sleep(Duration::from_millis(800)).await;
+        assert_eq!(
+            engine.command(&record.id).unwrap().unwrap().status,
+            "stopped",
+            "the user's stop is the last word"
+        );
+
+        engine.delete_command(&record.id).unwrap();
+        assert!(engine.command(&record.id).unwrap().is_none());
+
+        std::env::remove_var("LOOM_HOME");
+    }
+
+    #[test]
+    fn unknown_command_ids_are_errors_not_silent_successes() {
+        use crate::config::AppConfig;
+        use std::sync::Arc;
+
+        let _guard = crate::paths::env_lock();
+        let home = tempfile::tempdir().unwrap();
+        std::env::set_var("LOOM_HOME", home.path());
+
+        let db = Database::open_in_memory().unwrap();
+        let engine = Engine::new(
+            db,
+            Arc::new(Mutex::new(AppConfig::default())),
+            Arc::new(|_| {}),
+        );
+        assert!(engine.command_output("nope", 10).is_err());
+        assert!(engine.stop_command("nope").is_err());
+        // Deleting nothing is harmless, and idempotent.
+        assert!(engine.delete_command("nope").is_ok());
+
+        std::env::remove_var("LOOM_HOME");
+    }
+
+    #[test]
+    fn a_restart_orphans_commands_but_keeps_their_logs() {
+        use crate::config::AppConfig;
+        use crate::db::CommandRun;
+        use std::sync::Arc;
+
+        let _guard = crate::paths::env_lock();
+        let home = tempfile::tempdir().unwrap();
+        std::env::set_var("LOOM_HOME", home.path());
+
+        let db = Database::open_in_memory().unwrap();
+        let log = home.path().join("logs/cmd-kept.log");
+        let running = CommandRun {
+            id: "c1".to_string(),
+            session_id: None,
+            label: "left running".to_string(),
+            command: "npm run dev".to_string(),
+            cwd: "C:/work".to_string(),
+            // A pid that cannot exist, so nothing is actually probed or killed.
+            pid: 0,
+            status: "running".to_string(),
+            exit_code: None,
+            log_path: log.to_string_lossy().into_owned(),
+            background: true,
+            created_at: now_ms(),
+            finished_at: None,
+        };
+        db.insert_command(&running).unwrap();
+        std::fs::create_dir_all(log.parent().unwrap()).unwrap();
+        std::fs::write(&log, "still going\n").unwrap();
+
+        let engine = Engine::new(db, Arc::new(Mutex::new(AppConfig::default())), Arc::new(|_| {}));
+        assert_eq!(engine.mark_interrupted_commands(), 1);
+
+        let reconciled = engine.command("c1").unwrap().unwrap();
+        assert_eq!(reconciled.status, "orphaned");
+        assert!(reconciled.finished_at.is_some());
+        // The process is not killed and the log is not thrown away: the user
+        // asked for background commands to survive Loom.
+        assert_eq!(std::fs::read_to_string(&reconciled.log_path).unwrap(), "still going\n");
+        assert_eq!(engine.command_output("c1", 10).unwrap(), "still going");
+
+        // Reconciling twice is harmless.
+        assert_eq!(engine.mark_interrupted_commands(), 0);
+
+        std::env::remove_var("LOOM_HOME");
+    }
+
     #[test]
     fn usage_summary_skips_replies_without_a_known_price() {
         use crate::config::AppConfig;
@@ -6513,12 +7417,13 @@ mod tests {
             .unwrap();
         let extra = serialize_extra(
             &[],
-            Some(Usage {
-                input_tokens: Some(500),
-                output_tokens: Some(100),
-            }),
-            None,
-            None,
+            TurnOutcome {
+                usage: Some(Usage {
+                    input_tokens: Some(500),
+                    output_tokens: Some(100),
+                }),
+                ..Default::default()
+            },
         );
         engine
             .db()
@@ -6573,12 +7478,14 @@ mod tests {
         for (provider, input, output) in [("cheap", 1_000_000, 0), ("dear", 0, 1_000_000)] {
             let extra = serialize_extra(
                 &[],
-                Some(Usage {
-                    input_tokens: Some(input),
-                    output_tokens: Some(output),
-                }),
-                None,
-                Some(&ModelRef::new(provider, "m")),
+                TurnOutcome {
+                    usage: Some(Usage {
+                        input_tokens: Some(input),
+                        output_tokens: Some(output),
+                    }),
+                    model: Some(&ModelRef::new(provider, "m")),
+                    ..Default::default()
+                },
             );
             engine
                 .db()
@@ -6721,10 +7628,9 @@ mod tests {
                 after: 0,
                 seq: 0,
                 images: Vec::new(),
+                repeated: false,
             }],
-            None,
-            None,
-            None,
+            TurnOutcome::default(),
         )
         .unwrap();
 
@@ -6800,10 +7706,9 @@ mod tests {
                 after: 0,
                 seq: 0,
                 images: Vec::new(),
+                repeated: false,
             }],
-            None,
-            None,
-            None,
+            TurnOutcome::default(),
         )
         .unwrap();
         let history = vec![message(Role::Assistant, "trying", Some(&stored))];
@@ -6823,10 +7728,9 @@ mod tests {
                 after: 12,
                 seq: 3,
                 images: Vec::new(),
+                repeated: false,
             }],
-            None,
-            None,
-            None,
+            TurnOutcome::default(),
         )
         .unwrap();
         assert_eq!(parse_stored_tools(Some(&stored))[0].after, 12);

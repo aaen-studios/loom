@@ -5,11 +5,12 @@ import {
   formatUsage,
   mergeToolCalls,
   parseAttachments,
-  parseError,
+  parseNotice,
   parseReasoningBlocks,
   parseToolCalls,
   parseUsage,
   segmentMessage,
+  type Notice,
   type ReasoningBlock,
 } from "../lib/messageExtra";
 import type { Message, ToolCallDisplay, ToolCallRecord } from "../types";
@@ -257,7 +258,7 @@ function MessageRow({
 }) {
   const attachments = parseAttachments(message.extra);
   const usage = parseUsage(message.extra);
-  const failure = parseError(message.extra);
+  const notice = parseNotice(message.extra);
   const personas = useSettings((state) => state.config.personas);
   const persona = personas.find((item) => item.id === message.personaId);
   const castIds = useChat((state) => state.castIds);
@@ -367,11 +368,11 @@ function MessageRow({
             />
           ) : null,
         )}
-        {failure && <FailedTurn message={failure} />}
-        {streaming && !message.content && !thinkingShown && !runningTools && !failure && (
+        {notice && <TurnNote notice={notice} />}
+        {streaming && !message.content && !thinkingShown && !runningTools && !notice && (
           <span className="cursor-blink inline-block h-4 w-[7px] translate-y-[3px] rounded-[2px] bg-[var(--ink-soft)]" />
         )}
-        {!streaming && !failure && usage && (
+        {!streaming && !notice && usage && (
           <p className="mt-1.5 text-[11.5px] text-faint">{formatUsage(usage)}</p>
         )}
       </div>
@@ -380,14 +381,28 @@ function MessageRow({
   );
 }
 
-/** A turn that failed: the reason is stored on the message, so it survives a reload. */
-function FailedTurn({ message }: { message: string }) {
+/**
+ * A turn that ended early: a limit, a provider refusal, a loop.
+ *
+ * Deliberately not styled as a failure. The reason is stored on the message so
+ * it survives a reload, `detail` keeps the provider's own words behind a
+ * toggle, and the reply above is still the user's to read.
+ */
+function TurnNote({ notice }: { notice: Notice }) {
   const retryLast = useChat((state) => state.retryLast);
   return (
-    <div className="mt-1.5 rounded-control border border-[var(--danger)]/40 bg-[var(--danger)]/10 px-3 py-2">
-      <p className="text-[12.5px] leading-5 break-words text-[var(--ink)]">
-        This reply failed: {message}
-      </p>
+    <div className="mt-1.5 rounded-control border border-[var(--glass-border)] bg-[var(--hover-bg)] px-3 py-2">
+      <p className="text-[12.5px] leading-5 break-words text-soft">{notice.text}</p>
+      {notice.detail && (
+        <details className="group mt-1.5">
+          <summary className="cursor-pointer text-[12px] text-faint hover:text-[var(--ink)] [&::-webkit-details-marker]:hidden">
+            Details
+          </summary>
+          <pre className="mt-1.5 max-h-60 overflow-auto rounded-row bg-[var(--ink-ghost)] p-2 font-mono text-[11.5px] whitespace-pre-wrap text-soft">
+            {notice.detail}
+          </pre>
+        </details>
+      )}
       <button
         type="button"
         onClick={() => void retryLast()}

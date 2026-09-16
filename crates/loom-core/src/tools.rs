@@ -29,7 +29,9 @@ pub const ASK_USER: &str = "ask_user";
 pub const TODO_WRITE: &str = "todo_write";
 pub const TODO_READ: &str = "todo_read";
 
-/// Deleting a path always shows a confirmation card, even under Auto all.
+/// Deleting a path. Unlike the other destructive tools this is not gated by
+/// name alone: `delete_risk` decides per call whether losing the path could be
+/// undone. See that function for the rule.
 pub const DELETE_PATH: &str = "delete_path";
 
 /// Tracking the shell commands Loom has started. `run_command` itself is
@@ -268,6 +270,17 @@ pub struct ToolImage {
     pub mime: String,
     /// Absolute path inside the Loom home directory.
     pub path: String,
+    /// Encoded pixel dimensions; zero when unknown (a record written by an
+    /// older build). The context budget counts tokens per pixel tile rather
+    /// than per byte, because that is how providers meter an image.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub width: u32,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub height: u32,
+}
+
+fn is_zero(value: &u32) -> bool {
+    *value == 0
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -427,7 +440,7 @@ pub fn specs() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: DELETE_PATH,
-            description: "Delete a file or folder inside the workspace. Always asks the user first, whatever the permission mode.",
+            description: "Delete a file or folder inside the workspace. On Windows it goes to the Recycle Bin, so it can be restored. The user is asked to confirm only when the loss would be real: content that is uncommitted or ignored, a nested repository, or a folder outside version control. Deleting committed files in a repository runs without asking, so check `git_status` first if you are unsure what is at stake.",
             parameters: json!({
                 "type": "object",
                 "properties": {
@@ -857,9 +870,15 @@ pub fn is_read_only(name: &str) -> bool {
 }
 
 /// Calls that always show a confirmation card, even under Auto all: creating
-/// or deleting a schedule changes what Loom does while nobody is watching.
+/// or deleting a schedule changes what Loom does while nobody is watching, and
+/// the user is not there to notice.
+///
+/// `delete_path` is deliberately *not* here. It used to be, which meant every
+/// delete carded in every mode no matter how trivial. What makes a delete worth
+/// a card is not its name but whether the user could get the bytes back, and
+/// that needs the arguments — so it is judged by [`delete_risk`] instead.
 pub fn always_asks(name: &str) -> bool {
-    matches!(name, SCHEDULE_JOB | DELETE_JOB | DELETE_PATH)
+    matches!(name, SCHEDULE_JOB | DELETE_JOB)
 }
 
 /// Whether a call may proceed under the current mode.
@@ -880,6 +899,161 @@ pub fn requires_confirmation(mode: PermissionMode, name: &str) -> bool {
         // asks. That is the only asymmetry.
         PermissionMode::Atelier => crate::harness::is_destructive(name),
     }
+}
+
+/// Whether deleting this path deserves a confirmation card even where the
+/// mode would run it silently: the reason to show, or `None` to go ahead.
+///
+/// [`requires_confirmation`] answers a question about a tool's *name*. This
+/// answers a different one — "could the user get it back?" — which needs the
+/// arguments and the filesystem, so it cannot live in that match.
+///
+/// The rule is git, because git is the only undo Loom can actually check:
+///
+/// - a path with no repository above it cannot be restored, so it asks;
+/// - anything uncommitted underneath it asks — `git restore` cannot bring that
+///   back — ignored files included, since `.gitignore` happens to cover exactly
+///   the folders that are expensive to rebuild;
+/// - a nested repository asks whatever its own contents are, because `git
+///   status` collapses one to a single line and says nothing about the work
+///   inside it;
+/// - anything else — a tracked, committed path in a repository — runs silently,
+///   which is the common case and the one the user asked for.
+///
+/// [`delete_path`] also sends deletes to the Recycle Bin on Windows, but that
+/// is deliberately not part of this decision: the bin is a user setting, it
+/// empties on its own schedule, and other platforms have none. It is a safety
+/// net for the calls that ran without asking, never a reason to stop asking.
+pub fn delete_risk(arguments: &str, context: &ToolContext) -> Option<String> {
+    let parsed: Value = serde_json::from_str(arguments).ok()?;
+    let requested = parsed.get("path").and_then(Value::as_str)?;
+    let root = context.workdir.clone()?;
+
+    // A path the gate refuses anyway, or one that is not there, is not worth a
+    // card: the call will come back with an error the model can read.
+    let target = resolve(context, requested).ok()?;
+    if target == root || !target.exists() {
+        return None;
+    }
+
+    let relative = relative_path(&target, &root);
+    let directory = target.is_dir();
+
+    // Taking `.git` with it discards every commit the `git_*` tools could
+    // revert to — the one loss that removing a working tree does not cover.
+    if relative.split('/').any(|part| part == ".git") {
+        return Some(format!(
+            "{relative} is the repository's history — nothing Loom can reach would restore it"
+        ));
+    }
+
+    // A directory can hold repositories of its own, and `git status` reports
+    // badly on both kinds: a submodule collapses to one line, and a separate
+    // clone inside the tree is not mentioned at all.
+    if directory {
+        match nested_repository(&target) {
+            Nested::Repository => {
+                return Some(format!(
+                    "{relative} contains a git repository, whose commits are not part of \
+                     this workspace's history — deleting it would lose them"
+                ))
+            }
+            Nested::Submodule => {
+                return Some(format!(
+                    "{relative} contains a submodule's working tree; git records it as a \
+                     commit id only, so anything uncommitted inside it would be lost"
+                ))
+            }
+            Nested::None => {}
+        }
+    }
+
+    match uncommitted_count(&root, &relative) {
+        // Inside a repository, and git has a complete record of the path:
+        // `git restore` brings it straight back, so no question is warranted.
+        Some(0) => None,
+        Some(changed) if directory => {
+            let total = count_entries(&target);
+            Some(format!(
+                "{changed} of the {total} entries under {relative} are uncommitted — git \
+                 cannot restore those, and the Recycle Bin empties on its own schedule"
+            ))
+        }
+        Some(_) => Some(format!(
+            "{relative} is uncommitted — git cannot restore it, and the Recycle Bin \
+             empties on its own schedule"
+        )),
+        // Nowhere to ask, so nothing would bring the path back.
+        None => Some(format!(
+            "{relative} is not in version control — neither git nor the Recycle Bin \
+             would bring it back"
+        )),
+    }
+}
+
+/// What a directory holds that git would not report on usefully.
+#[derive(Debug, PartialEq, Eq)]
+enum Nested {
+    /// A `.git` directory in a child: a repository of its own.
+    Repository,
+    /// A `.git` file in a child: a submodule's working tree, whose contents
+    /// exist only on this machine until they are committed and pushed.
+    Submodule,
+    None,
+}
+
+fn nested_repository(directory: &Path) -> Nested {
+    let Ok(reader) = std::fs::read_dir(directory) else {
+        return Nested::None;
+    };
+    for entry in reader.flatten() {
+        if !entry.path().is_dir() {
+            continue;
+        }
+        let marker = entry.path().join(".git");
+        if marker.is_dir() {
+            return Nested::Repository;
+        }
+        if marker.is_file() {
+            return Nested::Submodule;
+        }
+    }
+    Nested::None
+}
+
+/// Uncommitted changes under `relative`, as git counts them. `Some(0)` means
+/// git has a complete record of the path; `None` means there is no repository
+/// to ask — or git is not installed, which comes to the same thing here.
+///
+/// Ignored files are included on purpose. They are untracked by definition, so
+/// deleting them is final, and `.gitignore` happens to cover the folders that
+/// are most expensive to rebuild (`node_modules`, `target`). Somewhere there
+/// is no git at all, the whole path can only be judged as unrecorded.
+///
+/// The count says nothing about what is *inside* a nested repository: a
+/// submodule comes back as a single changed line and a separate clone as none
+/// at all. [`delete_risk`] checks for both before trusting this number.
+fn uncommitted_count(root: &Path, relative: &str) -> Option<usize> {
+    let output = run_git(
+        root,
+        &[
+            "--no-pager",
+            "status",
+            "--porcelain=v1",
+            "--untracked-files=all",
+            "--ignored",
+            "--",
+            relative,
+        ],
+    )
+    .ok()?;
+    // A non-zero exit means "not a repository" (or a pathspec git rejected),
+    // not "clean" — the distinction the caller depends on.
+    if output.status.code() != Some(0) {
+        return None;
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    Some(stdout.lines().filter(|line| !line.trim().is_empty()).count())
 }
 
 /// Plan mode refuses anything that can change the workspace. Web tools are
@@ -1247,13 +1421,117 @@ fn copy_dir(source: &Path, destination: &Path) -> Result<()> {
     for entry in reader.flatten() {
         let from = entry.path();
         let to = destination.join(entry.file_name());
-        if from.is_dir() {
+        // Links are leaves here. Recursing through one would copy whatever it
+        // points at — quite possibly outside the workspace — and a junction
+        // aimed at its own parent would never finish.
+        if from.is_dir() && !is_link(&from) {
             copy_dir(&from, &to)?;
         } else {
             std::fs::copy(&from, &to).map_err(|e| Error::io(&from, e))?;
         }
     }
     Ok(())
+}
+
+/// Deletes a path, preferring the Recycle Bin where there is one, and returns
+/// a phrase naming where the bytes went so the model reports it accurately.
+fn remove_path(target: &Path) -> Result<&'static str> {
+    #[cfg(windows)]
+    {
+        // The shell owns the Recycle Bin, so anything that goes wrong here is
+        // not fatal: fall through to the permanent delete the user asked for.
+        // The returned phrase is what tells them which one happened.
+        if recycle(target).is_ok() {
+            return Ok("to the Recycle Bin");
+        }
+    }
+    if target.is_dir() {
+        std::fs::remove_dir_all(target).map_err(|e| Error::io(target, e))?;
+    } else {
+        std::fs::remove_file(target).map_err(|e| Error::io(target, e))?;
+    }
+    Ok("permanently")
+}
+
+/// Sends a path to the Recycle Bin.
+///
+/// `FOF_ALLOWUNDO` is the whole point: without it `SHFileOperation` erases the
+/// way `remove_dir_all` does. `FOF_NORECURSEREPARSE` holds the shell to the
+/// same rule as the rest of this module — never follow a junction.
+#[cfg(windows)]
+fn recycle(target: &Path) -> Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows::core::PCWSTR;
+    use windows::Win32::System::Com::{CoInitializeEx, COINIT_APARTMENTTHREADED};
+    use windows::Win32::UI::Shell::{
+        SHFileOperationW, SHFILEOPSTRUCTW, FOF_ALLOWUNDO, FOF_NOCONFIRMATION, FOF_NOERRORUI,
+        FOF_NORECURSEREPARSE, FOF_SILENT, FO_DELETE,
+    };
+
+    // The shell wants a double-null-terminated list of paths, and it may be
+    // reached from a worker thread where COM was never set up. Ignore the
+    // result: RPC_E_CHANGED_MODE just means someone else chose an apartment
+    // already.
+    let _ = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) };
+
+    let mut from: Vec<u16> = target.as_os_str().encode_wide().collect();
+    from.push(0);
+    from.push(0);
+
+    let mut operation = SHFILEOPSTRUCTW {
+        wFunc: FO_DELETE,
+        pFrom: PCWSTR(from.as_ptr()),
+        fFlags: (FOF_ALLOWUNDO.0
+            | FOF_NOCONFIRMATION.0
+            | FOF_NOERRORUI.0
+            | FOF_SILENT.0
+            | FOF_NORECURSEREPARSE.0) as u16,
+        ..Default::default()
+    };
+
+    let code = unsafe { SHFileOperationW(&mut operation) };
+    if code != 0 {
+        return Err(Error::Other(format!(
+            "the Recycle Bin refused {} (shell error {code})",
+            target.display()
+        )));
+    }
+    if operation.fAnyOperationsAborted.as_bool() {
+        return Err(Error::Other(format!(
+            "the Recycle Bin did not finish with {}",
+            target.display()
+        )));
+    }
+    Ok(())
+}
+
+/// Whether a path is a link — a symlink, or a Windows junction — and so must
+/// not be walked or recursed through.
+///
+/// Two reasons this matters. Following one can leave the workspace entirely,
+/// which is exactly what [`resolve`] exists to prevent. And a junction whose
+/// target is its own parent makes any recursion unbounded: `count_entries`
+/// would overflow the stack, and with `panic = "abort"` in the release profile
+/// that does not unwind, it takes the whole process down.
+fn is_link(path: &Path) -> bool {
+    let Ok(meta) = std::fs::symlink_metadata(path) else {
+        return false;
+    };
+    if meta.file_type().is_symlink() {
+        return true;
+    }
+    // Windows: treat any reparse point as a link, rather than trusting
+    // `is_symlink` to cover junctions as well as symlinks.
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0400;
+        meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+    }
+    #[cfg(not(windows))]
+    {
+        false
+    }
 }
 
 fn count_entries(path: &Path) -> usize {
@@ -1264,7 +1542,10 @@ fn count_entries(path: &Path) -> usize {
         .flatten()
         .map(|entry| {
             let child = entry.path();
-            if child.is_dir() {
+            // A link counts as one entry and is never walked into: its target
+            // is not part of this folder, and following it can recurse without
+            // end.
+            if child.is_dir() && !is_link(&child) {
                 1 + count_entries(&child)
             } else {
                 1
@@ -1288,14 +1569,14 @@ fn delete_path(target: &Path, root: &Path) -> Result<String> {
 
     if target.is_dir() {
         let count = count_entries(target);
-        std::fs::remove_dir_all(target).map_err(|e| Error::io(target, e))?;
+        let how = remove_path(target)?;
         Ok(format!(
-            "deleted folder {} ({count} entries)",
+            "deleted folder {} ({count} entries) {how}",
             relative_path(target, root)
         ))
     } else {
-        std::fs::remove_file(target).map_err(|e| Error::io(target, e))?;
-        Ok(format!("deleted {}", relative_path(target, root)))
+        let how = remove_path(target)?;
+        Ok(format!("deleted {} {how}", relative_path(target, root)))
     }
 }
 
@@ -1621,6 +1902,153 @@ mod tests {
         }
     }
 
+    /// A real repository, so the risk rule is exercised against git itself
+    /// rather than against a mock of it.
+    fn git(root: &Path, args: &[&str]) -> bool {
+        crate::process::hidden_std("git")
+            .args(args)
+            .current_dir(root)
+            .stdin(std::process::Stdio::null())
+            .output()
+            .map(|out| out.status.success())
+            .unwrap_or(false)
+    }
+
+    fn repo(root: &Path) {
+        // `-b main` keeps the initial branch name out of the test's concerns.
+        assert!(git(root, &["init", "-q", "-b", "main"]), "git init");
+        assert!(git(root, &["config", "user.email", "t@example.com"]), "email");
+        assert!(git(root, &["config", "user.name", "Test"]), "name");
+    }
+
+    #[test]
+    fn delete_risk_asks_outside_a_repository() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("notes.md"), "scratch").unwrap();
+
+        let reason = delete_risk(r#"{"path":"notes.md"}"#, &context(dir.path()));
+        let reason = reason.expect("nothing could restore this, so it must ask");
+        assert!(reason.contains("notes.md"), "{reason}");
+        assert!(reason.contains("version control"), "{reason}");
+    }
+
+    #[test]
+    fn delete_risk_is_quiet_for_committed_content() {
+        let dir = tempfile::tempdir().unwrap();
+        repo(dir.path());
+        std::fs::write(dir.path().join("kept.md"), "committed").unwrap();
+        assert!(git(dir.path(), &["add", "kept.md"]), "add");
+        assert!(git(dir.path(), &["commit", "-qm", "add kept.md"]), "commit");
+
+        // `git restore` brings this straight back, so a card would be noise.
+        assert_eq!(delete_risk(r#"{"path":"kept.md"}"#, &context(dir.path())), None);
+    }
+
+    #[test]
+    fn delete_risk_asks_for_untracked_and_modified_content() {
+        let dir = tempfile::tempdir().unwrap();
+        repo(dir.path());
+        std::fs::write(dir.path().join("tracked.md"), "one").unwrap();
+        assert!(git(dir.path(), &["add", "tracked.md"]), "add");
+        assert!(git(dir.path(), &["commit", "-qm", "add tracked.md"]), "commit");
+
+        // Untracked: git has never seen these bytes.
+        std::fs::write(dir.path().join("draft.md"), "unpublished").unwrap();
+        let reason = delete_risk(r#"{"path":"draft.md"}"#, &context(dir.path()))
+            .expect("untracked content must ask");
+        assert!(reason.contains("draft.md"), "{reason}");
+
+        // Modified: a commit exists, but not with these bytes in it.
+        std::fs::write(dir.path().join("tracked.md"), "two").unwrap();
+        let reason = delete_risk(r#"{"path":"tracked.md"}"#, &context(dir.path()))
+            .expect("modified content must ask");
+        assert!(reason.contains("tracked.md"), "{reason}");
+
+        // A folder is judged the same way, and the count is the useful part.
+        std::fs::write(dir.path().join("untouched.md"), "fine").unwrap();
+        assert!(git(dir.path(), &["add", "untouched.md"]), "add");
+        assert!(git(dir.path(), &["commit", "-qm", "add untouched.md"]), "commit");
+        std::fs::create_dir_all(dir.path().join("mixed")).unwrap();
+        std::fs::write(dir.path().join("mixed/clean.md"), "ok").unwrap();
+        assert!(git(dir.path(), &["add", "mixed/clean.md"]), "add");
+        assert!(git(dir.path(), &["commit", "-qm", "add mixed"]), "commit");
+        std::fs::write(dir.path().join("mixed/dirty.md"), "uncommitted").unwrap();
+
+        let reason = delete_risk(r#"{"path":"mixed"}"#, &context(dir.path()))
+            .expect("a folder with uncommitted content must ask");
+        assert!(reason.contains("uncommitted"), "{reason}");
+        assert!(reason.contains("1 of the 2"), "{reason}");
+    }
+
+    #[test]
+    fn delete_risk_asks_before_losing_repository_history() {
+        let dir = tempfile::tempdir().unwrap();
+        repo(dir.path());
+
+        // `.git` is never "clean" in a useful sense: taking it away discards
+        // every commit the git_* tools could revert to.
+        let reason = delete_risk(r#"{"path":".git"}"#, &context(dir.path()))
+            .expect("the repository's history must ask");
+        assert!(reason.contains("history"), "{reason}");
+    }
+
+    #[test]
+    fn nested_repositories_are_told_apart_from_ordinary_folders() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("plain/deep")).unwrap();
+        assert_eq!(nested_repository(&dir.path().join("plain")), Nested::None);
+
+        // A child with a real `.git` directory: a repository of its own, whose
+        // commits this workspace's history says nothing about.
+        std::fs::create_dir_all(dir.path().join("clone/inner/.git")).unwrap();
+        assert_eq!(nested_repository(&dir.path().join("clone")), Nested::Repository);
+
+        // A child whose `.git` is a *file*: a submodule's work tree, recorded
+        // in the parent only as a commit id.
+        std::fs::create_dir_all(dir.path().join("sub/module")).unwrap();
+        std::fs::write(dir.path().join("sub/module/.git"), "gitdir: ../.git/modules/x").unwrap();
+        assert_eq!(nested_repository(&dir.path().join("sub")), Nested::Submodule);
+    }
+
+    #[test]
+    fn delete_risk_does_not_follow_a_link_out_of_the_workspace() {
+        let dir = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(outside.path().join("secret.txt"), "not yours").unwrap();
+
+        // A junction needs no elevation on Windows, unlike a symlink.
+        let link = dir.path().join("escape");
+        let made = std::process::Command::new("cmd")
+            .args(["/C", "mklink", "/J"])
+            .arg(&link)
+            .arg(outside.path())
+            .output()
+            .map(|out| out.status.success())
+            .unwrap_or(false);
+        if !made {
+            // A filesystem without reparse points cannot exercise this; the
+            // walker's guard is still what `is_link` reports on below.
+            eprintln!("skipping: this filesystem would not create a junction");
+            return;
+        }
+
+        assert!(is_link(&link), "a junction must be recognised as a link");
+        // Counting must terminate and must not descend into the target: the
+        // link is one entry, and the file behind it is not in this folder.
+        assert_eq!(count_entries(&dir.path()), 1);
+    }
+
+    #[test]
+    fn plain_folders_are_not_links() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("real/inner")).unwrap();
+        std::fs::write(dir.path().join("real/file.txt"), "x").unwrap();
+
+        assert!(!is_link(&dir.path().join("real")));
+        assert!(!is_link(&dir.path().join("real/file.txt")));
+        assert_eq!(count_entries(&dir.path()), 1 + 2);
+    }
+
     #[test]
     fn read_file_refuses_escapes() {
         let dir = tempfile::tempdir().unwrap();
@@ -1676,6 +2104,19 @@ mod tests {
         assert!(outcome.ok);
         assert!(outcome.output.contains("a.txt:2"));
         assert!(!outcome.output.contains("node_modules"));
+    }
+
+    #[test]
+    fn only_the_schedules_still_always_ask() {
+        // Creating or deleting a schedule changes what Loom does while nobody
+        // is watching, which is a different thing from deleting a file.
+        assert!(always_asks(SCHEDULE_JOB));
+        assert!(always_asks(DELETE_JOB));
+        // A delete is judged by `delete_risk` instead, so the name alone no
+        // longer forces a card.
+        assert!(!always_asks(DELETE_PATH));
+        assert!(!requires_confirmation(PermissionMode::AutoAll, DELETE_PATH));
+        assert!(!requires_confirmation(PermissionMode::Atelier, DELETE_PATH));
     }
 
     #[test]

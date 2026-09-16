@@ -7,7 +7,15 @@
 // A `--debug` build also embeds the frontend, but it prefers the Vite dev
 // server while one is running, so it is not what you want to ship.
 import { execFileSync } from "node:child_process";
-import { existsSync, rmSync, mkdirSync, copyFileSync, readdirSync, statSync } from "node:fs";
+import {
+  existsSync,
+  readFileSync,
+  rmSync,
+  mkdirSync,
+  copyFileSync,
+  readdirSync,
+  statSync,
+} from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join, resolve } from "node:path";
 
@@ -27,6 +35,53 @@ if (!existsSync(distIndex)) {
     `No frontend build found at ${distIndex}. Run "bun run build" so the binary has assets to embed.`,
   );
   process.exit(1);
+}
+
+const appIco = join(root, "src-tauri", "icons", "icon.ico");
+const setupIco = join(root, "setup", "src-tauri", "icons", "icon.ico");
+const iconSvg = join(root, "src-tauri", "icons", "icon.svg");
+
+// ---------------------------------------------------------------------------
+// Preflight: the exe must be newer than the artwork it carries.
+//
+// Windows embeds the icon at link time, so a rebuilt icon alone does not change
+// a binary that was already linked. Packing such an exe produces an installer
+// that installs the *previous* logo and points every shortcut at it — the app
+// looks right everywhere except the places a user actually looks. Cheaper to
+// refuse here than to debug through a reinstall.
+// ---------------------------------------------------------------------------
+if (existsSync(iconSvg) && existsSync(appIco)) {
+  const exeTime = statSync(exe).mtimeMs;
+  const stale = [
+    [iconSvg, "src-tauri/icons/icon.svg"],
+    [appIco, "src-tauri/icons/icon.ico"],
+    [join(root, "src-tauri", "tauri.conf.json"), "src-tauri/tauri.conf.json"],
+  ].filter(([path]) => existsSync(path) && statSync(path).mtimeMs > exeTime);
+
+  if (stale.length > 0) {
+    console.error(
+      `The exe still carries the previous icon: ${stale
+        .map(([, label]) => label)
+        .join(", ")} ${stale.length === 1 ? "is" : "are"} newer than ${exe}.\n` +
+        `Rebuild the app before packing the payload:\n` +
+        `  bun run tauri build --no-bundle\n` +
+        `Otherwise the installer ships the old logo on every shortcut it writes.`,
+    );
+    process.exit(1);
+  }
+}
+
+// The two .ico files must be the same bytes: the app's icon lands on the
+// installed exe, and Setup's on the installer and the shortcuts it writes.
+if (existsSync(appIco) && existsSync(setupIco)) {
+  if (!readFileSync(appIco).equals(readFileSync(setupIco))) {
+    console.error(
+      `setup/src-tauri/icons/icon.ico differs from src-tauri/icons/icon.ico.\n` +
+        `The installer would draw a different logo from the app it installs.\n` +
+        `Run \`bun run icons\` to regenerate both from src-tauri/icons/icon.svg.`,
+    );
+    process.exit(1);
+  }
 }
 
 if (exe.includes(`${join("target", "debug")}`)) {

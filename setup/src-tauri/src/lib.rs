@@ -212,7 +212,12 @@ async fn install(
 
     emit(&app, SetupProgress::phase("shortcuts"));
     let uninstaller = write_uninstaller(&install_dir)?;
+    // The icon comes first: the shortcuts point at it, and the uninstall
+    // entry's DisplayIcon does too.
+    write_icon(&install_dir)?;
     create_shortcut(&install_dir, desktop_shortcut)?;
+    // Only meaningful once the shortcuts exist, and harmless if it fails.
+    refresh_shell_icons();
 
     emit(&app, SetupProgress::phase("registering"));
     register_uninstall(&install_dir, &uninstaller, bytes.len() as u64)?;
@@ -338,6 +343,7 @@ fn write_uninstaller(install_dir: &Path) -> Result<PathBuf, String> {
          reg delete \"HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run\" /v Loom /f >nul 2>&1\r\n\
          del \"%USERPROFILE%\\Desktop\\Loom.lnk\" >nul 2>&1\r\n\
          del \"%APPDATA%\\Microsoft\\Windows\\Start Menu\\Programs\\Loom.lnk\" >nul 2>&1\r\n\
+         del \"{install}\\loom.ico\" >nul 2>&1\r\n\
          rmdir /S /Q \"{install}\"\r\n\
          del \"%~f0\" >nul 2>&1\r\n\
          exit /b 0\r\n",
@@ -356,9 +362,35 @@ fn uninstall_home() -> Result<PathBuf, String> {
     Ok(base.join("Loom"))
 }
 
-/// Creates Start Menu (and optionally desktop) shortcuts via WScript.Shell.
+/// The app's icon, embedded at compile time and written next to the app on
+/// install.
+///
+/// This exists so shortcuts can point at a dedicated `.ico` rather than at
+/// `loom.exe`. Windows caches an icon per file path, and the app's path is the
+/// one thing an update is guaranteed to rewrite — Explorer is free to keep
+/// serving the previous image for it, which is exactly how an old logo survives
+/// a reinstall. A fresh path carrying the right bytes has no cache entry to
+/// inherit.
+const APP_ICON: &[u8] = include_bytes!("../icons/icon.ico");
+
+/// Name of that file inside the install folder.
+const ICON_FILE: &str = "loom.ico";
+
+/// Writes the icon beside the app.
+///
+/// An error here is a real install failure rather than something to shrug off:
+/// the shortcuts point at this file, so a missing one leaves them iconless.
+fn write_icon(install_dir: &Path) -> Result<(), String> {
+    let icon = install_dir.join(ICON_FILE);
+    std::fs::write(&icon, APP_ICON)
+        .map_err(|e| format!("could not write {}: {e}", icon.display()))
+}
+
+/// Creates Start Menu (and optionally desktop) shortcuts via WScript.Shell,
+/// pointing each one's `IconLocation` at the dedicated .ico.
 fn create_shortcut(install_dir: &Path, desktop: bool) -> Result<(), String> {
     let exe = install_dir.join("loom.exe");
+    let icon = install_dir.join(ICON_FILE);
     let start_menu = format!(
         "{}\\Microsoft\\Windows\\Start Menu\\Programs\\Loom.lnk",
         std::env::var("APPDATA").unwrap_or_default()
@@ -368,20 +400,28 @@ fn create_shortcut(install_dir: &Path, desktop: bool) -> Result<(), String> {
         std::env::var("USERPROFILE").unwrap_or_default()
     );
 
+    // `,0` selects the first image in the .ico, which is the format
+    // IconLocation expects: the file alone is not enough.
+    let icon_location = format!("{},0", icon.display());
+
     let mut script = format!(
         "$s = (New-Object -ComObject WScript.Shell).CreateShortcut('{start_menu}'); \
-         $s.TargetPath = '{exe}'; $s.WorkingDirectory = '{dir}'; $s.Save();",
+         $s.TargetPath = '{exe}'; $s.WorkingDirectory = '{dir}'; \
+         $s.IconLocation = '{icon_location}'; $s.Save();",
         start_menu = start_menu,
         exe = exe.display(),
         dir = install_dir.display(),
+        icon_location = icon_location,
     );
     if desktop {
         script.push_str(&format!(
             " $d = (New-Object -ComObject WScript.Shell).CreateShortcut('{desktop_path}'); \
-             $d.TargetPath = '{exe}'; $d.WorkingDirectory = '{dir}'; $d.Save();",
+             $d.TargetPath = '{exe}'; $d.WorkingDirectory = '{dir}'; \
+             $d.IconLocation = '{icon_location}'; $d.Save();",
             desktop_path = desktop_path,
             exe = exe.display(),
             dir = install_dir.display(),
+            icon_location = icon_location,
         ));
     }
 
@@ -395,6 +435,20 @@ fn create_shortcut(install_dir: &Path, desktop: bool) -> Result<(), String> {
     } else {
         Err("shortcut creation failed".to_string())
     }
+}
+
+/// Asks the shell to drop its per-path icon cache, so a shortcut that already
+/// existed stops showing the previous logo without a re-pin.
+///
+/// Best effort by design: `ie4uinit` is a Windows utility rather than a
+/// contract, and failing to refresh a cache must never read as a failed
+/// install. The icon on disk is already correct either way.
+fn refresh_shell_icons() {
+    let _ = hidden_command("ie4uinit.exe")
+        .arg("-show")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
 }
 
 /// Adds or removes the per-user Run entry. `Loom` is the name the app's
@@ -471,9 +525,12 @@ fn register_uninstall(
         &install_dir.to_string_lossy().into_owned(),
     )
     .map_err(|e| e.to_string())?;
+    // The dedicated .ico, not `loom.exe`: Settings → Apps shows the icon of
+    // whatever path is named here, and naming the exe means inheriting
+    // Explorer's cached image for it.
     key.set_value(
         "DisplayIcon",
-        &install_dir.join("loom.exe").to_string_lossy().into_owned(),
+        &install_dir.join(ICON_FILE).to_string_lossy().into_owned(),
     )
     .map_err(|e| e.to_string())?;
     key.set_value(

@@ -43,7 +43,18 @@ pub fn build_body(request: &ChatRequest<'_>) -> Value {
     if request.stream {
         body["stream_options"] = json!({ "include_usage": true });
     }
-    if let Some(max) = request.max_output_tokens {
+    // Always declare a completion budget. A gateway left to choose one reserves
+    // far more of the window than the budget reserved for it, and rejects the
+    // request — the failure the context module exists to prevent. The engine
+    // supplies the number; the fallback covers a request built outside a turn.
+    let max = request
+        .max_output_tokens
+        .unwrap_or(crate::context::DEFAULT_OUTPUT_TOKENS);
+    if uses_max_completion_tokens(request.model) {
+        // OpenAI's reasoning line renamed the field, and older ones reject
+        // `max_tokens` outright.
+        body["max_completion_tokens"] = json!(max);
+    } else {
         body["max_tokens"] = json!(max);
     }
     if let Some(temperature) = request.temperature {
@@ -75,6 +86,21 @@ pub fn build_body(request: &ChatRequest<'_>) -> Value {
     }
 
     body
+}
+
+/// Whether a model wants `max_completion_tokens` rather than `max_tokens`.
+/// OpenAI's o-series and gpt-5 line renamed the parameter and reject the old
+/// name, so a request that sets it anyway fails whatever the window allows.
+fn uses_max_completion_tokens(model: &str) -> bool {
+    let id = model
+        .rsplit('/')
+        .next()
+        .unwrap_or(model)
+        .trim()
+        .to_ascii_lowercase();
+    ["o1", "o3", "o4", "gpt-5"]
+        .iter()
+        .any(|prefix| id.starts_with(prefix))
 }
 
 /// Plain string content when there are no images (maximum compatibility with
@@ -333,6 +359,39 @@ mod tests {
         assert_eq!(body["stream_options"]["include_usage"], true);
         assert_eq!(body["max_tokens"], 1024);
         assert!(body.get("reasoning_effort").is_none());
+    }
+
+    /// A gateway left to choose its own completion budget reserves far more of
+    /// the window than Loom's fit did, and rejects the request. Never sending
+    /// the field is what let a 1.05M-token window reject a request Loom
+    /// believed had 375k tokens of room.
+    #[test]
+    fn a_completion_budget_is_always_declared() {
+        let provider = ProviderConfig::default();
+        let mut req = request(&provider);
+        req.max_output_tokens = None;
+        let body = build_body(&req);
+        assert_eq!(body["max_tokens"], crate::context::DEFAULT_OUTPUT_TOKENS);
+    }
+
+    /// The reasoning line renamed the parameter, and rejects the old name.
+    #[test]
+    fn reasoning_models_get_max_completion_tokens() {
+        let provider = ProviderConfig::default();
+        for model in ["o3", "o4-mini", "gpt-5.6-luna", "openai/gpt-5"] {
+            let mut req = request(&provider);
+            req.model = model;
+            let body = build_body(&req);
+            assert_eq!(body["max_completion_tokens"], 1024, "{model}");
+            assert!(body.get("max_tokens").is_none(), "{model}");
+        }
+        for model in ["gpt-4o", "deepseek-v4", "x-ai/grok-4"] {
+            let mut req = request(&provider);
+            req.model = model;
+            let body = build_body(&req);
+            assert_eq!(body["max_tokens"], 1024, "{model}");
+            assert!(body.get("max_completion_tokens").is_none(), "{model}");
+        }
     }
 
     #[test]

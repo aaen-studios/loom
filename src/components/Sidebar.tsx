@@ -46,6 +46,7 @@ const SORT_OPTIONS: { id: SidebarSort; label: string }[] = [
 export function SidebarPopup() {
   const open = useUi((state) => state.sidebarOpen);
   const setOpen = useUi((state) => state.setSidebarOpen);
+  const settingsOpen = useUi((state) => state.settingsOpen);
   const setSettingsOpen = useUi((state) => state.setSettingsOpen);
   const sessions = useChat((state) => state.sessions);
   const activeId = useChat((state) => state.activeId);
@@ -76,13 +77,15 @@ export function SidebarPopup() {
   };
 
   useEffect(() => {
-    if (!open) return;
+    if (!open || settingsOpen) return;
+    // Settings owns Escape while it is up, or one keypress would dismiss the
+    // panel and the chats behind it at once.
     const onKey = (event: KeyboardEvent) => {
       if (event.key === "Escape") setOpen(false);
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [open, setOpen]);
+  }, [open, settingsOpen, setOpen]);
 
   // Opening the list must show where you are, even if that group was collapsed
   // in a previous visit.
@@ -152,9 +155,18 @@ export function SidebarPopup() {
     // The card floats over the transcript in both states; only the scrim
     // depends on pinning. The layer itself ignores the pointer so the chat
     // behind stays interactive while pinned.
-    <div className="pointer-events-none absolute inset-0 z-30 animate-fade-in">
-      {/* Pinned means no click-away: only unpin or close retires the card. */}
-      {!pinned && (
+    <div
+      className={cn(
+        "pointer-events-none absolute inset-0 animate-fade-in",
+        // Above the settings panel while it is open: the two sit side by side,
+        // so the chats stay usable rather than dimmed underneath.
+        settingsOpen ? "z-50" : "z-30",
+      )}
+    >
+      {/* Pinned means no click-away: only unpin or close retires the card.
+          Settings is the other case — it opens beside the list, so a scrim
+          would only stand between the two. */}
+      {!pinned && !settingsOpen && (
         <button
           type="button"
           aria-label="Close chats"
@@ -364,10 +376,9 @@ export function SidebarPopup() {
         <div className="border-t border-[var(--glass-border)] p-2">
           <button
             type="button"
-            onClick={() => {
-              setOpen(false);
-              setSettingsOpen(true);
-            }}
+            // Settings opens beside the chats rather than over them, so the
+            // list stays open and clickable while you are in there.
+            onClick={() => setSettingsOpen(true)}
             className="hover-surface flex w-full items-center gap-2 rounded-row px-2.5 py-2 text-left text-[13px] text-soft"
           >
             <SettingsIcon size={15} />

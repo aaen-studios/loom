@@ -53,4 +53,15 @@ describe("mode lists", () => {
       expect(canAlwaysAllow(mode)).toBe(true);
     }
   });
+
+  it("hides Always allow on a delete, whatever the mode", () => {
+    // A delete card under Auto all means the loss would be real, so the card
+    // must not offer to stop asking: that is the one question worth keeping.
+    for (const mode of ["ask", "auto-read-only", "auto-all", null, undefined] as const) {
+      expect(canAlwaysAllow(mode, "delete_path")).toBe(false);
+      expect(canAlwaysAllow(mode, "write_file")).toBe(true);
+      expect(canAlwaysAllow(mode)).toBe(true);
+    }
+    expect(canAlwaysAllow("atelier", "write_file")).toBe(false);
+  });
 });

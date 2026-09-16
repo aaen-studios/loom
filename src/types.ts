@@ -486,6 +486,13 @@ export interface PendingPermission {
   name: string;
   arguments: string;
   readOnly: boolean;
+  /**
+   * Why this call is asking, when the permission mode alone would have let it
+   * run. Only `delete_path` produces one: it is the single tool judged by what
+   * the call would destroy rather than by its name, so the card has to say
+   * what that is.
+   */
+  reason?: string | null;
 }
 
 export interface QuestionOption {
@@ -595,6 +602,8 @@ export type EngineEvent =
       name: string;
       arguments: string;
       readOnly: boolean;
+      /** Present only when the mode would otherwise have allowed the call. */
+      reason?: string | null;
     }
   | {
       type: "questionRequest";
@@ -611,7 +620,19 @@ export type EngineEvent =
       reasoning: string | null;
       usage: Usage;
     }
-  | { type: "error"; sessionId: string; messageId: string; error: string }
+  | {
+      /**
+       * The turn ended early — a limit, a provider refusal, a loop. Not an
+       * error: the partial reply above it stays where it is, and the chat must
+       * still be handed back.
+       */
+      type: "notice";
+      sessionId: string;
+      /** The turn that stopped; null when no message owns the note. */
+      messageId: string | null;
+      text: string;
+      detail: string | null;
+    }
   | { type: "title"; sessionId: string; title: string }
   | { type: "computerPaused"; sessionId: string }
   | { type: "computerResumed"; sessionId: string }

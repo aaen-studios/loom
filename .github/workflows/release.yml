@@ -26,6 +26,13 @@ jobs:
       - name: Install frontend deps
         run: bun install --frozen-lockfile
 
+      # Regenerate the icons from src-tauri/icons/icon.svg rather than trusting
+      # whatever rasters were committed. The app's icon is baked into the exe at
+      # link time, so this has to sit *before* the build: a stale raster here
+      # ships a stale logo on every shortcut the installer writes.
+      - name: Regenerate icons
+        run: bun run icons
+
       - name: Build Loom (portable)
         run: bun run tauri build --no-bundle
 

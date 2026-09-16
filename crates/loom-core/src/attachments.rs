@@ -40,10 +40,29 @@ pub struct Attachment {
     /// attached: the transcript shows a small tag instead of the image.
     #[serde(skip_serializing_if = "is_false", default)]
     pub hidden: bool,
+    /// Encoded pixel dimensions for images; zero when unknown or not an image.
+    /// The context budget counts an image by its pixel tiles, not its bytes.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub width: u32,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub height: u32,
 }
 
 fn is_false(value: &bool) -> bool {
     !*value
+}
+
+fn is_zero(value: &u32) -> bool {
+    *value == 0
+}
+
+/// Reads an image's pixel dimensions, or `(0, 0)` when the header cannot be
+/// read. Never fails: a missing size only costs accuracy in the budget.
+fn dimensions_of(path: &Path, kind: AttachmentKind) -> (u32, u32) {
+    if kind != AttachmentKind::Image {
+        return (0, 0);
+    }
+    image::image_dimensions(path).unwrap_or((0, 0))
 }
 
 pub fn mime_for(name: &str) -> &'static str {
@@ -116,6 +135,7 @@ pub fn store_in(root: &Path, session_id: &str, source: &Path) -> Result<Attachme
     std::fs::create_dir_all(&directory).map_err(|e| Error::io(&directory, e))?;
     let target = directory.join(format!("{id}-{name}"));
     std::fs::copy(source, &target).map_err(|e| Error::io(source, e))?;
+    let (width, height) = dimensions_of(&target, kind);
 
     Ok(Attachment {
         id,
@@ -126,6 +146,8 @@ pub fn store_in(root: &Path, session_id: &str, source: &Path) -> Result<Attachme
         path: target.to_string_lossy().into_owned(),
         text: None,
         hidden: false,
+        width,
+        height,
     })
 }
 
@@ -150,21 +172,25 @@ pub fn store_bytes_in(
     }
 
     let mime = mime_for(name).to_string();
+    let kind = kind_for(&mime);
     let id = uuid::Uuid::new_v4().to_string();
     let directory = attachments_dir_in(root, session_id);
     std::fs::create_dir_all(&directory).map_err(|e| Error::io(&directory, e))?;
     let target = directory.join(format!("{id}-{name}"));
     std::fs::write(&target, bytes).map_err(|e| Error::io(&target, e))?;
+    let (width, height) = dimensions_of(&target, kind);
 
     Ok(Attachment {
         id,
-        kind: kind_for(&mime),
+        kind,
         name: name.to_string(),
         mime,
         size: bytes.len() as u64,
         path: target.to_string_lossy().into_owned(),
         text: None,
         hidden: false,
+        width,
+        height,
     })
 }
 
@@ -490,6 +516,8 @@ mod tests {
             path: "C:/tmp/x.png".into(),
             text: None,
             hidden: true,
+            width: 0,
+            height: 0,
         };
         let encoded = serialize_extra(std::slice::from_ref(&attachment)).unwrap();
         assert_eq!(parse_extra(Some(&encoded)), vec![attachment]);

@@ -1650,29 +1650,44 @@ pub fn list_commands(
         .map_err(to_string)
 }
 
+// All three of these block: `stop_command` and `delete_command` wait on
+// `taskkill`/`kill`, and `command_output` reads up to 256 KiB of log. A
+// synchronous Tauri command runs on the event-loop thread, so the window would
+// stop painting and accepting input for the duration — which is exactly what a
+// Stop press must not do. `spawn_blocking`, as the usage commands already do.
+
 #[tauri::command]
-pub fn command_output(
+pub async fn command_output(
     state: State<'_, AppState>,
     id: String,
     lines: Option<usize>,
 ) -> Result<String, String> {
-    state
-        .engine
-        .command_output(&id, lines.unwrap_or(200))
+    let engine = state.engine.clone();
+    tauri::async_runtime::spawn_blocking(move || engine.command_output(&id, lines.unwrap_or(200)))
+        .await
+        .map_err(|error| error.to_string())?
         .map_err(to_string)
 }
 
 #[tauri::command]
-pub fn stop_command(
+pub async fn stop_command(
     state: State<'_, AppState>,
     id: String,
 ) -> Result<loom_core::db::CommandRun, String> {
-    state.engine.stop_command(&id).map_err(to_string)
+    let engine = state.engine.clone();
+    tauri::async_runtime::spawn_blocking(move || engine.stop_command(&id))
+        .await
+        .map_err(|error| error.to_string())?
+        .map_err(to_string)
 }
 
 #[tauri::command]
-pub fn delete_command(state: State<'_, AppState>, id: String) -> Result<(), String> {
-    state.engine.delete_command(&id).map_err(to_string)
+pub async fn delete_command(state: State<'_, AppState>, id: String) -> Result<(), String> {
+    let engine = state.engine.clone();
+    tauri::async_runtime::spawn_blocking(move || engine.delete_command(&id))
+        .await
+        .map_err(|error| error.to_string())?
+        .map_err(to_string)
 }
 
 #[tauri::command]

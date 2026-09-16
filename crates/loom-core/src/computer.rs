@@ -561,7 +561,7 @@ async fn screenshot(
         }
     };
     let name = format!("Computer {}", shot.name);
-    let image = store_shot(session_id, &name, &shot.bytes)?;
+    let image = store_shot(session_id, &name, &shot.bytes, shot.width, shot.height)?;
 
     let scale = if captured.rect.2 == 0 {
         1.0
@@ -632,13 +632,22 @@ fn capture_frame(capture: &Capture) -> Result<CaptureResult> {
     Ok(last)
 }
 
-fn store_shot(session_id: &str, name: &str, bytes: &[u8]) -> Result<ToolImage> {
+fn store_shot(
+    session_id: &str,
+    name: &str,
+    bytes: &[u8],
+    width: u32,
+    height: u32,
+) -> Result<ToolImage> {
     let root = crate::paths::loom_home()?.join("attachments");
     let stored = crate::attachments::store_bytes_in(&root, session_id, name, bytes)?;
     Ok(ToolImage {
         name: name.to_string(),
         mime: stored.mime,
         path: stored.path,
+        // The encoded frame's own size, which is what a provider tiles.
+        width: if width > 0 { width } else { stored.width },
+        height: if height > 0 { height } else { stored.height },
     })
 }
 

@@ -709,6 +709,10 @@ export const useChat = create<ChatState>((set, get) => ({
       event.type === "computerResumed"
     ) {
       if (!event.sessionId) return;
+    } else if (event.type === "notice") {
+      // A note with no message behind it still has to clear the turn, so the
+      // id is not required — only the chat it belongs to.
+      if (!event.sessionId) return;
     } else if (
       event.type === "taskChanged" ||
       event.type === "jobChanged" ||
@@ -838,6 +842,7 @@ export const useChat = create<ChatState>((set, get) => ({
               name: event.name,
               arguments: event.arguments,
               readOnly: event.readOnly,
+              reason: event.reason ?? null,
             },
           },
         }));
@@ -926,13 +931,20 @@ export const useChat = create<ChatState>((set, get) => ({
         break;
       }
 
-      case "error": {
-        debugLog(`error for active=${isActive}: ${event.error}`);
+      case "notice": {
+        // The turn ended early: a limit, a provider refusal, a loop. Everything
+        // below is what hands the chat back — clearing `busy` frees the
+        // composer, and `advanceQueue` drains whatever was queued behind the
+        // turn. Without this arm (which is what a rename from `error` left
+        // behind) a stopped turn stayed busy for good.
+        debugLog(`notice for active=${isActive}: ${event.text}`);
         set((state) => {
           const busy = { ...state.busy };
           delete busy[event.sessionId];
           const live = { ...state.live };
           delete live[event.sessionId];
+          const liveTools = { ...state.liveTools };
+          if (event.messageId) delete liveTools[event.messageId];
           const questions = { ...state.questions };
           delete questions[event.sessionId];
           const permissions = { ...state.permissions };
@@ -944,7 +956,8 @@ export const useChat = create<ChatState>((set, get) => ({
           return {
             busy,
             live,
-            errors: { ...state.errors, [event.sessionId]: event.error },
+            liveTools,
+            errors: { ...state.errors, [event.sessionId]: event.text },
             questions,
             permissions,
             unread,
@@ -953,8 +966,8 @@ export const useChat = create<ChatState>((set, get) => ({
         // Reload so the reason recorded on the message shows (and survives a
         // restart) rather than leaving an empty bubble.
         if (isActive) void get().openSession(event.sessionId);
-        // A failure parks the queue (fix and resend), but an explicit
-        // "send now" still goes out — the user asked for it.
+        // A stop parks the queue (fix and resend), but an explicit "send now"
+        // still goes out — the user asked for it.
         void get().advanceQueue(event.sessionId, false);
         break;
       }
