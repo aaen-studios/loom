@@ -7,32 +7,34 @@
 
 pub mod attachments;
 pub mod catalog;
+pub mod computer;
 pub mod config;
+pub mod context;
 pub mod db;
-pub mod engine;
 pub mod embeddings;
+pub mod engine;
 pub mod error;
 pub mod export;
+pub mod external;
 pub mod fsutil;
+pub mod harness;
 pub mod images;
 pub mod index;
+pub mod jobs;
 pub mod mcp;
+pub mod memory;
 pub mod paths;
 pub mod persona;
 pub mod provider;
 pub mod providers;
+pub mod screen;
 pub mod secrets;
 pub mod skills;
 pub mod tools;
+pub mod ui_guide;
 pub mod updater;
+pub mod usage;
 pub mod web;
 pub mod workspace;
 
 pub use error::{Error, Result};
-
-
-
-
-
-
-

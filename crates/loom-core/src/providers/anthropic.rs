@@ -29,13 +29,30 @@ pub fn build_body(request: &ChatRequest<'_>) -> Value {
         .iter()
         .map(|message| {
             // Tool results travel as a user turn with tool_result blocks.
+            // Screenshots ride along as image blocks inside the same result.
             if message.role == "tool" {
+                let mut blocks: Vec<Value> = Vec::new();
+                let text = message.joined_text();
+                if !text.is_empty() {
+                    blocks.push(json!({ "type": "text", "text": text }));
+                }
+                for part in &message.parts {
+                    if let super::ContentPart::Image { mime, base64, .. } = part {
+                        blocks.push(json!({
+                            "type": "image",
+                            "source": { "type": "base64", "media_type": mime, "data": base64 }
+                        }));
+                    }
+                }
+                if blocks.is_empty() {
+                    blocks.push(json!({ "type": "text", "text": "" }));
+                }
                 return json!({
                     "role": "user",
                     "content": [{
                         "type": "tool_result",
                         "tool_use_id": message.tool_call_id.clone().unwrap_or_default(),
-                        "content": message.joined_text(),
+                        "content": blocks,
                     }]
                 });
             }
@@ -73,7 +90,9 @@ pub fn build_body(request: &ChatRequest<'_>) -> Value {
         })
         .collect();
 
-    let max_tokens = request.max_output_tokens.unwrap_or(4_096);
+    // Anthropic requires `max_tokens`. The engine normally supplies the
+    // model's own limit; this fallback only covers unknown models.
+    let max_tokens = request.max_output_tokens.unwrap_or(8_192);
     let mut body = json!({
         "model": request.model,
         "max_tokens": max_tokens,
@@ -83,6 +102,13 @@ pub fn build_body(request: &ChatRequest<'_>) -> Value {
 
     if let Some(system) = request.system.filter(|s| !s.trim().is_empty()) {
         body["system"] = json!(system);
+    }
+
+    if let Some(temperature) = request.temperature {
+        body["temperature"] = json!(temperature);
+    }
+    if let Some(top_p) = request.top_p {
+        body["top_p"] = json!(top_p);
     }
 
     if let Some(variant) = request.variant {
@@ -113,7 +139,10 @@ pub fn parse_chunk(data: &str) -> Result<Option<Vec<Delta>>> {
     let value: Value = serde_json::from_str(data)
         .map_err(|e| Error::Provider(format!("malformed stream chunk: {e}")))?;
 
-    let event_type = value.get("type").and_then(Value::as_str).unwrap_or_default();
+    let event_type = value
+        .get("type")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
     let mut deltas = Vec::new();
 
     match event_type {
@@ -146,7 +175,10 @@ pub fn parse_chunk(data: &str) -> Result<Option<Vec<Delta>>> {
                     deltas.push(Delta::ToolCall {
                         index,
                         id: block.get("id").and_then(Value::as_str).map(str::to_string),
-                        name: block.get("name").and_then(Value::as_str).map(str::to_string),
+                        name: block
+                            .get("name")
+                            .and_then(Value::as_str)
+                            .map(str::to_string),
                         argument_fragment: None,
                     });
                 }
@@ -158,12 +190,16 @@ pub fn parse_chunk(data: &str) -> Result<Option<Vec<Delta>>> {
             match delta.get("type").and_then(Value::as_str) {
                 Some("text_delta") => {
                     if let Some(text) = delta.get("text").and_then(Value::as_str) {
-                        deltas.push(Delta::Text { text: text.to_string() });
+                        deltas.push(Delta::Text {
+                            text: text.to_string(),
+                        });
                     }
                 }
                 Some("thinking_delta") => {
                     if let Some(text) = delta.get("thinking").and_then(Value::as_str) {
-                        deltas.push(Delta::Reasoning { text: text.to_string() });
+                        deltas.push(Delta::Reasoning {
+                            text: text.to_string(),
+                        });
                     }
                 }
                 Some("input_json_delta") => {
@@ -196,7 +232,11 @@ pub fn parse_chunk(data: &str) -> Result<Option<Vec<Delta>>> {
         _ => {}
     }
 
-    Ok(if deltas.is_empty() { None } else { Some(deltas) })
+    Ok(if deltas.is_empty() {
+        None
+    } else {
+        Some(deltas)
+    })
 }
 
 pub fn parse_response(value: &Value, status: u16) -> Result<(String, Option<String>, Usage)> {
@@ -243,7 +283,11 @@ pub fn parse_response(value: &Value, status: u16) -> Result<(String, Option<Stri
 
     Ok((
         content,
-        if reasoning.is_empty() { None } else { Some(reasoning) },
+        if reasoning.is_empty() {
+            None
+        } else {
+            Some(reasoning)
+        },
         usage,
     ))
 }
@@ -270,6 +314,8 @@ mod tests {
             messages: vec![super::super::WireMessage::text("user", "hi")],
             variant: None,
             max_output_tokens: None,
+            temperature: None,
+            top_p: None,
             stream: true,
             tools: Vec::new(),
             session_id: None,
@@ -309,7 +355,12 @@ mod tests {
         )
         .unwrap()
         .unwrap();
-        assert_eq!(text[0], Delta::Text { text: "Hello".into() });
+        assert_eq!(
+            text[0],
+            Delta::Text {
+                text: "Hello".into()
+            }
+        );
 
         let thinking = parse_chunk(
             r#"{"type":"content_block_delta","delta":{"type":"thinking_delta","thinking":"hm"}}"#,
@@ -323,7 +374,13 @@ mod tests {
         )
         .unwrap()
         .unwrap();
-        assert_eq!(start[0], Delta::Usage { input_tokens: Some(9), output_tokens: Some(0) });
+        assert_eq!(
+            start[0],
+            Delta::Usage {
+                input_tokens: Some(9),
+                output_tokens: Some(0)
+            }
+        );
     }
 
     #[test]
@@ -362,5 +419,3 @@ mod tests {
         );
     }
 }
-
-

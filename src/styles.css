@@ -79,9 +79,17 @@
   --accent: #8ea2ff;
   --accent-soft: rgb(142 162 255 / 0.16);
   --danger: #ff6369;
+  --danger-soft: rgb(255 99 105 / 0.14);
 
   --control-bg: rgb(244 246 252 / 0.94);
+  --control-bg-hover: rgb(244 246 252 / 0.82);
   --control-ink: #0b0e15;
+
+  /* A grouped card inside the settings drawer: one step up from the panel. */
+  --card-bg: rgb(255 255 255 / 0.045);
+
+  /* The selected row in a list. Stronger than hover, quieter than a control. */
+  --active-bg: rgb(255 255 255 / 0.11);
 
   /* A light background preset under the dark theme looks like fog unless the
      veil is lifted, so dark mode keeps a floor. */
@@ -113,9 +121,14 @@ html:not(.dark) {
   --accent: #4f5bd5;
   --accent-soft: rgb(79 91 213 / 0.14);
   --danger: #e5484d;
+  --danger-soft: rgb(229 72 77 / 0.12);
 
   --control-bg: rgb(16 19 36 / 0.92);
+  --control-bg-hover: rgb(16 19 36 / 0.78);
   --control-ink: #f6f7fb;
+
+  --card-bg: rgb(16 19 34 / 0.045);
+  --active-bg: rgb(16 19 34 / 0.09);
 }
 
 /* ---------------------------------------------------------------------------
@@ -166,6 +179,16 @@ body {
   cursor: default;
 }
 
+/* The quick-ask overlay hides its scrollbar: a track on the desktop reads as
+   window chrome, not as content. */
+.no-scrollbar {
+  scrollbar-width: none;
+}
+
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
+}
+
 [data-tauri-drag-region] {
   cursor: default;
 }
@@ -195,6 +218,26 @@ body {
   -webkit-backdrop-filter: blur(38px) saturate(165%);
   border: 1px solid var(--glass-border-strong);
   box-shadow: var(--panel-shadow), var(--glass-highlight);
+}
+
+/* A blob: one floating surface in the quick-ask overlay. Tighter and lighter
+   than a panel, because a column of them should read as loose objects on the
+   desktop, not as a single window. */
+@utility blob {
+  background-color: var(--panel-bg-strong);
+  backdrop-filter: blur(30px) saturate(160%);
+  -webkit-backdrop-filter: blur(30px) saturate(160%);
+  border: 1px solid var(--glass-border-strong);
+  box-shadow: 0 12px 32px -16px rgb(0 0 0 / 0.6), var(--glass-highlight);
+}
+
+/* Bare assistant text sits straight on the desktop, so it needs its own
+   contrast: a layered shadow keeps it legible over bright artwork. */
+.blob-text {
+  text-shadow:
+    0 1px 2px rgb(0 0 0 / 0.55),
+    0 1px 10px rgb(0 0 0 / 0.45),
+    0 0 3px rgb(0 0 0 / 0.4);
 }
 
 .hover-surface {
@@ -266,6 +309,17 @@ body {
   }
 }
 
+@keyframes loom-summon {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
 .animate-drift {
   animation: loom-drift 52s ease-in-out infinite;
 }
@@ -276,6 +330,10 @@ body {
 
 .animate-fade-in {
   animation: loom-fade-in 180ms ease both;
+}
+
+.animate-summon {
+  animation: loom-summon 200ms cubic-bezier(0.22, 1, 0.36, 1) both;
 }
 
 .cursor-blink {
@@ -294,37 +352,315 @@ body {
 
 /* ---------------------------------------------------------------------------
    Controls
+
+   These element rules live in the base layer so a utility (w-40 on a range,
+   an outline on an input) can still win; unlayered rules would beat every
+   Tailwind class in the file.
 --------------------------------------------------------------------------- */
-input[type="range"] {
-  -webkit-appearance: none;
-  appearance: none;
-  width: 100%;
-  height: 20px;
-  background: transparent;
-  cursor: pointer;
+@layer base {
+  input[type="range"] {
+    -webkit-appearance: none;
+    appearance: none;
+    width: 100%;
+    height: 20px;
+    background: transparent;
+    cursor: pointer;
+  }
+
+  input[type="range"]::-webkit-slider-runnable-track {
+    height: 4px;
+    border-radius: 999px;
+    background: var(--ink-ghost);
+  }
+
+  input[type="range"]::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    appearance: none;
+    width: 14px;
+    height: 14px;
+    margin-top: -5px;
+    border-radius: 999px;
+    background: var(--accent);
+    border: 2px solid var(--panel-bg-strong);
+    box-shadow: 0 2px 6px rgb(0 0 0 / 0.3);
+  }
+
+  textarea,
+  input {
+    outline: none;
+  }
+
+  /* Focus must stay visible even though the default outline is off: every
+     button and the controls that cannot carry a custom ring get the accent
+     one. Components with their own ring (btn-*, chip, Toggle) still win. */
+  button:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+  }
+
+  input[type="checkbox"]:focus-visible,
+  input[type="range"]:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+    border-radius: var(--radius-capsule);
+  }
 }
 
-input[type="range"]::-webkit-slider-runnable-track {
-  height: 4px;
-  border-radius: 999px;
-  background: var(--ink-ghost);
+/* ---------------------------------------------------------------------------
+   Buttons and key hints
+
+   Three button surfaces, one per intent: primary inverts to the control ink
+   (the app's established "this is the action" look), ghost is an outline for
+   secondary actions, danger tints red and fills only on hover so destructive
+   verbs stay quiet until you mean them. Sizing stays with the caller.
+--------------------------------------------------------------------------- */
+@utility btn-primary {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-control);
+  corner-shape: squircle;
+  background-color: var(--control-bg);
+  color: var(--control-ink);
+  font-weight: 500;
+  transition:
+    background-color 130ms ease,
+    opacity 130ms ease;
+
+  &:hover {
+    background-color: var(--control-bg-hover);
+  }
+
+  &:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+  }
+
+  &:disabled {
+    opacity: 0.5;
+    pointer-events: none;
+  }
 }
 
-input[type="range"]::-webkit-slider-thumb {
-  -webkit-appearance: none;
-  appearance: none;
-  width: 14px;
-  height: 14px;
-  margin-top: -5px;
-  border-radius: 999px;
-  background: var(--accent);
-  border: 2px solid var(--panel-bg-strong);
-  box-shadow: 0 2px 6px rgb(0 0 0 / 0.3);
+@utility btn-ghost {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius-control);
+  corner-shape: squircle;
+  background-color: transparent;
+  color: var(--ink-soft);
+  transition:
+    background-color 130ms ease,
+    color 130ms ease,
+    border-color 130ms ease;
+
+  &:hover {
+    background-color: var(--hover-bg);
+    border-color: var(--glass-border-strong);
+    color: var(--ink);
+  }
+
+  &:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+  }
+
+  &:disabled {
+    opacity: 0.5;
+    pointer-events: none;
+  }
 }
 
-textarea,
-input {
-  outline: none;
+@utility btn-danger {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  border: 1px solid var(--danger-soft);
+  border-radius: var(--radius-control);
+  corner-shape: squircle;
+  background-color: transparent;
+  color: var(--danger);
+  transition:
+    background-color 130ms ease,
+    color 130ms ease,
+    border-color 130ms ease;
+
+  &:hover {
+    background-color: var(--danger);
+    border-color: transparent;
+    color: #fff;
+  }
+
+  &:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+  }
+
+  &:disabled {
+    opacity: 0.5;
+    pointer-events: none;
+  }
+}
+
+/* A keycap: the physical shape of the shortcut it names. */
+@utility kbd {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 20px;
+  height: 18px;
+  padding: 0 5px;
+  border: 1px solid var(--glass-border);
+  border-radius: 6px;
+  background-color: var(--hover-bg);
+  color: var(--ink-faint);
+  font-family: var(--font-sans);
+  font-size: 10.5px;
+  font-weight: 500;
+  letter-spacing: 0.02em;
+}
+
+/* A preset chip: capsule outline for adding things (providers, skills…). */
+@utility chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius-capsule);
+  background-color: transparent;
+  color: var(--ink-soft);
+  transition:
+    background-color 130ms ease,
+    color 130ms ease,
+    border-color 130ms ease;
+
+  &:hover {
+    background-color: var(--hover-bg);
+    border-color: var(--glass-border-strong);
+    color: var(--ink);
+  }
+
+  &:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+  }
+
+  &:disabled {
+    opacity: 0.5;
+    pointer-events: none;
+  }
+}
+
+@utility chip-danger {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  border: 1px solid var(--danger-soft);
+  border-radius: var(--radius-capsule);
+  background-color: transparent;
+  color: var(--danger);
+  transition:
+    background-color 130ms ease,
+    color 130ms ease,
+    border-color 130ms ease;
+
+  &:hover {
+    background-color: var(--danger);
+    border-color: transparent;
+    color: #fff;
+  }
+
+  &:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+  }
+}
+
+/* ---------------------------------------------------------------------------
+   Model thinking
+
+   The inner monologue: quieter than the reply, marked by a fading spine, and
+   only animated while the text is actually arriving.
+--------------------------------------------------------------------------- */
+@keyframes loom-shimmer {
+  from {
+    background-position: 100% 0;
+  }
+  to {
+    background-position: 0% 0;
+  }
+}
+
+@keyframes loom-unfold {
+  from {
+    grid-template-rows: 0fr;
+  }
+  to {
+    grid-template-rows: 1fr;
+  }
+}
+
+.thinking-shimmer {
+  background-image: linear-gradient(
+    90deg,
+    var(--ink-faint) 38%,
+    var(--ink) 50%,
+    var(--ink-faint) 62%
+  );
+  background-size: 220% 100%;
+  background-position: 100% 0;
+  background-clip: text;
+  -webkit-background-clip: text;
+  color: transparent;
+  animation: loom-shimmer 1.6s linear infinite;
+}
+
+/* The preview trails off instead of ending in an ellipsis. */
+.thinking-preview {
+  mask-image: linear-gradient(to right, #000 68%, transparent);
+  -webkit-mask-image: linear-gradient(to right, #000 68%, transparent);
+}
+
+.thinking-unfold {
+  animation: loom-unfold 260ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.loom-thinking {
+  border-left: 2px solid var(--glass-border);
+  padding-left: 12px;
+  color: var(--ink-soft);
+}
+
+.loom-thinking .loom-markdown {
+  font-size: 13px;
+  line-height: 1.68;
+}
+
+.loom-thinking .loom-markdown > * + * {
+  margin-top: 0.6em;
+}
+
+.loom-thinking .loom-markdown h1,
+.loom-thinking .loom-markdown h2,
+.loom-thinking .loom-markdown h3,
+.loom-thinking .loom-markdown h4 {
+  font-size: 1.05em;
+}
+
+.loom-thinking .loom-markdown pre {
+  border-radius: 10px;
+  padding: 9px 11px;
+  font-size: 12px;
+}
+
+.density-compact .loom-thinking .loom-markdown {
+  font-size: 12.5px;
 }
 
 /* ---------------------------------------------------------------------------
@@ -438,6 +774,201 @@ html:not(.dark) .loom-markdown pre {
 .loom-markdown img {
   max-width: 100%;
   border-radius: 12px;
+}
+
+/* ---------------------------------------------------------------------------
+   Code blocks
+
+   Streamdown's markup, dressed in the house style: one surface per block, a
+   quiet language header that owns the actions, line numbers painted with CSS
+   counters, and Shiki token colours (inline --shiki-* variables) resolved per
+   theme. Nothing here depends on utility classes tailwind cannot see inside
+   node_modules.
+--------------------------------------------------------------------------- */
+.loom-markdown [data-streamdown="code-block"] {
+  position: relative;
+  margin: 0.85em 0;
+  border: 1px solid var(--glass-border);
+  border-radius: 14px;
+  background: rgb(8 10 16 / 0.55);
+  box-shadow: var(--glass-highlight);
+  overflow: hidden;
+}
+
+html:not(.dark) .loom-markdown [data-streamdown="code-block"] {
+  background: rgb(255 255 255 / 0.62);
+}
+
+.loom-markdown [data-streamdown="code-block-header"] {
+  display: flex;
+  align-items: center;
+  min-height: 30px;
+  padding: 0 42px 0 12px;
+  border-bottom: 1px solid var(--glass-border);
+  background: var(--hover-bg);
+  color: var(--ink-faint);
+  font-size: 11.5px;
+  line-height: 1.4;
+  white-space: nowrap;
+}
+
+.loom-markdown [data-streamdown="code-block-header"] > span {
+  margin: 0;
+  font-family: ui-monospace, "Cascadia Code", "SF Mono", Consolas, monospace;
+  letter-spacing: 0.04em;
+}
+
+/* A fence with no language still gets a header, so the actions have a home. */
+.loom-markdown [data-streamdown="code-block-header"] > span:empty::before {
+  content: "text";
+}
+
+/* The header owns the actions: pin them to its right edge. */
+.loom-markdown [data-streamdown="code-block"] > div:has(> [data-streamdown="code-block-actions"]) {
+  position: absolute;
+  top: 0;
+  right: 4px;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  height: 30px;
+}
+
+.loom-markdown [data-streamdown="code-block-actions"] {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: none;
+  backdrop-filter: none;
+  pointer-events: auto;
+}
+
+.loom-markdown [data-streamdown="code-block-copy-button"],
+.loom-markdown [data-streamdown="code-block-download-button"] {
+  display: grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: 0;
+  border-radius: 7px;
+  background: none;
+  color: var(--ink-faint);
+  cursor: pointer;
+  transition: background-color 120ms ease, color 120ms ease;
+}
+
+.loom-markdown [data-streamdown="code-block-copy-button"]:hover,
+.loom-markdown [data-streamdown="code-block-download-button"]:hover,
+.loom-markdown [data-streamdown="code-block-copy-button"]:focus-visible,
+.loom-markdown [data-streamdown="code-block-download-button"]:focus-visible {
+  background: var(--hover-bg);
+  color: var(--ink);
+}
+
+.loom-markdown [data-streamdown="code-block-copy-button"]:disabled,
+.loom-markdown [data-streamdown="code-block-download-button"]:disabled {
+  cursor: default;
+  opacity: 0.5;
+}
+
+.loom-markdown [data-streamdown="code-block-copy-button"] svg,
+.loom-markdown [data-streamdown="code-block-download-button"] svg {
+  width: 14px;
+  height: 14px;
+}
+
+/* Mid-stream the text is still moving; a half block is not worth copying. */
+.loom-markdown [data-streamdown="code-block"][data-incomplete] [data-streamdown="code-block-actions"] {
+  opacity: 0.35;
+  pointer-events: none;
+}
+
+.loom-markdown [data-streamdown="code-block-body"] {
+  padding: 11px 14px;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  overflow: auto;
+  font-size: 13px;
+  line-height: 1.65;
+}
+
+.loom-markdown [data-streamdown="code-block"] pre {
+  margin: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  overflow: visible;
+  font-size: inherit;
+  line-height: inherit;
+  tab-size: 4;
+}
+
+/* Line numbers sit outside the text and never travel with a selection. */
+.loom-markdown [data-streamdown="code-block-body"] code {
+  counter-reset: line;
+}
+
+.loom-markdown [data-streamdown="code-block-body"] code > span {
+  display: block;
+  counter-increment: line;
+}
+
+.loom-markdown [data-streamdown="code-block-body"] code > span::before {
+  content: counter(line);
+  display: inline-block;
+  width: 2.5em;
+  margin-right: 1em;
+  text-align: right;
+  color: var(--ink-faint);
+  opacity: 0.6;
+  user-select: none;
+}
+
+/* Shiki writes one --shiki-* variable pair per token; resolve it per theme. */
+.loom-markdown [data-streamdown="code-block-body"] span[style] {
+  color: var(--sdm-c, inherit);
+}
+
+.dark .loom-markdown [data-streamdown="code-block-body"] span[style] {
+  color: var(--shiki-dark, var(--sdm-c, inherit));
+}
+
+.loom-thinking .loom-markdown [data-streamdown="code-block-header"] {
+  min-height: 26px;
+  font-size: 11px;
+}
+
+.loom-thinking .loom-markdown [data-streamdown="code-block"] > div:has(> [data-streamdown="code-block-actions"]) {
+  height: 26px;
+}
+
+.loom-thinking .loom-markdown [data-streamdown="code-block-body"] {
+  padding: 9px 12px;
+  font-size: 12.5px;
+}
+
+/* ---------------------------------------------------------------------------
+   Markdown documents
+
+   A ```markdown fence renders as a card (see MarkdownDoc.tsx). The source view
+   stacks a real code block inside it, so the card owns the only frame.
+--------------------------------------------------------------------------- */
+.loom-markdown .loom-doc-source [data-streamdown="code-block"] {
+  margin: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
+.loom-markdown .loom-doc-source [data-streamdown="code-block-header"] {
+  display: none;
 }
 
 /* Keep streamdown's own chrome from fighting the glass surfaces. */

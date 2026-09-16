@@ -7,7 +7,7 @@
 
 use std::collections::BTreeMap;
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "kebab-case")]
@@ -38,6 +38,97 @@ pub enum Modality {
     Pdf,
 }
 
+impl Modality {
+    /// Parses the modality names gateways and datasets use. `file` is how
+    /// OpenRouter spells a document/PDF input.
+    pub fn from_wire(name: &str) -> Option<Self> {
+        match name {
+            "text" => Some(Modality::Text),
+            "image" => Some(Modality::Image),
+            "audio" => Some(Modality::Audio),
+            "video" => Some(Modality::Video),
+            "file" | "pdf" => Some(Modality::Pdf),
+            _ => None,
+        }
+    }
+}
+
+/// Where a model's metadata came from. Refreshes may overwrite anything below
+/// `User`; a spec tagged `User` is never touched by detection again.
+///
+/// Serialises as `"user"`, `"api"`, `"unknown"`, or `"catalog@N"` so the wire
+/// value stays legible in `config.json`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum MetadataSource {
+    /// The user typed or confirmed it; detection must not overwrite it.
+    User,
+    /// Read from the gateway's `/models` response.
+    Api,
+    /// Bundled catalogue, tagged with the `CATALOG_VERSION` that produced it.
+    Catalog(u32),
+    /// Nothing is known about where these values came from.
+    #[default]
+    Unknown,
+}
+
+impl MetadataSource {
+    /// Merge rank: the pair wins against any lower pair. Versions order
+    /// catalogue entries so a newer table can correct an older guess.
+    pub fn authority(self) -> (u8, u32) {
+        match self {
+            MetadataSource::Unknown => (0, 0),
+            MetadataSource::Catalog(version) => (1, version),
+            MetadataSource::Api => (2, 0),
+            MetadataSource::User => (3, 0),
+        }
+    }
+
+    pub fn is_catalog(self) -> bool {
+        matches!(self, MetadataSource::Catalog(_))
+    }
+}
+
+impl std::fmt::Display for MetadataSource {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            MetadataSource::User => write!(formatter, "user"),
+            MetadataSource::Api => write!(formatter, "api"),
+            MetadataSource::Unknown => write!(formatter, "unknown"),
+            MetadataSource::Catalog(version) => write!(formatter, "catalog@{version}"),
+        }
+    }
+}
+
+impl Serialize for MetadataSource {
+    fn serialize<S: Serializer>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error> {
+        match self {
+            MetadataSource::User => serializer.serialize_str("user"),
+            MetadataSource::Api => serializer.serialize_str("api"),
+            MetadataSource::Unknown => serializer.serialize_str("unknown"),
+            MetadataSource::Catalog(version) => {
+                serializer.serialize_str(&format!("catalog@{version}"))
+            }
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for MetadataSource {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> std::result::Result<Self, D::Error> {
+        let raw = String::deserialize(deserializer)?;
+        Ok(match raw.as_str() {
+            "user" => MetadataSource::User,
+            "api" => MetadataSource::Api,
+            other => match other
+                .strip_prefix("catalog@")
+                .and_then(|rest| rest.parse().ok())
+            {
+                Some(version) => MetadataSource::Catalog(version),
+                None => MetadataSource::Unknown,
+            },
+        })
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase", default)]
 pub struct ReasoningSpec {
@@ -58,6 +149,12 @@ pub struct ModelSpec {
     pub reasoning: Option<ReasoningSpec>,
     /// Marks the user's favourite models for the picker.
     pub favorite: bool,
+    /// USD per 1M input tokens, when known. The user can correct it.
+    pub input_price: Option<f32>,
+    /// USD per 1M output tokens, when known.
+    pub output_price: Option<f32>,
+    /// Who supplied this metadata; refreshes never overwrite `user`.
+    pub source: MetadataSource,
 }
 
 impl ModelSpec {
@@ -66,6 +163,18 @@ impl ModelSpec {
             input_modalities: modalities.to_vec(),
             ..Default::default()
         }
+    }
+
+    /// Whether any field carries real information. An explicit catalogue row
+    /// for a family whose values are unknown is all-empty by design.
+    pub fn has_metadata(&self) -> bool {
+        self.name.is_some()
+            || self.context.is_some()
+            || self.output.is_some()
+            || !self.input_modalities.is_empty()
+            || self.reasoning.is_some()
+            || self.input_price.is_some()
+            || self.output_price.is_some()
     }
 }
 

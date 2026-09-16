@@ -61,41 +61,12 @@ console.log(
   ),
 );
 
-// Search the transcript.
-await evaluate(`(() => {
-  const input = document.querySelector('input[placeholder="Search chat"]');
-  const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
-  setter.call(input, "Nobel");
-  input.dispatchEvent(new Event('input', { bubbles: true }));
-  return "typed";
-})()`);
-await sleep(700);
-console.log(
-  "after searching 'Nobel':",
-  await evaluate(
-    `(() => {
-      const text = document.body.innerText;
-      const match = text.match(/(\\d+) match/);
-      return JSON.stringify({ matches: match ? match[1] : null, blocks: document.querySelectorAll('.message-body').length });
-    })()`,
-  ),
-);
-await shot("target/search.png");
-
-// Clear the search again.
-await evaluate(`(() => {
-  const input = document.querySelector('input[placeholder="Search chat"]');
-  const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
-  setter.call(input, "");
-  input.dispatchEvent(new Event('input', { bubbles: true }));
-  return "cleared";
-})()`);
-await sleep(500);
-
 // Reveal thinking on the assistant reply (it is collapsed by default).
 console.log(
   "thinking panel before:",
-  await evaluate(`document.body.innerText.includes("Hide thinking") ? "open" : "collapsed or absent"`),
+  await evaluate(
+    `document.querySelector('[data-thinking="open"]') ? "open" : "collapsed or absent"`,
+  ),
 );
 await evaluate(`(() => {
   const rows = [...document.querySelectorAll('.group')];
@@ -108,6 +79,8 @@ await evaluate(`(() => {
 await sleep(600);
 console.log(
   "thinking panel after:",
-  await evaluate(`document.body.innerText.includes("Hide thinking") ? "open" : "still collapsed"`),
+  await evaluate(
+    `document.querySelector('[data-thinking="open"]') ? "open" : "still collapsed"`,
+  ),
 );
 socket.close();

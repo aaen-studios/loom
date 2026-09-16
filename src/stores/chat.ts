@@ -5,17 +5,25 @@ import type {
   Message,
   ModelRef,
   PendingPermission,
+  PendingQuestion,
+  QuestionAnswer,
+  QueuedMessage,
   Session,
+  Todo,
   ToolCallRecord,
 } from "../types";
 import { ipc } from "../lib/ipc";
 import { parseAttachments } from "../lib/messageExtra";
+import type { ReasoningBlock } from "../lib/messageExtra";
 import { useSettings } from "./settings";
+import { useSkills } from "./skills";
 
 interface LiveBuffer {
   messageId: string;
   content: string;
   reasoning: string;
+  /** Thinking spells with reply-text offsets, for in-place rendering. */
+  reasoningBlocks: ReasoningBlock[];
 }
 
 interface ChatState {
@@ -27,29 +35,77 @@ interface ChatState {
   /** messageId → tool calls still in flight this turn. */
   liveTools: Record<string, ToolCallRecord[]>;
   busy: Record<string, boolean>;
-  permission: PendingPermission | null;
-  error: string | null;
+  /** sessionId → tool call waiting for approval in that chat. Prompts are kept
+   *  with their chat so a request in the background never hijacks the one you
+   *  are looking at. */
+  permissions: Record<string, PendingPermission>;
+  /** sessionId → question waiting for an answer in that chat. */
+  questions: Record<string, PendingQuestion>;
+  /** sessionId → the last failure in that chat, shown there rather than in
+   *  whichever chat happens to be open. */
+  errors: Record<string, string>;
+  /** sessionId → a reply or failure landed while you were in another chat. */
+  unread: Record<string, boolean>;
+  /** sessionId → this chat's live task list. */
+  todos: Record<string, Todo[]>;
+  /** sessionId → its standing goal, set with /goal. */
+  goals: Record<string, string | null>;
+  /** sessionId → its computer turn is paused because the user took over. */
+  computerPaused: Record<string, boolean>;
+  /** Whether the goal/task panel above the composer is expanded. */
+  taskPanelOpen: boolean;
+  /** Persona that should answer the next message in a multi-persona chat. */
+  speakerId: string | null;
+  /** Persona ids currently in the active chat's cast, for transcript labels. */
+  castIds: string[];
+  /** sessionId → messages waiting to send when the current turn finishes. */
+  queues: Record<string, QueuedMessage[]>;
+  /** sessionId → a queued message the user sent now, waiting for the turn to
+   *  stop before it goes out. */
+  boosts: Record<string, QueuedMessage | null>;
+  /** sessionId → the user pressed Stop; the queue waits for them. */
+  halted: Record<string, boolean>;
   loaded: boolean;
 
   loadSessions: () => Promise<void>;
   openSession: (id: string) => Promise<void>;
-  newSession: (personaId?: string | null) => Promise<Session | null>;
+  newSession: (personaId?: string | null, workdir?: string | null) => Promise<Session | null>;
   deleteSession: (id: string) => Promise<void>;
   renameSession: (id: string, title: string) => Promise<void>;
   send: (
     text: string,
-    options?: { model?: ModelRef | null; attachments?: Attachment[] },
+    options?: {
+      model?: ModelRef | null;
+      attachments?: Attachment[];
+      /** Target a specific chat instead of the active one (queue drain). */
+      sessionId?: string;
+    },
   ) => Promise<void>;
+  enqueue: (text: string, attachments: Attachment[]) => Promise<void>;
+  removeQueued: (id: string) => void;
+  reorderQueue: (fromId: string, toId: string) => void;
+  /** Interrupts the running turn and sends this queued item next. */
+  sendQueuedNow: (id: string) => Promise<void>;
+  advanceQueue: (sessionId: string, allowQueued: boolean) => Promise<void>;
   ensureSession: () => Promise<string | null>;
   stop: () => Promise<void>;
   setModel: (model: ModelRef, variant?: string | null) => Promise<void>;
   setPersona: (personaId: string | null, systemPrompt: string | null) => Promise<void>;
+  setSpeaker: (personaId: string | null) => void;
+  setCastIds: (personaIds: string[]) => void;
   setWorkdir: (workdir: string | null) => Promise<void>;
   setPermissionMode: (mode: Session["permissionMode"]) => Promise<void>;
+  setAgentMode: (mode: Session["agentMode"]) => Promise<void>;
+  setComputerAccess: (enabled: boolean) => Promise<void>;
+  setGoal: (goal: string | null) => Promise<void>;
+  setTodos: (todos: Todo[]) => Promise<void>;
+  setTaskPanelOpen: (open: boolean) => void;
   answerPermission: (
+    permission: PendingPermission,
     allow: boolean,
     remember?: "read-only" | "all" | null,
   ) => Promise<void>;
+  answerQuestion: (question: PendingQuestion, answer: QuestionAnswer) => Promise<void>;
   retryLast: () => Promise<void>;
   /** Drops this reply and asks again from the user message before it. */
   regenerate: (messageId: string) => Promise<void>;
@@ -76,15 +132,32 @@ function debugLog(message: string): void {
   }
 }
 
-function placeholderFor(live: LiveBuffer, sessionId: string): Message {  return {
+function placeholderFor(live: LiveBuffer, sessionId: string): Message {
+  return {
     id: live.messageId,
     sessionId,
     role: "assistant",
     content: live.content,
     reasoning: live.reasoning || null,
     extra: null,
+    personaId: null,
     createdAt: Date.now(),
   };
+}
+
+/** Appends a reasoning delta to the current spell, or starts a new one once
+ *  the reply text (or the turn order) has moved on. */
+function appendReasoning(
+  blocks: ReasoningBlock[],
+  text: string,
+  after: number,
+  seq: number,
+): ReasoningBlock[] {
+  const last = blocks[blocks.length - 1];
+  if (last && (last.after ?? 0) === after && (last.seq ?? 0) === seq) {
+    return [...blocks.slice(0, -1), { ...last, text: last.text + text }];
+  }
+  return [...blocks, { text, after, seq }];
 }
 
 
@@ -100,12 +173,26 @@ export const useChat = create<ChatState>((set, get) => ({
   live: {},
   liveTools: {},
   busy: {},
-  permission: null,
-  error: null,
+  permissions: {},
+  questions: {},
+  errors: {},
+  unread: {},
+  todos: {},
+  goals: {},
+  computerPaused: {},
+  taskPanelOpen: true,
+  speakerId: null,
+  castIds: [],
+  queues: {},
+  boosts: {},
+  halted: {},
   loaded: false,
   draft: null,
 
   loadSessions: async () => {
+    // Chats that were created but never used are not worth keeping; the open
+    // one is protected so a chat being composed is never pulled away.
+    await ipc.pruneEmptySessions(get().activeId);
     const sessions = (await ipc.listSessions()) ?? [];
     set({ sessions, loaded: true });
     if (!get().activeId && sessions.length > 0) {
@@ -114,9 +201,16 @@ export const useChat = create<ChatState>((set, get) => ({
   },
 
   openSession: async (id) => {
-    const stored = (await ipc.sessionMessages(id)) ?? [];
+    const [storedMessages, todos, cast, goal] = await Promise.all([
+      ipc.sessionMessages(id),
+      ipc.sessionTodos(id),
+      ipc.sessionCast(id),
+      ipc.sessionGoal(id),
+    ]);
+    set({ castIds: (cast ?? []).map((member) => member.id) });
+    const stored = storedMessages ?? [];
     const live = get().live[id];
-    const messages = live
+    const withLive = live
       ? stored.some((message) => message.id === live.messageId)
         ? stored.map((message) =>
             message.id === live.messageId
@@ -130,18 +224,32 @@ export const useChat = create<ChatState>((set, get) => ({
         : [...stored, placeholderFor(live, id)]
       : stored;
 
-    set({ activeId: id, messages, error: null });
+    set((state) => {
+      // Opening the chat is what "reads" whatever landed there.
+      const next = {
+        activeId: id,
+        messages: withLive,
+        todos: { ...state.todos, [id]: todos ?? [] },
+        goals: { ...state.goals, [id]: goal ?? null },
+      };
+      if (!state.unread[id]) return next;
+      const unread = { ...state.unread };
+      delete unread[id];
+      return { ...next, unread };
+    });
   },
 
-  newSession: async (personaId = null) => {
-    const session = await ipc.createSession(null, personaId);
+  newSession: async (personaId = null, workdir = null) => {
+    const session = await ipc.createSession(null, personaId, workdir);
     if (!session) return null;
     set((state) => ({
       sessions: [session, ...state.sessions],
       activeId: session.id,
       messages: [],
-      error: null,
     }));
+    // Listing prunes the chats that were never used, including the empty one
+    // this replaced.
+    void get().loadSessions();
     return session;
   },
 
@@ -150,7 +258,38 @@ export const useChat = create<ChatState>((set, get) => ({
     set((state) => {
       const sessions = state.sessions.filter((session) => session.id !== id);
       const activeId = state.activeId === id ? (sessions[0]?.id ?? null) : state.activeId;
-      return { sessions, activeId, messages: activeId ? state.messages : [] };
+      const permissions = { ...state.permissions };
+      delete permissions[id];
+      const questions = { ...state.questions };
+      delete questions[id];
+      const errors = { ...state.errors };
+      delete errors[id];
+      const unread = { ...state.unread };
+      delete unread[id];
+      const todos = { ...state.todos };
+      delete todos[id];
+      const goals = { ...state.goals };
+      delete goals[id];
+      const queues = { ...state.queues };
+      delete queues[id];
+      const boosts = { ...state.boosts };
+      delete boosts[id];
+      const halted = { ...state.halted };
+      delete halted[id];
+      return {
+        sessions,
+        activeId,
+        permissions,
+        questions,
+        errors,
+        unread,
+        todos,
+        goals,
+        queues,
+        boosts,
+        halted,
+        messages: activeId ? state.messages : [],
+      };
     });
     const activeId = get().activeId;
     if (activeId) await get().openSession(activeId);
@@ -170,38 +309,146 @@ export const useChat = create<ChatState>((set, get) => ({
     const attachments = options?.attachments ?? [];
     if (!trimmed && attachments.length === 0) return;
 
-    let activeId = get().activeId;
-    if (!activeId) {
+    let targetId = options?.sessionId ?? get().activeId;
+    if (!targetId) {
       const session = await get().newSession();
       if (!session) return;
-      activeId = session.id;
+      targetId = session.id;
     }
-    if (get().busy[activeId]) return;
+    if (get().busy[targetId]) return;
 
     const optimistic: Message = {
       id: `local-${crypto.randomUUID()}`,
-      sessionId: activeId,
+      sessionId: targetId,
       role: "user",
       content: trimmed,
       reasoning: null,
       extra: attachments.length ? JSON.stringify(attachments) : null,
+      personaId: null,
       createdAt: Date.now(),
     };
-    set((state) => ({
-      messages: [...state.messages, optimistic],
-      busy: { ...state.busy, [activeId as string]: true },
-      error: null,
-    }));
+    set((state) => {
+      const errors = { ...state.errors };
+      delete errors[targetId as string];
+      return {
+        messages:
+          state.activeId === targetId
+            ? [...state.messages, optimistic]
+            : state.messages,
+        busy: { ...state.busy, [targetId as string]: true },
+        errors,
+      };
+    });
 
     try {
-      await ipc.sendMessage(activeId, trimmed, attachments, options?.model ?? null);
+      await ipc.sendMessage(
+        targetId,
+        trimmed,
+        attachments,
+        options?.model ?? null,
+        null,
+        null,
+        get().speakerId,
+      );
+      // The chosen speaker is for one turn only; the next reply goes back to
+      // the chat's default persona unless the user picks again.
+      if (get().speakerId) set({ speakerId: null });
       void get().loadSessions();
     } catch (error) {
       set((state) => ({
-        busy: { ...state.busy, [activeId as string]: false },
-        error: error instanceof Error ? error.message : String(error),
+        busy: { ...state.busy, [targetId as string]: false },
+        errors: {
+          ...state.errors,
+          [targetId as string]: error instanceof Error ? error.message : String(error),
+        },
       }));
     }
+  },
+
+  enqueue: async (text, attachments) => {
+    const trimmed = text.trim();
+    if (!trimmed && attachments.length === 0) return;
+    const sessionId = await get().ensureSession();
+    if (!sessionId) return;
+    const item: QueuedMessage = {
+      id: crypto.randomUUID(),
+      text: trimmed,
+      attachments,
+    };
+    set((state) => ({
+      queues: {
+        ...state.queues,
+        [sessionId]: [...(state.queues[sessionId] ?? []), item],
+      },
+    }));
+  },
+
+  removeQueued: (id) => {
+    const activeId = get().activeId;
+    if (!activeId) return;
+    set((state) => ({
+      queues: {
+        ...state.queues,
+        [activeId]: (state.queues[activeId] ?? []).filter((item) => item.id !== id),
+      },
+    }));
+  },
+
+  reorderQueue: (fromId, toId) => {
+    const activeId = get().activeId;
+    if (!activeId || fromId === toId) return;
+    set((state) => {
+      const queue = state.queues[activeId] ?? [];
+      const from = queue.findIndex((item) => item.id === fromId);
+      const to = queue.findIndex((item) => item.id === toId);
+      if (from < 0 || to < 0) return state;
+      const next = [...queue];
+      const [moved] = next.splice(from, 1);
+      next.splice(to, 0, moved);
+      return { queues: { ...state.queues, [activeId]: next } };
+    });
+  },
+
+  sendQueuedNow: async (id) => {
+    const activeId = get().activeId;
+    if (!activeId) return;
+    // One interrupt at a time; the pending one is already on its way out.
+    if (get().boosts[activeId]) return;
+    const item = (get().queues[activeId] ?? []).find((entry) => entry.id === id);
+    if (!item) return;
+    set((state) => ({
+      queues: {
+        ...state.queues,
+        [activeId]: (state.queues[activeId] ?? []).filter((entry) => entry.id !== id),
+      },
+      boosts: { ...state.boosts, [activeId]: item },
+      halted: { ...state.halted, [activeId]: false },
+    }));
+    // Stopping the turn produces a terminal event; the boost goes out then.
+    if (get().busy[activeId]) {
+      await ipc.cancelStream(activeId);
+    } else {
+      await get().advanceQueue(activeId, true);
+    }
+  },
+
+  /** Sends the pending boost, then the next queued message, after a turn. */
+  advanceQueue: async (sessionId, allowQueued) => {
+    const boost = get().boosts[sessionId];
+    if (boost) {
+      set((state) => ({ boosts: { ...state.boosts, [sessionId]: null } }));
+      await get().send(boost.text, {
+        attachments: boost.attachments,
+        sessionId,
+      });
+      return;
+    }
+    if (!allowQueued) return;
+    const queue = get().queues[sessionId] ?? [];
+    if (queue.length === 0) return;
+    const [next, ...rest] = queue;
+    set((state) => ({ queues: { ...state.queues, [sessionId]: rest } }));
+    await get().send(next.text, { attachments: next.attachments, sessionId });
   },
 
   ensureSession: async () => {
@@ -213,7 +460,11 @@ export const useChat = create<ChatState>((set, get) => ({
 
   stop: async () => {
     const activeId = get().activeId;
-    if (activeId) await ipc.cancelStream(activeId);
+    if (!activeId) return;
+    // Stopping means stop: the queue waits for the user rather than firing
+    // the next message the moment the cancelled turn lands.
+    set((state) => ({ halted: { ...state.halted, [activeId]: true } }));
+    await ipc.cancelStream(activeId);
   },
 
   setModel: async (model, variant = null) => {
@@ -245,6 +496,14 @@ export const useChat = create<ChatState>((set, get) => ({
     });
     if (updated) useSettings.getState().applyRemote(updated);
     void get().loadSessions();
+  },
+
+  setSpeaker: (personaId) => {
+    set({ speakerId: personaId });
+  },
+
+  setCastIds: (personaIds) => {
+    set({ castIds: personaIds });
   },
 
   setPersona: async (personaId, systemPrompt) => {
@@ -282,11 +541,63 @@ export const useChat = create<ChatState>((set, get) => ({
     }));
   },
 
-  answerPermission: async (allow, remember = null) => {
-    const permission = get().permission;
-    if (!permission) return;
-    set({ permission: null });
+  setAgentMode: async (mode) => {
+    const activeId = get().activeId;
+    if (!activeId) return;
+    await ipc.setSessionAgentMode(activeId, mode);
+    set((state) => ({
+      sessions: state.sessions.map((session) =>
+        session.id === activeId ? { ...session, agentMode: mode } : session,
+      ),
+    }));
+  },
+
+  setComputerAccess: async (enabled) => {
+    const activeId = get().activeId;
+    if (!activeId) return;
+    await ipc.setSessionComputerAccess(activeId, enabled);
+    set((state) => ({
+      sessions: state.sessions.map((session) =>
+        session.id === activeId ? { ...session, computerAccess: enabled } : session,
+      ),
+    }));
+  },
+
+  setGoal: async (goal) => {
+    const activeId = get().activeId;
+    if (!activeId) return;
+    set((state) => ({ goals: { ...state.goals, [activeId]: goal } }));
+    await ipc.setSessionGoal(activeId, goal);
+  },
+
+  setTodos: async (todos) => {
+    const activeId = get().activeId;
+    if (!activeId) return;
+    set((state) => ({ todos: { ...state.todos, [activeId]: todos } }));
+    const stored = await ipc.setTodos(activeId, todos);
+    if (stored) {
+      set((state) => ({ todos: { ...state.todos, [activeId]: stored } }));
+    }
+  },
+
+  setTaskPanelOpen: (open) => set({ taskPanelOpen: open }),
+
+  answerPermission: async (permission, allow, remember = null) => {
+    set((state) => {
+      const permissions = { ...state.permissions };
+      delete permissions[permission.sessionId];
+      return { permissions };
+    });
     await ipc.respondToolPermission(permission.callId, allow, remember);
+  },
+
+  answerQuestion: async (question, answer) => {
+    set((state) => {
+      const questions = { ...state.questions };
+      delete questions[question.sessionId];
+      return { questions };
+    });
+    await ipc.respondQuestion(question.callId, answer);
   },
 
   /**
@@ -322,7 +633,7 @@ export const useChat = create<ChatState>((set, get) => ({
     const user = messages[lastUserIndex];
     const attachments = parseAttachments(user.extra);
     await get().truncateFrom(lastUserIndex);
-    set({ error: null });
+    get().clearError();
     await get().send(user.content, { attachments });
   },
 
@@ -346,7 +657,7 @@ export const useChat = create<ChatState>((set, get) => ({
     const user = messages[userIndex];
     const attachments = parseAttachments(user.extra);
     await get().truncateFrom(userIndex);
-    set({ error: null });
+    get().clearError();
     await get().send(user.content, { attachments });
   },
 
@@ -375,8 +686,20 @@ export const useChat = create<ChatState>((set, get) => ({
 
   applyEvent: (event) => {
     // A payload missing its ids would otherwise be filed under "undefined"
-    // and silently strand the UI in a busy state.
-    if (event.type === "title") {
+    // and silently strand the UI in a busy state. `title` and
+    // `harnessChanged` carry no message id.
+    if (
+      event.type === "title" ||
+      event.type === "harnessChanged" ||
+      event.type === "todosChanged" ||
+      event.type === "computerPaused" ||
+      event.type === "computerResumed"
+    ) {
+      if (!event.sessionId) return;
+    } else if (event.type === "taskChanged" || event.type === "jobChanged") {
+      // Runs and jobs belong to their own store; events.ts routes them there.
+      return;
+    } else if (event.type === "memoryChanged") {
       if (!event.sessionId) return;
     } else if (!event.sessionId || !event.messageId) {
       debugLog(`dropped malformed ${event.type} event`);
@@ -389,7 +712,12 @@ export const useChat = create<ChatState>((set, get) => ({
 
     switch (event.type) {
       case "started": {
-        const live: LiveBuffer = { messageId: event.messageId, content: "", reasoning: "" };
+        const live: LiveBuffer = {
+          messageId: event.messageId,
+          content: "",
+          reasoning: "",
+          reasoningBlocks: [],
+        };
         set((state) => ({
           busy: { ...state.busy, [event.sessionId]: true },
           live: { ...state.live, [event.sessionId]: live },
@@ -405,10 +733,26 @@ export const useChat = create<ChatState>((set, get) => ({
       case "delta":
       case "reasoning": {
         const live = get().live[event.sessionId];
+        const base: LiveBuffer = live ?? {
+          messageId: event.messageId,
+          content: "",
+          reasoning: "",
+          reasoningBlocks: [],
+        };
         const key = event.type === "delta" ? "content" : "reasoning";
-        const nextLive: LiveBuffer = live
-          ? { ...live, [key]: live[key] + event.text }
-          : { messageId: event.messageId, content: "", reasoning: "", [key]: event.text };
+        const nextLive: LiveBuffer =
+          event.type === "delta"
+            ? { ...base, content: base.content + event.text }
+            : {
+                ...base,
+                reasoning: base.reasoning + event.text,
+                reasoningBlocks: appendReasoning(
+                  base.reasoningBlocks,
+                  event.text,
+                  event.after,
+                  event.seq,
+                ),
+              };
 
         set((state) => ({
           live: { ...state.live, [event.sessionId]: nextLive },
@@ -435,6 +779,10 @@ export const useChat = create<ChatState>((set, get) => ({
                 arguments: event.arguments,
                 status: "running",
                 output: "",
+                // The engine flushes all text before starting a call, so the
+                // live buffer is exactly the text that came before it.
+                after: [...(state.live[event.sessionId]?.content ?? "")].length,
+                seq: event.seq,
               },
             ],
           },
@@ -452,6 +800,7 @@ export const useChat = create<ChatState>((set, get) => ({
                     ...call,
                     status: event.ok ? "ok" : "error",
                     output: event.output,
+                    images: event.images ?? [],
                   }
                 : call,
             ),
@@ -461,16 +810,34 @@ export const useChat = create<ChatState>((set, get) => ({
       }
 
       case "toolPermissionRequest": {
-        set({
-          permission: {
-            sessionId: event.sessionId,
-            messageId: event.messageId,
-            callId: event.callId,
-            name: event.name,
-            arguments: event.arguments,
-            readOnly: event.readOnly,
+        set((state) => ({
+          permissions: {
+            ...state.permissions,
+            [event.sessionId]: {
+              sessionId: event.sessionId,
+              messageId: event.messageId,
+              callId: event.callId,
+              name: event.name,
+              arguments: event.arguments,
+              readOnly: event.readOnly,
+            },
           },
-        });
+        }));
+        break;
+      }
+
+      case "questionRequest": {
+        set((state) => ({
+          questions: {
+            ...state.questions,
+            [event.sessionId]: {
+              sessionId: event.sessionId,
+              messageId: event.messageId,
+              callId: event.callId,
+              question: event.question,
+            },
+          },
+        }));
         break;
       }
 
@@ -483,10 +850,25 @@ export const useChat = create<ChatState>((set, get) => ({
           delete busy[event.sessionId];
           const liveTools = { ...state.liveTools };
           delete liveTools[event.messageId];
+          // A prompt for this turn can no longer be answered once the turn
+          // ends (timeout, stop): clearing it gives the composer back.
+          const questions = { ...state.questions };
+          delete questions[event.sessionId];
+          const permissions = { ...state.permissions };
+          delete permissions[event.sessionId];
+          // A reply that lands in a chat you are not looking at stays marked
+          // until you open it.
+          const unread =
+            state.activeId === event.sessionId
+              ? state.unread
+              : { ...state.unread, [event.sessionId]: true };
           return {
             live,
             busy,
             liveTools,
+            questions,
+            permissions,
+            unread,
             messages:
               state.activeId === event.sessionId
                 ? state.messages.map((message) =>
@@ -506,6 +888,23 @@ export const useChat = create<ChatState>((set, get) => ({
         // The engine records recent models and titles while replying, so pull
         // the config back to keep the picker and settings in step.
         void useSettings.getState().load();
+        // The chat is free again: send whatever the user queued while it ran.
+        // A manual Stop parks the queue (the halt flag), and the send goes out
+        // after the reload so the optimistic bubble is not overwritten by it.
+        const releaseQueue = () => {
+          const wasHalted = get().halted[event.sessionId] ?? false;
+          if (wasHalted) {
+            set((state) => ({
+              halted: { ...state.halted, [event.sessionId]: false },
+            }));
+          }
+          void get().advanceQueue(event.sessionId, !wasHalted);
+        };
+        if (isActive) {
+          void get().openSession(event.sessionId).then(releaseQueue, releaseQueue);
+        } else {
+          releaseQueue();
+        }
         break;
       }
 
@@ -516,11 +915,29 @@ export const useChat = create<ChatState>((set, get) => ({
           delete busy[event.sessionId];
           const live = { ...state.live };
           delete live[event.sessionId];
-          return { busy, live, error: event.error };
+          const questions = { ...state.questions };
+          delete questions[event.sessionId];
+          const permissions = { ...state.permissions };
+          delete permissions[event.sessionId];
+          const unread =
+            state.activeId === event.sessionId
+              ? state.unread
+              : { ...state.unread, [event.sessionId]: true };
+          return {
+            busy,
+            live,
+            errors: { ...state.errors, [event.sessionId]: event.error },
+            questions,
+            permissions,
+            unread,
+          };
         });
         // Reload so the reason recorded on the message shows (and survives a
         // restart) rather than leaving an empty bubble.
         if (isActive) void get().openSession(event.sessionId);
+        // A failure parks the queue (fix and resend), but an explicit
+        // "send now" still goes out — the user asked for it.
+        void get().advanceQueue(event.sessionId, false);
         break;
       }
 
@@ -534,11 +951,51 @@ export const useChat = create<ChatState>((set, get) => ({
         }));
         break;
       }
+
+      case "harnessChanged": {
+        // A harness tool changed the config (or wrote a skill on disk). The
+        // engine has already saved; pull both stores back so the UI stops
+        // holding a stale copy that the next debounced save could revert.
+        void useSettings.getState().load();
+        void useSkills.getState().load();
+        break;
+      }
+
+      case "todosChanged": {
+        set((state) => ({
+          todos: { ...state.todos, [event.sessionId]: event.todos },
+        }));
+        break;
+      }
+
+      case "computerPaused": {
+        set((state) => ({
+          computerPaused: { ...state.computerPaused, [event.sessionId]: true },
+        }));
+        break;
+      }
+
+      case "computerResumed": {
+        set((state) => {
+          const computerPaused = { ...state.computerPaused };
+          delete computerPaused[event.sessionId];
+          return { computerPaused };
+        });
+        break;
+      }
     }
 
     debugLog(`  -> busy=[${Object.keys(get().busy).join(",")}] live=[${Object.keys(get().live).join(",")}] messages=${get().messages.length}`);
   },
 
-  clearError: () => set({ error: null }),
+  clearError: () => {
+    const activeId = get().activeId;
+    if (!activeId) return;
+    set((state) => {
+      const errors = { ...state.errors };
+      delete errors[activeId];
+      return { errors };
+    });
+  },
 }));
 

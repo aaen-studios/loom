@@ -1,64 +1,112 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { cn } from "../lib/cn";
 import { compactTokens } from "../lib/format";
-import { formatUsage, parseAttachments, parseError, parseUsage } from "../lib/messageExtra";
-import type { Message, ToolCallRecord } from "../types";
+import {
+  formatUsage,
+  mergeToolCalls,
+  parseAttachments,
+  parseError,
+  parseReasoningBlocks,
+  parseToolCalls,
+  parseUsage,
+  segmentMessage,
+  type ReasoningBlock,
+} from "../lib/messageExtra";
+import type { Message, ToolCallDisplay, ToolCallRecord } from "../types";
+import { folderName } from "../lib/workspaces";
 import { useChat } from "../stores/chat";
 import { useProviders } from "../stores/providers";
 import { useSettings } from "../stores/settings";
 import { useUi } from "../stores/ui";
 import { AttachmentStrip } from "./AttachmentChips";
 import { Composer } from "./Composer";
+import { GoalPanel } from "./GoalPanel";
 import { Markdown } from "./Markdown";
-import { PermissionCard, ToolCallList } from "./ToolCalls";
+import { MessageQueue } from "./MessageQueue";
+import { QuestionCard } from "./QuestionCard";
+import { PermissionCard, ToolCallGroup } from "./ToolCalls";
+import { UsageBadge } from "./UsageBadge";
 import {
   BrainIcon,
+  ChevronDownIcon,
   CopyIcon,
   EditIcon,
   LoomMark,
   RefreshIcon,
-  SearchIcon,
   TrashIcon,
 } from "./icons";
+
+/** Greeting for the blank-chat screen, fitting whatever hour it is. */
+function greeting(): string {
+  const hour = new Date().getHours();
+  if (hour < 5) return "Still up?";
+  if (hour < 12) return "Good morning";
+  if (hour < 18) return "Good afternoon";
+  return "Good evening";
+}
 
 function Reasoning({
   text,
   streaming,
-  hasContent,
   revealed,
 }: {
   text: string;
   streaming: boolean;
-  hasContent: boolean;
   revealed: boolean;
 }) {
   const showThinking = useSettings((state) => state.config.interface.showThinking);
   const [open, setOpen] = useState(showThinking === "expanded");
+  const [live, setLive] = useState(false);
 
   useEffect(() => {
     setOpen(showThinking === "expanded");
   }, [showThinking]);
 
-  // Hidden by default, unless this reply was opened from its actions.
+  useEffect(() => {
+    if (!streaming) {
+      setLive(false);
+      return;
+    }
+    setLive(true);
+    const timer = window.setTimeout(() => setLive(false), 1200);
+    return () => window.clearTimeout(timer);
+  }, [text, streaming]);
+
   if (showThinking === "hidden" && !revealed) return null;
-  // While the model is still thinking, the transcript shows a small indicator
-  // instead of the running commentary.
-  if (streaming && !hasContent) return null;
+
+  const lines = text
+    .split("\n")
+    .map((line) => line.replace(/^[#>*\-\s]+/, "").replace(/\s+/g, " ").trim())
+    .filter(Boolean);
+  const preview = lines.length > 0 ? lines[streaming ? lines.length - 1 : 0] : "";
 
   return (
-    <div className="mb-2">
+    <div className="mb-2" data-thinking={open ? "open" : "closed"}>
       <button
         type="button"
         onClick={() => setOpen((value) => !value)}
-        className="flex items-center gap-1.5 text-[12px] text-faint hover:text-[var(--ink)]"
+        aria-expanded={open}
+        className="hover-surface -ml-1 flex items-center gap-1.5 rounded-control px-1 py-1 text-[12px] text-faint hover:text-[var(--ink)]"
       >
-        <BrainIcon size={13} />
-        {open ? "Hide" : "Show"} thinking
-        {streaming && <span className="cursor-blink">•</span>}
+        <BrainIcon size={13} className={live ? "text-[var(--accent)]" : undefined} />
+        <span className={live ? "thinking-shimmer" : undefined}>Thinking</span>
+        <ChevronDownIcon
+          size={11}
+          className={cn("shrink-0 transition-transform", open && "rotate-180")}
+        />
       </button>
+      {!open && preview && (
+        <p className="thinking-preview mt-0.5 overflow-hidden pl-[19px] text-[12px] whitespace-nowrap text-faint">
+          {preview}
+        </p>
+      )}
       {open && (
-        <div className="mt-2 border-l-2 border-[var(--glass-border)] pl-3 text-[13px] leading-6 whitespace-pre-wrap text-soft italic">
-          {text}
+        <div className="thinking-unfold grid">
+          <div className="min-h-0 overflow-hidden">
+            <div className="loom-thinking mt-1.5">
+              <Markdown content={text} allowGeneratedUi={false} streaming={streaming} />
+            </div>
+          </div>
         </div>
       )}
     </div>
@@ -67,15 +115,7 @@ function Reasoning({
 
 
 /** Title, token totals for this chat, and a search box for the transcript. */
-function ChatHeader({
-  query,
-  onQuery,
-  matches,
-}: {
-  query: string;
-  onQuery: (value: string) => void;
-  matches: number;
-}) {
+function ChatHeader() {
   const session = useChat((state) =>
     state.sessions.find((item) => item.id === state.activeId),
   );
@@ -106,23 +146,7 @@ function ChatHeader({
         </span>
       )}
       <div className="flex-1" />
-      <div className="flex items-center gap-1.5">
-        <SearchIcon size={14} className="shrink-0 text-faint" />
-        <input
-          value={query}
-          placeholder="Search chat"
-          onChange={(event) => onQuery(event.currentTarget.value)}
-          onKeyDown={(event) => {
-            if (event.key === "Escape") onQuery("");
-          }}
-          className="w-40 rounded-control border border-[var(--glass-border)] bg-[var(--hover-bg)] px-2 py-1 text-[12px] placeholder:text-[var(--ink-faint)]"
-        />
-        {query.trim() && (
-          <span className="shrink-0 text-[11.5px] text-faint">
-            {matches} match{matches === 1 ? "" : "es"}
-          </span>
-        )}
-      </div>
+      <UsageBadge align="down" />
     </div>
   );
 }
@@ -212,24 +236,60 @@ function MessageActions({
   );
 }
 
+/** Shared empty lists so selectors keep stable references. */
+const NO_TOOLS: ToolCallRecord[] = [];
+const NO_REASONING: ReasoningBlock[] = [];
+
 function MessageRow({
   message,
   streaming,
-  runningTools,
   revealThinking,
   onRevealThinking,
   selected,
+  toolDisplay,
 }: {
   message: Message;
   streaming: boolean;
-  runningTools: boolean;
   revealThinking: boolean;
   onRevealThinking: () => void;
   selected: boolean;
+  toolDisplay: ToolCallDisplay;
 }) {
   const attachments = parseAttachments(message.extra);
   const usage = parseUsage(message.extra);
   const failure = parseError(message.extra);
+  const personas = useSettings((state) => state.config.personas);
+  const persona = personas.find((item) => item.id === message.personaId);
+  const castIds = useChat((state) => state.castIds);
+  const showSpeaker = Boolean(
+    persona && castIds.length > 1 && castIds.includes(persona.id),
+  );
+  const showThinking = useSettings((state) => state.config.interface.showThinking);
+  const generatedUi = useSettings((state) => state.config.interface.generatedUi);
+  const thinkingShown =
+    Boolean(message.reasoning) && (showThinking !== "hidden" || revealThinking);
+  const live = useChat((state) => state.liveTools[message.id] ?? NO_TOOLS);
+  const liveReasoning = useChat(
+    (state) => state.live[message.sessionId]?.reasoningBlocks ?? NO_REASONING,
+  );
+  const calls = useMemo(
+    () => mergeToolCalls(parseToolCalls(message.extra), live),
+    [message.extra, live],
+  );
+  const reasoningBlocks = useMemo(() => {
+    if (liveReasoning.length > 0) return liveReasoning;
+    const stored = parseReasoningBlocks(message.extra);
+    if (stored.length > 0) return stored;
+    // Replies recorded before thinking had positions keep their block on top.
+    return message.reasoning
+      ? [{ text: message.reasoning, after: 0, seq: 0 }]
+      : NO_REASONING;
+  }, [liveReasoning, message.extra, message.reasoning]);
+  const runningTools = calls.some((call) => call.status === "running");
+  const segments = useMemo(
+    () => segmentMessage(message.content, calls, reasoningBlocks, !streaming),
+    [message.content, calls, reasoningBlocks, streaming],
+  );
 
   if (message.role === "user") {
     return (
@@ -268,28 +328,48 @@ function MessageRow({
         selected && "ring-1 ring-[var(--accent)]",
       )}
     >
-      <div className="mt-0.5 grid h-7 w-7 shrink-0 place-items-center rounded-full border border-[var(--glass-border)] text-soft">
-        <LoomMark size={15} />
+      <div
+        className="mt-0.5 grid h-7 w-7 shrink-0 place-items-center rounded-full border border-[var(--glass-border)] text-soft"
+        title={persona?.name}
+      >
+        {persona?.emoji ? (
+          <span className="text-[14px] leading-none">{persona.emoji}</span>
+        ) : (
+          <LoomMark size={15} />
+        )}
       </div>
       <div className="message-body min-w-0 flex-1 select-text pt-0.5">
-        {message.reasoning && (
-          <Reasoning
-            text={message.reasoning}
-            streaming={streaming}
-            hasContent={message.content.length > 0}
-            revealed={revealThinking}
-          />
+        {showSpeaker && persona && (
+          <p className="mb-1 text-[12px] font-medium text-soft">
+            {persona.name}
+          </p>
         )}
-        <ToolCallList messageId={message.id} extra={message.extra} />
-        {failure ? (
-          <FailedTurn message={failure} />
-        ) : message.content ? (
-          <Markdown content={message.content} />
-        ) : (
-          streaming &&
-          !runningTools && (
-            <span className="cursor-blink inline-block h-4 w-[7px] translate-y-[3px] rounded-[2px] bg-[var(--ink-soft)]" />
-          )
+        {segments.map((segment, index) =>
+          segment.kind === "tools" ? (
+            <ToolCallGroup
+              key={`tools-${index}`}
+              calls={segment.calls}
+              display={toolDisplay}
+            />
+          ) : segment.kind === "reasoning" ? (
+            <Reasoning
+              key={`reasoning-${segment.seq}`}
+              text={segment.text}
+              streaming={streaming}
+              revealed={revealThinking}
+            />
+          ) : segment.text.trim() ? (
+            <Markdown
+              key={`text-${index}`}
+              content={segment.text}
+              allowGeneratedUi={generatedUi}
+              streaming={streaming}
+            />
+          ) : null,
+        )}
+        {failure && <FailedTurn message={failure} />}
+        {streaming && !message.content && !thinkingShown && !runningTools && !failure && (
+          <span className="cursor-blink inline-block h-4 w-[7px] translate-y-[3px] rounded-[2px] bg-[var(--ink-soft)]" />
         )}
         {!streaming && !failure && usage && (
           <p className="mt-1.5 text-[11.5px] text-faint">{formatUsage(usage)}</p>
@@ -319,13 +399,6 @@ function FailedTurn({ message }: { message: string }) {
   );
 }
 
-function hasRunningTools(
-  messageId: string,
-  liveTools: Record<string, ToolCallRecord[]>,
-): boolean {
-  return (liveTools[messageId] ?? []).some((call) => call.status === "running");
-}
-
 /**
  * The chat canvas: a hero composer when empty, the transcript plus a docked
  * composer once there are messages. Scrolling only follows new output while
@@ -333,19 +406,30 @@ function hasRunningTools(
  */
 export function ChatCanvas() {
   const messages = useChat((state) => state.messages);
+  const session = useChat((state) =>
+    state.sessions.find((item) => item.id === state.activeId),
+  );
   const busy = useChat(
     (state) => (state.activeId ? state.busy[state.activeId] : false) ?? false,
   );
-  const permission = useChat((state) => state.permission);
-  const liveTools = useChat((state) => state.liveTools);
-  const error = useChat((state) => state.error);
+  // Prompts belong to a chat: only the ones for the open chat are shown, so a
+  // question asked in the background waits until you return to that chat.
+  const permission = useChat((state) =>
+    state.activeId ? state.permissions[state.activeId] : undefined,
+  );
+  const question = useChat((state) =>
+    state.activeId ? state.questions[state.activeId] : undefined,
+  );
+  const error = useChat((state) =>
+    state.activeId ? state.errors[state.activeId] : undefined,
+  );
   const clearError = useChat((state) => state.clearError);
   const retryLast = useChat((state) => state.retryLast);
   const modelCount = useProviders((state) => state.models.length);
   const setSettingsOpen = useUi((state) => state.setSettingsOpen);
   const alwaysFollow = useSettings((state) => state.config.interface.alwaysFollow);
   const compact = useSettings((state) => state.config.interface.compact);
-  const [query, setQuery] = useState("");
+  const toolDisplay = useSettings((state) => state.config.interface.showToolCalls);
   const [revealed, setRevealed] = useState<Record<string, boolean>>({});
   const [selected, setSelected] = useState<string | null>(null);
   const stop = useChat((state) => state.stop);
@@ -353,11 +437,6 @@ export function ChatCanvas() {
   const editFrom = useChat((state) => state.editFrom);
   const removeMessage = useChat((state) => state.removeMessage);
   const setDraft = useChat((state) => state.setDraft);
-
-  const needle = query.trim().toLowerCase();
-  const visible = needle
-    ? messages.filter((message) => message.content.toLowerCase().includes(needle))
-    : messages;
 
   const scrollRef = useRef<HTMLDivElement>(null);
   const endRef = useRef<HTMLDivElement>(null);
@@ -371,11 +450,13 @@ export function ChatCanvas() {
     setPinned(distance < 90);
   }, []);
 
+  // Follow new output instantly. A smooth scroll fires scroll events while
+  // it travels, which would set `pinned` false mid-flight and strand the view.
   useEffect(() => {
     if (pinned || alwaysFollow) {
-      endRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
+      endRef.current?.scrollIntoView({ behavior: "auto", block: "end" });
     }
-  }, [messages, pinned, alwaysFollow]);
+  }, [messages, pinned, alwaysFollow, question, permission, error]);
 
   const jumpToLatest = () => {
     setPinned(true);
@@ -452,17 +533,32 @@ export function ChatCanvas() {
   }, [messages, selected, busy, stop, editFrom, regenerate, removeMessage, setDraft]);
 
   if (messages.length === 0) {
+    const workspaceName = session?.workdir ? folderName(session.workdir) : null;
     return (
-      <section className="relative flex h-full min-w-0 items-center justify-center px-6 pb-16">
-        <div className="w-full max-w-2xl -translate-y-8">
-          <div className="panel rounded-window p-4 pb-3">
-            <p className="mb-3 px-1 text-center text-[13px] text-soft">
-              Ask anything. Attach files with the paperclip, drop them on the
-              window, or paste an image.
+      <section className="relative flex h-full min-w-0 flex-1 items-center justify-center px-6 pb-16">
+        <div className="w-full max-w-2xl -translate-y-6">
+          <div className="mb-6 flex flex-col items-center text-center">
+            <LoomMark size={32} className="mb-3 text-[var(--accent)]" />
+            <h1 className="text-[24px] font-medium tracking-tight text-[var(--ink)]">
+              {greeting()}
+            </h1>
+            <p className="mt-1.5 max-w-lg text-[13px] leading-5 text-faint">
+              {workspaceName ? (
+                <>
+                  Working in{" "}
+                  <span className="font-medium text-soft">{workspaceName}</span>
+                </>
+              ) : (
+                "Ask anything — attach a file, drop one on the window, or paste an image."
+              )}
             </p>
+          </div>
+          <div className="panel rounded-window p-4 pb-3">
+            <MessageQueue />
+            <GoalPanel />
             <Composer variant="hero" />
           </div>
-          {modelCount === 0 ? (
+          {modelCount === 0 && (
             <p className="mt-3 text-center text-[12.5px] text-faint">
               No models yet.{" "}
               <button
@@ -474,10 +570,6 @@ export function ChatCanvas() {
               </button>{" "}
               to start chatting.
             </p>
-          ) : (
-            <p className="mt-3 text-center text-[12px] text-faint">
-              Enter to send · Shift+Enter for a new line · Ctrl+K for chats
-            </p>
           )}
         </div>
       </section>
@@ -485,11 +577,11 @@ export function ChatCanvas() {
   }
 
   return (
-    <section className="relative flex h-full min-w-0 flex-col px-4 pb-4">
+    <section className="relative flex h-full min-w-0 flex-1 flex-col px-4 pb-4">
       {/* The reading surface: messages and composer sit on this panel, so text
           stays legible over whatever the background art is doing. */}
       <div className="panel relative mx-auto flex h-full w-full max-w-4xl flex-col overflow-hidden rounded-window">
-        <ChatHeader query={query} onQuery={setQuery} matches={visible.length} />
+        <ChatHeader />
         <div
           ref={scrollRef}
           onScroll={onScroll}
@@ -504,24 +596,24 @@ export function ChatCanvas() {
               compact ? "gap-4" : "gap-6",
             )}
           >
-            {visible.map((message) => (
+            {messages.map((message) => (
               <MessageRow
                 key={message.id}
                 message={message}
                 streaming={busy && message.role === "assistant"}
-                runningTools={hasRunningTools(message.id, liveTools)}
                 revealThinking={revealed[message.id] ?? false}
                 onRevealThinking={() =>
                   setRevealed((current) => ({ ...current, [message.id]: true }))
                 }
                 selected={selected === message.id}
+                toolDisplay={toolDisplay}
               />
             ))}
             <div ref={endRef} data-latest />
           </div>
         </div>
 
-        {!pinned && (
+        {!pinned && !question && (
           <button
             type="button"
             onClick={jumpToLatest}
@@ -561,7 +653,9 @@ export function ChatCanvas() {
 
         <div className="px-8 pb-6 pt-3">
           <div className="mx-auto w-full max-w-3xl">
-            <Composer />
+            <MessageQueue />
+            <GoalPanel />
+            {question ? <QuestionCard question={question} /> : <Composer />}
           </div>
         </div>
       </div>

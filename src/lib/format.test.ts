@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { compactTokens, relativeTime, shortModelName } from "./format";
+import {
+  compactTokens,
+  formatMoney,
+  formatReset,
+  relativeTime,
+  shortModelName,
+} from "./format";
 import { parseAttachments, parseToolCalls } from "./messageExtra";
 
 describe("format", () => {
@@ -29,6 +35,30 @@ describe("format", () => {
       "claude-sonnet-4",
     );
     expect(shortModelName("Local", "qwen3:8b")).toBe("qwen3:8b");
+  });
+
+  it("formats money with a currency symbol", () => {
+    expect(formatMoney(25.5, "usd")).toBe("$25.50");
+    expect(formatMoney(100, "cny")).toBe("¥100.00");
+    expect(formatMoney(3, "eur")).toBe("3.00 EUR");
+    expect(formatMoney(null, "usd")).toBeNull();
+    expect(formatMoney(Number.NaN, "usd")).toBeNull();
+  });
+
+  it("counts down to a vendor reset stamp", () => {
+    const now = Date.now();
+    expect(formatReset(new Date(now + 45 * 60_000).toISOString(), null, now)).toBe(
+      "in 45m",
+    );
+    expect(
+      formatReset(null, now + (3 * 60 + 12) * 60_000, now),
+    ).toBe("in 3h 12m");
+    expect(
+      formatReset(null, now + (2 * 24 + 5) * 3_600_000, now),
+    ).toBe("in 2d 5h");
+    expect(formatReset(null, now - 1_000, now)).toBe("now");
+    expect(formatReset(null, null, now)).toBeNull();
+    expect(formatReset("not a date", null, now)).toBeNull();
   });
 });
 

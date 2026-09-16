@@ -39,3 +39,14 @@ export async function tryCall<T>(
 export function assetUrl(path: string): string {
   return isTauri ? convertFileSrc(path) : path;
 }
+
+/** Hands a URL to the OS, never to the webview: the app must not navigate away. */
+export function openExternal(url: string): void {
+  if (isTauri) {
+    void import("@tauri-apps/plugin-opener")
+      .then((module) => module.openUrl(url))
+      .catch(() => {});
+    return;
+  }
+  window.open(url, "_blank", "noopener,noreferrer");
+}

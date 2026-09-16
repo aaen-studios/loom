@@ -1,5 +1,7 @@
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { useChat } from "./chat";
+import { useSettings } from "./settings";
+import { useSkills } from "./skills";
 
 const reset = () => {
   useChat.setState({
@@ -9,8 +11,9 @@ const reset = () => {
     live: {},
     liveTools: {},
     busy: {},
-    permission: null,
-    error: null,
+    permissions: {},
+    questions: {},
+    errors: {},
     loaded: true,
   });
 };
@@ -30,6 +33,8 @@ describe("streaming state machine", () => {
       sessionId: "s1",
       messageId: "m1",
       text: "thinking",
+      after: 5,
+      seq: 1,
     });
 
     const message = useChat.getState().messages[0];
@@ -74,10 +79,23 @@ describe("streaming state machine", () => {
     });
 
     const state = useChat.getState();
-    expect(state.error).toBe("rate limited");
+    expect(state.errors.s1).toBe("rate limited");
     expect(state.busy.s1).toBeUndefined();
     // The message itself is kept: the engine stores the reason on it, so the
     // transcript shows why the turn failed instead of an empty bubble.
+  });
+
+  it("files a background chat's failure under that chat", () => {
+    useChat.getState().applyEvent({ type: "started", sessionId: "other", messageId: "m2" });
+    useChat.getState().applyEvent({
+      type: "error",
+      sessionId: "other",
+      messageId: "m2",
+      error: "no connection",
+    });
+
+    expect(useChat.getState().errors.other).toBe("no connection");
+    expect(useChat.getState().errors.s1).toBeUndefined();
   });
 
   it("tracks tool calls from start to finish", () => {
@@ -89,6 +107,7 @@ describe("streaming state machine", () => {
       callId: "c1",
       name: "read_file",
       arguments: '{"path":"a.txt"}',
+      seq: 2,
     });
     expect(useChat.getState().liveTools.m1[0].status).toBe("running");
 
@@ -116,7 +135,7 @@ describe("streaming state machine", () => {
     expect(useChat.getState().liveTools.m1).toBeUndefined();
   });
 
-  it("queues permission prompts and clears them when answered", async () => {
+  it("queues permission prompts per chat and clears them when answered", async () => {
     useChat.getState().applyEvent({
       type: "toolPermissionRequest",
       sessionId: "s1",
@@ -126,12 +145,87 @@ describe("streaming state machine", () => {
       arguments: '{"command":"dir"}',
       readOnly: false,
     });
-    expect(useChat.getState().permission?.name).toBe("run_command");
+    const permission = useChat.getState().permissions.s1;
+    expect(permission?.name).toBe("run_command");
 
     // In the browser (no Tauri) the IPC call resolves to null; the prompt must
     // still clear so the UI is never stuck.
-    await useChat.getState().answerPermission(true);
-    expect(useChat.getState().permission).toBeNull();
+    await useChat.getState().answerPermission(permission!, true);
+    expect(useChat.getState().permissions.s1).toBeUndefined();
+  });
+
+  it("shows an ask_user question and clears it when answered", async () => {
+    useChat.getState().applyEvent({
+      type: "questionRequest",
+      sessionId: "s1",
+      messageId: "m1",
+      callId: "c1",
+      question: {
+        question: "Which database?",
+        options: [{ label: "Postgres" }],
+        allowMultiple: false,
+        allowFreeText: true,
+      },
+    });
+    const question = useChat.getState().questions.s1;
+    expect(question?.question.question).toBe("Which database?");
+
+    await useChat.getState().answerQuestion(question!, {
+      selected: ["Postgres"],
+      text: null,
+      cancelled: false,
+    });
+    expect(useChat.getState().questions.s1).toBeUndefined();
+  });
+
+  it("keeps a background chat's question out of the open chat", async () => {
+    useChat.getState().applyEvent({
+      type: "questionRequest",
+      sessionId: "other",
+      messageId: "m2",
+      callId: "c2",
+      question: {
+        question: "Which database?",
+        options: [],
+        allowMultiple: false,
+        allowFreeText: true,
+      },
+    });
+
+    // The prompt is filed under the chat that asked, not the one on screen.
+    expect(useChat.getState().questions.s1).toBeUndefined();
+    expect(useChat.getState().questions.other?.callId).toBe("c2");
+
+    await useChat.getState().answerQuestion(useChat.getState().questions.other!, {
+      selected: [],
+      text: "Postgres",
+      cancelled: false,
+    });
+    expect(useChat.getState().questions.other).toBeUndefined();
+  });
+
+  it("clears a pending question when its turn ends", () => {
+    useChat.getState().applyEvent({
+      type: "questionRequest",
+      sessionId: "s1",
+      messageId: "m1",
+      callId: "c1",
+      question: {
+        question: "Still there?",
+        options: [],
+        allowMultiple: false,
+        allowFreeText: true,
+      },
+    });
+    useChat.getState().applyEvent({
+      type: "error",
+      sessionId: "s1",
+      messageId: "m1",
+      error: "the question timed out",
+    });
+
+    // The card replaces the composer, so it must not outlive the turn.
+    expect(useChat.getState().questions.s1).toBeUndefined();
   });
 
   it("renames sessions when a title event arrives", () => {
@@ -147,6 +241,8 @@ describe("streaming state machine", () => {
           systemPrompt: null,
           workdir: null,
           permissionMode: null,
+          agentMode: null,
+          computerAccess: false,
           createdAt: 0,
           updatedAt: 0,
         },
@@ -154,5 +250,44 @@ describe("streaming state machine", () => {
     });
     useChat.getState().applyEvent({ type: "title", sessionId: "s1", title: "Rust help" });
     expect(useChat.getState().sessions[0].title).toBe("Rust help");
+  });
+
+  it("reloads config and skills when a harness change arrives", () => {
+    // Config edits (personas, MCP servers, settings) live in the settings
+    // store; skills are files on disk in their own store. Both must refresh so
+    // the UI does not keep a stale copy a debounced save could revert.
+    const settingsLoad = vi
+      .spyOn(useSettings.getState(), "load")
+      .mockResolvedValue(undefined);
+    const skillsLoad = vi
+      .spyOn(useSkills.getState(), "load")
+      .mockResolvedValue(undefined);
+
+    useChat.getState().applyEvent({
+      type: "harnessChanged",
+      sessionId: "s1",
+      section: "personas",
+      summary: 'Created persona "Reviewer"',
+    });
+
+    expect(settingsLoad).toHaveBeenCalledTimes(1);
+    expect(skillsLoad).toHaveBeenCalledTimes(1);
+
+    settingsLoad.mockRestore();
+    skillsLoad.mockRestore();
+  });
+
+  it("drops a harness change with no session id", () => {
+    const settingsLoad = vi
+      .spyOn(useSettings.getState(), "load")
+      .mockResolvedValue(undefined);
+    useChat.getState().applyEvent({
+      type: "harnessChanged",
+      sessionId: "",
+      section: "settings",
+      summary: "Updated settings",
+    });
+    expect(settingsLoad).not.toHaveBeenCalled();
+    settingsLoad.mockRestore();
   });
 });

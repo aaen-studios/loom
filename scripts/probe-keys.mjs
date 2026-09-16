@@ -1,5 +1,5 @@
 // Drives the keyboard navigation: Alt+Arrow selection, C to copy, ? for the
-// shortcut sheet, Ctrl+F to focus search.
+// shortcut sheet.
 const port = process.argv[2] ?? "9333";
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const targets = await (await fetch(`http://127.0.0.1:${port}/json`)).json();

@@ -15,6 +15,199 @@ use crate::{Error, Result};
 /// Largest file a tool will return.
 const MAX_READ_BYTES: u64 = 400_000;
 
+/// Name of the tool that pauses the turn to ask the user something.
+///
+/// It is dispatched by the engine (which has the UI to ask through), not by
+/// [`execute`], and it is never gated behind a permission prompt: the question
+/// card *is* the prompt.
+pub const ASK_USER: &str = "ask_user";
+
+/// The task-list tools. They only touch Loom's own state, so they are declared
+/// read-only on purpose: they run without a permission card, and Plan mode may
+/// still use them (planning is exactly what a task list is for). The engine
+/// dispatches them; it owns the session and the database.
+pub const TODO_WRITE: &str = "todo_write";
+pub const TODO_READ: &str = "todo_read";
+
+/// Deleting a path always shows a confirmation card, even under Auto all.
+pub const DELETE_PATH: &str = "delete_path";
+
+/// Most option buttons one question may show. Beyond this the model should be
+/// asking a narrower question.
+const MAX_QUESTION_OPTIONS: usize = 6;
+
+/// Longest question/option text accepted, so a runaway model cannot push a
+/// novel through the UI.
+const MAX_QUESTION_CHARS: usize = 400;
+
+/// One button the user can pick from.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct QuestionOption {
+    pub label: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+}
+
+/// A normalized `ask_user` call: what the UI renders and what the model asked.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AskQuestion {
+    pub question: String,
+    /// Optional one-or-two-word label, e.g. "Database".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub header: Option<String>,
+    #[serde(default)]
+    pub options: Vec<QuestionOption>,
+    /// The user may pick several options.
+    #[serde(default)]
+    pub allow_multiple: bool,
+    /// The user may type an answer instead of (or as well as) picking.
+    #[serde(default)]
+    pub allow_free_text: bool,
+}
+
+/// The user's reply to an [`AskQuestion`].
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Answer {
+    /// Labels of the options the user picked, in the order they were shown.
+    #[serde(default)]
+    pub selected: Vec<String>,
+    /// Free text the user typed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
+    /// The user dismissed the question instead of answering it.
+    #[serde(default)]
+    pub cancelled: bool,
+}
+
+impl AskQuestion {
+    /// Reads an `ask_user` call, filling in defaults and rejecting the shapes
+    /// that would leave the user with nothing to click.
+    pub fn parse(arguments: &str) -> Result<Self> {
+        let value: Value = if arguments.trim().is_empty() {
+            json!({})
+        } else {
+            serde_json::from_str(arguments)
+                .map_err(|e| Error::Other(format!("invalid {ASK_USER} arguments: {e}")))?
+        };
+
+        let question = value
+            .get("question")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .trim()
+            .to_string();
+        if question.is_empty() {
+            return Err(Error::Other(format!("{ASK_USER} needs a question")));
+        }
+
+        let mut options: Vec<QuestionOption> = Vec::new();
+        if let Some(items) = value.get("options").and_then(Value::as_array) {
+            for item in items {
+                // Accept both `{"label": "..."}` and a bare `"..."`, because
+                // models mix the two shapes freely.
+                let (label, description) = match item {
+                    Value::String(text) => (text.clone(), None),
+                    other => (
+                        other
+                            .get("label")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default()
+                            .to_string(),
+                        other
+                            .get("description")
+                            .and_then(Value::as_str)
+                            .map(str::to_string),
+                    ),
+                };
+                let label = truncate_chars(label.trim(), MAX_QUESTION_CHARS);
+                // Skip blanks and duplicates rather than failing the whole call.
+                if label.is_empty() || options.iter().any(|option| option.label == label) {
+                    continue;
+                }
+                options.push(QuestionOption {
+                    label,
+                    description: description
+                        .map(|text| truncate_chars(text.trim(), MAX_QUESTION_CHARS))
+                        .filter(|text| !text.is_empty()),
+                });
+                if options.len() == MAX_QUESTION_OPTIONS {
+                    break;
+                }
+            }
+        }
+
+        let allow_free_text = value
+            .get("allow_free_text")
+            .and_then(Value::as_bool)
+            .unwrap_or(true);
+        if options.is_empty() && !allow_free_text {
+            return Err(Error::Other(format!(
+                "{ASK_USER} needs options or a free-text answer"
+            )));
+        }
+
+        Ok(AskQuestion {
+            question: truncate_chars(&question, MAX_QUESTION_CHARS),
+            header: value
+                .get("header")
+                .and_then(Value::as_str)
+                .map(|header| truncate_chars(header.trim(), 40))
+                .filter(|header| !header.is_empty()),
+            options,
+            allow_multiple: value
+                .get("allow_multiple")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
+            allow_free_text,
+        })
+    }
+
+    /// Tool output handed back to the model so the turn can continue.
+    pub fn to_tool_output(&self, answer: &Answer) -> String {
+        if answer.cancelled {
+            return "The user dismissed the question without answering. Do not ask it again: continue with your best judgement, or say what you need from them."
+                .to_string();
+        }
+
+        let mut parts: Vec<String> = Vec::new();
+        if !answer.selected.is_empty() {
+            parts.push(format!("selected {}", answer.selected.join(", ")));
+        }
+        let typed = answer
+            .text
+            .as_deref()
+            .map(str::trim)
+            .unwrap_or_default()
+            .to_string();
+        if !typed.is_empty() {
+            parts.push(format!("typed \"{typed}\""));
+        }
+        if parts.is_empty() {
+            return "The user submitted an empty answer. Continue with your best judgement."
+                .to_string();
+        }
+
+        format!(
+            "The user answered \"{}\" — {}.",
+            self.question,
+            parts.join("; ")
+        )
+    }
+}
+
+/// Keeps a tool argument to a sane length without splitting a UTF-8 character.
+fn truncate_chars(text: &str, limit: usize) -> String {
+    if text.chars().count() <= limit {
+        return text.to_string();
+    }
+    let mut out: String = text.chars().take(limit).collect();
+    out.push('…');
+    out
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ToolSpec {
@@ -22,12 +215,32 @@ pub struct ToolSpec {
     pub description: &'static str,
     pub parameters: Value,
     pub read_only: bool,
+    /// What the tool can reach. Omitted for workspace tools, which is the
+    /// default the UI assumes; harness tools declare themselves so the
+    /// permission card can say so.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope: Option<ToolScope>,
+}
+
+/// Where a tool's effects land. The permission card renders a different badge
+/// for each non-workspace scope.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ToolScope {
+    Workspace,
+    Harness,
+    Web,
+    Mcp,
+    /// Mouse, keyboard, windows, processes: the machine itself.
+    Computer,
 }
 
 #[derive(Debug, Clone, Default)]
 pub struct ToolContext {
     /// Absolute path of the chat's workspace folder, when one is set.
     pub workdir: Option<PathBuf>,
+    /// Computer use is armed for this chat (the composer's Computer chip).
+    pub computer: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -39,6 +252,17 @@ pub struct ToolCall {
     pub arguments: String,
 }
 
+/// An image a tool produced (a screenshot): stored on disk, shown in the
+/// transcript, and inlined into the wire for the model.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ToolImage {
+    pub name: String,
+    pub mime: String,
+    /// Absolute path inside the Loom home directory.
+    pub path: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ToolOutcome {
@@ -46,15 +270,49 @@ pub struct ToolOutcome {
     pub name: String,
     pub ok: bool,
     pub output: String,
+    /// Images produced by the call, e.g. a screenshot. Empty for most tools.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub images: Vec<ToolImage>,
 }
 
 pub fn specs() -> Vec<ToolSpec> {
     vec![
         ToolSpec {
+            name: ASK_USER,
+            description: "Ask the user a question and wait for their answer. Use it when a choice or a missing detail genuinely changes what you do next — not for routine confirmations. Ask as many as you need; each call asks one question, and the user can pick an option, type their own answer, or dismiss it.",
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "question": { "type": "string", "description": "The question, phrased plainly" },
+                    "header": { "type": "string", "description": "Optional one-or-two-word label, e.g. \"Database\"" },
+                    "options": {
+                        "type": "array",
+                        "description": "Choices to offer, each a label with an optional description",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "label": { "type": "string" },
+                                "description": { "type": "string" }
+                            },
+                            "required": ["label"],
+                            "additionalProperties": false
+                        }
+                    },
+                    "allow_multiple": { "type": "boolean", "description": "Set true when several options may be picked" },
+                    "allow_free_text": { "type": "boolean", "description": "Whether a typed answer is allowed (default true)" }
+                },
+                "required": ["question"],
+                "additionalProperties": false
+            }),
+            read_only: true,
+            scope: None,
+        },
+        ToolSpec {
             name: "datetime",
-            description: "Current local date and time, including timezone offset. Use when the user asks about now, today, or relative dates.",
+            description: "Current UTC date and time, with the unix timestamp. Use when the user asks about now, today, or relative dates.",
             parameters: json!({ "type": "object", "properties": {}, "additionalProperties": false }),
             read_only: true,
+            scope: None,
         },
         ToolSpec {
             name: "list_dir",
@@ -67,6 +325,7 @@ pub fn specs() -> Vec<ToolSpec> {
                 "additionalProperties": false
             }),
             read_only: true,
+            scope: None,
         },
         ToolSpec {
             name: "read_file",
@@ -74,12 +333,15 @@ pub fn specs() -> Vec<ToolSpec> {
             parameters: json!({
                 "type": "object",
                 "properties": {
-                    "path": { "type": "string", "description": "Relative file path" }
+                    "path": { "type": "string", "description": "Relative file path" },
+                    "start_line": { "type": "integer", "description": "First line to return (1-based, optional)" },
+                    "max_lines": { "type": "integer", "description": "How many lines to return (optional)" }
                 },
                 "required": ["path"],
                 "additionalProperties": false
             }),
             read_only: true,
+            scope: None,
         },
         ToolSpec {
             name: "grep",
@@ -88,12 +350,162 @@ pub fn specs() -> Vec<ToolSpec> {
                 "type": "object",
                 "properties": {
                     "query": { "type": "string", "description": "Literal text to search for" },
-                    "path": { "type": "string", "description": "Relative folder to search, defaults to the workspace root" }
+                    "path": { "type": "string", "description": "Relative folder to search, defaults to the workspace root" },
+                    "include": { "type": "string", "description": "Optional glob to limit files, e.g. \"*.rs\" or \"src/**/*.ts\"" }
                 },
                 "required": ["query"],
                 "additionalProperties": false
             }),
             read_only: true,
+            scope: None,
+        },
+        ToolSpec {
+            name: "find_files",
+            description: "Find files in the workspace folder by glob pattern, e.g. \"**/*.rs\" or \"src/**/*.tsx\". Returns matching relative paths.",
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "pattern": { "type": "string", "description": "Glob pattern relative to the workspace root" },
+                    "limit": { "type": "integer", "description": "Maximum matches (1-200, default 80)" }
+                },
+                "required": ["pattern"],
+                "additionalProperties": false
+            }),
+            read_only: true,
+            scope: None,
+        },
+        ToolSpec {
+            name: "create_dir",
+            description: "Create a folder (and any missing parents) inside the workspace.",
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string", "description": "Relative folder path" }
+                },
+                "required": ["path"],
+                "additionalProperties": false
+            }),
+            read_only: false,
+            scope: None,
+        },
+        ToolSpec {
+            name: "move_path",
+            description: "Move or rename a file or folder inside the workspace. The destination is a full relative path, not a folder.",
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "from": { "type": "string", "description": "Relative path to move" },
+                    "to": { "type": "string", "description": "Relative destination path" }
+                },
+                "required": ["from", "to"],
+                "additionalProperties": false
+            }),
+            read_only: false,
+            scope: None,
+        },
+        ToolSpec {
+            name: "copy_path",
+            description: "Copy a file or folder inside the workspace. The destination is a full relative path, not a folder.",
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "from": { "type": "string", "description": "Relative path to copy" },
+                    "to": { "type": "string", "description": "Relative destination path" }
+                },
+                "required": ["from", "to"],
+                "additionalProperties": false
+            }),
+            read_only: false,
+            scope: None,
+        },
+        ToolSpec {
+            name: DELETE_PATH,
+            description: "Delete a file or folder inside the workspace. Always asks the user first, whatever the permission mode.",
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string", "description": "Relative path to delete" }
+                },
+                "required": ["path"],
+                "additionalProperties": false
+            }),
+            read_only: false,
+            scope: None,
+        },
+        ToolSpec {
+            name: "git_status",
+            description: "Show the git branch and working-tree status of the workspace folder.",
+            parameters: json!({
+                "type": "object",
+                "properties": {},
+                "additionalProperties": false
+            }),
+            read_only: true,
+            scope: None,
+        },
+        ToolSpec {
+            name: "git_diff",
+            description: "Show the workspace's uncommitted git diff (unstaged, or staged with staged=true).",
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "staged": { "type": "boolean", "description": "Show the staged diff instead of the working-tree diff" },
+                    "path": { "type": "string", "description": "Optional relative path to limit the diff to" }
+                },
+                "additionalProperties": false
+            }),
+            read_only: true,
+            scope: None,
+        },
+        ToolSpec {
+            name: "git_log",
+            description: "Show the most recent commits in the workspace folder, one line each.",
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "count": { "type": "integer", "description": "How many commits (1-100, default 15)" }
+                },
+                "additionalProperties": false
+            }),
+            read_only: true,
+            scope: None,
+        },
+        ToolSpec {
+            name: TODO_WRITE,
+            description: "Replace this chat's live task list. This only edits Loom's own task panel — never the workspace — so it needs no permission and works in Plan mode too. Send the complete list every time; keep exactly one item in_progress while you work, and mark items completed as you finish them.",
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "todos": {
+                        "type": "array",
+                        "description": "The full task list, replacing whatever was there",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "content": { "type": "string", "description": "The task, in a few words" },
+                                "status": { "type": "string", "enum": ["pending", "in_progress", "completed"] }
+                            },
+                            "required": ["content", "status"],
+                            "additionalProperties": false
+                        }
+                    }
+                },
+                "required": ["todos"],
+                "additionalProperties": false
+            }),
+            read_only: true,
+            scope: None,
+        },
+        ToolSpec {
+            name: TODO_READ,
+            description: "Read this chat's current task list.",
+            parameters: json!({
+                "type": "object",
+                "properties": {},
+                "additionalProperties": false
+            }),
+            read_only: true,
+            scope: None,
         },
         ToolSpec {
             name: "write_file",
@@ -108,6 +520,7 @@ pub fn specs() -> Vec<ToolSpec> {
                 "additionalProperties": false
             }),
             read_only: false,
+            scope: None,
         },
         ToolSpec {
             name: "edit_file",
@@ -123,6 +536,7 @@ pub fn specs() -> Vec<ToolSpec> {
                 "additionalProperties": false
             }),
             read_only: false,
+            scope: None,
         },
         ToolSpec {
             name: "run_command",
@@ -136,6 +550,7 @@ pub fn specs() -> Vec<ToolSpec> {
                 "additionalProperties": false
             }),
             read_only: false,
+            scope: None,
         },
         ToolSpec {
             name: "search_workspace",
@@ -150,6 +565,7 @@ pub fn specs() -> Vec<ToolSpec> {
                 "additionalProperties": false
             }),
             read_only: true,
+            scope: None,
         },
         ToolSpec {
             name: "generate_image",
@@ -164,40 +580,290 @@ pub fn specs() -> Vec<ToolSpec> {
                 "additionalProperties": false
             }),
             read_only: true,
+            scope: None,
         },
         ToolSpec {
             name: "spawn_agent",
-            description: "Delegate a self-contained task to a subagent and get its final answer back. Useful for research or parallel reading. Maximum depth is one.",
+            description: "Delegate a self-contained task to a subagent and get its final answer back. Useful for research or parallel reading. Maximum depth is one. Set `background` to true to detach the work: it runs as its own task (visible in the Runs popup, survives this turn) and its result lands in this chat when it finishes.",
             parameters: json!({
                 "type": "object",
                 "properties": {
                     "task": { "type": "string", "description": "What the subagent should do" },
-                    "system": { "type": "string", "description": "Optional role for the subagent" }
+                    "system": { "type": "string", "description": "Optional role for the subagent" },
+                    "background": { "type": "boolean", "description": "Detach the run instead of waiting for it (default false)" }
                 },
                 "required": ["task"],
                 "additionalProperties": false
             }),
             read_only: true,
+            scope: None,
+        },
+        ToolSpec {
+            name: RECALL,
+            description: "Search long-term memory (durable facts about the user and the current project) for anything relevant. Use it when a remembered detail would change your answer.",
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "query": { "type": "string", "description": "What to look for" },
+                    "limit": { "type": "integer", "description": "How many facts to return (1-10, default 6)" }
+                },
+                "required": ["query"],
+                "additionalProperties": false
+            }),
+            read_only: true,
+            scope: Some(ToolScope::Harness),
+        },
+        ToolSpec {
+            name: REMEMBER_FACT,
+            description: "Save a durable fact to long-term memory: who the user is, their preferences, standing instructions, or something about the current project. Facts persist across chats. Do not save secrets or one-off requests. Updating an existing fact replaces it.",
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "fact": { "type": "string", "description": "The fact, one sentence (max 2 KiB)" },
+                    "scope": { "type": "string", "enum": ["global", "workspace"], "description": "global for facts about the user, workspace for facts about the current project (default global)" },
+                    "pinned": { "type": "boolean", "description": "Pin it into every future prompt (default false)" }
+                },
+                "required": ["fact"],
+                "additionalProperties": false
+            }),
+            read_only: false,
+            scope: Some(ToolScope::Harness),
+        },
+        ToolSpec {
+            name: FORGET_FACT,
+            description: "Delete a long-term memory. Pass `id` when you have it from `recall`; otherwise pass `query` and an unambiguous match is deleted.",
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "id": { "type": "string", "description": "Memory id from recall" },
+                    "query": { "type": "string", "description": "Text to match when no id is known" }
+                },
+                "additionalProperties": false
+            }),
+            read_only: false,
+            scope: Some(ToolScope::Harness),
+        },
+        ToolSpec {
+            name: SCHEDULE_JOB,
+            description: "Create or update a scheduled job: a prompt Loom runs on a cron schedule, in the background, even while you are away. Use it when the user asks for something recurring (\"every weekday morning\", \"every hour\"). The user always sees a confirmation card before anything is scheduled.",
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "name": { "type": "string", "description": "Short job name, e.g. \"Morning inbox summary\"" },
+                    "cron": { "type": "string", "description": "Five-field cron: minute hour day-of-month month weekday, e.g. \"0 8 * * 1-5\"" },
+                    "prompt": { "type": "string", "description": "The instruction the job runs" },
+                    "id": { "type": "string", "description": "Existing job id to update; omit to create" },
+                    "workspace": { "type": "string", "description": "Workspace folder path (defaults to this chat's)" },
+                    "permission_mode": { "type": "string", "enum": ["ask", "auto-read-only", "auto-all"], "description": "How much the job may do unattended (default auto-read-only)" },
+                    "notify_on_success": { "type": "boolean", "description": "Notify even when a run succeeds (default false: failures and questions only)" }
+                },
+                "required": ["name", "cron", "prompt"],
+                "additionalProperties": false
+            }),
+            read_only: false,
+            scope: Some(ToolScope::Harness),
+        },
+        ToolSpec {
+            name: LIST_JOBS,
+            description: "List the scheduled jobs and their next run times.",
+            parameters: json!({
+                "type": "object",
+                "properties": {},
+                "additionalProperties": false
+            }),
+            read_only: true,
+            scope: Some(ToolScope::Harness),
+        },
+        ToolSpec {
+            name: DELETE_JOB,
+            description: "Delete a scheduled job by id. The user always sees a confirmation card.",
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "id": { "type": "string", "description": "Job id from list_jobs" }
+                },
+                "required": ["id"],
+                "additionalProperties": false
+            }),
+            read_only: false,
+            scope: Some(ToolScope::Harness),
         },
     ]
 }
 
+/// Persistent persona memory: `remember` and `forget`, offered only when the
+/// active persona has memory enabled.
+pub const REMEMBER: &str = "remember";
+pub const FORGET: &str = "forget";
+
+/// Long-term memory (global + per-workspace facts), offered in every mode.
+pub const RECALL: &str = "recall";
+pub const REMEMBER_FACT: &str = "remember_fact";
+pub const FORGET_FACT: &str = "forget_fact";
+
+/// Scheduled jobs.
+pub const SCHEDULE_JOB: &str = "schedule_job";
+pub const LIST_JOBS: &str = "list_jobs";
+pub const DELETE_JOB: &str = "delete_job";
+
+/// Passes the turn to another persona in a multi-persona chat.
+pub const HANDOFF: &str = "handoff";
+
+/// Tools offered when the active persona has memory enabled.
+pub fn memory_specs() -> Vec<ToolSpec> {
+    vec![
+        ToolSpec {
+            name: REMEMBER,
+            description: "Save a durable fact to this persona's memory. Memory persists across every chat that uses the persona, so keep it short and general — preferences, ongoing projects, names — not a transcript.",
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "key": { "type": "string", "description": "Short stable label, e.g. \"preferred language\"" },
+                    "value": { "type": "string", "description": "What to remember (max 2 KiB)" }
+                },
+                "required": ["key", "value"],
+                "additionalProperties": false
+            }),
+            read_only: false,
+            scope: None,
+        },
+        ToolSpec {
+            name: FORGET,
+            description: "Delete one entry from this persona's memory by its key. Use when a remembered fact is wrong or no longer true.",
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "key": { "type": "string", "description": "The key passed to remember" }
+                },
+                "required": ["key"],
+                "additionalProperties": false
+            }),
+            read_only: false,
+            scope: None,
+        },
+    ]
+}
+
+/// The turn-passing tool, offered only in multi-persona chats.
+pub fn handoff_spec(cast: &[String]) -> ToolSpec {
+    ToolSpec {
+        name: HANDOFF,
+        description: "Pass the turn to another persona in this group chat and give them the floor. They will reply next, seeing the whole conversation including your handoff note.",
+        parameters: json!({
+            "type": "object",
+            "properties": {
+                "persona": {
+                    "type": "string",
+                    "description": format!("Persona name or id to hand the turn to. Cast: {}", cast.join(", "))
+                },
+                "note": { "type": "string", "description": "Why you are handing over and what they should address" }
+            },
+            "required": ["persona"],
+            "additionalProperties": false
+        }),
+        read_only: false,
+        scope: None,
+    }
+}
+
+/// Memory and handoff specs together, for Settings → Tools and the permission
+/// card's tool lookup. They are only *offered* to the model contextually.
+pub fn persona_tool_specs() -> Vec<ToolSpec> {
+    let mut specs = memory_specs();
+    specs.push(handoff_spec(&[]));
+    specs
+}
+
 pub fn spec(name: &str) -> Option<ToolSpec> {
-    specs().into_iter().find(|tool| tool.name == name)
+    specs()
+        .into_iter()
+        .chain(persona_tool_specs())
+        .find(|tool| tool.name == name)
+}
+
+/// The built-in tool list for a permission mode. Harness tools are listed only
+/// in Atelier; everywhere else the model never sees them.
+pub fn specs_for(mode: PermissionMode) -> Vec<ToolSpec> {
+    let mut specs = specs();
+    if mode == PermissionMode::Atelier {
+        specs.extend(crate::harness::specs());
+    }
+    specs
 }
 
 /// Tools that `AutoReadOnly` may run without asking.
 pub fn is_read_only(name: &str) -> bool {
+    // Harness tools are not in this module's `specs()`, so they are mapped
+    // explicitly: only `list_harness` is a read.
+    if crate::harness::is_harness_read(name) {
+        return true;
+    }
+    if crate::harness::is_harness_tool(name) {
+        return false;
+    }
+    if crate::computer::is_computer_tool(name) {
+        return crate::computer::is_read_only(name);
+    }
     spec(name).map(|tool| tool.read_only).unwrap_or(false)
+}
+
+/// Calls that always show a confirmation card, even under Auto all: creating
+/// or deleting a schedule changes what Loom does while nobody is watching.
+pub fn always_asks(name: &str) -> bool {
+    matches!(name, SCHEDULE_JOB | DELETE_JOB | DELETE_PATH)
 }
 
 /// Whether a call may proceed under the current mode.
 pub fn requires_confirmation(mode: PermissionMode, name: &str) -> bool {
-    match mode {
-        PermissionMode::AutoAll => false,
-        PermissionMode::AutoReadOnly => !is_read_only(name),
-        PermissionMode::Ask => true,
+    // The question card *is* the prompt, so `ask_user` is never gated: asking
+    // the user to allow asking the user would be silly.
+    if name == ASK_USER {
+        return false;
     }
+    if always_asks(name) {
+        return true;
+    }
+    match mode {
+        PermissionMode::Ask => true,
+        PermissionMode::AutoReadOnly => !is_read_only(name),
+        PermissionMode::AutoAll => false,
+        // Auto all plus the harness tools — except that destruction always
+        // asks. That is the only asymmetry.
+        PermissionMode::Atelier => crate::harness::is_destructive(name),
+    }
+}
+
+/// Plan mode refuses anything that can change the workspace. Web tools are
+/// fine (research is the point); MCP tools are refused because their side
+/// effects are unknown. `ask_user` is never refused — the card is the prompt.
+pub fn is_blocked_in_plan(name: &str) -> bool {
+    if name == ASK_USER {
+        return false;
+    }
+    if name == crate::web::SEARCH_TOOL || name == crate::web::FETCH_TOOL {
+        return false;
+    }
+    !is_read_only(name) // write_file, edit_file, run_command, and every MCP tool
+}
+
+/// What the model is told when a read-only agent mode refuses a call. Phrased
+/// as guidance, not just an error, so the next round produces the mode's
+/// deliverable instead of a retry.
+pub fn mode_refusal(mode: &str, name: &str) -> String {
+    let guidance = if mode == "Review" {
+        "report what you found — issues ranked by severity, with file and line, and a proposed \
+         fix each. The user can switch to Build to have them applied."
+    } else {
+        "present a concrete plan (steps, files, risks) and wait for the user to switch to Build."
+    };
+    format!(
+        "{mode} mode: `{name}` is unavailable. Do not call it again — read and \
+         search as much as you need, then {guidance}"
+    )
+}
+
+pub fn plan_refusal(name: &str) -> String {
+    mode_refusal("Plan", name)
 }
 
 pub fn execute(call: &ToolCall, context: &ToolContext) -> ToolOutcome {
@@ -208,12 +874,14 @@ pub fn execute(call: &ToolCall, context: &ToolContext) -> ToolOutcome {
             name: call.name.clone(),
             ok: true,
             output,
+            images: Vec::new(),
         },
         Err(error) => ToolOutcome {
             id: call.id.clone(),
             name: call.name.clone(),
             ok: false,
             output: error.to_string(),
+            images: Vec::new(),
         },
     }
 }
@@ -227,6 +895,9 @@ fn dispatch(call: &ToolCall, context: &ToolContext) -> Result<String> {
     };
 
     match call.name.as_str() {
+        ASK_USER => Err(Error::Other(format!(
+            "{ASK_USER} is answered by the engine, not executed"
+        ))),
         "datetime" => Ok(now_string()),
         "list_dir" => {
             let path = string_arg(&arguments, "path").unwrap_or_else(|| ".".to_string());
@@ -237,15 +908,75 @@ fn dispatch(call: &ToolCall, context: &ToolContext) -> Result<String> {
             let path = string_arg(&arguments, "path")
                 .ok_or_else(|| Error::Other("read_file requires a path".into()))?;
             let target = resolve(context, &path)?;
-            read_file(&target)
+            let start = int_arg(&arguments, "start_line").filter(|value| *value > 0);
+            let lines = int_arg(&arguments, "max_lines").filter(|value| *value > 0);
+            read_file(&target, start, lines)
         }
         "grep" => {
             let query = string_arg(&arguments, "query")
+                .or_else(|| string_arg(&arguments, "pattern"))
                 .ok_or_else(|| Error::Other("grep requires a query".into()))?;
             let path = string_arg(&arguments, "path").unwrap_or_else(|| ".".to_string());
             let target = resolve(context, &path)?;
-            grep(&target, &query)
+            let include = string_arg(&arguments, "include");
+            grep(&target, &query, include.as_deref())
         }
+        "find_files" => {
+            let pattern = string_arg(&arguments, "pattern")
+                .ok_or_else(|| Error::Other("find_files requires a pattern".into()))?;
+            let limit = int_arg(&arguments, "limit").unwrap_or(80).clamp(1, 200) as usize;
+            find_files(context, &pattern, limit)
+        }
+        "create_dir" => {
+            let path = string_arg(&arguments, "path")
+                .ok_or_else(|| Error::Other("create_dir requires a path".into()))?;
+            let target = resolve(context, &path)?;
+            create_dir(&target)
+        }
+        "move_path" => {
+            let from = string_arg(&arguments, "from")
+                .ok_or_else(|| Error::Other("move_path requires from".into()))?;
+            let to = string_arg(&arguments, "to")
+                .ok_or_else(|| Error::Other("move_path requires to".into()))?;
+            let source = resolve(context, &from)?;
+            let destination = resolve(context, &to)?;
+            let root = workspace_root(context)?;
+            move_path(&source, &destination, &root)
+        }
+        "copy_path" => {
+            let from = string_arg(&arguments, "from")
+                .ok_or_else(|| Error::Other("copy_path requires from".into()))?;
+            let to = string_arg(&arguments, "to")
+                .ok_or_else(|| Error::Other("copy_path requires to".into()))?;
+            let source = resolve(context, &from)?;
+            let destination = resolve(context, &to)?;
+            let root = workspace_root(context)?;
+            copy_path(&source, &destination, &root)
+        }
+        DELETE_PATH => {
+            let path = string_arg(&arguments, "path")
+                .ok_or_else(|| Error::Other("delete_path requires a path".into()))?;
+            let target = resolve(context, &path)?;
+            let root = workspace_root(context)?;
+            delete_path(&target, &root)
+        }
+        "git_status" => git_status(context),
+        "git_diff" => {
+            let staged = arguments
+                .get("staged")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            let path = string_arg(&arguments, "path");
+            git_diff(context, staged, path.as_deref())
+        }
+        "git_log" => {
+            let count = int_arg(&arguments, "count").unwrap_or(15).clamp(1, 100);
+            git_log(context, count)
+        }
+        TODO_WRITE | TODO_READ => Err(Error::Other(format!(
+            "{} is handled by the engine, not executed",
+            call.name
+        ))),
         "write_file" => {
             let path = string_arg(&arguments, "path")
                 .ok_or_else(|| Error::Other("write_file requires a path".into()))?;
@@ -278,7 +1009,7 @@ fn now_string() -> String {
         .unwrap_or(0);
     let days = now / 86_400;
     let seconds = now % 86_400;
-    let (year, month, day) = civil_from_days(days as i64);
+    let (year, month, day) = crate::fsutil::civil_from_days(days as i64);
     format!(
         "{year:04}-{month:02}-{day:02} {:02}:{:02}:{:02} UTC (unix {now})",
         seconds / 3_600,
@@ -287,18 +1018,305 @@ fn now_string() -> String {
     )
 }
 
-/// Howard Hinnant's civil-from-days algorithm (proleptic Gregorian).
-fn civil_from_days(days: i64) -> (i64, u32, u32) {
-    let z = days + 719_468;
-    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
-    let doe = (z - era * 146_097) as u64;
-    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
-    let y = yoe as i64 + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
-    (if m <= 2 { y + 1 } else { y }, m, d)
+fn int_arg(arguments: &Value, key: &str) -> Option<i64> {
+    arguments.get(key).and_then(Value::as_i64)
+}
+
+fn workspace_root(context: &ToolContext) -> Result<PathBuf> {
+    context
+        .workdir
+        .clone()
+        .ok_or_else(|| Error::Other("this chat has no workspace folder set".into()))
+}
+
+fn relative_path(path: &Path, root: &Path) -> String {
+    path.strip_prefix(root)
+        .unwrap_or(path)
+        .to_string_lossy()
+        .replace('\\', "/")
+}
+
+/// Glob matcher for `find_files` and `grep --include`: `*` stays inside a path
+/// segment, `**` crosses folders, `?` is one character.
+fn glob_match(pattern: &str, text: &str) -> bool {
+    let pattern: Vec<char> = pattern.chars().collect();
+    let text: Vec<char> = text.chars().collect();
+    match_glob(&pattern, &text)
+}
+
+fn match_glob(pattern: &[char], text: &[char]) -> bool {
+    if pattern.is_empty() {
+        return text.is_empty();
+    }
+    match pattern[0] {
+        '*' => {
+            if pattern.len() > 1 && pattern[1] == '*' {
+                let rest: &[char] = if pattern.len() > 2 && pattern[2] == '/' {
+                    &pattern[3..]
+                } else {
+                    &pattern[2..]
+                };
+                (0..=text.len()).any(|skip| match_glob(rest, &text[skip..]))
+            } else {
+                let rest = &pattern[1..];
+                for skip in 0..=text.len() {
+                    if skip > 0 && text[skip - 1] == '/' {
+                        break;
+                    }
+                    if match_glob(rest, &text[skip..]) {
+                        return true;
+                    }
+                }
+                false
+            }
+        }
+        '?' => !text.is_empty() && text[0] != '/' && match_glob(&pattern[1..], &text[1..]),
+        ch => !text.is_empty() && text[0] == ch && match_glob(&pattern[1..], &text[1..]),
+    }
+}
+
+fn find_files(context: &ToolContext, pattern: &str, limit: usize) -> Result<String> {
+    let root = workspace_root(context)?;
+    let mut matches: Vec<String> = Vec::new();
+    walk(&root, &mut |path| {
+        if matches.len() >= limit {
+            return;
+        }
+        let relative = relative_path(path, &root);
+        let name = path
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let hit = if pattern.contains('/') {
+            glob_match(pattern, &relative)
+        } else {
+            glob_match(pattern, &name)
+        };
+        if hit {
+            matches.push(relative);
+        }
+    })?;
+    matches.sort();
+    if matches.is_empty() {
+        return Ok(format!("no files match \"{pattern}\""));
+    }
+    Ok(matches.join("\n"))
+}
+
+fn create_dir(path: &Path) -> Result<String> {
+    std::fs::create_dir_all(path).map_err(|e| Error::io(path, e))?;
+    Ok(format!("created folder {}", relative_name(path)))
+}
+
+fn relative_name(path: &Path) -> String {
+    path.file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| path.display().to_string())
+}
+
+fn move_path(source: &Path, destination: &Path, root: &Path) -> Result<String> {
+    if !source.exists() {
+        return Err(Error::Other(format!(
+            "{} does not exist",
+            relative_path(source, root)
+        )));
+    }
+    if source == root || destination == root {
+        return Err(Error::Other(
+            "refusing to move the workspace root itself".into(),
+        ));
+    }
+    if destination.exists() {
+        return Err(Error::Other(format!(
+            "{} already exists",
+            relative_path(destination, root)
+        )));
+    }
+    if let Some(parent) = destination.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| Error::io(parent, e))?;
+    }
+
+    match std::fs::rename(source, destination) {
+        Ok(()) => {}
+        Err(_) if source.is_dir() => {
+            copy_dir(source, destination)?;
+            std::fs::remove_dir_all(source).map_err(|e| Error::io(source, e))?;
+        }
+        Err(_) => {
+            std::fs::copy(source, destination).map_err(|e| Error::io(source, e))?;
+            std::fs::remove_file(source).map_err(|e| Error::io(source, e))?;
+        }
+    }
+
+    Ok(format!(
+        "moved {} -> {}",
+        relative_path(source, root),
+        relative_path(destination, root)
+    ))
+}
+
+fn copy_path(source: &Path, destination: &Path, root: &Path) -> Result<String> {
+    if !source.exists() {
+        return Err(Error::Other(format!(
+            "{} does not exist",
+            relative_path(source, root)
+        )));
+    }
+    if source == root || destination == root {
+        return Err(Error::Other(
+            "refusing to copy the workspace root itself".into(),
+        ));
+    }
+    if destination.exists() {
+        return Err(Error::Other(format!(
+            "{} already exists",
+            relative_path(destination, root)
+        )));
+    }
+
+    if source.is_dir() {
+        copy_dir(source, destination)?;
+    } else {
+        if let Some(parent) = destination.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| Error::io(parent, e))?;
+        }
+        std::fs::copy(source, destination).map_err(|e| Error::io(source, e))?;
+    }
+
+    Ok(format!(
+        "copied {} -> {}",
+        relative_path(source, root),
+        relative_path(destination, root)
+    ))
+}
+
+fn copy_dir(source: &Path, destination: &Path) -> Result<()> {
+    std::fs::create_dir_all(destination).map_err(|e| Error::io(destination, e))?;
+    let reader = std::fs::read_dir(source).map_err(|e| Error::io(source, e))?;
+    for entry in reader.flatten() {
+        let from = entry.path();
+        let to = destination.join(entry.file_name());
+        if from.is_dir() {
+            copy_dir(&from, &to)?;
+        } else {
+            std::fs::copy(&from, &to).map_err(|e| Error::io(&from, e))?;
+        }
+    }
+    Ok(())
+}
+
+fn count_entries(path: &Path) -> usize {
+    let Ok(reader) = std::fs::read_dir(path) else {
+        return 0;
+    };
+    reader
+        .flatten()
+        .map(|entry| {
+            let child = entry.path();
+            if child.is_dir() {
+                1 + count_entries(&child)
+            } else {
+                1
+            }
+        })
+        .sum()
+}
+
+fn delete_path(target: &Path, root: &Path) -> Result<String> {
+    if target == root {
+        return Err(Error::Other(
+            "refusing to delete the workspace root itself".into(),
+        ));
+    }
+    if !target.exists() {
+        return Err(Error::Other(format!(
+            "{} does not exist",
+            relative_path(target, root)
+        )));
+    }
+
+    if target.is_dir() {
+        let count = count_entries(target);
+        std::fs::remove_dir_all(target).map_err(|e| Error::io(target, e))?;
+        Ok(format!(
+            "deleted folder {} ({count} entries)",
+            relative_path(target, root)
+        ))
+    } else {
+        std::fs::remove_file(target).map_err(|e| Error::io(target, e))?;
+        Ok(format!("deleted {}", relative_path(target, root)))
+    }
+}
+
+fn run_git(root: &Path, args: &[&str]) -> Result<std::process::Output> {
+    std::process::Command::new("git")
+        .args(args)
+        .current_dir(root)
+        .stdin(std::process::Stdio::null())
+        .output()
+        .map_err(|e| Error::Other(format!("could not run git: {e}")))
+}
+
+fn git_status(context: &ToolContext) -> Result<String> {
+    let root = workspace_root(context)?;
+    let output = run_git(&root, &["--no-pager", "status", "--porcelain=v1", "-b"])?;
+    if output.status.code() != Some(0) {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(Error::Other(format!("git: {}", stderr.trim())));
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    if stdout.trim().is_empty() {
+        return Ok("clean working tree".to_string());
+    }
+    Ok(truncate_output(&stdout))
+}
+
+fn git_diff(context: &ToolContext, staged: bool, path: Option<&str>) -> Result<String> {
+    let root = workspace_root(context)?;
+    let relative = match path {
+        Some(path) => {
+            let target = resolve(context, path)?;
+            relative_path(&target, &root)
+        }
+        None => ".".to_string(),
+    };
+
+    let mut args: Vec<&str> = vec!["--no-pager", "diff", "--patch"];
+    if staged {
+        args.push("--cached");
+    }
+    args.push("--");
+    args.push(&relative);
+
+    let output = run_git(&root, &args)?;
+    if output.status.code() != Some(0) {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(Error::Other(format!("git: {}", stderr.trim())));
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    if stdout.trim().is_empty() {
+        return Ok(if staged {
+            "no staged changes".to_string()
+        } else {
+            "no uncommitted changes".to_string()
+        });
+    }
+    Ok(truncate_output(&stdout))
+}
+
+fn git_log(context: &ToolContext, count: i64) -> Result<String> {
+    let root = workspace_root(context)?;
+    let limit = format!("-n{count}");
+    let output = run_git(&root, &["--no-pager", "log", "--oneline", &limit])?;
+    if output.status.code() != Some(0) {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(Error::Other(format!("git: {}", stderr.trim())));
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    if stdout.trim().is_empty() {
+        return Ok("no commits yet".to_string());
+    }
+    Ok(truncate_output(&stdout))
 }
 
 /// Resolves a relative path inside the workspace and refuses escapes.
@@ -348,10 +1366,7 @@ fn list_dir(path: &Path) -> Result<String> {
         } else {
             "file"
         };
-        let size = entry
-            .metadata()
-            .map(|m| m.len())
-            .unwrap_or(0);
+        let size = entry.metadata().map(|m| m.len()).unwrap_or(0);
         entries.push(format!("{kind} {name} ({size} bytes)"));
     }
     entries.sort();
@@ -361,7 +1376,7 @@ fn list_dir(path: &Path) -> Result<String> {
     Ok(entries.join("\n"))
 }
 
-fn read_file(path: &Path) -> Result<String> {
+fn read_file(path: &Path, start_line: Option<i64>, max_lines: Option<i64>) -> Result<String> {
     let metadata = std::fs::metadata(path).map_err(|e| Error::io(path, e))?;
     if metadata.is_dir() {
         return Err(Error::Other("that path is a folder, not a file".into()));
@@ -374,7 +1389,28 @@ fn read_file(path: &Path) -> Result<String> {
         )));
     }
     let text = std::fs::read_to_string(path).map_err(|e| Error::io(path, e))?;
-    Ok(text)
+
+    if start_line.is_none() && max_lines.is_none() {
+        return Ok(text);
+    }
+
+    let lines: Vec<&str> = text.lines().collect();
+    let total = lines.len();
+    if total == 0 {
+        return Ok("(the file is empty)".to_string());
+    }
+    let first = start_line.unwrap_or(1).max(1) as usize;
+    let start = (first - 1).min(total);
+    let end = match max_lines {
+        Some(count) => (start + count.max(1) as usize).min(total),
+        None => total,
+    };
+    let body = lines[start..end].join("\n");
+    Ok(format!(
+        "lines {}-{} of {total}:\n{body}",
+        start + 1,
+        end
+    ))
 }
 
 fn write_file(path: &Path, content: &str) -> Result<String> {
@@ -401,9 +1437,7 @@ fn edit_file(path: &Path, old: &str, new: &str) -> Result<String> {
     let current = std::fs::read_to_string(path).map_err(|e| Error::io(path, e))?;
     let occurrences = current.matches(old).count();
     if occurrences == 0 {
-        return Err(Error::Other(
-            "old_string was not found in the file".into(),
-        ));
+        return Err(Error::Other("old_string was not found in the file".into()));
     }
     if occurrences > 1 {
         return Err(Error::Other(format!(
@@ -463,7 +1497,10 @@ pub async fn run_command(context: &ToolContext, command: &str) -> Result<String>
     let mut report = String::new();
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
-    report.push_str(&format!("exit code: {}\n", output.status.code().unwrap_or(-1)));
+    report.push_str(&format!(
+        "exit code: {}\n",
+        output.status.code().unwrap_or(-1)
+    ));
     if !stdout.trim().is_empty() {
         report.push_str("stdout:\n");
         report.push_str(&truncate_output(&stdout));
@@ -488,23 +1525,34 @@ fn truncate_output(text: &str) -> String {
     format!("{}... [truncated]", &text[..cut])
 }
 
-fn grep(root: &Path, query: &str) -> Result<String> {
+fn grep(root: &Path, query: &str, include: Option<&str>) -> Result<String> {
     let needle = query.to_lowercase();
     let mut matches: Vec<String> = Vec::new();
     walk(root, &mut |path| {
         if matches.len() >= 200 {
             return;
         }
+        if let Some(include) = include {
+            let relative = relative_path(path, root);
+            let name = path
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            let hit = if include.contains('/') {
+                glob_match(include, &relative)
+            } else {
+                glob_match(include, &name)
+            };
+            if !hit {
+                return;
+            }
+        }
         let Ok(text) = std::fs::read_to_string(path) else {
             return;
         };
         for (index, line) in text.lines().enumerate() {
             if line.to_lowercase().contains(&needle) {
-                let relative = path
-                    .strip_prefix(root)
-                    .unwrap_or(path)
-                    .to_string_lossy()
-                    .into_owned();
+                let relative = relative_path(path, root);
                 matches.push(format!("{relative}:{}: {}", index + 1, line.trim()));
                 if matches.len() >= 200 {
                     break;
@@ -553,6 +1601,7 @@ mod tests {
     fn context(root: &Path) -> ToolContext {
         ToolContext {
             workdir: Some(root.to_path_buf()),
+            computer: false,
         }
     }
 
@@ -616,9 +1665,203 @@ mod tests {
     #[test]
     fn permission_modes_gate_tools() {
         assert!(requires_confirmation(PermissionMode::Ask, "read_file"));
-        assert!(!requires_confirmation(PermissionMode::AutoReadOnly, "read_file"));
-        assert!(requires_confirmation(PermissionMode::AutoReadOnly, "write_file"));
-        assert!(!requires_confirmation(PermissionMode::AutoAll, "write_file"));
+        assert!(!requires_confirmation(
+            PermissionMode::AutoReadOnly,
+            "read_file"
+        ));
+        assert!(requires_confirmation(
+            PermissionMode::AutoReadOnly,
+            "write_file"
+        ));
+        assert!(!requires_confirmation(
+            PermissionMode::AutoAll,
+            "write_file"
+        ));
+    }
+
+    #[test]
+    fn atelier_only_cards_its_five_deletes() {
+        for name in [
+            "run_command",
+            "write_file",
+            "upsert_persona",
+            "upsert_prompt",
+            "write_skill",
+            "upsert_mcp_server",
+            "test_mcp_server",
+            "upsert_provider",
+            "update_model",
+            "update_settings",
+            "list_harness",
+        ] {
+            assert!(
+                !requires_confirmation(PermissionMode::Atelier, name),
+                "{name} should run without a card in Atelier"
+            );
+        }
+        for name in [
+            "delete_persona",
+            "delete_skill",
+            "delete_prompt",
+            "delete_provider",
+            "delete_mcp_server",
+        ] {
+            assert!(
+                requires_confirmation(PermissionMode::Atelier, name),
+                "{name} must still ask in Atelier"
+            );
+        }
+    }
+
+    #[test]
+    fn harness_tools_are_listed_only_in_atelier() {
+        let harness: Vec<String> = crate::harness::specs()
+            .iter()
+            .map(|spec| spec.name.to_string())
+            .collect();
+        assert_eq!(harness.len(), 14);
+
+        for name in &harness {
+            assert!(
+                !name.starts_with("mcp__"),
+                "{name} must not collide with the MCP namespace"
+            );
+            assert!(
+                !specs_for(PermissionMode::Ask)
+                    .iter()
+                    .any(|spec| spec.name == name),
+                "{name} must not be listed outside Atelier"
+            );
+            assert!(
+                specs_for(PermissionMode::Atelier)
+                    .iter()
+                    .any(|spec| spec.name == name),
+                "{name} must be listed in Atelier"
+            );
+        }
+
+        // And the harness tools declare their scope for the permission card.
+        assert!(crate::harness::specs()
+            .iter()
+            .all(|spec| spec.scope == Some(ToolScope::Harness)));
+    }
+
+    #[test]
+    fn plan_mode_refuses_harness_writers_and_allows_list_harness() {
+        for name in [
+            "upsert_persona",
+            "delete_persona",
+            "write_skill",
+            "delete_skill",
+            "update_settings",
+        ] {
+            assert!(is_blocked_in_plan(name), "{name} should be refused in Plan");
+        }
+        assert!(is_read_only("list_harness"));
+        assert!(!is_read_only("upsert_persona"));
+        assert!(!is_blocked_in_plan("list_harness"));
+    }
+
+    #[test]
+    fn ask_user_is_never_gated() {
+        for mode in [
+            PermissionMode::Ask,
+            PermissionMode::AutoReadOnly,
+            PermissionMode::AutoAll,
+            PermissionMode::Atelier,
+        ] {
+            assert!(!requires_confirmation(mode, ASK_USER));
+        }
+    }
+
+    #[test]
+    fn plan_mode_blocks_what_can_change_the_workspace() {
+        for name in ["write_file", "edit_file", "run_command"] {
+            assert!(is_blocked_in_plan(name), "{name} should be refused");
+        }
+        for name in [
+            "read_file",
+            "grep",
+            "list_dir",
+            "search_workspace",
+            "datetime",
+            "generate_image",
+            "spawn_agent",
+            crate::web::SEARCH_TOOL,
+            crate::web::FETCH_TOOL,
+            ASK_USER,
+        ] {
+            assert!(!is_blocked_in_plan(name), "{name} should be allowed");
+        }
+    }
+
+    #[test]
+    fn plan_mode_refuses_unknown_and_mcp_tools() {
+        assert!(is_blocked_in_plan("mcp__files__write"));
+        assert!(is_blocked_in_plan("some_future_tool"));
+    }
+
+    #[test]
+    fn plan_refusal_names_the_tool_and_points_at_planning() {
+        let refusal = plan_refusal("write_file");
+        assert!(refusal.contains("Plan mode"), "{refusal}");
+        assert!(refusal.contains("write_file"), "{refusal}");
+        assert!(refusal.contains("Do not call it again"), "{refusal}");
+    }
+
+    #[test]
+    fn ask_user_parses_options_and_shapes() {
+        let question = AskQuestion::parse(
+            &json!({
+                "question": "Which database?",
+                "header": "Database",
+                "options": [
+                    "Postgres",
+                    { "label": "SQLite", "description": "single file" },
+                    "Postgres"
+                ]
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        assert_eq!(question.question, "Which database?");
+        assert_eq!(question.header.as_deref(), Some("Database"));
+        // A bare string and an object both parse; the duplicate is dropped.
+        assert_eq!(question.options.len(), 2);
+        assert_eq!(
+            question.options[1].description.as_deref(),
+            Some("single file")
+        );
+        assert!(question.allow_free_text);
+        assert!(!question.allow_multiple);
+    }
+
+    #[test]
+    fn ask_user_rejects_questions_with_nothing_to_do() {
+        assert!(AskQuestion::parse("{}").is_err());
+        assert!(AskQuestion::parse(
+            r#"{"question":"Pick one","options":[],"allow_free_text":false}"#
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn ask_user_output_carries_the_answer_back() {
+        let question = AskQuestion::parse(r#"{"question":"Which database?"}"#).unwrap();
+        let answered = question.to_tool_output(&Answer {
+            selected: vec!["Postgres".into()],
+            text: Some("not SQLite".into()),
+            cancelled: false,
+        });
+        assert!(answered.contains("Postgres"), "{answered}");
+        assert!(answered.contains("not SQLite"), "{answered}");
+
+        let skipped = question.to_tool_output(&Answer {
+            cancelled: true,
+            ..Default::default()
+        });
+        assert!(skipped.contains("dismissed"), "{skipped}");
     }
 
     #[test]
@@ -636,7 +1879,7 @@ mod tests {
 
     #[test]
     fn civil_dates_are_correct() {
-        assert_eq!(civil_from_days(0), (1970, 1, 1));
-        assert_eq!(civil_from_days(19_723), (2024, 1, 1));
+        assert_eq!(crate::fsutil::civil_from_days(0), (1970, 1, 1));
+        assert_eq!(crate::fsutil::civil_from_days(19_723), (2024, 1, 1));
     }
 }

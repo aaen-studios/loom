@@ -20,9 +20,8 @@ function isTyping(target: EventTarget | null): boolean {
  * Global keyboard shortcuts.
  *
  * - Ctrl+N       new chat
- * - Ctrl+K       chats popup
+ * - Ctrl+K       chats popup (focuses its search when the list is visible)
  * - Ctrl+,       settings
- * - Ctrl+F       search this chat
  * - Ctrl+End     jump to the newest text
  * - ?            the shortcut sheet
  *
@@ -33,13 +32,24 @@ export function useShortcuts(): void {
   const setSidebarOpen = useUi((state) => state.setSidebarOpen);
   const setSettingsOpen = useUi((state) => state.setSettingsOpen);
   const setShortcutsOpen = useUi((state) => state.setShortcutsOpen);
-  const sidebarOpen = useUi((state) => state.sidebarOpen);
   const settingsOpen = useUi((state) => state.settingsOpen);
   const shortcutsOpen = useUi((state) => state.shortcutsOpen);
   const theme = useSettings((state) => state.config.theme);
   const setTheme = useSettings((state) => state.setTheme);
 
   useEffect(() => {
+    const focusSidebarSearch = () => {
+      const input = document.getElementById(
+        "sidebar-search",
+      ) as HTMLInputElement | null;
+      if (input) {
+        input.focus();
+        input.select();
+        return true;
+      }
+      return false;
+    };
+
     const onKey = (event: KeyboardEvent) => {
       const modified = event.ctrlKey || event.metaKey;
       const key = event.key.toLowerCase();
@@ -51,15 +61,14 @@ export function useShortcuts(): void {
           setSidebarOpen(false);
         } else if (key === "k") {
           event.preventDefault();
-          setSidebarOpen(!sidebarOpen);
+          // Visible already (open or pinned): jump straight to the search.
+          if (!focusSidebarSearch()) {
+            setSidebarOpen(true);
+            requestAnimationFrame(() => focusSidebarSearch());
+          }
         } else if (key === ",") {
           event.preventDefault();
           setSettingsOpen(true);
-        } else if (key === "f") {
-          event.preventDefault();
-          document
-            .querySelector<HTMLInputElement>('input[placeholder="Search chat"]')
-            ?.focus();
         } else if (event.key === "End") {
           event.preventDefault();
           document
@@ -92,7 +101,6 @@ export function useShortcuts(): void {
     setSidebarOpen,
     setSettingsOpen,
     setShortcutsOpen,
-    sidebarOpen,
     settingsOpen,
     shortcutsOpen,
     theme,

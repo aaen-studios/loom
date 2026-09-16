@@ -3,9 +3,11 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { AskOverlay } from "./components/AskOverlay";
 import { Background } from "./components/Background";
 import { ChatCanvas } from "./components/ChatCanvas";
+import { ComputerPill } from "./components/ComputerPill";
 import { SettingsPanel } from "./components/SettingsPanel";
 import { ShortcutsSheet } from "./components/ShortcutsSheet";
 import { SidebarPopup } from "./components/Sidebar";
+import { TasksPanel } from "./components/TasksPanel";
 import { TitleBar } from "./components/TitleBar";
 import { UpdateToast } from "./components/UpdateToast";
 import { useEngineEvents, useShellEvents } from "./lib/events";
@@ -14,12 +16,14 @@ import { isTauri } from "./lib/tauri";
 import { useChat } from "./stores/chat";
 import { useProviders } from "./stores/providers";
 import { useSettings } from "./stores/settings";
+import { useUsage } from "./stores/usage";
 
 function MainShell() {
   const theme = useSettings((state) => state.config.theme);
   const load = useSettings((state) => state.load);
   const loadProviders = useProviders((state) => state.load);
   const loadSessions = useChat((state) => state.loadSessions);
+  const startUsage = useUsage((state) => state.start);
 
   useEngineEvents();
   useShellEvents();
@@ -29,7 +33,8 @@ function MainShell() {
     void load();
     void loadProviders();
     void loadSessions();
-  }, [load, loadProviders, loadSessions]);
+    startUsage();
+  }, [load, loadProviders, loadSessions, startUsage]);
 
   // The quick-ask overlay can create chats while this window is hidden.
   useEffect(() => {
@@ -65,6 +70,7 @@ function MainShell() {
       </div>
 
       <SettingsPanel />
+      <TasksPanel />
       <ShortcutsSheet />
       <UpdateToast />
     </div>
@@ -83,9 +89,13 @@ function OverlayShell() {
 }
 
 export default function App() {
-  const isOverlay =
-    typeof window !== "undefined" &&
-    new URLSearchParams(window.location.search).has("ask");
+  const params =
+    typeof window !== "undefined"
+      ? new URLSearchParams(window.location.search)
+      : new URLSearchParams();
 
-  return isOverlay ? <OverlayShell /> : <MainShell />;
+  if (params.has("computer")) {
+    return <ComputerPill />;
+  }
+  return params.has("ask") ? <OverlayShell /> : <MainShell />;
 }

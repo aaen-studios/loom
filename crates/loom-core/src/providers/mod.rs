@@ -63,7 +63,9 @@ pub struct Usage {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", tag = "type")]
 pub enum ContentPart {
-    Text { text: String },
+    Text {
+        text: String,
+    },
     Image {
         mime: String,
         base64: String,
@@ -113,6 +115,26 @@ impl WireMessage {
         }
     }
 
+    /// A tool result that carries images (screenshots) as well as text.
+    pub fn tool_result_with_images(
+        call_id: impl Into<String>,
+        content: impl Into<String>,
+        images: Vec<ContentPart>,
+    ) -> Self {
+        let mut parts = Vec::with_capacity(images.len() + 1);
+        parts.push(ContentPart::Text {
+            text: content.into(),
+        });
+        parts.extend(images);
+        Self {
+            role: "tool".to_string(),
+            parts,
+            tool_calls: Vec::new(),
+            tool_call_id: Some(call_id.into()),
+            reasoning: None,
+        }
+    }
+
     /// True when every part is text (lets adapters send a plain string, which
     /// older local models require).
     pub fn is_text_only(&self) -> bool {
@@ -141,6 +163,9 @@ pub struct ChatRequest<'a> {
     pub messages: Vec<WireMessage>,
     pub variant: Option<&'a str>,
     pub max_output_tokens: Option<u32>,
+    /// Persona sampling overrides, when the provider dialect supports them.
+    pub temperature: Option<f32>,
+    pub top_p: Option<f32>,
     pub stream: bool,
     pub tools: Vec<ToolDef>,
     /// Stable per-conversation id, sent when the provider asks for one.
@@ -158,10 +183,7 @@ impl ChatRequest<'_> {
             match self.provider.kind {
                 crate::provider::ProviderKind::Anthropic => {
                     headers.push(("x-api-key".to_string(), key.to_string()));
-                    headers.push((
-                        "anthropic-version".to_string(),
-                        "2023-06-01".to_string(),
-                    ));
+                    headers.push(("anthropic-version".to_string(), "2023-06-01".to_string()));
                 }
                 crate::provider::ProviderKind::OpenaiCompatible => {
                     headers.push(("authorization".to_string(), format!("Bearer {key}")));
@@ -171,7 +193,8 @@ impl ChatRequest<'_> {
 
         // Gateways such as OpenCode Go require a stable conversation id so they
         // can route requests and cache prompts; without it they reject the call.
-        if let (Some(name), Some(session)) = (self.provider.session_header.as_deref(), self.session_id)
+        if let (Some(name), Some(session)) =
+            (self.provider.session_header.as_deref(), self.session_id)
         {
             if !name.trim().is_empty() && !session.trim().is_empty() {
                 headers.push((name.to_string(), session.to_string()));
@@ -198,6 +221,8 @@ mod tests {
             messages: vec![WireMessage::text("user", "hi")],
             variant: None,
             max_output_tokens: None,
+            temperature: None,
+            top_p: None,
             stream: true,
             tools: Vec::new(),
             session_id: session,
@@ -251,4 +276,3 @@ mod tests {
         assert_eq!(header(&headers, "authorization"), None);
     }
 }
-

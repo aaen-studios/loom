@@ -81,14 +81,17 @@ impl McpClient {
             .args(&config.args)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null());
+            .stderr(Stdio::null())
+            // Dropping the client (a test, a config edit, app shutdown) must
+            // kill the server process, not orphan it.
+            .kill_on_drop(true);
         for (key, value) in &config.env {
             command.env(key, value);
         }
 
-        let mut child = command
-            .spawn()
-            .map_err(|e| Error::other(format!("failed to start MCP server \"{server_id}\": {e}")))?;
+        let mut child = command.spawn().map_err(|e| {
+            Error::other(format!("failed to start MCP server \"{server_id}\": {e}"))
+        })?;
 
         let stdin = child
             .stdin
@@ -180,7 +183,10 @@ impl McpClient {
                 return Err(Error::other(format!(
                     "MCP error from \"{}\": {}",
                     self.server_id,
-                    error.get("message").and_then(Value::as_str).unwrap_or("unknown")
+                    error
+                        .get("message")
+                        .and_then(Value::as_str)
+                        .unwrap_or("unknown")
                 )));
             }
             return Ok(value.get("result").cloned().unwrap_or(Value::Null));
@@ -293,5 +299,22 @@ mod tests {
         let config = McpServerConfig::default();
         assert!(config.enabled);
         assert!(config.args.is_empty());
+    }
+
+    /// `test_mcp_server` must fail fast on a bad command, not hang a turn.
+    #[tokio::test]
+    async fn a_bogus_command_fails_fast_instead_of_hanging() {
+        let config = McpServerConfig {
+            command: "definitely-not-an-mcp-server".to_string(),
+            ..Default::default()
+        };
+        let started = std::time::Instant::now();
+        let result = McpClient::connect("bogus", &config).await;
+        assert!(result.is_err());
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(5),
+            "took {:?}",
+            started.elapsed()
+        );
     }
 }

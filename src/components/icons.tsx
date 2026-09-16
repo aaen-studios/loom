@@ -71,10 +71,47 @@ export function PlusIcon(props: IconProps) {
   );
 }
 
+export function PlayIcon(props: IconProps) {
+  return (
+    <Icon {...props} strokeWidth={1.6}>
+      <path d="M8.5 5.8l9.2 6.2-9.2 6.2V5.8z" />
+    </Icon>
+  );
+}
+
+export function RunsIcon(props: IconProps) {
+  return (
+    <Icon {...props}>
+      <path d="M4.5 6.5h15M4.5 12h15M4.5 17.5h9" />
+      <circle cx="17.5" cy="17.5" r="2.4" />
+    </Icon>
+  );
+}
+
 export function ChevronDownIcon(props: IconProps) {
   return (
     <Icon {...props}>
       <path d="M6.5 9.5l5.5 5.5 5.5-5.5" />
+    </Icon>
+  );
+}
+
+export function SortIcon(props: IconProps) {
+  return (
+    <Icon {...props}>
+      <path d="M4.5 7h15" />
+      <path d="M7.5 12h9" />
+      <path d="M10.5 17h3" />
+    </Icon>
+  );
+}
+
+export function PinIcon(props: IconProps) {
+  return (
+    <Icon {...props}>
+      <path d="M9 4.5h6" />
+      <path d="M10 4.5v5.6a2 2 0 0 1-.9 1.7l-1.6 1V14h9v-1.2l-1.6-1a2 2 0 0 1-.9-1.7V4.5" />
+      <path d="M12 14v5.5" />
     </Icon>
   );
 }
@@ -227,6 +264,65 @@ export function WrenchIcon(props: IconProps) {
   );
 }
 
+export function PaletteIcon(props: IconProps) {
+  return (
+    <Icon {...props}>
+      <path d="M12 3.5c-4.7 0-8.5 3.6-8.5 8s3.8 8 8.5 8c1 0 1.8-.8 1.8-1.8 0-.5-.2-.9-.5-1.3-.2-.3-.4-.7-.4-1 0-1 .9-1.9 2-1.9h1.6c2 0 3.5-1.6 3.5-3.5 0-3.6-3.6-6.5-8-6.5z" />
+      <circle cx="7.8" cy="12.2" r="0.9" />
+      <circle cx="10.3" cy="8.3" r="0.9" />
+      <circle cx="14.8" cy="8.2" r="0.9" />
+    </Icon>
+  );
+}
+
+export function MessageIcon(props: IconProps) {
+  return (
+    <Icon {...props}>
+      <path d="M4.5 6.8a2.3 2.3 0 0 1 2.3-2.3h10.4a2.3 2.3 0 0 1 2.3 2.3v7.4a2.3 2.3 0 0 1-2.3 2.3H9l-4.5 3.5z" />
+    </Icon>
+  );
+}
+
+export function GaugeIcon(props: IconProps) {
+  return (
+    <Icon {...props}>
+      <path d="M4.5 16.5a8 8 0 1 1 15 0" />
+      <path d="M12 16.5l3.5-6" />
+      <circle cx="12" cy="16.5" r="1.2" />
+    </Icon>
+  );
+}
+
+export function PlugIcon(props: IconProps) {
+  return (
+    <Icon {...props}>
+      <path d="M9 3.5v5M15 3.5v5" />
+      <path d="M6.5 8.5h11v3a5.5 5.5 0 0 1-5.5 5.5 5.5 5.5 0 0 1-5.5-5.5z" />
+      <path d="M12 17v3.5" />
+    </Icon>
+  );
+}
+
+export function ServerIcon(props: IconProps) {
+  return (
+    <Icon {...props}>
+      <rect x="4" y="4.5" width="16" height="6" rx="2" />
+      <rect x="4" y="13.5" width="16" height="6" rx="2" />
+      <path d="M7.5 7.5h.01M7.5 16.5h.01" />
+    </Icon>
+  );
+}
+
+export function DatabaseIcon(props: IconProps) {
+  return (
+    <Icon {...props}>
+      <ellipse cx="12" cy="6" rx="7" ry="3" />
+      <path d="M5 6v12c0 1.7 3.1 3 7 3s7-1.3 7-3V6" />
+      <path d="M5 12c0 1.7 3.1 3 7 3s7-1.3 7-3" />
+    </Icon>
+  );
+}
+
 export function DownloadIcon(props: IconProps) {
   return (
     <Icon {...props}>
@@ -259,6 +355,52 @@ export function SearchIcon(props: IconProps) {
     <Icon {...props}>
       <circle cx="11" cy="11" r="6" />
       <path d="M15.5 15.5L20 20" />
+    </Icon>
+  );
+}
+
+export function ExternalLinkIcon(props: IconProps) {
+  return (
+    <Icon {...props}>
+      <path d="M14 4.5h5.5V10" />
+      <path d="M19.2 4.8L12.5 11.5" />
+      <path d="M19 14.5v3.6a2.4 2.4 0 0 1-2.4 2.4H6.9a2.4 2.4 0 0 1-2.4-2.4V7.4A2.4 2.4 0 0 1 6.9 5h3.6" />
+    </Icon>
+  );
+}
+
+export function CameraIcon(props: IconProps) {
+  return (
+    <Icon {...props}>
+      <path d="M6 6.5h1.2l1.1-1.7a1 1 0 0 1 .85-.45h5.7a1 1 0 0 1 .85.45l1.1 1.7H18a3 3 0 0 1 3 3v7a3 3 0 0 1-3 3H6a3 3 0 0 1-3-3v-7a3 3 0 0 1 3-3z" />
+      <circle cx="12" cy="13" r="3.4" />
+    </Icon>
+  );
+}
+
+export function TargetIcon(props: IconProps) {
+  return (
+    <Icon {...props}>
+      <circle cx="12" cy="12" r="7.2" />
+      <circle cx="12" cy="12" r="2.6" />
+      <path d="M12 4.8V2.6M12 21.4v-2.2M4.8 12H2.6M21.4 12h-2.2" />
+    </Icon>
+  );
+}
+
+export function CircleIcon(props: IconProps) {
+  return (
+    <Icon {...props}>
+      <circle cx="12" cy="12" r="7.2" />
+    </Icon>
+  );
+}
+
+export function HalfCircleIcon(props: IconProps) {
+  return (
+    <Icon {...props}>
+      <circle cx="12" cy="12" r="7.2" />
+      <path d="M12 4.8a7.2 7.2 0 0 1 0 14.4z" fill="currentColor" stroke="none" />
     </Icon>
   );
 }

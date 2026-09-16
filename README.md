@@ -4,10 +4,16 @@ Desktop app for AI chat and agents. Tauri v2, React 19, Tailwind v4, and a
 Rust engine (`crates/loom-core`).
 
 **Status: feature-complete for v0.1.** Providers (including OpenCode Go/Zen),
-streaming chat with reasoning, attachments, tools with permission modes, MCP
-servers, skills, image generation, subagents, a coding workspace with semantic
-search, tray + hotkey overlay, signed updater, and a bespoke glass installer.
-See [docs/spec.md](docs/spec.md).
+streaming chat with reasoning, attachments, tools with permission modes
+(including **Atelier**, which additionally lets the model edit its own harness:
+personas, MCP servers, skills, prompts, providers and settings), MCP servers,
+skills, image generation, subagents, a coding workspace with semantic search,
+`/` commands and a live goal/task panel the model keeps checked off, provider
+usage and subscription limits (Settings →
+Usage, plus a composer badge for the active model), **computer use** (Windows:
+`Ctrl+Alt+Esc`
+panic stop and screenshots in the transcript), tray + hotkey overlay,
+signed updater, and a bespoke glass installer. See [docs/spec.md](docs/spec.md).
 
 ## Development
 
@@ -48,6 +54,7 @@ node scripts/drive-ui.mjs 9333 "hello"                          # sends a messag
 node scripts/probe-streaming.mjs 9333 "write a paragraph"       # is text rendering progressively?
 node scripts/probe-newchat.mjs 9333                             # new chat: streaming + auto title
 node scripts/probe-state.mjs 9333                               # real store state during a turn
+node scripts/probe-computer.mjs 9333                           # armed chip: screenshot + cursor, timed
 node scripts/probe-appearance.mjs 9333                          # screenshots of both themes
 ```
 
@@ -81,6 +88,7 @@ Everything lives in `~/.loom`:
 | `backgrounds/` | your own background images/videos |
 | `generated/` | images produced by the `generate_image` tool |
 | `skills/` | markdown skills, surfaced in the composer's `/` menu |
+| `backups/` | config snapshots taken before harness edits (newest ten) and overwritten skill files |
 | `cache/` | downloaded update payloads |
 | `keys/` | **release signing keys (maintainers only)** |
 

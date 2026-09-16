@@ -67,7 +67,11 @@ fn setup_info(_app: AppHandle) -> SetupInfo {
     let bytes = payload_bytes();
 
     SetupInfo {
-        payload: if bytes.is_empty() { None } else { Some("embedded".to_string()) },
+        payload: if bytes.is_empty() {
+            None
+        } else {
+            Some("embedded".to_string())
+        },
         payload_bytes: bytes.len() as u64,
         default_dir: default_install_dir().to_string_lossy().into_owned(),
         current_version: current_version(),
@@ -118,7 +122,10 @@ fn extract_zip_bytes(bytes: &[u8], target: &Path) -> Result<(), String> {
 
     for index in 0..archive.len() {
         let mut entry = archive.by_index(index).map_err(|e| e.to_string())?;
-        let name = entry.enclosed_name().ok_or("unsafe path in payload")?.to_path_buf();
+        let name = entry
+            .enclosed_name()
+            .ok_or("unsafe path in payload")?
+            .to_path_buf();
         let destination = target.join(name);
 
         if entry.is_dir() {
@@ -227,10 +234,12 @@ fn register_uninstall(install_dir: &Path, uninstaller: &Path) -> Result<(), Stri
         )
         .map_err(|e| e.to_string())?;
 
-    key.set_value("DisplayName", &"Loom").map_err(|e| e.to_string())?;
+    key.set_value("DisplayName", &"Loom")
+        .map_err(|e| e.to_string())?;
     key.set_value("DisplayVersion", &current_version())
         .map_err(|e| e.to_string())?;
-    key.set_value("Publisher", &"Ellio").map_err(|e| e.to_string())?;
+    key.set_value("Publisher", &"Ellio")
+        .map_err(|e| e.to_string())?;
     key.set_value(
         "InstallLocation",
         &install_dir.to_string_lossy().into_owned(),
@@ -246,8 +255,10 @@ fn register_uninstall(install_dir: &Path, uninstaller: &Path) -> Result<(), Stri
         &format!("cmd /C \"{}\"", uninstaller.display()),
     )
     .map_err(|e| e.to_string())?;
-    key.set_value("NoModify", &1u32).map_err(|e| e.to_string())?;
-    key.set_value("NoRepair", &1u32).map_err(|e| e.to_string())?;
+    key.set_value("NoModify", &1u32)
+        .map_err(|e| e.to_string())?;
+    key.set_value("NoRepair", &1u32)
+        .map_err(|e| e.to_string())?;
 
     Ok(())
 }
@@ -300,10 +311,7 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![
-            setup_info,
-            sha256_of,
-            install,
-            launch_app
+            setup_info, sha256_of, install, launch_app
         ])
         .setup(|app| {
             if maybe_run_silent(app.handle()) {
@@ -314,9 +322,3 @@ pub fn run() {
         .run(tauri::generate_context!())
         .expect("error while running Loom Setup");
 }
-
-
-
-
-
-

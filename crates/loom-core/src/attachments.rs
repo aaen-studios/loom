@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use crate::{paths, Error, Result};
 
 /// Largest file we will inline as text (characters).
-const MAX_TEXT_CHARS: usize = 60_000;
+pub(crate) const MAX_TEXT_CHARS: usize = 60_000;
 /// Largest image we will send to a provider.
 const MAX_IMAGE_BYTES: u64 = 8 * 1024 * 1024;
 
@@ -36,6 +36,14 @@ pub struct Attachment {
     /// Extracted text for `Text`/`Pdf` kinds (filled when sending).
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub text: Option<String>,
+    /// Automatic screenshots are context for the model, not content the user
+    /// attached: the transcript shows a small tag instead of the image.
+    #[serde(skip_serializing_if = "is_false", default)]
+    pub hidden: bool,
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 pub fn mime_for(name: &str) -> &'static str {
@@ -117,6 +125,7 @@ pub fn store_in(root: &Path, session_id: &str, source: &Path) -> Result<Attachme
         size: metadata.len(),
         path: target.to_string_lossy().into_owned(),
         text: None,
+        hidden: false,
     })
 }
 
@@ -155,6 +164,7 @@ pub fn store_bytes_in(
         size: bytes.len() as u64,
         path: target.to_string_lossy().into_owned(),
         text: None,
+        hidden: false,
     })
 }
 
@@ -177,7 +187,13 @@ pub fn attachments_dir(session_id: &str) -> Result<PathBuf> {
 fn attachments_dir_in(root: &Path, session_id: &str) -> PathBuf {
     let safe: String = session_id
         .chars()
-        .map(|c| if c.is_ascii_alphanumeric() || c == '-' { c } else { '_' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect();
     root.join(safe)
 }
@@ -473,6 +489,7 @@ mod tests {
             size: 4,
             path: "C:/tmp/x.png".into(),
             text: None,
+            hidden: true,
         };
         let encoded = serialize_extra(std::slice::from_ref(&attachment)).unwrap();
         assert_eq!(parse_extra(Some(&encoded)), vec![attachment]);

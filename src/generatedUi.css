@@ -1,0 +1,433 @@
+/* ---------------------------------------------------------------------------
+   Model-generated UI (```loom-ui blocks)
+
+   This sheet is injected into a shadow root, so nothing here can leak into the
+   app, and no Tailwind utility reaches it. It deliberately styles itself from
+   the app's design tokens, which inherit across the shadow boundary: dark and
+   light switch for free, and the block always sits in the same glass world as
+   the message around it.
+
+   Keep the class vocabulary here and the guide in
+   `crates/loom-core/src/ui_guide.rs` in sync.
+--------------------------------------------------------------------------- */
+
+:host {
+  display: block;
+  /* The host is the app's boundary: `contain: paint` turns the host into a
+     containing block for `position: fixed`, so a generated overlay cannot
+     cover the window, and it stops paint bleeding. The padding/margin pair
+     gives shadows somewhere to live inside that clip. */
+  contain: paint;
+  padding: 12px;
+  margin: -12px;
+  color: var(--ink);
+  font-family: var(--font-sans);
+  font-size: 14.5px;
+  line-height: 1.7;
+  overflow-wrap: break-word;
+}
+
+:host([data-density="compact"]) {
+  font-size: 13.25px;
+  line-height: 1.6;
+}
+
+.loom-ui {
+  position: relative;
+  display: flow-root;
+}
+
+.loom-ui > * + * {
+  margin-top: 0.7em;
+}
+
+/* ---------------------------------------------------------------------------
+   Base elements
+--------------------------------------------------------------------------- */
+h1,
+h2,
+h3,
+h4,
+h5,
+h6 {
+  margin: 0;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  line-height: 1.3;
+}
+
+h1 {
+  font-size: 1.3em;
+}
+
+h2 {
+  font-size: 1.18em;
+}
+
+h3 {
+  font-size: 1.04em;
+}
+
+h4,
+h5,
+h6 {
+  font-size: 1em;
+}
+
+p {
+  margin: 0;
+}
+
+ul,
+ol {
+  margin: 0;
+  padding-left: 1.3em;
+}
+
+ul {
+  list-style: disc;
+}
+
+ol {
+  list-style: decimal;
+}
+
+li + li {
+  margin-top: 0.25em;
+}
+
+a {
+  color: var(--accent);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+code,
+kbd,
+samp,
+pre {
+  font-family: ui-monospace, "Cascadia Code", "SF Mono", Consolas, monospace;
+}
+
+code {
+  font-size: 0.9em;
+}
+
+:not(pre) > code {
+  background: var(--ink-ghost);
+  padding: 0.12em 0.4em;
+  border-radius: 6px;
+}
+
+pre {
+  margin: 0;
+  background: var(--panel-bg-strong);
+  border: 1px solid var(--glass-border);
+  border-radius: 14px;
+  padding: 12px 14px;
+  overflow-x: auto;
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+pre code {
+  background: none;
+  padding: 0;
+}
+
+blockquote {
+  margin: 0;
+  border-left: 2px solid var(--glass-border);
+  padding-left: 12px;
+  color: var(--ink-soft);
+}
+
+hr {
+  border: none;
+  border-top: 1px solid var(--glass-border);
+  margin: 0;
+}
+
+img {
+  max-width: 100%;
+  border-radius: var(--radius-control);
+}
+
+svg {
+  max-width: 100%;
+  height: auto;
+}
+
+svg text {
+  font-family: var(--font-sans);
+}
+
+table {
+  border-collapse: collapse;
+  width: 100%;
+  font-size: 13.5px;
+}
+
+th,
+td {
+  border: 1px solid var(--glass-border);
+  padding: 6px 10px;
+  text-align: left;
+}
+
+th {
+  background: var(--hover-bg);
+  font-weight: 600;
+}
+
+details > summary {
+  cursor: pointer;
+  color: var(--ink-soft);
+}
+
+details[open] > summary {
+  margin-bottom: 0.5em;
+}
+
+progress,
+meter {
+  accent-color: var(--accent);
+}
+
+/* ---------------------------------------------------------------------------
+   Controls
+--------------------------------------------------------------------------- */
+button,
+input,
+select,
+textarea {
+  font: inherit;
+}
+
+button {
+  color: var(--control-ink);
+  background: var(--control-bg);
+  border: 1px solid transparent;
+  border-radius: var(--radius-control);
+  padding: 6px 12px;
+  font-size: 0.95em;
+  font-weight: 500;
+  cursor: pointer;
+  transition:
+    background-color 130ms ease,
+    border-color 130ms ease,
+    opacity 130ms ease;
+}
+
+button:hover {
+  opacity: 0.88;
+}
+
+button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+input:not([type="checkbox"]):not([type="radio"]),
+select,
+textarea {
+  color: var(--ink);
+  background: var(--pill-bg);
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius-row);
+  padding: 6px 10px;
+}
+
+input[type="checkbox"],
+input[type="radio"] {
+  accent-color: var(--accent);
+  margin-right: 6px;
+}
+
+label {
+  color: var(--ink-soft);
+}
+
+fieldset {
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius-row);
+  padding: 10px 12px;
+}
+
+legend {
+  color: var(--ink-faint);
+  font-size: 0.85em;
+  padding: 0 6px;
+}
+
+/* ---------------------------------------------------------------------------
+   House classes (the vocabulary the model is told about)
+--------------------------------------------------------------------------- */
+.card {
+  background: var(--panel-bg);
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius-row);
+  box-shadow: var(--glass-highlight);
+  padding: 14px 16px;
+}
+
+.btn {
+  color: var(--control-ink);
+  background: var(--control-bg);
+  border: 1px solid transparent;
+  border-radius: var(--radius-control);
+  padding: 6px 12px;
+  font-size: 0.95em;
+  font-weight: 500;
+  cursor: pointer;
+}
+
+.btn-ghost,
+.chip {
+  color: var(--ink);
+  background: var(--panel-bg);
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius-capsule);
+  padding: 5px 12px;
+  font-size: 12.5px;
+  cursor: pointer;
+  transition:
+    background-color 130ms ease,
+    border-color 130ms ease;
+}
+
+.btn-ghost:hover,
+.chip:hover {
+  background: var(--hover-bg);
+}
+
+.grid {
+  display: grid;
+  gap: 10px;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+}
+
+.row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.stat {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.stat > b {
+  font-size: 1.5em;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+}
+
+.bar {
+  height: 8px;
+  border-radius: var(--radius-capsule);
+  background: var(--ink-ghost);
+  overflow: hidden;
+}
+
+.bar > i,
+.bar > span {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--accent);
+}
+
+.callout {
+  border-left: 2px solid var(--accent);
+  background: var(--accent-soft);
+  border-radius: var(--radius-row);
+  padding: 10px 12px;
+}
+
+.kv {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 4px 14px;
+  margin: 0;
+}
+
+.kv dt {
+  color: var(--ink-faint);
+}
+
+.kv dd {
+  margin: 0;
+}
+
+.muted {
+  color: var(--ink-soft);
+}
+
+.faint {
+  color: var(--ink-faint);
+}
+
+.mono {
+  font-family: ui-monospace, "Cascadia Code", "SF Mono", Consolas, monospace;
+  font-size: 0.9em;
+}
+
+.accent {
+  color: var(--accent);
+}
+
+.scroll {
+  overflow-x: auto;
+}
+
+[data-loom-action] {
+  cursor: pointer;
+}
+
+[data-loom-copied] {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+/* ---------------------------------------------------------------------------
+   Streaming
+
+   A block is re-rendered on every delta, so the marker is deliberately quiet:
+   a single accent scan while the fence is still open.
+--------------------------------------------------------------------------- */
+@keyframes loom-ui-scan {
+  0%,
+  100% {
+    opacity: 0.25;
+    transform: translateX(-30%);
+  }
+  50% {
+    opacity: 0.9;
+    transform: translateX(30%);
+  }
+}
+
+:host([data-streaming="true"]) .loom-ui::after {
+  content: "";
+  position: absolute;
+  top: -8px;
+  left: 0;
+  right: 0;
+  height: 2px;
+  border-radius: var(--radius-capsule);
+  background: linear-gradient(90deg, transparent, var(--accent), transparent);
+  animation: loom-ui-scan 1.4s ease-in-out infinite;
+  pointer-events: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :host([data-streaming="true"]) .loom-ui::after {
+    animation: none;
+    opacity: 0.5;
+    transform: none;
+  }
+}

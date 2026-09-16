@@ -15,9 +15,24 @@ pub fn build_body(request: &ChatRequest<'_>) -> Value {
     if let Some(system) = request.system.filter(|s| !s.trim().is_empty()) {
         messages.push(json!({ "role": "system", "content": system }));
     }
+    // This dialect's `tool` role is text-only, so screenshots a tool produced
+    // follow as user messages. They must come after the whole run of tool
+    // results: strict validators (DeepSeek) reject the request if anything
+    // sits between an assistant `tool_calls` turn and the tool messages
+    // answering it.
+    let mut pending_images: Vec<Value> = Vec::new();
     for message in &request.messages {
+        if message.role != "tool" && !pending_images.is_empty() {
+            messages.append(&mut pending_images);
+        }
         messages.push(message_json(message));
+        if message.role == "tool" {
+            if let Some(follow_up) = tool_images_message(message) {
+                pending_images.push(follow_up);
+            }
+        }
     }
+    messages.append(&mut pending_images);
 
     let mut body = json!({
         "model": request.model,
@@ -30,6 +45,12 @@ pub fn build_body(request: &ChatRequest<'_>) -> Value {
     }
     if let Some(max) = request.max_output_tokens {
         body["max_tokens"] = json!(max);
+    }
+    if let Some(temperature) = request.temperature {
+        body["temperature"] = json!(temperature);
+    }
+    if let Some(top_p) = request.top_p {
+        body["top_p"] = json!(top_p);
     }
     if let Some(variant) = request.variant.filter(|v| !v.is_empty() && *v != "off") {
         // Understood by OpenAI o-series and several compatible vendors; only
@@ -58,8 +79,7 @@ pub fn build_body(request: &ChatRequest<'_>) -> Value {
 
 /// Plain string content when there are no images (maximum compatibility with
 /// older and local models), otherwise the multimodal content array.
-fn message_json(message: &super::WireMessage) -> Value {
-    // Tool results use a dedicated shape in this dialect.
+fn message_json(message: &super::WireMessage) -> Value {    // Tool results use a dedicated shape in this dialect.
     if message.role == "tool" {
         return json!({
             "role": "tool",
@@ -115,6 +135,29 @@ fn message_json(message: &super::WireMessage) -> Value {
     object
 }
 
+/// The follow-up user message that carries a tool's images, or `None` when the
+/// tool result had none.
+fn tool_images_message(message: &super::WireMessage) -> Option<Value> {
+    let mut parts: Vec<Value> = Vec::new();
+    for part in &message.parts {
+        if let super::ContentPart::Image { mime, base64, .. } = part {
+            parts.push(json!({
+                "type": "image_url",
+                "image_url": { "url": format!("data:{mime};base64,{base64}") }
+            }));
+        }
+    }
+    if parts.is_empty() {
+        return None;
+    }
+    let mut content = vec![json!({
+        "type": "text",
+        "text": "Screenshot from the computer tool:"
+    })];
+    content.append(&mut parts);
+    Some(json!({ "role": "user", "content": content }))
+}
+
 /// Parses one `data:` payload of a streaming response. `Ok(None)` means the
 /// chunk carried nothing for us (role preamble, empty delta, `[DONE]`).
 pub fn parse_chunk(data: &str) -> Result<Option<Vec<Delta>>> {
@@ -155,14 +198,18 @@ pub fn parse_chunk(data: &str) -> Result<Option<Vec<Delta>>> {
     {
         if let Some(text) = delta.get("content").and_then(Value::as_str) {
             if !text.is_empty() {
-                deltas.push(Delta::Text { text: text.to_string() });
+                deltas.push(Delta::Text {
+                    text: text.to_string(),
+                });
             }
         }
         // DeepSeek / Z.ai / OpenRouter expose chain-of-thought here.
         for key in ["reasoning_content", "reasoning"] {
             if let Some(text) = delta.get(key).and_then(Value::as_str) {
                 if !text.is_empty() {
-                    deltas.push(Delta::Reasoning { text: text.to_string() });
+                    deltas.push(Delta::Reasoning {
+                        text: text.to_string(),
+                    });
                 }
             }
         }
@@ -196,7 +243,11 @@ pub fn parse_chunk(data: &str) -> Result<Option<Vec<Delta>>> {
         }
     }
 
-    Ok(if deltas.is_empty() { None } else { Some(deltas) })
+    Ok(if deltas.is_empty() {
+        None
+    } else {
+        Some(deltas)
+    })
 }
 
 /// Non-streaming response â†’ (content, reasoning, usage).
@@ -264,6 +315,8 @@ mod tests {
             messages: vec![super::super::WireMessage::text("user", "hi")],
             variant: None,
             max_output_tokens: Some(1024),
+            temperature: None,
+            top_p: None,
             stream: true,
             tools: Vec::new(),
             session_id: None,
@@ -329,9 +382,7 @@ mod tests {
         let provider = ProviderConfig::default();
         let assistant = super::super::WireMessage {
             role: "assistant".into(),
-            parts: vec![super::super::ContentPart::Text {
-                text: "hi".into(),
-            }],
+            parts: vec![super::super::ContentPart::Text { text: "hi".into() }],
             tool_calls: Vec::new(),
             tool_call_id: None,
             reasoning: Some("   ".into()),
@@ -340,6 +391,55 @@ mod tests {
         req.messages = vec![assistant];
         let body = build_body(&req);
         assert!(body["messages"][0].get("reasoning_content").is_none());
+    }
+
+    #[test]
+    fn tool_images_follow_the_whole_run_of_tool_results() {
+        let provider = ProviderConfig::default();
+        let assistant = super::super::WireMessage {
+            role: "assistant".into(),
+            parts: Vec::new(),
+            tool_calls: vec![
+                super::super::WireToolCall {
+                    id: "call_screen".into(),
+                    name: "screenshot".into(),
+                    arguments: "{}".into(),
+                },
+                super::super::WireToolCall {
+                    id: "call_windows".into(),
+                    name: "list_windows".into(),
+                    arguments: "{}".into(),
+                },
+            ],
+            tool_call_id: None,
+            reasoning: None,
+        };
+        let screenshot = super::super::WireMessage::tool_result_with_images(
+            "call_screen",
+            "captured",
+            vec![super::super::ContentPart::Image {
+                mime: "image/jpeg".into(),
+                base64: "AAAA".into(),
+                name: "screen.jpg".into(),
+            }],
+        );
+        let windows = super::super::WireMessage::tool_result("call_windows", "3 windows");
+
+        let mut req = request(&provider);
+        req.messages = vec![assistant, screenshot, windows];
+        let body = build_body(&req);
+
+        let sent = body["messages"].as_array().expect("messages");
+        let roles: Vec<&str> = sent
+            .iter()
+            .map(|message| message["role"].as_str().unwrap_or_default())
+            .collect();
+        // Strict validators reject anything between the assistant tool_calls
+        // turn and the tool messages answering each of its calls.
+        assert_eq!(roles, vec!["system", "assistant", "tool", "tool", "user"]);
+        assert_eq!(sent[2]["tool_call_id"], "call_screen");
+        assert_eq!(sent[3]["tool_call_id"], "call_windows");
+        assert_eq!(sent[4]["content"][1]["type"], "image_url");
     }
 
     #[test]
@@ -390,10 +490,9 @@ mod tests {
             base_url: "https://api.example.com".into(),
             ..Default::default()
         };
-        assert_eq!(endpoint(&provider), "https://api.example.com/v1/chat/completions");
+        assert_eq!(
+            endpoint(&provider),
+            "https://api.example.com/v1/chat/completions"
+        );
     }
 }
-
-
-
-

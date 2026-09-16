@@ -15,12 +15,12 @@ const SHORTCUTS: { group: string; items: Shortcut[] }[] = [
       { keys: "Ctrl+K", action: "Chats popup (search, rename, export)" },
       { keys: "Ctrl+,", action: "Settings" },
       { keys: "Ctrl+Shift+Space", action: "Quick-ask overlay from anywhere" },
+      { keys: "Ctrl+Alt+Esc", action: "Stop computer use from anywhere" },
     ],
   },
   {
     group: "Reading",
     items: [
-      { keys: "Ctrl+F", action: "Search this chat" },
       { keys: "Ctrl+End", action: "Jump to the newest text" },
       { keys: "Alt+↑ / Alt+↓", action: "Select the previous / next message" },
       { keys: "C", action: "Copy the selected message" },
@@ -34,8 +34,9 @@ const SHORTCUTS: { group: string; items: Shortcut[] }[] = [
     items: [
       { keys: "Enter", action: "Send (or Ctrl+Enter, your choice in Settings)" },
       { keys: "Shift+Enter", action: "New line" },
-      { keys: "/", action: "Skills and saved prompts" },
-      { keys: "Esc", action: "Stop the running reply, clear search, deselect" },
+      { keys: "Enter (while replying)", action: "Queue the message" },
+      { keys: "/", action: "Commands, skills and saved prompts" },
+      { keys: "Esc", action: "Stop the running reply, deselect" },
       { keys: "?", action: "This list" },
     ],
   },

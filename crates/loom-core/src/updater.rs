@@ -101,10 +101,7 @@ pub async fn check(
 }
 
 /// Downloads the payload into the cache directory. Returns the archive path.
-pub async fn download(
-    client: &reqwest::Client,
-    manifest: &UpdateManifest,
-) -> Result<PathBuf> {
+pub async fn download(client: &reqwest::Client, manifest: &UpdateManifest) -> Result<PathBuf> {
     let directory = paths::cache_dir()?;
     std::fs::create_dir_all(&directory).map_err(|e| Error::io(&directory, e))?;
     let target = directory.join(format!("loom-{}.zip", manifest.version));
@@ -262,7 +259,8 @@ pub fn extract_zip(zip_path: &Path, target: &Path) -> Result<()> {
         if let Some(parent) = destination.parent() {
             std::fs::create_dir_all(parent).map_err(|e| Error::io(parent, e))?;
         }
-        let mut out = std::fs::File::create(&destination).map_err(|e| Error::io(&destination, e))?;
+        let mut out =
+            std::fs::File::create(&destination).map_err(|e| Error::io(&destination, e))?;
         std::io::copy(&mut entry, &mut out).map_err(|e| Error::io(&destination, e))?;
     }
 

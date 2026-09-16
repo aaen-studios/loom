@@ -12,25 +12,45 @@ use serde_json::Value;
 
 use crate::fsutil::atomic_write;
 use crate::persona::Persona;
-use crate::provider::ProviderConfig;
+use crate::provider::{MetadataSource, ModelSpec, ProviderConfig};
 use crate::{paths, Error, Result};
 
 pub const SCHEMA_VERSION: u32 = 1;
+
+/// The provenance pass in [`migrate_metadata`]. Bump when its rules change.
+pub const METADATA_VERSION: u32 = 1;
+
+/// Configs saved before provenance existed report version 0, whatever the
+/// container default says, so the one-time pass runs exactly once.
+fn legacy_metadata_version() -> u32 {
+    0
+}
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct AppConfig {
     pub schema_version: u32,
+    /// Bumped when [`migrate_metadata`] needs to run once on an older config.
+    #[serde(default = "legacy_metadata_version")]
+    pub metadata_version: u32,
     pub theme: Theme,
     pub background: BackgroundConfig,
     pub sidebar_collapsed: bool,
     pub providers: BTreeMap<String, ProviderConfig>,
     pub personas: Vec<Persona>,
+    /// Personas grouped for organisation and for multi-persona casts.
+    pub persona_groups: Vec<PersonaGroup>,
+    /// Who the user is: feeds `{{user}}` and friends in persona prompts.
+    pub user_profile: UserProfile,
     pub mcp_servers: BTreeMap<String, crate::mcp::McpServerConfig>,
     pub chat: ChatDefaults,
     pub interface: InterfaceConfig,
     /// Reusable prompt snippets offered in the composer's slash menu.
     pub prompts: Vec<Prompt>,
+    /// Folders the user added; chats point at one by path.
+    pub workspaces: Vec<Workspace>,
+    /// Which service backs the web tools.
+    pub search_provider: SearchProvider,
     #[serde(flatten)]
     pub extra: serde_json::Map<String, Value>,
 }
@@ -39,15 +59,20 @@ impl Default for AppConfig {
     fn default() -> Self {
         Self {
             schema_version: SCHEMA_VERSION,
+            metadata_version: METADATA_VERSION,
             theme: Theme::Dark,
             background: BackgroundConfig::default(),
             sidebar_collapsed: false,
             providers: BTreeMap::new(),
             personas: Vec::new(),
+            persona_groups: Vec::new(),
+            user_profile: UserProfile::default(),
             mcp_servers: BTreeMap::new(),
             chat: ChatDefaults::default(),
             interface: InterfaceConfig::default(),
             prompts: Vec::new(),
+            workspaces: Vec::new(),
+            search_provider: SearchProvider::default(),
             extra: serde_json::Map::new(),
         }
     }
@@ -123,6 +148,41 @@ pub enum PermissionMode {
     AutoReadOnly,
     /// Everything runs without prompting.
     AutoAll,
+    /// Everything Auto all runs, plus the harness tools that let the model
+    /// edit Loom itself (personas, MCP servers, skills, prompts, providers,
+    /// and settings). The five deletes still ask. Deliberately per chat only:
+    /// it is never accepted as the global default.
+    Atelier,
+}
+
+/// Whether the model plans, reviews, or builds. Read-only modes refuse
+/// anything that can change the workspace; the permission mode keeps governing
+/// everything else.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AgentMode {
+    /// Research and propose; the mutating tools are refused.
+    Plan,
+    /// Inspect and report findings; the mutating tools are refused.
+    Review,
+    #[default]
+    Build,
+}
+
+impl AgentMode {
+    /// Read-only modes refuse anything that can change the workspace.
+    pub fn blocks_writes(self) -> bool {
+        matches!(self, AgentMode::Plan | AgentMode::Review)
+    }
+
+    /// Display name for prompts and refusals.
+    pub fn label(self) -> &'static str {
+        match self {
+            AgentMode::Plan => "Plan",
+            AgentMode::Review => "Review",
+            AgentMode::Build => "Build",
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -143,9 +203,27 @@ pub struct ChatDefaults {
     pub recent_models: Vec<ModelRef>,
     /// Global default for the tool permission mode (per-chat override exists).
     pub permission_mode: PermissionMode,
-    /// How many past messages to send as context.
-    pub history_limit: u32,
+    /// Global default for the agent mode (per-chat override exists).
+    pub agent_mode: AgentMode,
+    /// Cap on the reply length. Zero asks for the model's own limit; the
+    /// engine still reserves room for it when fitting the history into the
+    /// model's context window.
     pub max_output_tokens: u32,
+    /// Tool round-trips a single user turn may take. Clamped 1–200; the
+    /// engine tells the model to summarise when the budget runs out.
+    pub max_tool_rounds: u32,
+    /// Reasoning variant computer turns run with when the chat has no explicit
+    /// variant: `"off"` for none, `"low"` for the cheapest effort, `None` to
+    /// inherit the usual chain. Computer use is latency-bound, so the default
+    /// deliberately skips deep thinking.
+    pub computer_variant: Option<String>,
+    /// Model used only while the Computer chip is armed, so slow main models
+    /// can hand the wheel to a fast vision model. `None` keeps the chat's own.
+    pub computer_model: Option<ModelRef>,
+    /// Longest edge of computer screenshots. `0` is native resolution; any
+    /// other value downscales (1568 is the most providers honour, 1280 is
+    /// cheaper). Quality-first default: native.
+    pub computer_screenshot_edge: u32,
 }
 
 impl Default for ChatDefaults {
@@ -160,15 +238,20 @@ impl Default for ChatDefaults {
             auto_title: true,
             recent_models: Vec::new(),
             permission_mode: PermissionMode::Ask,
-            history_limit: 40,
-            max_output_tokens: 8_192,
+            agent_mode: AgentMode::Build,
+            max_output_tokens: 0,
+            max_tool_rounds: 40,
+            computer_variant: Some("low".to_string()),
+            computer_model: None,
+            computer_screenshot_edge: 0,
         }
     }
 }
 
 /// Fills in settings that a newer release requires but an existing config file
-/// cannot have — today, the session header that gateways such as OpenCode Go
-/// need. Returns `true` when the config changed and should be saved.
+/// cannot have — the session header that gateways such as OpenCode Go need,
+/// and an output cap that meant something else in older builds. Returns `true`
+/// when the config changed and should be saved.
 ///
 /// Only fields that are still at their default are touched, so user choices are
 /// never overwritten.
@@ -187,7 +270,107 @@ pub fn apply_preset_defaults(config: &mut AppConfig) -> bool {
         }
     }
 
+    // `maxOutputTokens` shipped as 8192, which cut long coding replies short
+    // and shared the budget with a reasoning model's thinking. Zero now means
+    // "the model's own limit".
+    const LEGACY_MAX_OUTPUT: u32 = 8_192;
+    if config.chat.max_output_tokens == LEGACY_MAX_OUTPUT {
+        config.chat.max_output_tokens = 0;
+        changed = true;
+    }
+
     changed
+}
+
+/// One-time provenance pass over models saved before `source` existed.
+///
+/// The only metadata an older build let the user edit was `context` and
+/// `output`, so agreement with the bundled catalogue there means the rest of
+/// the spec was machine-derived and a refresh may correct it (`catalog@0`,
+/// below the current version so it re-syncs). A difference means a hand edit
+/// and is kept as `user`. Ids the catalogue does not know, or knows nothing
+/// about, stay `unknown` so a refresh can fill them without ever pretending.
+///
+/// Returns `true` when the config changed and should be saved.
+pub fn migrate_metadata(config: &mut AppConfig) -> bool {
+    if config.metadata_version >= METADATA_VERSION {
+        return false;
+    }
+
+    for provider in config.providers.values_mut() {
+        for (model_id, spec) in provider.models.iter_mut() {
+            if spec.source != MetadataSource::Unknown {
+                continue;
+            }
+            let detected = crate::catalog::lookup(model_id);
+            let favorite = spec.favorite;
+            let name = spec.name.take();
+
+            *spec = match detected {
+                // The catalogue knows the family and nothing else: stale
+                // defaults from an old build are worse than honesty.
+                Some(detected) if !detected.has_metadata() => ModelSpec {
+                    favorite,
+                    name,
+                    ..detected
+                },
+                // No values to protect: first refresh fills it.
+                _ if spec.context.is_none() && spec.output.is_none() => ModelSpec {
+                    favorite,
+                    name,
+                    ..spec.clone()
+                },
+                Some(detected)
+                    if spec.context == detected.context && spec.output == detected.output =>
+                {
+                    ModelSpec {
+                        favorite,
+                        name,
+                        source: MetadataSource::Catalog(0),
+                        ..spec.clone()
+                    }
+                }
+                Some(_) => ModelSpec {
+                    favorite,
+                    name,
+                    source: MetadataSource::User,
+                    ..spec.clone()
+                },
+                None => ModelSpec {
+                    favorite,
+                    name,
+                    ..spec.clone()
+                },
+            };
+        }
+    }
+
+    config.metadata_version = METADATA_VERSION;
+    true
+}
+
+/// Who the user is, for `{{user}}` and friends in persona prompts.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct UserProfile {
+    pub name: String,
+    /// e.g. "she/her".
+    pub pronouns: String,
+    /// A short paragraph the user wants personas to know.
+    pub about: String,
+}
+
+/// A named set of personas. `cast` groups double as the starting line-up for
+/// multi-persona chats; ordinary groups are just folders.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct PersonaGroup {
+    pub id: String,
+    pub name: String,
+    /// Persona ids, in display order.
+    pub members: Vec<String>,
+    /// When true the group can start a multi-persona chat.
+    pub cast: bool,
 }
 
 /// A reusable prompt snippet, managed in the settings and offered in the
@@ -198,6 +381,31 @@ pub struct Prompt {
     pub id: String,
     pub title: String,
     pub body: String,
+}
+
+/// A folder the user added as a workspace. Chats remember their workspace by
+/// path; this list is what keeps the folder around after a restart.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct Workspace {
+    pub path: String,
+    /// Display name; defaults to the folder's name, but can be renamed.
+    pub name: String,
+    /// When the folder was added (ms since epoch).
+    pub added_at: i64,
+}
+
+/// Which service backs the `web_search` and `fetch_url` tools.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SearchProvider {
+    /// Jina when an API key is stored, DuckDuckGo otherwise.
+    #[default]
+    Auto,
+    /// Jina AI search and reader (needs a key for search).
+    Jina,
+    /// Keyless DuckDuckGo HTML results and a local page reader.
+    Duckduckgo,
 }
 
 /// How much of a reasoning model''s thinking to show.
@@ -213,6 +421,19 @@ pub enum ThinkingDisplay {
     Expanded,
 }
 
+/// How much of the tool calls' detail to show in the transcript.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ToolCallDisplay {
+    /// Compact rows you expand when you want the arguments and output.
+    #[default]
+    Collapsed,
+    /// Arguments and output open from the start.
+    Expanded,
+    /// Nothing rendered at all.
+    Hidden,
+}
+
 /// Which keystroke sends a message.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -222,11 +443,37 @@ pub enum SendKey {
     CtrlEnter,
 }
 
+/// Whether the chat list is split into workspace groups or shown flat.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SidebarGrouping {
+    /// One group per workspace folder.
+    #[default]
+    Workspace,
+    /// A single flat list.
+    None,
+}
+
+/// Order of chats in the sidebar list.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SidebarSort {
+    /// Newest activity first.
+    #[default]
+    Recent,
+    /// Oldest activity first.
+    Oldest,
+    /// By title, A to Z.
+    Title,
+}
+
 /// Interface behaviour that is not tied to a single chat.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct InterfaceConfig {
     pub show_thinking: ThinkingDisplay,
+    /// Whether search/file/tool activity is shown in the transcript.
+    pub show_tool_calls: ToolCallDisplay,
     pub send_key: SendKey,
     pub notify_on_completion: bool,
     /// Register the quick-ask overlay hotkey at all.
@@ -240,14 +487,28 @@ pub struct InterfaceConfig {
     pub sidebar_pinned: bool,
     /// Width in pixels of the docked sidebar.
     pub sidebar_width: u32,
+    /// Whether the sidebar splits chats by workspace or lists them flat.
+    pub sidebar_grouping: SidebarGrouping,
+    /// Order of chats in the sidebar list.
+    pub sidebar_sort: SidebarSort,
     /// Denser transcript and smaller text.
     pub compact: bool,
+    /// Let the model render ```loom-ui blocks as live, themed widgets.
+    pub generated_ui: bool,
+    /// Attach a screenshot of the current monitor to every quick-ask send.
+    pub capture_on_send: bool,
+    /// Let the model build long-term memory in the background: a lite-model
+    /// pass after each reply proposes durable facts, which are saved to the
+    /// Memory page. Facts always save instantly when the model calls
+    /// `remember_fact`; this only governs the automatic pass.
+    pub auto_memory: bool,
 }
 
 impl Default for InterfaceConfig {
     fn default() -> Self {
         Self {
             show_thinking: ThinkingDisplay::Collapsed,
+            show_tool_calls: ToolCallDisplay::Collapsed,
             send_key: SendKey::Enter,
             notify_on_completion: true,
             hotkey_enabled: true,
@@ -255,7 +516,12 @@ impl Default for InterfaceConfig {
             always_follow: false,
             sidebar_pinned: false,
             sidebar_width: 264,
+            sidebar_grouping: SidebarGrouping::Workspace,
+            sidebar_sort: SidebarSort::Recent,
             compact: false,
+            generated_ui: true,
+            capture_on_send: true,
+            auto_memory: true,
         }
     }
 }
@@ -304,6 +570,7 @@ mod tests {
         assert_eq!(config.theme, Theme::Dark);
         assert_eq!(config.background.preset, "rei");
         assert_eq!(config.chat.permission_mode, PermissionMode::Ask);
+        assert_eq!(config.chat.agent_mode, AgentMode::Build);
     }
 
     #[test]
@@ -319,7 +586,15 @@ mod tests {
         config.background.dim = 55;
         config.background.blur = 18;
         config.chat.lite = Some(ModelRef::new("openai", "gpt-4o-mini"));
-        config.personas.push(Persona::new("Coder", "You write Rust."));
+        config
+            .personas
+            .push(Persona::new("Coder", "You write Rust."));
+        config.search_provider = SearchProvider::Jina;
+        config.workspaces.push(Workspace {
+            path: "C:/work/loom".into(),
+            name: "Loom".into(),
+            added_at: 42,
+        });
 
         let mut provider = ProviderConfig {
             name: "Local".into(),
@@ -328,9 +603,10 @@ mod tests {
             key_required: false,
             ..Default::default()
         };
-        provider
-            .models
-            .insert("qwen3:8b".into(), ModelSpec::with_modalities(&[Modality::Text]));
+        provider.models.insert(
+            "qwen3:8b".into(),
+            ModelSpec::with_modalities(&[Modality::Text]),
+        );
         config.providers.insert("ollama".into(), provider);
 
         save_to(&path, &config).unwrap();
@@ -368,6 +644,49 @@ mod tests {
         assert!(raw.contains("schemaVersion"));
         assert!(raw.contains("sidebarCollapsed"));
         assert!(raw.contains("permissionMode"));
+        assert!(raw.contains("agentMode"));
+        assert!(raw.contains("searchProvider"));
+        assert!(raw.contains("workspaces"));
+    }
+
+    #[test]
+    fn search_provider_round_trips_as_lowercase() {
+        assert_eq!(
+            serde_json::to_string(&SearchProvider::Duckduckgo).unwrap(),
+            "\"duckduckgo\""
+        );
+        assert_eq!(
+            serde_json::to_string(&SearchProvider::Auto).unwrap(),
+            "\"auto\""
+        );
+        let config: AppConfig = serde_json::from_str(r#"{ "searchProvider": "jina" }"#).unwrap();
+        assert_eq!(config.search_provider, SearchProvider::Jina);
+    }
+
+    #[test]
+    fn agent_mode_round_trips_as_lowercase() {
+        assert_eq!(serde_json::to_string(&AgentMode::Plan).unwrap(), "\"plan\"");
+        let config: AppConfig =
+            serde_json::from_str(r#"{ "chat": { "agentMode": "plan" } }"#).unwrap();
+        assert_eq!(config.chat.agent_mode, AgentMode::Plan);
+    }
+
+    #[test]
+    fn permission_mode_wire_values_are_stable() {
+        assert_eq!(
+            serde_json::to_string(&PermissionMode::AutoReadOnly).unwrap(),
+            "\"auto-read-only\""
+        );
+        // An older build that does not know Atelier must fail to parse the
+        // string rather than misread it; the session then falls back to the
+        // global default. That is the whole downgrade story.
+        assert_eq!(
+            serde_json::to_string(&PermissionMode::Atelier).unwrap(),
+            "\"atelier\""
+        );
+        let config: AppConfig =
+            serde_json::from_str(r#"{ "chat": { "permissionMode": "atelier" } }"#).unwrap();
+        assert_eq!(config.chat.permission_mode, PermissionMode::Atelier);
     }
 
     #[test]
@@ -413,6 +732,20 @@ mod tests {
     }
 
     #[test]
+    fn legacy_output_default_is_upgraded_to_the_model_limit() {
+        let mut config = AppConfig::default();
+        config.chat.max_output_tokens = 8_192;
+
+        assert!(apply_preset_defaults(&mut config));
+        assert_eq!(config.chat.max_output_tokens, 0);
+
+        // A deliberate cap is respected, and running again is a no-op.
+        config.chat.max_output_tokens = 4_096;
+        assert!(!apply_preset_defaults(&mut config));
+        assert_eq!(config.chat.max_output_tokens, 4_096);
+    }
+
+    #[test]
     fn preset_defaults_leave_custom_providers_alone() {
         let mut config = AppConfig::default();
         config.providers.insert(
@@ -427,8 +760,93 @@ mod tests {
         assert!(!apply_preset_defaults(&mut config));
         assert!(config.providers["my-local"].session_header.is_none());
     }
+
+    #[test]
+    fn metadata_migration_separates_detected_from_edited() {
+        use crate::provider::MetadataSource;
+
+        let mut config = AppConfig::default();
+        config.metadata_version = 0;
+        let mut provider = ProviderConfig {
+            name: "P".into(),
+            ..Default::default()
+        };
+        // Matches the catalogue exactly: machine-derived, re-syncable.
+        provider.models.insert(
+            "gpt-4o".into(),
+            ModelSpec {
+                context: Some(128_000),
+                output: Some(16_000),
+                ..Default::default()
+            },
+        );
+        // A hand-typed window: protected.
+        provider.models.insert(
+            "gpt-5".into(),
+            ModelSpec {
+                context: Some(99),
+                output: None,
+                ..Default::default()
+            },
+        );
+        // Unknown to the catalogue, but has values: keep them, still unknown.
+        provider.models.insert(
+            "my-finetune".into(),
+            ModelSpec {
+                context: Some(4_096),
+                ..Default::default()
+            },
+        );
+        // An explicitly unknown family: stale fallback defaults are dropped.
+        provider.models.insert(
+            "hy3".into(),
+            ModelSpec {
+                context: Some(128_000),
+                output: Some(8_192),
+                input_modalities: vec![Modality::Text],
+                ..Default::default()
+            },
+        );
+
+        assert!(migrate_metadata(&mut config));
+        let models = &config.providers["P"].models;
+        assert_eq!(models["gpt-4o"].source, MetadataSource::Catalog(0));
+        assert_eq!(models["gpt-5"].source, MetadataSource::User);
+        assert_eq!(models["gpt-5"].context, Some(99), "hand edit survives");
+        assert_eq!(models["my-finetune"].source, MetadataSource::Unknown);
+        assert_eq!(models["my-finetune"].context, Some(4_096));
+        assert_eq!(models["hy3"].source, MetadataSource::Unknown);
+        assert!(models["hy3"].context.is_none());
+        assert!(models["hy3"].input_modalities.is_empty());
+
+        // Running again is a no-op.
+        assert!(!migrate_metadata(&mut config));
+    }
+
+    #[test]
+    fn configs_without_a_metadata_version_upgrade_once() {
+        use crate::provider::MetadataSource;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = temp_config_path(&dir);
+        std::fs::write(
+            &path,
+            r#"{ "providers": { "p": { "models": { "gpt-4o": { "context": 128000, "output": 16000 } } } } }"#,
+        )
+        .unwrap();
+
+        let mut config = load_from(&path).unwrap();
+        assert_eq!(config.metadata_version, 0);
+        assert!(migrate_metadata(&mut config));
+        assert_eq!(config.metadata_version, METADATA_VERSION);
+        assert_eq!(
+            config.providers["p"].models["gpt-4o"].source,
+            MetadataSource::Catalog(0)
+        );
+
+        save_to(&path, &config).unwrap();
+        let mut reloaded = load_from(&path).unwrap();
+        assert!(!migrate_metadata(&mut reloaded));
+        assert_eq!(reloaded, config);
+    }
 }
-
-
-
-

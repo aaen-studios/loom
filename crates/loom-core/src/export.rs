@@ -1,9 +1,9 @@
 //! Chat export: renders a session as markdown.
 
+use crate::attachments;
 use crate::db::{Message, Role, Session};
 use crate::engine::parse_stored_tools;
 use crate::providers::Usage;
-use crate::attachments;
 
 /// One markdown document per chat: metadata, then every turn, with reasoning
 /// collapsed and tool calls summarised.
@@ -116,6 +116,8 @@ mod tests {
             system_prompt: None,
             workdir: None,
             permission_mode: None,
+            agent_mode: None,
+            computer_access: false,
             created_at: 0,
             updated_at: 0,
         }
@@ -129,6 +131,7 @@ mod tests {
             content: content.into(),
             reasoning: None,
             extra: None,
+            persona_id: None,
             created_at: now_ms(),
         }
     }
@@ -137,7 +140,10 @@ mod tests {
     fn renders_title_metadata_and_turns() {
         let markdown = session_markdown(
             &session(),
-            &[message(Role::User, "why is rust"), message(Role::Assistant, "because")],
+            &[
+                message(Role::User, "why is rust"),
+                message(Role::Assistant, "because"),
+            ],
             Some(Usage {
                 input_tokens: Some(12),
                 output_tokens: Some(3),

@@ -1,7 +1,8 @@
+import { useState } from "react";
 import { cn } from "../lib/cn";
 import { assetUrl } from "../lib/tauri";
 import type { Attachment } from "../types";
-import { CloseIcon, FileIcon } from "./icons";
+import { CameraIcon, ChevronDownIcon, CloseIcon, FileIcon } from "./icons";
 
 export function formatBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
@@ -64,20 +65,85 @@ export function AttachmentChips({
   );
 }
 
-/** Attachments shown inside a sent message. */
-export function AttachmentStrip({ attachments }: { attachments: Attachment[] }) {
+/**
+ * A screenshot the model was sent but the transcript only tags. Clicking the
+ * tag reveals the image the model actually saw.
+ */
+function HiddenAttachment({
+  attachment,
+  compact,
+}: {
+  attachment: Attachment;
+  compact: boolean;
+}) {
+  const [open, setOpen] = useState(false);
+
+  return (
+    <span className="flex flex-col items-start gap-1.5">
+      <button
+        type="button"
+        title={open ? "Hide screenshot" : attachment.name}
+        aria-expanded={open}
+        onClick={() => setOpen((value) => !value)}
+        className={cn(
+          "flex items-center gap-1.5 rounded-capsule border border-[var(--glass-border)] px-2.5 py-1 text-[11.5px] transition-colors",
+          open ? "text-[var(--ink)]" : "text-faint hover:text-[var(--ink)]",
+        )}
+      >
+        <CameraIcon size={12} />
+        Screen
+        <ChevronDownIcon
+          size={12}
+          className={cn("transition-transform duration-150", open && "rotate-180")}
+        />
+      </button>
+      {open && (
+        <img
+          src={assetUrl(attachment.path)}
+          alt={attachment.name}
+          className={cn(
+            "animate-fade-up rounded-row border border-[var(--glass-border)] object-contain",
+            compact ? "max-h-40" : "max-h-64",
+          )}
+        />
+      )}
+    </span>
+  );
+}
+
+/**
+ * Attachments shown inside a sent message. `compact` keeps thumbnails small
+ * for the quick-ask overlay, where a full-height screenshot would swamp the
+ * blob it belongs to.
+ */
+export function AttachmentStrip({
+  attachments,
+  compact = false,
+}: {
+  attachments: Attachment[];
+  compact?: boolean;
+}) {
   if (attachments.length === 0) return null;
 
   return (
     <div className={cn("mb-2 flex flex-wrap gap-2", "select-none")}>
       {attachments.map((attachment) =>
-        attachment.kind === "image" ? (
+        attachment.hidden ? (
+          <HiddenAttachment
+            key={attachment.id}
+            attachment={attachment}
+            compact={compact}
+          />
+        ) : attachment.kind === "image" ? (
           <img
             key={attachment.id}
             src={assetUrl(attachment.path)}
             alt={attachment.name}
             title={attachment.name}
-            className="max-h-52 rounded-row border border-[var(--glass-border)] object-cover"
+            className={cn(
+              "rounded-row border border-[var(--glass-border)] object-cover",
+              compact ? "max-h-28" : "max-h-52",
+            )}
           />
         ) : (
           <span

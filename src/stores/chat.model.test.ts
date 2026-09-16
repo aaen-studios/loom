@@ -6,7 +6,9 @@ const calls = vi.hoisted(() => ({
   setDefaultModel: vi.fn(async () => null),
   sessionMessages: vi.fn(async (): Promise<unknown[]> => []),
   listSessions: vi.fn(async (): Promise<unknown[]> => []),
+  pruneEmptySessions: vi.fn(async () => 0),
   respondToolPermission: vi.fn(async () => null),
+  setSessionAgentMode: vi.fn(async () => null),
   deleteMessage: vi.fn(async () => null),
   sendMessage: vi.fn(async () => null),
 }));
@@ -26,8 +28,9 @@ describe("choosing a model", () => {
       live: {},
       liveTools: {},
       busy: {},
-      permission: null,
-      error: null,
+      permissions: {},
+      questions: {},
+      errors: {},
       loaded: true,
     });
     useSettings.setState({
@@ -69,6 +72,8 @@ describe("choosing a model", () => {
           systemPrompt: null,
           workdir: null,
           permissionMode: null,
+          agentMode: null,
+          computerAccess: false,
           createdAt: 0,
           updatedAt: 0,
         },
@@ -102,5 +107,33 @@ describe("choosing a model", () => {
         liteModelId: "cheap-model",
       }),
     );
+  });
+
+  it("writes the agent mode onto the active chat", async () => {
+    useChat.setState({
+      sessions: [
+        {
+          id: "s1",
+          title: "",
+          providerId: null,
+          modelId: null,
+          variant: null,
+          personaId: null,
+          systemPrompt: null,
+          workdir: null,
+          permissionMode: null,
+          agentMode: null,
+          computerAccess: false,
+          createdAt: 0,
+          updatedAt: 0,
+        },
+      ],
+      activeId: "s1",
+    });
+
+    await useChat.getState().setAgentMode("plan");
+
+    expect(calls.setSessionAgentMode).toHaveBeenCalledWith("s1", "plan");
+    expect(useChat.getState().sessions[0].agentMode).toBe("plan");
   });
 });

@@ -18,6 +18,7 @@ function entry(providerId: string, modelId: string): ModelEntry {
       inputModalities: ["text"],
       reasoning: null,
       favorite: false,
+      source: "unknown",
     },
   };
 }

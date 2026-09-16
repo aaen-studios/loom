@@ -17,7 +17,9 @@ impl Default for LineBuffer {
 
 impl LineBuffer {
     pub fn new() -> Self {
-        Self { buffer: String::new() }
+        Self {
+            buffer: String::new(),
+        }
     }
 
     /// Appends a chunk and returns every complete line it produced.

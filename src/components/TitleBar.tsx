@@ -8,7 +8,10 @@ import {
   toggleMaximizeWindow,
 } from "../lib/window";
 import { useChat } from "../stores/chat";
+import { activeTaskCount, useTasks } from "../stores/tasks";
 import { useUi } from "../stores/ui";
+import { PersonaMenu } from "./PersonaMenu";
+import { WorkspaceChip } from "./WorkspaceChip";
 import {
   CloseIcon,
   MaximizeIcon,
@@ -16,6 +19,7 @@ import {
   PanelLeftIcon,
   PlusIcon,
   RestoreIcon,
+  RunsIcon,
 } from "./icons";
 
 function PillButton({
@@ -52,16 +56,24 @@ function PillButton({
  */
 export function TitleBar() {
   const setSidebarOpen = useUi((state) => state.setSidebarOpen);
+  const setTasksOpen = useUi((state) => state.setTasksOpen);
   const newSession = useChat((state) => state.newSession);
   const busyCount = useChat(
     (state) => Object.keys(state.busy).length,
   );
+  const activeRuns = useTasks((state) => activeTaskCount(state.tasks));
+  const loadTasks = useTasks((state) => state.load);
   const [maximized, setMaximized] = useState(false);
 
   useEffect(() => {
     void isWindowMaximized().then(setMaximized);
     return onWindowResized(setMaximized);
   }, []);
+
+  // Keep the Runs badge honest before the popup is ever opened.
+  useEffect(() => {
+    void loadTasks();
+  }, [loadTasks]);
 
   return (
     <header className="chrome relative z-20 flex h-14 shrink-0 items-center justify-between px-3">
@@ -84,21 +96,39 @@ export function TitleBar() {
             <PlusIcon size={17} />
           </PillButton>
         </div>
+        <div className="pill flex h-10 items-center gap-0.5 rounded-capsule p-1">
+          <PillButton label="Runs" onClick={() => setTasksOpen(true)}>
+            <span className="relative">
+              <RunsIcon size={17} />
+              {activeRuns > 0 && (
+                <span className="absolute -top-1 -right-1.5 grid h-3.5 min-w-3.5 place-items-center rounded-full bg-[var(--accent)] px-0.5 text-[9px] font-semibold text-white">
+                  {activeRuns}
+                </span>
+              )}
+            </span>
+          </PillButton>
+        </div>
       </div>
 
-      <div className="pill flex h-10 items-center gap-0.5 rounded-capsule p-1">
-        <PillButton label="Minimize" onClick={() => void minimizeWindow()}>
-          <MinimizeIcon size={16} />
-        </PillButton>
-        <PillButton
-          label={maximized ? "Restore" : "Maximize"}
-          onClick={() => void toggleMaximizeWindow()}
-        >
-          {maximized ? <RestoreIcon size={15} /> : <MaximizeIcon size={14} />}
-        </PillButton>
-        <PillButton label="Close" danger onClick={() => void closeWindow()}>
-          <CloseIcon size={16} />
-        </PillButton>
+      <div className="flex items-center gap-2">
+        <div className="pill flex h-10 items-center gap-0.5 rounded-capsule p-1">
+          <WorkspaceChip align="down" />
+          <PersonaMenu align="down" />
+        </div>
+        <div className="pill flex h-10 items-center gap-0.5 rounded-capsule p-1">
+          <PillButton label="Minimize" onClick={() => void minimizeWindow()}>
+            <MinimizeIcon size={16} />
+          </PillButton>
+          <PillButton
+            label={maximized ? "Restore" : "Maximize"}
+            onClick={() => void toggleMaximizeWindow()}
+          >
+            {maximized ? <RestoreIcon size={15} /> : <MaximizeIcon size={14} />}
+          </PillButton>
+          <PillButton label="Close" danger onClick={() => void closeWindow()}>
+            <CloseIcon size={16} />
+          </PillButton>
+        </div>
       </div>
     </header>
   );

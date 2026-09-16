@@ -49,7 +49,8 @@ pub async fn run_stream(
     let status = response.status().as_u16();
     if !(200..300).contains(&status) {
         let body = response.text().await.unwrap_or_default();
-        let value: serde_json::Value = serde_json::from_str(&body).unwrap_or(serde_json::Value::Null);
+        let value: serde_json::Value =
+            serde_json::from_str(&body).unwrap_or(serde_json::Value::Null);
         let message = match provider.kind {
             ProviderKind::Anthropic => anthropic::error_message(&value, status),
             ProviderKind::OpenaiCompatible => openai::error_message(&value, status),
@@ -69,7 +70,9 @@ pub async fn run_stream(
         let text = String::from_utf8_lossy(&chunk);
 
         for line in buffer.push(&text) {
-            let Some(data) = data_field(&line) else { continue };
+            let Some(data) = data_field(&line) else {
+                continue;
+            };
             if data.trim().is_empty() {
                 continue;
             }

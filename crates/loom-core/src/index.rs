@@ -27,11 +27,60 @@ const SKIP_DIRS: &[&str] = &[
 ];
 
 const TEXT_EXTENSIONS: &[&str] = &[
-    "rs", "ts", "tsx", "js", "jsx", "mjs", "cjs", "py", "go", "java", "kt", "rb", "php", "cs",
-    "c", "h", "cpp", "hpp", "swift", "lua", "sh", "ps1", "bat", "sql", "toml", "yaml", "yml",
-    "json", "md", "markdown", "txt", "css", "scss", "html", "htm", "xml", "vue", "svelte", "astro",
-    "ex", "exs", "erl", "hs", "ml", "scala", "dart", "r", "jl", "tf", "dockerfile", "env", "cfg",
-    "ini", "conf",
+    "rs",
+    "ts",
+    "tsx",
+    "js",
+    "jsx",
+    "mjs",
+    "cjs",
+    "py",
+    "go",
+    "java",
+    "kt",
+    "rb",
+    "php",
+    "cs",
+    "c",
+    "h",
+    "cpp",
+    "hpp",
+    "swift",
+    "lua",
+    "sh",
+    "ps1",
+    "bat",
+    "sql",
+    "toml",
+    "yaml",
+    "yml",
+    "json",
+    "md",
+    "markdown",
+    "txt",
+    "css",
+    "scss",
+    "html",
+    "htm",
+    "xml",
+    "vue",
+    "svelte",
+    "astro",
+    "ex",
+    "exs",
+    "erl",
+    "hs",
+    "ml",
+    "scala",
+    "dart",
+    "r",
+    "jl",
+    "tf",
+    "dockerfile",
+    "env",
+    "cfg",
+    "ini",
+    "conf",
 ];
 
 pub fn is_text_file(path: &Path) -> bool {
@@ -87,7 +136,9 @@ fn walk(root: &Path, directory: &Path, files: &mut Vec<(String, String)>) {
         if !is_text_file(&path) {
             continue;
         }
-        let Ok(metadata) = entry.metadata() else { continue };
+        let Ok(metadata) = entry.metadata() else {
+            continue;
+        };
         if metadata.len() > MAX_FILE_BYTES {
             continue;
         }
