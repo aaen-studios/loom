@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{paths, Error, Result};
 
-pub const SCHEMA_VERSION: i64 = 10;
+pub const SCHEMA_VERSION: i64 = 11;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -48,7 +48,7 @@ pub struct Session {
     pub workdir: Option<String>,
     /// Per-chat override for the tool permission mode.
     pub permission_mode: Option<String>,
-    /// Per-chat override for the agent mode (plan or build).
+    /// Per-chat override for the agent mode (plan, review, build or chat).
     pub agent_mode: Option<String>,
     /// Computer use is armed for this chat with the composer's Computer chip.
     pub computer_access: bool,
@@ -130,6 +130,32 @@ pub struct Todo {
     pub status: String,
     #[serde(default)]
     pub position: i64,
+}
+
+/// The condensed view of a chat's older turns.
+///
+/// Written by the background pass, and used by the fit on the next turn: the
+/// messages up to and including `covers_through_id` collapse into `text`, so a
+/// long chat reaches the model as a summary plus its recent turns instead of
+/// arriving with a note saying context is missing.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionSummary {
+    pub session_id: String,
+    /// The message the summary reaches. The fold lands here and nowhere else,
+    /// so the block never covers half a turn.
+    pub covers_through_id: String,
+    /// That message's `created_at`, so the fold point can be found even if the
+    /// id was edited away.
+    pub covers_through_at: i64,
+    /// How many messages were folded in, for the count the UI shows.
+    pub covered_count: i64,
+    pub text: String,
+    /// Token estimate of `text`, so the fit does not have to recount it.
+    pub tokens: u32,
+    /// The model that wrote it, for the "written by" line in the expander.
+    pub model: Option<String>,
+    pub updated_at: i64,
 }
 
 /// A long-term memory: one durable fact, scoped `global` or to a workspace
@@ -513,6 +539,30 @@ impl Database {
             .map_err(map_sql(path))?;
         }
 
+        if current < 11 {
+            // The condensed view of a long chat: older turns folded into one
+            // block so the wire fits the model's window without dropping the
+            // context outright. `covers_through_id` is the message the summary
+            // reaches, so the fold lands on a boundary the summary knows about;
+            // a row whose message has since been edited away is ignored and
+            // rewritten rather than trusted.
+            tx.execute_batch(
+                r#"
+                    CREATE TABLE IF NOT EXISTS session_summaries (
+                        session_id TEXT PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE,
+                        covers_through_id TEXT NOT NULL,
+                        covers_through_at INTEGER NOT NULL,
+                        covered_count INTEGER NOT NULL,
+                        text TEXT NOT NULL,
+                        tokens INTEGER NOT NULL,
+                        model TEXT,
+                        updated_at INTEGER NOT NULL
+                    );
+                    "#,
+            )
+            .map_err(map_sql(path))?;
+        }
+
         tx.pragma_update(None, "user_version", SCHEMA_VERSION)
             .map_err(map_sql(path))?;
         tx.commit().map_err(map_sql(path))?;
@@ -887,6 +937,75 @@ impl Database {
             )
             .optional()
             .map_err(map_sql("session_goals"))
+    }
+
+    // ------------------------------------------------------ session summary
+
+    /// Stores (or replaces) a chat's condensed view of its older turns.
+    pub fn set_session_summary(&self, summary: &SessionSummary) -> Result<()> {
+        self.connection
+            .execute(
+                "INSERT INTO session_summaries
+                     (session_id, covers_through_id, covers_through_at, covered_count,
+                      text, tokens, model, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+                 ON CONFLICT(session_id) DO UPDATE SET
+                     covers_through_id = excluded.covers_through_id,
+                     covers_through_at = excluded.covers_through_at,
+                     covered_count = excluded.covered_count,
+                     text = excluded.text,
+                     tokens = excluded.tokens,
+                     model = excluded.model,
+                     updated_at = excluded.updated_at",
+                params![
+                    summary.session_id,
+                    summary.covers_through_id,
+                    summary.covers_through_at,
+                    summary.covered_count,
+                    summary.text,
+                    summary.tokens,
+                    summary.model,
+                    summary.updated_at,
+                ],
+            )
+            .map_err(map_sql("session_summaries"))
+            .map(|_| ())
+    }
+
+    pub fn session_summary(&self, session_id: &str) -> Result<Option<SessionSummary>> {
+        self.connection
+            .query_row(
+                "SELECT session_id, covers_through_id, covers_through_at, covered_count,
+                        text, tokens, model, updated_at
+                 FROM session_summaries WHERE session_id = ?1",
+                params![session_id],
+                |row| {
+                    Ok(SessionSummary {
+                        session_id: row.get(0)?,
+                        covers_through_id: row.get(1)?,
+                        covers_through_at: row.get(2)?,
+                        covered_count: row.get(3)?,
+                        text: row.get(4)?,
+                        tokens: row.get(5)?,
+                        model: row.get(6)?,
+                        updated_at: row.get(7)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(map_sql("session_summaries"))
+    }
+
+    /// Drops the summary, so the next fold builds a fresh one. Used when the
+    /// history changed underneath it (an edit, a delete, a regenerate).
+    pub fn clear_session_summary(&self, session_id: &str) -> Result<()> {
+        self.connection
+            .execute(
+                "DELETE FROM session_summaries WHERE session_id = ?1",
+                params![session_id],
+            )
+            .map_err(map_sql("session_summaries"))
+            .map(|_| ())
     }
 
     /// Replaces the whole task list for a session in one transaction, the same
@@ -1871,8 +1990,9 @@ mod tests {
             .unwrap();
         assert_eq!(version, SCHEMA_VERSION);
         assert!(db.list_sessions().unwrap().is_empty());
-        // The v10 table is created by the same forward-only pass.
+        // The v10 and v11 tables are created by the same forward-only pass.
         assert!(db.list_commands(None).unwrap().is_empty());
+        assert!(db.session_summary("s1").unwrap().is_none());
     }
 
     #[test]
@@ -1914,6 +2034,69 @@ mod tests {
         let stored = db.get_session("s1").unwrap().unwrap();
         assert!(stored.variant.is_none());
         assert_eq!(stored.persona_id.as_deref(), Some("coder"));
+    }
+
+    #[test]
+    fn session_summary_round_trips_and_replaces() {
+        let db = Database::open_in_memory().unwrap();
+        db.create_session(&session("s1")).unwrap();
+        db.add_message(&message("m1", "s1", Role::User, "hello"))
+            .unwrap();
+
+        assert!(db.session_summary("s1").unwrap().is_none());
+
+        let summary = SessionSummary {
+            session_id: "s1".into(),
+            covers_through_id: "m1".into(),
+            covers_through_at: 1_234,
+            covered_count: 24,
+            text: "Goal: fix the rename.\n\nFiles changed:\n- src/a.rs".into(),
+            tokens: 42,
+            model: Some("gpt-4o-mini".into()),
+            updated_at: 5_000,
+        };
+        db.set_session_summary(&summary).unwrap();
+        assert_eq!(db.session_summary("s1").unwrap().unwrap(), summary);
+
+        // Rewriting replaces rather than appending: one row per chat.
+        let next = SessionSummary {
+            covers_through_id: "m9".into(),
+            covered_count: 40,
+            text: "a longer fold".into(),
+            model: None,
+            ..summary
+        };
+        db.set_session_summary(&next).unwrap();
+        let stored = db.session_summary("s1").unwrap().unwrap();
+        assert_eq!(stored.covers_through_id, "m9");
+        assert_eq!(stored.covered_count, 40);
+        assert!(stored.model.is_none());
+
+        db.clear_session_summary("s1").unwrap();
+        assert!(db.session_summary("s1").unwrap().is_none());
+        // Clearing nothing is not an error: a fold that was never written is
+        // exactly the state the caller wanted.
+        db.clear_session_summary("s1").unwrap();
+    }
+
+    #[test]
+    fn deleting_a_chat_takes_its_summary_with_it() {
+        let db = Database::open_in_memory().unwrap();
+        db.create_session(&session("s1")).unwrap();
+        db.set_session_summary(&SessionSummary {
+            session_id: "s1".into(),
+            covers_through_id: "m1".into(),
+            covers_through_at: 1,
+            covered_count: 2,
+            text: "folded".into(),
+            tokens: 3,
+            model: None,
+            updated_at: 4,
+        })
+        .unwrap();
+
+        db.delete_session("s1").unwrap();
+        assert!(db.session_summary("s1").unwrap().is_none());
     }
 
     #[test]

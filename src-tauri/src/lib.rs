@@ -4,6 +4,7 @@
 //! live in `loom-core`, so a future CLI can reuse them unchanged.
 
 mod commands;
+mod voice;
 
 use std::sync::Arc;
 
@@ -47,17 +48,27 @@ fn apply_hotkey(app: &AppHandle, enabled: bool, keys: &str) -> Result<(), String
         .map_err(|e| e.to_string())
 }
 
-/// Ctrl+Alt+Esc: stops every computer turn immediately, from anywhere.
+/// Ctrl+Alt+Esc: stops the computer turn immediately, from anywhere.
 fn stop_shortcut() -> Shortcut {
     Shortcut::new(Some(Modifiers::CONTROL | Modifiers::ALT), Code::Escape)
 }
 
-fn stop_all_computer_turns(app: &AppHandle) {
-    if let Some(state) = app.try_state::<AppState>() {
-        state.engine.cancel_all();
-    }
+/// The panic key, and the pill's Stop: ends the chat that is driving the
+/// machine, and nothing else.
+///
+/// It used to call `cancel_all`, which ended every other chat's turn and every
+/// detached background run too — a key labelled "stop computer use" that killed
+/// unrelated work is not a panic button, it is a hazard. Returns the chat that
+/// was stopped, if any.
+fn stop_computer_turn(app: &AppHandle) -> Option<String> {
+    let stopped = app
+        .try_state::<AppState>()
+        .and_then(|state| state.engine.stop_computer());
     hide_computer_pill(app);
-    let _ = app.emit("loom://computer-stopped", ());
+    // Every window follows: the pill is one, but the chip in the main window
+    // and the overlay may be showing a Resume button for the same turn.
+    let _ = app.emit("loom://computer-stopped", stopped.clone());
+    stopped
 }
 
 /// Shows the "Loom is controlling your computer" pill, creating it lazily.
@@ -86,17 +97,38 @@ pub(crate) fn show_computer_pill(app: &AppHandle) {
 
     match built {
         Ok(window) => {
-            // Clicking Stop on the pill is Loom's own UI, not the user taking
-            // the machine back; keep it out of the takeover detector, and out
-            // of screenshots.
+            // Clicking Stop (or Resume) on the pill is Loom's own UI, not the
+            // user taking the machine back; keep it out of the takeover
+            // detector, and out of screenshots.
             if let Ok(hwnd) = window.hwnd() {
                 loom_core::computer::set_ignored_window(hwnd.0 as isize);
+                // Pressing Resume must not pull focus away from the window
+                // Loom is driving: the keystroke it sends next goes wherever
+                // focus is, and the model had no way to know it moved.
+                loom_core::computer::make_window_non_activating(hwnd.0 as isize);
                 let _ = loom_core::screen::exclude_from_capture(hwnd.0 as isize);
             }
             position_computer_pill(&window);
             let _ = window.show();
         }
         Err(error) => eprintln!("[loom] failed to create the computer pill: {error}"),
+    }
+}
+
+/// Registers every window Loom owns with the takeover detector, so the user
+/// reading the transcript, typing in the composer or answering the quick-ask
+/// overlay is not mistaken for taking the machine over.
+///
+/// All of them, not just the pill: the old build registered one hwnd, so a
+/// click anywhere in the main window paused the turn that the user was only
+/// trying to watch.
+fn register_own_windows(app: &AppHandle) {
+    for label in ["main", "ask", "computer"] {
+        if let Some(window) = app.get_webview_window(label) {
+            if let Ok(hwnd) = window.hwnd() {
+                loom_core::computer::set_ignored_window(hwnd.0 as isize);
+            }
+        }
     }
 }
 
@@ -187,6 +219,11 @@ fn toggle_overlay(app: &AppHandle) {
 
     match built {
         Ok(window) => {
+            // The overlay is Loom's own window: typing a question into it is
+            // not taking the machine over.
+            if let Ok(hwnd) = window.hwnd() {
+                loom_core::computer::set_ignored_window(hwnd.0 as isize);
+            }
             if exclude_overlay(&window) {
                 commands::stash_screen(app);
             }
@@ -296,7 +333,7 @@ pub fn run() {
                         if shortcut == &ask_shortcut() {
                             toggle_overlay(app);
                         } else if shortcut == &stop_shortcut() {
-                            stop_all_computer_turns(app);
+                            stop_computer_turn(app);
                         }
                     }
                 })
@@ -357,9 +394,19 @@ pub fn run() {
                         show_computer_pill(&handle);
                     }
                     // A stop ends the turn just as much as a Done does, so the
-                    // pill comes down either way.
-                    EngineEvent::Done { .. } | EngineEvent::Notice { .. } => {
-                        hide_computer_pill(&handle);
+                    // pill comes down either way — but only for the chat that
+                    // was actually driving. Another chat finishing must not take
+                    // the pill away while Loom is still moving the mouse.
+                    EngineEvent::Done { session_id, .. }
+                    | EngineEvent::Notice { session_id, .. } => {
+                        let holder = handle
+                            .try_state::<AppState>()
+                            .and_then(|state| state.engine.computer_holder());
+                        let ended_the_driver =
+                            holder.as_deref().is_none_or(|owner| owner == session_id);
+                        if ended_the_driver {
+                            hide_computer_pill(&handle);
+                        }
                     }
                     EngineEvent::ComputerPaused { .. } => {
                         if let Some(window) = handle.get_webview_window("computer") {
@@ -430,6 +477,10 @@ pub fn run() {
             });
 
             let engine = Engine::new(db, Arc::clone(&shared), emit);
+
+            // The main window is Loom's own: input over it is the user reading
+            // or typing in Loom, not taking the machine over.
+            register_own_windows(app.handle());
 
             // A development build loads the Vite dev server. If that server is
             // not running the window would stay blank, which looks like the app
@@ -579,11 +630,15 @@ pub fn run() {
             commands::set_session_computer_access,
             commands::set_session_goal,
             commands::session_goal,
+            commands::session_summary,
             commands::session_todos,
             commands::set_todos,
             commands::stop_computer,
             commands::resume_computer,
             commands::computer_status,
+            // Debug-only; returns an error rather than not existing, so the
+            // generated handler list is the same in every build.
+            commands::debug_trip_computer_takeover,
             commands::respond_tool_permission,
             commands::respond_question,
             commands::list_tools,
@@ -628,6 +683,18 @@ pub fn run() {
             commands::show_main,
             commands::open_settings,
             commands::quit_app,
+            voice::voice_status,
+            voice::voice_list_voices,
+            voice::voice_speak,
+            voice::voice_preview,
+            voice::voice_cancel,
+            voice::voice_install,
+            voice::save_voice_settings,
+            voice::set_persona_voice,
+    voice::voice_listen_start,
+    voice::voice_listen_audio,
+    voice::voice_listen_stop,
+    voice::voice_listen_status,
             commands::overlay_target,
             commands::list_tasks,
             commands::cancel_task,

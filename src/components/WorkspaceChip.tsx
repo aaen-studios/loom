@@ -328,7 +328,16 @@ export function ModeChip() {
   const selectedMode = AGENT_MODES.find((mode) => mode.id === agent);
   const selectedPermission = PERMISSION_MODES.find((mode) => mode.id === permission);
   const computerOn = session?.computerAccess ?? false;
-
+  // The chat actually driving the machine: every armed chat has a chip, but
+  // only one of them owns the mouse, so only that one gets a Stop button.
+  const driver = useChat((state) => state.computerDriver);
+  const driving = driver != null && (!session || driver === session.id);
+  // Plan and Review refuse every mutating tool, computer ones included, so an
+  // armed chip there shows screenshots only. Saying so beats the model
+  // discovering it a tool call at a time. Chat refuses the computer tools
+  // outright rather than narrowing them, so it shows no badge at all: there is
+  // nothing it could look with either.
+  const lookOnly = agent === "plan" || agent === "review";
   const model = currentModel(models, session, defaults);
   // A model that cannot see images makes every screenshot worthless; say so
   // rather than letting the turn burn tokens on blind clicks.
@@ -350,6 +359,11 @@ export function ModeChip() {
       setOpen(false);
       return;
     }
+    // Who holds the computer is engine state, not something the UI can derive
+    // from its own events alone (a chat armed while another drives, a turn that
+    // ended while this window was closed). Refreshing on open is cheap and
+    // keeps the Stop button honest.
+    void useChat.getState().refreshComputerDriver();
     const rect = containerRef.current?.getBoundingClientRect();
     const gap = 12;
     const above = (rect?.top ?? 0) - clipTop(containerRef.current) - gap;
@@ -382,13 +396,15 @@ export function ModeChip() {
           <ModeIcon />
         ) : agent === "review" ? (
           <SearchIcon size={13} />
+        ) : agent === "chat" ? (
+          <ChatIcon />
         ) : (
           <BuildIcon />
         )}
         {selectedMode?.label ?? "Build"}
         <span className="text-faint">·</span>
         {selectedPermission?.label ?? "Ask"}
-        {(computerOn || paused) && (
+        {(computerOn || paused) && agent !== "chat" && (
           <MonitorIcon
             size={12}
             className={paused ? "text-[var(--danger)]" : "text-[var(--accent)]"}
@@ -430,6 +446,8 @@ export function ModeChip() {
                       <ModeIcon />
                     ) : mode.id === "review" ? (
                       <SearchIcon size={13} />
+                    ) : mode.id === "chat" ? (
+                      <ChatIcon />
                     ) : (
                       <BuildIcon />
                     )}
@@ -527,11 +545,13 @@ export function ModeChip() {
               <p className="truncate text-[11px] text-faint">
                 {paused
                   ? "Paused while you use the machine"
-                  : computerOn
-                    ? "Screen, mouse and keyboard"
-                    : blind
-                      ? "Needs a vision model"
-                      : "Off for this chat"}
+                  : computerOn && lookOnly
+                    ? "Screenshots only in this mode"
+                    : computerOn
+                      ? "Screen, mouse and keyboard"
+                      : blind
+                        ? "Needs a vision model"
+                        : "Off for this chat"}
               </p>
             </div>
             {paused ? (
@@ -553,7 +573,7 @@ export function ModeChip() {
               </div>
             ) : (
               <>
-                {computerOn && (
+                {computerOn && driving && (
                   <button
                     type="button"
                     onClick={() => void ipc.stopComputer()}
@@ -581,6 +601,7 @@ const AGENT_NOTES: Record<string, string> = {
   plan: "Inspect, propose, don't touch",
   build: "Change files and run commands",
   review: "Find issues, propose fixes",
+  chat: "Answer only, search at most",
 };
 
 const PERMISSION_NOTES: Record<string, string> = {
@@ -690,6 +711,29 @@ function ModeIcon() {
     >
       <path d="M9 4.5l6 1.5 6-1.5v13l-6 1.5-6-1.5-6 1.5v-13z" />
       <path d="M9 4.5v13M15 6v13" />
+    </svg>
+  );
+}
+
+/**
+ * Pure chat: an empty speech bubble with a spark. Deliberately the lightest of
+ * the four glyphs — the mode is the one with nothing behind it but words.
+ */
+function ChatIcon() {
+  return (
+    <svg
+      width={13}
+      height={13}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={1.7}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <path d="M20 12.5a7 7 0 0 1-7 7H8l-4 3v-4.6A7 7 0 0 1 3 12.5v-1a7 7 0 0 1 7-7h3a7 7 0 0 1 7 7z" />
+      <path d="M12 7.6l.85 2.05L15 10.5l-2.15.85L12 13.4l-.85-2.05L9 10.5l2.15-.85z" />
     </svg>
   );
 }

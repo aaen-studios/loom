@@ -5,6 +5,7 @@ import { isTauri } from "./tauri";
 import { useChat } from "../stores/chat";
 import { useTasks } from "../stores/tasks";
 import { useUi } from "../stores/ui";
+import { useVoice } from "../stores/voice";
 
 /** Diagnostics switch: `localStorage.setItem("loomDebug", "1")`. */
 function debugEnabled(): boolean {
@@ -57,8 +58,37 @@ export function useEngineEvents(): void {
   }, [applyEvent]);
 }
 
-/** Tray menu → open settings, and the launch-time update notice. */
-export function useShellEvents(): void {
+/**
+ * Subscribes the voice store to its two event channels, for the app's lifetime.
+ *
+ * This has to be an event hook rather than something the voice UI does when it
+ * mounts, and that is not a style choice — it is what makes dictation reach the
+ * composer at all. The microphone button lives in the composer, and its
+ * transcript arrives as a `loom://voice-listen` event *after* the utterance
+ * ends. A listener attached by the voice surface would miss every transcript
+ * produced while that surface was closed.
+ *
+ * `attach` is called for its side-effect and returns its own disposer rather
+ * than being an effect body, because the two `listen` calls resolve
+ * asynchronously: an effect that returned early would leak whichever had
+ * already resolved.
+ */
+export function useVoiceEvents(): void {
+  const attach = useVoice((state) => state.attach);
+  const load = useVoice((state) => state.load);
+  const loadVoices = useVoice((state) => state.loadVoices);
+
+  useEffect(() => {
+    // The settings screen reads these, and the voice surface's voice picker
+    // needs the roster, so both are fetched once at start rather than on each
+    // open.
+    void load();
+    void loadVoices();
+    return attach();
+  }, [attach, load, loadVoices]);
+}
+
+/** Tray menu → open settings, and the launch-time update notice. */export function useShellEvents(): void {
   const setSettingsOpen = useUi((state) => state.setSettingsOpen);
   const setTasksOpen = useUi((state) => state.setTasksOpen);
   const setAvailableUpdate = useUi((state) => state.setAvailableUpdate);
@@ -84,6 +114,12 @@ export function useShellEvents(): void {
         if (event.payload) setAvailableUpdate(event.payload);
       },
     ).then((unlisten) => disposers.push(unlisten));
+    // The pill's Stop and Ctrl+Alt+Esc end a turn from outside this window, so
+    // the composer chip would otherwise keep showing a Resume/Stop pair for a
+    // turn that is already over. The engine emits this but nothing listened.
+    void listen<string | null>("loom://computer-stopped", (event) => {
+      useChat.getState().noteComputerStopped(event.payload ?? null);
+    }).then((unlisten) => disposers.push(unlisten));
 
     return () => disposers.forEach((dispose) => dispose());
   }, [setSettingsOpen, setTasksOpen, setAvailableUpdate, openSession]);

@@ -10,7 +10,8 @@ import { SidebarPopup } from "./components/Sidebar";
 import { TasksPanel } from "./components/TasksPanel";
 import { TitleBar } from "./components/TitleBar";
 import { UpdateToast } from "./components/UpdateToast";
-import { useEngineEvents, useShellEvents } from "./lib/events";
+import { VoiceMode } from "./components/VoiceMode";
+import { useEngineEvents, useShellEvents, useVoiceEvents } from "./lib/events";
 import { useShortcuts } from "./lib/shortcuts";
 import { isTauri } from "./lib/tauri";
 import { useChat } from "./stores/chat";
@@ -27,6 +28,10 @@ function MainShell() {
 
   useEngineEvents();
   useShellEvents();
+  // Voice has to be subscribed for the whole session, not when its surface
+  // opens: the composer's microphone button produces transcripts while the
+  // surface is closed, and they arrive as events.
+  useVoiceEvents();
   useShortcuts();
 
   useEffect(() => {
@@ -71,6 +76,7 @@ function MainShell() {
 
       <SettingsPanel />
       <TasksPanel />
+      <VoiceMode />
       <ShortcutsSheet />
       <UpdateToast />
     </div>

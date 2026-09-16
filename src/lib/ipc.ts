@@ -22,6 +22,7 @@ import type {
   ReasoningSpec,
   SearchProvider,
   Session,
+  SessionSummary,
   StorageUsage,
   StoredMemory,
   Task,
@@ -214,10 +215,21 @@ export const ipc = {
       sessionId: string | null;
       idleSeconds: number;
       pausedSeconds: number;
+      /** The engine's auto-resume window, so the pill never hardcodes it. */
+      resumeInSeconds: number;
+      /** False when the input hooks could not install. */
+      takeoverActive: boolean;
+      takeoverError?: string | null;
     }>("computer_status", {}),
+  /** Debug builds only: fakes the input that pauses a computer turn. */
+  debugTripComputerTakeover: () =>
+    call<void>("debug_trip_computer_takeover", {}),
   setSessionGoal: (id: string, goal: string | null) =>
     call<void>("set_session_goal", { id, goal }),
   sessionGoal: (id: string) => call<string | null>("session_goal", { id }),
+
+  /** The chat's condensed view of its older turns; `null` until one is written. */
+  sessionSummary: (id: string) => call<SessionSummary | null>("session_summary", { id }),
   sessionTodos: (id: string) => call<Todo[]>("session_todos", { id }),
   setTodos: (id: string, todos: Todo[]) =>
     call<Todo[]>("set_todos", { id, todos }),

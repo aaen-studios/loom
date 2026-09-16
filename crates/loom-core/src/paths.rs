@@ -55,6 +55,16 @@ pub fn cache_dir() -> Result<PathBuf> {
     Ok(loom_home()?.join("cache"))
 }
 
+/// `~/.loom/voice/` — voice mode's downloaded assets.
+///
+/// Its own directory rather than `cache/` because these files are large and
+/// the user can point at their own copies instead: `cache/` is disposable by
+/// contract, and deleting a 300 MB model because it looked like cache would be
+/// a bad surprise.
+pub fn voice_dir() -> Result<PathBuf> {
+    Ok(loom_home()?.join("voice"))
+}
+
 /// `~/.loom/scratch/` — the stand-in workspace for chats that have not picked a
 /// folder. Disposable: the model is told not to use it unless explicitly asked.
 pub fn scratch_dir() -> Result<PathBuf> {
@@ -72,6 +82,7 @@ pub fn ensure_home() -> Result<PathBuf> {
         home.join("skills"),
         home.join("backups"),
         home.join("scratch"),
+        home.join("voice"),
     ] {
         std::fs::create_dir_all(&dir).map_err(|e| Error::io(&dir, e))?;
     }

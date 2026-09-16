@@ -9,7 +9,10 @@ import type { Attachment, Todo } from "../types";
 import { useChat } from "../stores/chat";
 import { useSettings } from "../stores/settings";
 import { useSkills } from "../stores/skills";
-import { ArrowUpIcon, PaperclipIcon, StopIcon } from "./icons";
+import { ArrowUpIcon, MicIcon, MicOffIcon, PaperclipIcon, StopIcon } from "./icons";
+import { canCapture } from "../lib/microphone";
+import { barHeight } from "../lib/voiceActivity";
+import { useVoice } from "../stores/voice";
 import { AttachmentChips } from "./AttachmentChips";
 import { ModelPicker } from "./ModelPicker";
 import { ModeChip } from "./WorkspaceChip";
@@ -80,6 +83,23 @@ export function Composer({ variant = "docked" }: ComposerProps) {
   const draft = useChat((state) => state.draft);
   const setDraft = useChat((state) => state.setDraft);
 
+  // Dictation. The transcript arrives as a value plus a counter rather than as
+  // an event, so this effect appends exactly once per utterance — a re-render
+  // cannot duplicate a sentence, and two quick utterances cannot lose one.
+  const transcript = useVoice((state) => state.transcript);
+  const transcriptSeq = useVoice((state) => state.transcriptSeq);
+  const dictation = useVoice((state) => state.dictation);
+  const dictationError = useVoice((state) => state.dictationError);
+  const inputLevel = useVoice((state) => state.inputLevel);
+  const hearing = useVoice((state) => state.hearing);
+  const startListening = useVoice((state) => state.startListening);
+  const stopListening = useVoice((state) => state.stopListening);
+  // Whether a finished transcript sends itself. Read from the stored settings
+  // rather than local state, so the toggle in Settings → Voice is the only
+  // place this is decided.
+  const autoSend = useVoice((state) => state.status?.autoSend ?? false);
+  const seenTranscript = useRef(0);
+
   // "Edit and resend" hands the message back to the composer.
   useEffect(() => {
     if (draft === null) return;
@@ -87,6 +107,24 @@ export function Composer({ variant = "docked" }: ComposerProps) {
     setDraft(null);
     textareaRef.current?.focus();
   }, [draft, setDraft]);
+
+  useEffect(() => {
+    if (transcriptSeq === seenTranscript.current) return;
+    seenTranscript.current = transcriptSeq;
+
+    const said = transcript?.trim();
+    if (!said) return;
+
+    if (autoSend && !busy) {
+      void send(said);
+      return;
+    }
+
+    // Appended to what is already typed, never replacing it: replacing would
+    // silently discard a half-written message because someone spoke.
+    setValue((current) => (current.trim() ? `${current.trimEnd()} ${said}` : said));
+    textareaRef.current?.focus();
+  }, [transcriptSeq, transcript, autoSend, busy, send]);
 
   useEffect(() => {
     const el = textareaRef.current;
@@ -192,6 +230,15 @@ export function Composer({ variant = "docked" }: ComposerProps) {
       case "plan": {
         void ensureSession()
           .then(() => setAgentMode("plan"))
+          .then(() => {
+            if (args && !busy) void send(args);
+          });
+        setValue("");
+        return true;
+      }
+      case "chat": {
+        void ensureSession()
+          .then(() => setAgentMode("chat"))
           .then(() => {
             if (args && !busy) void send(args);
           });
@@ -370,11 +417,73 @@ export function Composer({ variant = "docked" }: ComposerProps) {
         <p className="px-3 pt-1 text-[12px] text-[var(--danger)]">{attachError}</p>
       )}
 
+      {dictationError && (
+        <p className="px-3 pt-1 text-[12px] text-[var(--danger)]">{dictationError}</p>
+      )}
+
+      {dictation === "listening" && (
+        // The meter answers the one question a user has while dictating: is it
+        // hearing me? A level that does not move means the wrong input device,
+        // and that is worth showing before they finish a sentence.
+        <div className="mt-1 flex items-center gap-2 px-3 pt-1">
+          <div className="h-1 w-24 overflow-hidden rounded-capsule bg-[var(--ink-ghost)]">
+            <div
+              className={cn(
+                "h-full rounded-capsule transition-[width] duration-75",
+                hearing ? "bg-[var(--accent)]" : "bg-[var(--ink-faint)]",
+              )}
+              // `barHeight` rather than a local `× 400`: the voice surface
+              // draws the same microphone, and two meters with different
+              // sensitivities would look like a bug in one of them.
+              style={{ width: `${Math.round(barHeight(inputLevel) * 100)}%` }}
+            />
+          </div>
+          <span className="text-[11px] text-faint">
+            {hearing ? "hearing you" : "listening"}
+          </span>
+        </div>
+      )}
+
       <div className="mt-1.5 flex items-center gap-1.5 pl-0.5">
         <ModelPicker />
         <ModeChip />
 
         <div className="flex-1" />
+
+        {canCapture() && (
+          <button
+            type="button"
+            onClick={() => {
+              if (dictation === "off" || dictation === "error") {
+                void startListening();
+              } else {
+                void stopListening();
+              }
+            }}
+            disabled={dictation === "starting"}
+            aria-label={dictation === "off" ? "Dictate" : "Stop dictating"}
+            title={
+              dictation === "starting"
+                ? "Loading the speech models…"
+                : dictation === "off"
+                  ? "Dictate — speak, and the words appear here"
+                  : "Stop dictating"
+            }
+            className={cn(
+              "hover-surface grid h-8 w-8 place-items-center rounded-full",
+              dictation === "off" || dictation === "error"
+                ? "text-faint"
+                : "text-[var(--accent)]",
+              dictation === "starting" && "opacity-50",
+            )}
+          >
+            {dictation === "listening" ? (
+              <MicOffIcon size={16} />
+            ) : (
+              <MicIcon size={16} />
+            )}
+          </button>
+        )}
 
         <button
           type="button"
@@ -428,3 +537,11 @@ export function Composer({ variant = "docked" }: ComposerProps) {
     </div>
   );
 }
+
+/* The microphone glyphs moved to `icons.tsx`.
+ *
+ * They were inline here with a 16 px viewBox and a 1.4 stroke, while every
+ * other icon in the app is drawn on a 24 px grid at 1.7 — so the composer's
+ * microphone was visibly lighter than the paperclip beside it. One icon set
+ * means the corpus stays consistent and the next microphone cannot invent a
+ * third weight. */

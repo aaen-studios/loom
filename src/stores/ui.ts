@@ -19,6 +19,9 @@ interface UiState {
   /** The Runs popup: detached tasks and scheduled jobs. */
   tasksOpen: boolean;
   setTasksOpen: (open: boolean) => void;
+  /** Voice mode: the full-screen speaking-and-listening surface. */
+  voiceOpen: boolean;
+  setVoiceOpen: (open: boolean) => void;
 }
 
 export const useUi = create<UiState>((set) => ({
@@ -36,4 +39,6 @@ export const useUi = create<UiState>((set) => ({
   setShortcutsOpen: (shortcutsOpen) => set({ shortcutsOpen }),
   tasksOpen: false,
   setTasksOpen: (tasksOpen) => set({ tasksOpen }),
+  voiceOpen: false,
+  setVoiceOpen: (voiceOpen) => set({ voiceOpen }),
 }));

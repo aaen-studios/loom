@@ -20,6 +20,7 @@ import {
   PlusIcon,
   RestoreIcon,
   RunsIcon,
+  SoundIcon,
 } from "./icons";
 
 function PillButton({
@@ -57,6 +58,7 @@ function PillButton({
 export function TitleBar() {
   const setSidebarOpen = useUi((state) => state.setSidebarOpen);
   const setTasksOpen = useUi((state) => state.setTasksOpen);
+  const setVoiceOpen = useUi((state) => state.setVoiceOpen);
   const newSession = useChat((state) => state.newSession);
   const busyCount = useChat(
     (state) => Object.keys(state.busy).length,
@@ -99,6 +101,12 @@ export function TitleBar() {
           </PillButton>
         </div>
         <div className="pill flex h-10 items-center gap-0.5 rounded-capsule p-1">
+          {/* Beside Runs rather than in the window-control pill: both are
+              app surfaces, and a control as destructive as Close should not
+              sit next to something reached for mid-sentence. */}
+          <PillButton label="Voice mode" onClick={() => setVoiceOpen(true)}>
+            <SoundIcon size={17} />
+          </PillButton>
           <PillButton label="Runs" onClick={() => setTasksOpen(true)}>
             <span className="relative">
               <RunsIcon size={17} />

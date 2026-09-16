@@ -32,6 +32,10 @@ const reset = () => {
     permissions: {},
     questions: {},
     errors: {},
+    // These two carry computer state between tests otherwise: a pause set by
+    // one test would still be "true" for the next one's assertions.
+    computerPaused: {},
+    computerDriver: null,
     loaded: true,
   });
 };
@@ -87,6 +91,51 @@ describe("streaming state machine", () => {
     expect(state.messages[0].content).toBe("complete answer");
   });
 
+  /// A reply answered from a condensed view of a long chat succeeded, so it
+  /// ends the turn normally. The fold rides on the message so the faint line
+  /// under it is there immediately, and it must not become an error.
+  it("records the fold from done without treating it as a stop", () => {
+    useChat.getState().applyEvent({ type: "started", sessionId: "s1", messageId: "m1" });
+    useChat.getState().applyEvent({
+      type: "done",
+      sessionId: "s1",
+      messageId: "m1",
+      content: "answered from a summary",
+      reasoning: null,
+      usage: { inputTokens: 10, outputTokens: 20 },
+      condensed: { covered: 24, source: "summary", tokens: 2_500 },
+    });
+
+    const state = useChat.getState();
+    expect(state.busy.s1).toBeUndefined();
+    // Never an error: a trimmed request is still a request that succeeded, and
+    // an error here paints a Retry over a reply that worked.
+    expect(state.errors.s1).toBeUndefined();
+    const message = state.messages[0];
+    expect(message.content).toBe("answered from a summary");
+    expect(JSON.parse(message.extra ?? "{}").condensed).toEqual({
+      covered: 24,
+      source: "summary",
+      tokens: 2_500,
+    });
+  });
+
+  /// And an ordinary reply carries no fold at all, so nothing renders for it.
+  it("leaves an uncondensed reply without a fold", () => {
+    useChat.getState().applyEvent({ type: "started", sessionId: "s1", messageId: "m1" });
+    useChat.getState().applyEvent({
+      type: "done",
+      sessionId: "s1",
+      messageId: "m1",
+      content: "plain",
+      reasoning: null,
+      usage: { inputTokens: 1, outputTokens: 1 },
+    });
+
+    const message = useChat.getState().messages[0];
+    expect(message.extra).toBeNull();
+  });
+
   it("surfaces a stop and hands the chat back", () => {
     useChat.getState().applyEvent({ type: "started", sessionId: "s1", messageId: "m1" });
     useChat.getState().applyEvent({
@@ -123,6 +172,85 @@ describe("streaming state machine", () => {
     expect(state.errors.s1).toContain("15 minutes");
   });
 
+  /// The pause marker used to be set and never cleared: `done` and `notice`
+  /// cleared `busy` and `live`, but not this, so a chat that had once been
+  /// paused kept a stale Resume/Stop pair in the chip for the rest of its life.
+  it("clears the computer pause when the turn finishes", () => {
+    useChat.getState().applyEvent({ type: "started", sessionId: "s1", messageId: "m1" });
+    useChat.getState().applyEvent({ type: "computerPaused", sessionId: "s1" });
+    expect(useChat.getState().computerPaused.s1).toBe(true);
+
+    useChat.getState().applyEvent({
+      type: "done",
+      sessionId: "s1",
+      messageId: "m1",
+      content: "finished",
+      reasoning: null,
+      usage: { inputTokens: 1, outputTokens: 1 },
+    });
+
+    expect(useChat.getState().computerPaused.s1).toBeUndefined();
+    expect(useChat.getState().computerDriver).toBeNull();
+  });
+
+  it("clears the computer pause when the turn is stopped", () => {
+    useChat.getState().applyEvent({ type: "started", sessionId: "s1", messageId: "m1" });
+    useChat.getState().applyEvent({ type: "computerPaused", sessionId: "s1" });
+    // The 15-minute takeover timeout arrives as a notice.
+    useChat.getState().applyEvent({
+      type: "notice",
+      sessionId: "s1",
+      messageId: "m1",
+      text: "The computer stayed paused for 15 minutes, so Loom stopped.",
+      detail: null,
+    });
+
+    expect(useChat.getState().computerPaused.s1).toBeUndefined();
+    expect(useChat.getState().computerDriver).toBeNull();
+  });
+
+  it("leaves another chat's pause alone", () => {
+    useChat.getState().applyEvent({ type: "computerPaused", sessionId: "s2" });
+    useChat.getState().applyEvent({ type: "started", sessionId: "s1", messageId: "m1" });
+    useChat.getState().applyEvent({
+      type: "notice",
+      sessionId: "s1",
+      messageId: "m1",
+      text: "stopped",
+      detail: null,
+    });
+
+    expect(useChat.getState().computerPaused.s2).toBe(true);
+    expect(useChat.getState().computerDriver).toBe("s2");
+  });
+
+  /// The chip's Stop button belongs to the chat that owns the mouse: every
+  /// armed chat has a chip, and one of them is not driving.
+  it("points the driver marker at the chat running a computer tool", () => {
+    useChat.getState().applyEvent({
+      type: "toolCallStarted",
+      sessionId: "s2",
+      messageId: "m2",
+      callId: "c1",
+      name: "screenshot",
+      arguments: "{}",
+      seq: 1,
+    });
+    expect(useChat.getState().computerDriver).toBe("s2");
+
+    // A non-computer tool must not claim the wheel.
+    useChat.getState().applyEvent({
+      type: "toolCallStarted",
+      sessionId: "s3",
+      messageId: "m3",
+      callId: "c2",
+      name: "read_file",
+      arguments: "{}",
+      seq: 2,
+    });
+    expect(useChat.getState().computerDriver).toBe("s2");
+  });
+
   it("files a background chat's stop under that chat", () => {
     useChat.getState().applyEvent({ type: "started", sessionId: "other", messageId: "m2" });
     useChat.getState().applyEvent({
@@ -135,6 +263,25 @@ describe("streaming state machine", () => {
 
     expect(useChat.getState().errors.other).toBe("no connection");
     expect(useChat.getState().errors.s1).toBeUndefined();
+  });
+
+  /// The pill and the panic key stop a turn from outside the chat store, so
+  /// the chip only learns about it from this event. Nothing listened for it,
+  /// which left the chip offering Resume for a turn that had ended.
+  it("drops the computer markers when a stop arrives from outside", () => {
+    useChat.getState().applyEvent({ type: "computerPaused", sessionId: "s1" });
+    useChat.getState().noteComputerStopped("s1");
+
+    expect(useChat.getState().computerPaused.s1).toBeUndefined();
+    expect(useChat.getState().computerDriver).toBeNull();
+  });
+
+  it("clears every marker when a stop names no chat", () => {
+    useChat.getState().applyEvent({ type: "computerPaused", sessionId: "s1" });
+    useChat.getState().noteComputerStopped(null);
+
+    expect(useChat.getState().computerPaused).toEqual({});
+    expect(useChat.getState().computerDriver).toBeNull();
   });
 
   it("tracks tool calls from start to finish", () => {

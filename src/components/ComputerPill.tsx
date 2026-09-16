@@ -7,12 +7,17 @@ type PillState = "active" | "paused";
 /**
  * The on-screen control indicator: while Loom drives the computer this pill
  * floats at the top of the primary monitor with Stop, and shows Resume while
- * a takeover pause is in effect. Its clicks are ignored by the takeover
- * detector, so pressing Stop never counts as taking over.
+ * a takeover pause is in effect.
+ *
+ * Its own clicks are ignored by the takeover detector and it never takes
+ * focus, so pressing Resume or Stop neither counts as taking over nor pulls
+ * focus away from the window Loom is driving.
  */
 export function ComputerPill() {
   const [state, setState] = useState<PillState>("active");
   const [idleSeconds, setIdleSeconds] = useState(0);
+  const [resumeInSeconds, setResumeInSeconds] = useState(30);
+  const [takeoverError, setTakeoverError] = useState<string | null>(null);
 
   useEffect(() => {
     const root = document.documentElement;
@@ -30,7 +35,15 @@ export function ComputerPill() {
 
     const timer = window.setInterval(() => {
       void ipc.computerStatus().then((status) => {
-        if (!status || status.state === "hidden") return;
+        if (!status) return;
+        // The status call reports the hooks as well as the pause, so it runs
+        // even when the pill is hidden: "takeover detection is off" must be
+        // visible from the first computer tool on, not only after a pause.
+        setTakeoverError(status.takeoverActive ? null : status.takeoverError ?? "unavailable");
+        if (typeof status.resumeInSeconds === "number") {
+          setResumeInSeconds(status.resumeInSeconds);
+        }
+        if (status.state === "hidden") return;
         setState(status.state === "paused" ? "paused" : "active");
         setIdleSeconds(status.idleSeconds);
       });
@@ -42,7 +55,7 @@ export function ComputerPill() {
     };
   }, []);
 
-  const resumeIn = Math.max(0, 30 - idleSeconds);
+  const resumeIn = Math.max(0, resumeInSeconds - idleSeconds);
 
   return (
     <div className="flex h-full w-full items-center justify-center p-1">
@@ -55,9 +68,11 @@ export function ComputerPill() {
           }
         />
         <span className="min-w-0 flex-1 truncate text-[12.5px] text-soft">
-          {state === "paused"
-            ? `Paused — you're in control · resumes in ${resumeIn}s`
-            : "Loom is controlling your computer"}
+          {takeoverError
+            ? "Loom can't tell when you take over — use Stop"
+            : state === "paused"
+              ? `Paused — you're in control · resumes in ${resumeIn}s`
+              : "Loom is controlling your computer"}
         </span>
         {state === "paused" ? (
           <button

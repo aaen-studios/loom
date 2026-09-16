@@ -41,18 +41,24 @@ window.addEventListener("unhandledrejection", (event) => {
 
 // Diagnostics: `localStorage.setItem("loomDebug","1")` exposes the stores on
 // window so the DevTools protocol can inspect real state.
+/* Diagnostics: the app exposes its stores as `window.__loom` when
+   `loomDebug` is set. */
 if (localStorage.getItem("loomDebug") === "1") {
   void Promise.all([
     import("./stores/chat"),
     import("./stores/providers"),
     import("./stores/settings"),
     import("./stores/ui"),
-  ]).then(([chat, providers, settings, ui]) => {
+    import("./lib/ipc"),
+  ]).then(([chat, providers, settings, ui, ipc]) => {
     (window as unknown as Record<string, unknown>).__loom = {
       chat: chat.useChat,
       providers: providers.useProviders,
       settings: settings.useSettings,
       ui: ui.useUi,
+      // The probe scripts drive the real IPC surface, which is the only way
+      // to reach the debug-only commands.
+      ipc: ipc.ipc,
     };
   });
 }

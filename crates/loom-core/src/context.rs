@@ -3,10 +3,17 @@
 //! A message-count history limit cannot do this job: one `read_file` can be a
 //! hundred thousand tokens, and a model with a million-token window should get
 //! far more than forty messages. Instead the request budget is derived from
-//! the model's context window, and the conversation is compressed to fit —
-//! bulky tool outputs are elided first, then whole turns are dropped, and the
-//! model is told when that happened. Nothing is deleted from the database;
-//! this shapes the wire only.
+//! the model's context window, and the conversation is fitted to it — bulky
+//! tool outputs are elided first, then older turns are folded into one
+//! condensed block ([`crate::condense`]) covering the messages they stood in
+//! for, and elision of the current turn is the last resort. Nothing is deleted
+//! from the database; this shapes the wire only.
+//!
+//! The budget is divided tail first: the last user turn and everything after it
+//! take what they need verbatim, and the condensed block gets the remainder,
+//! capped at [`crate::condense::condensed_budget`]. That ordering is the point —
+//! a generous summary must never be able to elide the fresh tool output the
+//! live turn depends on.
 //!
 //! Two rules keep the arithmetic honest, because the failure this module
 //! exists to prevent is a rejected request, not a degraded one. First, the
@@ -17,9 +24,12 @@
 //! from the token counts providers report, so the fit converges on models whose
 //! tokeniser disagrees with four characters per token instead of failing.
 
+use serde::{Deserialize, Serialize};
+
 use crate::attachments::{self, AttachmentKind};
 use crate::catalog;
-use crate::db::{Message, Role};
+use crate::condense;
+use crate::db::{Message, Role, SessionSummary, Todo};
 use crate::engine::{clear_tool_images, map_tool_outputs, parse_stored_tools, reasoning_echo};
 use crate::provider::{ModelSpec, ProviderConfig};
 
@@ -47,6 +57,11 @@ const BUDGET_PERCENT: u32 = 85;
 
 /// Token estimate for prose and code: roughly four characters per token.
 const CHARS_PER_TOKEN: u32 = 4;
+
+/// The same ratio, for `condense` to size a character budget with. A summary
+/// and the fit have to agree about what fits, or the block that was written to
+/// the budget would not have been.
+pub(crate) const CHARS_PER_TOKEN_FOR_CONDENSE: u32 = CHARS_PER_TOKEN;
 
 /// JSON punctuates far more heavily than prose, and tool schemas and call
 /// arguments are JSON. Three characters per token is the honest estimate;
@@ -238,26 +253,91 @@ pub struct Fitted {
     /// the system prompt and tool schemas too, so a caller comparing this with
     /// a reported count must add those first.
     pub estimate: u32,
-    /// True when anything was elided, dropped, or stripped of its images.
+    /// True when anything was elided or stripped of its images. Condensing is
+    /// reported separately, in `condensed`.
     pub trimmed: bool,
+    /// Set when older turns were folded into a condensed block. This is the
+    /// one kind of trimming worth telling the user about: eliding a bulky tool
+    /// output is invisible, but a reply answered from a summary should say so.
+    pub condensed: Option<Condensed>,
 }
 
-/// Fits the conversation into `budget` tokens by compressing and dropping the
-/// oldest content. The last user turn and everything after it — what the
-/// current request is working from — is kept whenever any part of it fits.
+/// How much of the history was folded away, and what the block was built from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Condensed {
+    /// How many messages the block stands in for.
+    pub covered: usize,
+    pub source: Source,
+    /// Estimated tokens the block cost, for the line under the reply.
+    pub tokens: u32,
+}
+
+/// Where a condensed block came from — the in-process digest, or a summary
+/// written by the lite model in the background.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Source {
+    Digest,
+    Summary,
+}
+
+/// What the fit needs beyond the history itself in order to fold older turns:
+/// the window that sizes the block, and the stored summary if there is one.
+#[derive(Default)]
+pub struct Folding<'a> {
+    /// The model's context window. Zero disables nothing but sizes the block
+    /// from the floor alone.
+    pub window: u32,
+    /// The chat's stored summary, when the background pass has written one.
+    pub summary: Option<&'a SessionSummary>,
+    /// The chat's standing goal, so a fresh digest can name it.
+    pub goal: Option<&'a str>,
+    /// The live task list, likewise.
+    pub todos: &'a [Todo],
+    /// `chat.condenseShare`: how much of the window the block may take. `None`
+    /// uses the default, and `Some(0)` switches condensing off, leaving older
+    /// turns to be dropped as they were before.
+    pub share: Option<u32>,
+}
+
+impl Folding<'_> {
+    /// No summary and no goal: a fresh digest is the only block available.
+    pub fn none() -> Self {
+        Self::default()
+    }
+
+    /// The share to size the block with, defaulted and bounded.
+    fn share(&self) -> u32 {
+        self.share
+            .unwrap_or(crate::condense::CONDENSED_SHARE)
+            .min(crate::condense::MAX_CONDENSED_SHARE)
+    }
+}
+
+/// Fits the conversation into `budget` tokens. The last user turn and
+/// everything after it — what the current request is working from — is kept
+/// whenever any part of it fits; older turns are folded into one condensed
+/// block, capped so they can never squeeze the live turn out.
 pub fn fit(history: &[Message], budget: u32) -> Vec<Message> {
-    fit_report(history, budget, true).messages
+    fit_report(history, budget, true, Folding::none()).messages
 }
 
-/// [`fit`], reporting the estimate and whether anything was trimmed, and able
-/// to drop the inlined screenshot up front when the caller has already run out
-/// of room (the retry after a length rejection).
-pub fn fit_report(history: &[Message], budget: u32, allow_images: bool) -> Fitted {
+/// [`fit`], reporting the estimate and what was folded, and able to drop the
+/// inlined screenshot up front when the caller has already run out of room
+/// (the retry after a length rejection).
+pub fn fit_report(
+    history: &[Message],
+    budget: u32,
+    allow_images: bool,
+    folding: Folding<'_>,
+) -> Fitted {
     if history.is_empty() {
         return Fitted {
             messages: Vec::new(),
             estimate: 0,
             trimmed: false,
+            condensed: None,
         };
     }
 
@@ -275,7 +355,9 @@ pub fn fit_report(history: &[Message], budget: u32, allow_images: bool) -> Fitte
     let mut used = cost(&kept, last_user);
 
     // 1. Elide bulky tool outputs in older turns, oldest first. The current
-    //    turn keeps its fresh results for as long as possible.
+    //    turn keeps its fresh results for as long as possible. Nothing is
+    //    reported for this: it was always invisible, and it is far cheaper
+    //    than summarising a turn whose output nobody needs in full.
     if used > budget {
         for index in 0..last_user {
             if used <= budget {
@@ -287,34 +369,33 @@ pub fn fit_report(history: &[Message], budget: u32, allow_images: bool) -> Fitte
         }
     }
 
-    // 2. Still too big: drop whole older turns, keeping the current one. A
-    //    synthetic note tells the model that context is missing instead of
-    //    leaving a silent gap in the transcript.
-    let mut dropped = 0usize;
+    // 2. Still too big: fold the older turns into one block and keep the
+    //    current turn verbatim. This is the step that used to drop them
+    //    outright and leave a note saying context was missing.
+    let mut condensed = None;
     if used > budget {
-        let tail_cost: u32 = (last_user..kept.len())
-            .map(|index| message_tokens(&kept[index], index, &kept, index == last_user))
-            .fold(0, u32::saturating_add);
-        let mut prefix_cost: u32 = (0..last_user)
-            .map(|index| message_tokens(&kept[index], index, &kept, false))
-            .fold(0, u32::saturating_add);
-
-        while dropped < last_user && tail_cost.saturating_add(prefix_cost) > budget {
-            prefix_cost =
-                prefix_cost.saturating_sub(message_tokens(&kept[dropped], dropped, &kept, false));
-            dropped += 1;
-        }
-
-        // Stop on a turn boundary so a dropped question never leaves its
-        // answer behind on its own.
-        while dropped < last_user && kept[dropped].role != Role::User {
-            dropped += 1;
-        }
-
-        if dropped > 0 {
-            kept.drain(0..dropped);
-            last_user -= dropped;
+        if folding.share() == 0 {
+            // Condensing switched off: fall back to dropping whole older turns,
+            // which is what the fit did before the block existed. No notice is
+            // reported for it either way — a request that was trimmed is still
+            // a request that succeeded.
+            if let Some(dropped) = drop_older_turns(&mut kept, budget, last_user) {
+                last_user = last_user_index(&kept);
+                used = cost(&kept, last_user);
+                trimmed = true;
+                let _ = dropped;
+            }
+        } else if let Some((cover, block, source)) = fold(&kept, budget, last_user, &folding) {
+            kept.drain(0..cover);
+            kept.insert(0, block);
+            last_user = last_user_index(&kept);
+            let tokens = message_tokens(&kept[0], 0, &kept, false);
             used = cost(&kept, last_user);
+            condensed = Some(Condensed {
+                covered: cover,
+                source,
+                tokens,
+            });
             trimmed = true;
         }
     }
@@ -336,16 +417,139 @@ pub fn fit_report(history: &[Message], budget: u32, allow_images: bool) -> Fitte
         trimmed = true;
     }
 
-    if dropped > 0 {
-        kept.insert(0, omitted_note(dropped));
-    }
-
     let estimate = cost(&kept, last_user_index(&kept));
     Fitted {
         messages: kept,
         estimate,
         trimmed,
+        condensed,
     }
+}
+
+/// The condensed block for this fit: how many messages it covers, the message
+/// that carries it, and where its text came from.
+///
+/// The budget is divided **tail first**. The verbatim tail takes what it needs,
+/// and the block gets the remainder, capped at its own ceiling — so a fat
+/// summary can never elide the fresh tool output the live turn depends on,
+/// which is the failure the whole arrangement exists to remove. When even that
+/// will not fit, the fold advances one turn boundary at a time until it does,
+/// and only stops when there is no turn left to fold.
+fn fold(
+    history: &[Message],
+    budget: u32,
+    last_user: usize,
+    folding: &Folding<'_>,
+) -> Option<(usize, Message, Source)> {
+    // A stored summary fixes the fold point — it covers exactly the messages it
+    // was written from, and folding on a boundary it knows about is what makes
+    // the block coherent. It must leave the live turn alone, and the message it
+    // reaches must still be in the history: an edit or a delete landing on it
+    // invalidates the row, and a fresh digest stands in until it is rewritten.
+    let from_summary = folding.summary.and_then(|summary| {
+        history
+            .iter()
+            .position(|message| message.id == summary.covers_through_id)
+            .filter(|index| *index < last_user)
+            .map(|index| index + 1)
+    });
+
+    let mut cover = from_summary.unwrap_or(last_user);
+    if cover == 0 {
+        // Nothing older to fold: this is a first turn whose own output is too
+        // large, and eliding it is the only honest move left.
+        return None;
+    }
+
+    loop {
+        let tail_cost: u32 = (cover..history.len())
+            .map(|index| message_tokens(&history[index], index, history, index == last_user))
+            .fold(0, u32::saturating_add);
+        let room = condense::summary_room(folding.share(), folding.window, budget, tail_cost);
+
+        let (text, source) = match (folding.summary, from_summary) {
+            (Some(summary), Some(fixed)) if cover == fixed => (
+                condense::clamp(&summary.text, room),
+                Source::Summary,
+            ),
+            // Either there is no summary, or the fold has had to reach further
+            // back than the one on file describes. Summarising the whole span
+            // from the messages is better than keeping a summary of part of it.
+            _ => (
+                condense::digest_for(&history[..cover], folding.goal, folding.todos, room),
+                Source::Digest,
+            ),
+        };
+        let block = condensed_message(cover, &text);
+        let block_cost = message_tokens(&block, 0, history, false);
+
+        // The next boundary to try, if this one does not fit. Absent means the
+        // tail is down to its last turn and there is nothing further to fold.
+        let next = next_turn_start(history, cover);
+        if tail_cost.saturating_add(block_cost) <= budget || next >= history.len() {
+            return Some((cover, block, source));
+        }
+        cover = next;
+    }
+}
+
+/// The synthetic turn that carries a condensed block.
+///
+/// A user message at the front of the wire, which is the position and role the
+/// old "context was dropped" note occupied — so no provider's role-alternation
+/// rules are disturbed by it — but saying what the block actually is rather
+/// than what is missing.
+fn condensed_message(covered: usize, text: &str) -> Message {
+    Message {
+        id: "context-condensed".to_string(),
+        session_id: String::new(),
+        role: Role::User,
+        content: format!(
+            "[{covered} earlier messages were condensed into the summary below to fit the \
+             model's context window. It is a record of what happened in this conversation, \
+             not a new request.]\n\n{text}"
+        ),
+        reasoning: None,
+        extra: None,
+        persona_id: None,
+        created_at: 0,
+    }
+}
+
+/// The next turn boundary after `from`: where a fold can advance to without
+/// leaving an answer behind its question.
+fn next_turn_start(history: &[Message], from: usize) -> usize {
+    (from + 1..history.len())
+        .find(|index| history[*index].role == Role::User)
+        .unwrap_or(history.len())
+}
+
+/// Drops whole older turns from the front until the tail fits, stopping on a
+/// turn boundary so a question never loses its answer.
+///
+/// Only reached when condensing is switched off. Returns how many messages went
+/// and whether the request now fits; `None` when there was nothing to drop.
+fn drop_older_turns(kept: &mut Vec<Message>, budget: u32, last_user: usize) -> Option<usize> {
+    let tail_cost: u32 = (last_user..kept.len())
+        .map(|index| message_tokens(&kept[index], index, kept, index == last_user))
+        .fold(0, u32::saturating_add);
+
+    let mut dropped = 0usize;
+    let mut prefix_cost: u32 = (0..last_user)
+        .map(|index| message_tokens(&kept[index], index, kept, false))
+        .fold(0, u32::saturating_add);
+    while dropped < last_user && tail_cost.saturating_add(prefix_cost) > budget {
+        prefix_cost = prefix_cost.saturating_sub(message_tokens(&kept[dropped], dropped, kept, false));
+        dropped += 1;
+    }
+    while dropped < last_user && kept[dropped].role != Role::User {
+        dropped += 1;
+    }
+    if dropped == 0 {
+        return None;
+    }
+    kept.drain(0..dropped);
+    Some(dropped)
 }
 
 fn last_user_index(history: &[Message]) -> usize {
@@ -471,23 +675,6 @@ fn elide_outputs(message: &Message) -> Message {
         }
         format!("[tool output omitted to fit the model's context window: {chars} characters]")
     })
-}
-
-/// A synthetic user turn telling the model that older context was dropped.
-fn omitted_note(count: usize) -> Message {
-    Message {
-        id: "context-omitted".to_string(),
-        session_id: String::new(),
-        role: Role::User,
-        content: format!(
-            "[{count} earlier messages were left out to fit the model's context window. \
-             Ask the user if you need context from them.]"
-        ),
-        reasoning: None,
-        extra: None,
-        persona_id: None,
-        created_at: 0,
-    }
 }
 
 #[cfg(test)]
@@ -741,11 +928,12 @@ mod tests {
             message(Role::Assistant, "hi"),
             message(Role::User, "write a file"),
         ];
-        let fitted = fit_report(&history, 50_000, true);
+        let fitted = fit_report(&history, 50_000, true, Folding::none());
         assert_eq!(fitted.messages.len(), 3);
         assert_eq!(fitted.messages[0].content, "hello");
         assert_eq!(fitted.messages[2].content, "write a file");
         assert!(!fitted.trimmed);
+        assert!(fitted.condensed.is_none());
         assert!(fitted.estimate > 0);
     }
 
@@ -759,10 +947,12 @@ mod tests {
             message(Role::Assistant, "ok"),
         ];
 
-        let fitted = fit_report(&history, 5_000, true);
+        let fitted = fit_report(&history, 5_000, true, Folding::none());
 
-        // No turn was dropped; the big output shrank to a note.
+        // No turn was condensed and nothing was dropped; the big output shrank
+        // to a note, which has never been reported.
         assert_eq!(fitted.messages.len(), history.len());
+        assert!(fitted.condensed.is_none());
         let calls = parse_stored_tools(fitted.messages[1].extra.as_deref());
         assert_eq!(calls.len(), 1);
         assert!(calls[0].output.contains("omitted"), "{}", calls[0].output);
@@ -771,8 +961,10 @@ mod tests {
         assert!(fitted.trimmed);
     }
 
+    /// The whole point of the module: older turns become a block that says what
+    /// happened, instead of a note saying something is missing.
     #[test]
-    fn old_turns_are_dropped_with_a_note_when_eliding_is_not_enough() {
+    fn old_turns_are_condensed_rather_than_dropped_when_eliding_is_not_enough() {
         let history = vec![
             message(Role::User, &"a".repeat(40_000)),
             message(Role::Assistant, "first answer"),
@@ -782,20 +974,211 @@ mod tests {
             message(Role::Assistant, "working"),
         ];
 
-        let fitted = fit_report(&history, 1_000, true);
+        let fitted = fit_report(&history, 1_000, true, Folding::none());
 
-        // The note stands in for the dropped exchange, and the current turn is
-        // intact.
-        assert!(fitted.messages[0].content.contains("earlier messages"));
+        // The block stands in for the older turns, and the current turn is
+        // intact and still the last one.
+        assert!(
+            fitted.messages[0].content.contains("condensed into the summary"),
+            "{}",
+            fitted.messages[0].content
+        );
+        // It carries what was asked and concluded, not just a count.
+        assert!(fitted.messages[0].content.contains("first answer"));
+        assert!(fitted.messages[0].content.contains("second question"));
+        assert!(!fitted.messages[0].content.contains("current question"));
         assert!(fitted
             .messages
             .iter()
             .any(|m| m.content == "current question"));
+
+        let condensed = fitted.condensed.expect("the fold is reported");
+        assert_eq!(condensed.source, Source::Digest);
+        assert!(condensed.tokens > 0);
+        assert!(
+            condensed.covered >= 2,
+            "covered {} of the older turns",
+            condensed.covered
+        );
+        assert!(fitted.trimmed);
+    }
+
+    /// A stored summary is used verbatim when it still describes the history,
+    /// and its fold point is honoured even when the budget could afford more.
+    #[test]
+    fn a_stored_summary_fixes_the_fold_point() {
+        // The first exchange is enormous, so a fold is genuinely needed; the
+        // second is small enough to survive verbatim beside the block. That is
+        // the situation the fold point exists for.
+        let history = vec![
+            message(Role::User, &"a".repeat(40_000)),
+            message(Role::Assistant, "first answer"),
+            message(Role::User, "second question"),
+            message(Role::Assistant, "second answer"),
+            message(Role::User, "current question"),
+            message(Role::Assistant, "working"),
+        ];
+        // Covers the first exchange only, so the second stays verbatim.
+        let covers = history[1].id.clone();
+        let summary = SessionSummary {
+            session_id: "s".into(),
+            covers_through_id: covers,
+            covers_through_at: 0,
+            covered_count: 2,
+            text: "Goal:\n- a stored summary of the first exchange".into(),
+            tokens: 20,
+            model: Some("gpt-4o-mini".into()),
+            updated_at: 0,
+        };
+
+        let fitted = fit_report(
+            &history,
+            1_000,
+            true,
+            Folding {
+                window: 8_000,
+                summary: Some(&summary),
+                goal: None,
+                todos: &[],
+                share: None,
+            },
+        );
+
+        assert!(
+            fitted.messages[0]
+                .content
+                .contains("a stored summary of the first exchange"),
+            "{}",
+            fitted.messages[0].content
+        );
+        assert_eq!(fitted.condensed.expect("folded").source, Source::Summary);
+        // The second exchange is untouched, because the summary does not
+        // describe it.
+        assert!(fitted
+            .messages
+            .iter()
+            .any(|m| m.content == "second question"));
+        assert!(fitted
+            .messages
+            .iter()
+            .any(|m| m.content == "second answer"));
+    }
+
+    /// An edit or a delete can take the message a summary reaches. The row is
+    /// then stale, and a fresh digest must stand in rather than the fold
+    /// landing somewhere the summary knows nothing about.
+    #[test]
+    fn a_summary_whose_fold_point_is_gone_is_replaced_by_a_digest() {
+        let history = vec![
+            message(Role::User, &"a".repeat(40_000)),
+            message(Role::Assistant, "first answer"),
+            message(Role::User, "current question"),
+            message(Role::Assistant, "working"),
+        ];
+        let summary = SessionSummary {
+            session_id: "s".into(),
+            covers_through_id: "a message that no longer exists".into(),
+            covers_through_at: 0,
+            covered_count: 2,
+            text: "Goal:\n- a summary of something that is gone".into(),
+            tokens: 20,
+            model: None,
+            updated_at: 0,
+        };
+
+        let fitted = fit_report(
+            &history,
+            1_000,
+            true,
+            Folding {
+                window: 8_000,
+                summary: Some(&summary),
+                goal: Some("the real goal"),
+                todos: &[],
+                share: None,
+            },
+        );
+
+        assert_eq!(fitted.condensed.expect("folded").source, Source::Digest);
+        assert!(fitted.messages[0].content.contains("the real goal"));
+        assert!(!fitted.messages[0].content.contains("something that is gone"));
+    }
+
+    /// `chat.condenseShare = 0` restores the old behaviour: older turns go,
+    /// no block stands in for them, and nothing is reported as a stop.
+    #[test]
+    fn a_zero_share_drops_older_turns_instead_of_condensing() {
+        let history = vec![
+            message(Role::User, &"a".repeat(40_000)),
+            message(Role::Assistant, "first answer"),
+            message(Role::User, "second question"),
+            message(Role::Assistant, "second answer"),
+            message(Role::User, "current question"),
+            message(Role::Assistant, "working"),
+        ];
+
+        let fitted = fit_report(
+            &history,
+            1_000,
+            true,
+            Folding {
+                share: Some(0),
+                ..Default::default()
+            },
+        );
+
+        assert!(fitted.condensed.is_none(), "nothing was condensed");
         assert!(!fitted
             .messages
             .iter()
             .any(|m| m.content == "first answer"));
+        assert!(fitted
+            .messages
+            .iter()
+            .any(|m| m.content == "current question"));
         assert!(fitted.trimmed);
+    }
+
+    /// A summary that is already in force must not cover the current turn: the
+    /// live request is never folded into a description of itself.
+    #[test]
+    fn the_current_turn_is_never_folded_away() {
+        let history = vec![
+            message(Role::User, "old question"),
+            message(Role::Assistant, "old answer"),
+            message(Role::User, &"b".repeat(40_000)),
+            message(Role::Assistant, "working"),
+        ];
+        // A summary claiming to reach the live user turn.
+        let summary = SessionSummary {
+            session_id: "s".into(),
+            covers_through_id: history[2].id.clone(),
+            covers_through_at: 0,
+            covered_count: 3,
+            text: "Goal:\n- covers too much".into(),
+            tokens: 10,
+            model: None,
+            updated_at: 0,
+        };
+
+        let fitted = fit_report(
+            &history,
+            1_000,
+            true,
+            Folding {
+                window: 8_000,
+                summary: Some(&summary),
+                goal: None,
+                todos: &[],
+                share: None,
+            },
+        );
+
+        assert!(!fitted.messages[0].content.contains("covers too much"));
+        assert!(fitted
+            .messages
+            .iter()
+            .any(|m| m.content.chars().all(|c| c == 'b')));
     }
 
     #[test]
@@ -805,7 +1188,7 @@ mod tests {
             tool_message(200_000),
         ];
 
-        let fitted = fit_report(&history, 500, true);
+        let fitted = fit_report(&history, 500, true, Folding::none());
 
         let calls = parse_stored_tools(fitted.messages[1].extra.as_deref());
         assert!(calls[0].output.contains("omitted"), "{}", calls[0].output);
@@ -839,7 +1222,7 @@ mod tests {
         // The image is visible to the budget before the fit.
         assert!(tool_image_cost(&history, 0) > 8_000);
 
-        let fitted = fit_report(&history, 2_000, true);
+        let fitted = fit_report(&history, 2_000, true, Folding::none());
         let calls = parse_stored_tools(fitted.messages[1].extra.as_deref());
         assert!(calls[0].images.is_empty(), "images should be dropped");
         assert!(
@@ -876,7 +1259,7 @@ mod tests {
             },
         ];
 
-        let fitted = fit_report(&history, 500_000, false);
+        let fitted = fit_report(&history, 500_000, false, Folding::none());
         let calls = parse_stored_tools(fitted.messages[1].extra.as_deref());
         assert!(calls[0].images.is_empty());
         // Nothing else was touched: the budget was never tight.
@@ -891,7 +1274,7 @@ mod tests {
             tool_message(100_000),
             tool_message(100_000),
         ];
-        let fitted = fit_report(&history, 1_000, true);
+        let fitted = fit_report(&history, 1_000, true, Folding::none());
         // Every remaining assistant turn still carries its calls, so the wire
         // never has a tool result without a preceding call.
         for message in &fitted.messages {

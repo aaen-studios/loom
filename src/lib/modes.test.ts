@@ -35,7 +35,12 @@ describe("mode lists", () => {
   });
 
   it("lists the agent modes, read-only ones after the defaults", () => {
-    expect(AGENT_MODES.map((mode) => mode.id)).toEqual(["plan", "build", "review"]);
+    expect(AGENT_MODES.map((mode) => mode.id)).toEqual([
+      "plan",
+      "build",
+      "review",
+      "chat",
+    ]);
   });
 
   it("hides Always allow in Atelier", () => {

@@ -8,6 +8,7 @@
 pub mod attachments;
 pub mod catalog;
 pub mod computer;
+pub mod condense;
 pub mod config;
 pub mod context;
 pub mod db;
@@ -35,6 +36,7 @@ pub mod tools;
 pub mod ui_guide;
 pub mod updater;
 pub mod usage;
+pub mod voice;
 pub mod web;
 pub mod workspace;
 

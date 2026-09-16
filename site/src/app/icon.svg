@@ -1,0 +1,14 @@
+<!-- Generated from src-tauri/icons/icon.svg by scripts/make-icons.mjs.
+     Do not edit by hand: run `bun run icons` instead.
+
+     The app's mark on a rounded white tile, which is how a browser icon is
+     drawn. The OS icons stay full-bleed squares — a shell supplies its own
+     corner radius, and the installer writes a plain .ico. -->
+<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+  <rect width="24" height="24" rx="5.4" fill="#ffffff"/>
+  <g fill="none" stroke="#000000" stroke-width="1.9" stroke-linecap="round">
+    <path d="M6.5 5.5c0 6.5 5.5 6.5 5.5 13"/>
+    <path d="M12 5.5c0 6.5 5.5 6.5 5.5 13"/>
+    <path d="M6.5 18.5h11" opacity="0.55"/>
+  </g>
+</svg>

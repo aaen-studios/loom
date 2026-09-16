@@ -13,6 +13,31 @@ image = { version = "0.25", default-features = false, features = ["png", "jpeg"]
 keyring = { version = "3", features = ["windows-native", "apple-native", "linux-native"] }
 minisign-verify = "0.2"
 sha2 = "0.10"
+
+# Voice mode. `ort` deliberately does NOT use its defaults: they include
+# `download-binaries` and `copy-dylibs`, which fetch and bundle ONNX Runtime at
+# build time. `load-dynamic` links nothing and loads the runtime from a file at
+# run time instead, which is what keeps the installer small.
+ort = { version = "2.0.0-rc.13", default-features = false, features = [
+    "std",
+    "load-dynamic",
+    "api-20",
+] }
+
+# espeak-ng is reached by hand-written FFI over a prebuilt library, not by these
+# bindings. `espeak-rs-sys` runs bindgen (needs libclang) and then compiles
+# espeak-ng from source (needs a full C toolchain and the platform headers),
+# which on Windows means MSVC Build Tools — a large admin-only dependency for
+# four function calls. See `voice/espeak.rs`.
+#
+# The library itself is loaded at run time, so it is not a build dependency at
+# all; `libloading` is.
+libloading = "0.8"
+
+# Whisper's mel front-end needs a 400-point FFT per frame. Pure Rust, no build
+# step and no C toolchain — which is the whole reason speech-to-text goes
+# through ONNX rather than whisper.cpp.
+rustfft = "6.4"
 zip = { version = "4", default-features = false, features = ["deflate"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
 rusqlite = { version = "0.37", features = ["bundled"] }
@@ -38,6 +63,9 @@ windows = { version = "0.62", features = [
     "Win32_System_DataExchange",
     "Win32_System_Diagnostics_ToolHelp",
     "Win32_System_Memory",
+    # The OLE clipboard: holding the user's clipboard as a data object so
+    # pasting text can put back an image or a set of files, not just text.
+    "Win32_System_Ole",
     "Win32_System_ProcessStatus",
     "Win32_System_Registry",
     "Win32_System_Threading",
@@ -56,5 +84,8 @@ xcap = "0.9"
 [dev-dependencies]
 tempfile = "3"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+
+[features]
+default = []
 
 

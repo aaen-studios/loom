@@ -653,12 +653,14 @@ fn settings_view(config: &AppConfig) -> Value {
             "alwaysFollow": config.interface.always_follow,
             "compact": config.interface.compact,
             "generatedUi": config.interface.generated_ui,
+            "showCondensing": config.interface.show_condensing,
             "captureOnSend": config.interface.capture_on_send,
             "sidebarPinned": config.interface.sidebar_pinned,
             "sidebarWidth": config.interface.sidebar_width,
         },
         "chat": {
             "maxOutputTokens": config.chat.max_output_tokens,
+            "condenseShare": config.chat.condense_share,
             "maxToolRounds": config.chat.max_tool_rounds,
             "autoTitle": config.chat.auto_title,
             "embeddingModel": config.chat.embedding_model,
@@ -1375,6 +1377,10 @@ pub fn update_settings(config: &mut AppConfig, args: &Value) -> Result<String> {
                 "generatedUi" => {
                     config.interface.generated_ui = as_bool(value, "interface.generatedUi")?;
                 }
+                "showCondensing" => {
+                    config.interface.show_condensing =
+                        as_bool(value, "interface.showCondensing")?;
+                }
                 "captureOnSend" => {
                     config.interface.capture_on_send = as_bool(value, "interface.captureOnSend")?;
                 }
@@ -1403,6 +1409,19 @@ pub fn update_settings(config: &mut AppConfig, args: &Value) -> Result<String> {
             .ok_or_else(|| Error::other("\"chat\" must be an object"))?;
         for (key, value) in chat {
             match key.as_str() {
+                "condenseShare" => {
+                    // 0 is meaningful: it switches condensing off. Above the
+                    // cap the block starts crowding out the live turn, so it is
+                    // held there rather than refused.
+                    let share = value
+                        .as_u64()
+                        .and_then(|share| u32::try_from(share).ok())
+                        .ok_or_else(|| {
+                            Error::other("\"chat.condenseShare\" must be a non-negative integer")
+                        })?;
+                    config.chat.condense_share =
+                        share.min(crate::condense::MAX_CONDENSED_SHARE);
+                }
                 "maxOutputTokens" => {
                     let tokens = value
                         .as_u64()

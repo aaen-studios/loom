@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { groupToolRuns, segmentMessage } from "./messageExtra";
+import {
+  groupToolRuns,
+  parseCondensed,
+  segmentMessage,
+  withCondensed,
+} from "./messageExtra";
 import type { ToolCallRecord } from "../types";
 
 function call(id: string, after: number): ToolCallRecord {
@@ -103,5 +108,93 @@ describe("segmentMessage", () => {
     };
     const segments = segmentMessage("text", [legacy]);
     expect(segments[0].kind).toBe("tools");
+  });
+});
+
+describe("condensed replies", () => {
+  it("reads the fold the engine recorded on a reply", () => {
+    const extra = JSON.stringify({
+      toolCalls: [],
+      usage: { inputTokens: 1, outputTokens: 2 },
+      condensed: { covered: 24, source: "summary", tokens: 3_000 },
+    });
+    expect(parseCondensed(extra)).toEqual({
+      covered: 24,
+      source: "summary",
+      tokens: 3_000,
+    });
+  });
+
+  /// A reply that was not condensed must have no line, which is every reply in
+  /// a short chat.
+  it("returns nothing for a reply that was not condensed", () => {
+    expect(parseCondensed(null)).toBeNull();
+    expect(parseCondensed("")).toBeNull();
+    expect(parseCondensed("{")).toBeNull();
+    expect(parseCondensed(JSON.stringify({ usage: {} }))).toBeNull();
+    // A fold covering nothing is not a fold worth a line.
+    expect(
+      parseCondensed(JSON.stringify({ condensed: { covered: 0, source: "digest" } })),
+    ).toBeNull();
+    expect(parseCondensed(JSON.stringify({ condensed: "yes" }))).toBeNull();
+  });
+
+  /// An unrecognised source reads as the fallback, which is the honest reading:
+  /// it is what a block is built from when nothing wrote one.
+  it("treats an unknown source as the digest", () => {
+    const parsed = parseCondensed(
+      JSON.stringify({ condensed: { covered: 5, source: "something-else" } }),
+    );
+    expect(parsed?.source).toBe("digest");
+    expect(parsed?.tokens).toBe(0);
+  });
+
+  it("writes the fold onto a message without losing what was there", () => {
+    const before = JSON.stringify({ usage: { inputTokens: 9, outputTokens: 9 } });
+    const after = withCondensed(before, {
+      covered: 12,
+      source: "digest",
+      tokens: 500,
+    });
+    const parsed = JSON.parse(after ?? "{}");
+    expect(parsed.usage).toEqual({ inputTokens: 9, outputTokens: 9 });
+    expect(parseCondensed(after)).toEqual({
+      covered: 12,
+      source: "digest",
+      tokens: 500,
+    });
+  });
+
+  it("leaves the extra alone when there was no fold", () => {
+    const before = JSON.stringify({ usage: { inputTokens: 1, outputTokens: 1 } });
+    expect(withCondensed(before, null)).toBe(before);
+    expect(withCondensed(before, undefined)).toBe(before);
+    // A reply with no extra at all and no fold stays without one.
+    expect(withCondensed(null, null)).toBeNull();
+  });
+
+  /// Unreadable to start with: replace it rather than compound the damage.
+  it("replaces an unparseable extra rather than losing the fold", () => {
+    const parsed = withCondensed("not json", {
+      covered: 3,
+      source: "summary",
+      tokens: 10,
+    });
+    expect(parseCondensed(parsed)).toEqual({
+      covered: 3,
+      source: "summary",
+      tokens: 10,
+    });
+  });
+
+  /// User messages store a bare attachment array, so the base cannot be assumed
+  /// to be an object.
+  it("does not merge into an array-shaped extra", () => {
+    const parsed = withCondensed(JSON.stringify([{ name: "a.png" }]), {
+      covered: 2,
+      source: "digest",
+      tokens: 5,
+    });
+    expect(parseCondensed(parsed)?.covered).toBe(2);
   });
 });

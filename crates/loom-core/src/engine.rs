@@ -40,8 +40,11 @@ const MCP_TEST_TIMEOUT: Duration = Duration::from_secs(10);
 const QUESTION_TIMEOUT: Duration = Duration::from_secs(1_800);
 
 /// How long the user must leave the machine alone before a paused computer
-/// turn resumes on its own.
-const PAUSE_IDLE_RESUME: Duration = Duration::from_secs(30);
+/// turn resumes on its own. Public so the pill shows the same number the
+/// engine uses instead of hardcoding its own copy.
+pub const PAUSE_IDLE_RESUME_SECONDS: u64 = 30;
+
+const PAUSE_IDLE_RESUME: Duration = Duration::from_secs(PAUSE_IDLE_RESUME_SECONDS);
 
 /// A paused computer turn gives up after this long, so a chat can never hang
 /// busy forever while the user is away.
@@ -65,6 +68,17 @@ const TAKEOVER_RESUME_NOTE: &str = "The user took over the computer and has now 
 
 /// Why a paused computer turn ended.
 const TAKEOVER_TIMEOUT: &str = "The computer stayed paused for 15 minutes, so Loom stopped.";
+
+/// Why a computer turn stopped by the user ended. Shown in the transcript, so
+/// a stopped turn is explained instead of just going quiet.
+const COMPUTER_STOPPED_NOTE: &str =
+    "The user stopped computer use for this turn (the control pill, the Computer chip, or \
+     Ctrl+Alt+Esc). Nothing further was clicked or typed.";
+
+/// Why a computer turn ended when the Computer chip was switched off while it
+/// was running: revoking consent has to bite at once, not next turn.
+const COMPUTER_REVOKED_NOTE: &str =
+    "The Computer chip was switched off, so this turn stopped and control was handed back.";
 
 /// Largest reply budget a persona may set. The global default is capped at
 /// 200k by the settings writer; a persona is not, so it is capped here.
@@ -223,6 +237,10 @@ pub enum EngineEvent {
         content: String,
         reasoning: Option<String>,
         usage: Usage,
+        /// Set when this reply was answered from a condensed view of the
+        /// chat's older turns. Purely informational: the turn succeeded.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        condensed: Option<context::Condensed>,
     },
     /// The turn ended early — a limit, a provider refusal, a loop. Not an
     /// error: the transcript shows a neutral note, and any partial reply
@@ -392,6 +410,13 @@ struct StoredExtra {
     reasoning_blocks: Vec<StoredReasoningBlock>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     usage: Option<Usage>,
+    /// Set when this reply was answered from a condensed view of the chat's
+    /// older turns, so the faint line under it survives a reload. The summary
+    /// *text* is deliberately not copied here: it is identical for every turn
+    /// between two folds, and at a few thousand characters a copy on each reply
+    /// would roughly double the transcript's size. The expander fetches it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    condensed: Option<context::Condensed>,
     /// Why a turn stopped early, kept so the reason survives a reload.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     notice: Option<Notice>,
@@ -443,6 +468,10 @@ struct TurnOutcome<'a> {
     usage: Option<Usage>,
     notice: Option<&'a Notice>,
     model: Option<&'a ModelRef>,
+    /// Set when this reply was answered from a condensed view of the chat's
+    /// older turns. Recorded on the message so the line under it survives a
+    /// reload, rather than being something only the live event knew.
+    condensed: Option<context::Condensed>,
 }
 
 fn serialize_extra(tool_calls: &[StoredToolCall], outcome: TurnOutcome<'_>) -> Option<String> {
@@ -458,12 +487,14 @@ fn serialize_extra_reasoning(
         usage,
         notice,
         model,
+        condensed,
     } = outcome;
     if tool_calls.is_empty()
         && reasoning_blocks.is_empty()
         && usage.is_none()
         && notice.is_none()
         && model.is_none()
+        && condensed.is_none()
     {
         return None;
     }
@@ -472,6 +503,7 @@ fn serialize_extra_reasoning(
         reasoning_blocks: reasoning_blocks.to_vec(),
         usage,
         notice: notice.cloned(),
+        condensed,
         // Never written again; the field exists so older replies still parse.
         error: None,
         model: model.cloned(),
@@ -628,19 +660,33 @@ struct Inner {
     /// take turns; two mice in one app is how clicks land in the wrong place).
     computer: Mutex<Option<String>>,
     /// Per-chat computer-use state: last screenshot, held keys, UI tree.
-    computer_state: Mutex<HashMap<String, crate::computer::ComputerState>>,
+    /// In an `Arc` so a tool call can carry it onto a blocking thread.
+    computer_state: Arc<Mutex<HashMap<String, crate::computer::ComputerState>>>,
     /// Chats whose turn is paused because the user took over, with when the
     /// pause started. Presence is the signal; the waiter polls this map, so a
     /// resume can never be missed.
     paused: Mutex<HashMap<String, std::time::Instant>>,
     /// Input hooks, installed only while a computer turn runs.
     takeover: Mutex<Option<Arc<crate::computer::TakeoverWatch>>>,
+    /// Whether those hooks installed, and why not when they did not. `None`
+    /// means no computer turn has needed them yet, so there is nothing to warn
+    /// about; `Some(Err(..))` means takeover detection is blind and the pill
+    /// says so rather than pretending to watch.
+    takeover_health: Mutex<Option<std::result::Result<(), String>>>,
+    /// Why a chat's turn was stopped, read by the loop once it breaks. Without
+    /// it a stopped turn ends silently and reads like a crash.
+    stop_notes: Mutex<HashMap<String, String>>,
     /// Detached runs: how many are running, and which tasks wait for a slot.
     task_queue: Mutex<TaskQueue>,
     /// Live shell commands, plus the slots being started right now.
     commands: Mutex<CommandTracker>,
     /// Per-session watermark (epoch ms) for the memory extraction pass.
     memory_scan: Mutex<HashMap<String, i64>>,
+    /// Per-session fold point the summary pass has already been run for. The
+    /// stored summary is the durable record; this stops a pass that keeps
+    /// failing (no key, a provider refusal) from being retried on every turn
+    /// of a long chat.
+    condense_scan: Mutex<HashMap<String, String>>,
     /// How far this model's tokeniser runs from the character estimate, keyed
     /// by `provider/model`. Learned from the counts providers report, so the
     /// fit converges instead of trusting four characters per token.
@@ -698,6 +744,10 @@ const MAX_HANDOFF_CHAIN: u32 = 6;
 
 /// Everything about a turn that the persona and session decided, resolved in
 /// one place so the send path stays readable.
+/// Pure chat's ceiling on tool rounds: enough for a search, a page fetch, and
+/// an answer. Interactive chat turns only; a detached run keeps its own budget.
+const CHAT_MAX_ROUNDS: usize = 3;
+
 struct TurnPlan {
     system: Option<String>,
     variant: Option<String>,
@@ -768,12 +818,15 @@ impl Engine {
                 pending_handoffs: Mutex::new(HashMap::new()),
                 mcp: tokio::sync::Mutex::new(McpState::default()),
                 computer: Mutex::new(None),
-                computer_state: Mutex::new(HashMap::new()),
+                computer_state: Arc::new(Mutex::new(HashMap::new())),
                 paused: Mutex::new(HashMap::new()),
                 takeover: Mutex::new(None),
+                takeover_health: Mutex::new(None),
+                stop_notes: Mutex::new(HashMap::new()),
                 task_queue: Mutex::new(TaskQueue::default()),
                 commands: Mutex::new(CommandTracker::default()),
                 memory_scan: Mutex::new(HashMap::new()),
+                condense_scan: Mutex::new(HashMap::new()),
                 calibration: Mutex::new(HashMap::new()),
             }),
         }
@@ -1024,6 +1077,11 @@ impl Engine {
     }
 
     /// Arms or disarms computer use for one chat (the composer's Computer chip).
+    ///
+    /// Disarming is a revocation, not a note for later: if this chat is driving
+    /// the machine when the switch goes off, its turn ends now. Leaving the
+    /// model clicking and typing after the user has taken the consent back
+    /// would make the switch a lie.
     pub fn set_session_computer_access(&self, id: &str, enabled: bool) -> Result<()> {
         self.db().update_session(
             id,
@@ -1031,12 +1089,22 @@ impl Engine {
                 computer_access: Some(enabled),
                 ..Default::default()
             },
-        )
+        )?;
+        if !enabled && self.computer_holder().as_deref() == Some(id) {
+            self.cancel_with_note(id, COMPUTER_REVOKED_NOTE);
+        }
+        Ok(())
     }
 
     /// Sets or clears this chat's goal (the `/goal` command).
     pub fn set_session_goal(&self, id: &str, goal: Option<&str>) -> Result<()> {
         self.db().set_session_goal(id, goal)
+    }
+
+    /// The chat's condensed view of its older turns, for the transcript's
+    /// expander. `None` until the background pass has written one.
+    pub fn session_summary(&self, id: &str) -> Result<Option<crate::db::SessionSummary>> {
+        self.db().session_summary(id)
     }
 
     pub fn session_goal(&self, id: &str) -> Result<Option<String>> {
@@ -1656,7 +1724,11 @@ impl Engine {
         // questions and propose, never write. The agent-mode note goes last so
         // Plan has the final word.
         let system = with_harness_mode(system, permission_mode);
-        let system = with_computer_mode(system, computer_access);
+        let system = with_computer_mode(
+            system,
+            computer_access && !agent_mode.is_chat(),
+            agent_mode.blocks_writes(),
+        );
         let system = with_agent_mode(system, agent_mode);
 
         let chat = config.chat.clone();
@@ -1912,7 +1984,30 @@ impl Engine {
             max_cost_usd,
             task_id,
         } = plan;
-        let mut tool_defs: Vec<ToolDef> =
+        let mut tool_defs: Vec<ToolDef> = if agent_mode.is_chat() {
+            // A fixed, tiny list: the web pair, the clock and `ask_user`. Nothing
+            // else is offered, so nothing has to be argued about — and because
+            // the MCP chain lives in the `else` arm, a chat skips tool discovery
+            // entirely, which is a round-trip before the first token.
+            tools::specs_for(permission_mode)
+                .into_iter()
+                .filter(|spec| tools::is_allowed_in_chat(spec.name))
+                .map(|spec| ToolDef {
+                    name: spec.name.to_string(),
+                    description: spec.description.to_string(),
+                    parameters: spec.parameters,
+                })
+                .chain(crate::web::tool_specs().into_iter().filter_map(
+                    |(name, description, parameters)| {
+                        tools::is_allowed_in_chat(&name).then_some(ToolDef {
+                            name,
+                            description,
+                            parameters,
+                        })
+                    },
+                ))
+                .collect()
+        } else {
             tools::specs_for(permission_mode)
                 .into_iter()
                 .map(|spec| ToolDef {
@@ -1930,6 +2025,13 @@ impl Engine {
                 .chain(
                     if computer_access {
                         crate::computer::specs()
+                            // A read-only mode refuses these anyway; offering
+                            // them only to refuse them costs a round per tool.
+                            .into_iter()
+                            .filter(|spec| {
+                                !agent_mode.blocks_writes() || spec.read_only
+                            })
+                            .collect::<Vec<_>>()
                     } else {
                         Vec::new()
                     }
@@ -1941,11 +2043,14 @@ impl Engine {
                     }),
                 )
                 .chain(self.mcp_tool_defs().await)
-                .collect();
+                .collect()
+        };
 
         // Persona-owned tools: memory only when the persona opted in, handoff
-        // only when there is somebody to hand the turn to.
-        if memory_enabled {
+        // only when there is somebody to hand the turn to. A chat never offers
+        // the memory writers — it is answering, not curating — though recalled
+        // facts still ride along in the prompt.
+        if memory_enabled && !agent_mode.is_chat() {
             tool_defs.extend(tools::memory_specs().into_iter().map(|spec| ToolDef {
                 name: spec.name.to_string(),
                 description: spec.description.to_string(),
@@ -2042,9 +2147,22 @@ impl Engine {
                     .unwrap_or(0),
             );
         let root_budget = context::input_budget(window, max_output, fixed);
-        // Set when the fit had to compress the conversation, so the user is
-        // told their older context was dropped rather than left wondering.
-        let mut trimmed_context = false;
+
+        // What the fit needs in order to fold older turns rather than drop
+        // them: the stored summary (if the background pass has written one),
+        // the chat's goal, and its task list, so a fresh digest can name both.
+        //
+        // Read once per turn. The fold point only moves when a rewrite lands,
+        // and a summary whose message has since been edited away is ignored by
+        // the fit itself rather than trusted.
+        let stored_summary = self.db().session_summary(&session_id).ok().flatten();
+        let goal = self.db().session_goal(&session_id).ok().flatten();
+        let todos = self.db().todos(&session_id).unwrap_or_default();
+        let condense_share = chat
+            .condense_share
+            .min(crate::condense::MAX_CONDENSED_SHARE);
+        // The widest fold this turn used, reported once it ends.
+        let mut condensed: Option<context::Condensed> = None;
 
         let max_rounds = (max_steps.unwrap_or(if computer_access {
             chat.max_tool_rounds.max(80)
@@ -2052,6 +2170,14 @@ impl Engine {
             chat.max_tool_rounds
         }) as usize)
             .clamp(1, 200);
+        // Pure chat is capped hard: a search or two, then an answer. Applied as
+        // a ceiling, never a floor — a user who lowered `maxToolRounds` still
+        // gets their smaller number, and a detached run keeps its task budget.
+        let max_rounds = if agent_mode.is_chat() && max_steps.is_none() {
+            max_rounds.min(CHAT_MAX_ROUNDS)
+        } else {
+            max_rounds
+        };
         let mut round = 0usize;
         let mut wrapping_up = false;
         let mut last_call: Option<(String, String)> = None;
@@ -2060,6 +2186,9 @@ impl Engine {
         // How many times this turn has told the model that an identical repeat
         // changed nothing.
         let mut nudges = 0usize;
+        // Set when a pause inside a batch ends the turn (stopped, or nobody
+        // came back): the inner loop breaks, and this carries it out.
+        let mut halt = false;
 
         // How far this model's tokeniser runs from the character estimate. The
         // provider reports the real count on every round, so the fit can be
@@ -2080,27 +2209,10 @@ impl Engine {
         // where Drop never runs.
         let _computer_guard = computer_access.then(|| ComputerTurnGuard::new(self, &session_id));
 
-        // Input hooks exist only for computer turns: watching every keystroke
-        // an app makes is not something Loom should do by default. The bridge
-        // task turns a real input event into a pause.
-        if computer_access {
-            if let Ok(watch) = crate::computer::TakeoverWatch::start() {
-                let watch = Arc::new(watch);
-                *self.inner.takeover.lock().expect("takeover mutex poisoned") =
-                    Some(Arc::clone(&watch));
-                let engine = self.clone();
-                let session = session_id.clone();
-                let stop = watch.stop_flag();
-                tokio::spawn(async move {
-                    while !stop.load(Ordering::Relaxed) {
-                        if watch.tripped() {
-                            engine.pause_computer(&session);
-                        }
-                        tokio::time::sleep(Duration::from_millis(150)).await;
-                    }
-                });
-            }
-        }
+        // Input hooks are installed lazily, by `run_computer_tool`, for the
+        // one chat that actually takes the computer. A chat that merely has
+        // the chip armed must not watch the user's input, or a second armed
+        // chat would pause itself on the first chat's clicks.
 
         loop {
             let round_started = std::time::Instant::now();
@@ -2186,10 +2298,26 @@ impl Engine {
             let mut pushback: Option<String> = None;
 
             let (result, sent_estimate) = loop {
-                let fitted = context::fit_report(&history, history_budget, allow_images);
+                let fitted = context::fit_report(
+                    &history,
+                    history_budget,
+                    allow_images,
+                    context::Folding {
+                        window,
+                        summary: stored_summary.as_ref(),
+                        goal: goal.as_deref(),
+                        todos: &todos,
+                        share: Some(condense_share),
+                    },
+                );
                 let sent_estimate = fitted.estimate;
-                if fitted.trimmed {
-                    trimmed_context = true;
+                // The fold can move during a turn — a length retry narrows the
+                // budget, and that reaches further back — so the turn reports
+                // the widest coverage it ever used rather than the last one.
+                if let Some(found) = fitted.condensed {
+                    if condensed.is_none_or(|widest| found.covered > widest.covered) {
+                        condensed = Some(found);
+                    }
                 }
 
                 let request = ChatRequest {
@@ -2422,41 +2550,19 @@ impl Engine {
             // The user touching the machine holds the whole turn before the
             // next batch of actions runs: acting on a screen someone else is
             // using is how clicks land on the wrong window.
-            if computer_access && self.computer_paused(&session_id) {
-                match self.wait_if_paused(&session_id, &cancel).await {
-                    PauseExit::Resumed => {
-                        // The resume invalidates what the model last saw — the
-                        // user may have navigated somewhere. Force a fresh look.
-                        if let Some(state) = self
-                            .inner
-                            .computer_state
-                            .lock()
-                            .expect("computer state mutex poisoned")
-                            .get_mut(&session_id)
-                        {
-                            state.last_shot = None;
-                            state.last_ui = None;
-                        }
-                        seq += 1;
-                        stored_calls.push(StoredToolCall {
-                            id: format!("loom-takeover-{}", uuid::Uuid::new_v4()),
-                            name: "user_takeover".to_string(),
-                            arguments: "{}".to_string(),
-                            status: "ok".to_string(),
-                            output: TAKEOVER_RESUME_NOTE.to_string(),
-                            after: content.chars().count(),
-                            seq,
-                            images: Vec::new(),
-                            repeated: false,
-                        });
-                        let _ = self.db().update_message_extra(
-                            &message_id,
-                            serialize_extra(&stored_calls, TurnOutcome::default()).as_deref(),
-                        );
-                        self.emit(EngineEvent::ComputerResumed {
-                            session_id: session_id.clone(),
-                        });
-                    }
+            if computer_access {
+                match self
+                    .gate_on_pause(
+                        &session_id,
+                        &message_id,
+                        &cancel,
+                        &content,
+                        &mut stored_calls,
+                        &mut seq,
+                    )
+                    .await
+                {
+                    PauseExit::Resumed => {}
                     PauseExit::TimedOut => {
                         notice = Some(Notice::new(TAKEOVER_TIMEOUT));
                         break;
@@ -2484,6 +2590,35 @@ impl Engine {
                     continue;
                 }
 
+                // A computer call is gated on the pause as well as the gap
+                // between rounds. The model batches its actions — focus, click,
+                // type, press — and a hand on the mouse must stop the rest of
+                // the batch, not just the next round.
+                if computer_access && crate::computer::is_computer_tool(&call.name) {
+                    match self
+                        .gate_on_pause(
+                            &session_id,
+                            &message_id,
+                            &cancel,
+                            &content,
+                            &mut stored_calls,
+                            &mut seq,
+                        )
+                        .await
+                    {
+                        PauseExit::Resumed => {}
+                        PauseExit::TimedOut => {
+                            notice = Some(Notice::new(TAKEOVER_TIMEOUT));
+                            halt = true;
+                            break;
+                        }
+                        PauseExit::Cancelled => {
+                            halt = true;
+                            break;
+                        }
+                    }
+                }
+
                 seq += 1;
                 let call_seq = seq;
 
@@ -2496,11 +2631,18 @@ impl Engine {
                     seq: call_seq,
                 });
 
-                // Read-only agent modes refuse mutating tools outright: no
+                // A restricted agent mode refuses its own tools outright: no
                 // permission card, just an error the model reads and works
-                // around.
-                let mode_blocked =
-                    agent_mode.blocks_writes() && tools::is_blocked_in_plan(&call.name);
+                // around. Read-only modes block the mutating tools; pure chat
+                // blocks everything outside its small allowlist, with one
+                // exception — `handoff` is conversational plumbing rather than
+                // a capability, and without it every turn in a group chat would
+                // end on a refused call.
+                let mode_blocked = if agent_mode.is_chat() {
+                    !tools::is_allowed_in_chat(&call.name) && call.name != tools::HANDOFF
+                } else {
+                    agent_mode.blocks_writes() && tools::is_blocked_in_plan(&call.name)
+                };
 
                 // Harness tools exist only in Atelier. Outside it they are
                 // refused outright rather than carded — a permission card for
@@ -2588,7 +2730,9 @@ impl Engine {
                                             .await
                                         {
                                             Some(outcome) => outcome,
-                                            None => tools::execute(&call, &tool_context),
+                                            None => {
+                                                self.run_local_tool(&call, &tool_context).await
+                                            }
                                         },
                                     }
                                 }
@@ -2676,6 +2820,12 @@ impl Engine {
                 });
             }
 
+            // A pause inside the batch that ended the turn: stop now rather
+            // than asking the model for another round.
+            if halt {
+                break;
+            }
+
             // Two nudges is the model's cue to try something else. If it
             // repeats itself anyway, take the tools away for one round so it
             // explains what is stuck instead of looping until the step budget
@@ -2731,6 +2881,7 @@ impl Engine {
                     usage: Some(usage),
                     notice: notice.as_ref(),
                     model: Some(&model),
+                    condensed,
                 },
             )
             .as_deref(),
@@ -2761,16 +2912,26 @@ impl Engine {
             self.complete_task(task_id, status, Some(&detail), Some(&content));
         }
 
-        // The conversation was compressed to fit: worth saying once, so the
-        // model's thin memory of earlier turns has an explanation. Only when
-        // there is no more specific stop to report.
-        if notice.is_none() && trimmed_context {
-            notice = Some(Notice::new(
-                "Older messages were left out of this request to fit the model's context window. \
-                 Loom kept the most recent turns and the current one.",
-            ));
+        // A turn the user stopped (the pill's Stop, the chip, Ctrl+Alt+Esc)
+        // says so, instead of just falling silent: a reply that stops with no
+        // explanation reads like a crash.
+        if notice.is_none() {
+            if let Some(note) = self
+                .inner
+                .stop_notes
+                .lock()
+                .expect("stop notes mutex poisoned")
+                .remove(&session_id)
+            {
+                notice = Some(Notice::new(note));
+            }
         }
 
+        // A turn answered from a condensed view is not a stopped turn: it ends
+        // with `Done` like any other, and the summary is reported there. It
+        // used to arrive as a `Notice`, which painted a red strip with a Retry
+        // button over a reply that had in fact succeeded, and suppressed the
+        // `Done` event entirely.
         match notice {
             Some(stopped) => {
                 // Record why, so the reason is visible after a reload instead of
@@ -2802,6 +2963,7 @@ impl Engine {
                     content,
                     reasoning: final_reasoning,
                     usage,
+                    condensed,
                 });
             }
         }
@@ -2810,6 +2972,7 @@ impl Engine {
             self.maybe_generate_title(&session_id, &provider, &model, api_key.as_deref())
                 .await;
             self.maybe_extract_memories(&session_id, &provider, &model, api_key.as_deref());
+            self.maybe_condense(&session_id, &provider, &model, api_key.as_deref());
         }
     }
 
@@ -2988,8 +3151,9 @@ impl Engine {
     }
 
     /// Holds a computer turn because the user touched the machine. Idempotent:
-    /// repeated real input while paused changes nothing. The idle clock starts
-    /// here, so walking away auto-resumes after [`PAUSE_IDLE_RESUME`].
+    /// the bridge consumes one trip per real input event, so repeated events
+    /// while already paused change nothing. The idle clock starts here, so
+    /// walking away auto-resumes after [`PAUSE_IDLE_RESUME`].
     pub fn pause_computer(&self, session_id: &str) {
         let inserted = self
             .inner
@@ -3021,12 +3185,69 @@ impl Engine {
     /// Wakes a paused computer turn (the pill's Resume, or the chip). Returns
     /// false when nothing was paused.
     pub fn resume_computer(&self) -> bool {
-        let mut paused = self.inner.paused.lock().expect("paused mutex poisoned");
-        if paused.is_empty() {
-            return false;
+        {
+            let mut paused = self.inner.paused.lock().expect("paused mutex poisoned");
+            if paused.is_empty() {
+                return false;
+            }
+            paused.clear();
         }
-        paused.clear();
+        // Pressing Resume is itself a click, and the input hooks see it either
+        // way: on a build where the pill's window registration failed, or for
+        // the millisecond between the click landing and the pause beginning.
+        // Dropping any trip recorded before now is what makes Resume stick
+        // instead of being undone by the very click that asked for it.
+        if let Some(watch) = self
+            .inner
+            .takeover
+            .lock()
+            .expect("takeover mutex poisoned")
+            .as_ref()
+        {
+            watch.clear_trip();
+        }
         true
+    }
+
+    /// Whether the input hooks are live, and the reason when they are not.
+    /// `None` means no computer turn has needed them yet.
+    pub fn takeover_health(&self) -> (bool, Option<String>) {
+        match self
+            .inner
+            .takeover_health
+            .lock()
+            .expect("takeover health mutex poisoned")
+            .as_ref()
+        {
+            Some(Err(error)) => (false, Some(error.clone())),
+            _ => (true, None),
+        }
+    }
+
+    /// Stops the computer turn, and nothing else.
+    ///
+    /// Only one chat can be holding the computer, so there is no requester to
+    /// disambiguate: the pill, the chip and the panic hotkey all mean "stop
+    /// the turn that is driving this machine". The old behaviour —
+    /// `cancel_all` — ended every other chat's turn and every detached run too,
+    /// which made the panic key far more destructive than its label.
+    ///
+    /// Returns the chat that was stopped, if any.
+    pub fn stop_computer(&self) -> Option<String> {
+        let target = self.computer_holder()?;
+        self.cancel_with_note(&target, COMPUTER_STOPPED_NOTE);
+        Some(target)
+    }
+
+    /// Stops a chat's turn, recording why so the stop is explained rather than
+    /// silent.
+    pub fn cancel_with_note(&self, session_id: &str, note: &str) {
+        self.inner
+            .stop_notes
+            .lock()
+            .expect("stop notes mutex poisoned")
+            .insert(session_id.to_string(), note.to_string());
+        self.cancel(session_id);
     }
 
     /// Whether a chat's computer turn is paused (waiting on the user).
@@ -3069,7 +3290,8 @@ impl Engine {
     }
 
     /// Releases everything a computer turn owned: input hooks, the single-turn
-    /// lock, a pending pause, held keys and buttons, and screenshot retention.
+    /// lock, a pending pause, held keys and buttons, this chat's cached shot
+    /// and UI tree, and screenshot retention.
     /// Safe to call twice (turn end and the supervisor's failure path).
     fn release_computer_turn(&self, session_id: &str) {
         crate::computer::release_held(&self.inner.computer_state, session_id);
@@ -3078,6 +3300,14 @@ impl Engine {
             .lock()
             .expect("paused mutex poisoned")
             .remove(session_id);
+        // The stop note is consumed by the turn that reads it, but a turn that
+        // ended some other way must not leave one behind for the next turn to
+        // inherit.
+        self.inner
+            .stop_notes
+            .lock()
+            .expect("stop notes mutex poisoned")
+            .remove(session_id);
         if let Some(watch) = self
             .inner
             .takeover
@@ -3085,6 +3315,7 @@ impl Engine {
             .expect("takeover mutex poisoned")
             .take()
         {
+            watch.clear_trip();
             watch.stop();
         }
         {
@@ -3093,7 +3324,158 @@ impl Engine {
                 *holder = None;
             }
         }
+        // A finished turn must not leave a stale screenshot or UI tree behind:
+        // the next turn in this chat starts by looking, not by trusting pixels
+        // from last time, and the map would otherwise grow without bound.
+        self.inner
+            .computer_state
+            .lock()
+            .expect("computer state mutex poisoned")
+            .remove(session_id);
         self.prune_computer_screenshots(session_id);
+    }
+
+    /// Installs the input hooks for the chat that has just taken the computer,
+    /// and starts the bridge that turns a real input event into a pause.
+    ///
+    /// Only the holder ever has a watch. A chat that is merely armed used to
+    /// install one too, so a second armed chat would pause itself when the
+    /// user clicked anywhere — including on the chat that was actually
+    /// driving.
+    async fn arm_takeover_watch(&self, session_id: &str) {
+        if self
+            .inner
+            .takeover
+            .lock()
+            .expect("takeover mutex poisoned")
+            .is_some()
+        {
+            return;
+        }
+        // Installing the hooks is a pair of `SetWindowsHookExW` calls plus a
+        // bounded wait to find out whether they took, so it goes to a blocking
+        // thread like every other piece of synchronous Win32 here. The wait is
+        // only ever paid once per process (the hook thread outlives each turn),
+        // but a blocking sleep on an async worker is still a blocking sleep.
+        let started = tokio::task::spawn_blocking(crate::computer::TakeoverWatch::start).await;
+        let outcome = match started {
+            Ok(outcome) => outcome,
+            // The blocking task panicked: treat it exactly like a failure to
+            // install, because that is what it is from here.
+            Err(error) => Err(crate::Error::Other(format!(
+                "the input hook task panicked: {error}"
+            ))),
+        };
+        match outcome {
+            Ok(watch) => {
+                let watch = Arc::new(watch);
+                *self.inner.takeover.lock().expect("takeover mutex poisoned") =
+                    Some(Arc::clone(&watch));
+                *self
+                    .inner
+                    .takeover_health
+                    .lock()
+                    .expect("takeover health mutex poisoned") = Some(Ok(()));
+                let engine = self.clone();
+                let session = session_id.to_string();
+                let stop = watch.stop_flag();
+                tokio::spawn(async move {
+                    while !stop.load(Ordering::Relaxed) {
+                        // Consumed, not sampled: one real input event is one
+                        // pause. Sampling a latch that nothing cleared is what
+                        // made every Resume fail.
+                        if watch.take_trip()
+                            && engine.computer_holder().as_deref() == Some(session.as_str())
+                        {
+                            engine.pause_computer(&session);
+                        }
+                        tokio::time::sleep(Duration::from_millis(150)).await;
+                    }
+                });
+            }
+            Err(error) => {
+                // Takeover protection is off. Say so, loudly and durably: the
+                // pill shows this, because a user who believes Loom will stop
+                // when they touch the mouse will not be watching it.
+                eprintln!("[loom] takeover detection is unavailable: {error}");
+                *self
+                    .inner
+                    .takeover_health
+                    .lock()
+                    .expect("takeover health mutex poisoned") = Some(Err(error.to_string()));
+            }
+        }
+    }
+
+    /// Waits out a takeover pause, and when the turn comes back tells the model
+    /// that everything it saw is stale.
+    ///
+    /// Called between rounds *and* before every computer call inside a batch: a
+    /// reply that asks for ten clicks has to stop for the user just as
+    /// completely as the gap after a single one. Returns immediately when
+    /// nothing paused, and writes the note once per pause episode.
+    async fn gate_on_pause(
+        &self,
+        session_id: &str,
+        message_id: &str,
+        cancel: &Cancellation,
+        content: &str,
+        stored_calls: &mut Vec<StoredToolCall>,
+        seq: &mut usize,
+    ) -> PauseExit {
+        if !self.computer_paused(session_id) {
+            return PauseExit::Resumed;
+        }
+        match self.wait_if_paused(session_id, cancel).await {
+            PauseExit::Resumed => {
+                self.note_takeover_resume(session_id, message_id, content, stored_calls, seq);
+                PauseExit::Resumed
+            }
+            ended => ended,
+        }
+    }
+
+    /// Records that the user handed the machine back. The model's next look
+    /// must be fresh, and the transcript says why its bearings changed.
+    fn note_takeover_resume(
+        &self,
+        session_id: &str,
+        message_id: &str,
+        content: &str,
+        stored_calls: &mut Vec<StoredToolCall>,
+        seq: &mut usize,
+    ) {
+        // The resume invalidates what the model last saw — the user may have
+        // navigated somewhere. Force a fresh look.
+        if let Some(state) = self
+            .inner
+            .computer_state
+            .lock()
+            .expect("computer state mutex poisoned")
+            .get_mut(session_id)
+        {
+            state.last_shot = None;
+            state.last_ui = None;
+        }
+        *seq += 1;
+        stored_calls.push(StoredToolCall {
+            id: format!("loom-takeover-{}", uuid::Uuid::new_v4()),
+            name: "user_takeover".to_string(),
+            arguments: "{}".to_string(),
+            status: "ok".to_string(),
+            output: TAKEOVER_RESUME_NOTE.to_string(),
+            after: content.chars().count(),
+            seq: *seq,
+            images: Vec::new(),
+            repeated: false,
+        });
+        let _ = self.db().update_message_extra(
+            message_id,
+            serialize_extra(stored_calls, TurnOutcome::default()).as_deref(),
+        );
+        self.emit(EngineEvent::ComputerResumed {
+            session_id: session_id.to_string(),
+        });
     }
 
     /// Waits out a pause: an explicit resume, [`PAUSE_IDLE_RESUME`] of real
@@ -3501,7 +3883,7 @@ impl Engine {
 
         // One chat drives at a time: two turns fighting over the cursor is how
         // clicks land in the wrong window.
-        {
+        let became_holder = {
             let mut holder = self.inner.computer.lock().expect("computer mutex poisoned");
             match holder.as_deref() {
                 Some(owner) if owner != session_id => {
@@ -3515,16 +3897,58 @@ impl Engine {
                         images: Vec::new(),
                     });
                 }
-                Some(_) => {}
-                None => *holder = Some(session_id.to_string()),
+                Some(_) => false,
+                None => {
+                    *holder = Some(session_id.to_string());
+                    true
+                }
             }
+        };
+
+        // The hooks go up for the chat that is actually driving, at the moment
+        // it takes the wheel — not at turn start for every armed chat.
+        if became_holder {
+            self.arm_takeover_watch(session_id).await;
         }
 
         let options = crate::computer::ComputerOptions {
             screenshot_edge: self.config().chat.computer_screenshot_edge,
             cancel: Some(cancel.clone()),
         };
+        // Every one of these tools is a synchronous Win32 call — a capture, a
+        // `SendInput`, a UI Automation walk, a `launch_app` that may wait thirty
+        // seconds for a window — so the computer layer hands them to a blocking
+        // thread rather than tying up an async worker.
         Some(crate::computer::run(session_id, call, &self.inner.computer_state, &options).await)
+    }
+
+    /// Runs a plain workspace tool.
+    ///
+    /// These are all synchronous, and some are slow — a `read_file` of a large
+    /// log, a `grep` across a tree, a `git diff` in a big repository — so they
+    /// run on a blocking thread rather than occupying one of the runtime's
+    /// async workers. A runtime is a small, fixed pool; blocking a worker on
+    /// file IO stalls every other task that needs one, including the streaming
+    /// reply in another chat.
+    async fn run_local_tool(
+        &self,
+        call: &ToolCall,
+        context: &crate::tools::ToolContext,
+    ) -> crate::tools::ToolOutcome {
+        let call = call.clone();
+        let context = context.clone();
+        let id = call.id.clone();
+        let name = call.name.clone();
+        match tokio::task::spawn_blocking(move || crate::tools::execute(&call, &context)).await {
+            Ok(outcome) => outcome,
+            Err(_) => crate::tools::ToolOutcome {
+                id,
+                name,
+                ok: false,
+                output: "that tool call panicked".to_string(),
+                images: Vec::new(),
+            },
+        }
     }
 
     /// Handles engine-side agent tools: shell commands, image generation, and
@@ -5491,6 +5915,213 @@ impl Engine {
         }
     }
 
+    /// Kicks off the background summary pass for an interactive turn.
+    ///
+    /// Cheap no-op until the request comes close to its budget. The point of
+    /// running it that early is that a written summary is already on file when
+    /// the fold first becomes *necessary*, so the common case is a real
+    /// summary rather than the in-process digest.
+    ///
+    /// Watermarked on the fold point, so it fires once per fold rather than
+    /// once per turn, and never while condensing is switched off.
+    fn maybe_condense(
+        &self,
+        session_id: &str,
+        provider: &ProviderConfig,
+        model: &ModelRef,
+        api_key: Option<&str>,
+    ) {
+        let config = self.config();
+        let share = config.chat
+            .condense_share
+            .min(crate::condense::MAX_CONDENSED_SHARE);
+        let configured = config.chat.max_output_tokens;
+        drop(config);
+        if share == 0 {
+            return;
+        }
+
+        let session = match self.db().get_session(session_id) {
+            Ok(Some(session)) => session,
+            _ => return,
+        };
+        let history = match self.db().messages(session_id) {
+            Ok(history) => history,
+            Err(_) => return,
+        };
+        // The live turn is everything from the last user message onwards; the
+        // summary covers what has aged out before it. Nothing has aged out on a
+        // first turn, so there is nothing to fold.
+        let Some(last_user) = history.iter().rposition(|message| message.role == Role::User) else {
+            return;
+        };
+        if last_user == 0 {
+            return;
+        }
+        let covered = &history[..last_user];
+        let covers_through_id = history[last_user - 1].id.clone();
+        let covers_through_at = history[last_user - 1].created_at;
+
+        // Once per fold point. The stored summary is the durable record; this
+        // map is what stops a pass that keeps failing (no key, a provider
+        // refusal) from being retried on every turn of a long chat.
+        {
+            let mut scan = self
+                .inner
+                .condense_scan
+                .lock()
+                .expect("condense scan mutex poisoned");
+            if scan.get(session_id) == Some(&covers_through_id) {
+                return;
+            }
+            scan.insert(session_id.to_string(), covers_through_id.clone());
+        }
+
+        let spec = context::model_spec(provider, &model.model_id);
+        let window = context::context_window(provider, &model.model_id);
+        let max_output = context::output_limit(configured, &spec, window);
+        // The fixed payload (system prompt, tool schemas) is not rebuilt here.
+        // Omitting it only under-states the budget, which makes the pass fire
+        // slightly later — never wrong, just later.
+        let root_budget = context::input_budget(window, max_output, 0);
+        // What the wire would cost right now with nothing folded. A budget
+        // nothing can exceed, so the fit reports the untrimmed cost rather than
+        // silently eliding the history before it is measured.
+        let used = context::fit_report(&history, u32::MAX, true, context::Folding::none()).estimate;
+        if !crate::condense::should_condense(used, root_budget) {
+            return;
+        }
+
+        // The pass extends the summary it already has, so the compression ratio
+        // rises as the chat grows instead of the block growing linearly.
+        let previous = self
+            .db()
+            .session_summary(session_id)
+            .ok()
+            .flatten()
+            .map(|stored| stored.text);
+        let excerpt = crate::condense::transcript_excerpt(covered, 24_000);
+        let budget = crate::condense::condensed_budget(share, window, root_budget);
+        let covered_count = covered.len() as i64;
+
+        // The lite model does this, like titles and memory: cheap and frequent.
+        let config = self.config();
+        let (pass_provider_id, pass_provider, pass_model) = match config.chat.lite.clone() {
+            Some(lite) => match config.providers.get(&lite.provider_id) {
+                Some(lite_provider) => (
+                    lite.provider_id.clone(),
+                    lite_provider.clone(),
+                    lite.model_id,
+                ),
+                None => (
+                    model.provider_id.clone(),
+                    provider.clone(),
+                    model.model_id.clone(),
+                ),
+            },
+            None => (
+                model.provider_id.clone(),
+                provider.clone(),
+                model.model_id.clone(),
+            ),
+        };
+        drop(config);
+        let pass_key = secrets::get_api_key(&pass_provider_id).unwrap_or_else(|_| {
+            if pass_provider_id == model.provider_id {
+                api_key.map(str::to_string)
+            } else {
+                None
+            }
+        });
+
+        let engine = self.clone();
+        let session_id = session_id.to_string();
+        let _ = session.workdir;
+        tokio::spawn(async move {
+            engine
+                .run_condense(
+                    session_id,
+                    covers_through_id,
+                    covers_through_at,
+                    covered_count,
+                    previous,
+                    excerpt,
+                    budget,
+                    pass_provider,
+                    pass_model,
+                    pass_key,
+                )
+                .await;
+        });
+    }
+
+    /// The summary pass: ask the lite model for a condensed view of the turns
+    /// that have aged out, store it, and let the next turn's fit fold on it.
+    /// Never fails the turn — on any error the digest stands and the fold point
+    /// is simply not advanced, so the pass is attempted again later.
+    #[allow(clippy::too_many_arguments)]
+    async fn run_condense(
+        &self,
+        session_id: String,
+        covers_through_id: String,
+        covers_through_at: i64,
+        covered_count: i64,
+        previous: Option<String>,
+        excerpt: String,
+        budget: u32,
+        provider: ProviderConfig,
+        model_id: String,
+        api_key: Option<String>,
+    ) {
+        let prompt = crate::condense::summary_prompt(previous.as_deref(), &excerpt);
+        let request = ChatRequest {
+            provider: &provider,
+            model: &model_id,
+            system: Some(
+                "You maintain a running summary of a coding conversation. Reply with the \
+                 summary itself and nothing else.",
+            ),
+            messages: vec![WireMessage::text("user", prompt)],
+            variant: None,
+            // Room for a thorough summary; the character cap in the prompt is
+            // what actually bounds it.
+            max_output_tokens: Some(4_096),
+            temperature: None,
+            top_p: None,
+            stream: false,
+            tools: Vec::new(),
+            session_id: Some(&session_id),
+        };
+
+        let (content, reasoning) =
+            match stream::run_once(&self.inner.client, &request, api_key.as_deref()).await {
+                Ok((content, reasoning, _)) => (content, reasoning),
+                Err(_) => return,
+            };
+        let raw = if content.trim().is_empty() {
+            reasoning.unwrap_or_default()
+        } else {
+            content
+        };
+        let Some((text, tokens)) = crate::condense::parse_summary(&raw, budget) else {
+            return;
+        };
+
+        let summary = crate::db::SessionSummary {
+            session_id,
+            covers_through_id,
+            covers_through_at,
+            covered_count,
+            text,
+            tokens,
+            model: Some(model_id),
+            updated_at: crate::db::now_ms(),
+        };
+        if let Err(error) = self.db().set_session_summary(&summary) {
+            eprintln!("[loom] summary write skipped: {error}");
+        }
+    }
+
     fn advance_memory_watermark(&self, session_id: &str, watermark: i64) {
         let mut scan = self
             .inner
@@ -6258,6 +6889,7 @@ fn agent_mode_str(mode: AgentMode) -> &'static str {
         AgentMode::Plan => "plan",
         AgentMode::Review => "review",
         AgentMode::Build => "build",
+        AgentMode::Chat => "chat",
     }
 }
 
@@ -6266,6 +6898,7 @@ fn parse_agent_mode(value: &str) -> Option<AgentMode> {
         "plan" => Some(AgentMode::Plan),
         "review" => Some(AgentMode::Review),
         "build" => Some(AgentMode::Build),
+        "chat" => Some(AgentMode::Chat),
         _ => None,
     }
 }
@@ -6310,9 +6943,21 @@ fn with_harness_mode(system: Option<String>, mode: PermissionMode) -> Option<Str
 /// Appends the computer-use note to whatever system prompt is in play, so the
 /// model knows it can see and drive the machine — and how to do it without
 /// flailing. Placed before the agent-mode note, so Plan gets the last word.
-fn with_computer_mode(system: Option<String>, computer: bool) -> Option<String> {
+fn with_computer_mode(system: Option<String>, computer: bool, look_only: bool) -> Option<String> {
     if !computer {
         return system;
+    }
+    // A read-only agent mode refuses every mutating tool, computer ones
+    // included. The prompt used to advertise mouse and keyboard anyway, so the
+    // model spent a round finding out it could not move.
+    if look_only {
+        let note = "Computer use is enabled for this chat, but the agent mode is read-only: you \
+            can look and report, not act. `screenshot` (with `region` and `scale` for small \
+            text), `list_windows`, `list_processes`, and `wait` are available; every mouse, \
+            keyboard, UI Automation, clipboard, window and process tool is refused. Do not \
+            call them. Take the shots you need, then report what you found and what you would \
+            do about it.";
+        return Some(append_note(system, note));
     }
     let note = "Computer use is enabled for this chat. You can see the screen with `screenshot` \
         and act with `mouse`, `keyboard`, `ui`, `window`, `launch_app`, `clipboard`, \
@@ -6358,6 +7003,17 @@ fn with_agent_mode(system: Option<String>, mode: AgentMode) -> Option<String> {
              fixes rather than applying them — the user can switch to Build to have them done."
         }
         AgentMode::Build => "You are in Build mode: you may change the workspace and run commands.",
+        AgentMode::Chat => {
+            "You are in Chat mode: answer quickly and directly, in prose, from what you \
+             already know. You have only four tools — `web_search`, `fetch_url`, `datetime` \
+             and `ask_user` — and every other tool is refused, so do not reach for one. \
+             Search the web when the answer depends on something recent or specific, and \
+             fetch a page when a snippet is not enough; do not search to confirm what you \
+             already know. Do not call `ask_user` unless the request genuinely cannot be \
+             answered without it — a short, direct answer beats a question. If the request \
+             needs work on files or commands, say so plainly and suggest switching to \
+             Build mode."
+        }
     };
     Some(match system {
         Some(existing) if !existing.trim().is_empty() => format!("{existing}\n\n{note}"),
@@ -6835,10 +7491,34 @@ mod tests {
             content: "x".into(),
             reasoning: None,
             usage: Usage::default(),
+            condensed: None,
         };
         let json = serde_json::to_string(&done).unwrap();
         assert!(json.contains("\"sessionId\":\"s1\""), "{json}");
         assert!(json.contains("\"inputTokens\""), "{json}");
+        // A reply that was not condensed carries no field at all, so the
+        // frontend's optional parse stays the only reader.
+        assert!(!json.contains("condensed"), "{json}");
+
+        // A condensed one carries the count and the source, camelCase, which is
+        // what the faint line under the reply reads.
+        let folded = EngineEvent::Done {
+            session_id: "s1".into(),
+            message_id: "m1".into(),
+            content: "x".into(),
+            reasoning: None,
+            usage: Usage::default(),
+            condensed: Some(context::Condensed {
+                covered: 24,
+                source: context::Source::Summary,
+                tokens: 3_000,
+            }),
+        };
+        let json = serde_json::to_string(&folded).unwrap();
+        assert!(json.contains("\"condensed\""), "{json}");
+        assert!(json.contains("\"covered\":24"), "{json}");
+        assert!(json.contains("\"source\":\"summary\""), "{json}");
+        assert!(json.contains("\"tokens\":3000"), "{json}");
 
         let permission = EngineEvent::ToolPermissionRequest {
             session_id: "s1".into(),
@@ -7880,7 +8560,12 @@ mod tests {
 
     #[test]
     fn agent_modes_encode_and_parse() {
-        for mode in [AgentMode::Plan, AgentMode::Build] {
+        for mode in [
+            AgentMode::Plan,
+            AgentMode::Review,
+            AgentMode::Build,
+            AgentMode::Chat,
+        ] {
             assert_eq!(parse_agent_mode(agent_mode_str(mode)), Some(mode));
         }
         assert_eq!(parse_agent_mode("nonsense"), None);
@@ -7896,6 +8581,16 @@ mod tests {
         let bare = with_agent_mode(None, AgentMode::Build).unwrap();
         assert!(bare.contains("Build mode"), "{bare}");
         assert!(!bare.contains("Plan mode"), "{bare}");
+
+        let chat = with_agent_mode(Some("Be terse.".into()), AgentMode::Chat).unwrap();
+        assert!(chat.starts_with("Be terse."), "{chat}");
+        assert!(chat.contains("Chat mode"), "{chat}");
+        // It has to name what it *can* use, or the model discovers the edge of
+        // the mode one refused call at a time.
+        for tool in ["web_search", "fetch_url", "datetime", "ask_user"] {
+            assert!(chat.contains(tool), "note should name {tool}: {chat}");
+        }
+        assert!(chat.contains("Build mode"), "{chat}");
     }
 
     #[test]

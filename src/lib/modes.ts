@@ -53,6 +53,12 @@ export const AGENT_MODES: ModeOption<AgentMode>[] = [
     help: "Read, then report issues ranked by severity; write tools are refused",
     tone: "accent",
   },
+  {
+    id: "chat",
+    label: "Chat",
+    help: "Answer from the model and the web only; fastest",
+    tone: "accent",
+  },
 ];
 
 /**

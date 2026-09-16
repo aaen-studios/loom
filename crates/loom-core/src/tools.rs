@@ -1069,20 +1069,54 @@ pub fn is_blocked_in_plan(name: &str) -> bool {
     !is_read_only(name) // write_file, edit_file, run_command, and every MCP tool
 }
 
-/// What the model is told when a read-only agent mode refuses a call. Phrased
-/// as guidance, not just an error, so the next round produces the mode's
+/// The only tools pure chat may use: the web pair, the clock, and `ask_user`.
+///
+/// Exact-match and fail-closed, like [`is_blocked_in_plan`]: a tool added later
+/// is refused in a chat until somebody names it here deliberately.
+///
+/// `handoff` is deliberately absent but still accepted by the turn gate when a
+/// chat has a cast — see the `mode_blocked` branch in the engine.
+pub const CHAT_TOOLS: [&str; 4] = [
+    crate::web::SEARCH_TOOL,
+    crate::web::FETCH_TOOL,
+    "datetime",
+    ASK_USER,
+];
+
+/// Whether pure chat may use this tool.
+///
+/// This is *not* the complement of [`is_blocked_in_plan`], and the difference is
+/// the whole mode. That function is a read-only test: `read_file`, `grep`,
+/// `list_dir` and `search_workspace` all pass it, and none of them belong in a
+/// chat. Chat is narrow, not read-only.
+pub fn is_allowed_in_chat(name: &str) -> bool {
+    CHAT_TOOLS.contains(&name)
+}
+
+/// What the model is told when an agent mode refuses a call. Phrased as
+/// guidance, not just an error, so the next round produces the mode's
 /// deliverable instead of a retry.
 pub fn mode_refusal(mode: &str, name: &str) -> String {
-    let guidance = if mode == "Review" {
-        "report what you found — issues ranked by severity, with file and line, and a proposed \
-         fix each. The user can switch to Build to have them applied."
-    } else {
-        "present a concrete plan (steps, files, risks) and wait for the user to switch to Build."
-    };
-    format!(
-        "{mode} mode: `{name}` is unavailable. Do not call it again — read and \
-         search as much as you need, then {guidance}"
-    )
+    match mode {
+        "Review" => format!(
+            "{mode} mode: `{name}` is unavailable. Do not call it again — read and \
+             search as much as you need, then report what you found: issues ranked by \
+             severity, with file and line, and a proposed fix each. The user can switch \
+             to Build to have them applied."
+        ),
+        "Chat" => format!(
+            "{mode} mode: `{name}` is unavailable — this chat answers from the model and \
+             the web only, so it stays quick. Do not call it again. Answer with what you \
+             already have, using `web_search` or `fetch_url` if you need something current. \
+             If the request needs work on files or commands, say so and suggest the user \
+             switch to Build mode."
+        ),
+        _ => format!(
+            "{mode} mode: `{name}` is unavailable. Do not call it again — read and \
+             search as much as you need, then present a concrete plan (steps, files, \
+             risks) and wait for the user to switch to Build."
+        ),
+    }
 }
 
 pub fn plan_refusal(name: &str) -> String {
@@ -2281,6 +2315,56 @@ mod tests {
     fn plan_mode_refuses_unknown_and_mcp_tools() {
         assert!(is_blocked_in_plan("mcp__files__write"));
         assert!(is_blocked_in_plan("some_future_tool"));
+    }
+
+    #[test]
+    fn chat_allows_only_the_web_pair_clock_and_ask_user() {
+        for name in CHAT_TOOLS {
+            assert!(is_allowed_in_chat(name), "{name} should be offered in Chat");
+        }
+        for name in [
+            // Writes, commands, harness writers and MCP: refused, as in Plan.
+            "write_file",
+            "edit_file",
+            "run_command",
+            STOP_COMMAND,
+            "update_settings",
+            "upsert_persona",
+            "mcp__files__write",
+            // And the read-only tools a chat still must not have.
+            "read_file",
+            "list_dir",
+            "grep",
+            "find_files",
+            "search_workspace",
+            "spawn_agent",
+            "generate_image",
+            // Fail-closed: anything added later is refused until named.
+            "some_future_tool",
+        ] {
+            assert!(!is_allowed_in_chat(name), "{name} should be refused in Chat");
+        }
+    }
+
+    #[test]
+    fn chat_is_narrower_than_read_only() {
+        // The trap this guards: every one of these is read-only, so the Plan
+        // gate waves them through. A chat must not, or "chat" quietly becomes
+        // "read the whole workspace".
+        for name in ["read_file", "grep", "list_dir", "search_workspace"] {
+            assert!(!is_blocked_in_plan(name), "{name} is read-only");
+            assert!(!is_allowed_in_chat(name), "{name} is not a chat tool");
+        }
+    }
+
+    #[test]
+    fn chat_refusal_names_the_mode_and_says_what_to_do() {
+        let refusal = mode_refusal("Chat", "write_file");
+        assert!(refusal.contains("Chat mode"), "{refusal}");
+        assert!(refusal.contains("write_file"), "{refusal}");
+        assert!(refusal.contains("Do not call it again"), "{refusal}");
+        // It has to point somewhere, or the model just apologises.
+        assert!(refusal.contains("Build"), "{refusal}");
     }
 
     #[test]

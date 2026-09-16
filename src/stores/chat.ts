@@ -13,7 +13,7 @@ import type {
   ToolCallRecord,
 } from "../types";
 import { ipc } from "../lib/ipc";
-import { parseAttachments } from "../lib/messageExtra";
+import { parseAttachments, withCondensed } from "../lib/messageExtra";
 import type { ReasoningBlock } from "../lib/messageExtra";
 import { useSettings } from "./settings";
 import { useSkills } from "./skills";
@@ -52,6 +52,8 @@ interface ChatState {
   goals: Record<string, string | null>;
   /** sessionId → its computer turn is paused because the user took over. */
   computerPaused: Record<string, boolean>;
+  /** The one chat currently driving the machine, for the chip's Stop. */
+  computerDriver: string | null;
   /** Whether the goal/task panel above the composer is expanded. */
   taskPanelOpen: boolean;
   /** Persona that should answer the next message in a multi-persona chat. */
@@ -97,6 +99,10 @@ interface ChatState {
   setPermissionMode: (mode: Session["permissionMode"]) => Promise<void>;
   setAgentMode: (mode: Session["agentMode"]) => Promise<void>;
   setComputerAccess: (enabled: boolean) => Promise<void>;
+  /** Polls the engine for who holds the computer, and updates the chip. */
+  refreshComputerDriver: () => Promise<void>;
+  /** The pill or the panic key stopped a turn: drop its pause/driver markers. */
+  noteComputerStopped: (sessionId: string | null) => void;
   setGoal: (goal: string | null) => Promise<void>;
   setTodos: (todos: Todo[]) => Promise<void>;
   setTaskPanelOpen: (open: boolean) => void;
@@ -119,6 +125,37 @@ interface ChatState {
   truncateFrom: (index: number) => Promise<Message | null>;
   applyEvent: (event: EngineEvent) => void;
   clearError: () => void;
+}
+
+/**
+ * The computer tools, mirrored from `loom_core::computer::is_computer_tool`.
+ * Used only to keep the chip's Stop button pointed at the right chat, so a
+ * name missing here degrades to a missing button rather than a wrong action.
+ */
+const COMPUTER_TOOLS = new Set([
+  "screenshot",
+  "ui",
+  "mouse",
+  "keyboard",
+  "clipboard",
+  "list_windows",
+  "window",
+  "list_processes",
+  "launch_app",
+  "kill_process",
+  "wait",
+]);
+
+function isComputerTool(name: string): boolean {
+  return COMPUTER_TOOLS.has(name);
+}
+
+/** A copy of `record` without `key`, keeping the object stable when absent. */
+function withoutKey<T>(record: Record<string, T>, key: string): Record<string, T> {
+  if (!(key in record)) return record;
+  const next = { ...record };
+  delete next[key];
+  return next;
 }
 
 /** Diagnostics: enable with `localStorage.setItem("loomDebug","1")`. */
@@ -196,6 +233,7 @@ export const useChat = create<ChatState>((set, get) => ({
   todos: {},
   goals: {},
   computerPaused: {},
+  computerDriver: null,
   taskPanelOpen: true,
   speakerId: null,
   castIds: [],
@@ -573,7 +611,33 @@ export const useChat = create<ChatState>((set, get) => ({
       sessions: state.sessions.map((session) =>
         session.id === sessionId ? { ...session, computerAccess: enabled } : session,
       ),
+      // Switching the chip off revokes consent: the engine stops the turn, so
+      // the pause marker this chat may be carrying is no longer true.
+      computerPaused: enabled
+        ? state.computerPaused
+        : withoutKey(state.computerPaused, sessionId),
     }));
+  },
+
+  refreshComputerDriver: async () => {
+    const status = await ipc.computerStatus();
+    if (!status) return;
+    set({ computerDriver: status.sessionId ?? null });
+  },
+
+  noteComputerStopped: (sessionId) => {
+    set((state) => {
+      // A stop from the pill or the panic key does not go through this chat's
+      // store, so the notice is the only thing that clears the markers. A stop
+      // with no session named (nothing was driving) clears them all: no chat is
+      // holding the computer any more.
+      if (!sessionId) return { computerPaused: {}, computerDriver: null };
+      return {
+        computerPaused: withoutKey(state.computerPaused, sessionId),
+        computerDriver:
+          state.computerDriver === sessionId ? null : state.computerDriver,
+      };
+    });
   },
 
   setGoal: async (goal) => {
@@ -791,6 +855,11 @@ export const useChat = create<ChatState>((set, get) => ({
 
       case "toolCallStarted": {
         set((state) => ({
+          // The pill follows computer tools; so does the chip's Stop button,
+          // which should only be there for the chat that owns the mouse.
+          computerDriver: isComputerTool(event.name)
+            ? event.sessionId
+            : state.computerDriver,
           liveTools: {
             ...state.liveTools,
             [event.messageId]: [
@@ -879,6 +948,14 @@ export const useChat = create<ChatState>((set, get) => ({
           delete questions[event.sessionId];
           const permissions = { ...state.permissions };
           delete permissions[event.sessionId];
+          // A paused computer turn cannot outlive its turn either: a stale
+          // Resume/Stop pair in the chip (or a chip still tinted red) is what
+          // this marker would otherwise leave behind for ever. The driver
+          // marker goes with it, so another armed chat's chip does not keep
+          // offering a Stop for a turn that has finished.
+          const computerPaused = withoutKey(state.computerPaused, event.sessionId);
+          const computerDriver =
+            state.computerDriver === event.sessionId ? null : state.computerDriver;
           // A reply that lands in a chat you are not looking at stays marked
           // until you open it.
           const unread =
@@ -891,6 +968,8 @@ export const useChat = create<ChatState>((set, get) => ({
             liveTools,
             questions,
             permissions,
+            computerPaused,
+            computerDriver,
             unread,
             messages:
               state.activeId === event.sessionId
@@ -900,6 +979,11 @@ export const useChat = create<ChatState>((set, get) => ({
                           ...message,
                           content: event.content,
                           reasoning: event.reasoning ?? null,
+                          // A reply answered from a condensed view carries the
+                          // fold on the message, so the faint line under it is
+                          // there the moment the turn ends rather than a
+                          // reload later.
+                          extra: withCondensed(message.extra, event.condensed),
                         }
                       : message,
                   )
@@ -957,6 +1041,11 @@ export const useChat = create<ChatState>((set, get) => ({
             busy,
             live,
             liveTools,
+            // A stop ends a paused computer turn too (the 15-minute takeover
+            // timeout arrives as a notice), so the marker goes with it.
+            computerPaused: withoutKey(state.computerPaused, event.sessionId),
+            computerDriver:
+              state.computerDriver === event.sessionId ? null : state.computerDriver,
             errors: { ...state.errors, [event.sessionId]: event.text },
             questions,
             permissions,
@@ -1002,16 +1091,16 @@ export const useChat = create<ChatState>((set, get) => ({
       case "computerPaused": {
         set((state) => ({
           computerPaused: { ...state.computerPaused, [event.sessionId]: true },
+          // The chat that can pause is by definition the one holding the mouse.
+          computerDriver: event.sessionId,
         }));
         break;
       }
 
       case "computerResumed": {
-        set((state) => {
-          const computerPaused = { ...state.computerPaused };
-          delete computerPaused[event.sessionId];
-          return { computerPaused };
-        });
+        set((state) => ({
+          computerPaused: withoutKey(state.computerPaused, event.sessionId),
+        }));
         break;
       }
     }

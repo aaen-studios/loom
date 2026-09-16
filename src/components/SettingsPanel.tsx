@@ -32,6 +32,7 @@ import { useSettings } from "../stores/settings";
 import { useSkills } from "../stores/skills";
 import { useUi } from "../stores/ui";
 import { useUsage } from "../stores/usage";
+import { VoiceSettings } from "./VoiceSettings";
 import {
   BrainIcon,
   CheckIcon,
@@ -51,6 +52,7 @@ import {
   SearchIcon,
   ServerIcon,
   SettingsIcon,
+  SoundIcon,
   SparkIcon,
   SunIcon,
   TrashIcon,
@@ -391,6 +393,12 @@ export const SETTINGS_CATEGORIES = [
     keywords: "long term memory facts remember recall pinned global workspace extract auto",
   },
   {
+    id: "voice",
+    label: "Voice",
+    blurb: "Reading replies aloud, and the voices Loom speaks with.",
+    keywords: "voice speech speak read aloud tts kokoro audio sound espeak onnx download component",
+  },
+  {
     id: "mcp",
     label: "MCP",
     blurb: "External tool servers speaking the Model Context Protocol.",
@@ -434,6 +442,7 @@ const CATEGORY_ICONS: Record<
   usage: GaugeIcon,
   personas: PersonIcon,
   memory: BrainIcon,
+  voice: SoundIcon,
   mcp: ServerIcon,
   skills: SparkIcon,
   data: DatabaseIcon,
@@ -444,7 +453,7 @@ const CATEGORY_ICONS: Record<
 const NAV_GROUPS: { label: string; ids: SettingsCategoryId[] }[] = [
   { label: "App", ids: ["general", "appearance"] },
   { label: "Model", ids: ["chat", "providers", "usage", "personas", "memory"] },
-  { label: "Extensions", ids: ["tools", "mcp", "skills"] },
+  { label: "Extensions", ids: ["tools", "mcp", "skills", "voice"] },
   { label: "System", ids: ["data", "updates"] },
 ];
 
@@ -1677,6 +1686,7 @@ function PersonasSection() {
                 <option value="build">Build</option>
                 <option value="plan">Plan</option>
                 <option value="review">Review</option>
+                <option value="chat">Chat</option>
               </select>
             </div>
           </div>
@@ -2869,6 +2879,13 @@ function GeneralSection() {
         checked={config.interface.generatedUi}
         onChange={(value) => void saveInterface({ generatedUi: value })}
       />
+
+      <Toggle
+        label="Condensed replies"
+        hint="Mark a reply that was answered from a summary of the chat's older turns, and let the line expand to show what the model was given. The long conversation still fits the window either way."
+        checked={config.interface.showCondensing}
+        onChange={(value) => void saveInterface({ showCondensing: value })}
+      />
     </Section>
   );
 }
@@ -3409,6 +3426,7 @@ export function SettingsPanel() {
                 {category === "usage" && <UsageSection />}
                 {category === "personas" && <PersonasSection />}
                 {category === "memory" && <MemorySection />}
+                {category === "voice" && <VoiceSettings />}
                 {category === "mcp" && <McpSection />}
                 {category === "skills" && (
                   <>
@@ -3545,14 +3563,20 @@ function ToolsSection() {
           <span className="text-soft">Computer</span> chip. When it is on, Loom
           can take screenshots and drive the mouse, keyboard, windows,
           processes, and the clipboard without asking for each action — the
-          chip is the standing consent. Anything you touch with the real mouse
-          or keyboard pauses the turn; it resumes after 30 seconds of quiet or
-          when you press Resume, and{" "}
-          <span className="font-mono">Ctrl+Alt+Esc</span> stops it from
-          anywhere. UAC prompts, the lock screen, and elevated windows cannot
-          be seen or controlled, and DRM or anti-cheat windows may capture
-          black. Screenshots are sent to your model provider and kept in the
-          chat (the newest 200 per chat) so you can see what Loom saw.
+          chip is the standing consent, and switching it off stops the turn at
+          once. Clicking, scrolling or typing anywhere but Loom&apos;s own
+          windows pauses the turn (moving the mouse does not); it resumes after
+          30 seconds of quiet or when you press Resume, and{" "}
+          <span className="font-mono">Ctrl+Alt+Esc</span> stops it from anywhere.
+          Stop ends only the chat that is driving — other chats and background
+          runs are untouched. Plan and Review modes make the chip
+          screenshots-only, since they refuse anything that changes the machine.
+          UAC prompts, the lock screen, and elevated windows cannot be seen or
+          controlled, and DRM or anti-cheat windows may capture black.
+          Screenshots are sent to your model provider and kept in the chat (the
+          newest 200 per chat) so you can see what Loom saw. Typing long text
+          goes through the clipboard and puts it back afterwards, images and
+          copied files included.
         </p>
         <Row label="Thinking">
           <Segmented
@@ -3643,6 +3667,7 @@ function ToolsSection() {
               { id: "plan", label: "Plan", title: "Research and propose without changing anything" },
               { id: "build", label: "Build", title: "Change the workspace and run commands" },
               { id: "review", label: "Review", title: "Read, then report issues ranked by severity without changing anything" },
+              { id: "chat", label: "Chat", title: "Answer from the model and the web only — the fastest mode" },
             ]}
             onChange={(value) => void setAgentMode(value)}
           />
@@ -3654,7 +3679,14 @@ function ToolsSection() {
           <span className="font-mono">run_command</span> are refused, and it is
           told to ask more questions before writing the plan. Review mode is
           read-only too: it reports issues ranked by severity instead of
-          proposing a plan. Each chat can override this from the composer.
+          proposing a plan. Chat mode is not read-only but <em>narrow</em>: it
+          is offered only <span className="font-mono">web_search</span>,{" "}
+          <span className="font-mono">fetch_url</span>,{" "}
+          <span className="font-mono">datetime</span> and{" "}
+          <span className="font-mono">ask_user</span>, refuses every other tool,
+          skips MCP tool discovery, and stops after three tool rounds — so it
+          answers from what the model knows and the web, and says so when a task
+          needs Build. Each chat can override this from the composer.
         </p>
       </Section>
 

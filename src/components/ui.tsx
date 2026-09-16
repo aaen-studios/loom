@@ -40,7 +40,10 @@ export function Section({
   );
 }
 
-/** Label on the left, control on the right. */
+/** Label on the left, control on the right.
+ *
+ * `children` is optional because a display-only row is a real thing — a
+ * component that is simply installed or not, a path, a version. */
 export function Row({
   label,
   hint,
@@ -48,7 +51,7 @@ export function Row({
 }: {
   label: string;
   hint?: string;
-  children: ReactNode;
+  children?: ReactNode;
 }) {
   return (
     <div className="flex items-center justify-between gap-4 px-1 py-2.5">

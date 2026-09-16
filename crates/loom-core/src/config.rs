@@ -13,6 +13,7 @@ use serde_json::Value;
 use crate::fsutil::atomic_write;
 use crate::persona::Persona;
 use crate::provider::{MetadataSource, ModelSpec, ProviderConfig};
+use crate::voice::config::VoiceConfig;
 use crate::{paths, Error, Result};
 
 pub const SCHEMA_VERSION: u32 = 1;
@@ -45,6 +46,9 @@ pub struct AppConfig {
     pub mcp_servers: BTreeMap<String, crate::mcp::McpServerConfig>,
     pub chat: ChatDefaults,
     pub interface: InterfaceConfig,
+    /// Voice mode: whether Loom speaks, in which voice, and where the assets
+    /// are. Present but silent until asked — see [`VoiceConfig::default`].
+    pub voice: VoiceConfig,
     /// Reusable prompt snippets offered in the composer's slash menu.
     pub prompts: Vec<Prompt>,
     /// Folders the user added; chats point at one by path.
@@ -70,6 +74,7 @@ impl Default for AppConfig {
             mcp_servers: BTreeMap::new(),
             chat: ChatDefaults::default(),
             interface: InterfaceConfig::default(),
+            voice: VoiceConfig::default(),
             prompts: Vec::new(),
             workspaces: Vec::new(),
             search_provider: SearchProvider::default(),
@@ -166,9 +171,10 @@ pub enum PermissionMode {
     Atelier,
 }
 
-/// Whether the model plans, reviews, or builds. Read-only modes refuse
-/// anything that can change the workspace; the permission mode keeps governing
-/// everything else.
+/// Whether the model plans, reviews, builds, or just chats. Read-only modes
+/// refuse anything that can change the workspace; `Chat` is not read-only but
+/// *narrow* — it is offered a fixed handful of tools and refuses the rest. The
+/// permission mode keeps governing everything else.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum AgentMode {
@@ -178,12 +184,24 @@ pub enum AgentMode {
     Review,
     #[default]
     Build,
+    /// Answer quickly from the model and the web; only the web pair, the
+    /// clock and `ask_user` are offered. See `tools::is_allowed_in_chat`.
+    Chat,
 }
 
 impl AgentMode {
     /// Read-only modes refuse anything that can change the workspace.
+    ///
+    /// `Chat` is deliberately *not* in here. It is a narrower mode, not a
+    /// read-only one: reusing this flag would let the read-only halves of
+    /// computer use and the workspace tools leak into a chat.
     pub fn blocks_writes(self) -> bool {
         matches!(self, AgentMode::Plan | AgentMode::Review)
+    }
+
+    /// Pure chat: a small fixed tool list, and nothing else.
+    pub fn is_chat(self) -> bool {
+        matches!(self, AgentMode::Chat)
     }
 
     /// Display name for prompts and refusals.
@@ -192,6 +210,7 @@ impl AgentMode {
             AgentMode::Plan => "Plan",
             AgentMode::Review => "Review",
             AgentMode::Build => "Build",
+            AgentMode::Chat => "Chat",
         }
     }
 }
@@ -220,6 +239,12 @@ pub struct ChatDefaults {
     /// engine still reserves room for it when fitting the history into the
     /// model's context window.
     pub max_output_tokens: u32,
+    /// How much of the model's window a condensed block of older turns may
+    /// occupy, as a percentage. `0` switches condensing off and restores the
+    /// old behaviour of dropping older turns outright. Clamped 0–50 when read:
+    /// above that the block starts crowding out the live turn it exists to
+    /// protect.
+    pub condense_share: u32,
     /// Tool round-trips a single user turn may take. Clamped 1–200; the
     /// engine tells the model to summarise when the budget runs out.
     pub max_tool_rounds: u32,
@@ -251,6 +276,7 @@ impl Default for ChatDefaults {
             permission_mode: PermissionMode::Ask,
             agent_mode: AgentMode::Build,
             max_output_tokens: 0,
+            condense_share: 20,
             max_tool_rounds: 40,
             computer_variant: Some("low".to_string()),
             computer_model: None,
@@ -506,6 +532,9 @@ pub struct InterfaceConfig {
     pub compact: bool,
     /// Let the model render ```loom-ui blocks as live, themed widgets.
     pub generated_ui: bool,
+    /// Show a faint line under a reply that was answered from a condensed view
+    /// of the chat's older turns, expandable to the text the model was given.
+    pub show_condensing: bool,
     /// Attach a screenshot of the current monitor to every quick-ask send.
     pub capture_on_send: bool,
     /// Let the model build long-term memory in the background: a lite-model
@@ -531,6 +560,7 @@ impl Default for InterfaceConfig {
             sidebar_sort: SidebarSort::Recent,
             compact: false,
             generated_ui: true,
+            show_condensing: true,
             capture_on_send: true,
             auto_memory: true,
         }
@@ -680,6 +710,31 @@ mod tests {
         let config: AppConfig =
             serde_json::from_str(r#"{ "chat": { "agentMode": "plan" } }"#).unwrap();
         assert_eq!(config.chat.agent_mode, AgentMode::Plan);
+
+        // Chat is a global default as well as a per-chat override, so pin both
+        // its wire value and the key. An older build that does not know "chat"
+        // fails to parse the string and falls back to the built-in default,
+        // the same downgrade story as `permissionMode: "atelier"`.
+        assert_eq!(serde_json::to_string(&AgentMode::Chat).unwrap(), "\"chat\"");
+        let config: AppConfig =
+            serde_json::from_str(r#"{ "chat": { "agentMode": "chat" } }"#).unwrap();
+        assert_eq!(config.chat.agent_mode, AgentMode::Chat);
+    }
+
+    #[test]
+    fn chat_is_narrow_rather_than_read_only() {
+        // The distinction the whole mode rests on. `blocks_writes` gates the
+        // read-only halves of computer use and the workspace tools; Chat must
+        // not be swept into either.
+        assert!(!AgentMode::Chat.blocks_writes());
+        assert!(AgentMode::Chat.is_chat());
+        assert_eq!(AgentMode::Chat.label(), "Chat");
+
+        assert!(!AgentMode::Build.is_chat());
+        assert!(!AgentMode::Plan.is_chat());
+        assert!(!AgentMode::Review.is_chat());
+        assert!(AgentMode::Plan.blocks_writes());
+        assert!(AgentMode::Review.blocks_writes());
     }
 
     #[test]

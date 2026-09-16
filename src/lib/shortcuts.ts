@@ -23,6 +23,7 @@ function isTyping(target: EventTarget | null): boolean {
  * - Ctrl+K       chats popup (focuses its search when the list is visible)
  * - Ctrl+,       settings
  * - Ctrl+End     jump to the newest text
+ * - Ctrl+Shift+V voice mode, on or off
  * - ?            the shortcut sheet
  *
  * Per-message navigation lives in the transcript itself.
@@ -32,8 +33,10 @@ export function useShortcuts(): void {
   const setSidebarOpen = useUi((state) => state.setSidebarOpen);
   const setSettingsOpen = useUi((state) => state.setSettingsOpen);
   const setShortcutsOpen = useUi((state) => state.setShortcutsOpen);
+  const setVoiceOpen = useUi((state) => state.setVoiceOpen);
   const settingsOpen = useUi((state) => state.settingsOpen);
   const shortcutsOpen = useUi((state) => state.shortcutsOpen);
+  const voiceOpen = useUi((state) => state.voiceOpen);
   const theme = useSettings((state) => state.config.theme);
   const setTheme = useSettings((state) => state.setTheme);
 
@@ -78,6 +81,21 @@ export function useShortcuts(): void {
           // A quick way to flip themes while designing.
           event.preventDefault();
           setTheme(theme === "dark" ? "light" : "dark");
+        } else if (event.shiftKey && key === "v" && !isTyping(event.target)) {
+          // Voice mode, on the same `Ctrl+Shift+<letter>` pattern as the theme
+          // flip. A toggle rather than an open, so the same keys get you out —
+          // and it closes Settings first, because two full-screen surfaces at
+          // once is one too many.
+          //
+          // The `isTyping` guard is not decoration: `Ctrl+Shift+V` is
+          // "paste as plain text" in most editors, so without it a paste in
+          // the composer would throw a full-screen surface over what was just
+          // pasted. None of the *other* modified shortcuts need this because
+          // none of them collide with a text-editing habit.
+          event.preventDefault();
+          setSettingsOpen(false);
+          setShortcutsOpen(false);
+          setVoiceOpen(!voiceOpen);
         }
         return;
       }
@@ -88,6 +106,9 @@ export function useShortcuts(): void {
         return;
       }
 
+      // Voice mode is absent here on purpose: it handles its own Escape, in
+      // its own listener. Closing it from two places would also mean two
+      // reasons to check its state on every keystroke in the app.
       if (event.key === "Escape" && (settingsOpen || shortcutsOpen)) {
         setSettingsOpen(false);
         setShortcutsOpen(false);
@@ -101,8 +122,10 @@ export function useShortcuts(): void {
     setSidebarOpen,
     setSettingsOpen,
     setShortcutsOpen,
+    setVoiceOpen,
     settingsOpen,
     shortcutsOpen,
+    voiceOpen,
     theme,
     setTheme,
   ]);

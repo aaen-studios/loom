@@ -16,8 +16,12 @@ export type ProviderKind = "openai-compatible" | "anthropic";
 export type ModelsSource = "manual" | "fetched";
 export type Modality = "text" | "image" | "audio" | "video" | "pdf";
 export type PermissionMode = "ask" | "auto-read-only" | "auto-all" | "atelier";
-/** Plan and Review refuse the write and command tools; Build lets the permission gate decide. */
-export type AgentMode = "plan" | "build" | "review";
+/**
+ * Plan and Review refuse the write and command tools; Chat is narrower still —
+ * it is offered only web search, page fetch, the clock and ask_user, and
+ * refuses everything else. Build lets the permission gate decide.
+ */
+export type AgentMode = "plan" | "build" | "review" | "chat";
 /** What a tool can reach; shown as a badge on the permission card. */
 export type ToolScope = "workspace" | "harness" | "web" | "mcp" | "computer";
 
@@ -312,6 +316,8 @@ export interface InterfaceConfig {
   captureOnSend: boolean;
   /** Render ```loom-ui blocks as live, themed widgets. */
   generatedUi: boolean;
+  /** Show the faint line under a reply answered from a condensed view. */
+  showCondensing: boolean;
   /** Let the lite model propose durable facts after each reply. */
   autoMemory: boolean;
 }
@@ -324,6 +330,31 @@ export interface StorageUsage {
   backgrounds: number;
   cache: number;
   total: number;
+}
+
+/**
+ * Older turns of a chat folded into one block so the request fits the model's
+ * window. `digest` is the in-process fallback; `summary` is written by the lite
+ * model in the background.
+ */
+export interface Condensed {
+  /** How many messages the block stands in for. */
+  covered: number;
+  source: "digest" | "summary";
+  /** Estimated tokens the block cost. */
+  tokens: number;
+}
+
+/** The stored condensed block itself, fetched by the expander. */
+export interface SessionSummary {
+  sessionId: string;
+  coversThroughId: string;
+  coversThroughAt: number;
+  coveredCount: number;
+  text: string;
+  tokens: number;
+  model: string | null;
+  updatedAt: number;
 }
 
 /** One line in a vendor usage card: a percent window or an amount. */
@@ -619,6 +650,12 @@ export type EngineEvent =
       content: string;
       reasoning: string | null;
       usage: Usage;
+      /**
+       * Set when this reply was answered from a condensed view of the chat's
+       * older turns. Not a failure: the turn succeeded, and this only says
+       * what the model could see.
+       */
+      condensed?: Condensed | null;
     }
   | {
       /**

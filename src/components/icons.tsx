@@ -31,8 +31,46 @@ export function PanelLeftIcon(props: IconProps) {
   );
 }
 
-export function MinimizeIcon(props: IconProps) {
+/** A speaker cone with waves: voice mode, and reading a reply aloud. */
+export function SoundIcon(props: IconProps) {
   return (
+    <Icon {...props}>
+      <path d="M11 4.8 6.9 8.4H3.6v7.2h3.3L11 19.2z" />
+      <path d="M14.6 9a4.4 4.4 0 0 1 0 6" />
+      <path d="M17.4 6.4a8 8 0 0 1 0 11.2" />
+    </Icon>
+  );
+}
+
+/**
+ * A microphone: dictation, and the voice-mode dial.
+ *
+ * The capsule and the cradle are separate strokes rather than one outline, so
+ * the shape still reads at 16 px next to a paperclip.
+ */
+export function MicIcon(props: IconProps) {
+  return (
+    <Icon {...props}>
+      <rect x="9" y="2.5" width="6" height="12" rx="3" />
+      <path d="M5.5 11.5a6.5 6.5 0 0 0 13 0" />
+      <path d="M12 18v3.5" />
+    </Icon>
+  );
+}
+
+/** A microphone with a slash: the microphone is open, so this stops it. */
+export function MicOffIcon(props: IconProps) {
+  return (
+    <Icon {...props}>
+      <rect x="9" y="2.5" width="6" height="12" rx="3" />
+      <path d="M5.5 11.5a6.5 6.5 0 0 0 13 0" />
+      <path d="M12 18v3.5" />
+      <path d="M4 3.5 20 20.5" />
+    </Icon>
+  );
+}
+
+export function MinimizeIcon(props: IconProps) {  return (
     <Icon {...props} strokeWidth={1.9}>
       <path d="M5.5 12h13" />
     </Icon>

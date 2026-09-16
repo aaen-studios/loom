@@ -6,8 +6,8 @@
 //! click into an elevated app fails loudly instead of silently vanishing
 //! (UIPI).
 
-use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, AtomicU64, Ordering};
-use std::sync::{Arc, OnceLock};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicU8, Ordering};
+use std::sync::{Arc, OnceLock, RwLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::Value;
@@ -19,11 +19,15 @@ use windows::Win32::Security::{
     GetTokenInformation, TokenElevation, TOKEN_ELEVATION, TOKEN_QUERY,
 };
 use windows::Win32::System::Com::{
-    CoCreateInstance, CoInitializeEx, CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED,
+    CoCreateInstance, CoInitializeEx, CoUninitialize, IDataObject, CLSCTX_INPROC_SERVER,
+    COINIT_APARTMENTTHREADED, COINIT_MULTITHREADED,
 };
 use windows::Win32::System::DataExchange::{
     CloseClipboard, EmptyClipboard, GetClipboardData, IsClipboardFormatAvailable, OpenClipboard,
     SetClipboardData,
+};
+use windows::Win32::System::Ole::{
+    OleFlushClipboard, OleGetClipboard, OleInitialize, OleSetClipboard, OleUninitialize,
 };
 use windows::Win32::System::Diagnostics::ToolHelp::{
     CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W,
@@ -56,12 +60,14 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 };
 use windows::Win32::UI::Shell::{ShellExecuteExW, SHELLEXECUTEINFOW, SEE_MASK_NOCLOSEPROCESS};
 use windows::Win32::UI::WindowsAndMessaging::{
-    CallNextHookEx, DispatchMessageW, EnumWindows, GetAncestor, GetForegroundWindow, GetMessageW,
-    GetWindowRect, GetWindowTextLengthW, GetWindowTextW, GetWindowThreadProcessId, IsIconic,
-    IsWindowVisible, PostMessageW, SetForegroundWindow, SetWindowPos, ShowWindow, TranslateMessage,
-    WindowFromPoint, GA_ROOT, HWND_NOTOPMOST, HWND_TOPMOST, KBDLLHOOKSTRUCT, LLKHF_INJECTED,
-    LLMHF_INJECTED, MSG, MSLLHOOKSTRUCT, SetWindowsHookExW, SW_MAXIMIZE, SW_MINIMIZE, SW_RESTORE,
-    SW_SHOWNORMAL, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, WH_KEYBOARD_LL, WH_MOUSE_LL, WM_CLOSE,
+    CallNextHookEx, DispatchMessageW, EnumWindows, GetAncestor, GetForegroundWindow,
+    GetWindowLongPtrW, GetMessageW, GetWindowRect, GetWindowTextLengthW, GetWindowTextW,
+    GetWindowThreadProcessId, IsIconic, IsWindowVisible, PostMessageW, SetForegroundWindow,
+    SetWindowLongPtrW, SetWindowPos, SetWindowsHookExW, ShowWindow, TranslateMessage,
+    UnhookWindowsHookEx, WindowFromPoint, GA_ROOT, GWL_EXSTYLE, HHOOK, HWND_NOTOPMOST, HWND_TOPMOST,
+    KBDLLHOOKSTRUCT, LLKHF_INJECTED, LLMHF_INJECTED, MSG, MSLLHOOKSTRUCT, SW_MAXIMIZE, SW_MINIMIZE,
+    SW_RESTORE, SW_SHOWNORMAL, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, WH_KEYBOARD_LL, WH_MOUSE_LL,
+    WM_CLOSE, WM_MOUSEMOVE, WS_EX_NOACTIVATE,
 };
 
 use super::{Capture, CaptureResult, UiNode};
@@ -218,13 +224,56 @@ fn window_is_elevated(hwnd: HWND) -> bool {
     }
 }
 
-fn own_input_target_blocked() -> Result<()> {
+/// Refuses when the focused process is elevated: UIPI drops the input, so
+/// saying so beats a click that silently vanishes.
+fn elevation_blocked() -> Result<()> {
     if let Some(foreground) = foreground_window() {
         if window_is_elevated(foreground) {
             return Err(Error::Other(
                 "that window is elevated; Loom must run elevated to control it".into(),
             ));
         }
+    }
+    Ok(())
+}
+
+/// Refuses keyboard input when one of Loom's own windows has focus. A click
+/// can be aimed at a window the user is not focused on, so it is only subject
+/// to [`elevation_blocked`]; a keystroke goes wherever focus is, and typing a
+/// message into Loom's own composer is never what the model meant.
+fn keyboard_target_blocked() -> Result<()> {
+    elevation_blocked()?;
+    if is_own_window(unsafe { GetForegroundWindow() }) {
+        return Err(Error::Other(
+            "Loom's own window has focus, so keystrokes would land in Loom. Focus the window \
+             you want to type into first (window action focus), then send the keys."
+                .into(),
+        ));
+    }
+    Ok(())
+}
+
+/// Refuses pointer input aimed at a window the input cannot reach.
+///
+/// The elevation check has to look at the window **under the point**, not at
+/// whichever window happens to have focus. Mouse input goes to the window the
+/// pointer is over, so foreground-based checks were both wrong in each
+/// direction: they refused a click on an ordinary window because a *different*
+/// elevated window had focus, and allowed a click that landed on an elevated
+/// window merely because focus was elsewhere. UIPI drops the latter silently,
+/// so the model would believe a click had happened.
+fn cursor_target_blocked(x: i32, y: i32) -> Result<()> {
+    let window = unsafe { WindowFromPoint(POINT { x, y }) };
+    if window.0.is_null() {
+        return Err(Error::Other(format!(
+            "there is no window at screen ({x},{y})"
+        )));
+    }
+    if window_is_elevated(window) {
+        return Err(Error::Other(
+            "the window at that point is elevated; Loom must run elevated to control it"
+                .into(),
+        ));
     }
     Ok(())
 }
@@ -419,6 +468,42 @@ fn frame_hash(image: &image::RgbaImage) -> u64 {
 // input: mouse
 // ------------------------------------------------------------------
 
+/// One wheel notch, in the units `mouseData` expects.
+const WHEEL_DELTA: i32 = 120;
+/// Pause between wheel events. Enough for a queued event to be processed,
+/// short enough that a 20-notch scroll still feels immediate.
+const SCROLL_STEP_MS: u64 = 12;
+/// Settling time after a drag's final move and before the button release. Apps
+/// that update their target on a move timer need to see the final position
+/// before the drop, or the drop lands where the pointer was a frame ago.
+const DRAG_SETTLE_MS: u64 = 60;
+
+/// Moves the pointer and reports whether it actually arrived. `SendInput`
+/// reports the number of events *inserted into the queue*, not delivered, so it
+/// says nothing about whether the movement happened. Comparing against
+/// `GetCursorPos` is the only way to know.
+fn move_verified(x: i32, y: i32) -> bool {
+    move_absolute(x, y);
+    // A click or a keystroke can move the pointer between the two reads, which
+    // would read as a failure; one retry and a tight matching window keeps that
+    // from turning into a false alarm.
+    for _ in 0..2 {
+        match screen::cursor_screen_pos() {
+            Ok((cx, cy)) if (cx - x).abs() <= 2 && (cy - y).abs() <= 2 => return true,
+            _ => {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+                move_absolute(x, y);
+            }
+        }
+    }
+    matches!(screen::cursor_screen_pos(), Ok((cx, cy)) if (cx - x).abs() <= 2 && (cy - y).abs() <= 2)
+}
+
+/// Why a `move_verified` failure matters, as one sentence.
+const CURSOR_STUCK: &str = "the pointer did not move to that position — another program is \
+    holding the mouse (a game, a remote-desktop session, or a pointer-locked window), or the \
+    coordinates are outside the desktop. `position` reports where it actually is.";
+
 fn mouse_input(dx: i32, dy: i32, data: u32, flags: MOUSE_EVENT_FLAGS) -> INPUT {
     INPUT {
         r#type: INPUT_MOUSE,
@@ -564,7 +649,9 @@ pub fn mouse(
 ) -> Result<String> {
     match action {
         "move" => {
-            move_absolute(x, y);
+            if !move_verified(x, y) {
+                return Err(Error::Other(CURSOR_STUCK.into()));
+            }
             Ok(format!("moved to screen ({x},{y})"))
         }
         "click" | "double_click" | "right_click" | "middle_click" => {
@@ -574,8 +661,12 @@ pub fn mouse(
                 _ => button,
             };
             let clicks = if action == "double_click" { 2 } else { count };
-            own_input_target_blocked()?;
-            move_absolute(x, y);
+            // The window under the point is what receives the click, so it is
+            // the one that has to be reachable.
+            cursor_target_blocked(x, y)?;
+            if !move_verified(x, y) {
+                return Err(Error::Other(CURSOR_STUCK.into()));
+            }
             with_modifiers(modifiers, || click(button, clicks))?;
             Ok(format!(
                 "{} {} at screen ({x},{y})",
@@ -584,8 +675,10 @@ pub fn mouse(
             ))
         }
         "down" => {
-            own_input_target_blocked()?;
-            move_absolute(x, y);
+            cursor_target_blocked(x, y)?;
+            if !move_verified(x, y) {
+                return Err(Error::Other(CURSOR_STUCK.into()));
+            }
             with_modifiers(modifiers, || {
                 send(&[mouse_input(0, 0, 0, button_flags(button, false))])
             })?;
@@ -599,38 +692,88 @@ pub fn mouse(
             let (tx, ty) = to.ok_or_else(|| {
                 Error::Other("drag needs to_x and to_y (image coordinates)".into())
             })?;
-            own_input_target_blocked()?;
-            move_absolute(x, y);
+            // Both ends matter: the button goes down on the source and the drop
+            // lands on the destination, so an elevated window at either end
+            // means the gesture cannot work.
+            cursor_target_blocked(x, y)?;
+            cursor_target_blocked(tx, ty)?;
+
+            // The press has to happen *over the source*, so a failure to get
+            // there is fatal — dragging from wherever the pointer happened to
+            // be picks up something else entirely, which is worse than not
+            // dragging at all.
+            if !move_verified(x, y) {
+                return Err(Error::Other(format!("{CURSOR_STUCK} The drag was not started.")));
+            }
             send(&[mouse_input(0, 0, 0, button_flags(button, false))]);
+            // Let the target register the press before anything moves: a
+            // drag-detection threshold and a pressed-state message both need a
+            // frame to land.
+            std::thread::sleep(std::time::Duration::from_millis(DRAG_SETTLE_MS));
+
+            // Interpolated in screen space, one step per requested step, with
+            // the time spread evenly across them. Real (non-injected) motion is
+            // a stream of small moves; a single teleport is ignored by drop
+            // targets that track the pointer.
             let steps = steps.max(1);
+            let per_step = if duration_ms == 0 {
+                0
+            } else {
+                // At least a millisecond, so a fast drag is still a sequence
+                // rather than a coalesced jump.
+                (duration_ms / steps).max(1)
+            };
             for step in 1..=steps {
                 let progress = f64::from(step) / f64::from(steps);
                 let ix = x + ((tx - x) as f64 * progress).round() as i32;
                 let iy = y + ((ty - y) as f64 * progress).round() as i32;
                 move_absolute(ix, iy);
-                if duration_ms > 0 {
-                    std::thread::sleep(std::time::Duration::from_millis(u64::from(
-                        duration_ms / steps,
-                    )));
+                if per_step > 0 {
+                    std::thread::sleep(std::time::Duration::from_millis(u64::from(per_step)));
                 }
             }
+            // Arrive exactly, and give the target a moment to see it: a drop at
+            // the position from the previous frame lands in the wrong place.
+            move_absolute(tx, ty);
+            std::thread::sleep(std::time::Duration::from_millis(DRAG_SETTLE_MS));
             send(&[mouse_input(0, 0, 0, button_flags(button, true))]);
-            Ok(format!("dragged {button} from ({x},{y}) to ({tx},{ty})"))
+
+            let landed = screen::cursor_screen_pos()
+                .map(|(cx, cy)| (cx - tx).abs() <= 2 && (cy - ty).abs() <= 2)
+                .unwrap_or(true);
+            Ok(if landed {
+                format!("dragged {button} from ({x},{y}) to ({tx},{ty})")
+            } else {
+                format!(
+                    "dragged {button} from ({x},{y}) toward ({tx},{ty}), but the pointer did \
+                     not end up there — the drop may have landed elsewhere"
+                )
+            })
         }
         "scroll" => {
             let notches = amount.clamp(-100, 100);
             if notches == 0 {
-                return Err(Error::Other("scroll needs a non-zero amount".into()));
+                return Err(Error::Other(
+                    "scroll needs a non-zero amount (negative is up/left)".into(),
+                ));
             }
-            let data = (notches * 120) as u32;
+            // The wheel goes to whatever is under the pointer, so the move is
+            // part of the action, not a nicety: without it the event scrolls
+            // whichever window the cursor happens to be over.
+            if !move_verified(x, y) {
+                return Err(Error::Other(CURSOR_STUCK.into()));
+            }
             let flag = if horizontal {
                 MOUSEEVENTF_HWHEEL
             } else {
                 MOUSEEVENTF_WHEEL
             };
-            send(&[mouse_input(0, 0, data, flag)]);
+            for data in super::wheel_deltas(notches, WHEEL_DELTA) {
+                send(&[mouse_input(0, 0, data as u32, flag)]);
+                std::thread::sleep(std::time::Duration::from_millis(SCROLL_STEP_MS));
+            }
             Ok(format!(
-                "scrolled {} {notches} notches",
+                "scrolled {} {notches} notches at screen ({x},{y})",
                 if horizontal { "horizontally" } else { "vertically" }
             ))
         }
@@ -642,9 +785,10 @@ pub fn cursor_pos() -> Result<(i32, i32)> {
     screen::cursor_screen_pos()
 }
 
-/// Refuses when the focused window is elevated (UIPI would drop the input).
+/// Refuses keyboard input that would land somewhere it cannot reach or should
+/// not go: an elevated target, or Loom's own focused window.
 pub fn check_input_target() -> Result<()> {
-    own_input_target_blocked()
+    keyboard_target_blocked()
 }
 
 /// The virtual-key code for a key name, for held-key bookkeeping.
@@ -758,7 +902,7 @@ fn key_flags(vk: VIRTUAL_KEY, up: bool) -> KEYBD_EVENT_FLAGS {
 pub fn key(action: &str, name: &str, repeat: u32) -> Result<String> {
     let vk = named_key(name)
         .ok_or_else(|| Error::Other(format!("unknown key name \"{name}\"")))?;
-    own_input_target_blocked()?;
+    keyboard_target_blocked()?;
     for _ in 0..repeat {
         match action {
             "down" => send(&[key_input(vk, key_flags(vk, false))]),
@@ -787,7 +931,7 @@ pub fn combo(keys: &[String], repeat: u32) -> Result<String> {
                 .ok_or_else(|| Error::Other(format!("unknown key name \"{name}\"")))
         })
         .collect::<Result<_>>()?;
-    own_input_target_blocked()?;
+    keyboard_target_blocked()?;
     let downs: Vec<INPUT> = vks
         .iter()
         .map(|vk| key_input(*vk, key_flags(*vk, false)))
@@ -826,20 +970,110 @@ pub fn type_unicode(text: &str) -> Result<String> {
     Ok(format!("typed {} characters", text.chars().count()))
 }
 
+/// The clipboard as it was before Loom touched it.
+enum Previous {
+    /// The whole thing, as an OLE data object: every format, including the
+    /// private ones Loom has no idea how to copy (an image, a file set from
+    /// Explorer, an app's own flavour of a document).
+    Object(IDataObject),
+    /// Only text could be read, so only text can go back.
+    Text(String),
+    /// Nothing could be read. Loom will not clobber what it cannot restore.
+    Nothing,
+}
+
+/// Types `text` by pasting it through the clipboard, then puts the clipboard
+/// back exactly as it was.
+///
+/// Restoring text alone is not enough: an image, a set of copied files, or a
+/// rich-text fragment would be destroyed by the paste and lost for good. The
+/// previous contents are therefore held as an OLE data object and set back
+/// afterwards. When they cannot be held — OLE unavailable, or the clipboard
+/// unreadable — the text is typed out with `SendInput` instead: slower, but
+/// nothing is lost, which is the whole point.
 pub fn type_via_clipboard(text: &str) -> Result<String> {
-    let previous = clipboard_text().ok();
-    write_text(text)?;
+    // The OLE clipboard calls are apartment-bound, and the engine's threads are
+    // already multithreaded (UI Automation initialises them that way), where
+    // `OleInitialize` fails outright. So the whole read-paste-restore dance
+    // runs on a thread of its own, initialised single-threaded.
+    let payload = text.to_string();
+    std::thread::spawn(move || paste_via_clipboard(&payload))
+        .join()
+        .map_err(|_| Error::Other("the clipboard thread panicked".into()))?
+}
+
+fn paste_via_clipboard(text: &str) -> Result<String> {
+    unsafe {
+        let com = CoInitializeEx(None, COINIT_APARTMENTTHREADED).is_ok();
+        let ole = OleInitialize(None).is_ok();
+        let result = paste_via_clipboard_inner(text, ole);
+        if ole {
+            OleUninitialize();
+        }
+        if com {
+            CoUninitialize();
+        }
+        result
+    }
+}
+
+fn paste_via_clipboard_inner(text: &str, ole: bool) -> Result<String> {
+    let previous = if ole {
+        match unsafe { OleGetClipboard() } {
+            Ok(object) => Previous::Object(object),
+            Err(_) => match clipboard_text() {
+                Ok(text) => Previous::Text(text),
+                Err(_) => Previous::Nothing,
+            },
+        }
+    } else {
+        match clipboard_text() {
+            Ok(text) => Previous::Text(text),
+            Err(_) => Previous::Nothing,
+        }
+    };
+
+    // Nothing to restore is not a licence to clobber: typing is slower but
+    // lossless, and the alternative is destroying whatever is on there.
+    if matches!(previous, Previous::Nothing) && clipboard_holds_something() {
+        return type_unicode(text).map(|summary| {
+            format!("{summary} (the clipboard held something Loom could not read, so it was left alone)")
+        });
+    }
+
+    if let Err(error) = write_text(text) {
+        return type_unicode(text).map(|summary| format!("{summary} ({error})"));
+    }
     std::thread::sleep(std::time::Duration::from_millis(120));
     let pressed = combo(&["ctrl".into(), "v".into()], 1)?;
-    std::thread::sleep(std::time::Duration::from_millis(250));
+    // Long enough for a slow app to read the clipboard before it changes back:
+    // a target that reads late would otherwise paste the restored contents.
+    std::thread::sleep(std::time::Duration::from_millis(400));
+
     let restored = match previous {
-        Some(previous) => write_text(&previous).is_ok(),
-        None => false,
+        Previous::Object(object) => unsafe {
+            let placed = OleSetClipboard(Some(&object)).is_ok();
+            if placed {
+                // Put it back in static form, so it survives this thread and
+                // Loom releasing the object.
+                let _ = OleFlushClipboard();
+                clipboard_holds_something()
+            } else {
+                false
+            }
+        },
+        Previous::Text(previous) => write_text(&previous).is_ok(),
+        Previous::Nothing => false,
     };
+
     Ok(format!(
         "typed {} characters via clipboard ({pressed}); previous clipboard {}",
         text.chars().count(),
-        if restored { "restored" } else { "not restored" }
+        if restored {
+            "restored"
+        } else {
+            "NOT restored — copy it again if you needed it"
+        }
     ))
 }
 
@@ -847,10 +1081,21 @@ pub fn type_via_clipboard(text: &str) -> Result<String> {
 // clipboard
 // ------------------------------------------------------------------
 
+const CF_BITMAP: u32 = 2;
+const CF_DIB: u32 = 8;
 const CF_UNICODETEXT: u32 = 13;
 const CF_HDROP: u32 = 15;
 
+/// The clipboard's text, in full. Used where the exact contents have to go
+/// back afterwards, so it is deliberately uncapped.
 fn clipboard_text() -> Result<String> {
+    clipboard_text_capped(usize::MAX).map(|(text, _)| text)
+}
+
+/// The clipboard's text, stopping after `max` characters. Returns the text and
+/// whether it was cut short: a clipboard can hold hundreds of megabytes, and
+/// building that string to then trim it is the whole cost.
+fn clipboard_text_capped(max: usize) -> Result<(String, bool)> {
     unsafe {
         OpenClipboard(None).map_err(|error| Error::Other(format!("clipboard busy: {error}")))?;
         let result = (|| {
@@ -861,16 +1106,27 @@ fn clipboard_text() -> Result<String> {
                 return Err(Error::Other("clipboard text was locked".into()));
             }
             let mut length = 0usize;
-            while *pointer.add(length) != 0 {
+            while length <= max && *pointer.add(length) != 0 {
                 length += 1;
             }
+            let truncated = length > max;
+            let length = length.min(max);
             let text = String::from_utf16_lossy(std::slice::from_raw_parts(pointer, length));
             let _ = GlobalUnlock(HGLOBAL(handle.0));
-            Ok(text)
+            Ok((text, truncated))
         })();
         let _ = CloseClipboard();
         result
     }
+}
+
+/// Whether the clipboard holds anything at all. Used to check that a restore
+/// actually landed rather than assuming it did.
+fn clipboard_holds_something() -> bool {
+    clipboard_text().is_ok()
+        || unsafe { IsClipboardFormatAvailable(CF_HDROP) }.is_ok()
+        || unsafe { IsClipboardFormatAvailable(CF_DIB) }.is_ok()
+        || unsafe { IsClipboardFormatAvailable(CF_BITMAP) }.is_ok()
 }
 
 fn write_bytes(format: u32, bytes: &[u8], utf16_terminator: bool) -> Result<()> {
@@ -941,7 +1197,7 @@ fn write_files(paths: &[String]) -> Result<()> {
     write_bytes(CF_HDROP, &payload, false)
 }
 
-pub fn clipboard(arguments: &Value) -> Result<String> {
+pub fn clipboard(arguments: &Value, read_chars: usize) -> Result<String> {
     let action = arguments
         .get("action")
         .and_then(Value::as_str)
@@ -949,10 +1205,12 @@ pub fn clipboard(arguments: &Value) -> Result<String> {
     match action {
         "read" => {
             if unsafe { IsClipboardFormatAvailable(CF_UNICODETEXT) }.is_ok() {
-                let mut text = clipboard_text()?;
-                if text.chars().count() > 10_000 {
-                    text = text.chars().take(10_000).collect::<String>() + "… [truncated]";
-                }
+                let (text, truncated) = clipboard_text_capped(read_chars)?;
+                let text = if truncated {
+                    format!("{text}… [truncated at {read_chars} characters]")
+                } else {
+                    text
+                };
                 Ok(format!("clipboard text:\n{text}"))
             } else if unsafe { IsClipboardFormatAvailable(CF_HDROP) }.is_ok() {
                 Ok("clipboard holds files, not text".to_string())
@@ -1733,7 +1991,13 @@ fn element_at(
     Ok(current)
 }
 
-pub fn ui_act(hwnd: isize, path: &[u32], action: &str, value: Option<&str>) -> Result<String> {
+pub fn ui_act(
+    hwnd: isize,
+    path: &[u32],
+    action: &str,
+    value: Option<&str>,
+    expected: Option<&str>,
+) -> Result<String> {
     if hwnd == 0 {
         return Err(Error::Other("run `ui tree` again".into()));
     }
@@ -1742,6 +2006,18 @@ pub fn ui_act(hwnd: isize, path: &[u32], action: &str, value: Option<&str>) -> R
     let name = unsafe { element.CurrentName() }
         .map(|value| value.to_string())
         .unwrap_or_default();
+
+    // The path is a position, not an identity: the window may have been
+    // rebuilt since the tree was read, in which case this element is a
+    // different one and acting on it would press the wrong button.
+    if let Some(expected) = expected {
+        if name != expected {
+            return Err(Error::Other(format!(
+                "the element at that id is now \"{name}\", not \"{expected}\"; run `ui tree` \
+                 again"
+            )));
+        }
+    }
 
     match action {
         "invoke" => {
@@ -1809,15 +2085,55 @@ pub fn ui_act(hwnd: isize, path: &[u32], action: &str, value: Option<&str>) -> R
 // takeover watch
 // ------------------------------------------------------------------
 
+/// The hooks are installed and working.
+const HOOKS_INSTALLED: u8 = 1;
+/// Neither hook could be installed: takeover detection is off.
+const HOOKS_UNAVAILABLE: u8 = 2;
+
+/// What the low-level hooks report, shared with the app.
+#[derive(Default)]
 struct HookShared {
+    /// Whether real input counts right now (a computer turn is running).
     armed: AtomicBool,
-    tripped: AtomicBool,
+    /// Set by a hook, consumed by [`TakeoverWatch::take_trip`]. Edge-triggered
+    /// on purpose: a level flag that nothing cleared is why every resume was
+    /// undone 150 ms later.
+    trip: AtomicBool,
+    /// When real input last arrived (epoch ms), movement included.
     last_input_ms: AtomicU64,
-    ignored: AtomicI64,
+    /// Id of the hook thread, once it is running.
     thread: AtomicU32,
+    /// [`HOOKS_INSTALLED`], [`HOOKS_UNAVAILABLE`], or 0 while the hook thread
+    /// has not tried yet. The distinction matters: "not yet tried" is not a
+    /// failure and must not be reported as one.
+    hooks: AtomicU8,
 }
 
 static WATCH: OnceLock<Arc<HookShared>> = OnceLock::new();
+
+/// Windows that are Loom's own. Kept apart from the hook state so the main
+/// window can register itself before any computer turn has ever run.
+static OWN_WINDOWS: OnceLock<RwLock<Vec<isize>>> = OnceLock::new();
+
+fn own_windows() -> &'static RwLock<Vec<isize>> {
+    OWN_WINDOWS.get_or_init(|| RwLock::new(Vec::new()))
+}
+
+/// True when `hwnd` is one of Loom's own windows, or a child of one.
+fn is_own_window(hwnd: HWND) -> bool {
+    if hwnd.0.is_null() {
+        return false;
+    }
+    let Ok(list) = own_windows().read() else {
+        return false;
+    };
+    if list.is_empty() {
+        return false;
+    }
+    let root = unsafe { GetAncestor(hwnd, GA_ROOT) };
+    list.iter()
+        .any(|own| *own == hwnd.0 as isize || *own == root.0 as isize)
+}
 
 /// Watches for real (non-injected) mouse and keyboard input while a computer
 /// turn runs, so the user touching the machine can pause it.
@@ -1827,20 +2143,42 @@ pub struct TakeoverWatch {
 }
 
 impl TakeoverWatch {
+    /// Arms the watch, installing the hooks on first use.
+    ///
+    /// Returns an error when the hooks cannot be installed. Silently carrying
+    /// on would leave takeover protection off with no sign of it, which is
+    /// exactly the sort of quiet failure that makes the user distrust the
+    /// thing; the caller records the reason and the pill shows it.
     pub fn start() -> Result<Self> {
         let shared = WATCH.get_or_init(|| {
-            let shared = Arc::new(HookShared {
-                armed: AtomicBool::new(false),
-                tripped: AtomicBool::new(false),
-                last_input_ms: AtomicU64::new(0),
-                ignored: AtomicI64::new(0),
-                thread: AtomicU32::new(0),
-            });
+            let shared = Arc::new(HookShared::default());
             spawn_hook_thread(Arc::clone(&shared));
             shared
         });
+
+        // The hook thread installs asynchronously, so wait briefly the first
+        // time to find out whether it worked.
+        for _ in 0..50 {
+            match shared.hooks.load(Ordering::Acquire) {
+                HOOKS_INSTALLED => break,
+                HOOKS_UNAVAILABLE => {
+                    return Err(Error::Other(
+                        "the low-level input hooks could not be installed, so Loom cannot tell \
+                         when you take the machine back"
+                            .into(),
+                    ))
+                }
+                _ => std::thread::sleep(std::time::Duration::from_millis(10)),
+            }
+        }
+        if shared.hooks.load(Ordering::Acquire) != HOOKS_INSTALLED {
+            return Err(Error::Other(
+                "the input hooks did not install in time".into(),
+            ));
+        }
+
         shared.armed.store(true, Ordering::Relaxed);
-        shared.tripped.store(false, Ordering::Relaxed);
+        shared.trip.store(false, Ordering::Relaxed);
         shared.last_input_ms.store(0, Ordering::Relaxed);
         Ok(Self {
             shared: Arc::clone(shared),
@@ -1848,8 +2186,17 @@ impl TakeoverWatch {
         })
     }
 
-    pub fn tripped(&self) -> bool {
-        self.shared.tripped.load(Ordering::Relaxed)
+    /// Consumes a pending takeover: true at most once per real input event.
+    /// Consuming rather than sampling is what makes a single click produce a
+    /// single pause.
+    pub fn take_trip(&self) -> bool {
+        self.shared.trip.swap(false, Ordering::SeqCst)
+    }
+
+    /// Drops a pending trip without pausing. Resume calls this, so the click
+    /// that asked for it cannot be read back as a fresh takeover.
+    pub fn clear_trip(&self) {
+        self.shared.trip.store(false, Ordering::SeqCst);
     }
 
     pub fn idle_ms(&self) -> u64 {
@@ -1860,6 +2207,9 @@ impl TakeoverWatch {
         now_ms().saturating_sub(last)
     }
 
+    /// Starts the idle clock here. Used when a pause begins, so the countdown
+    /// to auto-resume measures silence since the pause, not since the last
+    /// keystroke of a turn that has been running a while.
     pub fn mark_input_now(&self) {
         self.shared
             .last_input_ms
@@ -1872,77 +2222,119 @@ impl TakeoverWatch {
 
     pub fn stop(&self) {
         self.shared.armed.store(false, Ordering::Relaxed);
-        self.shared.tripped.store(false, Ordering::Relaxed);
+        self.shared.trip.store(false, Ordering::Relaxed);
         self.stop.store(true, Ordering::Relaxed);
     }
 }
 
-/// Marks a window whose input is Loom's own UI (the control pill): clicking
-/// Stop must not count as the user taking over.
+/// Registers a window as Loom's own: input over it is the user driving Loom,
+/// not taking the machine over. Called for every window Loom shows — the main
+/// window, the quick-ask overlay, and the control pill.
+///
+/// Additive on purpose. The old version stored a single hwnd, so clicking
+/// anywhere in Loom's main window counted as a takeover.
 pub fn set_ignored_window(hwnd: isize) {
+    if hwnd == 0 {
+        return;
+    }
+    if let Ok(mut list) = own_windows().write() {
+        if !list.contains(&hwnd) {
+            list.push(hwnd);
+        }
+    }
+}
+
+/// Marks a window as never taking focus. The control pill is a button the user
+/// presses while Loom is driving another app; clicking it must not steal focus
+/// from that app, or the key the model sends next goes somewhere else.
+pub fn make_window_non_activating(hwnd: isize) {
+    if hwnd == 0 {
+        return;
+    }
+    unsafe {
+        let window = HWND(hwnd as *mut core::ffi::c_void);
+        let style = GetWindowLongPtrW(window, GWL_EXSTYLE) as u32;
+        SetWindowLongPtrW(
+            window,
+            GWL_EXSTYLE,
+            (style | WS_EX_NOACTIVATE.0) as isize,
+        );
+    }
+}
+
+/// Trips the latch exactly as a real key press does, for the debug-only
+/// command the probe uses. Does nothing when no computer turn is watching.
+pub fn trip_takeover_for_debug() {
     if let Some(shared) = WATCH.get() {
-        shared.ignored.store(hwnd as i64, Ordering::Relaxed);
-    } else {
-        let _ = TakeoverWatch::start();
-        if let Some(shared) = WATCH.get() {
-            shared.ignored.store(hwnd as i64, Ordering::Relaxed);
+        if shared.armed.load(Ordering::Relaxed) {
+            shared.trip.store(true, Ordering::SeqCst);
+        }
+    }
+}
+
+/// Removes both hooks when the thread that owns them ends.
+struct HookGuard {
+    mouse: HHOOK,
+    keyboard: HHOOK,
+}
+
+impl Drop for HookGuard {
+    fn drop(&mut self) {
+        unsafe {
+            let _ = UnhookWindowsHookEx(self.mouse);
+            let _ = UnhookWindowsHookEx(self.keyboard);
         }
     }
 }
 
 fn spawn_hook_thread(shared: Arc<HookShared>) {
     std::thread::spawn(move || unsafe {
-        let mouse = SetWindowsHookExW(WH_MOUSE_LL, Some(mouse_hook), None, 0)
-            .ok()
-            .map(|hook| hook);
-        let keyboard = SetWindowsHookExW(WH_KEYBOARD_LL, Some(keyboard_hook), None, 0)
-            .ok()
-            .map(|hook| hook);
-        if mouse.is_none() || keyboard.is_none() {
-            eprintln!("[loom] input hooks are unavailable; takeover detection is off");
-            return;
-        }
+        let mouse = SetWindowsHookExW(WH_MOUSE_LL, Some(mouse_hook), None, 0).ok();
+        let keyboard = SetWindowsHookExW(WH_KEYBOARD_LL, Some(keyboard_hook), None, 0).ok();
+        let (mouse, keyboard) = match (mouse, keyboard) {
+            (Some(mouse), Some(keyboard)) => (mouse, keyboard),
+            _ => {
+                // One hook without the other is not protection. Drop the one
+                // that worked rather than leaking it, and say so.
+                if let Some(hook) = mouse {
+                    let _ = UnhookWindowsHookEx(hook);
+                }
+                if let Some(hook) = keyboard {
+                    let _ = UnhookWindowsHookEx(hook);
+                }
+                shared.hooks.store(HOOKS_UNAVAILABLE, Ordering::Release);
+                eprintln!("[loom] input hooks are unavailable; takeover detection is off");
+                return;
+            }
+        };
+        shared.hooks.store(HOOKS_INSTALLED, Ordering::Release);
         shared.thread.store(GetCurrentThreadId(), Ordering::Relaxed);
+        let _guard = HookGuard { mouse, keyboard };
 
         let mut message = MSG::default();
         while GetMessageW(&mut message, None, 0, 0).as_bool() {
             let _ = TranslateMessage(&message);
             DispatchMessageW(&message);
         }
-
-        // Thread ending: remove the hooks (only reached if the message loop
-        // is stopped, which the app does not currently do).
-        if let Some(hook) = mouse {
-            let _ = windows::Win32::UI::WindowsAndMessaging::UnhookWindowsHookEx(hook);
-        }
-        if let Some(hook) = keyboard {
-            let _ = windows::Win32::UI::WindowsAndMessaging::UnhookWindowsHookEx(hook);
-        }
+        // The thread only ends when the message loop does; the guard unhooks.
     });
 }
 
-fn over_ignored_window(point: POINT) -> bool {
-    let Some(shared) = WATCH.get() else {
-        return false;
-    };
-    let ignored = shared.ignored.load(Ordering::Relaxed);
-    if ignored == 0 {
-        return false;
-    }
-    let window = unsafe { WindowFromPoint(point) };
-    if window.0.is_null() {
-        return false;
-    }
-    let root = unsafe { GetAncestor(window, GA_ROOT) };
-    root.0 as i64 == ignored || window.0 as i64 == ignored
+/// Whether a point is over one of Loom's own windows.
+fn over_own_window(point: POINT) -> bool {
+    is_own_window(unsafe { WindowFromPoint(point) })
 }
 
-fn note_real_input(shared: &HookShared) {
-    if shared.armed.load(Ordering::Relaxed) {
-        shared.tripped.store(true, Ordering::Relaxed);
-        shared
-            .last_input_ms
-            .store(now_ms(), Ordering::Relaxed);
+/// Records a real input event. Movement only refreshes the idle clock; a
+/// deliberate act trips the latch, which the bridge consumes, so one physical
+/// event produces exactly one pause.
+fn note_real_input(shared: &HookShared, kind: super::InputKind, injected: bool, over_own: bool) {
+    if injected {
+        return;
+    }
+    shared.last_input_ms.store(now_ms(), Ordering::Relaxed);
+    if super::takeover_input(kind, false, over_own) {
+        shared.trip.store(true, Ordering::Relaxed);
     }
 }
 
@@ -1952,9 +2344,16 @@ unsafe extern "system" fn mouse_hook(code: i32, wparam: WPARAM, lparam: LPARAM) 
             if shared.armed.load(Ordering::Relaxed) {
                 let info = &*(lparam.0 as *const MSLLHOOKSTRUCT);
                 let injected = info.flags & LLMHF_INJECTED != 0;
-                if !injected && !over_ignored_window(info.pt) {
-                    note_real_input(shared);
-                }
+                // Everything except bare movement is a deliberate act: button
+                // down and up, a wheel notch, a horizontal wheel. Movement only
+                // refreshes the idle clock, because reaching for the Resume
+                // button is itself movement.
+                let kind = if wparam.0 as u32 == WM_MOUSEMOVE {
+                    super::InputKind::Move
+                } else {
+                    super::InputKind::Press
+                };
+                note_real_input(shared, kind, injected, over_own_window(info.pt));
             }
         }
     }
@@ -1967,9 +2366,10 @@ unsafe extern "system" fn keyboard_hook(code: i32, wparam: WPARAM, lparam: LPARA
             if shared.armed.load(Ordering::Relaxed) {
                 let info = &*(lparam.0 as *const KBDLLHOOKSTRUCT);
                 let injected = info.flags.0 & LLKHF_INJECTED.0 != 0;
-                if !injected {
-                    note_real_input(shared);
-                }
+                // A key event carries no point: the window it will reach is
+                // whichever one has focus.
+                let own = is_own_window(GetForegroundWindow());
+                note_real_input(shared, super::InputKind::Press, injected, own);
             }
         }
     }

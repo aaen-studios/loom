@@ -14,15 +14,17 @@ fn unsupported<T>() -> Result<T> {
     Err(Error::Other(UNSUPPORTED.into()))
 }
 
+/// There are no hooks off Windows, so there is never a trip to consume.
 pub struct TakeoverWatch;
 
 impl TakeoverWatch {
     pub fn start() -> Result<Self> {
         unsupported()
     }
-    pub fn tripped(&self) -> bool {
+    pub fn take_trip(&self) -> bool {
         false
     }
+    pub fn clear_trip(&self) {}
     pub fn idle_ms(&self) -> u64 {
         0
     }
@@ -34,6 +36,10 @@ impl TakeoverWatch {
 }
 
 pub fn set_ignored_window(_hwnd: isize) {}
+
+pub fn make_window_non_activating(_hwnd: isize) {}
+
+pub fn trip_takeover_for_debug() {}
 
 pub fn capture(_request: &Capture) -> Result<CaptureResult> {
     unsupported()
@@ -85,7 +91,7 @@ pub fn type_via_clipboard(_text: &str) -> Result<String> {
     unsupported()
 }
 
-pub fn clipboard(_arguments: &Value) -> Result<String> {
+pub fn clipboard(_arguments: &Value, _read_chars: usize) -> Result<String> {
     unsupported()
 }
 
@@ -125,7 +131,13 @@ pub fn ui_tree(
     unsupported()
 }
 
-pub fn ui_act(_hwnd: isize, _path: &[u32], _action: &str, _value: Option<&str>) -> Result<String> {
+pub fn ui_act(
+    _hwnd: isize,
+    _path: &[u32],
+    _action: &str,
+    _value: Option<&str>,
+    _expected: Option<&str>,
+) -> Result<String> {
     unsupported()
 }
 

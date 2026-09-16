@@ -1,4 +1,4 @@
-import type { Attachment, ToolCallRecord, Usage } from "../types";
+import type { Attachment, Condensed, ToolCallRecord, Usage } from "../types";
 
 /**
  * `messages.extra` has two shapes: user messages store an attachment array,
@@ -222,6 +222,60 @@ export function parseNotice(extra: string | null): Notice | null {
   } catch {
     return null;
   }
+}
+
+/**
+ * The condensed view a reply was answered from, if it was. Reads the record the
+ * engine writes on the message, so the faint line under a reply survives a
+ * reload rather than being something only the live event knew.
+ *
+ * Deliberately not a `Notice`: a turn answered from a summary succeeded, and
+ * the transcript must not present it as a stopped turn with a Retry button.
+ */
+export function parseCondensed(extra: string | null): Condensed | null {
+  if (!extra) return null;
+  try {
+    const parsed = JSON.parse(extra);
+    const condensed = parsed?.condensed;
+    if (!condensed || typeof condensed.covered !== "number" || condensed.covered <= 0) {
+      return null;
+    }
+    return {
+      covered: condensed.covered,
+      // Anything unrecognised is treated as the fallback, which is the honest
+      // reading: it is what the block was built from when nothing wrote one.
+      source: condensed.source === "summary" ? "summary" : "digest",
+      tokens: typeof condensed.tokens === "number" ? condensed.tokens : 0,
+    };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Records the condensed view on a message's `extra`, so the faint line under
+ * the reply appears the moment the turn ends rather than a reload later.
+ *
+ * A no-op when there was no fold, which is most turns in a short chat.
+ */
+export function withCondensed(
+  extra: string | null,
+  condensed: Condensed | null | undefined,
+): string | null {
+  if (!condensed) return extra;
+  let base: Record<string, unknown> = {};
+  if (extra) {
+    try {
+      const parsed = JSON.parse(extra);
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+        base = parsed as Record<string, unknown>;
+      }
+    } catch {
+      // Unparseable to start with: replace it rather than compound the
+      // damage. The record was already unreadable.
+    }
+  }
+  return JSON.stringify({ ...base, condensed });
 }
 
 export function parseUsage(extra: string | null): Usage | null {

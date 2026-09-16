@@ -1,0 +1,16 @@
+# Build output
+.next
+out
+.vercel
+
+# Dependencies
+node_modules
+
+# Next rewrites this on every run, so it is generated rather than source.
+next-env.d.ts
+
+# TypeScript
+*.tsbuildinfo
+
+# Local environment
+.env*.local

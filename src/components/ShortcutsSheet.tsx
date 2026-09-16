@@ -15,7 +15,7 @@ const SHORTCUTS: { group: string; items: Shortcut[] }[] = [
       { keys: "Ctrl+K", action: "Chats popup (search, rename, export)" },
       { keys: "Ctrl+,", action: "Settings" },
       { keys: "Ctrl+Shift+Space", action: "Quick-ask overlay from anywhere" },
-      { keys: "Ctrl+Alt+Esc", action: "Stop computer use from anywhere" },
+      { keys: "Ctrl+Alt+Esc", action: "Stop the computer turn, from anywhere" },
     ],
   },
   {
@@ -27,6 +27,13 @@ const SHORTCUTS: { group: string; items: Shortcut[] }[] = [
       { keys: "E", action: "Edit the selected message (yours)" },
       { keys: "R", action: "Regenerate the selected reply" },
       { keys: "Shift+Delete", action: "Delete the selected message" },
+    ],
+  },
+  {
+    group: "Voice",
+    items: [
+      { keys: "Ctrl+Shift+V", action: "Voice mode: speak and listen" },
+      { keys: "Esc", action: "Leave voice mode" },
     ],
   },
   {

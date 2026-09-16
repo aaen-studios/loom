@@ -31,6 +31,13 @@ export const BUILTIN_COMMANDS: BuiltinCommand[] = [
     argsHint: "<message>",
   },
   {
+    id: "chat",
+    label: "Chat, then send",
+    description:
+      "Switches this chat to Chat mode — answers from the model and the web only — and sends the text after it.",
+    argsHint: "<message>",
+  },
+  {
     id: "new",
     label: "New chat",
     description: "Same as Ctrl+N.",

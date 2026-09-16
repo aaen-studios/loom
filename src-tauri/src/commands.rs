@@ -19,18 +19,36 @@ use loom_core::{config, paths, secrets, Error};
 pub struct AppState {
     pub engine: Engine,
     pub config: SharedConfig,
+    /// Voice mode's worker thread and cancellation flag.
+    pub voice: crate::voice::VoiceService,
+    /// Speech to text: its own thread, so recognition is never queued behind
+    /// synthesis.
+    pub dictation: crate::voice::DictationService,
+    /// Whether an install is running, so two cannot start at once.
+    pub installing: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl AppState {
     pub fn new(engine: Engine, config: SharedConfig) -> Self {
-        Self { engine, config }
+        Self {
+            engine,
+            config,
+            voice: crate::voice::VoiceService::new(),
+            dictation: crate::voice::DictationService::new(),
+            installing: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        }
     }
 
     pub fn snapshot(&self) -> AppConfig {
         self.config.lock().expect("config mutex poisoned").clone()
     }
 
-    fn mutate(&self, change: impl FnOnce(&mut AppConfig)) -> Result<AppConfig, String> {
+    /// Saves the whole config back to disk.
+    ///
+    /// `pub(crate)` rather than private: the voice module owns its own settings
+    /// surface and needs the same write-and-reload path, including the
+    /// mutex discipline, rather than a second implementation of it.
+    pub(crate) fn mutate(&self, change: impl FnOnce(&mut AppConfig)) -> Result<AppConfig, String> {
         let snapshot = {
             let mut guard = self.config.lock().expect("config mutex poisoned");
             change(&mut guard);
@@ -660,6 +678,17 @@ pub fn session_goal(state: State<'_, AppState>, id: String) -> Result<Option<Str
     state.engine.session_goal(&id).map_err(to_string)
 }
 
+/// The chat's condensed view of its older turns, for the transcript's
+/// expander. Fetched on demand rather than copied onto every reply, because the
+/// summary is identical for every turn between two folds.
+#[tauri::command]
+pub fn session_summary(
+    state: State<'_, AppState>,
+    id: String,
+) -> Result<Option<loom_core::db::SessionSummary>, String> {
+    state.engine.session_summary(&id).map_err(to_string)
+}
+
 #[tauri::command]
 pub fn session_todos(
     state: State<'_, AppState>,
@@ -681,11 +710,17 @@ pub fn set_todos(
     state.engine.session_todos(&id).map_err(to_string)
 }
 
-/// The pill's Stop and the panic hotkey: every running computer turn ends now.
+/// The pill's Stop, the chip's Stop, and the panic hotkey.
+///
+/// Ends the chat that is driving the machine — and only that one. It used to
+/// call `cancel_all`, so pressing Stop on a pill that says "Loom is controlling
+/// your computer" also cancelled every other chat's turn and every detached
+/// background run.
 #[tauri::command]
 pub fn stop_computer(app: AppHandle, state: State<'_, AppState>) {
-    state.engine.cancel_all();
+    let stopped = state.engine.stop_computer();
     crate::hide_computer_pill(&app);
+    let _ = app.emit("loom://computer-stopped", stopped);
 }
 
 /// The pill's Resume (and the chip's): the paused turn carries on, after
@@ -693,6 +728,24 @@ pub fn stop_computer(app: AppHandle, state: State<'_, AppState>) {
 #[tauri::command]
 pub fn resume_computer(state: State<'_, AppState>) -> bool {
     state.engine.resume_computer()
+}
+
+/// Debug-only: trips the takeover latch exactly as a real key press does.
+///
+/// The resume path cannot be tested otherwise — proving that a Resume sticks
+/// needs a takeover that no human had to perform. Compiled out of release
+/// builds entirely, and the probe script is the only caller.
+#[tauri::command]
+pub fn debug_trip_computer_takeover() -> Result<(), String> {
+    #[cfg(debug_assertions)]
+    {
+        loom_core::computer::trip_takeover_for_debug();
+        Ok(())
+    }
+    #[cfg(not(debug_assertions))]
+    {
+        Err("takeover simulation is available only in debug builds".to_string())
+    }
 }
 
 #[derive(Serialize)]
@@ -703,6 +756,14 @@ pub struct ComputerStatus {
     pub session_id: Option<String>,
     pub idle_seconds: u64,
     pub paused_seconds: u64,
+    /// Seconds of silence that will auto-resume a paused turn. The engine's own
+    /// constant, so the countdown the pill shows is the one that is in force.
+    pub resume_in_seconds: u64,
+    /// False when the input hooks could not be installed, so the user is not
+    /// left believing Loom will stop the moment they touch the mouse.
+    pub takeover_active: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub takeover_error: Option<String>,
 }
 
 /// Polled by the pill so its paused state can show the auto-resume countdown.
@@ -710,6 +771,7 @@ pub struct ComputerStatus {
 pub fn computer_status(state: State<'_, AppState>) -> ComputerStatus {
     let holder = state.engine.computer_holder();
     let (paused, idle_ms, paused_ms) = state.engine.computer_status();
+    let (takeover_active, takeover_error) = state.engine.takeover_health();
     let label = if paused {
         "paused"
     } else if holder.is_some() {
@@ -722,6 +784,9 @@ pub fn computer_status(state: State<'_, AppState>) -> ComputerStatus {
         session_id: holder,
         idle_seconds: idle_ms / 1000,
         paused_seconds: paused_ms / 1000,
+        resume_in_seconds: loom_core::engine::PAUSE_IDLE_RESUME_SECONDS,
+        takeover_active,
+        takeover_error,
     }
 }
 

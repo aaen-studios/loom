@@ -1,0 +1,534 @@
+/*
+ * The site's entry stylesheet.
+ *
+ * `loom-tokens.css` is generated — never edit it. `scripts/sync-site-tokens.mjs`
+ * lifts the regions of the app's `src/styles.css` fenced by
+ * `loom-site:<name>:start` / `:end` comments and copies them here verbatim. So the
+ * app's own `@utility` surfaces (`panel`, `panel-strong`, `pill`, `btn-primary`,
+ * `chip`, `kbd`, the concentric radius scale, the `loom-*` keyframes) exist in
+ * this project with no reimplementation and cannot drift in behaviour.
+ */
+@import "tailwindcss";
+@import "./loom-tokens.css";
+
+/* ---------------------------------------------------------------------------
+   The one token that is deliberately not shared
+--------------------------------------------------------------------------- */
+
+/*
+ * `--font-sans` is excluded from the generated sheet because the two projects
+ * receive Inter by different means and neither is expressible in plain CSS. The
+ * app bundles the woff2 through Vite; this project loads the same binary through
+ * `next/font/local`, which preloads it and inlines the metric overrides. So the
+ * family has to be assembled here from the variable Next injects. The rest of the
+ * stack is the app's, character for character.
+ */
+@theme {
+  --font-sans:
+    var(--font-inter), "Inter Variable", "Inter", ui-sans-serif, system-ui,
+    -apple-system, "Segoe UI", sans-serif;
+}
+
+/* ===========================================================================
+   THE LOOM
+
+   Everything below this line is this project's own, and none of it is in a
+   marked region — which is the point. The app has no website, so it has no
+   opinion about how one is woven.
+
+   The organising idea: a page is a cloth. There is a warp (vertical threads held
+   under tension) strung before anything is woven, a shuttle that carries a weft
+   across it, and a shed — the gap that opens between lifted and unlifted threads
+   — into which each pass of the weft goes. Content lives in sheds. The warp is
+   the grid. The weft is the reading position.
+
+   That is why the layout variables below are shared between the *background*
+   (`.warp-field`, which draws the threads) and the *content* (`.warp-grid`, which
+   places everything). They are the same twelve columns measured the same way, so
+   a thread can never drift off the thing it is supposed to be holding.
+
+   ---------------------------------------------------------------------------
+   Why the threads are drawn in the app's colours
+   ---------------------------------------------------------------------------
+
+   The seven `--thread-*` custom properties are in the shared `tokens` region, in
+   both palettes: the app uses them for the quick-ask overlay's own woven column
+   (a warp rail, a knot per reply, a shuttle for the composer). So this site is
+   strung with the product's real thread colours rather than with a palette
+   invented for a landing page.
+
+   The *rules* the app builds from those tokens — `.ask-rail`, `.ask-shuttle`,
+   `.ask-reply`, `.ask-weaving` — are deliberately outside the marked regions and
+   `verify-tokens.mjs` fails the build if any of them reach this stylesheet. That
+   is the right boundary: the site shares the app's material, not its surfaces.
+   Everything woven below is therefore drawn from scratch on top of the shared
+   thread palette.
+=========================================================================== */
+
+:root {
+  /* The two colours the app paints behind itself before React mounts, exposed so
+     the sticky header's scrim can fade into exactly this rather than guessing. */
+  --site-light: #eef1f7;
+  --site-dark: #070a12;
+
+  /* --- the loom itself --- */
+  --warp-columns: 12;
+  --warp-gutter: clamp(1rem, 3.5vw, 3rem);
+  --warp-gap: clamp(0.75rem, 1.5vw, 1.75rem);
+  --warp-max: 92rem;
+
+  /* How far down the viewport the shuttle is considered to be reading. Slightly
+     above centre, because people read the upper half of a screen. */
+  --reading-line: 42vh;
+
+  /* The weft's position, written by `Shuttle` on scroll. Parked off-screen and
+     invisible until it has been measured, so the first frame is not a line lying
+     across the top of the page. */
+  --weft-y: -2px;
+  --weft-on: 0;
+
+  /*
+   * Where the outermost threads actually are, horizontally.
+   *
+   * This is not the same as `--warp-gutter`, and getting that wrong is a bug you
+   * only see on a wide monitor: the cloth is capped at `--warp-max` and *centred*,
+   * so on a viewport wider than the cap the first thread sits at the centring
+   * margin **plus** the gutter. On a 5120px screen that is 1824 + 48 = 1872px from
+   * the edge, not 48px — and a weft whose end-knots were pinned at the gutter
+   * would float in the margin, nowhere near the threads they are supposed to be
+   * crossing.
+   *
+   * `max(0px, …)` covers the narrow case, where the cloth is the full width and
+   * there is no centring margin to add.
+   */
+  --warp-edge: calc(
+    max(0px, (100vw - var(--warp-max)) / 2) + var(--warp-gutter)
+  );
+
+  /* How far below a pass's top edge the weft parks. Passes have `py-16`, so this
+     keeps the line in the section's own top whitespace rather than across the
+     eyebrow it belongs to. */
+  --weft-offset: 28px;
+}
+
+html {
+  scroll-behavior: smooth;
+  /* Light is the default here as it is in the app, and the shared
+     `html:not(.dark)` block already keys off this class — so the copied tokens
+     apply unchanged and nothing has to override anything. */
+  color-scheme: light;
+}
+
+html.dark {
+  color-scheme: dark;
+}
+
+body {
+  margin: 0;
+  font-family: var(--font-sans);
+  color: var(--ink);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+  /* The app's shell rule is `body { overflow: hidden }` — correct for a fixed,
+     chrome-less window and catastrophic for a document. It is outside every
+     marked region for that reason, and `verify-tokens.mjs` asserts no `#root`
+     rule and no `body` overflow rule reach the built stylesheet. */
+}
+
+@media (prefers-reduced-motion: reduce) {
+  html {
+    scroll-behavior: auto;
+  }
+}
+
+/* ---------------------------------------------------------------------------
+   The warp: twelve threads, strung before anything is woven
+
+   Fixed, full height, drawn behind everything. They are not a decorative
+   texture — `.warp-grid` below measures its columns the same way, so content
+   genuinely lands on them. Change `--warp-columns` and both ends move together.
+--------------------------------------------------------------------------- */
+
+.warp-field {
+  position: fixed;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+  /* Faded at the very top and bottom, because a thread with a hard cut-off reads
+     as a border rather than as tension. */
+  mask-image: linear-gradient(
+    to bottom,
+    transparent 0,
+    #000 6rem,
+    #000 calc(100% - 6rem),
+    transparent 100%
+  );
+  -webkit-mask-image: linear-gradient(
+    to bottom,
+    transparent 0,
+    #000 6rem,
+    #000 calc(100% - 6rem),
+    transparent 100%
+  );
+}
+
+.warp-line {
+  /* A hairline at the leading edge of each column, so the thread and the column
+     share an origin. */
+  border-left: 1px solid var(--thread-line);
+  opacity: 0.7;
+}
+
+/* The outermost threads are drawn stronger: a real warp is under more tension at
+   its edges, and it gives the field a frame. */
+.warp-line:first-child,
+.warp-line:last-child {
+  border-left-color: var(--thread-line-strong);
+  opacity: 1;
+}
+
+/*
+ * Warping the loom.
+ *
+ * A loom is warped before anything is woven: the threads are strung and brought up
+ * to tension one at a time, left to right, and only then does the first pick go in.
+ * So the page opens the same way — the twelve threads draw down in sequence and the
+ * cloth arrives into a warp that is already there.
+ *
+ * `scale` rather than `transform`, and `transform-origin: top`, so the thread grows
+ * downward from the beam instead of expanding from its own centre. The `scale`
+ * property is used rather than a transform so it cannot clobber anything else that
+ * later wants to transform a thread.
+ *
+ * `--i` is set per thread by `warp.tsx`. Nothing else keys off it, so a browser that
+ * ignores the property simply gets twelve threads that are already up.
+ *
+ * Skipped entirely under `prefers-reduced-motion`: this is a page-load flourish, and
+ * the honest reading of that preference is "do not animate things while I am trying
+ * to read", which includes the frame I am reading inside.
+ */
+@media (prefers-reduced-motion: no-preference) {
+  .warp-line {
+    transform-origin: top center;
+    animation: loom-warp-draw 900ms cubic-bezier(0.22, 1, 0.36, 1) both;
+    animation-delay: calc(var(--i, 0) * 26ms);
+  }
+}
+
+@keyframes loom-warp-draw {
+  from {
+    scale: 1 0;
+  }
+}
+
+/* ---------------------------------------------------------------------------
+   The grid everything is placed in
+
+   The same twelve columns as the warp field, measured the same way. Every piece
+   of content on this site is a `Shed` inside one of these.
+--------------------------------------------------------------------------- */
+
+.warp-grid {
+  display: grid;
+  grid-template-columns: repeat(var(--warp-columns), minmax(0, 1fr));
+  gap: var(--warp-gap);
+  width: 100%;
+  max-width: var(--warp-max);
+  margin-inline: auto;
+  padding-inline: var(--warp-gutter);
+}
+
+/* The warp field wraps a full-height grid so its threads span the viewport. */
+.warp-field .warp-grid {
+  height: 100%;
+}
+
+/* ---------------------------------------------------------------------------
+   The weft: where the shuttle is
+
+   A single line spanning the full field, parked at the reading position and
+   written there by a CSS variable — no React state, so tracking the scroll costs
+   no renders at all. It is `aria-hidden` and pointer-transparent: it is an
+   indicator, not content.
+--------------------------------------------------------------------------- */
+
+.weft {
+  position: fixed;
+  left: 0;
+  right: 0;
+  top: calc(var(--weft-y) + var(--weft-offset));
+  z-index: 5;
+  height: 1px;
+  pointer-events: none;
+  opacity: var(--weft-on);
+  transition: top 220ms cubic-bezier(0.22, 1, 0.36, 1);
+  background: linear-gradient(
+    90deg,
+    transparent 0,
+    var(--thread-line) 8%,
+    var(--thread-bright) 50%,
+    var(--thread-line) 92%,
+    transparent 100%
+  );
+  box-shadow: 0 0 18px var(--thread-glow);
+}
+
+/* The knots where the weft crosses the two outermost warp threads — the selvedge.
+   These use `--warp-edge`, not `--warp-gutter`: on a viewport wider than the cloth
+   the two are hundreds of pixels apart, and a knot pinned at the gutter would sit
+   in the margin instead of on its thread. */
+.weft::before,
+.weft::after {
+  content: "";
+  position: absolute;
+  top: -2px;
+  width: 5px;
+  height: 5px;
+  border-radius: 2px;
+  background: radial-gradient(circle at 35% 30%, #ffffff, var(--thread) 75%);
+  box-shadow: 0 0 10px var(--thread-glow);
+}
+
+.weft::before {
+  left: var(--warp-edge);
+}
+
+.weft::after {
+  right: var(--warp-edge);
+}
+
+/* ---------------------------------------------------------------------------
+   Knots and rails: the small vocabulary the woven sections share
+--------------------------------------------------------------------------- */
+
+/* A knot is one crossing — a marker for a single item (a thread of the warp, a
+   pick of the weft, a question). The app's overlay draws one per reply; these
+   draw one per thing worth counting. */
+.knot {
+  flex: none;
+  width: 5px;
+  height: 5px;
+  border-radius: 2px;
+  background: radial-gradient(circle at 35% 30%, #ffffff, var(--thread) 75%);
+  box-shadow: 0 0 0 3px var(--thread-soft);
+}
+
+.knot-lit {
+  box-shadow:
+    0 0 0 3px var(--thread-soft),
+    0 0 12px var(--thread-glow);
+}
+
+/* The rail: the warp thread a column of content hangs from. */
+.rail {
+  width: 1px;
+  background: linear-gradient(
+    to bottom,
+    transparent 0,
+    var(--thread-line) 10%,
+    var(--thread-line-strong) 50%,
+    var(--thread-line) 90%,
+    transparent 100%
+  );
+}
+
+/* ---------------------------------------------------------------------------
+   The cloth: the woven transcript in the hero
+
+   A transcript is cloth. The reasoning is a thread being spun down the rail, the
+   tool call is a knot tied into it, and the reply is the weft beaten in across
+   the warp, one line per pass. Reading order is top to bottom, which is also how
+   a loom is read.
+--------------------------------------------------------------------------- */
+
+.cloth {
+  /* The cloth's own vertical thread, behind the passes. */
+  position: relative;
+}
+
+.cloth-pass {
+  position: relative;
+  padding-left: 1.5rem;
+}
+
+/* The knot that ties each pass onto the rail. */
+.cloth-pass::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 0.5rem;
+  width: 5px;
+  height: 5px;
+  border-radius: 2px;
+  background: radial-gradient(circle at 35% 30%, #ffffff, var(--thread) 75%);
+  box-shadow: 0 0 0 3px var(--thread-soft);
+}
+
+/* The pass currently arriving is the one lit. */
+.cloth-pass[data-live="true"]::before {
+  animation: loom-knot-pulse 2s ease-out infinite;
+}
+
+@keyframes loom-knot-pulse {
+  0% {
+    box-shadow: 0 0 0 0 var(--thread-glow), 0 0 14px var(--thread-glow);
+  }
+  70% {
+    box-shadow: 0 0 0 8px transparent, 0 0 10px var(--thread-soft);
+  }
+  100% {
+    box-shadow: 0 0 0 0 transparent, 0 0 14px var(--thread-glow);
+  }
+}
+
+/* The thread running down the left of the cloth, tying the passes together. */
+.cloth-rail {
+  position: absolute;
+  left: 2px;
+  top: 0.75rem;
+  bottom: 0.75rem;
+  width: 1px;
+  background: linear-gradient(
+    to bottom,
+    transparent 0,
+    var(--thread-line) 12%,
+    var(--thread-line-strong) 50%,
+    var(--thread-line) 88%,
+    transparent 100%
+  );
+}
+
+/* ---------------------------------------------------------------------------
+   The draft: the plan for the cloth, beside the cloth itself
+
+   In weaving, the draft is the squared notation of a pattern — which threads are
+   lifted on which pick — drawn before anything is woven. Here it is the task
+   list: the model's plan, checking itself off while the cloth below it forms.
+   The app has a real panel for exactly this, so the metaphor is not doing work
+   the product does not already do.
+--------------------------------------------------------------------------- */
+
+.draft-row {
+  display: grid;
+  grid-template-columns: 0.9rem 1fr;
+  align-items: start;
+  gap: 0.5rem;
+}
+
+/* A lifted thread: the pick is being woven now. */
+.lifted {
+  color: var(--thread-bright);
+}
+
+/* ---------------------------------------------------------------------------
+   The draft strip: navigation as a weaving draft
+
+   A draft is read at a glance — a row of cells, some lifted, some not. So is a
+   navigation. Each cell is a destination, and the current one is the lifted
+   thread. Compact, legible, and the metaphor is doing the work of the underline.
+--------------------------------------------------------------------------- */
+
+.draft-strip {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+}
+
+.draft-cell {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  height: 2.25rem;
+  padding-inline: 0.65rem;
+  border-radius: var(--radius-capsule);
+  border: 1px solid transparent;
+  color: var(--ink-faint);
+  font-size: 13px;
+  transition:
+    background-color 130ms ease,
+    color 130ms ease,
+    border-color 130ms ease;
+}
+
+.draft-cell:hover {
+  background-color: var(--hover-bg);
+  color: var(--ink);
+}
+
+/* The lifted cell — where the shuttle currently is. */
+.draft-cell[data-current="true"] {
+  color: var(--ink);
+  border-color: var(--glass-border);
+  background-color: var(--hover-bg);
+}
+
+/* The mark of a lifted thread: a filled square, as on a real draft. */
+.draft-cell::after {
+  content: "";
+  position: absolute;
+  left: 50%;
+  bottom: -3px;
+  width: 4px;
+  height: 4px;
+  translate: -50% 0;
+  border-radius: 1px;
+  background: var(--thread);
+  opacity: 0;
+}
+
+.draft-cell[data-current="true"]::after {
+  opacity: 1;
+}
+
+/* ---------------------------------------------------------------------------
+   The selvedge: the finished edge
+
+   A selvedge is the tightly-woven border that stops a cloth fraying — the part
+   that holds. So it is the privacy and licensing band: drawn denser than the rest
+   of the cloth, at the end of it.
+--------------------------------------------------------------------------- */
+
+.selvedge {
+  border-top: 1px solid var(--thread-line-strong);
+  background-image: repeating-linear-gradient(
+    90deg,
+    var(--thread-line) 0 1px,
+    transparent 1px 7px
+  );
+  background-position: top left;
+  background-size: 100% 6px;
+  background-repeat: repeat-x;
+}
+
+/* ---------------------------------------------------------------------------
+   The one app behaviour that has to be restated rather than inherited
+--------------------------------------------------------------------------- */
+
+/*
+ * The app styles every scrollbar globally (`* { scrollbar-width: thin }` plus the
+ * WebKit pair). That lives in its base styles, outside the marked regions, so it
+ * does not travel with the token sync — and the cloth has a scroll area. Scoped to
+ * a class rather than `*`, because the app owns its own window and this project
+ * does not own the visitor's.
+ */
+.loom-scroll {
+  scrollbar-width: thin;
+  scrollbar-color: rgb(140 150 170 / 0.35) transparent;
+}
+
+.loom-scroll::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+.loom-scroll::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.loom-scroll::-webkit-scrollbar-thumb {
+  background-color: rgb(140 150 170 / 0.32);
+  border-radius: 999px;
+  border: 3px solid transparent;
+  background-clip: content-box;
+}

@@ -12,8 +12,8 @@ export type SettingsCategoryId =
   | "usage"
   | "personas"
   | "memory"
+  | "voice"
   | "mcp"
   | "skills"
   | "data"
-  | "memory"
   | "updates";

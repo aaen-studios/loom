@@ -14,7 +14,8 @@ stoppable from the Runs panel), provider
 usage and subscription limits (Settings →
 Usage, plus a composer badge for the active model), **computer use** (Windows:
 `Ctrl+Alt+Esc`
-panic stop and screenshots in the transcript), tray + hotkey overlay,
+stops the turn that is driving your PC, and screenshots land in the transcript),
+tray + hotkey overlay,
 launch at login (Settings → General), a fresh chat on every launch,
 signed updater, and a bespoke glass installer. See [docs/spec.md](docs/spec.md).
 
@@ -58,6 +59,7 @@ node scripts/probe-streaming.mjs 9333 "write a paragraph"       # is text render
 node scripts/probe-newchat.mjs 9333                             # new chat: streaming + auto title
 node scripts/probe-state.mjs 9333                               # real store state during a turn
 node scripts/probe-computer.mjs 9333                           # armed chip: screenshot + cursor, timed
+node scripts/probe-computer-resume.mjs 9333                    # fakes a takeover, proves Resume sticks
 node scripts/probe-appearance.mjs 9333                          # screenshots of both themes
 ```
 
@@ -67,7 +69,8 @@ found), and the screenshot is written to disk so it can be inspected directly.
 
 Frontend diagnostics (`[loom] <- delta`, `[loom] apply delta`) turn on with
 `localStorage.setItem("loomDebug","1")` — that also exposes the stores as
-`window.__loom` for inspection.
+`window.__loom` (plus `__loom.ipc`, which the probe scripts use to reach the
+debug-only commands).
 
 ## Layout
 

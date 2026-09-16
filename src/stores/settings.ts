@@ -49,6 +49,7 @@ export const DEFAULT_CONFIG: AppConfig = {
     sidebarSort: "recent",
     compact: false,
     generatedUi: true,
+    showCondensing: true,
     captureOnSend: true,
     autoMemory: true,
   },

@@ -26,6 +26,12 @@ pub struct Persona {
     pub emoji: Option<String>,
     /// Avatar colour token, e.g. "violet".
     pub color: Option<String>,
+    /// Kokoro voice id for this persona, e.g. `af_heart`.
+    ///
+    /// `None` uses the global default. An id that does not look like a voice
+    /// also falls back, so a typo mutes nothing — see
+    /// [`crate::voice::config::VoiceConfig::voice_for`].
+    pub voice: Option<String>,
     /// Pinned to the top of the picker.
     pub favorite: bool,
     /// Opening assistant message for chats started with this persona.
@@ -122,6 +128,7 @@ impl Persona {
             tags: Vec::new(),
             emoji: None,
             color: None,
+            voice: None,
             favorite: false,
             greeting: String::new(),
             style: String::new(),

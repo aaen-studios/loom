@@ -10,7 +10,7 @@
 //! against a fallback that refuses every action.
 
 use std::collections::HashMap;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -35,9 +35,37 @@ pub const DISABLED_NOTE: &str = "Computer control is off for this chat. Ask the 
 /// windows move; stale pixels are worse than no pixels.
 const SHOT_TTL_MS: u64 = 120_000;
 
+/// How long a cached UI Automation tree stays usable. The tree is a snapshot
+/// of a live window, so acting on an id read minutes ago is how a click lands
+/// on whatever has since moved into that slot.
+const UI_TTL_MS: u64 = 120_000;
+
+/// Longest clipboard read handed back to the model, in characters. The read
+/// stops here instead of building a string out of whatever happens to be on
+/// the clipboard, which can be hundreds of megabytes.
+const CLIPBOARD_READ_CHARS: usize = 10_000;
+
 /// Longest text `keyboard::type` hands to the clipboard staging path before
 /// typing it directly. Typing is layout-independent but slower per character.
 const CLIPBOARD_STAGE_CHARS: usize = 400;
+
+/// Most wheel events one `scroll` call may send. `amount` is already clamped to
+/// ±100; this is belt and braces on the loop.
+const MAX_WHEEL_EVENTS: i32 = 100;
+
+/// Splits wheel notches into the per-event deltas to send, in order.
+///
+/// One event per notch rather than a single aggregate carrying
+/// `notches × delta`: an aggregated wheel event is ignored outright by some
+/// windows (WPF among them), and a stream of single notches is what real
+/// hardware produces. Separating this from the `SendInput` call keeps the
+/// arithmetic — the part that is easy to get quietly wrong — testable.
+fn wheel_deltas(notches: i32, delta: i32) -> Vec<i32> {
+    let sign = if notches < 0 { -1 } else { 1 };
+    (0..notches.abs().min(MAX_WHEEL_EVENTS))
+        .map(|_| sign * delta)
+        .collect()
+}
 
 #[cfg(windows)]
 #[path = "computer/windows.rs"]
@@ -46,7 +74,43 @@ mod imp;
 #[path = "computer/fallback.rs"]
 mod imp;
 
-pub use imp::{set_ignored_window, TakeoverWatch};
+pub use imp::{make_window_non_activating, set_ignored_window, TakeoverWatch};
+
+/// What the low-level input hooks can see.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InputKind {
+    /// Pointer movement. Refreshes the idle clock; never a takeover.
+    Move,
+    /// A mouse button, a wheel notch, or a key: a deliberate act.
+    Press,
+}
+
+/// Whether a real input event means the user has taken the machine over.
+///
+/// Movement deliberately does not count. Reaching for the Resume button on the
+/// control pill *is* movement, so if movement tripped the latch then releasing
+/// a pause would re-pause it before the user let go of the mouse — which is
+/// exactly the bug this function exists to prevent.
+///
+/// Input landing on one of Loom's own windows (the main window, the quick-ask
+/// overlay, the pill) does not count either: pressing Resume, pressing Stop, or
+/// typing into Loom's own composer is using Loom, not taking the machine back.
+///
+/// Injected input is Loom's own — every click and keystroke the tools send —
+/// and must never count, or the first click of a turn would pause that turn.
+pub fn takeover_input(kind: InputKind, injected: bool, over_own_window: bool) -> bool {
+    if injected || over_own_window {
+        return false;
+    }
+    matches!(kind, InputKind::Press)
+}
+
+/// Trips the takeover latch exactly as a real key press does. Reached only
+/// through a debug-only Tauri command, so `scripts/probe-computer.mjs` can
+/// prove that a Resume sticks without a human moving the mouse.
+pub fn trip_takeover_for_debug() {
+    imp::trip_takeover_for_debug();
+}
 
 /// Where the last screenshot came from, so image pixels can be mapped back to
 /// screen pixels for the next click.
@@ -134,7 +198,9 @@ pub struct Capture {
     pub cursor: bool,
 }
 
-/// Per-turn knobs the engine hands to the tools.
+/// Per-turn knobs the engine hands to the tools. Cloneable so a tool call can
+/// take its copy onto a blocking thread.
+#[derive(Clone)]
 pub struct ComputerOptions {
     /// Longest edge of a screenshot; `0` keeps native resolution.
     pub screenshot_edge: u32,
@@ -253,7 +319,7 @@ pub fn specs() -> Vec<ToolSpec> {
         ),
         tool_spec(
             "mouse",
-            "Move, click, drag, and scroll the mouse. Coordinates are image pixels from the most recent screenshot (the result tells you their scale). `drag` goes from x,y to to_x,to_y; `scroll` uses wheel notches (negative is up/left); `modifiers` are held around the action (e.g. ctrl+click). After each action, take a fresh screenshot to verify.",
+            "Move, click, drag, and scroll the mouse. Coordinates are image pixels from the most recent screenshot (the result tells you their scale). `drag` goes from x,y to to_x,to_y and needs both: the press happens over the source. `scroll` needs x,y too, because the wheel goes to whatever is under the pointer — without coordinates it would scroll whichever window the cursor happened to be resting over. `amount` is wheel notches, negative for up/left. `modifiers` are held around the action (e.g. ctrl+click). After each action, take a fresh screenshot to verify.",
             json!({
                 "type": "object",
                 "properties": {
@@ -409,10 +475,16 @@ pub fn spec(name: &str) -> Option<ToolSpec> {
 }
 
 /// Executes one computer tool call.
+///
+/// Everything except `wait` is synchronous Win32 — a capture, a `SendInput`, a
+/// UI Automation walk, a `launch_app` that may wait thirty seconds — so it runs
+/// on a blocking thread. Blocking an async worker for half a minute inside a
+/// shared runtime stalls every other task that wants one, including the
+/// streaming reply in a different chat.
 pub async fn run(
     session_id: &str,
     call: &ToolCall,
-    state: &Mutex<HashMap<String, ComputerState>>,
+    state: &Arc<Mutex<HashMap<String, ComputerState>>>,
     options: &ComputerOptions,
 ) -> ToolOutcome {
     let arguments: Value = if call.arguments.trim().is_empty() {
@@ -426,24 +498,50 @@ pub async fn run(
         }
     };
 
-    let result = match call.name.as_str() {
-        "screenshot" => screenshot(session_id, &arguments, state, options).await,
-        "ui" => ui(session_id, &arguments, state).await,
-        "mouse" => mouse(session_id, &arguments, state),
-        "keyboard" => keyboard(session_id, &arguments, state),
-        "clipboard" => imp::clipboard(&arguments).map(Output::text),
-        "list_windows" => imp::list_windows(&arguments).map(Output::text),
-        "window" => imp::window(&arguments).map(Output::text),
-        "list_processes" => imp::list_processes(&arguments).map(Output::text),
-        "launch_app" => imp::launch_app(&arguments).map(Output::text),
-        "kill_process" => imp::kill_process(&arguments).map(Output::text),
-        "wait" => wait(&arguments, options).await,
-        other => Err(Error::Other(format!("unknown computer tool: {other}"))),
+    // `wait` sleeps on the async clock and does no Win32 work, so it stays here.
+    let result = if call.name == "wait" {
+        wait(&arguments, options).await
+    } else {
+        let session = session_id.to_string();
+        let name = call.name.clone();
+        let state = Arc::clone(state);
+        let options = options.clone();
+        match tokio::task::spawn_blocking(move || {
+            run_blocking(&session, &name, &arguments, &state, &options)
+        })
+        .await
+        {
+            Ok(result) => result,
+            Err(_) => Err(Error::Other("the computer tool panicked".into())),
+        }
     };
 
     match result {
         Ok(output) => outcome(call, true, output.text, output.images),
         Err(error) => outcome(call, false, error.to_string(), Vec::new()),
+    }
+}
+
+/// The synchronous half of [`run`], on a blocking thread.
+fn run_blocking(
+    session_id: &str,
+    name: &str,
+    arguments: &Value,
+    state: &Mutex<HashMap<String, ComputerState>>,
+    options: &ComputerOptions,
+) -> Result<Output> {
+    match name {
+        "screenshot" => screenshot(session_id, arguments, state, options),
+        "ui" => ui(session_id, arguments, state),
+        "mouse" => mouse(session_id, arguments, state),
+        "keyboard" => keyboard(session_id, arguments, state),
+        "clipboard" => imp::clipboard(arguments, CLIPBOARD_READ_CHARS).map(Output::text),
+        "list_windows" => imp::list_windows(arguments).map(Output::text),
+        "window" => imp::window(arguments).map(Output::text),
+        "list_processes" => imp::list_processes(arguments).map(Output::text),
+        "launch_app" => imp::launch_app(arguments).map(Output::text),
+        "kill_process" => imp::kill_process(arguments).map(Output::text),
+        other => Err(Error::Other(format!("unknown computer tool: {other}"))),
     }
 }
 
@@ -475,7 +573,7 @@ fn outcome(call: &ToolCall, ok: bool, output: String, images: Vec<ToolImage>) ->
 // screenshot
 // ------------------------------------------------------------------
 
-async fn screenshot(
+fn screenshot(
     session_id: &str,
     arguments: &Value,
     state: &Mutex<HashMap<String, ComputerState>>,
@@ -732,7 +830,10 @@ fn mouse(
         _ => {}
     }
 
-    // Coordinate actions need a screenshot to map from.
+    // Every coordinate action needs a screenshot to map from, `scroll`
+    // included: the wheel goes to whatever is under the pointer, so aiming it
+    // is the whole difference between scrolling the pane the model just looked
+    // at and scrolling whatever window the cursor happened to be resting over.
     let (screen_x, screen_y) = match (x, y) {
         (Some(x), Some(y)) => {
             let entry = states.get(session_id).ok_or_else(no_shot_error)?;
@@ -898,7 +999,7 @@ fn keyboard(
 // ui
 // ------------------------------------------------------------------
 
-async fn ui(
+fn ui(
     session_id: &str,
     arguments: &Value,
     state: &Mutex<HashMap<String, ComputerState>>,
@@ -968,7 +1069,7 @@ async fn ui(
         .and_then(Value::as_str)
         .map(str::to_string);
 
-    let (hwnd, path, bounds) = {
+    let (hwnd, path, bounds, name) = {
         let states = state.lock().map_err(|_| Error::Other("state busy".into()))?;
         let entry = states
             .get(session_id)
@@ -977,16 +1078,39 @@ async fn ui(
             .last_ui
             .as_ref()
             .ok_or_else(|| Error::Other("run `ui tree` first".into()))?;
+        // Ids are positions in a live tree: an old one points at whatever has
+        // since moved into that slot.
+        if now_ms().saturating_sub(entry.last_ui_ms) > UI_TTL_MS {
+            return Err(Error::Other(
+                "the UI tree is stale; run `ui tree` again".into(),
+            ));
+        }
         let node = nodes
             .iter()
             .find(|node| node.id == id)
             .ok_or_else(|| {
                 Error::Other("unknown element id; run `ui tree` again — ids expire when the tree is re-read".into())
             })?;
+        // Refuse an act that would go nowhere or land on something else: the
+        // tree promised an enabled element at these bounds.
+        let acting = !matches!(action, "focus" | "get_text");
+        if acting && !node.enabled {
+            return Err(Error::Other(format!(
+                "\"{}\" is disabled; there is nothing to {action}",
+                node.name
+            )));
+        }
+        if acting && node.offscreen {
+            return Err(Error::Other(format!(
+                "\"{}\" is off screen; scroll it into view first",
+                node.name
+            )));
+        }
         (
             entry.last_ui_window.unwrap_or(0),
             node.path.clone(),
             node.bounds,
+            node.name.clone(),
         )
     };
 
@@ -996,11 +1120,13 @@ async fn ui(
         if hwnd != 0 {
             let _ = imp::focus_window_handle(hwnd);
         }
+        // A pixel click cannot be verified the way a pattern act can, so it
+        // reports the element it believed it was clicking.
         let text = imp::mouse("click", cx, cy, None, "left", 1, &[], 0, false, 0, 1)?;
-        return Ok(Output::text(text));
+        return Ok(Output::text(format!("{text} — the centre of \"{name}\"")));
     }
 
-    imp::ui_act(hwnd, &path, action, value.as_deref()).map(Output::text)
+    imp::ui_act(hwnd, &path, action, value.as_deref(), Some(&name)).map(Output::text)
 }
 
 // ------------------------------------------------------------------
@@ -1070,6 +1196,9 @@ fn cancelled(options: &ComputerOptions) -> bool {
 /// Releases any mouse buttons and keys still held for a session: called when
 /// a turn pauses or ends so a half-finished drag cannot stick down.
 pub fn release_held(state: &Mutex<HashMap<String, ComputerState>>, session_id: &str) {
+    // (The `SendInput` below is a synchronous Win32 call, but it is a handful
+    // of microseconds and is on the path that must not wait: a turn ending
+    // with a button held down is the case this exists for.)
     let Ok(mut states) = state.lock() else {
         return;
     };
@@ -1092,7 +1221,13 @@ pub fn prune_screenshots(session_id: &str) -> Result<Vec<String>> {
         return Ok(Vec::new());
     };
     let directory = home.join("attachments").join(sanitize(session_id));
-    let Ok(reader) = std::fs::read_dir(&directory) else {
+    prune_screenshots_in(&directory, KEEP_SHOTS)
+}
+
+/// [`prune_screenshots`] against an explicit directory and retention, so the
+/// rule can be tested without a loom home.
+pub fn prune_screenshots_in(directory: &std::path::Path, keep: usize) -> Result<Vec<String>> {
+    let Ok(reader) = std::fs::read_dir(directory) else {
         return Ok(Vec::new());
     };
 
@@ -1110,12 +1245,12 @@ pub fn prune_screenshots(session_id: &str) -> Result<Vec<String>> {
         })
         .collect();
 
-    if screenshots.len() <= KEEP_SHOTS {
+    if screenshots.len() <= keep {
         return Ok(Vec::new());
     }
     screenshots.sort_by(|a, b| b.0.cmp(&a.0));
     let mut removed = Vec::new();
-    for (_, path) in screenshots.into_iter().skip(KEEP_SHOTS) {
+    for (_, path) in screenshots.into_iter().skip(keep) {
         if std::fs::remove_file(&path).is_ok() {
             removed.push(path.to_string_lossy().into_owned());
         }
@@ -1135,4 +1270,123 @@ fn sanitize(session_id: &str) -> String {
             }
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn state_with_shot(scale: f64, taken_ms: u64) -> ComputerState {
+        ComputerState {
+            last_shot: Some(ShotMeta {
+                rect: (100, 50, 800, 600),
+                image_w: 800,
+                image_h: 600,
+                scale,
+                monitor: 0,
+                taken_ms,
+            }),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn image_pixels_map_through_the_rect_and_the_scale() {
+        // A half-size image: every screen pixel covers two image pixels.
+        let state = state_with_shot(0.5, now_ms());
+        assert_eq!(image_to_screen(&state, 20, 10).unwrap(), (140, 70));
+    }
+
+    #[test]
+    fn a_screenshot_without_one_is_an_error_not_a_guess() {
+        let state = ComputerState::default();
+        assert!(image_to_screen(&state, 0, 0).is_err());
+    }
+
+    #[test]
+    fn a_stale_screenshot_is_refused() {
+        let state = state_with_shot(1.0, now_ms().saturating_sub(SHOT_TTL_MS + 1));
+        assert!(state.last_shot.as_ref().unwrap().stale());
+        assert!(image_to_screen(&state, 0, 0).is_err());
+    }
+
+    #[test]
+    fn wheel_notches_become_one_event_each() {
+        // A single aggregate is ignored by some windows, so notches are sent
+        // one at a time — and the sign is the direction the model asked for.
+        assert_eq!(wheel_deltas(3, 120), vec![120, 120, 120]);
+        assert_eq!(wheel_deltas(-2, 120), vec![-120, -120]);
+        assert!(wheel_deltas(0, 120).is_empty());
+    }
+
+    #[test]
+    fn a_wild_wheel_request_is_capped() {
+        assert_eq!(wheel_deltas(10_000, 120).len(), MAX_WHEEL_EVENTS as usize);
+    }
+
+    #[test]
+    fn movement_is_not_a_takeover_but_a_click_is() {
+        assert!(!takeover_input(InputKind::Move, false, false));
+        assert!(takeover_input(InputKind::Press, false, false));
+    }
+
+    #[test]
+    fn loom_s_own_input_never_counts_as_a_takeover() {
+        // Injected: the tools' own clicks and keystrokes.
+        assert!(!takeover_input(InputKind::Press, true, false));
+        // Over Loom's window: pressing Resume, Stop, or typing into the composer.
+        assert!(!takeover_input(InputKind::Press, false, true));
+        assert!(!takeover_input(InputKind::Move, true, true));
+    }
+
+    #[test]
+    fn pruning_keeps_only_the_newest_screenshots() {
+        let directory = tempfile::tempdir().unwrap();
+        for index in 0..5u64 {
+            let path = directory
+                .path()
+                .join(format!("Computer Screen 2026-01-01 {index:02}00.png"));
+            let file = std::fs::File::create(&path).unwrap();
+            // Distinct, ordered modification times: retention keeps the newest.
+            file.set_modified(
+                std::time::SystemTime::UNIX_EPOCH
+                    + std::time::Duration::from_secs(1_000 + index * 60),
+            )
+            .unwrap();
+        }
+        // Anything that is not a screenshot is none of this function's business.
+        std::fs::write(directory.path().join("diagram.png"), b"x").unwrap();
+
+        let removed = prune_screenshots_in(directory.path(), 2).unwrap();
+        assert_eq!(removed.len(), 3);
+
+        let left: Vec<String> = std::fs::read_dir(directory.path())
+            .unwrap()
+            .flatten()
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(left.len(), 3, "{left:?}");
+        assert!(left.contains(&"diagram.png".to_string()), "{left:?}");
+        assert!(
+            left.contains(&"Computer Screen 2026-01-01 0400.png".to_string()),
+            "{left:?}"
+        );
+        assert!(
+            left.contains(&"Computer Screen 2026-01-01 0300.png".to_string()),
+            "{left:?}"
+        );
+    }
+
+    #[test]
+    fn pruning_under_the_cap_removes_nothing() {
+        let directory = tempfile::tempdir().unwrap();
+        for index in 0..3u64 {
+            std::fs::write(
+                directory.path().join(format!("Computer Screen {index}.png")),
+                b"x",
+            )
+            .unwrap();
+        }
+        assert!(prune_screenshots_in(directory.path(), 5).unwrap().is_empty());
+    }
 }

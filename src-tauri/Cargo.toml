@@ -27,4 +27,5 @@ serde_json = "1"
 uuid = { version = "1", features = ["v4"] }
 tokio = { version = "1", features = ["time", "net"] }
 loom-core = { path = "../crates/loom-core" }
+base64 = "0.22"
 

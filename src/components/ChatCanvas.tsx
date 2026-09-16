@@ -5,6 +5,7 @@ import {
   formatUsage,
   mergeToolCalls,
   parseAttachments,
+  parseCondensed,
   parseNotice,
   parseReasoningBlocks,
   parseToolCalls,
@@ -13,7 +14,8 @@ import {
   type Notice,
   type ReasoningBlock,
 } from "../lib/messageExtra";
-import type { Message, ToolCallDisplay, ToolCallRecord } from "../types";
+import { ipc } from "../lib/ipc";
+import type { Condensed, Message, ToolCallDisplay, ToolCallRecord } from "../types";
 import { folderName } from "../lib/workspaces";
 import { useChat } from "../stores/chat";
 import { useProviders } from "../stores/providers";
@@ -259,6 +261,8 @@ function MessageRow({
   const attachments = parseAttachments(message.extra);
   const usage = parseUsage(message.extra);
   const notice = parseNotice(message.extra);
+  const condensed = parseCondensed(message.extra);
+  const showCondensing = useSettings((state) => state.config.interface.showCondensing);
   const personas = useSettings((state) => state.config.personas);
   const persona = personas.find((item) => item.id === message.personaId);
   const castIds = useChat((state) => state.castIds);
@@ -372,6 +376,9 @@ function MessageRow({
         {streaming && !message.content && !thinkingShown && !runningTools && !notice && (
           <span className="cursor-blink inline-block h-4 w-[7px] translate-y-[3px] rounded-[2px] bg-[var(--ink-soft)]" />
         )}
+        {!streaming && !notice && condensed && showCondensing && (
+          <CondensedLine condensed={condensed} sessionId={message.sessionId} />
+        )}
         {!streaming && !notice && usage && (
           <p className="mt-1.5 text-[11.5px] text-faint">{formatUsage(usage)}</p>
         )}
@@ -410,6 +417,92 @@ function TurnNote({ notice }: { notice: Notice }) {
       >
         Try again
       </button>
+    </div>
+  );
+}
+
+/**
+ * A reply that was answered from a condensed view of the chat's older turns.
+ *
+ * Deliberately the quietest thing in the transcript: one faint line in the slot
+ * the token-usage line already occupies, no border, no button and no red. The
+ * turn succeeded — this only says what the model could actually see, which is
+ * the one thing a reader of a long chat cannot otherwise tell. Expanding it
+ * shows the block verbatim, so "the summary lost something" is checkable rather
+ * than a matter of trust.
+ *
+ * The text is fetched on first expand rather than carried on every message: it
+ * is identical for every reply between two folds, and a copy on each of them
+ * would roughly double the transcript's size.
+ */
+function CondensedLine({
+  condensed,
+  sessionId,
+}: {
+  condensed: Condensed;
+  sessionId: string;
+}) {
+  const [open, setOpen] = useState(false);
+  const [text, setText] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!open || text !== null) return;
+    let live = true;
+    void ipc
+      .sessionSummary(sessionId)
+      .then((summary) => {
+        if (live) setText(summary?.text ?? "");
+      })
+      .catch(() => {
+        if (live) setText("");
+      });
+    return () => {
+      live = false;
+    };
+  }, [open, text, sessionId]);
+
+  const turns = `${condensed.covered} earlier ${
+    condensed.covered === 1 ? "message" : "messages"
+  }`;
+
+  return (
+    <div className="mt-1.5">
+      <button
+        type="button"
+        onClick={() => setOpen(!open)}
+        aria-expanded={open}
+        title={
+          condensed.source === "summary"
+            ? "Condensed by the lite model so the request would fit the window"
+            : "Condensed in-process so the request would fit the window"
+        }
+        className="flex items-center gap-1.5 text-[11.5px] text-faint hover:text-soft"
+      >
+        <span>Condensed · {turns}</span>
+        <span className="opacity-70">
+          {condensed.source === "summary" ? "summary" : "digest"}
+        </span>
+        <span className={cn("transition", open && "rotate-180")}>
+          <ChevronDownIcon />
+        </span>
+      </button>
+      {open && (
+        <div className="mt-1.5 rounded-row border border-[var(--glass-border)] bg-[var(--hover-bg)] px-2.5 py-2">
+          {text === null ? (
+            <p className="text-[11.5px] text-faint">Reading the summary…</p>
+          ) : text.trim() ? (
+            <pre className="loom-scroll max-h-72 overflow-auto font-mono text-[11.5px] leading-[1.55] whitespace-pre-wrap text-soft">
+              {text}
+            </pre>
+          ) : (
+            <p className="text-[11.5px] text-faint">
+              This fold was built in-process, so there is no stored summary to
+              show. The model was given these turns listed as headings,
+              changes and commands.
+            </p>
+          )}
+        </div>
+      )}
     </div>
   );
 }
