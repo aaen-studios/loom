@@ -76,8 +76,78 @@ src/                 React UI
 src-tauri/           Tauri shell (window, tray, hotkey, overlay, commands)
 crates/loom-core/    engine: providers, tools, mcp, index, storage, updater
 setup/               Loom Setup (bespoke installer)
+site/                marketing site (Next.js) — see below
 docs/spec.md         product + architecture spec
 ```
+
+## Website
+
+`site/` is the public landing page at **[loom.rip](https://loom.rip)**: Next.js
+and Tailwind v4, deployed from this repository. It is not a separate project
+with its own copy of the design — it is styled by the **same declarations** the
+app uses.
+
+```bash
+cd site
+bun install
+bun run dev            # http://localhost:3000
+bun run verify         # everything CI runs: tokens, typecheck, build, checks
+```
+
+### Shared tokens
+
+`src/styles.css` marks the regions the website needs with
+`loom-site:<name>:start` / `:end` comments. `scripts/sync-site-tokens.mjs`
+extracts them verbatim into `site/src/app/loom-tokens.css`, which the site
+imports. So the app's own `@utility` surfaces — `panel`, `pill`, `btn-primary`,
+`chip`, `rounded-window`, the `loom-*` keyframes — exist in the site with no
+reimplementation, and the two cannot drift in behaviour because there is one
+copy of the declarations.
+
+After changing a marked region, regenerate:
+
+```bash
+cd site && bun run tokens
+```
+
+CI runs `tokens:check` and fails when the generated file is stale, so a change
+to `src/styles.css` cannot reach `main` without the site following it. Four
+rules keep the regions extractable, and the script enforces all of them: each
+marker appears exactly once, regions never nest, a region is never empty, and
+they stay in source order.
+
+`site/GATE-TEST.md` records the experiment that made this approach valid —
+proving Tailwind v4 resolves `@utility`, `@theme` and `@custom-variant` when
+they arrive through an `@import` rather than in the entry stylesheet.
+
+### Site checks
+
+Six gates, all runnable together with `bun run verify` from `site/`:
+
+- **`tokens:check`** — the generated token sheet matches `src/styles.css`. This
+  is the one that makes the copying safe: a change to a marked region cannot
+  reach `main` without the regenerated sheet beside it.
+- **`bun test`** — the hero's scripted turn. The animation is invisible to every
+  other check the project has: `next build` cannot tell that a beat was edited
+  into the wrong order, and the page verifier only ever sees the first frame,
+  which is the empty state. So the timeline is a pure module (`src/lib/timeline.ts`)
+  and is tested for the invariants the animation depends on.
+- **`typecheck`** — `tsc --noEmit`.
+- **`verify:tokens`** — greps the **built** CSS for the app's real tokens, and
+  for the app-only rules that must *not* be there (the shell's
+  `overflow: hidden`, the quick-ask overlay, the markdown pipeline). Catches a
+  build that succeeds while the shared styles silently went missing.
+- **`verify:pages`** — asserts the prerendered HTML contains what the pages
+  claim, including that the download page reports its release state truthfully
+  rather than falling back to a hardcoded version unnoticed.
+- **`verify:a11y`** — heading structure, accessible names, alt text and
+  in-page link targets, read from the built HTML. This is what caught the
+  footer's column headings skipping a level on the 404.
+
+`scripts/test-site-token-sync.mjs` is a seventh, run locally rather than in CI
+because it temporarily edits `src/styles.css`: it breaks a marker in seven
+different ways and checks the sync fails loudly for each, then confirms the file
+is restored byte-for-byte.
 
 ## Data
 

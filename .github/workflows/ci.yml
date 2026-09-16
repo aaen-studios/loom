@@ -43,6 +43,24 @@ jobs:
           bun run typecheck
           bun run build
 
+      # The site is styled from the app's stylesheet, so this comes before the
+      # build: it fails when src/styles.css changed but the generated token
+      # sheet did not, rather than letting the site quietly render the old
+      # look.
+      - name: Site token parity
+        run: node scripts/sync-site-tokens.mjs --check
+
+      - name: Site typecheck + build + verify
+        run: |
+          cd site
+          bun install --frozen-lockfile
+          bun run typecheck
+          bun run test
+          bun run build
+          bun run verify:tokens
+          bun run verify:pages
+          bun run verify:a11y
+
       - name: Test engine
         run: cargo test -p loom-core
 

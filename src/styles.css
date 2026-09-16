@@ -1,13 +1,32 @@
 @import "tailwindcss";
 @import "@fontsource-variable/inter";
 
-@custom-variant dark (&:where(.dark, .dark *));
-
 @theme {
   --font-sans:
     "Inter Variable", "Inter", ui-sans-serif, system-ui, -apple-system,
     "Segoe UI", sans-serif;
 }
+
+/* ---------------------------------------------------------------------------
+   SHARED WITH THE WEBSITE
+
+   The regions between `loom-site:*:start` and `loom-site:*:end` are extracted
+   verbatim into `site/src/app/loom-tokens.css` by
+   `scripts/sync-site-tokens.mjs`, so the marketing site is styled by the same
+   declarations this file uses rather than by a copy that drifts.
+
+   Rules:
+   * A region may not nest inside another, and may not reference a declaration
+     outside itself — the extracted file has to stand alone. (The font above is
+     deliberately outside: the site loads Inter through `next/font` instead of
+     a bundled woff2.)
+   * Moving a marked block is fine; dropping a marker is not. The sync script
+     fails loudly on a missing or unbalanced marker, and CI runs it with
+     `--check` so a change here cannot reach main without the site following.
+--------------------------------------------------------------------------- */
+
+/* loom-site:tokens:start */
+@custom-variant dark (&:where(.dark, .dark *));
 
 /* ---------------------------------------------------------------------------
    Corner radii
@@ -148,6 +167,7 @@ html:not(.dark) {
   --card-bg: rgb(16 19 34 / 0.045);
   --active-bg: rgb(16 19 34 / 0.09);
 }
+/* loom-site:tokens:end */
 
 /* ---------------------------------------------------------------------------
    Base
@@ -214,6 +234,7 @@ body {
 /* ---------------------------------------------------------------------------
    Surfaces
 --------------------------------------------------------------------------- */
+/* loom-site:surfaces:start */
 @utility pill {
   background-color: var(--pill-bg);
   backdrop-filter: blur(24px) saturate(150%);
@@ -257,6 +278,7 @@ body {
     0 1px 2px rgb(0 0 0 / 0.5),
     0 2px 12px rgb(0 0 0 / 0.42);
 }
+/* loom-site:surfaces:end */
 
 /* ---------------------------------------------------------------------------
    Quick-ask overlay
@@ -457,6 +479,7 @@ html:not(.dark) .ask-node {
   transition: opacity 320ms ease;
 }
 
+/* loom-site:utilities:start */
 .hover-surface {
   transition:
     background-color 130ms ease,
@@ -475,6 +498,7 @@ html:not(.dark) .ask-node {
 @utility text-faint {
   color: var(--ink-faint);
 }
+/* loom-site:utilities:end */
 
 /* Compact density: a smaller reading size without changing any component. */
 .density-compact .message-body {
@@ -490,6 +514,7 @@ html:not(.dark) .ask-node {
 /* ---------------------------------------------------------------------------
    Motion
 --------------------------------------------------------------------------- */
+/* loom-site:motion:start */
 @keyframes loom-drift {
   0%,
   100% {
@@ -605,6 +630,7 @@ html:not(.dark) .ask-node {
     transition-duration: 0.01ms !important;
   }
 }
+/* loom-site:motion:end */
 
 /* ---------------------------------------------------------------------------
    Controls
@@ -613,6 +639,7 @@ html:not(.dark) .ask-node {
    an outline on an input) can still win; unlayered rules would beat every
    Tailwind class in the file.
 --------------------------------------------------------------------------- */
+/* loom-site:controls:start */
 @layer base {
   input[type="range"] {
     -webkit-appearance: none;
@@ -892,7 +919,13 @@ html:not(.dark) .ask-node {
   padding-left: 12px;
   color: var(--ink-soft);
 }
+/* loom-site:controls:end */
 
+/* Everything below styles rendered markdown — the `.loom-markdown` rules and
+   the compact-density overrides — and is deliberately outside the shared
+   regions. The website renders plain text, not the app's markdown pipeline, so
+   none of it applies there. The region above ends at `.loom-thinking` (the
+   spine itself, which the site's hero does use). */
 .loom-thinking .loom-markdown {
   font-size: 13px;
   line-height: 1.68;

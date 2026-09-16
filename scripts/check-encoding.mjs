@@ -13,7 +13,17 @@ const extensions = [
   ".json", ".ts", ".tsx", ".js", ".mjs", ".css", ".html",
   ".rs", ".toml", ".yml", ".yaml", ".md", ".nsi",
 ];
-const skip = new Set(["node_modules", "target", "dist", ".git", "gen"]);
+const skip = new Set([
+  "node_modules",
+  "target",
+  "dist",
+  ".git",
+  "gen",
+  // The site's build output and deploy metadata. These are generated, and
+  // walking them would report files this check has no business judging.
+  ".next",
+  ".vercel",
+]);
 
 const offenders = [];
 

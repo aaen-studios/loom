@@ -36,3 +36,12 @@ src-tauri/icons/ios
 *.njsproj
 *.sln
 *.sw?
+
+# Marketing site (site/) — its own install, build output and deploy metadata
+site/node_modules
+site/.next
+site/out
+site/.vercel
+site/next-env.d.ts
+site/tsconfig.tsbuildinfo
+site/.env*.local
