@@ -4,10 +4,10 @@ import { ipc } from "../lib/ipc";
 import { isTauri } from "../lib/tauri";
 import { useChat } from "../stores/chat";
 import { useSettings } from "../stores/settings";
-import { activeTaskCount, useTasks } from "../stores/tasks";
+import { activeCommandCount, activeTaskCount, useTasks } from "../stores/tasks";
 import { useUi } from "../stores/ui";
-import type { Job, Message, Task, TaskStatus } from "../types";
-import { CloseIcon, PlayIcon, PlusIcon, TrashIcon } from "./icons";
+import type { CommandRun, CommandStatus, Job, Message, Task, TaskStatus } from "../types";
+import { CloseIcon, PlayIcon, PlusIcon, StopIcon, TrashIcon } from "./icons";
 import { EmptyState, Row, Section, Toggle, inputClass } from "./ui";
 
 /** A dot whose colour carries the run's state. */
@@ -23,6 +23,45 @@ function StatusDot({ status }: { status: TaskStatus }) {
             ? "bg-[var(--danger)]"
             : "bg-[var(--ink-faint)] opacity-60";
   return <span className={cn("mt-1.5 h-1.5 w-1.5 shrink-0 rounded-full", tone)} />;
+}
+
+/** A dot whose colour carries a command's state. */
+function commandTone(status: CommandStatus): string {
+  switch (status) {
+    case "running":
+      return "bg-[var(--accent)]";
+    case "done":
+      return "bg-emerald-400";
+    case "failed":
+      return "bg-[var(--danger)]";
+    default:
+      // stopped / orphaned: over, but not a result.
+      return "bg-[var(--ink-faint)] opacity-60";
+  }
+}
+
+function commandStatusLabel(command: CommandRun): string {
+  switch (command.status) {
+    case "running":
+      return "Running";
+    case "done":
+      return "Finished";
+    case "failed":
+      return `Failed${command.exitCode != null ? ` (exit ${command.exitCode})` : ""}`;
+    case "stopped":
+      return "Stopped";
+    case "orphaned":
+      return "Orphaned — Loom restarted";
+  }
+}
+
+/** `1m 20s`, `2.1s`, `0.4s`: how long a command has been (or was) running. */
+function elapsed(command: CommandRun): string {
+  const end = command.finishedAt ?? Date.now();
+  const seconds = Math.max(0, (end - command.createdAt) / 1000);
+  if (seconds < 60) return `${seconds.toFixed(1)}s`;
+  const minutes = Math.floor(seconds / 60);
+  return `${minutes}m ${Math.round(seconds % 60)}s`;
 }
 
 function statusLabel(task: Task): string {
@@ -64,12 +103,15 @@ export function TasksPanel() {
   const setOpen = useUi((state) => state.setTasksOpen);
   const tasks = useTasks((state) => state.tasks);
   const jobs = useTasks((state) => state.jobs);
+  const commands = useTasks((state) => state.commands);
   const load = useTasks((state) => state.load);
-  const [tab, setTab] = useState<"runs" | "jobs">("runs");
+  const [tab, setTab] = useState<"runs" | "shell" | "jobs">("runs");
   const [selected, setSelected] = useState<string | null>(null);
   const [editing, setEditing] = useState<Job | null>(null);
   const active = activeTaskCount(tasks);
+  const busyCommands = activeCommandCount(commands);
   const selectedTask = tasks.find((task) => task.id === selected) ?? null;
+  const selectedCommand = commands.find((command) => command.id === selected) ?? null;
 
   useEffect(() => {
     if (open) void load();
@@ -101,11 +143,13 @@ export function TasksPanel() {
       <div className="animate-fade-up panel-strong relative flex h-full w-[560px] flex-col overflow-hidden rounded-sheet">
         <div className="flex items-center gap-2 px-4 pt-3 pb-2">
           <h2 className="text-[14.5px] font-semibold">Runs</h2>
-          {active > 0 && (
-            <span className="chip px-2 py-0.5 text-[11px]">{active} active</span>
+          {active + busyCommands > 0 && (
+            <span className="chip px-2 py-0.5 text-[11px]">
+              {active + busyCommands} active
+            </span>
           )}
           <div className="ml-auto flex items-center gap-1">
-            {(["runs", "jobs"] as const).map((id) => (
+            {(["runs", "shell", "jobs"] as const).map((id) => (
               <button
                 key={id}
                 type="button"
@@ -166,6 +210,51 @@ export function TasksPanel() {
                     {task.jobId && (
                       <span className="chip shrink-0 px-1.5 py-0.5 text-[10.5px]">
                         job
+                      </span>
+                    )}
+                  </button>
+                ))}
+              </div>
+            ))}
+
+          {tab === "shell" &&
+            (selectedCommand ? (
+              <CommandDetail
+                command={selectedCommand}
+                onBack={() => setSelected(null)}
+              />
+            ) : commands.length === 0 ? (
+              <EmptyState
+                title="No commands yet"
+                hint="Every command the agent runs shows up here — including one it left running in the background."
+              />
+            ) : (
+              <div className="rounded-control border border-[var(--glass-border)] bg-[var(--card-bg)]">
+                {commands.map((command) => (
+                  <button
+                    key={command.id}
+                    type="button"
+                    onClick={() => setSelected(command.id)}
+                    className="flex w-full items-start gap-2.5 border-b border-[var(--glass-border)] px-3 py-2.5 text-left last:border-b-0 hover:bg-[var(--hover-bg)]"
+                  >
+                    <span
+                      className={cn(
+                        "mt-1.5 h-1.5 w-1.5 shrink-0 rounded-full",
+                        commandTone(command.status),
+                      )}
+                    />
+                    <span className="min-w-0 flex-1">
+                      <span className="block truncate font-mono text-[12.5px] text-soft">
+                        {command.label || command.command}
+                      </span>
+                      <span className="block truncate text-[11.5px] text-faint">
+                        {commandStatusLabel(command)} · {elapsed(command)}
+                        {command.pid ? ` · pid ${command.pid}` : ""}
+                      </span>
+                    </span>
+                    {command.background && (
+                      <span className="chip shrink-0 px-1.5 py-0.5 text-[10.5px]">
+                        background
                       </span>
                     )}
                   </button>
@@ -406,6 +495,121 @@ function TaskDetail({ task, onBack }: { task: Task; onBack: () => void }) {
             onBack();
             void load();
           })}
+        >
+          Delete
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function CommandDetail({
+  command,
+  onBack,
+}: {
+  command: CommandRun;
+  onBack: () => void;
+}) {
+  const [output, setOutput] = useState("");
+  const [error, setError] = useState<string | null>(null);
+  const load = useTasks((state) => state.load);
+
+  useEffect(() => {
+    let live = true;
+    void ipc
+      .commandOutput(command.id, 400)
+      .then((text) => {
+        if (live) setOutput(text ?? "");
+      })
+      .catch((failure) => {
+        if (live) {
+          setError(failure instanceof Error ? failure.message : String(failure));
+        }
+      });
+    return () => {
+      live = false;
+    };
+  }, [command.id, command.status, command.finishedAt]);
+
+  // A running command's log keeps growing, so tail it while it is going.
+  useEffect(() => {
+    if (command.status !== "running") return;
+    const timer = window.setInterval(() => {
+      void ipc
+        .commandOutput(command.id, 400)
+        .then((text) => setOutput(text ?? ""))
+        .catch(() => {
+          // A log that cannot be read is already reported by the first load.
+        });
+    }, 1500);
+    return () => window.clearInterval(timer);
+  }, [command.id, command.status]);
+
+  return (
+    <div className="space-y-2">
+      <button
+        type="button"
+        onClick={onBack}
+        className="text-[12px] text-faint hover:text-[var(--ink)]"
+      >
+        ← All commands
+      </button>
+
+      <Section title={command.label || command.command}>
+        <Row label="Status">
+          <span className="text-[12.5px] text-soft">{commandStatusLabel(command)}</span>
+        </Row>
+        <Row label="Ran for">
+          <span className="text-[12.5px] text-soft">{elapsed(command)}</span>
+        </Row>
+        {command.pid > 0 && (
+          <Row label="Process">
+            <span className="font-mono text-[12px] text-soft">pid {command.pid}</span>
+          </Row>
+        )}
+        <Row label="Started">
+          <span className="text-[12.5px] text-soft">{when(command.createdAt)}</span>
+        </Row>
+        <Row label="Folder">
+          <span className="font-mono text-[11.5px] break-all text-soft">{command.cwd}</span>
+        </Row>
+      </Section>
+
+      <Section title="Command">
+        <pre className="max-h-32 overflow-auto rounded-row bg-[var(--hover-bg)] p-2 font-mono text-[11.5px] whitespace-pre-wrap text-soft">
+          {command.command}
+        </pre>
+      </Section>
+
+      <Section title="Output">
+        {error ? (
+          <p className="px-1 py-2 text-[12.5px] text-soft">{error}</p>
+        ) : (
+          <pre className="max-h-80 overflow-auto rounded-row bg-[var(--hover-bg)] p-2 font-mono text-[11.5px] whitespace-pre-wrap text-soft">
+            {output || "(no output yet)"}
+          </pre>
+        )}
+      </Section>
+
+      <div className="flex gap-2 px-1">
+        {command.status === "running" && (
+          <button
+            type="button"
+            className="btn-ghost flex items-center gap-1.5 px-2.5 py-1.5 text-[12px]"
+            onClick={() => void ipc.stopCommand(command.id).then(() => load())}
+          >
+            <StopIcon size={13} /> Stop
+          </button>
+        )}
+        <button
+          type="button"
+          className="btn-ghost px-2.5 py-1.5 text-[12px]"
+          onClick={() =>
+            void ipc.deleteCommand(command.id).then(() => {
+              onBack();
+              void load();
+            })
+          }
         >
           Delete
         </button>

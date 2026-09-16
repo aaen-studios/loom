@@ -219,22 +219,37 @@ pub fn stage_zip(zip_path: &Path, install_dir: &Path) -> Result<PathBuf> {
 
 /// Applies a staged update: writes a script that swaps files after this
 /// process exits, then relaunches the app.
+///
+/// The script itself is launched with `CREATE_NO_WINDOW` (see
+/// `commands::apply_update`), which is also why the wait loop sleeps with
+/// `ping -n 2 127.0.0.1` rather than `timeout /t 1`: `timeout` refuses to run
+/// without a console. The swap's output goes to `loom-update.log` beside the
+/// script, so a silent failure is still diagnosable afterwards.
 pub fn apply_after_exit(staging: &Path, install_dir: &Path, exe_name: &str) -> Result<PathBuf> {
     let script = std::env::temp_dir().join("loom-update.cmd");
+    let log = update_log_path();
     let body = format!(
         "@echo off\r\n\
          :wait\r\n\
-         tasklist /FI \"IMAGENAME eq {exe}\" | find /I \"{exe}\" >nul && (timeout /t 1 /nobreak >nul & goto wait)\r\n\
-         xcopy /E /Y /I \"{staging}\\*\" \"{install}\\\" >nul\r\n\
+         tasklist /FI \"IMAGENAME eq {exe}\" | find /I \"{exe}\" >nul && (ping -n 2 127.0.0.1 >nul & goto wait)\r\n\
+         xcopy /E /Y /I \"{staging}\\*\" \"{install}\\\" >>\"{log}\" 2>&1\r\n\
+         if errorlevel 1 (echo %DATE% %TIME% update failed, files not replaced >>\"{log}\" & goto end)\r\n\
          start \"\" \"{install}\\{exe}\"\r\n\
+         :end\r\n\
          del \"%~f0\"\r\n",
         exe = exe_name,
         staging = staging.display(),
         install = install_dir.display(),
+        log = log.display(),
     );
 
     std::fs::write(&script, body).map_err(|e| Error::io(&script, e))?;
     Ok(script)
+}
+
+/// `%TEMP%\loom-update.log` — what the swap script wrote while replacing files.
+pub fn update_log_path() -> PathBuf {
+    std::env::temp_dir().join("loom-update.log")
 }
 
 /// Extracts every file from a zip archive into `target`.
@@ -285,6 +300,24 @@ mod tests {
     fn versions_parse_numerically() {
         assert_eq!(version_parts("v1.12.3-beta.4"), vec![1, 12, 3]);
         assert_eq!(version_parts("0.10"), vec![0, 10]);
+    }
+
+    #[test]
+    fn the_swap_script_needs_no_console() {
+        let dir = tempfile::tempdir().unwrap();
+        let script = apply_after_exit(&dir.path().join("staging"), dir.path(), "loom.exe").unwrap();
+        let body = std::fs::read_to_string(&script).unwrap();
+
+        // `timeout` needs a console, and the script is spawned without one.
+        assert!(
+            !body.contains("timeout /t"),
+            "the swap script must not call timeout: {body}"
+        );
+        assert!(body.contains("ping -n 2 127.0.0.1"), "{body}");
+        assert!(body.contains("tasklist"), "{body}");
+        assert!(body.contains("loom-update.log"), "{body}");
+        assert!(body.contains("loom.exe"), "{body}");
+        let _ = std::fs::remove_file(&script);
     }
 
     #[test]

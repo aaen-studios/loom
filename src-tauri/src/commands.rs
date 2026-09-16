@@ -1267,7 +1267,9 @@ pub fn apply_update(app: AppHandle, staging: String) -> Result<(), String> {
     )
     .map_err(to_string)?;
 
-    std::process::Command::new("cmd")
+    // Hidden: the swap runs while the app is exiting, and a console window
+    // appearing at that moment reads like a crash.
+    loom_core::process::hidden_std("cmd")
         .arg("/C")
         .arg(script)
         .spawn()
@@ -1631,6 +1633,46 @@ pub fn overlay_target(state: State<'_, AppState>) -> Option<Session> {
 #[tauri::command]
 pub fn list_tasks(state: State<'_, AppState>, job_id: Option<String>) -> Result<Vec<Task>, String> {
     state.engine.tasks(job_id.as_deref()).map_err(to_string)
+}
+
+// ---------------------------------------------------------------------------
+// Shell commands
+// ---------------------------------------------------------------------------
+
+#[tauri::command]
+pub fn list_commands(
+    state: State<'_, AppState>,
+    session_id: Option<String>,
+) -> Result<Vec<loom_core::db::CommandRun>, String> {
+    state
+        .engine
+        .commands(session_id.as_deref())
+        .map_err(to_string)
+}
+
+#[tauri::command]
+pub fn command_output(
+    state: State<'_, AppState>,
+    id: String,
+    lines: Option<usize>,
+) -> Result<String, String> {
+    state
+        .engine
+        .command_output(&id, lines.unwrap_or(200))
+        .map_err(to_string)
+}
+
+#[tauri::command]
+pub fn stop_command(
+    state: State<'_, AppState>,
+    id: String,
+) -> Result<loom_core::db::CommandRun, String> {
+    state.engine.stop_command(&id).map_err(to_string)
+}
+
+#[tauri::command]
+pub fn delete_command(state: State<'_, AppState>, id: String) -> Result<(), String> {
+    state.engine.delete_command(&id).map_err(to_string)
 }
 
 #[tauri::command]

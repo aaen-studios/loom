@@ -8,7 +8,9 @@ streaming chat with reasoning, attachments, tools with permission modes
 (including **Atelier**, which additionally lets the model edit its own harness:
 personas, MCP servers, skills, prompts, providers and settings), MCP servers,
 skills, image generation, subagents, a coding workspace with semantic search,
-`/` commands and a live goal/task panel the model keeps checked off, provider
+`/` commands and a live goal/task panel the model keeps checked off, shell
+commands run windowless (and long ones run in the background, listed and
+stoppable from the Runs panel), provider
 usage and subscription limits (Settings →
 Usage, plus a composer badge for the active model), **computer use** (Windows:
 `Ctrl+Alt+Esc`
@@ -90,6 +92,7 @@ Everything lives in `~/.loom`:
 | `generated/` | images produced by the `generate_image` tool |
 | `skills/` | markdown skills, surfaced in the composer's `/` menu |
 | `backups/` | config snapshots taken before harness edits (newest ten) and overwritten skill files |
+| `logs/` | `cmd-<id>.log` per tracked shell command (capped at 5 MB each) |
 | `cache/` | downloaded update payloads |
 | `keys/` | **release signing keys (maintainers only)** |
 

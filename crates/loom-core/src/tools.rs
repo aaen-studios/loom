@@ -32,6 +32,13 @@ pub const TODO_READ: &str = "todo_read";
 /// Deleting a path always shows a confirmation card, even under Auto all.
 pub const DELETE_PATH: &str = "delete_path";
 
+/// Tracking the shell commands Loom has started. `run_command` itself is
+/// dispatched by the engine (it owns the process handles and the log files),
+/// and so are these three.
+pub const LIST_COMMANDS: &str = "list_commands";
+pub const COMMAND_OUTPUT: &str = "command_output";
+pub const STOP_COMMAND: &str = "stop_command";
+
 /// Most option buttons one question may show. Beyond this the model should be
 /// asking a narrower question.
 const MAX_QUESTION_OPTIONS: usize = 6;
@@ -540,13 +547,55 @@ pub fn specs() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "run_command",
-            description: "Run a shell command inside the workspace folder and return stdout, stderr, and the exit code. Use for tests, builds, and git status.",
+            description: "Run a shell command inside the workspace folder and return stdout, stderr, and the exit code. Use for tests, builds, and git status. It runs hidden — no terminal window opens — and is given 120s; if it is still going after that it is NOT killed, it keeps running in the background and you get its id so `command_output` can read it and `stop_command` can end it. Set `background: true` for anything long-lived you do not want to wait for (a dev server, a watcher): you get an id back immediately, the process survives this turn, and its output goes to a log.",
             parameters: json!({
                 "type": "object",
                 "properties": {
-                    "command": { "type": "string", "description": "Command line to execute" }
+                    "command": { "type": "string", "description": "Command line to execute" },
+                    "background": { "type": "boolean", "description": "Start it and return at once instead of waiting, for long-running processes (default false)" },
+                    "label": { "type": "string", "description": "Short human label for this command, e.g. \"dev server\" (optional)" }
                 },
                 "required": ["command"],
+                "additionalProperties": false
+            }),
+            read_only: false,
+            scope: None,
+        },
+        ToolSpec {
+            name: LIST_COMMANDS,
+            description: "List the shell commands Loom has started, newest first, with their status, exit code, and id. Includes background commands and any that outlived their turn.",
+            parameters: json!({
+                "type": "object",
+                "properties": {},
+                "additionalProperties": false
+            }),
+            read_only: true,
+            scope: None,
+        },
+        ToolSpec {
+            name: COMMAND_OUTPUT,
+            description: "Read what a command has produced so far (its log's last lines). Works for a running background command and for one that has finished.",
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "id": { "type": "string", "description": "Command id from run_command or list_commands" },
+                    "tail": { "type": "integer", "description": "How many trailing lines to return (default 60)" }
+                },
+                "required": ["id"],
+                "additionalProperties": false
+            }),
+            read_only: true,
+            scope: None,
+        },
+        ToolSpec {
+            name: STOP_COMMAND,
+            description: "Stop a running command and everything it spawned (its whole process tree). Use it to end a dev server or a watcher you started.",
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "id": { "type": "string", "description": "Command id from run_command or list_commands" }
+                },
+                "required": ["id"],
                 "additionalProperties": false
             }),
             read_only: false,
@@ -973,10 +1022,12 @@ fn dispatch(call: &ToolCall, context: &ToolContext) -> Result<String> {
             let count = int_arg(&arguments, "count").unwrap_or(15).clamp(1, 100);
             git_log(context, count)
         }
-        TODO_WRITE | TODO_READ => Err(Error::Other(format!(
-            "{} is handled by the engine, not executed",
-            call.name
-        ))),
+        TODO_WRITE | TODO_READ | LIST_COMMANDS | COMMAND_OUTPUT | STOP_COMMAND => {
+            Err(Error::Other(format!(
+                "{} is handled by the engine, not executed",
+                call.name
+            )))
+        }
         "write_file" => {
             let path = string_arg(&arguments, "path")
                 .ok_or_else(|| Error::Other("write_file requires a path".into()))?;
@@ -1249,7 +1300,9 @@ fn delete_path(target: &Path, root: &Path) -> Result<String> {
 }
 
 fn run_git(root: &Path, args: &[&str]) -> Result<std::process::Output> {
-    std::process::Command::new("git")
+    // Hidden: `git` is a console program, and a visible child would flash a
+    // window over whatever the user is doing.
+    crate::process::hidden_std("git")
         .args(args)
         .current_dir(root)
         .stdin(std::process::Stdio::null())
@@ -1472,48 +1525,11 @@ pub fn diff_preview(old: &str, new: &str) -> String {
     out.trim_end().to_string()
 }
 
-/// Executes a shell command inside the workspace (async, bounded).
-pub async fn run_command(context: &ToolContext, command: &str) -> Result<String> {
-    let root = context
-        .workdir
-        .clone()
-        .ok_or_else(|| Error::Other("this chat has no workspace folder set".into()))?;
-
-    let shell = if cfg!(windows) { "cmd" } else { "sh" };
-    let flag = if cfg!(windows) { "/C" } else { "-c" };
-
-    let child = tokio::process::Command::new(shell)
-        .arg(flag)
-        .arg(command)
-        .current_dir(&root)
-        .stdin(std::process::Stdio::null())
-        .output();
-
-    let output = tokio::time::timeout(std::time::Duration::from_secs(120), child)
-        .await
-        .map_err(|_| Error::Other("command timed out after 120s".into()))?
-        .map_err(|e| Error::Other(format!("failed to run command: {e}")))?;
-
-    let mut report = String::new();
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    report.push_str(&format!(
-        "exit code: {}\n",
-        output.status.code().unwrap_or(-1)
-    ));
-    if !stdout.trim().is_empty() {
-        report.push_str("stdout:\n");
-        report.push_str(&truncate_output(&stdout));
-        report.push('\n');
-    }
-    if !stderr.trim().is_empty() {
-        report.push_str("stderr:\n");
-        report.push_str(&truncate_output(&stderr));
-    }
-    Ok(report.trim_end().to_string())
-}
-
-fn truncate_output(text: &str) -> String {
+/// Caps captured output at a size the model can use without drowning in it.
+///
+/// Shared with the engine, which reports both a finished command's streams and
+/// what a still-running one has logged so far.
+pub(crate) fn truncate_output(text: &str) -> String {
     const MAX: usize = 12_000;
     if text.len() <= MAX {
         return text.trim_end().to_string();
@@ -1776,7 +1792,7 @@ mod tests {
 
     #[test]
     fn plan_mode_blocks_what_can_change_the_workspace() {
-        for name in ["write_file", "edit_file", "run_command"] {
+        for name in ["write_file", "edit_file", "run_command", STOP_COMMAND] {
             assert!(is_blocked_in_plan(name), "{name} should be refused");
         }
         for name in [
@@ -1787,11 +1803,36 @@ mod tests {
             "datetime",
             "generate_image",
             "spawn_agent",
+            LIST_COMMANDS,
+            COMMAND_OUTPUT,
             crate::web::SEARCH_TOOL,
             crate::web::FETCH_TOOL,
             ASK_USER,
         ] {
             assert!(!is_blocked_in_plan(name), "{name} should be allowed");
+        }
+    }
+
+    #[test]
+    fn the_command_tools_declare_what_they_do() {
+        // Reading a log is a read (no card under Auto read-only, fine in Plan);
+        // ending a process is not.
+        for name in [LIST_COMMANDS, COMMAND_OUTPUT] {
+            assert!(is_read_only(name), "{name} should be read-only");
+            assert!(
+                !requires_confirmation(PermissionMode::AutoReadOnly, name),
+                "{name} should not need a card"
+            );
+        }
+        assert!(!is_read_only(STOP_COMMAND));
+        assert!(requires_confirmation(PermissionMode::AutoReadOnly, STOP_COMMAND));
+        assert!(!requires_confirmation(PermissionMode::AutoAll, STOP_COMMAND));
+
+        // Every new tool is offered, and none of them collides with the MCP
+        // namespace ("mcp__server__tool").
+        for name in ["run_command", LIST_COMMANDS, COMMAND_OUTPUT, STOP_COMMAND] {
+            assert!(spec(name).is_some(), "{name} must be in specs()");
+            assert!(!name.starts_with("mcp__"), "{name} collides with MCP");
         }
     }
 

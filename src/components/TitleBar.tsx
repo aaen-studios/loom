@@ -8,7 +8,7 @@ import {
   toggleMaximizeWindow,
 } from "../lib/window";
 import { useChat } from "../stores/chat";
-import { activeTaskCount, useTasks } from "../stores/tasks";
+import { activeCommandCount, activeTaskCount, useTasks } from "../stores/tasks";
 import { useUi } from "../stores/ui";
 import { PersonaMenu } from "./PersonaMenu";
 import { WorkspaceChip } from "./WorkspaceChip";
@@ -61,7 +61,9 @@ export function TitleBar() {
   const busyCount = useChat(
     (state) => Object.keys(state.busy).length,
   );
-  const activeRuns = useTasks((state) => activeTaskCount(state.tasks));
+  const activeRuns =
+    useTasks((state) => activeTaskCount(state.tasks)) +
+    useTasks((state) => activeCommandCount(state.commands));
   const loadTasks = useTasks((state) => state.load);
   const [maximized, setMaximized] = useState(false);
 

@@ -3,6 +3,7 @@ import type {
   AppConfig,
   AppInfo,
   Attachment,
+  CommandRun,
   InterfaceConfig,
   Job,
   MemoryEntry,
@@ -338,6 +339,13 @@ export const ipc = {
     call<void>("show_main", { sessionId: sessionId ?? null }),
   openSettings: () => call<void>("open_settings"),
   quitApp: () => call<void>("quit_app"),
+
+  listCommands: (sessionId?: string | null) =>
+    call<CommandRun[]>("list_commands", { sessionId: sessionId ?? null }),
+  commandOutput: (id: string, lines?: number) =>
+    call<string>("command_output", { id, lines: lines ?? 200 }),
+  stopCommand: (id: string) => call<CommandRun>("stop_command", { id }),
+  deleteCommand: (id: string) => call<void>("delete_command", { id }),
 
   listTasks: (jobId?: string | null) =>
     call<Task[]>("list_tasks", { jobId: jobId ?? null }),

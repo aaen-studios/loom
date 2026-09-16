@@ -709,8 +709,13 @@ export const useChat = create<ChatState>((set, get) => ({
       event.type === "computerResumed"
     ) {
       if (!event.sessionId) return;
-    } else if (event.type === "taskChanged" || event.type === "jobChanged") {
-      // Runs and jobs belong to their own store; events.ts routes them there.
+    } else if (
+      event.type === "taskChanged" ||
+      event.type === "jobChanged" ||
+      event.type === "commandChanged"
+    ) {
+      // Runs, jobs, and shell commands belong to their own store; events.ts
+      // routes them there, and none of them is about this chat's transcript.
       return;
     } else if (event.type === "memoryChanged") {
       if (!event.sessionId) return;

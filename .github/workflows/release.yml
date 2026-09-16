@@ -32,14 +32,24 @@ jobs:
       # Optional: set WINDOWS_CERT_BASE64 + WINDOWS_CERT_PASSWORD to sign.
       # Signing happens before the payload is hashed so the manifest matches.
       - name: Sign the app binary (optional)
-        if: ${{ secrets.WINDOWS_CERT_BASE64 != '' }}
+        # `secrets` is NOT available in a step-level `if:`: GitHub rejects the
+        # whole workflow with "Unrecognized named-value: 'secrets'". Pass the
+        # values through `env` instead and let the script decide, which also
+        # keeps a stray quote in a secret from breaking the script.
+        env:
+          WINDOWS_CERT_BASE64: ${{ secrets.WINDOWS_CERT_BASE64 }}
+          WINDOWS_CERT_PASSWORD: ${{ secrets.WINDOWS_CERT_PASSWORD }}
         shell: pwsh
         run: |
+          if ([string]::IsNullOrWhiteSpace($env:WINDOWS_CERT_BASE64)) {
+            Write-Host "No certificate configured - skipping signing."
+            exit 0
+          }
           $pfx = Join-Path $env:RUNNER_TEMP "loom.pfx"
-          [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String("${{ secrets.WINDOWS_CERT_BASE64 }}"))
+          [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:WINDOWS_CERT_BASE64))
           $signtool = Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\bin\*\x64\signtool.exe" |
             Sort-Object FullName -Descending | Select-Object -First 1
-          & $signtool.FullName sign /f $pfx /p "${{ secrets.WINDOWS_CERT_PASSWORD }}" `
+          & $signtool.FullName sign /f $pfx /p $env:WINDOWS_CERT_PASSWORD `
             /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 "target\release\loom.exe"
           Remove-Item $pfx -Force
 
@@ -53,18 +63,30 @@ jobs:
           bun run tauri build --no-bundle
 
       - name: Sign the installer (optional)
-        if: ${{ secrets.WINDOWS_CERT_BASE64 != '' }}
+        # `secrets` is NOT available in a step-level `if:`: GitHub rejects the
+        # whole workflow with "Unrecognized named-value: 'secrets'". Pass the
+        # values through `env` instead and let the script decide, which also
+        # keeps a stray quote in a secret from breaking the script.
+        env:
+          WINDOWS_CERT_BASE64: ${{ secrets.WINDOWS_CERT_BASE64 }}
+          WINDOWS_CERT_PASSWORD: ${{ secrets.WINDOWS_CERT_PASSWORD }}
         shell: pwsh
         run: |
+          if ([string]::IsNullOrWhiteSpace($env:WINDOWS_CERT_BASE64)) {
+            Write-Host "No certificate configured - skipping signing."
+            exit 0
+          }
           $pfx = Join-Path $env:RUNNER_TEMP "loom.pfx"
-          [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String("${{ secrets.WINDOWS_CERT_BASE64 }}"))
+          [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:WINDOWS_CERT_BASE64))
           $signtool = Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\bin\*\x64\signtool.exe" |
             Sort-Object FullName -Descending | Select-Object -First 1
-          & $signtool.FullName sign /f $pfx /p "${{ secrets.WINDOWS_CERT_PASSWORD }}" `
+          & $signtool.FullName sign /f $pfx /p $env:WINDOWS_CERT_PASSWORD `
             /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 "target\release\loom-setup.exe"
           Remove-Item $pfx -Force
 
       - name: Collect artifacts + manifest
+        env:
+          LOOM_MINISIGN_KEY: ${{ secrets.LOOM_MINISIGN_KEY }}
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path release | Out-Null
@@ -86,13 +108,13 @@ jobs:
 
           # Sign the payload when the signing key is configured. The matching
           # public key is compiled into the app (crates/loom-core/src/updater.rs).
-          if ("${{ secrets.LOOM_MINISIGN_KEY }}" -ne "") {
+          if (-not [string]::IsNullOrWhiteSpace($env:LOOM_MINISIGN_KEY)) {
             $minisign = "minisign\minisign-win64\x86_64\minisign.exe"
             if (-not (Test-Path $minisign)) {
               Invoke-WebRequest -Uri "https://github.com/jedisct1/minisign/releases/download/0.12/minisign-0.12-win64.zip" -OutFile "minisign.zip"
               Expand-Archive -Path "minisign.zip" -DestinationPath "minisign" -Force
             }
-            Set-Content -Path "loom-release.key" -Value "${{ secrets.LOOM_MINISIGN_KEY }}" -NoNewline
+            Set-Content -Path "loom-release.key" -Value $env:LOOM_MINISIGN_KEY -NoNewline
             & $minisign -S -s "loom-release.key" -m $zip -c "loom $tag payload"
             Remove-Item "loom-release.key" -Force
             $manifest.signature = (Get-Content -Raw "$zip.minisig").Trim()

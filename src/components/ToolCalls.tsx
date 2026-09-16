@@ -149,9 +149,31 @@ function describe(call: ToolCallRecord): Look {
       return {
         icon: <WrenchIcon size={13} />,
         label: str(args.command) ?? call.name,
-        detail: null,
+        // Background runs are worth calling out: they outlive the reply.
+        detail: args.background === true ? "background" : null,
         inline: false,
         mono: true,
+      };
+    case "list_commands":
+      return {
+        icon: <WrenchIcon size={13} />,
+        label: running ? "Listing commands" : "Listed commands",
+        detail: null,
+        inline: true,
+      };
+    case "command_output":
+      return {
+        icon: <WrenchIcon size={13} />,
+        label: running ? "Reading a command's log" : "Read a command's log",
+        detail: str(args.id),
+        inline: true,
+      };
+    case "stop_command":
+      return {
+        icon: <StopIcon size={13} />,
+        label: running ? "Stopping a command" : "Stopped a command",
+        detail: str(args.id),
+        inline: false,
       };
     case "generate_image":
       return {
@@ -468,6 +490,9 @@ const RUN_LABELS: Record<string, { active: string; past: string; noun: string }>
   web_search: { active: "Searching", past: "Searched", noun: "times" },
   fetch_url: { active: "Fetching", past: "Fetched", noun: "pages" },
   run_command: { active: "Running", past: "Ran", noun: "commands" },
+  list_commands: { active: "Listing", past: "Listed", noun: "times" },
+  command_output: { active: "Reading", past: "Read", noun: "logs" },
+  stop_command: { active: "Stopping", past: "Stopped", noun: "commands" },
   generate_image: { active: "Generating", past: "Generated", noun: "images" },
   spawn_agent: { active: "Running", past: "Ran", noun: "agents" },
   screenshot: { active: "Looking at the screen", past: "Looked at the screen", noun: "times" },

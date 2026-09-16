@@ -231,6 +231,32 @@ export interface Task {
   finishedAt: number | null;
 }
 
+export type CommandStatus = "running" | "done" | "failed" | "stopped" | "orphaned";
+
+/**
+ * A shell command Loom started. Rows outlive their process: the log stays on
+ * disk, so a command that finished (or was orphaned by a restart) is still
+ * readable here.
+ */
+export interface CommandRun {
+  id: string;
+  /** The chat that started it, when a chat did. */
+  sessionId: string | null;
+  /** Short label, e.g. "unit tests". Falls back to the command's first line. */
+  label: string;
+  command: string;
+  cwd: string;
+  /** Process id of the shell Loom spawned; 0 when it never started. */
+  pid: number;
+  status: CommandStatus;
+  exitCode: number | null;
+  logPath: string;
+  /** True when the model asked for a background run rather than a timeout. */
+  background: boolean;
+  createdAt: number;
+  finishedAt: number | null;
+}
+
 /** A scheduled job: a prompt plus a five-field cron expression. */
 export interface Job {
   id: string;
@@ -603,6 +629,11 @@ export type EngineEvent =
       summary: string;
     }
   | { type: "taskChanged"; task: Task }
+  | {
+      /** A shell command Loom started changed status. */
+      type: "commandChanged";
+      command: CommandRun;
+    }
   | { type: "jobChanged"; job: Job }
   | {
       /** The memory pass (or a tool) saved facts. */

@@ -469,6 +469,13 @@ pub fn run() {
             if interrupted > 0 {
                 eprintln!("[loom] marked {interrupted} interrupted run(s)");
             }
+            // Background commands are deliberately NOT killed when Loom quits,
+            // so a row left as running is marked orphaned rather than
+            // pretending the process ended with the app.
+            let orphaned = scheduler.mark_interrupted_commands();
+            if orphaned > 0 {
+                eprintln!("[loom] marked {orphaned} orphaned command(s)");
+            }
             tauri::async_runtime::spawn(async move {
                 loop {
                     scheduler.tick_jobs().await;
@@ -612,6 +619,10 @@ pub fn run() {
             commands::retry_task,
             commands::delete_task,
             commands::start_task,
+            commands::list_commands,
+            commands::command_output,
+            commands::stop_command,
+            commands::delete_command,
             commands::list_jobs,
             commands::upsert_job,
             commands::delete_job,

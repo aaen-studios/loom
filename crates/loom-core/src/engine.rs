@@ -14,8 +14,11 @@ use serde::{Deserialize, Serialize};
 
 use crate::attachments::Attachment;
 use crate::config::{AgentMode, AppConfig, ChatDefaults, ModelRef, PermissionMode};
-use crate::db::{now_ms, Database, MemoryEntry, Message, Role, Session, SessionUpdate, Todo};
+use crate::db::{
+    now_ms, CommandRun, Database, MemoryEntry, Message, Role, Session, SessionUpdate, Todo,
+};
 use crate::persona::{Persona, PersonaVars};
+use crate::process::Running;
 use crate::provider::{MetadataSource, Modality, ModelSpec, ProviderConfig, ReasoningSpec};
 use crate::providers::stream::{self, Cancellation};
 use crate::providers::{
@@ -185,6 +188,11 @@ pub enum EngineEvent {
     TaskChanged {
         task: crate::db::Task,
     },
+    /// A shell command Loom started changed status (started, finished,
+    /// stopped). The Runs panel's Shell tab follows these live.
+    CommandChanged {
+        command: CommandRun,
+    },
     /// A scheduled job was created, edited, deleted, or fired.
     JobChanged {
         job: crate::db::Job,
@@ -222,6 +230,7 @@ impl EngineEvent {
             EngineEvent::Title { .. } => "title",
             EngineEvent::HarnessChanged { .. } => "harness-changed",
             EngineEvent::TaskChanged { .. } => "task-changed",
+            EngineEvent::CommandChanged { .. } => "command-changed",
             EngineEvent::JobChanged { .. } => "job-changed",
             EngineEvent::MemoryChanged { .. } => "memory-changed",
             EngineEvent::TodosChanged { .. } => "todos-changed",
@@ -463,6 +472,10 @@ struct Inner {
     takeover: Mutex<Option<Arc<crate::computer::TakeoverWatch>>>,
     /// Detached runs: how many are running, and which tasks wait for a slot.
     task_queue: Mutex<TaskQueue>,
+    /// Live shell commands, keyed by command id. Only handles live here; the
+    /// database is the durable record, and a missing handle just means there
+    /// is nothing left to wait on.
+    commands: Mutex<HashMap<String, Arc<tokio::sync::Mutex<Running>>>>,
     /// Per-session watermark (epoch ms) for the memory extraction pass.
     memory_scan: Mutex<HashMap<String, i64>>,
 }
@@ -476,6 +489,10 @@ struct TaskQueue {
 
 /// How many detached runs may run at once.
 pub const TASK_CONCURRENCY: usize = 3;
+
+/// How many background commands may run at once. Past this, `run_command`
+/// refuses instead of quietly piling up processes nobody is watching.
+pub const MAX_BACKGROUND_COMMANDS: usize = 8;
 
 /// Tool steps a detached run may take unless the caller says otherwise.
 pub const TASK_MAX_STEPS: u32 = 40;
@@ -574,6 +591,7 @@ impl Engine {
                 paused: Mutex::new(HashMap::new()),
                 takeover: Mutex::new(None),
                 task_queue: Mutex::new(TaskQueue::default()),
+                commands: Mutex::new(HashMap::new()),
                 memory_scan: Mutex::new(HashMap::new()),
             }),
         }
@@ -3097,13 +3115,32 @@ impl Engine {
         };
 
         let result = match call.name.as_str() {
-            "run_command" => {
-                let command = arguments
-                    .get("command")
+            "run_command" => self.run_shell_command(session_id, tool_context, &arguments).await,
+            crate::tools::LIST_COMMANDS => self.list_commands_for_tool().await,
+            crate::tools::COMMAND_OUTPUT => {
+                let id = arguments
+                    .get("id")
                     .and_then(serde_json::Value::as_str)
                     .unwrap_or_default()
                     .to_string();
-                crate::tools::run_command(tool_context, &command).await
+                let tail = arguments
+                    .get("tail")
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or(60) as usize;
+                self.command_output(&id, tail)
+            }
+            crate::tools::STOP_COMMAND => {
+                let id = arguments
+                    .get("id")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default()
+                    .to_string();
+                self.stop_command(&id).map(|command| {
+                    format!(
+                        "stopped \"{}\" (id {}, pid {})",
+                        command.label, command.id, command.pid
+                    )
+                })
             }
             "generate_image" => {
                 let prompt = arguments
@@ -3423,6 +3460,37 @@ impl Engine {
                 images: Vec::new(),
             },
         })
+    }
+
+    /// `list_commands` renders the tracked shell commands for the model.
+    async fn list_commands_for_tool(&self) -> Result<String> {
+        let commands = self.commands(None)?;
+        if commands.is_empty() {
+            return Ok("No shell commands have been run yet.".to_string());
+        }
+        let mut out = format!("{} command(s), newest first:\n", commands.len());
+        for command in commands.iter().take(30) {
+            let mut line = format!(
+                "- {} [{}] {} ({}{})",
+                command.label,
+                command.id,
+                command.status,
+                command.command,
+                command
+                    .exit_code
+                    .map(|code| format!(", exit {code}"))
+                    .unwrap_or_default()
+            );
+            if command.status == "orphaned" {
+                line.push_str(" — Loom restarted; it may still be running");
+            }
+            if command.background {
+                line.push_str(" [background]");
+            }
+            out.push_str(&line);
+            out.push('\n');
+        }
+        Ok(out)
     }
 
     async fn generate_image(
@@ -3915,6 +3983,347 @@ impl Engine {
             session_id: session_id.to_string(),
             title,
         });
+    }
+
+    // ------------------------------------------------------------------
+    // Shell commands (background runs, and timed-out foreground ones)
+    // ------------------------------------------------------------------
+
+    pub fn commands(&self, session_id: Option<&str>) -> Result<Vec<CommandRun>> {
+        self.db().list_commands(session_id)
+    }
+
+    pub fn command(&self, id: &str) -> Result<Option<CommandRun>> {
+        self.db().command(id)
+    }
+
+    /// What a command has produced so far. Reads the log file, which is
+    /// flushed after every chunk, so this is the whole story for a finished
+    /// command and the story so far for a running one.
+    pub fn command_output(&self, id: &str, lines: usize) -> Result<String> {
+        let record = self
+            .db()
+            .command(id)?
+            .ok_or_else(|| Error::other(format!("no command with id {id}")))?;
+
+        let path = std::path::PathBuf::from(&record.log_path);
+        match crate::process::log_tail(&path, lines) {
+            Ok(text) if text != "(no output yet)" => Ok(text),
+            // Nothing on disk yet: the process may not have written its first
+            // line, or the file could not be written at all. The handle still
+            // holds what arrived, so fall back to that.
+            other => {
+                if let Some(handle) = self.command_handle(id) {
+                    if let Ok(handle) = handle.try_lock() {
+                        let (stdout, stderr) = handle.tails();
+                        let mut text = String::new();
+                        if !stdout.trim().is_empty() {
+                            text.push_str("stdout:\n");
+                            text.push_str(&stdout);
+                        }
+                        if !stderr.trim().is_empty() {
+                            if !text.is_empty() {
+                                text.push('\n');
+                            }
+                            text.push_str("stderr:\n");
+                            text.push_str(&stderr);
+                        }
+                        if !text.trim().is_empty() {
+                            return Ok(tools::truncate_output(&text));
+                        }
+                    }
+                }
+                other
+            }
+        }
+    }
+
+    /// Starts a command that outlives the turn: hidden, logged, tracked, and
+    /// stoppable by id.
+    pub fn start_command(
+        &self,
+        session_id: Option<&str>,
+        cwd: &std::path::Path,
+        command: &str,
+        label: Option<&str>,
+        background: bool,
+    ) -> Result<CommandRun> {
+        if tokio::runtime::Handle::try_current().is_err() {
+            return Err(Error::other("running a command needs a Tokio runtime"));
+        }
+        let running_now = self
+            .inner
+            .commands
+            .lock()
+            .expect("commands mutex poisoned")
+            .len();
+        if running_now >= MAX_BACKGROUND_COMMANDS {
+            return Err(Error::other(format!(
+                "{MAX_BACKGROUND_COMMANDS} commands are already running — wait for one to \
+                 finish, or stop one with stop_command"
+            )));
+        }
+
+        let log_path = crate::process::command_log_path(&uuid::Uuid::new_v4().to_string())?;
+        let running = Running::spawn(command, cwd, &log_path)?;
+        self.track_command(
+            session_id,
+            cwd,
+            command,
+            label,
+            background,
+            log_path,
+            running,
+        )
+    }
+
+    /// Records an already-spawned process and watches it to completion.
+    ///
+    /// Deliberately not subject to [`MAX_BACKGROUND_COMMANDS`]: the process
+    /// exists either way, and refusing to track it would leave it invisible
+    /// and unstoppable.
+    fn track_command(
+        &self,
+        session_id: Option<&str>,
+        cwd: &std::path::Path,
+        command: &str,
+        label: Option<&str>,
+        background: bool,
+        log_path: std::path::PathBuf,
+        running: Running,
+    ) -> Result<CommandRun> {
+        let record = CommandRun {
+            id: uuid::Uuid::new_v4().to_string(),
+            session_id: session_id.map(str::to_string),
+            label: label
+                .map(str::trim)
+                .filter(|label| !label.is_empty())
+                .map(str::to_string)
+                .unwrap_or_else(|| command_label(command)),
+            command: command.to_string(),
+            cwd: cwd.to_string_lossy().into_owned(),
+            pid: running.pid(),
+            status: "running".to_string(),
+            exit_code: None,
+            log_path: log_path.to_string_lossy().into_owned(),
+            background,
+            created_at: now_ms(),
+            finished_at: None,
+        };
+        self.db().insert_command(&record)?;
+
+        let handle = Arc::new(tokio::sync::Mutex::new(running));
+        self.inner
+            .commands
+            .lock()
+            .expect("commands mutex poisoned")
+            .insert(record.id.clone(), Arc::clone(&handle));
+
+        // One watcher per command: it ends when the process does, whatever
+        // ended it (exit, stop_command, or a crash).
+        let engine = self.clone();
+        let watched = record.id.clone();
+        tokio::spawn(async move {
+            let status = handle.lock().await.wait().await;
+            engine.finish_command(&watched, status.and_then(|status| status.code()));
+        });
+
+        self.emit(EngineEvent::CommandChanged {
+            command: record.clone(),
+        });
+        Ok(record)
+    }
+
+    /// `run_command`: wait up to [`crate::process::COMMAND_TIMEOUT`], then
+    /// hand a command that is still going to the background tracker. It is
+    /// never killed — the user asked for a long build to be allowed to finish.
+    async fn run_shell_command(
+        &self,
+        session_id: &str,
+        context: &ToolContext,
+        arguments: &serde_json::Value,
+    ) -> Result<String> {
+        let command = arguments
+            .get("command")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .trim()
+            .to_string();
+        if command.is_empty() {
+            return Err(Error::other("run_command needs a command"));
+        }
+        let root = context
+            .workdir
+            .clone()
+            .ok_or_else(|| Error::other("this chat has no workspace folder set"))?;
+        let label = arguments
+            .get("label")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string);
+        let background = arguments
+            .get("background")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false);
+
+        if background {
+            let record =
+                self.start_command(Some(session_id), &root, &command, label.as_deref(), true)?;
+            return Ok(format!(
+                "started \"{}\" in the background (id {}, pid {}). It is still running and will \
+                 keep running after this turn. Its output is being written to {} — read what \
+                 it has produced with `command_output`, and end it with `stop_command`. Do not \
+                 wait for it.",
+                record.label, record.id, record.pid, record.log_path
+            ));
+        }
+
+        let log_path = crate::process::command_log_path(&uuid::Uuid::new_v4().to_string())?;
+        let mut running = Running::spawn(&command, &root, &log_path)?;
+
+        match running
+            .wait_timeout(crate::process::COMMAND_TIMEOUT)
+            .await
+        {
+            Some(status) => {
+                let (stdout, stderr) = running.finish().await;
+                drop(running);
+                // A command that finished inside the cap is reported in the
+                // transcript like any other tool; there is nothing to track,
+                // so the log goes with it.
+                let _ = std::fs::remove_file(&log_path);
+                Ok(format_command_report(
+                    status.code(),
+                    &stdout,
+                    &stderr,
+                ))
+            }
+            None => {
+                // Still going after two minutes. Adopt it: the row is what
+                // makes it visible in the Runs panel and stoppable, and the
+                // log keeps filling either way.
+                let record = self.track_command(
+                    Some(session_id),
+                    &root,
+                    &command,
+                    label.as_deref(),
+                    false,
+                    log_path.clone(),
+                    running,
+                )?;
+                let tail = crate::process::log_tail(&log_path, 40).unwrap_or_default();
+                let mut report = format!(
+                    "still running after {}s (id {}, pid {}). It was not stopped — it keeps \
+                     running, and its output goes to the log below. Read more with \
+                     `command_output`, or end it with `stop_command`.\n",
+                    crate::process::COMMAND_TIMEOUT.as_secs(),
+                    record.id,
+                    record.pid,
+                );
+                if !tail.trim().is_empty() {
+                    report.push_str("output so far:\n");
+                    report.push_str(&tools::truncate_output(&tail));
+                }
+                Ok(report)
+            }
+        }
+    }
+
+    fn command_handle(&self, id: &str) -> Option<Arc<tokio::sync::Mutex<Running>>> {
+        self.inner
+            .commands
+            .lock()
+            .ok()?
+            .get(id)
+            .map(Arc::clone)
+    }
+
+    /// Records a command's exit and drops its handle. A command the user
+    /// stopped keeps the word "stopped", whatever its exit code says.
+    fn finish_command(&self, id: &str, exit_code: Option<i32>) {
+        let stopped = self
+            .db()
+            .command(id)
+            .ok()
+            .flatten()
+            .map(|record| record.status == "stopped")
+            .unwrap_or(false);
+        let status = match (stopped, exit_code) {
+            (true, _) => "stopped",
+            (false, Some(0)) => "done",
+            (false, _) => "failed",
+        };
+        if let Err(error) = self.db().set_command_status(id, status, exit_code) {
+            eprintln!("[loom] could not update command {id}: {error}");
+        }
+        if let Ok(mut commands) = self.inner.commands.lock() {
+            commands.remove(id);
+        }
+        // Only announce it if the row is still there (it may have been deleted
+        // while the process was winding down).
+        if let Ok(Some(command)) = self.db().command(id) {
+            self.emit(EngineEvent::CommandChanged { command });
+        }
+    }
+
+    /// Ends a running command and everything it spawned.
+    pub fn stop_command(&self, id: &str) -> Result<CommandRun> {
+        let record = self
+            .db()
+            .command(id)?
+            .ok_or_else(|| Error::other(format!("no command with id {id}")))?;
+        if record.status != "running" {
+            return Err(Error::other(format!(
+                "command {id} is not running (it is {})",
+                record.status
+            )));
+        }
+        crate::process::kill_tree(record.pid);
+        self.db().set_command_status(id, "stopped", None)?;
+        let updated = self.db().command(id)?.unwrap_or(record);
+        self.emit(EngineEvent::CommandChanged {
+            command: updated.clone(),
+        });
+        Ok(updated)
+    }
+
+    /// Forgets a command, stopping it first: deleting the row of a live
+    /// process would leave a process nobody can find again.
+    pub fn delete_command(&self, id: &str) -> Result<()> {
+        if let Some(record) = self.db().command(id)? {
+            if record.status == "running" {
+                crate::process::kill_tree(record.pid);
+            }
+            let _ = std::fs::remove_file(&record.log_path);
+        }
+        if let Ok(mut commands) = self.inner.commands.lock() {
+            commands.remove(id);
+        }
+        self.db().delete_command(id)
+    }
+
+    /// After a restart, commands recorded as running are no longer ours. Loom
+    /// does not kill background commands when it quits, so the process may
+    /// well still be alive — the row says so rather than pretending it ended.
+    /// Called once at launch.
+    pub fn mark_interrupted_commands(&self) -> usize {
+        let unfinished = match self.db().running_commands() {
+            Ok(commands) => commands,
+            Err(_) => return 0,
+        };
+        let count = unfinished.len();
+        for command in unfinished {
+            if let Err(error) = self.db().set_command_status(&command.id, "orphaned", None) {
+                eprintln!("[loom] could not reconcile command {}: {error}", command.id);
+                continue;
+            }
+            if crate::process::is_alive(command.pid) {
+                eprintln!(
+                    "[loom] command {} ({}) was left running by a previous session",
+                    command.id, command.command
+                );
+            }
+        }
+        count
     }
 
     // ------------------------------------------------------------------
@@ -5276,6 +5685,37 @@ async fn wait_for_cancel(cancel: &Cancellation) {
     while !cancel.load(Ordering::Relaxed) {
         tokio::time::sleep(Duration::from_millis(200)).await;
     }
+}
+
+/// The report a finished foreground command returns to the model.
+fn format_command_report(
+    code: Option<i32>,
+    stdout: &str,
+    stderr: &str,
+) -> String {
+    let mut report = String::new();
+    report.push_str(&format!("exit code: {}\n", code.unwrap_or(-1)));
+    if !stdout.trim().is_empty() {
+        report.push_str("stdout:\n");
+        report.push_str(&tools::truncate_output(stdout));
+        report.push('\n');
+    }
+    if !stderr.trim().is_empty() {
+        report.push_str("stderr:\n");
+        report.push_str(&tools::truncate_output(stderr));
+    }
+    report.trim_end().to_string()
+}
+
+/// A command's first non-blank line, shortened: the label a tracked command
+/// shows when the model did not give one.
+fn command_label(command: &str) -> String {
+    let line = command
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or("command");
+    line.chars().take(80).collect()
 }
 
 fn permission_mode_str(mode: PermissionMode) -> &'static str {

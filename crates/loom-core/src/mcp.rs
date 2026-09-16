@@ -77,6 +77,9 @@ impl McpClient {
         }
 
         let mut command = Command::new(&config.command);
+        // MCP servers are console programs too: without this, connecting one
+        // drops an empty black window on the desktop for the app's lifetime.
+        crate::process::hide(&mut command);
         command
             .args(&config.args)
             .stdin(Stdio::piped())

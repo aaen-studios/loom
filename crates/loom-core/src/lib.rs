@@ -25,6 +25,7 @@ pub mod mcp;
 pub mod memory;
 pub mod paths;
 pub mod persona;
+pub mod process;
 pub mod provider;
 pub mod providers;
 pub mod screen;

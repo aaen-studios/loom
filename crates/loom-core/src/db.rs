@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{paths, Error, Result};
 
-pub const SCHEMA_VERSION: i64 = 9;
+pub const SCHEMA_VERSION: i64 = 10;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -175,6 +175,31 @@ pub struct Task {
     pub notify: bool,
     pub created_at: i64,
     pub started_at: Option<i64>,
+    pub finished_at: Option<i64>,
+}
+
+/// A shell command Loom started. Rows outlive their process: the log stays on
+/// disk, so a command that finished (or was orphaned) is still inspectable.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CommandRun {
+    pub id: String,
+    /// The chat that started it, when a chat did.
+    pub session_id: Option<String>,
+    /// Short human label, e.g. "unit tests". Falls back to the command itself.
+    pub label: String,
+    pub command: String,
+    pub cwd: String,
+    /// Process id of the shell Loom spawned; 0 when it never started.
+    pub pid: u32,
+    /// `running` | `done` | `failed` | `stopped` | `orphaned`
+    pub status: String,
+    pub exit_code: Option<i32>,
+    pub log_path: String,
+    /// True when the model asked for a background command rather than a
+    /// timed-out foreground one being adopted.
+    pub background: bool,
+    pub created_at: i64,
     pub finished_at: Option<i64>,
 }
 
@@ -455,6 +480,34 @@ impl Database {
                     );
 
                     CREATE INDEX IF NOT EXISTS idx_todos_session ON todos(session_id, position);
+                    "#,
+            )
+            .map_err(map_sql(path))?;
+        }
+
+        if current < 10 {
+            // Shell commands Loom started and still owns. A row outlives the
+            // process it describes: its log is on disk, so a command that
+            // finished while the app was closed is still readable afterwards.
+            tx.execute_batch(
+                r#"
+                    CREATE TABLE IF NOT EXISTS commands (
+                        id TEXT PRIMARY KEY,
+                        session_id TEXT,
+                        label TEXT NOT NULL DEFAULT '',
+                        command TEXT NOT NULL,
+                        cwd TEXT NOT NULL,
+                        pid INTEGER NOT NULL DEFAULT 0,
+                        status TEXT NOT NULL DEFAULT 'running',
+                        exit_code INTEGER,
+                        log_path TEXT NOT NULL,
+                        background INTEGER NOT NULL DEFAULT 0,
+                        created_at INTEGER NOT NULL,
+                        finished_at INTEGER
+                    );
+
+                    CREATE INDEX IF NOT EXISTS idx_commands_created ON commands(created_at DESC);
+                    CREATE INDEX IF NOT EXISTS idx_commands_status ON commands(status, created_at DESC);
                     "#,
             )
             .map_err(map_sql(path))?;
@@ -1202,6 +1255,107 @@ impl Database {
         transaction.commit().map_err(map_sql("tasks"))
     }
 
+    // --------------------------------------------------------- commands
+
+    pub fn insert_command(&self, command: &CommandRun) -> Result<()> {
+        self.connection
+            .execute(
+                "INSERT INTO commands (id, session_id, label, command, cwd, pid, status, exit_code, log_path, background, created_at, finished_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                params![
+                    command.id,
+                    command.session_id,
+                    command.label,
+                    command.command,
+                    command.cwd,
+                    command.pid,
+                    command.status,
+                    command.exit_code,
+                    command.log_path,
+                    command.background as i64,
+                    command.created_at,
+                    command.finished_at,
+                ],
+            )
+            .map_err(map_sql("commands"))
+            .map(|_| ())
+    }
+
+    pub fn command(&self, id: &str) -> Result<Option<CommandRun>> {
+        self.connection
+            .query_row(
+                "SELECT id, session_id, label, command, cwd, pid, status, exit_code, log_path, background, created_at, finished_at
+                 FROM commands WHERE id = ?1",
+                params![id],
+                row_to_command,
+            )
+            .optional()
+            .map_err(map_sql("commands"))
+    }
+
+    /// Newest first. Filter by chat when a chat's own commands are wanted.
+    pub fn list_commands(&self, session_id: Option<&str>) -> Result<Vec<CommandRun>> {
+        let mut statement = self
+            .connection
+            .prepare(
+                "SELECT id, session_id, label, command, cwd, pid, status, exit_code, log_path, background, created_at, finished_at
+                 FROM commands WHERE (?1 IS NULL OR session_id = ?1)
+                 ORDER BY created_at DESC LIMIT 200",
+            )
+            .map_err(map_sql("commands"))?;
+        let rows = statement
+            .query_map(params![session_id], row_to_command)
+            .map_err(map_sql("commands"))?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(map_sql("commands"))
+    }
+
+    /// Commands that never reached a terminal status — the ones a restart has
+    /// to reconcile, since their process may or may not still exist.
+    pub fn running_commands(&self) -> Result<Vec<CommandRun>> {
+        let mut statement = self
+            .connection
+            .prepare(
+                "SELECT id, session_id, label, command, cwd, pid, status, exit_code, log_path, background, created_at, finished_at
+                 FROM commands WHERE status = 'running' ORDER BY created_at ASC",
+            )
+            .map_err(map_sql("commands"))?;
+        let rows = statement
+            .query_map([], row_to_command)
+            .map_err(map_sql("commands"))?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(map_sql("commands"))
+    }
+
+    /// Moves a command to a new status, stamping the finish time for the
+    /// terminal ones.
+    pub fn set_command_status(
+        &self,
+        id: &str,
+        status: &str,
+        exit_code: Option<i32>,
+    ) -> Result<()> {
+        let terminal = matches!(status, "done" | "failed" | "stopped" | "orphaned");
+        self.connection
+            .execute(
+                "UPDATE commands SET
+                   status = ?2,
+                   exit_code = COALESCE(?3, exit_code),
+                   finished_at = CASE WHEN ?4 THEN ?5 ELSE finished_at END
+                 WHERE id = ?1",
+                params![id, status, exit_code, terminal, now_ms()],
+            )
+            .map_err(map_sql("commands"))
+            .map(|_| ())
+    }
+
+    pub fn delete_command(&self, id: &str) -> Result<()> {
+        self.connection
+            .execute("DELETE FROM commands WHERE id = ?1", params![id])
+            .map_err(map_sql("commands"))
+            .map(|_| ())
+    }
+
     // -------------------------------------------------------------- jobs
 
     pub fn upsert_job(&self, job: &Job) -> Result<()> {
@@ -1400,6 +1554,23 @@ impl Database {
             .map(|count| count as usize)
             .map_err(map_sql("memories"))
     }
+}
+
+fn row_to_command(row: &rusqlite::Row<'_>) -> rusqlite::Result<CommandRun> {
+    Ok(CommandRun {
+        id: row.get(0)?,
+        session_id: row.get(1)?,
+        label: row.get(2)?,
+        command: row.get(3)?,
+        cwd: row.get(4)?,
+        pid: row.get(5)?,
+        status: row.get(6)?,
+        exit_code: row.get(7)?,
+        log_path: row.get(8)?,
+        background: row.get::<_, i64>(9)? != 0,
+        created_at: row.get(10)?,
+        finished_at: row.get(11)?,
+    })
 }
 
 fn row_to_task(row: &rusqlite::Row<'_>) -> rusqlite::Result<Task> {
@@ -1700,6 +1871,8 @@ mod tests {
             .unwrap();
         assert_eq!(version, SCHEMA_VERSION);
         assert!(db.list_sessions().unwrap().is_empty());
+        // The v10 table is created by the same forward-only pass.
+        assert!(db.list_commands(None).unwrap().is_empty());
     }
 
     #[test]
@@ -1777,6 +1950,68 @@ mod tests {
         assert_eq!(db.prune_empty_sessions(None).unwrap(), 1);
         assert!(db.get_session("kept").unwrap().is_none());
         assert!(db.get_session("used").unwrap().is_some());
+    }
+
+    fn command(id: &str, status: &str) -> CommandRun {
+        CommandRun {
+            id: id.to_string(),
+            session_id: Some("s1".to_string()),
+            label: "tests".to_string(),
+            command: "cargo test".to_string(),
+            cwd: "C:/work".to_string(),
+            pid: 4242,
+            status: status.to_string(),
+            exit_code: None,
+            log_path: format!("C:/logs/cmd-{id}.log"),
+            background: true,
+            created_at: 1_000,
+            finished_at: None,
+        }
+    }
+
+    #[test]
+    fn commands_round_trip_and_filter_by_status() {
+        let db = Database::open_in_memory().unwrap();
+        db.insert_command(&command("c1", "running")).unwrap();
+        db.insert_command(&command("c2", "running")).unwrap();
+        db.insert_command(&command("c3", "done")).unwrap();
+
+        let stored = db.command("c1").unwrap().unwrap();
+        assert_eq!(stored.label, "tests");
+        assert!(stored.background);
+        assert_eq!(stored.pid, 4242);
+        assert_eq!(stored.session_id.as_deref(), Some("s1"));
+        assert!(stored.finished_at.is_none());
+
+        assert_eq!(db.running_commands().unwrap().len(), 2);
+        assert_eq!(db.list_commands(None).unwrap().len(), 3);
+        assert!(db.list_commands(Some("other")).unwrap().is_empty());
+
+        // A terminal status stamps the finish time and records the code.
+        db.set_command_status("c1", "failed", Some(101)).unwrap();
+        let finished = db.command("c1").unwrap().unwrap();
+        assert_eq!(finished.status, "failed");
+        assert_eq!(finished.exit_code, Some(101));
+        assert!(finished.finished_at.is_some());
+        assert_eq!(db.running_commands().unwrap().len(), 1);
+
+        // A later status update keeps the exit code that was already known.
+        db.set_command_status("c1", "done", None).unwrap();
+        assert_eq!(db.command("c1").unwrap().unwrap().exit_code, Some(101));
+
+        db.delete_command("c3").unwrap();
+        assert!(db.command("c3").unwrap().is_none());
+    }
+
+    #[test]
+    fn deleting_a_session_keeps_its_command_log() {
+        // The hidden session of a detached run can go; the command row is not
+        // a child of it, so the log stays readable from the Shell tab.
+        let db = Database::open_in_memory().unwrap();
+        db.create_session(&session("s1")).unwrap();
+        db.insert_command(&command("c1", "done")).unwrap();
+        db.delete_session("s1").unwrap();
+        assert!(db.command("c1").unwrap().is_some());
     }
 
     #[test]

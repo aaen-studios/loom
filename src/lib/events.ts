@@ -31,6 +31,10 @@ export function useEngineEvents(): void {
         useTasks.getState().applyTask(payload.task);
         return;
       }
+      if (payload.type === "commandChanged") {
+        useTasks.getState().applyCommand(payload.command);
+        return;
+      }
       if (payload.type === "jobChanged") {
         useTasks.getState().applyJob(payload.job);
         return;
