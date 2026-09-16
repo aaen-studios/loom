@@ -40,12 +40,23 @@ const staging = join(root, "target", "payload-staging");
 rmSync(staging, { recursive: true, force: true });
 mkdirSync(staging, { recursive: true });
 
-// Copy the exe plus any sidecar resources the app needs.
+// The app binary plus any runtime DLLs it needs. Other executables in
+// target/release (loom-setup.exe above all) belong to someone else — shipping
+// them would embed the installer inside its own payload. `loom_lib.dll` is the
+// crate's cdylib target, not a runtime sidecar: the exe is self-contained.
+const skipped = [];
 for (const entry of readdirSync(source)) {
   const full = join(source, entry);
-  if (statSync(full).isFile() && (entry.endsWith(".exe") || entry.endsWith(".dll"))) {
+  if (!statSync(full).isFile()) continue;
+  const runtimeDll = entry.endsWith(".dll") && entry !== "loom_lib.dll";
+  if (entry === "loom.exe" || runtimeDll) {
     copyFileSync(full, join(staging, entry));
+  } else if (entry.endsWith(".exe") || entry.endsWith(".dll")) {
+    skipped.push(entry);
   }
+}
+if (skipped.length > 0) {
+  console.log(`payload: skipped unrelated binaries: ${skipped.join(", ")}`);
 }
 
 rmSync(outFile, { force: true });

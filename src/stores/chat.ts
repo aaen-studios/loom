@@ -160,6 +160,22 @@ function appendReasoning(
   return [...blocks, { text, after, seq }];
 }
 
+/**
+ * The composer's per-chat controls (mode, approvals, persona, computer use)
+ * are usable before the first message exists. Choosing one is intent for a
+ * chat, so it starts one — the same way `/goal` and the workspace chip do.
+ * A `null` choice only clears an override, which with no chat is already the
+ * state, so it never starts one.
+ */
+async function sessionForChoice(
+  get: () => ChatState,
+  hasChoice: boolean,
+): Promise<string | null> {
+  const activeId = get().activeId;
+  if (activeId || !hasChoice) return activeId;
+  return get().ensureSession();
+}
+
 
 
 /**
@@ -194,10 +210,9 @@ export const useChat = create<ChatState>((set, get) => ({
     // one is protected so a chat being composed is never pulled away.
     await ipc.pruneEmptySessions(get().activeId);
     const sessions = (await ipc.listSessions()) ?? [];
+    // Launching never reopens old history: the canvas starts blank and the
+    // session is created on the first send (or picked from the chats popup).
     set({ sessions, loaded: true });
-    if (!get().activeId && sessions.length > 0) {
-      await get().openSession(sessions[0].id);
-    }
   },
 
   openSession: async (id) => {
@@ -507,14 +522,12 @@ export const useChat = create<ChatState>((set, get) => ({
   },
 
   setPersona: async (personaId, systemPrompt) => {
-    const activeId = get().activeId;
-    if (!activeId) return;
-    await ipc.setSessionPersona(activeId, personaId, systemPrompt);
+    const sessionId = await sessionForChoice(get, personaId !== null);
+    if (!sessionId) return;
+    await ipc.setSessionPersona(sessionId, personaId, systemPrompt);
     set((state) => ({
       sessions: state.sessions.map((session) =>
-        session.id === activeId
-          ? { ...session, personaId, systemPrompt }
-          : session,
+        session.id === sessionId ? { ...session, personaId, systemPrompt } : session,
       ),
     }));
   },
@@ -531,34 +544,34 @@ export const useChat = create<ChatState>((set, get) => ({
   },
 
   setPermissionMode: async (mode) => {
-    const activeId = get().activeId;
-    if (!activeId) return;
-    await ipc.setSessionPermissionMode(activeId, mode);
+    const sessionId = await sessionForChoice(get, mode !== null);
+    if (!sessionId) return;
+    await ipc.setSessionPermissionMode(sessionId, mode);
     set((state) => ({
       sessions: state.sessions.map((session) =>
-        session.id === activeId ? { ...session, permissionMode: mode } : session,
+        session.id === sessionId ? { ...session, permissionMode: mode } : session,
       ),
     }));
   },
 
   setAgentMode: async (mode) => {
-    const activeId = get().activeId;
-    if (!activeId) return;
-    await ipc.setSessionAgentMode(activeId, mode);
+    const sessionId = await sessionForChoice(get, mode !== null);
+    if (!sessionId) return;
+    await ipc.setSessionAgentMode(sessionId, mode);
     set((state) => ({
       sessions: state.sessions.map((session) =>
-        session.id === activeId ? { ...session, agentMode: mode } : session,
+        session.id === sessionId ? { ...session, agentMode: mode } : session,
       ),
     }));
   },
 
   setComputerAccess: async (enabled) => {
-    const activeId = get().activeId;
-    if (!activeId) return;
-    await ipc.setSessionComputerAccess(activeId, enabled);
+    const sessionId = await sessionForChoice(get, enabled);
+    if (!sessionId) return;
+    await ipc.setSessionComputerAccess(sessionId, enabled);
     set((state) => ({
       sessions: state.sessions.map((session) =>
-        session.id === activeId ? { ...session, computerAccess: enabled } : session,
+        session.id === sessionId ? { ...session, computerAccess: enabled } : session,
       ),
     }));
   },

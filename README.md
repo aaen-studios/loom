@@ -13,6 +13,7 @@ usage and subscription limits (Settings →
 Usage, plus a composer badge for the active model), **computer use** (Windows:
 `Ctrl+Alt+Esc`
 panic stop and screenshots in the transcript), tray + hotkey overlay,
+launch at login (Settings → General), a fresh chat on every launch,
 signed updater, and a bespoke glass installer. See [docs/spec.md](docs/spec.md).
 
 ## Development
@@ -117,11 +118,17 @@ exe), and publishes `update.json`. Users get the update in Settings → Updates
 
 Installing locally, without the workflow:
 
-```bash
-bun run tauri build --no-bundle              # target/release/loom.exe
-node scripts/make-payload.mjs                # setup/src-tauri/payload.zip
-cd setup && bun run tauri build --no-bundle  # target/release/loom-setup.exe
-./target/release/loom-setup.exe              # or --silent --dir <path>
+```powershell
+# 1. Build the app (this also builds the frontend), then zip it into a payload.
+bun run tauri build --no-bundle                # target\release\loom.exe
+node scripts/make-payload.mjs                  # setup\src-tauri\payload.zip
+
+# 2. Setup embeds the payload at compile time, so it must come last.
+Push-Location setup
+bun run tauri build --no-bundle                # target\release\loom-setup.exe
+Pop-Location
+
+.\target\release\loom-setup.exe                # or --silent --dir <path>
 ```
 
 Uninstalling: add/remove programs, or run

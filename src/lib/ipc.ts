@@ -132,6 +132,11 @@ export const ipc = {
   setHotkey: (enabled: boolean, keys: string) =>
     call<void>("set_hotkey", { enabled, keys }),
 
+  /** Registry-backed: true while Loom is set to launch at Windows login. */
+  autostartEnabled: () => call<boolean>("autostart_enabled"),
+  setAutostart: (enabled: boolean) =>
+    call<boolean>("set_autostart", { enabled }),
+
   upsertPrompt: (prompt: Prompt) => call<AppConfig>("upsert_prompt", { prompt }),
   deletePrompt: (id: string) => call<AppConfig>("delete_prompt", { id }),
   upsertPersona: (persona: Persona) =>

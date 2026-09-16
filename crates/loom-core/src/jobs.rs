@@ -218,8 +218,11 @@ mod tests {
     use super::*;
 
     fn at(year: i64, month: u32, day: u32, hour: u32, minute: u32) -> i64 {
+        // Cron fields are local time, so a fixture builds local wall time and
+        // converts it back the way `next_after` does.
         let days = crate::fsutil::days_from_civil(year, month as i64, day as i64);
         (days * 86_400 + hour as i64 * 3_600 + minute as i64 * 60) * 1_000
+            - local_offset_seconds() * 1_000
     }
 
     #[test]

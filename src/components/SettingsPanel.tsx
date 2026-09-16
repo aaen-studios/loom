@@ -2756,6 +2756,24 @@ function GeneralSection() {
   const setShortcutsOpen = useUi((state) => state.setShortcutsOpen);
   const [hotkeyDraft, setHotkeyDraft] = useState(config.interface.hotkey);
   const [hotkeyNote, setHotkeyNote] = useState<string | null>(null);
+  const [autostart, setAutostart] = useState(false);
+
+  useEffect(() => {
+    if (!isTauri) return;
+    void ipc.autostartEnabled().then((enabled) => setAutostart(Boolean(enabled)));
+  }, []);
+
+  const toggleAutostart = async (value: boolean) => {
+    const previous = autostart;
+    setAutostart(value);
+    const actual = await ipc.setAutostart(value).catch(() => null);
+    if (actual === null && isTauri) {
+      // The command failed; do not show a state the registry does not have.
+      setAutostart(previous);
+    } else if (actual !== null) {
+      setAutostart(actual);
+    }
+  };
 
   const saveInterface = async (patch: Partial<typeof config.interface>) => {
     const updated = await ipc.setInterfaceSettings({ ...config.interface, ...patch });
@@ -2809,6 +2827,13 @@ function GeneralSection() {
       {hotkeyNote && (
         <p className="px-1 py-1.5 text-[12px] text-faint">{hotkeyNote}</p>
       )}
+
+      <Toggle
+        label="Start Loom when you sign in"
+        hint="Windows launches Loom automatically at login."
+        checked={autostart}
+        onChange={(value) => void toggleAutostart(value)}
+      />
 
       <Row label="Keyboard shortcuts">
         <button
@@ -2875,7 +2900,7 @@ function AppearanceSection() {
   return (
     <>
       <Section title="Theme">
-        <Row label="Mode" hint="Dark is the default; light stays readable over any artwork.">
+        <Row label="Mode" hint="Light is the default; both palettes work over any artwork.">
           <Segmented
             value={config.theme}
             options={[
@@ -2950,7 +2975,14 @@ function AppearanceSection() {
           )}
         </div>
 
-        <Row label="Dim" hint="Veil the artwork so text stays legible.">
+        <Row
+          label="Dim"
+          hint={
+            config.theme === "dark"
+              ? "Dark mode keeps a minimum veil so bright art cannot wash out the text."
+              : "Veil your own artwork so text stays legible. The built-in presets need none."
+          }
+        >
           <div className="flex items-center gap-2">
             <input
               type="range"

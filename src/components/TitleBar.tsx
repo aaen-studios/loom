@@ -40,7 +40,7 @@ function PillButton({
       aria-label={label}
       onClick={onClick}
       className={cn(
-        "hover-surface grid h-8 w-9 place-items-center rounded-row text-soft",
+        "hover-surface grid h-8 w-9 place-items-center rounded-full text-soft",
         "focus-visible:outline focus-visible:outline-2 focus-visible:outline-[var(--accent)]",
         danger && "hover:!bg-[var(--danger)] hover:!text-white",
       )}

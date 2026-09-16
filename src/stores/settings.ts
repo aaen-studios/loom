@@ -4,12 +4,12 @@ import { ipc } from "../lib/ipc";
 
 export const DEFAULT_CONFIG: AppConfig = {
   schemaVersion: 1,
-  theme: "dark",
+  theme: "light",
   background: {
     kind: "builtin",
-    preset: "rei",
+    preset: "porcelain",
     path: null,
-    dim: 30,
+    dim: 0,
     blur: 0,
   },
   sidebarCollapsed: false,

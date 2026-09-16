@@ -78,12 +78,16 @@ function MainShell() {
 }
 
 function OverlayShell() {
+  const theme = useSettings((state) => state.config.theme);
+
   useEffect(() => {
     const root = document.documentElement;
-    root.classList.add("dark");
+    // The overlay follows the app's theme; it is a pane on the desktop, so it
+    // never paints a background of its own.
+    root.classList.toggle("dark", theme === "dark");
     root.style.background = "transparent";
     document.body.style.background = "transparent";
-  }, []);
+  }, [theme]);
 
   return <AskOverlay />;
 }

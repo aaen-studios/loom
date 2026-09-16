@@ -60,7 +60,7 @@ impl Default for AppConfig {
         Self {
             schema_version: SCHEMA_VERSION,
             metadata_version: METADATA_VERSION,
-            theme: Theme::Dark,
+            theme: Theme::Light,
             background: BackgroundConfig::default(),
             sidebar_collapsed: false,
             providers: BTreeMap::new(),
@@ -81,8 +81,10 @@ impl Default for AppConfig {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Theme {
-    Light,
+    /// The default. The built-in backgrounds are light, and a light surface
+    /// flatters the app's dark ink and its glass panels.
     #[default]
+    Light,
     Dark,
 }
 
@@ -99,11 +101,17 @@ pub enum BackgroundKind {
 #[serde(rename_all = "camelCase", default)]
 pub struct BackgroundConfig {
     pub kind: BackgroundKind,
-    /// Built-in preset id (see the UI's preset list).
+    /// Built-in preset id (see the UI's preset list). An id the UI no longer
+    /// knows falls back to the first preset, so retiring one needs no
+    /// migration here.
     pub preset: String,
     /// Absolute path for `Image`/`Video` kinds.
     pub path: Option<String>,
-    /// 0..=100 black overlay strength.
+    /// 0..=100 black overlay strength, for taming artwork the user supplies.
+    /// The built-in presets are authored to be legible already, so the default
+    /// is 0. Dark mode applies a floor of its own regardless (see the UI's
+    /// `DARK_DIM_FLOOR`), because near-white ink needs a bright background
+    /// held down.
     pub dim: u8,
     /// 0..=64 px blur applied to the background layer.
     pub blur: u8,
@@ -113,9 +121,12 @@ impl Default for BackgroundConfig {
     fn default() -> Self {
         Self {
             kind: BackgroundKind::Builtin,
-            preset: "rei".to_string(),
+            // Porcelain: a cool near-white, painted in CSS. Chosen as the
+            // default because it is the quietest of the set, and because a
+            // light surface flatters the app's dark ink and glass equally.
+            preset: "porcelain".to_string(),
             path: None,
-            dim: 30,
+            dim: 0,
             blur: 0,
         }
     }
@@ -567,8 +578,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let config = load_from(&temp_config_path(&dir)).unwrap();
         assert_eq!(config, AppConfig::default());
-        assert_eq!(config.theme, Theme::Dark);
-        assert_eq!(config.background.preset, "rei");
+        assert_eq!(config.theme, Theme::Light);
+        assert_eq!(config.background.preset, "porcelain");
         assert_eq!(config.chat.permission_mode, PermissionMode::Ask);
         assert_eq!(config.chat.agent_mode, AgentMode::Build);
     }
@@ -807,6 +818,8 @@ mod tests {
                 ..Default::default()
             },
         );
+
+        config.providers.insert("P".into(), provider);
 
         assert!(migrate_metadata(&mut config));
         let models = &config.providers["P"].models;

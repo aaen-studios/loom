@@ -538,11 +538,17 @@ export function ChatCanvas() {
       <section className="relative flex h-full min-w-0 flex-1 items-center justify-center px-6 pb-16">
         <div className="w-full max-w-2xl -translate-y-6">
           <div className="mb-6 flex flex-col items-center text-center">
-            <LoomMark size={32} className="mb-3 text-[var(--accent)]" />
-            <h1 className="text-[24px] font-medium tracking-tight text-[var(--ink)]">
+            <LoomMark size={32} weaving className="mb-3 text-[var(--accent)]" />
+            <h1
+              className="intro-step text-[24px] font-medium tracking-tight text-[var(--ink)]"
+              style={{ animationDelay: "180ms" }}
+            >
               {greeting()}
             </h1>
-            <p className="mt-1.5 max-w-lg text-[13px] leading-5 text-faint">
+            <p
+              className="intro-step mt-1.5 max-w-lg text-[13px] leading-5 text-faint"
+              style={{ animationDelay: "260ms" }}
+            >
               {workspaceName ? (
                 <>
                   Working in{" "}
@@ -553,13 +559,19 @@ export function ChatCanvas() {
               )}
             </p>
           </div>
-          <div className="panel rounded-window p-4 pb-3">
+          <div
+            className="intro-step panel rounded-window p-4 pb-3"
+            style={{ animationDelay: "340ms" }}
+          >
             <MessageQueue />
             <GoalPanel />
             <Composer variant="hero" />
           </div>
           {modelCount === 0 && (
-            <p className="mt-3 text-center text-[12.5px] text-faint">
+            <p
+              className="intro-step mt-3 text-center text-[12.5px] text-faint"
+              style={{ animationDelay: "440ms" }}
+            >
               No models yet.{" "}
               <button
                 type="button"

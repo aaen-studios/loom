@@ -55,7 +55,7 @@ export function WorkspaceChip({ align = "up" }: { align?: "up" | "down" }) {
       .then((info) => setBranch(info?.branch ?? null));
     if (workdir && session?.id) {
       void ipc.indexStatus(session.id).then((count) => setChunks(count ?? 0));
-    } 
+    }
   }, [workdir, session?.id]);
 
   // Using a folder is what "adding" it means: it must survive a restart, so
@@ -122,7 +122,7 @@ export function WorkspaceChip({ align = "up" }: { align?: "up" | "down" }) {
         onClick={() => setOpen(!open)}
         title={session?.workdir ?? "Choose a workspace folder for tools"}
         className={cn(
-          "hover-surface flex h-8 max-w-[210px] items-center gap-1.5 rounded-row px-2.5 text-[12.5px]",
+          "hover-surface flex h-8 max-w-[210px] items-center gap-1.5 rounded-full px-2.5 text-[12.5px]",
           folderName ? "text-soft" : "text-faint",
         )}
       >

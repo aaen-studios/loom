@@ -1804,7 +1804,7 @@ mod tests {
         for args in [
             json!({ "interface": { "hotkey": "Ctrl+Alt+L" } }),
             json!({ "interface": { "hotkeyEnabled": false } }),
-            json!({ "background": { "preset": "rei" } }),
+            json!({ "background": { "preset": "porcelain" } }),
             json!({ "interface": { "sidebarGrouping": "none" } }),
             json!({ "nonsense": true }),
         ] {

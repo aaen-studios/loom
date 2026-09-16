@@ -49,6 +49,7 @@ pub fn validate_id(id: &str) -> Result<()> {
     let valid = match chars.next() {
         Some(first) if first.is_ascii_lowercase() || first.is_ascii_digit() => {
             id.len() <= 48
+                && !id.ends_with('-')
                 && chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
         }
         _ => false,
@@ -58,7 +59,8 @@ pub fn validate_id(id: &str) -> Result<()> {
     }
     Err(Error::other(format!(
         "invalid skill id \"{id}\": use lowercase letters, digits and dashes, start \
-         with a letter or digit, and keep it at most 48 characters"
+         with a letter or digit, don't end with a dash, and keep it at most 48 \
+         characters"
     )))
 }
 
@@ -85,8 +87,9 @@ pub fn write_in(
 ) -> Result<String> {
     if body.len() > MAX_BODY {
         return Err(Error::other(format!(
-            "skill body is {} bytes, larger than the {MAX_BODY} byte limit",
-            body.len()
+            "skill body is {} bytes, larger than the {MAX_BODY} byte limit ({} KB)",
+            body.len(),
+            MAX_BODY / 1024
         )));
     }
 

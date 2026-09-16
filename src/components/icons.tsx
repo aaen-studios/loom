@@ -1,4 +1,5 @@
 import type { SVGProps } from "react";
+import { cn } from "../lib/cn";
 
 type IconProps = SVGProps<SVGSVGElement> & { size?: number };
 
@@ -405,22 +406,38 @@ export function HalfCircleIcon(props: IconProps) {
   );
 }
 
-/** Brand glyph: three woven threads. */
-export function LoomMark(props: IconProps) {
+/**
+ * Brand glyph: three woven threads. `weaving` draws them on as it mounts
+ * (the warp first, then the weft), for the opening screen.
+ */
+export function LoomMark({
+  size = 18,
+  weaving = false,
+  className,
+  ...rest
+}: IconProps & { weaving?: boolean }) {
   return (
     <svg
-      width={props.size ?? 18}
-      height={props.size ?? 18}
+      width={size}
+      height={size}
       viewBox="0 0 24 24"
       fill="none"
       stroke="currentColor"
       strokeWidth={1.9}
       strokeLinecap="round"
+      className={cn(weaving && "loom-mark-weaving", className)}
       aria-hidden="true"
+      {...rest}
     >
-      <path d="M6.5 5.5c0 6.5 5.5 6.5 5.5 13" />
-      <path d="M12 5.5c0 6.5 5.5 6.5 5.5 13" />
-      <path d="M6.5 18.5h11" opacity="0.55" />
+      <path
+        d="M6.5 5.5c0 6.5 5.5 6.5 5.5 13"
+        pathLength={weaving ? 1 : undefined}
+      />
+      <path
+        d="M12 5.5c0 6.5 5.5 6.5 5.5 13"
+        pathLength={weaving ? 1 : undefined}
+      />
+      <path d="M6.5 18.5h11" opacity="0.55" pathLength={weaving ? 1 : undefined} />
     </svg>
   );
 }

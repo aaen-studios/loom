@@ -87,7 +87,7 @@ export function PersonaMenu({ align = "up" }: { align?: "up" | "down" }) {
             : "Choose persona"
         }
         className={cn(
-          "hover-surface flex h-8 max-w-[190px] items-center gap-1.5 rounded-row px-2.5 text-[12.5px]",
+          "hover-surface flex h-8 max-w-[190px] items-center gap-1.5 rounded-full px-2.5 text-[12.5px]",
           persona ? "text-soft" : "text-faint",
         )}
       >

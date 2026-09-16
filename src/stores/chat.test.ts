@@ -1,7 +1,25 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { ipc } from "../lib/ipc";
+import type { Session } from "../types";
 import { useChat } from "./chat";
 import { useSettings } from "./settings";
 import { useSkills } from "./skills";
+
+const session = (id: string): Session => ({
+  id,
+  title: "",
+  providerId: null,
+  modelId: null,
+  variant: null,
+  personaId: null,
+  systemPrompt: null,
+  workdir: null,
+  permissionMode: null,
+  agentMode: null,
+  computerAccess: false,
+  createdAt: 0,
+  updatedAt: 0,
+});
 
 const reset = () => {
   useChat.setState({
@@ -289,5 +307,44 @@ describe("streaming state machine", () => {
     });
     expect(settingsLoad).not.toHaveBeenCalled();
     settingsLoad.mockRestore();
+  });
+});
+
+describe("composer choices before the first message", () => {
+  beforeEach(() => {
+    reset();
+    useChat.setState({ activeId: null, sessions: [] });
+  });
+
+  it("starts a chat when a mode is chosen on the blank canvas", async () => {
+    const created = session("new-1");
+    const create = vi.spyOn(ipc, "createSession").mockResolvedValue(created);
+    const list = vi.spyOn(ipc, "listSessions").mockResolvedValue([created]);
+    const prune = vi
+      .spyOn(ipc, "pruneEmptySessions")
+      .mockResolvedValue(0);
+    const setMode = vi
+      .spyOn(ipc, "setSessionAgentMode")
+      .mockResolvedValue(undefined);
+
+    await useChat.getState().setAgentMode("plan");
+
+    // The click must not be swallowed: a chat is started, then the mode lands.
+    expect(create).toHaveBeenCalledTimes(1);
+    expect(setMode).toHaveBeenCalledWith("new-1", "plan");
+
+    create.mockRestore();
+    list.mockRestore();
+    prune.mockRestore();
+    setMode.mockRestore();
+  });
+
+  it("does not start a chat just to clear an override", async () => {
+    const create = vi.spyOn(ipc, "createSession");
+
+    await useChat.getState().setAgentMode(null);
+
+    expect(create).not.toHaveBeenCalled();
+    create.mockRestore();
   });
 });

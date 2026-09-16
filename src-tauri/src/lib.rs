@@ -264,10 +264,31 @@ fn build_tray(app: &tauri::App) -> tauri::Result<()> {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    let mut context = tauri::generate_context!();
+
+    // A dev build claims its own identifier, so one dev instance and one
+    // installed instance can run together: the single-instance guard below is
+    // keyed on the identifier, and so is the WebView2 profile.
+    if cfg!(dev) {
+        context.config_mut().identifier = "com.ellio.loom.dev".to_string();
+    }
+
     tauri::Builder::default()
+        // First plugin on purpose: a second instance exits inside its setup,
+        // before the rest of the app touches the database, hotkeys, or tray.
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            show_main_window(app);
+        }))
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_notification::init())
+        .plugin(
+            // The same name the installer writes to the Run key, so the
+            // Settings toggle and a fresh install agree on one entry.
+            tauri_plugin_autostart::Builder::new()
+                .app_name("Loom")
+                .build(),
+        )
         .plugin(
             tauri_plugin_global_shortcut::Builder::new()
                 .with_handler(move |app, shortcut, event| {
@@ -398,13 +419,26 @@ pub fn run() {
             // A development build loads the Vite dev server. If that server is
             // not running the window would stay blank, which looks like the app
             // is broken; fall back to the frontend bundled in the binary.
+            //
+            // The probe follows the configured dev URL rather than a fixed
+            // address: Vite can bind `::1` only on Windows, so probing
+            // `127.0.0.1` would report a server that is right there as down,
+            // and "localhost" lets the resolver try every address family.
             if cfg!(dev) {
                 let handle = app.handle().clone();
+                let probe = app
+                    .config()
+                    .build
+                    .dev_url
+                    .as_ref()
+                    .and_then(|url| {
+                        let host = url.host_str()?;
+                        Some(format!("{host}:{}", url.port_or_known_default().unwrap_or(1420)))
+                    })
+                    .unwrap_or_else(|| "localhost:1420".to_string());
                 tauri::async_runtime::spawn(async move {
                     tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
-                    let reachable = tokio::net::TcpStream::connect("127.0.0.1:1420")
-                        .await
-                        .is_ok();
+                    let reachable = tokio::net::TcpStream::connect(&probe).await.is_ok();
                     if reachable {
                         return;
                     }
@@ -488,6 +522,8 @@ pub fn run() {
             commands::set_chat_settings,
             commands::set_interface_settings,
             commands::set_hotkey,
+            commands::autostart_enabled,
+            commands::set_autostart,
             commands::storage_usage,
             commands::clear_cache,
             commands::clear_generated,
@@ -595,6 +631,6 @@ pub fn run() {
                 }
             }
         })
-        .run(tauri::generate_context!())
+        .run(context)
         .expect("error while running loom");
 }

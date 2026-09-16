@@ -13,9 +13,9 @@ day-to-day polish (see "Open work" at the bottom).
 | --- | --- |
 | Stack | Tauri v2 + Vite + React 19 + TS + Tailwind v4, Bun. Rust engine in its own crate (`crates/loom-core`). |
 | Layout | Full-bleed background, centered full-width canvas. **No permanent sidebar** — chats live in a popup summoned from the titlebar. No big blurred panel around the workspace. |
-| Chrome | Frameless window, two floating pills (navigation left, window controls right), custom-drawn glyphs. Inter font. Dark by default. |
+| Chrome | Frameless window, two floating pills (navigation left, window controls right), custom-drawn glyphs. Inter font. Light by default, with a full dark palette one toggle away. |
 | Corners | Continuous (squircle) corners via `corner-shape`, on a concentric radius scale: window 20px, sheet 18px (composer, popovers, drawer, toast), row 10px (sheet − padding), control 12px, capsule for chrome bars and chips. The model picker also allows adding a model id by hand when `/models` is unavailable. |
-| Glass | The app renders its own background (built-in presets + user images/videos) and uses CSS `backdrop-filter` only on small surfaces (composer, popups, cards). |
+| Glass | The app renders its own background (built-in presets + user images/videos) and uses CSS `backdrop-filter` only on small surfaces (composer, popups, cards). The built-in presets are painted entirely in CSS — a faint woven texture over soft radial washes — so **no artwork is bundled** and nothing has to be cleared for redistribution. Each preset is authored to stay legible as-is, which is why the dim veil defaults to 0; it is for the user's own artwork. |
 | Streaming | Rust-owned streams: concurrent across chats, survive window switches and backgrounding. Toast when a reply finishes unfocused. |
 | Overlay | Tray icon + `Ctrl+Shift+Space` quick-ask overlay (new chat, then reveals the main window). |
 | Providers | Presets include OpenAI, Anthropic, OpenRouter, DeepSeek, Z.ai, Groq, xAI, Google, **OpenCode Go**, **OpenCode Zen**, Ollama, LM Studio, plus custom OpenAI-compatible/Anthropic endpoints. `GET /models` auto-detect merged over a bundled catalog with manual overrides. Keys live in Windows Credential Manager. |
@@ -134,3 +134,40 @@ claims a false dev/release check.
   credits, DeepSeek balance, and Z.ai coding-plan quota in Settings → Usage,
   plus a composer badge and per-provider local token/cost totals (parser and
   wire-shape tests per vendor).
+- Launch at login: a registry-backed toggle in Settings → General (the app's
+  autostart plugin) and a "Start Loom when you sign in" checkbox in Loom Setup;
+  both write the same per-user Run entry, and uninstalling removes it.
+- Every launch starts on a blank new chat. Sessions are still listed in the
+  chats popup, but the canvas no longer reopens the last conversation; the new
+  session is created on the first send (or picked from the popup), and every
+  composer chip that writes to a chat — mode, approvals, persona, computer use
+  — starts one too instead of dropping the click.
+- Loom Setup polish: a plain white window in the app's light palette (Inter,
+  squircle corners, switches, the dark control buttons) instead of the old
+  gradient; byte-level progress from Rust during extraction; an async install
+  command so the window keeps painting; a running Loom is closed before an
+  in-place update; console windows stay hidden; and the update screen shows the
+  real version instead of a derived one. The payload builder copies only the
+  app (`loom.exe` + runtime DLLs, never `loom_lib.dll` or anything else in
+  `target/release`), and the dev-only payload sidecar is ignored by release
+  builds, so a stray zip can no longer shadow what an installer ships.
+- Loom Setup follows the install to the end: phases (closing a running app,
+  extracting each file, shortcuts, registry) are reported to the UI, the bar
+  sweeps while a phase has no byte count, and the window refuses to close
+  mid-install. Enter runs the primary action and Esc closes. An update finds the
+  app through its uninstall entry wherever it was installed — custom folders
+  included — says "Reinstall" when the version already matches, shows the
+  installed size in Settings → Apps, offers Try again after a failure, and says
+  why a launch could not start.
+- Opening screen: the blank-chat hero weaves its mark in (the warp threads,
+  then the weft) and the greeting, subline and composer card follow on a short
+  stagger. The mark had been dropping the class names every caller passed it, so
+  it now wears the accent color and spacing they already asked for.
+- The quick-ask overlay follows the app theme instead of forcing dark: user
+  prompts are glass slabs with a thread edge, replies are the same loose text
+  (on a pane of fog in light mode so dark ink stays readable over artwork),
+  and the column hangs off a single warp thread with a knot per reply. Its
+  colors come from `--thread-*` tokens in both palettes; the whole thing stays
+  transparent and minimal. Waiting is three weft threads with light passing
+  along them, and the composer's hairline is one thread that sweeps while a
+  turn runs.

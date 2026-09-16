@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { currentMonitor, getCurrentWindow } from "@tauri-apps/api/window";
 import { LogicalSize, PhysicalPosition } from "@tauri-apps/api/dpi";
+import { cn } from "../lib/cn";
 import { ipc } from "../lib/ipc";
 import { useEngineEvents } from "../lib/events";
 import { parseAttachments } from "../lib/messageExtra";
@@ -301,6 +302,7 @@ export function AskOverlay() {
   const latest = messages[messages.length - 1];
   const waiting =
     busy && !(latest?.role === "assistant" && latest.content.trim().length > 0);
+  const hasReply = messages.some((message) => message.role === "assistant");
 
   let lastAnswerId: string | null = null;
   for (let index = messages.length - 1; index >= 0; index -= 1) {
@@ -340,11 +342,20 @@ export function AskOverlay() {
         style={maskStyle}
         className="no-scrollbar min-h-0 flex-1 overflow-y-auto"
       >
-        <div ref={contentRef} className="flex flex-col gap-2">
+        <div ref={contentRef} className="relative flex flex-col gap-4">
+          {/* The warp thread: the conversation is woven onto one line of
+              light, and every reply carries its own knot. */}
+          {(hasReply || waiting) && (
+            <span
+              aria-hidden
+              className="ask-rail absolute top-3 bottom-3 left-[6px]"
+            />
+          )}
+
           {messages.map((message) =>
             message.role === "user" ? (
               <div key={message.id} className="animate-fade-up flex justify-end">
-                <div className="blob max-w-[78%] rounded-sheet px-3.5 py-2 text-[13.5px] leading-5 whitespace-pre-wrap select-text">
+                <div className="blob ask-slab max-w-[78%] rounded-sheet px-4 py-2.5 text-[13.5px] leading-5 whitespace-pre-wrap select-text">
                   <AttachmentStrip
                     attachments={parseAttachments(message.extra)}
                     compact
@@ -355,9 +366,16 @@ export function AskOverlay() {
             ) : message.content ? (
               <div
                 key={message.id}
-                className="group animate-fade-up relative select-text"
+                className="group animate-fade-up relative max-w-[540px] pl-6 select-text"
               >
-                <div className="loom-markdown blob-text text-[13.5px] leading-6">
+                <span
+                  aria-hidden
+                  className={cn(
+                    "ask-node absolute top-[10px] left-[3.5px]",
+                    busy && message.id === latest?.id && "ask-node-live",
+                  )}
+                />
+                <div className="loom-markdown blob-text ask-reply text-[14px] leading-[1.75]">
                   <Markdown
                     content={message.content}
                     allowGeneratedUi={generatedUi}
@@ -365,12 +383,12 @@ export function AskOverlay() {
                   />
                 </div>
                 {message.id === lastAnswerId && (
-                  <div className="pointer-events-none mt-1.5 flex h-6 items-center gap-1 opacity-0 transition-opacity duration-150 group-hover:pointer-events-auto group-hover:opacity-100">
+                  <div className="pointer-events-none mt-2 flex h-6 items-center gap-1 opacity-0 transition-opacity duration-200 group-hover:pointer-events-auto group-hover:opacity-100">
                     <button
                       type="button"
                       onClick={() => void ipc.showMain(activeId)}
                       title="Open in chat"
-                      className="blob flex h-6 items-center gap-1.5 rounded-capsule px-2.5 text-[11.5px] text-soft hover:text-[var(--ink)]"
+                      className="blob flex h-6 items-center gap-1.5 rounded-capsule px-2.5 text-[11.5px] text-soft transition-colors hover:text-[var(--ink)]"
                     >
                       <ExternalLinkIcon size={12} />
                       Open in chat
@@ -382,14 +400,18 @@ export function AskOverlay() {
           )}
 
           {waiting && !question && (
-            <div className="blob animate-fade-up flex w-fit items-center gap-1 self-start rounded-capsule px-3.5 py-3">
-              {[0, 1, 2].map((index) => (
-                <span
-                  key={index}
-                  className="cursor-blink h-1.5 w-1.5 rounded-full bg-[var(--ink-faint)]"
-                  style={{ animationDelay: `${index * 0.16}s` }}
-                />
-              ))}
+            <div className="relative animate-fade-up pl-6">
+              <span
+                aria-hidden
+                className="ask-node ask-node-live absolute top-[13px] left-[3.5px]"
+              />
+              <div className="blob flex w-fit items-center rounded-capsule px-3 py-2.5">
+                <span className="ask-weaving" aria-hidden>
+                  <span />
+                  <span />
+                  <span />
+                </span>
+              </div>
             </div>
           )}
         </div>
@@ -397,13 +419,15 @@ export function AskOverlay() {
 
       <div ref={footerRef} className="shrink-0 pt-2.5">
         {notice && (
-          <p className="blob animate-fade-up mb-2 rounded-sheet px-3.5 py-2 text-center text-[12px] text-soft">
-            {notice}
+          <p className="blob animate-fade-up mb-2 flex items-center gap-2 rounded-sheet px-3.5 py-2 text-[12px] text-soft">
+            <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-[var(--ink-faint)]" />
+            <span className="min-w-0 flex-1">{notice}</span>
           </p>
         )}
         {error && (
-          <p className="blob animate-fade-up mb-2 rounded-sheet px-3.5 py-2 text-center text-[12px] text-[var(--danger)]">
-            {error}
+          <p className="blob animate-fade-up mb-2 flex items-center gap-2 rounded-sheet px-3.5 py-2 text-[12px]">
+            <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-[var(--danger)]" />
+            <span className="min-w-0 flex-1 text-[var(--danger)]">{error}</span>
           </p>
         )}
 
@@ -412,52 +436,70 @@ export function AskOverlay() {
         ) : permission ? (
           <PermissionCard permission={permission} />
         ) : (
-          <div className="blob flex items-center gap-2 rounded-sheet px-3 py-1">
-            {capturing ? (
-              <span className="flex shrink-0 items-center gap-1.5 text-faint">
-                <CameraIcon size={14} className="cursor-blink" />
-                <span className="text-[12px]">Screen</span>
-              </span>
-            ) : (
-              <LoomMark size={14} className="shrink-0 text-[var(--ink-faint)]" />
-            )}
-            <input
-              ref={inputRef}
-              autoFocus
-              value={value}
-              placeholder={
-                capturing ? "Capturing screen…" : started ? "Reply…" : "Ask anything…"
-              }
-              onChange={(event) => setValue(event.currentTarget.value)}
-              onKeyDown={(event) => {
-                if (event.key === "Enter" && !event.nativeEvent.isComposing) {
-                  event.preventDefault();
-                  void submit();
+          <>
+            <div
+              aria-hidden
+              className={cn(
+                "ask-hint pointer-events-none mb-1.5 flex items-center justify-center gap-2 text-[10.5px] font-medium tracking-[0.16em] text-[var(--ink-faint)] uppercase select-none",
+                !started && !value.trim() ? "opacity-100" : "opacity-0",
+              )}
+            >
+              <span>Esc closes</span>
+              <span className="h-[3px] w-[3px] rounded-full bg-current opacity-60" />
+              <span>Enter sends</span>
+            </div>
+            <div
+              className={cn(
+                "blob ask-shuttle flex items-center gap-2.5 rounded-sheet px-3.5 py-1.5",
+                busy && "ask-shuttle-live",
+              )}
+            >
+              {capturing ? (
+                <span className="flex shrink-0 items-center gap-1.5 rounded-capsule bg-[var(--accent-soft)] px-2 py-1 text-[10px] font-medium tracking-[0.12em] text-[var(--accent)] uppercase">
+                  <CameraIcon size={12} className="cursor-blink" />
+                  Screen
+                </span>
+              ) : (
+                <LoomMark size={15} className="shrink-0 text-[var(--accent)] opacity-90" />
+              )}
+              <input
+                ref={inputRef}
+                autoFocus
+                value={value}
+                placeholder={
+                  capturing ? "Capturing screen…" : started ? "Reply…" : "Ask anything…"
                 }
-              }}
-              className="h-7 min-w-0 flex-1 bg-transparent text-[14px] text-[var(--ink)] placeholder:text-[var(--ink-faint)]"
-            />
-            {messages.length > 0 && (
+                onChange={(event) => setValue(event.currentTarget.value)}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter" && !event.nativeEvent.isComposing) {
+                    event.preventDefault();
+                    void submit();
+                  }
+                }}
+                className="h-7 min-w-0 flex-1 bg-transparent text-[14px] text-[var(--ink)] placeholder:text-[var(--ink-faint)]"
+              />
+              {messages.length > 0 && (
+                <button
+                  type="button"
+                  onClick={reset}
+                  title="New chat"
+                  aria-label="New chat"
+                  className="grid h-7 w-7 shrink-0 place-items-center rounded-full text-[var(--ink-faint)] transition-colors hover:bg-[var(--hover-bg)] hover:text-[var(--ink)]"
+                >
+                  <PlusIcon size={15} />
+                </button>
+              )}
               <button
                 type="button"
-                onClick={reset}
-                title="New chat"
-                aria-label="New chat"
-                className="grid h-7 w-7 shrink-0 place-items-center rounded-full text-[var(--ink-faint)] hover:bg-[var(--hover-bg)] hover:text-[var(--ink)]"
+                onClick={busy ? () => void stop() : () => void submit()}
+                disabled={capturing || (!busy && !value.trim())}
+                aria-label={busy ? "Stop" : "Ask"}
+                className="grid h-7 w-7 shrink-0 place-items-center rounded-full bg-[var(--control-bg)] text-[var(--control-ink)] transition enabled:hover:scale-105 enabled:active:scale-95 disabled:opacity-40"
               >
-                <PlusIcon size={15} />
+                {busy ? <StopIcon size={13} /> : <ArrowUpIcon size={14} />}
               </button>
-            )}
-            <button
-              type="button"
-              onClick={busy ? () => void stop() : () => void submit()}
-              disabled={capturing || (!busy && !value.trim())}
-              aria-label={busy ? "Stop" : "Ask"}
-              className="grid h-7 w-7 shrink-0 place-items-center rounded-full bg-[var(--control-bg)] text-[var(--control-ink)] disabled:opacity-40"
-            >
-              {busy ? <StopIcon size={13} /> : <ArrowUpIcon size={14} />}
-            </button>
-          </div>
+            </div>
+          </>
         )}
       </div>
     </div>

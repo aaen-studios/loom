@@ -217,6 +217,11 @@ impl Database {
             std::fs::create_dir_all(parent).map_err(|e| Error::io(parent, e))?;
         }
         let connection = Connection::open(path).map_err(map_sql(path))?;
+        // A dev instance and an installed one may have the same database open
+        // at once; wait for the writer lock instead of failing instantly.
+        connection
+            .busy_timeout(std::time::Duration::from_secs(5))
+            .map_err(map_sql(path))?;
         connection
             .pragma_update(None, "foreign_keys", "ON")
             .map_err(map_sql(path))?;
@@ -240,11 +245,21 @@ impl Database {
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .map_err(map_sql(path))?;
 
+        // One transaction around every step: SQLite applies DDL atomically, so
+        // a run interrupted between an ALTER and the version bump is rolled
+        // back on the next open instead of leaving a half-migrated database.
+        // The guards below make the walk idempotent regardless, so a database
+        // that already drifted (schema ahead of `user_version`) is repaired
+        // rather than failing on a duplicate column.
+        let tx = self
+            .connection
+            .unchecked_transaction()
+            .map_err(map_sql(path))?;
+
         if current < 1 {
-            self.connection
-                .execute_batch(
-                    r#"
-                    CREATE TABLE sessions (
+            tx.execute_batch(
+                r#"
+                    CREATE TABLE IF NOT EXISTS sessions (
                         id TEXT PRIMARY KEY,
                         title TEXT NOT NULL DEFAULT '',
                         provider_id TEXT,
@@ -255,7 +270,7 @@ impl Database {
                         updated_at INTEGER NOT NULL
                     );
 
-                    CREATE TABLE messages (
+                    CREATE TABLE IF NOT EXISTS messages (
                         id TEXT PRIMARY KEY,
                         session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
                         role TEXT NOT NULL,
@@ -265,33 +280,34 @@ impl Database {
                         created_at INTEGER NOT NULL
                     );
 
-                    CREATE INDEX idx_messages_session ON messages(session_id, created_at);
-                    CREATE INDEX idx_sessions_updated ON sessions(updated_at DESC);
+                    CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id, created_at);
+                    CREATE INDEX IF NOT EXISTS idx_sessions_updated ON sessions(updated_at DESC);
                     "#,
-                )
-                .map_err(map_sql(path))?;
+            )
+            .map_err(map_sql(path))?;
         }
 
-        if current < 2 {
-            self.connection
-                .execute_batch("ALTER TABLE sessions ADD COLUMN variant TEXT;")
+        if current < 2 && !has_column(&tx, "sessions", "variant")? {
+            tx.execute_batch("ALTER TABLE sessions ADD COLUMN variant TEXT;")
                 .map_err(map_sql(path))?;
         }
 
         if current < 3 {
-            self.connection
-                .execute_batch(
-                    "ALTER TABLE sessions ADD COLUMN workdir TEXT;
-                     ALTER TABLE sessions ADD COLUMN permission_mode TEXT;",
-                )
-                .map_err(map_sql(path))?;
+            if !has_column(&tx, "sessions", "workdir")? {
+                tx.execute_batch("ALTER TABLE sessions ADD COLUMN workdir TEXT;")
+                    .map_err(map_sql(path))?;
+            }
+            if !has_column(&tx, "sessions", "permission_mode")? {
+                tx
+                    .execute_batch("ALTER TABLE sessions ADD COLUMN permission_mode TEXT;")
+                    .map_err(map_sql(path))?;
+            }
         }
 
         if current < 4 {
-            self.connection
-                .execute_batch(
-                    r#"
-                    CREATE TABLE chunks (
+            tx.execute_batch(
+                r#"
+                    CREATE TABLE IF NOT EXISTS chunks (
                         id TEXT PRIMARY KEY,
                         session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
                         path TEXT NOT NULL,
@@ -300,33 +316,32 @@ impl Database {
                         created_at INTEGER NOT NULL
                     );
 
-                    CREATE INDEX idx_chunks_session ON chunks(session_id);
+                    CREATE INDEX IF NOT EXISTS idx_chunks_session ON chunks(session_id);
                     "#,
-                )
+            )
+            .map_err(map_sql(path))?;
+        }
+
+        if current < 5 && !has_column(&tx, "sessions", "agent_mode")? {
+            tx.execute_batch("ALTER TABLE sessions ADD COLUMN agent_mode TEXT;")
                 .map_err(map_sql(path))?;
         }
 
-        if current < 5 {
-            self.connection
-                .execute_batch("ALTER TABLE sessions ADD COLUMN agent_mode TEXT;")
-                .map_err(map_sql(path))?;
-        }
-
-        if current < 6 {
-            self.connection
-                .execute_batch(
-                    "ALTER TABLE sessions ADD COLUMN computer_access INTEGER NOT NULL DEFAULT 0;",
-                )
-                .map_err(map_sql(path))?;
+        if current < 6 && !has_column(&tx, "sessions", "computer_access")? {
+            tx.execute_batch(
+                "ALTER TABLE sessions ADD COLUMN computer_access INTEGER NOT NULL DEFAULT 0;",
+            )
+            .map_err(map_sql(path))?;
         }
 
         if current < 7 {
-            self.connection
-                .execute_batch(
-                    r#"
-                    ALTER TABLE messages ADD COLUMN persona_id TEXT;
-
-                    CREATE TABLE persona_memory (
+            if !has_column(&tx, "messages", "persona_id")? {
+                tx.execute_batch("ALTER TABLE messages ADD COLUMN persona_id TEXT;")
+                    .map_err(map_sql(path))?;
+            }
+            tx.execute_batch(
+                r#"
+                    CREATE TABLE IF NOT EXISTS persona_memory (
                         id TEXT PRIMARY KEY,
                         persona_id TEXT NOT NULL,
                         key TEXT NOT NULL,
@@ -336,27 +351,31 @@ impl Database {
                         updated_at INTEGER NOT NULL
                     );
 
-                    CREATE UNIQUE INDEX idx_persona_memory_key
+                    CREATE UNIQUE INDEX IF NOT EXISTS idx_persona_memory_key
                         ON persona_memory(persona_id, key);
 
-                    CREATE TABLE session_personas (
+                    CREATE TABLE IF NOT EXISTS session_personas (
                         session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
                         persona_id TEXT NOT NULL,
                         position INTEGER NOT NULL,
                         PRIMARY KEY (session_id, persona_id)
                     );
                     "#,
-                )
-                .map_err(map_sql(path))?;
+            )
+            .map_err(map_sql(path))?;
         }
 
         if current < 8 {
-            self.connection
-                .execute_batch(
-                    r#"
-                    ALTER TABLE sessions ADD COLUMN kind TEXT NOT NULL DEFAULT 'chat';
-
-                    CREATE TABLE memories (
+            if !has_column(&tx, "sessions", "kind")? {
+                tx
+                    .execute_batch(
+                        "ALTER TABLE sessions ADD COLUMN kind TEXT NOT NULL DEFAULT 'chat';",
+                    )
+                    .map_err(map_sql(path))?;
+            }
+            tx.execute_batch(
+                r#"
+                    CREATE TABLE IF NOT EXISTS memories (
                         id TEXT PRIMARY KEY,
                         scope TEXT NOT NULL,
                         content TEXT NOT NULL,
@@ -369,9 +388,9 @@ impl Database {
                         updated_at INTEGER NOT NULL
                     );
 
-                    CREATE INDEX idx_memories_scope ON memories(scope, updated_at DESC);
+                    CREATE INDEX IF NOT EXISTS idx_memories_scope ON memories(scope, updated_at DESC);
 
-                    CREATE TABLE tasks (
+                    CREATE TABLE IF NOT EXISTS tasks (
                         id TEXT PRIMARY KEY,
                         session_id TEXT NOT NULL,
                         origin_session TEXT,
@@ -389,10 +408,10 @@ impl Database {
                         finished_at INTEGER
                     );
 
-                    CREATE INDEX idx_tasks_created ON tasks(created_at DESC);
-                    CREATE INDEX idx_tasks_status ON tasks(status, created_at DESC);
+                    CREATE INDEX IF NOT EXISTS idx_tasks_created ON tasks(created_at DESC);
+                    CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status, created_at DESC);
 
-                    CREATE TABLE jobs (
+                    CREATE TABLE IF NOT EXISTS jobs (
                         id TEXT PRIMARY KEY,
                         name TEXT NOT NULL,
                         cron TEXT NOT NULL,
@@ -412,21 +431,20 @@ impl Database {
                         updated_at INTEGER NOT NULL
                     );
                     "#,
-                )
-                .map_err(map_sql(path))?;
+            )
+            .map_err(map_sql(path))?;
         }
 
         if current < 9 {
-            self.connection
-                .execute_batch(
-                    r#"
-                    CREATE TABLE session_goals (
+            tx.execute_batch(
+                r#"
+                    CREATE TABLE IF NOT EXISTS session_goals (
                         session_id TEXT PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE,
                         goal TEXT NOT NULL,
                         updated_at INTEGER NOT NULL
                     );
 
-                    CREATE TABLE todos (
+                    CREATE TABLE IF NOT EXISTS todos (
                         id TEXT PRIMARY KEY,
                         session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
                         content TEXT NOT NULL,
@@ -436,15 +454,15 @@ impl Database {
                         updated_at INTEGER NOT NULL
                     );
 
-                    CREATE INDEX idx_todos_session ON todos(session_id, position);
+                    CREATE INDEX IF NOT EXISTS idx_todos_session ON todos(session_id, position);
                     "#,
-                )
-                .map_err(map_sql(path))?;
+            )
+            .map_err(map_sql(path))?;
         }
 
-        self.connection
-            .pragma_update(None, "user_version", SCHEMA_VERSION)
+        tx.pragma_update(None, "user_version", SCHEMA_VERSION)
             .map_err(map_sql(path))?;
+        tx.commit().map_err(map_sql(path))?;
         Ok(())
     }
 
@@ -1485,6 +1503,28 @@ fn map_sql(what: impl Into<PathBuf>) -> impl Fn(rusqlite::Error) -> Error {
     move |error| Error::Other(format!("sqlite ({}): {error}", what.display()))
 }
 
+fn pragma_sql(table: &str) -> impl Fn(rusqlite::Error) -> Error + '_ {
+    move |error| Error::Other(format!("sqlite (pragma {table}): {error}"))
+}
+
+/// Whether `table` already has `column`. Migration steps guard their `ALTER`s
+/// with this so a database whose schema got ahead of `user_version` (an
+/// interrupted first run, or an older build that added the column without
+/// bumping the version) is repaired instead of crashing on a duplicate.
+fn has_column(connection: &Connection, table: &str, column: &str) -> Result<bool> {
+    let mut statement = connection
+        .prepare(&format!("PRAGMA table_info({table})"))
+        .map_err(pragma_sql(table))?;
+    let mut rows = statement.query([]).map_err(pragma_sql(table))?;
+    while let Some(row) = rows.next().map_err(pragma_sql(table))? {
+        let name: String = row.get(1).map_err(pragma_sql(table))?;
+        if name == column {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1639,6 +1679,30 @@ mod tests {
     }
 
     #[test]
+    fn migration_repairs_a_schema_ahead_of_its_version() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("loom.db");
+        {
+            Database::open(&path).unwrap();
+        }
+        // Simulate an interrupted first run: every migration landed but the
+        // version bump never did. Reopening must not trip over the columns
+        // that already exist; it repairs the version instead.
+        {
+            let connection = Connection::open(&path).unwrap();
+            connection.pragma_update(None, "user_version", 4).unwrap();
+        }
+
+        let db = Database::open(&path).unwrap();
+        let version: i64 = db
+            .connection
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, SCHEMA_VERSION);
+        assert!(db.list_sessions().unwrap().is_empty());
+    }
+
+    #[test]
     fn session_variant_and_persona_updates_round_trip() {
         let db = Database::open_in_memory().unwrap();
         db.create_session(&session("s1")).unwrap();
@@ -1682,10 +1746,16 @@ mod tests {
     #[test]
     fn pruning_removes_unused_chats_but_keeps_the_open_one() {
         let db = Database::open_in_memory().unwrap();
-        db.create_session(&session("empty")).unwrap();
-        db.create_session(&session("kept")).unwrap();
-        db.create_session(&session("used")).unwrap();
-        db.create_session(&session("renamed")).unwrap();
+        // A chat with no messages and no title is what "empty" means, so the
+        // fixture asks for exactly that instead of the shared helper's title.
+        let untitled = |id: &str| Session {
+            title: String::new(),
+            ..session(id)
+        };
+        db.create_session(&untitled("empty")).unwrap();
+        db.create_session(&untitled("kept")).unwrap();
+        db.create_session(&untitled("used")).unwrap();
+        db.create_session(&untitled("renamed")).unwrap();
         db.add_message(&message("m1", "used", Role::User, "hello"))
             .unwrap();
         db.update_session(

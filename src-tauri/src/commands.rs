@@ -5,6 +5,7 @@ use std::sync::Mutex;
 
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, State};
+use tauri_plugin_autostart::ManagerExt;
 
 use loom_core::config::AppConfig;
 use loom_core::db::{Job, Memory, Message, Session, Task};
@@ -160,6 +161,26 @@ pub fn delete_provider(state: State<'_, AppState>, id: String) -> Result<AppConf
 #[tauri::command]
 pub fn set_hotkey(app: AppHandle, enabled: bool, keys: String) -> Result<(), String> {
     crate::set_hotkey_now(&app, enabled, &keys)
+}
+
+/// Whether Loom is registered to launch when the user signs in. The registry
+/// entry, not `config.json`, is the source of truth, so the toggle always
+/// reflects what is actually configured.
+#[tauri::command]
+pub fn autostart_enabled(app: AppHandle) -> Result<bool, String> {
+    app.autolaunch().is_enabled().map_err(|e| e.to_string())
+}
+
+/// Enables or disables launch-at-login and returns the state that took effect.
+#[tauri::command]
+pub fn set_autostart(app: AppHandle, enabled: bool) -> Result<bool, String> {
+    let manager = app.autolaunch();
+    if enabled {
+        manager.enable().map_err(|e| e.to_string())?;
+    } else {
+        manager.disable().map_err(|e| e.to_string())?;
+    }
+    manager.is_enabled().map_err(|e| e.to_string())
 }
 
 /// Replaces the whole interface section (thinking display, send key,
