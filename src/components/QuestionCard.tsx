@@ -2,6 +2,7 @@ import { useState } from "react";
 import { cn } from "../lib/cn";
 import type { PendingQuestion } from "../types";
 import { useChat } from "../stores/chat";
+import { LiquidSurface } from "./LiquidSurface";
 
 /**
  * The model's question, shown in the composer's place while the turn waits.

@@ -902,7 +902,13 @@ export function PermissionCard({ permission }: { permission: PendingPermission }
   const allowAlways = canAlwaysAllow(session?.permissionMode, permission.name);
 
   return (
-    <div className="panel-strong animate-fade-up mx-auto w-full max-w-3xl rounded-sheet p-3">
+    <LiquidSurface
+      surface="cards"
+      layout="block"
+      className="animate-fade-up mx-auto w-full max-w-3xl rounded-sheet"
+      contentClassName="p-3"
+      tint="var(--panel-bg-strong)"
+    >
       <p className="text-[13px]">
         Loom wants to run{" "}
         <span className="font-semibold">{permission.name}</span>
@@ -963,7 +969,7 @@ export function PermissionCard({ permission }: { permission: PendingPermission }
           </span>
         )}
       </div>
-    </div>
+    </LiquidSurface>
   );
 }
 

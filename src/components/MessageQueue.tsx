@@ -24,7 +24,12 @@ export function MessageQueue() {
   if (items.length === 0) return null;
 
   return (
-    <div className="panel-strong mb-2 w-full overflow-hidden rounded-sheet">
+    <LiquidSurface
+      surface="cards"
+      layout="block"
+      className="mb-2 w-full rounded-sheet"
+      tint="var(--panel-bg-strong)"
+    >
       <div className="flex items-baseline gap-2 px-3 pt-2 pb-1">
         <span className="shrink-0 text-[10px] font-semibold tracking-[0.1em] text-faint uppercase">
           Queued · {items.length}
@@ -102,6 +107,6 @@ export function MessageQueue() {
           </li>
         ))}
       </ul>
-    </div>
+    </LiquidSurface>
   );
 }
