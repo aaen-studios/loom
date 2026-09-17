@@ -43,6 +43,8 @@ const SHORTCUTS: { group: string; items: Shortcut[] }[] = [
       { keys: "Shift+Enter", action: "New line" },
       { keys: "Enter (while replying)", action: "Queue the message" },
       { keys: "/", action: "Commands, skills and saved prompts" },
+      { keys: "#", action: "Refer to another chat (the id is added on send)" },
+      { keys: "@", action: "Refer to a file in this workspace" },
       { keys: "Esc", action: "Stop the running reply, deselect" },
       { keys: "?", action: "This list" },
     ],

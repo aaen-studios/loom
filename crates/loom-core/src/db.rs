@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{paths, Error, Result};
 
-pub const SCHEMA_VERSION: i64 = 11;
+pub const SCHEMA_VERSION: i64 = 12;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -52,6 +52,11 @@ pub struct Session {
     pub agent_mode: Option<String>,
     /// Computer use is armed for this chat with the composer's Computer chip.
     pub computer_access: bool,
+    /// Hand-placed row in the chats popup. `None` means the chat has never
+    /// been dragged, which is what lets a chat created after you arranged a
+    /// group still land on top of it.
+    #[serde(default)]
+    pub position: Option<i64>,
     pub created_at: i64,
     pub updated_at: i64,
 }
@@ -69,6 +74,9 @@ pub struct SessionUpdate<'a> {
     pub permission_mode: Option<Option<&'a str>>,
     pub agent_mode: Option<Option<&'a str>>,
     pub computer_access: Option<bool>,
+    /// `None` leaves the hand-placed order alone; `Some(None)` returns the
+    /// chat to the computed (newest-first) order.
+    pub position: Option<Option<i64>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -563,6 +571,14 @@ impl Database {
             .map_err(map_sql(path))?;
         }
 
+        if current < 12 && !has_column(&tx, "sessions", "position")? {
+            // The hand-placed order in the chats popup. Nullable on purpose:
+            // `NULL` means "never dragged", and those chats keep sorting
+            // newest-first, above the ones the user placed by hand.
+            tx.execute_batch("ALTER TABLE sessions ADD COLUMN position INTEGER;")
+                .map_err(map_sql(path))?;
+        }
+
         tx.pragma_update(None, "user_version", SCHEMA_VERSION)
             .map_err(map_sql(path))?;
         tx.commit().map_err(map_sql(path))?;
@@ -572,8 +588,8 @@ impl Database {
     pub fn create_session(&self, session: &Session) -> Result<()> {
         self.connection
             .execute(
-                "INSERT INTO sessions (id, title, provider_id, model_id, variant, persona_id, system_prompt, workdir, permission_mode, agent_mode, computer_access, created_at, updated_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+                "INSERT INTO sessions (id, title, provider_id, model_id, variant, persona_id, system_prompt, workdir, permission_mode, agent_mode, computer_access, position, created_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
                 params![
                     session.id,
                     session.title,
@@ -586,6 +602,7 @@ impl Database {
                     session.permission_mode,
                     session.agent_mode,
                     session.computer_access,
+                    session.position,
                     session.created_at,
                     session.updated_at
                 ],
@@ -598,7 +615,7 @@ impl Database {
         let mut statement = self
             .connection
             .prepare(
-                "SELECT id, title, provider_id, model_id, variant, persona_id, system_prompt, created_at, updated_at, workdir, permission_mode, agent_mode, computer_access
+                "SELECT id, title, provider_id, model_id, variant, persona_id, system_prompt, created_at, updated_at, workdir, permission_mode, agent_mode, computer_access, position
                  FROM sessions WHERE kind = 'chat' ORDER BY updated_at DESC",
             )
             .map_err(map_sql("sessions"))?;
@@ -612,7 +629,7 @@ impl Database {
     pub fn get_session(&self, id: &str) -> Result<Option<Session>> {
         self.connection
             .query_row(
-                "SELECT id, title, provider_id, model_id, variant, persona_id, system_prompt, created_at, updated_at, workdir, permission_mode, agent_mode, computer_access
+                "SELECT id, title, provider_id, model_id, variant, persona_id, system_prompt, created_at, updated_at, workdir, permission_mode, agent_mode, computer_access, position
                  FROM sessions WHERE id = ?1",
                 params![id],
                 row_to_session,
@@ -694,6 +711,40 @@ impl Database {
                 )
                 .map_err(map_sql("sessions"))?;
         }
+        if let Some(position) = update.position {
+            // Deliberately does not touch `updated_at`: dragging a row is not
+            // activity in the chat, and touching it would reorder the very
+            // list being arranged.
+            self.connection
+                .execute(
+                    "UPDATE sessions SET position = ?2 WHERE id = ?1",
+                    params![id, position],
+                )
+                .map_err(map_sql("sessions"))?;
+        }
+        Ok(())
+    }
+
+    /// Writes a hand-placed order for a group of chats: the id at index 0
+    /// becomes position 0, and so on. One transaction, so a drag can never
+    /// leave half a group renumbered.
+    ///
+    /// Only the ids given are touched. A chat missing from the list keeps
+    /// whatever position it had, which is what makes the popup's "newest
+    /// first, above anything placed by hand" rule survive a reorder.
+    pub fn set_session_positions(&self, ids: &[String]) -> Result<()> {
+        let tx = self
+            .connection
+            .unchecked_transaction()
+            .map_err(map_sql("sessions"))?;
+        for (index, id) in ids.iter().enumerate() {
+            tx.execute(
+                "UPDATE sessions SET position = ?2 WHERE id = ?1",
+                params![id, index as i64],
+            )
+            .map_err(map_sql("sessions"))?;
+        }
+        tx.commit().map_err(map_sql("sessions"))?;
         Ok(())
     }
 
@@ -1771,6 +1822,9 @@ fn row_to_session(row: &rusqlite::Row<'_>) -> rusqlite::Result<Session> {
         permission_mode: row.get(10)?,
         agent_mode: row.get(11)?,
         computer_access: row.get(12)?,
+        // Appended last, and read by index: both SELECT lists above end with
+        // it, so the two have to move together.
+        position: row.get(13)?,
     })
 }
 
@@ -1832,6 +1886,7 @@ mod tests {
             permission_mode: None,
             agent_mode: None,
             computer_access: false,
+            position: None,
             created_at: now_ms(),
             updated_at: now_ms(),
         }

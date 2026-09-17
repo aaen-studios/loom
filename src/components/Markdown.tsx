@@ -2,10 +2,53 @@ import { lazy, Suspense, type MouseEvent } from "react";
 import type { CustomRenderer, CustomRendererProps, PluginConfig } from "streamdown";
 import { GENERATED_UI_LANGUAGE, safeExternalUrl } from "../lib/generatedUi";
 import { openExternal } from "../lib/tauri";
-import { CheckIcon, CopyIcon } from "./icons";
+import { CheckIcon, CopyIcon, ExternalLinkIcon } from "./icons";
 
 /** Fence languages a document is expected to arrive in. */
 export const DOCUMENT_LANGUAGES = ["markdown", "md"];
+
+/**
+ * A link in a reply, drawn as a badge rather than a bare underline.
+ *
+ * The host is the useful part: a wall of `https://…` underlines reads as noise,
+ * while `github.com` in a pill tells you where the link goes at a glance. The
+ * full URL is kept in `title`, so nothing is hidden — only de-emphasised.
+ *
+ * Rendered as a real `<a href>` on purpose. The delegated click handler in
+ * `Markdown` is what stops the webview navigating away, and it keys off the
+ * anchor, so this must stay one.
+ */
+function LinkBadge({
+  href,
+  children,
+  ...rest
+}: React.AnchorHTMLAttributes<HTMLAnchorElement>) {
+  const url = typeof href === "string" ? href : "";
+  let host: string | null = null;
+  try {
+    const parsed = new URL(url);
+    host = parsed.host.replace(/^www\./, "");
+  } catch {
+    // A relative or malformed href: fall back to the plain anchor, which is
+    // still clickable and still sanitized on click.
+    host = null;
+  }
+
+  if (!host) {
+    return (
+      <a href={href} {...rest}>
+        {children}
+      </a>
+    );
+  }
+
+  return (
+    <a href={href} title={url} className="loom-link" {...rest}>
+      <span className="loom-link-host">{host}</span>
+      <ExternalLinkIcon size={11} className="loom-link-glyph" />
+    </a>
+  );
+}
 
 // Loaded on demand: markdown, syntax highlighting and the rich renderers are by
 // far the heaviest part of the bundle and only matter once a reply arrives.
@@ -37,6 +80,9 @@ const Streamdown = lazy(async () => {
   const linkage = { enabled: false };
   const controls = { code: { download: false }, table: false, image: false };
   const icons = { CheckIcon, CopyIcon };
+  // Module scope, not created per render: Streamdown memoizes on this
+  // reference, so an inline object would remount every link on every delta.
+  const components = { a: LinkBadge };
 
   return {
     default: function MarkdownView({
@@ -53,6 +99,7 @@ const Streamdown = lazy(async () => {
           plugins={allowRich ? rich : plain}
           controls={controls}
           icons={icons}
+          components={components}
           linkSafety={linkage}
           isAnimating={streaming}
         >

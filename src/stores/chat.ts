@@ -74,6 +74,8 @@ interface ChatState {
   newSession: (personaId?: string | null, workdir?: string | null) => Promise<Session | null>;
   deleteSession: (id: string) => Promise<void>;
   renameSession: (id: string, title: string) => Promise<void>;
+  /** Adopts a hand-placed sidebar order: index becomes the chat's `position`. */
+  applySessionOrder: (orderedIds: string[]) => void;
   send: (
     text: string,
     options?: {
@@ -354,6 +356,19 @@ export const useChat = create<ChatState>((set, get) => ({
       sessions: state.sessions.map((session) =>
         session.id === id ? { ...session, title } : session,
       ),
+    }));
+  },
+
+  applySessionOrder: (orderedIds) => {
+    // The array itself is left alone: it stays newest-first, which is what the
+    // flat list and loadSessions hand back. Only the `position` column moves,
+    // and the sidebar's group order is derived from that.
+    const rank = new Map(orderedIds.map((id, index) => [id, index]));
+    set((state) => ({
+      sessions: state.sessions.map((session) => {
+        const position = rank.get(session.id);
+        return position === undefined ? session : { ...session, position };
+      }),
     }));
   },
 

@@ -42,6 +42,13 @@ interface Look {
   /** Inline calls render as a bare line; the rest get a small card. */
   inline: boolean;
   mono?: boolean;
+  /**
+   * The label is a command line, so it renders in a code chip with a status
+   * pill rather than as prose. Set for `run_command` only: it is the one row
+   * whose text the user may want to read exactly, and the one whose outcome
+   * (it finished, it failed, it exited non-zero) is worth a badge of its own.
+   */
+  code?: boolean;
 }
 
 const PENDING = "running";
@@ -153,6 +160,7 @@ function describe(call: ToolCallRecord): Look {
         detail: args.background === true ? "background" : null,
         inline: false,
         mono: true,
+        code: true,
       };
     case "list_commands":
       return {
@@ -489,8 +497,7 @@ const RUN_LABELS: Record<string, { active: string; past: string; noun: string }>
   },
   web_search: { active: "Searching", past: "Searched", noun: "times" },
   fetch_url: { active: "Fetching", past: "Fetched", noun: "pages" },
-  run_command: { active: "Running", past: "Ran", noun: "commands" },
-  list_commands: { active: "Listing", past: "Listed", noun: "times" },
+  run_command: { active: "Running", past: "Ran", noun: "commands" },  list_commands: { active: "Listing", past: "Listed", noun: "times" },
   command_output: { active: "Reading", past: "Read", noun: "logs" },
   stop_command: { active: "Stopping", past: "Stopped", noun: "commands" },
   generate_image: { active: "Generating", past: "Generated", noun: "images" },
@@ -545,6 +552,7 @@ function describeRun(run: ToolCallRecord[]): Look {
       detail: null,
       inline: look.inline,
       mono: look.mono,
+      code: look.code,
     };
   }
   const running = run.some((call) => call.status === PENDING);
@@ -553,6 +561,9 @@ function describeRun(run: ToolCallRecord[]): Look {
     label: `${running ? labels.active : labels.past} ${count} ${labels.noun}`,
     detail: null,
     inline: look.inline,
+    // A folded run is a summary ("Ran 3 commands"), not a command line, so it
+    // loses the code chip and keeps only the phrasing.
+    code: false,
   };
 }
 
@@ -671,6 +682,7 @@ function ToolRow({
       onToggle={() => setOpen((value) => !value)}
       bare={nested || look.inline}
       title={failed && call.output ? oneLine(call.output, 400) : undefined}
+      call={call}
     />
   );
   const body = (
@@ -735,8 +747,7 @@ function ToolRun({ run, display }: { run: ToolCallRecord[]; display: ToolCallDis
   if (look.inline) {
     return (
       <div>
-        <RowHeader look={look} status={runStatus(run)} hasBody open={open} onToggle={toggle} bare />
-        {open && (
+        <RowHeader look={look} status={runStatus(run)} hasBody open={open} onToggle={toggle} bare />        {open && (
           <div className="mt-1 ml-2 border-l border-[var(--glass-border)] pl-2">{calls}</div>
         )}
       </div>
@@ -751,6 +762,30 @@ function ToolRun({ run, display }: { run: ToolCallRecord[]; display: ToolCallDis
   );
 }
 
+/**
+ * The status pill on a shell command: running, an exit code, or a refusal.
+ *
+ * Reads the outcome rather than guessing it. `exit N` is only shown when the
+ * output actually carries one — a pill that invented "exit 0" for a command
+ * whose status was never reported would be a lie the user could act on.
+ */
+function CommandPill({ call }: { call: ToolCallRecord }) {
+  if (call.status === PENDING) {
+    return <span className="loom-pill loom-pill-live">running</span>;
+  }
+  if (call.status === "denied") {
+    return <span className="loom-pill loom-pill-bad">denied</span>;
+  }
+  if (call.status === "error") {
+    return <span className="loom-pill loom-pill-bad">failed</span>;
+  }
+  const exit = /exit(?:\s+code)?[:\s]+(-?\d+)/i.exec(call.output)?.[1];
+  if (exit && exit !== "0") {
+    return <span className="loom-pill loom-pill-bad">{`exit ${exit}`}</span>;
+  }
+  return <span className="loom-pill">{exit ? `exit ${exit}` : "done"}</span>;
+}
+
 function RowHeader({
   look,
   status,
@@ -759,6 +794,7 @@ function RowHeader({
   onToggle,
   bare = false,
   title,
+  call,
 }: {
   look: Look;
   status: ToolCallStatus;
@@ -767,6 +803,8 @@ function RowHeader({
   onToggle: () => void;
   bare?: boolean;
   title?: string;
+  /** The record behind the row, for the renderers that need more than a Look. */
+  call?: ToolCallRecord;
 }) {
   const failed = status === "error" || status === "denied";
   return (
@@ -785,21 +823,29 @@ function RowHeader({
       <span className={cn("shrink-0", failed ? "text-[var(--danger)]" : "text-faint")}>
         {look.icon}
       </span>
-      <span
-        className={cn(
-          "min-w-0 flex-1 truncate",
-          look.mono ? "font-mono text-[12px] text-soft" : "text-soft",
-        )}
-      >
-        {look.mono && <span className="text-faint">$ </span>}
-        {look.label}
-      </span>
+      {look.code ? (
+        // A command is quoted, not narrated: the chip is what tells the eye
+        // this text is to be read exactly as written.
+        <span className="loom-cmd min-w-0 flex-1">
+          <span className="loom-cmd-text">{look.label}</span>
+        </span>
+      ) : (
+        <span
+          className={cn(
+            "min-w-0 flex-1 truncate",
+            look.mono ? "font-mono text-[12px] text-soft" : "text-soft",
+          )}
+        >
+          {look.mono && <span className="text-faint">$ </span>}
+          {look.label}
+        </span>
+      )}
       {look.detail && (
         <span className="min-w-0 max-w-[45%] truncate text-[11.5px] text-faint">
           {look.detail}
         </span>
       )}
-      <StatusGlyph status={status} />
+      {look.code && call ? <CommandPill call={call} /> : <StatusGlyph status={status} />}
       {hasBody && (
         <ChevronDownIcon
           size={12}

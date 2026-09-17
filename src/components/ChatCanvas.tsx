@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { cn } from "../lib/cn";
+import { parseUserPrefix } from "../lib/commands";
 import { compactTokens } from "../lib/format";
 import {
   formatUsage,
@@ -239,6 +240,19 @@ function MessageActions({
   );
 }
 
+function MessageContentView({ content }: { content: string }) {
+  const prefix = parseUserPrefix(content);
+  if (!prefix) return <>{content}</>;
+  return (
+    <>
+      <span className={cn("loom-msg-badge", `loom-msg-badge-${prefix.kind}`)}>
+        {prefix.label}
+      </span>
+      {prefix.rest}
+    </>
+  );
+}
+
 /** Shared empty lists so selectors keep stable references. */
 const NO_TOOLS: ToolCallRecord[] = [];
 const NO_REASONING: ReasoningBlock[] = [];
@@ -317,7 +331,7 @@ function MessageRow({
               className="message-body panel-strong max-w-full select-text rounded-sheet px-3.5 py-2.5 text-[14.5px] leading-6 whitespace-pre-wrap"
               title={new Date(message.createdAt).toLocaleString()}
             >
-              {message.content}
+              <MessageContentView content={message.content} />
             </div>
           )}
         </div>

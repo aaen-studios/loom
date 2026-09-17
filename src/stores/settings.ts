@@ -47,6 +47,7 @@ export const DEFAULT_CONFIG: AppConfig = {
     sidebarWidth: 264,
     sidebarGrouping: "workspace",
     sidebarSort: "recent",
+    sidebarWorkspaceOrder: [],
     compact: false,
     generatedUi: true,
     showCondensing: true,

@@ -250,6 +250,35 @@ export function StopIcon(props: IconProps) {
   );
 }
 
+/**
+ * The drag handle: six dots on a 24 px grid, filled rather than stroked so it
+ * reads as a texture rather than as another line icon.
+ *
+ * It lives here rather than beside the queue that first needed it, because a
+ * list you reorder by hand is a recurring shape and a second hand-drawn grip
+ * would eventually disagree with this one about its dot spacing.
+ */
+export function GripIcon({ size = 12, className, ...rest }: IconProps) {
+  return (
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 24 24"
+      fill="currentColor"
+      aria-hidden="true"
+      className={cn("shrink-0", className)}
+      {...rest}
+    >
+      <circle cx="9" cy="6.5" r="1.4" />
+      <circle cx="15" cy="6.5" r="1.4" />
+      <circle cx="9" cy="12" r="1.4" />
+      <circle cx="15" cy="12" r="1.4" />
+      <circle cx="9" cy="17.5" r="1.4" />
+      <circle cx="15" cy="17.5" r="1.4" />
+    </svg>
+  );
+}
+
 export function TrashIcon(props: IconProps) {
   return (
     <Icon {...props}>

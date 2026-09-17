@@ -4,6 +4,77 @@ use std::path::Path;
 
 use crate::{Error, Result};
 
+/// Folders a file picker never wants to walk: build output and dependency
+/// trees, all of which are large, generated, and identical to something the
+/// user already has.
+const SKIP_DIRS: &[&str] = &[
+    ".git",
+    "node_modules",
+    "target",
+    "dist",
+    "build",
+    ".next",
+    "out",
+    "vendor",
+    "__pycache__",
+    ".venv",
+];
+
+/// How deep the walk will go. A guard rather than a policy: a directory tree
+/// that loops through a junction has no bottom, and a picker must not hang.
+const MAX_DEPTH: usize = 24;
+
+/// Every file under `root`, as `/`-separated paths relative to it.
+///
+/// Paths only — nothing is opened, so this is cheap enough to run when a picker
+/// opens rather than needing an index. Sorted, so the list does not depend on
+/// the order the filesystem happens to hand directories back in, and capped at
+/// `limit` so a huge repository cannot push a megabyte of strings through the
+/// IPC boundary.
+pub fn walk_files(root: &Path, limit: usize) -> Vec<String> {
+    let mut files = Vec::new();
+    walk_into(root, root, 0, limit, &mut files);
+    files.sort();
+    files
+}
+
+fn walk_into(
+    root: &Path,
+    directory: &Path,
+    depth: usize,
+    limit: usize,
+    files: &mut Vec<String>,
+) {
+    if depth >= MAX_DEPTH || files.len() >= limit {
+        return;
+    }
+    let Ok(reader) = std::fs::read_dir(directory) else {
+        return;
+    };
+    for entry in reader.flatten() {
+        if files.len() >= limit {
+            return;
+        }
+        let path = entry.path();
+        let name = entry.file_name().to_string_lossy().into_owned();
+        // A dot-directory is configuration or a checkout; either way it is not
+        // something to offer as "@" in a prompt.
+        if path.is_dir() {
+            if SKIP_DIRS.contains(&name.as_str()) || name.starts_with('.') {
+                continue;
+            }
+            walk_into(root, &path, depth + 1, limit, files);
+            continue;
+        }
+        let relative = path
+            .strip_prefix(root)
+            .unwrap_or(&path)
+            .to_string_lossy()
+            .replace('\\', "/");
+        files.push(relative);
+    }
+}
+
 /// UTC timestamp for file names, e.g. `20260915-123456Z`. Fixed width, so
 /// names sort chronologically with a plain string compare.
 pub fn utc_stamp() -> String {

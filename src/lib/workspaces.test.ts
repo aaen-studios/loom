@@ -15,6 +15,7 @@ function session(id: string, workdir: string | null, updatedAt: number): Session
     permissionMode: null,
     agentMode: null,
     computerAccess: false,
+    position: null,
     createdAt: 0,
     updatedAt,
   };

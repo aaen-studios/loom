@@ -7,10 +7,19 @@ import { GLOBAL_PERMISSION_MODES } from "../lib/modes";
 import type { SettingsCategoryId } from "../lib/settingsCategories";
 import { call, isTauri, tryCall } from "../lib/tauri";
 import { metricSummary, metricTone, percentOf } from "../lib/usage";
+import {
+  auxAmbiguity,
+  instancePosition,
+  isRecent,
+  providersServing,
+  referencesTo,
+  type ProviderIndex,
+} from "../lib/modelUsage";
 import { ipc } from "../lib/ipc";
 import type {
   AgentMode,
   AppInfo,
+  AuxModelRef,
   MemoryEntry,
   ModelEntry,
   Modality,
@@ -38,6 +47,7 @@ import {
   CheckIcon,
   ChevronDownIcon,
   CloseIcon,
+  CopyIcon,
   DatabaseIcon,
   EditIcon,
   GaugeIcon,
@@ -70,19 +80,106 @@ import {
   inputClass,
 } from "./ui";
 
-function ModelMetaList({
+/**
+ * The model list for one provider: choose which models the pickers offer, and
+ * edit the metadata behind them.
+ *
+ * Selection is stored as a *denylist* on the provider, so a model nobody has
+ * touched is selected by default — including one a refresh discovers later.
+ * Unselecting hides a model from every picker; it deliberately does not stop a
+ * chat that already points at it, which is why a row that is still referenced
+ * says so out loud instead of just disappearing.
+ */
+function ModelSelectionList({
   providerId,
-  models,
+  provider,
+  query,
 }: {
   providerId: string;
-  models: Record<string, ModelSpec>;
+  provider: ProviderConfig;
+  /** The section-wide search box; narrows which rows appear here. */
+  query: string;
 }) {
   const applyRemote = useSettings((state) => state.applyRemote);
+  const config = useSettings((state) => state.config);
+  const allModels = useProviders((state) => state.models);
   const refreshModels = useProviders((state) => state.refresh);
   const [error, setError] = useState<string | null>(null);
-  const entries = Object.entries(models);
+  const [search, setSearch] = useState("");
+  const [onlySelected, setOnlySelected] = useState(false);
+  const [busy, setBusy] = useState(false);
 
-  if (entries.length === 0) return null;
+  // Prefer the catalogue store (it carries `selected`), but fall back to the
+  // config so the section never blinks out on a cold open — or at all, if
+  // `list_models` is unavailable.
+  const fromStore = allModels.filter((entry) => entry.providerId === providerId);
+  const rows: ModelEntry[] = fromStore.length
+    ? fromStore
+    : Object.entries(provider.models).map(([modelId, spec]) => {
+        const selected = !provider.disabledModels.includes(modelId);
+        return {
+          providerId,
+          providerName: provider.name,
+          kind: provider.kind,
+          enabled: provider.enabled && selected,
+          providerEnabled: provider.enabled,
+          selected,
+          keyReady: true,
+          keyRequired: provider.keyRequired,
+          modelId,
+          spec,
+        };
+      });
+
+  const needle = `${query} ${search}`.trim().toLowerCase();
+  const shown = rows
+    .filter((entry) => {
+      if (onlySelected && !entry.selected) return false;
+      if (!needle) return true;
+      return (
+        entry.modelId.toLowerCase().includes(needle) ||
+        (entry.spec.name ?? "").toLowerCase().includes(needle)
+      );
+    })
+    // Favourites first, then alphabetical — never ordered by selection, so a
+    // row does not jump out from under the cursor the moment it is ticked.
+    .sort((left, right) => {
+      if (left.spec.favorite !== right.spec.favorite) {
+        return left.spec.favorite ? -1 : 1;
+      }
+      return left.modelId.localeCompare(right.modelId);
+    });
+
+  const total = rows.length;
+  const selectedCount = rows.filter((entry) => entry.selected).length;
+
+  if (total === 0) return null;
+
+  const selectMany = async (modelIds: string[], selected: boolean) => {
+    if (modelIds.length === 0) return;
+    setBusy(true);
+    try {
+      const updated = await ipc.setModelsSelected(providerId, modelIds, selected);
+      if (updated) applyRemote(updated);
+      await refreshModels();
+      setError(null);
+    } catch (cause) {
+      setError(messageOf(cause));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const setFavorite = async (modelId: string, favorite: boolean) => {
+    try {
+      const updated = await ipc.setModelFavorite(providerId, modelId, favorite);
+      if (updated) applyRemote(updated);
+      await refreshModels();
+      setError(null);
+    } catch (cause) {
+      setError(messageOf(cause));
+    }
+  };
 
   const save = async (modelId: string, spec: ModelSpec, edit: ModelEdit) => {
     const sameModalities =
@@ -128,26 +225,110 @@ function ModelMetaList({
   };
 
   return (
-    <details className="mt-2">
+    <details className="mt-2" open>
       <summary className="cursor-pointer text-[12px] text-faint hover:text-[var(--ink)]">
-        Models ({entries.length}) — edit windows and capabilities
+        Models ({selectedCount} of {total} selected)
+        {selectedCount < total ? " — some are hidden from the pickers" : ""}
       </summary>
-      <div className="mt-1.5 max-h-72 space-y-1 overflow-y-auto pr-0.5">
-        {entries.map(([modelId, spec]) => (
-          <ModelMetaRow
-            // Remount when the stored spec changes from under the editor
-            // (a refresh, a reset) so the inputs show the new truth.
-            key={`${modelId}:${spec.source}:${spec.context ?? "-"}:${spec.output ?? "-"}:${spec.inputModalities.join("+")}:${spec.reasoning?.variants.join("+") ?? "-"}:${spec.reasoning?.defaultVariant ?? "-"}`}
-            modelId={modelId}
-            spec={spec}
-            onSave={(edit) => void save(modelId, spec, edit)}
-            onReset={() => void reset(modelId)}
+
+      <div className="mt-1.5 space-y-1.5">
+        <SearchField
+          value={search}
+          onChange={setSearch}
+          placeholder="Filter this provider's models…"
+        />
+
+        <div className="flex flex-wrap items-center gap-1.5">
+          <span className="text-[11.5px] text-faint">
+            {shown.length === total
+              ? `${selectedCount} of ${total} selected`
+              : `${shown.length} shown · ${selectedCount} of ${total} selected`}
+          </span>
+          <button
+            type="button"
+            disabled={busy || shown.length === 0}
+            title="Select every model currently listed here"
+            onClick={() => void selectMany(shown.map((entry) => entry.modelId), true)}
+            className="chip px-2 py-0.5 text-[11.5px] disabled:opacity-50"
+          >
+            Select all shown
+          </button>
+          <button
+            type="button"
+            disabled={busy || shown.length === 0}
+            title="Unselect every model currently listed here — anything already using one keeps working"
+            onClick={() =>
+              void selectMany(shown.map((entry) => entry.modelId), false)
+            }
+            className="chip px-2 py-0.5 text-[11.5px] disabled:opacity-50"
+          >
+            Unselect all shown
+          </button>
+          <label className="flex items-center gap-1 text-[11.5px] text-faint">
+            <input
+              type="checkbox"
+              checked={onlySelected}
+              onChange={(event) => setOnlySelected(event.currentTarget.checked)}
+            />
+            Only selected
+          </label>
+        </div>
+
+        <div className="max-h-80 space-y-1 overflow-y-auto pr-0.5">
+          {shown.map((entry) => (
+            <ModelMetaRow
+              // Remount when the stored spec changes from under the editor
+              // (a refresh, a reset) so the inputs show the new truth. The
+              // selection is *not* part of the key: ticking a row must not
+              // rebuild its inputs.
+              key={`${entry.modelId}:${entry.spec.source}:${entry.spec.context ?? "-"}:${entry.spec.output ?? "-"}:${entry.spec.inputModalities.join("+")}:${entry.spec.reasoning?.variants.join("+") ?? "-"}:${entry.spec.reasoning?.defaultVariant ?? "-"}`}
+              modelId={entry.modelId}
+              spec={entry.spec}
+              selected={entry.selected}
+              providerEnabled={provider.enabled}
+              usage={referencesTo(config.chat, providerId, entry.modelId)}
+              recent={isRecent(config.chat, providerId, entry.modelId)}
+              onToggleSelected={(next) =>
+                void selectMany([entry.modelId], next)
+              }
+              onToggleFavorite={() =>
+                void setFavorite(entry.modelId, !entry.spec.favorite)
+              }
+              onSave={(edit) => void save(entry.modelId, entry.spec, edit)}
+              onReset={() => void reset(entry.modelId)}
+            />
+          ))}
+          {shown.length === 0 && (
+            <p className="px-1 py-2 text-[11.5px] text-faint">
+              No models match “{needle}”.
+            </p>
+          )}
+        </div>
+
+        <label
+          className="flex items-center gap-1.5 text-[11.5px] text-faint"
+          title="On: a refreshed catalogue keeps every model selected, so new ones simply appear. Off: only the models you tick stay selectable — right for a gateway with hundreds."
+        >
+          <input
+            type="checkbox"
+            checked={provider.autoSelectModels}
+            onChange={(event) =>
+              void ipc
+                .setProviderAutoSelect(providerId, event.currentTarget.checked)
+                .then((updated) => {
+                  if (updated) applyRemote(updated);
+                  return refreshModels();
+                })
+            }
           />
-        ))}
+          Auto-select new models
+          {provider.autoSelectModels ? "" : " (off — tick what you want)"}
+        </label>
+
+        {error && (
+          <p className="text-[11.5px] leading-4 text-[var(--danger)]">{error}</p>
+        )}
       </div>
-      {error && (
-        <p className="mt-1 text-[11.5px] leading-4 text-[var(--danger)]">{error}</p>
-      )}
     </details>
   );
 }
@@ -184,11 +365,24 @@ function tokenCount(text: string): number | null {
 function ModelMetaRow({
   modelId,
   spec,
+  selected,
+  providerEnabled,
+  usage,
+  recent,
+  onToggleSelected,
+  onToggleFavorite,
   onSave,
   onReset,
 }: {
   modelId: string;
   spec: ModelSpec;
+  selected: boolean;
+  providerEnabled: boolean;
+  /** Everywhere this model is still referenced, e.g. "App default". */
+  usage: string[];
+  recent: boolean;
+  onToggleSelected: (next: boolean) => void;
+  onToggleFavorite: () => void;
   onSave: (edit: ModelEdit) => void;
   onReset: () => void;
 }) {
@@ -250,9 +444,49 @@ function ModelMetaRow({
   return (
     <div className="rounded-row border border-[var(--glass-border)] px-2 py-1.5">
       <div className="flex items-center gap-1.5">
-        <span className="min-w-0 flex-1 truncate font-mono text-[11.5px] text-soft">
+        <button
+          type="button"
+          role="checkbox"
+          aria-checked={selected}
+          aria-label={`${selected ? "Unselect" : "Select"} ${modelId}`}
+          title={
+            selected
+              ? "Selected — offered in the pickers"
+              : "Unselected — hidden from the pickers. Anything already using it keeps working."
+          }
+          onClick={() => onToggleSelected(!selected)}
+          className={cn(
+            "grid h-5 w-5 shrink-0 place-items-center rounded-md border",
+            selected
+              ? "border-[var(--accent)] bg-[var(--accent-soft)] text-[var(--accent)]"
+              : "border-[var(--glass-border)] text-transparent",
+          )}
+        >
+          <CheckIcon size={12} />
+        </button>
+        <span
+          className={cn(
+            "min-w-0 flex-1 truncate font-mono text-[11.5px]",
+            selected ? "text-soft" : "text-faint",
+          )}
+        >
           {modelId}
         </span>
+        <button
+          type="button"
+          title={spec.favorite ? "Unpin favourite" : "Pin as favourite"}
+          aria-label={spec.favorite ? "Unpin favourite" : "Pin as favourite"}
+          aria-pressed={spec.favorite}
+          onClick={onToggleFavorite}
+          className={cn(
+            "grid h-6 w-6 shrink-0 place-items-center rounded-control",
+            spec.favorite
+              ? "text-[var(--accent)]"
+              : "text-faint hover:text-[var(--ink)]",
+          )}
+        >
+          ★
+        </button>
         <span
           className="shrink-0 text-[10.5px] text-faint"
           title={`Metadata source: ${metadataSourceLabel(spec.source)}`}
@@ -269,6 +503,45 @@ function ModelMetaRow({
           ↺
         </button>
       </div>
+
+      {/* Kept outside any dimming: a model that is hidden from the pickers but
+          still referenced by a chat or a setting is exactly the case the user
+          needs to notice, so these chips stay loud while the id above goes
+          quiet. */}
+      <div className="mt-0.5 flex flex-wrap items-center gap-1.5 pl-[26px]">
+        {!selected && (
+          <span className="text-[10.5px] text-faint">hidden from pickers</span>
+        )}
+        {!providerEnabled && (
+          <span className="text-[10.5px] text-faint">provider off</span>
+        )}
+        {spec.name && (
+          <span className="text-[10.5px] text-faint">{spec.name}</span>
+        )}
+        {spec.context != null && (
+          <span className="text-[10.5px] text-faint">
+            {compactTokens(spec.context)} ctx
+          </span>
+        )}
+        {usage.map((label) => (
+          <span
+            key={label}
+            title="Still in use here. Unselecting only hides the model from the pickers — this keeps working."
+            className="rounded-capsule border border-[var(--accent)] px-1.5 py-0.5 text-[10.5px] text-[var(--accent)]"
+          >
+            {label}
+          </span>
+        ))}
+        {recent && (
+          <span
+            title="Appears in the picker's recents list"
+            className="rounded-capsule border border-[var(--glass-border)] px-1.5 py-0.5 text-[10.5px] text-faint"
+          >
+            Recent
+          </span>
+        )}
+      </div>
+
       <div className="mt-1 flex flex-wrap items-center gap-1">
         <input
           value={context}
@@ -372,7 +645,8 @@ export const SETTINGS_CATEGORIES = [
     id: "providers",
     label: "Providers",
     blurb: "Endpoints and API keys. This is where models come from.",
-    keywords: "api key base url openai anthropic opencode ollama lm studio groq gemini model provider endpoint key",
+    keywords:
+      "api key base url openai anthropic opencode ollama lm studio groq gemini model provider endpoint key select unselect hide show search filter favourite favorite star duplicate copy instance second plan subscription limit meta context window session header",
   },
   {
     id: "usage",
@@ -680,18 +954,48 @@ const EMPTY_FORM: ProviderFormState = {
   sessionHeader: "",
 };
 
+/**
+ * `base`, `base-2`, `base-3`, … — the first id not already in use.
+ *
+ * Mirrors the Rust `unique_provider_id`, and matters because a preset's id is
+ * taken the moment that preset has been added once. Adding OpenCode Go a second
+ * time must produce a distinct instance rather than silently overwriting the
+ * first plan's endpoint.
+ */
+function uniqueId(base: string, taken: string[]): string {
+  if (!taken.includes(base)) return base;
+  for (let suffix = 2; ; suffix += 1) {
+    const candidate = `${base}-${suffix}`;
+    if (!taken.includes(candidate)) return candidate;
+  }
+}
+
+/** `name`, `name 2`, `name 3`, … — the first display name not already in use. */
+function uniqueName(base: string, taken: string[]): string {
+  const trimmed = base.trim() || "Provider";
+  if (!taken.includes(trimmed)) return trimmed;
+  for (let suffix = 2; ; suffix += 1) {
+    const candidate = `${trimmed} ${suffix}`;
+    if (!taken.includes(candidate)) return candidate;
+  }
+}
+
 function ProvidersSection() {
   const config = useSettings((state) => state.config);
   const applyRemote = useSettings((state) => state.applyRemote);
   const presets = useProviders((state) => state.presets);
   const refreshModels = useProviders((state) => state.refresh);
 
+  const allModels = useProviders((state) => state.models);
   const [form, setForm] = useState<ProviderFormState | null>(null);
   const [keyDrafts, setKeyDrafts] = useState<Record<string, string>>({});
   const [keyStatus, setKeyStatus] = useState<Record<string, boolean>>({});
   const [busy, setBusy] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // One box above every card: two plans serve the same catalogue, so "which
+  // plan has sonnet?" is answered by typing it once.
+  const [modelQuery, setModelQuery] = useState("");
 
   useEffect(() => {
     if (!isTauri) return;
@@ -707,19 +1011,29 @@ function ProvidersSection() {
   const startAdd = (preset: ProviderPreset | null) => {
     setNotice(null);
     setError(null);
+    // Adding a preset a second time makes a *second instance* — a separate id
+    // and name — rather than overwriting the first. Its `preset` is recorded so
+    // the gateway behaviour (the session header, say) still resolves for an id
+    // that matches no preset by name.
+    const takenIds = Object.keys(config.providers);
+    const takenNames = Object.values(config.providers).map((p) => p.name);
     setForm(
       preset
         ? {
-            id: preset.id,
+            id: uniqueId(preset.id, takenIds),
             preset: preset.id,
-            name: preset.name,
+            name: uniqueName(preset.name, takenNames),
             kind: preset.kind,
             baseUrl: preset.baseUrl,
             apiKey: "",
             keyRequired: preset.keyRequired,
             sessionHeader: preset.sessionHeader ?? "",
           }
-        : { ...EMPTY_FORM },
+        : {
+            ...EMPTY_FORM,
+            id: uniqueId("custom", takenIds),
+            name: uniqueName("Custom", takenNames),
+          },
     );
   };
 
@@ -729,7 +1043,9 @@ function ProvidersSection() {
     setError(null);
     setForm({
       id,
-      preset: null,
+      // Preserve which preset this instance came from, so editing the name or
+      // URL of a duplicate does not orphan it from its gateway behaviour.
+      preset: provider.presetId,
       name: provider.name,
       kind: provider.kind,
       baseUrl: provider.baseUrl,
@@ -764,6 +1080,11 @@ function ProvidersSection() {
         lastFetchedAt: config.providers[id]?.lastFetchedAt ?? null,
         keyRequired: form.keyRequired,
         sessionHeader: form.sessionHeader.trim() || null,
+        presetId: form.preset,
+        // Carried through untouched: editing the endpoint must never reset a
+        // model selection the user made.
+        disabledModels: config.providers[id]?.disabledModels ?? [],
+        autoSelectModels: config.providers[id]?.autoSelectModels ?? true,
       };
 
       const saved = await ipc.upsertProvider(id, provider);
@@ -814,6 +1135,35 @@ function ProvidersSection() {
     }
   };
 
+  /**
+   * Copies an instance so one vendor can be configured more than once — two
+   * OpenCode Go plans, each billed to its own subscription. The copy inherits
+   * the endpoint, headers and model selection but **no** key, so it starts
+   * keyless until its own key is pasted.
+   */
+  const duplicate = async (id: string) => {
+    setBusy(id);
+    setNotice(null);
+    setError(null);
+    try {
+      const updated = await ipc.duplicateProvider(id);
+      if (updated) applyRemote(updated);
+      await refreshModels();
+      const copy = Object.keys(updated?.providers ?? {}).find(
+        (candidate) => !config.providers[candidate],
+      );
+      setNotice(
+        copy
+          ? `Copied to “${updated?.providers[copy]?.name ?? copy}”. Paste its API key below.`
+          : "Provider copied.",
+      );
+    } catch (cause) {
+      setError(messageOf(cause));
+    } finally {
+      setBusy(null);
+    }
+  };
+
   const saveKey = async (id: string) => {
     const key = (keyDrafts[id] ?? "").trim();
     if (!key) return;
@@ -831,6 +1181,28 @@ function ProvidersSection() {
 
   const providerIds = Object.keys(config.providers);
 
+  // Which preset each configured provider belongs to, for instance labels.
+  // Matched on the recorded preset id, falling back to an exact id match, which
+  // mirrors what the engine does at startup.
+  const presetOf = (id: string): string | null => {
+    const provider = config.providers[id];
+    if (!provider) return null;
+    if (provider.presetId) return provider.presetId;
+    return presets.some((preset) => preset.id === id) ? id : null;
+  };
+
+  const providerIndex: ProviderIndex = Object.fromEntries(
+    providerIds.map((id) => [
+      id,
+      { name: config.providers[id].name, models: config.providers[id].models },
+    ]),
+  );
+
+  const selectedCountFor = (id: string) =>
+    allModels.filter((entry) => entry.providerId === id && entry.selected).length;
+
+  const totalHidden = allModels.filter((entry) => !entry.selected).length;
+
   return (
     <Section title="Providers">
       {providerIds.length === 0 && !form && (
@@ -838,6 +1210,23 @@ function ProvidersSection() {
           Add a provider to start chatting. Local providers (Ollama, LM Studio)
           need no key.
         </p>
+      )}
+
+      {providerIds.length > 1 && (
+        <div className="px-1 pt-1 pb-2">
+          <SearchField
+            value={modelQuery}
+            onChange={setModelQuery}
+            placeholder="Search models across every provider…"
+          />
+          <p className="mt-1 text-[11.5px] leading-4 text-faint">
+            {modelQuery
+              ? `Showing models matching “${modelQuery.trim()}”.`
+              : totalHidden > 0
+                ? `${totalHidden} model${totalHidden === 1 ? "" : "s"} hidden from the pickers.`
+                : "Every model is available in the pickers."}
+          </p>
+        </div>
       )}
 
       <div className="[&>*+*]:border-t [&>*+*]:border-[var(--glass-border)]">
@@ -869,10 +1258,28 @@ function ProvidersSection() {
                 </button>
 
                 <div className="min-w-0 flex-1">
-                  <p className="truncate text-[13.5px]">{provider.name}</p>
+                  <p className="flex items-center gap-1.5 truncate text-[13.5px]">
+                    <span className="truncate">{provider.name}</span>
+                    {(() => {
+                      const position = instancePosition(
+                        providerIndex,
+                        presetOf,
+                        id,
+                      );
+                      if (position.count < 2) return null;
+                      return (
+                        <span
+                          title="Another card is built from the same provider preset. Each instance keeps its own API key and its own model selection."
+                          className="shrink-0 rounded-capsule border border-[var(--accent)] px-1.5 py-0.5 text-[10.5px] text-[var(--accent)]"
+                        >
+                          {position.index} of {position.count}
+                        </span>
+                      );
+                    })()}
+                  </p>
                   <p className="truncate text-[11.5px] text-faint">
                     {provider.kind === "anthropic" ? "Anthropic" : "OpenAI-compatible"} ·{" "}
-                    {Object.keys(provider.models).length} models
+                    {selectedCountFor(id)}/{Object.keys(provider.models).length} models
                     {provider.sessionHeader ? ` · ${provider.sessionHeader}` : ""}
                   </p>
                 </div>
@@ -883,6 +1290,13 @@ function ProvidersSection() {
                   disabled={busy === id}
                 >
                   <RefreshIcon size={15} className={busy === id ? "animate-spin" : ""} />
+                </IconButton>
+                <IconButton
+                  label={`Duplicate ${provider.name}`}
+                  onClick={() => void duplicate(id)}
+                  disabled={busy === id}
+                >
+                  <CopyIcon size={15} />
                 </IconButton>
                 <IconButton label="Edit" onClick={() => startEdit(id)}>
                   <ChevronDownIcon size={15} />
@@ -927,7 +1341,11 @@ function ProvidersSection() {
                 </div>
               )}
 
-              <ModelMetaList providerId={id} models={provider.models} />
+              <ModelSelectionList
+                providerId={id}
+                provider={provider}
+                query={modelQuery}
+              />
             </div>
           );
         })}
@@ -1887,10 +2305,84 @@ function PersonasSection() {
 // Chat defaults
 // ---------------------------------------------------------------------------
 
+/**
+ * A model id plus an optional provider to pin it to.
+ *
+ * These settings began as free text, and the id still is: `gpt-image-1` and
+ * `text-embedding-3-small` are frequently absent from a provider's `/models`
+ * listing, so a closed dropdown would make them unreachable. What is new is the
+ * provider selector beside it — with the same catalogue configured twice, the
+ * bare id no longer identifies an account, and embeddings silently moving to
+ * another plan is an expensive surprise.
+ */
+function AuxModelField({
+  value,
+  placeholder,
+  hint,
+  providers,
+  onChange,
+}: {
+  value: AuxModelRef | null;
+  placeholder: string;
+  hint?: string;
+  providers: ProviderIndex;
+  onChange: (next: AuxModelRef | null) => void;
+}) {
+  const modelId = value?.modelId ?? "";
+  const qualified = (value?.providerId ?? "").trim();
+  // Offer the providers that actually serve the id; fall back to all of them
+  // while the field is empty or names something no provider lists.
+  const serving = providersServing(providers, modelId);
+  const choices = serving.length > 0 ? serving : Object.keys(providers);
+  const warning = auxAmbiguity(providers, value, "This setting");
+
+  return (
+    <div className="w-full max-w-[340px] space-y-1">
+      <div className="flex gap-1.5">
+        <input
+          value={modelId}
+          placeholder={placeholder}
+          title={hint}
+          onChange={(event) => {
+            const next = event.currentTarget.value;
+            onChange(next.trim() ? { providerId: qualified, modelId: next } : null);
+          }}
+          className={cn(fieldBase, "min-w-0 flex-1 text-[13px]")}
+        />
+        <select
+          value={qualified}
+          title="Which provider to send this to. “Any provider” is right while only one serves the model."
+          onChange={(event) => {
+            const next = event.currentTarget.value;
+            onChange(next || modelId ? { providerId: next, modelId } : null);
+          }}
+          className={cn(fieldBase, "max-w-[130px] text-[12px]")}
+        >
+          <option value="">Any provider</option>
+          {choices.map((id) => (
+            <option key={id} value={id}>
+              {providers[id]?.name ?? id}
+            </option>
+          ))}
+        </select>
+      </div>
+      {warning && (
+        <p className="text-[11.5px] leading-4 text-[var(--accent)]">{warning}</p>
+      )}
+    </div>
+  );
+}
+
 function ChatSection() {
   const config = useSettings((state) => state.config);
   const applyRemote = useSettings((state) => state.applyRemote);
   const models = useProviders((state) => state.models);
+  const providers: ProviderIndex = Object.fromEntries(
+    Object.entries(config.providers).map(([id, provider]) => [
+      id,
+      { name: provider.name, models: provider.models },
+    ]),
+  );
 
   const saveInterface = async (patch: Partial<typeof config.interface>) => {
     const updated = await ipc.setInterfaceSettings({ ...config.interface, ...patch });
@@ -2004,32 +2496,35 @@ function ChatSection() {
         />
       </Row>
 
-      <Row label="Image model">
-        <input
-          defaultValue={config.chat.imageModel ?? ""}
+      <Row
+        label="Image model"
+        hint="Used by generate_image. Pin a provider when two of them serve the same model."
+      >
+        <AuxModelField
+          value={config.chat.imageModel}
           placeholder="gpt-image-1"
-          onBlur={(event) =>
-            void ipc.setImageModel(event.currentTarget.value).then((updated) => {
+          providers={providers}
+          onChange={(next) =>
+            void ipc.setImageModel(next).then((updated) => {
               if (updated) applyRemote(updated);
             })
           }
-          className={cn(fieldBase, "w-44 text-[13px]")}
         />
       </Row>
 
-      <Row label="Embedding model">
-        <input
-          defaultValue={config.chat.embeddingModel ?? ""}
+      <Row
+        label="Embedding model"
+        hint="Used by the workspace index, semantic search, and memory recall."
+      >
+        <AuxModelField
+          value={config.chat.embeddingModel}
           placeholder="text-embedding-3-small"
-          title="Used by the workspace index and semantic search"
-          onBlur={(event) =>
-            void ipc
-              .setEmbeddingModel(event.currentTarget.value)
-              .then((updated) => {
-                if (updated) applyRemote(updated);
-              })
+          providers={providers}
+          onChange={(next) =>
+            void ipc.setEmbeddingModel(next).then((updated) => {
+              if (updated) applyRemote(updated);
+            })
           }
-          className={cn(fieldBase, "w-44 text-[13px]")}
         />
       </Row>
     </Section>

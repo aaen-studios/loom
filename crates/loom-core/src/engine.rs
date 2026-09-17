@@ -889,6 +889,7 @@ impl Engine {
             permission_mode: None,
             agent_mode: None,
             computer_access: false,
+            position: None,
             created_at: now_ms(),
             updated_at: now_ms(),
         };
@@ -923,6 +924,11 @@ impl Engine {
 
     pub fn list_sessions(&self) -> Result<Vec<Session>> {
         self.db().list_sessions()
+    }
+
+    /// Writes the hand-placed order for one group of chats in the sidebar.
+    pub fn reorder_sessions(&self, ids: &[String]) -> Result<()> {
+        self.db().set_session_positions(ids)
     }
 
     pub fn session(&self, id: &str) -> Result<Option<Session>> {
@@ -1155,6 +1161,147 @@ impl Engine {
         self.db().delete_message(message_id)
     }
 
+    /// The files in a chat's workspace, for the composer's `@` picker.
+    ///
+    /// Paths only, and nothing cached: the popup asks when it opens, and a walk
+    /// that only reads names is cheap enough that an index would be more moving
+    /// parts than the problem needs. A chat with no folder gets an empty list
+    /// rather than an error, because "no workspace yet" is an ordinary state.
+    pub fn workspace_files(&self, workdir: Option<&str>, limit: usize) -> Vec<String> {
+        match workdir {
+            Some(path) if !path.trim().is_empty() => {
+                crate::fsutil::walk_files(std::path::Path::new(path), limit)
+            }
+            _ => Vec::new(),
+        }
+    }
+
+    /// `list_chats`: the user's other conversations, newest first.
+    ///
+    /// `db().list_sessions()` filters to `kind = 'chat'`, so the hidden sessions
+    /// that detached runs write to are unreachable from here — a background
+    /// subagent's transcript is not a chat the user has, and the model has no
+    /// business reading one.
+    fn list_chats_for_tool(&self, arguments: &serde_json::Value) -> Result<String> {
+        let limit = arguments
+            .get("limit")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(30)
+            .clamp(1, 100) as usize;
+
+        let sessions = self.db().list_sessions()?;
+        if sessions.is_empty() {
+            return Ok("There are no chats yet.".to_string());
+        }
+
+        let mut out = format!("{} chat(s), newest first:\n", sessions.len());
+        for session in sessions.iter().take(limit) {
+            let title = match session.title.trim() {
+                "" => "(untitled)",
+                title => title,
+            };
+            out.push_str(&format!(
+                "- \"{}\" id {} — {} — last active {}",
+                title,
+                session.id,
+                session.workdir.as_deref().unwrap_or("no workspace"),
+                stamp_utc(session.updated_at)
+            ));
+            out.push('\n');
+        }
+        if sessions.len() > limit {
+            out.push_str(&format!(
+                "({} more not shown; raise limit to see them)\n",
+                sessions.len() - limit
+            ));
+        }
+        Ok(out)
+    }
+
+    /// `read_chat`: another chat's transcript, found by id, prefix or title.
+    fn read_chat_for_tool(&self, arguments: &serde_json::Value) -> Result<String> {
+        /// Enough for most chats whole, and small enough that reading the wrong
+        /// one is not a catastrophe.
+        const DEFAULT_BUDGET: usize = 40_000;
+
+        let reference = arguments
+            .get("chat")
+            .or_else(|| arguments.get("id"))
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .unwrap_or_default();
+        if reference.is_empty() {
+            return Err(Error::other("read_chat needs a chat id or title"));
+        }
+
+        let sessions = self.db().list_sessions()?;
+        let folded = |value: &str| -> String {
+            value
+                .chars()
+                .filter(|ch| *ch != '-')
+                .collect::<String>()
+                .to_lowercase()
+        };
+        let needle = folded(reference);
+
+        // Most specific first, so an exact id beats a title that happens to
+        // start with the same characters.
+        let found = sessions
+            .iter()
+            .find(|session| session.id == reference)
+            .or_else(|| sessions.iter().find(|session| folded(&session.id) == needle))
+            .or_else(|| {
+                sessions
+                    .iter()
+                    .find(|session| folded(&session.id).starts_with(&needle))
+            })
+            .or_else(|| {
+                sessions.iter().find(|session| {
+                    !session.title.trim().is_empty()
+                        && session.title.trim().to_lowercase() == reference.to_lowercase()
+                })
+            });
+
+        let Some(session) = found else {
+            return Ok(format!(
+                "No chat matches \"{reference}\". Call list_chats to see what there is."
+            ));
+        };
+
+        let max_chars = arguments
+            .get("max_chars")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(DEFAULT_BUDGET as u64)
+            .clamp(2_000, 200_000) as usize;
+
+        let messages = self.db().messages(&session.id)?;
+        let usage = messages
+            .iter()
+            .rev()
+            .find_map(|message| parse_usage(message.extra.as_deref()));
+        // The same renderer the Export button uses, so there is one definition
+        // of what a chat looks like as markdown and no second one to keep true.
+        let markdown = crate::export::session_markdown(session, &messages, usage);
+
+        if markdown.chars().count() <= max_chars {
+            return Ok(markdown);
+        }
+        // Head and tail rather than a prefix: the opening turns say what the
+        // chat was for and the closing ones say where it got to, and those are
+        // the two ends a caller needs. A silent truncation would let the model
+        // believe it had read the whole thing.
+        let chars: Vec<char> = markdown.chars().collect();
+        let head: usize = max_chars / 2;
+        let tail = max_chars - head;
+        let omitted = chars.len() - max_chars;
+        let head_text: String = chars[..head].iter().collect();
+        let tail_text: String = chars[chars.len() - tail..].iter().collect();
+        Ok(format!(
+            "{head_text}\n\n[{omitted} characters omitted from the middle of this chat — \
+             call read_chat again with a larger max_chars to see more]\n\n{tail_text}"
+        ))
+    }
+
     /// Marks a model as favourite so the picker can float it to the top.
     pub fn set_model_favorite(
         &self,
@@ -1173,6 +1320,56 @@ impl Engine {
             config.clone()
         };
         crate::config::save(&snapshot)
+    }
+
+    /// Turns a batch of models on or off in one config write.
+    ///
+    /// Batched because "select all shown" over a search result is one action
+    /// from the user's point of view, and writing the config once per model
+    /// would make a 300-model gateway crawl.
+    pub fn set_models_selected(
+        &self,
+        provider_id: &str,
+        model_ids: &[String],
+        selected: bool,
+    ) -> Result<()> {
+        let snapshot = {
+            let mut config = self.inner.config.lock().expect("config mutex poisoned");
+            let provider = config
+                .providers
+                .get_mut(provider_id)
+                .ok_or_else(|| Error::UnknownProvider(provider_id.to_string()))?;
+            let mut changed = false;
+            for model_id in model_ids {
+                changed |= provider.set_model_selected(model_id, selected);
+            }
+            if !changed {
+                return Ok(());
+            }
+            config.clone()
+        };
+        crate::config::save(&snapshot)
+    }
+
+    /// Copies a provider instance: same kind, endpoint, headers, gateway
+    /// session header, model catalogue and model selection, under a new id and
+    /// display name.
+    ///
+    /// This is what makes two plans from one vendor possible — two OpenCode Go
+    /// subscriptions, say. The copy starts with **no** API key on purpose:
+    /// keys are stored in the credential vault under the provider id, so a new
+    /// id cannot collide with (or silently inherit) the original's.
+    ///
+    /// `preset_id` is carried over so [`crate::provider::preset_for`] still
+    /// resolves the gateway behaviour a suffixed id no longer matches by name.
+    pub fn duplicate_provider(&self, provider_id: &str) -> Result<String> {
+        let (snapshot, new_id) = {
+            let mut config = self.inner.config.lock().expect("config mutex poisoned");
+            let new_id = crate::config::duplicate_provider(&mut config, provider_id)?;
+            (config.clone(), new_id)
+        };
+        crate::config::save(&snapshot)?;
+        Ok(new_id)
     }
 
     // ------------------------------------------------------------------
@@ -1209,7 +1406,31 @@ impl Engine {
 
         let mut config = self.inner.config.lock().expect("config mutex poisoned");
         if let Some(entry) = config.providers.get_mut(provider_id) {
+            let known: std::collections::BTreeSet<String> =
+                entry.models.keys().cloned().collect();
             entry.models = crate::providers::detect::merge_models(&entry.models, fetched);
+
+            // A gateway with hundreds of models is opt-in: nothing the user has
+            // not seen before arrives selected, so a refresh cannot flood the
+            // picker. Providers left on the default (which is every provider
+            // that predates this setting) get everything selected.
+            if !entry.auto_select_models {
+                let discovered: Vec<String> = entry
+                    .models
+                    .keys()
+                    .filter(|id| !known.contains(*id))
+                    .cloned()
+                    .collect();
+                for id in discovered {
+                    entry.disabled_models.insert(id);
+                }
+            }
+
+            // Only ever *adds* to the denylist above, so a refresh cannot
+            // discard a selection — but a model that has left the catalogue
+            // should not linger in it either.
+            entry.prune_disabled_models();
+
             entry.models_source = provider_mod::ModelsSource::Fetched;
             entry.last_fetched_at = Some(now_ms());
             let count = entry.models.len();
@@ -3974,6 +4195,8 @@ impl Engine {
         };
 
         let result = match call.name.as_str() {
+            crate::tools::LIST_CHATS => self.list_chats_for_tool(&arguments),
+            crate::tools::READ_CHAT => self.read_chat_for_tool(&arguments),
             "run_command" => self.run_shell_command(session_id, tool_context, &arguments).await,
             crate::tools::LIST_COMMANDS => self.list_commands_for_tool().await,
             crate::tools::COMMAND_OUTPUT => {
@@ -4374,12 +4597,15 @@ impl Engine {
         if prompt.trim().is_empty() {
             return Err(Error::other("generate_image needs a prompt"));
         }
-        let image_model = self
-            .config()
-            .chat
-            .image_model
-            .clone()
-            .unwrap_or_else(|| "gpt-image-1".to_string());
+        let reference = self.config().chat.image_model.clone();
+        // `chat.imageModel` may name its provider, in which case that provider
+        // and its key replace the chat's — see `aux_target`.
+        let (image_model, provider, api_key) = self.aux_target(
+            reference.as_ref(),
+            "gpt-image-1",
+            provider,
+            api_key,
+        );
 
         let url = format!("{}/images/generations", provider.normalized_base_url());
         let mut request = self
@@ -4387,7 +4613,7 @@ impl Engine {
             .client
             .post(&url)
             .json(&crate::images::build_body(&image_model, prompt, size));
-        if let Some(key) = api_key.filter(|key| !key.trim().is_empty()) {
+        if let Some(key) = api_key.as_deref().filter(|key| !key.trim().is_empty()) {
             request = request.header("authorization", format!("Bearer {key}"));
         }
         for (name, value) in &provider.headers {
@@ -4512,19 +4738,16 @@ impl Engine {
         let model = self.effective_model(&session)?;
 
         let config = self.config();
-        let provider = config
+        let fallback_provider = config
             .providers
             .get(&model.provider_id)
             .cloned()
             .ok_or_else(|| Error::UnknownProvider(model.provider_id.clone()))?;
-        let embedding_model = config
-            .chat
-            .embedding_model
-            .clone()
-            .unwrap_or_else(|| "text-embedding-3-small".to_string());
         drop(config);
 
-        let api_key = secrets::get_api_key(&model.provider_id)?;
+        let fallback_key = secrets::get_api_key(&model.provider_id)?;
+        let (embedding_model, provider, api_key) =
+            self.embedding_target(&fallback_provider, fallback_key.as_deref());
         let files = crate::index::collect_files(std::path::Path::new(&workdir));
         if files.is_empty() {
             return Err(Error::Other(
@@ -4597,16 +4820,11 @@ impl Engine {
         let model = self.effective_model(&session)?;
 
         let config = self.config();
-        let provider = config
+        let fallback_provider = config
             .providers
             .get(&model.provider_id)
             .cloned()
             .ok_or_else(|| Error::UnknownProvider(model.provider_id.clone()))?;
-        let embedding_model = config
-            .chat
-            .embedding_model
-            .clone()
-            .unwrap_or_else(|| "text-embedding-3-small".to_string());
         drop(config);
 
         let chunks = self.db().chunks(session_id)?;
@@ -4617,7 +4835,9 @@ impl Engine {
             );
         }
 
-        let api_key = secrets::get_api_key(&model.provider_id)?;
+        let fallback_key = secrets::get_api_key(&model.provider_id)?;
+        let (embedding_model, provider, api_key) =
+            self.embedding_target(&fallback_provider, fallback_key.as_deref());
         let vectors = crate::embeddings::embed(
             &self.inner.client,
             &provider,
@@ -4671,6 +4891,9 @@ impl Engine {
                     spec.source = MetadataSource::User;
                     spec
                 });
+            // Adding an id by hand is a deliberate act, so it is selected even
+            // on a provider that is otherwise opt-in.
+            provider.disabled_models.remove(model_id);
             config.clone()
         };
         crate::config::save(&snapshot)
@@ -5314,6 +5537,7 @@ impl Engine {
             permission_mode: request.permission_mode.clone(),
             agent_mode: Some("build".to_string()),
             computer_access: false,
+            position: None,
             created_at: now,
             updated_at: now,
         })?;
@@ -5610,22 +5834,75 @@ impl Engine {
         api_key: Option<&str>,
         inputs: &[String],
     ) -> Result<Vec<Vec<f32>>> {
-        let config = self.config();
-        let embedding_model = config
-            .chat
-            .embedding_model
-            .clone()
-            .unwrap_or_else(|| "text-embedding-3-small".to_string());
-        drop(config);
+        // Callers hand in the *chat's* provider and key, which is only right
+        // when the embedding ref is unqualified. A qualified ref — the same
+        // embedding id configured on two plans — settles it here instead.
+        let (embedding_model, provider, api_key) = self.embedding_target(provider, api_key);
 
         crate::embeddings::embed(
             &self.inner.client,
-            provider,
-            api_key,
+            &provider,
+            api_key.as_deref(),
             &embedding_model,
             inputs,
         )
         .await
+    }
+
+    /// Where an embedding call should go: model id, provider, and that
+    /// provider's own key.
+    fn embedding_target(
+        &self,
+        fallback_provider: &ProviderConfig,
+        fallback_key: Option<&str>,
+    ) -> (String, ProviderConfig, Option<String>) {
+        let reference = self.config().chat.embedding_model.clone();
+        self.aux_target(
+            reference.as_ref(),
+            "text-embedding-3-small",
+            fallback_provider,
+            fallback_key,
+        )
+    }
+
+    /// Resolves an auxiliary model ref to the model id to send, the provider to
+    /// send it to, and that provider's key.
+    ///
+    /// The ref decides *both* the id and the provider, because two instances of
+    /// one vendor mean the same id can live on two plans with two keys — sending
+    /// it to the chat's provider would bill the wrong account. When the ref does
+    /// not resolve (unset, or an id no configured provider serves) the chat's
+    /// own provider and key are used, which is exactly what these calls did
+    /// before a ref could name a provider: an untouched config is unchanged.
+    fn aux_target(
+        &self,
+        reference: Option<&crate::config::AuxModelRef>,
+        default_model_id: &str,
+        fallback_provider: &ProviderConfig,
+        fallback_key: Option<&str>,
+    ) -> (String, ProviderConfig, Option<String>) {
+        let config = self.config();
+        let resolved = reference
+            .filter(|reference| !reference.model_id.trim().is_empty())
+            .and_then(|reference| crate::config::resolve_aux_model(&config, reference));
+
+        if let Some(resolution) = resolved {
+            let model = resolution.model().clone();
+            if let Some(provider) = config.providers.get(&model.provider_id).cloned() {
+                let key = secrets::get_api_key(&model.provider_id).ok().flatten();
+                return (model.model_id, provider, key);
+            }
+        }
+
+        let model_id = reference
+            .map(|reference| reference.model_id.trim().to_string())
+            .filter(|id| !id.is_empty())
+            .unwrap_or_else(|| default_model_id.to_string());
+        (
+            model_id,
+            fallback_provider.clone(),
+            fallback_key.map(str::to_string),
+        )
     }
 
     /// Stores one fact, replacing a near-duplicate in the same scope. Returns
@@ -6705,6 +6982,21 @@ fn build_wire(history: &[Message]) -> Vec<WireMessage> {
 }
 
 /// The first line of a tool output, for compacting older turns.
+/// `2026-09-15 14:03` in UTC, for the chat list a tool reads.
+///
+/// Deliberately plain and zone-free: a model reasoning about "which chat was
+/// this" needs an ordering it can compare, not a locale's idea of yesterday.
+fn stamp_utc(ms: i64) -> String {
+    let seconds = ms.div_euclid(1000);
+    let (year, month, day) = crate::fsutil::civil_from_days(seconds.div_euclid(86_400));
+    let time = seconds.rem_euclid(86_400);
+    format!(
+        "{year:04}-{month:02}-{day:02} {:02}:{:02}",
+        time / 3_600,
+        (time % 3_600) / 60
+    )
+}
+
 fn first_line(text: &str) -> String {
     let line = text.lines().next().unwrap_or_default().trim();
     let line = if line.chars().count() > 200 {
@@ -8604,5 +8896,198 @@ mod tests {
 
         let bare = with_scratch_notice(None, scratch).unwrap();
         assert!(bare.contains("scratch folder"), "{bare}");
+    }
+
+    // ------------------------------------------------- reading other chats
+
+    /// A bare engine over an in-memory database.
+    fn test_engine() -> Engine {
+        use crate::config::AppConfig;
+        use std::sync::Arc;
+
+        Engine::new(
+            Database::open_in_memory().unwrap(),
+            Arc::new(Mutex::new(AppConfig::default())),
+            Arc::new(|_| {}),
+        )
+    }
+
+    /// An engine with two chats, each with its own message, for the
+    /// `list_chats` / `read_chat` tests. Returns the engine and both ids.
+    fn engine_with_chats() -> (Engine, String, String) {
+        let engine = test_engine();
+
+        let first = engine
+            .create_session(
+                Some("Renaming the parser".into()),
+                None,
+                None,
+                None,
+                None,
+                Some("C:/work/loom".into()),
+            )
+            .unwrap();
+        let second = engine
+            .create_session(Some("Updater notes".into()), None, None, None, None, None)
+            .unwrap();
+
+        // The helper builds a message with a placeholder session, and the
+        // foreign key is on, so each message has to be pointed at a real chat
+        // before it is written.
+        //
+        // `first` is the chat `read_chat` resolves, so it carries the
+        // distinctive line a test can look for. `second` exists so the listing
+        // has more than one row and the "not shown" line has something to
+        // count.
+        let mut question = message(Role::User, "the lexer is fine, it is the parser", None);
+        question.session_id = first.id.clone();
+        engine.db().add_message(&question).expect("a message");
+
+        let mut answer = message(Role::Assistant, "found it in parse_expr", None);
+        answer.session_id = first.id.clone();
+        engine.db().add_message(&answer).expect("a reply");
+
+        let mut other = message(Role::User, "the updater is fine", None);
+        other.session_id = second.id.clone();
+        engine.db().add_message(&other).expect("a message");
+
+        (engine, first.id, second.id)
+    }
+
+    #[test]
+    fn list_chats_names_every_conversation_with_its_id() {
+        let (engine, first, second) = engine_with_chats();
+        let listed = engine
+            .list_chats_for_tool(&serde_json::json!({}))
+            .expect("a list");
+
+        assert!(listed.contains("Renaming the parser"), "{listed}");
+        assert!(listed.contains("Updater notes"), "{listed}");
+        // The id is the whole point of the listing: it is what `read_chat`
+        // takes, and what a `#mention` carries.
+        assert!(listed.contains(&first), "{listed}");
+        assert!(listed.contains(&second), "{listed}");
+        assert!(listed.contains("C:/work/loom"), "{listed}");
+    }
+
+    #[test]
+    fn list_chats_says_when_there_is_nothing_to_list() {
+        let listed = test_engine()
+            .list_chats_for_tool(&serde_json::json!({}))
+            .expect("a list");
+        assert!(listed.contains("no chats"), "{listed}");
+    }
+
+    #[test]
+    fn list_chats_honours_its_limit_and_says_what_it_left_out() {
+        let (engine, _first, _second) = engine_with_chats();
+        let listed = engine
+            .list_chats_for_tool(&serde_json::json!({ "limit": 1 }))
+            .expect("a list");
+        assert!(listed.contains("1 more not shown"), "{listed}");
+    }
+
+    #[test]
+    fn read_chat_finds_a_conversation_by_id_prefix_or_title() {
+        let (engine, first, _second) = engine_with_chats();
+        let prefix: String = first.chars().take(8).collect();
+
+        for reference in [first.as_str(), prefix.as_str(), "Renaming the parser"] {
+            let read = engine
+                .read_chat_for_tool(&serde_json::json!({ "chat": reference }))
+                .expect("a transcript");
+            assert!(
+                read.contains("found it in parse_expr"),
+                "{reference} did not resolve: {read}"
+            );
+            assert!(read.starts_with("# Renaming the parser"), "{read}");
+        }
+    }
+
+    #[test]
+    fn read_chat_resolves_an_id_that_a_mention_wrote() {
+        let (engine, first, _second) = engine_with_chats();
+        // What `resolveChatMentions` puts in a message: eight characters with
+        // the dashes taken out.
+        let short: String = first.chars().filter(|ch| *ch != '-').take(8).collect();
+        let read = engine
+            .read_chat_for_tool(&serde_json::json!({ "chat": short }))
+            .expect("a transcript");
+        assert!(read.contains("parse_expr"), "{read}");
+    }
+
+    #[test]
+    fn read_chat_says_so_when_nothing_matches() {
+        let (engine, _first, _second) = engine_with_chats();
+        let read = engine
+            .read_chat_for_tool(&serde_json::json!({ "chat": "no such chat" }))
+            .expect("a reply, not an error: the model should be able to recover");
+        assert!(read.contains("No chat matches"), "{read}");
+        // It has to point somewhere, or the model apologises instead of trying.
+        assert!(read.contains("list_chats"), "{read}");
+    }
+
+    #[test]
+    fn read_chat_needs_something_to_look_up() {
+        let (engine, _first, _second) = engine_with_chats();
+        assert!(engine.read_chat_for_tool(&serde_json::json!({})).is_err());
+        assert!(engine
+            .read_chat_for_tool(&serde_json::json!({ "chat": "   " }))
+            .is_err());
+    }
+
+    #[test]
+    fn read_chat_omits_the_middle_of_a_long_conversation() {
+        let engine = test_engine();
+        let session = engine
+            .create_session(Some("Long".into()), None, None, None, None, None)
+            .unwrap();
+        for index in 0..40 {
+            let mut entry =
+                message(Role::User, &format!("turn {index} {}", "x".repeat(400)), None);
+            entry.session_id = session.id.clone();
+            engine.db().add_message(&entry).expect("a message");
+        }
+
+        let read = engine
+            .read_chat_for_tool(&serde_json::json!({
+                "chat": session.id,
+                "max_chars": 4_000,
+            }))
+            .expect("a transcript");
+
+        assert!(read.chars().count() < 5_000, "{}", read.chars().count());
+        // Both ends survive: the first turns say what the chat was, the last
+        // say where it got to.
+        assert!(read.starts_with("# Long"), "{read}");
+        assert!(read.contains("turn 39"), "{read}");
+        // And the omission is stated, never silent.
+        assert!(read.contains("characters omitted"), "{read}");
+    }
+
+    #[test]
+    fn workspace_files_lists_a_folder_and_skips_the_junk() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("main.rs"), "fn main() {}").unwrap();
+        std::fs::create_dir_all(dir.path().join("src")).unwrap();
+        std::fs::write(dir.path().join("src/lib.rs"), "").unwrap();
+        std::fs::create_dir_all(dir.path().join("node_modules")).unwrap();
+        std::fs::write(dir.path().join("node_modules/dep.js"), "").unwrap();
+
+        let found = test_engine().workspace_files(dir.path().to_str(), 100);
+        assert!(found.contains(&"main.rs".to_string()), "{found:?}");
+        assert!(found.contains(&"src/lib.rs".to_string()), "{found:?}");
+        assert!(
+            !found.iter().any(|path| path.contains("node_modules")),
+            "{found:?}"
+        );
+    }
+
+    #[test]
+    fn workspace_files_is_empty_rather_than_an_error_without_a_folder() {
+        let engine = test_engine();
+        // "No workspace yet" is an ordinary state, not a failure.
+        assert!(engine.workspace_files(None, 100).is_empty());
+        assert!(engine.workspace_files(Some("  "), 100).is_empty());
     }
 }

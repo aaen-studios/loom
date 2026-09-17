@@ -7,7 +7,7 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::Value;
 
 use crate::fsutil::atomic_write;
@@ -154,6 +154,304 @@ impl ModelRef {
     }
 }
 
+/// A reference to one of the auxiliary models — image generation, embeddings.
+///
+/// These started life as bare model-id strings. That is unambiguous only while
+/// a model id maps to one provider, which stops being true the moment the same
+/// catalogue is configured twice (two OpenCode Go plans both serving
+/// `qwen3:8b`). A ref may therefore name its provider.
+///
+/// An empty `provider_id` means "infer it at call time", which is exactly what
+/// a legacy bare string deserializes to. `Serialize` writes a bare string back
+/// whenever the provider is unset, so an untouched config round-trips
+/// byte-identically and there is no migration to run.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct AuxModelRef {
+    /// Empty means "infer the provider".
+    pub provider_id: String,
+    pub model_id: String,
+}
+
+impl AuxModelRef {
+    pub fn new(provider_id: impl Into<String>, model_id: impl Into<String>) -> Self {
+        Self {
+            provider_id: provider_id.into(),
+            model_id: model_id.into(),
+        }
+    }
+
+    /// The legacy shape: a bare model id with no provider.
+    pub fn bare(model_id: impl Into<String>) -> Self {
+        Self {
+            provider_id: String::new(),
+            model_id: model_id.into(),
+        }
+    }
+
+    pub fn is_qualified(&self) -> bool {
+        !self.provider_id.trim().is_empty()
+    }
+
+    /// Whether this ref means the given model. An unqualified ref matches the
+    /// id in *any* provider, which is what makes legacy configs keep working.
+    pub fn matches(&self, provider_id: &str, model_id: &str) -> bool {
+        self.model_id == model_id && (!self.is_qualified() || self.provider_id == provider_id)
+    }
+}
+
+impl Serialize for AuxModelRef {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        use serde::ser::SerializeMap;
+
+        // A local model (Ollama, LM Studio) is often one provider deep, and a
+        // legacy config is unqualified throughout: write the old shape back so
+        // those files show no diff after a save.
+        if !self.is_qualified() {
+            return serializer.serialize_str(&self.model_id);
+        }
+        let mut map = serializer.serialize_map(Some(2))?;
+        map.serialize_entry("providerId", &self.provider_id)?;
+        map.serialize_entry("modelId", &self.model_id)?;
+        map.end()
+    }
+}
+
+impl<'de> Deserialize<'de> for AuxModelRef {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        struct AuxVisitor;
+
+        impl<'de> serde::de::Visitor<'de> for AuxVisitor {
+            type Value = AuxModelRef;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+                formatter.write_str("a model id string, or {\"providerId\", \"modelId\"}")
+            }
+
+            fn visit_str<E: serde::de::Error>(
+                self,
+                value: &str,
+            ) -> std::result::Result<AuxModelRef, E> {
+                Ok(AuxModelRef::bare(value))
+            }
+
+            fn visit_string<E: serde::de::Error>(
+                self,
+                value: String,
+            ) -> std::result::Result<AuxModelRef, E> {
+                Ok(AuxModelRef::bare(value))
+            }
+
+            fn visit_map<A: serde::de::MapAccess<'de>>(
+                self,
+                mut map: A,
+            ) -> std::result::Result<AuxModelRef, A::Error> {
+                let mut provider_id: Option<String> = None;
+                let mut model_id: Option<String> = None;
+                while let Some(key) = map.next_key::<String>()? {
+                    match key.as_str() {
+                        "providerId" | "provider_id" => {
+                            provider_id = map.next_value::<Option<String>>()?.or(provider_id);
+                        }
+                        "modelId" | "model_id" => {
+                            model_id = Some(map.next_value::<String>()?);
+                        }
+                        _ => {
+                            let _ = map.next_value::<serde::de::IgnoredAny>()?;
+                        }
+                    }
+                }
+                let model_id = model_id
+                    .ok_or_else(|| serde::de::Error::missing_field("modelId"))?;
+                Ok(AuxModelRef {
+                    provider_id: provider_id.unwrap_or_default(),
+                    model_id,
+                })
+            }
+        }
+
+        deserializer.deserialize_any(AuxVisitor)
+    }
+}
+
+/// Why an [`AuxModelRef`] resolved to the provider it did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AuxResolution {
+    /// The ref named a provider that is configured and serves that model.
+    Explicit(ModelRef),
+    /// The ref was unqualified and exactly one configured provider serves the
+    /// id, so the choice is forced.
+    Unique(ModelRef),
+    /// The ref was unqualified and several providers serve the id. The winner
+    /// is the one chosen by precedence; the rest are listed so the UI can warn
+    /// rather than silently switch providers when a duplicate plan is added.
+    Ambiguous {
+        chosen: ModelRef,
+        others: Vec<ModelRef>,
+    },
+}
+
+impl AuxResolution {
+    pub fn model(&self) -> &ModelRef {
+        match self {
+            AuxResolution::Explicit(model) | AuxResolution::Unique(model) => model,
+            AuxResolution::Ambiguous { chosen, .. } => chosen,
+        }
+    }
+
+    /// True when more than one provider could serve the ref, so the settings
+    /// page should say which one is actually in use.
+    pub fn is_ambiguous(&self) -> bool {
+        matches!(self, AuxResolution::Ambiguous { .. })
+    }
+
+    pub fn others(&self) -> &[ModelRef] {
+        match self {
+            AuxResolution::Ambiguous { others, .. } => others,
+            _ => &[],
+        }
+    }
+}
+
+/// Resolves an auxiliary model ref against the configured providers.
+///
+/// Precedence, in order:
+///
+/// 1. the provider the ref names, when it exists and serves the model;
+/// 2. the only provider that serves the id, when there is exactly one;
+/// 3. the provider of the app-wide default model, when it serves the id;
+/// 4. otherwise the first provider (in id order) that serves the id.
+///
+/// Rules 3 and 4 are what make an unqualified legacy ref deterministic instead
+/// of dependent on map ordering. Returns `None` when no configured provider
+/// serves the id at all.
+pub fn resolve_aux_model(config: &AppConfig, reference: &AuxModelRef) -> Option<AuxResolution> {
+    let model_id = reference.model_id.trim();
+    if model_id.is_empty() {
+        return None;
+    }
+
+    let servers: Vec<&str> = config
+        .providers
+        .iter()
+        .filter(|(_, provider)| provider.models.contains_key(model_id))
+        .map(|(id, _)| id.as_str())
+        .collect();
+
+    if reference.is_qualified() {
+        let provider_id = reference.provider_id.trim();
+        if config
+            .providers
+            .get(provider_id)
+            .is_some_and(|provider| provider.models.contains_key(model_id))
+        {
+            return Some(AuxResolution::Explicit(ModelRef::new(provider_id, model_id)));
+        }
+        // A named provider that no longer serves the model falls through: the
+        // model clearly still exists, so preferring it beats failing outright.
+    }
+
+    if servers.is_empty() {
+        return None;
+    }
+
+    if let [only] = servers.as_slice() {
+        return Some(AuxResolution::Unique(ModelRef::new(*only, model_id)));
+    }
+
+    let default_provider = config.chat.provider_id.as_deref();
+    let chosen = default_provider
+        .filter(|candidate| servers.contains(candidate))
+        .unwrap_or(servers[0]);
+
+    let others = servers
+        .iter()
+        .filter(|candidate| **candidate != chosen)
+        .map(|candidate| ModelRef::new(*candidate, model_id))
+        .collect();
+
+    Some(AuxResolution::Ambiguous {
+        chosen: ModelRef::new(chosen, model_id),
+        others,
+    })
+}
+
+/// Aux model refs that cannot be resolved as things stand, for the settings
+/// page to report. Each entry is the field label, the ref, and how many
+/// providers serve the id.
+pub fn unresolved_aux_models(config: &AppConfig) -> Vec<(&'static str, AuxModelRef)> {
+    let mut unresolved = Vec::new();
+    for (label, reference) in [
+        ("imageModel", &config.chat.image_model),
+        ("embeddingModel", &config.chat.embedding_model),
+    ] {
+        if let Some(reference) = reference {
+            if !reference.model_id.trim().is_empty()
+                && resolve_aux_model(config, reference).is_none()
+            {
+                unresolved.push((label, reference.clone()));
+            }
+        }
+    }
+    unresolved
+}
+
+/// `{id}-2`, `{id}-3`, … — the first id not already taken.
+fn unique_provider_id(config: &AppConfig, base: &str) -> String {
+    (2..)
+        .map(|suffix| format!("{base}-{suffix}"))
+        .find(|candidate| !config.providers.contains_key(candidate))
+        .expect("an unused numeric suffix always exists")
+}
+
+/// `"{name} 2"`, … — the first free display name, so two cards built from one
+/// preset can be told apart in pickers without opening settings.
+fn unique_provider_name(config: &AppConfig, base: &str) -> String {
+    let base = base.trim();
+    (2..)
+        .map(|suffix| format!("{base} {suffix}"))
+        .find(|candidate| {
+            !config
+                .providers
+                .values()
+                .any(|provider| provider.name == *candidate)
+        })
+        .expect("an unused numeric suffix always exists")
+}
+
+/// Copies a configured provider under a fresh id and display name, returning
+/// the new id.
+///
+/// This is what makes one vendor usable more than once: two OpenCode Go plans,
+/// say, each with its own subscription. The copy inherits the endpoint, kind,
+/// headers, gateway session header, `preset_id`, the model catalogue **and**
+/// the model selection.
+///
+/// It deliberately inherits **no** API key: keys live in the credential vault
+/// under the provider id, so a new id starts keyless and cannot quietly bill
+/// the original's account.
+pub fn duplicate_provider(config: &mut AppConfig, provider_id: &str) -> Result<String> {
+    let source = config
+        .providers
+        .get(provider_id)
+        .cloned()
+        .ok_or_else(|| Error::UnknownProvider(provider_id.to_string()))?;
+
+    let new_id = unique_provider_id(config, provider_id);
+    let mut copy = source;
+    copy.name = unique_provider_name(config, &copy.name);
+    // A copied timestamp would claim this instance had already been polled,
+    // hiding the fact that its models came from the original.
+    copy.last_fetched_at = None;
+    config.providers.insert(new_id.clone(), copy);
+    Ok(new_id)
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum PermissionMode {
@@ -223,10 +521,12 @@ pub struct ChatDefaults {
     pub variant: Option<String>,
     /// Cheap model used for chat titles and small background jobs.
     pub lite: Option<ModelRef>,
-    /// Model used by the `generate_image` tool (chat provider is used).
-    pub image_model: Option<String>,
-    /// Embedding model used by the workspace index.
-    pub embedding_model: Option<String>,
+    /// Model used by the `generate_image` tool. `providerId` is optional: an
+    /// unqualified ref runs against whichever provider serves the id (see
+    /// [`resolve_aux_model`]), which is what a legacy bare string means.
+    pub image_model: Option<AuxModelRef>,
+    /// Embedding model used by the workspace index and memory search.
+    pub embedding_model: Option<AuxModelRef>,
     /// Generate a chat title with the lite model after the first reply.
     pub auto_title: bool,
     /// Models used recently, newest first (the picker lists them on top).
@@ -296,9 +596,22 @@ pub fn apply_preset_defaults(config: &mut AppConfig) -> bool {
     let mut changed = false;
 
     for (id, provider) in config.providers.iter_mut() {
-        let Some(preset) = crate::provider::preset(id) else {
+        // `preset_for`, not `preset`: a duplicated provider is stored under a
+        // suffixed id that matches no preset, and it still needs the gateway's
+        // session header. Resolving by base URL also repairs renamed ids.
+        let Some(preset) = crate::provider::preset_for(id, provider) else {
             continue;
         };
+        // Provenance is recorded only from an exact id match (`preset_provenance`),
+        // never from the base-URL fallback: this runs on every start, so a
+        // guess would be written to disk immediately and then outlive any later
+        // edit to the URL.
+        if provider.preset_id.is_none() {
+            if let Some(confirmed) = crate::provider::preset_provenance(id, provider) {
+                provider.preset_id = Some(confirmed.to_string());
+                changed = true;
+            }
+        }
         if provider.session_header.is_none() {
             if let Some(header) = preset.session_header {
                 provider.session_header = Some(header.to_string());
@@ -528,6 +841,12 @@ pub struct InterfaceConfig {
     pub sidebar_grouping: SidebarGrouping,
     /// Order of chats in the sidebar list.
     pub sidebar_sort: SidebarSort,
+    /// Hand-placed order of the workspace groups in the chats popup, by folder
+    /// path. A group listed here keeps that place; one that is not listed —
+    /// including a folder just added — sorts above them by recency. In grouped
+    /// mode this and each chat's `position` column are the whole order: the
+    /// Sort menu governs the flat list only.
+    pub sidebar_workspace_order: Vec<String>,
     /// Denser transcript and smaller text.
     pub compact: bool,
     /// Let the model render ```loom-ui blocks as live, themed widgets.
@@ -558,6 +877,7 @@ impl Default for InterfaceConfig {
             sidebar_width: 264,
             sidebar_grouping: SidebarGrouping::Workspace,
             sidebar_sort: SidebarSort::Recent,
+            sidebar_workspace_order: Vec::new(),
             compact: false,
             generated_ui: true,
             show_condensing: true,
@@ -916,5 +1236,209 @@ mod tests {
         let mut reloaded = load_from(&path).unwrap();
         assert!(!migrate_metadata(&mut reloaded));
         assert_eq!(reloaded, config);
+    }
+
+    // ---------------------------------------------------------- selection
+
+    #[test]
+    fn a_provider_saved_before_selection_still_selects_every_model() {
+        // The serde trap: `ProviderConfig` carries a container-level
+        // `#[serde(default)]`, so every absent field takes its value from the
+        // hand-written `Default` impl. Had `auto_select_models` defaulted to
+        // `false`, opening an existing config would have silently switched it
+        // to opt-in mode and emptied the pickers.
+        let provider: ProviderConfig = serde_json::from_str(
+            r#"{
+                 "name": "OpenCode Go",
+                 "baseUrl": "https://opencode.ai/zen/go/v1",
+                 "models": { "glm-4.7": {}, "qwen3-coder": {} }
+               }"#,
+        )
+        .unwrap();
+
+        assert!(provider.auto_select_models);
+        assert!(provider.disabled_models.is_empty());
+        assert!(provider.preset_id.is_none());
+        assert!(provider.model_selected("glm-4.7"));
+        assert!(provider.model_selected("qwen3-coder"));
+    }
+
+    #[test]
+    fn duplicating_a_provider_copies_its_catalogue_and_selection() {
+        let mut config = AppConfig::default();
+        let mut provider = ProviderConfig {
+            name: "OpenCode Go".into(),
+            base_url: "https://opencode.ai/zen/go/v1".into(),
+            preset_id: Some("opencode-go".into()),
+            session_header: Some("x-opencode-session".into()),
+            ..Default::default()
+        };
+        for model in ["glm-4.7", "qwen3-coder"] {
+            provider.models.insert(model.into(), ModelSpec::default());
+        }
+        provider.set_model_selected("qwen3-coder", false);
+        provider.last_fetched_at = Some(1_700_000_000_000);
+        config.providers.insert("opencode-go".into(), provider);
+
+        let new_id = duplicate_provider(&mut config, "opencode-go").unwrap();
+        assert_eq!(new_id, "opencode-go-2");
+
+        let copy = &config.providers[&new_id];
+        assert_eq!(copy.name, "OpenCode Go 2");
+        assert_eq!(copy.base_url, "https://opencode.ai/zen/go/v1");
+        // Carried so the second plan keeps its gateway behaviour even though a
+        // suffixed id matches no preset by name.
+        assert_eq!(copy.preset_id.as_deref(), Some("opencode-go"));
+        assert_eq!(copy.session_header.as_deref(), Some("x-opencode-session"));
+        assert_eq!(copy.models.len(), 2);
+        // The selection comes along, so the second plan starts where the first
+        // is rather than offering 300 models again.
+        assert!(copy.model_selected("glm-4.7"));
+        assert!(!copy.model_selected("qwen3-coder"));
+        // A copied timestamp would claim this instance had already been polled.
+        assert!(copy.last_fetched_at.is_none());
+        // The original is untouched.
+        assert_eq!(config.providers["opencode-go"].name, "OpenCode Go");
+    }
+
+    #[test]
+    fn duplicating_twice_keeps_ids_and_names_apart() {
+        let mut config = AppConfig::default();
+        config.providers.insert(
+            "p".into(),
+            ProviderConfig {
+                name: "Plan".into(),
+                ..Default::default()
+            },
+        );
+
+        assert_eq!(duplicate_provider(&mut config, "p").unwrap(), "p-2");
+        assert_eq!(duplicate_provider(&mut config, "p").unwrap(), "p-3");
+        assert_eq!(config.providers["p-2"].name, "Plan 2");
+        assert_eq!(config.providers["p-3"].name, "Plan 3");
+        assert!(duplicate_provider(&mut config, "nope").is_err());
+    }
+
+    // ------------------------------------------------------- aux model refs
+
+    #[test]
+    fn a_bare_aux_ref_round_trips_unchanged() {
+        // No migration step: a config that never pinned a provider writes back
+        // the exact shape it had, so merely saving does not rewrite the file.
+        let bare = AuxModelRef::bare("qwen3:8b");
+        assert_eq!(serde_json::to_string(&bare).unwrap(), r#""qwen3:8b""#);
+
+        let qualified = AuxModelRef::new("opencode-go-2", "qwen3:8b");
+        let text = serde_json::to_string(&qualified).unwrap();
+        assert!(text.contains("opencode-go-2"));
+        assert_eq!(
+            serde_json::from_str::<AuxModelRef>(&text).unwrap(),
+            qualified
+        );
+    }
+
+    #[test]
+    fn aux_model_refs_accept_both_shapes() {
+        let bare: AuxModelRef =
+            serde_json::from_str(r#""text-embedding-3-small""#).unwrap();
+        assert_eq!(bare, AuxModelRef::bare("text-embedding-3-small"));
+        assert!(!bare.is_qualified());
+
+        let qualified: AuxModelRef =
+            serde_json::from_str(r#"{"providerId":"go-2","modelId":"qwen3:8b"}"#).unwrap();
+        assert_eq!(qualified, AuxModelRef::new("go-2", "qwen3:8b"));
+        assert!(qualified.is_qualified());
+
+        // A null provider is how an unqualified object ref arrives.
+        let null_provider: AuxModelRef =
+            serde_json::from_str(r#"{"providerId":null,"modelId":"x"}"#).unwrap();
+        assert!(!null_provider.is_qualified());
+        assert_eq!(null_provider.model_id, "x");
+
+        // A missing model id is an error rather than an empty ref.
+        assert!(serde_json::from_str::<AuxModelRef>(r#"{"providerId":"p"}"#).is_err());
+    }
+
+    /// One provider per id, each serving the ids listed, with an optional app
+    /// default provider.
+    fn config_with(entries: &[(&str, &[&str])], default_provider: Option<&str>) -> AppConfig {
+        let mut config = AppConfig::default();
+        for (id, models) in entries {
+            let mut provider = ProviderConfig {
+                name: (*id).to_string(),
+                ..Default::default()
+            };
+            for model in *models {
+                provider.models.insert((*model).to_string(), ModelSpec::default());
+            }
+            config.providers.insert((*id).to_string(), provider);
+        }
+        config.chat.provider_id = default_provider.map(str::to_string);
+        config
+    }
+
+    #[test]
+    fn an_unqualified_ref_with_one_server_resolves_to_it() {
+        let config = config_with(&[("a", &["embed"]), ("b", &["other"])], None);
+        let resolved = resolve_aux_model(&config, &AuxModelRef::bare("embed")).unwrap();
+        assert_eq!(resolved.model(), &ModelRef::new("a", "embed"));
+        assert!(!resolved.is_ambiguous());
+    }
+
+    #[test]
+    fn a_qualified_ref_is_not_second_guessed_by_the_default() {
+        // Two plans serve the same id and the app default points at the first.
+        // Naming the second must win — otherwise embeddings would move to a
+        // different, separately billed account without saying so.
+        let config = config_with(&[("go", &["embed"]), ("go-2", &["embed"])], Some("go"));
+        let resolved = resolve_aux_model(&config, &AuxModelRef::new("go-2", "embed")).unwrap();
+        assert_eq!(resolved.model(), &ModelRef::new("go-2", "embed"));
+        assert!(!resolved.is_ambiguous());
+    }
+
+    #[test]
+    fn an_ambiguous_ref_prefers_the_default_and_reports_the_rest() {
+        let config = config_with(&[("go", &["embed"]), ("go-2", &["embed"])], Some("go-2"));
+        let resolved = resolve_aux_model(&config, &AuxModelRef::bare("embed")).unwrap();
+        assert_eq!(resolved.model(), &ModelRef::new("go-2", "embed"));
+        assert!(resolved.is_ambiguous());
+        // The losers are named so the UI can say which provider is not in use.
+        assert_eq!(resolved.others().to_vec(), vec![ModelRef::new("go", "embed")]);
+    }
+
+    #[test]
+    fn an_ambiguous_ref_without_a_default_is_deterministic() {
+        // Falls back to provider-id order, never to map iteration order.
+        let config = config_with(&[("b", &["embed"]), ("a", &["embed"])], None);
+        let resolved = resolve_aux_model(&config, &AuxModelRef::bare("embed")).unwrap();
+        assert_eq!(resolved.model(), &ModelRef::new("a", "embed"));
+    }
+
+    #[test]
+    fn a_named_provider_that_dropped_the_model_falls_back() {
+        // The model still exists elsewhere, so using it beats failing outright.
+        let config = config_with(&[("go", &["other"]), ("go-2", &["embed"])], None);
+        let resolved = resolve_aux_model(&config, &AuxModelRef::new("go", "embed")).unwrap();
+        assert_eq!(resolved.model(), &ModelRef::new("go-2", "embed"));
+    }
+
+    #[test]
+    fn a_ref_no_provider_serves_resolves_to_nothing() {
+        let config = config_with(&[("a", &["other"])], Some("a"));
+        assert!(resolve_aux_model(&config, &AuxModelRef::bare("embed")).is_none());
+        // An empty id is "unset", not "the empty model".
+        assert!(resolve_aux_model(&config, &AuxModelRef::bare("   ")).is_none());
+        assert!(unresolved_aux_models(&config).is_empty());
+    }
+
+    #[test]
+    fn an_unresolvable_setting_is_reported_for_the_ui() {
+        let mut config = config_with(&[("a", &["other"])], Some("a"));
+        config.chat.embedding_model = Some(AuxModelRef::bare("gone"));
+
+        let unresolved = unresolved_aux_models(&config);
+        assert_eq!(unresolved.len(), 1);
+        assert_eq!(unresolved[0].0, "embeddingModel");
+        assert_eq!(unresolved[0].1.model_id, "gone");
     }
 }

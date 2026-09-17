@@ -17,6 +17,7 @@ const session = (id: string): Session => ({
   permissionMode: null,
   agentMode: null,
   computerAccess: false,
+  position: null,
   createdAt: 0,
   updatedAt: 0,
 });
@@ -430,6 +431,7 @@ describe("streaming state machine", () => {
           permissionMode: null,
           agentMode: null,
           computerAccess: false,
+          position: null,
           createdAt: 0,
           updatedAt: 0,
         },

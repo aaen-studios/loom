@@ -7,6 +7,7 @@ import type { ModelEntry, ModelRef } from "../types";
 import { currentModel, findModel, useProviders } from "../stores/providers";
 import { useChat } from "../stores/chat";
 import { useSettings } from "../stores/settings";
+import { useUi } from "../stores/ui";
 import { ChevronDownIcon, PlusIcon, SparkIcon } from "./icons";
 
 /**
@@ -27,6 +28,8 @@ export function ModelPicker() {
   const chatDefaults = useSettings((state) => state.config.chat);
   const applyRemote = useSettings((state) => state.applyRemote);
   const refreshModels = useProviders((state) => state.refresh);
+  const setSettingsOpen = useUi((state) => state.setSettingsOpen);
+  const setSettingsCategory = useUi((state) => state.setSettingsCategory);
 
   const [query, setQuery] = useState("");
   const [variantTarget, setVariantTarget] = useState<ModelEntry | null>(null);
@@ -48,6 +51,12 @@ export function ModelPicker() {
     .filter((entry): entry is ModelEntry => !!entry && entry.enabled);
   const current = currentModel(models, session, chatDefaults);
   const variant = session?.variant ?? chatDefaults.variant ?? null;
+  // Models the user has switched off in Settings → Providers. They stay in the
+  // store (so a chat already using one still resolves), they are just not
+  // offered here.
+  const hiddenCount = models.filter(
+    (entry) => entry.providerEnabled && !entry.selected,
+  ).length;
 
   // The variant step is transient: leaving the picker forgets it.
   useEffect(() => {
@@ -421,6 +430,28 @@ export function ModelPicker() {
                       <PlusIcon size={14} />
                     </button>
                   </div>
+                </div>
+              )}
+
+              {/* Unselecting a model in Settings hides it here silently. Say
+                  how many are hidden, and offer the way to change that, so a
+                  missing model reads as a choice rather than a bug. */}
+              {hiddenCount > 0 && (
+                <div className="flex items-center justify-between gap-2 border-t border-[var(--glass-border)] px-3 py-1.5">
+                  <span className="text-[11.5px] text-faint">
+                    {hiddenCount} model{hiddenCount === 1 ? "" : "s"} hidden
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      close();
+                      setSettingsCategory("providers");
+                      setSettingsOpen(true);
+                    }}
+                    className="text-[11.5px] text-[var(--accent)] hover:underline"
+                  >
+                    Manage
+                  </button>
                 </div>
               )}
 

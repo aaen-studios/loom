@@ -6,6 +6,10 @@ export interface WorkspaceGroup {
   name: string;
   workdir: string | null;
   sessions: Session[];
+  /** Newest `updatedAt` in the group; 0 when it has no chats yet. */
+  newestAt: number;
+  /** When the folder was added to the saved list; 0 for an unsaved folder. */
+  addedAt: number;
 }
 
 /** Last path segment, used when a workspace has no saved name. */
@@ -62,6 +66,8 @@ export function groupSessions(
         name: workspaceLabel(workdir, workspaces) ?? "No workspace",
         workdir,
         sessions: [],
+        newestAt: 0,
+        addedAt: addedAt(workdir, workspaces),
       };
       groups.set(key, group);
     }
@@ -69,8 +75,16 @@ export function groupSessions(
   };
 
   for (const session of sessions) {
-    groupFor(session.workdir).sessions.push(session);
+    const group = groupFor(session.workdir);
+    group.sessions.push(session);
+    group.newestAt = Math.max(group.newestAt, session.updatedAt);
   }
 
   return [...groups.values()];
+}
+
+/** When the folder was saved, for the group ordering rule. */
+function addedAt(workdir: string | null, workspaces: Workspace[]): number {
+  if (!workdir) return 0;
+  return workspaces.find((workspace) => workspace.path === workdir)?.addedAt ?? 0;
 }

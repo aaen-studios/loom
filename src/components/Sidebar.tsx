@@ -6,7 +6,13 @@ import { ipc } from "../lib/ipc";
 import { useMenu } from "../lib/menu";
 import { isTauri } from "../lib/tauri";
 import { activityLabel } from "../lib/sessionStatus";
-import { groupSessions, sortSessions, workspaceLabel } from "../lib/workspaces";
+import {
+  arrangeGroups,
+  moveInList,
+  orderChats,
+  visibleRows,
+} from "../lib/sidebarOrder";
+import { sortSessions, workspaceLabel, type WorkspaceGroup } from "../lib/workspaces";
 import { useChat } from "../stores/chat";
 import { useSettings } from "../stores/settings";
 import { useUi } from "../stores/ui";
@@ -42,6 +48,12 @@ const SORT_OPTIONS: { id: SidebarSort; label: string }[] = [
  * and centered, and this floats over it when summoned from the titlebar.
  * Pinning only stops it retracting — same card, same place, until you unpin
  * it or close it.
+ *
+ * Grouped mode is ordered by hand. A workspace you drag keeps its place, a
+ * chat you drag keeps its, and anything you have never dragged still sorts
+ * newest-first — so a chat you just started lands on top of a group you
+ * arranged last week. The rules themselves live in `lib/sidebarOrder.ts`; this
+ * file is only the gesture and the rendering.
  */
 export function SidebarPopup() {
   const open = useUi((state) => state.sidebarOpen);
@@ -53,9 +65,16 @@ export function SidebarPopup() {
   const openSession = useChat((state) => state.openSession);
   const newSession = useChat((state) => state.newSession);
   const deleteSession = useChat((state) => state.deleteSession);
+  const applySessionOrder = useChat((state) => state.applySessionOrder);
 
   const [query, setQuery] = useState("");
   const [collapsed, setCollapsed] = useState<Record<string, boolean>>({});
+  /** Groups showing every row rather than the first handful. */
+  const [expandedGroups, setExpandedGroups] = useState<Record<string, boolean>>({});
+  const [groupDrag, setGroupDrag] = useState<string | null>(null);
+  const [groupOver, setGroupOver] = useState<string | null>(null);
+  const [chatDrag, setChatDrag] = useState<{ id: string; group: string } | null>(null);
+  const [chatOver, setChatOver] = useState<string | null>(null);
   const config = useSettings((state) => state.config);
   const applyRemote = useSettings((state) => state.applyRemote);
   const pinned = config.interface.sidebarPinned;
@@ -75,6 +94,17 @@ export function SidebarPopup() {
   const togglePin = async () => {
     await saveInterface({ sidebarPinned: !pinned });
   };
+
+  // Caps and in-flight drags belong to one visit. Reopening the popup shows
+  // every group at its usual size again, and never in a half-dragged state.
+  useEffect(() => {
+    if (open) return;
+    setExpandedGroups({});
+    setGroupDrag(null);
+    setGroupOver(null);
+    setChatDrag(null);
+    setChatOver(null);
+  }, [open]);
 
   useEffect(() => {
     if (!open || settingsOpen) return;
@@ -108,20 +138,74 @@ export function SidebarPopup() {
       )
     : sessions;
 
-  // History is grouped by workspace unless the user asked for one flat list.
-  // Headers only earn their space when grouped and there is something to
-  // separate; a search always expands every group.
+  // Grouped mode is the user's own order; flat mode is still the Sort menu's,
+  // which is why `sortSessions` is applied only there.
   const grouped = config.interface.sidebarGrouping === "workspace";
   const sorted = sortSessions(visible, config.interface.sidebarSort);
-  const groups = grouped
-    ? groupSessions(sorted, config.workspaces)
-    : [{ key: "", name: "", workdir: null, sessions: sorted }];
+  const groups: WorkspaceGroup[] = grouped
+    ? arrangeGroups(
+        visible,
+        config.workspaces,
+        config.interface.sidebarWorkspaceOrder,
+      )
+    : [
+        {
+          key: "",
+          name: "",
+          workdir: null,
+          sessions: sorted,
+          newestAt: 0,
+          addedAt: 0,
+        },
+      ];
+  // Headers only earn their space when grouped and there is something to
+  // separate; a search always expands every group.
   const showHeaders = grouped && (groups.length > 1 || Boolean(groups[0]?.workdir));
   const activeWorkdir =
     sessions.find((session) => session.id === activeId)?.workdir ?? null;
   const activeLabel = activeWorkdir
     ? workspaceLabel(activeWorkdir, config.workspaces)
     : null;
+
+  /** Every workspace group's path, in the order it is drawn. */
+  const groupOrder = groups
+    .map((group) => group.workdir)
+    .filter((path): path is string => Boolean(path));
+
+  /**
+   * Writes the whole group order, not just the moved entry. The first drag is
+   * what places every folder that exists at that moment, so only a folder
+   * added afterwards is unlisted — and only that one floats to the top.
+   */
+  const dropGroup = (targetPath: string) => {
+    setGroupDrag(null);
+    setGroupOver(null);
+    if (!groupDrag || groupDrag === targetPath) return;
+    const next = moveInList(groupOrder, groupDrag, targetPath);
+    if (next === groupOrder) return;
+    void saveInterface({ sidebarWorkspaceOrder: next });
+  };
+
+  /**
+   * Reorders the chats of one group. Dragging into a different workspace would
+   * mean moving the chat between folders, which is the workspace chip's job —
+   * so a cross-group drop is ignored rather than guessed at.
+   */
+  const dropChat = (targetId: string, targetGroup: string) => {
+    setChatDrag(null);
+    setChatOver(null);
+    if (!chatDrag) return;
+    if (chatDrag.group !== targetGroup || chatDrag.id === targetId) return;
+    const group = groups.find((entry) => entry.key === targetGroup);
+    if (!group) return;
+    const ids = orderChats(group.sessions).map((session) => session.id);
+    const next = moveInList(ids, chatDrag.id, targetId);
+    if (next === ids) return;
+    // Optimistic: the list must not jump back to its computed order while the
+    // write is in flight.
+    applySessionOrder(next);
+    if (isTauri) void ipc.reorderSessions(next);
+  };
 
   const startChat = (workdir: string | null) => {
     void newSession(null, workdir);
@@ -223,14 +307,23 @@ export function SidebarPopup() {
                 <p className="px-2 pt-2 pb-0.5 text-[11px] font-semibold tracking-[0.08em] text-faint uppercase">
                   Sort
                 </p>
-                {SORT_OPTIONS.map((option) => (
-                  <ArrangeRow
-                    key={option.id}
-                    label={option.label}
-                    active={config.interface.sidebarSort === option.id}
-                    onClick={() => void saveInterface({ sidebarSort: option.id })}
-                  />
-                ))}
+                {grouped ? (
+                  // Offering these here would be a lie: in grouped mode the
+                  // order is whatever you dragged it to.
+                  <p className="px-2 pb-1 text-[11.5px] leading-4 text-faint">
+                    Grouped order is by hand — drag a workspace or a chat to
+                    move it. Switch to Flat list for these.
+                  </p>
+                ) : (
+                  SORT_OPTIONS.map((option) => (
+                    <ArrangeRow
+                      key={option.id}
+                      label={option.label}
+                      active={config.interface.sidebarSort === option.id}
+                      onClick={() => void saveInterface({ sidebarSort: option.id })}
+                    />
+                  ))
+                )}
               </div>
             )}
           </div>
@@ -268,7 +361,17 @@ export function SidebarPopup() {
           />
         </div>
 
-        <div className="mt-2 min-h-0 flex-1 overflow-y-auto px-1.5 pb-1.5">
+        <div
+          className="mt-2 min-h-0 flex-1 overflow-y-auto px-1.5 pb-1.5"
+          // A drag that ends over empty space rather than a row: drop the
+          // gesture rather than leaving the indicator stuck.
+          onDragEnd={() => {
+            setChatDrag(null);
+            setChatOver(null);
+            setGroupDrag(null);
+            setGroupOver(null);
+          }}
+        >
           {visible.length === 0 &&
             (sessions.length === 0 ? (
               <EmptyState
@@ -304,13 +407,64 @@ export function SidebarPopup() {
 
           {groups.map((group) => {
             const isCollapsed = !needle && collapsed[group.key];
+            const ordered = orderChats(group.sessions);
+            // A search shows everything: the cap is for browsing, not looking
+            // for a specific chat.
+            const { shown, hidden } = visibleRows(
+              ordered,
+              activeId,
+              Boolean(needle) || Boolean(expandedGroups[group.key]),
+            );
+            // "No workspace" is pinned and cannot be dragged; in flat mode
+            // there are no groups to order.
+            const canDragGroup = grouped && Boolean(group.workdir);
+            const isGroupTarget = groupOver === group.key && groupDrag !== group.key;
+
             return (
-              <div key={group.key || "__none"}>
+              <div
+                key={group.key || "__none"}
+                className={cn(
+                  isGroupTarget && "rounded-row ring-1 ring-[var(--accent)]",
+                  groupDrag === group.key && "opacity-40",
+                )}
+              >
                 {showHeaders && (
-                  <div className="sticky top-0 z-10 -mx-1.5 flex items-center gap-1 bg-[var(--panel-bg-strong)] px-3 pt-2.5 pb-1">
+                  <div
+                    draggable={canDragGroup}
+                    onDragStart={(event) => {
+                      if (!canDragGroup) return;
+                      setGroupDrag(group.key);
+                      event.dataTransfer.effectAllowed = "move";
+                    }}
+                    onDragEnd={() => {
+                      setGroupDrag(null);
+                      setGroupOver(null);
+                    }}
+                    onDragOver={(event) => {
+                      if (!canDragGroup || !groupDrag) return;
+                      event.preventDefault();
+                      setGroupOver(group.key);
+                    }}
+                    onDragLeave={() =>
+                      setGroupOver((current) => (current === group.key ? null : current))
+                    }
+                    onDrop={(event) => {
+                      if (!canDragGroup) return;
+                      event.preventDefault();
+                      dropGroup(group.key);
+                    }}
+                    className={cn(
+                      "sticky top-0 z-10 -mx-1.5 flex items-center gap-1 bg-[var(--panel-bg-strong)] px-3 pt-2.5 pb-1",
+                      canDragGroup && "cursor-grab",
+                    )}
+                  >
                     <button
                       type="button"
-                      title={group.workdir ?? "Chats with no workspace"}
+                      title={
+                        group.workdir
+                          ? `${group.workdir}${canDragGroup ? " — drag to reorder" : ""}`
+                          : "Chats with no workspace"
+                      }
                       onClick={() =>
                         setCollapsed((current) => ({
                           ...current,
@@ -351,7 +505,7 @@ export function SidebarPopup() {
                   // The thread rail: one warp line per workspace, with the
                   // open chat knotted onto it.
                   <div className="ml-[13px] border-l border-[var(--ink-ghost)]">
-                    {group.sessions.map((session) => (
+                    {shown.map((session) => (
                       <SessionRow
                         key={session.id}
                         session={session}
@@ -361,11 +515,67 @@ export function SidebarPopup() {
                             ? null
                             : workspaceLabel(session.workdir, config.workspaces)
                         }
+                        draggable={grouped}
+                        dragging={chatDrag?.id === session.id}
+                        dropTarget={
+                          chatOver === session.id &&
+                          chatDrag !== null &&
+                          chatDrag.id !== session.id &&
+                          chatDrag.group === group.key
+                        }
+                        onDragStart={() => setChatDrag({ id: session.id, group: group.key })}
+                        onDragEnd={() => {
+                          setChatDrag(null);
+                          setChatOver(null);
+                        }}
+                        onDragOver={() => setChatOver(session.id)}
+                        onDragLeave={() =>
+                          setChatOver((current) =>
+                            current === session.id ? null : current,
+                          )
+                        }
+                        onDrop={() => dropChat(session.id, group.key)}
                         onOpen={openRow}
                         onExport={(id) => void exportSession(id)}
                         onDelete={(id) => void deleteSession(id)}
                       />
                     ))}
+
+                    {group.sessions.length === 0 && (
+                      <p className="px-2.5 py-2 text-[12px] text-faint">
+                        No chats yet
+                      </p>
+                    )}
+
+                    {hidden > 0 && (
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setExpandedGroups((current) => ({
+                            ...current,
+                            [group.key]: true,
+                          }))
+                        }
+                        className="hover-surface mx-1 my-0.5 rounded-row px-2.5 py-1.5 text-[12px] text-faint"
+                      >
+                        Show {hidden} more
+                      </button>
+                    )}
+
+                    {expandedGroups[group.key] && group.sessions.length > 5 && (
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setExpandedGroups((current) => ({
+                            ...current,
+                            [group.key]: false,
+                          }))
+                        }
+                        className="hover-surface mx-1 my-0.5 rounded-row px-2.5 py-1.5 text-[12px] text-faint"
+                      >
+                        Show less
+                      </button>
+                    )}
                   </div>
                 )}
               </div>
@@ -394,11 +604,24 @@ export function SidebarPopup() {
 /**
  * One chat row: what the chat is called, what it is doing (running, failed,
  * unread, waiting on you), and the actions revealed on hover.
+ *
+ * The whole row is the drag source rather than a handle, which is the pattern
+ * every file list uses and needs no extra glyph. Nothing is lost to it: a
+ * click is a click, and double-click rename survives because a drag needs
+ * movement the browser will not mistake for one.
  */
 function SessionRow({
   session,
   active,
   workspaceTag,
+  draggable,
+  dragging,
+  dropTarget,
+  onDragStart,
+  onDragEnd,
+  onDragOver,
+  onDragLeave,
+  onDrop,
   onOpen,
   onExport,
   onDelete,
@@ -406,6 +629,14 @@ function SessionRow({
   session: Session;
   active: boolean;
   workspaceTag: string | null;
+  draggable: boolean;
+  dragging: boolean;
+  dropTarget: boolean;
+  onDragStart: () => void;
+  onDragEnd: () => void;
+  onDragOver: () => void;
+  onDragLeave: () => void;
+  onDrop: () => void;
   onOpen: (id: string) => void;
   onExport: (id: string) => void;
   onDelete: (id: string) => void;
@@ -439,6 +670,7 @@ function SessionRow({
   const model = session.modelId ? session.modelId.split("/").pop() : null;
   const title = [
     failed ? error : activity ? `${activity}${model ? ` · ${model}` : ""}` : null,
+    draggable ? "Drag to reorder" : null,
     "Double-click to rename",
   ]
     .filter(Boolean)
@@ -448,8 +680,34 @@ function SessionRow({
     <div
       className={cn(
         "group relative flex items-center rounded-row",
-        active ? "bg-[var(--active-bg)]" : "hover:bg-[var(--hover-bg)]",
+        dragging
+          ? "opacity-40"
+          : active
+            ? "bg-[var(--active-bg)]"
+            : "hover:bg-[var(--hover-bg)]",
+        dropTarget && "ring-1 ring-[var(--accent)]",
+        // While renaming, the row must not be a drag source: selecting text in
+        // the input is the gesture you actually want there.
+        draggable && !renaming && "cursor-grab",
       )}
+      draggable={draggable && !renaming}
+      onDragStart={(event) => {
+        if (!draggable || renaming) return;
+        onDragStart();
+        event.dataTransfer.effectAllowed = "move";
+      }}
+      onDragEnd={onDragEnd}
+      onDragOver={(event) => {
+        if (!draggable) return;
+        event.preventDefault();
+        onDragOver();
+      }}
+      onDragLeave={onDragLeave}
+      onDrop={(event) => {
+        if (!draggable) return;
+        event.preventDefault();
+        onDrop();
+      }}
       aria-current={active ? "true" : undefined}
     >
       {active && (

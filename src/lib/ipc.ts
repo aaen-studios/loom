@@ -3,6 +3,7 @@ import type {
   AppConfig,
   AppInfo,
   Attachment,
+  AuxModelRef,
   CommandRun,
   InterfaceConfig,
   Job,
@@ -91,6 +92,19 @@ export const ipc = {
   upsertProvider: (id: string, provider: ProviderConfig) =>
     call<AppConfig>("upsert_provider", { id, provider }),
   deleteProvider: (id: string) => call<AppConfig>("delete_provider", { id }),
+  /** Copies a provider so one vendor can be configured more than once. The
+   *  copy inherits the catalogue and model selection but **no** API key. */
+  duplicateProvider: (id: string) =>
+    call<AppConfig>("duplicate_provider", { id }),
+  /** Batched: "select all shown" over a search result is one call. */
+  setModelsSelected: (
+    providerId: string,
+    modelIds: string[],
+    selected: boolean,
+  ) => call<AppConfig>("set_models_selected", { providerId, modelIds, selected }),
+  /** Whether models a refresh discovers start selected. */
+  setProviderAutoSelect: (id: string, autoSelect: boolean) =>
+    call<AppConfig>("set_provider_auto_select", { id, autoSelect }),
   setProviderKey: (id: string, key: string) =>
     call<void>("set_provider_key", { id, key }),
   clearProviderKey: (id: string) => call<void>("clear_provider_key", { id }),
@@ -186,6 +200,9 @@ export const ipc = {
     call<number>("prune_empty_sessions", { keep }),
   renameSession: (id: string, title: string) =>
     call<void>("rename_session", { id, title }),
+  /** Writes the hand-placed order for one workspace group, top row first. */
+  reorderSessions: (ids: string[]) =>
+    call<void>("reorder_sessions", { ids }),
   sessionMessages: (id: string) => call<Message[]>("session_messages", { id }),
   deleteMessage: (messageId: string) =>
     call<void>("delete_message", { messageId }),
@@ -244,6 +261,9 @@ export const ipc = {
   listTools: () => call<ToolSpec[]>("list_tools"),
   workspaceInfo: (workdir: string | null) =>
     call<WorkspaceInfo>("workspace_info", { workdir }),
+  /** Every file in a workspace folder, for the composer's `@` picker. */
+  listWorkspaceFiles: (workdir: string, limit?: number) =>
+    call<string[]>("list_workspace_files", { workdir, limit: limit ?? 4000 }),
 
   addWorkspace: (path: string, name?: string | null) =>
     call<AppConfig>("add_workspace", { path, name: name ?? null }),
@@ -270,9 +290,10 @@ export const ipc = {
   }) => call<void>("save_skill", args),
   deleteSkill: (id: string) => call<void>("delete_skill", { id }),
   readSkill: (id: string) => call<Skill>("read_skill", { id }),
-  setImageModel: (model: string | null) =>
+  /** A bare `{providerId: "", modelId}` means "whichever provider serves it". */
+  setImageModel: (model: AuxModelRef | null) =>
     call<AppConfig>("set_image_model", { model }),
-  setEmbeddingModel: (model: string | null) =>
+  setEmbeddingModel: (model: AuxModelRef | null) =>
     call<AppConfig>("set_embedding_model", { model }),
   addModel: (providerId: string, modelId: string) =>
     call<AppConfig>("add_model", { providerId, modelId }),

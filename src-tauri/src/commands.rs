@@ -172,6 +172,76 @@ pub fn delete_provider(state: State<'_, AppState>, id: String) -> Result<AppConf
         if config.chat.lite.as_ref().map(|l| l.provider_id.as_str()) == Some(id.as_str()) {
             config.chat.lite = None;
         }
+        // Aux refs that named the deleted provider lose the qualification but
+        // keep the model id, so `resolve_aux_model` can fall back to whichever
+        // provider still serves it rather than silently embedding nowhere.
+        for reference in [
+            config.chat.image_model.as_mut(),
+            config.chat.embedding_model.as_mut(),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            if reference.provider_id == id {
+                reference.provider_id.clear();
+            }
+        }
+        // Recent models pointing into the deleted provider would show up in the
+        // picker as dead rows.
+        config
+            .chat
+            .recent_models
+            .retain(|model| model.provider_id != id);
+    })
+}
+
+/// Copies a provider instance so one vendor can be configured more than once —
+/// two OpenCode Go plans, each with its own key. The copy inherits the
+/// endpoint, headers, model catalogue and model selection, but no API key:
+/// keys live in the credential vault under the provider id, so the new
+/// instance starts keyless and cannot bill the original's account by accident.
+#[tauri::command]
+pub fn duplicate_provider(state: State<'_, AppState>, id: String) -> Result<AppConfig, String> {
+    state
+        .engine
+        .duplicate_provider(&id)
+        .map_err(to_string)?;
+    Ok(state.snapshot())
+}
+
+/// Turns a batch of models on or off for one provider. Batched because
+/// "select all shown" across a search result is a single user action.
+#[tauri::command]
+pub fn set_models_selected(
+    state: State<'_, AppState>,
+    provider_id: String,
+    model_ids: Vec<String>,
+    selected: bool,
+) -> Result<AppConfig, String> {
+    state
+        .engine
+        .set_models_selected(&provider_id, &model_ids, selected)
+        .map_err(to_string)?;
+    Ok(state.snapshot())
+}
+
+/// Sets a provider's `autoSelectModels` flag: whether models discovered by a
+/// refresh arrive selected. Off makes a large gateway opt-in.
+#[tauri::command]
+pub fn set_provider_auto_select(
+    state: State<'_, AppState>,
+    id: String,
+    auto_select: bool,
+) -> Result<AppConfig, String> {
+    state.mutate(move |config| {
+        if let Some(provider) = config.providers.get_mut(&id) {
+            provider.auto_select_models = auto_select;
+            if auto_select {
+                // Switching back on clears the denylist, so the whole catalogue
+                // is visible again rather than only future discoveries.
+                provider.disabled_models.clear();
+            }
+        }
     })
 }
 
@@ -315,7 +385,14 @@ pub struct ModelEntry {
     pub provider_id: String,
     pub provider_name: String,
     pub kind: loom_core::provider::ProviderKind,
+    /// Ready to use: the provider is on *and* the model is selected. Existing
+    /// consumers only ever ask this, so folding selection in here is what makes
+    /// an unselected model disappear from every picker at once.
     pub enabled: bool,
+    /// The provider's own switch, independent of selection — settings needs to
+    /// tell "provider off" apart from "model unselected".
+    pub provider_enabled: bool,
+    pub selected: bool,
     pub key_ready: bool,
     pub key_required: bool,
     pub model_id: String,
@@ -329,11 +406,18 @@ pub fn list_models(state: State<'_, AppState>) -> Vec<ModelEntry> {
     for (provider_id, provider) in &config.providers {
         let key_ready = !provider.key_required || secrets::has_api_key(provider_id);
         for (model_id, spec) in &provider.models {
+            // `enabled` is the single field every consumer already filters on —
+            // the picker, the image-model list, the badges. Folding selection
+            // into it is what makes unselecting a model take effect everywhere
+            // at once, without teaching four call sites about a second flag.
+            let selected = provider.model_selected(model_id);
             entries.push(ModelEntry {
                 provider_id: provider_id.clone(),
                 provider_name: provider.name.clone(),
                 kind: provider.kind,
-                enabled: provider.enabled,
+                enabled: provider.enabled && selected,
+                provider_enabled: provider.enabled,
+                selected,
                 key_ready,
                 key_required: provider.key_required,
                 model_id: model_id.clone(),
@@ -547,6 +631,29 @@ pub fn prune_empty_sessions(
 #[tauri::command]
 pub fn rename_session(state: State<'_, AppState>, id: String, title: String) -> Result<(), String> {
     state.engine.rename_session(&id, &title).map_err(to_string)
+}
+
+#[tauri::command]
+pub fn reorder_sessions(
+    state: State<'_, AppState>,
+    ids: Vec<String>,
+) -> Result<(), String> {
+    state.engine.reorder_sessions(&ids).map_err(to_string)
+}
+
+/// Every file in a workspace folder, for the composer's `@` picker.
+///
+/// Paths only, and no state kept: the popup asks when it opens, and skipping
+/// build and dependency folders is what keeps the answer small enough to hold.
+#[tauri::command]
+pub fn list_workspace_files(workdir: Option<String>, limit: Option<usize>) -> Vec<String> {
+    let limit = limit.unwrap_or(4_000).clamp(1, 20_000);
+    match workdir {
+        Some(path) => {
+            loom_core::fsutil::walk_files(std::path::Path::new(&path), limit)
+        }
+        None => Vec::new(),
+    }
 }
 
 #[tauri::command]
@@ -1068,10 +1175,12 @@ pub fn clear_workspace_index(state: State<'_, AppState>, session_id: String) -> 
 #[tauri::command]
 pub fn set_embedding_model(
     state: State<'_, AppState>,
-    model: Option<String>,
+    model: Option<loom_core::config::AuxModelRef>,
 ) -> Result<AppConfig, String> {
     state.mutate(move |config| {
-        config.chat.embedding_model = model.filter(|value| !value.trim().is_empty());
+        // An empty model id clears the setting; a bare `{providerId: "",
+        // modelId}` is what an unqualified ref deserializes to.
+        config.chat.embedding_model = model.filter(|value| !value.model_id.trim().is_empty());
     })
 }
 
@@ -1278,10 +1387,10 @@ pub fn read_skill(id: String) -> Result<loom_core::skills::Skill, String> {
 #[tauri::command]
 pub fn set_image_model(
     state: State<'_, AppState>,
-    model: Option<String>,
+    model: Option<loom_core::config::AuxModelRef>,
 ) -> Result<AppConfig, String> {
     state.mutate(move |config| {
-        config.chat.image_model = model.filter(|value| !value.trim().is_empty());
+        config.chat.image_model = model.filter(|value| !value.model_id.trim().is_empty());
     })
 }
 

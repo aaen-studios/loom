@@ -8,6 +8,8 @@ function entry(providerId: string, modelId: string): ModelEntry {
     providerName: providerId,
     kind: "openai-compatible",
     enabled: true,
+    providerEnabled: true,
+    selected: true,
     keyReady: true,
     keyRequired: true,
     modelId,

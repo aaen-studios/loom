@@ -41,6 +41,16 @@ pub const LIST_COMMANDS: &str = "list_commands";
 pub const COMMAND_OUTPUT: &str = "command_output";
 pub const STOP_COMMAND: &str = "stop_command";
 
+/// Reading the user's *other* chats. Both are dispatched by the engine, which
+/// owns the database; they live here so the mode gates can name them.
+///
+/// `read_chat` reaches conversations that were never in this turn's context,
+/// which is why both are refused in Chat mode alongside the file tools: a chat
+/// answers from the model and the web, and "list every conversation the user
+/// has" is exactly the widening that mode exists to prevent.
+pub const LIST_CHATS: &str = "list_chats";
+pub const READ_CHAT: &str = "read_chat";
+
 /// Most option buttons one question may show. Beyond this the model should be
 /// asking a narrower question.
 const MAX_QUESTION_OPTIONS: usize = 6;
@@ -749,6 +759,34 @@ pub fn specs() -> Vec<ToolSpec> {
             }),
             read_only: false,
             scope: Some(ToolScope::Harness),
+        },
+        ToolSpec {
+            name: LIST_CHATS,
+            description: "List the user's other Loom chats, newest first, with the id, title, workspace folder and when each was last used. Use it to find a chat before reading it with read_chat — for instance when the user refers to another conversation by name, or asks what they were working on. The current chat's own transcript is already in front of you; it is in the list too, so you can tell which one you are.",
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "limit": { "type": "integer", "description": "Maximum chats to list (1-100, default 30)" }
+                },
+                "additionalProperties": false
+            }),
+            read_only: true,
+            scope: None,
+        },
+        ToolSpec {
+            name: READ_CHAT,
+            description: "Read another Loom chat's transcript, rendered as markdown. Accepts a chat id, the eight-character id a mention carries, an id prefix, or an exact title. Call list_chats first if you do not know the id. Very long chats come back with the middle omitted; raise max_chars if you need more of one.",
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "chat": { "type": "string", "description": "Chat id, id prefix, or exact title" },
+                    "max_chars": { "type": "integer", "description": "Character budget (2000-200000, default 40000)" }
+                },
+                "required": ["chat"],
+                "additionalProperties": false
+            }),
+            read_only: true,
+            scope: None,
         },
     ]
 }
@@ -2182,6 +2220,7 @@ mod tests {
             "test_mcp_server",
             "upsert_provider",
             "update_model",
+            "duplicate_provider",
             "update_settings",
             "list_harness",
         ] {
@@ -2210,7 +2249,7 @@ mod tests {
             .iter()
             .map(|spec| spec.name.to_string())
             .collect();
-        assert_eq!(harness.len(), 14);
+        assert_eq!(harness.len(), 15);
 
         for name in &harness {
             assert!(
@@ -2282,6 +2321,11 @@ mod tests {
             COMMAND_OUTPUT,
             crate::web::SEARCH_TOOL,
             crate::web::FETCH_TOOL,
+            // Reading the user's other chats changes nothing, so planning may
+            // consult them: "what did we decide in the other chat" is a real
+            // question to ask before proposing a plan.
+            LIST_CHATS,
+            READ_CHAT,
             ASK_USER,
         ] {
             assert!(!is_blocked_in_plan(name), "{name} should be allowed");
@@ -2339,6 +2383,11 @@ mod tests {
             "search_workspace",
             "spawn_agent",
             "generate_image",
+            // Reading the user's other conversations is a widening even though
+            // both are read-only: "answer from the model and the web" does not
+            // include "and anything else they have ever discussed with you".
+            LIST_CHATS,
+            READ_CHAT,
             // Fail-closed: anything added later is refused until named.
             "some_future_tool",
         ] {

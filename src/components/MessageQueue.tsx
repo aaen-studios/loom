@@ -2,7 +2,7 @@ import { useState } from "react";
 import { cn } from "../lib/cn";
 import { useChat } from "../stores/chat";
 import type { QueuedMessage } from "../types";
-import { ArrowUpIcon, CloseIcon } from "./icons";
+import { ArrowUpIcon, CloseIcon, GripIcon } from "./icons";
 
 const NO_QUEUE: QueuedMessage[] = [];
 
@@ -67,7 +67,7 @@ export function MessageQueue() {
               overId === item.id && dragId !== item.id && "ring-1 ring-[var(--accent)]",
             )}
           >
-            <GripIcon />
+            <GripIcon className="text-faint/70" />
             <span
               className="min-w-0 flex-1 truncate text-[12.5px] text-soft"
               title={item.text}
@@ -103,25 +103,5 @@ export function MessageQueue() {
         ))}
       </ul>
     </div>
-  );
-}
-
-function GripIcon() {
-  return (
-    <svg
-      width={12}
-      height={12}
-      viewBox="0 0 24 24"
-      fill="currentColor"
-      aria-hidden="true"
-      className="shrink-0 text-faint/70"
-    >
-      <circle cx="9" cy="6.5" r="1.4" />
-      <circle cx="15" cy="6.5" r="1.4" />
-      <circle cx="9" cy="12" r="1.4" />
-      <circle cx="15" cy="12" r="1.4" />
-      <circle cx="9" cy="17.5" r="1.4" />
-      <circle cx="15" cy="17.5" r="1.4" />
-    </svg>
   );
 }

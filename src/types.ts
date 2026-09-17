@@ -59,6 +59,20 @@ export interface ProviderConfig {
   keyRequired: boolean;
   /** Header the gateway wants filled with a stable per-chat id. */
   sessionHeader: string | null;
+  /**
+   * Which built-in preset this instance came from. Set for a *duplicated*
+   * provider, whose id no longer matches a preset, so the gateway behaviour
+   * still resolves.
+   */
+  presetId: string | null;
+  /**
+   * Models the user switched off. A denylist, so anything not listed is
+   * selected — which is what makes an existing config (and a newly discovered
+   * model) selected without a write.
+   */
+  disabledModels: string[];
+  /** Whether a refresh's newly discovered models start selected. */
+  autoSelectModels: boolean;
 }
 
 export interface ProviderPreset {
@@ -75,7 +89,14 @@ export interface ModelEntry {
   providerId: string;
   providerName: string;
   kind: ProviderKind;
+  /**
+   * Ready to use: the provider is on *and* the model is selected. Every picker
+   * filters on this one field, so unselecting a model hides it everywhere.
+   */
   enabled: boolean;
+  /** The provider's own switch, independent of selection. */
+  providerEnabled: boolean;
+  selected: boolean;
   keyReady: boolean;
   keyRequired: boolean;
   modelId: string;
@@ -87,13 +108,25 @@ export interface ModelRef {
   modelId: string;
 }
 
+/**
+ * One of the auxiliary models (image generation, embeddings).
+ *
+ * An empty `providerId` means "whichever provider serves the id", which is what
+ * a legacy bare string parses to. Qualified when the same model id is
+ * configured on more than one provider.
+ */
+export interface AuxModelRef {
+  providerId: string;
+  modelId: string;
+}
+
 export interface ChatDefaults {
   providerId: string | null;
   modelId: string | null;
   variant: string | null;
   lite: ModelRef | null;
-  imageModel: string | null;
-  embeddingModel: string | null;
+  imageModel: AuxModelRef | null;
+  embeddingModel: AuxModelRef | null;
   autoTitle: boolean;
   recentModels: ModelRef[];
   permissionMode: PermissionMode;
@@ -311,6 +344,13 @@ export interface InterfaceConfig {
   sidebarWidth: number;
   sidebarGrouping: SidebarGrouping;
   sidebarSort: SidebarSort;
+  /**
+   * Hand-placed order of the workspace groups, by folder path. A group listed
+   * here keeps that place; one that is not — including a folder just added —
+   * sorts above them by recency. In grouped mode this plus each chat's
+   * `position` are the whole order; the Sort menu governs the flat list only.
+   */
+  sidebarWorkspaceOrder: string[];
   compact: boolean;
   /** Attach a screenshot of the current monitor to every quick-ask send. */
   captureOnSend: boolean;
@@ -460,6 +500,12 @@ export interface Session {
   agentMode: AgentMode | null;
   /** Computer use is armed for this chat (the composer's Computer chip). */
   computerAccess: boolean;
+  /**
+   * Hand-placed row in the chats popup. `null` means this chat has never been
+   * dragged, and those keep sorting newest-first above the placed ones — so a
+   * chat started after you arranged a group still lands on top of it.
+   */
+  position: number | null;
   createdAt: number;
   updatedAt: number;
 }

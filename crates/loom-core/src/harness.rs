@@ -36,6 +36,7 @@ pub const TEST_MCP_SERVER: &str = "test_mcp_server";
 pub const UPSERT_PROVIDER: &str = "upsert_provider";
 pub const UPDATE_MODEL: &str = "update_model";
 pub const DELETE_PROVIDER: &str = "delete_provider";
+pub const DUPLICATE_PROVIDER: &str = "duplicate_provider";
 pub const UPDATE_SETTINGS: &str = "update_settings";
 
 /// The sections `list_harness` can return and `view` builds.
@@ -301,7 +302,8 @@ pub fn specs() -> Vec<ToolSpec> {
                         "type": "object",
                         "additionalProperties": { "type": "string" }
                     },
-                    "keyRequired": { "type": "boolean" }
+                    "keyRequired": { "type": "boolean" },
+                    "presetId": { "type": "string", "description": "Which built-in preset this came from, so a copied instance keeps its gateway behaviour. See list_provider_presets." }
                 },
                 "required": ["id", "name", "baseUrl"],
                 "additionalProperties": false
@@ -335,6 +337,7 @@ pub fn specs() -> Vec<ToolSpec> {
                         "description": "Thinking support; null clears it"
                     },
                     "favorite": { "type": "boolean" },
+                    "selected": { "type": "boolean", "description": "Whether the model appears in pickers. false hides it but leaves chats already using it working" },
                     "reset": { "type": "boolean", "description": "Forget detected values and re-read the bundled catalog (keeps the favourite flag)" },
                     "remove": { "type": "boolean", "description": "Remove the model instead of editing it" }
                 },
@@ -350,6 +353,21 @@ pub fn specs() -> Vec<ToolSpec> {
             parameters: json!({
                 "type": "object",
                 "properties": { "id": { "type": "string" } },
+                "required": ["id"],
+                "additionalProperties": false
+            }),
+            read_only: false,
+            scope: Some(ToolScope::Harness),
+        },
+        ToolSpec {
+            name: DUPLICATE_PROVIDER,
+            description: "Copy a provider so one vendor can be configured more than once — two OpenCode Go plans, each with its own key. The copy inherits the endpoint, headers, model catalogue and model selection, but never the API key: the new instance starts keyless, and the user pastes its key in Settings → Providers. Returns the new provider id.",
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "id": { "type": "string", "description": "Existing provider id" },
+                    "name": { "type": "string", "description": "Optional display name for the copy" }
+                },
                 "required": ["id"],
                 "additionalProperties": false
             }),
@@ -435,6 +453,7 @@ pub fn is_harness_tool(name: &str) -> bool {
             | UPSERT_PROVIDER
             | UPDATE_MODEL
             | DELETE_PROVIDER
+            | DUPLICATE_PROVIDER
             | UPDATE_SETTINGS
     )
 }
@@ -456,7 +475,7 @@ pub fn section_of(name: &str) -> String {
         UPSERT_PROMPT | DELETE_PROMPT => "prompts",
         WRITE_SKILL | DELETE_SKILL => "skills",
         UPSERT_MCP_SERVER | DELETE_MCP_SERVER | TEST_MCP_SERVER => "mcp",
-        UPSERT_PROVIDER | UPDATE_MODEL | DELETE_PROVIDER => "providers",
+        UPSERT_PROVIDER | UPDATE_MODEL | DELETE_PROVIDER | DUPLICATE_PROVIDER => "providers",
         UPDATE_SETTINGS => "settings",
         _ => "harness",
     }
@@ -748,6 +767,7 @@ fn apply_with(config: &mut AppConfig, name: &str, args: &Value, ui: bool) -> Res
         UPSERT_PROVIDER => upsert_provider(config, args),
         UPDATE_MODEL => update_model(config, args),
         DELETE_PROVIDER => delete_provider(config, args),
+        DUPLICATE_PROVIDER => duplicate_provider(config, args),
         UPDATE_SETTINGS => update_settings(config, args),
         other => Err(Error::other(format!("unknown harness tool: {other}"))),
     }
@@ -1141,6 +1161,26 @@ pub fn upsert_provider(config: &mut AppConfig, args: &Value) -> Result<String> {
         }
     };
 
+    // Recording the preset matters for providers built from a template: it is
+    // what lets a *duplicated* instance (whose id no longer matches any preset)
+    // keep the gateway's session header and other preset behaviour.
+    let preset_id = match args.get("presetId") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(value)) => {
+            let value = value.trim();
+            if value.is_empty() {
+                None
+            } else if crate::provider::preset(value).is_none() {
+                return Err(Error::other(format!(
+                    "unknown preset \"{value}\"; see list_provider_presets"
+                )));
+            } else {
+                Some(value.to_string())
+            }
+        }
+        Some(_) => return Err(Error::other("\"presetId\" must be a string")),
+    };
+
     let existed = config.providers.contains_key(&id);
     let provider = config.providers.entry(id.clone()).or_default();
     provider.name = name;
@@ -1156,6 +1196,9 @@ pub fn upsert_provider(config: &mut AppConfig, args: &Value) -> Result<String> {
     }
     if let Some(headers) = headers {
         provider.headers = headers;
+    }
+    if let Some(preset_id) = preset_id {
+        provider.preset_id = Some(preset_id);
     }
     Ok(format!(
         "{} provider \"{id}\"",
@@ -1201,6 +1244,7 @@ pub fn update_model(config: &mut AppConfig, args: &Value) -> Result<String> {
     let context = clearable_u32(args, "context")?;
     let output = clearable_u32(args, "output")?;
     let favorite = bool_arg(args, "favorite")?;
+    let selected = bool_arg(args, "selected")?;
     let modalities = args.get("inputModalities");
     let reasoning = args.get("reasoning");
 
@@ -1245,11 +1289,51 @@ pub fn update_model(config: &mut AppConfig, args: &Value) -> Result<String> {
         spec.source = crate::provider::MetadataSource::User;
     }
 
+    // Applied after the spec borrow ends, because selection lives on the
+    // provider rather than on the metadata (which a refresh replaces).
+    // Unselecting hides a model from pickers; it never stops a chat that
+    // already points at it.
+    if let Some(selected) = selected {
+        provider.set_model_selected(&model_id, selected);
+    }
+
     Ok(if existed {
-        format!("Updated model \"{model_id}\" on \"{provider_id}\"")
+        match selected {
+            Some(true) => format!("Updated model \"{model_id}\" on \"{provider_id}\" (selected)"),
+            Some(false) => {
+                format!("Updated model \"{model_id}\" on \"{provider_id}\" (unselected, hidden)")
+            }
+            None => format!("Updated model \"{model_id}\" on \"{provider_id}\""),
+        }
     } else {
         format!("Added model \"{model_id}\" to \"{provider_id}\"")
     })
+}
+
+/// Copies a provider so one vendor can be configured more than once — two
+/// OpenCode Go plans, each with its own key.
+///
+/// The copy inherits the endpoint, kind, headers, gateway session header,
+/// `presetId`, model catalogue and model selection, but never the API key:
+/// keys live in the credential vault under the provider id, so the new
+/// instance starts keyless and the user pastes its own key.
+pub fn duplicate_provider(config: &mut AppConfig, args: &Value) -> Result<String> {
+    let id = required_arg(args, DUPLICATE_PROVIDER, "id")?;
+    let new_id = crate::config::duplicate_provider(config, &id)?;
+
+    if let Some(name) = args.get("name").and_then(Value::as_str) {
+        let name = name.trim();
+        if !name.is_empty() {
+            check_name("provider", name)?;
+            if let Some(provider) = config.providers.get_mut(&new_id) {
+                provider.name = name.to_string();
+            }
+        }
+    }
+
+    Ok(format!(
+        "Duplicated provider \"{id}\" as \"{new_id}\" — paste its API key in Settings → Providers"
+    ))
 }
 
 pub fn delete_provider(config: &mut AppConfig, args: &Value) -> Result<String> {
@@ -1442,10 +1526,10 @@ pub fn update_settings(config: &mut AppConfig, args: &Value) -> Result<String> {
                 }
                 "embeddingModel" => {
                     config.chat.embedding_model =
-                        optional_model_name(value, "chat.embeddingModel")?;
+                        optional_aux_model(value, "chat.embeddingModel")?;
                 }
                 "imageModel" => {
-                    config.chat.image_model = optional_model_name(value, "chat.imageModel")?;
+                    config.chat.image_model = optional_aux_model(value, "chat.imageModel")?;
                 }
                 "lite" => {
                     config.chat.lite = match value {
@@ -1584,11 +1668,31 @@ fn as_bool(value: &Value, path: &str) -> Result<bool> {
         .ok_or_else(|| Error::other(format!("\"{path}\" must be true or false")))
 }
 
-fn optional_model_name(value: &Value, path: &str) -> Result<Option<String>> {
+/// Parses an auxiliary model field. Accepts a bare model id — the shape older
+/// configs and hand-edited files use, meaning "whichever provider serves it" —
+/// or `{providerId, modelId}` to pin the provider when the same id is
+/// configured on more than one.
+fn optional_aux_model(
+    value: &Value,
+    path: &str,
+) -> Result<Option<crate::config::AuxModelRef>> {
     match value {
         Value::Null => Ok(None),
-        Value::String(text) => Ok(Some(text.trim().to_string()).filter(|text| !text.is_empty())),
-        _ => Err(Error::other(format!("\"{path}\" must be a string or null"))),
+        Value::String(text) => {
+            let text = text.trim();
+            Ok(Some(crate::config::AuxModelRef::bare(text)).filter(|_| !text.is_empty()))
+        }
+        other => {
+            let reference =
+                serde_json::from_value::<crate::config::AuxModelRef>(other.clone()).map_err(
+                    |_| {
+                        Error::other(format!(
+                            "\"{path}\" must be a model id, or {{providerId, modelId}}, or null"
+                        ))
+                    },
+                )?;
+            Ok(Some(reference).filter(|reference| !reference.model_id.trim().is_empty()))
+        }
     }
 }
 
