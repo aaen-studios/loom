@@ -49,9 +49,13 @@ pub const SECTIONS: [&str; 6] = [
     "settings",
 ];
 
-/// The five calls that ask for confirmation even in Atelier; everything else
-/// runs silently, like Auto all.
-const DESTRUCTIVE: [&str; 5] = [
+/// The five harness calls that remove something the user made.
+///
+/// Listed by name rather than inferred from a prefix or a `delete_` match, so a
+/// harness writer added later has to be classified here deliberately. These are
+/// the calls [`is_harness_delete`] answers for, which is what exempts them from
+/// the Atelier confirmation gate.
+const HARNESS_DELETES: [&str; 5] = [
     DELETE_PERSONA,
     DELETE_SKILL,
     DELETE_PROMPT,
@@ -463,9 +467,13 @@ pub fn is_harness_read(name: &str) -> bool {
     name == LIST_HARNESS
 }
 
-/// The five deletes that still ask for confirmation in Atelier.
-pub fn is_destructive(name: &str) -> bool {
-    DESTRUCTIVE.contains(&name)
+/// Whether this harness call removes something, rather than writing it.
+///
+/// Atelier runs these without a confirmation card, the same way it runs every
+/// other harness call. The classification still matters because it is what the
+/// gate consults; it is no longer a list of "the ones that still ask".
+pub fn is_harness_delete(name: &str) -> bool {
+    HARNESS_DELETES.contains(&name)
 }
 
 /// Which transcript section a tool changed, for the `HarnessChanged` event.
@@ -1462,8 +1470,7 @@ pub fn update_settings(config: &mut AppConfig, args: &Value) -> Result<String> {
                     config.interface.generated_ui = as_bool(value, "interface.generatedUi")?;
                 }
                 "showCondensing" => {
-                    config.interface.show_condensing =
-                        as_bool(value, "interface.showCondensing")?;
+                    config.interface.show_condensing = as_bool(value, "interface.showCondensing")?;
                 }
                 "captureOnSend" => {
                     config.interface.capture_on_send = as_bool(value, "interface.captureOnSend")?;
@@ -1503,8 +1510,7 @@ pub fn update_settings(config: &mut AppConfig, args: &Value) -> Result<String> {
                         .ok_or_else(|| {
                             Error::other("\"chat.condenseShare\" must be a non-negative integer")
                         })?;
-                    config.chat.condense_share =
-                        share.min(crate::condense::MAX_CONDENSED_SHARE);
+                    config.chat.condense_share = share.min(crate::condense::MAX_CONDENSED_SHARE);
                 }
                 "maxOutputTokens" => {
                     let tokens = value
@@ -1525,8 +1531,7 @@ pub fn update_settings(config: &mut AppConfig, args: &Value) -> Result<String> {
                     config.chat.auto_title = as_bool(value, "chat.autoTitle")?;
                 }
                 "embeddingModel" => {
-                    config.chat.embedding_model =
-                        optional_aux_model(value, "chat.embeddingModel")?;
+                    config.chat.embedding_model = optional_aux_model(value, "chat.embeddingModel")?;
                 }
                 "imageModel" => {
                     config.chat.image_model = optional_aux_model(value, "chat.imageModel")?;
@@ -1546,9 +1551,7 @@ pub fn update_settings(config: &mut AppConfig, args: &Value) -> Result<String> {
                             other
                                 .as_str()
                                 .ok_or_else(|| {
-                                    Error::other(
-                                        "chat.computerVariant must be a string or null",
-                                    )
+                                    Error::other("chat.computerVariant must be a string or null")
                                 })?
                                 .to_string(),
                         ),
@@ -1672,10 +1675,7 @@ fn as_bool(value: &Value, path: &str) -> Result<bool> {
 /// configs and hand-edited files use, meaning "whichever provider serves it" —
 /// or `{providerId, modelId}` to pin the provider when the same id is
 /// configured on more than one.
-fn optional_aux_model(
-    value: &Value,
-    path: &str,
-) -> Result<Option<crate::config::AuxModelRef>> {
+fn optional_aux_model(value: &Value, path: &str) -> Result<Option<crate::config::AuxModelRef>> {
     match value {
         Value::Null => Ok(None),
         Value::String(text) => {
@@ -1683,14 +1683,12 @@ fn optional_aux_model(
             Ok(Some(crate::config::AuxModelRef::bare(text)).filter(|_| !text.is_empty()))
         }
         other => {
-            let reference =
-                serde_json::from_value::<crate::config::AuxModelRef>(other.clone()).map_err(
-                    |_| {
-                        Error::other(format!(
-                            "\"{path}\" must be a model id, or {{providerId, modelId}}, or null"
-                        ))
-                    },
-                )?;
+            let reference = serde_json::from_value::<crate::config::AuxModelRef>(other.clone())
+                .map_err(|_| {
+                    Error::other(format!(
+                        "\"{path}\" must be a model id, or {{providerId, modelId}}, or null"
+                    ))
+                })?;
             Ok(Some(reference).filter(|reference| !reference.model_id.trim().is_empty()))
         }
     }

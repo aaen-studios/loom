@@ -3,8 +3,10 @@ import type { Session, Workspace } from "../types";
 import {
   arrangeGroups,
   GROUP_PAGE_SIZE,
+  isGroupCollapsed,
   moveInList,
   orderChats,
+  toggleCollapsedGroup,
   visibleRows,
 } from "./sidebarOrder";
 
@@ -152,6 +154,58 @@ describe("moveInList", () => {
     const ids = ["a", "b"];
     expect(moveInList(ids, "a", "a")).toBe(ids);
     expect(moveInList(ids, "a", "zz")).toBe(ids);
+  });
+});
+
+describe("the collapsed-group preference", () => {
+  it("adds a group that was not collapsed", () => {
+    expect(toggleCollapsedGroup([], "C:/work/loom")).toEqual(["C:/work/loom"]);
+  });
+
+  it("removes one that was", () => {
+    expect(toggleCollapsedGroup(["a", "b"], "a")).toEqual(["b"]);
+  });
+
+  it("keeps the saved order stable rather than reordering on each click", () => {
+    // A list that reshuffled would make config.json churn for no reason, and a
+    // diff of it unreadable.
+    expect(toggleCollapsedGroup(["a", "b", "c"], "c")).toEqual(["a", "b"]);
+    expect(toggleCollapsedGroup(["b", "c"], "a")).toEqual(["b", "c", "a"]);
+  });
+
+  it("treats the no-workspace group as a group like any other", () => {
+    // Its key is the empty string, which is exactly the kind of value that
+    // gets dropped by a truthiness check somewhere.
+    expect(toggleCollapsedGroup([], "")).toEqual([""]);
+    expect(toggleCollapsedGroup([""], "")).toEqual([]);
+    expect(isGroupCollapsed([""], [], "")).toBe(true);
+  });
+
+  it("does not mutate the list it was given", () => {
+    const keys = ["a"];
+    toggleCollapsedGroup(keys, "a");
+    expect(keys).toEqual(["a"]);
+  });
+});
+
+describe("revealing the group you are in", () => {
+  it("hides a persisted collapse for the open chat's group", () => {
+    expect(isGroupCollapsed(["a", "b"], ["a"], "a")).toBe(false);
+    // Everything else keeps its saved state.
+    expect(isGroupCollapsed(["a", "b"], ["a"], "b")).toBe(true);
+  });
+
+  it("leaves an uncollapsed group uncollapsed", () => {
+    expect(isGroupCollapsed([], ["a"], "a")).toBe(false);
+    expect(isGroupCollapsed([], [], "a")).toBe(false);
+  });
+
+  it("keeps the reveal out of the saved list", () => {
+    // The whole point of separating them: opening the sidebar must not rewrite
+    // the fold, or a collapse would never survive the next glance at the list.
+    const saved = ["a"];
+    isGroupCollapsed(saved, ["a"], "a");
+    expect(saved).toEqual(["a"]);
   });
 });
 

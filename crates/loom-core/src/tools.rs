@@ -907,6 +907,20 @@ pub fn is_read_only(name: &str) -> bool {
     spec(name).map(|tool| tool.read_only).unwrap_or(false)
 }
 
+/// Whether this call removes something.
+///
+/// The three groups a deletion can come from: the five harness deletes, a path
+/// in the workspace, and a scheduled job. Named rather than pattern-matched, so
+/// a destructive tool added later has to be classified on purpose — the
+/// alternative is one that silently inherits somebody's idea of what "delete"
+/// covered when this was written.
+///
+/// This is only about *removal*. It says nothing about whether a call should
+/// ask, which is [`requires_confirmation`]'s job.
+pub fn is_deletion(name: &str) -> bool {
+    name == DELETE_PATH || name == DELETE_JOB || crate::harness::is_harness_delete(name)
+}
+
 /// Calls that always show a confirmation card, even under Auto all: creating
 /// or deleting a schedule changes what Loom does while nobody is watching, and
 /// the user is not there to notice.
@@ -926,16 +940,36 @@ pub fn requires_confirmation(mode: PermissionMode, name: &str) -> bool {
     if name == ASK_USER {
         return false;
     }
+
+    // Atelier is total consent for removal. Every delete runs without a card —
+    // the five harness ones, a workspace path, a scheduled job — because the
+    // mode exists so the model can run Loom itself, it is per chat, and the
+    // user turned it on deliberately knowing what it says.
+    //
+    // What that costs, stated plainly: the harness deletes are recoverable from
+    // the `~/.loom/backups/` snapshot every mutation takes, but a deleted
+    // workspace path and a deleted job are not backed up by anything. This is
+    // the one place in Loom where a model can destroy work irreversibly with no
+    // prompt. Atelier is the mode for a user who has decided that is acceptable.
+    //
+    // Deliberately *not* extended to `schedule_job`: that is not a removal but
+    // a standing commitment to act while the user is away, which is a different
+    // thing to agree to, and its card is the only place that ever says so.
+    if mode == PermissionMode::Atelier && is_deletion(name) {
+        return false;
+    }
+
     if always_asks(name) {
         return true;
     }
+
     match mode {
         PermissionMode::Ask => true,
         PermissionMode::AutoReadOnly => !is_read_only(name),
         PermissionMode::AutoAll => false,
-        // Auto all plus the harness tools — except that destruction always
-        // asks. That is the only asymmetry.
-        PermissionMode::Atelier => crate::harness::is_destructive(name),
+        // Auto all plus the harness tools. Atelier's own deletes are handled by
+        // the early return above, so nothing is left here that asks.
+        PermissionMode::Atelier => false,
     }
 }
 
@@ -1091,7 +1125,12 @@ fn uncommitted_count(root: &Path, relative: &str) -> Option<usize> {
         return None;
     }
     let stdout = String::from_utf8_lossy(&output.stdout);
-    Some(stdout.lines().filter(|line| !line.trim().is_empty()).count())
+    Some(
+        stdout
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .count(),
+    )
 }
 
 /// Plan mode refuses anything that can change the workspace. Web tools are
@@ -1536,8 +1575,8 @@ fn recycle(target: &Path) -> Result<()> {
     use windows::core::PCWSTR;
     use windows::Win32::System::Com::{CoInitializeEx, COINIT_APARTMENTTHREADED};
     use windows::Win32::UI::Shell::{
-        SHFileOperationW, SHFILEOPSTRUCTW, FOF_ALLOWUNDO, FOF_NOCONFIRMATION, FOF_NOERRORUI,
-        FOF_NORECURSEREPARSE, FOF_SILENT, FO_DELETE,
+        SHFileOperationW, FOF_ALLOWUNDO, FOF_NOCONFIRMATION, FOF_NOERRORUI, FOF_NORECURSEREPARSE,
+        FOF_SILENT, FO_DELETE, SHFILEOPSTRUCTW,
     };
 
     // The shell wants a double-null-terminated list of paths, and it may be
@@ -1812,11 +1851,7 @@ fn read_file(path: &Path, start_line: Option<i64>, max_lines: Option<i64>) -> Re
         None => total,
     };
     let body = lines[start..end].join("\n");
-    Ok(format!(
-        "lines {}-{} of {total}:\n{body}",
-        start + 1,
-        end
-    ))
+    Ok(format!("lines {}-{} of {total}:\n{body}", start + 1, end))
 }
 
 fn write_file(path: &Path, content: &str) -> Result<String> {
@@ -1989,7 +2024,10 @@ mod tests {
     fn repo(root: &Path) {
         // `-b main` keeps the initial branch name out of the test's concerns.
         assert!(git(root, &["init", "-q", "-b", "main"]), "git init");
-        assert!(git(root, &["config", "user.email", "t@example.com"]), "email");
+        assert!(
+            git(root, &["config", "user.email", "t@example.com"]),
+            "email"
+        );
         assert!(git(root, &["config", "user.name", "Test"]), "name");
     }
 
@@ -2013,7 +2051,10 @@ mod tests {
         assert!(git(dir.path(), &["commit", "-qm", "add kept.md"]), "commit");
 
         // `git restore` brings this straight back, so a card would be noise.
-        assert_eq!(delete_risk(r#"{"path":"kept.md"}"#, &context(dir.path())), None);
+        assert_eq!(
+            delete_risk(r#"{"path":"kept.md"}"#, &context(dir.path())),
+            None
+        );
     }
 
     #[test]
@@ -2022,7 +2063,10 @@ mod tests {
         repo(dir.path());
         std::fs::write(dir.path().join("tracked.md"), "one").unwrap();
         assert!(git(dir.path(), &["add", "tracked.md"]), "add");
-        assert!(git(dir.path(), &["commit", "-qm", "add tracked.md"]), "commit");
+        assert!(
+            git(dir.path(), &["commit", "-qm", "add tracked.md"]),
+            "commit"
+        );
 
         // Untracked: git has never seen these bytes.
         std::fs::write(dir.path().join("draft.md"), "unpublished").unwrap();
@@ -2039,7 +2083,10 @@ mod tests {
         // A folder is judged the same way, and the count is the useful part.
         std::fs::write(dir.path().join("untouched.md"), "fine").unwrap();
         assert!(git(dir.path(), &["add", "untouched.md"]), "add");
-        assert!(git(dir.path(), &["commit", "-qm", "add untouched.md"]), "commit");
+        assert!(
+            git(dir.path(), &["commit", "-qm", "add untouched.md"]),
+            "commit"
+        );
         std::fs::create_dir_all(dir.path().join("mixed")).unwrap();
         std::fs::write(dir.path().join("mixed/clean.md"), "ok").unwrap();
         assert!(git(dir.path(), &["add", "mixed/clean.md"]), "add");
@@ -2073,13 +2120,23 @@ mod tests {
         // A child with a real `.git` directory: a repository of its own, whose
         // commits this workspace's history says nothing about.
         std::fs::create_dir_all(dir.path().join("clone/inner/.git")).unwrap();
-        assert_eq!(nested_repository(&dir.path().join("clone")), Nested::Repository);
+        assert_eq!(
+            nested_repository(&dir.path().join("clone")),
+            Nested::Repository
+        );
 
         // A child whose `.git` is a *file*: a submodule's work tree, recorded
         // in the parent only as a commit id.
         std::fs::create_dir_all(dir.path().join("sub/module")).unwrap();
-        std::fs::write(dir.path().join("sub/module/.git"), "gitdir: ../.git/modules/x").unwrap();
-        assert_eq!(nested_repository(&dir.path().join("sub")), Nested::Submodule);
+        std::fs::write(
+            dir.path().join("sub/module/.git"),
+            "gitdir: ../.git/modules/x",
+        )
+        .unwrap();
+        assert_eq!(
+            nested_repository(&dir.path().join("sub")),
+            Nested::Submodule
+        );
     }
 
     #[test]
@@ -2209,7 +2266,7 @@ mod tests {
     }
 
     #[test]
-    fn atelier_only_cards_its_five_deletes() {
+    fn atelier_runs_harness_writers_without_a_card() {
         for name in [
             "run_command",
             "write_file",
@@ -2237,10 +2294,77 @@ mod tests {
             "delete_mcp_server",
         ] {
             assert!(
-                requires_confirmation(PermissionMode::Atelier, name),
-                "{name} must still ask in Atelier"
+                !requires_confirmation(PermissionMode::Atelier, name),
+                "{name} must not ask in Atelier"
             );
         }
+    }
+
+    #[test]
+    fn atelier_runs_every_deletion_without_a_card() {
+        // Atelier's whole premise is that the user has handed over the keys,
+        // Loom's own harness included. Deletion is part of that, so a card here
+        // would be asking a question the mode has already answered.
+        for name in [DELETE_PATH, DELETE_JOB, "delete_provider", "delete_path"] {
+            assert!(
+                !requires_confirmation(PermissionMode::Atelier, name),
+                "{name} must run without a card in Atelier"
+            );
+        }
+    }
+
+    #[test]
+    fn atelier_still_cards_creating_a_schedule() {
+        // The one thing left that asks, and on purpose: a schedule is not a
+        // removal but a standing commitment to act while the user is away.
+        // Whoever widens the exemption above should have to delete this test to
+        // do it.
+        assert!(requires_confirmation(PermissionMode::Atelier, SCHEDULE_JOB));
+        // And it is not a deletion, so it is not swept up by that rule.
+        assert!(!is_deletion(SCHEDULE_JOB));
+    }
+
+    #[test]
+    fn deletions_are_classified_by_name_across_all_three_sources() {
+        for name in [
+            DELETE_PATH,
+            DELETE_JOB,
+            "delete_persona",
+            "delete_skill",
+            "delete_prompt",
+            "delete_provider",
+            "delete_mcp_server",
+        ] {
+            assert!(is_deletion(name), "{name} removes something");
+        }
+        // Writers, readers and the schedule creator are not deletions.
+        for name in [
+            SCHEDULE_JOB,
+            "write_file",
+            "edit_file",
+            "read_file",
+            "list_chats",
+            "upsert_persona",
+            "write_skill",
+        ] {
+            assert!(!is_deletion(name), "{name} does not remove anything");
+        }
+    }
+
+    #[test]
+    fn auto_all_does_not_gain_ateliers_delete_exemption() {
+        // The two modes are not the same setting, and this is where that shows.
+        // `Auto all` is everyday "stop asking about tools", so the filesystem
+        // risk check still applies to it; Atelier is a deliberate handover.
+        // Widening one must not silently widen the other, so both directions
+        // are pinned here.
+        assert!(requires_confirmation(
+            PermissionMode::AutoReadOnly,
+            DELETE_PATH
+        ));
+        assert!(requires_confirmation(PermissionMode::Ask, DELETE_PATH));
+        assert!(!requires_confirmation(PermissionMode::AutoAll, DELETE_PATH));
+        assert!(!requires_confirmation(PermissionMode::Atelier, DELETE_PATH));
     }
 
     #[test]
@@ -2344,8 +2468,14 @@ mod tests {
             );
         }
         assert!(!is_read_only(STOP_COMMAND));
-        assert!(requires_confirmation(PermissionMode::AutoReadOnly, STOP_COMMAND));
-        assert!(!requires_confirmation(PermissionMode::AutoAll, STOP_COMMAND));
+        assert!(requires_confirmation(
+            PermissionMode::AutoReadOnly,
+            STOP_COMMAND
+        ));
+        assert!(!requires_confirmation(
+            PermissionMode::AutoAll,
+            STOP_COMMAND
+        ));
 
         // Every new tool is offered, and none of them collides with the MCP
         // namespace ("mcp__server__tool").
@@ -2391,7 +2521,10 @@ mod tests {
             // Fail-closed: anything added later is refused until named.
             "some_future_tool",
         ] {
-            assert!(!is_allowed_in_chat(name), "{name} should be refused in Chat");
+            assert!(
+                !is_allowed_in_chat(name),
+                "{name} should be refused in Chat"
+            );
         }
     }
 

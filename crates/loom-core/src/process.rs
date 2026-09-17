@@ -215,7 +215,8 @@ impl Running {
             truncated: false,
         }));
 
-        let mut readers = Vec::new();        if let Some(stdout) = child.stdout.take() {
+        let mut readers = Vec::new();
+        if let Some(stdout) = child.stdout.take() {
             readers.push(tokio::spawn(pump(stdout, Arc::clone(&sink), Stream::Out)));
         }
         if let Some(stderr) = child.stderr.take() {
@@ -442,17 +443,15 @@ pub fn log_tail(path: &Path, lines: usize) -> Result<String> {
     const WINDOW: u64 = 256 * 1024;
 
     let mut file = std::fs::File::open(path).map_err(|e| Error::io(path, e))?;
-    let length = file
-        .metadata()
-        .map_err(|e| Error::io(path, e))?
-        .len();
+    let length = file.metadata().map_err(|e| Error::io(path, e))?.len();
     let start = length.saturating_sub(WINDOW);
     if start > 0 {
         file.seek(SeekFrom::Start(start))
             .map_err(|e| Error::io(path, e))?;
     }
     let mut bytes = Vec::new();
-    file.read_to_end(&mut bytes).map_err(|e| Error::io(path, e))?;
+    file.read_to_end(&mut bytes)
+        .map_err(|e| Error::io(path, e))?;
 
     let text = String::from_utf8_lossy(&bytes);
     let wanted: Vec<&str> = text.lines().rev().take(lines.max(1)).collect();
@@ -474,7 +473,10 @@ mod tests {
     /// both shells. `ping` on Windows is the dependency-free sleep.
     fn sleeper(ms: u64) -> String {
         if cfg!(windows) {
-            format!("echo hello && ping -n {} 127.0.0.1 >nul && echo bye", (ms / 900).max(1) + 1)
+            format!(
+                "echo hello && ping -n {} 127.0.0.1 >nul && echo bye",
+                (ms / 900).max(1) + 1
+            )
         } else {
             format!("echo hello && sleep {} && echo bye", ms as f64 / 1000.0)
         }
@@ -547,7 +549,12 @@ mod tests {
         runtime().block_on(async {
             let dir = tempfile::tempdir().unwrap();
             let log = dir.path().join("logs/cmd-test.log");
-            let mut running = Running::spawn(&sleeper(3_000), dir.path(), &log).expect("spawn");
+            // Far longer than this test could ever run: the point is that
+            // nothing but a delivered kill can end it inside the window below.
+            // A short sleeper makes this test pass whether or not the kill did
+            // anything, because the command simply finishes on its own — which
+            // is what a three-second one did here.
+            let mut running = Running::spawn(&sleeper(60_000), dir.path(), &log).expect("spawn");
             let pid = running.pid();
             assert!(pid != 0);
 
@@ -560,13 +567,24 @@ mod tests {
             );
             assert!(is_alive(pid), "the command must still be alive");
 
-            assert!(kill_tree(pid), "the kill should be reported as delivered");
+            // The return value is deliberately *not* asserted. It answers "was
+            // the signal delivered to something", which on Windows means
+            // spawning `taskkill` and reading its exit status — and that spawn
+            // can fail transiently on a loaded machine, which is how this test
+            // used to flake in a full parallel run. `kill_tree` is documented as
+            // best effort, so the claim worth testing is the one about the
+            // process; the flag only goes in the message, where it helps
+            // diagnose a real failure.
+            let signalled = kill_tree(pid);
             let ended = running.wait_timeout(Duration::from_secs(30)).await;
             assert!(
                 matches!(ended, Wait::Exited(_)),
-                "the killed command should exit"
+                "the killed command should exit (kill reported delivered: {signalled})"
             );
-            assert!(!is_alive(pid), "kill_tree should end the process");
+            assert!(
+                !is_alive(pid),
+                "kill_tree should end the process (kill reported delivered: {signalled})"
+            );
         });
     }
 
@@ -587,7 +605,11 @@ mod tests {
             let mut waited = 0;
             let child_pid = loop {
                 let text = std::fs::read_to_string(&log).unwrap_or_default();
-                if let Some(line) = text.lines().next().and_then(|l| l.trim().parse::<u32>().ok()) {
+                if let Some(line) = text
+                    .lines()
+                    .next()
+                    .and_then(|l| l.trim().parse::<u32>().ok())
+                {
                     break line;
                 }
                 assert!(waited < 5_000, "the shell never started its child");

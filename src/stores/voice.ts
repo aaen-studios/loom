@@ -6,7 +6,7 @@
  * opens settings, or switches chats.
  */
 import { create } from "zustand";
-import { listen } from "@tauri-apps/api/event";
+import { subscribeTauri } from "../lib/listen";
 import {
   SpeechQueue,
   voiceIpc,
@@ -373,8 +373,7 @@ export const useVoice = create<VoiceState>((set, get) => ({
 
     const disposers: Array<() => void> = [unsubscribeLevel];
 
-    void listen<import("../lib/voice").VoiceEvent>("loom://voice", (event) => {
-      const payload = event.payload;
+    disposers.push(subscribeTauri<import("../lib/voice").VoiceEvent>("loom://voice", (payload) => {
       // A superseded utterance's events must not drive the UI: a late "done"
       // from a cancelled request would clear the new one's speaking mark.
       const current = get().utterance;
@@ -422,11 +421,9 @@ export const useVoice = create<VoiceState>((set, get) => ({
           });
           break;
       }
-    }).then((unlisten) => disposers.push(unlisten));
+    }));
 
-    void listen<VoiceInstallEvent>("loom://voice-install", (event) => {
-      const payload = event.payload;
-
+    disposers.push(subscribeTauri<VoiceInstallEvent>("loom://voice-install", (payload) => {
       if (payload.component === "all") {
         set({ installing: !payload.done, phase: payload.done ? "idle" : "installing" });
         if (payload.done) {
@@ -451,11 +448,9 @@ export const useVoice = create<VoiceState>((set, get) => ({
         });
         return { install: next };
       });
-    }).then((unlisten) => disposers.push(unlisten));
+    }));
 
-    void listen<ListenEvent>("loom://voice-listen", (event) => {
-      const payload = event.payload;
-
+    disposers.push(subscribeTauri<ListenEvent>("loom://voice-listen", (payload) => {
       switch (payload.type) {
         case "loading":
           // Only reached on the very first session, while Whisper loads.
@@ -508,7 +503,7 @@ export const useVoice = create<VoiceState>((set, get) => ({
           });
           break;
       }
-    }).then((unlisten) => disposers.push(unlisten));
+    }));
 
     return () => disposers.forEach((dispose) => dispose());
   },

@@ -19,6 +19,12 @@ use loom_core::{config, paths, secrets, Error};
 pub struct AppState {
     pub engine: Engine,
     pub config: SharedConfig,
+    /// The docked terminal's shells.
+    ///
+    /// Held here rather than in the frontend because a panel can be torn off
+    /// into its own window, and two webviews cannot share one JavaScript heap:
+    /// the shells are process state, so they belong to the process.
+    pub pty: std::sync::Arc<loom_core::pty::PtyManager>,
     /// Voice mode's worker thread and cancellation flag.
     pub voice: crate::voice::VoiceService,
     /// Speech to text: its own thread, so recognition is never queued behind
@@ -29,10 +35,15 @@ pub struct AppState {
 }
 
 impl AppState {
-    pub fn new(engine: Engine, config: SharedConfig) -> Self {
+    pub fn new(
+        engine: Engine,
+        config: SharedConfig,
+        pty: std::sync::Arc<loom_core::pty::PtyManager>,
+    ) -> Self {
         Self {
             engine,
             config,
+            pty,
             voice: crate::voice::VoiceService::new(),
             dictation: crate::voice::DictationService::new(),
             installing: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
@@ -202,10 +213,7 @@ pub fn delete_provider(state: State<'_, AppState>, id: String) -> Result<AppConf
 /// instance starts keyless and cannot bill the original's account by accident.
 #[tauri::command]
 pub fn duplicate_provider(state: State<'_, AppState>, id: String) -> Result<AppConfig, String> {
-    state
-        .engine
-        .duplicate_provider(&id)
-        .map_err(to_string)?;
+    state.engine.duplicate_provider(&id).map_err(to_string)?;
     Ok(state.snapshot())
 }
 
@@ -522,10 +530,7 @@ pub fn upsert_persona_group(
 }
 
 #[tauri::command]
-pub fn delete_persona_group(
-    state: State<'_, AppState>,
-    id: String,
-) -> Result<AppConfig, String> {
+pub fn delete_persona_group(state: State<'_, AppState>, id: String) -> Result<AppConfig, String> {
     state.mutate(move |config| {
         config.persona_groups.retain(|group| group.id != id);
     })
@@ -540,10 +545,7 @@ pub fn persona_memory(
     state: State<'_, AppState>,
     persona_id: String,
 ) -> Result<Vec<loom_core::db::MemoryEntry>, String> {
-    state
-        .engine
-        .persona_memory(&persona_id)
-        .map_err(to_string)
+    state.engine.persona_memory(&persona_id).map_err(to_string)
 }
 
 #[tauri::command]
@@ -634,10 +636,7 @@ pub fn rename_session(state: State<'_, AppState>, id: String, title: String) -> 
 }
 
 #[tauri::command]
-pub fn reorder_sessions(
-    state: State<'_, AppState>,
-    ids: Vec<String>,
-) -> Result<(), String> {
+pub fn reorder_sessions(state: State<'_, AppState>, ids: Vec<String>) -> Result<(), String> {
     state.engine.reorder_sessions(&ids).map_err(to_string)
 }
 
@@ -649,9 +648,7 @@ pub fn reorder_sessions(
 pub fn list_workspace_files(workdir: Option<String>, limit: Option<usize>) -> Vec<String> {
     let limit = limit.unwrap_or(4_000).clamp(1, 20_000);
     match workdir {
-        Some(path) => {
-            loom_core::fsutil::walk_files(std::path::Path::new(&path), limit)
-        }
+        Some(path) => loom_core::fsutil::walk_files(std::path::Path::new(&path), limit),
         None => Vec::new(),
     }
 }
@@ -810,10 +807,7 @@ pub fn set_todos(
     id: String,
     todos: Vec<loom_core::db::Todo>,
 ) -> Result<Vec<loom_core::db::Todo>, String> {
-    state
-        .engine
-        .replace_todos(&id, todos)
-        .map_err(to_string)?;
+    state.engine.replace_todos(&id, todos).map_err(to_string)?;
     state.engine.session_todos(&id).map_err(to_string)
 }
 
@@ -1001,10 +995,7 @@ pub fn set_session_cast(
 }
 
 #[tauri::command]
-pub fn session_cast(
-    state: State<'_, AppState>,
-    id: String,
-) -> Result<Vec<Persona>, String> {
+pub fn session_cast(state: State<'_, AppState>, id: String) -> Result<Vec<Persona>, String> {
     state.engine.session_cast(&id).map_err(to_string)
 }
 
@@ -1722,6 +1713,9 @@ pub async fn capture_screen(
 
 /// Copies a picked background image/video into `~/.loom/backgrounds` and points
 /// the config at it.
+///
+/// The folder keeps the pick now in use plus the two before it; older files are
+/// swept on the way out, so it cannot grow without bound.
 #[tauri::command]
 pub fn set_background_file(
     state: State<'_, AppState>,
@@ -1739,9 +1733,70 @@ pub fn set_background_file(
     let target = directory.join(format!("{}-{name}", uuid::Uuid::new_v4()));
     std::fs::copy(&source, &target).map_err(|e| e.to_string())?;
 
+    // Best effort: if this fails the pin below still spares the file we just
+    // picked, so the worst case is a stale ordering among the older two.
+    let _ = loom_core::backgrounds::mark_picked(&target);
+
+    // Without this the folder keeps every background ever picked. The new file
+    // is pinned as well, so nothing here can cost us the background in use.
+    loom_core::backgrounds::prune(
+        &directory,
+        loom_core::backgrounds::KEEP,
+        Some(target.as_path()),
+    );
+
     state.mutate(move |config| {
         config.background.kind = kind;
         config.background.path = Some(target.to_string_lossy().into_owned());
+    })
+}
+
+/// The backgrounds kept in `~/.loom/backgrounds`, newest first.
+///
+/// The picker shows these so the three files retention keeps are reachable
+/// rather than being invisible disk usage: switching back to one you used last
+/// week should not mean finding the original picture again.
+#[tauri::command]
+pub fn list_backgrounds(state: State<'_, AppState>) -> Vec<loom_core::backgrounds::StoredBackground> {
+    let Ok(directory) = loom_core::paths::backgrounds_dir() else {
+        return Vec::new();
+    };
+    let in_use = state.snapshot().background.path;
+    loom_core::backgrounds::list(&directory, in_use.as_deref().map(std::path::Path::new))
+}
+
+/// Switches to a background already stored, without copying anything.
+///
+/// Re-picking a saved file has to be cheap and lossless: copying it again would
+/// make a second copy of the same picture, push one of the other two out of the
+/// retention window, and slowly fill the folder with duplicates of itself.
+///
+/// The file is stamped as the most recent pick, which keeps `KEEP` meaning "the
+/// one in use plus the two used before it" rather than "the three most recently
+/// copied" — otherwise switching back and forth would retire the wrong files.
+#[tauri::command]
+pub fn use_background_file(state: State<'_, AppState>, path: String) -> Result<AppConfig, String> {
+    let directory = loom_core::paths::backgrounds_dir().map_err(to_string)?;
+    let candidate = std::path::PathBuf::from(&path);
+
+    // The path comes from the frontend, and the asset protocol will serve
+    // whatever it names. Confining it to Loom's own folder keeps a stale or
+    // hand-edited entry from pointing the window at any file on the machine.
+    if !loom_core::backgrounds::is_managed(&directory, &candidate) {
+        return Err("that background is not one Loom has stored".to_string());
+    }
+
+    let _ = loom_core::backgrounds::mark_picked(&candidate);
+    loom_core::backgrounds::prune(&directory, loom_core::backgrounds::KEEP, Some(&candidate));
+
+    let kind = match loom_core::backgrounds::kind_of(&candidate) {
+        loom_core::backgrounds::MediaKind::Video => loom_core::config::BackgroundKind::Video,
+        loom_core::backgrounds::MediaKind::Image => loom_core::config::BackgroundKind::Image,
+    };
+    let target = candidate.to_string_lossy().into_owned();
+    state.mutate(move |config| {
+        config.background.kind = kind;
+        config.background.path = Some(target);
     })
 }
 
@@ -1910,7 +1965,9 @@ pub fn start_task(
             job_id: None,
             provider_id: model.as_ref().map(|model| model.provider_id.clone()),
             model_id: model.as_ref().map(|model| model.model_id.clone()),
-            persona_id: session.as_ref().and_then(|session| session.persona_id.clone()),
+            persona_id: session
+                .as_ref()
+                .and_then(|session| session.persona_id.clone()),
             workdir,
             permission_mode: Some("auto-read-only".to_string()),
             notify: true,
@@ -1955,7 +2012,10 @@ pub fn preview_schedule(cron: String, count: Option<usize>) -> Result<Vec<i64>, 
 // ---------------------------------------------------------------------------
 
 #[tauri::command]
-pub fn list_memories(state: State<'_, AppState>, scope: Option<String>) -> Result<Vec<Memory>, String> {
+pub fn list_memories(
+    state: State<'_, AppState>,
+    scope: Option<String>,
+) -> Result<Vec<Memory>, String> {
     state.engine.memories(scope.as_deref()).map_err(to_string)
 }
 

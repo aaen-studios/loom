@@ -17,8 +17,8 @@
    spill the rest of the prose into the stylesheet.)
 
    source:      src/styles.css
-   fingerprint: 8f757a6bc7594b43
-   regions:     tokens (29-169), surfaces (238-280), utilities (483-500), motion (518-632), controls (643-921)
+   fingerprint: 4a792160faa877c6
+   regions:     tokens (29-169), surfaces (361-414), utilities (623-640), motion (658-787), controls (798-1076)
 --------------------------------------------------------------------------- */
 
 /* ========================================================================
@@ -206,11 +206,22 @@ html:not(.dark) {
   box-shadow: 0 12px 32px -16px rgb(0 0 0 / 0.6), var(--glass-highlight);
 }
 
-/* Bare assistant text sits straight on the desktop, so it needs its own
-   contrast: a layered shadow keeps it legible over bright artwork. In the
-   light theme the reply gets a soft pane instead (see `.ask-reply`). */
+/* Text with no surface under it — a bare assistant reply, the empty-chat
+   greeting, the hint above the shuttle — sits straight on the desktop, over
+   whatever artwork is behind it, so it needs its own contrast.
+
+   The first layer is a tight halo, and it is the one that matters: it darkens
+   the pixels immediately around each glyph. That is what holds up text drawn
+   in a *translucent* ink (`--ink-soft`, `--ink-faint` are alpha, not lighter
+   colour), because a single soft shadow only darkens the background while the
+   glyph itself stays see-through against it. The other two widen the halo into
+   a falloff, so it reads as depth rather than as an outline.
+
+   In the light theme the reply gets a pane of fog instead (see `.ask-reply`)
+   and the shadow inverts, since there the ink is near-black. */
 .blob-text {
   text-shadow:
+    0 0 1px rgb(0 0 0 / 0.55),
     0 1px 2px rgb(0 0 0 / 0.5),
     0 2px 12px rgb(0 0 0 / 0.42);
 }
@@ -291,6 +302,21 @@ html:not(.dark) {
 
 .animate-drift {
   animation: loom-drift 52s ease-in-out infinite;
+}
+
+/* A bottom dock taking its height. Only `from` is given, so the animation ends
+   on whatever height the element actually has — which is the point: the value
+   is set inline from the zone's size, and a hardcoded `to` would have to be
+   kept in step with it. */
+@keyframes loom-dock-rise {
+  from {
+    height: 0;
+    opacity: 0;
+  }
+}
+
+.animate-dock-rise {
+  animation: loom-dock-rise 220ms cubic-bezier(0.4, 0, 0.2, 1);
 }
 
 .animate-fade-up {

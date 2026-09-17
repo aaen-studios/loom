@@ -19,6 +19,7 @@ import {
   type MentionSpan,
 } from "../lib/mentions";
 import { isTauri } from "../lib/tauri";
+import { raceSafe } from "../lib/listen";
 import type { Attachment, Todo } from "../types";
 import { useChat } from "../stores/chat";
 import { useSettings } from "../stores/settings";
@@ -207,17 +208,15 @@ export function Composer({ variant = "docked" }: ComposerProps) {
   // Drag & drop files onto the window.
   useEffect(() => {
     if (!isTauri) return;
-    let dispose: (() => void) | undefined;
-    void getCurrentWebview()
-      .onDragDropEvent((event) => {
+    // `raceSafe`: the drag-drop subscription returns a promise, so a
+    // `dispose`-variable cleanup would run before it resolved and leak.
+    return raceSafe(() =>
+      getCurrentWebview().onDragDropEvent((event) => {
         if (event.payload.type === "drop") {
           void attachPaths(event.payload.paths);
         }
-      })
-      .then((unlisten) => {
-        dispose = unlisten;
-      });
-    return () => dispose?.();
+      }),
+    );
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 

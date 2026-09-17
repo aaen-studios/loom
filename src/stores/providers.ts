@@ -5,6 +5,15 @@ import { ipc } from "../lib/ipc";
 interface ProvidersState {
   presets: ProviderPreset[];
   models: ModelEntry[];
+  /**
+   * Whether the catalogue has ever finished loading, successfully or not.
+   *
+   * `loading` cannot stand in for this. It starts `false`, so on the first
+   * render "has not asked yet" and "asked, and there are none" are
+   * indistinguishable — which is why the opening screen told people to add a
+   * provider and then took it back a moment later when the models arrived.
+   */
+  loaded: boolean;
   loading: boolean;
   error: string | null;
   load: () => Promise<void>;
@@ -18,6 +27,7 @@ interface ProvidersState {
 export const useProviders = create<ProvidersState>((set) => ({
   presets: [],
   models: [],
+  loaded: false,
   loading: false,
   error: null,
 
@@ -31,10 +41,14 @@ export const useProviders = create<ProvidersState>((set) => ({
       set({
         presets: presets ?? [],
         models: models ?? [],
+        loaded: true,
         loading: false,
       });
     } catch (error) {
-      set({ loading: false, error: messageOf(error) });
+      // `loaded` is set on failure too, and deliberately. An empty list after a
+      // *failed* load is still an empty list: the UI should say so rather than
+      // sit in a permanent indeterminate state that looks like loading forever.
+      set({ loaded: true, loading: false, error: messageOf(error) });
     }
   },
 

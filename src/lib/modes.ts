@@ -29,7 +29,7 @@ export const PERMISSION_MODES: ModeOption<PermissionMode>[] = [
   {
     id: "atelier",
     label: "Atelier",
-    help: "Run everything, and let the model edit Loom's harness — personas, MCP servers, skills, prompts, providers, settings",
+    help: "Run everything, let the model edit Loom's harness — personas, MCP servers, skills, prompts, providers, settings — and delete without asking",
     tone: "accent",
   },
 ];
@@ -64,10 +64,12 @@ export const AGENT_MODES: ModeOption<AgentMode>[] = [
 /**
  * Whether the permission card may offer "Always allow".
  *
- * Two cases say no. In Atelier the button would persist Auto all as the global
- * default, which both drops the harness tools and silently discards the mode;
- * the mode already is the standing consent, so the card offers Deny and Allow
- * once only.
+ * Two cases say no.
+ *
+ * In Atelier the button would persist Auto all as the global default, which
+ * both drops the harness tools and silently discards the mode. That matters
+ * for the one card Atelier can still raise — a new schedule — where "always
+ * allow" would quietly hand the same question to every later chat as well.
  *
  * `delete_path` is the other. Under Auto all it only produces a card when
  * losing the path would be real, so "Always allow" is the one answer that must

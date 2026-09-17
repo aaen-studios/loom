@@ -6,12 +6,14 @@
 //! CLI or headless mode can reuse it unchanged.
 
 pub mod attachments;
+pub mod backgrounds;
 pub mod catalog;
 pub mod computer;
 pub mod condense;
 pub mod config;
 pub mod context;
 pub mod db;
+pub mod dock;
 pub mod embeddings;
 pub mod engine;
 pub mod error;
@@ -29,6 +31,7 @@ pub mod persona;
 pub mod process;
 pub mod provider;
 pub mod providers;
+pub mod pty;
 pub mod screen;
 pub mod secrets;
 pub mod skills;

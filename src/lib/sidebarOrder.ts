@@ -17,6 +17,36 @@ import { groupSessions, workspaceLabel, type WorkspaceGroup } from "./workspaces
 /** Rows a workspace shows before "Show more". */
 export const GROUP_PAGE_SIZE = 5;
 
+/**
+ * The collapsed set with one group toggled, as a new array.
+ *
+ * The sidebar keeps this as a list in `config.json` rather than as a map, so it
+ * survives a restart and reads sensibly in the file. Order is preserved so the
+ * saved list stays stable instead of churning on every click.
+ */
+export function toggleCollapsedGroup(keys: string[], key: string): string[] {
+  return keys.includes(key) ? keys.filter((entry) => entry !== key) : [...keys, key];
+}
+
+/**
+ * Whether a group renders collapsed.
+ *
+ * `revealed` is the ephemeral override for the group holding the chat you are
+ * in: opening the list has to show you where you are, but that is a courtesy
+ * for this visit, not a change to what you chose. So it is kept out of the
+ * persisted list entirely — otherwise opening the sidebar would quietly undo a
+ * collapse you meant, and the preference would never survive contact with the
+ * thing it describes.
+ */
+export function isGroupCollapsed(
+  collapsed: string[],
+  revealed: string[],
+  key: string,
+): boolean {
+  if (revealed.includes(key)) return false;
+  return collapsed.includes(key);
+}
+
 /** The key of the pinned group: chats with no workspace. */
 export const NO_WORKSPACE_KEY = "";
 

@@ -1,5 +1,6 @@
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { isTauri } from "./tauri";
+import { raceSafe } from "./listen";
 
 function currentWindow() {
   return isTauri ? getCurrentWindow() : null;
@@ -28,13 +29,11 @@ export async function isWindowMaximized(): Promise<boolean> {
 export function onWindowResized(handler: (maximized: boolean) => void): () => void {
   const win = currentWindow();
   if (!win) return () => {};
-  let dispose: (() => void) | undefined;
-  void win
-    .onResized(() => {
+  // `raceSafe` because `onResized` returns a promise and cleanup can run before
+  // it resolves — which, under StrictMode, it always does.
+  return raceSafe(() =>
+    win.onResized(() => {
       void isWindowMaximized().then(handler);
-    })
-    .then((unlisten) => {
-      dispose = unlisten;
-    });
-  return () => dispose?.();
+    }),
+  );
 }

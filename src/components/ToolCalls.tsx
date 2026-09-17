@@ -959,7 +959,7 @@ export function PermissionCard({ permission }: { permission: PendingPermission }
           <span className="text-[11.5px] leading-5 text-faint">
             {permission.name === "delete_path"
               ? "This one still asks: the loss here would be real."
-              : "Atelier already allows every tool; the harness deletes are the only step that asks."}
+              : "Atelier already consents to everything here; a new schedule is the one step that asks."}
           </span>
         )}
       </div>

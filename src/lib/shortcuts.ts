@@ -1,5 +1,6 @@
 import { useEffect } from "react";
 import { useChat } from "../stores/chat";
+import { useDock } from "../stores/dock";
 import { useSettings } from "../stores/settings";
 import { useUi } from "../stores/ui";
 
@@ -20,8 +21,9 @@ function isTyping(target: EventTarget | null): boolean {
  * Global keyboard shortcuts.
  *
  * - Ctrl+N       new chat
- * - Ctrl+K       chats popup (focuses its search when the list is visible)
+ * - Ctrl+K       the chats list (focuses its search when it is on screen)
  * - Ctrl+,       settings
+ * - Ctrl+`       the dock, on or off
  * - Ctrl+End     jump to the newest text
  * - Ctrl+Shift+V voice mode, on or off
  * - ?            the shortcut sheet
@@ -30,7 +32,6 @@ function isTyping(target: EventTarget | null): boolean {
  */
 export function useShortcuts(): void {
   const newSession = useChat((state) => state.newSession);
-  const setSidebarOpen = useUi((state) => state.setSidebarOpen);
   const setSettingsOpen = useUi((state) => state.setSettingsOpen);
   const setShortcutsOpen = useUi((state) => state.setShortcutsOpen);
   const setVoiceOpen = useUi((state) => state.setVoiceOpen);
@@ -39,6 +40,7 @@ export function useShortcuts(): void {
   const voiceOpen = useUi((state) => state.voiceOpen);
   const theme = useSettings((state) => state.config.theme);
   const setTheme = useSettings((state) => state.setTheme);
+  const toggleDock = useDock((state) => state.toggleDock);
 
   useEffect(() => {
     const focusSidebarSearch = () => {
@@ -60,18 +62,33 @@ export function useShortcuts(): void {
       if (modified) {
         if (key === "n") {
           event.preventDefault();
+          // The chats list is navigation now, not an overlay, so starting a chat
+          // leaves it alone. It used to close, because a popup sitting on top of
+          // the new chat was in the way.
           void newSession();
-          setSidebarOpen(false);
         } else if (key === "k") {
           event.preventDefault();
-          // Visible already (open or pinned): jump straight to the search.
+          // On screen already: jump straight to the search. Otherwise open the
+          // chats panel first and focus a frame later — the input does not exist
+          // until it has rendered, which is why the focus is deferred either way.
           if (!focusSidebarSearch()) {
-            setSidebarOpen(true);
+            useDock.getState().openPanel("sessions", "left");
             requestAnimationFrame(() => focusSidebarSearch());
           }
         } else if (key === ",") {
           event.preventDefault();
           setSettingsOpen(true);
+        } else if (event.key === "`" || key === "backquote") {
+          // The dock, from anywhere — including from inside the terminal.
+          //
+          // Deliberately here, in the modified branch and with no `isTyping`
+          // guard, which is the opposite of what the other shortcuts do. xterm
+          // keeps a hidden textarea for input, so `isTyping` reads every
+          // keystroke in the terminal as "the user is typing" — a guard would
+          // swallow this exactly where it is most wanted, and `Ctrl+backtick`
+          // is not a text-editing habit anyone has.
+          event.preventDefault();
+          toggleDock();
         } else if (event.key === "End") {
           event.preventDefault();
           document
@@ -119,7 +136,6 @@ export function useShortcuts(): void {
     return () => window.removeEventListener("keydown", onKey);
   }, [
     newSession,
-    setSidebarOpen,
     setSettingsOpen,
     setShortcutsOpen,
     setVoiceOpen,
@@ -128,5 +144,6 @@ export function useShortcuts(): void {
     voiceOpen,
     theme,
     setTheme,
+    toggleDock,
   ]);
 }

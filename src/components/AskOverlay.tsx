@@ -6,6 +6,7 @@ import { ipc } from "../lib/ipc";
 import { useEngineEvents } from "../lib/events";
 import { parseAttachments } from "../lib/messageExtra";
 import { isTauri } from "../lib/tauri";
+import { raceSafe } from "../lib/listen";
 import type { Attachment } from "../types";
 import { useChat } from "../stores/chat";
 import { useSettings } from "../stores/settings";
@@ -206,9 +207,11 @@ export function AskOverlay() {
   // Losing focus (a click anywhere else) puts the overlay away.
   useEffect(() => {
     if (!isTauri) return;
-    let dispose: (() => void) | undefined;
-    void getCurrentWindow()
-      .onFocusChanged(({ payload }) => {
+    // `raceSafe`: `onFocusChanged` returns a promise, and under StrictMode the
+    // cleanup runs before it resolves — so the plain `dispose`-variable shape
+    // left a second focus listener attached to the overlay window.
+    return raceSafe(() =>
+      getCurrentWindow().onFocusChanged(({ payload }) => {
         if (payload) {
           // A summon: re-pin in case the window landed on another monitor,
           // and pick up settings changed in the main window meanwhile.
@@ -222,12 +225,8 @@ export function AskOverlay() {
         } else if (focusedOnce.current) {
           void ipc.hideOverlay();
         }
-      })
-      .then((unlisten) => {
-        dispose = unlisten;
-      })
-      .catch(() => {});
-    return () => dispose?.();
+      }),
+    );
   }, [layout, loadSettings, replay]);
 
   useEffect(() => {
@@ -440,7 +439,10 @@ export function AskOverlay() {
             <div
               aria-hidden
               className={cn(
-                "ask-hint pointer-events-none mb-1.5 flex items-center justify-center gap-2 text-[10.5px] font-medium tracking-[0.16em] text-[var(--ink-faint)] uppercase select-none",
+                // `blob-text` and the softer ink because this line sits on the
+                // bare desktop above the shuttle, not inside it: it is the one
+                // piece of the overlay with nothing between it and the artwork.
+                "ask-hint blob-text pointer-events-none mb-1.5 flex items-center justify-center gap-2 text-[10.5px] font-medium tracking-[0.16em] text-soft uppercase select-none",
                 !started && !value.trim() ? "opacity-100" : "opacity-0",
               )}
             >

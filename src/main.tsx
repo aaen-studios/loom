@@ -2,7 +2,17 @@ import React from "react";
 import ReactDOM from "react-dom/client";
 import App from "./App";
 import { ErrorBoundary } from "./components/ErrorBoundary";
+import { applyCachedAppearance } from "./stores/settings";
 import "streamdown/styles.css";
+// The terminal's default typeface, bundled rather than assumed: a shell is the
+// one surface where the font is load-bearing, and a machine without a good mono
+// would fall back to whatever the browser picks.
+import "@fontsource/jetbrains-mono/400.css";
+import "@fontsource/jetbrains-mono/700.css";
+// Required, not cosmetic: xterm's own sheet is what positions the render layer,
+// the helper textarea and the scroll viewport. Without it the terminal paints
+// as a jumbled run of inline text.
+import "@xterm/xterm/css/xterm.css";
 import "./styles.css";
 
 /**
@@ -62,6 +72,12 @@ if (localStorage.getItem("loomDebug") === "1") {
     };
   });
 }
+
+// Before React mounts, and before the config arrives: the theme class and the
+// window backdrop come from the synchronous appearance cache, so the first
+// frame is already the right colour rather than light-then-dark. This is the
+// earliest point a CSP that forbids inline scripts allows.
+applyCachedAppearance();
 
 ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
   <React.StrictMode>

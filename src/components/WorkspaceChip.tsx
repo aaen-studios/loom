@@ -10,6 +10,15 @@ import { currentModel, useProviders } from "../stores/providers";
 import { useSettings } from "../stores/settings";
 import { useUi } from "../stores/ui";
 import type { Workspace } from "../types";
+import { SearchField } from "./ui";
+
+/**
+ * Above this many saved folders, the popover grows a search box.
+ *
+ * A threshold rather than always-on: the field costs a row of vertical space,
+ * and the common case is three or four folders you can take in at a glance.
+ */
+const SEARCH_THRESHOLD = 7;
 import {
   BrainIcon,
   CheckIcon,
@@ -36,8 +45,6 @@ export function WorkspaceChip({ align = "up" }: { align?: "up" | "down" }) {
   const applyRemote = useSettings((state) => state.applyRemote);
   const setSettingsCategory = useUi((state) => state.setSettingsCategory);
   const setSettingsOpen = useUi((state) => state.setSettingsOpen);
-  const globalMode = useSettings((state) => state.config.chat.permissionMode);
-  const globalAgentMode = useSettings((state) => state.config.chat.agentMode);
   const [branch, setBranch] = useState<string | null>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const { open, setOpen, close } = useMenu("workspace", containerRef);
@@ -46,6 +53,16 @@ export function WorkspaceChip({ align = "up" }: { align?: "up" | "down" }) {
   const [indexNote, setIndexNote] = useState<string | null>(null);
   const [renaming, setRenaming] = useState<string | null>(null);
   const [nameDraft, setNameDraft] = useState("");
+  const [query, setQuery] = useState("");
+  /**
+   * Where the popover opens, and how tall it may be — measured, not fixed.
+   *
+   * This chip renders twice: in the title bar at the top of the window, and in
+   * the composer's hero card. A menu that always opens one way is wrong in one
+   * of those two places, which is why the side and the cap are both derived from
+   * the space actually available rather than from the `align` hint alone.
+   */
+  const [drop, setDrop] = useState({ up: align === "up", maxHeight: 520 });
 
   const workdir = session?.workdir ?? null;
 
@@ -68,6 +85,24 @@ export function WorkspaceChip({ align = "up" }: { align?: "up" | "down" }) {
       if (updated) applyRemote(updated);
     });
   }, [workdir, workspaces, applyRemote]);
+
+  /** Opens toward whichever side has more room, capped to the visible panel. */
+  const toggle = () => {
+    if (open) {
+      close();
+      return;
+    }
+    const rect = containerRef.current?.getBoundingClientRect();
+    const gap = 12;
+    const above = (rect?.top ?? 0) - clipTop(containerRef.current) - gap;
+    const below = window.innerHeight - (rect?.bottom ?? 0) - gap;
+    const up = above > below;
+    setDrop({
+      up,
+      maxHeight: Math.max(220, Math.min(560, (up ? above : below) - 4)),
+    });
+    setOpen(true);
+  };
 
   const choose = async (path: string | null) => {
     close();
@@ -115,11 +150,23 @@ export function WorkspaceChip({ align = "up" }: { align?: "up" | "down" }) {
 
   const folderName = workdir ? workdir.split(/[\\/]/).filter(Boolean).pop() : null;
 
+  // A short saved list needs no search box; a long one is unusable without it.
+  // The threshold is what keeps the popover from growing a field it never needs.
+  const needle = query.trim().toLowerCase();
+  const shown =
+    needle.length === 0
+      ? workspaces
+      : workspaces.filter(
+          (workspace) =>
+            workspace.name.toLowerCase().includes(needle) ||
+            workspace.path.toLowerCase().includes(needle),
+        );
+
   return (
     <div className="relative" ref={containerRef}>
       <button
         type="button"
-        onClick={() => setOpen(!open)}
+        onClick={toggle}
         title={session?.workdir ?? "Choose a workspace folder for tools"}
         className={cn(
           "hover-surface flex h-8 max-w-[210px] items-center gap-1.5 rounded-full px-2.5 text-[12.5px]",
@@ -143,17 +190,37 @@ export function WorkspaceChip({ align = "up" }: { align?: "up" | "down" }) {
       {open && (
         <div
           className={cn(
-            "panel-strong absolute z-40 max-h-[70vh] w-[320px] overflow-y-auto rounded-sheet p-1.5",
-            align === "down" ? "right-0 top-full mt-2" : "bottom-full left-0 mb-2",
+            "panel-strong animate-fade-up absolute z-40 w-[340px] max-w-[calc(100vw-2rem)] overflow-y-auto rounded-sheet p-1.5",
+            drop.up ? "bottom-full left-0 mb-2" : "top-full left-0 mt-2",
           )}
+          style={{ maxHeight: drop.maxHeight }}
         >
-          {workspaces.length > 0 && (
-            <p className="px-2 pb-1 pt-1 text-[11px] font-semibold uppercase tracking-[0.08em] text-faint">
+          {/* The search box only appears once the list is long enough to need
+              it. A field over four folders is a row of chrome that never earns
+              its place, and the popover is meant to be scanned at a glance. */}
+          {workspaces.length > SEARCH_THRESHOLD && (
+            <div className="px-0.5 pt-0.5 pb-1.5">
+              <SearchField
+                value={query}
+                onChange={setQuery}
+                placeholder="Find a folder…"
+              />
+            </div>
+          )}
+
+          {shown.length > 0 && (
+            <p className="px-2 pt-1 pb-1 text-[11px] font-semibold tracking-[0.08em] text-faint uppercase">
               Workspaces
             </p>
           )}
 
-          {workspaces.map((workspace) => {
+          {workspaces.length > SEARCH_THRESHOLD && shown.length === 0 && (
+            <p className="px-2 py-2 text-[12.5px] text-faint">
+              No folder matches “{query.trim()}”.
+            </p>
+          )}
+
+          {shown.map((workspace) => {
             const current = workspace.path === workdir;
             const isRenaming = renaming === workspace.path;
             return (
@@ -285,14 +352,7 @@ export function WorkspaceChip({ align = "up" }: { align?: "up" | "down" }) {
           )}
 
           <p className="px-2 py-1.5 text-[11.5px] leading-5 text-faint">
-            Tools can only read inside this folder. Permission mode:{" "}
-            <span className="text-soft">
-              {session?.permissionMode ?? globalMode}
-            </span>
-            {" · "}Agent mode:{" "}
-            <span className="text-soft">
-              {session?.agentMode ?? globalAgentMode}
-            </span>
+            Tools can only read inside this folder.
           </p>
         </div>
       )}

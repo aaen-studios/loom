@@ -170,6 +170,129 @@ html:not(.dark) {
 /* loom-site:tokens:end */
 
 /* ---------------------------------------------------------------------------
+   Terminal
+
+   Deliberately *outside* the shared region above: these are read by xterm
+   through `getComputedStyle`, not by CSS rules, so the site has no use for
+   them and inheriting fourteen dead custom properties would only be noise.
+
+   **Every value here must be hex.** Not a style preference — it is what
+   xterm's parser accepts. From its shipped bundle:
+
+       if (value.match(/#[\da-f]{3,8}/i)) switch (value.length) { 4: … 9: }
+       const fn = value.match(/rgba?\(\s*(\d{1,3})\s*,\s*(\d{1,3})\s*,\s*(\d{1,3})…/);
+       if (fillRect(…), [r,g,b,a] = getImageData(…), a !== 255)
+         throw new Error("css.toColor: Unsupported css format");
+
+   Two consequences, and both bit this file. The functional form is
+   **comma-separated only**, so the modern `rgb(8 10 16 / 0.86)` does not match;
+   and the canvas fallback *throws* on any alpha, so a translucent value cannot
+   be rescued either. The caller upstream swallows that throw
+   (`try { toColor(v) } catch {}` → default), which is why the symptom was not
+   an error but a terminal that was quietly `#000000`. `xtermTheme.test.ts`
+   asserts every token below is parseable, so this cannot come back.
+
+   The background is a near-opaque tint rather than plain glass: every other
+   surface holds short text read at a glance, while a terminal holds dense
+   monospace at 13px for minutes. The artwork still shows through as a tint,
+   which is what keeps it feeling like Loom. xterm itself is given a fully
+   transparent background and this variable paints the panel around it, so
+   there is one declaration for the surface rather than two that can drift.
+
+   The sixteen ANSI slots are chosen rather than inherited. xterm's stock
+   palette is pure-hue (#ff0000, #0000ff) and sat wrong against the app's
+   indigo; these sit in the same tonal family as `--accent` while staying far
+   enough apart that a diff's red and green are never in doubt. Both themes are
+   tuned separately, because a colour that reads on near-black is muddy on
+   near-white.
+--------------------------------------------------------------------------- */
+:root {
+  /* 8-digit hex: understood by CSS *and* by xterm, so the tint has one home. */
+  --terminal-bg: #080a10db;
+  --terminal-selection: #8ea2ff47;
+  --terminal-cursor: var(--accent);
+  /* The ink a filled cursor sits on, which xterm blends against the theme. */
+  --terminal-cursor-ink: #06080e;
+
+  --ansi-black: #12151f;
+  --ansi-red: #ff7a85;
+  --ansi-green: #7fd88f;
+  --ansi-yellow: #f0c674;
+  --ansi-blue: #8ea2ff;
+  --ansi-magenta: #c9a2ff;
+  --ansi-cyan: #7fd4e0;
+  --ansi-white: #e6e9f5;
+  --ansi-bright-black: #5d6478;
+  --ansi-bright-red: #ff9aa2;
+  --ansi-bright-green: #a3e8b0;
+  --ansi-bright-yellow: #ffd98a;
+  --ansi-bright-blue: #aebcff;
+  --ansi-bright-magenta: #dcbcff;
+  --ansi-bright-cyan: #a3e6ef;
+  --ansi-bright-white: #ffffff;
+}
+
+html:not(.dark) {
+  --terminal-bg: #fafbffe6;
+  --terminal-selection: #4f5bd538;
+  --terminal-cursor: var(--accent);
+  --terminal-cursor-ink: #ffffff;
+
+  /* Darker and less saturated than the dark set. The greys matter most: in a
+     light terminal `white` and `brightWhite` are read as *dim* text, so mapping
+     them to near-white would make output invisible. */
+  --ansi-black: #57606a;
+  --ansi-red: #cf222e;
+  --ansi-green: #1a7f37;
+  --ansi-yellow: #9a6700;
+  --ansi-blue: #4f5bd5;
+  --ansi-magenta: #8250df;
+  --ansi-cyan: #1b7c83;
+  --ansi-white: #8c959f;
+  --ansi-bright-black: #6e7781;
+  --ansi-bright-red: #a40e26;
+  --ansi-bright-green: #116329;
+  --ansi-bright-yellow: #7d4e00;
+  --ansi-bright-blue: #3a45b8;
+  --ansi-bright-magenta: #6639ba;
+  --ansi-bright-cyan: #0f6b73;
+  --ansi-bright-white: #1f2328;
+}
+
+/* The terminal's own surface: the same glass as every other panel, pushed much
+   heavier. A terminal is dense 13px monospace read for minutes, so it gets a
+   stronger blur and a much higher opacity than a popover holding three rows of
+   text — the artwork is still a tint behind it, which is what keeps it Loom. */
+.terminal-surface {
+  background-color: var(--terminal-bg);
+  backdrop-filter: blur(46px) saturate(170%);
+  -webkit-backdrop-filter: blur(46px) saturate(170%);
+}
+
+/* Chromium gives every scrollable box a default light scrollbar, which reads as
+   a bright seam down the side of a dark terminal. */
+.terminal-surface * {
+  scrollbar-color: rgb(140 150 170 / 0.35) transparent;
+}
+
+/* The one place xterm's own defaults need overriding.
+
+   The viewport is what xterm paints the theme background onto. The theme's
+   background is transparent on purpose — this element already carries the tint,
+   and letting xterm fill too would darken it twice. */
+.terminal-surface .xterm .xterm-viewport {
+  background-color: transparent !important;
+}
+
+/* Padding lives on `.xterm` rather than on a wrapper, because that is the
+   element FitAddon measures: it reads the terminal's own padding and subtracts
+   it, so the column count accounts for the inset. Padding on an outer div would
+   be counted as usable width and the last column would fall off the edge. */
+.terminal-surface .xterm {
+  padding: 8px 10px;
+}
+
+/* ---------------------------------------------------------------------------
    Base
 --------------------------------------------------------------------------- */
 html,
@@ -270,11 +393,22 @@ body {
   box-shadow: 0 12px 32px -16px rgb(0 0 0 / 0.6), var(--glass-highlight);
 }
 
-/* Bare assistant text sits straight on the desktop, so it needs its own
-   contrast: a layered shadow keeps it legible over bright artwork. In the
-   light theme the reply gets a soft pane instead (see `.ask-reply`). */
+/* Text with no surface under it — a bare assistant reply, the empty-chat
+   greeting, the hint above the shuttle — sits straight on the desktop, over
+   whatever artwork is behind it, so it needs its own contrast.
+
+   The first layer is a tight halo, and it is the one that matters: it darkens
+   the pixels immediately around each glyph. That is what holds up text drawn
+   in a *translucent* ink (`--ink-soft`, `--ink-faint` are alpha, not lighter
+   colour), because a single soft shadow only darkens the background while the
+   glyph itself stays see-through against it. The other two widen the halo into
+   a falloff, so it reads as depth rather than as an outline.
+
+   In the light theme the reply gets a pane of fog instead (see `.ask-reply`)
+   and the shadow inverts, since there the ink is near-black. */
 .blob-text {
   text-shadow:
+    0 0 1px rgb(0 0 0 / 0.55),
     0 1px 2px rgb(0 0 0 / 0.5),
     0 2px 12px rgb(0 0 0 / 0.42);
 }
@@ -467,14 +601,20 @@ html:not(.dark) .ask-reply {
 }
 
 html:not(.dark) .blob-text {
-  text-shadow: 0 1px 0 rgb(255 255 255 / 0.45);
+  text-shadow:
+    0 0 1px rgb(255 255 255 / 0.8),
+    0 1px 1px rgb(255 255 255 / 0.6),
+    0 1px 6px rgb(255 255 255 / 0.45);
 }
 
 html:not(.dark) .ask-node {
   --node-top: 14px;
 }
 
-/* A faint instruction line under the column, gone the moment you type. */
+/* The instruction line under the column, gone the moment you type. It is the
+   one thing in the overlay with no surface under it — the shuttle below it is a
+   blob, this is not — so it takes the bare-desktop contrast treatment
+   (`.blob-text`) and the softer ink rather than the faint one. */
 .ask-hint {
   transition: opacity 320ms ease;
 }
@@ -564,6 +704,21 @@ html:not(.dark) .ask-node {
 
 .animate-drift {
   animation: loom-drift 52s ease-in-out infinite;
+}
+
+/* A bottom dock taking its height. Only `from` is given, so the animation ends
+   on whatever height the element actually has — which is the point: the value
+   is set inline from the zone's size, and a hardcoded `to` would have to be
+   kept in step with it. */
+@keyframes loom-dock-rise {
+  from {
+    height: 0;
+    opacity: 0;
+  }
+}
+
+.animate-dock-rise {
+  animation: loom-dock-rise 220ms cubic-bezier(0.4, 0, 0.2, 1);
 }
 
 .animate-fade-up {

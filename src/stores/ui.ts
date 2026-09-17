@@ -16,9 +16,6 @@ interface UiState {
   setAvailableUpdate: (manifest: UpdateManifest | null) => void;
   shortcutsOpen: boolean;
   setShortcutsOpen: (open: boolean) => void;
-  /** The Runs popup: detached tasks and scheduled jobs. */
-  tasksOpen: boolean;
-  setTasksOpen: (open: boolean) => void;
   /** Voice mode: the full-screen speaking-and-listening surface. */
   voiceOpen: boolean;
   setVoiceOpen: (open: boolean) => void;
@@ -37,8 +34,6 @@ export const useUi = create<UiState>((set) => ({
   setAvailableUpdate: (availableUpdate) => set({ availableUpdate }),
   shortcutsOpen: false,
   setShortcutsOpen: (shortcutsOpen) => set({ shortcutsOpen }),
-  tasksOpen: false,
-  setTasksOpen: (tasksOpen) => set({ tasksOpen }),
   voiceOpen: false,
   setVoiceOpen: (voiceOpen) => set({ voiceOpen }),
 }));

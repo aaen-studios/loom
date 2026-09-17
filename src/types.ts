@@ -2,6 +2,21 @@ export type Theme = "light" | "dark";
 
 export type BackgroundKind = "builtin" | "image" | "video";
 
+/**
+ * A background Loom has stored in `~/.loom/backgrounds`.
+ *
+ * Retention keeps the one in use plus the two before it, and these are what the
+ * picker lists so the kept files are reachable rather than invisible disk usage.
+ */
+export interface StoredBackground {
+  path: string;
+  /** The name it was picked under, without the uuid prefix Loom stores it with. */
+  name: string;
+  kind: "image" | "video";
+  bytes: number;
+  inUse: boolean;
+}
+
 export interface BackgroundConfig {
   kind: BackgroundKind;
   preset: string;
@@ -10,6 +25,25 @@ export interface BackgroundConfig {
   dim: number;
   /** 0..=64 px blur on the background layer */
   blur: number;
+}
+
+/**
+ * How the app's colours are chosen.
+ *
+ * `default` uses the stylesheet's own tokens. `custom` uses three picked
+ * colours and derives everything else from them. `adaptive` samples the
+ * background image for surfaces and the accent, and takes its text colour from
+ * the active theme rather than from the picture — a photograph cannot be
+ * trusted with contrast.
+ */
+export type PaletteMode = "default" | "custom" | "adaptive";
+
+/** The three colours a palette is built from, as hex. */
+export interface PaletteConfig {
+  mode: PaletteMode;
+  accent: string;
+  ink: string;
+  surface: string;
 }
 
 export type ProviderKind = "openai-compatible" | "anthropic";
@@ -343,6 +377,12 @@ export interface InterfaceConfig {
   sidebarPinned: boolean;
   sidebarWidth: number;
   sidebarGrouping: SidebarGrouping;
+  /**
+   * Workspace groups the user has collapsed, by folder path; `""` is the
+   * "No workspace" group. Persisted, so the fold survives a restart — which is
+   * the point of folding four folders you are not working in.
+   */
+  sidebarCollapsedGroups: string[];
   sidebarSort: SidebarSort;
   /**
    * Hand-placed order of the workspace groups, by folder path. A group listed
@@ -468,6 +508,7 @@ export interface AppConfig {
   schemaVersion: number;
   theme: Theme;
   background: BackgroundConfig;
+  palette: PaletteConfig;
   sidebarCollapsed: boolean;
   providers: Record<string, ProviderConfig>;
   personas: Persona[];
@@ -478,7 +519,73 @@ export interface AppConfig {
   interface: InterfaceConfig;
   prompts: Prompt[];
   workspaces: Workspace[];
+  /** Where the docked panels go, keyed by workspace folder path. */
+  dock: Record<string, DockLayout>;
+  /** The arrangement a folder follows until it has one of its own. */
+  dockDefault: DockLayout;
+  terminal: TerminalConfig;
   searchProvider: SearchProvider;
+}
+
+/* ---------------------------------------------------------------------------
+   The dock
+
+   Rust owns this and the UI projects it, rather than the other way round,
+   because a panel can be torn off into its own window — and two webviews do not
+   share a JavaScript heap, so no `zustand` store can be the source of truth for
+   both. Reads come from `dock_layout`, writes go through `set_dock_layout`, and
+   the authoritative result arrives on `loom://dock`.
+--------------------------------------------------------------------------- */
+
+/** Which window edge a zone is anchored to. */
+export type DockEdge = "left" | "right" | "bottom";
+
+/** One docked area: an edge, a size, and the panels stacked in it as tabs. */
+export interface DockZone {
+  id: string;
+  edge: DockEdge;
+  /** Width for a side zone, height for the bottom one, in logical pixels. */
+  size: number;
+  /** Whether it is showing. A closed zone keeps its panels and its size. */
+  open: boolean;
+  /** Panel ids in tab order. */
+  panels: string[];
+  /** Which tab is showing. */
+  active: number;
+}
+
+export interface DockLayout {
+  zones: DockZone[];
+  /** Shell profile id for this folder's terminal, once one has been chosen. */
+  shell: string | null;
+}
+
+/** Terminal appearance. A shell is read for hours, so this is the user's call. */
+export interface TerminalConfig {
+  fontFamily: string;
+  fontSize: number;
+  /** Percentage, as CSS line-height. */
+  lineHeight: number;
+  /** WebGL rendering, only when the WebView supports it and the user opts in. */
+  webgl: boolean;
+}
+
+/** A shell Loom found on this machine. */
+export interface PtyProfile {
+  id: string;
+  name: string;
+  /** True for the profile Loom starts when nothing has been chosen. */
+  default: boolean;
+}
+
+/** A live shell, as the backend sees it. */
+export interface PtyInfo {
+  id: string;
+  profile: string | null;
+  workdir: string;
+  alive: boolean;
+  rows: number;
+  cols: number;
 }
 
 export interface AppInfo {

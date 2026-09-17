@@ -548,6 +548,10 @@ export function ChatCanvas() {
   const clearError = useChat((state) => state.clearError);
   const retryLast = useChat((state) => state.retryLast);
   const modelCount = useProviders((state) => state.models.length);
+  // Gated on `loaded`, not on the count alone. An empty list before the first
+  // load is not evidence of anything, and treating it as evidence is what made
+  // the opening screen tell people to add a provider and then retract it.
+  const modelsLoaded = useProviders((state) => state.loaded);
   const setSettingsOpen = useUi((state) => state.setSettingsOpen);
   const alwaysFollow = useSettings((state) => state.config.interface.alwaysFollow);
   const compact = useSettings((state) => state.config.interface.compact);
@@ -661,14 +665,17 @@ export function ChatCanvas() {
         <div className="w-full max-w-2xl -translate-y-6">
           <div className="mb-6 flex flex-col items-center text-center">
             <LoomMark size={32} weaving className="mb-3 text-[var(--accent)]" />
+            {/* The header stands on the background art, with no panel under it,
+                so it carries its own contrast — see `.blob-text`. Without it a
+                greeting in translucent ink disappears into a bright wallpaper. */}
             <h1
-              className="intro-step text-[24px] font-medium tracking-tight text-[var(--ink)]"
+              className="intro-step blob-text text-[24px] font-medium tracking-tight text-[var(--ink)]"
               style={{ animationDelay: "180ms" }}
             >
               {greeting()}
             </h1>
             <p
-              className="intro-step mt-1.5 max-w-lg text-[13px] leading-5 text-faint"
+              className="intro-step blob-text mt-1.5 max-w-lg text-[13px] leading-5 text-soft"
               style={{ animationDelay: "260ms" }}
             >
               {workspaceName ? (
@@ -689,9 +696,9 @@ export function ChatCanvas() {
             <GoalPanel />
             <Composer variant="hero" />
           </div>
-          {modelCount === 0 && (
+          {modelsLoaded && modelCount === 0 && (
             <p
-              className="intro-step mt-3 text-center text-[12.5px] text-faint"
+              className="intro-step blob-text mt-3 text-center text-[12.5px] text-soft"
               style={{ animationDelay: "440ms" }}
             >
               No models yet.{" "}
@@ -713,8 +720,17 @@ export function ChatCanvas() {
   return (
     <section className="relative flex h-full min-w-0 flex-1 flex-col px-4 pb-4">
       {/* The reading surface: messages and composer sit on this panel, so text
-          stays legible over whatever the background art is doing. */}
-      <div className="panel relative mx-auto flex h-full w-full max-w-4xl flex-col overflow-hidden rounded-window">
+          stays legible over whatever the background art is doing.
+
+          Centred, and it can be now. The reason this felt wrong before was that
+          a splitter was resizing it: shrinking a centred column moves *both* of
+          its edges, so it looked like it was drifting rather than being pushed.
+          The dock overlays the region instead of taking width from it, so
+          nothing resizes this element and its centre is fixed for the life of
+          the window. Centring also puts equal slack on both sides, which is
+          what lets the chats panel open over the background art rather than
+          over the transcript. */}
+      <div className="panel relative mx-auto flex h-full w-full max-w-4xl min-w-0 flex-col overflow-hidden rounded-window">
         <ChatHeader />
         <div
           ref={scrollRef}

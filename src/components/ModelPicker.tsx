@@ -20,6 +20,7 @@ import { ChevronDownIcon, PlusIcon, SparkIcon } from "./icons";
  */
 export function ModelPicker() {
   const models = useProviders((state) => state.models);
+  const modelsLoaded = useProviders((state) => state.loaded);
   const setModel = useChat((state) => state.setModel);
   const session = useChat((state) =>
     state.sessions.find((item) => item.id === state.activeId),
@@ -152,9 +153,16 @@ export function ModelPicker() {
       setError(null);
     });
 
+  // Three states, not two. The chip used to say "Select model" before the
+  // catalogue had loaded — an instruction that turned out to be wrong the
+  // moment the chat's own model arrived. Until there is an answer, the chip
+  // says nothing definite and does not wear the accent that means "you must
+  // choose".
   const label = current
     ? shortModelName(current.providerName, current.modelId)
-    : "Select model";
+    : modelsLoaded
+      ? "Select model"
+      : "Loading models…";
   const chipLabel = current && variant ? `${label} · ${variant}` : label;
 
   /** Opens toward whichever side has more room, capped to the window. */
@@ -191,7 +199,9 @@ export function ModelPicker() {
           "flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-[12.5px] transition",
           current
             ? "border-[var(--glass-border)] text-soft hover:text-[var(--ink)]"
-            : "border-[var(--accent)] text-[var(--ink)]",
+            : modelsLoaded
+              ? "border-[var(--accent)] text-[var(--ink)]"
+              : "border-[var(--glass-border)] text-faint",
         )}
       >
         <SparkIcon size={14} />

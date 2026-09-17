@@ -31,6 +31,49 @@ export function PanelLeftIcon(props: IconProps) {
   );
 }
 
+/** A terminal: the docked shell. */
+export function TerminalIcon(props: IconProps) {
+  return (
+    <Icon {...props}>
+      <rect x="3" y="4.5" width="18" height="15" rx="3" />
+      <path d="m7.5 9.5 3 2.5-3 2.5" />
+      <path d="M13 15h3.5" />
+    </Icon>
+  );
+}
+
+/** Files and changes: the diff and tree panel. */
+export function FilesIcon(props: IconProps) {
+  return (
+    <Icon {...props}>
+      <path d="M6 3.5h7.5L19 9v11.5H6z" />
+      <path d="M13.5 3.5V9H19" />
+    </Icon>
+  );
+}
+
+/** A panel being torn off into its own window. */
+export function PopOutIcon(props: IconProps) {
+  return (
+    <Icon {...props}>
+      <path d="M14 4.5h5.5V10" />
+      <path d="M19.5 4.5 12 12" />
+      <path d="M18 14.5v4a1.5 1.5 0 0 1-1.5 1.5h-11A1.5 1.5 0 0 1 4 18.5v-11A1.5 1.5 0 0 1 5.5 6h4" />
+    </Icon>
+  );
+}
+
+/** The world: the browser panel, once it lands. */
+export function GlobeIcon(props: IconProps) {
+  return (
+    <Icon {...props}>
+      <circle cx="12" cy="12" r="8.5" />
+      <path d="M3.5 12h17" />
+      <path d="M12 3.5c2.2 2.4 3.3 5.3 3.3 8.5S14.2 18.1 12 20.5c-2.2-2.4-3.3-5.3-3.3-8.5S9.8 5.9 12 3.5Z" />
+    </Icon>
+  );
+}
+
 /** A speaker cone with waves: voice mode, and reading a reply aloud. */
 export function SoundIcon(props: IconProps) {
   return (

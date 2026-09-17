@@ -9,6 +9,15 @@ interface Shortcut {
 
 const SHORTCUTS: { group: string; items: Shortcut[] }[] = [
   {
+    group: "Panels",
+    items: [
+      { keys: "Ctrl+`", action: "The dock, on or off" },
+      { keys: "Ctrl+`", action: "Close every panel once the dock is showing" },
+      { keys: "Drag a tab", action: "Reorder panels, or drag one to another edge" },
+      { keys: "Drag outside", action: "Give a panel its own window" },
+    ],
+  },
+  {
     group: "Chats",
     items: [
       { keys: "Ctrl+N", action: "New chat" },

@@ -4,6 +4,7 @@
 //! live in `loom-core`, so a future CLI can reuse them unchanged.
 
 mod commands;
+mod panels;
 mod voice;
 
 use std::sync::Arc;
@@ -43,9 +44,7 @@ fn apply_hotkey(app: &AppHandle, enabled: bool, keys: &str) -> Result<(), String
         let shortcut = parse_shortcut(keys)?;
         manager.register(shortcut).map_err(|e| e.to_string())?;
     }
-    manager
-        .register(stop_shortcut())
-        .map_err(|e| e.to_string())
+    manager.register(stop_shortcut()).map_err(|e| e.to_string())
 }
 
 /// Ctrl+Alt+Esc: stops the computer turn immediately, from anywhere.
@@ -147,8 +146,7 @@ fn position_computer_pill(window: &tauri::WebviewWindow) {
     let size = window
         .outer_size()
         .unwrap_or(tauri::PhysicalSize::new(430, 56));
-    let x = monitor.position().x
-        + ((monitor.size().width as i32 - size.width as i32) / 2).max(0);
+    let x = monitor.position().x + ((monitor.size().width as i32 - size.width as i32) / 2).max(0);
     let y = monitor.position().y + 24;
     let _ = window.set_position(tauri::PhysicalPosition::new(x, y));
 }
@@ -351,6 +349,21 @@ pub fn run() {
             // metadata with where it came from so refreshes can correct it.
             let mut upgraded = loom_core::config::apply_preset_defaults(&mut app_config);
             upgraded |= loom_core::config::migrate_metadata(&mut app_config);
+
+            // Fold away backgrounds left behind by earlier builds, which kept
+            // every image ever picked. The one the config points at is spared,
+            // so a launch can never remove the background in use.
+            if let Ok(directory) = loom_core::paths::backgrounds_dir() {
+                loom_core::backgrounds::prune(
+                    &directory,
+                    loom_core::backgrounds::KEEP,
+                    app_config
+                        .background
+                        .path
+                        .as_deref()
+                        .map(std::path::Path::new),
+                );
+            }
             if upgraded {
                 if let Err(error) = loom_core::config::save(&app_config) {
                     eprintln!("[loom] could not upgrade config: {error}");
@@ -423,9 +436,7 @@ pub fn run() {
                     // and anything that is waiting on an answer.
                     EngineEvent::TaskChanged { task } => {
                         let body = match task.status.as_str() {
-                            "done" if task.notify => {
-                                Some(format!("“{}” finished.", task.title))
-                            }
+                            "done" if task.notify => Some(format!("“{}” finished.", task.title)),
                             "failed" => Some(format!(
                                 "“{}” failed: {}",
                                 task.title,
@@ -499,7 +510,10 @@ pub fn run() {
                     .as_ref()
                     .and_then(|url| {
                         let host = url.host_str()?;
-                        Some(format!("{host}:{}", url.port_or_known_default().unwrap_or(1420)))
+                        Some(format!(
+                            "{host}:{}",
+                            url.port_or_known_default().unwrap_or(1420)
+                        ))
                     })
                     .unwrap_or_else(|| "localhost:1420".to_string());
                 tauri::async_runtime::spawn(async move {
@@ -524,7 +538,11 @@ pub fn run() {
                 });
             }
 
-            app.manage(AppState::new(engine, shared));
+            // The terminal's shells. Created before the state that owns them,
+            // and given a sink that broadcasts: a session opened from a
+            // torn-off window has to reach the main window too.
+            let pty = panels::pty_manager(app.handle());
+            app.manage(AppState::new(engine, shared, pty));
             build_tray(app)?;
 
             // Anything left queued or running by a previous session is not
@@ -682,6 +700,8 @@ pub fn run() {
             commands::capture_screen,
             commands::claim_screen,
             commands::set_background_file,
+            commands::list_backgrounds,
+            commands::use_background_file,
             commands::cancel_stream,
             commands::busy_sessions,
             commands::hide_overlay,
@@ -696,10 +716,10 @@ pub fn run() {
             voice::voice_install,
             voice::save_voice_settings,
             voice::set_persona_voice,
-    voice::voice_listen_start,
-    voice::voice_listen_audio,
-    voice::voice_listen_stop,
-    voice::voice_listen_status,
+            voice::voice_listen_start,
+            voice::voice_listen_audio,
+            voice::voice_listen_stop,
+            voice::voice_listen_status,
             commands::overlay_target,
             commands::list_tasks,
             commands::cancel_task,
@@ -719,6 +739,17 @@ pub fn run() {
             commands::upsert_memory,
             commands::delete_memory,
             commands::clear_memories,
+            // The dock and the terminal it holds.
+            panels::dock_layout,
+            panels::set_dock_layout,
+            panels::set_terminal_settings,
+            panels::pty_profiles,
+            panels::pty_open,
+            panels::pty_write,
+            panels::pty_resize,
+            panels::pty_close,
+            panels::pty_list,
+            panels::open_panel_window,
         ])
         .on_window_event(|window, event| {
             // Close-to-tray: streams keep running in the background.
@@ -729,6 +760,18 @@ pub fn run() {
                 }
             }
         })
-        .run(context)
-        .expect("error while running loom");
+        .build(context)
+        .expect("error while building loom")
+        // `build` + `run` rather than `run(context)`, so the exit event can be
+        // handled. Shells are killed on the way out: an orphaned one holding a
+        // port or a lock file is a bad surprise on the next launch, and a
+        // `Drop` impl alone would not run under the release profile's
+        // `panic = "abort"`.
+        .run(|app, event| {
+            if let tauri::RunEvent::Exit = event {
+                if let Some(state) = app.try_state::<AppState>() {
+                    state.pty.close_all();
+                }
+            }
+        });
 }

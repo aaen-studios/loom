@@ -1,11 +1,19 @@
-import { useEffect, useRef, useState, type ComponentType } from "react";
+import { useEffect, useRef, useState, useSyncExternalStore, type ComponentType } from "react";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { cn } from "../lib/cn";
-import { BACKGROUND_PRESETS } from "../lib/background";
+import { AUTO_PRESET, BACKGROUND_PRESETS, isAuto, resolvePreset } from "../lib/background";
+import { getAppliedPalette, subscribeAppliedPalette } from "../lib/applyPalette";
+import {
+  BASE_PALETTE,
+  enforceContrast,
+  fromPaletteHex,
+  wasAdjusted,
+} from "../lib/palette";
+import { toHex } from "../lib/colour";
 import { metadataSourceLabel, formatReset, compactTokens } from "../lib/format";
 import { GLOBAL_PERMISSION_MODES } from "../lib/modes";
 import type { SettingsCategoryId } from "../lib/settingsCategories";
-import { call, isTauri, tryCall } from "../lib/tauri";
+import { assetUrl, call, isTauri, tryCall } from "../lib/tauri";
 import { metricSummary, metricTone, percentOf } from "../lib/usage";
 import {
   auxAmbiguity,
@@ -32,6 +40,7 @@ import type {
   ProviderKind,
   ProviderPreset,
   SearchProvider,
+  StoredBackground,
   StoredMemory,
   ToolScope,
   UsageMetric,
@@ -71,6 +80,7 @@ import {
 import {
   EmptyState,
   IconButton,
+  Kbd,
   Row,
   SearchField,
   Section,
@@ -626,8 +636,9 @@ export const SETTINGS_CATEGORIES = [
   {
     id: "appearance",
     label: "Appearance",
-    blurb: "Theme, background art, and how much of it shows through.",
-    keywords: "theme dark light mode background wallpaper image video dim blur look",
+    blurb: "Theme, background art, the dock, and the terminal's type.",
+    keywords:
+      "theme dark light mode background wallpaper image video dim blur look dock panel rail terminal shell font mono size line height shortcut",
   },
   {
     id: "chat",
@@ -702,6 +713,48 @@ export const SETTINGS_CATEGORIES = [
   blurb: string;
   keywords: string;
 }[];
+
+/** One colour well, with its hex beside it so the value is copyable. */
+function ColourField({
+  label,
+  hint,
+  value,
+  onChange,
+}: {
+  label: string;
+  hint?: string;
+  value: string;
+  onChange: (value: string) => void;
+}) {
+  return (
+    <Row label={label} hint={hint}>
+      <div className="flex shrink-0 items-center gap-2">
+        <input
+          type="color"
+          value={value}
+          onChange={(event) => onChange(event.currentTarget.value)}
+          className="h-7 w-9 cursor-pointer rounded-control border border-[var(--glass-border)] bg-transparent p-0.5"
+        />
+        <span className="w-[62px] font-mono text-[11.5px] text-faint">
+          {value.toLowerCase()}
+        </span>
+      </div>
+    </Row>
+  );
+}
+
+/**
+ * A byte count a person can read.
+ *
+ * Local rather than shared with the usage panel, which wants more precision: a
+ * size beside a thumbnail is context ("1.4 MB"), while a size in a storage
+ * table is a measurement.
+ */
+function readableSize(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
 
 /** One glyph per category, shared by the nav rail and the search results. */
 const CATEGORY_ICONS: Record<
@@ -3397,6 +3450,66 @@ function AppearanceSection() {
   const setBackground = useSettings((state) => state.setBackground);
   const applyRemote = useSettings((state) => state.applyRemote);
 
+  // Which preset is really painting, and whether that choice is automatic.
+  // Resolved here rather than per-swatch so the "Automatic" row, the two
+  // defaults it names, and the highlighted tile cannot disagree.
+  const isDark = config.theme === "dark";
+  const setPalette = useSettings((state) => state.setPalette);
+  const isAutoPreset = isAuto(config.background.preset);
+  const effective = resolvePreset(config.background.preset, isDark);
+  const lightDefault = resolvePreset(AUTO_PRESET, false);
+  const darkDefault = resolvePreset(AUTO_PRESET, true);
+  const custom = config.background.kind !== "builtin";
+
+  /**
+   * The palette, resolved for display.
+   *
+   * `PaletteSection`'s three decisions are all derived, not stored: which mode
+   * is active, what the theme's own colours are (so Custom can be reseeded),
+   * what Adaptive actually derived, and whether enforcement had to move
+   * anything. Computing them here keeps the JSX below declarative.
+   */
+  const paletteMode = config.palette.mode;
+  const paletteBase = BASE_PALETTE[isDark ? "dark" : "light"];
+  const chosenPalette = fromPaletteHex(config.palette, paletteBase);
+  // What enforcement had to change, computed the same way the app applies it —
+  // so the warning describes the nudge that actually happened rather than a
+  // second opinion about it.
+  const customAdjusted = wasAdjusted(chosenPalette, enforceContrast(chosenPalette));
+  // Adaptive resolves from sampled swatches, which `App` owns and installs.
+  // Subscribing rather than reading once means this strip follows the sample:
+  // a plain read happens a render too early and then never again, so the
+  // swatches on screen were always the previous picture's. Before the first
+  // sample lands it falls back to the theme's own colours, which is what is
+  // genuinely on screen then.
+  const adaptive =
+    useSyncExternalStore(subscribeAppliedPalette, getAppliedPalette) ?? paletteBase;
+
+  /**
+   * The backgrounds retention is holding: the one in use plus the two before it.
+   *
+   * Reloaded whenever the active path changes, because that is exactly when the
+   * list changes — picking a new file adds one and retires one. Reading it once
+   * on mount would leave the strip stale the first time you chose something.
+   */
+  const [saved, setSaved] = useState<StoredBackground[]>([]);
+  useEffect(() => {
+    void ipc.listBackgrounds().then((list) => setSaved(list ?? []));
+  }, [config.background.path]);
+
+  /**
+   * Switches to a stored background.
+   *
+   * A separate command from picking a file, and deliberately so: re-picking a
+   * saved picture by copying it again would make a duplicate, push one of the
+   * other two out of the retention window, and fill the folder with copies of
+   * itself. This only points the config at the file that is already there.
+   */
+  const useSaved = async (path: string) => {
+    const updated = await ipc.useBackgroundFile(path);
+    if (updated) applyRemote(updated);
+  };
+
   const pickBackground = async (kind: "image" | "video") => {
     if (!isTauri) return;
     const filters =
@@ -3426,30 +3539,107 @@ function AppearanceSection() {
 
       <Section title="Background">
         <div className="px-1 py-2.5">
-          <div className="grid grid-cols-3 gap-2">
-            {BACKGROUND_PRESETS.map((preset) => (
-              <button
-                key={preset.id}
-                type="button"
-                title={preset.name}
-                onClick={() =>
-                  setBackground({ kind: "builtin", preset: preset.id, path: null })
-                }
-                className={cn(
-                  "group relative h-16 overflow-hidden rounded-row border transition",
-                  config.background.preset === preset.id &&
-                    config.background.kind === "builtin"
-                    ? "border-[var(--accent)] ring-2 ring-[var(--accent-soft)]"
-                    : "border-[var(--glass-border)] hover:border-[var(--ink-faint)]",
+          {/*
+            Automatic sits on its own, above the grid, because it is the default
+            and the only choice that follows the theme. It replaced a fixed
+            `porcelain` default that, under dark mode's 48% veil, painted a grey
+            that matched none of the swatches — the built-in background looked
+            like it had gone missing from the picker.
+          */}
+          <button
+            type="button"
+            onClick={() =>
+              setBackground({ kind: "builtin", preset: AUTO_PRESET, path: null })
+            }
+            className={cn(
+              "flex w-full items-center gap-3 rounded-row border p-2 text-left transition",
+              isAutoPreset && config.background.kind === "builtin"
+                ? "border-[var(--accent)] ring-2 ring-[var(--accent-soft)]"
+                : "border-[var(--glass-border)] hover:border-[var(--ink-faint)]",
+            )}
+          >
+            {/* Half light, half dark: the whole point of the choice in one
+                glance, because the swatch has to stand for two backgrounds. */}
+            <span
+              aria-hidden="true"
+              className="h-10 w-16 shrink-0 overflow-hidden rounded-control border border-[var(--glass-border)]"
+              style={{
+                background: `linear-gradient(105deg, ${lightDefault.swatch} 0 50%, ${darkDefault.swatch} 50% 100%)`,
+              }}
+            />
+            <span className="min-w-0 flex-1">
+              <span className="block text-[13px] text-soft">Automatic</span>
+              <span className="block text-[11.5px] text-faint">
+                {lightDefault.name} in light mode, {darkDefault.name} in dark
+              </span>
+            </span>
+            {isAutoPreset && (
+              <CheckIcon size={15} className="shrink-0 text-[var(--accent)]" />
+            )}
+          </button>
+
+          {/* Grouped by the theme each preset is authored for. Without this the
+              grid mixed near-whites in with near-blacks, so picking one meant
+              guessing which would survive the veil. */}
+          {(["light", "dark"] as const).map((tone) => (
+            <div key={tone} className="mt-3">
+              <p className="px-0.5 pb-1.5 text-[11px] font-semibold tracking-[0.08em] text-faint uppercase">
+                {tone === "light" ? "Light backgrounds" : "Dark backgrounds"}
+              </p>
+              <div className="grid grid-cols-3 gap-2">
+                {BACKGROUND_PRESETS.filter((preset) => preset.tone === tone).map(
+                  (preset) => {
+                    const chosen =
+                      config.background.kind === "builtin" &&
+                      config.background.preset === preset.id;
+                    // The tile that will actually paint under Automatic gets a
+                    // quieter mark, so "Automatic" and "which one is it using"
+                    // are both legible at once.
+                    const viaAuto =
+                      config.background.kind === "builtin" && isAutoPreset && effective.id === preset.id;
+                    return (
+                      <button
+                        key={preset.id}
+                        type="button"
+                        title={preset.name}
+                        onClick={() =>
+                          setBackground({
+                            kind: "builtin",
+                            preset: preset.id,
+                            path: null,
+                          })
+                        }
+                        className={cn(
+                          "group relative overflow-hidden rounded-row border text-left transition",
+                          chosen
+                            ? "border-[var(--accent)] ring-2 ring-[var(--accent-soft)]"
+                            : viaAuto
+                              ? "border-[var(--accent)]"
+                              : "border-[var(--glass-border)] hover:border-[var(--ink-faint)]",
+                        )}
+                      >
+                        <span
+                          aria-hidden="true"
+                          className="block h-14 w-full"
+                          style={{ background: preset.swatch }}
+                        />
+                        <span className="flex items-center gap-1 px-1.5 py-1">
+                          <span className="min-w-0 flex-1 truncate text-[11px] text-soft">
+                            {preset.name}
+                          </span>
+                          {viaAuto && !chosen && (
+                            <span className="shrink-0 text-[9.5px] text-[var(--accent)]">
+                              auto
+                            </span>
+                          )}
+                        </span>
+                      </button>
+                    );
+                  },
                 )}
-                style={{ background: preset.swatch }}
-              >
-                <span className="absolute inset-x-0 bottom-0 bg-black/25 py-0.5 text-[10.5px] text-white/90 opacity-0 transition group-hover:opacity-100">
-                  {preset.name}
-                </span>
-              </button>
-            ))}
-          </div>
+              </div>
+            </div>
+          ))}
 
           <div className="mt-2.5 flex flex-wrap gap-1.5">
             <button
@@ -3466,7 +3656,7 @@ function AppearanceSection() {
             >
               Choose video…
             </button>
-            {config.background.kind !== "builtin" && (
+            {custom && (
               <button
                 type="button"
                 onClick={() => setBackground({ kind: "builtin", path: null })}
@@ -3477,7 +3667,86 @@ function AppearanceSection() {
             )}
           </div>
 
-          {config.background.kind !== "builtin" && config.background.path && (
+          {/* The saved set, shown rather than merely kept. Retention holding
+              three files is only useful if you can get back to them: without
+              this strip, switching back to last week's picture meant finding
+              the original on disk again, which made the retention invisible. */}
+          {saved.length > 0 && (
+            <div className="mt-3">
+              <p className="px-0.5 pb-1.5 text-[11px] font-semibold tracking-[0.08em] text-faint uppercase">
+                Saved
+              </p>
+              <div className="grid grid-cols-3 gap-2">
+                {saved.map((item) => {
+                  const active = config.background.path === item.path;
+                  return (
+                    <button
+                      key={item.path}
+                      type="button"
+                      title={`${item.name} — ${item.kind}, ${readableSize(item.bytes)}`}
+                      onClick={() => void useSaved(item.path)}
+                      className={cn(
+                        "group overflow-hidden rounded-row border text-left transition",
+                        active
+                          ? "border-[var(--accent)] ring-2 ring-[var(--accent-soft)]"
+                          : "border-[var(--glass-border)] hover:border-[var(--ink-faint)]",
+                      )}
+                    >
+                      <span className="block h-14 w-full overflow-hidden bg-[var(--hover-bg)]">
+                        {/* A still frame for a video, the picture for an image.
+                            `muted` and no controls: this is a thumbnail, and a
+                            strip of three autoplaying videos would be a
+                            remarkable way to waste a battery. */}
+                        {item.kind === "video" ? (
+                          <video
+                            src={assetUrl(item.path)}
+                            muted
+                            playsInline
+                            preload="metadata"
+                            className="h-full w-full object-cover"
+                          />
+                        ) : (
+                          <img
+                            src={assetUrl(item.path)}
+                            alt=""
+                            className="h-full w-full object-cover"
+                          />
+                        )}
+                      </span>
+                      <span className="flex items-center gap-1 px-1.5 py-1">
+                        <span className="min-w-0 flex-1 truncate text-[11px] text-soft">
+                          {item.name}
+                        </span>
+                        {active && (
+                          <CheckIcon
+                            size={12}
+                            className="shrink-0 text-[var(--accent)]"
+                          />
+                        )}
+                      </span>
+                    </button>
+                  );
+                })}
+              </div>
+              <p className="mt-1.5 text-[11px] text-faint">
+                The background in use and the two before it. Choosing a new one
+                retires the oldest — click any of these to switch straight back.
+              </p>
+            </div>
+          )}
+
+          {/* Says out loud which preset is live. With `auto` selected the
+              highlight in the grid is only a hint, and "why is my window grey"
+              should be answerable without reading the swatches. */}
+          <p className="mt-2 text-[11.5px] text-faint">
+            {custom
+              ? `Using your own ${config.background.kind}. The presets still apply when you remove it.`
+              : isAutoPreset
+                ? `Automatic: ${effective.name} for the current ${isDark ? "dark" : "light"} theme.`
+                : `Using ${effective.name}, whatever the theme.`}
+          </p>
+
+          {custom && config.background.path && (
             <p
               className="mt-2 truncate font-mono text-[11px] text-faint select-all"
               title={config.background.path}
@@ -3525,6 +3794,237 @@ function AppearanceSection() {
             />
             <span className="w-7 text-right text-[12px] text-faint tabular-nums">
               {config.background.blur}
+            </span>
+          </div>
+        </Row>
+      </Section>
+
+      <Section
+        title="Palette"
+        description="How the app's colours are chosen. Layered on top of the theme above, so either can change without disturbing the other — and a photograph is never allowed to decide whether your text is readable."
+      >
+        <Row
+          label="Colours"
+          hint={
+            paletteMode === "default"
+              ? "The built-in theme, tuned per base."
+              : paletteMode === "custom"
+                ? "Three colours you pick; every other token is derived."
+                : "Taken from the background image."
+          }
+        >
+          <Segmented
+            value={paletteMode}
+            options={[
+              { id: "default", label: "Default" },
+              { id: "custom", label: "Custom" },
+              { id: "adaptive", label: "Adaptive" },
+            ]}
+            onChange={(mode) => void setPalette({ mode })}
+          />
+        </Row>
+
+        {paletteMode === "custom" && (
+          <>
+            <ColourField
+              label="Accent"
+              hint="Buttons, focus rings, links, the active tab."
+              value={config.palette.accent}
+              onChange={(accent) => void setPalette({ accent })}
+            />
+            <ColourField
+              label="Text"
+              hint="Body text. Faint and soft text are this at a lower opacity."
+              value={config.palette.ink}
+              onChange={(ink) => void setPalette({ ink })}
+            />
+            <ColourField
+              label="Surface"
+              hint="Panels, cards, and the window behind them."
+              value={config.palette.surface}
+              onChange={(surface) => void setPalette({ surface })}
+            />
+
+            {/* Enforcement is silent by design — a theme that quietly fixes
+                itself is better than one that refuses to save — but a user who
+                picked a colour and got a different one deserves to know why. */}
+            {customAdjusted ? (
+              <div className="mx-1 my-2 rounded-control border border-[var(--glass-border)] bg-[var(--hover-bg)] px-2.5 py-2">
+                <p className="text-[12px] text-soft">
+                  Nudged for legibility.
+                </p>
+                <p className="mt-0.5 text-[11.5px] leading-4 text-faint">
+                  Text and accent are automatically moved until they clear the
+                  contrast a theme needs against the surface — {">"}4.5:1 for
+                  text, {">"}3:1 for the accent. Your surface is never changed,
+                  because everything else is measured against it.
+                </p>
+              </div>
+            ) : (
+              <Row
+                label="Reseed"
+                hint="Start again from the colours the current theme ships."
+              >
+                <button
+                  type="button"
+                  onClick={() =>
+                    void setPalette({
+                      accent: toHex(paletteBase.accent),
+                      ink: toHex(paletteBase.ink),
+                      surface: toHex(paletteBase.surface),
+                    })
+                  }
+                  className="btn-ghost px-3 py-1 text-[12.5px]"
+                >
+                  Use theme colours
+                </button>
+              </Row>
+            )}
+          </>
+        )}
+
+        {paletteMode === "adaptive" && (
+          <>
+            <Row
+              label="Source"
+              hint={
+                config.background.kind === "builtin"
+                  ? "Adaptive needs a picture. Pick an image or video under Background and this derives its colours from that."
+                  : "Surfaces take the picture's hue, the accent is its most vivid colour, and text stays principled."
+              }
+            >
+              <span className="text-[12px] text-faint">
+                {config.background.kind === "builtin"
+                  ? "None — built-in preset"
+                  : "Your picture"}
+              </span>
+            </Row>
+            <div className="flex flex-wrap gap-2 px-1 py-2">
+              {[
+                { label: "Surface", colour: adaptive.surface },
+                { label: "Accent", colour: adaptive.accent },
+                { label: "Text", colour: adaptive.ink },
+              ].map((entry) => (
+                <div
+                  key={entry.label}
+                  className="flex items-center gap-2 rounded-control border border-[var(--glass-border)] py-1 pr-2.5 pl-1"
+                >
+                  <span
+                    aria-hidden="true"
+                    className="h-5 w-5 shrink-0 rounded-[5px] border border-[var(--glass-border)]"
+                    style={{ background: toHex(entry.colour) }}
+                  />
+                  <span className="text-[11.5px] text-soft">{entry.label}</span>
+                  <span className="font-mono text-[11px] text-faint">
+                    {toHex(entry.colour)}
+                  </span>
+                </div>
+              ))}
+            </div>
+            <p className="px-1 pb-2 text-[11.5px] leading-4 text-faint">
+              Text is the one thing not taken from the picture. A photograph can
+              be any colour in any arrangement, so sampling it for text would
+              hand every contrast decision to chance — a pale sky would become
+              pale text on a pale panel.
+            </p>
+          </>
+        )}
+      </Section>
+
+      <Section
+        title="Panels"
+        description="The dock holds the terminal, Runs, the chats list, the file list and the goal. Panels open over the chat at a fixed size, so the transcript never moves or reflows — only the chats list starts open, and everything else is one click or one keystroke away in the Panels menu."
+      >
+        <Row
+          label="Shortcut"
+          hint="Toggles the dock from anywhere, including from inside a shell — and closes every panel once it is showing."
+        >
+          <Kbd>Ctrl+`</Kbd>
+        </Row>
+        <Row
+          label="Rearranging"
+          hint="Drag a tab to reorder it, drag it onto another panel to move it there, drag it to a window edge to dock it against that edge — or drag it out of the window to give it its own. Escape cancels a drag in flight."
+        >
+          <span className="text-[12px] text-faint">Drag a tab</span>
+        </Row>
+      </Section>
+
+      <Section
+        title="Terminal"
+        description="A shell is read for hours, so its size is your call rather than ours. Changes apply to open terminals immediately — nothing restarts."
+      >
+        <Row label="Font">
+          <select
+            value={config.terminal.fontFamily}
+            onChange={(event) =>
+              void ipc
+                .setTerminalSettings({
+                  ...config.terminal,
+                  fontFamily: event.currentTarget.value,
+                })
+                .then((updated) => {
+                  if (updated) applyRemote(updated);
+                })
+            }
+            className={cn(fieldBase, "w-48 text-[13px]")}
+          >
+            {/* Only stacks that exist on the machine, in order of preference,
+                plus the generic fallback so a Linux box is not left with a
+                font name that resolves to nothing. */}
+            <option value="JetBrains Mono">JetBrains Mono (bundled)</option>
+            <option value="Cascadia Mono">Cascadia Mono</option>
+            <option value="Consolas">Consolas</option>
+            <option value="SF Mono">SF Mono</option>
+            <option value="Menlo">Menlo</option>
+            <option value="ui-monospace">System monospace</option>
+          </select>
+        </Row>
+        <Row label="Size" hint="In pixels. 13 is the default.">
+          <div className="flex items-center gap-2">
+            <input
+              type="range"
+              min={9}
+              max={22}
+              value={config.terminal.fontSize}
+              onChange={(event) =>
+                void ipc
+                  .setTerminalSettings({
+                    ...config.terminal,
+                    fontSize: Number(event.currentTarget.value),
+                  })
+                  .then((updated) => {
+                    if (updated) applyRemote(updated);
+                  })
+              }
+              className="w-40"
+            />
+            <span className="w-7 text-right text-[12px] text-faint tabular-nums">
+              {config.terminal.fontSize}
+            </span>
+          </div>
+        </Row>
+        <Row label="Line height" hint="A percentage. 130 leaves a shell room to breathe.">
+          <div className="flex items-center gap-2">
+            <input
+              type="range"
+              min={100}
+              max={200}
+              step={5}
+              value={config.terminal.lineHeight}
+              onChange={(event) =>
+                void ipc
+                  .setTerminalSettings({
+                    ...config.terminal,
+                    lineHeight: Number(event.currentTarget.value),
+                  })
+                  .then((updated) => {
+                    if (updated) applyRemote(updated);
+                  })
+              }
+              className="w-40"
+            />
+            <span className="w-9 text-right text-[12px] text-faint tabular-nums">
+              {config.terminal.lineHeight}%
             </span>
           </div>
         </Row>
@@ -3709,7 +4209,6 @@ function UsageSection() {
 export function SettingsPanel() {
   const open = useUi((state) => state.settingsOpen);
   const setOpen = useUi((state) => state.setSettingsOpen);
-  const sidebarOpen = useUi((state) => state.sidebarOpen);
   const category = useUi((state) => state.settingsCategory);
   const setCategory = useUi((state) => state.setSettingsCategory);
   const [info, setInfo] = useState<AppInfo | null>(null);
@@ -3757,23 +4256,20 @@ export function SettingsPanel() {
 
   return (
     <div
-      className={cn(
-        "absolute inset-0 z-40 flex justify-end p-3 pt-16",
-        // The chats popup sits at the left edge; leave its column alone so the
-        // two panes read as side by side rather than stacked.
-        sidebarOpen && "pl-[332px]",
-      )}
+      // No column is left for the chats list any more. That panel belongs to the
+      // dock now, and Settings sits in front of the dock exactly as it sits in
+      // front of the terminal: one surface over another, rather than two panes
+      // negotiating a shared width.
+      className="absolute inset-0 z-40 flex justify-end p-3 pt-16"
     >
       <button
         type="button"
         aria-label="Close settings"
         onClick={() => setOpen(false)}
-        // Not `inset-0`: the scrim must not dim or swallow clicks over the
-        // chats popup while that is open.
-        className={cn(
-          "absolute top-0 right-0 bottom-0 cursor-default bg-black/10",
-          sidebarOpen ? "left-[332px]" : "left-0",
-        )}
+        // Covers the whole region, the dock included. Nothing underneath a
+        // settings modal should be clickable — and since the chats list is a
+        // dock panel, there is no longer a case where it must stay reachable.
+        className="absolute inset-0 cursor-default bg-black/10"
       />
 
       <div className="animate-fade-up panel-strong relative flex h-full w-[720px] max-w-full flex-col overflow-hidden rounded-sheet">

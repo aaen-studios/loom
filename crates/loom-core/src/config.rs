@@ -10,6 +10,7 @@ use std::path::Path;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::Value;
 
+use crate::dock::{DockLayout, DockLayouts, TerminalConfig};
 use crate::fsutil::atomic_write;
 use crate::persona::Persona;
 use crate::provider::{MetadataSource, ModelSpec, ProviderConfig};
@@ -36,6 +37,10 @@ pub struct AppConfig {
     pub metadata_version: u32,
     pub theme: Theme,
     pub background: BackgroundConfig,
+    /// How the app's colours are chosen. Separate from `background`: a palette
+    /// is layered *on top* of whichever background is active, so they are two
+    /// independent choices and either can change without the other.
+    pub palette: PaletteConfig,
     pub sidebar_collapsed: bool,
     pub providers: BTreeMap<String, ProviderConfig>,
     pub personas: Vec<Persona>,
@@ -53,6 +58,16 @@ pub struct AppConfig {
     pub prompts: Vec<Prompt>,
     /// Folders the user added; chats point at one by path.
     pub workspaces: Vec<Workspace>,
+    /// Where the docked panels go, keyed by workspace folder.
+    ///
+    /// Here rather than in the frontend because a panel can be torn off into a
+    /// second window, and two webviews cannot share a `zustand` store. Rust
+    /// owns the arrangement and broadcasts it, so both windows agree.
+    pub dock: DockLayouts,
+    /// How a workspace's dock is arranged when that folder has no entry yet.
+    pub dock_default: DockLayout,
+    /// How the terminal renders.
+    pub terminal: TerminalConfig,
     /// Which service backs the web tools.
     pub search_provider: SearchProvider,
     #[serde(flatten)]
@@ -66,6 +81,7 @@ impl Default for AppConfig {
             metadata_version: METADATA_VERSION,
             theme: Theme::Light,
             background: BackgroundConfig::default(),
+            palette: PaletteConfig::default(),
             sidebar_collapsed: false,
             providers: BTreeMap::new(),
             personas: Vec::new(),
@@ -77,6 +93,9 @@ impl Default for AppConfig {
             voice: VoiceConfig::default(),
             prompts: Vec::new(),
             workspaces: Vec::new(),
+            dock: DockLayouts::new(),
+            dock_default: DockLayout::default(),
+            terminal: TerminalConfig::default(),
             search_provider: SearchProvider::default(),
             extra: serde_json::Map::new(),
         }
@@ -122,14 +141,65 @@ pub struct BackgroundConfig {
     pub blur: u8,
 }
 
+/// How the app's colours are chosen.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PaletteMode {
+    /// The stylesheet's own tokens, per theme.
+    #[default]
+    Default,
+    /// Three colours the user picked, with everything else derived from them.
+    Custom,
+    /// Sampled from the background image: its hue and mood for surfaces, a
+    /// vivid colour from it for the accent, and principled light-or-dark text
+    /// that does not depend on what the picture happens to contain.
+    Adaptive,
+}
+
+/// The custom palette: three colours, and nothing else.
+///
+/// Stored as hex strings rather than structured colours because that is what
+/// `<input type="color">` round-trips and what the UI validates, so there is no
+/// conversion layer to disagree with the picker. An unparseable value falls back
+/// per channel on the frontend rather than failing the whole palette.
+///
+/// Every other token — `--ink-faint`, `--hover-bg`, `--glass-border`, the
+/// filled-button pair — is *derived* from these three, so this cannot describe a
+/// half-applied theme.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct PaletteConfig {
+    pub mode: PaletteMode,
+    /// Hex, e.g. `#8ea2ff`.
+    pub accent: String,
+    pub ink: String,
+    pub surface: String,
+}
+
+impl Default for PaletteConfig {
+    fn default() -> Self {
+        Self {
+            mode: PaletteMode::Default,
+            // The defaults match the dark tokens the stylesheet ships, so
+            // switching to Custom before touching anything looks like the theme
+            // you were already in rather than a jarring new one.
+            accent: "#8ea2ff".to_string(),
+            ink: "#f2f5fa".to_string(),
+            surface: "#12151f".to_string(),
+        }
+    }
+}
+
 impl Default for BackgroundConfig {
     fn default() -> Self {
         Self {
             kind: BackgroundKind::Builtin,
-            // Porcelain: a cool near-white, painted in CSS. Chosen as the
-            // default because it is the quietest of the set, and because a
-            // light surface flatters the app's dark ink and glass equally.
-            preset: "porcelain".to_string(),
+            // `auto`: the UI resolves it to Porcelain in light mode and
+            // Graphite in dark. A fixed preset cannot be the default, because
+            // dark mode veils the background by 48% — a near-white preset under
+            // that veil is grey mud that matches no swatch in the picker, which
+            // is exactly the bug this replaced.
+            preset: "auto".to_string(),
             path: None,
             dim: 0,
             blur: 0,
@@ -266,8 +336,8 @@ impl<'de> Deserialize<'de> for AuxModelRef {
                         }
                     }
                 }
-                let model_id = model_id
-                    .ok_or_else(|| serde::de::Error::missing_field("modelId"))?;
+                let model_id =
+                    model_id.ok_or_else(|| serde::de::Error::missing_field("modelId"))?;
                 Ok(AuxModelRef {
                     provider_id: provider_id.unwrap_or_default(),
                     model_id,
@@ -350,7 +420,10 @@ pub fn resolve_aux_model(config: &AppConfig, reference: &AuxModelRef) -> Option<
             .get(provider_id)
             .is_some_and(|provider| provider.models.contains_key(model_id))
         {
-            return Some(AuxResolution::Explicit(ModelRef::new(provider_id, model_id)));
+            return Some(AuxResolution::Explicit(ModelRef::new(
+                provider_id,
+                model_id,
+            )));
         }
         // A named provider that no longer serves the model falls through: the
         // model clearly still exists, so preferring it beats failing outright.
@@ -464,8 +537,8 @@ pub enum PermissionMode {
     AutoAll,
     /// Everything Auto all runs, plus the harness tools that let the model
     /// edit Loom itself (personas, MCP servers, skills, prompts, providers,
-    /// and settings). The five deletes still ask. Deliberately per chat only:
-    /// it is never accepted as the global default.
+    /// and settings). Nothing asks, deletes included. Deliberately per chat
+    /// only: it is never accepted as the global default.
     Atelier,
 }
 
@@ -839,6 +912,17 @@ pub struct InterfaceConfig {
     pub sidebar_width: u32,
     /// Whether the sidebar splits chats by workspace or lists them flat.
     pub sidebar_grouping: SidebarGrouping,
+    /// Workspace groups the user has collapsed, by folder path.
+    ///
+    /// Persisted rather than held for the visit: collapsing the four folders
+    /// you are not working in is how the list is made navigable, and having to
+    /// redo it after every restart would make the fold pointless. The empty
+    /// string is the "No workspace" group, which is a group like any other.
+    ///
+    /// Keys for folders that no longer exist are left in place rather than
+    /// pruned: a few strings cost nothing, and re-adding a folder restores the
+    /// state it had.
+    pub sidebar_collapsed_groups: Vec<String>,
     /// Order of chats in the sidebar list.
     pub sidebar_sort: SidebarSort,
     /// Hand-placed order of the workspace groups in the chats popup, by folder
@@ -876,6 +960,7 @@ impl Default for InterfaceConfig {
             sidebar_pinned: false,
             sidebar_width: 264,
             sidebar_grouping: SidebarGrouping::Workspace,
+            sidebar_collapsed_groups: Vec::new(),
             sidebar_sort: SidebarSort::Recent,
             sidebar_workspace_order: Vec::new(),
             compact: false,
@@ -929,7 +1014,10 @@ mod tests {
         let config = load_from(&temp_config_path(&dir)).unwrap();
         assert_eq!(config, AppConfig::default());
         assert_eq!(config.theme, Theme::Light);
-        assert_eq!(config.background.preset, "porcelain");
+        // `auto`, not a literal preset: the default has to resolve per theme,
+        // because dark mode veils the background and a fixed near-white preset
+        // under that veil is grey mud matching no swatch in the picker.
+        assert_eq!(config.background.preset, "auto");
         assert_eq!(config.chat.permission_mode, PermissionMode::Ask);
         assert_eq!(config.chat.agent_mode, AgentMode::Build);
     }
@@ -956,6 +1044,20 @@ mod tests {
             name: "Loom".into(),
             added_at: 42,
         });
+        // A folded group is a preference, so it has to survive the round trip
+        // like any other. The empty string is the "No workspace" group, which
+        // is the entry most likely to be dropped by a serialiser that treats
+        // empty strings as absent.
+        config.interface.sidebar_collapsed_groups = vec!["C:/work/loom".into(), String::new()];
+        // A per-folder dock arrangement, with a zone open and a shell chosen:
+        // the two things about a layout that are easiest to lose in a
+        // round trip, since one is a nested list and the other is an Option.
+        config.terminal.font_size = 15;
+        config.dock_default.zones[1].open = true;
+        let mut layout = DockLayout::default();
+        layout.zones[2].size = 320;
+        layout.shell = Some("git-bash".into());
+        config.dock.insert("C:/work/loom".into(), layout);
 
         let mut provider = ProviderConfig {
             name: "Local".into(),
@@ -1008,6 +1110,9 @@ mod tests {
         assert!(raw.contains("agentMode"));
         assert!(raw.contains("searchProvider"));
         assert!(raw.contains("workspaces"));
+        // The dock's own names, which the frontend reads directly.
+        assert!(raw.contains("dockDefault"));
+        assert!(raw.contains("fontFamily"));
     }
 
     #[test]
@@ -1339,8 +1444,7 @@ mod tests {
 
     #[test]
     fn aux_model_refs_accept_both_shapes() {
-        let bare: AuxModelRef =
-            serde_json::from_str(r#""text-embedding-3-small""#).unwrap();
+        let bare: AuxModelRef = serde_json::from_str(r#""text-embedding-3-small""#).unwrap();
         assert_eq!(bare, AuxModelRef::bare("text-embedding-3-small"));
         assert!(!bare.is_qualified());
 
@@ -1369,7 +1473,9 @@ mod tests {
                 ..Default::default()
             };
             for model in *models {
-                provider.models.insert((*model).to_string(), ModelSpec::default());
+                provider
+                    .models
+                    .insert((*model).to_string(), ModelSpec::default());
             }
             config.providers.insert((*id).to_string(), provider);
         }
@@ -1403,7 +1509,10 @@ mod tests {
         assert_eq!(resolved.model(), &ModelRef::new("go-2", "embed"));
         assert!(resolved.is_ambiguous());
         // The losers are named so the UI can say which provider is not in use.
-        assert_eq!(resolved.others().to_vec(), vec![ModelRef::new("go", "embed")]);
+        assert_eq!(
+            resolved.others().to_vec(),
+            vec![ModelRef::new("go", "embed")]
+        );
     }
 
     #[test]

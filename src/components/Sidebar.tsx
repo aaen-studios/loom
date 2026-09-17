@@ -8,8 +8,10 @@ import { isTauri } from "../lib/tauri";
 import { activityLabel } from "../lib/sessionStatus";
 import {
   arrangeGroups,
+  isGroupCollapsed,
   moveInList,
   orderChats,
+  toggleCollapsedGroup,
   visibleRows,
 } from "../lib/sidebarOrder";
 import { sortSessions, workspaceLabel, type WorkspaceGroup } from "../lib/workspaces";
@@ -20,11 +22,10 @@ import type { InterfaceConfig, Session, SidebarGrouping, SidebarSort } from "../
 import {
   CheckIcon,
   ChevronDownIcon,
-  CloseIcon,
   DownloadIcon,
   FolderIcon,
+  GripIcon,
   LoomMark,
-  PinIcon,
   PlusIcon,
   SettingsIcon,
   SortIcon,
@@ -44,10 +45,33 @@ const SORT_OPTIONS: { id: SidebarSort; label: string }[] = [
 ];
 
 /**
- * Sessions live in a card, not a permanent panel: the canvas stays full width
- * and centered, and this floats over it when summoned from the titlebar.
- * Pinning only stops it retracting — same card, same place, until you unpin
- * it or close it.
+ * A model id as a row label: the last path segment, without a routing suffix.
+ *
+ * The stored form is `deepseek/deepseek-v4.1-flash:free`, which is three times
+ * too long for a 300px column and made every row's second line the widest thing
+ * in the panel. The provider prefix is redundant — the chat's own provider is in
+ * its header — and `:free` / `:nitro` describe billing rather than capability.
+ * What remains is the part that actually distinguishes one chat's model from
+ * another's.
+ */
+function shortModel(modelId: string | null): string | null {
+  if (!modelId) return null;
+  const last = modelId.split("/").pop() ?? modelId;
+  return last.replace(/:(free|nitro|beta|preview|extended)$/i, "") || null;
+}
+
+/**
+ * The chats list, as the dock's left panel — the app's navigation column.
+ *
+ * It used to be a card floating over the transcript, and that is the reason so
+ * much of this file is machinery for a list: an `open` flag to summon it, a pin
+ * to stop it retracting, a click-away scrim, a check against the dock so the two
+ * copies never rendered at once, and a `setOpen(false)` on every row click so
+ * choosing a chat dismissed the thing you were choosing from. All of that
+ * existed to manage an overlay. It is one panel in the dock now, so the zone
+ * owns visibility, the zone's own header owns closing it, and selecting a chat
+ * leaves the list where it is — which is what you want when the list is a
+ * column beside the chat rather than a card on top of it.
  *
  * Grouped mode is ordered by hand. A workspace you drag keeps its place, a
  * chat you drag keeps its, and anything you have never dragged still sorts
@@ -55,10 +79,7 @@ const SORT_OPTIONS: { id: SidebarSort; label: string }[] = [
  * arranged last week. The rules themselves live in `lib/sidebarOrder.ts`; this
  * file is only the gesture and the rendering.
  */
-export function SidebarPopup() {
-  const open = useUi((state) => state.sidebarOpen);
-  const setOpen = useUi((state) => state.setSidebarOpen);
-  const settingsOpen = useUi((state) => state.settingsOpen);
+export function Sidebar() {
   const setSettingsOpen = useUi((state) => state.setSettingsOpen);
   const sessions = useChat((state) => state.sessions);
   const activeId = useChat((state) => state.activeId);
@@ -68,7 +89,13 @@ export function SidebarPopup() {
   const applySessionOrder = useChat((state) => state.applySessionOrder);
 
   const [query, setQuery] = useState("");
-  const [collapsed, setCollapsed] = useState<Record<string, boolean>>({});
+  /**
+   * Groups opened for this visit only, because the chat you are in lives in
+   * one of them. Deliberately *not* merged into the saved list: opening the
+   * list should not rewrite a fold you chose, or the choice would never
+   * outlive the next glance at the sidebar.
+   */
+  const [revealed, setRevealed] = useState<string[]>([]);
   /** Groups showing every row rather than the first handful. */
   const [expandedGroups, setExpandedGroups] = useState<Record<string, boolean>>({});
   const [groupDrag, setGroupDrag] = useState<string | null>(null);
@@ -77,7 +104,6 @@ export function SidebarPopup() {
   const [chatOver, setChatOver] = useState<string | null>(null);
   const config = useSettings((state) => state.config);
   const applyRemote = useSettings((state) => state.applyRemote);
-  const pinned = config.interface.sidebarPinned;
   const asideRef = useRef<HTMLElement>(null);
   const arrangeRef = useRef<HTMLDivElement>(null);
   const { open: arrangeOpen, setOpen: setArrangeOpen } = useMenu(
@@ -90,44 +116,16 @@ export function SidebarPopup() {
     if (updated) applyRemote(updated);
   };
 
-  /** Pinning keeps the popup open until it is closed explicitly. */
-  const togglePin = async () => {
-    await saveInterface({ sidebarPinned: !pinned });
-  };
-
-  // Caps and in-flight drags belong to one visit. Reopening the popup shows
-  // every group at its usual size again, and never in a half-dragged state.
+  // The list must show where you are, even if that group was collapsed in a
+  // previous visit — and, now that the fold persists in config, even if it was
+  // collapsed in a previous *run*. Runs on mount and whenever the chat changes,
+  // because a panel is always present rather than opened.
   useEffect(() => {
-    if (open) return;
-    setExpandedGroups({});
-    setGroupDrag(null);
-    setGroupOver(null);
-    setChatDrag(null);
-    setChatOver(null);
-  }, [open]);
-
-  useEffect(() => {
-    if (!open || settingsOpen) return;
-    // Settings owns Escape while it is up, or one keypress would dismiss the
-    // panel and the chats behind it at once.
-    const onKey = (event: KeyboardEvent) => {
-      if (event.key === "Escape") setOpen(false);
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [open, settingsOpen, setOpen]);
-
-  // Opening the list must show where you are, even if that group was collapsed
-  // in a previous visit.
-  useEffect(() => {
-    if (!open) return;
     const group = sessions.find((session) => session.id === activeId)?.workdir ?? "";
-    setCollapsed((current) =>
-      current[group] ? { ...current, [group]: false } : current,
+    setRevealed((current) =>
+      current.includes(group) ? current : [...current, group],
     );
-  }, [open, activeId, sessions]);
-
-  if (!open) return null;
+  }, [activeId, sessions]);
 
   const needle = query.trim().toLowerCase();
   const visible = needle
@@ -207,14 +205,17 @@ export function SidebarPopup() {
     if (isTauri) void ipc.reorderSessions(next);
   };
 
+  // Selecting a chat no longer dismisses anything. There was a `setOpen(false)`
+  // here, which made sense while this was a popup floating over the transcript:
+  // picking a row meant you wanted the chat back. A panel is a column beside the
+  // chat, so closing it on every click would make the list unusable — you could
+  // never open a second chat without re-summoning it.
   const startChat = (workdir: string | null) => {
     void newSession(null, workdir);
-    if (!pinned) setOpen(false);
   };
 
   const openRow = (id: string) => {
     void openSession(id);
-    if (!pinned) setOpen(false);
   };
 
   const exportSession = async (id: string) => {
@@ -232,45 +233,43 @@ export function SidebarPopup() {
     });
     if (!path) return;
     await ipc.exportSession(id, path);
-    if (!pinned) setOpen(false);
   };
 
   return (
-    // The card floats over the transcript in both states; only the scrim
-    // depends on pinning. The layer itself ignores the pointer so the chat
-    // behind stays interactive while pinned.
-    <div
-      className={cn(
-        "pointer-events-none absolute inset-0 animate-fade-in",
-        // Above the settings panel while it is open: the two sit side by side,
-        // so the chats stay usable rather than dimmed underneath.
-        settingsOpen ? "z-50" : "z-30",
-      )}
-    >
-      {/* Pinned means no click-away: only unpin or close retires the card.
-          Settings is the other case — it opens beside the list, so a scrim
-          would only stand between the two. */}
-      {!pinned && !settingsOpen && (
-        <button
-          type="button"
-          aria-label="Close chats"
-          onClick={() => setOpen(false)}
-          className="pointer-events-auto absolute inset-0 cursor-default"
-        />
-      )}
-
+    // No surface of its own. The zone it lives in is already a `panel`, and
+    // drawing a second `panel-strong` inside it put two glass edges a few pixels
+    // apart — a seam around the list, plus 8px of a 300px column spent on
+    // padding that belonged to the zone. The zone owns the surface; this is
+    // only its contents.
+    <div className="flex h-full min-h-0 flex-col">
       <aside
         ref={asideRef}
-        className="panel-strong pointer-events-auto animate-fade-up absolute bottom-3 left-3 top-16 flex w-[320px] flex-col overflow-hidden rounded-sheet"
+        className="flex h-full w-full flex-col overflow-hidden"
       >
-        <div className="flex items-center gap-2 px-3.5 pt-3 pb-1">
-          <LoomMark size={15} className="text-[var(--accent)]" />
-          <span className="text-[13px] font-semibold tracking-[0.01em]">Chats</span>
-          {sessions.length > 0 && (
-            <span className="text-[11px] text-faint">{sessions.length}</span>
-          )}
+        {/* No title row. The dock's zone header already says "Chats" a few
+            pixels above this, so the panel used to print the same word twice —
+            with 44px of a navigation column spent on a heading that was already
+            on screen. This panel starts with its controls instead. */}
+        <div className="flex items-center gap-1.5 px-2.5 pt-2.5">
+          <div className="min-w-0 flex-1">
+            <SearchField
+              id="sidebar-search"
+              value={query}
+              onChange={setQuery}
+              placeholder="Search chats…"
+              onKeyDown={(event) => {
+                if (event.key === "Escape" && query) {
+                  event.stopPropagation();
+                  setQuery("");
+                }
+              }}
+            />
+          </div>
 
-          <div ref={arrangeRef} className="relative ml-auto flex items-center gap-0.5">
+          <div ref={arrangeRef} className="relative shrink-0">
+            {/* No Pin and no Close. Pin meant "do not dismiss on click-away",
+                which cannot arise in a column; Close meant "hide the overlay",
+                and the zone's own collapse is that affordance now. */}
             <IconButton
               label="Arrange chats"
               aria-expanded={arrangeOpen}
@@ -279,86 +278,86 @@ export function SidebarPopup() {
             >
               <SortIcon size={15} />
             </IconButton>
-            <IconButton
-              label={pinned ? "Unpin chats" : "Pin chats open"}
-              active={pinned}
-              onClick={() => void togglePin()}
-            >
-              <PinIcon size={15} />
-            </IconButton>
-            <IconButton label="Close" onClick={() => setOpen(false)}>
-              <CloseIcon size={15} />
-            </IconButton>
 
             {arrangeOpen && (
-              <div className="panel-strong absolute top-full right-0 z-40 mt-2 w-[200px] rounded-sheet p-1.5">
-                <p className="px-2 pt-1 pb-0.5 text-[11px] font-semibold tracking-[0.08em] text-faint uppercase">
-                  Group
-                </p>
-                {GROUPING_OPTIONS.map((option) => (
-                  <ArrangeRow
-                    key={option.id}
-                    label={option.label}
-                    active={config.interface.sidebarGrouping === option.id}
-                    onClick={() => void saveInterface({ sidebarGrouping: option.id })}
-                  />
-                ))}
-
-                <p className="px-2 pt-2 pb-0.5 text-[11px] font-semibold tracking-[0.08em] text-faint uppercase">
-                  Sort
-                </p>
-                {grouped ? (
-                  // Offering these here would be a lie: in grouped mode the
-                  // order is whatever you dragged it to.
-                  <p className="px-2 pb-1 text-[11.5px] leading-4 text-faint">
-                    Grouped order is by hand — drag a workspace or a chat to
-                    move it. Switch to Flat list for these.
+              <>
+                {/* A click-catcher, so clicking anywhere else closes the menu.
+                    Without it the only way out of an open arrange menu was to
+                    press its own button again, which meant reaching for a
+                    control in order to dismiss one. */}
+                <button
+                  type="button"
+                  aria-label="Close arrange menu"
+                  onClick={() => setArrangeOpen(false)}
+                  className="fixed inset-0 z-30 cursor-default"
+                />
+                <div className="panel-strong absolute top-full right-0 z-40 mt-2 w-[210px] rounded-sheet p-1.5">
+                  <p className="px-2 pt-1 pb-0.5 text-[11px] font-semibold tracking-[0.08em] text-faint uppercase">
+                    Group
                   </p>
-                ) : (
-                  SORT_OPTIONS.map((option) => (
+                  {GROUPING_OPTIONS.map((option) => (
                     <ArrangeRow
                       key={option.id}
                       label={option.label}
-                      active={config.interface.sidebarSort === option.id}
-                      onClick={() => void saveInterface({ sidebarSort: option.id })}
+                      active={config.interface.sidebarGrouping === option.id}
+                      onClick={() => void saveInterface({ sidebarGrouping: option.id })}
                     />
-                  ))
-                )}
-              </div>
+                  ))}
+
+                  <p className="px-2 pt-2 pb-0.5 text-[11px] font-semibold tracking-[0.08em] text-faint uppercase">
+                    Sort
+                  </p>
+                  {grouped ? (
+                    // Offering these here would be a lie: in grouped mode the
+                    // order is whatever you dragged it to.
+                    <p className="px-2 pb-1 text-[11.5px] leading-4 text-faint">
+                      Grouped order is by hand — drag a workspace or a chat to
+                      move it. Switch to Flat list for these.
+                    </p>
+                  ) : (
+                    SORT_OPTIONS.map((option) => (
+                      <ArrangeRow
+                        key={option.id}
+                        label={option.label}
+                        active={config.interface.sidebarSort === option.id}
+                        onClick={() => void saveInterface({ sidebarSort: option.id })}
+                      />
+                    ))
+                  )}
+                </div>
+              </>
             )}
           </div>
         </div>
 
-        <div className="px-2.5 pt-2">
+        {/* A quiet outlined button, not the inverted `btn-primary` it was.
+            That version filled the width with `--control-bg` — a near-solid
+            near-black block at the top of a translucent column, which made the
+            single most routine action in the app the loudest thing on screen
+            and outweighed the chat titles it sits above. The accent plus is
+            what carries the "this creates something" meaning now. */}
+        <div className="px-2.5 pt-1.5">
           <button
             type="button"
             onClick={() => startChat(activeWorkdir)}
-            title={activeWorkdir ? "New chat in the current workspace" : "New chat"}
-            className="btn-primary w-full px-3 py-2 text-[13px]"
+            title={
+              activeWorkdir
+                ? `New chat in ${activeLabel ?? activeWorkdir}`
+                : "New chat"
+            }
+            className="hover-surface flex w-full items-center gap-2 rounded-row border border-[var(--glass-border)] px-2.5 py-1.5 text-[12.5px] text-soft"
           >
-            <PlusIcon size={15} />
-            New chat
+            <PlusIcon size={14} className="shrink-0 text-[var(--accent)]" />
+            <span className="shrink-0">New chat</span>
+            {/* Which folder the chat lands in, said once rather than in a
+                tooltip. It is the difference between a chat that can use tools
+                and one that cannot, so it belongs on the button. */}
             {activeLabel && (
-              <span className="min-w-0 truncate text-[11.5px] font-normal opacity-75">
+              <span className="min-w-0 flex-1 truncate text-right text-[11px] text-faint">
                 {activeLabel}
               </span>
             )}
           </button>
-        </div>
-
-        <div className="px-2.5 pt-2">
-          <SearchField
-            id="sidebar-search"
-            value={query}
-            onChange={setQuery}
-            placeholder="Search chats…"
-            onKeyDown={(event) => {
-              if (event.key === "Escape" && query) {
-                event.stopPropagation();
-                setQuery("");
-              }
-            }}
-          />
         </div>
 
         <div
@@ -406,7 +405,13 @@ export function SidebarPopup() {
             ))}
 
           {groups.map((group) => {
-            const isCollapsed = !needle && collapsed[group.key];
+            const isCollapsed =
+              !needle &&
+              isGroupCollapsed(
+                config.interface.sidebarCollapsedGroups,
+                revealed,
+                group.key,
+              );
             const ordered = orderChats(group.sessions);
             // A search shows everything: the cap is for browsing, not looking
             // for a specific chat.
@@ -423,6 +428,41 @@ export function SidebarPopup() {
             return (
               <div
                 key={group.key || "__none"}
+                // The drop target is the *whole group*, not just its header.
+                //
+                // This is what was actually broken. The header is a ~24px
+                // strip at the top of the group, and it carried the only
+                // `dragover`/`drop` handlers — so a drag that started fine and
+                // looked right did nothing at all unless the pointer happened
+                // to be released on that one thin line. Releasing anywhere over
+                // the group's own chats, which is where you naturally let go,
+                // silently cancelled the drag. A gesture that appears to work
+                // and then discards your input reads as "dragging is broken",
+                // which is exactly the report this fixes.
+                //
+                // A group drag and a chat drag are mutually exclusive, because
+                // `groupDrag` is only ever set for the former, so the chat
+                // rows' own handlers below still win for a chat.
+                onDragOver={(event) => {
+                  if (!canDragGroup || !groupDrag) return;
+                  event.preventDefault();
+                  setGroupOver(group.key);
+                }}
+                onDragLeave={(event) => {
+                  // Containment, not a bare clear: dragging across a group's
+                  // own children fires `dragleave` at every element boundary,
+                  // so clearing unconditionally made the drop indicator blink
+                  // on and off all the way down the list.
+                  if (event.currentTarget.contains(event.relatedTarget as Node | null)) {
+                    return;
+                  }
+                  setGroupOver((current) => (current === group.key ? null : current));
+                }}
+                onDrop={(event) => {
+                  if (!canDragGroup || !groupDrag) return;
+                  event.preventDefault();
+                  dropGroup(group.key);
+                }}
                 className={cn(
                   isGroupTarget && "rounded-row ring-1 ring-[var(--accent)]",
                   groupDrag === group.key && "opacity-40",
@@ -440,38 +480,57 @@ export function SidebarPopup() {
                       setGroupDrag(null);
                       setGroupOver(null);
                     }}
-                    onDragOver={(event) => {
-                      if (!canDragGroup || !groupDrag) return;
-                      event.preventDefault();
-                      setGroupOver(group.key);
-                    }}
-                    onDragLeave={() =>
-                      setGroupOver((current) => (current === group.key ? null : current))
-                    }
-                    onDrop={(event) => {
-                      if (!canDragGroup) return;
-                      event.preventDefault();
-                      dropGroup(group.key);
-                    }}
                     className={cn(
-                      "sticky top-0 z-10 -mx-1.5 flex items-center gap-1 bg-[var(--panel-bg-strong)] px-3 pt-2.5 pb-1",
+                      // A hairline under the sticky band, so a header that has
+                      // rows scrolling beneath it looks deliberate rather than
+                      // like the list is bleeding through.
+                      "group/head sticky top-0 z-10 -mx-1.5 flex select-none items-center gap-1 border-b border-[var(--glass-border)] bg-[var(--panel-bg-strong)] px-3 pt-2.5 pb-1.5",
                       canDragGroup && "cursor-grab",
                     )}
+                    title={
+                      group.workdir
+                        ? `${group.workdir}${canDragGroup ? " — drag to reorder" : ""}`
+                        : "Chats with no workspace"
+                    }
                   >
+                    {/* The handle. It has to be in the flow rather than
+                        absolute: a header's own padding is only 12px, so an
+                        overlay would sit on top of the chevron. The width is
+                        reserved whether or not it is hovered, so revealing it
+                        cannot shift the title sideways. */}
+                    {canDragGroup && (
+                      <span
+                        aria-hidden="true"
+                        className="grid w-3 shrink-0 place-items-center text-faint opacity-0 transition-opacity group-hover/head:opacity-100"
+                      >
+                        <GripIcon size={12} />
+                      </span>
+                    )}
                     <button
                       type="button"
-                      title={
-                        group.workdir
-                          ? `${group.workdir}${canDragGroup ? " — drag to reorder" : ""}`
-                          : "Chats with no workspace"
-                      }
-                      onClick={() =>
-                        setCollapsed((current) => ({
-                          ...current,
-                          [group.key]: !current[group.key],
-                        }))
-                      }
-                      className="flex min-w-0 flex-1 items-center gap-1.5 text-left"
+                      aria-expanded={!isCollapsed}
+                      onClick={() => {
+                        // Toggling clears this group's reveal as well, so the
+                        // click is what decides from here on rather than the
+                        // auto-reveal fighting it back open.
+                        setRevealed((current) =>
+                          current.filter((entry) => entry !== group.key),
+                        );
+                        void saveInterface({
+                          sidebarCollapsedGroups: toggleCollapsedGroup(
+                            config.interface.sidebarCollapsedGroups,
+                            group.key,
+                          ),
+                        });
+                      }}
+                      // `grab`, not `pointer`: this element covers the whole
+                      // header, so the cursor here is the only thing that says
+                      // the row can be dragged at all. It is also the collapse
+                      // toggle, but a click still works.
+                      className={cn(
+                        "flex min-w-0 flex-1 items-center gap-1.5 text-left",
+                        canDragGroup ? "cursor-grab" : "cursor-pointer",
+                      )}
                     >
                       <ChevronDownIcon
                         size={12}
@@ -556,8 +615,9 @@ export function SidebarPopup() {
                             [group.key]: true,
                           }))
                         }
-                        className="hover-surface mx-1 my-0.5 rounded-row px-2.5 py-1.5 text-[12px] text-faint"
+                        className="hover-surface mx-1 my-0.5 flex items-center gap-1.5 rounded-row px-2.5 py-1.5 text-[12px] text-faint"
                       >
+                        <ChevronDownIcon size={12} className="shrink-0" />
                         Show {hidden} more
                       </button>
                     )}
@@ -571,8 +631,9 @@ export function SidebarPopup() {
                             [group.key]: false,
                           }))
                         }
-                        className="hover-surface mx-1 my-0.5 rounded-row px-2.5 py-1.5 text-[12px] text-faint"
+                        className="hover-surface mx-1 my-0.5 flex items-center gap-1.5 rounded-row px-2.5 py-1.5 text-[12px] text-faint"
                       >
+                        <ChevronDownIcon size={12} className="shrink-0 -rotate-180" />
                         Show less
                       </button>
                     )}
@@ -667,7 +728,7 @@ function SessionRow({
   // row says so until you open it.
   const waiting = question ? "Question" : permission ? "Approval" : null;
   const failed = !busy && Boolean(error);
-  const model = session.modelId ? session.modelId.split("/").pop() : null;
+  const model = shortModel(session.modelId);
   const title = [
     failed ? error : activity ? `${activity}${model ? ` · ${model}` : ""}` : null,
     draggable ? "Drag to reorder" : null,
@@ -679,7 +740,10 @@ function SessionRow({
   return (
     <div
       className={cn(
-        "group relative flex items-center rounded-row",
+        // `select-none`: without it, a drag that crosses the title starts a
+        // text selection instead, and the two gestures fight over the same
+        // mousedown. The rename input below re-enables selection for itself.
+        "group relative flex select-none items-center rounded-row",
         dragging
           ? "opacity-40"
           : active
@@ -702,7 +766,12 @@ function SessionRow({
         event.preventDefault();
         onDragOver();
       }}
-      onDragLeave={onDragLeave}
+      onDragLeave={(event) => {
+        // Same containment rule as a group's: a row is full of spans, and each
+        // boundary crossing would otherwise clear the indicator.
+        if (event.currentTarget.contains(event.relatedTarget as Node | null)) return;
+        onDragLeave();
+      }}
       onDrop={(event) => {
         if (!draggable) return;
         event.preventDefault();
@@ -727,7 +796,7 @@ function SessionRow({
             if (event.key === "Enter") void commitRename();
             if (event.key === "Escape") setRenaming(false);
           }}
-          className="m-1 min-w-0 flex-1 rounded-control border border-[var(--accent)] bg-transparent px-2 py-1 text-[13px]"
+          className="m-1 min-w-0 flex-1 select-text rounded-control border border-[var(--accent)] bg-transparent px-2 py-1 text-[13px]"
         />
       ) : (
         <button
@@ -738,7 +807,7 @@ function SessionRow({
             setDraft(session.title);
           }}
           title={title}
-          className="flex min-w-0 flex-1 items-center gap-2 px-2.5 py-2 text-left"
+          className="flex min-w-0 flex-1 cursor-pointer items-center gap-2 px-2.5 py-2 text-left"
         >
           <span className="min-w-0 flex-1">
             <span className="flex items-center gap-1.5">

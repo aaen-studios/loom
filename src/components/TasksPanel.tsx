@@ -5,9 +5,8 @@ import { isTauri } from "../lib/tauri";
 import { useChat } from "../stores/chat";
 import { useSettings } from "../stores/settings";
 import { activeCommandCount, activeTaskCount, useTasks } from "../stores/tasks";
-import { useUi } from "../stores/ui";
 import type { CommandRun, CommandStatus, Job, Message, Task, TaskStatus } from "../types";
-import { CloseIcon, PlayIcon, PlusIcon, StopIcon, TrashIcon } from "./icons";
+import { PlayIcon, PlusIcon, StopIcon, TrashIcon } from "./icons";
 import { EmptyState, Row, Section, Toggle, inputClass } from "./ui";
 
 /** A dot whose colour carries the run's state. */
@@ -98,9 +97,17 @@ function when(ms: number | null): string {
       });
 }
 
+/**
+ * Runs: detached runs, tracked shell commands, and scheduled jobs.
+ *
+ * A dock panel rather than an overlay. It used to float in from the right,
+ * which made it a third place a surface could appear (a popup, a full-window
+ * panel, and the dock) and gave it no way to sit beside the thing it
+ * describes. In the dock it can be watched while the chat keeps running, moved
+ * to another edge, or torn off onto a second monitor — none of which an overlay
+ * can do.
+ */
 export function TasksPanel() {
-  const open = useUi((state) => state.tasksOpen);
-  const setOpen = useUi((state) => state.setTasksOpen);
   const tasks = useTasks((state) => state.tasks);
   const jobs = useTasks((state) => state.jobs);
   const commands = useTasks((state) => state.commands);
@@ -113,36 +120,32 @@ export function TasksPanel() {
   const selectedTask = tasks.find((task) => task.id === selected) ?? null;
   const selectedCommand = commands.find((command) => command.id === selected) ?? null;
 
+  // Loads whenever the panel is mounted, which is whenever its zone is
+  // showing it. There is no open flag to gate on: the dock decides what is
+  // visible, and a panel that second-guessed that would need its own copy of
+  // the layout.
   useEffect(() => {
-    if (open) void load();
-  }, [open, load]);
+    void load();
+  }, [load]);
 
   useEffect(() => {
-    if (!open) return;
     const onKey = (event: KeyboardEvent) => {
-      if (event.key === "Escape") {
-        if (editing) setEditing(null);
-        else if (selected) setSelected(null);
-        else setOpen(false);
-      }
+      // Escape steps back through the detail view. It deliberately does not
+      // close the dock: a panel is closed from its tab, and one key quietly
+      // putting away the whole dock is a much bigger consequence than Escape
+      // looks like it has.
+      if (event.key !== "Escape") return;
+      if (editing) setEditing(null);
+      else if (selected) setSelected(null);
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [open, editing, selected, setOpen]);
-
-  if (!open) return null;
+  }, [editing, selected]);
 
   return (
-    <div className="absolute inset-0 z-40 flex justify-end p-3 pt-16">
-      <button
-        type="button"
-        aria-label="Close runs"
-        onClick={() => setOpen(false)}
-        className="absolute inset-0 cursor-default bg-black/10"
-      />
-      <div className="animate-fade-up panel-strong relative flex h-full w-[560px] flex-col overflow-hidden rounded-sheet">
+    <div className="flex h-full min-h-0">
+      <div className="relative flex h-full w-full flex-col overflow-hidden">
         <div className="flex items-center gap-2 px-4 pt-3 pb-2">
-          <h2 className="text-[14.5px] font-semibold">Runs</h2>
           {active + busyCommands > 0 && (
             <span className="chip px-2 py-0.5 text-[11px]">
               {active + busyCommands} active
@@ -168,14 +171,9 @@ export function TasksPanel() {
                 {id}
               </button>
             ))}
-            <button
-              type="button"
-              aria-label="Close runs"
-              onClick={() => setOpen(false)}
-              className="hover-surface ml-1 grid h-8 w-8 place-items-center rounded-control text-soft"
-            >
-              <CloseIcon size={16} />
-            </button>
+            {/* No Close button: the dock owns that. A tab's × or the zone's
+                collapse are the ways out, and a third one inside the panel
+                would be a control whose meaning depends on where it is. */}
           </div>
         </div>
 

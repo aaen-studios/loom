@@ -82,6 +82,13 @@ export interface UpdateCheck {
   manifest: UpdateManifest | null;
 }
 import { call } from "./tauri";
+import type {
+  DockLayout,
+  PtyInfo,
+  PtyProfile,
+  StoredBackground,
+  TerminalConfig,
+} from "../types";
 
 export const ipc = {
   appInfo: () => call<AppInfo>("app_info"),
@@ -136,6 +143,37 @@ export const ipc = {
 
   setInterfaceSettings: (interface_: InterfaceConfig) =>
     call<AppConfig>("set_interface_settings", { interface: interface_ }),
+
+  /* --- The dock ---------------------------------------------------------- */
+
+  /** A folder's arrangement; `null` asks for the default. */
+  dockLayout: (workdir?: string | null) =>
+    call<DockLayout>("dock_layout", { workdir: workdir ?? null }),
+  /** Stores a folder's arrangement (`workdir: null` writes the default). */
+  setDockLayout: (workdir: string | null, layout: DockLayout) =>
+    call<AppConfig>("set_dock_layout", { workdir, layout }),
+  setTerminalSettings: (terminal: TerminalConfig) =>
+    call<AppConfig>("set_terminal_settings", { terminal }),
+
+  /* --- The terminal ------------------------------------------------------ */
+
+  /** Probes the filesystem and `wsl.exe`, so callers cache the answer. */
+  ptyProfiles: () => call<PtyProfile[]>("pty_profiles"),
+  ptyOpen: (args: {
+    id: string;
+    profile: string;
+    workdir?: string | null;
+    rows?: number;
+    cols?: number;
+  }) => call<void>("pty_open", { ...args, workdir: args.workdir ?? null }),
+  ptyWrite: (id: string, data: string) => call<void>("pty_write", { id, data }),
+  ptyResize: (id: string, rows: number, cols: number) =>
+    call<void>("pty_resize", { id, rows, cols }),
+  ptyClose: (id: string) => call<void>("pty_close", { id }),
+  ptyList: () => call<PtyInfo[]>("pty_list"),
+  /** Tears a panel off into its own window, or focuses it if already out. */
+  openPanelWindow: (panel: string, title: string) =>
+    call<void>("open_panel_window", { panel, title }),
   storageUsage: () => call<StorageUsage>("storage_usage"),
   clearCache: () => call<number>("clear_cache"),
   clearGenerated: () => call<number>("clear_generated"),
@@ -364,6 +402,11 @@ export const ipc = {
     call<Attachment | null>("claim_screen", { sessionId }),
   setBackgroundFile: (kind: "image" | "video", source: string) =>
     call<AppConfig>("set_background_file", { kind, source }),
+  /** The three backgrounds retention keeps, newest first. */
+  listBackgrounds: () => call<StoredBackground[]>("list_backgrounds"),
+  /** Switches to one already stored — no copy, so it cannot duplicate itself. */
+  useBackgroundFile: (path: string) =>
+    call<AppConfig>("use_background_file", { path }),
   cancelStream: (sessionId: string) => call<void>("cancel_stream", { sessionId }),
   busySessions: () => call<string[]>("busy_sessions"),
 

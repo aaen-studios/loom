@@ -455,9 +455,7 @@ pub fn parse_usage(extra: Option<&str>) -> Option<Usage> {
 /// a reply written by a build that only had `error`.
 pub fn parse_notice(extra: Option<&str>) -> Option<Notice> {
     let stored: StoredExtra = serde_json::from_str(extra?).ok()?;
-    stored
-        .notice
-        .or_else(|| stored.error.map(Notice::new))
+    stored.notice.or_else(|| stored.error.map(Notice::new))
 }
 
 /// How a turn ended, as recorded on its message. Bundled rather than passed as
@@ -536,7 +534,12 @@ pub(crate) fn clear_tool_images(message: &Message) -> Message {
             &call
                 .images
                 .iter()
-                .map(|image| format!("[screenshot omitted to fit the model's context window: {}]", image.name))
+                .map(|image| {
+                    format!(
+                        "[screenshot omitted to fit the model's context window: {}]",
+                        image.name
+                    )
+                })
                 .collect::<Vec<_>>()
                 .join(" "),
         );
@@ -592,7 +595,8 @@ pub fn parse_model(extra: Option<&str>) -> Option<ModelRef> {
 fn round_cost(usage: &Usage, spec: &ModelSpec) -> f64 {
     let input = usage.input_tokens.unwrap_or(0) as f64 / 1_000_000.0;
     let output = usage.output_tokens.unwrap_or(0) as f64 / 1_000_000.0;
-    input * spec.input_price.unwrap_or(0.0) as f64 + output * spec.output_price.unwrap_or(0.0) as f64
+    input * spec.input_price.unwrap_or(0.0) as f64
+        + output * spec.output_price.unwrap_or(0.0) as f64
 }
 
 #[derive(Debug, Clone, Default, Serialize)]
@@ -687,6 +691,15 @@ struct Inner {
     /// failing (no key, a provider refusal) from being retried on every turn
     /// of a long chat.
     condense_scan: Mutex<HashMap<String, String>>,
+    /// The title the auto-title pass last wrote, per session. This is what lets
+    /// the confirming pass tell its own guess from a name the user chose: a
+    /// stored title that no longer matches what is recorded here was renamed by
+    /// hand.
+    titles: Mutex<HashMap<String, String>>,
+    /// Sessions whose title has already been confirmed against a finished
+    /// reply. Once is the whole point — re-asking on every turn would spend a
+    /// model call per message to re-answer a question already settled.
+    title_done: Mutex<std::collections::HashSet<String>>,
     /// How far this model's tokeniser runs from the character estimate, keyed
     /// by `provider/model`. Learned from the counts providers report, so the
     /// fit converges instead of trusting four characters per token.
@@ -742,12 +755,24 @@ struct PendingHandoff {
 /// How many consecutive handoffs one user turn may trigger.
 const MAX_HANDOFF_CHAIN: u32 = 6;
 
-/// Everything about a turn that the persona and session decided, resolved in
-/// one place so the send path stays readable.
+/// Which of the two title passes is running. See
+/// [`Engine::maybe_generate_title`] for what each one is for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TitlePass {
+    /// The instant the user sends: name the chat from their own message, so
+    /// the sidebar has something to show before the reply exists.
+    Early,
+    /// Once the first reply has landed: check the name against what the
+    /// exchange turned out to be, and replace it only if it does not fit.
+    Confirm,
+}
+
 /// Pure chat's ceiling on tool rounds: enough for a search, a page fetch, and
 /// an answer. Interactive chat turns only; a detached run keeps its own budget.
 const CHAT_MAX_ROUNDS: usize = 3;
 
+/// Everything about a turn that the persona and session decided, resolved in
+/// one place so the send path stays readable.
 struct TurnPlan {
     system: Option<String>,
     variant: Option<String>,
@@ -827,6 +852,8 @@ impl Engine {
                 commands: Mutex::new(CommandTracker::default()),
                 memory_scan: Mutex::new(HashMap::new()),
                 condense_scan: Mutex::new(HashMap::new()),
+                titles: Mutex::new(HashMap::new()),
+                title_done: Mutex::new(std::collections::HashSet::new()),
                 calibration: Mutex::new(HashMap::new()),
             }),
         }
@@ -1249,7 +1276,11 @@ impl Engine {
         let found = sessions
             .iter()
             .find(|session| session.id == reference)
-            .or_else(|| sessions.iter().find(|session| folded(&session.id) == needle))
+            .or_else(|| {
+                sessions
+                    .iter()
+                    .find(|session| folded(&session.id) == needle)
+            })
             .or_else(|| {
                 sessions
                     .iter()
@@ -1406,8 +1437,7 @@ impl Engine {
 
         let mut config = self.inner.config.lock().expect("config mutex poisoned");
         if let Some(entry) = config.providers.get_mut(provider_id) {
-            let known: std::collections::BTreeSet<String> =
-                entry.models.keys().cloned().collect();
+            let known: std::collections::BTreeSet<String> = entry.models.keys().cloned().collect();
             entry.models = crate::providers::detect::merge_models(&entry.models, fetched);
 
             // A gateway with hundreds of models is opt-in: nothing the user has
@@ -1788,16 +1818,14 @@ impl Engine {
         // "off", which both adapters already treat as no reasoning), and never
         // over an explicit per-chat choice.
         let computer_variant = if session.computer_access {
-            config
-                .chat
-                .computer_variant
-                .clone()
-                .filter(|variant| variant == "off" || variant == "none" || {
+            config.chat.computer_variant.clone().filter(|variant| {
+                variant == "off" || variant == "none" || {
                     let spec = self.model_spec(&model.provider_id, &model.model_id);
                     spec.reasoning
                         .as_ref()
                         .is_some_and(|reasoning| reasoning.variants.iter().any(|v| v == variant))
-                })
+                }
+            })
         } else {
             None
         };
@@ -1846,7 +1874,12 @@ impl Engine {
         // The chat's cast, when it has one. Multi-persona chats resolve each
         // speaker independently and tell the model who is present.
         let cast = self.session_cast(session_id).unwrap_or_default();
-        let vars = persona_vars(&config, persona.as_ref(), &model, session.workdir.as_deref());
+        let vars = persona_vars(
+            &config,
+            persona.as_ref(),
+            &model,
+            session.workdir.as_deref(),
+        );
 
         // The session snapshot keeps a chat stable across persona edits; a cast
         // member without a snapshot uses its live, assembled prompt.
@@ -1998,6 +2031,34 @@ impl Engine {
             message_id: assistant_id.clone(),
         });
 
+        // Name the chat now, from the user's own message, rather than waiting
+        // for the reply. The sidebar row is what you scan to find a chat, and
+        // sitting on "New chat" for the length of a slow turn is the difference
+        // between a list you can navigate and one you have to open chats in.
+        //
+        // Spawned rather than awaited: this is a model call, and the turn it is
+        // describing must not wait behind it. Detached runs are skipped — their
+        // sessions are hidden from the sidebar, so a title would be work with
+        // nothing to show for it.
+        if plan.task_id.is_none() {
+            let engine = self.clone();
+            let target = session_id.to_string();
+            let title_provider = provider.clone();
+            let title_model = model.clone();
+            let key = api_key.clone();
+            tokio::spawn(async move {
+                engine
+                    .maybe_generate_title(
+                        &target,
+                        &title_provider,
+                        &title_model,
+                        key.as_deref(),
+                        TitlePass::Early,
+                    )
+                    .await;
+            });
+        }
+
         let engine = self.clone();
         let supervisor = self.clone();
         let session_id_owned = session_id.to_string();
@@ -2032,7 +2093,11 @@ impl Engine {
                     } else {
                         "the turn was interrupted"
                     };
-                    supervisor.report_task_failure(&supervised_session, &supervised_message, reason);
+                    supervisor.report_task_failure(
+                        &supervised_session,
+                        &supervised_message,
+                        reason,
+                    );
                 }
                 Ok(()) => {
                     // A `handoff` opens the next speaker's turn. The chain is
@@ -2249,9 +2314,7 @@ impl Engine {
                             // A read-only mode refuses these anyway; offering
                             // them only to refuse them costs a round per tool.
                             .into_iter()
-                            .filter(|spec| {
-                                !agent_mode.blocks_writes() || spec.read_only
-                            })
+                            .filter(|spec| !agent_mode.blocks_writes() || spec.read_only)
                             .collect::<Vec<_>>()
                     } else {
                         Vec::new()
@@ -2348,12 +2411,14 @@ impl Engine {
         // for room for both. The adapter then trims the budget to whatever fits
         // rather than inflating the declared number behind the budget's back.
         let thinking = (provider.kind == crate::provider::ProviderKind::Anthropic)
-            .then(|| variant.as_deref().and_then(crate::providers::anthropic::thinking_budget))
+            .then(|| {
+                variant
+                    .as_deref()
+                    .and_then(crate::providers::anthropic::thinking_budget)
+            })
             .flatten();
         let max_output = match thinking {
-            Some(budget) => {
-                context::output_limit(configured.max(budget + 1_024), &spec, window)
-            }
+            Some(budget) => context::output_limit(configured.max(budget + 1_024), &spec, window),
             None => context::output_limit(configured, &spec, window),
         };
         let fixed = system
@@ -2632,10 +2697,7 @@ impl Engine {
                         // Anything already streamed makes a resend a duplicate,
                         // so retries stop the moment the model has spoken.
                         let started = !round_text.lock().expect("text mutex").is_empty()
-                            || !round_reasoning
-                                .lock()
-                                .expect("reasoning mutex")
-                                .is_empty()
+                            || !round_reasoning.lock().expect("reasoning mutex").is_empty()
                             || !round_calls.lock().expect("calls mutex").is_empty();
 
                         if !started && !cancel.load(Ordering::Relaxed) {
@@ -2690,7 +2752,8 @@ impl Engine {
 
             let text = round_text.lock().expect("text mutex").clone();
             content.push_str(&text);
-            let round_thinking = std::mem::take(&mut *round_reasoning.lock().expect("reasoning mutex"));
+            let round_thinking =
+                std::mem::take(&mut *round_reasoning.lock().expect("reasoning mutex"));
             if !round_thinking.trim().is_empty() {
                 seq = reasoning_seq;
                 reasoning_blocks.push(StoredReasoningBlock {
@@ -2931,7 +2994,12 @@ impl Engine {
                                 Some(outcome) => outcome,
                                 None => {
                                     match self
-                                        .run_computer_tool(&session_id, &call, &tool_context, &cancel)
+                                        .run_computer_tool(
+                                            &session_id,
+                                            &call,
+                                            &tool_context,
+                                            &cancel,
+                                        )
                                         .await
                                     {
                                         Some(outcome) => outcome,
@@ -2951,9 +3019,7 @@ impl Engine {
                                             .await
                                         {
                                             Some(outcome) => outcome,
-                                            None => {
-                                                self.run_local_tool(&call, &tool_context).await
-                                            }
+                                            None => self.run_local_tool(&call, &tool_context).await,
                                         },
                                     }
                                 }
@@ -3190,8 +3256,17 @@ impl Engine {
         }
 
         if task_id.is_none() && !cancel.load(Ordering::Relaxed) {
-            self.maybe_generate_title(&session_id, &provider, &model, api_key.as_deref())
-                .await;
+            // The checking pass: the early title was written from one side of
+            // the conversation, so once there is a reply to read, ask whether
+            // the name still fits and replace it only if it does not.
+            self.maybe_generate_title(
+                &session_id,
+                &provider,
+                &model,
+                api_key.as_deref(),
+                TitlePass::Confirm,
+            )
+            .await;
             self.maybe_extract_memories(&session_id, &provider, &model, api_key.as_deref());
             self.maybe_condense(&session_id, &provider, &model, api_key.as_deref());
         }
@@ -3212,7 +3287,13 @@ impl Engine {
         // Atelier run everything, so a delete has to be judged by what this
         // particular call would destroy instead. That needs the arguments and
         // the filesystem, so it cannot live in `requires_confirmation`.
-        let reason = if !gated && call.name == tools::DELETE_PATH {
+        //
+        // Atelier is exempt, and this is the one asymmetry between it and
+        // `Auto all`: the risk card exists to protect a user who asked for
+        // tools to run silently, whereas Atelier is a deliberate per-chat
+        // handover that includes the filesystem.
+        let reason = if !gated && call.name == tools::DELETE_PATH && mode != PermissionMode::Atelier
+        {
             tools::delete_risk(&call.arguments, context)
         } else {
             None
@@ -4197,7 +4278,10 @@ impl Engine {
         let result = match call.name.as_str() {
             crate::tools::LIST_CHATS => self.list_chats_for_tool(&arguments),
             crate::tools::READ_CHAT => self.read_chat_for_tool(&arguments),
-            "run_command" => self.run_shell_command(session_id, tool_context, &arguments).await,
+            "run_command" => {
+                self.run_shell_command(session_id, tool_context, &arguments)
+                    .await
+            }
             crate::tools::LIST_COMMANDS => self.list_commands_for_tool().await,
             crate::tools::COMMAND_OUTPUT => {
                 let id = arguments
@@ -4353,10 +4437,7 @@ impl Engine {
                     .unwrap_or(crate::memory::RECALL_LIMIT as u64)
                     .clamp(1, 10) as usize;
                 let scopes = crate::memory::scopes_for(
-                    tool_context
-                        .workdir
-                        .as_ref()
-                        .and_then(|path| path.to_str()),
+                    tool_context.workdir.as_ref().and_then(|path| path.to_str()),
                 );
                 match self
                     .recall_facts(&scopes, &query, limit, provider, api_key)
@@ -4393,10 +4474,7 @@ impl Engine {
                         .get("scope")
                         .and_then(serde_json::Value::as_str)
                         .unwrap_or("global"),
-                    tool_context
-                        .workdir
-                        .as_ref()
-                        .and_then(|path| path.to_str()),
+                    tool_context.workdir.as_ref().and_then(|path| path.to_str()),
                 );
                 self.store_fact(
                     &scope,
@@ -4600,12 +4678,8 @@ impl Engine {
         let reference = self.config().chat.image_model.clone();
         // `chat.imageModel` may name its provider, in which case that provider
         // and its key replace the chat's — see `aux_target`.
-        let (image_model, provider, api_key) = self.aux_target(
-            reference.as_ref(),
-            "gpt-image-1",
-            provider,
-            api_key,
-        );
+        let (image_model, provider, api_key) =
+            self.aux_target(reference.as_ref(), "gpt-image-1", provider, api_key);
 
         let url = format!("{}/images/generations", provider.normalized_base_url());
         let mut request = self
@@ -4966,19 +5040,102 @@ impl Engine {
     // Titles
     // ------------------------------------------------------------------
 
+    /// Names a chat, in two passes.
+    ///
+    /// [`TitlePass::Early`] runs the instant the user sends, from their own
+    /// message alone. The row in the sidebar gets a real name immediately
+    /// instead of sitting on "New chat" for however long the turn takes —
+    /// which, on a slow model, is the difference between a list you can scan
+    /// and one you have to open chats to navigate.
+    ///
+    /// [`TitlePass::Confirm`] runs once, after the first reply has landed. A
+    /// title written from one side of a conversation is a guess, and by now
+    /// there is more to go on — so it shows the model the existing title and
+    /// the exchange, and asks whether the name still fits. It is told to reply
+    /// `KEEP` when it does, so the common case costs no write and no visible
+    /// change. This is the "check whether it is fine, and replace it if not"
+    /// pass.
+    ///
+    /// A title the user typed is never touched: guesses are recorded in
+    /// `inner.titles`, and anything that does not match what was recorded was
+    /// renamed by hand.
     async fn maybe_generate_title(
         &self,
         session_id: &str,
         provider: &ProviderConfig,
         model: &ModelRef,
         api_key: Option<&str>,
+        pass: TitlePass,
     ) {
+        let config = self.config();
+        // Settings → Chat. This toggle was written by the settings UI, carried
+        // through the harness schema, and then read by nothing at all: turning
+        // auto-titles off changed nothing. Reading it here is the fix, and it
+        // matters more now that a title is two model calls rather than one.
+        if !config.chat.auto_title {
+            return;
+        }
+
+        // One confirm per chat. Without this the question would be re-asked on
+        // every turn for the life of the conversation, at one model call each.
+        if pass == TitlePass::Confirm
+            && self
+                .inner
+                .title_done
+                .lock()
+                .expect("title mutex poisoned")
+                .contains(session_id)
+        {
+            return;
+        }
+
         let session = match self.db().get_session(session_id) {
             Ok(Some(session)) => session,
             _ => return,
         };
-        if !session.title.trim().is_empty() {
-            return;
+        let existing = session.title.trim().to_string();
+
+        if pass == TitlePass::Early {
+            // Anything already there — the user's, or a name an earlier turn
+            // produced — is left alone.
+            if !existing.is_empty() {
+                return;
+            }
+            // A confirm that has already run holds the better title, because it
+            // read the reply. This pass is detached, so it can land *after* the
+            // turn it was spawned from has finished; without this check a fast
+            // reply could have its confirmed title overwritten by the guess
+            // made before that reply existed.
+            if self
+                .inner
+                .title_done
+                .lock()
+                .expect("title mutex poisoned")
+                .contains(session_id)
+            {
+                return;
+            }
+        } else {
+            // The confirm pass runs whatever the title is, including empty: an
+            // early pass that failed (no key, a provider refusal) leaves it
+            // blank, and blank is exactly the case worth filling in now that
+            // there is a reply to read.
+            let recorded = self
+                .inner
+                .titles
+                .lock()
+                .expect("title mutex poisoned")
+                .get(session_id)
+                .cloned();
+            if !existing.is_empty() && !title_is_ours(&existing, recorded.as_deref()) {
+                // Renamed by hand. Leave it alone, and do not ask again.
+                self.inner
+                    .title_done
+                    .lock()
+                    .expect("title mutex poisoned")
+                    .insert(session_id.to_string());
+                return;
+            }
         }
 
         let messages = match self.db().messages(session_id) {
@@ -4994,11 +5151,16 @@ impl Engine {
             .find(|m| m.role == Role::Assistant && !m.content.is_empty())
             .map(|m| m.content.clone());
 
-        let (Some(user), Some(assistant)) = (first_user, first_assistant) else {
+        let Some(user) = first_user.filter(|text| !text.trim().is_empty()) else {
             return;
         };
+        // The early pass deliberately has only the user's side — that is what
+        // makes it available before the reply exists.
+        let assistant = match pass {
+            TitlePass::Confirm => first_assistant.unwrap_or_default(),
+            TitlePass::Early => String::new(),
+        };
 
-        let config = self.config();
         let (title_provider_id, title_provider, title_model) = match config.chat.lite.clone() {
             Some(lite) => match config.providers.get(&lite.provider_id) {
                 Some(provider) => (lite.provider_id.clone(), provider.clone(), lite.model_id),
@@ -5014,7 +5176,6 @@ impl Engine {
                 model.model_id.clone(),
             ),
         };
-        drop(config);
 
         let title_key = secrets::get_api_key(&title_provider_id).unwrap_or_else(|_| {
             if title_provider_id == model.provider_id {
@@ -5024,16 +5185,35 @@ impl Engine {
             }
         });
 
-        let prompt = format!(
-            "User: {}\n\nAssistant: {}",
-            truncate(&user, 600),
-            truncate(&assistant, 600)
-        );
+        let (system, prompt) = match pass {
+            TitlePass::Early => (
+                "Write a title for this conversation from the user's opening message. Reply \
+                 with the title only: at most 6 words, no quotes, no trailing punctuation.",
+                format!("User: {}", truncate(&user, 600)),
+            ),
+            TitlePass::Confirm => (
+                "You are shown the current title of a conversation and the exchange it \
+                 describes. If the current title already fits, reply with exactly KEEP. \
+                 Otherwise reply with a better title: at most 6 words, no quotes, no \
+                 trailing punctuation. Judge strictly — a title that is vague, generic, or \
+                 that merely echoes the user's greeting does not fit.",
+                format!(
+                    "Current title: {}\n\nUser: {}\n\nAssistant: {}",
+                    if existing.is_empty() {
+                        "(none)"
+                    } else {
+                        existing.as_str()
+                    },
+                    truncate(&user, 600),
+                    truncate(&assistant, 600),
+                ),
+            ),
+        };
 
         let request = ChatRequest {
             provider: &title_provider,
             model: &title_model,
-            system: Some("Write a title for this conversation. Reply with the title only: at most 6 words, no quotes, no trailing punctuation."),
+            system: Some(system),
             messages: vec![WireMessage::text("user", prompt)],
             variant: None,
             // Generous on purpose: reasoning models spend the first tokens
@@ -5052,22 +5232,46 @@ impl Engine {
                 Ok((content, reasoning, _)) => (content, reasoning),
                 Err(error) => {
                     eprintln!("[loom] title generation failed: {error}");
+                    // A confirm that could not run is not an answer, so the flag
+                    // stays clear and a later turn may still ask. An early pass
+                    // has nothing to remember either way.
                     return;
                 }
             };
 
         // Fall back to the tail of the model's thinking when it never got to
-        // writing a title.
+        // writing a reply.
         let candidate = if content.trim().is_empty() {
             reasoning.unwrap_or_default()
         } else {
             content
         };
-        let title = clean_title(candidate.lines().last().unwrap_or_default());
-        if title.is_empty() {
-            eprintln!("[loom] title generation produced nothing usable");
-            return;
-        }
+
+        let title = match pass {
+            TitlePass::Early => {
+                let title = clean_title(candidate.lines().last().unwrap_or_default());
+                if title.is_empty() {
+                    eprintln!("[loom] title generation produced nothing usable");
+                    return;
+                }
+                title
+            }
+            TitlePass::Confirm => match parse_confirm_reply(&candidate) {
+                // Replacing a title with itself would emit a redundant update
+                // and make the sidebar re-render for nothing.
+                Some(next) if next != existing => next,
+                // `KEEP`, an empty reply, or the same words back: the title
+                // stands, and the question has now been answered.
+                _ => {
+                    self.inner
+                        .title_done
+                        .lock()
+                        .expect("title mutex poisoned")
+                        .insert(session_id.to_string());
+                    return;
+                }
+            },
+        };
 
         let _ = self.db().update_session(
             session_id,
@@ -5076,6 +5280,20 @@ impl Engine {
                 ..Default::default()
             },
         );
+        // Record what *we* wrote before announcing it, so a confirm pass that
+        // somehow races this one still recognises the title as its own.
+        self.inner
+            .titles
+            .lock()
+            .expect("title mutex poisoned")
+            .insert(session_id.to_string(), title.clone());
+        if pass == TitlePass::Confirm {
+            self.inner
+                .title_done
+                .lock()
+                .expect("title mutex poisoned")
+                .insert(session_id.to_string());
+        }
         self.emit(EngineEvent::Title {
             session_id: session_id.to_string(),
             title,
@@ -5173,14 +5391,7 @@ impl Engine {
             }
         };
         self.track_command(
-            session_id,
-            cwd,
-            command,
-            label,
-            background,
-            log_path,
-            running,
-            true,
+            session_id, cwd, command, label, background, log_path, running, true,
         )
     }
 
@@ -5226,7 +5437,9 @@ impl Engine {
 
         {
             let mut tracker = self.inner.commands.lock().expect("commands mutex poisoned");
-            tracker.handles.insert(record.id.clone(), running.tail_handle());
+            tracker
+                .handles
+                .insert(record.id.clone(), running.tail_handle());
             if claimed {
                 tracker.starting = tracker.starting.saturating_sub(1);
             }
@@ -5297,10 +5510,7 @@ impl Engine {
         let log_path = crate::process::command_log_path(&uuid::Uuid::new_v4().to_string())?;
         let mut running = Running::spawn(&command, &root, &log_path)?;
 
-        match running
-            .wait_timeout(crate::process::COMMAND_TIMEOUT)
-            .await
-        {
+        match running.wait_timeout(crate::process::COMMAND_TIMEOUT).await {
             Wait::Exited(status) => {
                 let (stdout, stderr) = running.finish().await;
                 drop(running);
@@ -5343,13 +5553,7 @@ impl Engine {
     }
 
     fn command_handle(&self, id: &str) -> Option<TailHandle> {
-        self.inner
-            .commands
-            .lock()
-            .ok()?
-            .handles
-            .get(id)
-            .cloned()
+        self.inner.commands.lock().ok()?.handles.get(id).cloned()
     }
 
     /// Records a command's exit and drops its handle.
@@ -5369,7 +5573,11 @@ impl Engine {
         let current = self.db().command(id).ok().flatten();
         if let Some(record) = current {
             if record.status == "running" {
-                let status = if exit_code == Some(0) { "done" } else { "failed" };
+                let status = if exit_code == Some(0) {
+                    "done"
+                } else {
+                    "failed"
+                };
                 if let Err(error) = self.db().set_command_status(id, status, exit_code) {
                     eprintln!("[loom] could not update command {id}: {error}");
                 }
@@ -5410,9 +5618,7 @@ impl Engine {
             // Not an error to the user: the commonest cause is that the
             // process had already exited. Worth a log line, because the other
             // cause is a tree that resisted and is still running.
-            eprintln!(
-                "[loom] command {id} was marked stopped but the signal was not delivered"
-            );
+            eprintln!("[loom] command {id} was marked stopped but the signal was not delivered");
         }
         self.emit(EngineEvent::CommandChanged {
             command: updated.clone(),
@@ -5511,12 +5717,13 @@ impl Engine {
         }
 
         let config = self.config();
-        let (provider_id, model_id) = match (
-            request.provider_id.clone(),
-            request.model_id.clone(),
-        ) {
+        let (provider_id, model_id) = match (request.provider_id.clone(), request.model_id.clone())
+        {
             (Some(provider), Some(model)) => (provider, model),
-            _ => match (config.chat.provider_id.clone(), config.chat.model_id.clone()) {
+            _ => match (
+                config.chat.provider_id.clone(),
+                config.chat.model_id.clone(),
+            ) {
                 (Some(provider), Some(model)) => (provider, model),
                 _ => return Err(Error::Other("no model selected for this task".into())),
             },
@@ -5682,14 +5889,10 @@ impl Engine {
             task_id: Some(task_id.clone()),
         };
 
-        if let Err(error) = self.send_limited(&task.session_id, &task.prompt, model, Vec::new(), limits)
+        if let Err(error) =
+            self.send_limited(&task.session_id, &task.prompt, model, Vec::new(), limits)
         {
-            self.complete_task(
-                &task_id,
-                "failed",
-                Some(&error.to_string()),
-                None,
-            );
+            self.complete_task(&task_id, "failed", Some(&error.to_string()), None);
         }
     }
 
@@ -5720,12 +5923,11 @@ impl Engine {
             // Bind the row and drop the guard before `add_message`, which locks
             // the database again: inline, this froze the app on every
             // background run that finished with a chat behind it.
-            let origin = self
-                .db()
-                .task(task_id)
-                .ok()
-                .flatten()
-                .and_then(|task| task.origin_session.clone().map(|origin| (origin, task.title)));
+            let origin = self.db().task(task_id).ok().flatten().and_then(|task| {
+                task.origin_session
+                    .clone()
+                    .map(|origin| (origin, task.title))
+            });
             if let Some((origin, title)) = origin {
                 let text = match (status, result) {
                     ("done", Some(result)) if !result.trim().is_empty() => {
@@ -5786,7 +5988,13 @@ impl Engine {
 
         let recalled = match query {
             Some(text) if !text.trim().is_empty() => self
-                .recall_facts(&scopes, &text, crate::memory::RECALL_LIMIT, provider, api_key)
+                .recall_facts(
+                    &scopes,
+                    &text,
+                    crate::memory::RECALL_LIMIT,
+                    provider,
+                    api_key,
+                )
                 .await
                 .unwrap_or_default(),
             _ => Vec::new(),
@@ -5951,13 +6159,7 @@ impl Engine {
         }
 
         let memory = crate::memory::new_memory(
-            scope,
-            content,
-            pinned,
-            source,
-            session_id,
-            message_id,
-            bytes,
+            scope, content, pinned, source, session_id, message_id, bytes,
         );
         self.db().insert_memory(&memory)?;
         Ok((memory, false))
@@ -6071,8 +6273,16 @@ impl Engine {
         let config = self.config();
         let (fact_provider_id, fact_provider, fact_model) = match config.chat.lite.clone() {
             Some(lite) => match config.providers.get(&lite.provider_id) {
-                Some(lite_provider) => (lite.provider_id.clone(), lite_provider.clone(), lite.model_id),
-                None => (model.provider_id.clone(), provider.clone(), model.model_id.clone()),
+                Some(lite_provider) => (
+                    lite.provider_id.clone(),
+                    lite_provider.clone(),
+                    lite.model_id,
+                ),
+                None => (
+                    model.provider_id.clone(),
+                    provider.clone(),
+                    model.model_id.clone(),
+                ),
             },
             None => (
                 model.provider_id.clone(),
@@ -6209,7 +6419,8 @@ impl Engine {
         api_key: Option<&str>,
     ) {
         let config = self.config();
-        let share = config.chat
+        let share = config
+            .chat
             .condense_share
             .min(crate::condense::MAX_CONDENSED_SHARE);
         let configured = config.chat.max_output_tokens;
@@ -6229,7 +6440,10 @@ impl Engine {
         // The live turn is everything from the last user message onwards; the
         // summary covers what has aged out before it. Nothing has aged out on a
         // first turn, so there is nothing to fold.
-        let Some(last_user) = history.iter().rposition(|message| message.role == Role::User) else {
+        let Some(last_user) = history
+            .iter()
+            .rposition(|message| message.role == Role::User)
+        else {
             return;
         };
         if last_user == 0 {
@@ -6482,15 +6696,8 @@ impl Engine {
                 .unwrap_or(existing));
         }
 
-        let memory = crate::memory::new_memory(
-            scope,
-            content,
-            pinned,
-            "user",
-            None,
-            None,
-            embedding,
-        );
+        let memory =
+            crate::memory::new_memory(scope, content, pinned, "user", None, None, embedding);
         self.db().insert_memory(&memory)?;
         Ok(memory)
     }
@@ -6864,7 +7071,11 @@ fn merge_tool_delta(
 /// that goes on the wire, no more. Counting the whole `reasoning` column
 /// instead over-estimated long reasoning turns badly enough to drop history
 /// that would have fitted.
-pub(crate) fn reasoning_echo(message: &Message, index: usize, history: &[Message]) -> Option<String> {
+pub(crate) fn reasoning_echo(
+    message: &Message,
+    index: usize,
+    history: &[Message],
+) -> Option<String> {
     if history[index + 1..]
         .iter()
         .any(|later| later.role == Role::User)
@@ -6890,7 +7101,9 @@ fn build_wire(history: &[Message]) -> Vec<WireMessage> {
     // latest one, and older ones only exist as a text breadcrumb. Everything
     // from the current user turn may carry images; every older call gets a
     // placeholder. Only the newest image-bearing call is inlined.
-    let last_user = history.iter().rposition(|message| message.role == Role::User);
+    let last_user = history
+        .iter()
+        .rposition(|message| message.role == Role::User);
     let last_image_call = history
         .iter()
         .enumerate()
@@ -7127,11 +7340,7 @@ async fn wait_for_cancel(cancel: &Cancellation) {
 }
 
 /// The report a finished foreground command returns to the model.
-fn format_command_report(
-    code: Option<i32>,
-    stdout: &str,
-    stderr: &str,
-) -> String {
+fn format_command_report(code: Option<i32>, stdout: &str, stderr: &str) -> String {
     let mut report = String::new();
     report.push_str(&format!("exit code: {}\n", code.unwrap_or(-1)));
     if !stdout.trim().is_empty() {
@@ -7391,10 +7600,7 @@ fn render_todos(todos: &[Todo]) -> String {
 /// fill the panel.
 fn parse_todos(arguments: &serde_json::Value) -> Vec<Todo> {
     let mut todos: Vec<Todo> = Vec::new();
-    if let Some(items) = arguments
-        .get("todos")
-        .and_then(serde_json::Value::as_array)
-    {
+    if let Some(items) = arguments.get("todos").and_then(serde_json::Value::as_array) {
         for item in items.iter().take(50) {
             let content = item
                 .get("content")
@@ -7430,7 +7636,8 @@ fn trimmed_json(args: &serde_json::Value, key: &str) -> String {
 }
 
 /// Appends a note to a system prompt, keeping existing content first.
-fn append_note(system: Option<String>, note: &str) -> String {    match system {
+fn append_note(system: Option<String>, note: &str) -> String {
+    match system {
         Some(existing) if !existing.trim().is_empty() => format!("{existing}\n\n{note}"),
         _ => note.to_string(),
     }
@@ -7471,6 +7678,46 @@ fn persona_vars(
         persona_name: persona.map(|p| p.name.clone()).unwrap_or_default(),
         date: today_utc(),
     }
+}
+
+/// The word the confirm pass is told to reply with when the title it was shown
+/// already fits.
+///
+/// A sentinel rather than an inferred answer, because "did it change its mind"
+/// is not something the text of a title can tell you: a model asked to improve
+/// a good title will usually return that title, or a near-identical paraphrase
+/// of it, and neither is distinguishable from a genuine correction.
+const KEEP_TITLE: &str = "KEEP";
+
+/// Whether a title is one the auto-title pass wrote.
+///
+/// Only its own guesses may be replaced. A stored title that does not match
+/// what was recorded here was typed by the user, and a name they chose being
+/// silently overwritten a moment later is worse than any automatic title.
+fn title_is_ours(existing: &str, recorded: Option<&str>) -> bool {
+    recorded.is_some_and(|title| title == existing)
+}
+
+/// The title to adopt from the confirm pass's reply, or `None` to keep the one
+/// already there.
+///
+/// The sentinel is read from the raw last line rather than from the cleaned
+/// title, because `clean_title` would hand back `KEEP` as a title quite
+/// happily — it is a well-formed six-letter word, and once it has been through
+/// there nothing distinguishes it from a real answer.
+fn parse_confirm_reply(reply: &str) -> Option<String> {
+    let last = reply.lines().last().unwrap_or_default();
+    let bare = last
+        .trim()
+        .trim_matches(|c: char| matches!(c, '"' | '\'' | '.' | '!' | '*' | '`'));
+    if bare.eq_ignore_ascii_case(KEEP_TITLE) {
+        return None;
+    }
+    let title = clean_title(last);
+    if title.is_empty() || title.eq_ignore_ascii_case(KEEP_TITLE) {
+        return None;
+    }
+    Some(title)
 }
 
 /// `YYYY-MM-DD` in UTC, without pulling in a date library.
@@ -8090,7 +8337,13 @@ mod tests {
         let workdir = tempfile::tempdir().unwrap();
 
         let record = engine
-            .start_command(Some("session-1"), workdir.path(), slow_command(), None, true)
+            .start_command(
+                Some("session-1"),
+                workdir.path(),
+                slow_command(),
+                None,
+                true,
+            )
             .unwrap();
 
         // Let it write something first, so the watcher has real work to drain.
@@ -8168,7 +8421,11 @@ mod tests {
 
         let posted = engine.messages(&origin.id).unwrap();
         assert_eq!(posted.len(), 1, "the origin chat gains the result");
-        assert!(posted[0].content.contains("the answer"), "{}", posted[0].content);
+        assert!(
+            posted[0].content.contains("the answer"),
+            "{}",
+            posted[0].content
+        );
 
         // The lock is free again.
         assert!(engine.commands(None).is_ok());
@@ -8356,7 +8613,11 @@ mod tests {
         std::fs::create_dir_all(log.parent().unwrap()).unwrap();
         std::fs::write(&log, "still going\n").unwrap();
 
-        let engine = Engine::new(db, Arc::new(Mutex::new(AppConfig::default())), Arc::new(|_| {}));
+        let engine = Engine::new(
+            db,
+            Arc::new(Mutex::new(AppConfig::default())),
+            Arc::new(|_| {}),
+        );
         assert_eq!(engine.mark_interrupted_commands(), 1);
 
         let reconciled = engine.command("c1").unwrap().unwrap();
@@ -8364,7 +8625,10 @@ mod tests {
         assert!(reconciled.finished_at.is_some());
         // The process is not killed and the log is not thrown away: the user
         // asked for background commands to survive Loom.
-        assert_eq!(std::fs::read_to_string(&reconciled.log_path).unwrap(), "still going\n");
+        assert_eq!(
+            std::fs::read_to_string(&reconciled.log_path).unwrap(),
+            "still going\n"
+        );
         assert_eq!(engine.command_output("c1", 10).unwrap(), "still going");
 
         // Reconciling twice is harmless.
@@ -8553,6 +8817,57 @@ mod tests {
         );
         assert_eq!(clean_title("a  b"), "a b");
         assert!(clean_title(&"x".repeat(200)).len() <= 64);
+    }
+
+    // ----------------------------------------------------- the title passes
+
+    #[test]
+    fn the_confirm_pass_keeps_a_title_it_was_told_is_fine() {
+        // The sentinel has to survive the shapes a model actually returns it
+        // in. Each of these would otherwise become a chat called "KEEP".
+        for reply in [
+            "KEEP",
+            "keep",
+            " KEEP ",
+            "\"KEEP\".",
+            "*keep*",
+            "`KEEP`",
+            "The user asks about Norway.\nKEEP",
+        ] {
+            assert_eq!(parse_confirm_reply(reply), None, "{reply:?}");
+        }
+    }
+
+    #[test]
+    fn the_confirm_pass_takes_a_better_title() {
+        assert_eq!(
+            parse_confirm_reply("Rust ownership rules"),
+            Some("Rust ownership rules".into())
+        );
+        assert_eq!(
+            parse_confirm_reply("Thinking about it...\n\"Norway's capital.\""),
+            Some("Norway's capital.".into())
+        );
+    }
+
+    #[test]
+    fn an_unusable_confirm_reply_keeps_the_title_rather_than_blanking_it() {
+        // Nothing to go on. Keeping the existing name is the safe direction:
+        // the worst case is a dull title, not a missing one.
+        assert_eq!(parse_confirm_reply(""), None);
+        assert_eq!(parse_confirm_reply("   \n  "), None);
+    }
+
+    #[test]
+    fn only_the_auto_passes_own_guesses_may_be_replaced() {
+        // What the pass wrote, still unchanged: fair game.
+        assert!(title_is_ours("Rust help", Some("Rust help")));
+        // Renamed by hand after the guess landed: must never be overwritten.
+        assert!(!title_is_ours("My parser work", Some("Rust help")));
+        // Nothing recorded — the app restarted, or the chat predates the map.
+        // Treated as the user's, because a wrong guess overwritten is
+        // recoverable and a chosen name destroyed is not.
+        assert!(!title_is_ours("Rust help", None));
     }
 
     #[test]
@@ -9043,8 +9358,11 @@ mod tests {
             .create_session(Some("Long".into()), None, None, None, None, None)
             .unwrap();
         for index in 0..40 {
-            let mut entry =
-                message(Role::User, &format!("turn {index} {}", "x".repeat(400)), None);
+            let mut entry = message(
+                Role::User,
+                &format!("turn {index} {}", "x".repeat(400)),
+                None,
+            );
             entry.session_id = session.id.clone();
             engine.db().add_message(&entry).expect("a message");
         }

@@ -1,17 +1,134 @@
 import { create } from "zustand";
-import type { AppConfig, BackgroundConfig, Theme } from "../types";
+import type {
+  AppConfig,
+  BackgroundConfig,
+  PaletteConfig,
+  Theme,
+} from "../types";
+import { backdropFor } from "../lib/background";
 import { ipc } from "../lib/ipc";
+
+/**
+ * The part of the config that decides what the window *looks* like, mirrored
+ * into `localStorage`.
+ *
+ * The real config lives behind an async IPC call, so on every cold start the
+ * first paint used the hardcoded defaults: light theme, no blur, the wrong
+ * preset. A dark user watched a light window flip to dark; anyone with a
+ * blurred or custom background watched it arrive a frame or two late. Those
+ * were not slow loads — the app was painting something it already knew was
+ * wrong, because it had not asked yet.
+ *
+ * `localStorage` is synchronous, so this is readable before the first render.
+ * Only what changes pixels is mirrored; everything else still comes from the
+ * config, which remains the source of truth and overwrites this a moment later.
+ */
+const APPEARANCE_KEY = "loomAppearance";
+
+interface CachedAppearance {
+  theme?: Theme;
+  background?: BackgroundConfig;
+  palette?: PaletteConfig;
+}
+
+/** Matches `PaletteConfig::default()` in `crates/loom-core/src/config.rs`. */
+const DEFAULT_PALETTE: PaletteConfig = {
+  mode: "default",
+  accent: "#8ea2ff",
+  ink: "#f2f5fa",
+  surface: "#12151f",
+};
+
+/** Matches `BackgroundConfig::default()` in `crates/loom-core/src/config.rs`. */
+const DEFAULT_BACKGROUND: BackgroundConfig = {
+  kind: "builtin",
+  // Theme-following. Pinning `porcelain` as the default is what made the
+  // built-in background look absent from the picker: a light preset under
+  // dark mode's veil is grey and matches no swatch on offer.
+  preset: "auto",
+  path: null,
+  dim: 0,
+  blur: 0,
+};
+
+/**
+ * The cached appearance, or nothing usable.
+ *
+ * Never throws and never returns a partial value: a corrupt entry, a field of
+ * the wrong type, or storage being unavailable all fall back to the defaults,
+ * because the config still arrives a moment later and corrects anything wrong.
+ * A cache that could stop the app booting would be a worse bug than the flash
+ * it exists to prevent.
+ */
+function readAppearance(): CachedAppearance {
+  try {
+    const raw = localStorage.getItem(APPEARANCE_KEY);
+    if (!raw) return {};
+    const parsed: unknown = JSON.parse(raw);
+    if (typeof parsed !== "object" || parsed === null) return {};
+    const { theme, background, palette } = parsed as CachedAppearance;
+    return {
+      theme: theme === "dark" || theme === "light" ? theme : undefined,
+      // Spread over the defaults so a cache written by an older build cannot
+      // introduce a missing key that the rest of the app assumes exists.
+      background:
+        background && typeof background === "object"
+          ? { ...DEFAULT_BACKGROUND, ...background }
+          : undefined,
+      palette:
+        palette && typeof palette === "object"
+          ? { ...DEFAULT_PALETTE, ...palette }
+          : undefined,
+    };
+  } catch {
+    return {};
+  }
+}
+
+/** Mirrors the visible part of a config so the next launch can start correctly. */
+function cacheAppearance(config: AppConfig): void {
+  try {
+    localStorage.setItem(
+      APPEARANCE_KEY,
+      JSON.stringify({
+        theme: config.theme,
+        background: config.background,
+        palette: config.palette,
+      } satisfies CachedAppearance),
+    );
+  } catch {
+    // Private mode, or a full quota. The app works; it just flashes on launch.
+  }
+}
+
+const CACHED = readAppearance();
+
+/**
+ * Applies the cached theme to the document, before React mounts.
+ *
+ * Without this the class arrived with React's first commit, so a dark-mode user
+ * saw one painted frame of the light theme. Called from `main.tsx` as early as
+ * the bundle allows.
+ */
+export function applyCachedAppearance(): void {
+  if (typeof document === "undefined") return;
+  // Re-read rather than using `CACHED`. The function's job is "apply what is
+  // cached *now*", and reading at call time is what makes that true — the
+  // module-level read only exists to seed `DEFAULT_CONFIG` at boot.
+  const dark = readAppearance().theme === "dark";
+  document.documentElement.classList.toggle("dark", dark);
+  document.documentElement.style.background = backdropFor(dark);
+}
 
 export const DEFAULT_CONFIG: AppConfig = {
   schemaVersion: 1,
-  theme: "light",
-  background: {
-    kind: "builtin",
-    preset: "porcelain",
-    path: null,
-    dim: 0,
-    blur: 0,
-  },
+  // Hydrated from the cache, so `App`'s first render already has the right
+  // theme and the right background instead of flipping once the config lands.
+  theme: CACHED.theme ?? "light",
+  background: CACHED.background ?? DEFAULT_BACKGROUND,
+  // Seeded from the launch cache for the same reason as the theme: a custom
+  // palette that arrived with the config would flash the default first.
+  palette: CACHED.palette ?? DEFAULT_PALETTE,
   sidebarCollapsed: false,
   providers: {},
   personas: [],
@@ -46,6 +163,7 @@ export const DEFAULT_CONFIG: AppConfig = {
     sidebarPinned: false,
     sidebarWidth: 264,
     sidebarGrouping: "workspace",
+    sidebarCollapsedGroups: [],
     sidebarSort: "recent",
     sidebarWorkspaceOrder: [],
     compact: false,
@@ -56,6 +174,27 @@ export const DEFAULT_CONFIG: AppConfig = {
   },
   prompts: [],
   workspaces: [],
+  // Mirrors `DockLayout::default()` in `dock.rs`.
+  //
+  // The chats list is **open**, because it is the sidebar: navigation you should
+  // not have to summon. Everything else is **closed**, because a terminal or a
+  // runs list is a place you go to, not a tax on every launch. Since zones
+  // overlay rather than take space, an open panel costs the chat nothing.
+  dock: {},
+  dockDefault: {
+    zones: [
+      { id: "left", edge: "left", size: 300, open: true, panels: ["sessions"], active: 0 },
+      { id: "right", edge: "right", size: 460, open: false, panels: ["terminal"], active: 0 },
+      { id: "bottom", edge: "bottom", size: 260, open: false, panels: ["runs"], active: 0 },
+    ],
+    shell: null,
+  },
+  terminal: {
+    fontFamily: "JetBrains Mono",
+    fontSize: 13,
+    lineHeight: 130,
+    webgl: false,
+  },
   searchProvider: "auto",
 };
 
@@ -66,6 +205,7 @@ interface SettingsState {
   applyRemote: (config: AppConfig) => void;
   setTheme: (theme: Theme) => void;
   setBackground: (patch: Partial<BackgroundConfig>) => void;
+  setPalette: (patch: Partial<PaletteConfig>) => void;
 }
 
 let saveTimer: number | undefined;
@@ -85,23 +225,47 @@ export const useSettings = create<SettingsState>((set, get) => ({
 
   load: async () => {
     const remote = await ipc.getConfig();
-    set({ config: remote ?? DEFAULT_CONFIG, loaded: true });
+    const config = remote ?? DEFAULT_CONFIG;
+    cacheAppearance(config);
+    set({ config, loaded: true });
   },
 
-  applyRemote: (config) => set({ config }),
+  // Every path that can change the appearance writes the cache, not just the
+  // two setters: a config edited on another machine, or on a first run, arrives
+  // through here and would otherwise leave the next launch painting the old
+  // theme.
+  applyRemote: (config) => {
+    cacheAppearance(config);
+    set({ config });
+  },
 
   setTheme: (theme) => {
-    set((state) => ({ config: { ...state.config, theme } }));
+    const config = { ...get().config, theme };
+    cacheAppearance(config);
+    set({ config });
     scheduleSave(get);
   },
 
   setBackground: (patch) => {
-    set((state) => ({
-      config: {
-        ...state.config,
-        background: { ...state.config.background, ...patch },
-      },
-    }));
+    const config = {
+      ...get().config,
+      background: { ...get().config.background, ...patch },
+    };
+    cacheAppearance(config);
+    set({ config });
+    scheduleSave(get);
+  },
+
+  setPalette: (patch) => {
+    const config = {
+      ...get().config,
+      palette: { ...get().config.palette, ...patch },
+    };
+    // The palette is part of the appearance the launch cache carries, because a
+    // custom theme that appeared a frame late would be the same flash the cache
+    // exists to prevent.
+    cacheAppearance(config);
+    set({ config });
     scheduleSave(get);
   },
 }));

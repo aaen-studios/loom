@@ -17,7 +17,10 @@ Usage, plus a composer badge for the active model), **computer use** (Windows:
 stops the turn that is driving your PC, and screenshots land in the transcript),
 tray + hotkey overlay,
 launch at login (Settings → General), a fresh chat on every launch,
-signed updater, and a bespoke glass installer. See [docs/spec.md](docs/spec.md).
+signed updater, and a bespoke glass installer. The shell is now a **docking
+system** with a **real terminal** in it — see
+[The dock and the terminal](#the-dock-and-the-terminal) below. See also
+[docs/spec.md](docs/spec.md).
 
 ## Development
 
@@ -72,12 +75,68 @@ Frontend diagnostics (`[loom] <- delta`, `[loom] apply delta`) turn on with
 `window.__loom` (plus `__loom.ipc`, which the probe scripts use to reach the
 debug-only commands).
 
+## The dock and the terminal
+
+Loom's shell is a docking system. Any window edge holds a **zone** — a resizable
+area with a stack of panels as tabs — and panels register in one place
+(`src/dock/registry.tsx`): Terminal, Runs, Chats, Files, Goal, Browser.
+
+```text
+Ctrl+`             the dock, on or off (works from inside the terminal)
+Panels (title bar) every panel, with what is open and what is docked
+drag a tab         reorder it, move it to another panel, dock it to a window
+                   edge, or drag it out of the window to give it its own
+Escape             cancel a drag in flight
+⋯ on a tab         the same moves, for when you would rather not drag
+double-click       reset a panel's width
+```
+
+Zones start **closed**: Loom opens on the conversation, and every panel is one
+keystroke away. Dragging a splitter past the point where the chat can still be a
+column collapses the chat to a spine rather than refusing the drag, because
+someone pulling a dock open is asking for the dock.
+
+There is no rail of icons on the window edge and no hover zone. Both were tried
+and both were worse than what replaced them: the rail was permanent chrome over
+the artwork for a surface that is usually shut, and the hover band fought the
+native window resize. One menu in the title bar does the job, and it stays
+correct when a panel is added.
+
+The terminal is a real pty, not a pipe over `run_command`:
+
+- `crates/loom-core/src/pty.rs` — sessions, one per workspace folder plus as
+  many more as `+` asks for. `portable-pty`, so ConPTY on Windows and real
+  `openpty` elsewhere. Colours, arrow keys, resize and full-screen programs all
+  work.
+- Output is **bytes over `loom://pty`**, base64, on its own channel — a shell
+  repainting a progress bar is thousands of chunks a second and must not go
+  through the engine event stream. A per-session reader thread feeds one pump
+  thread that coalesces each burst into a single event.
+- The xterm instances live outside React, keyed by session id, so a tab switch
+  or a `StrictMode` remount keeps the scrollback.
+- **All sixteen ANSI colours are Loom's**, defined per theme and read from the
+  live stylesheet — xterm's stock palette is pure-hue and clashes badly.
+- The background is heavy glass, not a hole. A terminal is dense 13px monospace
+  read for minutes, so legibility wins and the wallpaper stays a tint.
+- When the terminal is alone in its zone, **its shell tabs are the zone's tabs** —
+  one row, not two.
+- Shells are auto-detected (pwsh → powershell → cmd, `$SHELL`, Git Bash, every
+  WSL distro). Closing a tab kills the process tree; quitting kills them all.
+
+`pty_write` is deliberately **not** an agent tool. A live shell has no permission
+card in front of it, so the agent cannot type into it by construction.
+
+Where a panel sits is stored in Rust config (`config.dock`, per workspace
+folder) and broadcast on `loom://dock`, because a torn-off panel is a second
+webview and two webviews cannot share a `zustand` store.
+
 ## Layout
 
 ```
 src/                 React UI
-src-tauri/           Tauri shell (window, tray, hotkey, overlay, commands)
-crates/loom-core/    engine: providers, tools, mcp, index, storage, updater
+src/dock/            the dock: zones, splitters, tab strips, panel registry
+src-tauri/           Tauri shell (window, tray, hotkey, overlay, commands, panels)
+crates/loom-core/    engine: providers, tools, mcp, index, storage, updater, dock, pty
 setup/               Loom Setup (bespoke installer)
 site/                marketing site (Next.js) — see below
 docs/spec.md         product + architecture spec

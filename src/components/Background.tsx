@@ -85,7 +85,7 @@ export function Background() {
         <div
           className="absolute inset-[-6%] animate-drift"
           style={{
-            ...backgroundStyle(config),
+            ...backgroundStyle(config, dark),
             filter: config.blur > 0 ? `blur(${config.blur}px)` : undefined,
           }}
         />

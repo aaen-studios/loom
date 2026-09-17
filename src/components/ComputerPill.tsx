@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { listen } from "@tauri-apps/api/event";
+import { subscribeTauri } from "../lib/listen";
 import { ipc } from "../lib/ipc";
 
 type PillState = "active" | "paused";
@@ -26,11 +26,12 @@ export function ComputerPill() {
     document.body.style.background = "transparent";
 
     let dispose: (() => void) | undefined;
-    void listen<string>("loom://computer-state", (event) => {
-      setState(event.payload === "paused" ? "paused" : "active");
+    // Subscribed through the race-safe helper: `listen` returns a promise, and
+    // StrictMode's cleanup runs before it resolves — so the plain shape attached
+    // a second `loom://computer-state` listener.
+    dispose = subscribeTauri<string>("loom://computer-state", (payload) => {
+      setState(payload === "paused" ? "paused" : "active");
       setIdleSeconds(0);
-    }).then((unlisten) => {
-      dispose = unlisten;
     });
 
     const timer = window.setInterval(() => {
