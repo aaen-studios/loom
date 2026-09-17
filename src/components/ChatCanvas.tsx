@@ -768,13 +768,19 @@ export function ChatCanvas() {
         </div>
 
         {!pinned && !question && (
-          <button
-            type="button"
-            onClick={jumpToLatest}
-            className="panel-strong rounded-capsule absolute bottom-28 left-1/2 z-20 -translate-x-1/2 px-3 py-1.5 text-[12px] text-soft"
+          <LiquidSurface
+            surface="cards"
+            className="rounded-capsule absolute bottom-28 left-1/2 z-20 -translate-x-1/2"
+            tint="var(--panel-bg-strong)"
           >
-            Jump to latest ↓
-          </button>
+            <button
+              type="button"
+              onClick={jumpToLatest}
+              className="px-3 py-1.5 text-[12px] text-soft"
+            >
+              Jump to latest ↓
+            </button>
+          </LiquidSurface>
         )}
 
         {error && (

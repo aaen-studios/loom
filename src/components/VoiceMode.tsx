@@ -52,6 +52,7 @@ import {
   StopIcon,
   TrashIcon,
 } from "./icons";
+import { LiquidSurface } from "./LiquidSurface";
 import { EmptyState, IconButton, fieldBase } from "./ui";
 
 export function VoiceMode() {
@@ -153,7 +154,12 @@ export function VoiceMode() {
         className="absolute inset-0 cursor-default bg-black/25"
       />
 
-      <div className="animate-summon panel-strong relative flex h-full w-full max-w-3xl flex-col overflow-hidden rounded-window">
+      <LiquidSurface
+        surface="overlays"
+        layout="block"
+        className="animate-summon relative flex h-full w-full max-w-3xl flex-col rounded-window"
+        tint="var(--panel-bg-strong)"
+      >
         <header className="flex items-center gap-2 px-4 pt-3 pb-2">
           <SoundIcon size={16} className="text-[var(--accent)]" />
           <h2 className="text-[14.5px] font-semibold">Voice mode</h2>
@@ -431,7 +437,7 @@ export function VoiceMode() {
             </p>
           )}
         </footer>
-      </div>
+      </LiquidSurface>
     </div>
   );
 }

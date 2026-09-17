@@ -1,5 +1,6 @@
 import { useEffect, useRef } from "react";
 import { cn } from "../lib/cn";
+import { LiquidSurface } from "./LiquidSurface";
 import { formatReset, relativeTime } from "../lib/format";
 import { useMenu } from "../lib/menu";
 import {
@@ -83,11 +84,15 @@ export function UsageBadge({ align = "up" }: { align?: "up" | "down" }) {
       </button>
 
       {open && (
-        <div
+        <LiquidSurface
+          surface="popovers"
+          layout="block"
           className={cn(
-            "panel-strong absolute z-50 w-64 max-w-[calc(100vw-2rem)] rounded-sheet border border-[var(--glass-border)] p-2.5",
+            "absolute z-50 w-64 max-w-[calc(100vw-2rem)] rounded-sheet border border-[var(--glass-border)]",
             align === "down" ? "right-0 top-full mt-2" : "bottom-full left-0 mb-2",
           )}
+          contentClassName="p-2.5"
+          tint="var(--panel-bg-strong)"
         >
           <p className="flex items-center gap-1.5 text-[10.5px] font-semibold tracking-[0.06em] text-faint uppercase">
             <span
@@ -136,7 +141,7 @@ export function UsageBadge({ align = "up" }: { align?: "up" | "down" }) {
             {reset ? <span>{reset}</span> : <span />}
             <span>updated {relativeTime(usage.fetchedAt)}</span>
           </div>
-        </div>
+        </LiquidSurface>
       )}
     </div>
   );

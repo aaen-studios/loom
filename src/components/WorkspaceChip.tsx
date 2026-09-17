@@ -478,12 +478,16 @@ export function ModeChip() {
       </button>
 
       {open && (
-        <div
+        <LiquidSurface
+          surface="popovers"
+          layout="block"
           className={cn(
-            "panel-strong animate-fade-up absolute left-0 z-40 w-[336px] max-w-[calc(100vw-2rem)] overflow-y-auto rounded-sheet p-1.5",
+            "animate-fade-up absolute left-0 z-40 w-[336px] max-w-[calc(100vw-2rem)] overflow-y-auto rounded-sheet",
             drop.up ? "bottom-full mb-2" : "top-full mt-2",
           )}
-          style={{ maxHeight: drop.maxHeight }}
+          contentStyle={{ maxHeight: drop.maxHeight }}
+          contentClassName="p-1.5"
+          tint="var(--panel-bg-strong)"
         >
           <p className="px-2 pt-1.5 pb-1 text-[10px] font-semibold tracking-[0.1em] text-faint uppercase">
             Mode
@@ -655,7 +659,7 @@ export function ModeChip() {
               </>
             )}
           </div>
-        </div>
+        </LiquidSurface>
       )}
     </div>
   );
