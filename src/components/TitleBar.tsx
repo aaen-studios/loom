@@ -22,7 +22,7 @@ import {
   PanelLeftIcon,
   PlusIcon,
   RestoreIcon,
-  SoundIcon,
+  SettingsIcon,
 } from "./icons";
 
 function PillButton({
@@ -62,11 +62,19 @@ function PillButton({
 }
 
 /**
- * Two floating pills — navigation on the left, window controls on the right —
- * over an invisible full-width drag strip.
+ * Four floating pills — Settings, then navigation on the left; app surfaces and
+ * window controls on the right — over an invisible full-width drag strip.
+ *
+ * Settings is here rather than at the foot of the chats list, which is where it
+ * used to be. That row was permanently reserved space at the bottom of a column
+ * whose whole job is showing as many chats as possible, and it was only
+ * reachable while the chats panel was open — so the one place you go to change
+ * something was inside a panel you might not have open. A title-bar button is
+ * always visible and costs the list nothing.
  */
 export function TitleBar() {
-  const setVoiceOpen = useUi((state) => state.setVoiceOpen);
+  const setSettingsOpen = useUi((state) => state.setSettingsOpen);
+  const settingsOpen = useUi((state) => state.settingsOpen);
   const openPanel = useDock((state) => state.openPanel);
   const toggleZone = useDock((state) => state.toggleZone);
   // The open zone whose visible tab is the chats list, if there is one. It
@@ -102,6 +110,22 @@ export function TitleBar() {
       <div className="absolute inset-0 -z-10" data-tauri-drag-region />
 
       <div className="flex items-center gap-2">
+        {/* Left of the chats pill, so the left group reads settings-then-
+            navigation. Its own capsule rather than a third icon inside the
+            navigation pill: that pill is about moving around one conversation,
+            and this opens a whole surface over everything. */}
+        <LiquidSurface
+          className="h-10 rounded-capsule"
+          contentClassName="gap-0.5 p-1"
+        >
+          <PillButton
+            label="Settings"
+            active={settingsOpen}
+            onClick={() => setSettingsOpen(true)}
+          >
+            <SettingsIcon size={17} />
+          </PillButton>
+        </LiquidSurface>
         <LiquidSurface
           className="h-10 rounded-capsule"
           contentClassName="gap-0.5 p-1"
@@ -132,17 +156,6 @@ export function TitleBar() {
           </PillButton>
           <PillButton label="New chat" onClick={() => void newSession()}>
             <PlusIcon size={17} />
-          </PillButton>
-        </LiquidSurface>
-        <LiquidSurface
-          className="h-10 rounded-capsule"
-          contentClassName="gap-0.5 p-1"
-        >
-          {/* Beside Runs rather than in the window-control pill: both are
-              app surfaces, and a control as destructive as Close should not
-              sit next to something reached for mid-sentence. */}
-          <PillButton label="Voice mode" onClick={() => setVoiceOpen(true)}>
-            <SoundIcon size={17} />
           </PillButton>
         </LiquidSurface>
       </div>

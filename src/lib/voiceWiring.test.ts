@@ -67,20 +67,35 @@ describe("voice mode is reachable", () => {
     expect(read("src/App.tsx")).toMatch(/<VoiceMode\s*\/>/);
   });
 
-  it("has a button in the title bar", () => {
-    // A feature with no way in is a feature nobody has. This was the second
-    // absence-shaped bug: the surface existed and nothing opened it.
-    const titleBar = read("src/components/TitleBar.tsx");
-    expect(titleBar, "no control opens voice mode").toContain("setVoiceOpen");
-  });
-
-  it("has a keyboard shortcut", () => {
+  it("has a keyboard shortcut, which is now the only way in", () => {
+    // Voice mode used to have a title-bar button beside the window controls.
+    // It was removed on request, so **the shortcut is the entire entry point**
+    // and this test is what stands between the feature and the
+    // absence-shaped bug the header describes — a surface nothing opens.
+    //
+    // That makes the sheet assertion load-bearing rather than a nicety. A
+    // shortcut nobody can find is a feature nobody has: with no button, `?`
+    // is the only place a new user would ever learn the keys exist.
     const shortcuts = read("src/lib/shortcuts.ts");
     expect(shortcuts, "voice mode has no shortcut").toMatch(
       /shiftKey && key === "v"/,
     );
-    // And the sheet lists it, or the shortcut is undiscoverable.
-    expect(read("src/components/ShortcutsSheet.tsx")).toContain("Ctrl+Shift+V");
+    expect(
+      read("src/components/ShortcutsSheet.tsx"),
+      "voice mode is shortcut-only now, so the shortcut sheet must list it",
+    ).toContain("Ctrl+Shift+V");
+  });
+
+  it("is opened by something in the app, not only by its own shortcut", () => {
+    // The settings button now occupies the slot the voice button had, and it is
+    // here rather than in a comment so that a future reshape of the title bar
+    // has to keep *some* deliberate answer to "how does voice mode open". If
+    // this fails, either give voice mode a control again or delete the test
+    // knowingly — do not let it fail quietly into a green suite.
+    const titleBar = read("src/components/TitleBar.tsx");
+    expect(titleBar, "the title bar lost its settings button").toContain(
+      "setSettingsOpen",
+    );
   });
 
   it("closes on Escape, from its own listener", () => {

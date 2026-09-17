@@ -17,7 +17,6 @@ import {
 import { sortSessions, workspaceLabel, type WorkspaceGroup } from "../lib/workspaces";
 import { useChat } from "../stores/chat";
 import { useSettings } from "../stores/settings";
-import { useUi } from "../stores/ui";
 import type { InterfaceConfig, Session, SidebarGrouping, SidebarSort } from "../types";
 import {
   CheckIcon,
@@ -27,11 +26,10 @@ import {
   GripIcon,
   LoomMark,
   PlusIcon,
-  SettingsIcon,
   SortIcon,
   TrashIcon,
 } from "./icons";
-import { EmptyState, IconButton, Kbd, SearchField } from "./ui";
+import { EmptyState, IconButton, SearchField } from "./ui";
 
 const GROUPING_OPTIONS: { id: SidebarGrouping; label: string }[] = [
   { id: "workspace", label: "By workspace" },
@@ -80,7 +78,6 @@ function shortModel(modelId: string | null): string | null {
  * file is only the gesture and the rendering.
  */
 export function Sidebar() {
-  const setSettingsOpen = useUi((state) => state.setSettingsOpen);
   const sessions = useChat((state) => state.sessions);
   const activeId = useChat((state) => state.activeId);
   const openSession = useChat((state) => state.openSession);
@@ -644,19 +641,11 @@ export function Sidebar() {
           })}
         </div>
 
-        <div className="border-t border-[var(--glass-border)] p-2">
-          <button
-            type="button"
-            // Settings opens beside the chats rather than over them, so the
-            // list stays open and clickable while you are in there.
-            onClick={() => setSettingsOpen(true)}
-            className="hover-surface flex w-full items-center gap-2 rounded-row px-2.5 py-2 text-left text-[13px] text-soft"
-          >
-            <SettingsIcon size={15} />
-            <span className="flex-1">Settings</span>
-            <Kbd>Ctrl+,</Kbd>
-          </button>
-        </div>
+        {/* Settings used to sit here, pinned to the foot of the list. It is a
+            button in the title bar now (see `TitleBar`), which is where the
+            other app surfaces live and which is visible whether or not this
+            panel is open. Nothing replaces it: the extra room belongs to the
+            list, which is the one thing this column is for. */}
       </aside>
     </div>
   );

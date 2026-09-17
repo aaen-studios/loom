@@ -21,7 +21,7 @@ const SHORTCUTS: { group: string; items: Shortcut[] }[] = [
     group: "Chats",
     items: [
       { keys: "Ctrl+N", action: "New chat" },
-      { keys: "Ctrl+K", action: "Chats popup (search, rename, export)" },
+      { keys: "Ctrl+K", action: "The chats list, with its search focused" },
       { keys: "Ctrl+,", action: "Settings" },
       { keys: "Ctrl+Shift+Space", action: "Quick-ask overlay from anywhere" },
       { keys: "Ctrl+Alt+Esc", action: "Stop the computer turn, from anywhere" },

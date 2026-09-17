@@ -131,6 +131,26 @@ Where a panel sits is stored in Rust config (`config.dock`, per workspace
 folder) and broadcast on `loom://dock`, because a torn-off panel is a second
 webview and two webviews cannot share a `zustand` store.
 
+## Finding your way around
+
+The title bar's left-hand pills are **Settings**, then the chats list and a new
+chat. Settings is there rather than at the foot of the chats list because that
+row was reserved space in the one column whose job is showing as many chats as
+possible, and it was only reachable while that panel happened to be open.
+
+Voice mode has no button: it is `Ctrl+Shift+V`, and it is listed under **Voice**
+in the `?` sheet — which, since the button went, is the only place its keys are
+discoverable.
+
+```text
+Ctrl+,             Settings
+Ctrl+Shift+V       Voice mode: speak and listen
+Ctrl+N             New chat
+Ctrl+K             Chats list (focuses its search when it is open)
+Ctrl+`             the dock, on or off
+?                  every shortcut
+```
+
 ## Glass
 
 The app is glass all the way down, and the thickness is yours to set.
