@@ -360,7 +360,7 @@ function ZoneHeader({
   const def = active ? panelDef(active) : null;
 
   return (
-    <div className="flex h-9 shrink-0 items-center gap-0.5 border-b border-[var(--glass-border)] px-1">
+    <div className="glass-thin flex h-9 shrink-0 items-center gap-0.5 border-b border-[var(--glass-border)] px-1">
       {soloStrip && def?.tabStrip ? (
         // The strip owns the whole row including its own trailing buttons, so
         // its `+` sits exactly where a panel `+` would.

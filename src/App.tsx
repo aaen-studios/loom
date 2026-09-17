@@ -14,6 +14,7 @@ import { VoiceMode } from "./components/VoiceMode";
 import { DockHost } from "./dock/DockShell";
 import { panelDef } from "./dock/registry";
 import { useEngineEvents, usePanelEvents, useShellEvents, useVoiceEvents } from "./lib/events";
+import { useGlassVars } from "./lib/glass";
 import { raceSafe } from "./lib/listen";
 import { useShortcuts } from "./lib/shortcuts";
 import { isTauri } from "./lib/tauri";
@@ -122,6 +123,10 @@ function MainShell() {
  */
 function PanelWindow({ panel }: { panel: string }) {
   const theme = useSettings((state) => state.config.theme);
+  const glass = useSettings((state) => state.config.interface.glass);
+  // A torn-off window is a second webview with its own document, so it needs the
+  // multipliers written onto its own <html> — the main window's are not shared.
+  useGlassVars(glass);
   const load = useSettings((state) => state.load);
   const loadSessions = useChat((state) => state.loadSessions);
   const workdir = useChat(

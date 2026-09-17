@@ -357,6 +357,103 @@ export interface McpServerConfig {
   enabled: boolean;
 }
 
+/* ---------------------------------------------------------------------------
+   Glass
+
+   Two palettes' worth of surfaces are tuned by `--pill-bg` and friends, and
+   this is the one place the user gets to move them. Everything here is typed in
+   Rust as well, and that is not ceremony: `InterfaceConfig` is a struct with a
+   container-level `#[serde(default)]` and **no** `extra` catch-all, and
+   `set_interface_settings` replaces the whole thing. So an untyped nested key
+   would be dropped on every save, the sliders would appear to work, and the
+   values would be gone on the next launch.
+--------------------------------------------------------------------------- */
+
+/**
+ * Refraction mode for a liquid surface.
+ *
+ * `shader` is deliberately absent from the type rather than merely unoffered in
+ * the settings screen: it rasterises its displacement map pixel by pixel in a
+ * nested loop on mount and again on every resize, which is the wrong trade for
+ * a 40px pill. Leaving it out of the union is what stops a later caller passing
+ * it by accident.
+ */
+export type GlassMode = "standard" | "polar" | "prominent";
+
+/**
+ * A refracting surface's parameters — the six numbers, without the switches.
+ *
+ * The render-side shape. `LiquidGlassConfig` is this plus the on/off flags, and
+ * defining one as a subset of the other is what makes it impossible for the two
+ * to drift apart.
+ */
+export type LiquidParams = Omit<
+  LiquidGlassConfig,
+  "enabled" | "pills" | "composer" | "panels"
+>;
+
+/**
+ * A refracting surface's parameters, as stored.
+ *
+ * Field for field the same as `LiquidParams` in `lib/glass.ts`, which is the
+ * same shape minus the flags. The clamps live in `lib/glass.ts` and are applied
+ * on the way *out* of here, because Rust stores whatever it is given.
+ *
+ * `elasticity` is a float, which is safe here in a way an out-of-range integer
+ * is not: JSON has no NaN literal and an `f64` accepts any number it can carry,
+ * so this field cannot be the reason a config fails to parse. `refraction`,
+ * `frost`, `saturation` and `chromatics` stay integers both because they are
+ * counts of pixels or percent and because a value outside `u8` would fail the
+ * load rather than degrade one field.
+ */
+export interface LiquidGlassConfig {
+  /** Whether any surface refracts at all. The master switch. */
+  enabled: boolean;
+  /**
+   * Which surfaces refract, per surface rather than all-or-nothing.
+   *
+   * The composer is the expensive one — the largest area, a moving background
+   * behind it, and it resizes as you type — so wanting the effect on the small
+   * chrome and not there is a reasonable place to land.
+   */
+  pills: boolean;
+  composer: boolean;
+  panels: boolean;
+  /** `displacementScale`: how far edge samples are pulled. 0–120. */
+  refraction: number;
+  /** Backdrop blur in px — *not* the library's own `blurAmount` units. */
+  frost: number;
+  /** Percent. 100 is neutral. */
+  saturation: number;
+  /** Chromatic fringing on the rim. 0–5. */
+  chromatics: number;
+  /** How far the surface follows the pointer. 0 is rigid. */
+  elasticity: number;
+  mode: GlassMode;
+}
+
+/**
+ * The app-wide glass knobs.
+ *
+ * Both multipliers default to 100, so the app looks exactly as it does today
+ * until a slider moves. That is deliberate: light theme over bright artwork is
+ * already named in `docs/spec.md` as the weakest point in the design, and
+ * shipping a glass feature should not trade it away silently.
+ */
+export interface GlassConfig {
+  /**
+   * Percent of each surface token's own alpha, 50–100.
+   *
+   * A multiplier rather than a replacement colour, so `--pill-bg` and
+   * `--panel-bg-strong` keep their own values and only their opacity moves.
+   * Lower is more see-through, which is what "glassier" means here.
+   */
+  tint: number;
+  /** Percent backdrop blur, 0–200. Higher is frostier. */
+  blur: number;
+  liquid: LiquidGlassConfig;
+}
+
 export type ThinkingDisplay = "collapsed" | "hidden" | "expanded";
 /** How much tool-call detail the transcript shows. */
 export type ToolCallDisplay = "collapsed" | "expanded" | "hidden";
@@ -400,6 +497,8 @@ export interface InterfaceConfig {
   showCondensing: boolean;
   /** Let the lite model propose durable facts after each reply. */
   autoMemory: boolean;
+  /** App-wide glass tuning, and the refracting-surface parameters. */
+  glass: GlassConfig;
 }
 
 export interface StorageUsage {

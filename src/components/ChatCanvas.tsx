@@ -137,7 +137,7 @@ function ChatHeader() {
   );
 
   return (
-    <div className="flex h-11 shrink-0 items-center gap-3 border-b border-[var(--glass-border)] px-5">
+    <div className="glass-thin flex h-11 shrink-0 items-center gap-3 border-b border-[var(--glass-border)] px-5">
       <span className="min-w-0 truncate text-[13px] text-soft">
         {session?.title || "New chat"}
       </span>

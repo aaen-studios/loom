@@ -30,6 +30,7 @@ import { canCapture } from "../lib/microphone";
 import { barHeight } from "../lib/voiceActivity";
 import { useVoice } from "../stores/voice";
 import { AttachmentChips } from "./AttachmentChips";
+import { LiquidSurface } from "./LiquidSurface";
 import { MentionMenu, chatDetail, fileDetail, type MentionOption } from "./MentionMenu";
 import { ModelPicker } from "./ModelPicker";
 import { ModeChip } from "./WorkspaceChip";
@@ -467,12 +468,35 @@ export function Composer({ variant = "docked" }: ComposerProps) {
         : "This chat has no workspace folder, so there are no files to offer. Pick one from the workspace chip.";
 
   return (
-    <div
-      className={cn(
-        "panel-strong relative w-full rounded-sheet p-2.5",
-        variant === "hero" && "animate-fade-up",
-      )}
+    <LiquidSurface
+      /*
+        The liquid layer goes **behind** the composer, never around it.
+
+        `panel-strong` is dropped here for a tint-only treatment, because that
+        utility's 82% tint and 38px backdrop blur are exactly what would hide
+        the refraction: the warp samples what is painted behind the element, and
+        an opaque-enough fill on top of it leaves nothing to bend.
+
+        The slash menu and the mention menu below keep `panel-strong`. They are
+        popups *over* the chat rather than part of this surface, and they are
+        children of `.lg-content` — a sibling of the shell — precisely so their
+        `absolute bottom-full` can overflow the composer instead of being
+        clipped by the library's `overflow: hidden` box.
+
+        Refraction is halved relative to the pills: the displacement maps stretch
+        to the box, so the same scale that reads as a subtle rim on a 40px
+        capsule reads as a heavy smear across a full-width sheet, and this
+        surface sits under the text you are reading.
+      */
+      surface="composer"
+      className="w-full rounded-sheet"
+      contentClassName="p-2.5"
+      contentStyle={{ display: "block" }}
+      tint="var(--panel-bg-strong)"
+      tintStrength={70}
+      params={{ refraction: 16 }}
     >
+      <div className={cn(variant === "hero" && "animate-fade-up")}>
       {mentionOpen && mentionSpan && (
         <MentionMenu
           trigger={mentionSpan.trigger}
@@ -743,8 +767,9 @@ export function Composer({ variant = "docked" }: ComposerProps) {
             <ArrowUpIcon size={17} />
           </button>
         )}
+        </div>
       </div>
-    </div>
+    </LiquidSurface>
   );
 }
 

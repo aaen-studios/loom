@@ -60,7 +60,7 @@ export function ComputerPill() {
 
   return (
     <div className="flex h-full w-full items-center justify-center p-1">
-      <div className="flex w-full items-center gap-2.5 rounded-full border border-[var(--glass-border)] bg-[color-mix(in_srgb,var(--panel)_88%,transparent)] px-3.5 py-2 shadow-lg backdrop-blur">
+      <div className="flex w-full items-center gap-2.5 rounded-full border border-[var(--glass-border)] bg-[color-mix(in_srgb,var(--panel-bg)_88%,transparent)] px-3.5 py-2 shadow-lg backdrop-blur">
         <span
           className={
             state === "paused"

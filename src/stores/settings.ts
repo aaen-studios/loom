@@ -2,10 +2,12 @@ import { create } from "zustand";
 import type {
   AppConfig,
   BackgroundConfig,
+  GlassConfig,
   PaletteConfig,
   Theme,
 } from "../types";
 import { backdropFor } from "../lib/background";
+import { DEFAULT_GLASS } from "../lib/glass";
 import { ipc } from "../lib/ipc";
 
 /**
@@ -171,6 +173,10 @@ export const DEFAULT_CONFIG: AppConfig = {
     showCondensing: true,
     captureOnSend: true,
     autoMemory: true,
+    // Present here as well as in Rust, and that is the whole point: `saveConfig`
+    // replaces the entire struct, so a default without `glass` would silently
+    // reset the user's sliders on the next unrelated save.
+    glass: DEFAULT_GLASS,
   },
   prompts: [],
   workspaces: [],
@@ -206,6 +212,9 @@ interface SettingsState {
   setTheme: (theme: Theme) => void;
   setBackground: (patch: Partial<BackgroundConfig>) => void;
   setPalette: (patch: Partial<PaletteConfig>) => void;
+  setGlass: (patch: Partial<GlassConfig>) => void;
+  /** The refracting surfaces, one level deeper than `setGlass`. */
+  setLiquid: (patch: Partial<GlassConfig["liquid"]>) => void;
 }
 
 let saveTimer: number | undefined;
@@ -265,6 +274,42 @@ export const useSettings = create<SettingsState>((set, get) => ({
     // custom theme that appeared a frame late would be the same flash the cache
     // exists to prevent.
     cacheAppearance(config);
+    set({ config });
+    scheduleSave(get);
+  },
+
+  // Glass deliberately does **not** go into the launch cache. It is not part of
+  // what makes the first frame wrong — the tint and blur multipliers only move
+  // when the user drags a slider, and the surfaces are already painted by then —
+  // so caching it would add a second place for the value to be stale without
+  // preventing a flash.
+  //
+  // Both persist through `saveConfig`, which writes the whole config: the same
+  // route `setBackground` and `setPalette` take. No new Rust command, and
+  // nothing to keep in step when a field is added.
+  setGlass: (patch) => {
+    const config = {
+      ...get().config,
+      interface: {
+        ...get().config.interface,
+        glass: { ...get().config.interface.glass, ...patch },
+      },
+    };
+    set({ config });
+    scheduleSave(get);
+  },
+
+  setLiquid: (patch) => {
+    const config = {
+      ...get().config,
+      interface: {
+        ...get().config.interface,
+        glass: {
+          ...get().config.interface.glass,
+          liquid: { ...get().config.interface.glass.liquid, ...patch },
+        },
+      },
+    };
     set({ config });
     scheduleSave(get);
   },

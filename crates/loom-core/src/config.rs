@@ -945,6 +945,8 @@ pub struct InterfaceConfig {
     /// Memory page. Facts always save instantly when the model calls
     /// `remember_fact`; this only governs the automatic pass.
     pub auto_memory: bool,
+    /// App-wide glass tuning, and the parameters of the refracting surfaces.
+    pub glass: GlassConfig,
 }
 
 impl Default for InterfaceConfig {
@@ -968,6 +970,114 @@ impl Default for InterfaceConfig {
             show_condensing: true,
             capture_on_send: true,
             auto_memory: true,
+            glass: GlassConfig::default(),
+        }
+    }
+}
+
+/// Refraction mode for a liquid surface.
+///
+/// `shader` is deliberately absent rather than merely unoffered. It rasterises
+/// its displacement map pixel by pixel in a nested loop on mount and again on
+/// every resize, which is the wrong trade for a 40px pill.
+///
+/// The cost of leaving it out of the enum is that an unknown string in a
+/// hand-edited config fails the whole load rather than being ignored — which is
+/// the honest failure, and the reason a retired mode would need a migration.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum GlassMode {
+    #[default]
+    Standard,
+    Polar,
+    Prominent,
+}
+
+/// A refracting surface's parameters.
+///
+/// Field for field the same as `LiquidParams` in the UI's `lib/glass.ts`, which
+/// is the same shape minus the four switches. The clamps live there and are
+/// applied on the way out of the config, because this stores what it is given.
+///
+/// `elasticity` is an `f64` rather than a scaled integer, and that is safe here
+/// in a way an out-of-range integer is not: JSON has no NaN literal and an
+/// `f64` accepts any number it can carry, so this field cannot be the reason a
+/// config fails to parse. The others stay integers — they are counts of pixels
+/// or percent, and a value outside `u8` should fail loudly rather than be
+/// silently truncated.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct LiquidGlassConfig {
+    /// The master switch. Off renders the same surfaces as ordinary glass.
+    pub enabled: bool,
+    /// Which surfaces refract, per surface rather than all-or-nothing. The
+    /// composer is much the most expensive, so wanting the effect on small
+    /// chrome and not there is a reasonable place to land.
+    pub pills: bool,
+    pub composer: bool,
+    pub panels: bool,
+    /// `displacementScale`: how far edge samples are pulled.
+    pub refraction: u8,
+    /// Backdrop blur in px — *not* the library's own `blurAmount` units, which
+    /// are on a wildly different scale. See `LiquidParams::frost` in the UI.
+    pub frost: u8,
+    /// Percent saturation. 100 is neutral.
+    pub saturation: u8,
+    /// Chromatic aberration on the rim.
+    pub chromatics: u8,
+    /// How far the surface follows the pointer. 0 is rigid.
+    pub elasticity: f64,
+    pub mode: GlassMode,
+}
+
+impl Default for LiquidGlassConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            pills: true,
+            composer: true,
+            panels: true,
+            // Modest by default: the refraction has to be visible without the
+            // edge pulling the chrome apart, and these pills are 40px tall.
+            refraction: 32,
+            // 6px. The library's own default, and about as much as a 40px pill
+            // can take before the backdrop is too flat to refract at all.
+            frost: 6,
+            saturation: 140,
+            chromatics: 2,
+            // Rigid by default. The library moves the surface with the pointer
+            // from up to 200px away, which on a title bar means the pills shift
+            // as you cross the window to reach a menu.
+            elasticity: 0.0,
+            mode: GlassMode::Standard,
+        }
+    }
+}
+
+/// The app-wide glass knobs.
+///
+/// Both multipliers default to 100, so the app looks exactly as it does today
+/// until a slider moves. Deliberate: light theme over bright artwork is already
+/// the weakest point in the design, and shipping a glass feature should not
+/// trade it away silently.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct GlassConfig {
+    /// Percent of each surface token's own alpha, 50–100. A multiplier rather
+    /// than a replacement colour, so `--pill-bg` and `--panel-bg-strong` keep
+    /// their own values and only their opacity moves.
+    pub tint: u8,
+    /// Percent backdrop blur, 0–200.
+    pub blur: u8,
+    pub liquid: LiquidGlassConfig,
+}
+
+impl Default for GlassConfig {
+    fn default() -> Self {
+        Self {
+            tint: 100,
+            blur: 100,
+            liquid: LiquidGlassConfig::default(),
         }
     }
 }
@@ -1049,6 +1159,19 @@ mod tests {
         // is the entry most likely to be dropped by a serialiser that treats
         // empty strings as absent.
         config.interface.sidebar_collapsed_groups = vec!["C:/work/loom".into(), String::new()];
+        // Glass settings are a nested struct inside a struct that itself has no
+        // `extra` catch-all, which is the arrangement most likely to lose a
+        // field silently: a missing inner key takes the container default, and
+        // an unknown one is dropped on save. Every field is moved off its
+        // default here so a round trip that ignores the whole block cannot pass.
+        config.interface.glass.tint = 72;
+        config.interface.glass.blur = 160;
+        config.interface.glass.liquid.enabled = true;
+        config.interface.glass.liquid.panels = false;
+        config.interface.glass.liquid.refraction = 64;
+        config.interface.glass.liquid.frost = 14;
+        config.interface.glass.liquid.elasticity = 0.35;
+        config.interface.glass.liquid.mode = GlassMode::Prominent;
         // A per-folder dock arrangement, with a zone open and a shell chosen:
         // the two things about a layout that are easiest to lose in a
         // round trip, since one is a nested list and the other is an Option.

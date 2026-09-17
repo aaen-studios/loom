@@ -1,7 +1,9 @@
 import { useEffect, useState, type CSSProperties, type ReactNode } from "react";
 import LiquidGlass from "liquid-glass-react";
 import { cn } from "../lib/cn";
-import { DEFAULT_LIQUID, clampLiquid, toBlurAmount, type LiquidParams } from "../lib/glass";
+import { clampLiquid, toBlurAmount } from "../lib/glass";
+import { useSettings } from "../stores/settings";
+import type { LiquidGlassConfig } from "../types";
 
 /**
  * A glass surface, optionally refracted.
@@ -20,7 +22,8 @@ import { DEFAULT_LIQUID, clampLiquid, toBlurAmount, type LiquidParams } from "..
  * The library's own box is `overflow: hidden` inline, and every surface this is
  * used on holds absolutely positioned popups: the title-bar pills contain the
  * Panels menu, the workspace chip and the persona menu, and the composer
- * contains the slash menu. A child would be clipped. A sibling cannot be.
+ * contains the slash menu and the mention menu. A child would be clipped. A
+ * sibling cannot be.
  *
  * ## Why `top/left: 50%` and `width/height: 100%` rather than `inset: 0`
  *
@@ -32,7 +35,7 @@ import { DEFAULT_LIQUID, clampLiquid, toBlurAmount, type LiquidParams } from "..
  * it back. Fighting the transform with `!important` would also throw away the
  * elasticity and the hover scale — which is the whole "liquid" part of the
  * effect, and the reason for reaching for this library rather than an SVG
- * filter written here.
+ * filter written here. Verified: the root lands within a pixel.
  *
  * ## Why no measurement and no `ResizeObserver`
  *
@@ -47,7 +50,8 @@ export function LiquidSurface({
   children,
   className,
   contentClassName,
-  /** Which token the surface tints with. */
+  /** Inline, so it wins. For layout the `lg-content` class cannot express. */
+  contentStyle,  /** Which token the surface tints with. */
   tint = "var(--pill-bg)",
   /**
    * How much of that token survives, as a percentage.
@@ -59,40 +63,62 @@ export function LiquidSurface({
    * layering exists to avoid.
    */
   tintStrength = 60,
+  /**
+   * Which config switch governs this surface.
+   *
+   * Resolved here rather than passed in as a boolean so every call site obeys
+   * the master switch without having to remember to combine them. The failure
+   * mode of the other arrangement is one surface that quietly ignores "off".
+   */
+  surface,
   /** Off renders the same geometry as ordinary frosted glass, no refraction. */
-  liquid = true,
-  params = DEFAULT_LIQUID,
+  liquid,
+  /** Per-surface overrides, merged over the stored config. */
+  params,
 }: {
   children: ReactNode;
   className?: string;
   contentClassName?: string;
+  contentStyle?: CSSProperties;
   tint?: string;
   tintStrength?: number;
+  surface?: keyof Pick<LiquidGlassConfig, "pills" | "composer" | "panels">;
   liquid?: boolean;
-  params?: LiquidParams;
+  params?: Partial<LiquidGlassConfig>;
 }) {
   const reduced = useReducedMotion();
-  const safe = clampLiquid(params);
+  const config = useSettings((state) => state.config.interface.glass.liquid);
 
-  // The fill is the one place the two modes differ, and it is the same
-  // declaration either way: the full token when there is no warp to show
-  // through it, and a fraction of it when there is.
-  const fill = `color-mix(in srgb, ${tint} ${liquid ? tintStrength : 100}%, transparent)`;
+  // The master switch, this surface's own switch, and the caller's override —
+  // in that order, so a surface cannot opt itself in past "off".
+  const enabled = config.enabled && (surface ? config[surface] : true) && (liquid ?? true);
+
+  // Config first, so a caller can override one field for one surface. The
+  // composer wants less refraction than a 40px pill: the displacement maps
+  // stretch to the box, so the same scale reads much heavier on a wide, short
+  // surface than on a small round one.
+  const safe = clampLiquid(params ? { ...config, ...params } : config);
+
+  // The one place the two modes differ, and it is the same declaration either
+  // way: the full token when there is no warp to show through it, and a
+  // fraction of it when there is.
+  const fill = `color-mix(in srgb, ${tint} ${enabled ? tintStrength : 100}%, transparent)`;
 
   return (
     <div className={cn("lg-stage", className)}>
-      {liquid ? (
+      {enabled ? (
         <div className="lg-shell">
           <LiquidGlass
             className="lg-glass"
             displacementScale={safe.refraction}
-            // `safe.frost` is in px; the library wants its own unit.
+            // `safe.frost` is in px; the library wants its own unit, which is a
+            // different scale by a factor of 32. See `toBlurAmount`.
             blurAmount={toBlurAmount(safe.frost)}
             saturation={safe.saturation}
             aberrationIntensity={safe.chromatics}
             // The pointer-following is a transform rewritten every frame, so the
-            // global reduced-motion override (which only shortens transitions
-            // and animations) does not cover it. This does.
+            // global reduced-motion override — which only shortens transitions
+            // and animations — does not cover it. This does.
             elasticity={reduced ? 0 : safe.elasticity}
             // The shell owns the silhouette; a radius here would be a second,
             // smaller one on the inner box.
@@ -106,18 +132,29 @@ export function LiquidSurface({
               omitted. The library renders children inside its own box, which is
               `overflow: hidden` inline — so anything passed here is clipped. All
               real content is a sibling, in `.lg-content`, where the title-bar
-              menus and the composer's slash menu can overflow freely. The
-              library only needs *something* so its inline-flex box does not
-              collapse; our CSS flattens that box to fill the shell regardless.
+              menus and the composer's slash menu can overflow freely.
+
+              The library only needs *something* so its inline-flex box does not
+              collapse to nothing, which would leave the warp painting zero
+              pixels. Our CSS flattens that box to fill the shell regardless.
             */}
             {null}
           </LiquidGlass>
+          {/* Above the warp, never below it: `backdrop-filter` samples what is
+              painted behind the element, so a tint on the shell would become
+              part of the warp's own input and get frosted along with everything
+              else. */}
           <div className="lg-tint" style={{ backgroundColor: fill }} />
         </div>
       ) : (
         <div className="lg-static" style={{ backgroundColor: fill }} />
       )}
-      <div className={cn("lg-content", contentClassName)}>{children}</div>
+      <div
+        className={cn("lg-content", DEFAULT_CONTENT_CLASS, contentClassName)}
+        style={contentStyle}
+      >
+        {children}
+      </div>
     </div>
   );
 }
@@ -135,6 +172,24 @@ const LIQUID_FILL: CSSProperties = {
   width: "100%",
   height: "100%",
 };
+
+/**
+ * The base layout for the content: a centred row, which is what chrome is.
+ *
+ * Applied as Tailwind classes rather than inside the unlayered `.lg-content`
+ * rule, because unlayered rules beat every utility — a `display` there could
+ * not have been overridden by a call site, and the composer has to stay `block`.
+ *
+ * Always applied, with the caller's classes appended rather than substituted.
+ * The first version of this treated `contentClassName` as the whole value, so
+ * the pills' `"gap-0.5 p-1"` silently replaced `flex` and their buttons stacked
+ * vertically: the stage measured 40px while its content measured 72. Nothing
+ * about the shell geometry showed it.
+ *
+ * A call site that needs a different `display` passes `contentStyle`, since an
+ * inline style beats any class without depending on stylesheet order.
+ */
+const DEFAULT_CONTENT_CLASS = "flex h-full items-center";
 
 /** Tracks the OS setting, including while the app is open. */
 function useReducedMotion(): boolean {

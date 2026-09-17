@@ -50,6 +50,7 @@ import { useSettings } from "../stores/settings";
 import { useSkills } from "../stores/skills";
 import { useUi } from "../stores/ui";
 import { useUsage } from "../stores/usage";
+import { GlassPreview, GlassSection } from "./GlassSettings";
 import { VoiceSettings } from "./VoiceSettings";
 import {
   BrainIcon,
@@ -3524,8 +3525,7 @@ function AppearanceSection() {
 
   return (
     <>
-      <Section title="Theme">
-        <Row label="Mode" hint="Light is the default; both palettes work over any artwork.">
+      <Section title="Theme">        <Row label="Mode" hint="Light is the default; both palettes work over any artwork.">
           <Segmented
             value={config.theme}
             options={[
@@ -3536,6 +3536,9 @@ function AppearanceSection() {
           />
         </Row>
       </Section>
+
+      <GlassPreview />
+      <GlassSection />
 
       <Section title="Background">
         <div className="px-1 py-2.5">

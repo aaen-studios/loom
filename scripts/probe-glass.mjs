@@ -1,41 +1,42 @@
-// The decisive Phase 0 question: does the refraction actually produce different
-// pixels, or does the DOM merely look right?
+// Does the refraction bend real pixels, and does it cost anything?
 //
-// Computed styles cannot answer this. `filter: url(#id)` can parse, resolve, and
-// still rasterise to something indistinguishable from no filter at all — which
-// is exactly what a heavy `backdrop-filter` will do, since a flat smear has no
-// detail left for a displacement map to bend.
+// ## What this probe got wrong the first three times
 //
-// Method: A/B the SAME live element.
+// Reading the pixels is the only way to tell "the filter is applied" from "the
+// filter produced a visible difference" — a resolved `filter: url(#id)` can
+// still rasterise to something indistinguishable from no filter at all. But the
+// first versions of this file reported nonsense, and the ways they did are
+// worth keeping written down:
 //
-//   A  screenshot with the warp's filter as it ships
-//   B  screenshot with `filter: none` forced onto it
+//  1. **The background drifts.** `Background` runs a 52-second animation, so two
+//     screenshots taken 700ms apart differ nearly everywhere. The first run
+//     reported "93% of pixels change" for a *cosmetic* effect that only bites at
+//     the edges, and the number was the animation.
+//  2. **The injected test backdrop was underneath the app's own.** It went in at
+//     `z-index: 0`, below `Background`, so the "hard-edged pattern" case measured
+//     the identical scene as the live-background case — 502,606 vs 502,605
+//     differing pixels. Two cases returning the same number to five digits is
+//     the tell, and it was in the output the whole time.
+//  3. **The wrong target.** An earlier version attached to the first `type=page`
+//     target and evaluated immediately, so it sampled Edge's first-run sync
+//     dialog and a document where React had not mounted.
 //
-// Both PNGs are handed back to the page, decoded with `createImageBitmap`, drawn
-// to a canvas and compared channel by channel. A difference of zero means the
-// effect is not rendering, whatever the styles say.
+// So: freeze the animation, put the pattern in the chrome's own stacking layer,
+// and *verify the injection changed anything* before trusting a diff.
 //
-// Run against two backdrops, because the answer genuinely differs:
-//
-//   * a hard-edged pattern — the best case for a displacement map
-//   * Loom's own current background — the case that actually matters
-//
-//   node target/probe-ab.mjs 9333
+//   node scripts/probe-glass.mjs 9333
 import { writeFileSync } from "node:fs";
 
 const port = process.argv[2] ?? "9333";
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-/* ---------------------------------------------------------- attach properly */
-
 let page = null;
-for (let attempt = 0; attempt < 40 && !page; attempt += 1) {
+for (let i = 0; i < 40 && !page; i += 1) {
   try {
     const targets = await (await fetch(`http://127.0.0.1:${port}/json`)).json();
-    const pages = targets.filter((t) => t.type === "page" && t.webSocketDebuggerUrl);
-    page = pages.find((t) => t.url.includes("1420")) ?? null;
+    page = targets.find((t) => t.type === "page" && t.url.includes("1420")) ?? null;
   } catch {
-    /* not up yet */
+    /* not up */
   }
   if (!page) await sleep(500);
 }
@@ -71,39 +72,76 @@ await new Promise((r) => socket.addEventListener("open", r));
 await send("Runtime.enable");
 await send("Page.enable");
 
-// Wait for the app.
-for (let attempt = 0; attempt < 60; attempt += 1) {
-  const ready = await evaluate('!!document.querySelector(".lg-shell .glass__warp")', false);
-  if (ready === true) break;
+// A hard reload, so the page under test is the code on disk rather than an
+// accumulation of HMR updates. A module that failed to transform mid-edit leaves
+// a permanently broken graph that no later fix reaches.
+console.log("reloading for a clean module graph...");
+await send("Page.reload", { ignoreCache: true });
+await sleep(4000);
+for (let i = 0; i < 40; i += 1) {
+  if ((await evaluate('document.querySelectorAll(".lg-stage").length', false)) > 0) break;
   await sleep(500);
 }
 
-/* --------------------------------------------------- geometry of what we test */
+/* --------------------------------------------------------------- the scene */
 
-const target = await evaluate(`(() => {
-  // The widest pill: most backdrop inside one displacement box.
-  const stages = [...document.querySelectorAll(".lg-stage")];
-  if (!stages.length) return "";
-  const best = stages.sort((a, b) =>
-    b.getBoundingClientRect().width - a.getBoundingClientRect().width)[0];
-  const b = best.getBoundingClientRect();
-  return JSON.stringify({
-    x: Math.floor(b.x), y: Math.floor(b.y),
-    width: Math.ceil(b.width), height: Math.ceil(b.height),
-  });
-})()`, false);
+/** Pauses every animation, so two screenshots of a static scene are comparable. */
+const FREEZE = `(() => {
+  const el = document.createElement("style");
+  el.id = "lg-freeze";
+  el.textContent = "*, *::before, *::after { animation-play-state: paused !important; }";
+  document.head.appendChild(el);
+  return true;
+})()`;
 
-if (!target) {
-  console.error("no liquid surface to measure — is Phase 0 still mounted?");
-  process.exit(1);
-}
-const clip = { ...JSON.parse(target), scale: 3 };
-console.log("measuring region:", JSON.stringify(clip), "\n");
+/**
+ * A hard-edged pattern, painted *behind the chrome but above the background*.
+ *
+ * The z-index is the whole trick and it took a wrong answer to find. `Background`
+ * is a child of the root div with no z-index of its own, and the app's chrome
+ * (`.z-10`, which is where the title bar and the composer live) sits above it. So
+ * a fixed layer at `z-index: 5` lands exactly between them: above the wallpaper,
+ * below the glass — which is what a backdropped surface needs to sample.
+ *
+ * `z-index: 0` puts it underneath the wallpaper instead, and the pattern is never
+ * seen at all.
+ */
+const PATTERN = `(() => {
+  document.getElementById("lg-pattern")?.remove();
+  const layer = document.createElement("div");
+  layer.id = "lg-pattern";
+  layer.style.cssText =
+    "position:fixed;inset:0;z-index:5;pointer-events:none;background:" +
+    "repeating-linear-gradient(45deg,#e11 0 14px,#11e 14px 28px,#ee1 28px 42px,#1e1 42px 56px)," +
+    "repeating-linear-gradient(-45deg,rgba(255,255,255,.9) 0 9px,rgba(0,0,0,.85) 9px 18px)";
+  document.body.appendChild(layer);
+  return true;
+})()`;
 
-/* ------------------------------------------------------------- decode + diff
+/** The pill and the composer, so each is measured on its own terms. */
+const REGION = {
+  pill: `(() => {
+    const stages = [...document.querySelectorAll(".lg-stage")];
+    const pill = stages.find((s) => s.closest("header"));
+    if (!pill) return "";
+    const b = pill.getBoundingClientRect();
+    return JSON.stringify({ x: Math.floor(b.x), y: Math.floor(b.y), width: Math.ceil(b.width), height: Math.ceil(b.height), scale: 4 });
+  })()`,
+  // Padded, so the edge refraction has somewhere to happen: the bend reaches
+  // outside the element's own box.
+  composer: `(() => {
+    const stages = [...document.querySelectorAll(".lg-stage")];
+    const composer = stages.find((s) => !s.closest("header"));
+    if (!composer) return "";
+    const b = composer.getBoundingClientRect();
+    return JSON.stringify({ x: Math.max(0, Math.floor(b.x) - 10), y: Math.max(0, Math.floor(b.y) - 10), width: Math.ceil(b.width) + 20, height: Math.ceil(b.height) + 20, scale: 2 });
+  })()`,
+};
 
-   Node has no PNG decoder here, but the page does. So both screenshots are
-   base64 strings that get handed straight back to the browser.               */
+/* ------------------------------------------------------------ the comparison
+
+   Both screenshots are handed back to the page to decode: Node has no PNG
+   decoder here, and the browser has `createImageBitmap` and a canvas.        */
 
 const DIFF = `(async (aB64, bB64) => {
   const load = async (b64) => {
@@ -117,138 +155,152 @@ const DIFF = `(async (aB64, bB64) => {
   const A = await load(aB64);
   const B = await load(bB64);
   if (A.w !== B.w || A.h !== B.h) return JSON.stringify({ error: "size mismatch" });
-
-  let differing = 0;
-  let maxDelta = 0;
-  let sumDelta = 0;
+  let differing = 0, maxDelta = 0, sumDelta = 0;
   const total = A.w * A.h;
   for (let i = 0; i < A.data.length; i += 4) {
-    const dr = Math.abs(A.data[i] - B.data[i]);
-    const dg = Math.abs(A.data[i + 1] - B.data[i + 1]);
-    const db = Math.abs(A.data[i + 2] - B.data[i + 2]);
-    const d = Math.max(dr, dg, db);
+    const d = Math.max(
+      Math.abs(A.data[i] - B.data[i]),
+      Math.abs(A.data[i + 1] - B.data[i + 1]),
+      Math.abs(A.data[i + 2] - B.data[i + 2]),
+    );
     if (d > 2) differing += 1;
     if (d > maxDelta) maxDelta = d;
     sumDelta += d;
   }
   return JSON.stringify({
     size: A.w + "x" + A.h,
-    pixels: total,
-    differingPixels: differing,
     percentDiffering: +((differing / total) * 100).toFixed(2),
     maxChannelDelta: maxDelta,
     meanChannelDelta: +(sumDelta / total).toFixed(2),
   });
 })`;
 
-/** A/B one region, returning the raw numbers plus the two PNGs on disk. */
-async function ab(label, name) {
-  const a = await send("Page.captureScreenshot", { format: "png", clip });
-  const disable = await evaluate(
+async function shoot(name) {
+  const region = await evaluate(REGION[name.kind], false);
+  if (!region) return null;
+  const shot = await send("Page.captureScreenshot", { format: "png", clip: JSON.parse(region) });
+  return shot?.data ?? null;
+}
+
+/**
+ * A/B one surface: the warp with its filter, then with `filter: none`.
+ *
+ * Everything else is held identical — same frozen scene, same tint, same
+ * backdrop-filter — so a difference can only be the displacement.
+ */
+async function ab(kind, label, name) {
+  const a = await shoot({ kind });
+  await evaluate(
     `(() => {
        const el = document.createElement("style");
-       el.id = "lg-ab-disable";
+       el.id = "lg-ab-off";
        el.textContent = ".lg-shell .glass__warp { filter: none !important; }";
        document.head.appendChild(el);
        return true;
      })()`,
     false,
   );
-  if (disable !== true) console.log("  (could not inject the disable rule)");
-  await sleep(700);
-  const b = await send("Page.captureScreenshot", { format: "png", clip });
-  await evaluate('document.getElementById("lg-ab-disable")?.remove()', false);
-  await sleep(400);
+  await sleep(500);
+  const b = await shoot({ kind });
+  await evaluate('document.getElementById("lg-ab-off")?.remove()', false);
+  await sleep(300);
 
-  if (!a?.data || !b?.data) {
-    console.log(`${label}: screenshot failed`);
+  if (!a || !b) {
+    console.log(`  ${label}: capture failed`);
     return null;
   }
-  writeFileSync(`target/ab-${name}-filter-on.png`, Buffer.from(a.data, "base64"));
-  writeFileSync(`target/ab-${name}-filter-off.png`, Buffer.from(b.data, "base64"));
-  const bytes = Buffer.from(a.data, "base64").length;
-  const identicalBytes = a.data === b.data;
-  const diff = await evaluate(`(${DIFF})(${JSON.stringify(a.data)}, ${JSON.stringify(b.data)})`);
-  const parsed = typeof diff === "string" ? JSON.parse(diff) : null;
-  console.log(`${label}`);
-  console.log(`  png bytes ${bytes}, byte-identical: ${identicalBytes}`);
-  console.log(`  ${diff}`);
+  if (a === b) {
+    // Byte-identical is worth calling out on its own: it means nothing was
+    // rendered at all, which is a different fault from "the filter did nothing".
+    console.log(`  ${label}: the two captures are byte-identical`);
+    return { percentDiffering: 0, maxChannelDelta: 0, identical: true };
+  }
+  writeFileSync(`target/ab-${name}-on.png`, Buffer.from(a, "base64"));
+  writeFileSync(`target/ab-${name}-off.png`, Buffer.from(b, "base64"));
+  const raw = await evaluate(`(${DIFF})(${JSON.stringify(a)}, ${JSON.stringify(b)})`);
+  let parsed = null;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    console.log(`  ${label}: ${raw}`);
+    return null;
+  }
+  console.log(`  ${label}: ${raw}`);
   return parsed;
 }
 
-/* --------------------------------------- case 1: Loom's own current background */
+await evaluate(FREEZE, false);
+await sleep(600);
 
-console.log("=== CASE 1: Loom's live background ===");
-const onLive = await ab("filter on vs filter off, over whatever is behind it now", "live");
+const results = {};
 
-/* ------------------------- case 2: a hard-edged backdrop, the best case for it
+console.log("=== live background (frozen) ===");
+results.pillLive = await ab("pill", "pill", "pill-live");
+results.composerLive = await ab("composer", "composer", "composer-live");
 
-   The built-in presets are soft radial washes by design (see
-   `lib/background.ts`), and a displacement map has nothing to bend in a smooth
-   gradient. This puts a hard-edged pattern behind the same element so the
-   effect's ceiling is visible — and so a weak result on the live background can
-   be attributed to the background rather than to the wiring.                  */
-
-console.log("\n=== CASE 2: a hard-edged backdrop (best case) ===");
-const injected = await evaluate(`(() => {
-  const layer = document.createElement("div");
-  layer.id = "lg-test-backdrop";
-  layer.style.cssText =
-    "position:fixed;inset:0;z-index:0;pointer-events:none;background:" +
-    "repeating-linear-gradient(45deg,#e11 0 14px,#11e 14px 28px,#ee1 28px 42px,#1e1 42px 56px)," +
-    "repeating-linear-gradient(-45deg,#fff 0 9px,rgba(0,0,0,.75) 9px 18px)";
-  document.body.appendChild(layer);
-  return true;
-})()`, false);
-if (injected !== true) console.log("  (backdrop injection failed)");
-await sleep(900);
-const onHard = await ab("filter on vs filter off, over a hard-edged pattern", "hard");
-
-/* ----------------------------- case 3: does it survive Loom's own tint + blur?
-
-   The wrapper deliberately lays a tint ABOVE the warp. If that tint is too
-   strong the refraction is buried, which is the one trade-off this design makes
-   and therefore the one worth measuring rather than eyeballing.               */
-
-console.log("\n=== CASE 3: the same, with the tint reduced to 0 ===");
-const cleared = await evaluate(`(() => {
-  const el = document.createElement("style");
-  el.id = "lg-ab-notint";
-  el.textContent = ".lg-tint { background-color: transparent !important; }";
-  document.head.appendChild(el);
-  return true;
-})()`, false);
-if (cleared !== true) console.log("  (tint override failed)");
+console.log("\n=== over a hard-edged pattern ===");
+// Verify the injection actually changed the scene. Without this check the
+// pattern case silently measures the same thing as the live-background case,
+// which is precisely what happened the first time.
+const before = await shoot({ kind: "pill" });
+await evaluate(PATTERN, false);
 await sleep(700);
-const onHardNoTint = await ab("filter on vs filter off, hard backdrop, no tint", "hard-notint");
-await evaluate('document.getElementById("lg-ab-notint")?.remove()', false);
+const after = await shoot({ kind: "pill" });
+if (before && after) {
+  const raw = await evaluate(`(${DIFF})(${JSON.stringify(before)}, ${JSON.stringify(after)})`);
+  let parsed = null;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    /* reported below */
+  }
+  if (parsed && parsed.percentDiffering > 20) {
+    console.log(`  the pattern took effect (${parsed.percentDiffering}% of the region changed)`);
+  } else {
+    console.log(`  WARNING: the pattern changed almost nothing (${raw}) — it is behind the wallpaper`);
+  }
+} else {
+  console.log("  WARNING: could not verify the pattern took effect");
+}
 
-// Clean up the injected backdrop so the running app is left as we found it.
-await evaluate('document.getElementById("lg-test-backdrop")?.remove()', false);
+results.pillPattern = await ab("pill", "pill", "pill-pattern");
+results.composerPattern = await ab("composer", "composer", "composer-pattern");
 
-/* ----------------------------------------------------------------- verdict */
+await evaluate('document.getElementById("lg-pattern")?.remove()', false);
+await evaluate('document.getElementById("lg-freeze")?.remove()', false);
+
+/* ---------------------------------------------------------------- verdict */
 
 console.log("\n=== VERDICT ===");
-const cases = [
-  ["live Loom background", onLive],
-  ["hard-edged backdrop", onHard],
-  ["hard-edged, tint removed", onHardNoTint],
+const rows = [
+  ["pill, live background", results.pillLive],
+  ["pill, hard edges", results.pillPattern],
+  ["composer, live background", results.composerLive],
+  ["composer, hard edges", results.composerPattern],
 ];
-for (const [label, result] of cases) {
+let failures = 0;
+for (const [label, result] of rows) {
   if (!result) {
     console.log(`  ?     ${label}: no measurement`);
     continue;
   }
-  const ok = result.differingPixels > 0 && result.maxChannelDelta > 8;
+  // A displacement map only bites near the edge mask, so a small percentage is
+  // the expected shape. What matters is that the difference is real and that its
+  // magnitude is more than dither.
+  const ok = result.percentDiffering > 1 && result.maxChannelDelta > 8;
+  if (!ok) failures += 1;
   console.log(
-    `  ${ok ? "PASS" : "FAIL"}  ${label}: ${result.percentDiffering}% of pixels change, ` +
+    `  ${ok ? "PASS" : "FAIL"}  ${label}: ${result.percentDiffering}% of pixels bend, ` +
       `max channel delta ${result.maxChannelDelta}`,
   );
 }
+
 console.log(
-  "\n  A PASS means the filter is bending real pixels. Percentages in the low\n" +
-    "  single digits are expected: `feDisplacementMap` only bites near the edges,\n" +
-    "  which is the whole point of the edge mask in the library's filter graph.",
+  `\n  ${failures === 0 ? "The filter is bending real pixels on every surface." : `${failures} surface(s) did not show a difference.`}`,
+);
+console.log(
+  "  Expect a few percent rather than most of them: the library's filter graph\n" +
+    "  masks the displacement to the rim, which is what keeps the centre readable.",
 );
 
 socket.close();

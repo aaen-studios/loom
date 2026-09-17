@@ -1536,6 +1536,88 @@ html:not(.dark) .loom-markdown [data-streamdown="code-block"] {
 }
 
 /* ---------------------------------------------------------------------------
+   Glass tuning
+
+   Two multipliers over every glass surface, written onto `<html>` by
+   `useGlassVars` from the user's config. Both default to 100, so a fresh
+   install and every existing user look exactly as they did before until a
+   slider moves — which matters, because light theme over bright artwork is
+   already the weakest point in the design and a glass feature should not trade
+   it away silently.
+
+   **Unlayered, and app-only, on purpose.** Three reasons, and all are load
+   bearing:
+
+   1. Cascade. `@utility` compiles into `@layer utilities`, and an unlayered rule
+      beats every layer — which the Controls section names as a hazard
+      ("unlayered rules would beat every Tailwind class in the file"). Here it is
+      the mechanism rather than an accident, and it is safe because it is scoped
+      to four selectors and redeclares only two properties. No `pill`, `panel`,
+      `panel-strong` or `blob` usage in `src/` sets its own `bg-*`, so nothing is
+      overridden that wanted to win; `border` and `box-shadow` still come from
+      the layered `@utility` rule.
+
+   2. These declarations must not be inside a `loom-site:*` marker. Those regions
+      are copied verbatim into the website's stylesheet, and `site/verify-tokens.mjs`
+      asserts their literal contents — including `backdrop-filter:blur(34px)`. A
+      multiplier would break the site's build for a feature the site does not
+      have.
+
+   3. **Below the last marker**, not merely outside them. `sync-site-tokens.mjs`
+      records each region's source line range in the generated file's header, so
+      inserting anything *above* a marked region shifts it and `tokens:check`
+      fails even though no shared declaration changed. This block lives at the
+      bottom of the file so the marked regions keep their line numbers.
+
+   Ranges are deliberately one-directional, because `color-mix` percentages clamp
+   at 100: a "120% tint" would be silently identical to 100%. So tint is 50–100
+   (lower is more see-through) and blur is 0–200 (higher is frostier).
+--------------------------------------------------------------------------- */
+.pill {
+  background-color: color-mix(in srgb, var(--pill-bg) calc(var(--glass-tint, 100) * 1%), transparent);
+  backdrop-filter: blur(calc(24px * var(--glass-blur, 100) / 100)) saturate(150%);
+  -webkit-backdrop-filter: blur(calc(24px * var(--glass-blur, 100) / 100)) saturate(150%);
+}
+
+.panel {
+  background-color: color-mix(in srgb, var(--panel-bg) calc(var(--glass-tint, 100) * 1%), transparent);
+  backdrop-filter: blur(calc(34px * var(--glass-blur, 100) / 100)) saturate(160%);
+  -webkit-backdrop-filter: blur(calc(34px * var(--glass-blur, 100) / 100)) saturate(160%);
+}
+
+.panel-strong {
+  background-color: color-mix(in srgb, var(--panel-bg-strong) calc(var(--glass-tint, 100) * 1%), transparent);
+  backdrop-filter: blur(calc(38px * var(--glass-blur, 100) / 100)) saturate(165%);
+  -webkit-backdrop-filter: blur(calc(38px * var(--glass-blur, 100) / 100)) saturate(165%);
+}
+
+.blob {
+  background-color: color-mix(in srgb, var(--panel-bg-strong) calc(var(--glass-tint, 100) * 1%), transparent);
+  backdrop-filter: blur(calc(30px * var(--glass-blur, 100) / 100)) saturate(160%);
+  -webkit-backdrop-filter: blur(calc(30px * var(--glass-blur, 100) / 100)) saturate(160%);
+}
+
+/* `.terminal-surface` is deliberately **not** in that list. A shell is dense
+   13px monospace read for minutes, and its heavier surface is a spec decision
+   rather than an oversight — so it stays out of reach of the tint slider. */
+
+/* ---------------------------------------------------------------------------
+   The thin tier
+
+   A hairline of surface for chrome rows that had only a border: the chat header
+   and the dock's zone tab row. Cheaper than a panel by a wide margin — a small
+   blur and a low tint — and it exists because those rows sit directly over the
+   artwork, so a 1px line was doing all the work of separating chrome from
+   content. Most of what "the app feels glassier" means in practice comes from
+   these two rows rather than from the refracting pills.
+--------------------------------------------------------------------------- */
+.glass-thin {
+  background-color: color-mix(in srgb, var(--panel-bg) calc(var(--glass-tint, 100) * 0.55%), transparent);
+  backdrop-filter: blur(calc(18px * var(--glass-blur, 100) / 100)) saturate(150%);
+  -webkit-backdrop-filter: blur(calc(18px * var(--glass-blur, 100) / 100)) saturate(150%);
+}
+
+/* ---------------------------------------------------------------------------
    Liquid glass
 
    The layer stack for a refracting surface, and the contract `LiquidSurface`
@@ -1645,7 +1727,9 @@ html:not(.dark) .loom-markdown [data-streamdown="code-block"] {
 
 /* The same geometry without refraction: the fill does the frosting instead of
    the warp, which is what every existing `.pill` does and what these surfaces
-   fall back to when the effect is switched off. */
+   fall back to when the effect is switched off. It honours the same two
+   multipliers, so turning refraction off is not also a change in how heavy the
+   glass looks. */
 .lg-static {
   position: absolute;
   inset: 0;
@@ -1653,16 +1737,19 @@ html:not(.dark) .loom-markdown [data-streamdown="code-block"] {
   corner-shape: inherit;
   border: 1px solid var(--glass-border);
   box-shadow: var(--glass-highlight);
-  backdrop-filter: blur(24px) saturate(150%);
-  -webkit-backdrop-filter: blur(24px) saturate(150%);
+  backdrop-filter: blur(calc(24px * var(--glass-blur, 100) / 100)) saturate(150%);
+  -webkit-backdrop-filter: blur(calc(24px * var(--glass-blur, 100) / 100)) saturate(150%);
   pointer-events: none;
 }
 
-/* The real content, above everything and never clipped. */
+/* The real content, above everything and never clipped.
+
+   Position and stacking only — deliberately **no `display`**. `LiquidSurface`
+   applies `flex h-full items-center` as Tailwind classes, and a `display` here
+   would beat them, because this rule is unlayered and unlayered rules win every
+   layer. That would leave the composer — which has to stay `block` — unable to
+   override it except by `!important`. Layout belongs with the component. */
 .lg-content {
   position: relative;
   z-index: 1;
-  display: flex;
-  height: 100%;
-  align-items: center;
 }
