@@ -9,6 +9,7 @@ import { useChat } from "../stores/chat";
 import { useSettings } from "../stores/settings";
 import { useUi } from "../stores/ui";
 import { ChevronDownIcon, PlusIcon, SparkIcon } from "./icons";
+import { LiquidSurface } from "./LiquidSurface";
 
 /**
  * Model chip + picker. Selecting a model sets it for the active chat and as
@@ -210,12 +211,17 @@ export function ModelPicker() {
       </button>
 
       {open && (
-        <div
+        <LiquidSurface
+          surface="popovers"
+          layout="block"
           className={cn(
-            "panel-strong absolute left-0 z-50 flex w-[420px] max-w-[calc(100vw-2rem)] flex-col overflow-hidden rounded-sheet",
+            "absolute left-0 z-50 w-[420px] max-w-[calc(100vw-2rem)] rounded-sheet",
             drop.up ? "bottom-full mb-2" : "top-full mt-2",
           )}
-          style={{ maxHeight: drop.maxHeight }}
+          // The popover's height is a measured number per open, not one of a
+          // fixed set of classes, so it has to be an inline style.
+          contentStyle={{ maxHeight: drop.maxHeight }}
+          tint="var(--panel-bg-strong)"
         >
           {variantTarget ? (
             <div className="p-3">
@@ -472,7 +478,7 @@ export function ModelPicker() {
               )}
             </>
           )}
-        </div>
+        </LiquidSurface>
       )}
     </div>
   );
