@@ -1620,6 +1620,19 @@ html:not(.dark) .loom-markdown [data-streamdown="code-block"] {
 /* ---------------------------------------------------------------------------
    Liquid glass
 
+   **In `@layer components`, and that is load bearing.** Most of the refracting
+   surfaces are absolutely positioned popovers wrapped from a trigger — the model
+   picker, the persona menu, the shell menu, the dock's tab menu. `.lg-stage`
+   sets `position: relative` so the shell has a positioning context, and while
+   this block was unlayered that rule beat the `absolute` utility the call site
+   passes, because unlayered declarations win every layer. Every one of those
+   menus would have rendered in flow inside its trigger instead of floating.
+
+   In `components` it loses to `utilities` — which is the arrangement the
+   Controls section below describes and the reason that section is layered too.
+   The `!important` overrides on `.glass` are unaffected: `!important` beats
+   unlayered normal declarations from any layer, which is what they exist for.
+
    The layer stack for a refracting surface, and the contract `LiquidSurface`
    relies on. Read this before changing any of it.
 
@@ -1650,6 +1663,7 @@ html:not(.dark) .loom-markdown [data-streamdown="code-block"] {
    disappear into a blur of its own colour.
 --------------------------------------------------------------------------- */
 
+@layer components {
 .lg-stage {
   position: relative;
   /* Not `isolation: isolate`. Isolation creates a backdrop root, so the warp
@@ -1744,12 +1758,10 @@ html:not(.dark) .loom-markdown [data-streamdown="code-block"] {
 
 /* The real content, above everything and never clipped.
 
-   Position and stacking only — deliberately **no `display`**. `LiquidSurface`
-   applies `flex h-full items-center` as Tailwind classes, and a `display` here
-   would beat them, because this rule is unlayered and unlayered rules win every
-   layer. That would leave the composer — which has to stay `block` — unable to
-   override it except by `!important`. Layout belongs with the component. */
+   Position and stacking only — deliberately **no `display`**, which belongs to
+   `LiquidSurface` where `layout` decides it. */
 .lg-content {
   position: relative;
   z-index: 1;
+}
 }

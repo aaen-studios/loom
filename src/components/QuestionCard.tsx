@@ -42,7 +42,12 @@ export function QuestionCard({ question }: { question: PendingQuestion }) {
   };
 
   return (
-    <div className="panel-strong animate-fade-up w-full rounded-sheet p-2.5">
+    <LiquidSurface
+      surface="cards"
+      layout="block"
+      className="animate-fade-up w-full rounded-sheet"
+      tint="var(--panel-bg-strong)"
+    >
       <div className="px-3 pt-2">
         {ask.header && (
           <p className="mb-1 text-[11px] font-medium tracking-wide text-faint uppercase">
@@ -119,6 +124,6 @@ export function QuestionCard({ question }: { question: PendingQuestion }) {
           Answer
         </button>
       </div>
-    </div>
+    </LiquidSurface>
   );
 }

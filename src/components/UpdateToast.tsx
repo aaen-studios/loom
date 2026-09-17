@@ -1,6 +1,7 @@
 import { cn } from "../lib/cn";
 import { useUi } from "../stores/ui";
 import { ArrowUpIcon, CloseIcon } from "./icons";
+import { LiquidSurface } from "./LiquidSurface";
 
 /**
  * Bottom-center notice for a launch-time update check. It only points at
@@ -14,10 +15,13 @@ export function UpdateToast() {
   if (!update) return null;
 
   return (
-    <div
+    <LiquidSurface
+      surface="overlays"
       className={cn(
-        "panel-strong animate-fade-up absolute bottom-4 left-1/2 z-40 flex -translate-x-1/2 items-center gap-3 rounded-capsule px-3.5 py-2.5",
+        "animate-fade-up absolute bottom-4 left-1/2 z-40 -translate-x-1/2 rounded-capsule",
+        "flex items-center gap-3 px-3.5 py-2.5",
       )}
+      tint="var(--panel-bg-strong)"
     >
       <span className="grid h-7 w-7 place-items-center rounded-full bg-[var(--accent-soft)] text-[var(--accent)]">
         <ArrowUpIcon size={15} />
@@ -43,6 +47,6 @@ export function UpdateToast() {
       >
         <CloseIcon size={14} />
       </button>
-    </div>
+    </LiquidSurface>
   );
 }
