@@ -493,8 +493,12 @@ export function Composer({ variant = "docked" }: ComposerProps) {
       contentClassName="p-2.5"
       layout="block"
       tint="var(--panel-bg-strong)"
-      tintStrength={70}
-      params={{ refraction: 16 }}
+      /* No `tintStrength` or `params` override. Both were here and both were
+         compensating for the wrapper's own wrong defaults — 70 halved the
+         composer's alpha on top of the 50 it was already being scaled by, and
+         the refraction override existed to counter a frost of 6px. The per-group
+         tables in `lib/glass.ts` are where those decisions belong now, and a call
+         site only overrides them with a reason it can name. */
     >
       <div className={cn(variant === "hero" && "animate-fade-up")}>
       {mentionOpen && mentionSpan && (

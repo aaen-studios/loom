@@ -25,14 +25,17 @@ export type GlassPresetId = "subtle" | "standard" | "prominent";
 /**
  * Starting points, not themes.
  *
- * `standard` is `DEFAULT_LIQUID` exactly, so the preset buttons describe the
- * sliders rather than being a second source of truth that drifts from them, and
- * `matchingPreset` can name what the sliders currently spell.
+ * Each differs in **frost** as well as refraction, and that is deliberate: the
+ * two trade against each other, so "more prominent" means a little less frost as
+ * well as a longer throw, and "subtle" means the reverse.
+ *
+ * `standard` is `DEFAULT_LIQUID` exactly, which is what lets `matchingPreset`
+ * name the values the sliders currently spell.
  */
 export const GLASS_PRESETS: Record<GlassPresetId, LiquidParams> = {
-  subtle: { refraction: 16, frost: 4, saturation: 130, chromatics: 1, elasticity: 0, mode: "standard" },
-  standard: { refraction: 32, frost: 6, saturation: 140, chromatics: 2, elasticity: 0, mode: "standard" },
-  prominent: { refraction: 64, frost: 10, saturation: 165, chromatics: 3, elasticity: 0, mode: "prominent" },
+  subtle: { refraction: 16, frost: 38, saturation: 130, chromatics: 0, elasticity: 0, mode: "standard" },
+  standard: { refraction: 32, frost: 30, saturation: 140, chromatics: 1, elasticity: 0, mode: "standard" },
+  prominent: { refraction: 64, frost: 20, saturation: 165, chromatics: 2, elasticity: 0, mode: "prominent" },
 };
 
 export const PRESET_LABELS: Record<GlassPresetId, string> = {
@@ -50,15 +53,23 @@ export const DEFAULT_LIQUID: LiquidParams = GLASS_PRESETS.standard;
 /**
  * Ranges, shared by the clamps and the sliders.
  *
- * `frost` tops out at 40px rather than the library's effective ceiling of about
- * 1600. Past roughly 40 the backdrop is smeared flat enough that the refraction
- * stops reading — measured, not assumed (see `scripts/probe-glass.mjs`) — so a
- * larger number would be a slider that makes the effect *worse* while looking
- * like it makes the glass *stronger*.
+ * `frost` starts at **8**, not at 0, and that floor is a correction rather than a
+ * preference. It shipped at 4, with a default of 6, on the reasoning that less
+ * blur leaves more detail for the displacement to bend — which is true, and was
+ * the wrong thing to optimise. The surfaces this wrapper replaced were painting
+ * `blur(24px)` (pill), `blur(34px)` (panel) and `blur(38px)` (panel-strong), so
+ * 6px left the artwork plainly legible through every panel and the app read as a
+ * film over the wallpaper rather than as glass.
+ *
+ * The ceiling is 60 rather than the library's effective 1600: past roughly 60
+ * the backdrop is smeared flat enough that the refraction stops reading —
+ * measured, not assumed (see `scripts/probe-glass.mjs`) — so a larger number
+ * would be a slider that makes the effect *worse* while looking like it makes
+ * the glass *stronger*.
  */
 export const LIQUID_RANGE = {
   refraction: [0, 120],
-  frost: [4, 40],
+  frost: [8, 60],
   saturation: [60, 220],
   chromatics: [0, 5],
   elasticity: [0, 0.5],
@@ -84,8 +95,120 @@ export const DEFAULT_GLASS: GlassConfig = {
     popovers: true,
     cards: true,
     overlays: true,
+    // `DEFAULT_LIQUID` last, so the six numbers cannot be shadowed by the
+    // switches above.
     ...DEFAULT_LIQUID,
   },
+};
+
+/**
+ * How much of a surface's own token survives, per surface group.
+ *
+ * **This is the table that matters most, and the first attempt got it badly
+ * wrong.** It used one default of 50 everywhere, which halved every surface's
+ * alpha. Measured afterwards:
+ *
+ *     the `panel-strong` utility    color(srgb 1 1 1 / 0.95), blur(38px)
+ *     the settings drawer after     color(srgb 1 1 1 / 0.48), frost 6px
+ *     the title-bar pills after     0.45, against `--pill-bg`'s 0.90
+ *
+ * A half-transparent sheet with a 6px blur, with the app's prose on it. Glass
+ * became a barely-legible film over whatever the user's wallpaper happened to be.
+ *
+ * Two things made that worse than it looks. The 6px frost was chosen to *help*
+ * the effect — less blur leaves more detail to bend — so it traded legibility
+ * away for something that, measured over Loom's own presets, is imperceptible
+ * anyway: 0% of pixels bend, max channel delta 2, and no combination of frost
+ * and refraction rescues it because a smooth wash has no edges to bend.
+ *
+ * So the rule is now inverted: a converted surface keeps the alpha of the utility
+ * it replaced **unless there is a measured reason to spend some**, and the only
+ * group with that reason is the popovers — they sit over the transcript, where
+ * text gives the bend something to act on and where the effect is genuinely
+ * visible. Nothing spends opacity for an effect that cannot be seen.
+ *
+ *   pills      58   `--pill-bg` is 90% light, so this lands at 0.52 — the one
+ *                   group that spends real opacity, and the only one that can:
+ *                   a pill holds icons, never a sentence. It is also the only
+ *                   group where the effect is visible at all, because it sits
+ *                   over the user's own artwork rather than over the app's
+ *                   (measured imperceptible) background presets. Everything else
+ *                   has to be legible first.
+ *   composer   92   The surface messages are typed into, so it stays close to
+ *                   opaque. The refraction on it is effectively invisible, and
+ *                   that is the right trade.
+ *   panels     96   Docked panels hold tables, file lists and shells.
+ *   popovers   88   Menus sit over the transcript, where the bend reads against
+ *                   text and code, and 88% of a 95% token is still 84%.
+ *   cards      90   Tool calls and cards, also over the transcript.
+ *   overlays  100   The settings drawer, the shortcut sheet, voice mode. The most
+ *                   text in the app on the largest surfaces, and legibility here
+ *                   is not negotiable. Exactly what they had before.
+ */
+export const SURFACE_STRENGTH: Record<
+  "pills" | "composer" | "panels" | "popovers" | "cards" | "overlays",
+  number
+> = {
+  pills: 58,
+  composer: 92,
+  panels: 96,
+  popovers: 88,
+  cards: 90,
+  overlays: 100,
+};
+
+/**
+ * Frost per surface group, as a multiple of the configured `frost`.
+ *
+ * A multiplier rather than an absolute, so the Frost slider stays meaningful
+ * everywhere while a 40px pill and a 720px drawer each get the frost they can
+ * carry.
+ *
+ * **The two groups are doing opposite jobs here, and that is the point.**
+ *
+ * For everything that holds text, the value lands on or above the blur the
+ * utility it replaced used — `panel-strong` was `blur(38px)`, `panel` was
+ * `blur(34px)` — so a converted surface is exactly as frosted as it always was:
+ *
+ *     composer   30 x 1.10 = 33px
+ *     panels     30 x 1.15 = 35px
+ *     popovers   30 x 1.20 = 36px
+ *     cards      30 x 1.10 = 33px
+ *     overlays   30 x 1.25 = 38px   `panel-strong`'s 38px, exactly
+ *
+ * For the **pills** it is deliberately far *below* the `pill` utility's 24px, and
+ * that is the one place this table spends frost rather than protecting it. The
+ * reason is a conflict the earlier versions of this file never resolved: the two
+ * properties the library puts on one element run in an order that makes them
+ * enemies.
+ *
+ *     backdrop-filter: blur(Npx)     blurs what is behind
+ *     filter: url(#displacement)     then displaces that blur
+ *
+ * The frost destroys the detail *before* the displacement reaches it, so a bend
+ * only shows when the blur is smaller than the scale of the backdrop's structure.
+ * At 24px over a photograph — or over the 44px bands in the preview — the blur
+ * has already averaged the detail away and a 32px displacement of a flat wash
+ * looks like nothing at all. Measured over Loom's own presets it is 0% of pixels,
+ * and no combination of frost and refraction rescues that, because a smooth
+ * radial wash has no edges.
+ *
+ * So the pills take 9px at the default: enough to still read as frosted glass,
+ * small enough that the structure behind survives for the displacement to move.
+ * They are the one group that can afford it — icons, never a sentence — and they
+ * are also the group that sits over the user's own artwork, which is the only
+ * backdrop in the app where this effect is visible at all.
+ */
+export const SURFACE_FROST: Record<
+  "pills" | "composer" | "panels" | "popovers" | "cards" | "overlays",
+  number
+> = {
+  pills: 0.3,
+  composer: 1.1,
+  panels: 1.15,
+  popovers: 1.2,
+  cards: 1.1,
+  overlays: 1.25,
 };
 
 /** The library always adds this much blur before its own scaling. */

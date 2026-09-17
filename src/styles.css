@@ -1743,7 +1743,13 @@ html:not(.dark) .loom-markdown [data-streamdown="code-block"] {
    the warp, which is what every existing `.pill` does and what these surfaces
    fall back to when the effect is switched off. It honours the same two
    multipliers, so turning refraction off is not also a change in how heavy the
-   glass looks. */
+   glass looks.
+
+   The 30px is only a fallback for a `.lg-static` outside React — the wrapper
+   passes the computed per-group value down as `--lg-frost`, so the plain path
+   and the refracting path blur by exactly the same amount. Without that, turning
+   refraction off also changed the blur, which is the opposite of what the
+   toggle's own hint promises. */
 .lg-static {
   position: absolute;
   inset: 0;
@@ -1751,8 +1757,8 @@ html:not(.dark) .loom-markdown [data-streamdown="code-block"] {
   corner-shape: inherit;
   border: 1px solid var(--glass-border);
   box-shadow: var(--glass-highlight);
-  backdrop-filter: blur(calc(24px * var(--glass-blur, 100) / 100)) saturate(150%);
-  -webkit-backdrop-filter: blur(calc(24px * var(--glass-blur, 100) / 100)) saturate(150%);
+  backdrop-filter: blur(var(--lg-frost, 30px)) saturate(150%);
+  -webkit-backdrop-filter: blur(var(--lg-frost, 30px)) saturate(150%);
   pointer-events: none;
 }
 

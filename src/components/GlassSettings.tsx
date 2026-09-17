@@ -112,21 +112,35 @@ function SamplePill({ plain = false }: { plain?: boolean }) {
  */
 export function GlassPreview() {
   const config = useSettings((state) => state.config);
+  const tint = config.interface.glass.tint;
   const dark = config.theme === "dark";
   const preset = resolvePreset(config.background.preset, dark);
   const [media, setMedia] = useState<"pattern" | "preset">("pattern");
 
-  // A high-contrast pattern, and it is not decoration. It has to do two jobs:
-  // be visible in both themes (so it is built from saturated colour rather than
-  // black-and-white), and carry fine detail for the displacement to bend (hence
-  // the hairline crossings over the diagonal blocks).
+  /*
+    A pattern whose features are sized for the effect, and getting that sizing
+    wrong is why the first two versions of this preview showed nothing.
+
+    A bend is only visible where there is an **edge** at a scale that (a) the
+    frost has not already averaged away and (b) the displacement can actually
+    shift. The first version drew ~18px stripes against a 24–32px frost, so the
+    blur flattened them into a wash and the displacement moved a wash onto a wash.
+    The second used 44px bands, which survived the blur but only gave one axis of
+    edges to work with.
+
+    This is a **quadrant grid at 120px**, which is four times the frost and nearly
+    four times the displacement scale, and its boundaries are sharp in both axes —
+    so a rim that pulls samples outward visibly moves the colour corners, in
+    whichever direction the displacement map happens to point. The colours are
+    saturated rather than black and white so the pattern is legible in both
+    themes: a white-and-grey grid vanishes against a light panel and reads as
+    damage against a dark one.
+  */
   const pattern = {
-    backgroundColor: "#1a1030",
-    backgroundImage: [
-      "repeating-linear-gradient(45deg, rgb(255 255 255 / 0.55) 0 3px, transparent 3px 24px)",
-      "repeating-linear-gradient(-45deg, rgb(0 0 0 / 0.45) 0 3px, transparent 3px 24px)",
-      "repeating-linear-gradient(135deg, #ff5a5a 0 18px, #4d6bff 18px 36px, #ffd21e 36px 54px, #12c46a 54px 72px)",
-    ].join(", "),
+    backgroundColor: "#141021",
+    backgroundImage:
+      "repeating-conic-gradient(from 0deg, #ff3b30 0deg 90deg, #0a84ff 90deg 180deg, #ffd60a 180deg 270deg, #30d158 270deg 360deg)",
+    backgroundSize: "120px 120px",
   };
 
   return (
@@ -157,19 +171,21 @@ export function GlassPreview() {
               }
         }
       >
-        <div className="absolute top-5 left-5 flex items-end gap-3">
+        <div className="absolute top-6 left-6 flex flex-wrap items-center gap-2.5">
           <SamplePill />
           <SamplePill plain />
         </div>
 
-        <div className="absolute right-5 bottom-5 left-5">
-          <LiquidSurface
+        {/* Narrower than the panel, so all four of its rims sit over the pattern
+            rather than two of them hanging off the edge — the bend happens at the
+            rim, so a sample whose edges are outside the artwork demonstrates
+            nothing. */}
+        <div className="absolute right-5 bottom-5 left-5 flex justify-center">          <LiquidSurface
             surface="composer"
-            className="w-full rounded-sheet"
+            className="w-[58%] rounded-sheet"
             contentClassName="px-3 py-2.5"
             layout="block"
             tint="var(--panel-bg-strong)"
-            params={{ refraction: 16 }}
           >
             <span className="text-[12.5px] text-soft">Composer</span>
           </LiquidSurface>
@@ -181,14 +197,22 @@ export function GlassPreview() {
           <>
             <span className="text-soft">Liquid</span> bends the pattern at its
             rim; <span className="text-soft">Plain glass</span> is the same tint
-            with the bending off. Every control on this page moves both.
+            with the bending off — look where the colour corners meet, just
+            inside each edge. The blocks are 120px on purpose: a bend only shows
+            against an edge the frost has not already flattened. These samples
+            are more transparent than the real surfaces, on purpose — at the
+            opacity the app needs for legibility, the bend is not visible.
           </>
         ) : (
           <>
-            Over {preset.name}. Loom's own presets are smooth washes by choice, so
-            there is much less detail for the bend to act on — the same is true of
-            the real title bar. Switch to Hard edges to see the effect at its
-            clearest.
+            Over {preset.name}, with Tint at {tint}%. Loom's presets are smooth
+            washes by choice, so there is far less for the bend to act on —
+            measured over this exact preset, a title-bar pill moves{" "}
+            <span className="text-soft">0% of its pixels</span>, against 88% over
+            hard edges. The same is true of the real title bar, and it is why{" "}
+            <span className="text-soft">Hard edges</span> is the view that shows
+            what the effect does. Lower <span className="text-soft">Tint</span>{" "}
+            to let more of it through.
           </>
         )}
       </p>
@@ -222,7 +246,7 @@ export function GlassSection() {
       >
         <Row
           label="Tint opacity"
-          hint="Lower is more see-through, and more glassy. The floor protects the dense popovers — the model picker and the persona menu — from becoming unreadable over bright artwork."
+          hint="Lower is more see-through, and lets more of the bend show through. The floor protects the dense popovers — the model picker and the persona menu — from becoming unreadable over bright artwork."
         >
           <Slider
             label="Glass tint opacity"

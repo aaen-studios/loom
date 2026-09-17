@@ -702,6 +702,21 @@ pub fn apply_preset_defaults(config: &mut AppConfig) -> bool {
         changed = true;
     }
 
+    // Glass `frost` shipped at 6px, which is *below* the range the settings
+    // slider now offers (8–60). That makes the migration exact rather than a
+    // guess: a value the UI cannot produce cannot have been chosen deliberately,
+    // so lifting it cannot overwrite anyone's decision.
+    //
+    // The value matters because 6px leaves the artwork plainly legible through
+    // every panel — the app reads as a film over the wallpaper rather than as
+    // glass. 30px is the new default and sits among the blur radii the
+    // `pill`/`panel`/`panel-strong` utilities it replaced were using.
+    const LEGACY_FROST_FLOOR: u8 = 8;
+    if config.interface.glass.liquid.frost < LEGACY_FROST_FLOOR {
+        config.interface.glass.liquid.frost = LiquidGlassConfig::default().frost;
+        changed = true;
+    }
+
     changed
 }
 
@@ -1052,11 +1067,27 @@ impl Default for LiquidGlassConfig {
             // Modest by default: the refraction has to be visible without the
             // edge pulling the chrome apart, and these pills are 40px tall.
             refraction: 32,
-            // 6px. The library's own default, and about as much as a 40px pill
-            // can take before the backdrop is too flat to refract at all.
-            frost: 6,
+            // 30px, not the library's own 6.
+            //
+            // This defaulted to 6 in the first release of the glass work, on the
+            // reasoning that less frost leaves more detail for the displacement
+            // to bend. That reasoning is sound and it was the wrong thing to
+            // optimise: the surfaces this replaced painted `blur(24px)` (pill),
+            // `blur(34px)` (panel) and `blur(38px)` (panel-strong), so 6px left
+            // the artwork plainly legible through every panel — and the
+            // refraction it was buying is imperceptible over a smooth background
+            // anyway (0% of pixels bend, measured). Frost is what makes a
+            // translucent surface read as glass rather than as a hole.
+            //
+            // `apply_preset_defaults` lifts a stored value below the UI's own
+            // floor to this, because a value the slider cannot produce cannot
+            // have been chosen deliberately.
+            frost: 30,
             saturation: 140,
-            chromatics: 2,
+            // 1, not the library's default of 2: the intensity that is subtle on
+            // a 40px pill is garish across the composer, because the
+            // displacement maps stretch to the box.
+            chromatics: 1,
             // Rigid by default. The library moves the surface with the pointer
             // from up to 200px away, which on a title bar means the pills shift
             // as you cross the window to reach a menu.
@@ -1250,6 +1281,43 @@ mod tests {
         // The dock's own names, which the frontend reads directly.
         assert!(raw.contains("dockDefault"));
         assert!(raw.contains("fontFamily"));
+    }
+
+    #[test]
+    fn glass_frost_below_the_ui_floor_is_lifted() {
+        // The regression this guards: `frost` shipped at 6px, which is below the
+        // 8px floor the settings slider now offers. A stored config therefore
+        // holds a value the UI cannot produce — and 6px is what made every panel
+        // read as a film over the wallpaper rather than as glass, because the
+        // utilities it replaced were painting blur(24px) to blur(38px).
+        //
+        // The distinction that makes the migration safe: a value the slider
+        // cannot produce cannot have been chosen deliberately, so lifting it
+        // cannot overwrite a decision. A value *inside* the range is left alone,
+        // which the second half of this asserts.
+        let mut config = AppConfig::default();
+
+        config.interface.glass.liquid.frost = 6;
+        assert!(apply_preset_defaults(&mut config));
+        assert_eq!(
+            config.interface.glass.liquid.frost, 30,
+            "a frost the UI cannot offer should be lifted to the default"
+        );
+
+        // Idempotent, and silent the second time.
+        assert!(!apply_preset_defaults(&mut config));
+        assert_eq!(config.interface.glass.liquid.frost, 30);
+
+        // A deliberate choice inside the range survives untouched.
+        config.interface.glass.liquid.frost = 44;
+        assert!(!apply_preset_defaults(&mut config));
+        assert_eq!(config.interface.glass.liquid.frost, 44);
+
+        // And the floor itself is kept, not lifted: 8 is a value the slider can
+        // produce, so it is somebody's choice.
+        config.interface.glass.liquid.frost = 8;
+        assert!(!apply_preset_defaults(&mut config));
+        assert_eq!(config.interface.glass.liquid.frost, 8);
     }
 
     #[test]

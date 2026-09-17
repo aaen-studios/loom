@@ -124,8 +124,28 @@ describe("the presets", () => {
     // a bug even though nothing is broken.
     expect(DEFAULT_LIQUID).toEqual(GLASS_PRESETS.standard);
   });
-});
 
+  it("keeps frost inside the range the slider offers", () => {
+    // A preset outside the range is a preset the UI cannot represent: the slider
+    // would clamp it, `matchingPreset` would stop matching, and the "Standard"
+    // chip would silently stop naming the values it had just set.
+    const [min, max] = LIQUID_RANGE.frost;
+    for (const [id, preset] of Object.entries(GLASS_PRESETS)) {
+      expect(preset.frost, `${id} frost is below the slider floor`).toBeGreaterThanOrEqual(min);
+      expect(preset.frost, `${id} frost is above the slider ceiling`).toBeLessThanOrEqual(max);
+    }
+  });
+
+  it("trades frost against refraction rather than raising both", () => {
+    // The two work against each other: more blur means less detail for the
+    // displacement to bend. A "prominent" preset with *more* frost than
+    // "subtle" would be claiming to be stronger while blurring away the thing
+    // that makes it strong.
+    const { subtle, prominent } = GLASS_PRESETS;
+    expect(prominent.refraction).toBeGreaterThan(subtle.refraction);
+    expect(prominent.frost).toBeLessThan(subtle.frost);
+  });
+});
 describe("blur units", () => {
   it("converts px to the library's own scale", () => {
     // The library computes `blur((4 + blurAmount * 32)px)`. The default 6px is

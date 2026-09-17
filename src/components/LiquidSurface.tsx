@@ -2,7 +2,14 @@ import { useEffect, useState, type CSSProperties, type ReactNode } from "react";
 // `CSSProperties` is still needed for `LIQUID_FILL`, which is inline on purpose.
 import LiquidGlass from "liquid-glass-react";
 import { cn } from "../lib/cn";
-import { clampBlur, clampLiquid, clampTint, toBlurAmount } from "../lib/glass";
+import {
+  SURFACE_FROST,
+  SURFACE_STRENGTH,
+  clampBlur,
+  clampLiquid,
+  clampTint,
+  toBlurAmount,
+} from "../lib/glass";
 import { useSettings } from "../stores/settings";
 import type { LiquidGlassConfig } from "../types";
 
@@ -92,17 +99,26 @@ export function LiquidSurface({
   /**
    * How much of that token survives, as a percentage.
    *
-   * A token like `--pill-bg` is about 90% alpha in light theme, so 50 here lands
-   * near 45% — enough to keep text legible over busy artwork while still letting
-   * the refraction read. Above about 80 the warp disappears behind the tint and
-   * the surface looks like ordinary frosted glass, which is the trap this whole
-   * layering exists to avoid; below about 35 the chrome stops separating from
-   * the artwork.
+   * **Leave this alone unless you have measured a reason.** It is `100` by
+   * default, and that default is load bearing: it means a converted surface
+   * paints its token at exactly the alpha the `panel-strong` (or `pill`) it
+   * replaced did, so the glass looks as thick as it always did and nothing about
+   * legibility changes.
    *
-   * The app-wide Tint slider scales this, so this is the ceiling rather than the
-   * final value.
+   * It was `50` for one commit, applied to every surface at once, and the result
+   * was that the settings drawer resolved to `color(srgb 1 1 1 / 0.48)` against
+   * the `0.95` it had been — a half-transparent sheet over the user's wallpaper,
+   * with prose on it. Measured, not guessed:
+   *
+   *     panel-strong utility       alpha 0.95, backdrop-filter blur(38px)
+   *     settings drawer after       alpha 0.48, and frost 6px
+   *
+   * The per-group numbers now live in `SURFACE_STRENGTH` in `lib/glass.ts`, where
+   * each one is chosen against the token that group already used, and only the
+   * chrome — where the effect is actually visible — trades any opacity for the
+   * bend. The app-wide **Tint** slider is the user's handle for trading more.
    */
-  tintStrength = 50,
+  tintStrength,
   /**
    * Which config switch governs this surface.
    *
@@ -176,11 +192,39 @@ export function LiquidSurface({
     nothing anywhere, because the variables were never written — and even once
     they were, the pills and the preview ignored them.
   */
-  const strength = Math.round(tintStrength * (clampTint(glass.tint) / 100));
-  // Floored at 1px: the library adds its own 4px base, and a frost of 0 would
-  // leave the warp sampling a backdrop with no frost at all, which reads as a
-  // hard-edged copy of the artwork rather than as glass.
-  const frost = Math.max(1, Math.round(safe.frost * (clampBlur(glass.blur) / 100)));
+  /*
+    Which group this surface belongs to, for the two per-group tables.
+
+    An ungrouped surface — the preview's samples, mostly — lands on the
+    composer's numbers, which are the conservative ones: a surface whose job is
+    unknown should look like the surface that holds typed text, not like chrome.
+  */
+  const group = surface ?? "composer";
+
+  /*
+    The tint, as a percentage of the token's own alpha.
+
+    `tintStrength` overrides the table when a caller passes it, but nothing does
+    any more: the table exists precisely so every call site does not have to
+    rediscover that a popover needs to stay readable. `100` for a group means
+    "the token exactly as it was", which is what keeps a converted surface
+    indistinguishable from its unconverted self unless you look at the rim.
+  */
+  const strength = Math.round(
+    (tintStrength ?? SURFACE_STRENGTH[group]) * (clampTint(glass.tint) / 100),
+  );
+
+  /*
+    The frost, in px, as a multiple of the configured value.
+
+    The library adds its own 4px base, so this is never zero in practice — but it
+    is floored at 1 anyway, because a warp sampling a completely unfrosted
+    backdrop reads as a hard-edged copy of the artwork rather than as glass.
+  */
+  const frost = Math.max(
+    1,
+    Math.round(safe.frost * SURFACE_FROST[group] * (clampBlur(glass.blur) / 100)),
+  );
 
   /*
     One declaration for both modes, deliberately.
@@ -195,7 +239,22 @@ export function LiquidSurface({
   const fill = `color-mix(in srgb, ${tint} ${strength}%, transparent)`;
 
   return (
-    <div className={cn("lg-stage", className)} role={role} title={title}>
+    <div
+    className={cn("lg-stage", className)}
+    role={role}
+    title={title}
+    /*
+      The frost goes out as a variable so the two paths can share it.
+
+      `.lg-static` is the refraction-off path, and its `backdrop-filter` used to
+      be a fixed 24px in CSS while the refracting path computed its own from
+      `SURFACE_FROST` — so turning refraction off also changed the blur, which
+      the toggle's own hint promises it will not ("off renders the same surfaces
+      as ordinary frosted glass, at the same tint and blur"). One number, both
+      paths.
+    */
+    style={{ "--lg-frost": `${frost}px` } as CSSProperties}
+  >
       {enabled ? (
         <div className="lg-shell">
           <LiquidGlass
@@ -253,7 +312,6 @@ export function LiquidSurface({
     </div>
   );
 }
-
 /**
  * Fill the shell, and sit its top-left on the shell's centre.
  *
