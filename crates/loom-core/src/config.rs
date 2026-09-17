@@ -1010,12 +1010,21 @@ pub enum GlassMode {
 pub struct LiquidGlassConfig {
     /// The master switch. Off renders the same surfaces as ordinary glass.
     pub enabled: bool,
-    /// Which surfaces refract, per surface rather than all-or-nothing. The
-    /// composer is much the most expensive, so wanting the effect on small
-    /// chrome and not there is a reasonable place to land.
+    /// Which surfaces refract, grouped by where they sit rather than by
+    /// component name, because that is what decides how the effect reads and
+    /// what it costs.
+    ///
+    /// `pills` is the measured worst case — the title bar floats over the bare
+    /// background, which is the one backdrop a displacement map has nothing to
+    /// act on. `popovers` and `cards` are the opposite: they sit over the
+    /// transcript, where text gives the bend something to grab. `composer` is
+    /// the most expensive by area and the only one that resizes while you type.
     pub pills: bool,
     pub composer: bool,
     pub panels: bool,
+    pub popovers: bool,
+    pub cards: bool,
+    pub overlays: bool,
     /// `displacementScale`: how far edge samples are pulled.
     pub refraction: u8,
     /// Backdrop blur in px — *not* the library's own `blurAmount` units, which
@@ -1037,6 +1046,9 @@ impl Default for LiquidGlassConfig {
             pills: true,
             composer: true,
             panels: true,
+            popovers: true,
+            cards: true,
+            overlays: true,
             // Modest by default: the refraction has to be visible without the
             // edge pulling the chrome apart, and these pills are 40px tall.
             refraction: 32,
@@ -1168,6 +1180,8 @@ mod tests {
         config.interface.glass.blur = 160;
         config.interface.glass.liquid.enabled = true;
         config.interface.glass.liquid.panels = false;
+        config.interface.glass.liquid.cards = false;
+        config.interface.glass.liquid.popovers = false;
         config.interface.glass.liquid.refraction = 64;
         config.interface.glass.liquid.frost = 14;
         config.interface.glass.liquid.elasticity = 0.35;

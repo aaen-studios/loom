@@ -389,8 +389,23 @@ export type GlassMode = "standard" | "polar" | "prominent";
  */
 export type LiquidParams = Omit<
   LiquidGlassConfig,
-  "enabled" | "pills" | "composer" | "panels"
+  "enabled" | SurfaceFlags
 >;
+
+/**
+ * The per-surface switches, as a unit.
+ *
+ * Named so the group can be omitted from `LiquidParams` in one place: the six
+ * numbers and the six switches are different kinds of thing, and the render-side
+ * type wants only the numbers.
+ */
+type SurfaceFlags =
+  | "pills"
+  | "composer"
+  | "panels"
+  | "popovers"
+  | "cards"
+  | "overlays";
 
 /**
  * A refracting surface's parameters, as stored.
@@ -410,15 +425,32 @@ export interface LiquidGlassConfig {
   /** Whether any surface refracts at all. The master switch. */
   enabled: boolean;
   /**
-   * Which surfaces refract, per surface rather than all-or-nothing.
+   * Which surfaces refract, per group rather than all-or-nothing.
    *
-   * The composer is the expensive one — the largest area, a moving background
-   * behind it, and it resizes as you type — so wanting the effect on the small
-   * chrome and not there is a reasonable place to land.
+   * Grouped by *where they sit* rather than by component name, because that is
+   * what decides how the effect reads and what it costs:
+   *
+   *  - `pills`    — the title bar. Over the bare background, which is the one
+   *                 backdrop a displacement map has nothing to act on; the
+   *                 measured worst case, and still worth having because the
+   *                 rims catch the drifting artwork.
+   *  - `composer` — the largest single area, and the only one that resizes as
+   *                 you type. The most expensive, so it gets its own switch.
+   *  - `panels`   — torn-off windows in the dock.
+   *  - `popovers` — menus and pickers: the model picker, the persona menu, the
+   *                 workspace chip, the slash menu. Over the transcript, so
+   *                 there is text behind them to bend.
+   *  - `cards`    — surfaces inside the transcript: tool calls, the goal panel,
+   *                 the question card, queued messages.
+   *  - `overlays` — the full-surface ones: the settings drawer, the shortcut
+   *                 sheet, voice mode, the update toast.
    */
   pills: boolean;
   composer: boolean;
   panels: boolean;
+  popovers: boolean;
+  cards: boolean;
+  overlays: boolean;
   /** `displacementScale`: how far edge samples are pulled. 0–120. */
   refraction: number;
   /** Backdrop blur in px — *not* the library's own `blurAmount` units. */

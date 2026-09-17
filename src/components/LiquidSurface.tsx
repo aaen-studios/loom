@@ -1,9 +1,28 @@
 import { useEffect, useState, type CSSProperties, type ReactNode } from "react";
+// `CSSProperties` is still needed for `LIQUID_FILL`, which is inline on purpose.
 import LiquidGlass from "liquid-glass-react";
 import { cn } from "../lib/cn";
 import { clampBlur, clampLiquid, clampTint, toBlurAmount } from "../lib/glass";
 import { useSettings } from "../stores/settings";
 import type { LiquidGlassConfig } from "../types";
+
+/** How the surface's content is laid out. See `layout` below. */
+export type SurfaceLayout = "row" | "block";
+
+/**
+ * The surfaces the config can switch on and off.
+ *
+ * A union rather than `keyof LiquidGlassConfig` so this stays the list of
+ * *groups*, not of fields: adding a number to the config should not silently
+ * make `surface="refraction"` typecheck.
+ */
+export type SurfaceKey =
+  | "pills"
+  | "composer"
+  | "panels"
+  | "popovers"
+  | "cards"
+  | "overlays";
 
 /**
  * A glass surface, optionally refracted.
@@ -50,8 +69,25 @@ export function LiquidSurface({
   children,
   className,
   contentClassName,
-  /** Inline, so it wins. For layout the `lg-content` class cannot express. */
-  contentStyle,  /** Which token the surface tints with. */
+  /**
+   * How the content is laid out.
+   *
+   * `row` is chrome — a pill holding a few buttons side by side. `block` is
+   * everything that contains a *list*: a menu of rows, a card with paragraphs,
+   * a drawer of sections. Those are the majority, and passing `row` by accident
+   * lays a popup's rows out horizontally, which is a confusing way to discover
+   * that the default was wrong for it.
+   */
+  layout = "row",
+  /**
+   * Inline styles for the content, for values that cannot be a class.
+   *
+   * Only the popovers need it, and they need it genuinely: their height comes
+   * from a measured `maxHeight` computed per open (`drop.maxHeight`), which is a
+   * number rather than one of a fixed set of classes.
+   */
+  contentStyle,
+  /** Which token the surface tints with. */
   tint = "var(--pill-bg)",
   /**
    * How much of that token survives, as a percentage.
@@ -83,10 +119,11 @@ export function LiquidSurface({
   children: ReactNode;
   className?: string;
   contentClassName?: string;
+  layout?: SurfaceLayout;
   contentStyle?: CSSProperties;
   tint?: string;
   tintStrength?: number;
-  surface?: keyof Pick<LiquidGlassConfig, "pills" | "composer" | "panels">;
+  surface?: SurfaceKey;
   liquid?: boolean;
   params?: Partial<LiquidGlassConfig>;
 }) {
@@ -184,7 +221,11 @@ export function LiquidSurface({
         <div className="lg-static" style={{ backgroundColor: fill }} />
       )}
       <div
-        className={cn("lg-content", DEFAULT_CONTENT_CLASS, contentClassName)}
+        className={cn(
+          "lg-content",
+          layout === "row" ? ROW_CONTENT_CLASS : BLOCK_CONTENT_CLASS,
+          contentClassName,
+        )}
         style={contentStyle}
       >
         {children}
@@ -208,22 +249,21 @@ const LIQUID_FILL: CSSProperties = {
 };
 
 /**
- * The base layout for the content: a centred row, which is what chrome is.
+ * The two content layouts, as Tailwind classes rather than as rules inside the
+ * unlayered `.lg-content` block.
  *
- * Applied as Tailwind classes rather than inside the unlayered `.lg-content`
- * rule, because unlayered rules beat every utility — a `display` there could
- * not have been overridden by a call site, and the composer has to stay `block`.
+ * Unlayered rules beat every utility, so a `display` there could not have been
+ * overridden by a call site at all. Keeping it here means `layout` decides and
+ * the caller can still append anything else.
  *
- * Always applied, with the caller's classes appended rather than substituted.
- * The first version of this treated `contentClassName` as the whole value, so
- * the pills' `"gap-0.5 p-1"` silently replaced `flex` and their buttons stacked
- * vertically: the stage measured 40px while its content measured 72. Nothing
- * about the shell geometry showed it.
- *
- * A call site that needs a different `display` passes `contentStyle`, since an
- * inline style beats any class without depending on stylesheet order.
+ * Both are always applied alongside the caller's `contentClassName`, which is
+ * appended rather than substituted. The first version of this treated
+ * `contentClassName` as the whole value, so the pills' `"gap-0.5 p-1"` silently
+ * replaced `flex` and their buttons stacked vertically — the stage measured 40px
+ * while its content measured 72, and every shell-geometry check still passed.
  */
-const DEFAULT_CONTENT_CLASS = "flex h-full items-center";
+const ROW_CONTENT_CLASS = "flex h-full items-center";
+const BLOCK_CONTENT_CLASS = "block h-full";
 
 /** Tracks the OS setting, including while the app is open. */
 function useReducedMotion(): boolean {

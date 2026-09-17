@@ -73,12 +73,17 @@ export const DEFAULT_GLASS: GlassConfig = {
   tint: 100,
   blur: 100,
   liquid: {
-    // On by default once the surfaces are wired, so the feature is not a
-    // setting you have to find before you can see it. `enabled` is the escape.
+    // On everywhere by default, so the feature is not a setting you have to
+    // find before you can see it. `enabled` is the escape hatch, and each group
+    // has its own switch for anyone who wants the effect somewhere and not
+    // somewhere else.
     enabled: true,
     pills: true,
     composer: true,
     panels: true,
+    popovers: true,
+    cards: true,
+    overlays: true,
     ...DEFAULT_LIQUID,
   },
 };
@@ -144,7 +149,14 @@ export function clampParams(input: Partial<LiquidParams> | undefined): LiquidPar
   };
 }
 
-/** Forces a whole liquid config — the six numbers and the four switches. */
+/**
+ * Forces a whole liquid config — the six numbers and the seven switches.
+ *
+ * The switches pass through rather than being clamped, because they are not
+ * numbers; only their *default* matters, and it is on for all of them. A clamp
+ * that dropped them would turn every surface on regardless of the config, which
+ * is the opposite of what "off" means.
+ */
 export function clampLiquid(input: Partial<LiquidGlassConfig> | undefined): LiquidGlassConfig {
   const source = input ?? {};
   const params = clampParams(source);
@@ -153,6 +165,9 @@ export function clampLiquid(input: Partial<LiquidGlassConfig> | undefined): Liqu
     pills: source.pills ?? true,
     composer: source.composer ?? true,
     panels: source.panels ?? true,
+    popovers: source.popovers ?? true,
+    cards: source.cards ?? true,
+    overlays: source.overlays ?? true,
     ...params,
   };
 }

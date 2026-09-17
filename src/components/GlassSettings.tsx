@@ -81,6 +81,7 @@ function SamplePill({ plain = false }: { plain?: boolean }) {
       // things and calling it a comparison.
       liquid={plain ? false : undefined}
     >
+
       <span className="px-2.5 text-[12.5px] text-soft">
         {plain ? "Plain glass" : "Liquid"}
       </span>
@@ -166,7 +167,7 @@ export function GlassPreview() {
             surface="composer"
             className="w-full rounded-sheet"
             contentClassName="px-3 py-2.5"
-            contentStyle={{ display: "block" }}
+            layout="block"
             tint="var(--panel-bg-strong)"
             params={{ refraction: 16 }}
           >
@@ -285,6 +286,27 @@ export function GlassSection() {
           hint="Only the windows detached from the main one. A panel docked inside the app sits over the transcript, not over artwork, so there is nothing there to refract."
           checked={liquid.panels}
           onChange={(panels) => setLiquid({ panels })}
+          disabled={!liquid.enabled}
+        />
+        <Toggle
+          label="Menus and pickers"
+          hint="The model picker, the persona menu, the workspace chip, the composer's slash menu. These sit over the transcript, so there is text behind them for the bend to act on — it reads much more clearly here than on the title bar."
+          checked={liquid.popovers}
+          onChange={(popovers) => setLiquid({ popovers })}
+          disabled={!liquid.enabled}
+        />
+        <Toggle
+          label="Cards in the transcript"
+          hint="Tool calls, the goal panel, the question card, queued messages. The most numerous refracting surfaces by far, because a long chat holds many."
+          checked={liquid.cards}
+          onChange={(cards) => setLiquid({ cards })}
+          disabled={!liquid.enabled}
+        />
+        <Toggle
+          label="Full-screen surfaces"
+          hint="Settings, the shortcut sheet, voice mode, the update toast."
+          checked={liquid.overlays}
+          onChange={(overlays) => setLiquid({ overlays })}
           disabled={!liquid.enabled}
         />
 
