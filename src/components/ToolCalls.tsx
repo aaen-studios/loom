@@ -3,6 +3,7 @@ import { cn } from "../lib/cn";
 import { canAlwaysAllow } from "../lib/modes";
 import { assetUrl } from "../lib/tauri";
 import { useChat } from "../stores/chat";
+import { LiquidSurface } from "./LiquidSurface";
 import { ipc } from "../lib/ipc";
 import { groupToolRuns } from "../lib/messageExtra";
 import type {

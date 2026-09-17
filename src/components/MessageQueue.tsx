@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { cn } from "../lib/cn";
 import { useChat } from "../stores/chat";
+import { LiquidSurface } from "./LiquidSurface";
 import type { QueuedMessage } from "../types";
 import { ArrowUpIcon, CloseIcon, GripIcon } from "./icons";
 
