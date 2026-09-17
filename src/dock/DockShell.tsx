@@ -780,10 +780,14 @@ function DragLayer({
         className="pointer-events-none fixed top-0 left-0 z-[60]"
         style={{ willChange: "transform" }}
       >
-        <LiquidSurface
-        surface="popovers"
-        layout="block"
-        tint="var(--panel-bg-strong)" className="flex max-w-[260px] items-center gap-2 rounded-sheet px-2.5 py-1.5 shadow-lg">
+        {/* Deliberately **not** a `LiquidSurface`, and the one place in the app
+            where that is the right call. This element is moved by writing a
+            transform at pointer rate (see `willChange` above), so an SVG filter
+            on it would re-rasterise on every frame of every drag — the only
+            surface whose cost is not amortised by it standing still. It keeps
+            the plain `panel-strong` path, which is a `backdrop-filter` and
+            nothing more. */}
+        <div className="panel-strong flex max-w-[260px] items-center gap-2 rounded-sheet px-2.5 py-1.5 shadow-lg">
           <Icon size={14} className="shrink-0 text-faint" />
           <span className="truncate text-[12.5px] text-[var(--ink)]">
             {titleFor(panel)}
@@ -792,7 +796,7 @@ function DragLayer({
             ref={labelRef}
             className="shrink-0 text-[11.5px] text-[var(--accent)] opacity-0 transition-opacity"
           />
-        </LiquidSurface>
+        </div>
       </div>
     </>
   );
