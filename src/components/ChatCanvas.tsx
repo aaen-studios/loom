@@ -39,6 +39,7 @@ import {
   RefreshIcon,
   TrashIcon,
 } from "./icons";
+import { LiquidSurface } from "./LiquidSurface";
 
 /** Greeting for the blank-chat screen, fitting whatever hour it is. */
 function greeting(): string {
@@ -327,12 +328,15 @@ function MessageRow({
             </div>
           )}
           {message.content && (
-            <div
-              className="message-body panel-strong max-w-full select-text rounded-sheet px-3.5 py-2.5 text-[14.5px] leading-6 whitespace-pre-wrap"
+            <LiquidSurface
+        surface="cards"
+        layout="block"
+        tint="var(--panel-bg-strong)"
+              className="message-body max-w-full select-text rounded-sheet px-3.5 py-2.5 text-[14.5px] leading-6 whitespace-pre-wrap"
               title={new Date(message.createdAt).toLocaleString()}
             >
               <MessageContentView content={message.content} />
-            </div>
+            </LiquidSurface>
           )}
         </div>
       </div>

@@ -24,6 +24,7 @@ import type { DockEdge, DockZone } from "../types";
 import { CloseIcon, PopOutIcon } from "../components/icons";
 import { StripRenderedProvider, iconFor, panelDef, titleFor } from "./registry";
 import { useTerminalAppearance } from "../components/TerminalPanel";
+import { LiquidSurface } from "../components/LiquidSurface";
 
 /**
  * The dock: zones on the window's edges, each a tab stack of panels.
@@ -535,7 +536,10 @@ function PanelMenu({ zone, panel }: { zone: DockZone; panel: string }) {
             onClick={() => setOpen(false)}
             className="fixed inset-0 z-40 cursor-default"
           />
-          <div className="panel-strong absolute right-0 z-50 mt-1 w-[200px] overflow-hidden rounded-sheet p-1">
+          <LiquidSurface
+        surface="popovers"
+        layout="block"
+        tint="var(--panel-bg-strong)" className="absolute right-0 z-50 mt-1 w-[200px] overflow-hidden rounded-sheet p-1">
             <button
               type="button"
               onClick={() => {
@@ -589,7 +593,7 @@ function PanelMenu({ zone, panel }: { zone: DockZone; panel: string }) {
               <CloseIcon size={14} />
               <span className="flex-1">Close</span>
             </button>
-          </div>
+          </LiquidSurface>
         </>
       )}
     </div>
@@ -776,7 +780,10 @@ function DragLayer({
         className="pointer-events-none fixed top-0 left-0 z-[60]"
         style={{ willChange: "transform" }}
       >
-        <div className="panel-strong flex max-w-[260px] items-center gap-2 rounded-sheet px-2.5 py-1.5 shadow-lg">
+        <LiquidSurface
+        surface="popovers"
+        layout="block"
+        tint="var(--panel-bg-strong)" className="flex max-w-[260px] items-center gap-2 rounded-sheet px-2.5 py-1.5 shadow-lg">
           <Icon size={14} className="shrink-0 text-faint" />
           <span className="truncate text-[12.5px] text-[var(--ink)]">
             {titleFor(panel)}
@@ -785,7 +792,7 @@ function DragLayer({
             ref={labelRef}
             className="shrink-0 text-[11.5px] text-[var(--accent)] opacity-0 transition-opacity"
           />
-        </div>
+        </LiquidSurface>
       </div>
     </>
   );

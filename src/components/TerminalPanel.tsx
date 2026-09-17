@@ -16,6 +16,7 @@ import { usePty } from "../stores/pty";
 import { useSettings } from "../stores/settings";
 import { useStripRendered } from "../dock/registry";
 import { CloseIcon, PlusIcon, SearchIcon, TerminalIcon } from "./icons";
+import { LiquidSurface } from "./LiquidSurface";
 
 /**
  * The docked terminal.
@@ -180,7 +181,10 @@ export function TerminalTabs({
               onClick={() => setMenuOpen(false)}
               className="fixed inset-0 z-40 cursor-default"
             />
-            <div className="panel-strong absolute right-0 z-50 mt-1 w-[210px] overflow-hidden rounded-sheet p-1">
+            <LiquidSurface
+        surface="popovers"
+        layout="block"
+        tint="var(--panel-bg-strong)" className="absolute right-0 z-50 mt-1 w-[210px] overflow-hidden rounded-sheet p-1">
               <p className="px-2 pt-1.5 pb-1 text-[11px] font-semibold tracking-[0.08em] text-faint uppercase">
                 New shell
               </p>
@@ -203,7 +207,7 @@ export function TerminalTabs({
                   )}
                 </button>
               ))}
-            </div>
+            </LiquidSurface>
           </>
         )}
       </div>

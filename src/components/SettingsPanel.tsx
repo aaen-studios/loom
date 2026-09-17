@@ -93,6 +93,7 @@ import {
   fieldBase,
   inputClass,
 } from "./ui";
+import { LiquidSurface } from "./LiquidSurface";
 
 /**
  * The model list for one provider: choose which models the pickers offer, and
@@ -4328,7 +4329,10 @@ export function SettingsPanel() {
         className="absolute inset-0 cursor-default bg-black/10"
       />
 
-      <div className="animate-fade-up panel-strong relative flex h-full w-[720px] max-w-full flex-col overflow-hidden rounded-sheet">
+      <LiquidSurface
+        surface="overlays"
+        layout="block"
+        tint="var(--panel-bg-strong)" className="animate-fade-up relative flex h-full w-[720px] max-w-full flex-col overflow-hidden rounded-sheet">
         <div className="flex items-center gap-3 px-4 pt-3 pb-1">
           <h2 className="text-[14.5px] font-semibold">Settings</h2>
           <SearchField
@@ -4503,7 +4507,7 @@ export function SettingsPanel() {
             )}
           </div>
         </div>
-      </div>
+      </LiquidSurface>
     </div>
   );
 }

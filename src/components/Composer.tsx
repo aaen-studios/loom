@@ -509,7 +509,10 @@ export function Composer({ variant = "docked" }: ComposerProps) {
       )}
 
       {slashOpen && slashQuery !== null && slashMatches.length > 0 && (
-        <div className="panel-strong absolute bottom-full left-0 z-40 mb-2 w-[360px] overflow-hidden rounded-sheet p-1.5">
+        <LiquidSurface
+        surface="popovers"
+        layout="block"
+        tint="var(--panel-bg-strong)" className="absolute bottom-full left-0 z-40 mb-2 w-[360px] overflow-hidden rounded-sheet p-1.5">
           <div className="max-h-[300px] overflow-y-auto">
             {slashMatches.slice(0, 8).map((entry, index) => (
               <div key={`${entry.kind}-${entry.id}`}>
@@ -563,7 +566,7 @@ export function Composer({ variant = "docked" }: ComposerProps) {
           <p className="px-2 py-1 text-[11px] text-faint">
             ↑↓ to choose · Enter to accept · Esc to dismiss
           </p>
-        </div>
+        </LiquidSurface>
       )}
 
       <AttachmentChips

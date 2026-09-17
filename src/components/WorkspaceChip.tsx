@@ -29,6 +29,7 @@ import {
   SearchIcon,
   TrashIcon,
 } from "./icons";
+import { LiquidSurface } from "./LiquidSurface";
 
 /**
  * Workspace chip: the folder this chat's tools may touch, plus the git branch
@@ -188,12 +189,15 @@ export function WorkspaceChip({ align = "up" }: { align?: "up" | "down" }) {
       </button>
 
       {open && (
-        <div
+        <LiquidSurface
+        surface="popovers"
+        layout="block"
+        tint="var(--panel-bg-strong)"
           className={cn(
-            "panel-strong animate-fade-up absolute z-40 w-[340px] max-w-[calc(100vw-2rem)] overflow-y-auto rounded-sheet p-1.5",
+            "animate-fade-up absolute z-40 w-[340px] max-w-[calc(100vw-2rem)] overflow-y-auto rounded-sheet p-1.5",
             drop.up ? "bottom-full left-0 mb-2" : "top-full left-0 mt-2",
           )}
-          style={{ maxHeight: drop.maxHeight }}
+          contentStyle={{ maxHeight: drop.maxHeight }}
         >
           {/* The search box only appears once the list is long enough to need
               it. A field over four folders is a row of chrome that never earns
@@ -354,7 +358,7 @@ export function WorkspaceChip({ align = "up" }: { align?: "up" | "down" }) {
           <p className="px-2 py-1.5 text-[11.5px] leading-5 text-faint">
             Tools can only read inside this folder.
           </p>
-        </div>
+        </LiquidSurface>
       )}
     </div>
   );

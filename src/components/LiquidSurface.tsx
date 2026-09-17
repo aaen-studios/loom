@@ -115,6 +115,24 @@ export function LiquidSurface({
   liquid,
   /** Per-surface overrides, merged over the stored config. */
   params,
+  /**
+   * ARIA role for the surface itself.
+   *
+   * Explicit rather than a general prop spread, because a wrapper that forwards
+   * arbitrary props hides which ones actually do something. Exactly one caller
+   * needs it today: the Panels menu is `role="menu"` with `menuitemcheckbox`
+   * children, and dropping the role on the floor while converting it would have
+   * been an accessibility regression disguised as a styling change.
+   */
+  role,
+  /**
+   * Native tooltip for the surface.
+   *
+   * Also an explicit passthrough, for the same reason. One caller: a user's own
+   * message bubble carries the timestamp as a `title`, and the bubble is now
+   * this wrapper's stage — so without it the tooltip would have silently gone.
+   */
+  title,
 }: {
   children: ReactNode;
   className?: string;
@@ -126,6 +144,8 @@ export function LiquidSurface({
   surface?: SurfaceKey;
   liquid?: boolean;
   params?: Partial<LiquidGlassConfig>;
+  role?: string;
+  title?: string;
 }) {
   const reduced = useReducedMotion();
   const glass = useSettings((state) => state.config.interface.glass);
@@ -175,7 +195,7 @@ export function LiquidSurface({
   const fill = `color-mix(in srgb, ${tint} ${strength}%, transparent)`;
 
   return (
-    <div className={cn("lg-stage", className)}>
+    <div className={cn("lg-stage", className)} role={role} title={title}>
       {enabled ? (
         <div className="lg-shell">
           <LiquidGlass

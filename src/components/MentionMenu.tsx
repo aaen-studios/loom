@@ -3,6 +3,7 @@ import { cn } from "../lib/cn";
 import { shortId } from "../lib/mentions";
 import type { Session } from "../types";
 import { FileIcon, FolderIcon, MessageIcon } from "./icons";
+import { LiquidSurface } from "./LiquidSurface";
 
 /** One row of the popup, already rendered into what the picker shows. */
 export interface MentionOption {
@@ -51,7 +52,10 @@ export function MentionMenu({
   const isChat = trigger === "#";
 
   return (
-    <div className="panel-strong absolute bottom-full left-0 z-40 mb-2 w-[360px] overflow-hidden rounded-sheet p-1.5">
+    <LiquidSurface
+        surface="popovers"
+        layout="block"
+        tint="var(--panel-bg-strong)" className="absolute bottom-full left-0 z-40 mb-2 w-[360px] overflow-hidden rounded-sheet p-1.5">
       <p className="px-2 pt-1.5 pb-0.5 text-[10.5px] font-semibold tracking-[0.08em] text-faint uppercase">
         {isChat ? "Chats" : "Files"}
       </p>
@@ -107,7 +111,7 @@ export function MentionMenu({
           ? "The chat's id is added when you send, so the model can read it."
           : "↑↓ to choose · Enter to insert · Esc to dismiss"}
       </p>
-    </div>
+    </LiquidSurface>
   );
 }
 

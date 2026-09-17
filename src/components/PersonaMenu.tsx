@@ -5,6 +5,7 @@ import { ipc } from "../lib/ipc";
 import { useChat } from "../stores/chat";
 import { useSettings } from "../stores/settings";
 import { CheckIcon, ChevronDownIcon, PersonIcon } from "./icons";
+import { LiquidSurface } from "./LiquidSurface";
 
 /**
  * Persona chip + menu. Selecting a persona snapshots its system prompt onto
@@ -104,9 +105,12 @@ export function PersonaMenu({ align = "up" }: { align?: "up" | "down" }) {
       </button>
 
       {open && (
-        <div
+        <LiquidSurface
+        surface="popovers"
+        layout="block"
+        tint="var(--panel-bg-strong)"
           className={cn(
-            "panel-strong absolute z-40 max-h-[70vh] w-[300px] overflow-y-auto rounded-sheet p-1.5",
+            "absolute z-40 max-h-[70vh] w-[300px] overflow-y-auto rounded-sheet p-1.5",
             align === "down" ? "right-0 top-full mt-2" : "bottom-full left-0 mb-2",
           )}
         >
@@ -244,7 +248,7 @@ export function PersonaMenu({ align = "up" }: { align?: "up" | "down" }) {
               )}
             </div>
           )}
-        </div>
+        </LiquidSurface>
       )}
     </div>
   );

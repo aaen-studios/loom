@@ -1,6 +1,7 @@
 import { cn } from "../lib/cn";
 import { useUi } from "../stores/ui";
 import { CloseIcon } from "./icons";
+import { LiquidSurface } from "./LiquidSurface";
 
 interface Shortcut {
   keys: string;
@@ -75,7 +76,10 @@ export function ShortcutsSheet() {
         onClick={() => setOpen(false)}
         className="absolute inset-0 cursor-default bg-black/20"
       />
-      <div className="panel-strong animate-fade-up relative flex max-h-full w-[460px] flex-col overflow-hidden rounded-sheet">
+      <LiquidSurface
+        surface="overlays"
+        layout="block"
+        tint="var(--panel-bg-strong)" className="animate-fade-up relative flex max-h-full w-[460px] flex-col overflow-hidden rounded-sheet">
         <div className="flex items-center justify-between px-4 py-3">
           <h2 className="text-[14.5px] font-semibold">Keyboard shortcuts</h2>
           <button
@@ -111,7 +115,7 @@ export function ShortcutsSheet() {
             </div>
           ))}
         </div>
-      </div>
+      </LiquidSurface>
     </div>
   );
 }

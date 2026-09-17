@@ -6,6 +6,7 @@ import { usePty } from "../stores/pty";
 import { PANEL_LIST, iconFor, titleFor } from "../dock/registry";
 import { CheckIcon, ChevronDownIcon, PanelLeftIcon } from "./icons";
 import { Kbd } from "./ui";
+import { LiquidSurface } from "./LiquidSurface";
 
 /**
  * The dock's one control: a menu of every panel.
@@ -94,13 +95,16 @@ export function PanelsMenu() {
       </button>
 
       {open && (
-        <div
-          role="menu"
+        <LiquidSurface
+        surface="popovers"
+        layout="block"
+        role="menu"
+        tint="var(--panel-bg-strong)"
           className={cn(
-            "panel-strong animate-fade-up absolute right-0 z-50 w-[264px] overflow-y-auto rounded-sheet p-1.5",
+            "animate-fade-up absolute right-0 z-50 w-[264px] overflow-y-auto rounded-sheet p-1.5",
             drop.up ? "bottom-full mb-2" : "top-full mt-2",
           )}
-          style={{ maxHeight: drop.maxHeight }}
+          contentStyle={{ maxHeight: drop.maxHeight }}
         >
           <p className="px-2 pt-1 pb-1 text-[11px] font-semibold tracking-[0.08em] text-faint uppercase">
             Panels
@@ -168,7 +172,7 @@ export function PanelsMenu() {
               <Kbd>Ctrl+`</Kbd>
             </button>
           </div>
-        </div>
+        </LiquidSurface>
       )}
     </div>
   );

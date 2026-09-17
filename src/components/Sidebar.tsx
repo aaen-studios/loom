@@ -30,6 +30,7 @@ import {
   TrashIcon,
 } from "./icons";
 import { EmptyState, IconButton, SearchField } from "./ui";
+import { LiquidSurface } from "./LiquidSurface";
 
 const GROUPING_OPTIONS: { id: SidebarGrouping; label: string }[] = [
   { id: "workspace", label: "By workspace" },
@@ -288,7 +289,10 @@ export function Sidebar() {
                   onClick={() => setArrangeOpen(false)}
                   className="fixed inset-0 z-30 cursor-default"
                 />
-                <div className="panel-strong absolute top-full right-0 z-40 mt-2 w-[210px] rounded-sheet p-1.5">
+                <LiquidSurface
+        surface="popovers"
+        layout="block"
+        tint="var(--panel-bg-strong)" className="absolute top-full right-0 z-40 mt-2 w-[210px] rounded-sheet p-1.5">
                   <p className="px-2 pt-1 pb-0.5 text-[11px] font-semibold tracking-[0.08em] text-faint uppercase">
                     Group
                   </p>
@@ -321,7 +325,7 @@ export function Sidebar() {
                       />
                     ))
                   )}
-                </div>
+                </LiquidSurface>
               </>
             )}
           </div>

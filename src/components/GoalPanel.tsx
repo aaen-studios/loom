@@ -3,6 +3,7 @@ import { cn } from "../lib/cn";
 import { useChat } from "../stores/chat";
 import type { Todo, TodoStatus } from "../types";
 import { CheckIcon, ChevronDownIcon, CircleIcon, HalfCircleIcon, TargetIcon } from "./icons";
+import { LiquidSurface } from "./LiquidSurface";
 
 const NO_TODOS: Todo[] = [];
 
@@ -43,7 +44,10 @@ export function GoalPanel() {
   };
 
   return (
-    <div className="panel-strong mb-2 w-full overflow-hidden rounded-sheet">
+    <LiquidSurface
+        surface="cards"
+        layout="block"
+        tint="var(--panel-bg-strong)" className="mb-2 w-full overflow-hidden rounded-sheet">
       <button
         type="button"
         onClick={() => setOpen(!open)}
@@ -121,6 +125,6 @@ export function GoalPanel() {
           ))}
         </ul>
       )}
-    </div>
+    </LiquidSurface>
   );
 }
