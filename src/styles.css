@@ -1534,3 +1534,135 @@ html:not(.dark) .loom-markdown [data-streamdown="code-block"] {
 .loom-markdown [data-streamdown] {
   background: transparent;
 }
+
+/* ---------------------------------------------------------------------------
+   Liquid glass
+
+   The layer stack for a refracting surface, and the contract `LiquidSurface`
+   relies on. Read this before changing any of it.
+
+   Deliberately **unlayered** and app-only, for two reasons:
+
+   1. Cascade. These have to beat declarations the library sets *inline*, which
+      no `@layer` rule can do without `!important`. Unlayered plus `!important`
+      is the narrowest tool that works.
+   2. The shared token regions (`loom-site:surfaces:*`) are extracted verbatim
+      into the website's stylesheet by `scripts/sync-site-tokens.mjs --check`,
+      and `site/verify-tokens.mjs` asserts their literal contents. Nothing here
+      may live inside a marker, or the site's build breaks for a feature the
+      site does not have.
+
+   The stack, outermost first:
+
+     .lg-stage     owns layout, padding, radius and the drop shadow
+       .lg-shell   absolutely covers the stage and clips to its radius
+         div       the library's root (`.lg-glass`), positioned by it
+           .glass  flattened to fill the root, holds `.glass__warp`
+         .lg-tint  the tint and border, painted *above* the warp
+       .lg-content the real content, a sibling so popups are never clipped
+
+   Why the tint is a sibling *above* the warp rather than a background on the
+   shell: `backdrop-filter` samples what is painted behind the element, so an
+   ancestor's background would become part of the warp's own input. It would
+   frost Loom's tint instead of the window behind it, and the refraction would
+   disappear into a blur of its own colour.
+--------------------------------------------------------------------------- */
+
+.lg-stage {
+  position: relative;
+  /* Not `isolation: isolate`. Isolation creates a backdrop root, so the warp
+     would sample only what is inside the shell — nothing — and the refraction
+     would silently vanish. The library's blend-mode border layers are hidden
+     below, so there is nothing left for isolation to contain. */
+  box-shadow: var(--panel-shadow);
+}
+
+.lg-shell {
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  corner-shape: inherit;
+  /* Clips the warped output to the silhouette, so it cannot paint square
+     corners over a capsule. */
+  overflow: clip;
+  /* Purely decorative: every click belongs to `.lg-content` above it. */
+  pointer-events: none;
+}
+
+/* The library's four decorative layers, hidden.
+
+   Two black veils for its `overLight` mode and two gradient border spans. Loom
+   has its own border and shadow language (`--glass-border`, `--glass-highlight`,
+   `--panel-shadow`), and the spans are sized from the library's `glassSize`
+   guess rather than from the shell, so they would also be the wrong size for a
+   frame or two. Hiding them is what removes the need for a Tailwind shim:
+   without them there is no library class name left that Loom's Tailwind scan
+   would have had to emit. */
+.lg-shell > span {
+  display: none;
+}
+
+.lg-shell > div:not(.lg-glass):not(.lg-tint) {
+  display: none;
+}
+
+/* The library's own box, flattened onto the root.
+
+   It ships as `display: inline-flex` with `padding: 24px 32px` and sized by its
+   children. Our children are empty on purpose — the real content is a sibling,
+   so that `overflow: hidden` here cannot clip the composer's slash menu — which
+   means it would collapse to 0×0 and the warp would paint nothing at all.
+
+   Every property overridden here is one the library sets inline, hence
+   `!important`. They are all layout; nothing about the effect itself. */
+.lg-shell .glass {
+  position: absolute !important;
+  inset: 0 !important;
+  display: block !important;
+  padding: 0 !important;
+  gap: 0 !important;
+  border-radius: 0 !important;
+  box-shadow: none !important;
+  overflow: hidden !important;
+  /* Inline on the library's box too, and it would animate the flattening. */
+  transition: none !important;
+}
+
+/* The tint, and the border with it.
+
+   Painted above the warp, and carrying no `backdrop-filter` of its own: the
+   warp is the only thing doing any frosting, which is the whole reason a
+   refracting Loom surface is not built from the `.pill` utility. */
+.lg-tint {
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  corner-shape: inherit;
+  border: 1px solid var(--glass-border);
+  box-shadow: var(--glass-highlight);
+  pointer-events: none;
+}
+
+/* The same geometry without refraction: the fill does the frosting instead of
+   the warp, which is what every existing `.pill` does and what these surfaces
+   fall back to when the effect is switched off. */
+.lg-static {
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  corner-shape: inherit;
+  border: 1px solid var(--glass-border);
+  box-shadow: var(--glass-highlight);
+  backdrop-filter: blur(24px) saturate(150%);
+  -webkit-backdrop-filter: blur(24px) saturate(150%);
+  pointer-events: none;
+}
+
+/* The real content, above everything and never clipped. */
+.lg-content {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  height: 100%;
+  align-items: center;
+}

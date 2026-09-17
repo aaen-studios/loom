@@ -1,5 +1,6 @@
 import { useEffect, useState, type ReactNode } from "react";
 import { cn } from "../lib/cn";
+import { LiquidSurface } from "./LiquidSurface";
 import {
   closeWindow,
   isWindowMaximized,
@@ -101,7 +102,10 @@ export function TitleBar() {
       <div className="absolute inset-0 -z-10" data-tauri-drag-region />
 
       <div className="flex items-center gap-2">
-        <div className="pill flex h-10 items-center gap-0.5 rounded-capsule p-1">
+        <LiquidSurface
+          className="h-10 rounded-capsule"
+          contentClassName="gap-0.5 p-1"
+        >
           {/* Opens the popup unless the dock is already holding the list, in
               which case it pops the zone out of the way — one button, and it
               always does the thing that shows you less of what is in the way. */}
@@ -129,24 +133,33 @@ export function TitleBar() {
           <PillButton label="New chat" onClick={() => void newSession()}>
             <PlusIcon size={17} />
           </PillButton>
-        </div>
-        <div className="pill flex h-10 items-center gap-0.5 rounded-capsule p-1">
+        </LiquidSurface>
+        <LiquidSurface
+          className="h-10 rounded-capsule"
+          contentClassName="gap-0.5 p-1"
+        >
           {/* Beside Runs rather than in the window-control pill: both are
               app surfaces, and a control as destructive as Close should not
               sit next to something reached for mid-sentence. */}
           <PillButton label="Voice mode" onClick={() => setVoiceOpen(true)}>
             <SoundIcon size={17} />
           </PillButton>
-        </div>
+        </LiquidSurface>
       </div>
 
       <div className="flex items-center gap-2">
-        <div className="pill flex h-10 items-center gap-0.5 rounded-capsule p-1">
+        <LiquidSurface
+          className="h-10 rounded-capsule"
+          contentClassName="gap-0.5 p-1"
+        >
           <PanelsMenu />
           <WorkspaceChip align="down" />
           <PersonaMenu align="down" />
-        </div>
-        <div className="pill flex h-10 items-center gap-0.5 rounded-capsule p-1">
+        </LiquidSurface>
+        <LiquidSurface
+          className="h-10 rounded-capsule"
+          contentClassName="gap-0.5 p-1"
+        >
           <PillButton label="Minimize" onClick={() => void minimizeWindow()}>
             <MinimizeIcon size={16} />
           </PillButton>
@@ -159,7 +172,7 @@ export function TitleBar() {
           <PillButton label="Close" danger onClick={() => void closeWindow()}>
             <CloseIcon size={16} />
           </PillButton>
-        </div>
+        </LiquidSurface>
       </div>
     </header>
   );
