@@ -18,9 +18,10 @@ stops the turn that is driving your PC, and screenshots land in the transcript),
 tray + hotkey overlay,
 launch at login (Settings → General), a fresh chat on every launch,
 signed updater, and a bespoke glass installer. The shell is now a **docking
-system** with a **real terminal** in it — see
-[The dock and the terminal](#the-dock-and-the-terminal) below. See also
-[docs/spec.md](docs/spec.md).
+system** with a **real terminal** in it, and the glass on the title bar, the
+composer and any torn-off window **refracts what is behind it** — see
+[The dock and the terminal](#the-dock-and-the-terminal) and
+[Glass](#glass) below. See also [docs/spec.md](docs/spec.md).
 
 ## Development
 
@@ -129,6 +130,43 @@ card in front of it, so the agent cannot type into it by construction.
 Where a panel sits is stored in Rust config (`config.dock`, per workspace
 folder) and broadcast on `loom://dock`, because a torn-off panel is a second
 webview and two webviews cannot share a `zustand` store.
+
+## Glass
+
+The app is glass all the way down, and the thickness is yours to set.
+
+Settings → **Appearance** has two sections and a live preview. *Glass* sets how
+heavy every surface is — **tint opacity** (50–100%, lower is more see-through)
+and **blur strength** (0–200%) — and applies to every panel, pill, popover and
+the composer at once. *Liquid glass* is the refraction sitting on top of three of
+them: the four title-bar pills, the composer, and torn-off panel windows bend the
+artwork at their edges the way a thick lens would, with sliders for how far they
+bend, how much they frost, and how much colour tears at the rim.
+
+The preview card shows it two ways and is worth looking at once: over a
+hard-edged grid, which is the best case for a bending effect, and over your own
+background, which is the honest one.
+
+```text
+Ctrl+,             Settings → Appearance
+```
+
+Two notes that are not obvious from the sliders:
+
+- **Frost trades against refraction rather than adding to it.** Past about 40px
+  the backdrop behind the glass is smeared too flat for the displacement map to
+  bend anything, so more frost makes the effect *weaker* while looking like it
+  makes the glass stronger.
+- **Loom's own background presets are smooth radial washes**, deliberately, so
+  the bending is subtle over them — 0% of pixels change on a title-bar pill,
+  against 88% over a hard-edged pattern. It reads properly over your own
+  photograph or video. That is in `docs/spec.md` as an open question rather than
+  a bug.
+
+Everything lives in `config.interface.glass`, typed in Rust as well as in
+TypeScript. That is not ceremony: `InterfaceConfig` has no catch-all field and is
+replaced wholesale on every save, so an untyped key would be dropped silently and
+the sliders would reset on the next launch.
 
 ## Layout
 
