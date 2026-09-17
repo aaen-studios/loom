@@ -14,15 +14,16 @@ import { useSettings } from "../stores/settings";
 import type { GlassMode } from "../types";
 import { LiquidSurface } from "./LiquidSurface";
 import { Row, Section, Segmented, Toggle } from "./ui";
+
 /**
  * A slider with the app's number beside it.
  *
  * The layout is the established one — `w-40` input, `w-7` tabular-nums value —
  * because the range element rules live in `styles.css`'s base layer and the
  * whole point of that arrangement is that every slider in the app looks the
- * same. The unit is part of the value rather than the label, so a row that
- * reads "6 px" cannot be mistaken for the library's own unitless `blurAmount`,
- * which is a different number by a factor of 32.
+ * same. The unit is part of the value rather than the label, so a row that reads
+ * "6 px" cannot be mistaken for the library's own unitless `blurAmount`, which
+ * is a different number by a factor of 32.
  */
 function Slider({
   value,
@@ -62,12 +63,145 @@ function Slider({
 }
 
 /**
+ * The four refracting samples, all reading the live config.
+ *
+ * A separate component so the preview can show the same surface twice — once
+ * refracting, once as plain glass — without duplicating the props. That
+ * side-by-side is the whole point of the preview: the effect is only legible in
+ * comparison. A single sample floating over a pattern asks the eye to remember
+ * what the edge looked like a moment ago, which it cannot do.
+ */
+function SamplePill({ plain = false }: { plain?: boolean }) {
+  return (
+    <LiquidSurface
+      className="h-11 rounded-capsule"
+      contentClassName="gap-0.5 p-1"
+      surface="pills"
+      // The static twin must otherwise be identical, or it is comparing two
+      // things and calling it a comparison.
+      liquid={plain ? false : undefined}
+    >
+      <span className="px-2.5 text-[12.5px] text-soft">
+        {plain ? "Plain glass" : "Liquid"}
+      </span>
+    </LiquidSurface>
+  );
+}
+
+/**
+ * The preview.
+ *
+ * Three things about this are load-bearing rather than decorative.
+ *
+ * **The backdrop is painted here, and it is opaque.** The natural thing is to
+ * drop a sample onto the drawer — but the drawer is itself 82% glass with a 38px
+ * blur, and a surface with `backdrop-filter` becomes a *backdrop root* for its
+ * descendants. So a sample drawn straight onto it would refract a blurred
+ * version of the drawer, which is nothing like what the title bar shows. Painting
+ * it its own opaque artwork is what makes the preview honest.
+ *
+ * **The pattern is hard-edged, and deliberately so.** A displacement map bends
+ * *detail*; Loom's own presets are smooth radial washes by design, which is why
+ * the effect is quiet over them. Both are offered, because showing only the
+ * flattering one would be a lie — but the default is the honest best case.
+ *
+ * **Refracting and plain sit side by side.** The effect is a bend at the rim, so
+ * it is only legible against a reference. Two identical surfaces with one
+ * difference is that reference.
+ */
+export function GlassPreview() {
+  const config = useSettings((state) => state.config);
+  const dark = config.theme === "dark";
+  const preset = resolvePreset(config.background.preset, dark);
+  const [media, setMedia] = useState<"pattern" | "preset">("pattern");
+
+  // A high-contrast pattern, and it is not decoration. It has to do two jobs:
+  // be visible in both themes (so it is built from saturated colour rather than
+  // black-and-white), and carry fine detail for the displacement to bend (hence
+  // the hairline crossings over the diagonal blocks).
+  const pattern = {
+    backgroundColor: "#1a1030",
+    backgroundImage: [
+      "repeating-linear-gradient(45deg, rgb(255 255 255 / 0.55) 0 3px, transparent 3px 24px)",
+      "repeating-linear-gradient(-45deg, rgb(0 0 0 / 0.45) 0 3px, transparent 3px 24px)",
+      "repeating-linear-gradient(135deg, #ff5a5a 0 18px, #4d6bff 18px 36px, #ffd21e 36px 54px, #12c46a 54px 72px)",
+    ].join(", "),
+  };
+
+  return (
+    <section className="mb-3 rounded-control border border-[var(--glass-border)] bg-[var(--card-bg)] p-3">
+      <div className="mb-2 flex items-center justify-between gap-3 px-1">
+        <h3 className="text-[11px] font-semibold tracking-[0.09em] text-faint uppercase">
+          Preview
+        </h3>
+        <Segmented
+          value={media}
+          options={[
+            { id: "pattern", label: "Hard edges" },
+            { id: "preset", label: "Your background" },
+          ]}
+          onChange={setMedia}
+        />
+      </div>
+
+      <div
+        className="relative h-[196px] overflow-hidden rounded-row border border-[var(--glass-border)]"
+        style={
+          media === "pattern"
+            ? pattern
+            : {
+                ...backgroundStyle(config.background, dark),
+                background: preset.layers,
+                backgroundColor: preset.base,
+              }
+        }
+      >
+        <div className="absolute top-5 left-5 flex items-end gap-3">
+          <SamplePill />
+          <SamplePill plain />
+        </div>
+
+        <div className="absolute right-5 bottom-5 left-5">
+          <LiquidSurface
+            surface="composer"
+            className="w-full rounded-sheet"
+            contentClassName="px-3 py-2.5"
+            contentStyle={{ display: "block" }}
+            tint="var(--panel-bg-strong)"
+            params={{ refraction: 16 }}
+          >
+            <span className="text-[12.5px] text-soft">Composer</span>
+          </LiquidSurface>
+        </div>
+      </div>
+
+      <p className="mt-2 px-1 text-[11.5px] leading-4 text-faint">
+        {media === "pattern" ? (
+          <>
+            <span className="text-soft">Liquid</span> bends the pattern at its
+            rim; <span className="text-soft">Plain glass</span> is the same tint
+            with the bending off. Every control on this page moves both.
+          </>
+        ) : (
+          <>
+            Over {preset.name}. Loom's own presets are smooth washes by choice, so
+            there is much less detail for the bend to act on — the same is true of
+            the real title bar. Switch to Hard edges to see the effect at its
+            clearest.
+          </>
+        )}
+      </p>
+    </section>
+  );
+}
+
+/**
  * The glass surfaces, and what they refract.
  *
- * Split into two sections rather than one because they are different kinds of
- * decision: "Glass" moves every surface in the app at once, and "Liquid glass"
- * is the refraction sitting on top of three of them. Merging them put a master
- * switch next to a saturation slider, which reads as one feature when it is two.
+ * Two sections rather than one because they are different kinds of decision:
+ * "Glass" moves every surface in the app at once, and "Liquid glass" is the
+ * refraction sitting on top of three of them. Merging them put a master switch
+ * next to a saturation slider, which reads as one feature when it is two.
  */
 export function GlassSection() {
   const glass = useSettings((state) => state.config.interface.glass);
@@ -83,11 +217,11 @@ export function GlassSection() {
     <>
       <Section
         title="Glass"
-        description="How heavy every surface in the app is. Both apply everywhere — panels, pills, popovers and the composer."
+        description="How heavy every surface in the app is — the refracting ones included. Watch the preview above while you move these."
       >
         <Row
           label="Tint opacity"
-          hint="Lower is more see-through. The floor protects the dense popovers — the model picker and the persona menu — from becoming unreadable over bright artwork."
+          hint="Lower is more see-through, and more glassy. The floor protects the dense popovers — the model picker and the persona menu — from becoming unreadable over bright artwork."
         >
           <Slider
             label="Glass tint opacity"
@@ -100,7 +234,7 @@ export function GlassSection() {
         </Row>
         <Row
           label="Blur strength"
-          hint="How far each surface frosts the artwork behind it. The terminal keeps its own heavier blur, because a shell is read for minutes."
+          hint="How far each surface frosts the artwork behind it, the refracting ones included. The terminal keeps its own heavier blur, because a shell is read for minutes."
         >
           <Slider
             label="Glass blur strength"
@@ -111,7 +245,7 @@ export function GlassSection() {
             onChange={(blur) => setGlass({ blur })}
           />
         </Row>
-        <Row label="Reset">
+        <Row label="Reset" hint="Both back to the shipped values.">
           <button
             type="button"
             onClick={() => setGlass({ tint: 100, blur: 100 })}
@@ -158,7 +292,17 @@ export function GlassSection() {
           <Segmented
             value={preset ?? "custom"}
             options={[
-                        { id: "custom" as const, label: "Custom", title: "No preset matches these values." },
+              // The Custom chip only appears when nothing matches, so the
+              // control never claims a preset that is not set.
+              ...(preset
+                ? []
+                : [
+                    {
+                      id: "custom" as const,
+                      label: "Custom",
+                      title: "No preset matches these values.",
+                    },
+                  ]),
               ...(["subtle", "standard", "prominent"] as const).map((id) => ({
                 id,
                 label: PRESET_LABELS[id],
@@ -173,7 +317,7 @@ export function GlassSection() {
 
       <Section
         title="Refraction"
-        description="What the bending looks like. Changes here are visible on the title bar immediately."
+        description="What the bending looks like. Every one of these is visible in the preview above as you move it."
       >
         <Row
           label="Refraction depth"
@@ -235,7 +379,10 @@ export function GlassSection() {
             onChange={(elasticity) => setLiquid({ elasticity })}
           />
         </Row>
-        <Row label="Mode" hint="Three displacement maps, from gentlest to strongest. 'Prominent' bends furthest, at the cost of a slightly softer centre.">
+        <Row
+          label="Mode"
+          hint="Three displacement maps, from gentlest to strongest. 'Prominent' bends furthest, at the cost of a slightly softer centre."
+        >
           <Segmented
             value={liquid.mode}
             options={LIQUID_MODES.map((mode) => ({
@@ -247,98 +394,5 @@ export function GlassSection() {
         </Row>
       </Section>
     </>
-  );
-}
-
-/**
- * The refracting preview.
- *
- * The opaque rectangle is load-bearing rather than decorative. The settings
- * drawer is itself `panel-strong`, so a sample pill drawn straight onto it would
- * refract the drawer's own glass — which is to say, a blurred version of the
- * drawer, and nothing like what the title bar actually shows. So the preview
- * paints a real background preset underneath and puts the samples over that, the
- * way the title bar has one.
- *
- * The background follows the theme and the chosen preset, so switching from a
- * light preset to a dark one changes what the glass is reacting to as well as
- * the swatch it is reacting over.
- */
-export function GlassPreview() {
-  const config = useSettings((state) => state.config);
-  const theme = config.theme;
-  const dark = theme === "dark";
-  const preset = resolvePreset(config.background.preset, dark);
-  const [media, setMedia] = useState<"preset" | "pattern">("pattern");
-
-  return (
-    <section className="mb-3 rounded-control border border-[var(--glass-border)] bg-[var(--card-bg)] p-3">
-      <div className="mb-2 flex items-center justify-between gap-3 px-1">
-        <h3 className="text-[11px] font-semibold tracking-[0.09em] text-faint uppercase">
-          Preview
-        </h3>
-        <Segmented
-          value={media}
-          options={[
-            { id: "pattern" as const, label: "Hard edges" },
-            { id: "preset" as const, label: "Your background" },
-          ]}
-          onChange={setMedia}
-        />
-      </div>
-
-      <div
-        className="relative h-[132px] overflow-hidden rounded-row border border-[var(--glass-border)]"
-        style={
-          media === "pattern"
-            ? // A hard-edged grid, deliberately. The refraction warps whatever
-              // is behind it, and a smooth gradient gives it nothing to bend —
-              // which is exactly why the effect is quiet over Loom's own
-              // presets. Showing it over both is more honest than showing it
-              // over whichever flatters it.
-              {
-                backgroundColor: dark ? "#0b1020" : "#eef1f7",
-                backgroundImage:
-                  "repeating-linear-gradient(45deg, rgb(255 90 90 / 0.55) 0 14px, transparent 14px 28px)," +
-                  "repeating-linear-gradient(-45deg, rgb(90 120 255 / 0.55) 0 14px, transparent 14px 28px)",
-              }
-            : {
-                ...backgroundStyle(config.background, dark),
-                background: preset.layers,
-                backgroundColor: preset.base,
-              }
-        }
-      >
-        <div className="absolute top-4 left-4">
-          <LiquidSurface
-            className="h-10 rounded-capsule"
-            contentClassName="gap-0.5 p-1"
-            surface="pills"
-          >
-            <span className="px-2 text-[12.5px] text-soft">Pills</span>
-          </LiquidSurface>
-        </div>
-
-        <div className="absolute right-4 bottom-4 left-4">
-          <LiquidSurface
-            surface="composer"
-            className="w-full rounded-sheet"
-            contentClassName="px-3 py-2.5"
-            contentStyle={{ display: "block" }}
-            tint="var(--panel-bg-strong)"
-            tintStrength={70}
-            params={{ refraction: 16 }}
-          >
-            <span className="text-[12.5px] text-soft">Composer</span>
-          </LiquidSurface>
-        </div>
-      </div>
-
-      <p className="mt-2 px-1 text-[11.5px] leading-4 text-faint">
-        {media === "pattern"
-          ? "The effect is only as visible as the detail behind it is sharp. This is the best case."
-          : `Over ${preset.name}. Loom's own presets are smooth washes by design, so the bending is subtler here — the same is true of the real title bar.`}
-      </p>
-    </section>
   );
 }

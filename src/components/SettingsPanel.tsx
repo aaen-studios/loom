@@ -60,9 +60,12 @@ import {
   CopyIcon,
   DatabaseIcon,
   EditIcon,
+  DropletIcon,
   GaugeIcon,
+  ImageIcon,
   KeyIcon,
   MessageIcon,
+  PanelLeftIcon,
   MoonIcon,
   PaletteIcon,
   PersonIcon,
@@ -634,12 +637,38 @@ export const SETTINGS_CATEGORIES = [
     blurb: "Notifications, the quick-ask hotkey, and how the app reads.",
     keywords: "notification toast hotkey shortcut keyboard density compact scroll follow generated ui html widget sandbox screenshot capture",
   },
+  // Appearance used to hold nine sections and ran to several screens: theme,
+  // the artwork behind everything, the palette, the dock, the terminal's type
+  // and the whole glass feature. It was four unrelated subjects in one tab, and
+  // the glass controls in particular were buried under two long picture grids.
+  // Splitting it is most of why the glass settings now read as a feature rather
+  // than as more Appearance.
   {
     id: "appearance",
     label: "Appearance",
-    blurb: "Theme, background art, the dock, and the terminal's type.",
+    blurb: "Light or dark, and the colours the app is drawn in.",
+    keywords: "theme dark light mode palette accent ink surface colour color custom adaptive contrast",
+  },
+  {
+    id: "glass",
+    label: "Glass",
+    blurb: "How thick the glass is, and how it bends what is behind it.",
     keywords:
-      "theme dark light mode background wallpaper image video dim blur look dock panel rail terminal shell font mono size line height shortcut",
+      "glass liquid refract refraction blur frost tint opacity saturation chromatic edge lens prism elasticity preview droplet bend",
+  },
+  {
+    id: "background",
+    label: "Background",
+    blurb: "The artwork behind everything.",
+    keywords:
+      "background wallpaper artwork image video picture preset dim veil darken choose saved recent builtin",
+  },
+  {
+    id: "layout",
+    label: "Layout",
+    blurb: "The dock, its panels, and how the terminal reads.",
+    keywords:
+      "dock panel zone rail tear off tab splitter terminal shell font mono size line height resize rearrange shortcut",
   },
   {
     id: "chat",
@@ -764,6 +793,9 @@ const CATEGORY_ICONS: Record<
 > = {
   general: SettingsIcon,
   appearance: PaletteIcon,
+  glass: DropletIcon,
+  background: ImageIcon,
+  layout: PanelLeftIcon,
   chat: MessageIcon,
   tools: WrenchIcon,
   providers: PlugIcon,
@@ -779,7 +811,10 @@ const CATEGORY_ICONS: Record<
 
 /** The nav rail reads as four small families, not one flat list. */
 const NAV_GROUPS: { label: string; ids: SettingsCategoryId[] }[] = [
-  { label: "App", ids: ["general", "appearance"] },
+  // The four "what it looks like" categories sit together and in the order you
+  // would think about them: the theme, then the glass over it, then the picture
+  // under it, then the chrome around it.
+  { label: "App", ids: ["general", "appearance", "glass", "background", "layout"] },
   { label: "Model", ids: ["chat", "providers", "usage", "personas", "memory"] },
   { label: "Extensions", ids: ["tools", "mcp", "skills", "voice"] },
   { label: "System", ids: ["data", "updates"] },
@@ -3446,6 +3481,9 @@ function GeneralSection() {
 // ---------------------------------------------------------------------------
 
 function AppearanceSection() {
+  // Which of the four "look" categories is showing. Read here rather than passed
+  // in, so the component keeps its own props-free shape.
+  const category = useUi((state) => state.settingsCategory);
   const config = useSettings((state) => state.config);
   const setTheme = useSettings((state) => state.setTheme);
   const setBackground = useSettings((state) => state.setBackground);
@@ -3525,22 +3563,30 @@ function AppearanceSection() {
 
   return (
     <>
-      <Section title="Theme">        <Row label="Mode" hint="Light is the default; both palettes work over any artwork.">
-          <Segmented
-            value={config.theme}
-            options={[
-              { id: "light", label: "Light", icon: <SunIcon size={14} /> },
-              { id: "dark", label: "Dark", icon: <MoonIcon size={14} /> },
-            ]}
-            onChange={setTheme}
-          />
-        </Row>
-      </Section>
+      {category === "appearance" && (
+        <Section title="Theme">
+          <Row label="Mode" hint="Light is the default; both palettes work over any artwork.">
+            <Segmented
+              value={config.theme}
+              options={[
+                { id: "light", label: "Light", icon: <SunIcon size={14} /> },
+                { id: "dark", label: "Dark", icon: <MoonIcon size={14} /> },
+              ]}
+              onChange={setTheme}
+            />
+          </Row>
+        </Section>
+      )}
 
-      <GlassPreview />
-      <GlassSection />
+      {category === "glass" && (
+        <>
+          <GlassPreview />
+          <GlassSection />
+        </>
+      )}
 
-      <Section title="Background">
+      {category === "background" && (
+        <Section title="Background">
         <div className="px-1 py-2.5">
           {/*
             Automatic sits on its own, above the grid, because it is the default
@@ -3801,7 +3847,9 @@ function AppearanceSection() {
           </div>
         </Row>
       </Section>
+      )}
 
+      {category === "appearance" && (
       <Section
         title="Palette"
         description="How the app's colours are chosen. Layered on top of the theme above, so either can change without disturbing the other — and a photograph is never allowed to decide whether your text is readable."
@@ -3933,7 +3981,10 @@ function AppearanceSection() {
           </>
         )}
       </Section>
+      )}
 
+      {category === "layout" && (
+        <>
       <Section
         title="Panels"
         description="The dock holds the terminal, Runs, the chats list, the file list and the goal. Panels open over the chat at a fixed size, so the transcript never moves or reflows — only the chats list starts open, and everything else is one click or one keystroke away in the Panels menu."
@@ -4032,6 +4083,8 @@ function AppearanceSection() {
           </div>
         </Row>
       </Section>
+        </>
+      )}
     </>
   );
 }
@@ -4413,7 +4466,18 @@ export function SettingsPanel() {
                   </header>
                 )}
                 {category === "general" && <GeneralSection />}
-                {category === "appearance" && <AppearanceSection />}
+                {/* One component serves four nav entries. The reason is that
+                    the state they need — the resolved palette, the background
+                    preset, the dock's handlers — is computed in one place for
+                    all of them, and splitting the JSX across four components
+                    would mean either duplicating that resolution or lifting it
+                    into a hook that exists only to be shared. Each entry still
+                    gets its own label, blurb and nav icon from
+                    `SETTINGS_CATEGORIES`, so what you see is four categories. */}
+                {(category === "appearance" ||
+                  category === "glass" ||
+                  category === "background" ||
+                  category === "layout") && <AppearanceSection />}
                 {category === "chat" && <ChatSection />}
                 {category === "tools" && <ToolsSection />}
                 {category === "providers" && <ProvidersSection />}

@@ -27,6 +27,17 @@ import { useUsage } from "./stores/usage";
 function MainShell() {
   const config = useSettings((state) => state.config);
   const theme = config.theme;
+  // Writes --glass-tint and --glass-blur onto <html>, where the unlayered
+  // overrides in styles.css read them, and where `LiquidSurface` reads them for
+  // the tints it computes itself.
+  //
+  // This call was missing for a while and the failure was thoroughly confusing
+  // in a way worth recording: the sliders moved, the store updated, the DOM
+  // updated, and *nothing anywhere changed*, because the two variables they
+  // drive were never written. A missing half of a wiring is invisible to every
+  // check that only exercises the half that exists.
+  const glass = config.interface.glass;
+  useGlassVars(glass);
   const load = useSettings((state) => state.load);
   const loadProviders = useProviders((state) => state.load);
   const loadSessions = useChat((state) => state.loadSessions);

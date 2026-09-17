@@ -1,7 +1,7 @@
 import { useEffect, useState, type CSSProperties, type ReactNode } from "react";
 import LiquidGlass from "liquid-glass-react";
 import { cn } from "../lib/cn";
-import { clampLiquid, toBlurAmount } from "../lib/glass";
+import { clampBlur, clampLiquid, clampTint, toBlurAmount } from "../lib/glass";
 import { useSettings } from "../stores/settings";
 import type { LiquidGlassConfig } from "../types";
 
@@ -56,13 +56,17 @@ export function LiquidSurface({
   /**
    * How much of that token survives, as a percentage.
    *
-   * A token like `--pill-bg` is about 74% alpha, so 60 here lands near 44% —
-   * enough to keep text legible over busy artwork while still letting the
-   * refraction read. Above about 80 the warp disappears behind the tint and the
-   * surface looks like ordinary frosted glass, which is the trap this whole
-   * layering exists to avoid.
+   * A token like `--pill-bg` is about 90% alpha in light theme, so 50 here lands
+   * near 45% — enough to keep text legible over busy artwork while still letting
+   * the refraction read. Above about 80 the warp disappears behind the tint and
+   * the surface looks like ordinary frosted glass, which is the trap this whole
+   * layering exists to avoid; below about 35 the chrome stops separating from
+   * the artwork.
+   *
+   * The app-wide Tint slider scales this, so this is the ceiling rather than the
+   * final value.
    */
-  tintStrength = 60,
+  tintStrength = 50,
   /**
    * Which config switch governs this surface.
    *
@@ -87,7 +91,8 @@ export function LiquidSurface({
   params?: Partial<LiquidGlassConfig>;
 }) {
   const reduced = useReducedMotion();
-  const config = useSettings((state) => state.config.interface.glass.liquid);
+  const glass = useSettings((state) => state.config.interface.glass);
+  const config = glass.liquid;
 
   // The master switch, this surface's own switch, and the caller's override —
   // in that order, so a surface cannot opt itself in past "off".
@@ -99,10 +104,38 @@ export function LiquidSurface({
   // surface than on a small round one.
   const safe = clampLiquid(params ? { ...config, ...params } : config);
 
-  // The one place the two modes differ, and it is the same declaration either
-  // way: the full token when there is no warp to show through it, and a
-  // fraction of it when there is.
-  const fill = `color-mix(in srgb, ${tint} ${enabled ? tintStrength : 100}%, transparent)`;
+  /*
+    The two app-wide multipliers reach here, and this is the only place they can.
+
+    `.lg-tint` is an inline `color-mix`, so `--glass-tint` cannot scale it in CSS
+    the way the unlayered `.pill` overrides do — and the vector-effect problem is
+    the opposite way round for the warp: its `backdrop-filter` is written by the
+    library, which knows nothing about our variables. So both are folded in here,
+    in JS, where the arithmetic is a plain number and cannot silently produce an
+    invalid declaration the way a nested `calc()` inside `color-mix()` can.
+
+    The practical effect is that Tint and Blur in Settings now move the
+    refracting surfaces too, not only the plain ones. Before this they moved
+    nothing anywhere, because the variables were never written — and even once
+    they were, the pills and the preview ignored them.
+  */
+  const strength = Math.round(tintStrength * (clampTint(glass.tint) / 100));
+  // Floored at 1px: the library adds its own 4px base, and a frost of 0 would
+  // leave the warp sampling a backdrop with no frost at all, which reads as a
+  // hard-edged copy of the artwork rather than as glass.
+  const frost = Math.max(1, Math.round(safe.frost * (clampBlur(glass.blur) / 100)));
+
+  /*
+    One declaration for both modes, deliberately.
+
+    The static path used to take the *full* token while the refracting path took
+    a fraction of it, which meant turning refraction off made the surface more
+    opaque — the opposite of what the toggle's own hint promises ("off renders
+    the same surfaces as ordinary frosted glass, at the same tint and blur").
+    Same fill, different mechanism for the frosting: the warp here, a plain
+    `backdrop-filter` in `.lg-static`.
+  */
+  const fill = `color-mix(in srgb, ${tint} ${strength}%, transparent)`;
 
   return (
     <div className={cn("lg-stage", className)}>
@@ -111,9 +144,10 @@ export function LiquidSurface({
           <LiquidGlass
             className="lg-glass"
             displacementScale={safe.refraction}
-            // `safe.frost` is in px; the library wants its own unit, which is a
-            // different scale by a factor of 32. See `toBlurAmount`.
-            blurAmount={toBlurAmount(safe.frost)}
+            // `frost` is in px, already scaled by the app-wide Blur slider; the
+            // library wants its own unit, which is a different scale by a factor
+            // of 32. See `toBlurAmount`.
+            blurAmount={toBlurAmount(frost)}
             saturation={safe.saturation}
             aberrationIntensity={safe.chromatics}
             // The pointer-following is a transform rewritten every frame, so the

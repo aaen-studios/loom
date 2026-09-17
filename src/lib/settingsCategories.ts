@@ -6,6 +6,9 @@
 export type SettingsCategoryId =
   | "general"
   | "appearance"
+  | "glass"
+  | "background"
+  | "layout"
   | "chat"
   | "tools"
   | "providers"

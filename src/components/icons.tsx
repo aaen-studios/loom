@@ -198,6 +198,28 @@ export function PinIcon(props: IconProps) {
   );
 }
 
+/** A droplet: the Glass settings, and the refracting surfaces generally. */
+export function DropletIcon(props: IconProps) {
+  return (
+    <Icon {...props}>
+      <path d="M12 3.5c3 3.4 5.5 6.2 5.5 9.2a5.5 5.5 0 0 1-11 0c0-3 2.5-5.8 5.5-9.2z" />
+      <path d="M9.5 13.2a2.5 2.5 0 0 0 2.5 2.5" />
+    </Icon>
+  );
+}
+
+/** A framed picture: the background artwork. */
+export function ImageIcon(props: IconProps) {
+  return (
+    <Icon {...props}>
+      <rect x="3" y="4.5" width="18" height="15" rx="3" />
+      <circle cx="8.5" cy="9.5" r="1.4" />
+      <path d="m4 17 4.6-4.6a2 2 0 0 1 2.8 0L16 17" />
+      <path d="m14 15.2 1.6-1.6a2 2 0 0 1 2.8 0L21 16.2" />
+    </Icon>
+  );
+}
+
 export function SettingsIcon(props: IconProps) {
   return (
     <Icon {...props}>
