@@ -53,29 +53,35 @@ export const DEFAULT_LIQUID: LiquidParams = GLASS_PRESETS.standard;
 /**
  * Ranges, shared by the clamps and the sliders.
  *
- * `frost` starts at **8**, not at 0. It shipped at 4 with a default of 6, on the
- * reasoning that less blur leaves more detail for the displacement to bend —
- * which is true, and was the wrong thing to optimise. The surfaces this wrapper
- * replaced were painting `blur(24px)` (pill), `blur(34px)` (panel) and
- * `blur(38px)` (panel-strong), so 6px left the artwork plainly legible through
- * every panel and the app read as a film over the wallpaper rather than as glass.
+ * `frost` runs from **12 to 72**, with the shipped default at 38 — which is
+ * `panel-strong`'s own blur radius, so a panel you never touch is exactly as
+ * thick as it was before any of this existed.
  *
- * 8 is where the *default* stops being reachable downward while still leaving
- * room to experiment: the default is 38, and 8 is the point at which a user has
- * clearly asked for thinner glass than Loom ships. That is a choice worth
- * honouring, which is why the floor is not the default.
+ * Both ends of that range are corrections rather than preferences, and each
+ * fixes a different mistake.
  *
- * The ceiling is 60 rather than the library's effective 1600: past roughly 60 the
- * backdrop is smeared flat enough that the refraction stops reading — measured,
- * not assumed (see `scripts/probe-glass.mjs`) — so a larger number would be a
- * slider that makes the effect *worse* while looking like it makes the glass
- * *stronger*.
+ * **The floor was 4, and a default of 6 shipped against it.** Six pixels is
+ * almost no frost, and the surfaces here had been painting `blur(24px)` (pill),
+ * `blur(34px)` (panel) and `blur(38px)` (panel-strong) — so the whole app went
+ * from glass to a legible film over the wallpaper in one release. The reasoning
+ * that produced it was that less blur leaves more detail for the displacement to
+ * bend, which is true and was still the wrong thing to spend: measured over
+ * Loom's own presets, the refraction moves **0% of pixels** whatever the frost
+ * is, so the trade bought nothing and cost the app its surface.
+ *
+ * 12 rather than 24 (where the thinning genuinely starts to show) because a
+ * slider whose lower half is unusable is worse than a short one. What matters is
+ * that **the default sits well above the floor**, so nobody reaches the thin end
+ * by accident — and that the invariant in `SURFACE_FROST` holds at the default,
+ * which `glass.test.ts` asserts against a table of the original radii.
+ *
+ * **The ceiling was 60 and is now 72**, for the same class of reason: the
+ * presets needed room above the default, and 72 is still short of the point
+ * where the backdrop is smeared so flat that the refraction stops reading
+ * entirely — measured, not assumed (see `scripts/probe-glass.mjs`).
  */
 export const LIQUID_RANGE = {
   refraction: [0, 120],
-  // 12, not 8: the floor times the smallest group multiplier must still land at
-  // or above the `pill` utility's 24px, so that no setting of this control can
-  // make the app's chrome thinner than it was before the feature existed.
   frost: [12, 72],
   saturation: [60, 220],
   chromatics: [0, 5],
@@ -185,9 +191,15 @@ export const SURFACE_STRENGTH: Record<
  * nothing and cost the chrome its glass.
  *
  * The rule both failures violated, and `glass.test.ts` now asserts: **at the
- * default, a converted surface is as frosted as what it replaced.** The slider's
- * floor is where a user can deliberately go thinner, and below there is the
- * honest expression of how far that trade goes.
+ * default, a converted surface is as frosted as what it replaced.** Tests assert
+ * the relationship against a table of the original radii (pill 24, panel 34,
+ * panel-strong 38) rather than leaving it as a claim in prose — because prose is
+ * what the two broken versions had too, and it did not stop either of them.
+ *
+ * The slider's floor is separate: that is where a user can deliberately ask for
+ * thinner glass than Loom ships, and honouring the request is the whole reason
+ * the control goes below the default. What must never happen is someone who
+ * touches nothing getting a thinner surface than they had before this existed.
  */
 export const SURFACE_FROST: Record<
   "pills" | "composer" | "panels" | "popovers" | "cards" | "overlays",
