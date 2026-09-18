@@ -182,14 +182,15 @@ export const DEFAULT_CONFIG: AppConfig = {
   workspaces: [],
   // Mirrors `DockLayout::default()` in `dock.rs`.
   //
-  // The chats list is **open**, because it is the sidebar: navigation you should
-  // not have to summon. Everything else is **closed**, because a terminal or a
-  // runs list is a place you go to, not a tax on every launch. Since zones
-  // overlay rather than take space, an open panel costs the chat nothing.
+  // **Every zone closed.** Loom opens on the conversation, and every panel is a
+  // click or a keystroke away. This shipped with the chats list open, which
+  // meant the app decided on every launch that a panel was wanted — and a panel
+  // is something you choose to look at. It also covered the first 300px of the
+  // reply you had just launched the app to read.
   dock: {},
   dockDefault: {
     zones: [
-      { id: "left", edge: "left", size: 300, open: true, panels: ["sessions"], active: 0 },
+      { id: "left", edge: "left", size: 300, open: false, panels: ["sessions"], active: 0 },
       { id: "right", edge: "right", size: 460, open: false, panels: ["terminal"], active: 0 },
       { id: "bottom", edge: "bottom", size: 260, open: false, panels: ["runs"], active: 0 },
     ],

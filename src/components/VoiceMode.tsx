@@ -156,7 +156,7 @@ export function VoiceMode() {
 
       <LiquidSurface
         surface="overlays"
-        layout="block"
+        layout="column"
         className="animate-summon relative flex h-full w-full max-w-3xl flex-col rounded-window"
         tint="var(--panel-bg-strong)"
       >

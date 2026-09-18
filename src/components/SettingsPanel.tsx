@@ -4326,7 +4326,7 @@ export function SettingsPanel() {
 
       <LiquidSurface
         surface="overlays"
-        layout="block"
+        layout="column"
         tint="var(--panel-bg-strong)" className="animate-fade-up relative flex h-full w-[720px] max-w-full flex-col overflow-hidden rounded-sheet">
         <div className="flex items-center gap-3 px-4 pt-3 pb-1">
           <h2 className="text-[14.5px] font-semibold">Settings</h2>
@@ -4354,7 +4354,7 @@ export function SettingsPanel() {
         </div>
 
         <div className="flex min-h-0 flex-1">
-          <nav className="w-[180px] shrink-0 overflow-y-auto border-r border-[var(--glass-border)] px-2 py-2">
+          <nav className="min-h-0 w-[180px] shrink-0 overflow-y-auto overscroll-contain border-r border-[var(--glass-border)] px-2 py-2">
             {NAV_GROUPS.map((group) => (
               <div key={group.label} className="pt-3 first:pt-0">
                 <p className="px-2.5 pb-1 text-[10.5px] font-semibold tracking-[0.09em] text-faint uppercase">
@@ -4399,7 +4399,7 @@ export function SettingsPanel() {
             ))}
           </nav>
 
-          <div className="min-h-0 flex-1 overflow-y-auto px-4 py-4">
+          <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-4 py-4">
             {searching ? (
               matched.length === 0 ? (
                 <EmptyState

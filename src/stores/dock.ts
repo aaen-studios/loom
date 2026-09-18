@@ -109,9 +109,18 @@ export const useDock = create<DockState>((set, get) => {
       }
       // In a plain browser there is no backend, so fall back to the config's
       // default and let the UI still be usable.
+      //
+      // Every zone is closed on the way in, matching `resolve()` in
+      // `panels.rs`: the default layout describes *where panels live when they
+      // are opened*, not that any of them should be. Without this the browser
+      // path would open the chats list on load while the Tauri path did not,
+      // which is the kind of divergence that only shows up in one of the two.
       const config = useSettings.getState().config;
       const fallback = (workdir ? config.dock[workdir] : null) ?? config.dockDefault;
-      set({ layout: sanitize(fallback ?? EMPTY), workdir, loaded: true });
+      const closed = fallback
+        ? { ...fallback, zones: fallback.zones.map((zone) => ({ ...zone, open: false })) }
+        : EMPTY;
+      set({ layout: sanitize(closed), workdir, loaded: true });
     },
 
     applyRemote: (workdir, layout) => {

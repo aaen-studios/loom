@@ -103,17 +103,25 @@ pub struct DockLayout {
 }
 
 impl Default for DockLayout {
-    /// The chats list open, everything else closed.
+    /// **Every zone closed**, and that is a correction rather than a shrug.
     ///
-    /// Two different kinds of surface, so two different defaults. The chats list
-    /// is the sidebar — navigation, which you should not have to summon, and
-    /// which is why it is open. The terminal, runs and the rest are places you
-    /// go to, and opening them on every launch would be a tax on the common case
-    /// of wanting to read a reply.
+    /// This shipped with the left zone open, reasoned as "the chats list is the
+    /// sidebar, so it should not have to be summoned". The reasoning was wrong
+    /// in the way that matters: the app was deciding, on every launch, that the
+    /// user wanted a panel — and a panel is a thing you *choose* to look at. The
+    /// distinction the old comment missed is that a sidebar being *available* is
+    /// not the same as it being *open*.
     ///
-    /// Neither choice costs the chat anything: a zone **overlays** the region
-    /// rather than taking width from it, so an open panel never moves the
-    /// transcript. See the note on `DockLayout` about why nothing is resized.
+    /// It also had a cost the comment claimed it did not. Zones overlay the
+    /// transcript rather than reflowing it, so an open panel never moved a word
+    /// — true, and beside the point: it still covered the first 300px of the
+    /// conversation on every launch, and the only way to read the beginning of a
+    /// reply was to close it first.
+    ///
+    /// So the default is now "Loom opens on the conversation", and every panel
+    /// is one click or one `Ctrl+`` away. `resolve()` in `panels.rs` enforces the
+    /// same rule for configs already on disk, because this default was what got
+    /// persisted into them.
     fn default() -> Self {
         Self {
             zones: vec![
@@ -121,7 +129,7 @@ impl Default for DockLayout {
                     id: "left".into(),
                     edge: DockEdge::Left,
                     size: 300,
-                    open: true,
+                    open: false,
                     panels: vec!["sessions".into()],
                     active: 0,
                 },
@@ -348,19 +356,30 @@ mod tests {
     }
 
     #[test]
-    fn default_opens_the_chats_list_and_nothing_else() {
+    fn default_opens_nothing_at_all() {
         let layout = DockLayout::default();
-        // Exactly one zone open, and it is the chats list. This is the whole
-        // default, stated once: navigation is present, everything else is a
-        // place you go to. The old assertion here was `!is_open()`, which was
-        // true when every panel was an overlay you summoned.
+        // **No zone open.** This is the whole default, stated once: Loom opens on
+        // the conversation, and every panel is one click or one `Ctrl+`` away.
+        //
+        // The assertion this replaces was `assert_eq!(open, vec!["left"])`, and
+        // the history is worth keeping because the same argument got it wrong
+        // twice. It was first `!is_open()` — correct while every panel was an
+        // overlay you summoned. Then the dock landed and it became "the chats
+        // list is open", on the reasoning that navigation should not have to be
+        // summoned. That is where the reasoning broke: *available* navigation and
+        // *open* navigation are different things, and the app was choosing the
+        // second on the user's behalf on every launch.
+        //
+        // If someone wants this changed back, they should have to change this
+        // test and delete this paragraph — not discover that a config default
+        // quietly decided it.
         let open: Vec<&str> = layout
             .zones
             .iter()
             .filter(|zone| zone.open)
             .map(|zone| zone.id.as_str())
             .collect();
-        assert_eq!(open, vec!["left"]);
+        assert!(open.is_empty(), "no zone should open by default, got {open:?}");
         assert_eq!(layout.zone("left").unwrap().edge, DockEdge::Left);
         assert_eq!(layout.shell, None);
         // Every default zone carries a panel, so opening one shows something
@@ -375,14 +394,12 @@ mod tests {
 
     #[test]
     fn toggle_targets_the_right_zone_when_nothing_is_open() {
-        // The default now opens the chats list, so this test has to close
-        // everything explicitly rather than relying on the default being closed.
-        // What it is actually about — what a toggle falls back to when no zone is
-        // showing — is unchanged, and must not depend on the default.
-        let mut layout = DockLayout::default();
-        for zone in &mut layout.zones {
-            zone.open = false;
-        }
+        // What a toggle falls back to when no zone is showing. It no longer needs
+        // to close everything first — that is the default now — so this asserts
+        // the fallback against the shipped layout directly, which is stronger:
+        // the fallback and the default can no longer drift apart without this
+        // failing.
+        let layout = DockLayout::default();
         assert!(!layout.is_open());
         let index = layout.primary_index().unwrap();
         assert_eq!(layout.zones[index].edge, DockEdge::Right);
@@ -390,11 +407,8 @@ mod tests {
 
     #[test]
     fn toggle_prefers_a_zone_that_is_already_open() {
-        // Note this now opens *nothing new*: `zones[0]` is the left chats zone
-        // and the default already has it open. That still tests the rule — an
-        // open zone is preferred over the right-edge fallback — but the fact is
-        // worth naming, because it is exactly why the test above had to be made
-        // explicit.
+        // An open zone is preferred over the right-edge fallback. This has to
+        // open `zones[0]` explicitly, because nothing is open by default.
         let mut layout = DockLayout::default();
         layout.zones[0].open = true;
         let index = layout.primary_index().unwrap();

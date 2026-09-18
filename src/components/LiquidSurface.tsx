@@ -13,8 +13,18 @@ import {
 import { useSettings } from "../stores/settings";
 import type { LiquidGlassConfig } from "../types";
 
-/** How the surface's content is laid out. See `layout` below. */
-export type SurfaceLayout = "row" | "block";
+/**
+ * How the surface's content is laid out. See `layout` below.
+ *
+ * Three options rather than two, and the third is load bearing: a surface whose
+ * content is itself a column with a fixed header and a scrolling body — the
+ * settings drawer, the shortcut sheet, voice mode — needs `flex-col` *and*
+ * `min-h-0`, because `min-h-0` is what lets a flex child shrink below its
+ * content height and hand the overflow to `overflow-y-auto`. Without it such a
+ * surface simply grows past the window and nothing scrolls, which is exactly the
+ * bug `block` produced on all three of them.
+ */
+export type SurfaceLayout = "row" | "block" | "column";
 
 /**
  * The surfaces the config can switch on and off.
@@ -79,11 +89,16 @@ export function LiquidSurface({
   /**
    * How the content is laid out.
    *
-   * `row` is chrome — a pill holding a few buttons side by side. `block` is
-   * everything that contains a *list*: a menu of rows, a card with paragraphs,
-   * a drawer of sections. Those are the majority, and passing `row` by accident
-   * lays a popup's rows out horizontally, which is a confusing way to discover
-   * that the default was wrong for it.
+   * - `row` — chrome: a pill holding a few buttons side by side.
+   * - `block` — a surface that just stacks its content: a menu of rows, a card
+   *   of paragraphs. The majority.
+   * - `column` — a surface that manages its *own* vertical layout, with a fixed
+   *   header and an internally scrolling body: the settings drawer, the shortcut
+   *   sheet, voice mode. See `SurfaceLayout` for why `min-h-0` matters here.
+   *
+   * Passing `row` by accident lays a popup's rows out horizontally; passing
+   * `block` where `column` belongs is subtler and worse, because the surface
+   * renders perfectly and simply refuses to scroll.
    */
   layout = "row",
   /**
@@ -306,7 +321,11 @@ export function LiquidSurface({
       <div
         className={cn(
           "lg-content",
-          layout === "row" ? ROW_CONTENT_CLASS : BLOCK_CONTENT_CLASS,
+          layout === "row"
+            ? ROW_CONTENT_CLASS
+            : layout === "column"
+              ? COLUMN_CONTENT_CLASS
+              : BLOCK_CONTENT_CLASS,
           contentClassName,
         )}
         style={contentStyle}
@@ -346,6 +365,13 @@ const LIQUID_FILL: CSSProperties = {
  */
 const ROW_CONTENT_CLASS = "flex h-full items-center";
 const BLOCK_CONTENT_CLASS = "block h-full";
+/*
+  `min-h-0` is the important one. A flex child defaults to `min-height: auto`,
+  which refuses to shrink below its content — so a tall body inside this column
+  pushes the whole surface past its container instead of overflowing into the
+  `overflow-y-auto` it was given, and the result is a drawer you cannot scroll.
+*/
+const COLUMN_CONTENT_CLASS = "flex h-full min-h-0 flex-col";
 
 /** Tracks the OS setting, including while the app is open. */
 function useReducedMotion(): boolean {

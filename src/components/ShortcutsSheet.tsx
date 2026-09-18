@@ -78,7 +78,7 @@ export function ShortcutsSheet() {
       />
       <LiquidSurface
         surface="overlays"
-        layout="block"
+        layout="column"
         tint="var(--panel-bg-strong)" className="animate-fade-up relative flex max-h-full w-[460px] flex-col overflow-hidden rounded-sheet">
         <div className="flex items-center justify-between px-4 py-3">
           <h2 className="text-[14.5px] font-semibold">Keyboard shortcuts</h2>
@@ -91,7 +91,7 @@ export function ShortcutsSheet() {
             <CloseIcon size={16} />
           </button>
         </div>
-        <div className="min-h-0 flex-1 overflow-y-auto px-4 pb-4">
+        <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-4 pb-4">
           {SHORTCUTS.map((section) => (
             <div key={section.group} className="mb-4 last:mb-0">
               <h3 className="mb-1.5 text-[11.5px] font-semibold tracking-[0.08em] text-faint uppercase">

@@ -170,15 +170,38 @@ pub fn pty_list(state: State<'_, AppState>) -> Vec<loom_core::pty::PtyInfo> {
    instead of each applying its own optimistic edit.
 --------------------------------------------------------------------------- */
 
-/// The layout for a folder: its own if it has one, the default otherwise.
+/// The layout for a folder: its own if it has one, nothing open if it has not.
+///
+/// ## Why the default is forced closed rather than read from the config
+///
+/// A folder with its own entry honours it exactly, including which zones are
+/// open — that is a saved decision about *that* folder, and overruling it would
+/// be the wrong kind of help.
+///
+/// A folder with no entry of its own is the case this function exists to get
+/// right. It used to return `dock_default` as stored, and that conflates two
+/// different things: "what a fresh folder should look like" and "what the user
+/// last did". Closing a panel while no folder is active writes through to
+/// `dock_default`, so a stored `open: true` there is not a preference anyone
+/// expressed about *this* folder — and it was in practice the residue of a
+/// shipped default that opened the chats list on every launch.
+///
+/// So the default supplies the zones, their panels and their sizes, and no zone
+/// is open. Loom opens on the conversation; a panel is something you ask for.
+/// This is what makes that true for configs already on disk rather than only for
+/// new ones, which matters because the old default is *in* those files.
 fn resolve(config: &AppConfig, workdir: Option<&str>) -> DockLayout {
-    workdir
-        .and_then(|path| config.dock.get(path))
-        .cloned()
-        .unwrap_or_else(|| config.dock_default.clone())
-        // Repaired on the way out as well as the way in: a config older than
-        // this build could hold a size this one would refuse to draw.
-        .validated()
+    if let Some(layout) = workdir.and_then(|path| config.dock.get(path)) {
+        return layout.clone().validated();
+    }
+
+    let mut layout = config.dock_default.clone();
+    for zone in &mut layout.zones {
+        zone.open = false;
+    }
+    // Repaired on the way out as well as the way in: a config older than this
+    // build could hold a size this one would refuse to draw.
+    layout.validated()
 }
 
 #[derive(Serialize, Clone)]
