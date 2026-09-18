@@ -53,19 +53,23 @@ export const DEFAULT_LIQUID: LiquidParams = GLASS_PRESETS.standard;
 /**
  * Ranges, shared by the clamps and the sliders.
  *
- * `frost` starts at **8**, not at 0, and that floor is a correction rather than a
- * preference. It shipped at 4, with a default of 6, on the reasoning that less
- * blur leaves more detail for the displacement to bend — which is true, and was
- * the wrong thing to optimise. The surfaces this wrapper replaced were painting
- * `blur(24px)` (pill), `blur(34px)` (panel) and `blur(38px)` (panel-strong), so
- * 6px left the artwork plainly legible through every panel and the app read as a
- * film over the wallpaper rather than as glass.
+ * `frost` starts at **8**, not at 0. It shipped at 4 with a default of 6, on the
+ * reasoning that less blur leaves more detail for the displacement to bend —
+ * which is true, and was the wrong thing to optimise. The surfaces this wrapper
+ * replaced were painting `blur(24px)` (pill), `blur(34px)` (panel) and
+ * `blur(38px)` (panel-strong), so 6px left the artwork plainly legible through
+ * every panel and the app read as a film over the wallpaper rather than as glass.
  *
- * The ceiling is 60 rather than the library's effective 1600: past roughly 60
- * the backdrop is smeared flat enough that the refraction stops reading —
- * measured, not assumed (see `scripts/probe-glass.mjs`) — so a larger number
- * would be a slider that makes the effect *worse* while looking like it makes
- * the glass *stronger*.
+ * 8 is where the *default* stops being reachable downward while still leaving
+ * room to experiment: the default is 38, and 8 is the point at which a user has
+ * clearly asked for thinner glass than Loom ships. That is a choice worth
+ * honouring, which is why the floor is not the default.
+ *
+ * The ceiling is 60 rather than the library's effective 1600: past roughly 60 the
+ * backdrop is smeared flat enough that the refraction stops reading — measured,
+ * not assumed (see `scripts/probe-glass.mjs`) — so a larger number would be a
+ * slider that makes the effect *worse* while looking like it makes the glass
+ * *stronger*.
  */
 export const LIQUID_RANGE = {
   refraction: [0, 120],
@@ -152,55 +156,46 @@ export const SURFACE_STRENGTH: Record<
 /**
  * Frost per surface group, as a multiple of the configured `frost`.
  *
- * A multiplier rather than an absolute, so the Frost slider stays meaningful
- * everywhere while a 40px pill and a 720px drawer each get the frost they can
- * carry.
+ * A multiplier rather than an absolute, so the Frost slider still moves every
+ * surface together while each keeps its proportion to the others.
  *
- * **The two groups are doing opposite jobs here, and that is the point.**
+ * Each value makes the surface land on **the blur its own utility was already
+ * painting**, at the default frost of 38px:
  *
- * For everything that holds text, the value lands on or above the blur the
- * utility it replaced used — `panel-strong` was `blur(38px)`, `panel` was
- * `blur(34px)` — so a converted surface is exactly as frosted as it always was:
+ *     pills      38 x 0.64 = 24px   the `pill` utility's blur(24px), exactly
+ *     composer   38 x 1.00 = 38px   `panel-strong`'s blur(38px), exactly
+ *     panels     38 x 1.00 = 38px   (the `panel` utility is 34, so this is above)
+ *     popovers   38 x 1.00 = 38px   `panel-strong`, exactly
+ *     cards      38 x 1.00 = 38px   `panel-strong`, exactly
+ *     overlays   38 x 1.00 = 38px   `panel-strong`, exactly
  *
- *     composer   30 x 1.10 = 33px
- *     panels     30 x 1.15 = 35px
- *     popovers   30 x 1.20 = 36px
- *     cards      30 x 1.10 = 33px
- *     overlays   30 x 1.25 = 38px   `panel-strong`'s 38px, exactly
+ * Only the pills differ, and only because theirs was the one utility with a
+ * smaller radius than the rest. Everything else is 1.0.
  *
- * For the **pills** it is deliberately *below* the `pill` utility's 24px, and
- * that is the one place this table spends frost rather than protecting it. The
- * reason is a conflict the earlier versions of this file never resolved: the two
- * properties the library puts on one element run in an order that makes them
- * enemies.
+ * **Two earlier versions of this table got it wrong, and both made the app worse
+ * than it had been before the feature existed.** The first put every group at the
+ * library's own 6px, which left the artwork plainly legible through every panel.
+ * The second put the pills at 15px, *below* the `pill` utility's 24px, on the
+ * reasoning that less frost means a more visible bend — which is true, and is
+ * exactly why it is the wrong thing to spend. Over Loom's own presets the
+ * refraction moves 0% of pixels whatever the frost is, so the trade bought
+ * nothing and cost the chrome its glass.
  *
- *     backdrop-filter: blur(Npx)     blurs what is behind
- *     filter: url(#displacement)     then displaces that blur
- *
- * The frost destroys the detail *before* the displacement reaches it, so a bend
- * only shows when the blur is smaller than the scale of the structure behind. The
- * `pill` utility's 24px is over half of the 40px capsule it sits in, and over a
- * photograph it averages the detail into a wash — a 32px displacement of a wash
- * looks like nothing at all. Measured over Loom's own presets it is 0% of pixels,
- * and no combination of frost and refraction rescues that, because a smooth
- * radial wash has no edges to move.
- *
- * So the pills take **15px**: still plainly frosted, small enough that real
- * artwork keeps its structure for the displacement to act on. They are the one
- * group that can afford the trade — icons, never a sentence — and they sit over
- * the user's own wallpaper, which is the only backdrop in the app where this
- * effect is visible at all.
+ * The rule both failures violated, and `glass.test.ts` now asserts: **at the
+ * default, a converted surface is as frosted as what it replaced.** The slider's
+ * floor is where a user can deliberately go thinner, and below there is the
+ * honest expression of how far that trade goes.
  */
 export const SURFACE_FROST: Record<
   "pills" | "composer" | "panels" | "popovers" | "cards" | "overlays",
   number
 > = {
-  pills: 0.5,
-  composer: 1.1,
-  panels: 1.15,
-  popovers: 1.2,
-  cards: 1.1,
-  overlays: 1.25,
+  pills: 0.64,
+  composer: 1,
+  panels: 1,
+  popovers: 1,
+  cards: 1,
+  overlays: 1,
 };
 
 /** The library always adds this much blur before its own scaling. */
