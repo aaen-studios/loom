@@ -33,9 +33,9 @@ export type GlassPresetId = "subtle" | "standard" | "prominent";
  * name the values the sliders currently spell.
  */
 export const GLASS_PRESETS: Record<GlassPresetId, LiquidParams> = {
-  subtle: { refraction: 16, frost: 48, saturation: 130, chromatics: 0, elasticity: 0, mode: "standard" },
-  standard: { refraction: 32, frost: 38, saturation: 140, chromatics: 1, elasticity: 0, mode: "standard" },
-  prominent: { refraction: 64, frost: 28, saturation: 165, chromatics: 2, elasticity: 0, mode: "prominent" },
+  subtle: { refraction: 16, frost: 38, saturation: 130, chromatics: 0, elasticity: 0, mode: "standard" },
+  standard: { refraction: 32, frost: 30, saturation: 140, chromatics: 1, elasticity: 0, mode: "standard" },
+  prominent: { refraction: 64, frost: 20, saturation: 165, chromatics: 2, elasticity: 0, mode: "prominent" },
 };
 
 export const PRESET_LABELS: Record<GlassPresetId, string> = {

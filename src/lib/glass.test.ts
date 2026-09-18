@@ -5,6 +5,7 @@ import {
   DEFAULT_LIQUID,
   GLASS_PRESETS,
   LIQUID_RANGE,
+  SURFACE_FROST,
   TINT_RANGE,
   clampBlur,
   clampGlass,
@@ -51,6 +52,52 @@ describe("the clamps", () => {
     expect(wild.chromatics).toBeLessThanOrEqual(cMax);
     expect(wild.elasticity).toBeGreaterThanOrEqual(eMin);
     expect(wild.elasticity).toBeLessThanOrEqual(eMax);
+  });
+
+  it("lifts a stored frost below the floor to the default, not to the floor", () => {
+    // `frost` shipped at 6px, which is below the 12px floor the slider now
+    // offers. Clamping would leave it at the floor — legal, and still far too
+    // clear for a panel to read as glass, since the utilities this replaced were
+    // painting blur(24px) to blur(38px). A value the slider cannot produce
+    // cannot have been chosen, so it becomes the default.
+    expect(clampParams({ frost: 6 }).frost).toBe(DEFAULT_LIQUID.frost);
+    expect(clampParams({ frost: 4 }).frost).toBe(DEFAULT_LIQUID.frost);
+
+    // But a value *inside* the range is somebody's choice, floor included.
+    expect(clampParams({ frost: LIQUID_RANGE.frost[0] }).frost).toBe(LIQUID_RANGE.frost[0]);
+    expect(clampParams({ frost: 44 }).frost).toBe(44);
+  });
+
+  it("gives every surface group at least the frost the utility it replaced used", () => {
+    // The rule `SURFACE_FROST` encodes, asserted rather than described: a
+    // converted surface must never be *thinner* than the plain `pill`, `panel`
+    // or `panel-strong` it was converted from. The first version of the table
+    // broke this — it put the pills at 15px against the `pill` utility's 24px —
+    // and the app's chrome ended up less frosted than it had ever been.
+    const ORIGINAL = { pill: 24, panel: 34, "panel-strong": 38 } as const;
+    const REPLACES = {
+      pills: "pill",
+      composer: "panel-strong",
+      panels: "panel",
+      popovers: "panel-strong",
+      cards: "panel-strong",
+      overlays: "panel-strong",
+    } as const;
+
+    for (const [group, utility] of Object.entries(REPLACES)) {
+      // The worst case is the slider's own floor, since the multipliers only
+      // ever raise it from there.
+      const atFloor = LIQUID_RANGE.frost[0] * SURFACE_FROST[group as keyof typeof SURFACE_FROST];
+      const atDefault = DEFAULT_LIQUID.frost * SURFACE_FROST[group as keyof typeof SURFACE_FROST];
+      expect(
+        atDefault,
+        `${group} is less frosted at the default than the ${utility} it replaced`,
+      ).toBeGreaterThanOrEqual(ORIGINAL[utility]);
+      expect(
+        atFloor,
+        `${group} drops below the ${utility} it replaced at the slider's floor`,
+      ).toBeGreaterThanOrEqual(ORIGINAL[utility] * 0.75);
+    }
   });
 
   it("treats a non-finite number as absent rather than clamping it", () => {
