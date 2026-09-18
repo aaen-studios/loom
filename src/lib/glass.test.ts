@@ -6,6 +6,7 @@ import {
   GLASS_PRESETS,
   LIQUID_RANGE,
   SURFACE_FROST,
+  SURFACE_STRENGTH,
   TINT_RANGE,
   clampBlur,
   clampGlass,
@@ -68,12 +69,20 @@ describe("the clamps", () => {
     expect(clampParams({ frost: 44 }).frost).toBe(44);
   });
 
-  it("gives every surface group at least the frost the utility it replaced used", () => {
-    // The rule `SURFACE_FROST` encodes, asserted rather than described: a
-    // converted surface must never be *thinner* than the plain `pill`, `panel`
-    // or `panel-strong` it was converted from. The first version of the table
-    // broke this — it put the pills at 15px against the `pill` utility's 24px —
-    // and the app's chrome ended up less frosted than it had ever been.
+  it("reproduces the blur each group's utility was already painting", () => {
+    // The rule `SURFACE_FROST` encodes, asserted rather than described: at the
+    // **default** frost, a converted surface is as frosted as the plain `pill`,
+    // `panel` or `panel-strong` it was converted from. Two earlier versions of
+    // this table broke it — one put every group at 6px, one put the pills at
+    // 15px against the `pill` utility's 24 — and both times the app's chrome came
+    // out thinner than it had ever been, so the app got *worse* than before the
+    // feature existed.
+    //
+    // The invariant is about the default and not the slider's floor, and that
+    // distinction is the point: at the floor the user is deliberately asking for
+    // the thinnest glass the control offers. That is a choice, and honouring it
+    // is the whole reason the slider goes below the default. What must never
+    // happen is a user who *touches nothing* getting thinner glass than they had.
     const ORIGINAL = { pill: 24, panel: 34, "panel-strong": 38 } as const;
     const REPLACES = {
       pills: "pill",
@@ -85,18 +94,26 @@ describe("the clamps", () => {
     } as const;
 
     for (const [group, utility] of Object.entries(REPLACES)) {
-      // The worst case is the slider's own floor, since the multipliers only
-      // ever raise it from there.
-      const atFloor = LIQUID_RANGE.frost[0] * SURFACE_FROST[group as keyof typeof SURFACE_FROST];
       const atDefault = DEFAULT_LIQUID.frost * SURFACE_FROST[group as keyof typeof SURFACE_FROST];
+      // `* 0.95` rather than a bare `>=`, because the multipliers are rounded to
+      // two decimals: 0.64 x 38 is 24.32, and the nearest reachable integer is
+      // 24. Demanding exactness would make the table unwritable for no gain.
       expect(
         atDefault,
         `${group} is less frosted at the default than the ${utility} it replaced`,
-      ).toBeGreaterThanOrEqual(ORIGINAL[utility]);
-      expect(
-        atFloor,
-        `${group} drops below the ${utility} it replaced at the slider's floor`,
-      ).toBeGreaterThanOrEqual(ORIGINAL[utility] * 0.75);
+      ).toBeGreaterThanOrEqual(ORIGINAL[utility] * 0.95);
+    }
+  });
+
+  it("spends no surface's opacity on the effect", () => {
+    // `SURFACE_STRENGTH` is all 100, and this is what keeps it that way. The
+    // temptation it guards against is real — the effect is more visible on a
+    // thinner surface — but over Loom's own presets the effect is not visible at
+    // all (0% of pixels bend, measured), so spending opacity there buys nothing
+    // and costs the readability of every panel in the app. Anyone who wants the
+    // trade can move Tint; nobody should get it by default.
+    for (const [group, value] of Object.entries(SURFACE_STRENGTH)) {
+      expect(value, `${group} spends opacity on the effect`).toBe(100);
     }
   });
 

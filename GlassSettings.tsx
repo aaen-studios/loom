@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, type CSSProperties } from "react";
 import { backgroundStyle, resolvePreset } from "../lib/background";
 import {
   BLUR_RANGE,
@@ -74,7 +74,10 @@ function Slider({
 function SamplePill({ plain = false }: { plain?: boolean }) {
   return (
     <LiquidSurface
-      className="h-11 rounded-capsule"
+      // Taller than the real pill (h-12 against h-10) so it reliably straddles a
+      // 64px boundary rather than sitting inside one square, where there would be
+      // no edge at its rim to bend.
+      className="h-12 rounded-capsule"
       contentClassName="gap-0.5 p-1"
       surface="pills"
       /*
@@ -93,13 +96,27 @@ function SamplePill({ plain = false }: { plain?: boolean }) {
       // things and calling it a comparison.
       liquid={plain ? false : undefined}
     >
-      <span className="px-2.5 text-[12.5px] text-[var(--ink)]">
+      <span className="px-2.5 text-[12.5px] font-medium" style={SAMPLE_LABEL}>
         {plain ? "Plain glass" : "Liquid"}
       </span>
-
     </LiquidSurface>
   );
 }
+
+/**
+ * White with a dark halo, for a label that sits on glass over arbitrary artwork.
+ *
+ * Neither of the app's ink tokens works here. The samples are deliberately
+ * transparent and the surface beneath them is the highest-contrast thing in the
+ * UI, so at any point under a glyph the background is either near-black or
+ * near-white — which makes any single ink colour invisible on part of it. A white
+ * glyph with a dark shadow reads on both, which is the same trick `.blob-text`
+ * uses for bare assistant text over the wallpaper.
+ */
+const SAMPLE_LABEL: CSSProperties = {
+  color: "#fff",
+  textShadow: "0 1px 2px rgb(0 0 0 / 0.85), 0 0 12px rgb(0 0 0 / 0.6)",
+};
 
 /**
  * The preview.
@@ -127,61 +144,64 @@ export function GlassPreview() {
   const tint = config.interface.glass.tint;
   const dark = config.theme === "dark";
   const preset = resolvePreset(config.background.preset, dark);
-  const [media, setMedia] = useState<"pattern" | "preset">("pattern");
+  /*
+    **Your background is the default, and the test pattern is the option.**
+
+    That ordering is the point rather than a detail. A checkerboard is a *test
+    pattern* — it belongs in a verification script, not in a settings page, and
+    the first version of this shipped it as the default because it flattered the
+    effect. The honest default is what the app actually looks like: glass over
+    the artwork you chose. Anyone who wants to see the bend clearly can switch to
+    Hard edges, and the caption tells them the effect is subtler over a smooth
+    background before they wonder why nothing looks different.
+  */
+  const [media, setMedia] = useState<"pattern" | "preset">("preset");
 
   /*
-    A pattern whose features are sized for the effect, in the app's own colours.
+    The tiles are the **opposite** of the glass, and that is the whole trick.
 
-    Two things had to be got right, and the first two versions of this got each
-    of them wrong in a different way.
+    In light theme Loom's glass is near-white — `--pill-bg` is white at 90% — so a
+    pale pattern leaves the samples as white-on-white smudges with nothing to see
+    through them. That is precisely what the first three versions of this preview
+    did, and no amount of re-tuning the tile *colours* fixed it, because the
+    palette was never the problem. The **relationship** was: glass only reads as
+    glass when there is something behind it that contrasts.
 
-    **Scale.** A bend is only visible where there is an edge that (a) the frost
-    has not already averaged away and (b) the displacement can actually shift.
-    The first version drew ~18px stripes against a 24–32px frost, so the blur
-    flattened them into a wash and the displacement moved a wash onto a wash. The
-    second used 44px bands, which survived the blur but gave only one axis of
-    edges. This is a **checkerboard at 96px** — three times the 32px displacement
-    scale, with hard corners in both axes, so a rim that pulls its samples outward
-    visibly moves the corners whichever way the displacement map points.
+    So the pattern inverts with the theme. Light theme gets a dark, detailed
+    surface — the same tonal range as the wallpaper in the screenshot that
+    prompted this; dark theme gets a pale one. Either way a 34% white sample reads
+    unmistakably as a pane, and the artwork behind it stays visible through the
+    glass.
 
-    **Colour.** The version before this used four saturated hues and read as a
-    test card sitting in the middle of the app. Two colours fix that: the accent
-    and near-black, which is the same vocabulary as everything around it. The
-    hairlines are what the frost still has to work with at a fine scale, and they
-    are the reason the surface reads as *frosted* rather than as a flat tint —
-    a checkerboard alone has nothing between its corners for a blur to act on.
+    Two details are load bearing, and both were arrived at by measuring what was
+    invisible rather than by taste:
+
+    * **64px squares.** A bend needs an edge that (a) the frost has not already
+      averaged away and (b) the displacement can actually move. 18px stripes lost
+      to a 24px frost; 44px bands survived but gave only one axis. 64px is wider
+      than the frost and twice the 32px displacement, with hard corners in both
+      axes — and it is *narrower than the samples*, so a sample always straddles a
+      boundary rather than sitting inside one square, where there would be no edge
+      at its rim to bend at all.
+    * **12px hairlines** at low alpha, over the squares. A frosted surface needs
+      detail at a fine scale as well as a coarse one, or it reads as a flat tint
+      rather than as frost.
   */
+  const glassIsLight = !dark;
+  const tileA = glassIsLight ? "#0d1424" : "#eef1f8";
+  const tileB = glassIsLight ? "#33436b" : "#c9d2e4";
+  const hairline = glassIsLight ? "rgb(255 255 255 / 0.13)" : "rgb(0 0 0 / 0.13)";
+
   const pattern = {
-    /*
-      Both squares accept the theme's own ink, and that is the constraint that
-      decides the colours.
-
-      The samples on this pattern are deliberately transparent — that is the
-      whole point of a preview — so the labels painted on them sit over whatever
-      square is behind. A high-contrast black-and-white checkerboard would show
-      the bend beautifully and make the labels unreadable on half the squares.
-      So each theme gets two colours that differ enough in *luminance* to give
-      the displacement a real edge, while both stay on the same side of the ink:
-      light colours under near-black text, dark colours under near-white.
-
-      Measured worst case at the 34% tint the samples use: near-black on the
-      accent square is 9:1, on the near-white square 18:1; near-white on the dark
-      indigo is 11:1, on the near-black square 17:1. Every combination clears
-      WCAG AA for body text with room to spare.
-    */
-    backgroundColor: dark ? "#0b0e17" : "#f7f9ff",
+    backgroundColor: tileA,
     backgroundImage: [
-      // Topmost first, as CSS draws them. A neutral hairline reads on both.
-      "repeating-linear-gradient(0deg, rgb(127 135 160 / 0.22) 0 1px, transparent 1px 12px)",
-      "repeating-linear-gradient(90deg, rgb(127 135 160 / 0.22) 0 1px, transparent 1px 12px)",
-      // The checkerboard, drawn last so the hairlines sit over it.
-      `repeating-conic-gradient(from 0deg, ${
-        dark ? "#39406b" : "#8ea2ff"
-      } 0deg 90deg, ${dark ? "#0b0e17" : "#f7f9ff"} 90deg 180deg, ${
-        dark ? "#39406b" : "#8ea2ff"
-      } 180deg 270deg, ${dark ? "#0b0e17" : "#f7f9ff"} 270deg 360deg)`,
+      // Topmost first, as CSS draws them; the checkerboard last so the hairlines
+      // sit over it.
+      `repeating-linear-gradient(0deg, ${hairline} 0 1px, transparent 1px 12px)`,
+      `repeating-linear-gradient(90deg, ${hairline} 0 1px, transparent 1px 12px)`,
+      `repeating-conic-gradient(from 0deg, ${tileB} 0deg 90deg, ${tileA} 90deg 180deg, ${tileB} 180deg 270deg, ${tileA} 270deg 360deg)`,
     ].join(", "),
-    backgroundSize: "12px 12px, 12px 12px, 96px 96px",
+    backgroundSize: "12px 12px, 12px 12px, 64px 64px",
   };
 
   return (
@@ -193,15 +213,15 @@ export function GlassPreview() {
         <Segmented
           value={media}
           options={[
-            { id: "pattern", label: "Hard edges" },
             { id: "preset", label: "Your background" },
+            { id: "pattern", label: "Hard edges" },
           ]}
           onChange={setMedia}
         />
       </div>
 
       <div
-        className="relative h-[196px] overflow-hidden rounded-row border border-[var(--glass-border)]"
+        className="relative h-[224px] overflow-hidden rounded-row border border-[var(--glass-border)]"
         style={
           media === "pattern"
             ? pattern
@@ -235,7 +255,9 @@ export function GlassPreview() {
             // edges are outside the artwork demonstrates nothing.
             tintStrength={40}
           >
-            <span className="text-[12.5px] text-[var(--ink)]">Composer</span>
+            <span className="text-[12.5px] font-medium" style={SAMPLE_LABEL}>
+              Composer
+            </span>
           </LiquidSurface>
         </div>
       </div>
@@ -244,12 +266,12 @@ export function GlassPreview() {
         {media === "pattern" ? (
           <>
             <span className="text-soft">Liquid</span> bends the pattern at its
-            rim, <span className="text-soft">Plain glass</span> does not — the
-            corners of each square shift inward or outward along the edge. The
-            squares are 96px on purpose: a bend only shows against an edge the
-            frost has not already flattened. These two samples are more
-            transparent than the real surfaces, deliberately, so there is
-            something to see.
+            rim; <span className="text-soft">Plain glass</span> does not — watch
+            where a square's edge meets the rim of each sample, and it shifts on
+            one and not the other. Two things are exaggerated here so there is
+            something to see: the squares are 64px, and both samples are far more
+            transparent than the real surfaces. At the opacity the app needs for
+            legibility, this is a great deal subtler.
           </>
         ) : (
           <>

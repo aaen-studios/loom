@@ -104,67 +104,48 @@ export const DEFAULT_GLASS: GlassConfig = {
 /**
  * How much of a surface's own token survives, per surface group.
  *
- * **This is the table that matters most, and the first attempt got it badly
- * wrong.** It used one default of 50 everywhere, which halved every surface's
- * alpha. Measured afterwards:
+ * **Every entry is 100, and that is the whole design.**
  *
- *     the `panel-strong` utility    color(srgb 1 1 1 / 0.95), blur(38px)
- *     the settings drawer after     color(srgb 1 1 1 / 0.48), frost 6px
- *     the title-bar pills after     0.45, against `--pill-bg`'s 0.90
+ * A converted surface paints its token at exactly the alpha the `panel-strong`
+ * (or `pill`) it replaced did. Nothing is traded for the effect: the surface you
+ * get is the surface you always had, plus a bent rim.
  *
- * A half-transparent sheet with a 6px blur, with the app's prose on it. Glass
- * became a barely-legible film over whatever the user's wallpaper happened to be.
+ * This table exists to hold that at 100 rather than to tune anything, and it is
+ * worth being blunt about why, because the first two attempts at this file did
+ * real damage by treating opacity as a knob to spend on the effect:
  *
- * Two things made that worse than it looks. The 6px frost was chosen to *help*
- * the effect — less blur leaves more detail to bend — so it traded legibility
- * away for something that, measured over Loom's own presets, is imperceptible
- * anyway: 0% of pixels bend, max channel delta 2, and no combination of frost
- * and refraction rescues it because a smooth wash has no edges to bend.
+ *   * At a blanket `50` the settings drawer resolved to
+ *     `color(srgb 1 1 1 / 0.48)` where `panel-strong` is `0.95` — a
+ *     half-transparent sheet carrying the app's prose over the user's wallpaper.
+ *   * At a per-group table (78–100) it was merely *worse* than before: the
+ *     chrome looked washed rather than glassy, and bought nothing for it.
  *
- * So the rule is inverted from where it started: a converted surface keeps the
- * alpha of the utility it replaced, and only a group with a **measured** reason
- * spends any of it. There is exactly one such group, the pills, and its entry
- * below explains the reason. Nothing spends opacity for an effect that cannot be
- * seen — which is what the first version did, on every surface at once.
+ * Both were spending legibility on an effect that, measured, is not there: over
+ * Loom's own presets the refraction moves **0% of pixels** (max channel delta 2),
+ * and no combination of tint, frost and refraction rescues that, because a
+ * smooth radial wash has no edges for a displacement map to bend. It is visible
+ * over the user's own detailed artwork — 88% of pixels over a hard-edged
+ * pattern — and that is a real feature, but it is not one worth one percent of
+ * any panel's readability.
  *
- *   pills      78   `--pill-bg` is 90% light, so this lands at 0.70.
- *                   The one group with a spend, and the number is reasoned
- *                   rather than taste: **tint and visibility are not the same
- *                   lever.** The displacement acts on the backdrop *behind* the
- *                   element whatever the tint is — a heavier tint only means you
- *                   see less of the result. At 0.70 you still see 30% of the
- *                   backdrop at the rim, shifted, which is what reads as a bend,
- *                   while icons keep the contrast they had. At the 0.52 this was
- *                   set to first, the chrome looked washed rather than glassy and
- *                   bought nothing for it.
+ * So the sequencing is: **legible first, and the effect is what is left over.**
+ * Anyone who wants more of it has the **Tint** slider, which is one control in
+ * one place and whose floor is the honest expression of how far that trade can
+ * go before text stops being readable.
  *
- *                   The pills are the right group for even this much: they hold
- *                   icons and never a sentence, and they sit over the user's own
- *                   artwork, which is the only backdrop in the app where the
- *                   effect is visible at all (measured: 88% of pixels over a
- *                   photograph, against 0% over the built-in presets).
- *   composer   92   The surface messages are typed into, so it stays close to
- *                   opaque. The refraction on it is effectively invisible, and
- *                   that is the right trade.
- *   panels     96   Docked panels hold tables, file lists and shells.
- *   popovers   88   Menus sit over the transcript, where the bend reads against
- *                   text and code, so this is the second group that spends a
- *                   little — and 88% of a 95% token is still 84%, which stays
- *                   comfortably legible behind a 36px frost.
- *   cards      90   Tool calls and cards, also over the transcript.
- *   overlays  100   The settings drawer, the shortcut sheet, voice mode. The most
- *                   text in the app on the largest surfaces, and legibility here
- *                   is not negotiable. Exactly what they had before.
+ * A group belongs in this table the day it has a *measured* reason to differ.
+ * None does today, and the type is here so that the day it does, the change is
+ * one number with a name rather than a magic `tintStrength` at a call site.
  */
 export const SURFACE_STRENGTH: Record<
   "pills" | "composer" | "panels" | "popovers" | "cards" | "overlays",
   number
 > = {
-  pills: 78,
-  composer: 92,
-  panels: 96,
-  popovers: 88,
-  cards: 90,
+  pills: 100,
+  composer: 100,
+  panels: 100,
+  popovers: 100,
+  cards: 100,
   overlays: 100,
 };
 
