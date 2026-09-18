@@ -3579,13 +3579,6 @@ function AppearanceSection() {
         </Section>
       )}
 
-      {/* One component serves four nav entries, and no preview card sits above
-          it. The controls apply to the app immediately and the drawer they sit in
-          is itself a liquid surface, with the title bar visible above it — so the
-          live window *is* the preview, in the only version of one that cannot be
-          wrong. Five earlier attempts drew a synthetic sample in this panel;
-          every one was either a test card that did not belong in a settings page
-          or too subtle to read. See the note at the top of `GlassSettings.tsx`. */}
       {category === "glass" && <GlassSection />}
 
       {category === "background" && (

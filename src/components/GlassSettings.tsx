@@ -1,36 +1,34 @@
 /**
  * The Glass settings.
  *
- * ## There is no preview, and that is the decision rather than an omission
+ * ## There is no preview, and that is a decision rather than an omission
  *
- * Five versions of this file drew a preview: 18px stripes, 44px bands, a 96px
- * checkerboard, 64px squares, and then the user's own background. The first four
- * were a *test card* — a foreign object in a settings page, each one needing a
- * caption to explain which numbers were exaggerated and why. The fifth was honest
- * and invisible, because over a smooth preset the effect it was demonstrating
- * genuinely is invisible.
+ * Six versions of this file drew one: 18px stripes, 44px bands, a 96px
+ * checkerboard, 64px squares, the user's own background, and a set of samples
+ * with their transparency exaggerated so the bend would show. Four were a *test
+ * card* in a settings page; two were too subtle to demonstrate anything.
  *
- * The fifth was closest and still wrong, because it answered the wrong question.
- * A preview exists so someone can judge a change without leaving the screen — but
- * **these controls apply immediately, to the app the user is already looking at.**
- * The drawer these sliders sit in is itself a liquid surface. The title bar is
- * visible above it. The composer is behind it. Moving Tint changes the very panel
- * being read, in the same frame.
+ * They failed for one shared reason, which is the same mistake that made every
+ * panel in the app 48% opaque for a commit: **they chose what shows the effect
+ * over what the app looks like.** A synthetic sample at any settings is a claim
+ * about how Loom looks, and every claim I made was either a lie in the app's
+ * favour or an honest nothing.
  *
- * So the honest interface is the live one, and the section says so in a sentence
- * instead of drawing a diorama. That also removes the failure mode this file kept
- * hitting, which was that a synthetic sample at *any* settings is a claim about
- * how the app looks — and every such claim I made was either exaggerated to
- * flatter the effect or too subtle to see.
+ * The live surface makes no claim at all, which is why it is the right answer
+ * here. **These controls apply to the app immediately.** The drawer they sit in
+ * is itself a liquid surface with a title bar visible above it and the composer
+ * behind it — move Tint and the panel being read repaints in the same frame.
+ * There is nothing a picture in this panel could add.
  *
  * ## What is worth knowing before touching these
  *
- * The two properties the library uses run in an order that makes them enemies:
- * `backdrop-filter` frosts what is behind, and then `filter: url(#displacement)`
- * bends that frost. So **more frost means less visible bend**, and the defaults
- * deliberately favour legibility over the effect — a surface you cannot read is a
- * worse outcome than one whose rim is subtle. The hints below say this at the two
- * rows where it matters.
+ * The library's two properties run in an order that makes them enemies:
+ * `backdrop-filter` frosts what is behind, then `filter: url(#displacement)`
+ * bends that frost. So **more frost means less visible bend**, and a displacement
+ * map needs *edges* to move — which is why the effect is nearly invisible over
+ * Loom's own backgrounds (measured: 0% of pixels) and clear over a photograph
+ * (88%). The hints below say so at the two rows where it matters, and the
+ * presets in `lib/glass.ts` are chosen to trade one against the other.
  */
 import {
   BLUR_RANGE,
@@ -114,7 +112,7 @@ export function GlassSection() {
     <>
       <Section
         title="Glass"
-        description="How heavy every surface in the app is — the refracting ones included. These apply as you move them, so the panel you are reading this in is the preview: lower the tint and watch its own background lighten."
+        description="How heavy every surface in the app is — the refracting ones included. These apply as you move them, so the panel you are reading this in is the preview: lower the tint and watch its own background change."
       >
         <Row
           label="Tint opacity"
@@ -131,7 +129,7 @@ export function GlassSection() {
         </Row>
         <Row
           label="Blur strength"
-          hint="How far each surface frosts the artwork behind it. This is what makes glass read as glass rather than as a hole, so it is the control that most affects legibility — and it trades against the effect, because a backdrop that has been blurred has little left for a lens to bend."
+          hint="How far each surface frosts the artwork behind it. This is what makes glass read as glass rather than as a hole, so it is the control that most affects legibility — and it trades against the effect, because a backdrop that has already been blurred has little left for a lens to bend."
         >
           <Slider
             label="Glass blur strength"
@@ -165,7 +163,7 @@ export function GlassSection() {
         />
         <Toggle
           label="Title-bar pills"
-          hint="The easiest place to see it: the pills float over your wallpaper rather than over the app, and the rims catch its detail as you drag the tint slider."
+          hint="The easiest place to see it: the pills float over your wallpaper rather than over the app, and their rims catch its detail."
           checked={liquid.pills}
           onChange={(pills) => setLiquid({ pills })}
           disabled={!liquid.enabled}
@@ -230,7 +228,7 @@ export function GlassSection() {
         </Row>
         <Row
           label="Frost"
-          hint="Backdrop blur, in pixels, and the number that trades hardest against the effect: past about 40px the backdrop is too flat to bend, so the refraction disappears into the blur. The default is the blur each surface already had."
+          hint="Backdrop blur, in pixels, and the number that trades hardest against the effect: past about 40px the backdrop is too flat to bend, so the refraction disappears into the blur. The default reproduces the blur each surface already had."
         >
           <Slider
             label="Frost"

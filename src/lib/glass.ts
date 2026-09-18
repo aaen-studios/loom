@@ -73,7 +73,10 @@ export const DEFAULT_LIQUID: LiquidParams = GLASS_PRESETS.standard;
  */
 export const LIQUID_RANGE = {
   refraction: [0, 120],
-  frost: [8, 60],
+  // 12, not 8: the floor times the smallest group multiplier must still land at
+  // or above the `pill` utility's 24px, so that no setting of this control can
+  // make the app's chrome thinner than it was before the feature existed.
+  frost: [12, 72],
   saturation: [60, 220],
   chromatics: [0, 5],
   elasticity: [0, 0.5],
