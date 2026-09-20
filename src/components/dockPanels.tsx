@@ -176,22 +176,13 @@ export function FilesPanel({ workdir }: { workdir: string | null }) {
 }
 
 /**
- * The browser, as a placeholder.
+ * The browser: Loom's own, in a dock zone.
  *
- * Registered so the docking system already carries a panel it knows nothing
- * about. When the real one lands it is a component swap in `registry.tsx` and
- * nothing else.
+ * The real component lives in `BrowserPanel.tsx` and is re-exported here rather
+ * than moved, because this file is the complete list of what had to change to
+ * turn an overlay into a panel — and the browser is the entry that proves the
+ * list is *only* adapters now. Its slot existed before the feature did, so
+ * docking, tearing off and dragging between edges were already exercised by the
+ * time there was anything to put in them.
  */
-export function BrowserPanel() {
-  return (
-    <div className="grid h-full place-items-center p-6">
-      <div className="max-w-[280px] text-center">
-        <p className="text-[13px] text-soft">The browser panel is not built yet.</p>
-        <p className="mt-1.5 text-[12px] leading-5 text-faint">
-          Its slot exists so that when it arrives it docks, tabs and tears off
-          like every panel beside it — with no change to the layout.
-        </p>
-      </div>
-    </div>
-  );
-}
+export { BrowserPanel } from "./BrowserPanel";

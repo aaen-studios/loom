@@ -152,6 +152,54 @@ impl Drop for ComputerTurnGuard {
     }
 }
 
+/// Why a browser turn ended when the Browser chip was switched off while it
+/// ran.
+const BROWSER_REVOKED_NOTE: &str =
+    "The Browser chip was switched off, so this turn stopped and the browser was handed back.";
+
+/// Releases a browser turn's global state (the single-turn lock, and the
+/// host's per-chat holds) on every exit path, including a panic that skips the
+/// rest of [`Engine::run_completion`].
+struct BrowserTurnGuard {
+    engine: Engine,
+    session_id: String,
+}
+
+impl BrowserTurnGuard {
+    fn new(engine: &Engine, session_id: &str) -> Self {
+        Self {
+            engine: engine.clone(),
+            session_id: session_id.to_string(),
+        }
+    }
+}
+
+impl Drop for BrowserTurnGuard {
+    fn drop(&mut self) {
+        self.engine.release_browser_turn(&self.session_id);
+    }
+}
+
+/// The config lock, recovering from a poisoned mutex.
+///
+/// A panic anywhere while the lock is held poisons it, and `Mutex::lock` then
+/// returns `Err` for the rest of the process: every later config read panics in
+/// turn, so one bad turn becomes an app that cannot load its own settings or
+/// save them again. The value is plain data, so the state written before the
+/// panic is still the best one available, and the two locks in `src-tauri`
+/// (`blocker.rs` and `browser.rs`) already recover this way.
+///
+/// A free function, not a method: `commands.rs` reaches it too, and its own
+/// `AppState::config` wraps a different `Mutex`. It sits here, above
+/// `SharedConfig`, so it is at module scope — an earlier version of this was
+/// anchored inside `impl Engine`, which made it an associated function and left
+/// every bare `lock_config(..)` call in the file unable to see it.
+pub fn lock_config(
+    config: &std::sync::Mutex<AppConfig>,
+) -> std::sync::MutexGuard<'_, AppConfig> {
+    config.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 pub type SharedConfig = Arc<Mutex<AppConfig>>;
 pub type EmitFn = Arc<dyn Fn(EngineEvent) + Send + Sync + 'static>;
 
@@ -700,6 +748,14 @@ struct Inner {
     /// reply. Once is the whole point — re-asking on every turn would spend a
     /// model call per message to re-answer a question already settled.
     title_done: Mutex<std::collections::HashSet<String>>,
+    /// The built-in browser, or a stub that refuses everything. Held as a trait
+    /// object so this crate never learns what a webview is, and so tests can
+    /// run without a window.
+    browser: Mutex<Arc<dyn crate::browser::BrowserHost>>,
+    /// Which chat is driving the browser. Same rule as `computer` above, and
+    /// the same reason: two turns fighting over one tab is how clicks land in
+    /// the wrong place.
+    browser_holder: crate::browser::Holder,
     /// How far this model's tokeniser runs from the character estimate, keyed
     /// by `provider/model`. Learned from the counts providers report, so the
     /// fit converges instead of trusting four characters per token.
@@ -789,6 +845,10 @@ struct TurnPlan {
     cast: Vec<(String, String)>,
     handoff_chain: u32,
     computer_access: bool,
+    /// The built-in browser is armed for this chat. Carried on the plan rather
+    /// than read again in `run_completion`, so the offer, the gate and the
+    /// prompt note all agree on one value.
+    browser_access: bool,
     /// Budget overrides for detached runs; `None` for interactive turns.
     max_steps: Option<u32>,
     max_cost_usd: Option<f64>,
@@ -844,6 +904,12 @@ impl Engine {
                 mcp: tokio::sync::Mutex::new(McpState::default()),
                 computer: Mutex::new(None),
                 computer_state: Arc::new(Mutex::new(HashMap::new())),
+                // A stub until the shell installs a real host. `NoBrowser`
+                // rather than an `Option`, so every call site has something to
+                // call and the "no browser here" path is one implementation
+                // instead of a `None` check in five places.
+                browser: Mutex::new(Arc::new(crate::browser::NoBrowser::default())),
+                browser_holder: crate::browser::Holder::default(),
                 paused: Mutex::new(HashMap::new()),
                 takeover: Mutex::new(None),
                 takeover_health: Mutex::new(None),
@@ -869,16 +935,20 @@ impl Engine {
     /// = self.db().…` scrutinee lives to the end of the block, so read the row
     /// into a local first and let the guard drop. See `finish_command` and
     /// `complete_task` for the shape that caused it.
-    fn db(&self) -> std::sync::MutexGuard<'_, Database> {
-        self.inner.db.lock().expect("db mutex poisoned")
+    ///
+    /// In a debug build a reentrant call panics here and names both call sites
+    /// instead of hanging, which is what `db_reentry` is for.
+    #[track_caller]
+    fn db(&self) -> crate::db_reentry::Guard<'_, Database> {
+        // `#[track_caller]` on this function is what makes `Location::caller()`
+        // here mean the caller of `db()`. The tripwire cannot work that out for
+        // itself: reading the location inside `db_reentry` would name the one
+        // line there that every `db()` in the process shares.
+        crate::db_reentry::lock(&self.inner.db, std::panic::Location::caller())
     }
 
     pub fn config(&self) -> AppConfig {
-        self.inner
-            .config
-            .lock()
-            .expect("config mutex poisoned")
-            .clone()
+        lock_config(&self.inner.config).clone()
     }
 
     /// Shared HTTP client (updater, tooling).
@@ -916,6 +986,7 @@ impl Engine {
             permission_mode: None,
             agent_mode: None,
             computer_access: false,
+            browser_access: false,
             position: None,
             created_at: now_ms(),
             updated_at: now_ms(),
@@ -1107,6 +1178,66 @@ impl Engine {
                 ..Default::default()
             },
         )
+    }
+
+    /// Arms or disarms the built-in browser for one chat (the Browser chip).
+    ///
+    /// Disarming is a revocation, not a note for later: if this chat is driving
+    /// tabs when the switch goes off, its turn ends now. The same rule as the
+    /// Computer chip, and for the same reason — a switch that only took effect
+    /// on the next turn would leave the model clicking after consent was
+    /// withdrawn.
+    pub fn set_session_browser_access(&self, id: &str, enabled: bool) -> Result<()> {
+        self.db().update_session(
+            id,
+            SessionUpdate {
+                browser_access: Some(enabled),
+                ..Default::default()
+            },
+        )?;
+        if !enabled && self.browser_holder().as_deref() == Some(id) {
+            self.cancel_with_note(id, BROWSER_REVOKED_NOTE);
+        }
+        Ok(())
+    }
+
+    /// The chat currently driving the browser, if any. Read by the composer
+    /// chip and by Stop, both of which need to know who holds it.
+    pub fn browser_holder(&self) -> Option<String> {
+        self.inner.browser_holder.current()
+    }
+
+    /// Installs the shell's browser host. Called once at startup.
+    ///
+    /// Takes a trait object rather than making the engine generic: this is what
+    /// keeps the crate free of any webview type, and it is what lets a test
+    /// hand the engine a fake and exercise dispatch with no window at all.
+    pub fn set_browser_host(&self, host: Arc<dyn crate::browser::BrowserHost>) {
+        let mut slot = self.inner.browser.lock().expect("browser mutex poisoned");
+        *slot = host;
+    }
+
+    /// Releases everything a browser turn owned: the single-turn lock, and
+    /// whatever the host was holding for this chat. Safe to call twice — the
+    /// turn guard and an explicit release both reach it.
+    fn release_browser_turn(&self, session_id: &str) {
+        // If this chat never held the browser, it never called the host, so
+        // there is nothing to give back.
+        if !self.inner.browser_holder.release(session_id) {
+            return;
+        }
+        // The host may hold per-chat state: which tab this chat was working in,
+        // and whatever the panel was told about it. A turn that ended must not
+        // leave it behind, or the next turn starts by trusting a hold from last
+        // time instead of looking. The page itself is left open — it is a page
+        // the user may still want, and the model's claim on it is all that goes.
+        let host = self
+            .inner
+            .browser
+            .lock()
+            .expect("browser mutex poisoned")
+            .clone();
+        host.release(session_id);
     }
 
     /// Arms or disarms computer use for one chat (the composer's Computer chip).
@@ -1341,7 +1472,7 @@ impl Engine {
         favorite: bool,
     ) -> Result<()> {
         let snapshot = {
-            let mut config = self.inner.config.lock().expect("config mutex poisoned");
+            let mut config = lock_config(&self.inner.config);
             let model = config
                 .providers
                 .get_mut(provider_id)
@@ -1365,7 +1496,7 @@ impl Engine {
         selected: bool,
     ) -> Result<()> {
         let snapshot = {
-            let mut config = self.inner.config.lock().expect("config mutex poisoned");
+            let mut config = lock_config(&self.inner.config);
             let provider = config
                 .providers
                 .get_mut(provider_id)
@@ -1395,7 +1526,7 @@ impl Engine {
     /// resolves the gateway behaviour a suffixed id no longer matches by name.
     pub fn duplicate_provider(&self, provider_id: &str) -> Result<String> {
         let (snapshot, new_id) = {
-            let mut config = self.inner.config.lock().expect("config mutex poisoned");
+            let mut config = lock_config(&self.inner.config);
             let new_id = crate::config::duplicate_provider(&mut config, provider_id)?;
             (config.clone(), new_id)
         };
@@ -1435,7 +1566,7 @@ impl Engine {
             }
         }
 
-        let mut config = self.inner.config.lock().expect("config mutex poisoned");
+        let mut config = lock_config(&self.inner.config);
         if let Some(entry) = config.providers.get_mut(provider_id) {
             let known: std::collections::BTreeSet<String> = entry.models.keys().cloned().collect();
             entry.models = crate::providers::detect::merge_models(&entry.models, fetched);
@@ -1576,7 +1707,7 @@ impl Engine {
     /// can offer it without a search.
     fn remember_model(&self, model: &ModelRef) {
         let snapshot = {
-            let mut config = self.inner.config.lock().expect("config mutex poisoned");
+            let mut config = lock_config(&self.inner.config);
             config.chat.recent_models.retain(|entry| entry != model);
             config.chat.recent_models.insert(0, model.clone());
             config.chat.recent_models.truncate(5);
@@ -1862,6 +1993,7 @@ impl Engine {
         // that folder as the user's project.
         let has_workspace = session.workdir.is_some();
         let computer_access = session.computer_access;
+        let browser_access = session.browser_access;
         let tool_context = ToolContext {
             workdir: session
                 .workdir
@@ -1869,6 +2001,7 @@ impl Engine {
                 .map(std::path::PathBuf::from)
                 .or_else(|| crate::paths::scratch_dir().ok()),
             computer: computer_access,
+            browser: browser_access,
         };
 
         // The chat's cast, when it has one. Multi-persona chats resolve each
@@ -1983,6 +2116,12 @@ impl Engine {
             computer_access && !agent_mode.is_chat(),
             agent_mode.blocks_writes(),
         );
+        let system = with_browser_mode(
+            system,
+            browser_access && !agent_mode.is_chat(),
+            agent_mode.blocks_writes(),
+            config.browser.prefer_over_fetch,
+        );
         let system = with_agent_mode(system, agent_mode);
 
         let chat = config.chat.clone();
@@ -2014,6 +2153,7 @@ impl Engine {
                 .collect(),
             handoff_chain,
             computer_access,
+            browser_access,
             max_steps: limits.max_steps,
             max_cost_usd: limits.max_cost_usd,
             task_id: limits.task_id,
@@ -2266,6 +2406,7 @@ impl Engine {
             cast,
             handoff_chain,
             computer_access,
+            browser_access,
             max_steps,
             max_cost_usd,
             task_id,
@@ -2315,6 +2456,29 @@ impl Engine {
                             // them only to refuse them costs a round per tool.
                             .into_iter()
                             .filter(|spec| !agent_mode.blocks_writes() || spec.read_only)
+                            .collect::<Vec<_>>()
+                    } else {
+                        Vec::new()
+                    }
+                    .into_iter()
+                    .map(|spec| ToolDef {
+                        name: spec.name.to_string(),
+                        description: spec.description.to_string(),
+                        parameters: spec.parameters,
+                    }),
+                )
+                .chain(
+                    if browser_access {
+                        let tiers = self.config().browser.tiers;
+                        crate::browser::specs()
+                            // A read-only mode refuses these anyway; offering
+                            // them only to refuse them costs a round per tool.
+                            .into_iter()
+                            .filter(|spec| !agent_mode.blocks_writes() || spec.read_only)
+                            // Tiers are a context-cost switch, not a gate: a
+                            // chat that does not need the escape hatch should
+                            // not pay for its schemas on every request.
+                            .filter(|spec| crate::browser::tier_enabled(&tiers, spec.name))
                             .collect::<Vec<_>>()
                     } else {
                         Vec::new()
@@ -2450,8 +2614,17 @@ impl Engine {
         // The widest fold this turn used, reported once it ends.
         let mut condensed: Option<context::Condensed> = None;
 
-        let max_rounds = (max_steps.unwrap_or(if computer_access {
-            chat.max_tool_rounds.max(80)
+        // A browser turn gets its own step budget, read once. A page task is
+        // many small round trips — click, wait, assert — and the default 40
+        // runs out mid-task on anything real. The same treatment a computer
+        // turn gets, and for the same reason.
+        let browser_steps = if browser_access {
+            self.config().browser.max_steps
+        } else {
+            0
+        };
+        let max_rounds = (max_steps.unwrap_or(if computer_access || browser_access {
+            chat.max_tool_rounds.max(browser_steps.max(80))
         } else {
             chat.max_tool_rounds
         }) as usize)
@@ -2494,6 +2667,11 @@ impl Engine {
         // exit path, and the supervisor's release covers `panic = "abort"`,
         // where Drop never runs.
         let _computer_guard = computer_access.then(|| ComputerTurnGuard::new(self, &session_id));
+        // The same arrangement for the browser. Keeping the hold only in the
+        // host would be enough for the happy path and wrong for every early
+        // return, which is exactly the class of leak the computer guard exists
+        // to prevent.
+        let _browser_guard = browser_access.then(|| BrowserTurnGuard::new(self, &session_id));
 
         // Input hooks are installed lazily, by `run_computer_tool`, for the
         // one chat that actually takes the computer. A chat that merely has
@@ -2946,13 +3124,20 @@ impl Engine {
                 let computer_allowed =
                     tool_context.computer && crate::computer::is_computer_tool(&call.name);
 
+                // The Browser chip is the standing consent in exactly the same
+                // way, and deliberately so: a permission card per click in a
+                // browser would be unworkable for the same reason it is on the
+                // desktop. Switching the chip off is the revocation.
+                let browser_allowed =
+                    tool_context.browser && crate::browser::is_browser_tool(&call.name);
+
                 // `ask_user` never goes through the permission gate: the card
                 // is the prompt, and the user's answer is the outcome.
                 let allowed = if call.name == tools::ASK_USER {
                     true
                 } else if mode_blocked || harness_blocked.is_some() || scope_blocked {
                     false
-                } else if computer_allowed {
+                } else if computer_allowed || browser_allowed {
                     true
                 } else {
                     self.request_permission(
@@ -3004,22 +3189,30 @@ impl Engine {
                                     {
                                         Some(outcome) => outcome,
                                         None => match self
-                                            .run_agent_tool(
-                                                &session_id,
-                                                &call,
-                                                &provider,
-                                                &model,
-                                                api_key.as_deref(),
-                                                &tool_context,
-                                                permission_mode,
-                                                persona_id.as_deref(),
-                                                &cast,
-                                                handoff_chain,
-                                            )
+                                            .run_browser_tool(&session_id, &call, &tool_context)
                                             .await
                                         {
                                             Some(outcome) => outcome,
-                                            None => self.run_local_tool(&call, &tool_context).await,
+                                            None => match self
+                                                .run_agent_tool(
+                                                    &session_id,
+                                                    &call,
+                                                    &provider,
+                                                    &model,
+                                                    api_key.as_deref(),
+                                                    &tool_context,
+                                                    permission_mode,
+                                                    persona_id.as_deref(),
+                                                    &cast,
+                                                    handoff_chain,
+                                                )
+                                                .await
+                                            {
+                                                Some(outcome) => outcome,
+                                                None => {
+                                                    self.run_local_tool(&call, &tool_context).await
+                                                }
+                                            },
                                         },
                                     }
                                 }
@@ -4054,7 +4247,7 @@ impl Engine {
         args: &serde_json::Value,
     ) -> Result<String> {
         let (summary, snapshot, section) = {
-            let mut config = self.inner.config.lock().expect("config mutex poisoned");
+            let mut config = lock_config(&self.inner.config);
             // Best effort: a failed backup is logged, never fatal.
             if let Err(error) = harness::backup(&config) {
                 eprintln!("[loom] harness backup failed: {error}");
@@ -4222,6 +4415,95 @@ impl Engine {
         // seconds for a window — so the computer layer hands them to a blocking
         // thread rather than tying up an async worker.
         Some(crate::computer::run(session_id, call, &self.inner.computer_state, &options).await)
+    }
+
+    /// Handles browser tools: pages, tabs, cookies, the network. Returns `None`
+    /// for tools that belong to other layers.
+    ///
+    /// Deliberately the same shape as [`Engine::run_computer_tool`]: the chip is
+    /// the permission, one chat drives at a time, and the work happens on a
+    /// blocking thread because everything underneath it is a synchronous
+    /// webview call.
+    async fn run_browser_tool(
+        &self,
+        session_id: &str,
+        call: &ToolCall,
+        context: &ToolContext,
+    ) -> Option<crate::tools::ToolOutcome> {
+        if !crate::browser::is_browser_tool(&call.name) {
+            return None;
+        }
+
+        // The chip is the permission. Without it the model should not even see
+        // these tools, and a stale plan that names one gets a clear refusal
+        // rather than a mysterious failure.
+        if !context.browser {
+            return Some(crate::tools::ToolOutcome {
+                id: call.id.clone(),
+                name: call.name.clone(),
+                ok: false,
+                output: crate::browser::DISABLED_NOTE.to_string(),
+                images: Vec::new(),
+            });
+        }
+
+        // One chat drives at a time. A second chat is told to wait rather than
+        // being handed the tabs: two turns typing into one form is how a field
+        // ends up holding half of each. It is not a dead end — `fetch_url` still
+        // reads a page for whoever is waiting.
+        if self.inner.browser_holder.claim(session_id).is_err() {
+            return Some(crate::tools::ToolOutcome {
+                id: call.id.clone(),
+                name: call.name.clone(),
+                ok: false,
+                output: crate::browser::BUSY_NOTE.to_string(),
+                images: Vec::new(),
+            });
+        }
+
+        let options = {
+            let config = self.config();
+            crate::browser::BrowserOptions {
+                armed: true,
+                // The browser's own edge, falling back to the computer one so a
+                // user who has already tuned the size gets the same answer in
+                // both places rather than two settings meaning one thing.
+                screenshot_edge: if config.browser.screenshot_edge > 0 {
+                    config.browser.screenshot_edge
+                } else {
+                    config.chat.computer_screenshot_edge
+                },
+            }
+        };
+
+        let host = self
+            .inner
+            .browser
+            .lock()
+            .expect("browser mutex poisoned")
+            .clone();
+        let call_id = call.id.clone();
+        let call_name = call.name.clone();
+        let call = call.clone();
+        let session = session_id.to_string();
+
+        // Every one of these is a synchronous webview call — a navigation, a
+        // script evaluation, a COM cookie read, a capture — so it goes to a
+        // blocking thread rather than occupying an async worker. The runtime is
+        // a small fixed pool, and a page load can take seconds.
+        Some(
+            tokio::task::spawn_blocking(move || {
+                crate::browser::run(&session, &call, host.as_ref(), &options)
+            })
+            .await
+            .unwrap_or_else(|_| crate::tools::ToolOutcome {
+                id: call_id,
+                name: call_name,
+                ok: false,
+                output: "that browser call panicked".to_string(),
+                images: Vec::new(),
+            }),
+        )
     }
 
     /// Runs a plain workspace tool.
@@ -4952,7 +5234,7 @@ impl Engine {
         }
 
         let snapshot = {
-            let mut config = self.inner.config.lock().expect("config mutex poisoned");
+            let mut config = lock_config(&self.inner.config);
             let provider = config
                 .providers
                 .get_mut(provider_id)
@@ -4986,7 +5268,7 @@ impl Engine {
         reasoning: Option<ReasoningSpec>,
     ) -> Result<()> {
         let snapshot = {
-            let mut config = self.inner.config.lock().expect("config mutex poisoned");
+            let mut config = lock_config(&self.inner.config);
             let model = config
                 .providers
                 .get_mut(provider_id)
@@ -5008,7 +5290,7 @@ impl Engine {
     /// it again. This is the escape hatch for guesses kept by the migration.
     pub fn reset_model_spec(&self, provider_id: &str, model_id: &str) -> Result<()> {
         let snapshot = {
-            let mut config = self.inner.config.lock().expect("config mutex poisoned");
+            let mut config = lock_config(&self.inner.config);
             let model = config
                 .providers
                 .get_mut(provider_id)
@@ -5744,6 +6026,7 @@ impl Engine {
             permission_mode: request.permission_mode.clone(),
             agent_mode: Some("build".to_string()),
             computer_access: false,
+            browser_access: false,
             position: None,
             created_at: now,
             updated_at: now,
@@ -7165,6 +7448,14 @@ fn build_wire(history: &[Message]) -> Vec<WireMessage> {
                     if !current_turn && crate::computer::is_computer_tool(&call.name) {
                         body = first_line(&body);
                     }
+                    // Browser chatter from earlier turns is the same shape of
+                    // thing, and the same rule: one line each. A snapshot is
+                    // already compact, but a console dump or a network listing
+                    // is not, and a twenty-step page task buries the live turn
+                    // in the transcripts of its own earlier steps.
+                    if !current_turn && crate::browser::is_browser_tool(&call.name) {
+                        body = first_line(&body);
+                    }
                     let inline = last_image_call.as_deref() == Some(call.id.as_str());
                     if !inline && !call.images.is_empty() {
                         body.push('\n');
@@ -7439,6 +7730,71 @@ fn with_harness_mode(system: Option<String>, mode: PermissionMode) -> Option<Str
         Some(existing) if !existing.trim().is_empty() => format!("{existing}\n\n{note}"),
         _ => note.to_string(),
     })
+}
+
+/// Appends the browser note to whatever system prompt is in play, so the model
+/// knows it has a real browser and how to use it without flailing. Placed
+/// before the agent-mode note, so Plan gets the last word.
+///
+/// The three rules that carry this are: snapshot before you click, assert
+/// instead of screenshotting, and read the user-activity footer. The first two
+/// are what keep a long turn cheap; the third is what makes shared control
+/// safe, because it is how the model learns that the user is in the page.
+fn with_browser_mode(
+    system: Option<String>,
+    browser: bool,
+    look_only: bool,
+    prefer_over_fetch: bool,
+) -> Option<String> {
+    if !browser {
+        return system;
+    }
+
+    let fetch_note = if prefer_over_fetch {
+        "Reading a page that needs no interaction is often cheaper with `fetch_url` — no tab, \
+         no page load — so use that for a quick read and the browser when the page needs \
+         JavaScript, a login, or a click."
+    } else {
+        "`fetch_url` reads a page without a tab and is usually the cheaper choice when a page \
+         needs no interaction."
+    };
+
+    if look_only {
+        let note = format!(
+            "The built-in browser is enabled for this chat, but the agent mode is read-only: \
+             you can look and report, not act. `browser_open`, `browser_snapshot`, \
+             `browser_read`, `browser_find`, `browser_wait`, `browser_assert`, \
+             `browser_screenshot`, `browser_console`, `browser_cookies` and `browser_storage` \
+             are available; every tool that clicks, types, navigates an existing tab or clears \
+             data is refused. Do not call them. Open the pages you need, read them, then \
+             report what you found and what you would do about it. {fetch_note}"
+        );
+        return Some(append_note(system, &note));
+    }
+
+    let note = format!(
+        "The built-in browser is enabled for this chat: a real Chromium you share with the \
+         user, with the pages they are already signed into. Rules, in order of how much they \
+         matter. **Prefer `browser_snapshot` to `browser_screenshot`**: a snapshot is an \
+         indexed list of what is clickable, costs a fraction of the tokens, and is what the \
+         `[n]` indexes in `browser_click` and `browser_type` refer to. Take a screenshot only \
+         when the appearance is the point — a layout, a chart, a canvas — and never to find \
+         out whether something worked; `browser_assert` does that for a fraction of the cost. \
+         **Verify with `browser_assert`, not with another look.** After clicking, ask whether \
+         the URL changed, whether the confirmation text is there, whether the console is \
+         clean — that is one cheap call, and it is what keeps a twenty-step turn flat. **Use \
+         `browser_wait` rather than re-snapshotting in a loop**: wait for a selector, a piece \
+         of text, a URL, or network idle, and it returns the moment the condition holds. \
+         **Read the user-activity footer** on any result that carries one. The user is in the \
+         same browser, and their typing, clicks and scrolling are reported to you rather than \
+         pausing anything — so if it says they have typed into a field, re-read before you \
+         submit, and if it says they are somewhere else on the page, that is where they are, \
+         not a fault to correct. Never submit a form whose fields the user is mid-way through; \
+         the page refuses it and tells you why. Say briefly what you are doing between steps, \
+         keep it to one short sentence, and do not narrate a plan you are about to execute. \
+         {fetch_note}"
+    );
+    Some(append_note(system, &note))
 }
 
 /// Appends the computer-use note to whatever system prompt is in play, so the

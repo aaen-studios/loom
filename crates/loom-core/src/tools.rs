@@ -252,6 +252,8 @@ pub enum ToolScope {
     Mcp,
     /// Mouse, keyboard, windows, processes: the machine itself.
     Computer,
+    /// A real browser: pages, tabs, cookies, the network.
+    Browser,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -260,6 +262,10 @@ pub struct ToolContext {
     pub workdir: Option<PathBuf>,
     /// Computer use is armed for this chat (the composer's Computer chip).
     pub computer: bool,
+    /// The built-in browser is armed for this chat (the composer's Browser
+    /// chip). Read-only in the prompt sense: the tools are only *offered* when
+    /// it is on, and a stale plan that names one gets a clear refusal.
+    pub browser: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -903,6 +909,13 @@ pub fn is_read_only(name: &str) -> bool {
     }
     if crate::computer::is_computer_tool(name) {
         return crate::computer::is_read_only(name);
+    }
+    // Browser tools are not in this module's `specs()` either, so they are
+    // mapped explicitly — and that is what makes Plan and Review work on a
+    // browser for free: `is_blocked_in_plan` is `!is_read_only`, so getting
+    // this arm right is the whole of the read-only mode's behaviour.
+    if crate::browser::is_browser_tool(name) {
+        return crate::browser::is_read_only(name);
     }
     spec(name).map(|tool| tool.read_only).unwrap_or(false)
 }
@@ -2006,6 +2019,7 @@ mod tests {
         ToolContext {
             workdir: Some(root.to_path_buf()),
             computer: false,
+            browser: false,
         }
     }
 
@@ -2482,6 +2496,34 @@ mod tests {
         for name in ["run_command", LIST_COMMANDS, COMMAND_OUTPUT, STOP_COMMAND] {
             assert!(spec(name).is_some(), "{name} must be in specs()");
             assert!(!name.starts_with("mcp__"), "{name} collides with MCP");
+        }
+    }
+
+    #[test]
+    fn browser_tools_are_classified_for_read_only_modes() {
+        // The two properties that make Plan and Review work on a browser
+        // without a line of mode-specific code: every looking tool is
+        // read-only, and no acting tool is.
+        assert!(is_read_only("browser_snapshot"));
+        assert!(is_read_only("browser_read"));
+        assert!(!is_read_only("browser_click"));
+        assert!(!is_read_only("browser_type"));
+        assert!(!is_blocked_in_plan("browser_snapshot"));
+        assert!(is_blocked_in_plan("browser_click"));
+        // And a browser tool is not mistaken for one of this module's.
+        assert!(spec("browser_snapshot").is_none());
+    }
+
+    #[test]
+    fn chat_refuses_every_browser_tool() {
+        // Fail-closed and exact-match: `CHAT_TOOLS` names four tools, so the
+        // browser is refused in Chat with no work at all. Asserted anyway,
+        // because "no work needed" is the kind of claim that rots.
+        for name in crate::browser::TOOLS {
+            assert!(
+                !is_allowed_in_chat(name),
+                "{name} must be refused in Chat mode"
+            );
         }
     }
 

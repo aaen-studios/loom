@@ -170,6 +170,32 @@ pub fn pty_list(state: State<'_, AppState>) -> Vec<loom_core::pty::PtyInfo> {
    instead of each applying its own optimistic edit.
 --------------------------------------------------------------------------- */
 
+/// What a resolve is being asked, which changes the answer for the one case
+/// that has two of them.
+///
+/// `resolve` used to take only a workdir, and that conflated two different
+/// questions: "what should this folder look like when it is opened cold" and
+/// "what does this folder look like right now, given what was just written".
+/// Both are legitimate, they disagree about exactly one field — `open` — and
+/// asking the cold question after a write is what made the Panels menu do
+/// nothing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Resolve {
+    /// A read: what a window should show when it opens, or when it asks.
+    ///
+    /// A folder with no entry of its own is *closed* — Loom opens on the
+    /// conversation and a panel is something you ask for. See the note below on
+    /// why that has to be enforced here rather than left to the default.
+    Cold,
+    /// The read-back that follows a write: adopt what was written.
+    ///
+    /// The layout passed to `set_dock_layout` is a decision the user just made,
+    /// including which zones they opened. Re-closing it is not a rule being
+    /// applied, it is the user's own click being thrown away — and because the
+    /// result is broadcast, it throws away the *panel*, not just the flag.
+    Written,
+}
+
 /// The layout for a folder: its own if it has one, nothing open if it has not.
 ///
 /// ## Why the default is forced closed rather than read from the config
@@ -179,25 +205,37 @@ pub fn pty_list(state: State<'_, AppState>) -> Vec<loom_core::pty::PtyInfo> {
 /// be the wrong kind of help.
 ///
 /// A folder with no entry of its own is the case this function exists to get
-/// right. It used to return `dock_default` as stored, and that conflates two
-/// different things: "what a fresh folder should look like" and "what the user
-/// last did". Closing a panel while no folder is active writes through to
-/// `dock_default`, so a stored `open: true` there is not a preference anyone
-/// expressed about *this* folder — and it was in practice the residue of a
-/// shipped default that opened the chats list on every launch.
+/// right, and `mode` decides which of the two answers applies.
 ///
-/// So the default supplies the zones, their panels and their sizes, and no zone
-/// is open. Loom opens on the conversation; a panel is something you ask for.
-/// This is what makes that true for configs already on disk rather than only for
-/// new ones, which matters because the old default is *in* those files.
-fn resolve(config: &AppConfig, workdir: Option<&str>) -> DockLayout {
+/// It used to return `dock_default` as stored, and that conflates two different
+/// things: "what a fresh folder should look like" and "what the user last did".
+/// Closing a panel while no folder is active writes through to `dock_default`,
+/// so a stored `open: true` there is not a preference anyone expressed about
+/// *this* folder — it was in practice the residue of a shipped default that
+/// opened the chats list on every launch.
+///
+/// So a **cold** resolve supplies the zones, their panels and their sizes, and
+/// no zone is open. Loom opens on the conversation; a panel is something you ask
+/// for. This is what makes that true for configs already on disk rather than
+/// only for new ones, which matters because the old default is *in* those files.
+///
+/// A **written** resolve is the other half, and leaving it out was the bug. With
+/// no folder active, `write()` sends `workdir: null`, so opening a panel stores
+/// it in `dock_default` and the broadcast that follows resolved cold — returning
+/// every zone closed, which `applyRemote` then wrote over the optimistic local
+/// state. The panel opened and vanished in the same frame. A cold-resolve rule
+/// is a rule about *first sight* of a folder; applying it to a layout that had
+/// just been edited is how a deliberate open got discarded.
+fn resolve(config: &AppConfig, workdir: Option<&str>, mode: Resolve) -> DockLayout {
     if let Some(layout) = workdir.and_then(|path| config.dock.get(path)) {
         return layout.clone().validated();
     }
 
     let mut layout = config.dock_default.clone();
-    for zone in &mut layout.zones {
-        zone.open = false;
+    if mode == Resolve::Cold {
+        for zone in &mut layout.zones {
+            zone.open = false;
+        }
     }
     // Repaired on the way out as well as the way in: a config older than this
     // build could hold a size this one would refuse to draw.
@@ -215,7 +253,9 @@ struct DockWire {
 
 #[tauri::command]
 pub fn dock_layout(state: State<'_, AppState>, workdir: Option<String>) -> DockLayout {
-    resolve(&state.snapshot(), workdir.as_deref())
+    // A read, so the cold rule applies: a folder with no arrangement of its own
+    // opens on the conversation.
+    resolve(&state.snapshot(), workdir.as_deref(), Resolve::Cold)
 }
 
 /// Stores a folder's arrangement and tells every window about it.
@@ -239,7 +279,11 @@ pub fn set_dock_layout(
         None => config.dock_default = layout,
     })?;
 
-    let resolved = resolve(&updated, workdir.as_deref());
+    // `Written`, not `Cold`. This layout is what the user just asked for, so
+    // the broadcast has to carry it back — including any zone they opened. A
+    // cold resolve here would close every panel the moment it was opened, in
+    // the state the app starts in and in any folder without a saved entry.
+    let resolved = resolve(&updated, workdir.as_deref(), Resolve::Written);
     let _ = app.emit(
         "loom://dock",
         DockWire {

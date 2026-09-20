@@ -352,6 +352,31 @@ export function TrashIcon(props: IconProps) {
   );
 }
 
+/** A clock face: waiting for a page to reach a state. */
+export function ClockIcon(props: IconProps) {
+  return (
+    <Icon {...props}>
+      <circle cx="12" cy="12" r="8.5" />
+      <path d="M12 7.5V12l3 1.8" />
+    </Icon>
+  );
+}
+
+/**
+ * A shield: content blocking, and the blocked count beside it.
+ *
+ * Drawn as a shield rather than a crossed circle deliberately — the browser's
+ * blocking is *filters*, not a prohibition, and a shield is the glyph every
+ * blocker uses for the same thing.
+ */
+export function ShieldIcon(props: IconProps) {
+  return (
+    <Icon {...props}>
+      <path d="M12 3.5 5 6.2v5.1c0 4.2 2.9 7.6 7 9.2 4.1-1.6 7-5 7-9.2V6.2z" />
+    </Icon>
+  );
+}
+
 export function RefreshIcon(props: IconProps) {
   return (
     <Icon {...props}>

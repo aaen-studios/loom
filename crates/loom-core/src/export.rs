@@ -118,6 +118,7 @@ mod tests {
             permission_mode: None,
             agent_mode: None,
             computer_access: false,
+            browser_access: false,
             position: None,
             created_at: 0,
             updated_at: 0,

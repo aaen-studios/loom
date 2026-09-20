@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { cn } from "../lib/cn";
 import { parseUserPrefix } from "../lib/commands";
 import { compactTokens } from "../lib/format";
@@ -258,21 +258,53 @@ function MessageContentView({ content }: { content: string }) {
 const NO_TOOLS: ToolCallRecord[] = [];
 const NO_REASONING: ReasoningBlock[] = [];
 
-function MessageRow({
-  message,
-  streaming,
-  revealThinking,
-  onRevealThinking,
-  selected,
-  toolDisplay,
-}: {
+type MessageRowProps = {
   message: Message;
   streaming: boolean;
   revealThinking: boolean;
   onRevealThinking: () => void;
   selected: boolean;
   toolDisplay: ToolCallDisplay;
-}) {
+};
+
+/**
+ * Whether a row would draw anything different.
+ *
+ * `onRevealThinking` is deliberately left out. The call site builds a fresh
+ * closure on every render, so a shallow compare would see a changed prop every
+ * time and the memo would never skip a row — which is the whole reason this
+ * comparison exists. Leaving it out is safe because that closure only calls
+ * `setRevealed`, a `useState` setter that is stable for the life of the canvas,
+ * and closes over `message.id`, which cannot change for a row that keeps its
+ * key. The state it flips comes back in as `revealThinking`, and that *is*
+ * compared.
+ *
+ * Without this, a delta re-rendered every message in the transcript: the store
+ * builds a new `messages` array, and each row re-parsed its own markdown. The
+ * streaming row still re-renders, because its `message` is a new object — the
+ * one row that should.
+ */
+function messageRowPropsMatch(
+  previous: MessageRowProps,
+  next: MessageRowProps,
+): boolean {
+  return (
+    previous.message === next.message &&
+    previous.streaming === next.streaming &&
+    previous.revealThinking === next.revealThinking &&
+    previous.selected === next.selected &&
+    previous.toolDisplay === next.toolDisplay
+  );
+}
+
+const MessageRow = memo(function MessageRow({
+  message,
+  streaming,
+  revealThinking,
+  onRevealThinking,
+  selected,
+  toolDisplay,
+}: MessageRowProps) {
   const attachments = parseAttachments(message.extra);
   const usage = parseUsage(message.extra);
   const notice = parseNotice(message.extra);
@@ -404,7 +436,7 @@ function MessageRow({
       <MessageActions message={message} onRevealThinking={onRevealThinking} />
     </div>
   );
-}
+}, messageRowPropsMatch);
 
 /**
  * A turn that ended early: a limit, a provider refusal, a loop.

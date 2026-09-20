@@ -202,6 +202,29 @@ export const DEFAULT_CONFIG: AppConfig = {
     lineHeight: 130,
     webgl: false,
   },
+  // Mirrors `BrowserConfig::default()` in `config.rs`.
+  browser: {
+    // See and Act are on; Dev — `browser_evaluate`'s arbitrary JavaScript, and
+    // the cookie and storage writers — ships off, because an escape hatch should
+    // be a decision the user makes rather than one they discover.
+    tiers: ["see", "act"],
+    screenshotEdge: 0,
+    variant: "low",
+    model: null,
+    preferOverFetch: true,
+    downloadDestination: "downloads",
+    openLinksInBrowser: true,
+    blockedOrigins: [],
+    maxSteps: 80,
+    blocking: {
+      // Mirrors `BlockingConfig::default()`: on, with the two lists that
+      // between them catch most of what "an ad blocker" means.
+      enabled: true,
+      lists: ["peter-lowe", "easylist"],
+      customLists: [],
+      allow: [],
+    },
+  },
   searchProvider: "auto",
 };
 

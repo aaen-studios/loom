@@ -5,11 +5,13 @@ import { ipc } from "../lib/ipc";
 import { useMenu, clipTop } from "../lib/menu";
 import { AGENT_MODES, PERMISSION_MODES } from "../lib/modes";
 import { isTauri } from "../lib/tauri";
+import { useBrowser } from "../stores/browser";
 import { useChat } from "../stores/chat";
+import { useDock } from "../stores/dock";
 import { currentModel, useProviders } from "../stores/providers";
 import { useSettings } from "../stores/settings";
 import { useUi } from "../stores/ui";
-import type { Workspace } from "../types";
+import type { BrowserTier, Workspace } from "../types";
 import { SearchField } from "./ui";
 
 /**
@@ -19,12 +21,23 @@ import { SearchField } from "./ui";
  * and the common case is three or four folders you can take in at a glance.
  */
 const SEARCH_THRESHOLD = 7;
+
+/**
+ * The empty tier list, shared.
+ *
+ * A `?? []` written inside the selector hands the store a brand-new array on
+ * every read, and `useSettings` compares by identity: the chip re-rendered on
+ * every unrelated store update, twice, because the dev badge reads the same
+ * list. Hoisted, the empty case is one stable reference.
+ */
+const NO_TIERS: BrowserTier[] = [];
 import {
   BrainIcon,
   CheckIcon,
   ChevronDownIcon,
   FolderIcon,
   GitBranchIcon,
+  GlobeIcon,
   PlusIcon,
   SearchIcon,
   TrashIcon,
@@ -376,6 +389,7 @@ export function ModeChip() {
   const setAgentMode = useChat((state) => state.setAgentMode);
   const setPermissionMode = useChat((state) => state.setPermissionMode);
   const setComputerAccess = useChat((state) => state.setComputerAccess);
+  const setBrowserAccess = useChat((state) => state.setBrowserAccess);
   const paused = useChat((state) =>
     session ? Boolean(state.computerPaused[session.id]) : false,
   );
@@ -392,6 +406,15 @@ export function ModeChip() {
   const selectedMode = AGENT_MODES.find((mode) => mode.id === agent);
   const selectedPermission = PERMISSION_MODES.find((mode) => mode.id === permission);
   const computerOn = session?.computerAccess ?? false;
+  const browserOn = session?.browserAccess ?? false;
+  // The dev tier holds `browser_evaluate` and the cookie writer. Saying which
+  // is on beats the model discovering it one refused call at a time — and
+  // Chat mode refuses the browser outright rather than narrowing it, so there
+  // is no badge to show there.
+  const browserTiers = useSettings(
+    (state) => state.config.browser?.tiers ?? NO_TIERS,
+  );
+  const browserDev = browserTiers.includes("dev");
   // The chat actually driving the machine: every armed chat has a chip, but
   // only one of them owns the mouse, so only that one gets a Stop button.
   const driver = useChat((state) => state.computerDriver);
@@ -659,10 +682,78 @@ export function ModeChip() {
               </>
             )}
           </div>
+
+          <div className="mx-1.5 my-1.5 h-px bg-[var(--glass-border)]" />
+
+          <p className="px-2 pb-1 text-[10px] font-semibold tracking-[0.1em] text-faint uppercase">
+            Browser
+          </p>
+          <div className="flex items-center gap-2.5 rounded-row px-2 py-1.5">
+            <GlobeIcon
+              size={13}
+              className={cn(
+                "shrink-0",
+                browserOn ? "text-[var(--accent)]" : "text-faint",
+              )}
+            />
+            <div className="min-w-0 flex-1">
+              <p className="text-[12.5px] text-soft">Let Loom use the browser</p>
+              <p className="truncate text-[11px] text-faint">
+                {browserOn
+                  ? lookOnly
+                    ? "Reading pages only in this mode"
+                    : browserDev
+                      ? "Pages, tabs, cookies and JavaScript"
+                      : "Pages, tabs and clicks"
+                  : "Off for this chat"}
+              </p>
+            </div>
+            <button
+              type="button"
+              onClick={() => {
+                // Off is a revocation, not a note for later: the engine stops
+                // the turn, so there is no Stop button to offer beside it.
+                void setBrowserAccess(!browserOn);
+                // Opening the panel is what makes the chip useful — an armed
+                // browser with nowhere to show a page is a switch that does
+                // nothing visible.
+                if (!browserOn) openBrowserPanel();
+              }}
+              aria-label="Browser use"
+              role="switch"
+              aria-checked={browserOn}
+              className={cn(
+                "relative h-[18px] w-8 shrink-0 rounded-full border transition",
+                browserOn
+                  ? "border-transparent bg-[var(--accent)]"
+                  : "border-[var(--glass-border-strong)] bg-[var(--ink-ghost)]",
+              )}
+            >
+              <span
+                className={cn(
+                  "absolute top-1/2 h-3 w-3 -translate-y-1/2 rounded-full bg-white shadow-sm transition-all",
+                  browserOn ? "left-[16px]" : "left-[2px]",
+                )}
+              />
+            </button>
+          </div>
         </LiquidSurface>
       )}
     </div>
   );
+}
+
+/**
+ * Opens the browser panel, in the active chat's folder.
+ *
+ * Through the dock store rather than a bespoke window call, so the panel obeys
+ * the same rules as every other: it goes to its own edge, it is draggable, it
+ * can be torn off, and its arrangement is remembered per folder.
+ */
+function openBrowserPanel() {
+  const dock = useDock.getState();
+  dock.openPanel("browser", "right");
+  void useBrowser.getState().load();
 }
 
 const AGENT_NOTES: Record<string, string> = {

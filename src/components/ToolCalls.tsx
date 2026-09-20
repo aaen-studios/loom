@@ -18,6 +18,7 @@ import {
   CameraIcon,
   CheckIcon,
   ChevronDownIcon,
+  ClockIcon,
   CopyIcon,
   DownloadIcon,
   EditIcon,
@@ -25,10 +26,12 @@ import {
   FileIcon,
   FolderIcon,
   GitBranchIcon,
+  GlobeIcon,
   PersonIcon,
   SearchIcon,
   SparkIcon,
   StopIcon,
+  TerminalIcon,
   TrashIcon,
   WrenchIcon,
 } from "./icons";
@@ -204,6 +207,193 @@ function describe(call: ToolCallRecord): Look {
         label: "Asked a question",
         detail: str(args.question),
         inline: true,
+      };
+    // Browser tools (only offered while the chat's Browser chip is on).
+    //
+    // One case per tool rather than an arm keyed on the `browser_` prefix,
+    // because the detail line is the part that matters: "to example.com/login"
+    // and "[4] Sign in" are what let a reader follow a long page task, and a
+    // generated label would say "browser click" for both.
+    case "browser_open":
+      return {
+        icon: <GlobeIcon size={13} />,
+        label: running ? "Opening" : "Opened",
+        detail: str(args.url),
+        inline: true,
+      };
+    case "browser_tabs":
+      return {
+        icon: <GlobeIcon size={13} />,
+        label: running ? "Listing tabs" : "Listed tabs",
+        detail: null,
+        inline: true,
+      };
+    case "browser_snapshot":
+      return {
+        icon: <SearchIcon size={13} />,
+        label: running ? "Looking at the page" : "Looked at the page",
+        detail: str(args.selector) ?? null,
+        inline: true,
+      };
+    case "browser_read":
+      return {
+        icon: <FileIcon size={13} />,
+        label: running ? "Reading" : "Read",
+        detail: str(args.selector) ?? null,
+        inline: true,
+      };
+    case "browser_find":
+      return {
+        icon: <SearchIcon size={13} />,
+        label: running ? "Finding" : "Found",
+        detail: str(args.text),
+        inline: true,
+      };
+    case "browser_wait":
+      return {
+        icon: <ClockIcon size={13} />,
+        label: running ? "Waiting" : "Waited",
+        detail:
+          str(args.selector) ??
+          str(args.text) ??
+          str(args.url_matches) ??
+          (args.idle ? "for the page to settle" : "for the network"),
+        inline: true,
+      };
+    case "browser_assert":
+      return {
+        icon: <CheckIcon size={13} />,
+        label: running ? "Checking" : "Checked",
+        detail: str(args.value) ?? str(args.check),
+        inline: true,
+      };
+    case "browser_screenshot":
+      return {
+        icon: <CameraIcon size={13} />,
+        label: running ? "Capturing the page" : "Captured the page",
+        detail: str(args.mode) ?? "viewport",
+        inline: true,
+      };
+    case "browser_console":
+      return {
+        icon: <TerminalIcon size={13} />,
+        label: running ? "Reading the console" : "Read the console",
+        detail: null,
+        inline: true,
+      };
+    case "browser_navigate":
+      return {
+        icon: <GlobeIcon size={13} />,
+        label: running ? "Navigating" : "Navigated",
+        detail: str(args.url) ?? str(args.action),
+        inline: true,
+      };
+    case "browser_tab":
+      return {
+        icon: <GlobeIcon size={13} />,
+        label: running ? "Managing a tab" : "Managed a tab",
+        detail: str(args.action),
+        inline: true,
+      };
+    case "browser_click":
+      return {
+        icon: <WrenchIcon size={13} />,
+        label: running ? "Clicking" : "Clicked",
+        detail: str(args.target),
+        inline: true,
+      };
+    case "browser_type":
+      return {
+        icon: <WrenchIcon size={13} />,
+        label: running ? "Typing" : "Typed",
+        // The *target*, not the text: a value typed into a form is the user's
+        // data, and the transcript is not the place to echo it.
+        detail: str(args.target),
+        inline: true,
+      };
+    case "browser_press":
+      return {
+        icon: <WrenchIcon size={13} />,
+        label: running ? "Pressing" : "Pressed",
+        detail: str(args.key),
+        inline: true,
+      };
+    case "browser_select":
+      return {
+        icon: <WrenchIcon size={13} />,
+        label: running ? "Selecting" : "Selected",
+        detail: str(args.label) ?? str(args.value),
+        inline: true,
+      };
+    case "browser_check":
+      return {
+        icon: <CheckIcon size={13} />,
+        label: running ? "Toggling" : "Toggled",
+        detail: str(args.target),
+        inline: true,
+      };
+    case "browser_hover":
+      return {
+        icon: <WrenchIcon size={13} />,
+        label: running ? "Hovering" : "Hovered",
+        detail: str(args.target),
+        inline: true,
+      };
+    case "browser_scroll":
+      return {
+        icon: <ChevronDownIcon size={13} />,
+        label: running ? "Scrolling" : "Scrolled",
+        detail: args.amount != null ? `${str(args.amount)}px` : null,
+        inline: true,
+      };
+    case "browser_fill_form":
+      return {
+        icon: <WrenchIcon size={13} />,
+        label: running ? "Filling a form" : "Filled a form",
+        detail: Array.isArray(args.fields) ? `${args.fields.length} fields` : null,
+        inline: true,
+      };
+    case "browser_dialog":
+      return {
+        icon: <PersonIcon size={13} />,
+        label: running ? "Answering a dialog" : "Answered a dialog",
+        detail: str(args.action),
+        inline: true,
+      };
+    case "browser_drag":
+      return {
+        icon: <WrenchIcon size={13} />,
+        label: running ? "Dragging" : "Dragged",
+        detail: str(args.to),
+        inline: true,
+      };
+    case "browser_evaluate":
+      return {
+        icon: <TerminalIcon size={13} />,
+        label: running ? "Running script" : "Ran script",
+        detail: str(args.expression),
+        inline: false,
+      };
+    case "browser_cookies":
+      return {
+        icon: <SearchIcon size={13} />,
+        label: running ? "Reading cookies" : "Read cookies",
+        detail: str(args.url) ?? str(args.action),
+        inline: true,
+      };
+    case "browser_storage":
+      return {
+        icon: <SearchIcon size={13} />,
+        label: running ? "Reading storage" : "Read storage",
+        detail: str(args.kind) ?? "local",
+        inline: true,
+      };
+    case "browser_clear_data":
+      return {
+        icon: <TrashIcon size={13} />,
+        label: running ? "Clearing site data" : "Cleared site data",
+        detail: str(args.origin) ?? "everything",
+        inline: false,
       };
     // Computer tools (only offered while the chat's Computer chip is on).
     case "screenshot":
@@ -522,6 +712,33 @@ const RUN_LABELS: Record<string, { active: string; past: string; noun: string }>
   git_status: { active: "Checking git", past: "Checked git", noun: "times" },
   git_diff: { active: "Reading diffs", past: "Read diffs", noun: "times" },
   git_log: { active: "Reading git logs", past: "Read git logs", noun: "times" },
+  // Browser tools. One line each, because a run of twenty page actions
+  // summarized as "browsing × 20" tells a reader nothing about where it went.
+  browser_open: { active: "Opening", past: "Opened", noun: "pages" },
+  browser_tabs: { active: "Listing", past: "Listed", noun: "tabs" },
+  browser_snapshot: { active: "Looking at", past: "Looked at", noun: "pages" },
+  browser_read: { active: "Reading", past: "Read", noun: "pages" },
+  browser_find: { active: "Finding", past: "Found", noun: "times" },
+  browser_wait: { active: "Waiting", past: "Waited", noun: "times" },
+  browser_assert: { active: "Checking", past: "Checked", noun: "times" },
+  browser_screenshot: { active: "Capturing", past: "Captured", noun: "pages" },
+  browser_console: { active: "Reading the console", past: "Read the console", noun: "times" },
+  browser_navigate: { active: "Navigating", past: "Navigated", noun: "times" },
+  browser_tab: { active: "Managing tabs", past: "Managed tabs", noun: "tabs" },
+  browser_click: { active: "Clicking", past: "Clicked", noun: "times" },
+  browser_type: { active: "Typing", past: "Typed", noun: "fields" },
+  browser_press: { active: "Pressing", past: "Pressed", noun: "keys" },
+  browser_select: { active: "Selecting", past: "Selected", noun: "options" },
+  browser_check: { active: "Toggling", past: "Toggled", noun: "checkboxes" },
+  browser_hover: { active: "Hovering", past: "Hovered", noun: "times" },
+  browser_scroll: { active: "Scrolling", past: "Scrolled", noun: "times" },
+  browser_fill_form: { active: "Filling", past: "Filled", noun: "forms" },
+  browser_dialog: { active: "Answering", past: "Answered", noun: "dialogs" },
+  browser_drag: { active: "Dragging", past: "Dragged", noun: "times" },
+  browser_evaluate: { active: "Running script", past: "Ran script", noun: "times" },
+  browser_cookies: { active: "Reading cookies", past: "Read cookies", noun: "times" },
+  browser_storage: { active: "Reading storage", past: "Read storage", noun: "times" },
+  browser_clear_data: { active: "Clearing", past: "Cleared", noun: "sites" },
   todo_write: { active: "Updating", past: "Updated", noun: "task lists" },
   todo_read: { active: "Reading", past: "Read", noun: "task lists" },
   datetime: { active: "Checking the clock", past: "Checked the clock", noun: "times" },

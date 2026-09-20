@@ -2589,6 +2589,7 @@ version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
  "loom-core",
+ "reqwest 0.12.28",
  "serde",
  "serde_json",
  "tauri",
@@ -2601,6 +2602,8 @@ dependencies = [
  "tauri-plugin-single-instance",
  "tokio",
  "uuid",
+ "webview2-com",
+ "windows 0.61.3",
 ]
 
 [[package]]

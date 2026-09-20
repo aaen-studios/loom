@@ -28,6 +28,8 @@ import type {
   AgentMode,
   AppInfo,
   AuxModelRef,
+  BlockingStatus,
+  FilterListPreset,
   MemoryEntry,
   ModelEntry,
   Modality,
@@ -4572,6 +4574,7 @@ function ToolsSection() {
 
   return (
     <>
+      <BlockingSection />
       <Section title="Permissions">
         <Row label="Default mode">
           <Segmented
@@ -4824,5 +4827,210 @@ function ToolsSection() {
         </div>
       </Section>
     </>
+  );
+}
+
+/**
+ * Content blocking for the built-in browser.
+ *
+ * ## What this is, said plainly
+ *
+ * It is **not uBlock Origin**, and it cannot be: WebView2 has no extension API, so
+ * a `.crx` has nowhere to go. That is a property of the substrate and no amount of
+ * wiring changes it.
+ *
+ * What it is, is the technique underneath — the same thing uBlock's network layer
+ * does, one level down. Every request the browser is about to make is offered to
+ * Loom first, and one matching a filter rule is answered with a refusal instead of
+ * being sent. So an ad is never fetched, which is strictly better than blocking its
+ * response after the fact.
+ *
+ * The lists are the real lists. So this catches what an ad blocker catches, with
+ * two honest differences the copy below states rather than buries: it cannot do a
+ * list's *script* injections (no replacing a video player), and a change takes
+ * effect on reload because the filter is installed when a tab is created.
+ */
+function BlockingSection() {
+  const config = useSettings((state) => state.config);
+  const applyRemote = useSettings((state) => state.applyRemote);
+
+  const blocking = config.browser?.blocking;
+  const [status, setStatus] = useState<BlockingStatus | null>(null);
+  const [presets, setPresets] = useState<FilterListPreset[]>([]);
+  const [allowDraft, setAllowDraft] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    void ipc.browserBlockingPresets().then((result) => setPresets(result ?? []));
+  }, []);
+
+  useEffect(() => {
+    void ipc.browserBlockingStatus().then(setStatus);
+  }, [blocking?.enabled, blocking?.lists.length, blocking?.customLists.length]);
+
+  if (!blocking) return null;
+
+  /**
+   * Writes the config, takes the replaced copy, and refreshes the status.
+   *
+   * Two round trips rather than one, and deliberately: the config write and the
+   * filter rebuild are different things on the backend — the first is what the
+   * switch reflects, the second is what the rule count reflects, and the second
+   * is not finished when the first returns.
+   */
+  const save = async (patch: Partial<typeof blocking>) => {
+    const next = { ...blocking, ...patch };
+    setBusy(true);
+    const updated = await ipc.browserSetBlocking(next);
+    if (updated) applyRemote(updated);
+    const fresh = await ipc.browserBlockingStatus();
+    if (fresh) setStatus(fresh);
+    setBusy(false);
+  };
+
+  const toggleList = (id: string) => {
+    const lists = blocking.lists.includes(id)
+      ? blocking.lists.filter((entry) => entry !== id)
+      : [...blocking.lists, id];
+    void save({ lists });
+  };
+
+  // The allow list is a textarea rather than a list of rows: it is edited rarely,
+  // in bursts, and one entry per line is how people actually paste a set of hosts.
+  const allowText = allowDraft ?? blocking.allow.join("\n");
+  const commitAllow = () => {
+    if (allowDraft === null) return;
+    const allow = allowDraft
+      .split("\n")
+      .map((line) => line.trim())
+      .filter(Boolean);
+    setAllowDraft(null);
+    if (allow.join("\n") !== blocking.allow.join("\n")) void save({ allow });
+  };
+
+  const loaded = new Set(
+    (status?.sources ?? []).filter((source) => !source.error).map((source) => source.id),
+  );
+  const failed = (status?.sources ?? []).filter((source) => source.error);
+
+  return (
+    <Section
+      title="Content blocking"
+      description="Filters every request the built-in browser makes, against real ad-blocking filter lists. Not an extension — WebView2 has none — but the same technique one layer down, so an ad is never fetched rather than hidden after it arrives."
+    >
+      <Toggle
+        label="Block ads and trackers"
+        hint={
+          blocking.enabled
+            ? status?.installed
+              ? `${status.rules.toLocaleString()} rules loaded · ${status.blocked.toLocaleString()} requests blocked this session`
+              : busy
+                ? "Downloading filter lists…"
+                : "Downloading filter lists — the first page you open is unfiltered until they land"
+            : "Off: the browser loads everything, exactly as it did before"
+        }
+        checked={blocking.enabled}
+        disabled={busy}
+        onChange={(enabled) => void save({ enabled })}
+      />
+
+      {blocking.enabled && (
+        <>
+          <div className="px-1 py-2">
+            <p className="mb-1.5 text-[13px] text-soft">Lists</p>
+            <div className="flex flex-col gap-0.5">
+              {presets.map((preset) => {
+                const on = blocking.lists.includes(preset.id);
+                return (
+                  <button
+                    key={preset.id}
+                    type="button"
+                    onClick={() => toggleList(preset.id)}
+                    disabled={busy}
+                    className="flex items-center gap-2 rounded-row px-1 py-1 text-left transition hover:bg-[var(--hover-bg)] disabled:opacity-50"
+                  >
+                    <span
+                      aria-hidden="true"
+                      className={cn(
+                        "grid h-3.5 w-3.5 shrink-0 place-items-center rounded-[4px] border",
+                        on
+                          ? "border-transparent bg-[var(--accent)] text-white"
+                          : "border-[var(--glass-border-strong)]",
+                      )}
+                    >
+                      {on && <CheckIcon size={9} />}
+                    </span>
+                    <span className="min-w-0 flex-1 truncate text-[12.5px] text-soft">
+                      {preset.name}
+                    </span>
+                    {/* A list that failed must not look like a list that is off:
+                        one is a choice and the other is a problem. */}
+                    {on && !loaded.has(preset.id) && status && (
+                      <span className="shrink-0 text-[10.5px] text-[var(--danger)]">
+                        not loaded
+                      </span>
+                    )}
+                  </button>
+                );
+              })}
+            </div>
+            {failed.length > 0 && (
+              <p className="mt-1.5 px-1 text-[11.5px] leading-4 text-[var(--danger)]">
+                {failed.length} list{failed.length === 1 ? "" : "s"} could not be
+                downloaded — {failed[0].name}: {failed[0].error}
+              </p>
+            )}
+          </div>
+
+          <Row
+            label="Sites to leave alone"
+            hint="One host per line. A site here is never filtered, so a list that breaks something can be worked around without turning blocking off."
+          >
+            {null}
+          </Row>
+          <div className="px-1 pb-2">
+            <textarea
+              value={allowText}
+              onChange={(event) => setAllowDraft(event.target.value)}
+              onBlur={commitAllow}
+              rows={2}
+              spellCheck={false}
+              placeholder="example.com"
+              className={cn(fieldBase, "w-full font-mono text-[12px]")}
+            />
+          </div>
+
+          <Row
+            label="Apply now"
+            hint="Lists are cached for three days, and the filter is installed when a tab is created — so a change normally takes effect on the next tab. This re-downloads the lists and reloads every open tab."
+          >
+            <button
+              type="button"
+              disabled={busy}
+              onClick={async () => {
+                setBusy(true);
+                const fresh = await ipc.browserRefreshBlocking();
+                if (fresh) setStatus(fresh);
+                await ipc.browserReloadTabs();
+                setBusy(false);
+              }}
+              className="btn-ghost shrink-0 px-2.5 py-1 text-[12px] disabled:opacity-50"
+            >
+              <RefreshIcon size={12} />
+              Refresh
+            </button>
+          </Row>
+
+          <p className="px-1 py-2 text-[12px] leading-5 text-faint">
+            Element hiding is included, so a page shows no holes where the blocked
+            ads were. What is <span className="text-soft">not</span> possible
+            without an extension API is a filter list&apos;s script injections — a
+            rule that replaces a video player or rewrites a page&apos;s own
+            variables is counted and skipped rather than guessed at, so the rule
+            count here is what actually runs.
+          </p>
+        </>
+      )}
+    </Section>
   );
 }

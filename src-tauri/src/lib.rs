@@ -3,6 +3,8 @@
 //! Window/app plumbing only: the engine, storage, providers, and streaming all
 //! live in `loom-core`, so a future CLI can reuse them unchanged.
 
+mod blocker;
+mod browser;
 mod commands;
 mod panels;
 mod voice;
@@ -543,6 +545,56 @@ pub fn run() {
             // torn-off window has to reach the main window too.
             let pty = panels::pty_manager(app.handle());
             app.manage(AppState::new(engine, shared, pty));
+
+            // The built-in browser: hand the engine the shell's host.
+            //
+            // Installed here rather than in `commands.rs` because the host needs
+            // the `AppHandle` — it builds a window per tab — and because a
+            // browser that cannot start must not stop the app. The engine's
+            // `NoBrowser` stub stays in place if this is ever skipped, and every
+            // browser tool then reports that it is unavailable rather than
+            // failing one at a time.
+            //
+            // The tabs themselves hang off `AppState`, beside the pty manager
+            // and for the same reason: a tab is process state, because the panel
+            // showing it can be torn off into a second webview and two webviews
+            // share no JavaScript heap.
+            {
+                let state = app.state::<AppState>();
+                let host = browser::TauriBrowserHost::new(
+                    app.handle().clone(),
+                    std::sync::Arc::clone(&state.browser),
+                );
+                state.engine.set_browser_host(std::sync::Arc::new(host));
+            }
+
+            // Content blocking, fetched before anything can open a tab. Spawned
+            // rather than awaited: it is a few hundred kilobytes over the
+            // network, and a slow or offline fetch must not hold up the window.
+            // Until it lands the blocker is simply empty, and an empty blocker
+            // installs no request filter at all — so the first page a user opens
+            // is unblocked rather than broken, and the next one is not.
+            {
+                let handle = app.handle().clone();
+                tauri::async_runtime::spawn(async move {
+                    let state = handle.state::<AppState>();
+                    let config = state.snapshot().browser.blocking;
+                    if !config.enabled {
+                        return;
+                    }
+                    let client = state.engine.http_client();
+                    let loaded = loom_core::browser::lists::load(&client, &config).await;
+                    let rules = loaded.filters.stats().rules;
+                    state
+                        .browser
+                        .blocker
+                        .set(loaded.filters, config.allow.clone());
+                    if let Ok(mut sources) = state.blocking_sources.lock() {
+                        *sources = loaded.sources;
+                    }
+                    eprintln!("[loom] blocking: {rules} rules loaded");
+                });
+            }
             build_tray(app)?;
 
             // Anything left queued or running by a previous session is not
@@ -650,6 +702,7 @@ pub fn run() {
             commands::set_session_permission_mode,
             commands::set_session_agent_mode,
             commands::set_session_computer_access,
+            commands::set_session_browser_access,
             commands::set_session_goal,
             commands::session_goal,
             commands::session_summary,
@@ -735,6 +788,27 @@ pub fn run() {
             commands::delete_job,
             commands::run_job_now,
             commands::preview_schedule,
+            // The built-in browser: the panel's own commands. The *tools* are
+            // dispatched by the engine through `set_browser_host`; these are the
+            // ones the UI calls directly.
+            browser::browser_open_tab,
+            browser::browser_tabs,
+            browser::browser_close_tab,
+            browser::browser_set_slot,
+            browser::browser_focus_tab,
+            browser::browser_navigate,
+            browser::browser_call,
+            browser::browser_ping,
+            browser::browser_show_panel,
+            browser::browser_set_blocked_origins,
+            // Content blocking: the network half of an ad blocker. WebView2 has
+            // no extension API, so a filter list driving the request filter is
+            // what is available — see `crate::blocker`.
+            browser::browser_blocking_status,
+            browser::browser_blocking_presets,
+            browser::browser_refresh_blocking,
+            browser::browser_set_blocking,
+            browser::browser_reload_tabs,
             commands::list_memories,
             commands::upsert_memory,
             commands::delete_memory,
@@ -752,12 +826,22 @@ pub fn run() {
             panels::open_panel_window,
         ])
         .on_window_event(|window, event| {
-            // Close-to-tray: streams keep running in the background.
-            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
-                if window.label() == "main" {
-                    api.prevent_close();
-                    let _ = window.hide();
+            match event {
+                // Close-to-tray: streams keep running in the background.
+                tauri::WindowEvent::CloseRequested { api, .. } => {
+                    if window.label() == "main" {
+                        api.prevent_close();
+                        let _ = window.hide();
+                    }
                 }
+                // A torn-off browser panel going away must not take the pages
+                // with it: the tabs belong to the app, not to the window that was
+                // showing them, so they are moved back to the main window rather
+                // than closed.
+                tauri::WindowEvent::Destroyed => {
+                    browser::on_host_destroyed(window.app_handle(), window.label());
+                }
+                _ => {}
             }
         })
         .build(context)

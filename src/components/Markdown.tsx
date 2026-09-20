@@ -2,6 +2,10 @@ import { lazy, Suspense, type MouseEvent } from "react";
 import type { CustomRenderer, CustomRendererProps, PluginConfig } from "streamdown";
 import { GENERATED_UI_LANGUAGE, safeExternalUrl } from "../lib/generatedUi";
 import { openExternal } from "../lib/tauri";
+import { useBrowser } from "../stores/browser";
+import { useChat } from "../stores/chat";
+import { useDock } from "../stores/dock";
+import { useSettings } from "../stores/settings";
 import { CheckIcon, CopyIcon, ExternalLinkIcon } from "./icons";
 
 /** Fence languages a document is expected to arrive in. */
@@ -148,13 +152,48 @@ function MarkdownDocSlot(props: CustomRendererProps) {
   );
 }
 
-/** Links leave the app: the webview must never navigate away from Loom. */
+/**
+ * Links leave the app — the webview must never navigate away from Loom — but
+ * *which* browser they leave to depends on what the chat may do.
+ *
+ * With the Browser chip armed, a link opens a tab in Loom's own browser, which
+ * is the point of having one: it is where the model is already working, and the
+ * page it is reading is one click from what it just told you. **Ctrl+click** (or
+ * ⌘) opens the OS browser instead, because that is the habit for "I want this
+ * somewhere else", and it means the escape hatch is always one keystroke away
+ * rather than a settings trip.
+ *
+ * Without the chip armed, nothing changes: links go to the OS browser as they
+ * always have. A user who has not turned the browser on has not asked for Loom
+ * to start handling their links.
+ *
+ * Read through `getState()` rather than hooks: this is an event handler, and the
+ * values it needs are decisions made at click time, not at render time.
+ */
 function handleLinkClick(event: MouseEvent<HTMLDivElement>) {
   const anchor = (event.target as Element | null)?.closest("a[href]");
   if (!anchor) return;
   event.preventDefault();
   const url = safeExternalUrl(anchor.getAttribute("href") ?? "");
-  if (url) openExternal(url);
+  if (!url) return;
+
+  const wantsElsewhere = event.ctrlKey || event.metaKey;
+  const armed = useChat.getState().sessions.some(
+    (session) =>
+      session.id === useChat.getState().activeId && session.browserAccess,
+  );
+  const configured = useSettings.getState().config.browser?.openLinksInBrowser ?? true;
+
+  if (!wantsElsewhere && armed && configured) {
+    // Docking the panel first means the tab has a slot to be placed in: a tab
+    // opened while the panel is closed is created in the main window and parked,
+    // which is a working page nobody can see. Opening the panel is also the
+    // honest signal that Loom is about to handle this link.
+    useDock.getState().openPanel("browser", "right");
+    void useBrowser.getState().open(url);
+    return;
+  }
+  openExternal(url);
 }
 
 /**

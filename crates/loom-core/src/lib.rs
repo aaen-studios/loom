@@ -7,12 +7,14 @@
 
 pub mod attachments;
 pub mod backgrounds;
+pub mod browser;
 pub mod catalog;
 pub mod computer;
 pub mod condense;
 pub mod config;
 pub mod context;
 pub mod db;
+mod db_reentry;
 pub mod dock;
 pub mod embeddings;
 pub mod engine;

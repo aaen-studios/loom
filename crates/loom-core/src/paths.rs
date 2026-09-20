@@ -71,6 +71,29 @@ pub fn scratch_dir() -> Result<PathBuf> {
     Ok(loom_home()?.join("scratch"))
 }
 
+/// `~/.loom/browser/` — the built-in browser's own WebView2 profile.
+///
+/// Its own directory rather than the app's own profile, and that separation is
+/// the point: browsing a page must not be able to touch Loom's own storage, and
+/// clearing the browser's cookies must not reset the app. It is also what makes
+/// a Ghost tab meaningful — an in-private webview shares no data with this one.
+///
+/// Already inside the `asset:` scope in `tauri.conf.json` (`$HOME/.loom/**`), so
+/// a downloaded file or a saved page shot can be rendered in the transcript
+/// without widening the scope.
+pub fn browser_dir() -> Result<PathBuf> {
+    Ok(loom_home()?.join("browser"))
+}
+
+/// `~/.loom/browser/downloads/` — where a *ghost* tab's downloads land.
+///
+/// The normal profile's downloads go to the OS Downloads folder, like any
+/// browser. A ghost tab writes here instead, so a private download cannot leave
+/// a record in the user's own folder.
+pub fn browser_downloads_dir() -> Result<PathBuf> {
+    Ok(browser_dir()?.join("downloads"))
+}
+
 /// Creates the home directory and its standard subdirectories.
 pub fn ensure_home() -> Result<PathBuf> {
     let home = loom_home()?;
@@ -83,6 +106,7 @@ pub fn ensure_home() -> Result<PathBuf> {
         home.join("backups"),
         home.join("scratch"),
         home.join("voice"),
+        home.join("browser"),
     ] {
         std::fs::create_dir_all(&dir).map_err(|e| Error::io(&dir, e))?;
     }

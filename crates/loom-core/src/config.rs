@@ -68,6 +68,9 @@ pub struct AppConfig {
     pub dock_default: DockLayout,
     /// How the terminal renders.
     pub terminal: TerminalConfig,
+    /// The built-in browser: which of its tools a chat is offered, how big its
+    /// screenshots are, and what the model does when it needs a page.
+    pub browser: BrowserConfig,
     /// Which service backs the web tools.
     pub search_provider: SearchProvider,
     #[serde(flatten)]
@@ -96,6 +99,7 @@ impl Default for AppConfig {
             dock: DockLayouts::new(),
             dock_default: DockLayout::default(),
             terminal: TerminalConfig::default(),
+            browser: BrowserConfig::default(),
             search_provider: SearchProvider::default(),
             extra: serde_json::Map::new(),
         }
@@ -993,6 +997,138 @@ impl Default for InterfaceConfig {
             auto_memory: true,
             glass: GlassConfig::default(),
         }
+    }
+}
+
+/// The built-in browser.
+///
+/// Config rather than per-chat state, because most of these are one decision
+/// for the whole app: how big a screenshot is, whether the model may fall back
+/// to `fetch_url`, and which tiers of tool it is even offered.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct BrowserConfig {
+    /// Which tiers of browser tool a chat is offered.
+    ///
+    /// `See` and `Act` are on; `Dev` — `browser_evaluate`'s arbitrary
+    /// JavaScript, and the cookie and storage writers — ships off, because an
+    /// escape hatch should be a decision the user makes rather than one they
+    /// discover. Nothing here is a *permission*: the composer's Browser chip is
+    /// the consent, and this only decides which schemas a chat pays for.
+    pub tiers: Vec<crate::browser::Tier>,
+    /// Longest edge of a browser screenshot, 0 for native resolution. Matches
+    /// computer use's quality-first default rather than the overlay's 1568,
+    /// because a page is usually being read rather than glanced at.
+    pub screenshot_edge: u32,
+    /// Reasoning variant browser turns run with when the chat has no explicit
+    /// one. Driving a page is not a reasoning-heavy task and the round trip
+    /// dominates, so the default skips deep thinking.
+    pub variant: Option<String>,
+    /// Model used only while the Browser chip is armed, so a slow main model
+    /// can hand the wheel to a fast one. `None` keeps the chat's own.
+    pub model: Option<ModelRef>,
+    /// Tell the model to prefer the browser over `fetch_url` when armed.
+    ///
+    /// Both tools stay available either way; this only sets the expectation in
+    /// the prompt. Off is the honest choice for a chat that mostly reads pages,
+    /// because a fetch costs no tab and no page load.
+    pub prefer_over_fetch: bool,
+    /// Where a downloaded file lands: `downloads` for the OS folder, `loom` for
+    /// `~/.loom/browser/downloads`, or any absolute path. Ghost tabs always use
+    /// `loom`, so a private download cannot leave a record in the user's own
+    /// folder.
+    pub download_destination: String,
+    /// Open a link in a reply in Loom's browser rather than the OS one.
+    /// Ctrl+click does the opposite either way.
+    pub open_links_in_browser: bool,
+    /// Origins the browser refuses to load, whatever the model asks for.
+    ///
+    /// Empty by default, and read by the *host* rather than by a tool, so no
+    /// tool call can route around it. This is the one guardrail that sits below
+    /// the model, which is why it is a setting rather than a prompt.
+    pub blocked_origins: Vec<String>,
+    /// Step budget for a browser turn, used when the chat's own is lower.
+    ///
+    /// A page task is many small round trips — click, wait, assert — and the
+    /// default 40 runs out mid-task on anything real. Browser turns raise it
+    /// the same way computer turns do, and for the same reason.
+    pub max_steps: u32,
+    /// Content blocking: the network half of what an ad blocker does.
+    pub blocking: BlockingConfig,
+}
+
+/// Content blocking.
+///
+/// # Why this is not uBlock Origin
+///
+/// It cannot be. WebView2 has **no extension API at all**, so a `.crx` has
+/// nowhere to go. That is a property of the substrate and no amount of wiring
+/// changes it.
+///
+/// What *is* available is the technique uBlock is built on, one layer down:
+/// WebView2 offers every request to the host before it goes out
+/// (`AddWebResourceRequestedFilter` + `add_WebResourceRequested`) and lets the
+/// host answer it, so a request matching a filter rule is never made. The engine
+/// in `browser/filters.rs` reads the same lists, and element hiding is covered
+/// too, through the injected collector.
+///
+/// The honest difference, in one line: this works at the *network*, so it cannot
+/// do the page-level tricks a script injection can — replacing a video ad's
+/// player, or rewriting a page's own variables.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct BlockingConfig {
+    /// Off means no request filter is installed at all, so a browser with this
+    /// switched off costs exactly what it did before the feature existed.
+    pub enabled: bool,
+    /// Which presets are on, by id — see [`crate::browser::LIST_PRESETS`].
+    pub lists: Vec<String>,
+    /// Extra list URLs the user added.
+    pub custom_lists: Vec<String>,
+    /// Hosts and domains that are never blocked, for a site a list breaks.
+    ///
+    /// Checked before every rule, including `$important` ones: an allow list
+    /// that a rule can outrank is not an allow list.
+    pub allow: Vec<String>,
+}
+
+impl Default for BrowserConfig {
+    fn default() -> Self {
+        Self {
+            tiers: crate::browser::default_tiers(),
+            screenshot_edge: 0,
+            variant: Some("low".to_string()),
+            model: None,
+            prefer_over_fetch: true,
+            download_destination: "downloads".to_string(),
+            open_links_in_browser: true,
+            blocked_origins: Vec::new(),
+            max_steps: 80,
+            blocking: BlockingConfig::default(),
+        }
+    }
+}
+
+impl Default for BlockingConfig {
+    fn default() -> Self {
+        Self {
+            // On by default: someone who turns the built-in browser on has
+            // asked for a browser, and a browser without a blocker in 2026 is
+            // not the thing they asked for. Two lists that between them catch
+            // most of what "an ad blocker" means, and both are hosts/EasyList
+            // format so the first fetch is small.
+            enabled: true,
+            lists: vec!["peter-lowe".to_string(), "easylist".to_string()],
+            custom_lists: Vec::new(),
+            allow: Vec::new(),
+        }
+    }
+}
+
+impl BrowserConfig {
+    /// Whether this config offers the tool at all.
+    pub fn offers(&self, name: &str) -> bool {
+        crate::browser::tier_enabled(&self.tiers, name)
     }
 }
 

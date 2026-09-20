@@ -1,6 +1,8 @@
 import { useEffect } from "react";
 import type { EngineEvent } from "../types";
+import type { BrowserWire } from "./ipc";
 import { useTauriEvent } from "./listen";
+import { useBrowser } from "../stores/browser";
 import { useChat } from "../stores/chat";
 import { useDock } from "../stores/dock";
 import { usePty } from "../stores/pty";
@@ -123,6 +125,22 @@ export function usePanelEvents(): void {
 }
 
 /**
+ * Subscribes the browser panel to its channel.
+ *
+ * On its own channel rather than `loom://event`, for the reason the pty has
+ * one: a console-emitting page produces traffic at whatever rate the page
+ * decides, and it must not be routed through every store subscription in the
+ * app. Broadcast rather than targeted because a torn-off browser panel is a
+ * second webview with its own heap — so it has to be told, not read shared
+ * state.
+ */
+export function useBrowserEvents(): void {
+  useTauriEvent<BrowserWire>("loom://browser", (payload) => {
+    useBrowser.getState().applyRemote(payload);
+  });
+}
+
+/**
  * Subscribes the voice store to its event channels.
  *
  * Stays a store method rather than four hooks, because dictation has to reach
@@ -175,5 +193,14 @@ export function useShellEvents(): void {
   // turn that is already over.
   useTauriEvent<string | null>("loom://computer-stopped", (sessionId) => {
     useChat.getState().noteComputerStopped(sessionId ?? null);
+  });
+
+  // A detached run, a scheduled job or the tray asking for the browser: the
+  // backend cannot open a dock panel itself, so it asks the UI to. Routing it
+  // through the dock store rather than a bespoke window call means the panel
+  // lands on its own edge and is draggable like every other.
+  useTauriEvent<void>("loom://browser-show-panel", () => {
+    useDock.getState().openPanel("browser", "right");
+    void useBrowser.getState().load();
   });
 }

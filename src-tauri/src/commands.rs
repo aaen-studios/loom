@@ -9,6 +9,7 @@ use tauri_plugin_autostart::ManagerExt;
 
 use loom_core::config::AppConfig;
 use loom_core::db::{Job, Memory, Message, Session, Task};
+use loom_core::engine::lock_config;
 use loom_core::engine::{Engine, SharedConfig};
 use loom_core::persona::Persona;
 use loom_core::provider::{
@@ -32,6 +33,18 @@ pub struct AppState {
     pub dictation: crate::voice::DictationService,
     /// Whether an install is running, so two cannot start at once.
     pub installing: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// The built-in browser's tabs.
+    ///
+    /// Here for the same reason the pty manager is: a tab is a process-side
+    /// object, and the panel can be torn off into a second window with its own
+    /// JavaScript heap. Two webviews cannot share a store, so the tabs belong to
+    /// the process.
+    pub browser: std::sync::Arc<crate::browser::BrowserState>,
+    /// Which filter lists loaded, and which failed. Held here rather than in the
+    /// blocker so a *failed* list is still reportable — the blocker only knows
+    /// what it ended up with, which is exactly the state that cannot say
+    /// "EasyPrivacy did not download".
+    pub blocking_sources: std::sync::Mutex<Vec<loom_core::browser::lists::SourceStatus>>,
 }
 
 impl AppState {
@@ -47,11 +60,13 @@ impl AppState {
             voice: crate::voice::VoiceService::new(),
             dictation: crate::voice::DictationService::new(),
             installing: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            browser: std::sync::Arc::new(crate::browser::BrowserState::default()),
+            blocking_sources: std::sync::Mutex::new(Vec::new()),
         }
     }
 
     pub fn snapshot(&self) -> AppConfig {
-        self.config.lock().expect("config mutex poisoned").clone()
+        lock_config(&self.config).clone()
     }
 
     /// Saves the whole config back to disk.
@@ -61,7 +76,7 @@ impl AppState {
     /// mutex discipline, rather than a second implementation of it.
     pub(crate) fn mutate(&self, change: impl FnOnce(&mut AppConfig)) -> Result<AppConfig, String> {
         let snapshot = {
-            let mut guard = self.config.lock().expect("config mutex poisoned");
+            let mut guard = lock_config(&self.config);
             change(&mut guard);
             guard.clone()
         };
@@ -75,7 +90,7 @@ impl AppState {
     fn harness_mutate(&self, name: &str, args: serde_json::Value) -> Result<AppConfig, String> {
         let section = loom_core::harness::section_of(name);
         let snapshot = {
-            let mut guard = self.config.lock().expect("config mutex poisoned");
+            let mut guard = lock_config(&self.config);
             if let Err(error) = loom_core::harness::backup(&guard) {
                 eprintln!("[loom] harness backup failed: {error}");
             }
@@ -750,6 +765,18 @@ pub fn set_session_agent_mode(
     state
         .engine
         .set_session_agent_mode(&id, mode)
+        .map_err(to_string)
+}
+
+#[tauri::command]
+pub fn set_session_browser_access(
+    state: State<'_, AppState>,
+    id: String,
+    enabled: bool,
+) -> Result<(), String> {
+    state
+        .engine
+        .set_session_browser_access(&id, enabled)
         .map_err(to_string)
 }
 

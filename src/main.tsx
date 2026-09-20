@@ -52,17 +52,25 @@ window.addEventListener("unhandledrejection", (event) => {
 // Diagnostics: `localStorage.setItem("loomDebug","1")` exposes the stores on
 // window so the DevTools protocol can inspect real state.
 /* Diagnostics: the app exposes its stores as `window.__loom` when
-   `loomDebug` is set. */
+   `loomDebug` is set. `ipc` rides along so a probe can drive real commands. */
 if (localStorage.getItem("loomDebug") === "1") {
   void Promise.all([
+    import("./stores/browser"),
     import("./stores/chat"),
+    import("./stores/dock"),
     import("./stores/providers"),
     import("./stores/settings"),
     import("./stores/ui"),
     import("./lib/ipc"),
-  ]).then(([chat, providers, settings, ui, ipc]) => {
+  ]).then(([browser, chat, dock, providers, settings, ui, ipc]) => {
     (window as unknown as Record<string, unknown>).__loom = {
+      // The browser's tabs, so `probe-browser.mjs` can watch a real page being
+      // placed rather than only the shell's side of it.
+      browser: browser.useBrowser,
       chat: chat.useChat,
+      // The dock, so a probe can open the browser panel the way the composer
+      // chip does instead of hunting for the button.
+      dock: dock.useDock,
       providers: providers.useProviders,
       settings: settings.useSettings,
       ui: ui.useUi,

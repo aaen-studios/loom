@@ -122,6 +122,24 @@ pub fn prepare_with_edge(image: RgbaImage, edge: u32) -> Result<Shot> {
     })
 }
 
+/// Prepares a screenshot that arrived **already encoded** — a browser tab
+/// capture, rather than one of the raw desktop frames above.
+///
+/// It is decoded and re-encoded rather than passed through, and that is the
+/// point: a browser screenshot then goes down exactly the same
+/// downscale-and-encode path as a desktop one, so `chat.browserScreenshotEdge`
+/// means the same thing as `chat.computerScreenshotEdge` and a large capture
+/// falls back to JPEG by the same rule. Two sources of pixels, one set of
+/// decisions about their size and format — rather than a second policy to keep
+/// in step.
+pub fn prepare_encoded(bytes: &[u8], edge: u32, name: &str) -> Result<Shot> {
+    let decoded = image::load_from_memory(bytes)
+        .map_err(|error| Error::Other(format!("could not decode the captured image: {error}")))?;
+    let mut shot = prepare_with_edge(decoded.to_rgba8(), edge)?;
+    shot.name = name.to_string();
+    Ok(shot)
+}
+
 /// Scales the longest edge down to `edge`, preserving the aspect ratio.
 /// `edge` of 0 means no scaling at all.
 fn downscale(image: DynamicImage, edge: u32) -> DynamicImage {

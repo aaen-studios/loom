@@ -28,6 +28,7 @@ function session(
     permissionMode: null,
     agentMode: null,
     computerAccess: false,
+    browserAccess: false,
     position,
     createdAt: 0,
     updatedAt,

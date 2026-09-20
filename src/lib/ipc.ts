@@ -1,6 +1,9 @@
 import type {
   AgentMode,
   AppConfig,
+  BlockingConfig,
+  BlockingStatus,
+  FilterListPreset,
   AppInfo,
   Attachment,
   AuxModelRef,
@@ -42,6 +45,51 @@ export interface ToolSpec {
   readOnly: boolean;
   /** Absent means a workspace tool. */
   scope?: ToolScope;
+}
+
+/** Which cookie jar a tab uses. */
+export type BrowserProfile = "normal" | "ghost";
+
+/** One open tab, as the shell reports it. */
+export interface BrowserTab {
+  id: number;
+  title: string;
+  url: string;
+  profile: BrowserProfile;
+  /** The tab on screen *in its own host window*; two windows can each have one. */
+  active: boolean;
+  /** The chat's current tool call is working in this tab. */
+  driving: boolean;
+  loading: boolean;
+  /** Which window's panel is showing it, so a panel can pick out its own. */
+  host: string;
+  sessionId: string | null;
+}
+
+export interface BrowserWire {
+  tabs: BrowserTab[];
+  downloads: BrowserDownload[];
+}
+
+/** A download the browser saw, for the panel's rail. */
+export interface BrowserDownload {
+  url: string;
+  path: string;
+  ok: boolean;
+  at: number;
+}
+
+/**
+ * Where the page goes, in **logical pixels relative to its window's client
+ * area** — exactly what `getBoundingClientRect` returns for an element in that
+ * window. The page is a child webview of the window showing the panel, so there
+ * is no screen coordinate and no scale factor involved.
+ */
+export interface BrowserSlot {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
 }
 
 export interface McpServerConfig {
@@ -262,6 +310,58 @@ export const ipc = {
     call<void>("set_session_agent_mode", { id, mode }),
   setSessionComputerAccess: (id: string, enabled: boolean) =>
     call<void>("set_session_computer_access", { id, enabled }),
+  setSessionBrowserAccess: (id: string, enabled: boolean) =>
+    call<void>("set_session_browser_access", { id, enabled }),
+
+  /* --- The built-in browser ---------------------------------------------- */
+
+  /** Opens a tab over `host`'s slot. A tab is a real window, positioned by the panel. */
+  browserOpenTab: (args: {
+    url: string;
+    host?: string | null;
+    profile?: BrowserProfile;
+    sessionId?: string | null;
+  }) =>
+    call<BrowserTab>("browser_open_tab", {
+      url: args.url,
+      host: args.host ?? null,
+      profile: args.profile ?? null,
+      sessionId: args.sessionId ?? null,
+    }),
+  browserTabs: () => call<BrowserWire>("browser_tabs"),
+  browserCloseTab: (id: number) => call<void>("browser_close_tab", { id }),
+  /** Reports where the page goes, in the panel's own window coordinates. */
+  browserSetSlot: (args: {
+    host: string;
+    active: number | null;
+    slot: BrowserSlot | null;
+  }) => call<void>("browser_set_slot", args),
+  browserFocusTab: (id: number, sessionId?: string | null) =>
+    call<void>("browser_focus_tab", { id, sessionId: sessionId ?? null }),
+  browserNavigate: (args: {
+    id: number;
+    action: "goto" | "back" | "forward" | "reload" | "stop";
+    url?: string | null;
+  }) => call<void>("browser_navigate", { ...args, url: args.url ?? null }),
+  /** Runs a browser tool from the UI, through the same path the model uses. */
+  browserCall: (sessionId: string, op: string, args: Record<string, unknown>) =>
+    call<unknown>("browser_call", { sessionId, op, args }),
+  browserPing: (id: number) => call<unknown>("browser_ping", { id }),
+  browserSetBlockedOrigins: (origins: string[]) =>
+    call<AppConfig>("browser_set_blocked_origins", { origins }),
+
+  /* --- Content blocking --------------------------------------------------- */
+
+  browserBlockingStatus: () => call<BlockingStatus>("browser_blocking_status"),
+  browserBlockingPresets: () =>
+    call<FilterListPreset[]>("browser_blocking_presets"),
+  /** Rebuilds from the config; takes effect on the next tab. */
+  browserRefreshBlocking: () => call<BlockingStatus>("browser_refresh_blocking"),
+  /** Returns the whole config, so the caller can replace its copy. */
+  browserSetBlocking: (blocking: BlockingConfig) =>
+    call<AppConfig>("browser_set_blocking", { blocking }),
+  /** Reloads every open tab, which is how a blocking change takes effect. */
+  browserReloadTabs: () => call<void>("browser_reload_tabs"),
   stopComputer: () => call<void>("stop_computer", {}),
   resumeComputer: () => call<boolean>("resume_computer", {}),
   computerStatus: () =>

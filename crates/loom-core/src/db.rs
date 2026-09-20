@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{paths, Error, Result};
 
-pub const SCHEMA_VERSION: i64 = 12;
+pub const SCHEMA_VERSION: i64 = 13;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -52,6 +52,8 @@ pub struct Session {
     pub agent_mode: Option<String>,
     /// Computer use is armed for this chat with the composer's Computer chip.
     pub computer_access: bool,
+    /// The built-in browser is armed for this chat with the Browser chip.
+    pub browser_access: bool,
     /// Hand-placed row in the chats popup. `None` means the chat has never
     /// been dragged, which is what lets a chat created after you arranged a
     /// group still land on top of it.
@@ -74,6 +76,8 @@ pub struct SessionUpdate<'a> {
     pub permission_mode: Option<Option<&'a str>>,
     pub agent_mode: Option<Option<&'a str>>,
     pub computer_access: Option<bool>,
+    /// Arm or disarm the browser for one chat (the composer's Browser chip).
+    pub browser_access: Option<bool>,
     /// `None` leaves the hand-placed order alone; `Some(None)` returns the
     /// chat to the computed (newest-first) order.
     pub position: Option<Option<i64>>,
@@ -280,6 +284,23 @@ impl Database {
         // at once; wait for the writer lock instead of failing instantly.
         connection
             .busy_timeout(std::time::Duration::from_secs(5))
+            .map_err(map_sql(path))?;
+        // Write-ahead logging, because reads and writes must not queue behind
+        // each other. In the default rollback journal a writer takes an
+        // exclusive lock for the whole transaction and every reader blocks on
+        // it — with a 5 s `busy_timeout` that surfaces as the app freezing,
+        // which is exactly the "lots happening at once" case: a streaming turn
+        // writing a message while another chat reads its transcript. In WAL
+        // readers see the last committed snapshot and never wait for a writer.
+        connection
+            .pragma_update(None, "journal_mode", "WAL")
+            .map_err(map_sql(path))?;
+        // `NORMAL` is the right pairing with WAL: a commit still survives a
+        // process crash, and only a power loss can lose the most recent
+        // transactions. `FULL` would fsync on every commit, which on Windows is
+        // a visible stall in the middle of a streaming reply.
+        connection
+            .pragma_update(None, "synchronous", "NORMAL")
             .map_err(map_sql(path))?;
         connection
             .pragma_update(None, "foreign_keys", "ON")
@@ -579,6 +600,17 @@ impl Database {
                 .map_err(map_sql(path))?;
         }
 
+        if current < 13 && !has_column(&tx, "sessions", "browser_access")? {
+            // The composer's Browser chip, per chat: the built-in browser is
+            // armed for this chat. Same shape and same default as
+            // `computer_access` above — off, and a revocation rather than a
+            // note for later when it goes off.
+            tx.execute_batch(
+                "ALTER TABLE sessions ADD COLUMN browser_access INTEGER NOT NULL DEFAULT 0;",
+            )
+            .map_err(map_sql(path))?;
+        }
+
         tx.pragma_update(None, "user_version", SCHEMA_VERSION)
             .map_err(map_sql(path))?;
         tx.commit().map_err(map_sql(path))?;
@@ -588,8 +620,8 @@ impl Database {
     pub fn create_session(&self, session: &Session) -> Result<()> {
         self.connection
             .execute(
-                "INSERT INTO sessions (id, title, provider_id, model_id, variant, persona_id, system_prompt, workdir, permission_mode, agent_mode, computer_access, position, created_at, updated_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+                "INSERT INTO sessions (id, title, provider_id, model_id, variant, persona_id, system_prompt, workdir, permission_mode, agent_mode, computer_access, position, browser_access, created_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
                 params![
                     session.id,
                     session.title,
@@ -603,6 +635,7 @@ impl Database {
                     session.agent_mode,
                     session.computer_access,
                     session.position,
+                    session.browser_access,
                     session.created_at,
                     session.updated_at
                 ],
@@ -615,7 +648,7 @@ impl Database {
         let mut statement = self
             .connection
             .prepare(
-                "SELECT id, title, provider_id, model_id, variant, persona_id, system_prompt, created_at, updated_at, workdir, permission_mode, agent_mode, computer_access, position
+                "SELECT id, title, provider_id, model_id, variant, persona_id, system_prompt, created_at, updated_at, workdir, permission_mode, agent_mode, computer_access, position, browser_access
                  FROM sessions WHERE kind = 'chat' ORDER BY updated_at DESC",
             )
             .map_err(map_sql("sessions"))?;
@@ -629,7 +662,7 @@ impl Database {
     pub fn get_session(&self, id: &str) -> Result<Option<Session>> {
         self.connection
             .query_row(
-                "SELECT id, title, provider_id, model_id, variant, persona_id, system_prompt, created_at, updated_at, workdir, permission_mode, agent_mode, computer_access, position
+                "SELECT id, title, provider_id, model_id, variant, persona_id, system_prompt, created_at, updated_at, workdir, permission_mode, agent_mode, computer_access, position, browser_access
                  FROM sessions WHERE id = ?1",
                 params![id],
                 row_to_session,
@@ -707,6 +740,14 @@ impl Database {
             self.connection
                 .execute(
                     "UPDATE sessions SET computer_access = ?2, updated_at = ?3 WHERE id = ?1",
+                    params![id, enabled, now_ms()],
+                )
+                .map_err(map_sql("sessions"))?;
+        }
+        if let Some(enabled) = update.browser_access {
+            self.connection
+                .execute(
+                    "UPDATE sessions SET browser_access = ?2, updated_at = ?3 WHERE id = ?1",
                     params![id, enabled, now_ms()],
                 )
                 .map_err(map_sql("sessions"))?;
@@ -1269,8 +1310,8 @@ impl Database {
     pub fn create_task_session(&self, session: &Session) -> Result<()> {
         self.connection
             .execute(
-                "INSERT INTO sessions (id, title, provider_id, model_id, variant, persona_id, system_prompt, workdir, permission_mode, agent_mode, computer_access, kind, created_at, updated_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, 'task', ?12, ?13)",
+                "INSERT INTO sessions (id, title, provider_id, model_id, variant, persona_id, system_prompt, workdir, permission_mode, agent_mode, computer_access, browser_access, kind, created_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, 'task', ?13, ?14)",
                 params![
                     session.id,
                     session.title,
@@ -1283,6 +1324,7 @@ impl Database {
                     session.permission_mode,
                     session.agent_mode,
                     session.computer_access,
+                    session.browser_access,
                     session.created_at,
                     session.updated_at
                 ],
@@ -1825,6 +1867,10 @@ fn row_to_session(row: &rusqlite::Row<'_>) -> rusqlite::Result<Session> {
         // Appended last, and read by index: both SELECT lists above end with
         // it, so the two have to move together.
         position: row.get(13)?,
+        // Newest addition, and appended for the same reason: adding it beside
+        // `computer_access` would have shifted every index after it, and four
+        // column lists would have had to move as one.
+        browser_access: row.get(14)?,
     })
 }
 
@@ -1886,6 +1932,7 @@ mod tests {
             permission_mode: None,
             agent_mode: None,
             computer_access: false,
+            browser_access: false,
             position: None,
             created_at: now_ms(),
             updated_at: now_ms(),

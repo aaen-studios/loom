@@ -1,8 +1,8 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Capabilities for the main and overlay windows",
-  "windows": ["main", "ask", "computer", "panel-*"],
+  "description": "Loom's own webviews, and deliberately NOT the pages the browser shows. Matched on `webviews` rather than `windows` because Tauri matches a capability as `webviews.matches(webview) || windows.matches(window)` — an OR — so naming a window would grant every webview inside it. Since each browser tab is a child webview of the window showing the panel, a `windows` list here would have handed a real remote web page Loom's whole IPC surface. A WebviewWindow's webview label is its window label, so this changes nothing for Loom's own windows and excludes every tab (named loom-tab-<id>).",
+  "webviews": ["main", "ask", "computer", "panel-*"],
   "permissions": [
     "core:default",
     "core:window:allow-start-dragging",
@@ -20,6 +20,9 @@
     "core:window:allow-center",
     "core:window:allow-inner-size",
     "core:window:allow-current-monitor",
+    "core:window:allow-outer-position",
+    "core:window:allow-outer-size",
+    "core:window:allow-scale-factor",
     "opener:default",
     "dialog:default",
     "notification:default"

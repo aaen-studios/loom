@@ -13,7 +13,13 @@ import { UpdateToast } from "./components/UpdateToast";
 import { VoiceMode } from "./components/VoiceMode";
 import { DockHost } from "./dock/DockShell";
 import { panelDef } from "./dock/registry";
-import { useEngineEvents, usePanelEvents, useShellEvents, useVoiceEvents } from "./lib/events";
+import {
+  useBrowserEvents,
+  useEngineEvents,
+  usePanelEvents,
+  useShellEvents,
+  useVoiceEvents,
+} from "./lib/events";
 import { useGlassVars } from "./lib/glass";
 import { raceSafe } from "./lib/listen";
 import { useShortcuts } from "./lib/shortcuts";
@@ -47,6 +53,10 @@ function MainShell() {
   useShellEvents();
   // The dock's layout and the terminal's output, on their own channels.
   usePanelEvents();
+  // The browser's tabs, on a channel of their own: a page can produce console
+  // traffic at whatever rate it decides, and it must not be multiplexed with
+  // `loom://event` — the same reason the pty has its own.
+  useBrowserEvents();
   // Voice has to be subscribed for the whole session, not when its surface
   // opens: the composer's microphone button produces transcripts while the
   // surface is closed, and they arrive as events.

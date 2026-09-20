@@ -15,7 +15,13 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri = { version = "2", features = ["protocol-asset", "tray-icon"] }
+# `unstable` is required, and for one reason: the built-in browser's tabs are
+# **child webviews** (`Window::add_child`) inside the panel's own window rather
+# than windows of their own. That is what makes a page sit inside the panel with
+# no screen coordinates, no scale factor and no z-order to maintain — see the
+# note at the top of `src/browser.rs` for why the window-per-tab version did not
+# work. `WebviewBuilder` lives behind the same feature.
+tauri = { version = "2", features = ["protocol-asset", "tray-icon", "unstable"] }
 tauri-plugin-autostart = "2"
 tauri-plugin-dialog = "2"
 tauri-plugin-global-shortcut = "2"
@@ -27,5 +33,30 @@ serde_json = "1"
 uuid = { version = "1", features = ["v4"] }
 tokio = { version = "1", features = ["time", "net"] }
 loom-core = { path = "../crates/loom-core" }
+# Used only to name the client `loom-core` already owns, for the filter-list
+# fetch. The same crate and the same version, so this adds no dependency to the
+# build — it makes the type nameable in this crate's signatures.
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
+
+# The built-in browser's screenshot path.
+#
+# `webview2-com` is pinned to the version `wry` already resolves (see
+# Cargo.lock), so the graph keeps exactly one copy of the COM bindings — two
+# copies would mean two `ICoreWebView2` types that are not the same type, and
+# `with_webview` hands out one of them. Its docs also recommend pinning Tauri to
+# at least a minor version when this API is used, which is why `tauri` above is
+# `"2"` and the lock holds a specific one.
+#
+# `windows` is pinned to the same 0.61 line webview2-com depends on, for the
+# same reason. Nothing here touches Loom's own `windows 0.62` (loom-core's screen
+# and computer layers): they are separate crates in the graph and never meet.
+[target.'cfg(windows)'.dependencies]
+webview2-com = "0.38.2"
+windows = { version = "0.61.3", features = [
+    "Win32_Foundation",
+    "Win32_System_Com",
+    "Win32_System_Com_StructuredStorage",
+    "Win32_System_Memory",
+] }
 base64 = "0.22"
 

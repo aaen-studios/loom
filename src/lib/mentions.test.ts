@@ -22,6 +22,7 @@ function session(id: string, title: string, updatedAt = 0): Session {
     permissionMode: null,
     agentMode: null,
     computerAccess: false,
+    browserAccess: false,
     position: null,
     createdAt: 0,
     updatedAt,

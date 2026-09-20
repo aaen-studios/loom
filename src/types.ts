@@ -57,7 +57,13 @@ export type PermissionMode = "ask" | "auto-read-only" | "auto-all" | "atelier";
  */
 export type AgentMode = "plan" | "build" | "review" | "chat";
 /** What a tool can reach; shown as a badge on the permission card. */
-export type ToolScope = "workspace" | "harness" | "web" | "mcp" | "computer";
+export type ToolScope =
+  | "workspace"
+  | "harness"
+  | "web"
+  | "mcp"
+  | "computer"
+  | "browser";
 
 /**
  * Where a model's metadata came from. A refresh may correct anything below
@@ -635,6 +641,84 @@ export interface Workspace {
 /** Which service backs the web tools. */
 export type SearchProvider = "auto" | "jina" | "duckduckgo";
 
+/**
+ * A band of browser tools. Not a permission — the composer's Browser chip is
+ * the consent. Tiers exist because tool schemas are a *fixed* cost against every
+ * request's token budget, so a chat that only needs to read a page should not
+ * pay for the arbitrary-JavaScript escape hatch on every turn.
+ */
+export type BrowserTier = "see" | "act" | "dev";
+
+/** How the built-in browser behaves. Mirrors `BrowserConfig` in config.rs. */
+export interface BrowserConfig {
+  tiers: BrowserTier[];
+  /** Longest screenshot edge in pixels; 0 is native resolution. */
+  screenshotEdge: number;
+  /** Thinking effort for browser turns, when the chat has no explicit variant. */
+  variant: string | null;
+  /** A fast model used only while the chip is armed; `null` keeps the chat's. */
+  model: ModelRef | null;
+  /** Tell the model to reach for the browser before `fetch_url` when armed. */
+  preferOverFetch: boolean;
+  /** `downloads` for the OS folder, `loom` for ~/.loom/browser/downloads. */
+  downloadDestination: string;
+  /** Open a link in a reply in Loom's browser; Ctrl+click does the opposite. */
+  openLinksInBrowser: boolean;
+  /**
+   * Origins the browser refuses to load, whatever the model asks for. Enforced
+   * by the shell rather than by a tool, so no call can route around it. Empty by
+   * default: this is a setting, not a permission card.
+   */
+  blockedOrigins: string[];
+  /** Step budget for a browser turn, which is many small round trips. */
+  maxSteps: number;
+  /** Content blocking: the network half of an ad blocker. */
+  blocking: BlockingConfig;
+}
+
+/**
+ * Content blocking.
+ *
+ * Not uBlock Origin — WebView2 has no extension API, so that is impossible
+ * rather than unimplemented. It is the same technique one layer down: every
+ * request is offered to the host before it goes out, so one matching a filter
+ * rule is never made. Same lists, network layer only.
+ */
+export interface BlockingConfig {
+  enabled: boolean;
+  /** Preset ids that are on, e.g. `easylist`. */
+  lists: string[];
+  /** Extra list URLs the user added. */
+  customLists: string[];
+  /** Hosts and domains never blocked, for a site a list breaks. */
+  allow: string[];
+}
+
+/** One offered filter list, as the settings page lists it. */
+export interface FilterListPreset {
+  id: string;
+  name: string;
+  url: string;
+}
+
+/**
+ * What the blocker is actually doing.
+ *
+ * `installed` is separate from `enabled` on purpose, and the difference is the
+ * point: "switched off" and "switched on but every list failed to download" are
+ * very different states, and a page full of ads should not look the same in both.
+ */
+export interface BlockingStatus {
+  enabled: boolean;
+  installed: boolean;
+  /** Rules loaded across every list. */
+  rules: number;
+  /** Requests cancelled since launch. */
+  blocked: number;
+  /** Per-list state, so a list that failed says so rather than being absent. */
+  sources: { id: string; name: string; rules: number; error: string | null }[];
+}
+
 export interface AppConfig {
   schemaVersion: number;
   theme: Theme;
@@ -655,6 +739,7 @@ export interface AppConfig {
   /** The arrangement a folder follows until it has one of its own. */
   dockDefault: DockLayout;
   terminal: TerminalConfig;
+  browser: BrowserConfig;
   searchProvider: SearchProvider;
 }
 
@@ -738,6 +823,8 @@ export interface Session {
   agentMode: AgentMode | null;
   /** Computer use is armed for this chat (the composer's Computer chip). */
   computerAccess: boolean;
+  /** The built-in browser is armed for this chat (the Browser chip). */
+  browserAccess: boolean;
   /**
    * Hand-placed row in the chats popup. `null` means this chat has never been
    * dragged, and those keep sorting newest-first above the placed ones — so a

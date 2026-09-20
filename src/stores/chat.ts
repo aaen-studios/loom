@@ -101,6 +101,7 @@ interface ChatState {
   setPermissionMode: (mode: Session["permissionMode"]) => Promise<void>;
   setAgentMode: (mode: Session["agentMode"]) => Promise<void>;
   setComputerAccess: (enabled: boolean) => Promise<void>;
+  setBrowserAccess: (enabled: boolean) => Promise<void>;
   /** Polls the engine for who holds the computer, and updates the chip. */
   refreshComputerDriver: () => Promise<void>;
   /** The pill or the panic key stopped a turn: drop its pause/driver markers. */
@@ -631,6 +632,17 @@ export const useChat = create<ChatState>((set, get) => ({
       computerPaused: enabled
         ? state.computerPaused
         : withoutKey(state.computerPaused, sessionId),
+    }));
+  },
+
+  setBrowserAccess: async (enabled) => {
+    const sessionId = await sessionForChoice(get, enabled);
+    if (!sessionId) return;
+    await ipc.setSessionBrowserAccess(sessionId, enabled);
+    set((state) => ({
+      sessions: state.sessions.map((session) =>
+        session.id === sessionId ? { ...session, browserAccess: enabled } : session,
+      ),
     }));
   },
 
