@@ -1612,7 +1612,13 @@ impl Engine {
         let mut summary = UsageSummary::default();
         let mut by_provider: BTreeMap<String, ProviderTotals> = BTreeMap::new();
 
-        for extra in self.db().assistant_extras()? {
+        // Bound to a local so the guard is released before the loop. The loop
+        // walks every assistant row in the database and touches the database
+        // not at all, so holding the one connection's lock across it would
+        // stall every other database user in the process for the length of the
+        // scan — which is the "lots of things at once" freeze, in one call.
+        let extras = self.db().assistant_extras()?;
+        for extra in extras {
             let Some(usage) = parse_usage(Some(&extra)) else {
                 continue;
             };
@@ -3514,7 +3520,20 @@ impl Engine {
 
         // A detached run that needs approval says so in the Runs popup, and
         // waits: the timeout is long, but the run is not stuck by accident.
-        if let Ok(Some(task)) = self.db().task_for_session(session_id) {
+        //
+        // The row is bound to a local first, and that is not a style choice.
+        // `self.db()` in an `if let` scrutinee is a temporary that lives to the
+        // end of the whole `if let` — body included — and `update_task` calls
+        // `self.db()` again. Both are on this thread, so the second lock would
+        // wait forever on the first: the app would freeze at precisely the
+        // moment a background run asked for approval, which is the least
+        // explicable time for it to stop responding.
+        //
+        // **This was live.** The tripwire below would have caught it if any
+        // test exercised a detached run awaiting approval; none does, which is
+        // why the fix is here and not in a failing test.
+        let waiting = self.db().task_for_session(session_id).ok().flatten();
+        if let Some(task) = waiting {
             if task.status == "running" {
                 self.update_task(
                     &task.id,
@@ -6184,7 +6203,12 @@ impl Engine {
             eprintln!("[loom] could not update task {task_id}: {error}");
             return;
         }
-        if let Ok(Some(task)) = self.db().task(task_id) {
+        // Read into a local, then emit. `emit` crosses into the shell to reach
+        // the webview, so the database guard has no business being held across
+        // it: `TaskChanged` fires on every run status change, and this is on
+        // the path that a permission prompt is waiting behind.
+        let task = self.db().task(task_id).ok().flatten();
+        if let Some(task) = task {
             self.emit(EngineEvent::TaskChanged { task });
         }
     }
@@ -7199,7 +7223,11 @@ impl Engine {
             .and_then(|cron| cron.next_after(now));
         self.db()
             .set_job_schedule(&job.id, next, Some(now), Some("fired"))?;
-        if let Ok(Some(fresh)) = self.db().job(&job.id) {
+        // Read into a local, then emit, for the same reason `update_task` does:
+        // a guard bound by an `if let` scrutinee lives to the end of the block,
+        // so it would be held across `emit` and the webview crossing inside it.
+        let fresh = self.db().job(&job.id).ok().flatten();
+        if let Some(fresh) = fresh {
             self.emit(EngineEvent::JobChanged { job: fresh });
         }
         Ok(task_id)
