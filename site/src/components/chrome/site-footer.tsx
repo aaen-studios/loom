@@ -2,7 +2,7 @@ import Link from "next/link";
 import { DOWNLOAD, REPO, SITE } from "@/lib/site";
 import { PANELS } from "@/lib/panels";
 import { MOVEMENTS } from "@/lib/movements";
-import { Still } from "@/components/weave/figure";
+import { Drifting } from "@/components/weave/animated";
 import { LoomMark } from "@/components/loom-mark";
 
 /**
@@ -27,7 +27,7 @@ export function SiteFooter() {
         aria-hidden="true"
         className="pointer-events-none absolute inset-x-0 top-0 h-40 opacity-[0.35]"
       >
-        <Still
+        <Drifting
           kind="field"
           seed={31337}
           width={1800}

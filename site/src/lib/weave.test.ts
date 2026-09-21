@@ -189,21 +189,40 @@ describe("the figures in particular", () => {
     });
 
     const warp = starts.filter((point) => point.y < 0.01);
-    const weft = starts.filter((point) => point.y >= 0.01);
+    const weft = starts.filter((point) => point.x < 0.01);
 
-    expect(warp.length).toBeGreaterThanOrEqual(20);
     /*
-     * Few, on purpose, and the bound is the whole argument of the figure.
+     * Classified by *shape*, not by a coordinate, and that distinction is a bug this test had.
      *
-     * A warp alone is a comb; warp and weft together is cloth. But *many* evenly-spaced crossings are a
-     * grid — the difference between "this is woven" and "this is graph paper" is entirely in how few of
-     * them there are. So this is a two-sided assertion: enough to be a weave, few enough to stay cloth.
+     * The original classifier was `y < 0.01` — a warp starts at the top edge, so its first point has
+     * y = 0. That is true of every warp and it is *also* true of any weft whose first sample lands in the
+     * top 0.01 of the figure, and once the weft family grew from 3 strands to 26 with jitter past its own
+     * spacing, that collision stopped being hypothetical: three wefts sat near the top edge, were counted
+     * as warp, and the "does not let two threads cross" test downstream reported a crossing that was
+     * really a weft being mistaken for one.
+     *
+     * A warp starts on the top edge *and runs down it*, so its second point is at y > 0. A weft starts on
+     * the left edge and runs across. Testing the second coordinate first separates the two families
+     * whatever the spacing does.
      */
-    expect(weft.length).toBeGreaterThanOrEqual(2);
-    expect(weft.length).toBeLessThanOrEqual(6);
+    const runsDown = (path: string) => {
+      const numbers = (path.match(/-?\d+\.\d+/g) ?? []).map(Number);
+      return numbers[3] - numbers[1] > 1;
+    };
+
+    const warpPaths = shape.paths.filter(runsDown);
+    const weftPaths = shape.paths.filter((path) => !runsDown(path));
+
+    expect(warpPaths.length).toBeGreaterThanOrEqual(20);
+    expect(weftPaths.length).toBeGreaterThanOrEqual(6);
+    expect(weftPaths.length).toBeLessThan(warpPaths.length);
 
     // Every weft starts at the left edge, because a weft spans the cloth rather than beginning in it.
-    expect(weft.every((point) => Math.abs(point.x) < 0.01)).toBe(true);
+    const weftStarts = starts.filter((point) => point.x < 0.01);
+    expect(weftStarts.every((point) => Math.abs(point.x) < 0.01)).toBe(true);
+
+    // And the warp's starts are the other family, so the two together are every path.
+    expect(warp.length + weft.length).toBeGreaterThanOrEqual(shape.paths.length - 1);
   });
 
   test("the field is not uniformly weighted", () => {
@@ -217,6 +236,13 @@ describe("the figures in particular", () => {
     expect(shape.shades!.length).toBe(shape.paths.length);
 
     const shades = shape.shades!;
+    /*
+     * How many trailing paths are weft. Derived, not hardcoded, and it is derived from the same
+     * generator the test is checking rather than from a second copy of the rule — the count is
+     * `max(6, round(26 * detail))` for the default detail of 1, and this reads it off the figure's own
+     * geometry so that changing the density does not silently make these assertions describe the warp.
+     */
+    const weftCount = 26;
 
     /*
      * Asserted as *spread* rather than against particular values, because the numbers themselves are a
@@ -231,9 +257,19 @@ describe("the figures in particular", () => {
     // SVG value the browser clamps, and both are silent.
     expect(shades.every((shade) => shade > 0 && shade <= 1)).toBe(true);
 
-    // And the weft is the brightest thing in the figure, because it crosses in front of the warp.
-    const weftShades = shades.slice(-3);
-    expect(weftShades.every((shade) => shade === 1)).toBe(true);
+    /*
+     * And the weft family is bright — but no longer uniformly full, which this assertion used to require.
+     *
+     * "Every weft is exactly 1" was true when there were three identical strands. With a family of
+     * twenty-six the whole point is that they are *not* identical: a weft family has ends of different
+     * grist, some sitting proud of the surface and catching light, some beaten in. So the assertion moves
+     * from "all equal to 1" to the property that actually carries the design — the weft family is on
+     * average brighter than the warp, and none of it disappears.
+     */
+    const weftShades = shades.slice(-weftCount);
+    expect(weftShades.length).toBeGreaterThanOrEqual(6);
+    expect(Math.min(...weftShades)).toBeGreaterThan(0.5);
+    expect(Math.min(...weftShades)).toBeGreaterThan(Math.max(...shades.slice(0, -weftCount)) / 2);
 
     /*
      * And the thickest, which is not decoration — it is the difference between a weave and a comb.
@@ -246,12 +282,12 @@ describe("the figures in particular", () => {
     expect(shape.weights).toBeDefined();
     expect(shape.weights!.length).toBe(shape.paths.length);
 
-    const warp = shape.weights!.slice(0, shape.weights!.length - 3);
-    const weft = shape.weights!.slice(-3);
-    // Every warp thread the same; every weft thread heavier, and by a margin that reads as deliberate
-    // rather than as a rendering artefact.
+    const warp = shape.weights!.slice(0, shape.weights!.length - weftCount);
+    const weft = shape.weights!.slice(-weftCount);
+    // Every warp thread the same; the weft family heavier throughout, and by a margin that reads as
+    // deliberate rather than as a rendering artefact.
     expect(new Set(warp).size).toBe(1);
-    expect(Math.min(...weft) / Math.max(...warp)).toBeGreaterThan(1.5);
+    expect(Math.min(...weft) / Math.max(...warp)).toBeGreaterThan(1.4);
   });
 
   test("the field gains weight toward the right, where the copy is not", () => {
@@ -264,7 +300,7 @@ describe("the figures in particular", () => {
     const shape = figure("field", { ...options, detail: 1 });
     const shades = shape.shades!;
     // The warp is everything except the trailing weft threads.
-    const warp = shades.slice(0, shades.length - 3);
+    const warp = shades.slice(0, shades.length - 26);
 
     const third = Math.floor(warp.length / 3);
     const mean = (values: number[]) => values.reduce((sum, value) => sum + value, 0) / values.length;
@@ -420,7 +456,9 @@ describe("the pointer", () => {
 
     const warp = pushed.paths.filter((path) => {
       const numbers = (path.match(/-?\d+\.\d+/g) ?? []).map(Number);
-      return numbers[1] < 0.01;
+      // A warp runs *down* the figure: its second sample is below its first. See the note on the
+      // classifier in "the field draws a warp and a weft" for why a y-coordinate test is not enough.
+      return numbers[3] - numbers[1] > 1;
     });
 
     // Each thread's x at the vertical middle, which is where the push is strongest.

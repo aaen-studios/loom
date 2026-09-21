@@ -1,6 +1,6 @@
 import Link from "next/link";
 import { DOWNLOAD } from "@/lib/site";
-import { Still } from "@/components/weave/figure";
+import { Drifting } from "@/components/weave/animated";
 
 /**
  * The 404.
@@ -16,7 +16,7 @@ export default function NotFound() {
   return (
     <div className="relative isolate overflow-hidden pt-20 pb-24">
       <div className="pointer-events-none absolute inset-0 -z-10 h-full opacity-50">
-        <Still
+        <Drifting
           kind="bundle"
           seed={404}
           width={1600}

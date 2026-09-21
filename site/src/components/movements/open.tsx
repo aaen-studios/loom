@@ -2,8 +2,7 @@ import Link from "next/link";
 import { DOWNLOAD } from "@/lib/site";
 import { movementById } from "@/lib/movements";
 import { PANELS } from "@/lib/panels";
-import { AnimatedWeave } from "@/components/weave/animated";
-import { Still } from "@/components/weave/figure";
+import { AnimatedWeave, Drifting } from "@/components/weave/animated";
 import { Reveal } from "@/components/ui/reveal";
 import {
   Card,
@@ -195,7 +194,7 @@ export function Parts() {
       {/* The figure, bleed to the right edge and clipped, so it reads as a texture the prose sits
           beside rather than as a picture on a page. */}
       <div className="figure-plate" aria-hidden="true">
-        <Still kind="lattice" seed={4181} className="figure-art" opacity={0.9} id="parts" />
+        <Drifting kind="lattice" seed={4181} className="figure-art" opacity={0.9} id="parts" />
       </div>
 
       <div className="mt-12 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
@@ -300,7 +299,7 @@ export function Meeting() {
       lead="The mode decides what the model is willing to do. It is set per chat and per turn, and the two read-only modes refuse the write and command tools rather than asking for permission — which is the difference between a mode and a preference."
     >
       <div className="figure-plate" aria-hidden="true">
-        <Still kind="rings" seed={1618} className="figure-art" opacity={0.85} id="meeting" />
+        <Drifting kind="rings" seed={1618} className="figure-art" opacity={0.85} id="meeting" />
       </div>
 
       <Statement>
@@ -407,14 +406,41 @@ export function Narrowing() {
       heading="A field of possibilities, narrowed in order."
       lead="Not a tour. This is one turn of the agent, in the order its parts arrived: something asked, something thought, something run, something written back. A transcript that reorders these is showing you a summary, not a turn."
     >
-      <div className="grid gap-10 lg:grid-cols-[minmax(0,1fr)_minmax(0,1.15fr)] lg:items-start">
+      {/* `relative` and `isolate` because the figure is now an absolutely positioned layer inside this
+          row rather than a grid track: without them the `-z-10` plate escapes to the page's root stacking
+          context and can slide under the movement's own background. */}
+      <div className="relative isolate grid gap-10 lg:grid-cols-[minmax(0,1fr)_minmax(0,1.15fr)] lg:items-start">
         {/* The figure beside the turn rather than above it, so the two read as one movement: the
             convergence on the left, the sequence it converged to on the right. */}
-        <div className="figure-plate lg:sticky lg:top-24" aria-hidden="true">
-          <Still kind="bundle" seed={5772} width={900} height={900} className="figure-art" id="narrow" />
+        {/*
+          * The figure is *behind* the turn, not beside it — and it took a screenshot to see that.
+          *
+          * This was a two-column grid: the figure in the first track, the transcript card in the second.
+          * The intent was that the threads converge in the left track and stop at the card's edge, which
+          * is what the narrow viewport does. On a wide one it did not, and the reason is a stacking rule
+          * rather than a geometry one: `.figure-plate` is `position: relative` (and `lg:sticky`), so it
+          * establishes a positioned box, while the card below it is a static `panel-strong`. A positioned
+          * box paints above a static sibling *whatever the DOM order*, so every thread in the plate's
+          * subtree was lifted above the card — and you could watch hairlines crossing the card's border
+          * near "READ 0.4s" and "RUN 4.1s" while the middle stayed opaque. Two planes fighting, and the
+          * seam was exactly where the card's background let one through.
+          *
+          * The fix is not `z-index` on the card, tempting as that is. Stacking the two is a *tie* — the
+          * threads would then stop at the card's left edge and accumulate behind it, which is the figure
+          * being cropped by an invisible wall. So the plate becomes a full-width layer behind the row,
+          * the way the hero's figure already is, and the card sits in the right-hand column on top with
+          * nothing to intersect. The threads now pass behind the transcript and out the other side, which
+          * is what converging threads in a cloth should do.
+          *
+          * The plate keeps its bleed and its mask; only its role in the layout changed.
+          */}
+        <div className="absolute inset-0 -z-10">
+          <div className="figure-plate lg:h-full" aria-hidden="true">
+            <Drifting kind="bundle" seed={5772} width={900} height={900} className="figure-art" id="narrow" />
+          </div>
         </div>
 
-        <Reveal>
+        <Reveal className="relative z-10 lg:col-start-2">
           <div className="panel-strong rounded-sheet overflow-hidden">
             <div className="flex items-center gap-2 border-b border-[var(--glass-border)] px-4 py-2.5">
               <span className="t-label">Loom · one turn</span>

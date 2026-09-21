@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { figure, type Figure, type Pointer } from "@/lib/weave";
+import { figure, type Figure, type FigureKind, type Pointer } from "@/lib/weave";
 import { FigureSvg } from "./figure";
 
 /**
@@ -45,6 +45,140 @@ import { FigureSvg } from "./figure";
  * The pointer is tracked but *not* on the animation path — it writes to a ref, and the next frame
  * reads it. A cursor that moves forty times between two frames costs one write.
  */
+/**
+ * A figure that drifts, at a fixed size — the animated counterpart of `Still`.
+ *
+ * ---------------------------------------------------------------------------
+ * Why this exists, and what was wrong with only animating the hero
+ * ---------------------------------------------------------------------------
+ *
+ * The page had one moving figure and six still ones. That was defended as restraint — "five of the six
+ * figures here cost a visitor nothing at all" — and restraint is not what it looked like. It looked
+ * *inert*. A field of threads is a picture of material under tension, and material under tension moves;
+ * a frozen one reads as a diagram of itself, which is the failure the hero was rebuilt to escape and
+ * which the other six figures were quietly still making. The hero apologised for the rest of the page.
+ *
+ * So the drift is shared rather than special. This reuses `AnimatedWeave`'s machinery exactly — the same
+ * phase, the same clamping, the same politeness — and differs in three ways, all of them because these
+ * figures are *beside* prose rather than behind a headline:
+ *
+ *   - **Slower.** A quarter the hero's rate. A figure the reader is scrolling past does not need to
+ *     announce itself; twelve seconds per cycle is enough that a glance sees movement and a paragraph of
+ *     reading does not see a loop.
+ *   - **No pointer.** The pull is right for the hero because the reader's cursor is *in* that figure.
+ *     Applying it to a decorative plate would make the page twitch as the pointer crossed it, which is a
+ *     worse page. These drift; they do not react.
+ *   - **Cheap when unseen.** These are below the fold, so the observer is not an optimisation here — it
+ *     is the whole reason this is affordable. Six figures each computing their own geometry every frame
+ *     would be six `requestAnimationFrame` loops; this runs one per visible figure and none otherwise.
+ */
+export function Drifting({
+  kind,
+  seed,
+  width = 1200,
+  height = 620,
+  detail = 1,
+  className,
+  opacity,
+  label,
+  id,
+}: {
+  kind: FigureKind;
+  seed: number;
+  width?: number;
+  height?: number;
+  detail?: number;
+  className?: string;
+  opacity?: number;
+  label?: string;
+  id: string;
+}) {
+  const host = useRef<HTMLDivElement>(null);
+  const frame = useRef(0);
+
+  const [shape] = useState<Figure>(() => figure(kind, { width, height, seed, detail }));
+
+  useEffect(() => {
+    const element = host.current;
+    if (!element) return;
+
+    const motion = window.matchMedia("(prefers-reduced-motion: reduce)");
+    if (motion.matches || window.innerWidth < 768) return;
+
+    const paths = Array.from(element.querySelectorAll<SVGPathElement>("path"));
+    if (paths.length === 0) return;
+
+    let running = false;
+    let start = 0;
+
+    const draw = (elapsed: number) => {
+      // Twelve seconds a cycle rather than the hero's twenty-four. See the note above: a decorative
+      // figure should be *caught* moving rather than seen to move.
+      const phase = (elapsed / 12000) % 1;
+      const next = figure(kind, { width, height, seed, detail, phase });
+
+      for (let i = 0; i < paths.length && i < next.paths.length; i += 1) {
+        paths[i].setAttribute("d", next.paths[i]);
+      }
+    };
+
+    const loop = (now: number) => {
+      if (!running) return;
+      if (!start) start = now;
+      draw(now - start);
+      frame.current = requestAnimationFrame(loop);
+    };
+
+    const startLoop = () => {
+      if (running) return;
+      running = true;
+      frame.current = requestAnimationFrame(loop);
+    };
+
+    const stopLoop = () => {
+      running = false;
+      if (frame.current) cancelAnimationFrame(frame.current);
+      frame.current = 0;
+    };
+
+    const visible = new IntersectionObserver(
+      ([entry]) => {
+        if (entry.isIntersecting && !document.hidden) startLoop();
+        else stopLoop();
+      },
+      // A margin, unlike the hero's bare threshold: these figures are scattered down a long page, and
+      // starting each one exactly as it crests the fold means the first thing a reader sees at the bottom
+      // of every scroll is a figure *beginning*. Starting a little early means it is already running.
+      { rootMargin: "200px" },
+    );
+    visible.observe(element);
+
+    const onVisibility = () => {
+      if (document.hidden) stopLoop();
+    };
+    document.addEventListener("visibilitychange", onVisibility);
+
+    return () => {
+      stopLoop();
+      visible.disconnect();
+      document.removeEventListener("visibilitychange", onVisibility);
+    };
+  }, [kind, seed, width, height, detail]);
+
+  return (
+    <div ref={host} className="h-full w-full">
+      <FigureSvg
+        kind={kind}
+        shape={shape}
+        className={className}
+        opacity={opacity}
+        label={label}
+        id={id}
+      />
+    </div>
+  );
+}
+
 export function AnimatedWeave({
   seed,
   className,

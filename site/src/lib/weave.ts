@@ -287,8 +287,26 @@ function field(o: FigureOptions): Figure {
   const phase = o.phase ?? 0;
   const detail = o.detail ?? 1;
 
-  const count = Math.max(6, Math.round(26 * detail));
-  const samples = 48;
+  /*
+   * ---------------------------------------------------------------------------
+   * Density, and why it went up by more than a factor of three
+   * ---------------------------------------------------------------------------
+   *
+   * This was 26 — a "drawing of cloth" rather than a cloth, on the argument that few definite threads
+   * make each crossing unmissable. That argument was wrong, and a screenshot is what settled it: at 26
+   * threads over 1600 units the pitch is 53 and the bow is 18, so thirty near-vertical hairlines bow
+   * together off one shared sine. Thirty hairlines is not a field of threads, it is a *fan* — lines
+   * radiating from a common phase — and a fan is a diagram. It read as a diagram still and as a
+   * diagram moving, which is why no amount of phase tuning over it helped.
+   *
+   * Cloth is dense. A real warp is hundreds of ends per inch and the eye reads *material* from the
+   * density long before it reads any individual thread. So the count is ninety-odd here, the pitch is
+   * down to about seventeen, and the interesting consequence is that the bow — which is derived from
+   * the pitch — shrinks with it. Density and amplitude are one decision, not two; that is what the
+   * `amplitude` line below is for.
+   */
+  const count = Math.max(12, Math.round(78 * detail));
+  const samples = 54;
 
   /** The distance between two threads, and the figure's fundamental unit. */
   const pitch = width / count;
@@ -304,7 +322,26 @@ function field(o: FigureOptions): Figure {
    * independent knobs that happen to be safe at the numbers they were chosen with and unsafe at the next
    * ones — and "the threads cross each other" is the failure that stops a warp being a warp.
    */
-  const amplitude = pitch * 0.34;
+  /*
+   * ---------------------------------------------------------------------------
+   * The bow is now *wide relative to the pitch*, and that is the fix for the fan
+   * ---------------------------------------------------------------------------
+   *
+   * At 0.34 of the pitch, a thread bends a third of the way toward its neighbour and comes back. Every
+   * thread does it at the same phase, lagged smoothly across the field, and the result sums to a comb
+   * with a wave in it: the strands never approach each other, so the eye never sees a *surface*.
+   *
+   * The value that makes cloth is above 0.5, and the reason is geometric rather than aesthetic. Past
+   * half the pitch, a thread crosses the midline between it and its neighbour for part of every cycle,
+   * so the gap between any two neighbours *opens and closes*. Neighbours alternately crowd and part,
+   * which is what a stretched weave does under load, and it is the thing that reads as material. Two
+   * threads never touch — the per-thread `reach` below still caps the worst case at 0.46 either side,
+   * leaving 0.08 of the pitch with light through it — but they come close enough to read as one sheet.
+   *
+   * The cap matters: 0.46 each side means the two can never cross, and the test asserting that two
+   * threads never swap places is what enforces it. Density and safety are the same equation.
+   */
+  const amplitude = pitch * 0.62;
 
   const paths: string[] = [];
   const shades: number[] = [];
@@ -339,8 +376,16 @@ function field(o: FigureOptions): Figure {
     const across = count === 1 ? 0.5 : i / (count - 1);
     const lag = (across - 0.5) * 2.6 + (random() - 0.5) * 0.5;
 
-    /** How far this thread travels. It is what makes two neighbours visibly different threads. */
-    const reach = 0.5 + random() * 0.6;
+    /*
+     * How far this thread travels — and at this amplitude it is a *safety* term, not a flourish.
+     *
+     * A thread may reach `amplitude * reach` from its rest position, and `reach` is capped so that two
+     * neighbours bending toward each other at once still leave a gap. With `amplitude` at 0.62 of the
+     * pitch the budget is tight: 0.62 × 0.74 = 0.46 each, so the worst case pair leaves 0.08 of the
+     * pitch between them. The narrow band is deliberate — it keeps two neighbours from ever crossing
+     * while letting them crowd as close as the geometry allows, which is where the cloth lives.
+     */
+    const reach = 0.58 + random() * 0.16;
     /** This thread's own faint ripple, at a fraction of a full cycle. */
     const ripple = 0.6 + random() * 1.4;
     const ripplePhase = random() * Math.PI * 2;
@@ -355,7 +400,39 @@ function field(o: FigureOptions): Figure {
         base +
         amplitude *
           reach *
+          /*
+           * ---------------------------------------------------------------------------
+           * Interference: the warp stopped being a single shared wave
+           * ---------------------------------------------------------------------------
+           *
+           * The bow was one shared sine plus a tenth-weight private ripple. The shared part is what
+           * makes the field behave as a *sheet* (neighbours related by a small lag), and that was right.
+           * But one sine, however lagged, has one wavelength, and a field with one wavelength is a
+           * pattern — the moiré curtain this figure was rebuilt to escape. It is also why the fan read as
+           * a diagram: thirty copies of one curve.
+           *
+           * Two more terms, both of them slow and both *structural*:
+           *
+           *   - A cross-term whose wavelength runs across the field rather than down it. Where this is
+           *     positive the whole sheet narrows, where negative it widens — so the light comes through
+           *     in *bands* down the figure, which is what a warp under uneven tension actually does.
+           *   - A beat between the shared bow and that cross-term. Two waves of slightly different
+           *     frequency interfere, and the interference itself travels: the tension pattern migrates
+           *     across the cloth instead of pulsing in place.
+           *
+           * Both are second-order by amplitude (0.26 and 0.22) so they modulate the sheet rather than
+           * dissolve it. Raised, this is wood grain — which is the mistake the ripple made at five times
+           * this weight, and the reason neither term touches the per-thread phase.
+           */
           (Math.sin(t * Math.PI * 2 * bowSlow + bowPhase + lag + phase * Math.PI * 2) +
+            0.26 * Math.sin(across * Math.PI * 2 * 1.7 - phase * Math.PI * 2 * 0.6) +
+            0.22 *
+              Math.sin(
+                t * Math.PI * 2 * (bowSlow * 0.5) +
+                  across * Math.PI * 2 * 1.7 -
+                  phase * Math.PI * 2 * 1.4 +
+                  bowPhase,
+              ) +
             /*
              * The ripple is deliberately small — a tenth of the shared bow.
              *
@@ -378,7 +455,13 @@ function field(o: FigureOptions): Figure {
        * neighbour and the two can never cross.
        */
       const looseness = Math.sin(Math.PI * t);
-      x += pull(x, y, o.pointer, width, height, pitch * 0.5 * looseness).x;
+      /*
+       * Bounded by the *half* pitch, so a pushed thread can travel as far as its neighbour allows and no
+       * further. At the new density the pointer's reach (a fifth of the width) spans several threads
+       * rather than one, so the pull now reads as a *dip* in the cloth with a shape rather than a single
+       * strand being dragged — which is what a cursor pressing on a surface should look like.
+       */
+      x += pull(x, y, o.pointer, width, height, pitch * 0.46 * looseness).x;
 
       points.push({ x, y });
     }
@@ -413,15 +496,33 @@ function field(o: FigureOptions): Figure {
    * warp takes it on the horizontal: a weft is pinned at both ends too, just at the sides rather than top
    * and bottom.
    */
-  const weftCount = Math.max(2, Math.round(3 * detail));
+  /*
+   * ---------------------------------------------------------------------------
+   * A real weft family, and the end of the comb
+   * ---------------------------------------------------------------------------
+   *
+   * This was three, on the argument that many evenly-spaced crossings read as graph paper rather than
+   * as cloth. Half of that was right — a *grid* is graph paper — and the conclusion was wrong. Three
+   * strands across a hundred verticals is not a weave at any spacing; it is a fan of hairlines with
+   * three whiskers, which is exactly what the hero looked like.
+   *
+   * What stops crossings reading as graph paper is not *few* wefts, it is *uneven* ones: count
+   * unevenness, a heavy-to-light weight ramp, and irregular spacing. So there are many wefts now —
+   * roughly a third as many as warps, which is the ratio that makes a woven surface — and they vary in
+   * both height and weight. The rhythm is broken by the variation rather than by the scarcity.
+   */
+  const weftCount = Math.max(6, Math.round(26 * detail));
 
   for (let w = 0; w < weftCount; w += 1) {
     const random = rng(seed + 90001 + w * 6151);
 
     // Irregular by a fifth of the figure's height, which is enough to break the rhythm and not enough to
     // make the spacing look accidental.
-    const base = ((w + 0.5) / weftCount + (random() - 0.5) * 0.2) * height;
-    const bow = 0.25 + random() * 0.5;
+    // Irregular by nearly a full gap now rather than a fifth of the figure, because with this many
+    // wefts the *spacing* is the thing the eye would otherwise read as a grid. Jittered past its own
+    // gap, the sequence stops being countable, which is the whole difference between cloth and paper.
+    const base = ((w + 0.5) / weftCount + (random() - 0.5) * 0.85) * height;
+    const bow = 0.18 + random() * 0.42;
     const bowPhase = random() * Math.PI * 2;
 
     const points: Point[] = [];
@@ -448,8 +549,21 @@ function field(o: FigureOptions): Figure {
      * vertical lines with some faint horizontal ones behind them. Being *thrown across*, a real weft
      * passes over the warp: brighter, and heavier.
      */
-    shades.push(1);
-    weights.push(2);
+    /*
+     * The weft's weight and brightness, as a *ramp* rather than a constant.
+     *
+     * Every weft was previously identical — full brightness, twice the warp's width — which makes the
+     * crossings regular in exactly the way real cloth is not. A weft family has ends of different
+     * grist, so this ramps across the family with a little jitter on top: some strands sit proud of the
+     * surface and catch light, others are beaten in and nearly disappear. That variation is what makes
+     * the crossings read as *woven into* the warp rather than laid over it.
+     *
+     * The floor is 0.55 of the warp's weight, so no weft vanishes outright — a weft below the warp's
+     * weight stops being a weft, which is the failure this figure began with.
+     */
+    const grist = w / Math.max(1, weftCount - 1);
+    shades.push(0.72 + random() * 0.28);
+    weights.push(1.55 + 0.85 * grist + random() * 0.35);
   }
 
   return { kind: "field", viewBox: `0 0 ${width} ${height}`, paths, shades, weights, nodes: [], edges: [] };

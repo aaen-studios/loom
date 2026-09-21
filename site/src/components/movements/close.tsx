@@ -2,7 +2,7 @@ import Link from "next/link";
 import { DOWNLOAD, REPO, SITE } from "@/lib/site";
 import { PANELS } from "@/lib/panels";
 import { MOVEMENTS } from "@/lib/movements";
-import { Still } from "@/components/weave/figure";
+import { Drifting } from "@/components/weave/animated";
 import { Movement, Code, Note, P, Spec, Statement, Table } from "@/components/ui/primitives";
 
 /**
@@ -28,7 +28,7 @@ export function Ground() {
       {/* The quietest figure on the page: a wide, shallow field, faded almost to nothing. It is
           here to keep the ground from changing character between movements, not to be looked at. */}
       <div className="figure-plate figure-plate-low" aria-hidden="true">
-        <Still
+        <Drifting
           kind="field"
           seed={7011}
           width={1800}
@@ -197,7 +197,7 @@ export function Install() {
       lead="One portable installer with the application embedded. No runtime to install first, no framework, and nothing to configure beyond adding a provider key."
     >
       <div className="figure-plate figure-plate-low" aria-hidden="true">
-        <Still
+        <Drifting
           kind="bundle"
           seed={991}
           width={1800}
