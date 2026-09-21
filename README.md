@@ -199,16 +199,44 @@ src/dock/            the dock: zones, splitters, tab strips, panel registry
 src-tauri/           Tauri shell (window, tray, hotkey, overlay, commands, panels)
 crates/loom-core/    engine: providers, tools, mcp, index, storage, updater, dock, pty
 setup/               Loom Setup (bespoke installer)
-site/                marketing site (Next.js) — see below
+site/                the public page (Next.js) — see below
 docs/spec.md         product + architecture spec
 ```
 
 ## Website
 
-`site/` is the public landing page at **[loom.rip](https://loom.rip)**: Next.js
-and Tailwind v4, deployed from this repository. It is not a separate project
-with its own copy of the design — it is styled by the **same declarations** the
-app uses.
+`site/` is the public page at **[loom.rip](https://loom.rip)**: Next.js and
+Tailwind v4, deployed from this repository. It is not a separate project with its
+own copy of the design — it is built out of the **same declarations** the app is:
+its `panel`, `pill`, `btn-primary`, `chip`, `kbd` and radius scale are the app's
+own utilities, extracted at build time rather than reimplemented.
+
+**Every figure on the page is generated in the browser from a seed.** There are no
+images, no SVG files and nothing fetched: `src/lib/weave.ts` is a pure function
+that takes a size, a seed and a phase and returns paths as data, and
+`components/weave/` renders it. `weave.test.ts` checks the properties that matter
+and are invisible by eye — determinism, that a figure stays inside its own box,
+that the pointer only moves what is near it, that no point is ever `NaN` (one
+`NaN` makes the browser drop the whole path, and a figure whose threads have
+silently vanished looks deliberate).
+
+The artwork is a thread field in the application's own seven `--thread-*`
+colours, because those tokens are in the shared region — so re-tinting a thread in
+the app changes the figures on the site or fails the build. The hero's field is
+animated (a slow sine phase, plus a Gaussian repulsion from the cursor) by writing
+`d` attributes directly onto the paths the server rendered, which is why the
+server and the browser draw the identical first frame and there is no hydration
+flash.
+
+Six movements after the hero, and the order is the argument: the weave, the parts,
+where they meet, narrowing, ground truth, install.
+
+`src/lib/movements.ts` and `src/lib/panels.ts` are the page's two sources of
+truth. The eight panels are listed once and read by the capability grid, the
+footer and the verifiers; the six movements are listed once and read by the
+header, the footer and the verifiers. A ninth panel or a renamed movement arrives
+on the page or fails the build, which is the only way a long page stays internally
+consistent across the files it is written in.
 
 ```bash
 cd site
@@ -245,27 +273,41 @@ they arrive through an `@import` rather than in the entry stylesheet.
 
 ### Site checks
 
-Six gates, all runnable together with `bun run verify` from `site/`:
+Three verifiers plus the two that have to run first, all runnable together with
+`bun run verify` from `site/`:
 
 - **`tokens:check`** — the generated token sheet matches `src/styles.css`. This
   is the one that makes the copying safe: a change to a marked region cannot
   reach `main` without the regenerated sheet beside it.
-- **`bun test`** — the hero's scripted turn. The animation is invisible to every
-  other check the project has: `next build` cannot tell that a beat was edited
-  into the wrong order, and the page verifier only ever sees the first frame,
-  which is the empty state. So the timeline is a pure module (`src/lib/timeline.ts`)
-  and is tested for the invariants the animation depends on.
+- **`bun test`** — the weave's geometry, and the page's ground. The geometry is a
+  pure module (`src/lib/weave.ts`) because a generative figure fails *silently*:
+  one `NaN` anywhere in a path makes the browser drop that entire `<path>`, and a
+  figure whose threads have vanished looks like a deliberate choice rather than a
+  bug. So determinism, bounds and no-NaN are all assertions. The bounds check is
+  also the one that found a real defect — the `bundle` figure's strands met 2.4px
+  apart instead of converging, because `GATHER = 0.004` reads like "nearly zero"
+  and is 0.4% of a 600px spread.
 - **`typecheck`** — `tsc --noEmit`.
-- **`verify:tokens`** — greps the **built** CSS for the app's real tokens, and
-  for the app-only rules that must *not* be there (the shell's
-  `overflow: hidden`, the quick-ask overlay, the markdown pipeline). Catches a
-  build that succeeds while the shared styles silently went missing.
+- **`verify:tokens`** — greps the **built** CSS for the app's real tokens, and for
+  the app-only rules that must *not* be there (the shell's `overflow: hidden`, the
+  quick-ask overlay, the markdown pipeline). It also asserts that the generated
+  figures are in the *prerendered* HTML with real path geometry, because a
+  generator that throws during the server render produces a page that builds,
+  ships and has no pictures in it. Two lessons are recorded in its header comment:
+  an unused `@utility` is not emitted, and Tailwind's candidate scan reads prose as
+  well as class names — so the word "panel" in a sentence generates `@utility
+  panel` just as reliably as `className="panel"` does. The scan is confined to
+  `src/` for that reason.
 - **`verify:pages`** — asserts the prerendered HTML contains what the pages
   claim, including that the download page reports its release state truthfully
-  rather than falling back to a hardcoded version unnoticed.
-- **`verify:a11y`** — heading structure, accessible names, alt text and
-  in-page link targets, read from the built HTML. This is what caught the
-  footer's column headings skipping a level on the 404.
+  rather than falling back to a hardcoded version unnoticed. The release state is
+  read from a `data-release-state` attribute rather than by searching the prose,
+  because the phrase "the current release" also occurs in an ordinary sentence —
+  so a prose search reported two states at once on a page that rendered one.
+- **`verify:a11y`** — heading structure, accessible names, alt text, in-page link
+  targets, and every `<svg>` either labelled or hidden. This is what caught five of
+  the page's movements being unreachable by link, which is why the footer now
+  lists all six from `src/lib/movements.ts` instead of hardcoding one anchor.
 
 `scripts/test-site-token-sync.mjs` is a seventh, run locally rather than in CI
 because it temporarily edits `src/styles.css`: it breaks a marker in seven

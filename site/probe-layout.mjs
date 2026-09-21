@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Measures the rendered document and prints the result as text.
+// Measures the rendered page and prints the result as text.
 //
 //   node probe-layout.mjs                 every viewport, both motion preferences
 //   node probe-layout.mjs 1440            one width
@@ -9,34 +9,32 @@
 // Why text rather than a screenshot
 // ---------------------------------------------------------------------------
 //
-// The claims this document makes are *geometric*, and none of them is visible in a
-// build, a typecheck or a prerendered HTML dump.
+// Every claim this page makes is one a screenshot cannot settle and a build step cannot see.
 //
-//   - The text column must be the measure. This is the defect the rebuild was largely
-//     about: the previous layout let prose run a ten-column shed, which at the cap is
-//     about 150 characters a line — twice what anyone can read without losing their
-//     place — and an over-long line typechecks, builds and renders perfectly.
-//   - The margin index and the running head's section indicator must be gated in
-//     opposite directions, so "where am I" is answered exactly once at any width:
-//     never twice, and never zero times.
-//   - A figure must not be shrunk below legibility, and the table breakout must not give
-//     the document a horizontal scrollbar.
+//   - **The figures are drawn.** A generator that returns an empty path list renders as nothing at all,
+//     silently, and a movement with a blank plate in it looks like a deliberate choice. The only way to
+//     know is to count the geometry in a laid-out DOM.
+//   - **The geometry is identical on both sides.** The hero's figure is computed once on the server and
+//     once in the browser, from the same seed. If they disagree the page flashes a different drawing
+//     before settling — and the flash is only visible on a fast machine, which is never CI.
+//   - **The threads are the application's colours.** Every stroke is a `var(--thread-*)`, so the artwork
+//     follows the theme with no second code path. A single literal colour would be the one thing on the
+//     page that did not change with the theme, and it would look *nearly* right in the theme it was
+//     written in.
+//   - **Nothing is wider than the shell.** A figure that bleeds without knowing where the edges are is
+//     the one layout bug that gives a page a horizontal scrollbar, and it is invisible at the width it
+//     was written for.
+//   - **The reveal never hides content.** Its worst case has to be "no animation" rather than "no text".
 //
-// Every one of those fails in a viewport-dependent way. A column that is two gutters
-// too narrow looks fine at 1440 and cramped at 390. An index that appears one breakpoint
-// early is invisible until the exact width where it overlaps the text. So a regression
-// here is invisible on the machine you develop on and glaring on the machine you own —
-// which is the same argument the previous version of this tool made about a weft line
-// that followed the scroll, and it is why the tool survived the rebuild when the element
-// it was written for did not.
+// A screenshot could catch some of that — but only if someone remembered to look at the right width, and
+// only by eye. This asserts numbers.
 //
-// The page reports its own measurements (`components/dev/probe.tsx`, behind `?probe=1`)
-// and this script drives headless Chrome over it and prints the numbers. It reads the
-// installed Chrome rather than downloading a browser, and it needs no dependency.
+// The page reports its own measurements (`components/dev/probe.tsx`, behind `?probe=1`) and this script
+// drives headless Chrome over it and prints the numbers. It reads the installed Chrome rather than
+// downloading a browser, and it needs no dependency.
 //
-// Not part of `bun run verify`: that has to stay fast and dependency-free for CI, and
-// this needs a running dev server. It is the tool you reach for while changing the
-// layout.
+// Not part of `bun run verify`: that has to stay fast and dependency-free for CI, and this needs a
+// running dev server. It is the tool you reach for while changing the layout or the figures.
 import { execFileSync } from "node:child_process";
 import { existsSync } from "node:fs";
 
@@ -46,23 +44,22 @@ const URL = `http://localhost:${PORT}/?probe=1`;
 /**
  * The widths worth checking.
  *
- * 390 is a phone, where the figure scrolls rather than shrinking and the running head
- * carries the section. 1152 is the margin index's breakpoint exactly — a breakpoint is
- * the one kind of layout decision that can be wrong at exactly one width, so probing it
- * only at 1440 would never test the boundary. 1440 is an ordinary laptop. 5120 is not
- * hypothetical: it is the ultrawide this project is developed on, and it is the width at
- * which the measure either holds or drifts into a 200-character line.
+ * 390 is a phone, where the hero's weave falls back to a still frame and the figures have to hold
+ * together at a width they were not tuned at. 1024 and 1440 bracket an ordinary laptop. 2560 is here
+ * because a fluid figure is most likely to look wrong at a width nobody develops on — a thread field
+ * tuned at 1440 is a different texture at 2560, and the failure is invisible until someone with a big
+ * monitor opens it.
  *
- * `dsf` is the device scale factor, and the phone entry needs it: headless Chrome refuses
- * to make a window narrower than about 500px, so asking for `--window-size=390` silently
- * gives a 500px CSS viewport — which is a tablet, not a phone, and every narrow-screen
- * check would be made against the wrong layout. Doubling the window and doubling the
- * scale factor produces a genuine 390×844 CSS viewport.
+ * `dsf` is the device scale factor, and the phone entry needs it: headless Chrome refuses to make a
+ * window narrower than about 500px, so asking for `--window-size=390` silently gives a 500px CSS
+ * viewport — which is a tablet, not a phone, and every narrow-screen check would be made against the
+ * wrong layout. Doubling the window and doubling the scale factor produces a genuine 390×844 CSS
+ * viewport.
  */
 const VIEWPORTS = [
-  { width: 5120, height: 1400, dsf: 1, note: "the ultrawide this is built on" },
+  { width: 2560, height: 1400, dsf: 1, note: "a wide monitor" },
   { width: 1440, height: 900, dsf: 1, note: "an ordinary laptop" },
-  { width: 1152, height: 900, dsf: 1, note: "the margin index's breakpoint, exactly" },
+  { width: 1024, height: 800, dsf: 1, note: "a small laptop" },
   { width: 390, height: 844, dsf: 2, note: "a phone" },
 ];
 
@@ -89,19 +86,18 @@ function probe(viewport, reduced) {
     "--headless=new",
     "--no-sandbox",
     "--hide-scrollbars",
-    // Virtual time, so React's effects and the font swap have both happened before the
-    // DOM is dumped. Without it the dump can land before the probe mounts.
+    // Virtual time, so the effects, the hero's animation and the font swap have all happened before the
+    // DOM is dumped. Without it the dump lands before the figures mount and every measurement is taken
+    // against an empty frame.
     "--virtual-time-budget=4000",
     `--window-size=${Math.round(viewport.width * viewport.dsf)},${Math.round(viewport.height * viewport.dsf)}`,
     `--force-device-scale-factor=${viewport.dsf}`,
   ];
 
-  // Both branches matter, and not only for the shared `reduce` override. The section
-  // indicator is checked under both because the honest reading of that preference is
-  // that it removes *movement*, not *position*: which section you are in is information,
-  // and withholding it from someone who asked for less animation would be removing a
-  // feature rather than respecting a preference. That distinction is easy to get wrong in
-  // the component and impossible to see in a screenshot.
+  // Both branches matter, and not only for the shared `reduce` override. The figures are checked under
+  // both because the honest reading of the preference is that it removes *movement*, not *content*: the
+  // still frames must be there either way, and if the reduced case were a blank plate the page would be
+  // broken for exactly the readers most likely to be reading it carefully.
   if (reduced) args.push("--force-prefers-reduced-motion");
 
   args.push("--dump-dom", URL);
@@ -164,7 +160,7 @@ for (const viewport of targets) {
 
 console.log("");
 if (failures === 0) {
-  console.log("the column, the index and the drawings hold at every width checked");
+  console.log("the figures, the shell and the reveal hold at every width checked");
 } else {
   console.log(`${failures} failure(s)`);
   process.exit(1);

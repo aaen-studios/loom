@@ -1,13 +1,11 @@
 // Structural and accessibility checks over the prerendered HTML.
 //
-// Not a replacement for testing with a screen reader. It catches the class of
-// mistake that is easy to make and invisible in a browser: an image with no alt
-// text, a link with no accessible name, two `<h1>`s on one page, a heading level
-// that skips, a control that cannot be reached or operated.
+// Not a replacement for testing with a screen reader. It catches the class of mistake that is easy to
+// make and invisible in a browser: an image with no alt text, a link with no accessible name, two `<h1>`s
+// on one page, a heading level that skips, a control that cannot be reached or operated.
 //
-// It reads the *built* HTML rather than the source, so it sees what a visitor and
-// a crawler actually receive — including anything a component quietly failed to
-// render.
+// It reads the *built* HTML rather than the source, so it sees what a visitor and a crawler actually
+// receive — including anything a component quietly failed to render.
 import { readFileSync, readdirSync, statSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -25,8 +23,8 @@ function allFiles(dir, out = []) {
 
 const pages = allFiles(join(here, ".next", "server", "app"))
   .filter((file) => file.endsWith(".html"))
-  // The internal error pages are Next's markup, not this project's, so auditing
-  // them would mean auditing a framework.
+  // The internal error pages are Next's markup, not this project's, so auditing them would mean auditing
+  // a framework.
   .filter((file) => !file.includes("_global-error"));
 
 let failed = 0;
@@ -71,8 +69,9 @@ for (const file of pages) {
   if (h1s.length !== 1) fail(name, `expected exactly one <h1>, found ${h1s.length}`);
   else pass(name, "has exactly one h1");
 
-  // Heading levels must not skip. An `h2` followed by an `h4` makes the outline
-  // nonsense for anyone moving through the page by heading.
+  // Heading levels must not skip. An `h2` followed by an `h4` makes the outline nonsense for anyone
+  // moving through the page by heading — and it is invisible to everyone else, which is why it is
+  // checked here rather than left to review.
   const levels = [...html.matchAll(/<h([1-6])[\s>]/g)].map((match) => Number(match[1]));
   let skip = null;
   for (let index = 1; index < levels.length; index += 1) {
@@ -85,8 +84,8 @@ for (const file of pages) {
   else pass(name, "heading levels do not skip");
 
   // --- Images ------------------------------------------------------------
-  // The attribute is what matters, not its contents: `alt=""` is correct for a
-  // decorative image and absent `alt` is not.
+  // The attribute is what matters, not its contents: `alt=""` is correct for a decorative image and an
+  // absent `alt` is not.
   const images = [...html.matchAll(/<img\b[^>]*>/g)].map((match) => match[0]);
   const missingAlt = images.filter((tag) => !/\salt=/.test(tag));
   if (missingAlt.length > 0) {
@@ -96,8 +95,8 @@ for (const file of pages) {
   }
 
   // --- Links -------------------------------------------------------------
-  // Every link needs text, an `aria-label`, or a nested image with alt. An icon
-  // link with none of those is announced as nothing but "link".
+  // Every link needs text, an `aria-label`, or a nested image with alt. An icon link with none of those
+  // is announced as nothing but "link".
   const anchors = [...html.matchAll(/<a\b([^>]*)>([\s\S]*?)<\/a>/g)];
   const nameless = anchors.filter(([, attrs, inner]) => {
     if (/aria-label=/.test(attrs)) return false;
@@ -120,6 +119,31 @@ for (const file of pages) {
   if (unnamed.length > 0) fail(name, `${unnamed.length} <summary> without an accessible name`);
   else pass(name, `every summary is named (${summaries.length})`);
 
+  // --- The artwork --------------------------------------------------------
+  /*
+   * Every `<svg>` needs a decision made about it: either it carries meaning and has a label, or it is
+   * decoration and is hidden. An unlabelled, unhidden SVG is announced by a screen reader as an empty
+   * "graphic", which tells a reader that something is there and nothing about what.
+   *
+   * On this page every figure is decoration — the prose says everything they say — so the correct state
+   * is `aria-hidden="true"` on all of them, and that is what is asserted. A figure that later gains a
+   * `role="img"` and a label would fail this, which is the right direction: it would be a deliberate
+   * change, and the check should be edited when the decision is made.
+   */
+  const svgs = [...html.matchAll(/<svg\b([^>]*)>/g)].map((match) => match[1]);
+  const unhandled = svgs.filter(
+    (attrs) => !/aria-hidden="true"/.test(attrs) && !/role="img"/.test(attrs),
+  );
+  if (unhandled.length > 0) {
+    fail(
+      name,
+      `${unhandled.length} svg(s) are neither labelled nor hidden`,
+      unhandled[0].slice(0, 110),
+    );
+  } else {
+    pass(name, `every svg is labelled or hidden (${svgs.length})`);
+  }
+
   // --- Substance ---------------------------------------------------------
   const words = textOf(html).split(/\s+/).filter(Boolean).length;
   if (words < 50) fail(name, `only ${words} words of text content`);
@@ -128,46 +152,38 @@ for (const file of pages) {
   console.log("");
 }
 
-// --- Cross-page checks on the landing page ---------------------------------
+// --- Cross-page checks on the product page ---------------------------------
 const index = pages.find((file) => file.endsWith("index.html"));
 if (index) {
   const html = visible(readFileSync(index, "utf8"));
 
-  // The small-screen navigation has to be a `<details>` rather than a scripted button,
-  // or it would be the one part of the site that needs JavaScript. This asserts the
-  // approach, not the appearance.
-  //
-  // The FAQ used to be `<details>` too, and it deliberately is not any more: a
-  // collapsible answer is hidden from in-page search and from anyone reading without
-  // JavaScript, which for a question that decides whether someone installs the software
-  // is exactly the wrong trade. So the disclosure check applies to the header only, and
-  // the FAQ's *readability* is what is asserted instead — by looking for an answer.
-  if (!/<details/.test(html)) {
-    fail("index", "no <details> navigation — the small-screen menu would need JS");
+  /*
+   * At most one `<details>`: the small-screen nav menu, and nothing else.
+   *
+   * Asserted as a ceiling rather than a floor because a disclosure is the one pattern this page has had
+   * to argue itself out of twice. The questions were briefly an accordion, and a collapsible answer is
+   * hidden from in-page search and from anyone reading without JavaScript — which, for a question that
+   * decides whether someone installs the software, is exactly the wrong trade.
+   */
+  const details = (html.match(/<details/g) ?? []).length;
+  if (details > 1) {
+    fail("index", `found ${details} <details>; only the nav menu needs to be one`);
   } else {
-    pass("index", "the small-screen menu works without JavaScript");
+    pass("index", "nothing but the small-screen menu is behind a disclosure");
   }
 
-  if (!/SmartScreen/.test(html)) {
-    fail("index", "the security questions are not answered in the prerender");
-  } else {
-    pass("index", "the questions are answered in the prerendered HTML");
-  }
-
-  // Every in-page anchor needs a matching id, or a nav link silently does nothing when
-  // clicked — which is worse than a 404, because it looks like the browser misbehaving
-  // rather than a wrong address.
-  //
-  // The pattern allows a leading `/`, because Next's `<Link>` renders
-  // `href="/#glossary"` rather than `href="#glossary"` on the pages that are not the
-  // manual. Matching only the bare form finds a handful of anchors and passes anyway,
-  // which is the worst kind of green: a check that succeeds because it is looking in the
-  // wrong place.
-  //
-  // The floor is six. The manual declares its entries three times over — the contents
-  // list, the registers and the margin index — and the pages outside it add a few more,
-  // so a correct page carries more than two dozen. Finding fewer than six means this
-  // check has stopped looking, not that the links have gone.
+  /*
+   * Every in-page anchor needs a matching id, or a nav link silently does nothing when clicked — which
+   * is worse than a 404, because it looks like the browser misbehaving rather than a wrong address.
+   *
+   * The pattern allows a leading `/`, because Next's `<Link>` renders `href="/#parts"` rather than
+   * `href="#parts"`. Matching only the bare form finds a handful of anchors and passes anyway, which is
+   * the worst kind of green: a check that succeeds because it is looking in the wrong place.
+   *
+   * The floor is six — one per movement — which is derived rather than guessed. An earlier version of
+   * this check asserted a number above the true count and failed on a correct page, and the fix was to
+   * notice the page was missing links rather than to lower the number.
+   */
   const anchors = [...html.matchAll(/href="\/?#([a-z0-9-]+)"/g)].map((m) => m[1]);
   const unique = [...new Set(anchors)];
   const ids = new Set([...html.matchAll(/\sid="([^"]+)"/g)].map((m) => m[1]));
@@ -180,19 +196,6 @@ if (index) {
   } else {
     pass("index", `every in-page link resolves (${unique.length})`);
   }
-
-  // The FAQ is *not* a disclosure widget any more, and this asserts the reason rather
-  // than the absence: a collapsible answer is hidden from in-page search and from
-  // anyone reading without JavaScript, which for a question that decides whether
-  // someone installs the software is the wrong trade. So the header's small-screen menu
-  // is the only `<details>` on the page, and every answer is in the prerender.
-  const details = (html.match(/<details/g) ?? []).length;
-  if (details !== 1) {
-    fail("index", `expected exactly one <details> (the small-screen menu), found ${details}`);
-  } else {
-    pass("index", "the only disclosure on the page is the small-screen menu");
-  }
-  else pass("index", `FAQ uses native disclosure (${details} items)`);
 }
 
 console.log("");

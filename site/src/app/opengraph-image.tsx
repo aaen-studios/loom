@@ -1,66 +1,60 @@
 import { ImageResponse } from "next/og";
 import { SITE } from "@/lib/site";
-import { FIGURES, SECTIONS, TABLES } from "@/lib/document";
+import { profile } from "@/lib/weave";
 
 /**
- * The Open Graph card: the cover of the manual.
+ * The Open Graph card: the weave, as a picture.
  *
  * ---------------------------------------------------------------------------
- * What this replaced, and why the replacement is the same idea twice
+ * What this card is doing
  * ---------------------------------------------------------------------------
  *
- * The previous card drew a seven-row weaving draft in squared cells, which was the
- * previous site's whole conceit rendered as a picture. It was competent and it
- * communicated nothing: a share card showing an unlabelled grid means whatever the
- * reader already thought, which for most readers is "a grid". A card that only makes
- * sense once you have learned a notation has failed at the one job a card has, which
- * is to be legible in a timeline next to nine other links.
+ * A share card has one job — be legible next to nine other links in a timeline — and most cards for
+ * products like this fail it the same way, by drawing the product's logo large and saying nothing. This
+ * one draws the page's own material: a field of threads under tension in the application's dark palette,
+ * with the claim beneath them.
  *
- * A book cover is the opposite: it says the title, what the thing is, and how much of
- * it there is — in that order, at a glance, with no prerequisite. That is what a
- * technical publisher has put on the front of a manual for a hundred years and it is
- * the correct answer here, because it is the same answer to the same problem.
+ * The thread positions come from `profile()` — the same sum-of-sines the hero figure uses — with a
+ * different seed. They are drawn as *bars* rather than as paths for one reason, and it is the renderer
+ * rather than the design: Satori's SVG support is unpredictable and its flexbox support is not, so a row
+ * of thin divs is a reliable thread field where a `<path>` is a gamble. This is the only place on the
+ * site where the artwork is not drawn with a path.
  *
  * ---------------------------------------------------------------------------
- * Two Satori constraints shape every line below
+ * Three constraints shape every line below
  * ---------------------------------------------------------------------------
  *
- *  1. **It cannot see CSS variables.** Satori renders only the inline styles it is
- *     given and never loads the stylesheet, so `var(--accent)` here would silently
- *     render as nothing at all — a bug you discover when someone shares the link.
- *     Every colour below is a literal from the application's palette: the dark
- *     `--accent` (`#8ea2ff`), the dark `--ink` (`#f4f6fc`), the dark `--ink-soft`
- *     (`rgb(244 246 252 / 0.76)` as a hex), and the pre-mount ground (`#070a12`).
- *  2. **An element with more than one child needs an explicit `display`.** This
- *     includes text interpolation: `{n} sections` is two child nodes and Satori
- *     refuses it outright unless the parent is told how to lay them out. Every
- *     string below that mixes a value with a word is a single template literal, and
- *     that is not a stylistic preference — it is the difference between a card that
- *     builds and a card that renders a bare number with the word missing.
+ *  1. **It cannot see CSS variables.** Satori renders only the inline styles it is given and never loads
+ *     the stylesheet, so `var(--accent)` here would silently render as nothing at all — a bug you
+ *     discover when someone shares the link. Every colour below is a literal from the application's own
+ *     dark palette: `--accent` at `#8ea2ff`, `--thread-bright` at `#bed0ff`, the dark `--ink` at
+ *     `#f4f6fc`, `--ink-soft` composited over the ground to `#a9b0c0`, the glass border at
+ *     `rgba(255,255,255,0.12)`, and the pre-mount ground itself at `#070a12`.
  *
- * There is no grid either: rows and columns are nested flex containers with fixed
- * sizes, because Satori implements only part of flexbox and none of grid.
+ *  2. **An element with more than one child needs an explicit `display`.** This includes text
+ *     interpolation: `{n} panels` is two child nodes, and Satori refuses it outright unless the parent
+ *     is told how to lay them out. Every string below that mixes a value with a word is a single
+ *     template literal.
+ *
+ *  3. **A style value of `undefined` fails the whole build**, with "Cannot read properties of undefined
+ *     (reading 'trim')", which names nothing at all. So every style is stated unconditionally, including
+ *     the ones that look inferable.
  */
-export const alt = "Loom — a desktop workspace for AI chat and agents";
+export const alt = "Loom — a window that holds everything";
 export const size = { width: 1200, height: 630 };
 export const contentType = "image/png";
 
-/**
- * The cover's facts, read from the registers.
- *
- * Deliberately imported rather than hardcoded, unlike the thread count the previous
- * card took from its own drawing. A cover that says "7 sections" over a manual with
- * eight is the kind of small lie that costs more than an import saves — and unlike a
- * decorative grid, these numbers are the card's actual content.
- */
-const FACTS = [
-  `${SECTIONS.length} sections`,
-  `${FIGURES.length} figures`,
-  `${TABLES.length} tables`,
-  "MIT licensed",
-] as const;
+/** How many threads the field draws, and how tall it is. */
+const THREADS = 108;
+const FIELD = 236;
+
+/** The seed. Different from the hero's, so the card is not a copy of the top of the page. */
+const SEED = 6011;
 
 export default function OpengraphImage() {
+  const threads = profile(SEED, THREADS);
+  const weft = profile(SEED + 91, 4);
+
   return new ImageResponse(
     (
       <div
@@ -70,13 +64,13 @@ export default function OpengraphImage() {
           display: "flex",
           flexDirection: "column",
           backgroundColor: "#070a12",
-          padding: "68px 76px",
+          padding: "54px 62px",
           fontFamily: "sans-serif",
         }}
       >
-        {/* The running head: the mark and the name, at the size a cover uses. */}
-        <div style={{ display: "flex", alignItems: "center", gap: 14 }}>
-          <svg width="34" height="34" viewBox="0 0 24 24" fill="none">
+        {/* The running head. */}
+        <div style={{ display: "flex", alignItems: "center", gap: 13 }}>
+          <svg width="30" height="30" viewBox="0 0 24 24" fill="none">
             <path
               d="M6.5 5.5c0 6.5 5.5 6.5 5.5 13"
               stroke="#8ea2ff"
@@ -97,88 +91,107 @@ export default function OpengraphImage() {
               opacity="0.55"
             />
           </svg>
-          <div style={{ display: "flex", fontSize: 26, fontWeight: 600, color: "#f4f6fc" }}>
+          <div style={{ display: "flex", fontSize: 25, fontWeight: 600, color: "#f4f6fc" }}>
             Loom
           </div>
+          <div style={{ display: "flex", marginLeft: "auto", fontSize: 17, color: "#7d8497" }}>
+            {SITE.url.replace("https://", "")}
+          </div>
+        </div>
+
+        {/* The field. Threads whose horizontal offset comes from the profile, and whose opacity
+            follows the same curve — so the field has a *shape* rather than being a flat barcode. */}
+        <div
+          style={{
+            display: "flex",
+            position: "relative",
+            height: FIELD,
+            marginTop: 34,
+            alignItems: "flex-start",
+            overflow: "hidden",
+          }}
+        >
+          {threads.map((value, index) => (
+            <div
+              key={index}
+              style={{
+                display: "flex",
+                width: 1,
+                height: FIELD,
+                marginLeft: index === 0 ? 0 : 9,
+                marginTop: Math.round(value * 42),
+                backgroundColor:
+                  value > 0.62 ? "rgba(190, 208, 255, 0.72)" : "rgba(142, 162, 255, 0.26)",
+              }}
+            />
+          ))}
+
+          {/* The weft: four hairlines crossing the field, at positions from a second profile. Each is
+              absolutely placed so it crosses every thread rather than sitting between two of them. */}
+          {weft.map((value, index) => (
+            <div
+              key={`weft-${index}`}
+              style={{
+                display: "flex",
+                position: "absolute",
+                left: 0,
+                right: 0,
+                top: Math.round(24 + value * (FIELD - 48)),
+                height: 1,
+                backgroundColor: "rgba(142, 162, 255, 0.34)",
+              }}
+            />
+          ))}
+        </div>
+
+        {/* The words, under the field rather than over it — a card with text on top of a texture is
+            a card nobody reads. */}
+        <div style={{ display: "flex", flexDirection: "column", marginTop: "auto" }}>
+          <div
+            style={{
+              display: "flex",
+              fontSize: 56,
+              fontWeight: 600,
+              color: "#f4f6fc",
+              lineHeight: 1.02,
+              letterSpacing: "-0.04em",
+            }}
+          >
+            {"A window that holds everything."}
+          </div>
+
           <div
             style={{
               display: "flex",
               fontSize: 20,
-              color: "#7d8497",
-              marginLeft: 10,
+              color: "#a9b0c0",
+              marginTop: 18,
+              lineHeight: 1.45,
+              maxWidth: 940,
             }}
           >
-            The manual
-          </div>
-        </div>
-
-        {/* The title block, pushed to sit low on the cover as a title does. */}
-        <div
-          style={{
-            display: "flex",
-            flexDirection: "column",
-            marginTop: "auto",
-          }}
-        >
-          <div
-            style={{
-              display: "flex",
-              flexDirection: "column",
-              borderTop: "2px solid #f4f6fc",
-              paddingTop: 30,
-            }}
-          >
-            <div
-              style={{
-                display: "flex",
-                fontSize: 66,
-                fontWeight: 600,
-                color: "#f4f6fc",
-                lineHeight: 1.05,
-                letterSpacing: "-0.035em",
-                maxWidth: 900,
-              }}
-            >
-              An agent you can watch work.
-            </div>
-
-            <div
-              style={{
-                display: "flex",
-                fontSize: 23,
-                color: "#a9b0c0",
-                marginTop: 22,
-                maxWidth: 820,
-                lineHeight: 1.45,
-              }}
-            >
-              A desktop workspace for AI chat and agents: a real terminal, an editor
-              with git, and the model&rsquo;s reasoning kept in the transcript where it
-              happened.
-            </div>
+            {
+              "A desktop workspace for AI chat and agents: a real terminal, an editor with git, and the model's reasoning kept in the transcript where it happened."
+            }
           </div>
 
-          {/* The four facts, on one line, tabular and separated by rules — the
-              register a cover carries. */}
           <div
             style={{
               display: "flex",
               alignItems: "center",
-              gap: 18,
-              marginTop: 34,
-              fontSize: 19,
+              gap: 14,
+              marginTop: 24,
+              fontSize: 18,
               color: "#7d8497",
             }}
           >
-            {FACTS.map((fact, index) => (
-              <div key={fact} style={{ display: "flex", alignItems: "center", gap: 18 }}>
-                {index > 0 && <div style={{ display: "flex", color: "#39404f" }}>|</div>}
-                <div style={{ display: "flex" }}>{fact}</div>
-              </div>
-            ))}
-            <div style={{ display: "flex", flexGrow: 1 }} />
-            <div style={{ display: "flex", color: "#8ea2ff" }}>
-              {SITE.url.replace("https://", "")}
+            <div style={{ display: "flex" }}>{"Windows"}</div>
+            <div style={{ display: "flex", color: "#39404f" }}>|</div>
+            <div style={{ display: "flex" }}>{"8 panels · 12 provider presets"}</div>
+            <div style={{ display: "flex", color: "#39404f" }}>|</div>
+            <div style={{ display: "flex" }}>{"Free · MIT licensed"}</div>
+            <div style={{ display: "flex", marginLeft: "auto", color: "#8ea2ff" }}>
+              {"12 models, or your own"}
             </div>
           </div>
         </div>
