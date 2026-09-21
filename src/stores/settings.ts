@@ -3,6 +3,7 @@ import type {
   AppConfig,
   BackgroundConfig,
   GlassConfig,
+  InterfaceConfig,
   PaletteConfig,
   Theme,
 } from "../types";
@@ -173,6 +174,14 @@ export const DEFAULT_CONFIG: AppConfig = {
     showCondensing: true,
     captureOnSend: true,
     autoMemory: true,
+    // IDE mode. False by default: this is a chat app, and the editor is
+    // something you switch to. Persisted once switched, because that is the
+    // difference between a mode and a dismissal — a panel is something you ask
+    // to see, a way of working is something you have said.
+    ideMode: false,
+    ideChatWidth: 420,
+    ideSidebarOpen: true,
+    ideSidebarWidth: 260,
     // Present here as well as in Rust, and that is the whole point: `saveConfig`
     // replaces the entire struct, so a default without `glass` would silently
     // reset the user's sliders on the next unrelated save.
@@ -190,7 +199,10 @@ export const DEFAULT_CONFIG: AppConfig = {
   dock: {},
   dockDefault: {
     zones: [
-      { id: "left", edge: "left", size: 300, open: false, panels: ["sessions"], active: 0 },
+      // `git` leads the left zone, matching `DockLayout::default()` in
+      // `dock.rs`. The zone is still **closed**: this decides what the first
+      // `Ctrl+`` shows, not whether the app shows anything on its own.
+      { id: "left", edge: "left", size: 300, open: false, panels: ["git", "sessions"], active: 0 },
       { id: "right", edge: "right", size: 460, open: false, panels: ["terminal"], active: 0 },
       { id: "bottom", edge: "bottom", size: 260, open: false, panels: ["runs"], active: 0 },
     ],
@@ -201,6 +213,29 @@ export const DEFAULT_CONFIG: AppConfig = {
     fontSize: 13,
     lineHeight: 130,
     webgl: false,
+  },
+  // Mirrors `EditorConfig::default()` in `config.rs`. Explicit rather than
+  // omitted for the same reason `glass` is: `saveConfig` replaces the whole
+  // struct, so a default without a key would silently reset it on the next
+  // unrelated save.
+  editor: {
+    fontSize: 13,
+    tabSize: 2,
+    wordWrap: "on",
+    minimap: false,
+    lineNumbers: true,
+    // On, and only safe because a write carries the hash of what was loaded —
+    // see the note on `EditorConfig::autosave`.
+    autosave: true,
+    autosaveDelayMs: 900,
+    renderWhitespace: false,
+    trimOnSave: false,
+    insertFinalNewline: false,
+  },
+  commit: {
+    style: "conventional",
+    includeBody: true,
+    diffBudget: 24000,
   },
   // Mirrors `BrowserConfig::default()` in `config.rs`.
   browser: {
@@ -239,6 +274,16 @@ interface SettingsState {
   setGlass: (patch: Partial<GlassConfig>) => void;
   /** The refracting surfaces, one level deeper than `setGlass`. */
   setLiquid: (patch: Partial<GlassConfig["liquid"]>) => void;
+  /**
+   * Any other interface field, in one setter.
+   *
+   * Deliberately generic rather than a setter per field. There are already four
+   * IDE-mode settings and there will be more, and each one with its own action
+   * is another place to forget the `scheduleSave` — which fails silently, by
+   * keeping the change on screen and losing it at the next launch. One setter
+   * that spreads a patch cannot forget.
+   */
+  setInterface: (patch: Partial<InterfaceConfig>) => void;
 }
 
 let saveTimer: number | undefined;
@@ -333,6 +378,18 @@ export const useSettings = create<SettingsState>((set, get) => ({
           liquid: { ...get().config.interface.glass.liquid, ...patch },
         },
       },
+    };
+    set({ config });
+    scheduleSave(get);
+  },
+
+  // Not a pure spread of the config, unlike the setters above: this is an
+  // *interface* patch, so the nesting is the point — `ideMode` is one field of
+  // one section, and a caller should not have to know the shape above it.
+  setInterface: (patch) => {
+    const config = {
+      ...get().config,
+      interface: { ...get().config.interface, ...patch },
     };
     set({ config });
     scheduleSave(get);

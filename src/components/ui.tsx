@@ -1,3 +1,4 @@
+import { useRef } from "react";
 import type {
   ButtonHTMLAttributes,
   KeyboardEvent,
@@ -251,6 +252,93 @@ export function IconButton({
 /** A keycap: the physical shape of the shortcut it names. */
 export function Kbd({ children }: { children: ReactNode }) {
   return <kbd className="kbd">{children}</kbd>;
+}
+
+/**
+ * A drag strip that reports a new value as the pointer moves.
+ *
+ * Deliberately not the dock's `ResizeHandle` in `DockShell.tsx`, which is bound
+ * to a *zone* — it calls `resizeZone` and `persist` on the layout store, and it
+ * clamps against the measured dock region. IDE mode's splitter resizes a
+ * persisted *setting* instead, so sharing the dock's would mean teaching it about
+ * two different owners. What is worth sharing — pointer capture, the axis sign,
+ * and the clamping — is here.
+ *
+ * `sign` is which way is bigger: a sidebar anchored left grows as the pointer
+ * moves right (`1`), and a chat column anchored right grows as it moves left
+ * (`-1`). Getting that wrong makes a drag feel inverted, which is worse than not
+ * working.
+ */
+export function ResizeHandle({
+  value,
+  min,
+  max,
+  axis,
+  sign,
+  onChange,
+  label,
+}: {
+  value: number;
+  min: number;
+  max: number;
+  axis: "x" | "y";
+  sign: 1 | -1;
+  onChange: (value: number) => void;
+  label: string;
+}) {
+  const drag = useRef<{ pointer: number; start: number } | null>(null);
+
+  return (
+    <div
+      role="separator"
+      aria-orientation={axis === "x" ? "vertical" : "horizontal"}
+      aria-label={label}
+      onPointerDown={(event) => {
+        // Left button only, and prevent the default so a drag cannot start a
+        // text selection in the panel behind it.
+        if (event.button !== 0) return;
+        event.preventDefault();
+        event.currentTarget.setPointerCapture(event.pointerId);
+        drag.current = {
+          pointer: axis === "x" ? event.clientX : event.clientY,
+          start: value,
+        };
+      }}
+      onPointerMove={(event) => {
+        if (!drag.current) return;
+        const now = axis === "x" ? event.clientX : event.clientY;
+        const delta = (now - drag.current.pointer) * sign;
+        onChange(Math.min(Math.max(Math.round(drag.current.start + delta), min), max));
+      }}
+      onPointerUp={(event) => {
+        if (!drag.current) return;
+        event.currentTarget.releasePointerCapture(event.pointerId);
+        drag.current = null;
+      }}
+      onPointerCancel={() => {
+        drag.current = null;
+      }}
+      onDoubleClick={() => onChange(Math.min(Math.max(value, min), max))}
+      className={cn(
+        "absolute z-30 touch-none",
+        axis === "x"
+          ? cn("top-0 bottom-0 w-2 cursor-col-resize", sign === 1 ? "right-0" : "left-0")
+          : "right-0 left-0 h-2 cursor-row-resize",
+      )}
+    >
+      {/* The visible line is a hairline; the hit area is the full 8px strip. A
+          1px target is why a divider feels ungrabbable. */}
+      <span
+        aria-hidden="true"
+        className={cn(
+          "absolute bg-transparent transition-colors hover:bg-[var(--accent)]",
+          axis === "x"
+            ? "top-1 bottom-1 left-1/2 w-px -translate-x-1/2"
+            : "top-1/2 right-1 left-1 h-px -translate-y-1/2",
+        )}
+      />
+    </div>
+  );
 }
 
 /** The empty state of any list: a mark, a reason, and a way forward. */

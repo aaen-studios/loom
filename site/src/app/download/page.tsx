@@ -1,7 +1,9 @@
 import type { Metadata } from "next";
 import { DownloadPanel } from "@/components/pages/download-panel";
-import { Code } from "@/components/pages/legal";
-import { SITE } from "@/lib/site";
+import { Standalone } from "@/components/doc/standalone";
+import { Sub } from "@/components/doc/section";
+import { Code, Note, P, Shell } from "@/components/doc/text";
+import { REPO } from "@/lib/site";
 
 export const metadata: Metadata = {
   title: "Download",
@@ -13,76 +15,105 @@ export const metadata: Metadata = {
 /**
  * The download page.
  *
- * Thin on purpose. The interesting part is `DownloadPanel`, a server component: the
- * version, the size and the checksum are in the HTML rather than appearing after
- * hydration, because a version number that pops in a beat late reads as broken and
- * the checksums are the point of the page.
+ * ---------------------------------------------------------------------------
+ * Why this is not part of the manual
+ * ---------------------------------------------------------------------------
  *
- * The prose around it carries the two things a download page should not be coy
- * about: that Windows will warn about the publisher, and how to verify the file
- * yourself instead of trusting it.
+ * The manual's eighth section covers installation in the way a manual covers it:
+ * numbered steps and a note on verifying the hash. That is the right treatment for a
+ * reader who is already convinced.
+ *
+ * This page exists for a different reader and a different moment — someone who has
+ * been sent a link, who wants the file, and who needs the state of the release stated
+ * truthfully before they take it. That is why it is a separate page rather than a
+ * subsection: it needs a server, because the version is read from GitHub at request
+ * time with a five-minute revalidation, and a build-time snapshot would go stale the
+ * moment a release was published.
+ *
+ * What it deliberately does *not* do is repeat the manual. Installation, the
+ * permission model, where your data lives and what leaves the machine are all written
+ * out at length on the front page, and a second, slightly different telling of any of
+ * them is how a site begins to contradict itself. So the prose here is the prose that
+ * only belongs here: what the file is, why Windows will complain about it, and how to
+ * check it.
  */
 export default function DownloadPage() {
   return (
-    <section className="px-4 pt-12 pb-4 sm:px-6 sm:pt-16">
-      <div className="warp-grid">
-        <div className="max-w-3xl" style={{ gridColumn: "2 / span 10" }}>
-          <p className="text-faint flex items-center gap-2.5 text-[11.5px] font-medium tracking-[0.16em] uppercase">
-            <span className="knot-lit knot" />
-            <span>Off the loom</span>
-          </p>
+    <Standalone
+      title="Download"
+      standfirst="One portable installer with the application embedded. No runtime to install first, no account, and nothing to configure beyond adding a provider key."
+    >
+      <DownloadPanel />
 
-          <h1 className="mt-4 text-[30px] leading-tight font-medium tracking-tight sm:text-[38px]">
-            Download Loom
-          </h1>
-          <p className="text-soft mt-4 text-[15px] leading-6">
-            A single portable installer with the application embedded. No account, no
-            runtime to install first, and nothing to configure beyond adding a
-            provider key.
-          </p>
+      <Sub>Why Windows says the publisher is unknown</Sub>
 
-          <div className="mt-8">
-            <DownloadPanel />
-          </div>
+      <P>
+        The installer is not code-signed. A Windows code-signing certificate is a
+        recurring cost, and until one is in place SmartScreen shows the same generic
+        warning for any installer that lacks it, regardless of what the installer does.
+        So the honest substitute is to verify the file yourself rather than to trust the
+        absence of a warning.
+      </P>
 
-          <section className="mt-10">
-            <h2 className="text-[16px] font-medium">Installing</h2>
-            <ol className="text-soft mt-3 space-y-2 text-[13.5px] leading-[1.65]">
-              <li>
-                Run the installer. Windows will warn that the publisher is unknown —{" "}
-                <a href="#unsigned" className="text-[var(--accent)] hover:underline">
-                  here is why
-                </a>
-                .
-              </li>
-              <li>
-                Choose a folder, or accept the default. If Loom is already installed
-                somewhere else, the installer finds it through its uninstall entry and
-                updates in place.
-              </li>
-              <li>
-                Open Loom, add a provider key in Settings → Providers, and pick a
-                model in the composer.
-              </li>
-            </ol>
+      <Shell>
+        {`# in the folder you saved the installer
+Get-FileHash .\\Loom-Setup-<tag>.exe -Algorithm SHA256
 
-            <h2 className="mt-8 text-[16px] font-medium">Uninstalling</h2>
-            <p className="text-soft mt-3 text-[13.5px] leading-[1.65]">
-              Use Add or remove programs, or run{" "}
-              <Code>%LOCALAPPDATA%\Loom\uninstall.cmd</Code>. Your chats, keys and
-              settings are deliberately left in place — see{" "}
-              <a href="/privacy" className="text-[var(--accent)] hover:underline">
-                privacy
-              </a>{" "}
-              for exactly what lives where.
-            </p>
-          </section>
-        </div>
-      </div>
+# compare against the hash in the release notes
+${REPO.releasesUrl}`}
+      </Shell>
 
-      <p className="sr-only">
-        Loom is published by {SITE.publisher}. Licensed {SITE.license}.
-      </p>
-    </section>
+      <Note>
+        This is separate from the updater, and the updater is the stronger of the two.
+        The payload an update installs is signed with minisign and verified before
+        anything is applied, so an update cannot be tampered with in transit even though
+        the installer that delivered it cannot prove who built it. The one thing a hash
+        cannot tell you is who wrote the code &mdash; and that is what the{" "}
+        <a
+          href={REPO.url}
+          target="_blank"
+          rel="noreferrer"
+          className="text-[var(--accent)] hover:underline"
+        >
+          public repository
+        </a>{" "}
+        is for.
+      </Note>
+
+      <Sub>After installing</Sub>
+
+      <P>
+        Add a provider key in Settings &rarr; Providers and pick a model in the composer.
+        To skip the key entirely, install Ollama or LM Studio and point Loom at it &mdash;
+        local models are detected rather than configured. The{" "}
+        <a href="/#warp" className="text-[var(--accent)] hover:underline">
+          second section of the manual
+        </a>{" "}
+        covers the window, and{" "}
+        <a href="/#shortcuts" className="text-[var(--accent)] hover:underline">
+          Appendix A
+        </a>{" "}
+        has the nine keys worth knowing.
+      </P>
+
+      <Sub>Uninstalling</Sub>
+
+      <P>
+        Either add or remove programs, or run{" "}
+        <Code>%LOCALAPPDATA%\Loom\uninstall.cmd</Code>. Your chats, keys and settings
+        are deliberately left in place; the{" "}
+        <a href="/privacy" className="text-[var(--accent)] hover:underline">
+          privacy page
+        </a>{" "}
+        lists exactly what remains and where.
+      </P>
+
+      <Note>
+        Releases are built and published from that repository, which is public and MIT
+        licensed. The download button resolves through this site rather than pointing at
+        GitHub directly, so a link you have already copied keeps working if the
+        repository is ever renamed or moved.
+      </Note>
+    </Standalone>
   );
 }

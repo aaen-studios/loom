@@ -1,23 +1,44 @@
 // Checks that the prerendered HTML contains what the pages claim it does.
 //
-// A successful build proves the components compile. It does not prove that the
-// release lookup found anything, or that a feature list still describes the
-// product — and the failure this is aimed at is a quiet one: `getRelease()`
-// falls back to a bundled snapshot on any error, so the download page can render
-// perfectly while silently advertising a hardcoded version.
+// A successful build proves the components compile. It does not prove that the release
+// lookup found anything, or that a feature list still describes the product — and the
+// failure this is aimed at is a quiet one: `getRelease()` falls back to a bundled
+// snapshot on any error, so the download page can render perfectly while silently
+// advertising a hardcoded version.
 //
+// ---------------------------------------------------------------------------
 // Three things learned writing this, each of which produced a false failure
-// before it was understood:
+// ---------------------------------------------------------------------------
 //
-//  1. **React inserts a text separator between adjacent static and dynamic
-//     text.** `<h2>Loom {version}</h2>` serialises as `Loom <!-- -->0.1.0`, so a
-//     regex expecting a space finds nothing. The HTML is normalised first.
+//  1. **React inserts a text separator between adjacent static and dynamic text.**
+//     `<h2>Loom {version}</h2>` serialises as `Loom <!-- -->0.1.0`, so a regex
+//     expecting a space finds nothing. The HTML is normalised first.
 //  2. **Route handlers are emitted as `<route>.body`.** `sitemap.xml.body` and
-//     `robots.txt.body` do not end in `.xml` or `.txt`, so matching on the
-//     extension alone misses them entirely.
+//     `robots.txt.body` do not end in `.xml` or `.txt`, so matching on the extension
+//     alone misses them entirely.
 //  3. **No release yet is not a failure.** `getRelease()` distinguishes "GitHub
-//     answered with nothing" from "GitHub could not be reached", and before the
-//     first tag the former is the correct, expected state.
+//     answered with nothing" from "GitHub could not be reached", and before the first
+//     tag the former is the correct, expected state.
+//  4. **Next emits the 404 as `404.html`, not `not-found.html`.** The glob below used
+//     to look for the latter and reported the page missing for as long as it existed,
+//     which is the worst kind of false negative: it taught whoever read the output to
+//     ignore that line.
+//
+// ---------------------------------------------------------------------------
+// Why the landing-page checks describe a document now
+// ---------------------------------------------------------------------------
+//
+// They used to assert a *scripted turn*: that the hero's headline was "An AI agent
+// that runs on your machine", and that the composer's placeholder "Do anything" had
+// reached the prerender — the latter proving the animation committed its first frame to
+// the server render rather than starting mid-animation.
+//
+// Both of those are gone along with the whole demonstration they belonged to, and that
+// is worth stating plainly, because a check like "the first frame is the empty state"
+// is a check that *pins the defect in place*. It would have failed the moment the right
+// thing happened, which makes it worse than no check at all. So the assertions below
+// describe the manual that exists, and `verify-manual.mjs` separately asserts that the
+// scripted hero has not come back.
 import { readFileSync, readdirSync, statSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -55,32 +76,82 @@ console.log("");
 
 const find = (suffix) => files.find((file) => file.endsWith(suffix));
 
-// --- The landing page -------------------------------------------------------
+// --- The manual -------------------------------------------------------------
 const home = find("index.html");
 if (home) {
   const html = visible(readFileSync(home, "utf8"));
-  check("landing: the hero heading is present", html.includes("An AI agent that runs on"));
-  // The composer's placeholder. It proves the scene committed its *first* frame
-  // to the server render rather than starting mid-animation.
-  check("landing: the first frame is the empty state", html.includes("Do anything"));
-  check("landing: the agent-modes feature is described", html.includes("Four agent modes"));
-  check("landing: providers are listed", html.includes("OpenCode Go"));
-  // A `<details>` FAQ is readable with JavaScript disabled and searchable with
-  // in-page find; a scripted accordion is neither.
-  check("landing: the FAQ renders without JavaScript", html.includes("<details"));
-  check("landing: the app's own glass is applied", html.includes("panel-strong"));
-  check("landing: long-lived commands are described", html.includes("outlive the turn"));
+
+  // The title page. No headline, no tagline: the product's name and one sentence.
+  check("manual: the title page names the instrument", html.includes("An agent you can watch work"));
+  check(
+    "manual: the contents list is present",
+    html.includes("sections") && html.includes("figures") && html.includes("tables"),
+  );
+
+  // The three sections of the argument. Each is a claim the page has to actually make.
+  check("manual: the dock is described", html.includes("Every zone starts"));
+  check("manual: the terminal is described", html.includes("A real terminal"));
+  check("manual: the editor is described", html.includes("Monaco"));
+  check("manual: the agent modes are described", html.includes("Atelier"));
+  check("manual: providers are listed", html.includes("OpenCode Go"));
+
+  // The drawings. A plate that stopped rendering would leave a caption with no figure,
+  // which looks almost right.
+  check("manual: the figures are drawn", (html.match(/class="figure-art"/g) ?? []).length >= 3);
+  check("manual: a drawing carries a text alternative", html.includes('aria-label="A drawing'));
+
+  // The glossary, which is the condition on which the vocabulary is allowed on the
+  // page at all.
+  check("manual: the glossary defines its terms", html.includes("On a loom:"));
+  check("manual: the shortcuts are written down", html.includes("Ctrl+Shift+Space"));
+
+  // The answers are static prose rather than a disclosure widget, which is the whole
+  // reason they are findable with in-page search and readable without JavaScript.
+  check(
+    "manual: the questions are answered in the prerender, not hidden behind a control",
+    html.includes("SmartScreen") && !html.includes("<details"),
+  );
+
+  // Two position indicators, gated in opposite directions by CSS. Both are in the
+  // markup — the gating is a media query — so what is checked here is that both exist
+  // and that they are built from the same list.
+  check("manual: the margin index is present", html.includes('class="index"'));
+  check("manual: the running head is present", html.includes('class="bar"'));
+
+  // The colophon. The most human thing on the page, and the part that a generator
+  // assembling components would not have written.
+  check("manual: the colophon names the type and the licence", html.includes("Colophon") && html.includes("Inter"));
+
+  // The anchors the two contents lists promise. Eight sections, two appendices.
+  const anchors = [
+    "instrument",
+    "warp",
+    "pick",
+    "ends",
+    "count",
+    "selvedge",
+    "heddles",
+    "off",
+    "shortcuts",
+    "glossary",
+  ];
+  const missing = anchors.filter((anchor) => !html.includes(`id="${anchor}"`));
+  check(
+    "manual: all ten entries are in the document",
+    missing.length === 0,
+    missing.map((anchor) => `#${anchor}`).join(", "),
+  );
 } else {
-  check("the landing page was emitted", false);
+  check("the manual was emitted", false);
 }
 
 // --- The download page ------------------------------------------------------
 const download = find("download.html");
 if (download) {
   const html = visible(readFileSync(download, "utf8"));
-  const live = html.includes("latest release");
+  const live = html.includes("the current release");
   const none = html.includes("not released yet");
-  const unreachable = html.includes("could not reach GitHub");
+  const unreachable = html.includes("GitHub could not be reached");
   const version = html.match(/Loom (\d+\.\d+\.\d+)/)?.[1] ?? null;
 
   check("download: a version number is rendered", version !== null, `version: ${version}`);
@@ -95,12 +166,21 @@ if (download) {
     "download: an absent release is reported as absent, not as a fault",
     !unreachable || live,
     unreachable
-      ? "Rendered 'could not reach GitHub' — that should only appear on a real network failure."
+      ? "Rendered 'GitHub could not be reached' — that should only appear on a real network failure."
       : "Either a live release, or an honest 'not released yet'.",
   );
-  check("download: the unsigned-installer warning is present", html.includes("publisher is unknown"));
+  check(
+    "download: the unsigned-installer warning is present",
+    html.includes("publisher is unknown"),
+  );
   check("download: a hash-verification command is shown", html.includes("Get-FileHash"));
   check("download: the stable redirect path is used", html.includes("/download/latest"));
+  // The page says out loud that it is not the manual, which is what stops a reader
+  // wondering why the installation instructions appear twice in slightly different words.
+  check(
+    "download: it points back at the manual rather than restating it",
+    html.includes("Appendix A"),
+  );
 } else {
   check("the download page was emitted", false);
 }
@@ -117,6 +197,37 @@ for (const [file, label, marker] of [
   }
   const html = visible(readFileSync(page, "utf8"));
   check(`${label}: has substantive content`, html.includes(marker));
+}
+
+// Privacy has to name every path it claims to store, because the whole reason that page
+// exists is that its list can be checked by opening a folder.
+const privacy = find("privacy.html");
+if (privacy) {
+  const html = visible(readFileSync(privacy, "utf8"));
+  const paths = ["~/.loom", "loom.db", "config.json", "attachments", "logs", "backups"];
+  const missing = paths.filter((path) => !html.includes(path));
+  check(
+    "privacy: every storage path it relies on is named",
+    missing.length === 0,
+    missing.join(", "),
+  );
+  check(
+    "privacy: it states the telemetry claim in the negative",
+    html.includes("There is none, and it is not a setting"),
+  );
+}
+
+// --- The 404 ----------------------------------------------------------------
+// Next emits this as `404.html`; see note 4 at the top of the file. It is a page a
+// visitor can genuinely land on, so it is checked like one: what matters is that it
+// explains itself and offers a way out, rather than being a framework default.
+const notFound = files.find((file) => /(^|[\\/])(404|not-found)\.html$/.test(file));
+if (notFound) {
+  const html = visible(readFileSync(notFound, "utf8"));
+  check("404: explains itself", html.includes("That page does not exist"));
+  check("404: offers a way home", html.includes('href="/"'));
+} else {
+  check("the 404 page was emitted", false);
 }
 
 // --- Crawlability -----------------------------------------------------------

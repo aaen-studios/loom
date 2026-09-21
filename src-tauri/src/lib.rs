@@ -6,6 +6,7 @@
 mod blocker;
 mod browser;
 mod commands;
+mod ide;
 mod panels;
 mod voice;
 
@@ -824,6 +825,31 @@ pub fn run() {
             panels::pty_close,
             panels::pty_list,
             panels::open_panel_window,
+            // The IDE surface: git, and the editor's file IO.
+            ide::git_available,
+            ide::git_status,
+            ide::git_stage,
+            ide::git_unstage,
+            ide::git_discard,
+            ide::git_commit,
+            ide::git_branches,
+            ide::git_checkout,
+            ide::git_create_branch,
+            ide::git_fetch,
+            ide::git_pull,
+            ide::git_push,
+            ide::git_log,
+            ide::git_diff,
+            ide::git_file_at,
+            ide::draft_commit_message,
+            ide::file_read,
+            ide::file_save,
+            ide::file_stat_many,
+            ide::dir_list,
+            ide::file_create,
+            ide::file_rename,
+            ide::file_delete,
+            ide::file_exists,
         ])
         .on_window_event(|window, event| {
             match event {

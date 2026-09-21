@@ -14,8 +14,8 @@
     "verify:tokens": "node verify-tokens.mjs",
     "verify:pages": "node verify-pages.mjs",
     "verify:a11y": "node verify-a11y.mjs",
-    "verify:weave": "node verify-weave.mjs",
-    "verify": "bun run tokens:check && bun run test && bun run typecheck && bun run build && bun run verify:tokens && bun run verify:pages && bun run verify:a11y && bun run verify:weave"
+    "verify:manual": "node verify-manual.mjs",
+    "verify": "bun run tokens:check && bun run test && bun run typecheck && bun run build && bun run verify:tokens && bun run verify:pages && bun run verify:a11y && bun run verify:manual"
   },
   "dependencies": {
     "next": "^16.3.5",

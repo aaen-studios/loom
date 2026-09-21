@@ -6,6 +6,7 @@ import { AskOverlay } from "./components/AskOverlay";
 import { Background } from "./components/Background";
 import { ChatCanvas } from "./components/ChatCanvas";
 import { ComputerPill } from "./components/ComputerPill";
+import { IdeShell } from "./components/IdeShell";
 import { SettingsPanel } from "./components/SettingsPanel";
 import { ShortcutsSheet } from "./components/ShortcutsSheet";
 import { TitleBar } from "./components/TitleBar";
@@ -44,6 +45,7 @@ function MainShell() {
   // check that only exercises the half that exists.
   const glass = config.interface.glass;
   useGlassVars(glass);
+  const ideMode = config.interface.ideMode;
   const load = useSettings((state) => state.load);
   const loadProviders = useProviders((state) => state.load);
   const loadSessions = useChat((state) => state.loadSessions);
@@ -114,9 +116,12 @@ function MainShell() {
               which is also what lets it be dragged, moved to another edge, or
               torn off into its own window without a second implementation of
               the same list. */}
-          <DockHost>
-            <ChatCanvas />
-          </DockHost>
+          {/* IDE mode swaps the dock's *centre child* and nothing else, which is
+              what keeps every zone working unchanged: the terminal still docks
+              and still tears off, `Ctrl+`` still toggles, a bottom Runs panel
+              behaves identically in both modes. A second application shell would
+              have had to reimplement all of it and would then have drifted. */}
+          <DockHost>{ideMode ? <IdeShell /> : <ChatCanvas />}</DockHost>
         </main>
       </div>
 

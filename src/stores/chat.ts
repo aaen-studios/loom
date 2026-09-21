@@ -807,10 +807,15 @@ export const useChat = create<ChatState>((set, get) => ({
     } else if (
       event.type === "taskChanged" ||
       event.type === "jobChanged" ||
-      event.type === "commandChanged"
+      event.type === "commandChanged" ||
+      event.type === "filesChanged"
     ) {
-      // Runs, jobs, and shell commands belong to their own store; events.ts
-      // routes them there, and none of them is about this chat's transcript.
+      // Runs, jobs, shell commands and filesystem changes belong to their own
+      // stores; `events.ts` routes them there before this is reached, and none
+      // of them is about this chat's transcript. Listed here as well because
+      // this guard is what validates `sessionId`/`messageId` below, and
+      // `filesChanged` has no `messageId` — falling through would drop it as
+      // malformed and log a warning on every tool call.
       return;
     } else if (event.type === "memoryChanged") {
       if (!event.sessionId) return;

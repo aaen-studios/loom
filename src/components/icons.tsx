@@ -567,6 +567,99 @@ export function HalfCircleIcon(props: IconProps) {
  * Brand glyph: three woven threads. `weaving` draws them on as it mounts
  * (the warp first, then the weft), for the opening screen.
  */
+/* ---------------------------------------------------------------------------
+   Git and the IDE
+
+   Drawn on the same 24px grid at 1.7 as everything else, deliberately. The
+   composer's microphone glyph once lived inline at 16px and 1.4, and it read as
+   visibly lighter than the paperclip beside it — `lib/iconConsistency.test.ts`
+   now fails the build on exactly that mistake.
+--------------------------------------------------------------------------- */
+
+export function GitCommitIcon(props: IconProps) {
+  return (
+    <Icon {...props}>
+      <circle cx="12" cy="12" r="3.4" />
+      <path d="M12 3v5.6M12 15.4V21" />
+    </Icon>
+  );
+}
+
+export function GitDiffIcon(props: IconProps) {
+  return (
+    <Icon {...props}>
+      <path d="M7 4.5v15" />
+      <circle cx="7" cy="6.5" r="1.9" />
+      <circle cx="7" cy="17.5" r="1.9" />
+      <path d="M15.5 9.5h5M18 7v5" />
+      <path d="M15.5 16.5h5" />
+    </Icon>
+  );
+}
+
+export function GitPushIcon(props: IconProps) {
+  return (
+    <Icon {...props}>
+      <path d="M12 20V6.5" />
+      <path d="M7 11l5-5 5 5" />
+    </Icon>
+  );
+}
+
+export function GitPullIcon(props: IconProps) {
+  return (
+    <Icon {...props}>
+      <path d="M12 4.5V18" />
+      <path d="M7 13.5l5 5 5-5" />
+    </Icon>
+  );
+}
+
+export function BranchPlusIcon(props: IconProps) {
+  return (
+    <Icon {...props}>
+      <circle cx="6.5" cy="6" r="2.2" />
+      <circle cx="6.5" cy="18" r="2.2" />
+      <path d="M6.5 8.2v7.6" />
+      <path d="M17 13.5v6M14 16.5h6" />
+      <path d="M8.7 6h4.3A4.5 4.5 0 0 1 17 10.5v1" />
+    </Icon>
+  );
+}
+
+/** The chat column in IDE mode: a speech bubble on a squared frame. */
+export function ChatIcon(props: IconProps) {
+  return (
+    <Icon {...props}>
+      <path d="M20 5.5v9a2 2 0 0 1-2 2h-6.5L7 20.5v-4H6a2 2 0 0 1-2-2v-9a2 2 0 0 1 2-2h12a2 2 0 0 1 2 2z" />
+    </Icon>
+  );
+}
+
+/**
+ * The IDE mode toggle: an editor with a sidebar.
+ *
+ * The first version was a frame with a divider and a single caret, which read as
+ * a generic panel glyph — too close to `PanelLeftIcon`, and a toggle that looks
+ * like another toggle is one you have to read the tooltip for.
+ *
+ * What makes this one say "IDE" at 17px is the **three text strokes** on the
+ * right of the rail. They are the difference between "a box with a line in it"
+ * and "a code editor with a file tree beside it", and they cost nothing.
+ *
+ * Kept to four paths deliberately: icons in this set are on a 24px grid at 1.7,
+ * and `lib/iconConsistency.test.ts` fails the build on a glyph drawn at a
+ * different weight. */
+export function IdeIcon(props: IconProps) {
+  return (
+    <Icon {...props}>
+      <rect x="3" y="4.5" width="18" height="15" rx="2.6" />
+      <path d="M9.2 4.5v15" />
+      <path d="M12.8 9.4h5M12.8 12.5h5M12.8 15.6h3" />
+    </Icon>
+  );
+}
+
 export function LoomMark({
   size = 18,
   weaving = false,

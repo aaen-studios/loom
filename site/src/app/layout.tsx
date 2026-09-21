@@ -1,11 +1,8 @@
 import type { Metadata, Viewport } from "next";
 import { inter } from "@/lib/fonts";
+import { DARK, LIGHT } from "@/lib/background";
 import { SITE } from "@/lib/site";
-import { Background } from "@/components/chrome/background";
-import { Warp } from "@/components/chrome/warp";
-import { Shuttle } from "@/components/chrome/shuttle";
-import { DraftStrip } from "@/components/chrome/draft-strip";
-import { Selvedge } from "@/components/chrome/selvedge";
+import { RunningHead } from "@/components/doc/running-head";
 import { LayoutProbe } from "@/components/dev/probe";
 import "./globals.css";
 
@@ -15,9 +12,9 @@ export const metadata: Metadata = {
   // be.
   metadataBase: new URL(SITE.url),
   title: {
-    default: "Loom — a desktop app for AI chat and agents",
-    // So a page only has to name itself. `Download · Loom`, not
-    // `Download · Loom — a desktop app…`.
+    // The document's title, as a manual's is: the instrument, then what it is.
+    default: "Loom — a desktop workspace for AI chat and agents",
+    // So a page only has to name itself.
     template: "%s · Loom",
   },
   description: SITE.description,
@@ -29,18 +26,21 @@ export const metadata: Metadata = {
     "MCP",
     "agentic coding",
     "Windows AI app",
+    "AI terminal",
+    "AI code editor",
+    "AI workspace",
   ],
   authors: [{ name: SITE.publisher, url: SITE.publisherUrl }],
   openGraph: {
     type: "website",
     url: SITE.url,
     siteName: "Loom",
-    title: "Loom — a desktop app for AI chat and agents",
+    title: "Loom — a desktop workspace for AI chat and agents",
     description: SITE.description,
   },
   twitter: {
     card: "summary_large_image",
-    title: "Loom — a desktop app for AI chat and agents",
+    title: "Loom — a desktop workspace for AI chat and agents",
     description: SITE.description,
   },
   robots: { index: true, follow: true },
@@ -52,23 +52,26 @@ export const viewport: Viewport = {
   // The two colours the app paints itself with before React mounts, so a mobile
   // browser's own chrome does not clash with the page it is framing.
   themeColor: [
-    { media: "(prefers-color-scheme: light)", color: "#eef1f7" },
-    { media: "(prefers-color-scheme: dark)", color: "#070a12" },
+    { media: "(prefers-color-scheme: light)", color: LIGHT },
+    { media: "(prefers-color-scheme: dark)", color: DARK },
   ],
 };
 
 /**
  * Theme boot.
  *
- * Runs synchronously in `<head>`, before anything is painted, so the first frame is
- * already the right palette. A React effect instead would show a white flash to
- * every dark visitor on every navigation — and on a page strung with hairlines and
- * frosted panels, that flash is the first thing anyone would notice.
+ * Runs synchronously in `<head>`, before anything is painted, so the first frame
+ * is already the right palette. A React effect instead would show a white flash to
+ * every dark visitor on every navigation — and on a document whose ground is one
+ * flat colour, that flash is the first thing anyone would see.
  *
  * The contract is the app's exactly: a `.dark` class on `<html>`, and `<html>`
- * painted one of the two colours the app uses for its own pre-mount backdrop. Light
- * is the default in both, so the shared `html:not(.dark)` token block applies to
- * this page unchanged and nothing has to override anything.
+ * painted one of the two colours the app uses for its own pre-mount backdrop.
+ *
+ * `root.style.background` is set here *as well as* in the stylesheet, and that
+ * duplication is deliberate: the stylesheet may still be loading when this runs,
+ * and this is the one moment where "already the right colour" matters. It is also
+ * why `background.test.ts` names it as one of the three places the value lives.
  *
  * Wrapped in `try`/`catch` because a browser with storage disabled throws on
  * `localStorage` access, and failing to read a theme preference must not take the
@@ -78,31 +81,32 @@ const THEME_BOOT = `
 (function () {
   try {
     var stored = localStorage.getItem("loom-theme");
-    var dark = stored === "dark";
+    var dark = stored !== "light";
     var root = document.documentElement;
     root.classList.toggle("dark", dark);
-    root.style.background = dark ? "#070a12" : "#eef1f7";
+    root.style.background = dark ? "${DARK}" : "${LIGHT}";
   } catch (error) {
-    /* No storage available: stay on the light default. */
+    /* No storage available: the stylesheet's default ground stands. */
   }
 })();
 `;
 
 /**
- * The frame every page is woven into.
+ * The frame every page shares.
  *
- * Five fixed layers, in stacking order, and the order is the entire architecture:
+ * Almost nothing is here, and that is the change. The previous layout stacked five
+ * fixed layers: a drifting backdrop, twelve full-height warp hairlines, a weft
+ * line that followed the scroll, then the content, then the footer. Three of those
+ * were the metaphor applied as texture rather than as information.
  *
- *   1. `Background` at `-z-10` — the app's Porcelain preset, painted in CSS.
- *   2. `Warp` at `z-0`         — twelve threads, strung full height.
- *   3. `Shuttle` at `z-5`      — the weft, at the reading position.
- *   4. the content at `z-10`   — every page, in a `.warp-grid`.
- *   5. `Selvedge`             — the footer, in flow.
+ * What is left:
  *
- * That the content sits *above* the weft is deliberate and is why the threads read
- * as being behind the page rather than laid over it: the weft crosses the whole
- * viewport, and text is painted on top of it, so the line appears in the whitespace
- * and the gutters and passes behind the words rather than through them.
+ *   - the ground, which is now a `background-color` on `<body>` and needs no
+ *     element at all;
+ *   - the running head, which is a real printed device — it names the document
+ *     while you are inside it, and on a narrow viewport it names the section,
+ *     because that is where the margin index is not;
+ *   - the content, with nothing fixed over it and nothing behind it.
  *
  * `suppressHydrationWarning` on `<html>` is required rather than a shrug: the boot
  * script adds a class to that element before React hydrates, so the server markup
@@ -112,22 +116,17 @@ export default function RootLayout({
   children,
 }: Readonly<{ children: React.ReactNode }>) {
   return (
-    <html lang="en" className={inter.variable} suppressHydrationWarning>
+    <html lang="en" className={`${inter.variable} dark`} suppressHydrationWarning>
       <head>
         <script dangerouslySetInnerHTML={{ __html: THEME_BOOT }} />
       </head>
       <body>
-        <Background />
-        <Warp />
-        <Shuttle />
-        <div className="relative z-10">
-          <DraftStrip />
-          <main id="top">{children}</main>
-          <Selvedge />
-        </div>
+        <RunningHead />
+        <main id="top">{children}</main>
         {/* Development only, and tree-shaken out of the production build entirely
-            rather than merely inert inside it. Measures the rendered page when the
-            URL carries `?probe`, so `probe-layout.mjs` can read geometry as text. */}
+            rather than merely inert inside it. Measures the rendered document when
+            the URL carries `?probe`, so `probe-layout.mjs` can read geometry as
+            text. */}
         {process.env.NODE_ENV === "development" && <LayoutProbe />}
       </body>
     </html>

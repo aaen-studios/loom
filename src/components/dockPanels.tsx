@@ -1,11 +1,8 @@
-import { useEffect, useMemo, useState } from "react";
-import { folderName } from "../lib/workspaces";
 import { useChat } from "../stores/chat";
-import { useWorkspaceFiles } from "../stores/workspaceFiles";
+import { FileTree } from "./FileTree";
 import { GoalPanel } from "./GoalPanel";
 import { Sidebar } from "./Sidebar";
 import { TasksPanel } from "./TasksPanel";
-import { EmptyState, SearchField } from "./ui";
 
 /**
  * The panels, as the dock sees them.
@@ -71,108 +68,21 @@ export function GoalDockPanel() {
 }
 
 /**
- * Files in the workspace.
+ * Files in the workspace, as a tree you can open files from.
  *
- * Reuses the composer's cached file list rather than walking the tree again, so
- * opening this panel costs nothing when the `@` picker has already run — and a
- * second walk would be a second thing that can disagree with the first.
+ * This used to be a flat list of every path that copied one to the clipboard on
+ * click, and its own comment said why there was no more: "the backend exposes a
+ * file list, not a change set, and deriving a diff from a list of paths would be
+ * inventing one." That is still true of a *list*. It stopped being the whole
+ * story when the backend grew `dir_list`, `file_read` and `git_diff` — there is
+ * now a change set to show, and a file to open rather than a path to copy.
  *
- * No diff view yet: the backend exposes a file list, not a change set, and
- * deriving a diff from a list of paths would be inventing one.
+ * The composer's `@` picker keeps the flat list, and should: it needs to *search*
+ * every path, which is the opposite of what a tree that expands on demand needs.
+ * Two callers, two shapes, one backend.
  */
 export function FilesPanel({ workdir }: { workdir: string | null }) {
-  const files = useWorkspaceFiles((state) => state.files);
-  const load = useWorkspaceFiles((state) => state.load);
-  const loading = useWorkspaceFiles((state) => state.loading);
-  const [query, setQuery] = useState("");
-  const [copied, setCopied] = useState<string | null>(null);
-
-  useEffect(() => {
-    void load(workdir);
-  }, [load, workdir]);
-
-  const needle = query.trim().toLowerCase();
-  const shown = useMemo(() => {
-    if (!needle) return files;
-    return files.filter((file) => file.toLowerCase().includes(needle));
-  }, [files, needle]);
-
-  if (!workdir) {
-    return (
-      <div className="grid h-full place-items-center p-4">
-        <p className="max-w-[240px] text-center text-[12.5px] leading-5 text-faint">
-          This chat has no workspace folder. Pick one from the workspace chip and
-          its files appear here.
-        </p>
-      </div>
-    );
-  }
-
-  const copy = (path: string) => {
-    void navigator.clipboard?.writeText(path);
-    setCopied(path);
-    window.setTimeout(
-      () => setCopied((current) => (current === path ? null : current)),
-      1200,
-    );
-  };
-
-  return (
-    <div className="flex h-full min-h-0 flex-col">
-      <div className="shrink-0 px-2 pt-2 pb-1.5">
-        <SearchField
-          value={query}
-          onChange={setQuery}
-          placeholder={`Search ${folderName(workdir)}…`}
-        />
-      </div>
-
-      {loading && files.length === 0 && (
-        <p className="px-3 py-2 text-[12.5px] text-faint">Reading the workspace…</p>
-      )}
-
-      {!loading && files.length === 0 && (
-        <div className="p-3">
-          <EmptyState
-            title="No files indexed"
-            hint="Loom could not read this folder, or it is empty."
-          />
-        </div>
-      )}
-
-      {files.length > 0 && shown.length === 0 && (
-        <p className="px-3 py-2 text-[12.5px] text-faint">No matches.</p>
-      )}
-
-      <ul className="min-h-0 flex-1 overflow-y-auto px-1.5 pb-2">
-        {shown.slice(0, 800).map((file) => (
-          <li key={file}>
-            <button
-              type="button"
-              onClick={() => copy(file)}
-              title={`Copy path — ${file}`}
-              className="hover-surface flex w-full items-center gap-2 rounded-row px-2 py-1 text-left"
-            >
-              <span className="min-w-0 flex-1 truncate font-mono text-[11.5px] text-soft">
-                {file}
-              </span>
-              {copied === file && (
-                <span className="shrink-0 text-[10.5px] text-[var(--accent)]">
-                  copied
-                </span>
-              )}
-            </button>
-          </li>
-        ))}
-      </ul>
-
-      {shown.length > 800 && (
-        <p className="shrink-0 border-t border-[var(--glass-border)] px-3 py-1.5 text-[11px] text-faint">
-          Showing the first 800 of {shown.length}. Narrow the search to see the rest.
-        </p>
-      )}
-    </div>
-  );
+  return <FileTree workdir={workdir} />;
 }
 
 /**
@@ -186,3 +96,14 @@ export function FilesPanel({ workdir }: { workdir: string | null }) {
  * time there was anything to put in them.
  */
 export { BrowserPanel } from "./BrowserPanel";
+
+/**
+ * Git, and the editor that shows what it changed.
+ *
+ * Re-exported rather than wrapped, unlike the adapters above: these two were
+ * written *as* panels, so there is no shape to convert. `FilesPanel` was the
+ * one component that had to change — it was a flat list of paths that copied on
+ * click, and it is now `FileTree`, an expandable tree that opens files.
+ */
+export { GitPanel } from "./GitPanel";
+export { EditorPanel, EditorTabs } from "./EditorPanel";

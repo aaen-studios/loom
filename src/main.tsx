@@ -58,11 +58,13 @@ if (localStorage.getItem("loomDebug") === "1") {
     import("./stores/browser"),
     import("./stores/chat"),
     import("./stores/dock"),
+    import("./stores/editor"),
+    import("./stores/git"),
     import("./stores/providers"),
     import("./stores/settings"),
     import("./stores/ui"),
     import("./lib/ipc"),
-  ]).then(([browser, chat, dock, providers, settings, ui, ipc]) => {
+  ]).then(([browser, chat, dock, editor, git, providers, settings, ui, ipc]) => {
     (window as unknown as Record<string, unknown>).__loom = {
       // The browser's tabs, so `probe-browser.mjs` can watch a real page being
       // placed rather than only the shell's side of it.
@@ -71,6 +73,10 @@ if (localStorage.getItem("loomDebug") === "1") {
       // The dock, so a probe can open the browser panel the way the composer
       // chip does instead of hunting for the button.
       dock: dock.useDock,
+      // The editor and git stores, so `probe-editor.mjs` can open a file and
+      // watch whether Monaco's workers actually started.
+      editor: editor.useEditor,
+      git: git.useGit,
       providers: providers.useProviders,
       settings: settings.useSettings,
       ui: ui.useUi,

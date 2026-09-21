@@ -537,6 +537,27 @@ export interface InterfaceConfig {
   autoMemory: boolean;
   /** App-wide glass tuning, and the refracting-surface parameters. */
   glass: GlassConfig;
+  /**
+   * IDE mode: the editor shell has replaced the chat surface.
+   *
+   * Persisted rather than held for the session, which is a deliberate departure
+   * from how the dock's zones behave. A panel is something you *ask* to see, so
+   * it opens closed every launch — but IDE mode is a way of working, and someone
+   * who has switched to it has said so. Persisting it is the difference between
+   * a mode and a dismissal.
+   */
+  ideMode: boolean;
+  /**
+   * Width in pixels of the chat column while IDE mode is on.
+   *
+   * Its own setting rather than `sidebarWidth`, because the two answer different
+   * questions — one is "how wide is the chats list", the other "how much room
+   * does the model get while I am editing" — and sharing one number would make
+   * widening either silently narrow the other.
+   */
+  ideChatWidth: number;
+  ideSidebarOpen: boolean;
+  ideSidebarWidth: number;
 }
 
 export interface StorageUsage {
@@ -739,6 +760,10 @@ export interface AppConfig {
   /** The arrangement a folder follows until it has one of its own. */
   dockDefault: DockLayout;
   terminal: TerminalConfig;
+  /** The file editor: how it renders, and whether it saves on its own. */
+  editor: EditorConfig;
+  /** How the AI commit-message button writes its message. */
+  commit: CommitConfig;
   browser: BrowserConfig;
   searchProvider: SearchProvider;
 }
@@ -880,6 +905,155 @@ export interface WorkspaceInfo {
   branch: string | null;
   isRepo: boolean;
 }
+
+/* ---------------------------------------------------------------------------
+   Git and the editor
+
+   Mirrors of the shapes in `crates/loom-core/src/git.rs` and `edit.rs`. The
+   `#[serde(rename_all = "camelCase")]` on those structs is what makes these the
+   same shape rather than a translation — a field renamed on one side and not
+   the other is a silent `undefined`, which is the failure `docs/spec.md` records
+   under "Streaming fix (the important one)".
+--------------------------------------------------------------------------- */
+
+/** One changed path, with both sides of the index. */
+export interface GitFile {
+  /** Relative to the repository root, always `/`-separated. */
+  path: string;
+  /** Where a rename came from; null otherwise. */
+  from: string | null;
+  /** The index differs from HEAD. */
+  staged: boolean;
+  /** The work tree differs from the index. */
+  unstaged: boolean;
+  /** git has never seen this path. */
+  untracked: boolean;
+  /** An unmerged entry — a conflict to resolve before committing. */
+  conflicted: boolean;
+}
+
+export interface GitStatus {
+  isRepo: boolean;
+  root: string | null;
+  branch: string | null;
+  detached: boolean;
+  upstream: string | null;
+  ahead: number;
+  behind: number;
+  /** `rebase` | `merge` | `cherry-pick` | `revert` while one is half-finished. */
+  operation: string | null;
+  files: GitFile[];
+}
+
+export interface Branch {
+  name: string;
+  current: boolean;
+  upstream: string | null;
+}
+
+export interface GitCommit {
+  /** Abbreviated. */
+  id: string;
+  subject: string;
+  author: string;
+  /** Unix seconds. */
+  at: number;
+}
+
+export interface CommitResult {
+  id: string;
+  subject: string;
+  files: number;
+}
+
+/** How a file's line endings are written back. */
+export type LineEnding = "lf" | "crlf";
+
+/** A file, as the editor loads it. */
+export interface TextFile {
+  path: string;
+  absolute: string;
+  /** Line endings normalised to `\n`. */
+  text: string;
+  /** SHA-256 of the raw bytes on disk, which is what a save checks against. */
+  hash: string;
+  bytes: number;
+  lines: number;
+  eol: LineEnding;
+  bom: boolean;
+  /** Not valid UTF-8; readable, and flagged rather than hidden. */
+  lossy: boolean;
+  readOnly: boolean;
+  /** Freshness hint from size and mtime, so a later stat can compare like
+   *  for like without hashing the file. */
+  hashHint: string;
+}
+
+/**
+ * What a save did.
+ *
+ * A conflict is a **value**, not an error: it is an expected outcome of
+ * autosave, and the UI branches on it. An error string would have to be parsed
+ * to recover that distinction.
+ */
+export type SaveOutcome =
+
+  | { kind: "written"; hash: string; bytes: number; hashHint: string }
+  | { kind: "conflict"; currentHash: string; modified: number };
+
+/** One entry in a directory listing. */
+export interface TreeEntry {
+  name: string;
+  /** Relative to the workspace root, `/`-separated. */
+  path: string;
+  isDir: boolean;
+}
+
+/** A file's state on disk. */
+export interface FileStat {
+  path: string;
+  exists: boolean;
+  bytes: number;
+  /** Unix milliseconds, or 0 when the file is gone. */
+  modified: number;
+  /**
+   * A cheap freshness hint: size and mtime together.
+   *
+   * The exact check is a hash of the whole file, which an editor cannot afford
+   * on every tool call. This is what makes the common case — nothing changed —
+   * one integer comparison, and only a file that looks different pays for the
+   * read.
+   */
+  hashHint: string;
+}
+
+/* ---------------------------------------------------------------------------
+   The editor and git, in config
+--------------------------------------------------------------------------- */
+
+export type WordWrap = "off" | "on";
+export type CommitStyle = "conventional" | "plain";
+
+export interface EditorConfig {
+  fontSize: number;
+  tabSize: number;
+  wordWrap: WordWrap;
+  minimap: boolean;
+  lineNumbers: boolean;
+  autosave: boolean;
+  autosaveDelayMs: number;
+  renderWhitespace: boolean;
+  trimOnSave: boolean;
+  insertFinalNewline: boolean;
+}
+
+export interface CommitConfig {
+  style: CommitStyle;
+  includeBody: boolean;
+  /** Characters of diff the model is shown. */
+  diffBudget: number;
+}
+
 
 export interface PendingPermission {
   sessionId: string;
@@ -1056,6 +1230,19 @@ export type EngineEvent =
       sessionId: string;
       section: string;
       summary: string;
+    }
+  | {
+      /**
+       * A tool finished and may have touched the filesystem.
+       *
+       * Sent after every call rather than only the writers: deciding whether a
+       * given call changed anything cannot cover an MCP server's tools, and what
+       * this actually asks — "restat what you have open" — is cheap and always
+       * correct. The editor and the git panel are what listen.
+       */
+      type: "filesChanged";
+      sessionId: string;
+      tool: string;
     }
   | { type: "taskChanged"; task: Task }
   | {

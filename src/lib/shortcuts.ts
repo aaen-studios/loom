@@ -28,7 +28,22 @@ function isTyping(target: EventTarget | null): boolean {
  * - Ctrl+Shift+V voice mode, on or off
  * - ?            the shortcut sheet
  *
- * Per-message navigation lives in the transcript itself.
+ * Per-message navigation lives in the transcript itself, and the editor's own
+ * keys (Ctrl+S, Ctrl+F, Ctrl+D and the rest of Monaco's) are deliberately left
+ * to Monaco — see the note in `ShortcutsSheet`.
+ *
+ * ## Why IDE mode has no key here
+ *
+ * It was going to be Ctrl+I, and Monaco is the reason it is not. Monaco claims
+ * a large part of the `Ctrl+<letter>` space, and a global binding that loses to
+ * an editor-local one works everywhere *except* the place it was added for. The
+ * failure is quiet and intermittent — depending on whether the editor has focus —
+ * which is the worst kind of key to ship.
+ *
+ * So IDE mode is a title-bar button and a Settings row. `Ctrl+`` still works
+ * inside IDE mode, and that is deliberate: it is bound in the modified branch
+ * with no `isTyping` guard precisely so xterm cannot swallow it, and Monaco's
+ * hidden textarea would otherwise do exactly the same thing.
  */
 export function useShortcuts(): void {
   const newSession = useChat((state) => state.newSession);

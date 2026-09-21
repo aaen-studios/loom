@@ -65,6 +65,8 @@ node scripts/probe-state.mjs 9333                               # real store sta
 node scripts/probe-computer.mjs 9333                           # armed chip: screenshot + cursor, timed
 node scripts/probe-computer-resume.mjs 9333                    # fakes a takeover, proves Resume sticks
 node scripts/probe-appearance.mjs 9333                          # screenshots of both themes
+node scripts/probe-dock.mjs 9333                                # the dock: zones, panels, tear-off
+node scripts/probe-editor.mjs 9333                              # do Monaco's workers actually start?
 ```
 
 `inspect-webview` prints uncaught exceptions and console output (this is how the
@@ -80,7 +82,8 @@ debug-only commands).
 
 Loom's shell is a docking system. Any window edge holds a **zone** — a resizable
 area with a stack of panels as tabs — and panels register in one place
-(`src/dock/registry.tsx`): Terminal, Runs, Chats, Files, Goal, Browser.
+(`src/dock/registry.tsx`): Terminal, Runs, Chats, Files, Goal, Browser, Git,
+Editor.
 
 ```text
 Ctrl+`             the dock, on or off (works from inside the terminal)

@@ -2,15 +2,20 @@ import { createContext, useContext, type ReactNode } from "react";
 import type { ComponentType } from "react";
 import {
   FilesIcon,
+  GitBranchIcon,
   GlobeIcon,
   PanelLeftIcon,
   RunsIcon,
   TargetIcon,
   TerminalIcon,
+  WrenchIcon,
 } from "../components/icons";
 import {
   BrowserPanel,
+  EditorPanel,
+  EditorTabs,
   FilesPanel,
+  GitPanel,
   GoalDockPanel,
   RunsPanel,
   SessionsPanel,
@@ -152,6 +157,35 @@ const DEFS: PanelDef[] = [
     edge: "right",
     windowTitle: "Loom — Browser",
     render: BrowserPanel,
+  },
+  {
+    // Left by default, and first in the left zone's tab stack — see
+    // `DockLayout::default()` in `dock.rs`. The left edge is where a project's
+    // *state* belongs: what has changed, and what you are working on.
+    id: "git",
+    title: "Git",
+    icon: GitBranchIcon,
+    edge: "left",
+    windowTitle: "Loom — Git",
+    render: GitPanel,
+  },
+  {
+    // Right by default, beside the terminal, because both are things you read
+    // while the chat runs. **Not** added to the right zone's default tab stack:
+    // registering the edge is enough for `openPanel` to land it there, and
+    // putting it in the stack would cost the terminal its solo tab strip —
+    // where its shell tabs *become* the zone's tabs and the `+` that opens a
+    // shell sits where a `+` for a panel would.
+    id: "editor",
+    title: "Editor",
+    icon: WrenchIcon,
+    edge: "right",
+    windowTitle: "Loom — Editor",
+    render: EditorPanel,
+    // The same seam the terminal uses: when the editor is alone in its zone its
+    // open files *are* the zone's tabs, so there is one row instead of two
+    // saying almost the same thing.
+    tabStrip: EditorTabs,
   },
 ];
 

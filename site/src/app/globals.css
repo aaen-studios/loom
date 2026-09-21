@@ -3,532 +3,1056 @@
  *
  * `loom-tokens.css` is generated — never edit it. `scripts/sync-site-tokens.mjs`
  * lifts the regions of the app's `src/styles.css` fenced by
- * `loom-site:<name>:start` / `:end` comments and copies them here verbatim. So the
- * app's own `@utility` surfaces (`panel`, `panel-strong`, `pill`, `btn-primary`,
- * `chip`, `kbd`, the concentric radius scale, the `loom-*` keyframes) exist in
- * this project with no reimplementation and cannot drift in behaviour.
+ * `loom-site:<name>:start` / `:end` comments and copies them here verbatim. The
+ * app's `@utility` surfaces, the concentric radius scale, the two palettes and the
+ * `loom-*` keyframes therefore exist in this project with no reimplementation and
+ * cannot drift in behaviour.
  */
-@import "tailwindcss";
+/*
+ * `source("../")` confines Tailwind's candidate detection to `src/`.
+ *
+ * Without it, Tailwind scans the whole project — which includes `verify-*.mjs` and
+ * `inspect-css.mjs`, whose string literals contain `.panel{`, `.pill{` and `.blob{`
+ * because those are the selectors they check for. Tailwind cannot tell a class in an
+ * attribute from a selector in a test fixture, so **the check for the glass was what
+ * caused the glass to be generated**. Confining the scan to `src/` removes that
+ * particular self-reference.
+ *
+ * It does not remove all of them, and the note on the `@utility` surfaces below is the
+ * honest version of why: prose is scanned too, so the word "panel" in a sentence
+ * generates `@utility panel` exactly as reliably as `className="panel"` does. That is
+ * a property of the tool, not a mistake here, and the check that the page carries no
+ * glass therefore has to be made against the rendered document — see
+ * `verify-tokens.mjs` and `components/dev/probe.tsx`.
+ */
+@import "tailwindcss" source("../");
 @import "./loom-tokens.css";
 
-/* ---------------------------------------------------------------------------
-   The one token that is deliberately not shared
---------------------------------------------------------------------------- */
-
-/*
- * `--font-sans` is excluded from the generated sheet because the two projects
- * receive Inter by different means and neither is expressible in plain CSS. The
- * app bundles the woff2 through Vite; this project loads the same binary through
- * `next/font/local`, which preloads it and inlines the metric overrides. So the
- * family has to be assembled here from the variable Next injects. The rest of the
- * stack is the app's, character for character.
- */
 @theme {
   --font-sans:
     var(--font-inter), "Inter Variable", "Inter", ui-sans-serif, system-ui,
     -apple-system, "Segoe UI", sans-serif;
+  /* One mono face, for one job: paths, commands, hashes. It is a system stack
+     rather than a second woff2 because JetBrains Mono would be ~60 kB to set
+     eleven strings, and because a manual does not need its code set beautifully —
+     it needs it set *differently*, so the eye can tell a path from a sentence. */
+  --font-mono:
+    ui-monospace, "SFMono-Regular", "Cascadia Mono", "Consolas", "Liberation Mono",
+    monospace;
 }
 
 /* ===========================================================================
-   THE LOOM
+   THE MANUAL
 
-   Everything below this line is this project's own, and none of it is in a
-   marked region — which is the point. The app has no website, so it has no
-   opinion about how one is woven.
-
-   The organising idea: a page is a cloth. There is a warp (vertical threads held
-   under tension) strung before anything is woven, a shuttle that carries a weft
-   across it, and a shed — the gap that opens between lifted and unlifted threads
-   — into which each pass of the weft goes. Content lives in sheds. The warp is
-   the grid. The weft is the reading position.
-
-   That is why the layout variables below are shared between the *background*
-   (`.warp-field`, which draws the threads) and the *content* (`.warp-grid`, which
-   places everything). They are the same twelve columns measured the same way, so
-   a thread can never drift off the thing it is supposed to be holding.
+   This site is one continuous document about the application: what it is, how it
+   is built, what it does when you are not watching, and where your data lives.
+   Everything below is the typographic system that document is set in.
 
    ---------------------------------------------------------------------------
-   Why the threads are drawn in the app's colours
+   Why a manual, and what it replaced
    ---------------------------------------------------------------------------
+   The previous site was a landing page in seven numbered sections of a weaving
+   draft, and the failure was structural rather than cosmetic: a reader had to
+   learn the notation *before* they could evaluate the software. The vocabulary
+   was not decoration, it was load-bearing — which made it worse, because the
+   costume could not be removed without removing the page's contents.
 
-   The seven `--thread-*` custom properties are in the shared `tokens` region, in
-   both palettes: the app uses them for the quick-ask overlay's own woven column
-   (a warp rail, a knot per reply, a shuttle for the composer). So this site is
-   strung with the product's real thread colours rather than with a palette
-   invented for a landing page.
+   A manual fixes that by being a document. It has a title page, a contents list,
+   numbered sections, drawn figures, numbered tables, appendices and a colophon.
+   It states things plainly and it defines its terms. So the weaving vocabulary
+   finally has a legitimate home: as the *part names of the document*, listed in a
+   glossary and glossed wherever they appear. A reader never decodes anything,
+   because every term arrives with its plain meaning attached.
 
-   The *rules* the app builds from those tokens — `.ask-rail`, `.ask-shuttle`,
-   `.ask-reply`, `.ask-weaving` — are deliberately outside the marked regions and
-   `verify-tokens.mjs` fails the build if any of them reach this stylesheet. That
-   is the right boundary: the site shares the app's material, not its surfaces.
-   Everything woven below is therefore drawn from scratch on top of the shared
-   thread palette.
+   ---------------------------------------------------------------------------
+   Why the app's glass surfaces are deliberately absent
+   ---------------------------------------------------------------------------
+   The shared token sheet hands this project the app's `panel`, `pill`, `blob`,
+   `btn-primary` and `chip` utilities. Only two are used here, and that is a
+   decision rather than an oversight: a document is not a window. Paper with glass
+   on it reads as a mock-up, and the app's surfaces are the one thing this site
+   has no business imitating.
+
+   What *is* shared, and what makes the site genuinely of the product rather than
+   a brochure about it:
+     - both palettes (`--ink`, `--ink-soft`, `--ink-faint`, `--accent`, the
+       `--thread-*` row, `--glass-border` used as the hairline),
+     - the concentric radius scale, on the two controls a document actually has,
+     - the app's `btn-primary` for the one action the document contains,
+     - the app's `kbd` for the shortcut appendix,
+     - the app's `prefers-reduced-motion` override, which this page inherits
+       without asking.
+   `verify-tokens.mjs` asserts exactly that list — the tokens arrive, those two
+   surfaces arrive, and every app-only rule stays out.
+
+   ---------------------------------------------------------------------------
+   The typography, since it is the whole of the design
+   ---------------------------------------------------------------------------
+   Three decisions carry it.
+
+   1. **The measure is the layout.** `--measure: 34rem` — 544px at the root size,
+   which is about 68 characters of Inter. Nearly every site gets this wrong in the
+   same direction (a full-width grid, 130 characters a line); getting it right is
+   the difference between a document and a wall. Figures and tables break out to
+   `--wide` *asymmetrically*, to the right, so their left edges stay on the
+   manuscript line.
+
+   2. **The margin carries information.** A 544px column inside a 1440px viewport
+   leaves room for the contents list to sit permanently in the left margin, marked
+   at your position. That is where a manual's margin apparatus goes, and it means
+   the white space is doing work rather than being centred away.
+
+   3. **Hierarchy is typographic, not imitative.** No letterspaced monospace
+   labels, no pills, no chips, no cards. Size, weight, ink and hairline rules —
+   plus tabular numerals everywhere a number appears, which is what makes a spec
+   table scan.
 =========================================================================== */
 
 :root {
-  /* The two colours the app paints behind itself before React mounts, exposed so
-     the sticky header's scrim can fade into exactly this rather than guessing. */
+  /* The two colours the app paints into its window before React mounts. Named
+     separately from `--page` because the *test* asserts these two against the
+     app's source, and the page only needs to know one of them. */
   --site-light: #eef1f7;
   --site-dark: #070a12;
 
-  /* --- the loom itself --- */
-  --warp-columns: 12;
-  --warp-gutter: clamp(1rem, 3.5vw, 3rem);
-  --warp-gap: clamp(0.75rem, 1.5vw, 1.75rem);
-  --warp-max: 92rem;
+  /* Dark is the generated token sheet's default, matching the app's own
+     `:root { color-scheme: dark }`, so `--page` follows it and the light case is
+     the exception — which is the opposite of how the previous stylesheet read,
+     and is why `html:not(.dark)` below has to exist at all. */
+  --page: var(--site-dark);
 
-  /* How far down the viewport the shuttle is considered to be reading. Slightly
-     above centre, because people read the upper half of a screen. */
-  --reading-line: 42vh;
+  /* --- the layout ---
+     Both in `rem`, not `em`. An `em` measure is resolved against whatever
+     element it lands on, so the same token used in a `calc()` on a 13px caption
+     would mean a different width than on a 16px paragraph — which is a silent
+     bug in exactly one place and invisible everywhere else. */
+  --measure: 34rem;
+  --wide: 46rem;
+  --gutter: clamp(1.25rem, 5vw, 3rem);
+  --rule: 1px solid var(--glass-border);
+  --rule-strong: 1px solid var(--glass-border-strong);
 
-  /* The weft's position, written by `Shuttle` on scroll. Parked off-screen and
-     invisible until it has been measured, so the first frame is not a line lying
-     across the top of the page. */
-  --weft-y: -2px;
-  --weft-on: 0;
+  /* The sticky bar's height, stated once because three things need it: the bar
+     itself, the scroll padding that keeps an anchored heading out from under it,
+     and the top offset of the margin index. */
+  --bar-h: 3.25rem;
+}
 
-  /*
-   * Where the outermost threads actually are, horizontally.
-   *
-   * This is not the same as `--warp-gutter`, and getting that wrong is a bug you
-   * only see on a wide monitor: the cloth is capped at `--warp-max` and *centred*,
-   * so on a viewport wider than the cap the first thread sits at the centring
-   * margin **plus** the gutter. On a 5120px screen that is 1824 + 48 = 1872px from
-   * the edge, not 48px — and a weft whose end-knots were pinned at the gutter
-   * would float in the margin, nowhere near the threads they are supposed to be
-   * crossing.
-   *
-   * `max(0px, …)` covers the narrow case, where the cloth is the full width and
-   * there is no centring margin to add.
-   */
-  --warp-edge: calc(
-    max(0px, (100vw - var(--warp-max)) / 2) + var(--warp-gutter)
-  );
-
-  /* How far below a pass's top edge the weft parks. Passes have `py-16`, so this
-     keeps the line in the section's own top whitespace rather than across the
-     eyebrow it belongs to. */
-  --weft-offset: 28px;
+html:not(.dark) {
+  color-scheme: light;
+  --page: var(--site-light);
 }
 
 html {
   scroll-behavior: smooth;
-  /* Light is the default here as it is in the app, and the shared
-     `html:not(.dark)` block already keys off this class — so the copied tokens
-     apply unchanged and nothing has to override anything. */
-  color-scheme: light;
-}
-
-html.dark {
-  color-scheme: dark;
+  /* Clears the running head for every in-page anchor at once. */
+  scroll-padding-top: calc(var(--bar-h) + 1.5rem);
+  -webkit-text-size-adjust: 100%;
 }
 
 body {
   margin: 0;
+  background-color: var(--page);
   font-family: var(--font-sans);
+  /* Body copy in the darkest ink, not a softened one. Setting long prose in a
+     translucent grey is the single most common way a page of text is made
+     needlessly hard to read, and it is almost universal — which is presumably why
+     it reads as generated. `--ink-soft` is for captions, legends and marginalia,
+     where a step back is genuine hierarchy. */
   color: var(--ink);
+  font-size: 1rem;
+  line-height: 1.68;
   -webkit-font-smoothing: antialiased;
   text-rendering: optimizeLegibility;
-  /* The app's shell rule is `body { overflow: hidden }` — correct for a fixed,
-     chrome-less window and catastrophic for a document. It is outside every
-     marked region for that reason, and `verify-tokens.mjs` asserts no `#root`
-     rule and no `body` overflow rule reach the built stylesheet. */
+  font-variant-numeric: proportional-nums;
 }
 
-@media (prefers-reduced-motion: reduce) {
-  html {
-    scroll-behavior: auto;
-  }
+::selection {
+  background: var(--accent-soft);
+}
+
+/* The shared sheet gives buttons and inputs a focus ring but says nothing about
+   links, because in the app every link is inside a control that already has one.
+   Here they are top-level, so they get the same treatment. */
+a:focus-visible,
+summary:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 3px;
+  border-radius: 3px;
+}
+
+/* Tabular figures, on everything that is a quantity. Figures that do not line up
+   in a column are the clearest sign a number was never meant to be read as data. */
+.num {
+  font-variant-numeric: tabular-nums;
+}
+
+.mono {
+  font-family: var(--font-mono);
+  font-size: 0.85em;
+  letter-spacing: -0.01em;
 }
 
 /* ---------------------------------------------------------------------------
-   The warp: twelve threads, strung before anything is woven
+   The type scale
 
-   Fixed, full height, drawn behind everything. They are not a decorative
-   texture — `.warp-grid` below measures its columns the same way, so content
-   genuinely lands on them. Change `--warp-columns` and both ends move together.
+   Six steps, and no more. A manual needs a title, a section heading, a
+   subheading, body text, captions and a rubric — and the discipline of having
+   exactly six is most of what makes the page read as typeset rather than as
+   styled, because every heading on the page is visibly *of a size* rather than of
+   its own.
 --------------------------------------------------------------------------- */
 
-.warp-field {
-  position: fixed;
-  inset: 0;
-  z-index: 0;
-  pointer-events: none;
-  /* Faded at the very top and bottom, because a thread with a hard cut-off reads
-     as a border rather than as tension. */
-  mask-image: linear-gradient(
-    to bottom,
-    transparent 0,
-    #000 6rem,
-    #000 calc(100% - 6rem),
-    transparent 100%
-  );
-  -webkit-mask-image: linear-gradient(
-    to bottom,
-    transparent 0,
-    #000 6rem,
-    #000 calc(100% - 6rem),
-    transparent 100%
-  );
+.t-title {
+  font-size: clamp(2.5rem, 7vw, 4rem);
+  line-height: 1;
+  font-weight: 600;
+  letter-spacing: -0.035em;
 }
 
-.warp-line {
-  /* A hairline at the leading edge of each column, so the thread and the column
-     share an origin. */
-  border-left: 1px solid var(--thread-line);
-  opacity: 0.7;
+.t-standfirst {
+  font-size: clamp(1.125rem, 1.6vw, 1.3125rem);
+  line-height: 1.5;
+  color: var(--ink-soft);
+  text-wrap: pretty;
 }
 
-/* The outermost threads are drawn stronger: a real warp is under more tension at
-   its edges, and it gives the field a frame. */
-.warp-line:first-child,
-.warp-line:last-child {
-  border-left-color: var(--thread-line-strong);
-  opacity: 1;
+.t-section {
+  font-size: clamp(1.5rem, 3.2vw, 2rem);
+  line-height: 1.14;
+  font-weight: 600;
+  letter-spacing: -0.022em;
+  text-wrap: balance;
 }
+
+.t-sub {
+  font-size: 1.0625rem;
+  line-height: 1.35;
+  font-weight: 600;
+  letter-spacing: -0.012em;
+  text-wrap: balance;
+}
+
+.t-body {
+  font-size: 1rem;
+  line-height: 1.68;
+  text-wrap: pretty;
+}
+
+.t-caption {
+  font-size: 0.8125rem;
+  line-height: 1.55;
+  color: var(--ink-soft);
+  text-wrap: pretty;
+}
+
+/* The part name above a heading — `WARP`, `PICK`, `SELVEDGE`. Uppercase and
+   letterspaced, in Inter, because a monospace label would be imitating a terminal
+   and a wide-tracked mono kicker is the most worn-out ornament on the web. */
+.rubric {
+  font-size: 0.6875rem;
+  font-weight: 600;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--ink-faint);
+}
+
+.label {
+  font-size: 0.6875rem;
+  font-weight: 600;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--ink-faint);
+}
+
+/* ---------------------------------------------------------------------------
+   The paper
+--------------------------------------------------------------------------- */
 
 /*
- * Warping the loom.
+ * The text column, plus its own gutter on both sides.
  *
- * A loom is warped before anything is woven: the threads are strung and brought up
- * to tension one at a time, left to right, and only then does the first pick go in.
- * So the page opens the same way — the twelve threads draw down in sequence and the
- * cloth arrives into a warp that is already there.
- *
- * `scale` rather than `transform`, and `transform-origin: top`, so the thread grows
- * downward from the beam instead of expanding from its own centre. The `scale`
- * property is used rather than a transform so it cannot clobber anything else that
- * later wants to transform a thread.
- *
- * `--i` is set per thread by `warp.tsx`. Nothing else keys off it, so a browser that
- * ignores the property simply gets twelve threads that are already up.
- *
- * Skipped entirely under `prefers-reduced-motion`: this is a page-load flourish, and
- * the honest reading of that preference is "do not animate things while I am trying
- * to read", which includes the frame I am reading inside.
+ * `max-width` includes the padding — Tailwind's preflight sets `border-box` — so
+ * the measure has to be *added* to the gutters rather than set as the whole
+ * width, or the column would silently be 34rem minus two gutters, which is about
+ * 56 characters and reads as cramped without anyone being able to say why.
  */
-@media (prefers-reduced-motion: no-preference) {
-  .warp-line {
-    transform-origin: top center;
-    animation: loom-warp-draw 900ms cubic-bezier(0.22, 1, 0.36, 1) both;
-    animation-delay: calc(var(--i, 0) * 26ms);
-  }
-}
-
-@keyframes loom-warp-draw {
-  from {
-    scale: 1 0;
-  }
-}
-
-/* ---------------------------------------------------------------------------
-   The grid everything is placed in
-
-   The same twelve columns as the warp field, measured the same way. Every piece
-   of content on this site is a `Shed` inside one of these.
---------------------------------------------------------------------------- */
-
-.warp-grid {
-  display: grid;
-  grid-template-columns: repeat(var(--warp-columns), minmax(0, 1fr));
-  gap: var(--warp-gap);
+.paper {
   width: 100%;
-  max-width: var(--warp-max);
+  max-width: calc(var(--measure) + 2 * var(--gutter));
   margin-inline: auto;
-  padding-inline: var(--warp-gutter);
+  padding-inline: var(--gutter);
 }
 
-/* The warp field wraps a full-height grid so its threads span the viewport. */
-.warp-field .warp-grid {
+/* Prose sits in the measure; figures and tables break out of it to the right, on
+   purpose, so their left edge shares the manuscript line. Below `lg` there is no
+   margin to break into, so they take the column. */
+.wide {
+  width: 100%;
+}
+
+@media (min-width: 64rem) {
+  .wide {
+    width: var(--wide);
+  }
+}
+
+/* ---------------------------------------------------------------------------
+   The running head
+
+   A manual has one: it names the document while you are inside it. Here it also
+   carries the current section on a narrow viewport, where the margin index is not
+   on screen — so the answer to "where am I" is in one place at any width, never
+   zero and never two.
+
+   Opaque, not translucent. A blurred bar over a page of text is a window
+   treatment; a printed running head is simply the top of the page, and content
+   must not show through it.
+--------------------------------------------------------------------------- */
+
+.bar {
+  position: sticky;
+  top: 0;
+  z-index: 40;
+  height: var(--bar-h);
+  background-color: var(--page);
+  border-bottom: var(--rule);
+}
+
+.bar-inner {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
   height: 100%;
+  max-width: 82rem;
+  margin-inline: auto;
+  padding-inline: var(--gutter);
 }
 
-/* ---------------------------------------------------------------------------
-   The weft: where the shuttle is
-
-   A single line spanning the full field, parked at the reading position and
-   written there by a CSS variable — no React state, so tracking the scroll costs
-   no renders at all. It is `aria-hidden` and pointer-transparent: it is an
-   indicator, not content.
---------------------------------------------------------------------------- */
-
-.weft {
-  position: fixed;
-  left: 0;
-  right: 0;
-  top: calc(var(--weft-y) + var(--weft-offset));
-  z-index: 5;
-  height: 1px;
-  pointer-events: none;
-  opacity: var(--weft-on);
-  transition: top 220ms cubic-bezier(0.22, 1, 0.36, 1);
-  background: linear-gradient(
-    90deg,
-    transparent 0,
-    var(--thread-line) 8%,
-    var(--thread-bright) 50%,
-    var(--thread-line) 92%,
-    transparent 100%
-  );
-  box-shadow: 0 0 18px var(--thread-glow);
-}
-
-/* The knots where the weft crosses the two outermost warp threads — the selvedge.
-   These use `--warp-edge`, not `--warp-gutter`: on a viewport wider than the cloth
-   the two are hundreds of pixels apart, and a knot pinned at the gutter would sit
-   in the margin instead of on its thread. */
-.weft::before,
-.weft::after {
-  content: "";
-  position: absolute;
-  top: -2px;
-  width: 5px;
-  height: 5px;
-  border-radius: 2px;
-  background: radial-gradient(circle at 35% 30%, #ffffff, var(--thread) 75%);
-  box-shadow: 0 0 10px var(--thread-glow);
-}
-
-.weft::before {
-  left: var(--warp-edge);
-}
-
-.weft::after {
-  right: var(--warp-edge);
-}
-
-/* ---------------------------------------------------------------------------
-   Knots and rails: the small vocabulary the woven sections share
---------------------------------------------------------------------------- */
-
-/* A knot is one crossing — a marker for a single item (a thread of the warp, a
-   pick of the weft, a question). The app's overlay draws one per reply; these
-   draw one per thing worth counting. */
-.knot {
-  flex: none;
-  width: 5px;
-  height: 5px;
-  border-radius: 2px;
-  background: radial-gradient(circle at 35% 30%, #ffffff, var(--thread) 75%);
-  box-shadow: 0 0 0 3px var(--thread-soft);
-}
-
-.knot-lit {
-  box-shadow:
-    0 0 0 3px var(--thread-soft),
-    0 0 12px var(--thread-glow);
-}
-
-/* The rail: the warp thread a column of content hangs from. */
-.rail {
-  width: 1px;
-  background: linear-gradient(
-    to bottom,
-    transparent 0,
-    var(--thread-line) 10%,
-    var(--thread-line-strong) 50%,
-    var(--thread-line) 90%,
-    transparent 100%
-  );
-}
-
-/* ---------------------------------------------------------------------------
-   The cloth: the woven transcript in the hero
-
-   A transcript is cloth. The reasoning is a thread being spun down the rail, the
-   tool call is a knot tied into it, and the reply is the weft beaten in across
-   the warp, one line per pass. Reading order is top to bottom, which is also how
-   a loom is read.
---------------------------------------------------------------------------- */
-
-.cloth {
-  /* The cloth's own vertical thread, behind the passes. */
-  position: relative;
-}
-
-.cloth-pass {
-  position: relative;
-  padding-left: 1.5rem;
-}
-
-/* The knot that ties each pass onto the rail. */
-.cloth-pass::before {
-  content: "";
-  position: absolute;
-  left: 0;
-  top: 0.5rem;
-  width: 5px;
-  height: 5px;
-  border-radius: 2px;
-  background: radial-gradient(circle at 35% 30%, #ffffff, var(--thread) 75%);
-  box-shadow: 0 0 0 3px var(--thread-soft);
-}
-
-/* The pass currently arriving is the one lit. */
-.cloth-pass[data-live="true"]::before {
-  animation: loom-knot-pulse 2s ease-out infinite;
-}
-
-@keyframes loom-knot-pulse {
-  0% {
-    box-shadow: 0 0 0 0 var(--thread-glow), 0 0 14px var(--thread-glow);
-  }
-  70% {
-    box-shadow: 0 0 0 8px transparent, 0 0 10px var(--thread-soft);
-  }
-  100% {
-    box-shadow: 0 0 0 0 transparent, 0 0 14px var(--thread-glow);
-  }
-}
-
-/* The thread running down the left of the cloth, tying the passes together. */
-.cloth-rail {
-  position: absolute;
-  left: 2px;
-  top: 0.75rem;
-  bottom: 0.75rem;
-  width: 1px;
-  background: linear-gradient(
-    to bottom,
-    transparent 0,
-    var(--thread-line) 12%,
-    var(--thread-line-strong) 50%,
-    var(--thread-line) 88%,
-    transparent 100%
-  );
-}
-
-/* ---------------------------------------------------------------------------
-   The draft: the plan for the cloth, beside the cloth itself
-
-   In weaving, the draft is the squared notation of a pattern — which threads are
-   lifted on which pick — drawn before anything is woven. Here it is the task
-   list: the model's plan, checking itself off while the cloth below it forms.
-   The app has a real panel for exactly this, so the metaphor is not doing work
-   the product does not already do.
---------------------------------------------------------------------------- */
-
-.draft-row {
-  display: grid;
-  grid-template-columns: 0.9rem 1fr;
-  align-items: start;
+.bar-brand {
+  display: inline-flex;
+  align-items: center;
   gap: 0.5rem;
+  font-size: 0.9375rem;
+  font-weight: 600;
+  letter-spacing: -0.012em;
+  color: var(--ink);
+  text-decoration: none;
+  flex: none;
 }
 
-/* A lifted thread: the pick is being woven now. */
-.lifted {
-  color: var(--thread-bright);
-}
-
-/* ---------------------------------------------------------------------------
-   The draft strip: navigation as a weaving draft
-
-   A draft is read at a glance — a row of cells, some lifted, some not. So is a
-   navigation. Each cell is a destination, and the current one is the lifted
-   thread. Compact, legible, and the metaphor is doing the work of the underline.
---------------------------------------------------------------------------- */
-
-.draft-strip {
-  display: flex;
-  align-items: center;
-  gap: 3px;
-}
-
-.draft-cell {
-  position: relative;
-  display: flex;
-  align-items: center;
-  gap: 0.4rem;
-  height: 2.25rem;
-  padding-inline: 0.65rem;
-  border-radius: var(--radius-capsule);
-  border: 1px solid transparent;
+.bar-descriptor {
+  display: none;
   color: var(--ink-faint);
-  font-size: 13px;
+  font-size: 0.8125rem;
+}
+
+.bar-current {
+  /* Pushed right of the brand, so it reads as a running head rather than as a
+     subtitle. */
+  margin-left: 0.35rem;
+  color: var(--ink-faint);
+  font-size: 0.8125rem;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.bar-links {
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
+  margin-left: auto;
+}
+
+.bar-link {
+  display: inline-flex;
+  align-items: center;
+  height: 2rem;
+  padding-inline: 0.5rem;
+  border-radius: var(--radius-row);
+  font-size: 0.8125rem;
+  color: var(--ink-soft);
+  text-decoration: none;
   transition:
     background-color 130ms ease,
-    color 130ms ease,
-    border-color 130ms ease;
+    color 130ms ease;
 }
 
-.draft-cell:hover {
+.bar-link:hover {
   background-color: var(--hover-bg);
   color: var(--ink);
 }
 
-/* The lifted cell — where the shuttle currently is. */
-.draft-cell[data-current="true"] {
+/* At `lg` the margin index takes over the job of naming where you are, so the
+   running head stops repeating it and states what the document is instead. */
+@media (min-width: 64rem) {
+  .bar-descriptor {
+    display: inline;
+  }
+  .bar-current {
+    display: none;
+  }
+}
+
+/* ---------------------------------------------------------------------------
+   The margin index
+
+   The contents list, fixed in the left margin, marking the section you are in.
+   This is the only fixed element on the page and it earns its place the way a
+   printed running index does: it answers "where am I, and what else is here"
+   without a scroll back to the top.
+
+   `left` is computed from the measure rather than from a grid, because the text
+   column is centred by its own `max-width` and a grid would have to state that
+   width a second time. Both terms are `rem`, so the arithmetic is the same on
+   every element. It appears only where the arithmetic gives a positive margin —
+   1152px, which is where 34rem of text plus a 15rem index and two gutters first
+   fit side by side.
+--------------------------------------------------------------------------- */
+
+.index {
+  display: none;
+}
+
+@media (min-width: 72rem) {
+  .index {
+    display: block;
+    position: fixed;
+    top: calc(var(--bar-h) + 2.5rem);
+    left: max(1rem, calc((100vw - var(--measure)) / 2 - 17rem));
+    width: 14rem;
+    z-index: 20;
+  }
+}
+
+.index-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.index-link {
+  display: grid;
+  grid-template-columns: 1.5rem 1fr;
+  gap: 0.5rem;
+  padding: 0.3rem 0.5rem 0.3rem 0;
+  font-size: 0.8125rem;
+  line-height: 1.35;
+  color: var(--ink-faint);
+  text-decoration: none;
+  border-left: 1px solid transparent;
+  transition: color 130ms ease;
+}
+
+.index-link:hover {
   color: var(--ink);
-  border-color: var(--glass-border);
-  background-color: var(--hover-bg);
 }
 
-/* The mark of a lifted thread: a filled square, as on a real draft. */
-.draft-cell::after {
-  content: "";
-  position: absolute;
-  left: 50%;
-  bottom: -3px;
-  width: 4px;
-  height: 4px;
-  translate: -50% 0;
-  border-radius: 1px;
-  background: var(--thread);
-  opacity: 0;
+/* The section you are reading, marked the way a printed index marks it: the
+   number and the title go to full ink and a rule is drawn down the left. One
+   attribute, `aria-current`, carries both the announcement and the appearance, so
+   there is no second copy of "where am I" in the markup. */
+.index-link[aria-current="true"] {
+  color: var(--ink);
+  border-left-color: var(--accent);
+  padding-left: 0.6rem;
 }
 
-.draft-cell[data-current="true"]::after {
-  opacity: 1;
+.index-num {
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+  color: var(--ink-faint);
 }
 
-/* ---------------------------------------------------------------------------
-   The selvedge: the finished edge
+.index-link[aria-current="true"] .index-num {
+  color: var(--accent);
+}
 
-   A selvedge is the tightly-woven border that stops a cloth fraying — the part
-   that holds. So it is the privacy and licensing band: drawn denser than the rest
-   of the cloth, at the end of it.
---------------------------------------------------------------------------- */
-
-.selvedge {
-  border-top: 1px solid var(--thread-line-strong);
-  background-image: repeating-linear-gradient(
-    90deg,
-    var(--thread-line) 0 1px,
-    transparent 1px 7px
-  );
-  background-position: top left;
-  background-size: 100% 6px;
-  background-repeat: repeat-x;
+.index-head {
+  margin-bottom: 0.5rem;
+  padding-bottom: 0.5rem;
+  border-bottom: var(--rule);
 }
 
 /* ---------------------------------------------------------------------------
-   The one app behaviour that has to be restated rather than inherited
+   Sections
+
+   A rule above the heading, the section number hanging in the margin, the part
+   name as a rubric, then the heading. That is the whole of the section furniture,
+   and it is enough to make a long document navigable by eye.
 --------------------------------------------------------------------------- */
 
-/*
- * The app styles every scrollbar globally (`* { scrollbar-width: thin }` plus the
- * WebKit pair). That lives in its base styles, outside the marked regions, so it
- * does not travel with the token sync — and the cloth has a scroll area. Scoped to
- * a class rather than `*`, because the app owns its own window and this project
- * does not own the visitor's.
- */
-.loom-scroll {
-  scrollbar-width: thin;
-  scrollbar-color: rgb(140 150 170 / 0.35) transparent;
+.section {
+  padding-top: 3.5rem;
 }
 
-.loom-scroll::-webkit-scrollbar {
-  width: 10px;
-  height: 10px;
+@media (min-width: 40rem) {
+  .section {
+    padding-top: 5rem;
+  }
 }
 
-.loom-scroll::-webkit-scrollbar-track {
-  background: transparent;
+.section-rule {
+  border-top: var(--rule-strong);
 }
 
-.loom-scroll::-webkit-scrollbar-thumb {
-  background-color: rgb(140 150 170 / 0.32);
-  border-radius: 999px;
-  border: 3px solid transparent;
-  background-clip: content-box;
+.section-head {
+  position: relative;
+  margin-top: 1.75rem;
+}
+
+/* The number hangs outside the measure, on the manuscript line's left, which is
+   where a printed specification puts it — so the heading itself starts flush with
+   every paragraph under it. Below `md` there is no margin to hang in, so it is
+   set inline and separated by a thin space. */
+.sec-num {
+  color: var(--ink-faint);
+  font-variant-numeric: tabular-nums;
+  font-weight: 500;
+  margin-right: 0.6rem;
+}
+
+@media (min-width: 48rem) {
+  .sec-num {
+    position: absolute;
+    left: -3.25rem;
+    margin-right: 0;
+  }
+}
+
+.section-body {
+  margin-top: 1.25rem;
+}
+
+/* ---------------------------------------------------------------------------
+   Blocks of prose and their furniture
+--------------------------------------------------------------------------- */
+
+.block {
+  margin-top: 1.25rem;
+}
+
+.block-first {
+  margin-top: 0;
+}
+
+.note {
+  margin-top: 1.5rem;
+  padding-top: 0.75rem;
+  border-top: var(--rule);
+  font-size: 0.8125rem;
+  line-height: 1.6;
+  color: var(--ink-soft);
+  text-wrap: pretty;
+}
+
+/* A block of specification lines: term, definition, hairline between. The `div`
+   wrapper is what HTML permits inside a `dl` to group a `dt` with its `dd` — which
+   matters here because the rows are grid items. */
+.spec {
+  margin-top: 1.5rem;
+  border-top: var(--rule-strong);
+}
+
+.spec-row {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 0.15rem 1.5rem;
+  padding: 0.6rem 0;
+  border-bottom: var(--rule);
+}
+
+@media (min-width: 32rem) {
+  .spec-row {
+    grid-template-columns: 9.5rem 1fr;
+  }
+}
+
+.spec-term {
+  font-size: 0.8125rem;
+  color: var(--ink-faint);
+}
+
+.spec-def {
+  margin: 0;
+  font-size: 0.875rem;
+  line-height: 1.55;
+}
+
+/* ---------------------------------------------------------------------------
+   Figures
+
+   `Figure N — title` set beneath the drawing, with the legend under that. The
+   drawing itself is SVG, which is the whole reason the figures are worth having:
+   hairlines stay hairlines at any size, leader lines are real geometry, and a
+   callout cannot drift away from the thing it points at the way it can when a
+   figure is built out of styled boxes.
+--------------------------------------------------------------------------- */
+
+.figure {
+  margin: 2rem 0 0;
+}
+
+/* A figure narrow enough to be read is wider than a phone. Rather than shrink the
+   drawing until its labels are unreadable, it scrolls — which is honest, and is
+   what a folded plate in a paper manual amounts to. */
+.figure-scroll {
+  overflow-x: auto;
+  overscroll-behavior-x: contain;
+}
+
+.figure-art {
+  display: block;
+  width: 100%;
+  min-width: 44rem;
+  height: auto;
+}
+
+/* The drawing's own vocabulary. Every colour here is one of the app's tokens, so
+   a figure is drawn in the product's material — which is the only sense in which
+   a line drawing can be "of" the thing it describes. */
+.figure-art .f-disc {
+  fill: var(--page);
+}
+
+.figure-art .f-open-fill {
+  fill: var(--accent-soft);
+  stroke: var(--accent);
+}
+
+.figure-art .f-mono {
+  font-family: var(--font-mono);
+  font-size: 9px;
+}
+
+.figure-art text {
+  font-family: var(--font-sans);
+  fill: var(--ink-soft);
+}
+
+.figure-art .f-faint {
+  fill: var(--ink-faint);
+}
+
+.figure-art .f-ink {
+  fill: var(--ink);
+}
+
+.figure-art .f-label {
+  font-size: 8px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  fill: var(--ink-faint);
+}
+
+.figure-art .f-line {
+  stroke: var(--glass-border-strong);
+  fill: none;
+}
+
+.figure-art .f-hair {
+  stroke: var(--glass-border);
+  fill: none;
+}
+
+.figure-art .f-open {
+  stroke: var(--accent);
+  fill: none;
+}
+
+.figure-art .f-thread {
+  fill: var(--thread);
+  opacity: 0.28;
+}
+
+.figure-art .f-thread-solid {
+  fill: var(--accent);
+  opacity: 0.85;
+}
+
+.figure-art .f-accent-ink {
+  fill: var(--accent);
+}
+
+.figure-art .f-dash {
+  stroke-dasharray: 3 3;
+}
+
+.figure-caption {
+  margin-top: 0.75rem;
+  font-size: 0.8125rem;
+  line-height: 1.55;
+  color: var(--ink-soft);
+  text-wrap: pretty;
+}
+
+.figure-caption b {
+  color: var(--ink);
+  font-weight: 600;
+}
+
+.figure-legend {
+  margin: 0.6rem 0 0;
+  padding: 0;
+  list-style: none;
+  display: grid;
+  gap: 0.4rem;
+}
+
+@media (min-width: 34rem) {
+  .figure-legend {
+    grid-template-columns: 1fr 1fr;
+    column-gap: 1.5rem;
+  }
+}
+
+.figure-legend b {
+  color: var(--ink);
+  font-weight: 600;
+}
+
+.figure-legend li {
+  display: grid;
+  grid-template-columns: 1.5rem 1fr;
+  gap: 0.5rem;
+  font-size: 0.8125rem;
+  line-height: 1.5;
+  color: var(--ink-soft);
+}
+
+.figure-legend .legend-n {
+  font-variant-numeric: tabular-nums;
+  color: var(--accent);
+  font-weight: 600;
+}
+
+/* ---------------------------------------------------------------------------
+   Tables
+
+   Booktabs: a rule above, a rule under the header, a rule below, and nothing
+   vertical anywhere. Vertical rules are what make a table look like a
+   spreadsheet; removing them and giving the rows room is most of what makes a
+   printed table readable.
+--------------------------------------------------------------------------- */
+
+.table-scroll {
+  overflow-x: auto;
+  overscroll-behavior-x: contain;
+}
+
+.booktabs {
+  width: 100%;
+  min-width: 26rem;
+  border-collapse: collapse;
+  border-top: var(--rule-strong);
+  font-size: 0.8125rem;
+  line-height: 1.5;
+}
+
+.booktabs caption {
+  caption-side: top;
+  text-align: left;
+  padding-bottom: 0.6rem;
+  font-size: 0.8125rem;
+  color: var(--ink-soft);
+}
+
+.booktabs caption b {
+  color: var(--ink);
+  font-weight: 600;
+}
+
+.booktabs th,
+.booktabs td {
+  text-align: left;
+  vertical-align: top;
+  padding: 0.55rem 1.25rem 0.55rem 0;
+}
+
+.booktabs th:last-child,
+.booktabs td:last-child {
+  padding-right: 0;
+}
+
+.booktabs thead th {
+  padding-bottom: 0.45rem;
+  border-bottom: var(--rule);
+  font-size: 0.6875rem;
+  font-weight: 600;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--ink-faint);
+}
+
+.booktabs tbody tr:last-child td {
+  border-bottom: var(--rule-strong);
+}
+
+.booktabs td.num,
+.booktabs th.num {
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+/* ---------------------------------------------------------------------------
+   Numbered questions and glossary entries
+
+   Both hang their number outside the text, so the copy is flush left on the
+   manuscript line and the number never travels with a text selection inside the
+   answer.
+--------------------------------------------------------------------------- */
+
+.hanging {
+  display: grid;
+  grid-template-columns: 2.25rem 1fr;
+  gap: 0.5rem 0.85rem;
+  padding: 1.1rem 0;
+  border-bottom: var(--rule);
+}
+
+.hanging:first-child {
+  border-top: var(--rule);
+}
+
+.hanging-n {
+  font-variant-numeric: tabular-nums;
+  font-size: 0.8125rem;
+  color: var(--ink-faint);
+  padding-top: 0.15rem;
+}
+
+.hanging-h {
+  font-size: 0.9375rem;
+  font-weight: 600;
+  letter-spacing: -0.008em;
+}
+
+.hanging-b {
+  grid-column: 2;
+  margin: 0;
+  font-size: 0.875rem;
+  line-height: 1.62;
+  color: var(--ink-soft);
+  text-wrap: pretty;
+}
+
+.hanging-b + .hanging-b {
+  margin-top: 0.6rem;
+}
+
+/* ---------------------------------------------------------------------------
+   Inline code, for paths and commands only
+--------------------------------------------------------------------------- */
+
+.code {
+  font-family: var(--font-mono);
+  font-size: 0.85em;
+  padding: 0.1em 0.32em;
+  border-radius: 5px;
+  background-color: var(--ink-ghost);
+  white-space: nowrap;
+}
+
+pre.shell {
+  margin: 1.25rem 0 0;
+  padding: 0.9rem 1rem;
+  border: var(--rule);
+  overflow-x: auto;
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+  line-height: 1.7;
+  color: var(--ink-soft);
+  background-color: var(--card-bg);
+}
+
+/* ---------------------------------------------------------------------------
+   The one action in the document
+
+   The app's own primary button, unchanged, at a document's scale. Everything else
+   on the page is a link in text; this is the only thing shaped like a control,
+   which is why it reads as the one thing to do.
+--------------------------------------------------------------------------- */
+
+.action {
+  margin-top: 1.75rem;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.75rem 1rem;
+}
+
+.action-note {
+  font-size: 0.8125rem;
+  color: var(--ink-faint);
+}
+
+/* ---------------------------------------------------------------------------
+   The contents list, and the registers of plates
+
+   The contents is the document's front matter and its navigation at once. The
+   rubric ends each line, faint and right-aligned, so scanning the list teaches the
+   vocabulary without ever putting a term in front of the thing it names.
+--------------------------------------------------------------------------- */
+
+.contents-list {
+  margin: 1.5rem 0 0;
+  padding: 0;
+  list-style: none;
+  border-top: var(--rule-strong);
+}
+
+.contents-item {
+  display: grid;
+  grid-template-columns: 2rem 1fr;
+  gap: 0.75rem;
+  align-items: baseline;
+  padding: 0.55rem 0;
+  border-bottom: var(--rule);
+}
+
+@media (min-width: 34rem) {
+  .contents-item {
+    grid-template-columns: 2rem 1fr auto;
+  }
+}
+
+.contents-num {
+  font-variant-numeric: tabular-nums;
+  font-size: 0.8125rem;
+  color: var(--ink-faint);
+}
+
+.contents-title {
+  font-size: 0.9375rem;
+  color: var(--ink);
+  text-decoration: none;
+}
+
+.contents-title:hover {
+  color: var(--accent);
+}
+
+.contents-rubric {
+  display: none;
+  font-size: 0.6875rem;
+  font-weight: 600;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--ink-faint);
+}
+
+@media (min-width: 34rem) {
+  .contents-rubric {
+    display: block;
+  }
+}
+
+.register {
+  margin-top: 2.25rem;
+}
+
+.register-row {
+  display: grid;
+  grid-template-columns: 4.25rem 1fr;
+  gap: 0.75rem;
+  padding: 0.3rem 0;
+  font-size: 0.8125rem;
+  line-height: 1.5;
+  color: var(--ink-soft);
+}
+
+.register-n {
+  font-variant-numeric: tabular-nums;
+  color: var(--ink-faint);
+}
+
+/* ---------------------------------------------------------------------------
+   Instructions
+
+   A numbered step list, with the number hanging in the margin, which is the only
+   list on the page that is genuinely a sequence.
+--------------------------------------------------------------------------- */
+
+.steps {
+  margin: 1.5rem 0 0;
+  padding: 0;
+  list-style: none;
+  counter-reset: step;
+  border-top: var(--rule-strong);
+}
+
+.steps li {
+  counter-increment: step;
+  display: grid;
+  grid-template-columns: 2rem 1fr;
+  gap: 0.75rem;
+  padding: 0.6rem 0;
+  border-bottom: var(--rule);
+  font-size: 0.9375rem;
+  line-height: 1.6;
+}
+
+.steps li::before {
+  content: counter(step) ".";
+  font-variant-numeric: tabular-nums;
+  color: var(--ink-faint);
+}
+
+/* ---------------------------------------------------------------------------
+   The colophon
+
+   The last page of a book, and the most human thing on this one: how the document
+   is set, what it is licensed under, and what it does not do. A page that says
+   these things plainly cannot have been assembled by a generator that had nothing
+   to say.
+--------------------------------------------------------------------------- */
+
+.colophon {
+  margin-top: 4rem;
+  padding-top: 1.5rem;
+  border-top: var(--rule-strong);
+}
+
+.colophon p {
+  max-width: var(--measure);
+  font-size: 0.8125rem;
+  line-height: 1.65;
+  color: var(--ink-soft);
+  text-wrap: pretty;
+}
+
+.colophon p + p {
+  margin-top: 0.85rem;
+}
+
+/* ---------------------------------------------------------------------------
+   Print
+
+   A manual should print. Nothing here is load-bearing — the page is already
+   black-on-paper — but the navigation is screen furniture, the breakout widths
+   would push figures off the sheet, and an orphaned figure is the one way a
+   printed page looks broken.
+--------------------------------------------------------------------------- */
+
+@media print {
+  .bar,
+  .index {
+    display: none;
+  }
+  .paper,
+  .wide {
+    max-width: none;
+    width: auto;
+    padding-inline: 0;
+  }
+  .figure,
+  .booktabs,
+  .hanging {
+    break-inside: avoid;
+  }
+  .section {
+    padding-top: 2rem;
+  }
 }

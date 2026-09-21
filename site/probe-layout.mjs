@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Measures the rendered site and prints the result as text.
+// Measures the rendered document and prints the result as text.
 //
 //   node probe-layout.mjs                 every viewport, both motion preferences
 //   node probe-layout.mjs 1440            one width
@@ -9,17 +9,26 @@
 // Why text rather than a screenshot
 // ---------------------------------------------------------------------------
 //
-// Several of this page's defining ideas are geometry, not content: the warp threads
-// have to line up with the columns the content sits in, and the weft's end-knots have
-// to sit on the outermost of those threads. Both are invisible to a build, a
-// typecheck and the three `verify-*.mjs` scripts, because all three read markup rather
-// than a laid-out page.
+// The claims this document makes are *geometric*, and none of them is visible in a
+// build, a typecheck or a prerendered HTML dump.
 //
-// And both fail in a viewport-dependent way: the knots are placed with
-// `calc(max(0px, (100vw - 92rem) / 2) + <gutter>)`, which on a 1440px laptop is simply
-// the gutter and on a 5120px monitor is the gutter *plus* 1824px of centring margin.
-// So a regression there is invisible on the machine you develop on and glaring on the
-// machine you own.
+//   - The text column must be the measure. This is the defect the rebuild was largely
+//     about: the previous layout let prose run a ten-column shed, which at the cap is
+//     about 150 characters a line — twice what anyone can read without losing their
+//     place — and an over-long line typechecks, builds and renders perfectly.
+//   - The margin index and the running head's section indicator must be gated in
+//     opposite directions, so "where am I" is answered exactly once at any width:
+//     never twice, and never zero times.
+//   - A figure must not be shrunk below legibility, and the table breakout must not give
+//     the document a horizontal scrollbar.
+//
+// Every one of those fails in a viewport-dependent way. A column that is two gutters
+// too narrow looks fine at 1440 and cramped at 390. An index that appears one breakpoint
+// early is invisible until the exact width where it overlaps the text. So a regression
+// here is invisible on the machine you develop on and glaring on the machine you own —
+// which is the same argument the previous version of this tool made about a weft line
+// that followed the scroll, and it is why the tool survived the rebuild when the element
+// it was written for did not.
 //
 // The page reports its own measurements (`components/dev/probe.tsx`, behind `?probe=1`)
 // and this script drives headless Chrome over it and prints the numbers. It reads the
@@ -37,19 +46,23 @@ const URL = `http://localhost:${PORT}/?probe=1`;
 /**
  * The widths worth checking.
  *
- * 5120 is not hypothetical — it is the monitor this was developed on, and it is the
- * width that exposed the knot bug. 1440 is an ordinary laptop. 390 is a phone, where
- * twelve columns are 39px apart and everything still has to hold together.
+ * 390 is a phone, where the figure scrolls rather than shrinking and the running head
+ * carries the section. 1152 is the margin index's breakpoint exactly — a breakpoint is
+ * the one kind of layout decision that can be wrong at exactly one width, so probing it
+ * only at 1440 would never test the boundary. 1440 is an ordinary laptop. 5120 is not
+ * hypothetical: it is the ultrawide this project is developed on, and it is the width at
+ * which the measure either holds or drifts into a 200-character line.
  *
- * `dsf` is the device scale factor, and the phone entry needs it: headless Chrome
- * refuses to make a window narrower than about 500px, so asking for `--window-size=390`
- * silently gives a 500px CSS viewport — which is a tablet, not a phone, and the
- * narrow-screen checks would all be made against the wrong layout. Doubling the window
- * and doubling the scale factor produces a genuine 390×844 CSS viewport.
+ * `dsf` is the device scale factor, and the phone entry needs it: headless Chrome refuses
+ * to make a window narrower than about 500px, so asking for `--window-size=390` silently
+ * gives a 500px CSS viewport — which is a tablet, not a phone, and every narrow-screen
+ * check would be made against the wrong layout. Doubling the window and doubling the
+ * scale factor produces a genuine 390×844 CSS viewport.
  */
 const VIEWPORTS = [
-  { width: 5120, height: 1400, dsf: 1, note: "the ultrawide this was built on" },
+  { width: 5120, height: 1400, dsf: 1, note: "the ultrawide this is built on" },
   { width: 1440, height: 900, dsf: 1, note: "an ordinary laptop" },
+  { width: 1152, height: 900, dsf: 1, note: "the margin index's breakpoint, exactly" },
   { width: 390, height: 844, dsf: 2, note: "a phone" },
 ];
 
@@ -76,16 +89,19 @@ function probe(viewport, reduced) {
     "--headless=new",
     "--no-sandbox",
     "--hide-scrollbars",
-    // Virtual time, so React's effects and the font swap have both happened before
-    // the DOM is dumped. Without it the dump can land before the probe mounts.
+    // Virtual time, so React's effects and the font swap have both happened before the
+    // DOM is dumped. Without it the dump can land before the probe mounts.
     "--virtual-time-budget=4000",
     `--window-size=${Math.round(viewport.width * viewport.dsf)},${Math.round(viewport.height * viewport.dsf)}`,
     `--force-device-scale-factor=${viewport.dsf}`,
   ];
 
-  // Both branches matter. `reduce` is what a headless browser reports by default, and
-  // the path a visitor with that preference actually gets — which is how the weft was
-  // found to be invisible for them.
+  // Both branches matter, and not only for the shared `reduce` override. The section
+  // indicator is checked under both because the honest reading of that preference is
+  // that it removes *movement*, not *position*: which section you are in is information,
+  // and withholding it from someone who asked for less animation would be removing a
+  // feature rather than respecting a preference. That distinction is easy to get wrong in
+  // the component and impossible to see in a screenshot.
   if (reduced) args.push("--force-prefers-reduced-motion");
 
   args.push("--dump-dom", URL);
@@ -148,7 +164,7 @@ for (const viewport of targets) {
 
 console.log("");
 if (failures === 0) {
-  console.log("the layout holds at every width and motion preference checked");
+  console.log("the column, the index and the drawings hold at every width checked");
 } else {
   console.log(`${failures} failure(s)`);
   process.exit(1);

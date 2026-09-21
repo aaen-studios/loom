@@ -336,6 +336,27 @@ pub enum EngineEvent {
         session_id: String,
         todos: Vec<crate::db::Todo>,
     },
+    /// A tool finished and may have touched the filesystem.
+    ///
+    /// Emitted after **every** tool call rather than only the ones that write,
+    /// and that is a deliberate over-approximation. Working out whether a given
+    /// call changed anything would mean either a list of mutating tool names —
+    /// which cannot cover an MCP server's tools at all — or a diff of the tree
+    /// before and after, which is far more expensive than what it saves. What
+    /// this event actually asks is cheap and always correct: "restat what you
+    /// have open, and refresh git".
+    ///
+    /// The editor is the reason it exists at all. A file the agent rewrites while
+    /// you have it open in a **torn-off window** has no other way to hear about
+    /// it — that window is a second webview with its own heap, so nothing the
+    /// main window knows is visible there. An engine event reaches both, which is
+    /// the same reason the dock's layout is broadcast rather than kept in a store.
+    FilesChanged {
+        session_id: String,
+        /// Which tool touched it, for the diagnostics line. Not used to decide
+        /// anything: naming the tool is cheaper than proving it was a writer.
+        tool: String,
+    },
 }
 
 impl EngineEvent {
@@ -360,8 +381,306 @@ impl EngineEvent {
             EngineEvent::JobChanged { .. } => "job-changed",
             EngineEvent::MemoryChanged { .. } => "memory-changed",
             EngineEvent::TodosChanged { .. } => "todos-changed",
+            EngineEvent::FilesChanged { .. } => "files-changed",
         }
     }
+}
+
+#[cfg(test)]
+mod commit_message_tests {
+    use super::*;
+    use crate::provider::{ProviderConfig, ProviderKind};
+
+    /// A provider that asks for a session header, like OpenCode Go.
+    fn gateway() -> ProviderConfig {
+        ProviderConfig {
+            kind: ProviderKind::OpenaiCompatible,
+            session_header: Some("x-opencode-session".to_string()),
+            ..ProviderConfig::default()
+        }
+    }
+
+    #[test]
+    fn the_request_names_the_model_it_was_given() {
+        // The bug: reading `config.chat.*` meant a chat switched to another model
+        // still had its commit messages written by the app default.
+        let provider = gateway();
+        let request = commit_request(
+            &provider,
+            "chosen-model",
+            Some("high"),
+            "session-1",
+            "system",
+            "diff".to_string(),
+        );
+        assert_eq!(request.model, "chosen-model");
+        assert_eq!(request.variant, Some("high"));
+    }
+
+    #[test]
+    fn the_request_carries_the_session_id() {
+        // The bug that produced "Request is missing x-opencode-session": the id
+        // is what makes `headers()` emit the provider's session header at all, so
+        // `None` here is not a harmless omission — it is a guaranteed rejection
+        // by any gateway that asks for one.
+        let provider = gateway();
+        let request = commit_request(
+            &provider,
+            "m",
+            None,
+            "session-abc",
+            "system",
+            "diff".to_string(),
+        );
+        assert_eq!(request.session_id, Some("session-abc"));
+
+        let headers = request.headers(Some("key"));
+        let sent = headers
+            .iter()
+            .find(|(name, _)| name == "x-opencode-session")
+            .unwrap_or_else(|| panic!("session header missing from {headers:?}"));
+        assert_eq!(sent.1, "session-abc");
+    }
+
+    #[test]
+    fn a_provider_that_wants_no_session_header_gets_none() {
+        // The same request against an ordinary provider adds nothing, which is
+        // what keeps this from being a blanket "always send an id" rule.
+        let provider = ProviderConfig::default();
+        let request = commit_request(&provider, "m", None, "s", "sys", "d".to_string());
+        let headers = request.headers(Some("key"));
+        assert!(
+            headers.iter().all(|(name, _)| name != "x-opencode-session"),
+            "{headers:?}"
+        );
+    }
+
+    #[test]
+    fn the_pass_asks_for_a_writable_reply_and_no_tools() {
+        // A commit message is text. Offering tools here would let the model try
+        // to call one, and a one-shot pass has no loop to handle the call.
+        let provider = ProviderConfig::default();
+        let request = commit_request(&provider, "m", None, "s", "sys", "d".to_string());
+        assert!(!request.stream);
+        assert!(request.tools.is_empty());
+        assert_eq!(request.messages.len(), 1);
+        // Generous, because a reasoning model spends its first tokens thinking
+        // and a tight cap leaves the reply empty.
+        assert_eq!(request.max_output_tokens, Some(1024));
+    }
+
+    #[test]
+    fn a_fenced_reply_becomes_a_plain_message() {
+        let cleaned = clean_commit_message("```\nfeat(editor): add a diff view\n```");
+        assert_eq!(cleaned, "feat(editor): add a diff view");
+    }
+
+    #[test]
+    fn a_prefixed_reply_loses_its_preamble() {
+        // Models open with this constantly, and no amount of prompting stops it
+        // reliably. Stripping it here is what makes the button save time rather
+        // than trading one edit for another.
+        for raw in [
+            "Here's the commit message:\nfeat: add a thing",
+            "Here is the commit message:\nfeat: add a thing",
+            "Commit message:\nfeat: add a thing",
+        ] {
+            assert_eq!(clean_commit_message(raw), "feat: add a thing", "{raw}");
+        }
+    }
+
+    #[test]
+    fn a_quoted_subject_loses_its_quotes() {
+        // Only the subject: a body containing a quoted phrase must be left alone,
+        // and that is the case the trailing-newline guard exists for.
+        assert_eq!(clean_commit_message("\"feat: add a thing\""), "feat: add a thing");
+        let body = "feat: add a thing\n\nIt handles \"quoted\" input and\nnewlines.";
+        assert_eq!(clean_commit_message(body), body);
+    }
+
+    #[test]
+    fn a_body_keeps_one_blank_line() {
+        // git keeps runs of blank lines, and models produce them freely.
+        let cleaned = clean_commit_message("fix: a thing\n\n\n\nWhy it broke.");
+        assert_eq!(cleaned, "fix: a thing\n\nWhy it broke.");
+    }
+
+    #[test]
+    fn a_diff_is_cut_on_a_line_boundary() {
+        // Half a line of diff is a change that did not happen, and a model
+        // reading one will describe it as though it had.
+        let text = "line one\nline two\nline three\n";
+        let (cut, truncated) = truncate_for_prompt(text, 14);
+        assert!(truncated);
+        assert_eq!(cut, "line one");
+        // And an unchanged diff is passed through untouched.
+        let (whole, truncated) = truncate_for_prompt(text, 1000);
+        assert!(!truncated);
+        assert_eq!(whole, text);
+    }
+
+    #[test]
+    fn truncating_never_splits_a_multibyte_character() {
+        // Slicing bytes here would panic, and a diff can hold any UTF-8.
+        let text = "café λ ✓ — more text after this point";
+        for budget in 1..text.len() {
+            let (cut, _) = truncate_for_prompt(text, budget);
+            // The assertion is that this did not panic; `cut` being a valid
+            // `String` is what proves nothing was split.
+            assert!(cut.len() <= budget);
+        }
+    }
+}
+
+/// The one-shot request a commit-message pass sends.
+///
+/// Extracted from the body of [`Engine::draft_commit_message`] for one reason:
+/// it is where the two bugs lived, and neither was reachable by a test while it
+/// was inline. A regression test can now assert both facts that matter —
+/// **the model named is the one passed in**, and **the session id is carried** —
+/// without a network call or a live provider.
+///
+/// The session id is the one to keep an eye on. `ChatRequest::headers()` emits a
+/// provider's `session_header` only when `session_id` is `Some`, so passing
+/// `None` silently drops the header and a gateway like OpenCode Go rejects the
+/// call with "Request is missing x-opencode-session". It reads like an
+/// unnecessary field on a request that is not streaming and not part of a turn;
+/// it is not.
+fn commit_request<'a>(
+    provider: &'a ProviderConfig,
+    model_id: &'a str,
+    variant: Option<&'a str>,
+    session_id: &'a str,
+    system: &'a str,
+    prompt: String,
+) -> ChatRequest<'a> {
+    ChatRequest {
+        provider,
+        model: model_id,
+        system: Some(system),
+        messages: vec![WireMessage::text("user", prompt)],
+        // The chat's reasoning effort, so a commit message is written with the
+        // same thinking budget the chat itself uses. `None` asks for the model's
+        // default instead, which for a reasoning model means quietly ignoring
+        // the setting shown in its own header.
+        variant,
+        // Generous for the same reason the title pass is: a reasoning model
+        // spends its first tokens thinking, and a cap too tight leaves `content`
+        // empty so nothing is ever produced.
+        max_output_tokens: Some(1024),
+        temperature: None,
+        top_p: None,
+        stream: false,
+        tools: Vec::new(),
+        session_id: Some(session_id),
+    }
+}
+
+/// Trims a diff to a prompt budget, and says whether it had to.
+///
+/// Cut on a line boundary, because half a line of diff is a change that did not
+/// happen and a model reading one will describe it. Also cut on a *character*
+/// boundary after that, since a diff can hold any UTF-8 and slicing bytes would
+/// panic on a multi-byte character.
+fn truncate_for_prompt(text: &str, budget: usize) -> (String, bool) {
+    if text.len() <= budget {
+        return (text.to_string(), false);
+    }
+    let mut cut = budget;
+    while cut > 0 && !text.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    let head = &text[..cut];
+    let trimmed = match head.rfind('\n') {
+        Some(index) => &head[..index],
+        None => head,
+    };
+    (trimmed.to_string(), true)
+}
+
+/// Turns a model's reply into something `git commit` will accept.
+///
+/// Models fence things. They also open with "Here's a commit message:" or wrap
+/// the whole thing in quotes, and every one of those is a commit subject with
+/// three characters of junk on the front that no amount of prompting removes
+/// reliably. Stripping them here means the button always produces a message that
+/// can be committed as-is, which is the only way it saves time rather than
+/// trading one edit for another.
+fn clean_commit_message(raw: &str) -> String {
+    let mut text = raw.trim().to_string();
+
+    // A fenced block, with or without a language.
+    if text.starts_with("```") {
+        let after_first = match text.find('\n') {
+            Some(index) => &text[index + 1..],
+            None => "",
+        };
+        text = match after_first.rfind("```") {
+            Some(index) => after_first[..index].trim().to_string(),
+            None => after_first.trim().to_string(),
+        };
+    }
+
+    // A leading label line: "Commit message:", "Here is the message:".
+    let lowered = text.to_lowercase();
+    for lead in [
+        "here is the commit message:",
+        "here's the commit message:",
+        "here is a commit message:",
+        "here's a commit message:",
+        "commit message:",
+        "message:",
+    ] {
+        if lowered.starts_with(lead) {
+            let rest = text[lead.len()..].trim_start();
+            // Only strip it when something follows, or a message that genuinely
+            // begins with the word "message:" is lost.
+            if !rest.is_empty() {
+                text = rest.to_string();
+            }
+            break;
+        }
+    }
+
+    // Wrapping quotes around the whole thing, which would otherwise become part
+    // of the subject.
+    let pairs = [('"', '"'), ('\'', '\''), ('`', '`'), ('“', '”')];
+    for (open, close) in pairs {
+        if text.starts_with(open) && text.ends_with(close) && text.len() > 2 {
+            let inner = &text[open.len_utf8()..text.len() - close.len_utf8()];
+            // Not for a body: a message legitimately containing a quoted phrase
+            // at both ends and newlines in between is untouched.
+            if !inner.contains(open) || inner.contains('\n') {
+                if !inner.contains('\n') {
+                    text = inner.trim().to_string();
+                }
+            }
+            break;
+        }
+    }
+
+    // Collapse runs of blank lines in the body, which models produce freely and
+    // which git keeps.
+    let mut lines: Vec<&str> = Vec::new();
+    let mut blank_run = 0;
+    for line in text.lines() {
+        if line.trim().is_empty() {
+            blank_run += 1;
+            // One blank line separates subject from body; more is noise.
+            if blank_run > 1 {
+                continue;
+            }
+            lines.push("");
+        } else {
+            blank_run = 0;
+            lines.push(line);
+        }
+    }
+
+    while lines.last().map(|line| line.trim().is_empty()).unwrap_or(false) {
+        lines.pop();
+    }
+    lines.join("\n").trim().to_string()
 }
 
 /// Tool call record stored in a message's `extra` column.
@@ -3304,6 +3623,15 @@ impl Engine {
                     output: outcome.output.clone(),
                     images: outcome.images.clone(),
                 });
+
+                // Told after every call, not only the writers — see the note on
+                // the variant. An open editor buffer and the git panel both need
+                // to hear that something may have moved on disk, and they are the
+                // only two things that can decide whether it matters.
+                self.emit(EngineEvent::FilesChanged {
+                    session_id: session_id.clone(),
+                    tool: outcome.name.clone(),
+                });
             }
 
             // A pause inside the batch that ended the turn: stop now rather
@@ -5331,10 +5659,192 @@ impl Engine {
         }
     }
 
+    /// Whether git can be run at all, for the panel's one clear sentence.
+    pub fn git_available(&self) -> bool {
+        crate::git::available()
+    }
+
     /// Tool names currently offered by connected MCP servers, for the UI.
     pub async fn mcp_tool_count(&self, server: &str) -> usize {
         let state = self.inner.mcp.lock().await;
         state.tools.iter().filter(|(id, _)| id == server).count()
+    }
+
+    // ------------------------------------------------------------------
+    // Commit messages
+    // ------------------------------------------------------------------
+
+    /// Writes a commit message for what is staged, or for the work tree when
+    /// nothing is.
+    ///
+    /// A one-shot call against **the chat's own model**, resolved through
+    /// [`Engine::effective_model`] exactly as a turn does — the same provider,
+    /// the same model id, the same reasoning variant. Deliberately **not** the
+    /// lite model: a commit subject is read by whoever comes back to this history
+    /// in six months, and it is written once per commit rather than once per
+    /// keystroke, so paying for the good model here is the right way round.
+    ///
+    /// ## Two bugs this function shipped with, both worth naming
+    ///
+    /// **It read `config.chat.*` — the global defaults — not the chat's model.**
+    /// So a chat switched to a different model still had its commit messages
+    /// written by whatever the app default happened to be, and a chat with no
+    /// default set at all got "no model is selected yet" while a perfectly good
+    /// model sat in its header. Resolving through the session is also what makes
+    /// this follow the *variant*: `session.variant` is the per-chat thinking
+    /// effort, and passing `None` asked for the model's default instead.
+    ///
+    /// **It passed `session_id: None`.** Gateways such as OpenCode Go require a
+    /// stable conversation id — that is what `ProviderConfig::session_header`
+    /// exists for — and `ChatRequest::headers()` only emits the header when
+    /// there is an id to send. With `None` the header was silently omitted and
+    /// the provider rejected every call with "Request is missing
+    /// x-opencode-session". The fix is one word, and the lesson is that a
+    /// one-shot request is still a request *from a conversation*: it needs the
+    /// same id a streaming turn sends.
+    ///
+    /// The diff is capped rather than refused when it is large. What a message
+    /// needs is which files changed and roughly how, and a 3,000-line lockfile
+    /// adds nothing to that while costing the whole request budget. The cap is
+    /// stated in the prompt when it bites, so the model knows it is looking at
+    /// part of a change rather than all of one.
+    pub async fn draft_commit_message(
+        &self,
+        session_id: &str,
+        staged: bool,
+    ) -> Result<String> {
+        // The session first, because it is the source of truth for the model,
+        // the variant *and* the folder — the caller does not get to pass a
+        // workdir that disagrees with the chat it came from.
+        let session = self
+            .db()
+            .get_session(session_id)?
+            .ok_or_else(|| Error::UnknownSession(session_id.to_string()))?;
+        let model = self.effective_model(&session)?;
+        let workdir = session
+            .workdir
+            .clone()
+            .ok_or_else(|| Error::Other("this chat has no workspace folder set".into()))?;
+
+        let config = self.config();
+        let provider = config
+            .providers
+            .get(&model.provider_id)
+            .cloned()
+            .ok_or_else(|| Error::UnknownProvider(model.provider_id.clone()))?;
+        let commit = config.commit.clone();
+        drop(config);
+
+        let root = std::path::PathBuf::from(&workdir);
+        if crate::git::root_of(&root).is_none() {
+            return Err(Error::Other("this folder is not a git repository".into()));
+        }
+
+        // Prefer what is staged: if anything is, that is what the commit will
+        // contain, and describing the unstaged remainder would produce a message
+        // about work that is not in the commit.
+        let status = crate::git::status(&root)?;
+        let any_staged = status.files.iter().any(|file| file.staged);
+        let use_staged = staged || any_staged;
+        let patch = crate::git::diff(&root, use_staged)?;
+
+        if patch.trim().is_empty() {
+            return Err(Error::Other(if use_staged {
+                "nothing is staged to describe".into()
+            } else {
+                "there are no changes to describe".into()
+            }));
+        }
+
+        let budget = commit.diff_budget.max(2_000);
+        let (excerpt, truncated) = truncate_for_prompt(&patch, budget);
+
+        let style = match commit.style {
+            crate::config::CommitStyle::Conventional => {
+                "Follow Conventional Commits: `type(scope): summary`, where type is one of \
+                 feat, fix, docs, style, refactor, perf, test, build, ci, chore or revert, and \
+                 scope is the area touched — a folder or module name — when one is obvious. \
+                 The summary is imperative mood, lower case, no trailing full stop, at most 72 \
+                 characters."
+            }
+            crate::config::CommitStyle::Plain => {
+                "Write a plain single-sentence summary in the imperative mood, lower case, no \
+                 trailing full stop, at most 72 characters. Do not use a type prefix."
+            }
+        };
+
+        let body_rule = if commit.include_body {
+            "Then, if the change needs more than the summary can carry, a blank line and a short \
+             body of one to three sentences saying what changed and why. Omit the body entirely \
+             when the summary already says it — most commits do not need one."
+        } else {
+            "Reply with the summary line only. No body."
+        };
+
+        let system = format!(
+            "You write git commit messages. You are shown a diff and reply with the message \
+             only: no preamble, no quotes, no code fence, no explanation.\n\n{style}\n\n\
+             {body_rule}\n\nDescribe what the change does, not which files it touches — \"add \
+             diff view to the editor panel\" rather than \"update EditorPanel.tsx\"."
+        );
+
+        let mut prompt = String::new();
+        if !status.files.is_empty() {
+            // The file list is given separately as well as in the patch, because a
+            // capped patch can lose whole files and the list is what says what the
+            // change covers.
+            prompt.push_str("Changed files:\n");
+            for file in &status.files {
+                let marker = if file.staged && use_staged {
+                    "staged"
+                } else if file.untracked {
+                    "new"
+                } else if file.conflicted {
+                    "conflicted"
+                } else {
+                    "modified"
+                };
+                let rename = match &file.from {
+                    Some(from) => format!(" (renamed from {from})"),
+                    None => String::new(),
+                };
+                prompt.push_str(&format!("  {} [{marker}]{rename}\n", file.path));
+            }
+            prompt.push('\n');
+        }
+        prompt.push_str("Diff:\n");
+        prompt.push_str(&excerpt);
+        if truncated {
+            prompt.push_str(
+                "\n\n[The diff above was truncated to fit a budget. Base the message on the \
+                 files and the changes shown, and keep it general enough to still be true of \
+                 the rest.]",
+            );
+        }
+
+        // The chat's own key, not the app default's: this request goes to the
+        // provider the chat selected.
+        let key = secrets::get_api_key(&model.provider_id).ok().flatten();
+
+        let request = commit_request(
+            &provider,
+            &model.model_id,
+            session.variant.as_deref(),
+            session_id,
+            &system,
+            prompt,
+        );
+
+        let (content, _, _) =
+            stream::run_once(&self.inner.client, &request, key.as_deref()).await?;
+
+        let message = clean_commit_message(&content);
+        if message.is_empty() {
+            return Err(Error::Other(
+                "the model returned an empty message — write one by hand".into(),
+            ));
+        }
+        Ok(message)
     }
 
     // ------------------------------------------------------------------

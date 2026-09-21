@@ -10,6 +10,7 @@ import {
 } from "../lib/window";
 import { useChat } from "../stores/chat";
 import { useDock } from "../stores/dock";
+import { useSettings } from "../stores/settings";
 import { useTasks } from "../stores/tasks";
 import { PanelsMenu } from "./PanelsMenu";
 import { useUi } from "../stores/ui";
@@ -17,6 +18,7 @@ import { PersonaMenu } from "./PersonaMenu";
 import { WorkspaceChip } from "./WorkspaceChip";
 import {
   CloseIcon,
+  IdeIcon,
   MaximizeIcon,
   MinimizeIcon,
   PanelLeftIcon,
@@ -92,6 +94,8 @@ export function TitleBar() {
     (state) => Object.keys(state.busy).length,
   );
   const loadTasks = useTasks((state) => state.load);
+  const ideMode = useSettings((state) => state.config.interface.ideMode);
+  const setInterface = useSettings((state) => state.setInterface);
   const [maximized, setMaximized] = useState(false);
 
   useEffect(() => {
@@ -118,12 +122,25 @@ export function TitleBar() {
           className="h-10 rounded-capsule"
           contentClassName="gap-0.5 p-1"
         >
+          {/* Settings first, then IDE mode.
+              The order is deliberate rather than incidental: Settings is the
+              fixed point — it has been the leftmost control since the title bar
+              was built, and muscle memory for it is the strongest in the app.
+              IDE mode is the new one, so it goes *after* the anchor rather than
+              displacing it. */}
           <PillButton
             label="Settings"
             active={settingsOpen}
             onClick={() => setSettingsOpen(true)}
           >
             <SettingsIcon size={17} />
+          </PillButton>
+          <PillButton
+            label={ideMode ? "Leave IDE mode" : "IDE mode — editor, git and chat"}
+            active={ideMode}
+            onClick={() => setInterface({ ideMode: !ideMode })}
+          >
+            <IdeIcon size={17} />
           </PillButton>
         </LiquidSurface>
         <LiquidSurface

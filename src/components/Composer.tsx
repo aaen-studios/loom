@@ -47,6 +47,18 @@ type SlashEntry =
 /** Stable identity: a selector returning a fresh `[]` loops in zustand v5. */
 const NO_TODOS: Todo[] = [];
 
+/**
+ * Below this content width the two chips drop their labels and show only their
+ * glyphs.
+ *
+ * 430 is chosen against the two widths the composer actually has: about 760px
+ * when it is docked across the window, and about 420px as IDE mode's chat
+ * column. Nothing sits near the threshold, so it cannot flicker as the column is
+ * dragged — and dragging it *is* possible, which is why this is measured at all
+ * rather than fixed per variant.
+ */
+const NARROW_CHIP_PX = 430;
+
 const FILE_FILTERS = [
   {
     name: "Attachments",
@@ -68,6 +80,34 @@ const FILE_FILTERS = [
  * contract, because a menu you can only click is one you have to look at.
  */
 export function Composer({ variant = "docked" }: ComposerProps) {
+  /**
+   * Whether the composer is too narrow for the chips' labels.
+   *
+   * Measured rather than read from a breakpoint, because the *window* width says
+   * nothing about this: the composer is 768px across the whole window normally,
+   * and 420px wide in IDE mode **with the same maximised window**. A media query
+   * would get the two cases exactly backwards.
+   *
+   * Observed on the textarea rather than on the composer's own box, and not by
+   * preference: `LiquidSurface` is a compound element that does not forward a
+   * ref, so there is nothing to attach an observer to from here. The textarea is
+   * `w-full` inside the composer's content, so its width *is* the composer's
+   * width minus padding — which is the number this actually wants, since the
+   * padding cannot hold the chips either.
+   */
+  const [narrow, setNarrow] = useState(false);
+
+  useEffect(() => {
+    const node = textareaRef.current;
+    if (!node) return;
+    const observer = new ResizeObserver(([entry]) => {
+      if (!entry) return;
+      setNarrow(entry.contentRect.width < NARROW_CHIP_PX);
+    });
+    observer.observe(node);
+    return () => observer.disconnect();
+  }, []);
+
   const [value, setValue] = useState("");
   const [attachments, setAttachments] = useState<Attachment[]>([]);
   const [attachError, setAttachError] = useState<string | null>(null);
@@ -685,11 +725,26 @@ export function Composer({ variant = "docked" }: ComposerProps) {
         </div>
       )}
 
-      <div className="mt-1.5 flex items-center gap-1.5 pl-0.5">
-        <ModelPicker />
-        <ModeChip />
+      {/* The control row, as two groups so it can wrap.
+          In IDE mode the chat is a column — 420px wide by default — and this row
+          holds a model chip, a mode chip, up to three round buttons and a send
+          button. That is roughly 400px of content that **cannot shrink**: every
+          item is either a chip with a label in it or a fixed-size tap target.
+          Without wrapping, the send button was pushed past the right edge and
+          clipped, which is what made the composer look wrong at this width.
 
-        <div className="flex-1" />
+          Two groups rather than `flex-wrap` alone: the chips are what you read
+          and the buttons are what you press, so keeping each group together and
+          letting the *buttons* drop to a second line is what every mobile
+          composer does, and for the same reason. `ml-auto` keeps them hard right
+          on whichever line they land. */}
+      <div className="mt-1.5 flex flex-wrap items-center gap-1.5 pl-0.5">
+        <div className="flex min-w-0 items-center gap-1.5">
+          <ModelPicker compact={narrow} />
+          <ModeChip compact={narrow} />
+        </div>
+
+        <div className="ml-auto flex shrink-0 items-center gap-1.5">
 
         {canCapture() && (
           <button
@@ -774,6 +829,7 @@ export function Composer({ variant = "docked" }: ComposerProps) {
             <ArrowUpIcon size={17} />
           </button>
         )}
+        </div>
         </div>
       </div>
     </LiquidSurface>

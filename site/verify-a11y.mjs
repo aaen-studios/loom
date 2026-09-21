@@ -133,44 +133,65 @@ const index = pages.find((file) => file.endsWith("index.html"));
 if (index) {
   const html = visible(readFileSync(index, "utf8"));
 
-  // The small-screen menu has to be a `<details>` rather than a scripted button,
-  // or navigation would be the one part of the site that needs JavaScript. This
-  // asserts the approach, not the appearance.
+  // The small-screen navigation has to be a `<details>` rather than a scripted button,
+  // or it would be the one part of the site that needs JavaScript. This asserts the
+  // approach, not the appearance.
+  //
+  // The FAQ used to be `<details>` too, and it deliberately is not any more: a
+  // collapsible answer is hidden from in-page search and from anyone reading without
+  // JavaScript, which for a question that decides whether someone installs the software
+  // is exactly the wrong trade. So the disclosure check applies to the header only, and
+  // the FAQ's *readability* is what is asserted instead — by looking for an answer.
   if (!/<details/.test(html)) {
-    fail("index", "no <details> menu — small-screen navigation would need JS");
+    fail("index", "no <details> navigation — the small-screen menu would need JS");
   } else {
-    pass("index", "small-screen navigation works without JavaScript");
+    pass("index", "the small-screen menu works without JavaScript");
   }
 
-  // Every in-page anchor needs a matching id, or a nav link silently does
-  // nothing when clicked — which is worse than a 404, because it looks like the
-  // browser misbehaving rather than a wrong address.
+  if (!/SmartScreen/.test(html)) {
+    fail("index", "the security questions are not answered in the prerender");
+  } else {
+    pass("index", "the questions are answered in the prerendered HTML");
+  }
+
+  // Every in-page anchor needs a matching id, or a nav link silently does nothing when
+  // clicked — which is worse than a 404, because it looks like the browser misbehaving
+  // rather than a wrong address.
   //
   // The pattern allows a leading `/`, because Next's `<Link>` renders
-  // `href="/#features"` rather than `href="#features"`. Matching only the bare
-  // form finds one anchor out of eight and passes anyway, which is the worst kind
-  // of green: a check that succeeds because it is looking in the wrong place.
+  // `href="/#glossary"` rather than `href="#glossary"` on the pages that are not the
+  // manual. Matching only the bare form finds a handful of anchors and passes anyway,
+  // which is the worst kind of green: a check that succeeds because it is looking in the
+  // wrong place.
+  //
+  // The floor is six. The manual declares its entries three times over — the contents
+  // list, the registers and the margin index — and the pages outside it add a few more,
+  // so a correct page carries more than two dozen. Finding fewer than six means this
+  // check has stopped looking, not that the links have gone.
   const anchors = [...html.matchAll(/href="\/?#([a-z0-9-]+)"/g)].map((m) => m[1]);
   const unique = [...new Set(anchors)];
   const ids = new Set([...html.matchAll(/\sid="([^"]+)"/g)].map((m) => m[1]));
   const dangling = unique.filter((anchor) => !ids.has(anchor));
 
-  if (unique.length < 4) {
-    // The header carries four section links. Finding fewer means this check has
-    // stopped looking, not that the links are gone — and a check that quietly
-    // stops looking is worse than one that fails.
-    fail("index", `only found ${unique.length} in-page link(s); expected at least 4`);
+  if (unique.length < 6) {
+    fail("index", `only found ${unique.length} in-page link(s); expected at least 6`);
   } else if (dangling.length > 0) {
     fail("index", `in-page links with no target: ${dangling.join(", ")}`);
   } else {
     pass("index", `every in-page link resolves (${unique.length})`);
   }
 
-  // The FAQ is collapsed by default, and a keyboard user has to be able to open
-  // it — which `<details>` gives for free. Asserted so a later refactor to a
-  // scripted accordion has to think about that.
+  // The FAQ is *not* a disclosure widget any more, and this asserts the reason rather
+  // than the absence: a collapsible answer is hidden from in-page search and from
+  // anyone reading without JavaScript, which for a question that decides whether
+  // someone installs the software is the wrong trade. So the header's small-screen menu
+  // is the only `<details>` on the page, and every answer is in the prerender.
   const details = (html.match(/<details/g) ?? []).length;
-  if (details === 0) fail("index", "no FAQ <details> found");
+  if (details !== 1) {
+    fail("index", `expected exactly one <details> (the small-screen menu), found ${details}`);
+  } else {
+    pass("index", "the only disclosure on the page is the small-screen menu");
+  }
   else pass("index", `FAQ uses native disclosure (${details} items)`);
 }
 

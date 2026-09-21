@@ -59,6 +59,37 @@ const SHORTCUTS: { group: string; items: Shortcut[] }[] = [
       { keys: "?", action: "This list" },
     ],
   },
+  {
+    group: "Editor",
+    items: [
+      // There is deliberately no `Ctrl+I` here. Monaco claims a large share of
+      // the `Ctrl+<letter>` space for itself — `Ctrl+I` is italic in several
+      // grammars, `Ctrl+P` is its own quick-open, `Ctrl+F` its find — and a
+      // global binding that silently loses to an editor-local one is worse than
+      // no binding at all, because it works everywhere except where you want it.
+      // So IDE mode is a button in the title bar and a row in Settings, and the
+      // keys below are the ones the editor does not already own.
+      { keys: "Ctrl+S", action: "Save the file (it also saves as you pause)" },
+      { keys: "Ctrl+Z / Ctrl+Shift+Z", action: "Undo / redo in the editor" },
+      { keys: "Ctrl+F", action: "Find in the open file" },
+      { keys: "Ctrl+D", action: "Select the next occurrence" },
+      { keys: "Alt+↑ / Alt+↓", action: "Move the current line" },
+      { keys: "Middle-click a tab", action: "Close it" },
+      { keys: "Right-click a tab", action: "Close, or close the others" },
+    ],
+  },
+  {
+    group: "Git",
+    items: [
+      // Ctrl+K is the app's chats list, so the commit key is Ctrl+Enter — the
+      // same chord that queues a message when the composer has focus, which is
+      // the closest thing to a habit to hang this on.
+      { keys: "Ctrl+Enter", action: "Commit what is staged (in the commit box)" },
+      { keys: "Click a changed file", action: "Open its diff beside the panel" },
+      { keys: "Drag a splitter", action: "Resize the git or editor column" },
+      { keys: "Double-click a splitter", action: "Reset it to its default width" },
+    ],
+  },
 ];
 
 /** Overlay listing every shortcut; opened with `?` or from Settings. */

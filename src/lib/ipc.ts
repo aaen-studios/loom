@@ -1,20 +1,26 @@
 import type {
   AgentMode,
-  AppConfig,
-  BlockingConfig,
-  BlockingStatus,
-  FilterListPreset,
   AppInfo,
+  AppConfig,
   Attachment,
   AuxModelRef,
+  BlockingConfig,
+  BlockingStatus,
+  Branch,
   CommandRun,
+  CommitResult,
+  FileStat,
+  FilterListPreset,
+  GitCommit,
+  GitStatus,
   InterfaceConfig,
   Job,
+  LineEnding,
   MemoryEntry,
   Message,
   ModelEntry,
-  ModelRef,
   Modality,
+  ModelRef,
   PermissionMode,
   Persona,
   PersonaGroup,
@@ -24,19 +30,28 @@ import type {
   ProviderUsage,
   QuestionAnswer,
   ReasoningSpec,
+  SaveOutcome,
   SearchProvider,
   Session,
   SessionSummary,
   StorageUsage,
   StoredMemory,
   Task,
+  TextFile,
   Todo,
   ToolScope,
+  TreeEntry,
   UsageCapableProvider,
   UsageSummary,
   UserProfile,
   WorkspaceInfo,
 } from "../types";
+
+/**
+ * Re-exported so `lib/fileTreeOperations` and the tree component import one
+ * module rather than reaching into `types` for a shape the IPC layer owns.
+ */
+export type { TreeEntry };
 
 export interface ToolSpec {
   name: string;
@@ -128,6 +143,12 @@ export interface UpdateCheck {
   available: boolean;
   currentVersion: string;
   manifest: UpdateManifest | null;
+  /**
+   * Why a newer release is not being offered, when one exists and this build
+   * will not install it — an unsigned payload, today. `null` in every ordinary
+   * case, including "already current".
+   */
+  refused: string | null;
 }
 import { call } from "./tauri";
 import type {
@@ -559,4 +580,71 @@ export const ipc = {
     call<StoredMemory>("upsert_memory", { id, scope, content, pinned }),
   deleteMemory: (id: string) => call<void>("delete_memory", { id }),
   clearMemories: (scope: string) => call<number>("clear_memories", { scope }),
+
+  /* --- Git ---------------------------------------------------------------- */
+
+  /** Whether `git` can be run at all, so the panel can say so once. */
+  gitAvailable: () => call<boolean>("git_available"),
+  gitStatus: (workdir: string) => call<GitStatus>("git_status", { workdir }),
+  gitStage: (workdir: string, paths: string[]) =>
+    call<GitStatus>("git_stage", { workdir, paths }),
+  gitUnstage: (workdir: string, paths: string[]) =>
+    call<GitStatus>("git_unstage", { workdir, paths }),
+  /** Destructive. The panel confirms before calling this. */
+  gitDiscard: (workdir: string, paths: string[]) =>
+    call<GitStatus>("git_discard", { workdir, paths }),
+  gitCommit: (workdir: string, message: string) =>
+    call<CommitResult>("git_commit", { workdir, message }),
+  gitBranches: (workdir: string) => call<Branch[]>("git_branches", { workdir }),
+  gitCheckout: (workdir: string, name: string) =>
+    call<GitStatus>("git_checkout", { workdir, name }),
+  gitCreateBranch: (workdir: string, name: string, checkout: boolean) =>
+    call<GitStatus>("git_create_branch", { workdir, name, checkout }),
+  gitFetch: (workdir: string) => call<string>("git_fetch", { workdir }),
+  gitPull: (workdir: string) => call<string>("git_pull", { workdir }),
+  gitPush: (workdir: string) => call<string>("git_push", { workdir }),
+  gitLog: (workdir: string, count?: number) =>
+    call<GitCommit[]>("git_log", { workdir, count: count ?? 30 }),
+  gitDiff: (workdir: string, staged: boolean) =>
+    call<string>("git_diff", { workdir, staged }),
+  /** A file's content at HEAD or in the index; null when it is absent there. */
+  gitFileAt: (workdir: string, path: string, staged: boolean) =>
+    call<string | null>("git_file_at", { workdir, path, staged }),
+  /**
+   * Asks the chat's own model for a message. Slow: it is a real model call.
+   *
+   * Takes the session rather than the folder, because the message must come from
+   * the model that chat selected — its provider, model id, variant and key. The
+   * backend resolves all of those from the session id, so there is no way for
+   * the panel to ask the wrong model by passing a different folder.
+   */
+  draftCommitMessage: (sessionId: string, staged: boolean) =>
+    call<string>("draft_commit_message", { sessionId, staged }),
+
+  /* --- Files -------------------------------------------------------------- */
+
+  fileRead: (workdir: string | null, path: string) =>
+    call<TextFile>("file_read", { workdir, path }),
+  fileSave: (args: {
+    workdir: string | null;
+    path: string;
+    text: string;
+    /** Null writes unconditionally — what "keep mine" passes. */
+    expectedHash: string | null;
+    eol: LineEnding;
+    bom: boolean;
+  }) => call<SaveOutcome>("file_save", args),
+  /** Batched: autosave fires on a timer and an editor can have a dozen tabs. */
+  fileStatMany: (workdir: string | null, paths: string[]) =>
+    call<FileStat[]>("file_stat_many", { workdir, paths }),
+  dirList: (workdir: string | null, path: string) =>
+    call<TreeEntry[]>("dir_list", { workdir, path }),
+  fileCreate: (workdir: string | null, path: string, isDir: boolean) =>
+    call<TreeEntry>("file_create", { workdir, path, isDir }),
+  fileRename: (workdir: string | null, from: string, to: string) =>
+    call<TreeEntry>("file_rename", { workdir, from, to }),
+  fileDelete: (workdir: string | null, path: string) =>
+    call<void>("file_delete", { workdir, path }),
+  fileExists: (workdir: string | null, path: string) =>
+    call<boolean>("file_exists", { workdir, path }),
 };

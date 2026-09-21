@@ -382,7 +382,7 @@ export function WorkspaceChip({ align = "up" }: { align?: "up" | "down" }) {
  * computer use. They are all the same question — what may the model do here —
  * so they live in one menu instead of three competing pills.
  */
-export function ModeChip() {
+export function ModeChip({ compact = false }: { compact?: boolean }) {
   const session = useChat((state) =>
     state.sessions.find((item) => item.id === state.activeId),
   );
@@ -488,9 +488,18 @@ export function ModeChip() {
         ) : (
           <BuildIcon />
         )}
-        {selectedMode?.label ?? "Build"}
-        <span className="text-faint">·</span>
-        {selectedPermission?.label ?? "Ask"}
+        {/* Two labels and a separator are about 90px, which is the single
+            biggest thing standing between this row and fitting a narrow
+            composer. The glyph and the tone already carry the meaning — a
+            danger-toned chip means Ask, an accent one means auto — and the
+            `title` above spells both out. */}
+        {!compact && (
+          <>
+            {selectedMode?.label ?? "Build"}
+            <span className="text-faint">·</span>
+            {selectedPermission?.label ?? "Ask"}
+          </>
+        )}
         {(computerOn || paused) && agent !== "chat" && (
           <MonitorIcon
             size={12}

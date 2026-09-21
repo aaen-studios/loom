@@ -3037,6 +3037,11 @@ function UpdatesSection({ version }: { version: string | undefined }) {
       } else if (result.available && result.manifest) {
         setManifest(result.manifest);
         setStatus(`Version ${result.manifest.version} is available.`);
+      } else if (result.refused) {
+        // A newer release exists that this build will not install. Claiming to
+        // be on the latest version here would be a lie, and the backend sends
+        // the reason precisely so the UI can say it.
+        setError(result.refused);
       } else {
         setStatus(`You are on the latest version (${result.currentVersion}).`);
       }

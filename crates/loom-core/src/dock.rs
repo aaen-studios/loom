@@ -130,7 +130,20 @@ impl Default for DockLayout {
                     edge: DockEdge::Left,
                     size: 300,
                     open: false,
-                    panels: vec!["sessions".into()],
+                    // Git first, then the chats list. Both live here because the
+                    // left edge is where a project's *state* belongs — what has
+                    // changed, and what you are working on — while the right
+                    // edge is where you watch something run.
+                    //
+                    // Git leads because it is the panel with a job to do that
+                    // has no other home: the chats list is also reachable from
+                    // the title bar and `Ctrl+K`, so anything that opens the
+                    // left zone on it is one click from the list anyway.
+                    //
+                    // **The zone still opens closed**, and the test below is
+                    // what holds that line. This changes *what* the first click
+                    // shows, not whether the app decides to show it.
+                    panels: vec!["git".into(), "sessions".into()],
                     active: 0,
                 },
                 DockZone {
@@ -381,6 +394,11 @@ mod tests {
             .collect();
         assert!(open.is_empty(), "no zone should open by default, got {open:?}");
         assert_eq!(layout.zone("left").unwrap().edge, DockEdge::Left);
+        // The left zone's first tab is git, which is a statement about *content*
+        // and not about visibility: it decides what the first `Ctrl+`` shows,
+        // not whether anything is shown.
+        assert_eq!(layout.zone("left").unwrap().panels[0], "git");
+        assert_eq!(layout.zone("left").unwrap().panels[1], "sessions");
         assert_eq!(layout.shell, None);
         // Every default zone carries a panel, so opening one shows something
         // rather than an empty frame. A zone with no panels renders as a strip

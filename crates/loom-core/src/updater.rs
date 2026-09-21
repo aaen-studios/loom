@@ -30,9 +30,20 @@ pub struct UpdateManifest {
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UpdateCheck {
+    /// Whether there is a newer release that this build is willing to install.
+    ///
+    /// **Not** the same as "a newer release exists". A newer release whose
+    /// payload carries no signature is deliberately not offered — see
+    /// [`check_signature_present`] — and reports `available: false` with
+    /// `refused` set, so the UI can explain itself instead of appearing to be
+    /// broken.
     pub available: bool,
     pub current_version: String,
     pub manifest: Option<UpdateManifest>,
+    /// Why a newer release is not being offered, when one exists and cannot be
+    /// installed. `None` in every ordinary case, including "already current".
+    #[serde(default)]
+    pub refused: Option<String>,
 }
 
 /// Parses `1.2.3` into comparable numbers. Pre-release and build metadata are
@@ -92,11 +103,24 @@ pub async fn check(
     let manifest: UpdateManifest = serde_json::from_str(&body)
         .map_err(|e| Error::Other(format!("update manifest is malformed: {e}")))?;
 
-    let available = is_newer(current_version, &manifest.version);
+    let newer = is_newer(current_version, &manifest.version);
+    // A newer release this build will not trust is not offered, but it is not
+    // silence either: `refused` carries the reason so the UI can explain itself
+    // rather than claiming the user is already current. See
+    // `check_signature_present`.
+    let refused = if newer {
+        check_signature_present(&manifest, signature_is_required())
+            .err()
+            .map(|error| error.to_string())
+    } else {
+        None
+    };
+    let available = newer && refused.is_none();
     Ok(UpdateCheck {
         available,
         current_version: current_version.to_string(),
         manifest: available.then_some(manifest),
+        refused,
     })
 }
 
@@ -124,12 +148,71 @@ pub async fn download(client: &reqwest::Client, manifest: &UpdateManifest) -> Re
         .map_err(|e| Error::Http(format!("download interrupted: {e}")))?;
     std::fs::write(&target, &bytes).map_err(|e| Error::io(&target, e))?;
 
+    // The policy first, and before a single byte is verified, because this is
+    // the one check that is about *whether* to trust a release rather than
+    // whether the bytes arrived intact. See `check_signature_present`.
+    check_signature_present(manifest, signature_is_required())?;
+
     verify_sha256(&target, &manifest.sha256)?;
     if let Some(signature) = manifest.signature.as_deref() {
         verify_signature(&target, signature)?;
     }
 
     Ok(target)
+}
+
+/// Whether this build demands a signature on a release payload.
+///
+/// True whenever a public key is compiled in, which is every shipped build —
+/// `UPDATE_PUBLIC_KEY` is a constant, not a placeholder. Only a build with an
+/// empty key (a fork that has not generated its own keypair, or a test harness)
+/// answers false.
+pub fn signature_is_required() -> bool {
+    !public_key().trim().is_empty()
+}
+
+/// Refuses an unsigned release when `require` is set.
+///
+/// ## Why this is a refusal rather than a skip
+///
+/// The download path used to verify a signature *only if the manifest carried
+/// one*, which meant an unsigned `update.json` skipped the check entirely and the
+/// app would swap its own binary for whatever that payload contained. The hash
+/// alone does not help: `sha256` arrives in the same manifest, so it proves the
+/// download was not corrupted in transit and proves nothing about who built it.
+///
+/// That is the opposite of what this project documents, in three places. The
+/// README says "release payloads are signed with minisign and the app verifies
+/// that signature before applying anything"; `docs/spec.md` says the same; and the
+/// download page states outright that a release with no signature is one "the app
+/// will refuse to auto-update from, which is the intended behaviour rather than a
+/// fault". The code now does what the prose says.
+///
+/// The cost is real and worth naming: a release published without
+/// `LOOM_MINISIGN_KEY` cannot be installed by the updater at all. That is the
+/// intended trade — an update channel that silently accepts unsigned payloads is
+/// a remote code execution path with a version number on it — and the error below
+/// says exactly what is wrong and what to do, rather than failing obscurely.
+pub fn check_signature_present(manifest: &UpdateManifest, require: bool) -> Result<()> {
+    if !require {
+        return Ok(());
+    }
+    if manifest
+        .signature
+        .as_deref()
+        .map(str::trim)
+        .unwrap_or("")
+        .is_empty()
+    {
+        return Err(Error::other(format!(
+            "release {} carries no minisign signature, so Loom will not install it. \
+             A payload that is not signed cannot be proven to be the one that was \
+             published. If you maintain this project, set LOOM_MINISIGN_KEY so the \
+             release workflow signs the payload.",
+            manifest.version
+        )));
+    }
+    Ok(())
 }
 
 /// Lowercase hex SHA-256 of a file.
@@ -217,6 +300,16 @@ pub fn stage_zip(zip_path: &Path, install_dir: &Path) -> Result<PathBuf> {
     Ok(staging)
 }
 
+/// How many half-second waits the swap script allows for the app to exit.
+///
+/// Bounded, and that bound is the point. The loop used to be `goto wait` with no
+/// counter, so a `tasklist` that kept reporting the image name — a second Loom
+/// running, a filter that matched something else, a `tasklist` that failed and
+/// left `find` matching its own output — spun forever with no message and no
+/// relaunch. Thirty seconds is far longer than a clean exit takes and far shorter
+/// than a user waiting to find out why nothing happened.
+pub const SWAP_WAIT_TRIES: u32 = 60;
+
 /// Applies a staged update: writes a script that swaps files after this
 /// process exits, then relaunches the app.
 ///
@@ -225,22 +318,55 @@ pub fn stage_zip(zip_path: &Path, install_dir: &Path) -> Result<PathBuf> {
 /// `ping -n 2 127.0.0.1` rather than `timeout /t 1`: `timeout` refuses to run
 /// without a console. The swap's output goes to `loom-update.log` beside the
 /// script, so a silent failure is still diagnosable afterwards.
+///
+/// ## Why a failed copy still relaunches
+///
+/// This script is the last thing that runs, and it deletes itself on the way out.
+/// The first version did `if errorlevel 1 (... & goto end)`, so an `xcopy` that
+/// failed — a locked file, a full disk, a payload that did not unpack — jumped
+/// straight past the `start` line to `del "%~f0"`. The result: Loom was not
+/// running, was not going to be started, and the only record was a line in a
+/// `%TEMP%` log nobody had a reason to open. Pressing "Restart & install" made the
+/// application disappear, which is exactly the shape of an uninstall.
+///
+/// So the copy's failure no longer skips the relaunch. Whatever is at
+/// `{install}\{exe}` is started either way, and if the exe is genuinely gone the
+/// log says so in as many words. A half-applied update that still starts is a bad
+/// afternoon; an update that leaves nothing to start is a reinstall.
 pub fn apply_after_exit(staging: &Path, install_dir: &Path, exe_name: &str) -> Result<PathBuf> {
     let script = std::env::temp_dir().join("loom-update.cmd");
     let log = update_log_path();
+    // Written with `\r\n` throughout: this is a batch file, and a bare `\n` in a
+    // `.cmd` makes `goto` behave in ways that are not worth discovering.
     let body = format!(
         "@echo off\r\n\
+         setlocal\r\n\
+         set tries=0\r\n\
          :wait\r\n\
-         tasklist /FI \"IMAGENAME eq {exe}\" | find /I \"{exe}\" >nul && (ping -n 2 127.0.0.1 >nul & goto wait)\r\n\
+         tasklist /FI \"IMAGENAME eq {exe}\" | find /I \"{exe}\" >nul || goto copy\r\n\
+         set /a tries+=1\r\n\
+         if %tries% GEQ {limit} goto copy\r\n\
+         ping -n 2 127.0.0.1 >nul\r\n\
+         goto wait\r\n\
+         :copy\r\n\
          xcopy /E /Y /I \"{staging}\\*\" \"{install}\\\" >>\"{log}\" 2>&1\r\n\
-         if errorlevel 1 (echo %DATE% %TIME% update failed, files not replaced >>\"{log}\" & goto end)\r\n\
+         if errorlevel 1 (\r\n\
+         echo %DATE% %TIME% update failed, files not replaced >>\"{log}\"\r\n\
+         ) else (\r\n\
+         echo %DATE% %TIME% update applied >>\"{log}\"\r\n\
+         )\r\n\
+         :relaunch\r\n\
+         if exist \"{install}\\{exe}\" (\r\n\
          start \"\" \"{install}\\{exe}\"\r\n\
-         :end\r\n\
+         ) else (\r\n\
+         echo %DATE% %TIME% {exe} is missing from {install}; Loom was not restarted >>\"{log}\"\r\n\
+         )\r\n\
          del \"%~f0\"\r\n",
         exe = exe_name,
         staging = staging.display(),
         install = install_dir.display(),
         log = log.display(),
+        limit = SWAP_WAIT_TRIES,
     );
 
     std::fs::write(&script, body).map_err(|e| Error::io(&script, e))?;
@@ -318,6 +444,102 @@ mod tests {
         assert!(body.contains("loom-update.log"), "{body}");
         assert!(body.contains("loom.exe"), "{body}");
         let _ = std::fs::remove_file(&script);
+    }
+
+    /// The regression this whole file exists to prevent, and the closest thing
+    /// in the codebase to "Loom uninstalled itself": a failed swap that skipped
+    /// the relaunch, deleted its own script, and left nothing running.
+    #[test]
+    fn a_failed_swap_still_relaunches_the_app() {
+        let dir = tempfile::tempdir().unwrap();
+        let script = apply_after_exit(&dir.path().join("staging"), dir.path(), "loom.exe").unwrap();
+        let body = std::fs::read_to_string(&script).unwrap();
+
+        // The relaunch must not sit behind the copy's error branch. Stated as an
+        // ordering assertion rather than a string match, because the bug was
+        // precisely that `goto end` jumped over this line.
+        let copy = body.find("xcopy").expect("the swap must copy");
+        let relaunch = body.find("start \"\"").expect("the swap must relaunch");
+        assert!(
+            relaunch > copy,
+            "the relaunch must follow the copy: {body}"
+        );
+        // And nothing may jump past it: the only `goto` targets are the loop and
+        // the copy, neither of which is past the relaunch.
+        assert!(
+            !body.contains("goto end"),
+            "a `goto end` is how the relaunch was skipped: {body}"
+        );
+
+        // A missing exe is reported rather than silently ignored, so the log
+        // explains a vanished install instead of the app just not appearing.
+        assert!(body.contains("Loom was not restarted"), "{body}");
+        let _ = std::fs::remove_file(&script);
+    }
+
+    #[test]
+    fn the_wait_loop_is_bounded() {
+        // Unbounded, this spun forever with no message and no relaunch.
+        let dir = tempfile::tempdir().unwrap();
+        let script = apply_after_exit(&dir.path().join("staging"), dir.path(), "loom.exe").unwrap();
+        let body = std::fs::read_to_string(&script).unwrap();
+
+        assert!(body.contains("set /a tries+=1"), "{body}");
+        assert!(
+            body.contains(&format!("GEQ {SWAP_WAIT_TRIES}")),
+            "the loop needs a ceiling: {body}"
+        );
+        let _ = std::fs::remove_file(&script);
+    }
+
+    #[test]
+    fn an_unsigned_release_is_refused_when_a_key_is_compiled_in() {
+        // The check that was missing entirely: an unsigned manifest used to skip
+        // signature verification rather than failing it, so the app would apply
+        // whatever that payload contained.
+        let unsigned = UpdateManifest {
+            version: "9.9.9".into(),
+            notes: String::new(),
+            payload: "https://example.invalid/p.zip".into(),
+            sha256: "0".repeat(64),
+            signature: None,
+        };
+        let error = check_signature_present(&unsigned, true).unwrap_err();
+        assert!(
+            error.to_string().contains("no minisign signature"),
+            "{error}"
+        );
+
+        // A blank signature is the same case as a missing one — a `signature: ""`
+        // in a hand-edited manifest must not read as signed.
+        let blank = UpdateManifest {
+            signature: Some("   ".into()),
+            ..unsigned.clone()
+        };
+        assert!(check_signature_present(&blank, true).is_err());
+
+        // A present signature passes this gate; whether it *verifies* is a
+        // separate question, answered by `verify_signature_with_key`.
+        let signed = UpdateManifest {
+            signature: Some(TEST_SIGNATURE.into()),
+            ..unsigned.clone()
+        };
+        assert!(check_signature_present(&signed, true).is_ok());
+
+        // A build with no key of its own has nothing to verify against, so it
+        // does not demand one. This is the fork/test case, not a shipped build.
+        assert!(check_signature_present(&unsigned, false).is_ok());
+    }
+
+    #[test]
+    fn shipped_builds_require_a_signature() {
+        // `UPDATE_PUBLIC_KEY` is a real key, not a placeholder, so every shipped
+        // build answers true here. A build that answered false would silently
+        // accept unsigned payloads, which is the hole this closes.
+        assert!(
+            signature_is_required(),
+            "a compiled-in public key means signatures are required"
+        );
     }
 
     #[test]

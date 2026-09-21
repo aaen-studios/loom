@@ -68,6 +68,10 @@ pub struct AppConfig {
     pub dock_default: DockLayout,
     /// How the terminal renders.
     pub terminal: TerminalConfig,
+    /// How the editor panel renders, and whether it saves on its own.
+    pub editor: EditorConfig,
+    /// How the AI commit-message button writes its message.
+    pub commit: CommitConfig,
     /// The built-in browser: which of its tools a chat is offered, how big its
     /// screenshots are, and what the model does when it needs a page.
     pub browser: BrowserConfig,
@@ -99,6 +103,8 @@ impl Default for AppConfig {
             dock: DockLayouts::new(),
             dock_default: DockLayout::default(),
             terminal: TerminalConfig::default(),
+            editor: EditorConfig::default(),
+            commit: CommitConfig::default(),
             browser: BrowserConfig::default(),
             search_provider: SearchProvider::default(),
             extra: serde_json::Map::new(),
@@ -972,6 +978,24 @@ pub struct InterfaceConfig {
     pub auto_memory: bool,
     /// App-wide glass tuning, and the parameters of the refracting surfaces.
     pub glass: GlassConfig,
+    /// Whether the editor shell has replaced the chat surface.
+    ///
+    /// Stored rather than held for the session, and that is a deliberate
+    /// departure from how the dock's zones behave. A panel is something you
+    /// *ask* to see, so it opens closed every launch — but IDE mode is a way of
+    /// working, and someone who has switched to it has said so. Persisting it is
+    /// the difference between a mode and a dismissal.
+    pub ide_mode: bool,
+    /// Width in pixels of the chat column while IDE mode is on.
+    ///
+    /// Its own setting rather than `sidebar_width`, because the two are answers
+    /// to different questions — one is "how wide is the chats list" and the
+    /// other is "how much room does the model get while I am editing" — and
+    /// sharing a number would make widening one silently narrow the other.
+    pub ide_chat_width: u32,
+    /// Whether the IDE sidebar is showing, and how wide.
+    pub ide_sidebar_open: bool,
+    pub ide_sidebar_width: u32,
 }
 
 impl Default for InterfaceConfig {
@@ -996,6 +1020,115 @@ impl Default for InterfaceConfig {
             capture_on_send: true,
             auto_memory: true,
             glass: GlassConfig::default(),
+            ide_mode: false,
+            ide_chat_width: 420,
+            ide_sidebar_open: true,
+            ide_sidebar_width: 260,
+        }
+    }
+}
+
+/// The file editor, and how it saves.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct EditorConfig {
+    /// Logical pixels, matching the terminal's setting rather than CSS `rem`, so
+    /// the two monospace surfaces in the app can be made to match each other.
+    pub font_size: u32,
+    pub tab_size: u32,
+    /// `off` | `on` | `wordWrapColumn`.
+    pub word_wrap: WordWrap,
+    /// The minimap costs a column of width and is off by default: this panel is
+    /// usually docked at 460–600px, where a minimap is a strip of noise over the
+    /// code rather than a navigator.
+    pub minimap: bool,
+    /// Line numbers, on by default — the git panel quotes them.
+    pub line_numbers: bool,
+    /// Write shortly after typing stops, rather than waiting for Ctrl+S.
+    ///
+    /// On by default because the alternative is worse in a chat-first app: the
+    /// agent can edit a file you have open, and a buffer held dirty for minutes
+    /// is a buffer that conflicts. Autosave is only safe because a write carries
+    /// the hash of what was loaded and is refused when the file has moved on —
+    /// see `edit::write_text`. Nothing is ever overwritten silently.
+    pub autosave: bool,
+    /// How long typing must pause before an autosave fires.
+    pub autosave_delay_ms: u32,
+    /// Show whitespace and indentation guides.
+    pub render_whitespace: bool,
+    /// Trim trailing whitespace on save.
+    pub trim_on_save: bool,
+    /// Ensure the file ends with exactly one newline on save.
+    pub insert_final_newline: bool,
+}
+
+impl Default for EditorConfig {
+    fn default() -> Self {
+        Self {
+            font_size: 13,
+            tab_size: 2,
+            word_wrap: WordWrap::On,
+            minimap: false,
+            line_numbers: true,
+            autosave: true,
+            autosave_delay_ms: 900,
+            render_whitespace: false,
+            trim_on_save: false,
+            insert_final_newline: false,
+        }
+    }
+}
+
+/// How the editor wraps long lines.
+///
+/// Wrapped by default, unlike VS Code. A docked panel is narrow — 460px at its
+/// default width — and a horizontally scrolling code view in a column that size
+/// shows about forty characters at a time. Wrapping is the choice that makes the
+/// panel usable at the width it is actually given.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum WordWrap {
+    Off,
+    On,
+}
+
+/// Which commit-message convention the generated subject follows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum CommitStyle {
+    /// `feat(editor): add a diff view` — the default, and what the button asks
+    /// the model for.
+    Conventional,
+    /// A plain sentence, for a repository whose history is not typed.
+    Plain,
+}
+
+impl Default for CommitStyle {
+    fn default() -> Self {
+        Self::Conventional
+    }
+}
+
+/// How the AI commit-message button writes its message.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct CommitConfig {
+    pub style: CommitStyle,
+    /// Ask for a body as well as a subject.
+    pub include_body: bool,
+    /// How many characters of diff the model is shown. A large refactor can run
+    /// to megabytes, and the whole thing would cost more than the commit is
+    /// worth; what matters for a message is which files and roughly what kind of
+    /// change, which a capped excerpt conveys.
+    pub diff_budget: usize,
+}
+
+impl Default for CommitConfig {
+    fn default() -> Self {
+        Self {
+            style: CommitStyle::Conventional,
+            include_body: true,
+            diff_budget: 24_000,
         }
     }
 }

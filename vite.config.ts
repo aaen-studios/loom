@@ -10,6 +10,25 @@ const host = process.env.TAURI_DEV_HOST;
 export default defineConfig(() => ({
   plugins: [react(), tailwindcss()],
 
+  // Monaco's workers, and the reason this is here rather than left to the
+  // default.
+  //
+  // Vite's `worker.format` defaults to `iife`, which **cannot code-split**. The
+  // TypeScript worker pulls in the whole of `typescript.js` on top of Monaco's
+  // own language services, and bundling that into one IIFE fails outright with
+  // "UMD and IIFE output formats are not supported for code-splitting builds" —
+  // a build error, but only once the editor is actually opened.
+  //
+  // `es` lets Vite emit the worker as a module with its own chunks, which is
+  // also what `lib/monaco.ts` needs: it imports each worker through the `?worker`
+  // form, so Vite emits real same-origin files rather than blob URLs. A blob URL
+  // is refused by `script-src 'self'`, and — this is the part that matters — the
+  // refusal is *silent*: Monaco falls back to doing the work on the main thread
+  // and looks merely slow rather than broken.
+  worker: {
+    format: "es",
+  },
+
   // Vite options tailored for Tauri development and only applied in `tauri dev` or `tauri build`
   //
   // 1. prevent Vite from obscuring rust errors

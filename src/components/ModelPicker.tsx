@@ -19,7 +19,16 @@ import { LiquidSurface } from "./LiquidSurface";
  * Providers whose `/models` endpoint fails can still be used: type a model id
  * at the bottom of the list and it is added by hand.
  */
-export function ModelPicker() {
+/**
+ * The model chip.
+ *
+ * `compact` drops the model name and keeps the glyph, which is what makes it fit
+ * a narrow composer. It is passed down from the composer rather than measured
+ * here, so one observer decides for both chips and they cannot disagree about
+ * whether there is room — two chips that collapse at slightly different widths
+ * would flicker against each other as a splitter is dragged.
+ */
+export function ModelPicker({ compact = false }: { compact?: boolean }) {
   const models = useProviders((state) => state.models);
   const modelsLoaded = useProviders((state) => state.loaded);
   const setModel = useChat((state) => state.setModel);
@@ -206,7 +215,9 @@ export function ModelPicker() {
         )}
       >
         <SparkIcon size={14} />
-        <span className="max-w-[200px] truncate">{chipLabel}</span>
+        {/* The `title` above still names the model in full, so collapsing this
+            hides the label without hiding the information. */}
+        {!compact && <span className="max-w-[200px] truncate">{chipLabel}</span>}
         <ChevronDownIcon size={13} />
       </button>
 

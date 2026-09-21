@@ -1,95 +1,53 @@
 /**
- * The site's backdrop.
+ * The two colours the application paints into its window before React mounts.
  *
- * The app paints its background entirely in CSS — a faint woven texture over a
- * few soft radial washes — and then frosts it with `backdrop-filter`. This does
- * the same, using the app's *default* preset rather than a lookalike, so a
- * visitor is looking at the surface the product actually ships.
+ * This used to be a whole backdrop — a woven texture over four radial washes, with
+ * a film-grain overlay and a 52-second drift. All of it is gone, and the reason is
+ * the organising idea of the site: this is a document, and a document is set on
+ * paper. A page of long-form prose under a drifting gradient has to compete with
+ * its own wallpaper, and putting glass on it reads as a mock-up of the
+ * application rather than a description of it.
+ *
+ * So the page is flat, and what is left here is the part that has to be exact.
  *
  * ---------------------------------------------------------------------------
- * Why the values are copied by hand, and what keeps them honest
+ * Why these two values, and not a colour of this project's own choosing
  * ---------------------------------------------------------------------------
  *
- * The app's presets live in `src/lib/background.ts` as TypeScript, because each
- * one is also a data structure the settings grid renders as a swatch. There is
- * no way to hand that to a separate build without publishing a package or
- * parsing TypeScript at build time — both of which cost more than they return
- * for one preset.
+ * They are the app's own pre-mount backdrop, in both themes. The app writes one of
+ * them onto `<html>` before its bundle loads, so the first frame of the window is
+ * already the right colour; this page does the same thing for the same reason, and
+ * uses the same two values so switching between the documentation and the
+ * application is not a change of colour.
  *
- * So the value is copied, and `background.test.ts` reads the app's source and
- * asserts the `base` colour still matches. If Porcelain is re-tinted in the app
- * this file fails to build rather than rendering a background the product never
- * had.
- *
- * The check covers the flat fill only. The layer stack is listed here so a
- * reviewer can diff it by eye; a change to the app's preset is a prompt to
- * update both, and the test's name says so.
+ * They are also, unavoidably, a copy: `src/styles.css` states them for the app,
+ * this project cannot import the app's TypeScript at build time, and the theme-boot
+ * script in `layout.tsx` cannot read either. Three copies exist because three
+ * contexts need the value at a moment when none of the others is available.
+ * `background.test.ts` reads the app's source and asserts that Porcelain still
+ * resolves its base from the same constant, and that this file still agrees with
+ * it — so the copy cannot rot silently.
  */
 
-export interface SiteBackground {
-  id: string;
-  name: string;
-  /** The fill underneath everything. Must match the app's `porcelain.base`. */
-  base: string;
-  /** The layer stack, topmost first. */
-  layers: string;
-}
+/** The app's light pre-mount colour: Porcelain's base. */
+export const LIGHT = "#eef1f7";
+
+/** The app's dark pre-mount colour. */
+export const DARK = "#070a12";
+
+/** Both, by the theme name the boot script has already applied. */
+export const PAGE = { light: LIGHT, dark: DARK } as const;
+
+export type ThemeName = keyof typeof PAGE;
 
 /**
- * The house texture: two hairline threads crossing at right angles.
+ * How hard the app veils its own background in dark mode, 0–100.
  *
- * Nearly invisible, and load-bearing. `backdrop-filter` can only frost what is
- * actually behind it, so a perfectly flat backdrop blurs to a perfectly flat
- * result and every glass surface above it loses its depth. The two directions
- * use periods two pixels apart on purpose — an exact grid reads as graph paper,
- * an incommensurate one reads as cloth.
- */
-function weave(
-  highlight: string,
-  shadow: string,
-  period: number,
-  angle: number,
-): string {
-  return [
-    `repeating-linear-gradient(${angle}deg, ${highlight} 0 1px, transparent 1px ${period}px)`,
-    `repeating-linear-gradient(${angle + 90}deg, ${shadow} 0 1px, transparent 1px ${period + 2}px)`,
-  ].join(", ");
-}
-
-export const PORCELAIN: SiteBackground = {
-  id: "porcelain",
-  name: "Porcelain",
-  // Identical to the colour the app paints into the window before React mounts,
-  // and to `--site-light` in `globals.css`. That is why there is no flash: the
-  // first frame is already the right colour.
-  base: "#eef1f7",
-  layers: [
-    weave("rgb(255 255 255 / 0.5)", "rgb(30 41 59 / 0.022)", 11, 118),
-    "radial-gradient(120% 95% at 16% 2%, #ffffff 0%, transparent 55%)",
-    "radial-gradient(95% 80% at 94% 16%, #dbe4f5 0%, transparent 60%)",
-    "radial-gradient(110% 90% at 74% 102%, #e2e3f7 0%, transparent 58%)",
-    "radial-gradient(80% 65% at 0% 94%, #d3dce9 0%, transparent 54%)",
-    "linear-gradient(158deg, #f9fbff 0%, #eef1f7 52%, #e7ebf5 100%)",
-  ].join(", "),
-};
-
-/**
- * How hard to veil the backdrop in dark mode, 0–100.
- *
- * The app's dark palette is near-white ink, which needs a bright backdrop held
- * down or text stops being readable over it. Porcelain is a *light* preset, so
- * in dark mode it is dimmed to a cool grey rather than left glaring. This is the
- * app's own floor, not a site-specific decision — a visitor who switches to dark
- * should see what the product would actually do, including this.
+ * Not used by this site, and deliberately still exported, because it is the value
+ * that *used* to make dark mode unreadable here and the name is the cheapest way
+ * to explain why it no longer applies: the app's dark palette is near-white ink,
+ * which needs the artwork underneath held down. There is no artwork underneath
+ * this page, so there is nothing to hold down — the ground is already dark, and
+ * `background.test.ts` asserts the contrast rather than the veil.
  */
 export const DARK_DIM_FLOOR = 48;
-
-/**
- * Film grain, as an inline SVG turbulence filter.
- *
- * Large fields of a very subtle gradient band visibly on some displays; a
- * whisper of noise breaks the steps. The app uses the same technique at the same
- * 4% opacity, so the two surfaces have the same tooth.
- */
-export const GRAIN =
-  "url(\"data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='180' height='180'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2' stitchTiles='stitch'/></filter><rect width='100%25' height='100%25' filter='url(%23n)' opacity='0.55'/></svg>\")";

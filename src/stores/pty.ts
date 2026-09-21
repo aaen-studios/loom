@@ -160,11 +160,40 @@ export const usePty = create<PtyState>((set, get) => ({
         return id;
       } catch (cause) {
         const message = cause instanceof Error ? cause.message : String(cause);
-        // A torn-off terminal window can race the main window for the same id.
-        // Rather than showing an error, reuse the shell that already exists.
+        // The id is already taken — a torn-off terminal window, or a webview
+        // reload (the Rust side keeps its ptys while the frontend forgets
+        // them). Reuse the shell rather than erroring, which is what this
+        // branch always said it did.
+        //
+        // From the *backend's* record and not from the arguments, because the
+        // id counter restarts at zero with the page: this page's `sh-1` is not
+        // necessarily the shell the last page called `sh-1`, and a session
+        // adopted under the wrong folder is a tab the panel will not show.
+        // Adopting it as the backend describes it keeps the folder honest, and
+        // the panel's own effect will ask for a fresh id if this one turns out
+        // to belong somewhere else.
         if (message.includes("already open")) {
-          set({ activeId: id });
-          return id;
+          const listed = (await ipc.ptyList()) ?? [];
+          const existing = listed.find((entry) => entry.id === id);
+          if (existing) {
+            const known = get().profiles.find((entry) => entry.id === existing.profile);
+            set((state) => ({
+              sessions: state.sessions.some((session) => session.id === existing.id)
+                ? state.sessions
+                : [
+                    ...state.sessions,
+                    {
+                      id: existing.id,
+                      profile: existing.profile,
+                      name: known?.name ?? existing.profile ?? "Shell",
+                      workdir: existing.workdir || null,
+                      alive: existing.alive,
+                    },
+                  ],
+              activeId: existing.id,
+            }));
+            return existing.id;
+          }
         }
         set({ error: message });
         return null;

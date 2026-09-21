@@ -5,11 +5,21 @@ import { useTauriEvent } from "./listen";
 import { useBrowser } from "../stores/browser";
 import { useChat } from "../stores/chat";
 import { useDock } from "../stores/dock";
+import { useEditor } from "../stores/editor";
+import { useGit } from "../stores/git";
 import { usePty } from "../stores/pty";
 import { useTasks } from "../stores/tasks";
 import { useUi } from "../stores/ui";
 import { useVoice } from "../stores/voice";
 import { writeToTerminal } from "./terminals";
+
+/** Payload for `loom://fs`, mirroring `FsWire` in `src-tauri/src/ide.rs`. */
+interface FsWire {
+  /** Which folder changed; a window showing another one ignores it. */
+  workdir: string;
+  /** What caused it, for the diagnostics line. Not branchable. */
+  reason: string;
+}
 
 /** Diagnostics switch: `localStorage.setItem("loomDebug", "1")`. */
 function debugEnabled(): boolean {
@@ -58,6 +68,18 @@ export function useEngineEvents(): void {
         added: payload.added,
         sessionId: payload.sessionId,
       });
+      return;
+    }
+    // A tool may have written a file. The editor re-stats what it has open and
+    // the git panel refreshes, and neither of them is the chat store's business
+    // — so this is routed before the fallthrough that hands everything else to
+    // `applyEvent`, which would file it under a key nothing reads.
+    if (payload.type === "filesChanged") {
+      useEditor.getState().onExternalChange();
+      // `void`ed, like every other floating promise in this file: a rejection
+      // here would surface as an unhandled promise rejection for what is
+      // background work, and `refresh` already swallows its own failures.
+      void useGit.getState().refresh();
       return;
     }
     useChat.getState().applyEvent(payload);
@@ -121,6 +143,24 @@ export function usePanelEvents(): void {
     const { id, data, exit } = payload;
     if (data) writeToTerminal(id, base64ToBytes(data));
     if (exit) usePty.getState().markExited(id);
+  });
+
+  // A folder's files may have moved on.
+  //
+  // The IDE commands emit this after anything that can change the disk — a save,
+  // a checkout, a pull, a discard, a rename, a create, a delete — and the
+  // distinction from the engine's `filesChanged` on `loom://event` is *who* did
+  // it: that one fires when a tool ran, this one when the user did.
+  //
+  // Both channels matter, and they are not redundant. A checkout from this
+  // window's git panel is not an engine event and never will be, because the
+  // engine did not do it.
+  useTauriEvent<FsWire>("loom://fs", (payload) => {
+    // A broadcast for a folder this window is not showing is not this window's
+    // business — the same rule the dock's layout follows.
+    if (useEditor.getState().workdir !== payload.workdir) return;
+    useEditor.getState().onExternalChange();
+    useGit.getState().refresh();
   });
 }
 

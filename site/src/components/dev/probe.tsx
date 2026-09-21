@@ -5,32 +5,45 @@ import { useEffect } from "react";
 /**
  * The layout probe.
  *
- * A development-only diagnostic that measures the rendered page and writes the
+ * A development-only diagnostic that measures the rendered document and writes the
  * result into a `<pre id="loom-probe">`, so a headless browser can dump it as text.
- * `probe-layout.mjs` drives that, at several widths and both motion preferences.
+ * `probe-layout.mjs` drives that, at four widths and both motion preferences.
  *
  * ---------------------------------------------------------------------------
- * Why this rather than a screenshot
+ * Why numbers rather than a screenshot
  * ---------------------------------------------------------------------------
  *
- * Several of this site's defining ideas are *geometry*, not content: the warp
- * threads have to line up with the columns the content sits in, the weft's end-knots
- * have to sit on the outermost of those threads, and neither is visible in a build, a
- * typecheck, or a prerendered HTML dump. Both can also be wrong in a way that only
- * appears at a particular viewport width.
+ * The claims this document makes are *geometric*, and none of them is visible in a
+ * build, a typecheck or a prerendered HTML dump:
  *
- * Concretely, the weft's knots are placed with
- * `calc(max(0px, (100vw - 92rem) / 2) + <gutter>)`. If a CSS parser rejects that, the
- * declaration is invalid at computed-value time, `left` falls back to `auto`, and
- * both knots pile up at the left edge — roughly 1800px from the threads they are meant
- * to be crossing, on a wide monitor. No build step can tell you that. This can.
+ *   - the text column must be the measure. This is the defect the rebuild was
+ *     largely about: the previous layout let prose run a ten-column shed, which at
+ *     the cap is about 150 characters a line, or twice what anyone can read without
+ *     losing their place. A page that is 150 characters wide typechecks, builds and
+ *     renders perfectly.
+ *   - the margin index must appear at exactly one breakpoint and the running head's
+ *     section indicator at exactly the other, so "where am I" is answered once and
+ *     never twice or zero times.
+ *   - a figure must not be shrunk below legibility, and a table must scroll rather
+ *     than push the page sideways.
  *
- * A screenshot could too, but only if someone remembered to look at the right
- * viewport, and only by eye. This asserts numbers, which is the job `verify-*.mjs`
- * already does for the markup.
+ * A screenshot could catch some of that, but only if someone remembered to look at
+ * the right width, and only by eye. This asserts numbers.
  *
- * Rendered only when `NODE_ENV === "development"`, so it is absent from the
- * production build entirely rather than merely inert inside it.
+ * ---------------------------------------------------------------------------
+ * What was deleted, and why deleting it matters as much as what is here
+ * ---------------------------------------------------------------------------
+ *
+ * The previous probe checked two things that no longer exist: the position of a weft
+ * line that followed the scroll, and the pitch of twelve fixed warp hairlines. It also
+ * checked that a `.panel` actually had `backdrop-filter`, because the site was built
+ * out of the application's glass.
+ *
+ * All of those are gone from the page, so all of those checks are gone from here.
+ * Leaving them would have been worse than deleting them: a `querySelectorAll` that
+ * matches nothing is not a failure, it is an empty list, so every check would have
+ * passed against `undefined` forever while reading as coverage. The last check in this
+ * file exists specifically to keep the glass deleted.
  */
 export function LayoutProbe() {
   useEffect(() => {
@@ -45,26 +58,14 @@ export function LayoutProbe() {
     const root = document.documentElement;
     const viewport = { width: window.innerWidth, height: window.innerHeight };
     say("viewport", `${viewport.width}×${viewport.height}`);
+    say(
+      "prefers-reduced-motion",
+      window.matchMedia("(prefers-reduced-motion: reduce)").matches
+        ? "reduce"
+        : "no-preference",
+    );
 
-    /**
-     * The motion preference the browser is reporting.
-     *
-     * Reported because it changes what the rest of this probe means: under `reduce`
-     * the scene renders its settled frame, so a check written against the animated
-     * path would be testing nothing.
-     */
-    const reduced = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
-    say("prefers-reduced-motion", reduced ? "reduce" : "no-preference");
-
-    /**
-     * Resolves a CSS expression to pixels.
-     *
-     * `getComputedStyle(root).getPropertyValue("--warp-edge")` returns the
-     * *substituted token stream* — literally `calc(max(0px, …) + …)` — not a number,
-     * because custom properties are computed lazily. So the value is resolved by
-     * handing it to a throwaway element and measuring where it lands. This is the
-     * only honest way to find out what the browser actually did with it.
-     */
+    /** Resolves a CSS expression to pixels by measuring where it lands. */
     const resolve = (expression: string): number => {
       const probe = document.createElement("div");
       probe.style.cssText = `position:absolute;top:-9999px;left:${expression};width:0;height:0;`;
@@ -74,134 +75,211 @@ export function LayoutProbe() {
       return round(x);
     };
 
-    // --- the frame --------------------------------------------------------
-    const header = document.querySelector<HTMLElement>("header");
-    const hero = document.querySelector<HTMLElement>("[data-pass]");
-    say("header bottom", header ? `${round(header.getBoundingClientRect().bottom)}px` : "—");
-    say("first pass top", hero ? `${round(hero.getBoundingClientRect().top)}px` : "—");
+    // --- the measure ------------------------------------------------------
+    //
+    // The single most load-bearing number in the stylesheet, and the one that cannot
+    // be checked any other way. Resolved rather than read, because
+    // `getPropertyValue("--measure")` returns the token stream and not a length.
+    const declared = getComputedStyle(root).getPropertyValue("--measure").trim();
+    say("--measure declared", declared || "(missing)");
 
-    // --- the warp ---------------------------------------------------------
-    const threads = Array.from(document.querySelectorAll<HTMLElement>(".warp-line"));
-    say("warp threads rendered", String(threads.length));
+    const paper = document.querySelector<HTMLElement>(".paper");
+    if (paper) {
+      const style = getComputedStyle(paper);
+      const padding = Number.parseFloat(style.paddingLeft) || 0;
+      const content = paper.getBoundingClientRect().width - padding * 2;
+      say("text column", `${round(content)}px`);
 
-    const threadX = threads.map((thread) => round(thread.getBoundingClientRect().left));
-    if (threadX.length > 1) {
-      say("first thread x", String(threadX[0]));
-      say("last thread x", String(threadX[threadX.length - 1]));
+      // The column is the measure, to within a rounding pixel — unless the viewport
+      // is narrower than the measure, in which case the gutter is the constraint and
+      // the column is *supposed* to be narrower.
+      const expected = Math.min(
+        Number.parseFloat(declared.replace("rem", "")) * 16 || 0,
+        viewport.width - padding * 2,
+      );
+      check(
+        "the text column is the measure, not the viewport",
+        Math.abs(content - expected) < 2,
+      );
 
-      // The columns must be evenly pitched, or the threads are not a grid and nothing
-      // placed in them lands where it was told to.
-      const pitches = threadX.slice(1).map((x, index) => x - threadX[index]);
-      const spread = Math.max(...pitches) - Math.min(...pitches);
-      say("column pitch", `${pitches[0].toFixed(2)} (spread ${spread.toFixed(2)})`);
-      check("the warp is an even grid", spread < 1);
-    }
-
-    // --- the weft ---------------------------------------------------------
-    const weft = document.querySelector<HTMLElement>(".weft");
-    say("weft present", weft ? "yes" : "no");
-    say("weft top", weft ? `${round(weft.getBoundingClientRect().top)}px` : "—");
-
-    const declaredEdge = getComputedStyle(root).getPropertyValue("--warp-edge").trim();
-    say("--warp-edge declared", declaredEdge.replace(/\s+/g, " ") || "(missing)");
-    say("--weft-y resolved", `${round(resolve("var(--weft-y)"))}px`);
-
-    if (declaredEdge && threadX.length > 0) {
-      const edge = resolve("var(--warp-edge)");
-      say("--warp-edge resolved", `${edge}px`);
-      const drift = Math.abs(edge - threadX[0]);
-      say("knot vs first thread", `${drift.toFixed(2)}px apart`);
-      // A knot pinned at the gutter instead would be hundreds of pixels out on a
-      // viewport wider than the cloth, and a few pixels out on a narrow one — so the
-      // tolerance has to be tight enough to catch the small version too.
-      check("the knots sit on the outer threads", drift < 1.5);
-    }
-
-    // The line has to have been positioned. Its initial value is `-2px`, and the
-    // failure this catches is the shuttle never running at all — which is what happens
-    // under a motion preference if the component bails out instead of just not
-    // gliding.
-    const weftY = resolve("var(--weft-y)");
-    check("the shuttle positioned the weft", weftY > 0);
-
-    // --- the scene --------------------------------------------------------
-    const cloth = document.querySelector<HTMLElement>("[data-scene-phase]");
-    if (cloth) {
-      say("scene phase", cloth.dataset.scenePhase ?? "—");
-      say("scene clock running", cloth.dataset.sceneRunning ?? "—");
-      say("cloth passes rendered", String(document.querySelectorAll(".cloth-pass").length));
-      // Under `reduce` the settled frame is correct and expected, so this only asserts
-      // the animated path.
-      if (!reduced) {
-        check(
-          "the clock advanced past the empty state",
-          cloth.dataset.scenePhase !== "empty",
-        );
+      // And the measure is a readable number of characters. 34rem at 16px is 544px,
+      // which is 62–70 characters of Inter depending on the line — so the assertion
+      // is on the width, and the character count is what the width is for.
+      if (viewport.width > 900) {
+        check("the measure is in the readable range", content >= 480 && content <= 620);
       }
+
+      // The column is centred, which is what leaves a margin on both sides for the
+      // index. Left-flush prose on a wide screen reads as a document that fell over.
+      const leftGap = paper.getBoundingClientRect().left;
+      const rightGap = viewport.width - paper.getBoundingClientRect().right;
+      check("the column is centred", Math.abs(leftGap - rightGap) < 2);
+    } else {
+      check("the document has a text column", false);
     }
 
-    // --- the demonstration is reachable -----------------------------------
-    const firstPanel = document.querySelector<HTMLElement>(".panel");
-    if (firstPanel) {
-      say(
-        "first .panel",
-        `${firstPanel.tagName.toLowerCase()}.${firstPanel.className.split(" ").slice(0, 2).join(".")}`,
-      );
-      say("  top", `${round(firstPanel.getBoundingClientRect().top)}px`);
-      // The page's whole argument is that it shows the work rather than claiming it,
-      // so the demonstration starting below the fold would undercut it.
+    // --- the index and the running head ------------------------------------
+    //
+    // Two position indicators, gated in opposite directions so exactly one of them is
+    // ever visible. Two would duplicate the answer to "where am I" for anyone moving
+    // through the document; none would mean the reader has no way to know.
+    const index = document.querySelector<HTMLElement>(".index");
+    const current = document.querySelector<HTMLElement>(".bar-current");
+    const shown = (element: HTMLElement | null) =>
+      element ? element.getBoundingClientRect().width > 0 : false;
+
+    say("margin index visible", shown(index) ? "yes" : "no");
+    say("running-head section visible", shown(current) ? "yes" : "no");
+    check(
+      "exactly one position indicator is on screen",
+      shown(index) !== shown(current),
+    );
+
+    // The breakpoint is the point. Above 72rem there is a margin wide enough for the
+    // index; below it there is not, and a fixed panel drawn over the text it is
+    // supposed to be beside is not navigation.
+    check(
+      "the margin index appears only where there is a margin for it",
+      shown(index) === (viewport.width >= 1152),
+    );
+
+    if (shown(index) && index) {
+      const box = index.getBoundingClientRect();
+      const paperBox = paper?.getBoundingClientRect();
+      // It must not overlap the text. The whole reason it is in the margin and not
+      // over the column.
+      if (paperBox) {
+        check("the index clears the text column", box.right <= paperBox.left + 0.5);
+      }
+      // It has to stay reachable: if the list is longer than the viewport it would
+      // run off the bottom and the last entries would be unreachable.
+      check("the whole index fits on screen", box.height < viewport.height - 80);
+    }
+
+    // --- the running head --------------------------------------------------
+    const bar = document.querySelector<HTMLElement>(".bar");
+    say("running head present", bar ? "yes" : "no");
+    if (bar) {
+      const style = getComputedStyle(bar);
+      // Opaque, not frosted. Content must not show through a running head, and the
+      // assertion is on the computed colour rather than on the absence of a rule.
       check(
-        "the demonstration is visible without scrolling",
-        firstPanel.getBoundingClientRect().top < viewport.height,
+        "the running head is opaque",
+        !style.backdropFilter.includes("blur"),
       );
+      // Sticky, so it stays while the document scrolls under it.
+      check("the running head sticks", style.position === "sticky");
     }
 
-    // --- the app's glass --------------------------------------------------
-    // Three declarations from the same `@utility panel` rule. Reading all three is
-    // deliberate: headless Chrome with GPU compositing disabled can report
-    // `backdrop-filter: none` while the rule is applying perfectly, and a single
-    // reading would look like a broken build. If the background and border come back
-    // from the token sheet, the rule is reaching the element.
-    if (firstPanel) {
-      const style = getComputedStyle(firstPanel);
-      const blur = style.backdropFilter || style.getPropertyValue("backdrop-filter");
-      say("  background", style.backgroundColor);
-      say("  border", style.borderTopColor);
-      say("  backdrop-filter", blur || "(none)");
-      check(
-        "the app's glass rule reaches the element",
-        style.backgroundColor.startsWith("rgba"),
-      );
-      check("the glass blurs what is behind it", blur.includes("blur"));
+    // --- figures and tables ------------------------------------------------
+    const figureCaptions = document.querySelectorAll("figcaption").length;
+    const tableCaptions = document.querySelectorAll("table caption").length;
+    say("figure captions", String(figureCaptions));
+    say("table captions", String(tableCaptions));
+
+    // The registers in `lib/document.ts` are the source for both, so a figure whose
+    // caption was written by hand would show up here as a mismatch.
+    const registerFigures = document.querySelectorAll(".figure").length;
+    check(
+      "every figure has exactly one caption",
+      figureCaptions === registerFigures && registerFigures > 0,
+    );
+
+    // A drawing shrunk below legibility is worse than no drawing. The figure scrolls
+    // rather than shrinking, so the SVG's rendered width is what to measure.
+    const firstArt = document.querySelector<SVGElement>(".figure-art");
+    if (firstArt) {
+      const width = firstArt.getBoundingClientRect().width;
+      say("first figure width", `${round(width)}px`);
+      check("a figure is not shrunk below legibility", width >= 660);
     }
 
-    // --- overflow ---------------------------------------------------------
-    // One element wider than its container is enough to give the whole page a
-    // horizontal scrollbar, and on a page built from twelve hairlines a stray 1px
-    // border is the usual culprit.
+    // --- what is deliberately absent ---------------------------------------
+    //
+    // The check that keeps the deletions deleted. Each of these was a real element on
+    // the previous version of this page and each is a two-line change to add back — and
+    // every one of them read as "generated" rather than as made.
+    //
+    // This is measured on the *rendered* document, by computed style, and that is a
+    // deliberate choice rather than a convenience. The obvious version of this check —
+    // `querySelectorAll(".panel, .pill, .blob")` — was here first, and it failed for a
+    // reason worth recording: querying for a class name puts that class name in this
+    // file, Tailwind scans this file, and so **writing the check was what made Tailwind
+    // emit the very utilities the check was looking for.** The stylesheet then contained
+    // `.panel{...}` and `.pill{...}`, and a separate stylesheet-level check reported them
+    // as failures, which they were not: no element on the page had ever carried them.
+    //
+    // Computed style is immune to that whole class of confusion, because it asks the
+    // browser what it actually painted rather than asking the stylesheet what it
+    // contains. It is also strictly stronger: it catches a glass surface however the
+    // class name got there, including from markup nobody thought to grep for.
+    const painted = Array.from(document.querySelectorAll<HTMLElement>("*"));
+    const busy = painted.filter((element) => {
+      const style = getComputedStyle(element);
+      return (
+        (style.backdropFilter && style.backdropFilter.includes("blur")) ||
+        (style.backgroundImage && style.backgroundImage.includes("data:image/svg"))
+      );
+    });
+    say("blurred or textured elements", String(busy.length));
+    check("nothing on the page is blurred or textured", busy.length === 0);
+
+    const drifting = painted.filter((element) => {
+      const style = getComputedStyle(element);
+      return (
+        style.animationName !== "none" && style.animationIterationCount === "infinite"
+      );
+    });
+    say("elements that loop forever", String(drifting.length));
+    check("nothing on the page loops forever", drifting.length === 0);
+
+    // The old fixed layers, by the same route: a filled, fixed, full-viewport element
+    // behind everything. There is no backdrop element any more — the ground is a
+    // `background-color` on `<body>` — so anything matching this shape is a regression.
+    const layers = painted.filter((element) => {
+      const style = getComputedStyle(element);
+      const box = element.getBoundingClientRect();
+      return (
+        style.position === "fixed" &&
+        box.width >= viewport.width - 1 &&
+        box.height >= viewport.height - 1 &&
+        style.backgroundColor !== "rgba(0, 0, 0, 0)"
+      );
+    });
+    say("full-viewport fixed layers", String(layers.length));
+    check("no fixed layer is painted behind the document", layers.length === 0);
+
+    // The scripted turn the hero used to run. A regression to it is exactly the kind
+    // of thing that gets reintroduced as "a bit of life at the top of the page".
+    check(
+      "the hero is a drawing, not a scripted turn",
+      !document.querySelector("[data-scene-phase]"),
+    );
+
+    // --- the document's shape ----------------------------------------------
+    say("sections rendered", String(document.querySelectorAll("[data-section]").length));
+    say("prose runs measured", String(document.querySelectorAll(".t-body").length));
+
+    // Every block of prose is inside the measure, and this is the check the whole
+    // file exists for. A single over-wide paragraph is invisible in a build and plain
+    // to a reader.
+    const measurePx = resolve("var(--measure)");
+    say("--measure resolved", `${measurePx}px`);
+    if (measurePx > 0) {
+      const wide = Array.from(
+        document.querySelectorAll<HTMLElement>(".t-body, .t-standfirst, .note, .hanging-b"),
+      ).filter((run) => run.getBoundingClientRect().width > measurePx + 2);
+      say("prose runs wider than the measure", String(wide.length));
+      check("no run of prose is wider than the measure", wide.length === 0);
+    }
+
+    // --- overflow ----------------------------------------------------------
+    // One element wider than its container is enough to give the whole document a
+    // horizontal scrollbar, and a breakout width on a narrow viewport is the usual
+    // culprit.
     const overflow = root.scrollWidth - root.clientWidth;
     say("horizontal overflow", `${overflow}px`);
     check("there is no sideways scroll", overflow <= 1);
-
-    // --- the strip --------------------------------------------------------
-    const details = document.querySelector<HTMLElement>("header details");
-    const inline = document.querySelector<HTMLElement>(".draft-strip");
-    const visible = (element: HTMLElement | null) =>
-      element ? element.getBoundingClientRect().width > 0 : false;
-    say("small-screen menu visible", visible(details) ? "yes" : "no");
-    say("inline strip visible", visible(inline) ? "yes" : "no");
-    // Exactly one of the two, never both and never neither: both would duplicate
-    // every destination for anyone moving through the page by link.
-    check(
-      "exactly one navigation is reachable",
-      visible(details) !== visible(inline),
-    );
-
-    // --- what the page is made of ----------------------------------------
-    say("passes on the page", String(document.querySelectorAll("[data-pass]").length));
-    say("compact density leaked in", document.querySelector(".density-compact") ? "yes" : "no");
-    // The app-only surface that must never reach this stylesheet.
-    check("the quick-ask overlay stayed out", !document.querySelector(".ask-rail"));
 
     const pre = document.createElement("pre");
     pre.id = "loom-probe";

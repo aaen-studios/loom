@@ -1557,6 +1557,51 @@ fn copy_dir(source: &Path, destination: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Deletes a workspace-relative path on behalf of the **UI** rather than the
+/// model.
+///
+/// Exists so the editor panel's Delete and the agent's `delete_path` make the
+/// same judgement about what is at stake. They share the two functions that
+/// matter — [`resolve`] for the escape check and [`remove_path`] for the Recycle
+/// Bin — and this wrapper is only the string-in/`Result`-out shape a Tauri
+/// command needs, because the tool path is built around a JSON argument and a
+/// `ToolContext`.
+///
+/// What is deliberately *not* shared is the permission gate. The model's call may
+/// be gated by a card or a risk check because it is acting on its own; a click on
+/// Delete in the file tree is the user acting, so it has already been decided.
+/// The panel still confirms, because a delete is irreversible where git cannot
+/// reach it — but that is the UI's card, not a rule applied here.
+pub fn delete_in_workspace(workdir: &str, relative: &str) -> Result<String> {
+    let root = PathBuf::from(workdir);
+    let context = ToolContext {
+        workdir: Some(root.clone()),
+        ..Default::default()
+    };
+    let target = resolve(&context, relative)?;
+
+    // Refusing the workspace root itself: every child of it would go, and there
+    // is no reading of "delete this folder" from a file tree that means that.
+    if target == root {
+        return Err(Error::Other(
+            "the workspace folder itself cannot be deleted from here".into(),
+        ));
+    }
+    if !target.exists() {
+        return Err(Error::Other(format!("\"{relative}\" does not exist")));
+    }
+
+    let relative_path = relative_path(&target, &root);
+    if target.is_dir() {
+        let count = count_entries(&target);
+        let how = remove_path(&target)?;
+        Ok(format!("deleted folder {relative_path} ({count} entries) {how}"))
+    } else {
+        let how = remove_path(&target)?;
+        Ok(format!("deleted {relative_path} {how}"))
+    }
+}
+
 /// Deletes a path, preferring the Recycle Bin where there is one, and returns
 /// a phrase naming where the bytes went so the model reports it accurately.
 fn remove_path(target: &Path) -> Result<&'static str> {
