@@ -705,6 +705,12 @@ pub struct StoredToolCall {
     /// Screenshots and other images the call produced, kept on disk.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub images: Vec<tools::ToolImage>,
+    /// Documents the call produced — a PDF read natively — kept on disk.
+    ///
+    /// Persisted for the same reason images are: the bytes have to survive
+    /// into a later turn, because that is when the wire gets rebuilt.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub documents: Vec<tools::ToolDocument>,
     /// Set when this call repeated the previous one exactly, arguments and
     /// result both. The call still ran; the transcript just explains why the
     /// model was told nothing had changed.
@@ -2320,6 +2326,7 @@ impl Engine {
         let computer_access = session.computer_access;
         let browser_access = session.browser_access;
         let tool_context = ToolContext {
+            session_id: Some(session_id.to_string()),
             workdir: session
                 .workdir
                 .clone()
@@ -3032,6 +3039,7 @@ impl Engine {
                     after: content.chars().count(),
                     seq,
                     images: Vec::new(),
+                    documents: Vec::new(),
                     repeated: false,
                 });
                 let _ = self.db().update_message_extra(
@@ -3113,7 +3121,21 @@ impl Engine {
                     provider: &provider,
                     model: &model.model_id,
                     system: system.as_deref(),
-                    messages: build_wire(&fitted.messages),
+                    // Whether this model can be handed a real PDF. Read from the
+                    // provider's own spec rather than decided inside `build_wire`,
+                    // because only this scope knows which model the round will run
+                    // on — and a document sent to a model that does not accept one
+                    // is a rejected request, not a degraded one. A model the
+                    // config knows nothing about is treated as text-only, which is
+                    // the fail-closed direction.
+                    messages: build_wire(
+                        &fitted.messages,
+                        provider
+                            .models
+                            .get(&model.model_id)
+                            .map(|spec| spec.input_modalities.contains(&Modality::Pdf))
+                            .unwrap_or(false),
+                    ),
                     variant: variant.as_deref(),
                     max_output_tokens: Some(max_output),
                     temperature,
@@ -3488,6 +3510,7 @@ impl Engine {
                                     ok: true,
                                     output,
                                     images: Vec::new(),
+                                    documents: Vec::new(),
                                 },
                                 Err(error) => crate::tools::ToolOutcome {
                                     id: call.id.clone(),
@@ -3495,6 +3518,7 @@ impl Engine {
                                     ok: false,
                                     output: error.to_string(),
                                     images: Vec::new(),
+                                    documents: Vec::new(),
                                 },
                             }
                         }
@@ -3564,6 +3588,7 @@ impl Engine {
                             "denied by the user".to_string()
                         },
                         images: Vec::new(),
+                        documents: Vec::new(),
                     }
                 };
 
@@ -3612,6 +3637,7 @@ impl Engine {
                     after: call_offset,
                     seq: call_seq,
                     images: outcome.images.clone(),
+            documents: outcome.documents.clone(),
                     repeated,
                 });
 
@@ -3919,6 +3945,7 @@ impl Engine {
                     ok: false,
                     output: error.to_string(),
                     images: Vec::new(),
+                    documents: Vec::new(),
                 }
             }
         };
@@ -3951,6 +3978,7 @@ impl Engine {
             ok: true,
             output: question.to_tool_output(&answer),
             images: Vec::new(),
+            documents: Vec::new(),
         }
     }
 
@@ -4309,6 +4337,7 @@ impl Engine {
             after: content.chars().count(),
             seq: *seq,
             images: Vec::new(),
+            documents: Vec::new(),
             repeated: false,
         });
         let _ = self.db().update_message_extra(
@@ -4500,6 +4529,7 @@ impl Engine {
                 ok: true,
                 output,
                 images: Vec::new(),
+                documents: Vec::new(),
             },
             Err(error) => crate::tools::ToolOutcome {
                 id: call.id.clone(),
@@ -4507,6 +4537,7 @@ impl Engine {
                 ok: false,
                 output: error.to_string(),
                 images: Vec::new(),
+                documents: Vec::new(),
             },
         })
     }
@@ -4536,6 +4567,7 @@ impl Engine {
                         ok: false,
                         output: format!("invalid harness tool arguments: {error}"),
                         images: Vec::new(),
+                        documents: Vec::new(),
                     })
                 }
             }
@@ -4556,6 +4588,7 @@ impl Engine {
                 ok: true,
                 output,
                 images: Vec::new(),
+                documents: Vec::new(),
             },
             Err(error) => crate::tools::ToolOutcome {
                 id: call.id.clone(),
@@ -4563,6 +4596,7 @@ impl Engine {
                 ok: false,
                 output: error.to_string(),
                 images: Vec::new(),
+                documents: Vec::new(),
             },
         })
     }
@@ -4720,6 +4754,7 @@ impl Engine {
                 ok: false,
                 output: crate::computer::DISABLED_NOTE.to_string(),
                 images: Vec::new(),
+                documents: Vec::new(),
             });
         }
 
@@ -4737,6 +4772,7 @@ impl Engine {
                                 it to finish."
                             .to_string(),
                         images: Vec::new(),
+                        documents: Vec::new(),
                     });
                 }
                 Some(_) => false,
@@ -4791,6 +4827,7 @@ impl Engine {
                 ok: false,
                 output: crate::browser::DISABLED_NOTE.to_string(),
                 images: Vec::new(),
+                documents: Vec::new(),
             });
         }
 
@@ -4805,6 +4842,7 @@ impl Engine {
                 ok: false,
                 output: crate::browser::BUSY_NOTE.to_string(),
                 images: Vec::new(),
+                documents: Vec::new(),
             });
         }
 
@@ -4849,6 +4887,7 @@ impl Engine {
                 ok: false,
                 output: "that browser call panicked".to_string(),
                 images: Vec::new(),
+                documents: Vec::new(),
             }),
         )
     }
@@ -4878,6 +4917,7 @@ impl Engine {
                 ok: false,
                 output: "that tool call panicked".to_string(),
                 images: Vec::new(),
+                documents: Vec::new(),
             },
         }
     }
@@ -5151,6 +5191,7 @@ impl Engine {
                         output: "this chat has no persona, so there is nowhere to store memory"
                             .to_string(),
                         images: Vec::new(),
+                        documents: Vec::new(),
                     });
                 };
                 if key.is_empty() || value.is_empty() {
@@ -5170,6 +5211,7 @@ impl Engine {
                         output: "this chat has no persona, so there is no memory to forget"
                             .to_string(),
                         images: Vec::new(),
+                        documents: Vec::new(),
                     });
                 };
                 if key.is_empty() {
@@ -5197,6 +5239,7 @@ impl Engine {
                         ok: false,
                         output: "handoff needs a persona".to_string(),
                         images: Vec::new(),
+                        documents: Vec::new(),
                     });
                 }
                 let member = cast
@@ -5251,6 +5294,7 @@ impl Engine {
                 ok: true,
                 output,
                 images: Vec::new(),
+                documents: Vec::new(),
             },
             Err(error) => crate::tools::ToolOutcome {
                 id: call.id.clone(),
@@ -5258,6 +5302,7 @@ impl Engine {
                 ok: false,
                 output: error.to_string(),
                 images: Vec::new(),
+                documents: Vec::new(),
             },
         })
     }
@@ -7915,7 +7960,12 @@ pub(crate) fn reasoning_echo(
 
 /// Builds the provider wire from stored history, including tool calls and
 /// their results.
-fn build_wire(history: &[Message]) -> Vec<WireMessage> {
+///
+/// `accepts_documents` is whether the model running this round advertises
+/// `Modality::Pdf`. When it does not, a PDF a tool read is left as the extracted
+/// text that tool already produced, and the stored document is never read from
+/// disk at all.
+fn build_wire(history: &[Message], accepts_documents: bool) -> Vec<WireMessage> {
     let mut wire = Vec::new();
 
     // Screenshots are the most recent pair of eyes only: the model needs the
@@ -7932,6 +7982,22 @@ fn build_wire(history: &[Message]) -> Vec<WireMessage> {
         .filter(|(index, _)| Some(*index) > last_user)
         .flat_map(|(_, message)| parse_stored_tools(message.extra.as_deref()))
         .find(|call| !call.images.is_empty())
+        .map(|call| call.id);
+
+    // A document gets its own newest-only rule, and it is not optional.
+    // `read_pdf` stores the whole PDF, so without this a single read would
+    // re-upload that file on every later turn of the conversation — a cost that
+    // grows with the chat rather than staying put. Images and documents are
+    // tracked separately because a turn can legitimately have one of each, and
+    // the newest screenshot should not suppress the newest document or the
+    // other way round.
+    let last_document_call = history
+        .iter()
+        .enumerate()
+        .rev()
+        .filter(|(index, _)| Some(*index) > last_user)
+        .flat_map(|(_, message)| parse_stored_tools(message.extra.as_deref()))
+        .find(|call| accepts_documents && !call.documents.is_empty())
         .map(|call| call.id);
 
     for (index, message) in history.iter().enumerate() {
@@ -8006,11 +8072,38 @@ fn build_wire(history: &[Message]) -> Vec<WireMessage> {
                                 .join(" "),
                         );
                     }
-                    if inline {
-                        wire.push(WireMessage::tool_result_with_images(
+                    // The same breadcrumb for a document that has aged out, so
+                    // the model still knows it read one rather than wondering
+                    // why the text stops.
+                    let inline_document =
+                        last_document_call.as_deref() == Some(call.id.as_str());
+                    if !inline_document && !call.documents.is_empty() {
+                        body.push('\n');
+                        body.push_str(
+                            &call
+                                .documents
+                                .iter()
+                                .map(|document| format!("[document: {}]", document.name))
+                                .collect::<Vec<_>>()
+                                .join(" "),
+                        );
+                    }
+
+                    if inline || inline_document {
+                        // One part list, so a call that produced both a
+                        // screenshot and a PDF arrives as a single message
+                        // rather than two — which strict validators reject.
+                        let mut extra = Vec::new();
+                        if inline {
+                            extra.extend(inline_images(call));
+                        }
+                        if inline_document {
+                            extra.extend(inline_documents(call));
+                        }
+                        wire.push(WireMessage::tool_result_with_parts(
                             call.id.clone(),
                             body,
-                            inline_images(call),
+                            extra,
                         ));
                     } else {
                         wire.push(WireMessage::tool_result(call.id.clone(), body));
@@ -8070,6 +8163,27 @@ fn inline_images(call: &StoredToolCall) -> Vec<ContentPart> {
             }),
             Err(_) => parts.push(ContentPart::Text {
                 text: format!("[screenshot {} unavailable]", image.name),
+            }),
+        }
+    }
+    parts
+}
+
+/// Reads a stored call's documents from disk as wire parts, skipping any file
+/// that has since been pruned.
+fn inline_documents(call: &StoredToolCall) -> Vec<ContentPart> {
+    use base64::Engine;
+
+    let mut parts = Vec::new();
+    for document in &call.documents {
+        match std::fs::read(&document.path) {
+            Ok(bytes) => parts.push(ContentPart::Document {
+                mime: document.mime.clone(),
+                base64: base64::engine::general_purpose::STANDARD.encode(bytes),
+                name: document.name.clone(),
+            }),
+            Err(_) => parts.push(ContentPart::Text {
+                text: format!("[document {} unavailable]", document.name),
             }),
         }
     }
@@ -8248,6 +8362,7 @@ fn harness_denial(
         ok: false,
         output: harness::refusal(&call.name),
         images: Vec::new(),
+        documents: Vec::new(),
     })
 }
 
@@ -9809,6 +9924,7 @@ mod tests {
                 after: 0,
                 seq: 0,
                 images: Vec::new(),
+                documents: Vec::new(),
                 repeated: false,
             }],
             TurnOutcome::default(),
@@ -9820,7 +9936,7 @@ mod tests {
             message(Role::Assistant, "Reading it.", Some(&stored)),
         ];
 
-        let wire = build_wire(&history);
+        let wire = build_wire(&history, false);
         assert_eq!(wire.len(), 3);
         assert_eq!(wire[1].role, "assistant");
         assert_eq!(wire[1].tool_calls.len(), 1);
@@ -9843,9 +9959,25 @@ mod tests {
             message(Role::User, "hi", None),
             message(Role::Assistant, "", None),
         ];
-        let wire = build_wire(&history);
+        let wire = build_wire(&history, false);
         assert_eq!(wire.len(), 1);
         assert_eq!(wire[0].role, "user");
+    }
+
+    /// The `extra` JSON a stored tool call lives in.
+    ///
+    /// Built here rather than through `serialize_extra`, which takes a whole
+    /// `TurnOutcome` and is about persisting a turn: a test that wants to
+    /// *read* one back should write the shape directly, so it fails when the
+    /// reader changes rather than when the writer does.
+    fn stored_extra_json(calls: &[StoredToolCall]) -> String {
+        serde_json::to_string(&serde_json::json!({
+            "toolCalls": calls
+                .iter()
+                .map(|call| serde_json::to_value(call).unwrap())
+                .collect::<Vec<_>>(),
+        }))
+        .unwrap()
     }
 
     /// The quick-ask overlay's screenshots are only useful if the model knows
@@ -9863,7 +9995,7 @@ mod tests {
         let extra = crate::attachments::serialize_extra(&[attachment]);
 
         let history = vec![message(Role::User, "what is this?", extra.as_deref())];
-        let wire = build_wire(&history);
+        let wire = build_wire(&history, false);
 
         assert!(
             matches!(&wire[0].parts[0], ContentPart::Text { text } if text.contains("actual screenshot")),
@@ -9887,14 +10019,159 @@ mod tests {
                 after: 0,
                 seq: 0,
                 images: Vec::new(),
+                documents: Vec::new(),
                 repeated: false,
             }],
             TurnOutcome::default(),
         )
         .unwrap();
         let history = vec![message(Role::Assistant, "trying", Some(&stored))];
-        let wire = build_wire(&history);
+        let wire = build_wire(&history, false);
         assert!(wire[1].joined_text().starts_with("ERROR:"));
+    }
+
+    /// A PDF read natively arrives as a document part for a model that takes
+    /// one, and as text plus a breadcrumb for a model that does not.
+    #[test]
+    fn a_native_pdf_becomes_a_document_part_only_for_a_model_that_takes_one() {
+        let _guard = crate::paths::env_lock();
+        let dir = tempfile::tempdir().unwrap();
+        std::env::set_var("LOOM_HOME", dir.path());
+
+        let bytes = crate::documents::test_support::sample_pdf(&["Alpha"]);
+        let stored = crate::attachments::store_bytes_in(
+            &dir.path().join("attachments"),
+            "session-1",
+            "paper.pdf",
+            &bytes,
+        )
+        .unwrap();
+
+        let call = |documents: Vec<crate::tools::ToolDocument>| StoredToolCall {
+            id: "c1".into(),
+            name: "read_pdf".into(),
+            arguments: "{}".into(),
+            status: "ok".into(),
+            output: "paper.pdf — 1 page".into(),
+            after: 0,
+            seq: 0,
+            images: Vec::new(),
+            documents,
+            repeated: false,
+        };
+
+        let document = crate::tools::ToolDocument {
+            name: stored.name.clone(),
+            mime: "application/pdf".into(),
+            path: stored.path.clone(),
+            bytes: bytes.len() as u64,
+            pages: 1,
+        };
+
+        // With a model that accepts one: a real document part, base64 and all.
+        let extra = stored_extra_json(&[call(vec![document.clone()])]);
+        let history = vec![
+            message(Role::User, "read it", None),
+            message(Role::Assistant, "Reading it.", Some(extra.as_str())),
+        ];
+        let wire = build_wire(&history, true);
+        assert!(
+            wire.iter().any(|entry| entry
+                .parts
+                .iter()
+                .any(|part| matches!(part, ContentPart::Document { .. }))),
+            "a PDF-capable model must be handed the document: {:?}",
+            wire.iter().map(|entry| &entry.parts).collect::<Vec<_>>()
+        );
+
+        // With a model that does not: no document part at all, and the text the
+        // tool already produced is all it sees.
+        let wire = build_wire(&history, false);
+        assert!(
+            !wire.iter().any(|entry| entry
+                .parts
+                .iter()
+                .any(|part| matches!(part, ContentPart::Document { .. }))),
+            "a model without the modality must not be sent a document"
+        );
+        assert!(
+            wire.iter()
+                .any(|entry| entry.joined_text().contains("paper.pdf")),
+            "the extracted text still has to reach it"
+        );
+
+        std::env::remove_var("LOOM_HOME");
+    }
+
+    /// Only the newest document is inlined. Without this a single read
+    /// re-uploads the whole file on every later turn of the conversation.
+    #[test]
+    fn only_the_newest_document_is_sent_natively() {
+        let _guard = crate::paths::env_lock();
+        let dir = tempfile::tempdir().unwrap();
+        std::env::set_var("LOOM_HOME", dir.path());
+
+        let bytes = crate::documents::test_support::sample_pdf(&["Alpha"]);
+        let stored = crate::attachments::store_bytes_in(
+            &dir.path().join("attachments"),
+            "session-1",
+            "paper.pdf",
+            &bytes,
+        )
+        .unwrap();
+        let document = crate::tools::ToolDocument {
+            name: stored.name.clone(),
+            mime: "application/pdf".into(),
+            path: stored.path.clone(),
+            bytes: bytes.len() as u64,
+            pages: 1,
+        };
+
+        // Two reads of the same PDF in the same turn, as a model comparing two
+        // ranges would produce.
+        let call = |id: &str| StoredToolCall {
+            id: id.into(),
+            name: "read_pdf".into(),
+            arguments: "{}".into(),
+            status: "ok".into(),
+            output: "paper.pdf — 1 page".into(),
+            after: 0,
+            seq: 0,
+            images: Vec::new(),
+            documents: vec![document.clone()],
+            repeated: false,
+        };
+        let stored_calls = stored_extra_json(&[call("c1"), call("c2")]);
+
+        let history = vec![
+            message(Role::User, "compare the two ranges", None),
+            message(
+                Role::Assistant,
+                "Reading.",
+                Some(stored_calls.as_str()),
+            ),
+        ];
+        let wire = build_wire(&history, true);
+
+        let documents = wire
+            .iter()
+            .flat_map(|entry| entry.parts.iter())
+            .filter(|part| matches!(part, ContentPart::Document { .. }))
+            .count();
+        assert_eq!(
+            documents, 1,
+            "only the newest document may be inlined, or every later turn re-uploads it"
+        );
+
+        // The older one is still visible as a breadcrumb, so the model knows it
+        // read something rather than wondering why the text stops.
+        assert!(
+            wire.iter()
+                .any(|entry| entry.joined_text().contains("[document: ")),
+            "the aged-out document must leave a breadcrumb"
+        );
+
+        std::env::remove_var("LOOM_HOME");
     }
 
     #[test]
@@ -9909,6 +10186,7 @@ mod tests {
                 after: 12,
                 seq: 3,
                 images: Vec::new(),
+                documents: Vec::new(),
                 repeated: false,
             }],
             TurnOutcome::default(),

@@ -566,6 +566,7 @@ fn outcome(call: &ToolCall, ok: bool, output: String, images: Vec<ToolImage>) ->
         ok,
         output,
         images,
+        documents: Vec::new(),
     }
 }
 

@@ -620,6 +620,12 @@ pub fn run() {
                 }
             });
 
+            // The browser's own background sweep: closes tabs the user has
+            // stopped looking at, so a long page task does not leave a dozen
+            // live webviews behind. Every close goes on the reopen stack, and
+            // nothing pinned, visible or being driven is ever a candidate.
+            browser::spawn_sweeper(app.handle().clone());
+
             let interface = shared_interface(&app.handle().clone());
             if let Err(error) = apply_hotkey(&app.handle().clone(), interface.0, &interface.1) {
                 eprintln!("[loom] hotkey not registered: {error}");
@@ -719,6 +725,7 @@ pub fn run() {
             commands::respond_question,
             commands::list_tools,
             commands::workspace_info,
+            commands::open_in_explorer,
             commands::list_workspace_files,
             commands::add_workspace,
             commands::rename_workspace,
@@ -882,6 +889,12 @@ pub fn run() {
                 if let Some(state) = app.try_state::<AppState>() {
                     state.pty.close_all();
                 }
+                // Every browser tab's webview, for the same reason the shells are
+                // killed: a child webview left behind by a process that is ending
+                // is a resource nothing will ever reclaim. `Exit` fires only on a
+                // genuine quit — close-to-tray does not reach it — which is
+                // exactly right: hiding to the tray must not lose the pages.
+                browser::close_all(app);
             }
         });
 }

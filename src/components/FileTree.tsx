@@ -7,6 +7,7 @@ import { statusFor, useGit } from "../stores/git";
 import type { GitStatus, TreeEntry } from "../types";
 import {
   ChevronDownIcon,
+  ExplorerIcon,
   FileIcon,
   FolderIcon,
   PlusIcon,
@@ -156,6 +157,15 @@ export function FileTree({ workdir }: { workdir: string | null }) {
           className="grid h-7 w-7 shrink-0 place-items-center rounded-control text-faint hover:bg-[var(--hover-bg)] hover:text-[var(--ink)]"
         >
           <FolderIcon size={14} />
+        </button>
+        <button
+          type="button"
+          aria-label="Open this folder in File Explorer"
+          title="Open in File Explorer"
+          onClick={() => void ipc.openInExplorer(workdir)}
+          className="grid h-7 w-7 shrink-0 place-items-center rounded-control text-faint hover:bg-[var(--hover-bg)] hover:text-[var(--ink)]"
+        >
+          <ExplorerIcon size={14} />
         </button>
         <button
           type="button"

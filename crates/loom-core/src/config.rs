@@ -1186,6 +1186,34 @@ pub struct BrowserConfig {
     /// default 40 runs out mid-task on anything real. Browser turns raise it
     /// the same way computer turns do, and for the same reason.
     pub max_steps: u32,
+    /// Minutes a tab may sit untouched before the automatic sweep closes it.
+    ///
+    /// `0` means never, which is what a user who does not want automatic closing
+    /// should be able to say. The default is 15 rather than 0 because the feature
+    /// exists to tidy up after long page work, and a feature that ships doing
+    /// nothing is indistinguishable from one that is broken.
+    ///
+    /// The clock is the **host's**, not the page's: a tab whose collector cannot
+    /// answer is judged by the clock alone, or a crashed renderer would be
+    /// immortal. Before closing, the page is asked whether anyone is using it —
+    /// see `browser::in_use` — so a half-filled form survives.
+    pub idle_close_minutes: u32,
+    /// Most tabs Loom will keep open, `0` for unbounded.
+    ///
+    /// A backstop rather than the main mechanism: reuse and the idle sweep
+    /// handle the ordinary case, and this only fires when one turn opens thirty
+    /// distinct sites. Past it, the least recently touched unprotected tabs are
+    /// closed, through the same function and the same reopen stack as everything
+    /// else, so there is one behaviour to explain and one way to get a page back.
+    pub max_tabs: u32,
+    /// Whether `browser_open` may navigate an existing tab instead of opening a
+    /// new one.
+    ///
+    /// On by default, because the alternative is a tab per call and a model that
+    /// reads six pages leaves six webviews. Off restores the older behaviour
+    /// exactly, which is worth having as one switch rather than as a code revert:
+    /// a model comparing two pages side by side is the case reuse is worst at.
+    pub reuse_tabs: bool,
     /// Content blocking: the network half of what an ad blocker does.
     pub blocking: BlockingConfig,
 }
@@ -1237,6 +1265,9 @@ impl Default for BrowserConfig {
             open_links_in_browser: true,
             blocked_origins: Vec::new(),
             max_steps: 80,
+            idle_close_minutes: 15,
+            max_tabs: 40,
+            reuse_tabs: true,
             blocking: BlockingConfig::default(),
         }
     }

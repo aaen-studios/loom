@@ -478,6 +478,9 @@ fn normalize(op: &str, raw: &Value, options: &BrowserOptions) -> Result<Value> {
             // in the wrong profile — which, for `ghost`, would mean a page the
             // user expected to be private writing cookies to the shared jar.
             out.insert("profile".into(), json!(args.profile(Profile::Normal)?.as_str()));
+            // Passed through rather than decided here: reuse is the host's
+            // judgement, because only the host knows what is already open.
+            out.insert("new_tab".into(), json!(args.bool_or("new_tab", false)));
         }
         "browser_tabs" => {}
         "browser_tab" => {
@@ -485,7 +488,7 @@ fn normalize(op: &str, raw: &Value, options: &BrowserOptions) -> Result<Value> {
                 "action",
                 &[
                     "list", "open", "close", "focus", "activate", "pin", "unpin", "mute",
-                    "duplicate", "reopen",
+                    "unmute", "duplicate", "reopen",
                 ],
                 "list",
             )?;
@@ -877,6 +880,7 @@ pub fn run(
         ok: false,
         output: message,
         images: Vec::new(),
+        documents: Vec::new(),
     };
 
     if !is_browser_tool(&call.name) {
@@ -945,6 +949,7 @@ pub fn run(
         ok: refused.is_none(),
         output: text,
         images,
+        documents: Vec::new(),
     }
 }
 
@@ -1081,18 +1086,29 @@ fn tab_property() -> Value {
     })
 }
 
+/// `browser_open`: opens a URL, reusing a tab when one will do.
+///
+/// **Reuse is the default and it is reported.** A page already open on that URL
+/// is navigated rather than duplicated; otherwise the same-origin tab, this
+/// chat's own tab, or the least recently used unprotected one is taken. The
+/// result says which happened, because a model that sees one tab id for two calls
+/// would otherwise conclude the second open failed.
+///
+/// Set `new_tab` to force a fresh tab, which is what a comparison of two pages
+/// needs.
 pub fn specs() -> Vec<ToolSpec> {
     vec![
         // ------------------------------------------------------------ See
         spec(
             "browser_open",
-            "Open a URL in a new tab and return the page's structure. The workhorse: it opens, waits for the page, and gives you an indexed list of what is clickable, in one call. A bare host is treated as https, and anything with a space in it is a search.",
+            "Open a URL and return the page's structure. The workhorse: it opens, waits for the page, and gives you an indexed list of what is clickable, in one call. A bare host is treated as https, and anything with a space in it is a search. If a tab is already on that URL — or on that site — it is reused rather than duplicated, and the result says so; pass `new_tab` when you genuinely need a second tab, such as comparing two pages side by side.",
             json!({
                 "type": "object",
                 "properties": {
                     "url": { "type": "string", "description": "URL, bare host (example.com), or a search query" },
                     "profile": { "type": "string", "enum": ["normal", "ghost"], "description": "normal uses the persistent profile (logins carry over); ghost is in-private with no cookies and nothing left behind" },
-                    "private": { "type": "boolean", "description": "Shorthand for profile: ghost" }
+                    "private": { "type": "boolean", "description": "Shorthand for profile: ghost" },
+                    "new_tab": { "type": "boolean", "description": "Force a new tab instead of reusing one. Use it when you need two pages open at once" }
                 },
                 "required": ["url"],
                 "additionalProperties": false
@@ -1225,11 +1241,11 @@ pub fn specs() -> Vec<ToolSpec> {
         // ------------------------------------------------------------ Act
         spec(
             "browser_tab",
-            "Manage tabs: open, close, focus, pin, mute, duplicate, reopen the last closed one. Use it to work on several pages at once — a form in one tab and its documentation in another — rather than navigating back and forth.",
+            "Manage tabs: open, close, focus, pin, unmute, duplicate, or reopen the last closed one. Use it to work on several pages at once — a form in one tab and its documentation in another — rather than navigating back and forth. A pinned tab is protected from Loom's automatic closing, so pin anything you will need later; a tab closed by you or by the sweep goes on a reopen stack, and `reopen` brings it back.",
             json!({
                 "type": "object",
                 "properties": {
-                    "action": { "type": "string", "enum": ["list", "open", "close", "focus", "activate", "pin", "unpin", "mute", "duplicate", "reopen"], "description": "What to do (default list)" },
+                    "action": { "type": "string", "enum": ["list", "open", "close", "focus", "activate", "pin", "unpin", "mute", "unmute", "duplicate", "reopen"], "description": "What to do (default list)" },
                     "tab": tab_property(),
                     "url": { "type": "string", "description": "For action: open" },
                     "profile": { "type": "string", "enum": ["normal", "ghost"], "description": "For action: open" }

@@ -294,17 +294,51 @@ pub fn tabs(value: &Value) -> String {
     let mut out = format!("{} tab(s):\n", tabs.len());
     for tab in tabs {
         let active = tab.get("active").and_then(Value::as_bool).unwrap_or(false);
+        let pinned = tab.get("pinned").and_then(Value::as_bool).unwrap_or(false);
+        let muted = tab.get("muted").and_then(Value::as_bool).unwrap_or(false);
         let profile = str_at(tab, "profile").unwrap_or_else(|| "normal".to_string());
         let title = str_at(tab, "title").unwrap_or_default();
         let url = str_at(tab, "url").unwrap_or_default();
+        // The marks are one character each rather than words, because this line
+        // is repeated for every tab and the model reads it to decide what to do
+        // next: `>` is where the page is, `*` is protected, `~` is silenced.
+        //
+        // They share the one slot the ghost marker already used, so a tab with
+        // nothing to say about it renders exactly as it did before pinning
+        // existed — which is what keeps this line stable for everything that
+        // reads it.
+        let mut marks: Vec<&str> = Vec::new();
+        if pinned {
+            marks.push("*");
+        }
+        if muted {
+            marks.push("~");
+        }
+        if profile == "ghost" {
+            marks.push("(ghost)");
+        }
+        let marks = if marks.is_empty() {
+            String::new()
+        } else {
+            format!("{} ", marks.join(" "))
+        };
         out.push_str(&format!(
-            "  {} [{}] {}  {}\n        {}\n",
+            "  {} [{}] {}{}\n        {}\n",
             if active { ">" } else { " " },
             num_at(tab, "id").unwrap_or(0),
-            if profile == "ghost" { "(ghost)" } else { "" },
+            marks,
             truncate(title.trim(), 80),
             truncate(&url, 160),
         ));
+    }
+    if tabs
+        .iter()
+        .any(|tab| tab.get("pinned").and_then(Value::as_bool) == Some(true))
+    {
+        out.push_str(
+            "\n`*` marks a pinned tab: protected from the automatic sweep and from reuse. \
+             `(muted)` means the page's own media is silenced.",
+        );
     }
     out.trim_end().to_string()
 }

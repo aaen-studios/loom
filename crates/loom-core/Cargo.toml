@@ -39,6 +39,26 @@ libloading = "0.8"
 # through ONNX rather than whisper.cpp.
 rustfft = "6.4"
 zip = { version = "4", default-features = false, features = ["deflate"] }
+
+# Documents. Four crates, all pure Rust, so none of them drags in a C toolchain.
+#
+# `lopdf` is the whole PDF story: the page tree, the metadata dictionary, and the
+# processors behind extract/delete/rotate. `pdf-extract` was the obvious
+# companion for text and was **not** taken, for one reason that outweighs its
+# better font handling: this workspace builds release with `panic = "abort"` (see
+# the root manifest), so a parser that can panic on a malformed object does not
+# fail a tool call — it takes the process down. "A model reading an arbitrary PDF
+# out of a workspace" is exactly the input that finds those paths. `lopdf` is
+# `Result`-based throughout, and its `extract_text_with_limit` already does the
+# font/CMap decoding that was the only thing worth having from pdf-extract.
+lopdf = "0.45"
+# DOCX and PPTX are ordinary XML in a zip; `zip` above opens the container.
+quick-xml = "0.42"
+# XLSX is the hard half of OOXML — shared strings, cell typing, number formats —
+# and `calamine` already solves all of it.
+calamine = "0.36"
+# `.tar` and `.tar.gz`. `flate2` above decompresses the gzip half.
+tar = "0.4"
 reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
 rusqlite = { version = "0.37", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }

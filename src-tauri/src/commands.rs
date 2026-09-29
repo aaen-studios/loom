@@ -628,8 +628,18 @@ pub fn list_sessions(state: State<'_, AppState>) -> Result<Vec<Session>, String>
 }
 
 #[tauri::command]
-pub fn delete_session(state: State<'_, AppState>, id: String) -> Result<(), String> {
-    state.engine.delete_session(&id).map_err(to_string)
+pub fn delete_session(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    id: String,
+) -> Result<(), String> {
+    state.engine.delete_session(&id).map_err(to_string)?;
+    // After the chat is gone, so a failure to delete does not cost the pages.
+    // Takes an `AppHandle` for this one line: the browser lives in its own
+    // process-side state, and a chat's tabs would otherwise outlive the chat that
+    // opened them with nothing left to close them.
+    crate::browser::close_session_tabs(&app, &id);
+    Ok(())
 }
 
 /// Drops chats that were created but never used, so the list does not fill
@@ -994,6 +1004,41 @@ pub fn workspace_info(workdir: Option<String>) -> WorkspaceInfo {
             is_repo: false,
         },
     }
+}
+
+/// Opens a folder in the OS file explorer.
+///
+/// # Why this is a Rust command and not a widened capability
+///
+/// Capabilities gate what a **webview** may invoke, not what Rust may call. So
+/// the obvious implementation — grant `opener:allow-open-path` in
+/// `capabilities/default.json` and call the plugin from the frontend — would
+/// hand every one of Loom's own webviews the ability to open any path on the
+/// machine. `opener:default` deliberately grants `reveal-item-in-dir` and not
+/// `open-path`, and this keeps that decision intact.
+///
+/// This is a Rust call to the plugin's free function, so it needs no capability
+/// at all, and the path is checked here first: canonicalised, then required to
+/// be a directory that exists. A caller cannot use it to open a file, a
+/// nonexistent path, or anything reached through a symlink or `..` that does not
+/// resolve to a real folder.
+#[tauri::command]
+pub fn open_in_explorer(path: String) -> Result<(), String> {
+    let requested = std::path::PathBuf::from(path.trim());
+    if requested.as_os_str().is_empty() {
+        return Err("no folder given".into());
+    }
+    // Canonicalise before the check rather than after, so `..` and symlinks are
+    // resolved by the filesystem and the test is made against what is actually
+    // there.
+    let target = requested
+        .canonicalize()
+        .map_err(|error| format!("{}: {error}", requested.display()))?;
+    if !target.is_dir() {
+        return Err(format!("{} is not a folder", target.display()));
+    }
+    tauri_plugin_opener::open_path(&target, None::<&str>)
+        .map_err(|error| format!("could not open {}: {error}", target.display()))
 }
 
 #[tauri::command]

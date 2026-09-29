@@ -126,6 +126,15 @@ fn message_json(message: &super::WireMessage) -> Value {    // Tool results use 
                     "type": "image_url",
                     "image_url": { "url": format!("data:{mime};base64,{base64}") }
                 }),
+                // The chat-completions dialect spells a document as a `file`
+                // part carrying a data URL, not as an `image_url`.
+                super::ContentPart::Document { mime, base64, name } => json!({
+                    "type": "file",
+                    "file": {
+                        "filename": name,
+                        "file_data": format!("data:{mime};base64,{base64}")
+                    }
+                }),
             })
             .collect();
         json!({ "role": message.role, "content": parts })
@@ -161,25 +170,51 @@ fn message_json(message: &super::WireMessage) -> Value {    // Tool results use 
     object
 }
 
-/// The follow-up user message that carries a tool's images, or `None` when the
-/// tool result had none.
+/// The follow-up user message that carries a tool's images and documents, or
+/// `None` when the tool result had neither.
+///
+/// This dialect's `tool` role is text-only, so anything binary has to travel as
+/// a user turn. Both kinds go here for the same reason, and in one message
+/// rather than two: a tool that returned a screenshot *and* a PDF would otherwise
+/// produce two user turns between two tool results, which strict validators
+/// reject.
 fn tool_images_message(message: &super::WireMessage) -> Option<Value> {
     let mut parts: Vec<Value> = Vec::new();
+    let mut has_image = false;
+    let mut has_document = false;
+
     for part in &message.parts {
-        if let super::ContentPart::Image { mime, base64, .. } = part {
-            parts.push(json!({
-                "type": "image_url",
-                "image_url": { "url": format!("data:{mime};base64,{base64}") }
-            }));
+        match part {
+            super::ContentPart::Image { mime, base64, .. } => {
+                has_image = true;
+                parts.push(json!({
+                    "type": "image_url",
+                    "image_url": { "url": format!("data:{mime};base64,{base64}") }
+                }));
+            }
+            super::ContentPart::Document { mime, base64, name } => {
+                has_document = true;
+                parts.push(json!({
+                    "type": "file",
+                    "file": {
+                        "filename": name,
+                        "file_data": format!("data:{mime};base64,{base64}")
+                    }
+                }));
+            }
+            super::ContentPart::Text { .. } => {}
         }
     }
     if parts.is_empty() {
         return None;
     }
-    let mut content = vec![json!({
-        "type": "text",
-        "text": "Screenshot from the computer tool:"
-    })];
+
+    let preamble = match (has_image, has_document) {
+        (true, true) => "Images and documents from the tool call above:",
+        (true, false) => "Screenshot from the computer tool:",
+        _ => "The document from the tool call above:",
+    };
+    let mut content = vec![json!({ "type": "text", "text": preamble })];
     content.append(&mut parts);
     Some(json!({ "role": "user", "content": content }))
 }
@@ -473,7 +508,7 @@ mod tests {
             tool_call_id: None,
             reasoning: None,
         };
-        let screenshot = super::super::WireMessage::tool_result_with_images(
+        let screenshot = super::super::WireMessage::tool_result_with_parts(
             "call_screen",
             "captured",
             vec![super::super::ContentPart::Image {

@@ -155,7 +155,35 @@ pub struct TabWire {
     /// Which window's panel is showing it, so the panel can pick its own.
     pub host: String,
     pub session_id: Option<String>,
+    /// Protected from the sweeper and from reuse. A pinned tab is one the user
+    /// said to keep, and nothing automatic may take it.
+    pub pinned: bool,
+    /// Muted at the page level. Survives a reload only as far as the collector
+    /// can re-apply it, which is why `mute` is a patch rather than a property.
+    pub muted: bool,
 }
+
+/// A tab that was closed, for the reopen stack.
+///
+/// Deliberately not a `Tab`: the webview is gone, and keeping a dead handle
+/// around would invite a call to it. Everything here is what is needed to build
+/// a fresh one that looks the same.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ClosedTab {
+    pub url: String,
+    pub title: String,
+    pub profile: String,
+    pub host: String,
+    pub session_id: Option<String>,
+}
+
+/// How many closed tabs the reopen stack remembers.
+///
+/// Capped because this is an undo affordance, not a history: twenty is more than
+/// anyone reaches back through, and the stack is the only thing keeping a closed
+/// tab's URL alive.
+pub const CLOSED_STACK: usize = 20;
 
 /// A download Loom saw, for the panel's rail.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -184,6 +212,17 @@ struct Tab {
     /// real webview.
     bounds: Option<Slot>,
     loading: bool,
+    /// Protected from the sweeper and from reuse.
+    pinned: bool,
+    /// The page's own media elements are muted.
+    muted: bool,
+    /// When this tab was last opened, focused, navigated or driven.
+    ///
+    /// The host's clock rather than the page's, because the sweeper has to be
+    /// able to judge a tab whose collector is not answering — a page mid-load, a
+    /// crashed renderer, an error page. A page that cannot report its own
+    /// activity must not therefore be immortal.
+    touched_ms: u64,
 }
 
 /// The browser's own state: the tabs, which chat is working in which, and which
@@ -199,6 +238,12 @@ pub struct BrowserState {
     /// panel is closed still knows where to put a page.
     last_host: Mutex<Option<String>>,
     downloads: Mutex<Vec<DownloadRow>>,
+    /// Tabs that were closed, newest last.
+    ///
+    /// This is what makes an automatic close undoable, and that is the whole
+    /// point: a sweeper that can destroy a page with no way back is a feature
+    /// nobody should trust.
+    closed: Mutex<Vec<ClosedTab>>,
     /// The content blocker, shared by every tab's request filter.
     pub blocker: crate::blocker::Blocker,
 }
@@ -214,6 +259,7 @@ impl Default for BrowserState {
             tab_by_session: Mutex::new(HashMap::new()),
             last_host: Mutex::new(None),
             downloads: Mutex::new(Vec::new()),
+            closed: Mutex::new(Vec::new()),
             blocker: crate::blocker::Blocker::new(),
         }
     }
@@ -238,8 +284,67 @@ impl BrowserState {
                 loading: tab.loading,
                 host: tab.host.clone(),
                 session_id: tab.session_id.clone(),
+                pinned: tab.pinned,
+                muted: tab.muted,
             })
             .collect()
+    }
+
+    /// Marks a tab as used, for the sweeper's clock.
+    ///
+    /// Called from every path that means "someone is still interested in this
+    /// page": opening it, focusing it, navigating it, and every tool call routed
+    /// to it. The one thing it is *not* called from is the sweeper's own
+    /// enquiry, or a page would keep itself alive by being asked about.
+    fn touch(&self, id: u32) {
+        self.with_tab(id, |tab| tab.touched_ms = loom_core::db::now_ms() as u64);
+    }
+
+    /// Whether a tab may be closed automatically.
+    ///
+    /// The protection list, in one place so the sweeper and the emergency bound
+    /// cannot disagree about it. A tab is protected when it is pinned, when some
+    /// window's panel is showing it, or when a chat is driving it — the three
+    /// cases where closing it would take away something a person is looking at
+    /// or a model is working in.
+    fn protected(&self, tab: &Tab) -> bool {
+        if tab.pinned || tab.active {
+            return true;
+        }
+        if lock(&self.active_by_host).values().any(|id| *id == tab.id) {
+            return true;
+        }
+        lock(&self.tab_by_session).values().any(|id| *id == tab.id)
+    }
+
+    /// The tabs a sweep may consider, oldest-touched first.
+    fn sweepable(&self) -> Vec<(u32, u64)> {
+        lock(&self.tabs)
+            .iter()
+            .filter(|tab| !self.protected(tab))
+            .map(|tab| (tab.id, tab.touched_ms))
+            .collect()
+    }
+
+    /// Records a closed tab so it can be reopened.
+    fn remember_closed(&self, tab: &Tab) {
+        let mut closed = lock(&self.closed);
+        closed.push(ClosedTab {
+            url: tab.url.clone(),
+            title: tab.title.clone(),
+            profile: tab.profile.as_str().to_string(),
+            host: tab.host.clone(),
+            session_id: tab.session_id.clone(),
+        });
+        if closed.len() > CLOSED_STACK {
+            let excess = closed.len() - CLOSED_STACK;
+            closed.drain(0..excess);
+        }
+    }
+
+    /// The most recently closed tab, removed from the stack.
+    fn take_closed(&self) -> Option<ClosedTab> {
+        lock(&self.closed).pop()
     }
 
     /// The tab a chat is working in, or the one its host is showing.
@@ -790,6 +895,9 @@ fn create_tab(
             active: true,
             bounds: None,
             loading: true,
+            pinned: false,
+            muted: false,
+            touched_ms: loom_core::db::now_ms() as u64,
         });
     }
     lock(&state.active_by_host).insert(host.to_string(), id);
@@ -1004,6 +1112,11 @@ impl BrowserHost for TauriBrowserHost {
             "browser_open" => self.open(session_id, args),
             "browser_tabs" => Ok(json!({ "tabs": self.state.snapshot() })),
             "browser_screenshot" => screenshot(&self.state, session_id, args),
+            // Tab management is host state, not page state. Until this arm
+            // existed every `browser_tab` action fell through to `run` and came
+            // back with "the collector does not implement browser_tab" — the
+            // schema advertised ten actions and none of them worked.
+            "browser_tab" => self.tab(session_id, args),
             _ => self.run(session_id, op, args),
         };
         Ok(outcome.unwrap_or_else(|error| json!({ "error": error })))
@@ -1022,8 +1135,8 @@ impl BrowserHost for TauriBrowserHost {
 }
 
 impl TauriBrowserHost {
-    /// `browser_open`: create a tab, wait for it to settle, and answer with the
-    /// same shaped page view every other See-tier tool returns.
+    /// `browser_open`: reuse a tab when one will do, otherwise create one, then
+    /// answer with the same shaped page view every other See-tier tool returns.
     fn open(&self, session_id: &str, args: &Value) -> Result<Value, String> {
         let url = args
             .get("url")
@@ -1034,20 +1147,30 @@ impl TauriBrowserHost {
             .and_then(Value::as_str)
             .and_then(Profile::parse)
             .unwrap_or_default();
+        // `new_tab` is the escape hatch from reuse, and it exists because reuse
+        // is otherwise invisible: a model comparing two pages would see the same
+        // tab id twice and have no way to ask for a second tab except by
+        // guessing.
+        let force_new = args
+            .get("new_tab")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
 
-        let id = open_tab(
-            &self.app,
-            &self.state,
-            None,
-            url,
-            profile,
-            Some(session_id),
-        )?;
+        let wanted = normalize_url(url);
+        let (id, reused) = if force_new {
+            (self.create(session_id, &wanted, profile)?, None)
+        } else {
+            match self.reuse(session_id, &wanted, profile) {
+                Some((id, why)) => (id, Some(why)),
+                None => (self.create(session_id, &wanted, profile)?, None),
+            }
+        };
+        self.state.touch(id);
         lock(&self.state.tab_by_session).insert(session_id.to_string(), id);
 
-        // A fresh page is usually not ready at the moment the webview exists, so
-        // waiting for it is the difference between a useful first answer and "no
-        // actionable elements found".
+        // A reused tab may already be loaded; a fresh one usually is not. Waiting
+        // either way is the difference between a useful first answer and "no
+        // actionable elements found", and a loaded page answers immediately.
         let webview = self
             .state
             .webview(id)
@@ -1061,9 +1184,402 @@ impl TauriBrowserHost {
         let mut page = collect(&webview, "snapshot", &json!({ "tab": id }))?;
         if let Some(object) = page.as_object_mut() {
             object.insert("tab".into(), json!(id));
+            // Said out loud, because a model that sees one tab id for two calls
+            // needs to know why or it will conclude the second open failed.
+            if let Some(why) = reused {
+                object.insert("reused".into(), json!(why));
+            }
         }
         Ok(page)
     }
+
+    /// Creates a tab in this chat's usual host.
+    fn create(&self, session_id: &str, url: &str, profile: Profile) -> Result<u32, String> {
+        open_tab(
+            &self.app,
+            &self.state,
+            None,
+            url,
+            profile,
+            Some(session_id),
+        )
+    }
+
+    /// Picks an existing tab to navigate instead of opening another one, or
+    /// `None` when a new tab is the right answer.
+    ///
+    /// The order, most specific first:
+    ///
+    /// 1. the same URL, so a reload of the page the model is already on costs
+    ///    nothing and loses nothing;
+    /// 2. the same origin, preferring this chat's own tab;
+    /// 3. this chat's own tab whatever it is showing;
+    /// 4. the least recently touched tab that is unprotected.
+    ///
+    /// Two constraints, both load-bearing.
+    ///
+    /// **Only a tab in the same host window.** Reusing one elsewhere would need a
+    /// `reparent` mid-open — the fallback path in [`migrate`], which loses in-page
+    /// form state. Opening a new tab is cheaper and safer than silently emptying
+    /// a form.
+    ///
+    /// **A chat may always reuse its own tab.** `protected` counts a tab driven
+    /// by *any* chat, so without this the most obvious candidate — the tab this
+    /// very chat is working in — would be excluded by its own protection. What
+    /// reuse protects against is taking *someone else's* page.
+    fn reuse(&self, session_id: &str, url: &str, profile: Profile) -> Option<(u32, String)> {
+        let host = self.state.host_for_new_tab(&self.app, None);
+        let mine = lock(&self.state.tab_by_session).get(session_id).copied();
+        let wanted_origin = origin_of(url);
+        let target = url::Url::parse(url).ok();
+
+        let candidates: Vec<(u32, String, bool, u64)> = {
+            let tabs = lock(&self.state.tabs);
+            tabs.iter()
+                .filter(|tab| tab.host == host)
+                // A ghost tab and a normal one are different cookie jars; moving
+                // one into the other's place would silently change who the page
+                // thinks the user is.
+                .filter(|tab| tab.profile == profile)
+                .map(|tab| {
+                    (
+                        tab.id,
+                        tab.url.clone(),
+                        tab.active || self.state.protected(tab),
+                        tab.touched_ms,
+                    )
+                })
+                .collect()
+        };
+        if candidates.is_empty() {
+            return None;
+        }
+
+        let owns = |id: u32| mine == Some(id);
+
+        // 1. Exactly this URL.
+        if let Some((id, _, _, _)) = candidates
+            .iter()
+            .find(|(id, existing, _, _)| {
+                existing == url || (owns(*id) && same_url(existing, url))
+            })
+        {
+            return Some((*id, "navigated the tab already on that URL".to_string()));
+        }
+
+        // 2. Same origin, preferring this chat's own tab.
+        if let Some(origin) = wanted_origin.as_deref() {
+            let same_site = |candidate: &(u32, String, bool, u64)| {
+                origin_of(&candidate.1).as_deref() == Some(origin)
+            };
+            if let Some((id, _, _, _)) = candidates
+                .iter()
+                .filter(|candidate| same_site(candidate))
+                .min_by_key(|candidate| (!owns(candidate.0), candidate.3))
+            {
+                return Some((
+                    *id,
+                    format!("reused the tab already on {origin}"),
+                ));
+            }
+        }
+
+        // 3. This chat's own tab, whatever it is showing. Not "protected": a
+        //    chat's own tab is exactly what it may repurpose.
+        if let Some(id) = mine.filter(|id| candidates.iter().any(|(c, ..)| c == id)) {
+            return Some((id, "reused this chat's own tab".to_string()));
+        }
+
+        // 4. The least recently touched unprotected tab.
+        if let Some((id, _, _, _)) = candidates
+            .iter()
+            .filter(|(_, _, protected, _)| !*protected)
+            .min_by_key(|(_, _, _, touched)| *touched)
+        {
+            return Some((*id, "reused an idle tab".to_string()));
+        }
+
+        // Nothing safe to take. This is also where a `target` that failed to
+        // parse ends up, which is correct: a URL the browser cannot reason about
+        // is not one to navigate an existing page to.
+        let _ = target;
+        None
+    }
+
+    /// `browser_tab`: the ten actions the schema advertises.
+    fn tab(&self, session_id: &str, args: &Value) -> Result<Value, String> {
+        let action = args
+            .get("action")
+            .and_then(Value::as_str)
+            .unwrap_or("list");
+        let requested = args.get("tab").and_then(Value::as_u64).map(|id| id as u32);
+
+        match action {
+            "list" => Ok(json!({ "tabs": self.state.snapshot() })),
+
+            "open" => {
+                let url = args
+                    .get("url")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| "browser_tab with action `open` needs a `url`".to_string())?;
+                let profile = args
+                    .get("profile")
+                    .and_then(Value::as_str)
+                    .and_then(Profile::parse)
+                    .unwrap_or_default();
+                let id = open_tab(
+                    &self.app,
+                    &self.state,
+                    None,
+                    &normalize_url(url),
+                    profile,
+                    Some(session_id),
+                )?;
+                lock(&self.state.tab_by_session).insert(session_id.to_string(), id);
+                Ok(json!({ "opened": id, "tabs": self.state.snapshot() }))
+            }
+
+            "close" => {
+                let id = self
+                    .state
+                    .resolve(session_id, requested)
+                    .ok_or_else(|| "no tab to close".to_string())?;
+                close_tab(&self.app, &self.state, id, "closed")?;
+                Ok(json!({ "closed": id, "tabs": self.state.snapshot() }))
+            }
+
+            "focus" | "activate" => {
+                let id = self
+                    .state
+                    .resolve(session_id, requested)
+                    .ok_or_else(|| "no tab to focus".to_string())?;
+                focus_tab(&self.app, &self.state, id, Some(session_id))?;
+                Ok(json!({ "focused": id, "tabs": self.state.snapshot() }))
+            }
+
+            "pin" | "unpin" => {
+                let pinned = action == "pin";
+                let id = self
+                    .state
+                    .resolve(session_id, requested)
+                    .ok_or_else(|| "no tab to pin".to_string())?;
+                if !self.state.with_tab(id, |tab| tab.pinned = pinned) {
+                    return Err(format!("tab {id} is no longer open"));
+                }
+                // Pinning is a statement about what to keep, so it resets the
+                // idle clock: an unpinned tab pinned by hand should not be swept
+                // a second later for having sat idle beforehand.
+                self.state.touch(id);
+                broadcast(&self.app, &self.state);
+                Ok(json!({
+                    "tab": id,
+                    "pinned": pinned,
+                    "note": if pinned {
+                        "Pinned: this tab is now protected from the automatic sweep."
+                    } else {
+                        "Unpinned: this tab may now be closed automatically when idle."
+                    },
+                    "tabs": self.state.snapshot()
+                }))
+            }
+
+            // Muting is a page patch rather than a webview property, so it goes
+            // through the collector. See the `mute` op in inject.js for what it
+            // can and cannot reach.
+            "mute" | "unmute" => {
+                let muted = action == "mute";
+                let id = self
+                    .state
+                    .resolve(session_id, requested)
+                    .ok_or_else(|| "no tab to mute".to_string())?;
+                let outcome = self.run(
+                    session_id,
+                    if muted { "mute" } else { "unmute" },
+                    &json!({ "tab": id }),
+                )?;
+                if outcome.get("error").is_none() {
+                    self.state.with_tab(id, |tab| tab.muted = muted);
+                    broadcast(&self.app, &self.state);
+                }
+                Ok(outcome)
+            }
+
+            "duplicate" => {
+                let id = self
+                    .state
+                    .resolve(session_id, requested)
+                    .ok_or_else(|| "no tab to duplicate".to_string())?;
+                let (url, profile, host) = {
+                    let tabs = lock(&self.state.tabs);
+                    let tab = tabs
+                        .iter()
+                        .find(|tab| tab.id == id)
+                        .ok_or_else(|| format!("tab {id} is no longer open"))?;
+                    (tab.url.clone(), tab.profile, tab.host.clone())
+                };
+                // Same profile deliberately: duplicating a ghost tab into the
+                // persistent jar would log the page in as the user.
+                let new_id = open_tab(
+                    &self.app,
+                    &self.state,
+                    Some(&host),
+                    &url,
+                    profile,
+                    Some(session_id),
+                )?;
+                Ok(json!({ "tab": new_id, "duplicated": id, "tabs": self.state.snapshot() }))
+            }
+
+            "reopen" => {
+                let Some(closed) = self.state.take_closed() else {
+                    return Ok(json!({
+                        "error": "nothing to reopen — the closed-tab stack is empty. Tabs are \
+                                  pushed onto it when they are closed, whether by hand or by \
+                                  the automatic sweep."
+                    }));
+                };
+                let profile = Profile::parse(&closed.profile).unwrap_or_default();
+                let id = open_tab(
+                    &self.app,
+                    &self.state,
+                    Some(&closed.host),
+                    &closed.url,
+                    profile,
+                    closed.session_id.as_deref(),
+                )?;
+                if let Some(session) = closed.session_id.as_deref() {
+                    lock(&self.state.tab_by_session).insert(session.to_string(), id);
+                }
+                Ok(json!({
+                    "reopened": id,
+                    "title": closed.title,
+                    "url": closed.url,
+                    "tabs": self.state.snapshot()
+                }))
+            }
+
+            other => Err(format!(
+                "`{other}` is not a browser_tab action; use list, open, close, focus, \
+                 activate, pin, unpin, mute, duplicate or reopen"
+            )),
+        }
+    }
+}
+
+/// Closes a tab, whichever caller asked.
+///
+/// **The only way a tab dies.** A manual close and the sweeper's automatic one go
+/// through here so they cannot diverge — including the part that matters most,
+/// which is that every close is pushed onto the reopen stack and is therefore
+/// undoable. A second close path is how one of them quietly stops being
+/// recoverable.
+pub fn close_tab(
+    app: &AppHandle,
+    state: &Arc<BrowserState>,
+    id: u32,
+    reason: &str,
+) -> Result<(), String> {
+    let Some(tab) = state.remove(id) else {
+        return Err(format!("tab {id} is not open"));
+    };
+    state.remember_closed(&tab);
+    // Closing the webview is what actually ends the page. The state is changed
+    // first so a handler firing on the close finds nothing to do.
+    let _ = tab.webview.close();
+    let _ = app.emit(
+        "loom://browser-note",
+        json!({
+            "reason": reason,
+            "title": tab.title,
+            "url": tab.url,
+        }),
+    );
+    broadcast(app, state);
+    Ok(())
+}
+
+/// Raises a tab within its window and gives it the keyboard.
+///
+/// Factored out of the command so the model's `browser_tab` and the panel's own
+/// click go through one implementation: two ways to focus a tab is two ways to
+/// disagree about which one is active.
+pub fn focus_tab(
+    app: &AppHandle,
+    state: &Arc<BrowserState>,
+    id: u32,
+    session_id: Option<&str>,
+) -> Result<(), String> {
+    let Some(webview) = state.webview(id) else {
+        return Err(format!("tab {id} is not open"));
+    };
+    let _ = webview.show();
+    let _ = webview.set_focus();
+    state.touch(id);
+
+    // Two pieces of bookkeeping, both under one lock so the tab list cannot be
+    // broadcast mid-change with two tabs claiming to be the visible one.
+    let host = {
+        let mut tabs = lock(&state.tabs);
+        let Some(host) = tabs.iter().find(|tab| tab.id == id).map(|tab| tab.host.clone()) else {
+            return Ok(());
+        };
+        for tab in tabs.iter_mut() {
+            if tab.host == host {
+                tab.active = tab.id == id;
+            }
+        }
+        host
+    };
+    lock(&state.active_by_host).insert(host, id);
+    if let Some(session_id) = session_id {
+        lock(&state.tab_by_session).insert(session_id.to_string(), id);
+    }
+    broadcast(app, state);
+    Ok(())
+}
+
+/// Adds a missing scheme, and turns something with a space in it into a search.
+///
+/// Duplicated from the frontend's `resolveOmnibox` on purpose rather than
+/// exported: this runs in the host, that runs in the panel, and the two must
+/// agree. A test pins the shared cases.
+pub fn normalize_url(raw: &str) -> String {
+    let text = raw.trim();
+    if text.is_empty() {
+        return "about:blank".to_string();
+    }
+    if let Ok(parsed) = url::Url::parse(text) {
+        if parsed.scheme().len() > 1 {
+            return parsed.to_string();
+        }
+    }
+    if text.contains(' ') || !text.contains('.') {
+        let query = text.replace(' ', "+");
+        return format!("https://duckduckgo.com/?q={query}");
+    }
+    format!("https://{text}")
+}
+
+/// The scheme and authority of a URL, for same-site reuse.
+fn origin_of(raw: &str) -> Option<String> {
+    let parsed = url::Url::parse(raw).ok()?;
+    let host = parsed.host_str()?;
+    Some(format!(
+        "{}://{}{}",
+        parsed.scheme(),
+        host,
+        parsed.port().map(|p| format!(":{p}")).unwrap_or_default()
+    ))
+}
+
+/// Whether two URLs are the same page, ignoring a fragment.
+///
+/// A `#section` is a place within a page, not a different one, and treating the
+/// two as different pages would open a second tab every time a model followed a
+/// table-of-contents link.
+fn same_url(a: &str, b: &str) -> bool {
+    let strip = |raw: &str| raw.split('#').next().unwrap_or(raw).to_string();
+    strip(a) == strip(b)
 }
 
 /// Screenshots go through WebView2's capture API.
@@ -1369,13 +1885,10 @@ pub fn browser_close_tab(
     id: u32,
 ) -> Result<(), String> {
     let browser = state_of(&state);
-    if let Some(tab) = browser.remove(id) {
-        // Closing the webview is what actually ends the page; the state is
-        // changed first so a handler firing on the close finds nothing to do.
-        let _ = tab.webview.close();
-    }
-    broadcast(&app, &browser);
-    Ok(())
+    // Through the one close function, so a click on the × behaves exactly like
+    // the sweeper: the tab leaves the strip, lands on the reopen stack, and can
+    // be brought back.
+    close_tab(&app, &browser, id, "closed by the user")
 }
 
 /// Lays the browser out in a window: the active tab in the slot, the rest
@@ -1422,32 +1935,7 @@ pub fn browser_focus_tab(
     session_id: Option<String>,
 ) -> Result<(), String> {
     let browser = state_of(&state);
-    let Some(webview) = browser.webview(id) else {
-        return Err(format!("tab {id} is not open"));
-    };
-    let _ = webview.show();
-    let _ = webview.set_focus();
-
-    // Two pieces of bookkeeping, both done under one lock so the tab list cannot
-    // be broadcast mid-change with two tabs claiming to be the visible one.
-    let host = {
-        let mut tabs = lock(&browser.tabs);
-        let Some(host) = tabs.iter().find(|tab| tab.id == id).map(|tab| tab.host.clone()) else {
-            return Ok(());
-        };
-        for tab in tabs.iter_mut() {
-            if tab.host == host {
-                tab.active = tab.id == id;
-            }
-        }
-        host
-    };
-    lock(&browser.active_by_host).insert(host, id);
-    if let Some(session_id) = session_id {
-        lock(&browser.tab_by_session).insert(session_id, id);
-    }
-    broadcast(&app, &browser);
-    Ok(())
+    focus_tab(&app, &browser, id, session_id.as_deref())
 }
 
 /// Navigates a tab, or moves through its history.
@@ -1702,4 +2190,226 @@ async fn refresh_blocking(
         .blocker
         .set(loaded.filters, config.allow.clone());
     *lock(&state.blocking_sources) = loaded.sources;
+}
+
+/* ---------------------------------------------------------------------------
+   Lifecycle: the sweeper, quit, and a deleted chat
+
+   Together in one place because they all have to agree about the same thing:
+   [the protection list](BrowserState::protected). A sweeper that closed a pinned
+   tab, or a quit that lost one, would be three functions disagreeing about what
+   "do not touch this" means.
+--------------------------------------------------------------------------- */
+
+/// How often the sweeper looks.
+///
+/// A minute rather than the fifteen it acts on: a sweep costs one collector call
+/// per candidate, and a coarser interval would let a tab linger well past the
+/// deadline the user configured.
+const SWEEP_INTERVAL: Duration = Duration::from_secs(60);
+
+/// Starts the background sweep.
+///
+/// Spawned from `lib.rs` beside the scheduler tick, on the async runtime but
+/// doing its webview work on a thread of its own — creating or destroying a
+/// webview from the event loop deadlocks on Windows, the same trap `create_tab`
+/// documents at length.
+pub fn spawn_sweeper(app: AppHandle) {
+    tauri::async_runtime::spawn(async move {
+        loop {
+            tokio::time::sleep(SWEEP_INTERVAL).await;
+            let Some(state) = app.try_state::<AppState>() else {
+                // The app is shutting down. Nothing to sweep.
+                return;
+            };
+            let config = state.snapshot().browser;
+            let browser = Arc::clone(&state.browser);
+            let app = app.clone();
+            // A thread, not this task: the sweep calls into webviews, and it is
+            // allowed to take its time.
+            std::thread::spawn(move || {
+                if let Err(error) = sweep(&app, &browser, &config) {
+                    eprintln!("[loom] browser sweep: {error}");
+                }
+            });
+        }
+    });
+}
+
+/// One pass: close what is idle, then enforce the ceiling.
+///
+/// `idle_close_minutes` and `max_tabs` of zero mean "never" and "unbounded",
+/// which is what a user turning the feature off would expect to be able to say.
+pub fn sweep(
+    app: &AppHandle,
+    state: &Arc<BrowserState>,
+    config: &loom_core::config::BrowserConfig,
+) -> Result<(), String> {
+    let idle_after = config.idle_close_minutes as u64 * 60_000;
+    let now = loom_core::db::now_ms() as u64;
+
+    // The idle pass first, the ceiling second. A tab the idle rule would have
+    // taken must not also count against the ceiling, or it would be closed for a
+    // reason that is not the real one and the note on the activity rail would
+    // say the wrong thing.
+    if idle_after > 0 {
+        let candidates: Vec<(u32, u64)> = state
+            .sweepable()
+            .into_iter()
+            .filter(|(_, touched)| now.saturating_sub(*touched) >= idle_after)
+            .collect();
+
+        for (id, touched) in candidates {
+            // Ask the page before believing the clock. A tab can be untouched by
+            // the *host* while someone is halfway through a form in it, and the
+            // collector's own activity record is the only thing that knows.
+            match in_use(state, id) {
+                // Genuinely in use: reset the clock rather than closing, so the
+                // next judgement is made from evidence instead of from the same
+                // stale timestamp.
+                Ok(true) => {
+                    state.touch(id);
+                    continue;
+                }
+                Ok(false) => {}
+                // A page that cannot answer is judged by the clock alone. A
+                // deliberate choice: a crashed renderer or an error page would
+                // otherwise be immortal, and that is exactly the kind of tab a
+                // sweep exists to clear.
+                Err(_) => {}
+            }
+            // Re-read the clock immediately before closing. The window between
+            // the check above and this line is where a user could have started
+            // typing into the page.
+            if !still_idle(state, id, idle_after) {
+                continue;
+            }
+            let minutes = now.saturating_sub(touched) / 60_000;
+            if let Err(error) = close_tab(app, state, id, &format!("idle for {minutes} minutes")) {
+                eprintln!("[loom] browser sweep: could not close tab {id}: {error}");
+            }
+        }
+    }
+
+    let max = config.max_tabs as usize;
+    if max > 0 {
+        let mut open = state.sweepable();
+        // Oldest first, so the ceiling takes the least recently used.
+        open.sort_by_key(|(_, touched)| *touched);
+        let excess = lock(&state.tabs).len().saturating_sub(max);
+        for (id, _) in open.into_iter().take(excess) {
+            if let Err(error) = close_tab(app, state, id, "over the tab limit") {
+                eprintln!("[loom] browser sweep: could not close tab {id}: {error}");
+            }
+        }
+        if excess > 0 {
+            let _ = app.emit(
+                "loom://browser-note",
+                json!({ "reason": format!("over the tab limit of {max}") }),
+            );
+        }
+    }
+
+    Ok(())
+}
+
+/// Whether the page says someone is using it.
+///
+/// The collector reports both halves of "in use": real input it saw recently, and
+/// fields that currently hold a value. The second is the one that matters — a
+/// half-filled form is the single most expensive thing an automatic close can
+/// destroy, and nothing in the host can see it.
+fn in_use(state: &Arc<BrowserState>, id: u32) -> Result<bool, String> {
+    let Some(webview) = state.webview(id) else {
+        return Err(format!("tab {id} is gone"));
+    };
+    let activity = collect(&webview, "activity", &json!({}))?;
+
+    let Some(activity) = activity.as_object() else {
+        // Not an object and no error key: the collector answered with something
+        // unexpected. Treated as in use, which is the safe direction — a swept
+        // tab is recoverable, a destroyed form is not.
+        return Ok(true);
+    };
+    if activity.get("error").is_some() {
+        return Err("the page did not answer".to_string());
+    }
+
+    let recent_input = activity
+        .get("idleMs")
+        .and_then(Value::as_u64)
+        .map(|idle| idle < 60_000)
+        .unwrap_or(false);
+    let typed = activity
+        .get("typedFields")
+        .and_then(Value::as_array)
+        .map(|fields| !fields.is_empty())
+        .unwrap_or(false);
+    let filled = activity
+        .get("filledFields")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let playing = activity
+        .get("playingMedia")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+
+    Ok(recent_input || typed || filled > 0 || playing)
+}
+
+/// The second look, immediately before the close.
+///
+/// Deliberately re-reads the host clock rather than reusing the one from the
+/// candidate scan: the scan may have been minutes ago if the page was slow to
+/// answer, and a stale comparison is the one that closes the wrong tab.
+fn still_idle(state: &Arc<BrowserState>, id: u32, idle_after: u64) -> bool {
+    let now = loom_core::db::now_ms() as u64;
+    match lock(&state.tabs)
+        .iter()
+        .find(|tab| tab.id == id)
+        .map(|tab| tab.touched_ms)
+    {
+        Some(touched) => now.saturating_sub(touched) >= idle_after,
+        // Gone already, so there is nothing to close and nothing to argue about.
+        None => false,
+    }
+}
+
+/// Closes every tab. Called on a real quit, never on close-to-tray.
+///
+/// `RunEvent::Exit` fires only when the app is genuinely going away, which is
+/// what makes it the right hook: hiding to the tray must not lose the pages, and
+/// a quit must not leave a dozen webviews behind for a process that is ending.
+pub fn close_all(app: &AppHandle) {
+    let Some(state) = app.try_state::<AppState>().map(|state| Arc::clone(&state.browser)) else {
+        return;
+    };
+    let ids: Vec<u32> = lock(&state.tabs).iter().map(|tab| tab.id).collect();
+    for id in ids {
+        if let Err(error) = close_tab(app, &state, id, "the app is quitting") {
+            eprintln!("[loom] browser: could not close tab {id} on exit: {error}");
+        }
+    }
+}
+
+/// Closes the tabs a deleted chat was working in.
+///
+/// Pinned tabs survive, which is the point of pinning: "I am finished with this
+/// conversation" is not the same statement as "throw away the page I told you to
+/// keep". Everything closed here goes on the reopen stack, so a chat deleted by
+/// mistake costs the conversation and not the pages it had open.
+pub fn close_session_tabs(app: &AppHandle, session_id: &str) {
+    let Some(state) = app.try_state::<AppState>().map(|state| Arc::clone(&state.browser)) else {
+        return;
+    };
+    let ids: Vec<u32> = lock(&state.tabs)
+        .iter()
+        .filter(|tab| tab.session_id.as_deref() == Some(session_id) && !tab.pinned)
+        .map(|tab| tab.id)
+        .collect();
+    for id in ids {
+        if let Err(error) = close_tab(app, &state, id, "the chat was deleted") {
+            eprintln!("[loom] browser: could not close tab {id} for a deleted chat: {error}");
+        }
+    }
 }

@@ -5,6 +5,7 @@
 //! shell in `src-tauri` is a thin command layer over this crate so a future
 //! CLI or headless mode can reuse it unchanged.
 
+pub mod archives;
 pub mod attachments;
 pub mod backgrounds;
 pub mod browser;
@@ -16,6 +17,7 @@ pub mod context;
 pub mod db;
 mod db_reentry;
 pub mod dock;
+pub mod documents;
 pub mod edit;
 pub mod embeddings;
 pub mod engine;

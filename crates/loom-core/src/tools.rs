@@ -51,6 +51,19 @@ pub const STOP_COMMAND: &str = "stop_command";
 pub const LIST_CHATS: &str = "list_chats";
 pub const READ_CHAT: &str = "read_chat";
 
+/// The document readers and writers.
+///
+/// Named here because the mode gates, the engine's dispatch and the tool list
+/// all have to agree on them, and a string literal in three places is a typo
+/// waiting to happen in the one place that is not covered by a test.
+pub const READ_PDF: &str = "read_pdf";
+pub const PDF_INFO: &str = "pdf_info";
+pub const READ_DOCUMENT: &str = "read_document";
+pub const IMAGE_INFO: &str = "image_info";
+pub const LIST_ARCHIVE: &str = "list_archive";
+pub const PDF_WRITE: &str = "pdf_write";
+pub const EXTRACT_ARCHIVE: &str = "extract_archive";
+
 /// Most option buttons one question may show. Beyond this the model should be
 /// asking a narrower question.
 const MAX_QUESTION_OPTIONS: usize = 6;
@@ -260,6 +273,13 @@ pub enum ToolScope {
 pub struct ToolContext {
     /// Absolute path of the chat's workspace folder, when one is set.
     pub workdir: Option<PathBuf>,
+    /// The chat this call belongs to, when the engine knows it.
+    ///
+    /// Needed by exactly one thing: a reader that hands the model a *document*
+    /// has to store the bytes somewhere per-session, and the attachments
+    /// directory is keyed by session id. Every other tool works from the
+    /// workspace alone, which is why this is optional and defaults to empty.
+    pub session_id: Option<String>,
     /// Computer use is armed for this chat (the composer's Computer chip).
     pub computer: bool,
     /// The built-in browser is armed for this chat (the composer's Browser
@@ -295,6 +315,27 @@ pub struct ToolImage {
     pub height: u32,
 }
 
+/// A document a tool produced, for a model that can read the real file.
+///
+/// Separate from [`ToolImage`] because the two are metered differently and
+/// because only some models accept a document at all: an image is counted in
+/// pixel tiles and nearly every modern model takes one, while a PDF is counted
+/// against its own page budget and only a `Modality::Pdf` model will accept it.
+/// The engine decides which applies; a tool just records what it found.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ToolDocument {
+    pub name: String,
+    pub mime: String,
+    /// Absolute path inside the Loom home directory, so the bytes can be read at
+    /// wire-building time rather than held in memory between turns.
+    pub path: String,
+    pub bytes: u64,
+    /// Pages, when the producer knows — a PDF's native cost is per page.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub pages: u32,
+}
+
 fn is_zero(value: &u32) -> bool {
     *value == 0
 }
@@ -309,6 +350,10 @@ pub struct ToolOutcome {
     /// Images produced by the call, e.g. a screenshot. Empty for most tools.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub images: Vec<ToolImage>,
+    /// Documents produced by the call, e.g. a PDF read natively. Empty for all
+    /// but a few tools, and only ever inlined for a model that accepts them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub documents: Vec<ToolDocument>,
 }
 
 pub fn specs() -> Vec<ToolSpec> {
@@ -411,6 +456,81 @@ pub fn specs() -> Vec<ToolSpec> {
             scope: None,
         },
         ToolSpec {
+            name: READ_PDF,
+            description: "Read a PDF's text, page by page. Give `pages` a range like \"1-5,8,12-\" for a long document: a whole book at once is slow, expensive and rarely what is wanted. Pages with no text say so, which is how a scanned document is told apart from a cover page. If the PDF has no text layer there is nothing here to read — say so and stop rather than retrying, because a scanned document needs looking at, not reading.",
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string", "description": "Relative path to the PDF" },
+                    "pages": { "type": "string", "description": "Page range, e.g. \"1-5,8,12-\". Omit for the whole document, which is capped at 2000 pages" },
+                    "max_chars": { "type": "integer", "description": "Character budget for the extracted text (default 60000)" }
+                },
+                "required": ["path"],
+                "additionalProperties": false
+            }),
+            read_only: true,
+            scope: None,
+        },
+        ToolSpec {
+            name: PDF_INFO,
+            description: "A PDF's shape, without reading it: page count, page size, metadata (title, author, producer), whether it is encrypted, and whether it has a text layer at all. Use it first on an unknown PDF, and before read_pdf on a large one, so you know which pages matter and whether reading it as text can work.",
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string", "description": "Relative path to the PDF" }
+                },
+                "required": ["path"],
+                "additionalProperties": false
+            }),
+            read_only: true,
+            scope: None,
+        },
+        ToolSpec {
+            name: READ_DOCUMENT,
+            description: "Read a Word, PowerPoint or Excel file: .docx, .pptx, .xlsx, .xlsm, .xls or .ods. Headings come back as headings, tables as tables, and each spreadsheet sheet as its own grid. Use this instead of read_file, which cannot open any of them — they are zipped XML, not text.",
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string", "description": "Relative path to the document" },
+                    "format": { "type": "string", "enum": ["docx", "pptx", "xlsx"], "description": "Override the format the extension implies" },
+                    "max_chars": { "type": "integer", "description": "Character budget (default 60000)" }
+                },
+                "required": ["path"],
+                "additionalProperties": false
+            }),
+            read_only: true,
+            scope: None,
+        },
+        ToolSpec {
+            name: IMAGE_INFO,
+            description: "An image's dimensions and format, read from the header only, so it is cheap on a large file. Use it for a PNG, JPEG, GIF, WebP or TIFF; read_file cannot open any of those.",
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string", "description": "Relative path to the image" }
+                },
+                "required": ["path"],
+                "additionalProperties": false
+            }),
+            read_only: true,
+            scope: None,
+        },
+        ToolSpec {
+            name: LIST_ARCHIVE,
+            description: "List a zip, tar or tar.gz archive's contents with sizes, without extracting anything. The format is sniffed from the file itself, so a misnamed archive still reads correctly. Hostile entry names are shown as written rather than sanitised — seeing `../../etc/passwd` in a listing is the point.",
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string", "description": "Relative path to the archive" },
+                    "limit": { "type": "integer", "description": "Most entries to list (default 200, max 500)" }
+                },
+                "required": ["path"],
+                "additionalProperties": false
+            }),
+            read_only: true,
+            scope: None,
+        },
+        ToolSpec {
             name: "create_dir",
             description: "Create a folder (and any missing parents) inside the workspace.",
             parameters: json!({
@@ -463,6 +583,42 @@ pub fn specs() -> Vec<ToolSpec> {
                     "path": { "type": "string", "description": "Relative path to delete" }
                 },
                 "required": ["path"],
+                "additionalProperties": false
+            }),
+            read_only: false,
+            scope: None,
+        },
+        ToolSpec {
+            name: PDF_WRITE,
+            description: "Change a PDF and write the result to a new file: merge several into one, extract or split out pages, delete pages, rotate them, or set metadata. `out` is required on purpose — writing a PDF is a whole-file rewrite, and a crash mid-write would lose the original if it were overwritten in place. Any rewrite also invalidates a digital signature the PDF carried.",
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "action": { "type": "string", "enum": ["merge", "extract", "split", "delete_pages", "rotate", "set_metadata"], "description": "What to do" },
+                    "path": { "type": "string", "description": "Relative path to the PDF to change (for merge, the first one)" },
+                    "paths": { "type": "array", "items": { "type": "string" }, "description": "For merge: the further PDFs, added in order after `path`" },
+                    "out": { "type": "string", "description": "Relative path to write the result to" },
+                    "pages": { "type": "string", "description": "Which pages, for extract, split, delete_pages and rotate: a range like \"1-5,8,12-\"" },
+                    "rotation": { "type": "integer", "enum": [0, 90, 180, 270], "description": "For rotate: the angle in degrees" },
+                    "metadata": { "type": "object", "description": "For set_metadata: title, author, subject, keywords, creator, producer" }
+                },
+                "required": ["action", "path", "out"],
+                "additionalProperties": false
+            }),
+            read_only: false,
+            scope: None,
+        },
+        ToolSpec {
+            name: EXTRACT_ARCHIVE,
+            description: "Extract a zip, tar or tar.gz into a folder in the workspace. Entries whose names would write *outside* the destination — anything absolute, or containing `..` — are refused and reported rather than written, so a hostile archive cannot escape. A zip bomb is refused by its declared size before a byte is written. Links are not extracted: a link is a path that resolves later, which would defeat every check.",
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string", "description": "Relative path to the archive" },
+                    "out": { "type": "string", "description": "Relative folder to extract into; created if missing" },
+                    "entries": { "type": "array", "items": { "type": "string" }, "description": "Only these paths or folders. Omit for everything" }
+                },
+                "required": ["path", "out"],
                 "additionalProperties": false
             }),
             read_only: false,
@@ -1213,15 +1369,326 @@ pub fn plan_refusal(name: &str) -> String {
     mode_refusal("Plan", name)
 }
 
+/* ---------------------------------------------------------------------------
+   The document tools
+--------------------------------------------------------------------------- */
+
+/// Reads a file's bytes, refusing anything too large before it is read.
+///
+/// Every one of these tools starts here, so the size ceiling is decided in one
+/// place rather than repeated seven times with six different numbers.
+fn read_document_bytes(target: &Path, limit: u64) -> Result<Vec<u8>> {
+    let metadata = std::fs::metadata(target).map_err(|e| Error::io(target, e))?;
+    if metadata.is_dir() {
+        return Err(Error::Other("that path is a folder, not a file".into()));
+    }
+    crate::documents::check_size(target, metadata.len(), limit)?;
+    std::fs::read(target).map_err(|e| Error::io(target, e))
+}
+
+/// The arguments a document reader shares, parsed once.
+fn document_path(arguments: &Value, tool: &str) -> Result<String> {
+    string_arg(arguments, "path").ok_or_else(|| Error::Other(format!("{tool} requires a path")))
+}
+
+/// `read_pdf`: the text, *and* a document for a model that accepts one.
+///
+/// Returning both is what lets one tool serve two kinds of model. The engine
+/// decides which to send — a model advertising `Modality::Pdf` gets the real
+/// file, everyone else gets the text — so there is no capability branch in the
+/// tool layer and no second read of the same file.
+fn read_pdf_tool(call: &ToolCall, context: &ToolContext) -> Result<(String, Vec<ToolDocument>)> {
+    let arguments: Value = if call.arguments.trim().is_empty() {
+        json!({})
+    } else {
+        serde_json::from_str(&call.arguments)
+            .map_err(|e| Error::Other(format!("invalid {READ_PDF} arguments: {e}")))?
+    };
+    let target = resolve(context, &document_path(&arguments, READ_PDF)?)?;
+
+    // Honoured rather than ignored: a model that asks for a smaller read is
+    // usually working inside a tight context, and handing it 60,000 characters
+    // anyway is the opposite of helpful.
+    let max_chars = int_arg(&arguments, "max_chars")
+        .unwrap_or(crate::documents::MAX_DOCUMENT_CHARS as i64)
+        .clamp(200, crate::documents::MAX_DOCUMENT_CHARS as i64) as usize;
+
+    let bytes = read_document_bytes(&target, crate::documents::MAX_DOCUMENT_BYTES)?;
+    let info = crate::documents::pdf_info(&bytes)?;
+    let name = crate::documents::name_of(&target);
+
+    let mut out = format!(
+        "{name} — {} page{}",
+        info.pages,
+        if info.pages == 1 { "" } else { "s" }
+    );
+    if let Some(size) = info.size {
+        out.push_str(&format!(", {:.0}×{:.0}pt", size[0], size[1]));
+    }
+    for (key, value) in &info.metadata {
+        out.push_str(&format!("\n{key}: {value}"));
+    }
+    // The caveat goes near the top of what the model reads, because the decision
+    // it informs — "can I read this at all?" — comes before the reading.
+    if let Some(caveat) = info.text_caveat() {
+        out.push_str(&format!("\n\nNote: {caveat}"));
+    }
+
+    if info.text_layer && info.pages > 0 {
+        let requested = string_arg(&arguments, "pages").unwrap_or_default();
+        let pages = crate::documents::parse_pages(&requested, info.pages as u32)?;
+        let mut body = String::new();
+        let mut blank = Vec::new();
+        for (number, text) in crate::documents::pdf_text_pages(&bytes, &pages)? {
+            if text.trim().is_empty() {
+                blank.push(number);
+                continue;
+            }
+            body.push_str(&format!("--- page {number} ---\n{}\n", text.trim_end()));
+        }
+        if !blank.is_empty() {
+            body.push_str(&format!(
+                "--- pages with no text: {} ---\n",
+                blank
+                    .iter()
+                    .map(u32::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        }
+        if body.trim().is_empty() {
+            out.push_str("\n\nThe selected pages have no text at all.");
+        } else {
+            out.push_str("\n\n");
+            out.push_str(&crate::documents::clamp_to(body, max_chars));
+        }
+    }
+
+    // The document is offered only when it is small enough to be re-sent on
+    // later turns without costing more than it is worth.
+    let mut documents = Vec::new();
+    if bytes.len() as u64 <= crate::documents::MAX_NATIVE_PDF_BYTES {
+        let stored = crate::attachments::store_bytes_in(
+            &crate::paths::loom_home()?.join("attachments"),
+            context.session_id.as_deref().unwrap_or("workspace"),
+            &name,
+            &bytes,
+        )?;
+        documents.push(ToolDocument {
+            name: stored.name,
+            mime: "application/pdf".to_string(),
+            path: stored.path,
+            bytes: bytes.len() as u64,
+            pages: info.pages as u32,
+        });
+    }
+
+    Ok((crate::documents::clamp(out), documents))
+}
+
+/// `pdf_info`.
+fn pdf_info_tool(arguments: &Value, context: &ToolContext) -> Result<String> {
+    let target = resolve(context, &document_path(arguments, PDF_INFO)?)?;
+    let bytes = read_document_bytes(&target, crate::documents::MAX_DOCUMENT_BYTES)?;
+    let info = crate::documents::pdf_info(&bytes)?;
+
+    let mut out = format!(
+        "{} — {} page{}",
+        crate::documents::name_of(&target),
+        info.pages,
+        if info.pages == 1 { "" } else { "s" }
+    );
+    if let Some(size) = info.size {
+        out.push_str(&format!("\nPage size: {:.0} × {:.0} points", size[0], size[1]));
+    }
+    out.push_str(&format!(
+        "\nEncrypted: {}",
+        if info.encrypted { "yes" } else { "no" }
+    ));
+    out.push_str(&format!(
+        "\nText layer: {} ({} characters across the {} page{} sampled)",
+        if info.text_layer { "yes" } else { "no" },
+        info.text_chars,
+        info.pages_sampled,
+        if info.pages_sampled == 1 { "" } else { "s" }
+    ));
+    if info.metadata.is_empty() {
+        out.push_str("\nMetadata: none");
+    } else {
+        out.push_str("\nMetadata:");
+        for (key, value) in &info.metadata {
+            out.push_str(&format!("\n  {key}: {value}"));
+        }
+    }
+    if let Some(caveat) = info.text_caveat() {
+        out.push_str(&format!("\n\nNote: {caveat}"));
+    }
+    Ok(out)
+}
+
+/// `read_document`: DOCX, PPTX and XLSX.
+fn read_document_tool(arguments: &Value, context: &ToolContext) -> Result<String> {
+    let target = resolve(context, &document_path(arguments, READ_DOCUMENT)?)?;
+    let name = crate::documents::name_of(&target);
+
+    let format = match string_arg(arguments, "format") {
+        Some(explicit) => explicit,
+        None => crate::documents::ooxml_format(&name)
+            .ok_or_else(|| {
+                Error::Other(format!(
+                    "`{name}` has no format read_document knows; pass `format` as docx, pptx \
+                     or xlsx"
+                ))
+            })?
+            .to_string(),
+    };
+
+    let max_chars = int_arg(arguments, "max_chars")
+        .unwrap_or(crate::documents::MAX_DOCUMENT_CHARS as i64)
+        .clamp(200, crate::documents::MAX_DOCUMENT_CHARS as i64) as usize;
+
+    let bytes = read_document_bytes(&target, crate::documents::MAX_DOCUMENT_BYTES)?;
+    let rendered = crate::documents::ooxml_text(&bytes, &format)?.render();
+    if rendered.trim().is_empty() {
+        return Ok(format!("{name} has no readable text."));
+    }
+    Ok(crate::documents::clamp_to(
+        format!("{name}:\n\n{rendered}"),
+        max_chars,
+    ))
+}
+
+/// `image_info`.
+fn image_info_tool(arguments: &Value, context: &ToolContext) -> Result<String> {
+    let target = resolve(context, &document_path(arguments, IMAGE_INFO)?)?;
+    let bytes = read_document_bytes(&target, crate::documents::MAX_DOCUMENT_BYTES)?;
+    let meta = crate::documents::image_meta(&target, &bytes)?;
+    Ok(format!(
+        "{} — {} × {} {}, {} bytes{}",
+        crate::documents::name_of(&target),
+        meta.width,
+        meta.height,
+        meta.format,
+        meta.bytes,
+        if meta.can_have_alpha {
+            " (this format can carry transparency)"
+        } else {
+            ""
+        }
+    ))
+}
+
+/// `list_archive`.
+fn list_archive_tool(arguments: &Value, context: &ToolContext) -> Result<String> {
+    let target = resolve(context, &document_path(arguments, LIST_ARCHIVE)?)?;
+    let limit = int_arg(arguments, "limit").unwrap_or(200).clamp(1, 500) as usize;
+    let bytes = read_document_bytes(&target, crate::documents::MAX_DOCUMENT_BYTES)?;
+    let (kind, entries, total) = crate::archives::list(&target, &bytes, limit)?;
+    Ok(crate::archives::render_listing(kind, &entries, total))
+}
+
+/// `pdf_write`.
+fn pdf_write_tool(arguments: &Value, context: &ToolContext) -> Result<String> {
+    let action = string_arg(arguments, "action")
+        .ok_or_else(|| Error::Other("pdf_write requires an action".into()))?;
+    let source = resolve(context, &document_path(arguments, PDF_WRITE)?)?;
+    let out = string_arg(arguments, "out")
+        .ok_or_else(|| Error::Other("pdf_write requires an out".into()))?;
+    // Resolved, not joined: `out` is the newest path argument in the tool set,
+    // and a `pdf_write` must not be a way to write outside the workspace that
+    // `write_file` does not also offer.
+    let destination = resolve(context, &out)?;
+
+    let mut sources = vec![read_document_bytes(
+        &source,
+        crate::documents::MAX_DOCUMENT_BYTES,
+    )?];
+    if let Some(extra) = arguments.get("paths").and_then(Value::as_array) {
+        for entry in extra {
+            let Some(relative) = entry.as_str() else {
+                continue;
+            };
+            let target = resolve(context, relative)?;
+            sources.push(read_document_bytes(
+                &target,
+                crate::documents::MAX_DOCUMENT_BYTES,
+            )?);
+        }
+    }
+
+    let pages = string_arg(arguments, "pages").unwrap_or_default();
+    let rotation = int_arg(arguments, "rotation").unwrap_or(0);
+    let mut metadata = std::collections::BTreeMap::new();
+    if let Some(object) = arguments.get("metadata").and_then(Value::as_object) {
+        for (key, value) in object {
+            if let Some(text) = value.as_str() {
+                metadata.insert(key.clone(), text.to_string());
+            }
+        }
+    }
+
+    let (bytes, report) =
+        crate::documents::pdf_write(&action, &sources, &pages, rotation, &metadata)?;
+
+    if let Some(parent) = destination.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| Error::io(parent, e))?;
+    }
+    std::fs::write(&destination, &bytes).map_err(|e| Error::io(&destination, e))?;
+
+    let mut out_text = format!(
+        "{} → {} ({} page{}, {} bytes)",
+        crate::documents::name_of(&source),
+        crate::documents::name_of(&destination),
+        report.pages,
+        if report.pages == 1 { "" } else { "s" },
+        report.bytes
+    );
+    for note in &report.notes {
+        out_text.push_str(&format!("\n{note}"));
+    }
+    Ok(out_text)
+}
+
+/// `extract_archive`.
+fn extract_archive_tool(arguments: &Value, context: &ToolContext) -> Result<String> {
+    let source = resolve(context, &document_path(arguments, EXTRACT_ARCHIVE)?)?;
+    let out = string_arg(arguments, "out")
+        .ok_or_else(|| Error::Other("extract_archive requires an out".into()))?;
+    let destination = resolve(context, &out)?;
+
+    let bytes = read_document_bytes(&source, crate::documents::MAX_DOCUMENT_BYTES)?;
+    let only: Vec<String> = arguments
+        .get("entries")
+        .and_then(Value::as_array)
+        .map(|entries| {
+            entries
+                .iter()
+                .filter_map(|entry| entry.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let report = crate::archives::extract(&source, &bytes, &destination, &only)?;
+    Ok(crate::archives::render_report(&report))
+}
+
 pub fn execute(call: &ToolCall, context: &ToolContext) -> ToolOutcome {
-    let result = dispatch(call, context);
+    // `read_pdf` is the one tool that also yields a *document* rather than only
+    // text, and threading a second return value through every arm of `dispatch`
+    // would cost more than it explains. So it is handled here, at the top, and
+    // the dispatch table below stays a table of strings.
+    let result = match call.name.as_str() {
+        READ_PDF => read_pdf_tool(call, context),
+        _ => dispatch(call, context).map(|output| (output, Vec::new())),
+    };
     match result {
-        Ok(output) => ToolOutcome {
+        Ok((output, documents)) => ToolOutcome {
             id: call.id.clone(),
             name: call.name.clone(),
             ok: true,
             output,
             images: Vec::new(),
+            documents,
         },
         Err(error) => ToolOutcome {
             id: call.id.clone(),
@@ -1229,6 +1696,7 @@ pub fn execute(call: &ToolCall, context: &ToolContext) -> ToolOutcome {
             ok: false,
             output: error.to_string(),
             images: Vec::new(),
+            documents: Vec::new(),
         },
     }
 }
@@ -1259,6 +1727,17 @@ fn dispatch(call: &ToolCall, context: &ToolContext) -> Result<String> {
             let lines = int_arg(&arguments, "max_lines").filter(|value| *value > 0);
             read_file(&target, start, lines)
         }
+        // The document readers and writers. They share this table rather than
+        // having their own because they use the same `resolve`, the same size
+        // guard and the same error shapes as everything else here — the only
+        // thing that makes them unusual is the format, and that lives in
+        // `documents` and `archives`.
+        PDF_INFO => pdf_info_tool(&arguments, context),
+        READ_DOCUMENT => read_document_tool(&arguments, context),
+        IMAGE_INFO => image_info_tool(&arguments, context),
+        LIST_ARCHIVE => list_archive_tool(&arguments, context),
+        PDF_WRITE => pdf_write_tool(&arguments, context),
+        EXTRACT_ARCHIVE => extract_archive_tool(&arguments, context),
         "grep" => {
             let query = string_arg(&arguments, "query")
                 .or_else(|| string_arg(&arguments, "pattern"))
@@ -2063,6 +2542,9 @@ mod tests {
     fn context(root: &Path) -> ToolContext {
         ToolContext {
             workdir: Some(root.to_path_buf()),
+            // No session: a reader that hands back a document falls back to the
+            // shared workspace bucket, which is what these tests want anyway.
+            session_id: None,
             computer: false,
             browser: false,
         }
@@ -2305,6 +2787,185 @@ mod tests {
         assert!(!always_asks(DELETE_PATH));
         assert!(!requires_confirmation(PermissionMode::AutoAll, DELETE_PATH));
         assert!(!requires_confirmation(PermissionMode::Atelier, DELETE_PATH));
+    }
+
+    #[test]
+    fn the_document_tools_are_classified_by_the_read_only_flag_alone() {
+        // The five readers must run without a card under Auto read-only and be
+        // allowed in Plan; the two writers must not. That is the entire
+        // classification, and it falls out of the `read_only` flag with no
+        // mode-specific code — which is what makes Plan and Review work on a
+        // document for free.
+        for name in [READ_PDF, PDF_INFO, READ_DOCUMENT, IMAGE_INFO, LIST_ARCHIVE] {
+            assert!(spec(name).is_some(), "{name} must be in specs()");
+            assert!(is_read_only(name), "{name} reads");
+            assert!(!is_blocked_in_plan(name), "{name} must be allowed in Plan");
+            assert!(
+                !requires_confirmation(PermissionMode::AutoReadOnly, name),
+                "{name} should not need a card"
+            );
+        }
+        for name in [PDF_WRITE, EXTRACT_ARCHIVE] {
+            assert!(spec(name).is_some(), "{name} must be in specs()");
+            assert!(!is_read_only(name), "{name} writes");
+            assert!(is_blocked_in_plan(name), "{name} must be refused in Plan");
+            assert!(requires_confirmation(PermissionMode::AutoReadOnly, name));
+            // Neither removes anything, so neither is a deletion, and neither
+            // should be swept up by the Recycle Bin risk rule.
+            assert!(!is_deletion(name), "{name} is not a deletion");
+            assert!(!always_asks(name), "{name} does not always ask");
+        }
+        // Chat is a fixed list of four, so none of the seven is offered there.
+        // Fail-closed, and no exception was asked for.
+        for name in [
+            READ_PDF,
+            PDF_INFO,
+            READ_DOCUMENT,
+            IMAGE_INFO,
+            LIST_ARCHIVE,
+            PDF_WRITE,
+            EXTRACT_ARCHIVE,
+        ] {
+            assert!(!is_allowed_in_chat(name), "{name} is not a chat tool");
+            assert!(!name.starts_with("mcp__"), "{name} collides with MCP");
+        }
+    }
+
+    #[test]
+    fn every_document_tool_refuses_a_path_outside_the_workspace() {
+        // All seven go through `resolve`, including the writers' `out`, which is
+        // the newest path argument in the tool set and so the one most worth
+        // pinning: a `pdf_write` must not be a way to write outside the
+        // workspace that `write_file` does not also offer.
+        let dir = tempfile::tempdir().unwrap();
+        let context = context(dir.path());
+
+        for (name, arguments) in [
+            (READ_PDF, json!({ "path": "C:/Windows/win.ini" })),
+            (PDF_INFO, json!({ "path": "/etc/passwd" })),
+            (READ_DOCUMENT, json!({ "path": "/etc/passwd" })),
+            (IMAGE_INFO, json!({ "path": "/etc/passwd" })),
+            (LIST_ARCHIVE, json!({ "path": "/etc/passwd" })),
+            (
+                PDF_WRITE,
+                json!({ "action": "extract", "path": "a.pdf", "out": "/tmp/out.pdf" }),
+            ),
+            (PDF_WRITE, json!({ "action": "extract", "path": "/a.pdf", "out": "out.pdf" })),
+            (EXTRACT_ARCHIVE, json!({ "path": "a.zip", "out": "/tmp/out" })),
+            (EXTRACT_ARCHIVE, json!({ "path": "/a.zip", "out": "out" })),
+            // And a traversal, which is the same escape spelled differently.
+            (PDF_INFO, json!({ "path": "../../secrets.pdf" })),
+            (EXTRACT_ARCHIVE, json!({ "path": "a.zip", "out": "../escaped" })),
+        ] {
+            let call = ToolCall {
+                id: "1".into(),
+                name: name.into(),
+                arguments: arguments.to_string(),
+            };
+            let outcome = execute(&call, &context);
+            assert!(
+                !outcome.ok,
+                "{name} accepted {arguments} and must not have"
+            );
+            assert!(
+                outcome.output.contains("absolute")
+                    || outcome.output.contains("outside")
+                    || outcome.output.contains("not allowed"),
+                "{name} said: {}",
+                outcome.output
+            );
+        }
+    }
+
+    #[test]
+    fn pdf_info_reads_a_real_pdf_from_the_workspace() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("sample.pdf"),
+            crate::documents::test_support::sample_pdf(&["Hello"]),
+        )
+        .unwrap();
+
+        let call = ToolCall {
+            id: "1".into(),
+            name: PDF_INFO.into(),
+            arguments: json!({ "path": "sample.pdf" }).to_string(),
+        };
+        let outcome = execute(&call, &context(dir.path()));
+        assert!(outcome.ok, "{}", outcome.output);
+        assert!(outcome.output.contains("1 page"), "{}", outcome.output);
+        assert!(
+            outcome.output.contains("Text layer: yes"),
+            "{}",
+            outcome.output
+        );
+        // `pdf_info` reads but does not extract, so it offers no document.
+        assert!(outcome.documents.is_empty());
+    }
+
+    #[test]
+    fn read_pdf_offers_the_document_alongside_the_text() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("sample.pdf"),
+            crate::documents::test_support::sample_pdf(&["Alpha"]),
+        )
+        .unwrap();
+
+        let mut context = context(dir.path());
+        context.session_id = Some("session-1".into());
+        let call = ToolCall {
+            id: "1".into(),
+            name: READ_PDF.into(),
+            arguments: json!({ "path": "sample.pdf" }).to_string(),
+        };
+        let outcome = execute(&call, &context);
+        assert!(outcome.ok, "{}", outcome.output);
+        assert!(outcome.output.contains("Alpha"), "{}", outcome.output);
+
+        // The document rides alongside, so the engine can choose. A tool that
+        // returned only text could never send the real PDF to a model that takes
+        // one, and a tool that returned only the document would leave every other
+        // model with nothing.
+        assert_eq!(outcome.documents.len(), 1, "{:?}", outcome.documents);
+        let document = &outcome.documents[0];
+        assert_eq!(document.mime, "application/pdf");
+        assert_eq!(document.pages, 1);
+        assert!(
+            std::path::Path::new(&document.path).exists(),
+            "the stored document must exist on disk for a later turn to read"
+        );
+    }
+
+    #[test]
+    fn list_archive_and_extract_archive_work_through_the_workspace() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("bundle.zip"),
+            crate::archives::test_support::zip_bytes(&[("a.txt", "hello")]),
+        )
+        .unwrap();
+
+        let call = ToolCall {
+            id: "1".into(),
+            name: LIST_ARCHIVE.into(),
+            arguments: json!({ "path": "bundle.zip" }).to_string(),
+        };
+        let outcome = execute(&call, &context(dir.path()));
+        assert!(outcome.ok, "{}", outcome.output);
+        assert!(outcome.output.contains("a.txt"), "{}", outcome.output);
+
+        let call = ToolCall {
+            id: "2".into(),
+            name: EXTRACT_ARCHIVE.into(),
+            arguments: json!({ "path": "bundle.zip", "out": "unpacked" }).to_string(),
+        };
+        let outcome = execute(&call, &context(dir.path()));
+        assert!(outcome.ok, "{}", outcome.output);
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("unpacked/a.txt")).unwrap(),
+            "hello"
+        );
     }
 
     #[test]

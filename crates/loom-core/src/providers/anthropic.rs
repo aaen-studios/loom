@@ -44,11 +44,21 @@ pub fn build_body(request: &ChatRequest<'_>) -> Value {
                     blocks.push(json!({ "type": "text", "text": text }));
                 }
                 for part in &message.parts {
-                    if let super::ContentPart::Image { mime, base64, .. } = part {
-                        blocks.push(json!({
+                    match part {
+                        super::ContentPart::Image { mime, base64, .. } => blocks.push(json!({
                             "type": "image",
                             "source": { "type": "base64", "media_type": mime, "data": base64 }
-                        }));
+                        })),
+                        // This dialect has a first-class document block, and it
+                        // belongs inside the same `tool_result` as the text —
+                        // unlike the OpenAI shape, nothing has to be moved to a
+                        // separate user turn.
+                        super::ContentPart::Document { mime, base64, name } => blocks.push(json!({
+                            "type": "document",
+                            "source": { "type": "base64", "media_type": mime, "data": base64 },
+                            "title": name
+                        })),
+                        super::ContentPart::Text { .. } => {}
                     }
                 }
                 if blocks.is_empty() {
@@ -79,6 +89,11 @@ pub fn build_body(request: &ChatRequest<'_>) -> Value {
                     super::ContentPart::Image { mime, base64, .. } => blocks.push(json!({
                         "type": "image",
                         "source": { "type": "base64", "media_type": mime, "data": base64 }
+                    })),
+                    super::ContentPart::Document { mime, base64, name } => blocks.push(json!({
+                        "type": "document",
+                        "source": { "type": "base64", "media_type": mime, "data": base64 },
+                        "title": name
                     })),
                 }
             }

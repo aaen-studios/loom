@@ -243,6 +243,16 @@ export const ipc = {
   /** Tears a panel off into its own window, or focuses it if already out. */
   openPanelWindow: (panel: string, title: string) =>
     call<void>("open_panel_window", { panel, title }),
+  /**
+   * Opens a folder in the OS file explorer.
+   *
+   * Goes through a Rust command rather than the opener plugin's own JS API, so
+   * the path is validated on the way in and Loom's webviews never gain the
+   * ability to open an arbitrary path. The command refuses anything that is not
+   * an existing directory.
+   */
+  openInExplorer: (path: string) => call<void>("open_in_explorer", { path }),
+
   storageUsage: () => call<StorageUsage>("storage_usage"),
   clearCache: () => call<number>("clear_cache"),
   clearGenerated: () => call<number>("clear_generated"),

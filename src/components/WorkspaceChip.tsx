@@ -35,6 +35,7 @@ import {
   BrainIcon,
   CheckIcon,
   ChevronDownIcon,
+  ExplorerIcon,
   FolderIcon,
   GitBranchIcon,
   GlobeIcon,
@@ -329,6 +330,17 @@ export function WorkspaceChip({ align = "up" }: { align?: "up" | "down" }) {
                 className="hover-surface flex w-full items-center gap-2 rounded-row px-2 py-1.5 text-left text-[13px] text-soft disabled:opacity-50"
               >
                 {indexing ? "Indexing…" : "Index workspace"}
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  close();
+                  void ipc.openInExplorer(session.workdir!);
+                }}
+                className="hover-surface flex w-full items-center gap-2 rounded-row px-2 py-1.5 text-left text-[13px] text-soft"
+              >
+                <ExplorerIcon size={15} className="shrink-0 text-faint" />
+                Open in File Explorer
               </button>
               <button
                 type="button"

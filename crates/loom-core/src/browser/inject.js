@@ -787,6 +787,86 @@
     return { pass: pass, check: kind, value: value, evidence: evidence };
   }
 
+  /* ---------------------------------------------------------------- media */
+
+  /** Every media element in this frame. Cross-origin iframes are not reachable. */
+  function mediaElements() {
+    try {
+      return Array.prototype.slice.call(document.querySelectorAll("audio, video"));
+    } catch (error) {
+      return [];
+    }
+  }
+
+  function playingMedia() {
+    return mediaElements().some(function (element) {
+      return !element.paused && !element.ended && element.currentTime > 0;
+    });
+  }
+
+  /**
+   * Mutes or unmutes every media element, and every one the page creates later.
+   *
+   * The prototype patch is what makes "later" work: a page that builds a player
+   * on demand would otherwise play at full volume through a mute that was applied
+   * before it existed. It is installed once and only once.
+   *
+   * Each element's own volume is remembered rather than zeroed, so unmuting gives
+   * back what was there — a page that was already at 30% does not come back at
+   * 100%.
+   */
+  var muted = false;
+  var volumes = [];
+  var patchInstalled = false;
+
+  function applyMute(want) {
+    muted = want;
+    if (!patchInstalled && window.HTMLMediaElement && window.HTMLMediaElement.prototype) {
+      patchInstalled = true;
+      var proto = window.HTMLMediaElement.prototype;
+      var wasPlaying = proto.play;
+      // `play()` is the one hook a page cannot go around: a media element that
+      // never plays needs no muting, and one that plays is caught here however it
+      // was created.
+      proto.play = function () {
+        if (muted) {
+          try {
+            this.muted = true;
+          } catch (error) {
+            /* a page-level property that refuses to set is not our problem */
+          }
+        }
+        return wasPlaying.apply(this, arguments);
+      };
+    }
+
+    var elements = mediaElements();
+    if (want) {
+      volumes = elements.map(function (element) {
+        return { muted: element.muted, volume: element.volume };
+      });
+      elements.forEach(function (element) {
+        try {
+          element.muted = true;
+        } catch (error) {
+          /* ignore */
+        }
+      });
+    } else {
+      elements.forEach(function (element, index) {
+        var previous = volumes[index];
+        if (!previous) return;
+        try {
+          element.muted = previous.muted;
+          element.volume = previous.volume;
+        } catch (error) {
+          /* ignore */
+        }
+      });
+      volumes = [];
+    }
+  }
+
   /* ----------------------------------------------------------------- page */
 
   function page() {
@@ -878,6 +958,77 @@
     console: function () {
       return { console: consoleLog.slice(-200), failures: failures.slice(-40) };
     },
+    idle: function () {
+      return { idleMs: lastUserAt ? now() - lastUserAt : null };
+    },
+
+    /**
+     * Whether anyone is using this page right now.
+     *
+     * Two signals, and the second is the one that matters. `typedFields` is the
+     * real typing the collector already records; `filledFields` is a count of
+     * visible fields that currently hold a value, whatever put it there. A
+     * half-filled form is the single most expensive thing an automatic close can
+     * destroy, and nothing outside the page can see it — a value set by a script,
+     * or by the user before Loom was watching, leaves no trace in `userTyped`.
+     *
+     * Deliberately not drained or reset: this is a question, not an event, and
+     * asking it must not change the answer.
+     */
+    activity: function () {
+      var filled = 0;
+      var nodes = document.querySelectorAll("input, textarea, select");
+      for (var i = 0; i < nodes.length; i++) {
+        var node = nodes[i];
+        if (!visible(node)) continue;
+        var type = (node.getAttribute("type") || "").toLowerCase();
+        // A checkbox or radio is "filled" only when it is on: an untouched
+        // unchecked box is a field waiting to be used, not work in progress.
+        if (type === "checkbox" || type === "radio") {
+          if (node.checked) filled++;
+          continue;
+        }
+        if (type === "hidden" || type === "submit" || type === "button" ||
+            type === "reset" || type === "image") {
+          continue;
+        }
+        // A search box holding a URL's query is not a form in progress; the
+        // panel's own omnibox is not in the page at all, so only a page's own
+        // search field lands here, and an empty one does not count.
+        var value = node.value;
+        if (typeof value === "string" && value.trim() !== "") filled++;
+      }
+      return {
+        lastInputAt: lastUserAt,
+        idleMs: lastUserAt ? now() - lastUserAt : null,
+        typedFields: Object.keys(userTyped),
+        filledFields: filled,
+        // A page playing audio is in use in the sense that matters here: closing
+        // it stops something the user is listening to.
+        playingMedia: playingMedia(),
+      };
+    },
+
+    /**
+     * Silences the page's media, now and for anything it creates later.
+     *
+     * This is a patch rather than a browser setting, and its limits are worth
+     * stating because the tool description carries them: it reaches the page's
+     * own `HTMLMediaElement`s and nothing inside a cross-origin iframe, and a page
+     * that sets its own `volume` after the patch can win. It is the right 90%; it
+     * must not be advertised as total. The patch is idempotent, and `unmute`
+     * reverses it without losing the page's own volume.
+     */
+    mute: function () {
+      applyMute(true);
+      return { muted: true, media: mediaElements().length };
+    },
+
+    unmute: function () {
+      applyMute(false);
+      return { muted: false, media: mediaElements().length };
+    },
+
     reset: function () {
       userEvents.length = 0;
       userTyped = Object.create(null);

@@ -369,7 +369,12 @@ pub fn apply_after_exit(staging: &Path, install_dir: &Path, exe_name: &str) -> R
         limit = SWAP_WAIT_TRIES,
     );
 
-    std::fs::write(&script, body).map_err(|e| Error::io(&script, e))?;
+    // Atomic, not a plain write. A truncated `loom-update.cmd` is a swap that
+    // silently does nothing: the app exits, the script runs, and there is no
+    // `xcopy` in it. The window is small but it is exactly the window this code
+    // is in — the write happens as the process is on its way out. The same
+    // helper already guards the config for the same reason.
+    crate::fsutil::atomic_write(&script, body.as_bytes())?;
     Ok(script)
 }
 
@@ -413,6 +418,27 @@ mod tests {
     use super::*;
     use std::io::Write;
 
+    /// Serialises the tests that call `apply_after_exit`.
+    ///
+    /// That function writes to a *fixed* path — `%TEMP%\loom-update.cmd`, which
+    /// is right for production because only one update ever runs at a time — and
+    /// that makes it process-global state. Two tests exercising it in parallel
+    /// therefore race on the same file: one overwrites it while the other is
+    /// reading it, and `the_swap_script_needs_no_console` deletes the very file
+    /// the other test is about to open. The symptom was `expect("the swap must
+    /// copy")` failing roughly once in every few full-suite runs — intermittent,
+    /// and nowhere near the code it named.
+    ///
+    /// A lock rather than a parameter, because the alternative is changing
+    /// production behaviour to make a test tidier.
+    static SCRIPT_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn guard() -> std::sync::MutexGuard<'static, ()> {
+        SCRIPT_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
     #[test]
     fn version_comparison_handles_prefixes_and_lengths() {
         assert!(is_newer("0.1.0", "0.1.1"));
@@ -430,6 +456,7 @@ mod tests {
 
     #[test]
     fn the_swap_script_needs_no_console() {
+        let _guard = guard();
         let dir = tempfile::tempdir().unwrap();
         let script = apply_after_exit(&dir.path().join("staging"), dir.path(), "loom.exe").unwrap();
         let body = std::fs::read_to_string(&script).unwrap();
@@ -451,6 +478,7 @@ mod tests {
     /// the relaunch, deleted its own script, and left nothing running.
     #[test]
     fn a_failed_swap_still_relaunches_the_app() {
+        let _guard = guard();
         let dir = tempfile::tempdir().unwrap();
         let script = apply_after_exit(&dir.path().join("staging"), dir.path(), "loom.exe").unwrap();
         let body = std::fs::read_to_string(&script).unwrap();

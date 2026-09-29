@@ -71,6 +71,17 @@ pub enum ContentPart {
         base64: String,
         name: String,
     },
+    /// A PDF sent as the real file rather than as extracted text.
+    ///
+    /// Its own variant rather than a flag on `Image` because the two are encoded
+    /// differently by both dialects — a document is not an image with a different
+    /// mime type, and typing it as one would have produced a request that every
+    /// provider rejects with a message about the wrong field.
+    Document {
+        mime: String,
+        base64: String,
+        name: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -115,17 +126,17 @@ impl WireMessage {
         }
     }
 
-    /// A tool result that carries images (screenshots) as well as text.
-    pub fn tool_result_with_images(
+    /// A tool result that carries images or documents as well as text.
+    pub fn tool_result_with_parts(
         call_id: impl Into<String>,
         content: impl Into<String>,
-        images: Vec<ContentPart>,
+        extra: Vec<ContentPart>,
     ) -> Self {
-        let mut parts = Vec::with_capacity(images.len() + 1);
+        let mut parts = Vec::with_capacity(extra.len() + 1);
         parts.push(ContentPart::Text {
             text: content.into(),
         });
-        parts.extend(images);
+        parts.extend(extra);
         Self {
             role: "tool".to_string(),
             parts,

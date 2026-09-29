@@ -274,8 +274,7 @@ pub fn extract_text(attachment: &Attachment) -> Result<String> {
                 )));
             }
             Ok(clamp_text(text))
-        }
-    }
+        }    }
 }
 
 fn clamp_text(text: String) -> String {
@@ -286,175 +285,15 @@ fn clamp_text(text: String) -> String {
     format!("{truncated}\n[... truncated]")
 }
 
-/// Minimal PDF text extraction: walks `stream ... endstream` blocks, inflates
-/// flate streams, and concatenates the string operands of text-showing
-/// operators.
+/// Every page's text, joined, with a per-page marker.
 ///
-/// Deliberately dependency-light and conservative: a scanned PDF yields an
-/// empty string, which the caller reports as "no text layer".
+/// Delegates to `documents`, which is now the only PDF reader in the codebase.
+/// What was here before was a hand-rolled `stream`/`endstream` walker: no
+/// concept of pages, no metadata, no bound on how far a compressed stream could
+/// inflate. A PDF the user attached and a PDF the model read with `read_pdf` are
+/// now read by exactly the same code, so they cannot disagree about a document.
 pub fn pdf_text(bytes: &[u8]) -> Result<String> {
-    use std::io::Read;
-
-    let text = String::from_utf8_lossy(bytes);
-    let mut out = String::new();
-    let mut cursor = 0;
-
-    while let Some(start) = text[cursor..].find("stream") {
-        let stream_start = cursor + start + "stream".len();
-        let Some(end) = text[stream_start..].find("endstream") else {
-            break;
-        };
-        let end_index = stream_start + end;
-        let raw = &bytes[stream_start.min(bytes.len())..end_index.min(bytes.len())];
-        let raw = raw
-            .strip_prefix(b"\r\n")
-            .or_else(|| raw.strip_prefix(b"\n"))
-            .unwrap_or(raw);
-
-        let mut decoded = String::new();
-        let inflated = match flate2_decode(raw) {
-            Ok(mut decoder) => decoder.read_to_string(&mut decoded).is_ok(),
-            Err(_) => false,
-        };
-        if !inflated {
-            decoded = String::from_utf8_lossy(raw).into_owned();
-        }
-        out.push_str(&extract_operands(&decoded));
-
-        cursor = end_index + "endstream".len();
-        if cursor >= text.len() {
-            break;
-        }
-    }
-
-    if out.trim().is_empty() {
-        out = extract_operands(&text);
-    }
-
-    Ok(out)
-}
-
-/// Extracts the string operands of text-showing operators, which is where the
-/// characters live in a PDF content stream.
-fn extract_operands(stream: &str) -> String {
-    let mut out = String::new();
-    let bytes = stream.as_bytes();
-    let mut index = 0;
-
-    while index < bytes.len() {
-        if bytes[index] == b'(' {
-            let (literal, next) = read_literal(stream, index);
-            let after = stream[next..].trim_start();
-            let shows_text = after.starts_with("Tj")
-                || after.starts_with("TJ")
-                || after.starts_with('\'')
-                || after.starts_with('"');
-            if shows_text {
-                out.push_str(&literal);
-                out.push(' ');
-            }
-            index = next.max(index + 1);
-            continue;
-        }
-        if bytes[index] == b'<' && bytes.get(index + 1) != Some(&b'<') {
-            let (hex, next) = read_hex(stream, index);
-            let after = stream[next..].trim_start();
-            if !hex.is_empty() && (after.starts_with("Tj") || after.starts_with("TJ")) {
-                out.push_str(&hex);
-                out.push(' ');
-            }
-            index = next.max(index + 1);
-            continue;
-        }
-        index += 1;
-    }
-
-    out.split_whitespace().collect::<Vec<_>>().join(" ")
-}
-
-/// Reads a `(...)` PDF string literal starting at `start`, returning the
-/// decoded text and the index just past the closing parenthesis.
-fn read_literal(stream: &str, start: usize) -> (String, usize) {
-    let bytes = stream.as_bytes();
-    let mut out = Vec::new();
-    let mut depth = 0usize;
-    let mut index = start + 1; // skip the opening parenthesis
-
-    while index < bytes.len() {
-        match bytes[index] {
-            b'\\' => {
-                index += 1;
-                if index >= bytes.len() {
-                    break;
-                }
-                let escaped = match bytes[index] {
-                    b'n' => b'\n',
-                    b'r' => b'\r',
-                    b't' => b'\t',
-                    b'(' => b'(',
-                    b')' => b')',
-                    b'\\' => b'\\',
-                    other => other,
-                };
-                out.push(escaped);
-            }
-            b'(' => {
-                depth += 1;
-                out.push(b'(');
-            }
-            b')' => {
-                if depth == 0 {
-                    return (String::from_utf8_lossy(&out).into_owned(), index + 1);
-                }
-                depth -= 1;
-                out.push(b')');
-            }
-            other => out.push(other),
-        }
-        index += 1;
-    }
-
-    (String::from_utf8_lossy(&out).into_owned(), index)
-}
-
-/// Reads a `<hex>` PDF string.
-fn read_hex(stream: &str, start: usize) -> (String, usize) {
-    let bytes = stream.as_bytes();
-    let mut hex = String::new();
-    let mut index = start + 1;
-    while index < bytes.len() && bytes[index] != b'>' {
-        hex.push(bytes[index] as char);
-        index += 1;
-    }
-    (decode_hex_text(&hex), (index + 1).min(bytes.len()))
-}
-
-/// Hex strings are usually UTF-16BE in PDFs, so decode both shapes.
-fn decode_hex_text(hex: &str) -> String {
-    let cleaned: String = hex.chars().filter(|c| c.is_ascii_hexdigit()).collect();
-    let mut bytes = Vec::new();
-    let mut chars = cleaned.chars();
-    while let (Some(high), Some(low)) = (chars.next(), chars.next()) {
-        if let Ok(byte) = u8::from_str_radix(&format!("{high}{low}"), 16) {
-            bytes.push(byte);
-        }
-    }
-
-    if bytes.len() % 2 == 0 && bytes.iter().step_by(2).all(|b| *b == 0) {
-        let units: Vec<u16> = bytes
-            .chunks(2)
-            .map(|pair| u16::from_be_bytes([pair[0], pair[1]]))
-            .collect();
-        return String::from_utf16_lossy(&units);
-    }
-
-    String::from_utf8_lossy(&bytes).into_owned()
-}
-
-fn flate2_decode(raw: &[u8]) -> Result<Box<dyn std::io::Read>> {
-    use std::io::Cursor;
-    let cursor = Cursor::new(raw.to_vec());
-    Ok(Box::new(flate2::read::ZlibDecoder::new(cursor)))
+    crate::documents::pdf_text(bytes)
 }
 
 #[cfg(test)]
@@ -467,29 +306,6 @@ mod tests {
         assert_eq!(kind_for(mime_for("notes.md")), AttachmentKind::Text);
         assert_eq!(kind_for(mime_for("paper.pdf")), AttachmentKind::Pdf);
         assert_eq!(kind_for(mime_for("weird")), AttachmentKind::Text);
-    }
-
-    #[test]
-    fn extracts_text_from_a_simple_content_stream() {
-        let content = "BT /F1 12 Tf (Hello ) Tj (world) Tj ET";
-        assert_eq!(extract_operands(content), "Hello world");
-    }
-
-    #[test]
-    fn handles_escapes_and_hex_strings() {
-        assert_eq!(extract_operands(r"(a \(b\) c) Tj"), "a (b) c");
-        assert_eq!(extract_operands("<48656C6C6F> Tj"), "Hello");
-    }
-
-    #[test]
-    fn ignores_strings_that_are_not_text_operands() {
-        assert_eq!(extract_operands("(not shown) 0 0 1 RG"), "");
-    }
-
-    #[test]
-    fn extracts_from_a_stream_with_binary_envelope() {
-        let pdf = b"%PDF-1.4\n1 0 obj\n<< /Length 34 >>\nstream\nBT (Hi there) Tj ET\nendstream\nendobj\n";
-        assert_eq!(pdf_text(pdf).unwrap(), "Hi there");
     }
 
     #[test]

@@ -279,6 +279,18 @@ export function FolderIcon(props: IconProps) {
   );
 }
 
+/** A folder opening outwards: reveal in the OS file explorer. */
+export function ExplorerIcon(props: IconProps) {
+  return (
+    <Icon {...props}>
+      <path d="M3.5 6.5a1.5 1.5 0 0 1 1.5-1.5h3.6l1.6 2h7.8a1.5 1.5 0 0 1 1.5 1.5v1" />
+      <path d="M3.5 6.5v10.5a1.5 1.5 0 0 0 1.5 1.5h7" />
+      <path d="M15 15.5h5.5" />
+      <path d="M18.2 13.2 20.5 15.5 18.2 17.8" />
+    </Icon>
+  );
+}
+
 export function GitBranchIcon(props: IconProps) {
   return (
     <Icon {...props}>
