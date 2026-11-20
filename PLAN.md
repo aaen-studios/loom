@@ -450,6 +450,8 @@ loom/
   scripts/    Calx: build, release, install
 ```
 
+**How the Calx code fits together.** The repository's root is the source root of every Calx module, so a file's module is its path: `server/main.calx` is `module server.main`, and imports `shared.protocol` from `shared/protocol.calx`. That needs no packages, which Calx hasn't built yet (`calx.toml`, CLX-370). Scripts in `scripts/` stand alone. `calx scripts/check.calx` checks the formatting of every `.calx` file, checks each one builds, runs every file's tests and checks the design tokens are up to date. CI runs it on Linux and Windows on every push and pull request, and macOS joins with the Mac build.
+
 ## What Calx needs
 
 Checked against Calx nightly 2026-11-14 (`838dc1b`), on 2026-11-20. Calx work runs one phase ahead: each item without a card gets one on [`aaen-studios/clx`](https://acta.aaenz.no/aaen-studios/clx) when the phase before its own starts, so it's ready in time. If it isn't, it still blocks its phase.

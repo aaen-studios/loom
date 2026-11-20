@@ -9,4 +9,4 @@ Calx: the instance, and the `loom` program.
 
 The same code is compiled into the desktop app's library for an instance with no server ([PLAN.md](../PLAN.md#an-instance-in-the-desktop-app)).
 
-Starts in Phase 1.
+Started in Phase 1 with `main.calx`, the `loom` program, which so far only says its version: `calx server/main.calx version`.
