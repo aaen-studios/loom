@@ -1,0 +1,1030 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Loom directions, round 2</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Schibsted+Grotesk:wght@400;500;600;700;800&family=DM+Mono:wght@400;500&family=Doto:wght@500;700;900&family=Hanken+Grotesk:wght@400;500;600;700&family=Martian+Mono:wght@400;500;600&family=Jost:wght@400;500;600;700;800&family=Azeret+Mono:wght@400;500;600&family=Instrument+Serif:ital@0;1&family=Geist:wght@400;500;600;700&family=Geist+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+/* ==========================================================================
+   The page around the mocks. Plain, so the directions are what you look at.
+   ========================================================================== */
+:root {
+  --page-bg: #e8e8ea; --page-ink: #17171a; --page-soft: #55555f; --page-line: #cfcfd6; --page-card: #f5f5f7;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) { --page-bg: #101013; --page-ink: #ececf1; --page-soft: #a0a0ac; --page-line: #2a2a31; --page-card: #18181c; }
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; }
+body { background: var(--page-bg); color: var(--page-ink); font: 14px/1.5 system-ui, "Segoe UI", sans-serif; padding: 28px 16px 64px; }
+.page { max-width: 1240px; margin: 0 auto; }
+.page > header h1 { font-size: 22px; margin: 0 0 6px; letter-spacing: -0.01em; }
+.page > header p { margin: 0 0 10px; color: var(--page-soft); max-width: 96ch; }
+.bets { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin: 14px 0 12px; }
+.bet { background: var(--page-card); border: 1px solid var(--page-line); border-radius: 10px; padding: 11px 13px; font-size: 13px; color: var(--page-soft); }
+.bet b { display: block; color: var(--page-ink); font-size: 14px; margin-bottom: 2px; }
+.pick { background: var(--page-card); border: 1px solid var(--page-line); border-left: 4px solid var(--page-ink); border-radius: 10px; padding: 12px 16px; margin: 0 0 20px; }
+.pick p { margin: 0 0 6px; color: var(--page-soft); max-width: 110ch; }
+.pick p:last-child { margin: 0; }
+.pick b { color: var(--page-ink); }
+.bar { display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap; margin-bottom: 14px; position: sticky; top: 0; z-index: 50; background: var(--page-bg); padding: 8px 0; }
+.tabs, .seg { display: flex; gap: 6px; flex-wrap: wrap; }
+.tabs button, .seg button { font: inherit; font-weight: 500; border: 1px solid var(--page-line); background: var(--page-card); color: var(--page-ink); padding: 7px 14px; border-radius: 999px; cursor: pointer; }
+.tabs button[aria-selected="true"], .seg button[aria-pressed="true"] { background: var(--page-ink); color: var(--page-bg); border-color: var(--page-ink); }
+.about { background: var(--page-card); border: 1px solid var(--page-line); border-radius: 12px; padding: 16px 18px; margin: 0 0 18px; }
+.about h2 { margin: 0 0 4px; font-size: 19px; }
+.about .idea { margin: 0 0 12px; color: var(--page-soft); max-width: 105ch; }
+.facts { display: grid; grid-template-columns: 1fr 1fr; gap: 10px 28px; margin: 0; }
+.facts div { font-size: 13px; color: var(--page-soft); }
+.facts dt { font-size: 11px; font-weight: 700; letter-spacing: .07em; text-transform: uppercase; color: var(--page-ink); margin: 0 0 2px; }
+.facts dd { margin: 0; }
+.swatches { display: flex; flex-wrap: wrap; gap: 6px 12px; margin-top: 4px; }
+.sw { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--page-soft); font-family: ui-monospace, Consolas, monospace; }
+.sw i { width: 16px; height: 16px; border-radius: 4px; border: 1px solid var(--page-line); display: inline-block; }
+.stack { display: grid; gap: 22px; }
+.label { font-size: 12px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; color: var(--page-soft); margin: 0 0 6px; }
+.scroller { overflow-x: auto; padding-bottom: 6px; }
+.overview { display: grid; gap: 30px; }
+.overview h2 { margin: 0 0 2px; font-size: 16px; cursor: pointer; }
+.overview p { margin: 0 0 10px; color: var(--page-soft); max-width: 110ch; }
+.pair { display: grid; grid-template-columns: repeat(auto-fit, 590px); gap: 14px; }
+.mini { width: 590px; height: 360px; overflow: hidden; border-radius: 6px; }
+.mini .win { transform: scale(.5); transform-origin: top left; }
+body.solo { padding: 0; background: #000; }
+body.solo .page { max-width: none; }
+body.solo .page > header, body.solo .bar, body.solo .about, body.solo .label { display: none; }
+body.solo .win { border-radius: 0; box-shadow: none; }
+
+/* ==========================================================================
+   The mock window, 1180 x 720. Everything a direction draws comes from its
+   own tokens (custom properties on .win[data-dir][data-theme]), and uses only
+   what GPUI draws: fills, linear gradients, borders, corners, shadows, paths,
+   lines and text. No backdrop blur, nothing floating over a panel.
+   ========================================================================== */
+.win { width: 1180px; height: 720px; overflow: hidden; position: relative; border-radius: 10px; box-shadow: 0 30px 70px -30px rgb(0 0 0 / .5), 0 0 0 1px rgb(0 0 0 / .18); text-rendering: optimizeLegibility; -webkit-font-smoothing: antialiased; }
+.win * { box-sizing: border-box; }
+.win p, .win h3, .win pre { margin: 0; }
+.win button { font: inherit; color: inherit; cursor: pointer; }
+.winctl { display: flex; align-self: stretch; margin-left: auto; }
+.winctl i { width: 44px; display: grid; place-items: center; opacity: .6; }
+.winctl svg { width: 14px; height: 14px; }
+.ic { width: 14px; height: 14px; flex: none; }
+
+/* ==========================================================================
+   1. OPPSTAD. The window is a warp-weighted loom (the old Norse oppstadvev).
+   A beam across the top, each agent a section of warp hanging from it, the
+   conversation the cloth being woven downwards, weights at the bottom.
+   ========================================================================== */
+.win[data-dir="oppstad"] {
+  --font-ui: "Schibsted Grotesk", system-ui, sans-serif;
+  --font-mono: "DM Mono", ui-monospace, monospace;
+  --thread-pitch: 9px;
+  --size-you: 16px; --size-reply: 15.5px; --size-meta: 10.5px;
+}
+.win[data-dir="oppstad"][data-theme="light"] {
+  --wall: #d9dbd5;            /* the wall behind the loom */
+  --cloth: #f4f2ea;           /* undyed wool: where replies are written */
+  --cloth-tool: #e8e5da;      /* twill band: tool calls */
+  --ink: #1f1d1a; --ink-soft: #57534b; --ink-faint: #878278;
+  --you: #26231f; --you-ink: #f4f2ea;          /* your rows: black-sheep wool */
+  --beam: #26231f; --beam-ink: #f4f2ea; --beam-faint: rgb(244 242 234 / .58);
+  --signal: #ebb720; --signal-deep: #a87d05; --signal-ink: #1f1d1a;   /* weld yellow: needs you */
+  --ok: #3b7a48;
+  --dye-main: #b4492f; --dye-builder: #2c6398; --dye-coach: #55843f; --dye-post: #7b5a91;
+  --stone: #b5b2a7; --stone-ink: #1f1d1a;
+  --field: #fbfaf5; --line: rgb(31 29 26 / .18); --weft: rgb(31 29 26 / .055);
+}
+.win[data-dir="oppstad"][data-theme="dark"] {
+  --wall: #141311;
+  --cloth: #23211d;
+  --cloth-tool: #1b1a17;
+  --ink: #efe9dc; --ink-soft: #bfb8a9; --ink-faint: #8d867a;
+  --you: #e3dccb; --you-ink: #1b1917;          /* your rows: white-sheep wool */
+  --beam: #3b342c; --beam-ink: #f3ecdd; --beam-faint: rgb(243 236 221 / .58);
+  --signal: #f2c02e; --signal-deep: #c79a12; --signal-ink: #1b1917;
+  --ok: #8cc58f;
+  --dye-main: #dd7c60; --dye-builder: #7fb0de; --dye-coach: #9cc383; --dye-post: #b998cf;
+  --stone: #4c463e; --stone-ink: #efe9dc;
+  --field: #2b2824; --line: rgb(239 233 220 / .16); --weft: rgb(239 233 220 / .04);
+}
+.win[data-dir="oppstad"] { background: var(--wall); color: var(--ink); font-family: var(--font-ui); font-size: 13px; display: grid; grid-template-rows: 28px 44px 1fr; }
+.op-bar { display: flex; align-items: center; gap: 16px; padding-left: 12px; font-size: 12px; color: var(--ink-soft); }
+.op-mark { display: flex; gap: 7px; align-items: center; font-weight: 800; color: var(--ink); font-size: 13.5px; letter-spacing: -.01em; }
+.op-inst b { color: var(--ink); font-weight: 700; }
+.op-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--ok); display: inline-block; margin-right: 7px; }
+.op-sp { flex: 1; }
+.op-bar kbd { font-family: var(--font-mono); font-size: 10.5px; border: 1px solid var(--line); border-radius: 4px; padding: 0 4px; margin-left: 6px; }
+.op-bar .winctl { margin-left: 0; }
+
+.op-beam { padding: 0 12px; display: grid; grid-template-columns: 118px 766px 118px 118px; gap: 12px; background-color: var(--beam); color: var(--beam-ink); position: relative; z-index: 2;
+  background-image: linear-gradient(180deg, rgb(255 255 255 / .09) 0 1px, transparent 1px 13px, rgb(0 0 0 / .16) 13px 14px, transparent 14px 29px, rgb(0 0 0 / .16) 29px 30px, transparent 30px);
+  box-shadow: 0 5px 0 rgb(0 0 0 / .14); }
+.op-peg { display: flex; align-items: center; gap: 8px; font-weight: 600; font-size: 13px; padding: 0 4px; color: var(--beam-faint); min-width: 0; white-space: nowrap; }
+.op-spool { width: 10px; height: 20px; border-radius: 2px; flex: none; background: repeating-linear-gradient(0deg, var(--dye) 0 2px, color-mix(in srgb, var(--dye) 62%, #000) 2px 3px); }
+.op-peg.on { color: var(--beam-ink); }
+.op-peg.on b { font-weight: 700; }
+.op-badge { min-width: 18px; height: 18px; border-radius: 9px; background: var(--signal); color: var(--signal-ink); font-size: 11px; font-weight: 800; display: grid; place-items: center; padding: 0 5px; }
+.op-slash { opacity: .35; }
+.op-title { font-size: 15px; font-weight: 700; letter-spacing: -.01em; }
+.op-meta { margin-left: auto; font-family: var(--font-mono); font-size: var(--size-meta); color: var(--beam-faint); }
+.op-new { font-size: 12px; font-weight: 600; color: var(--beam-faint); border: 1px solid rgb(255 255 255 / .2); border-radius: 5px; padding: 2px 8px; }
+
+.op-loom { display: grid; grid-template-columns: 118px 766px 118px 118px; gap: 12px; padding: 0 12px; min-height: 0; }
+.op-lane { display: flex; flex-direction: column; min-height: 0;
+  --warp-f: color-mix(in srgb, var(--dye) 80%, transparent); --warp-b: color-mix(in srgb, var(--dye) 38%, transparent);
+  --warp-c: color-mix(in srgb, var(--dye) 13%, transparent); --selv: color-mix(in srgb, var(--dye) 42%, var(--cloth)); }
+.op-hang { flex: 1; min-height: 0; display: flex; flex-direction: column; gap: 9px;
+  background-image: repeating-linear-gradient(90deg, var(--warp-f) 0 1.2px, transparent 1.2px 9px, var(--warp-b) 9px 10.2px, transparent 10.2px 18px); }
+.op-patch { padding: 9px 10px 9px; border-bottom: 2px solid var(--ink); box-shadow: inset 3px 0 0 var(--selv), inset -3px 0 0 var(--selv);
+  background: repeating-linear-gradient(90deg, var(--warp-c) 0 1.2px, transparent 1.2px 9px), repeating-linear-gradient(0deg, var(--weft) 0 1px, transparent 1px 3px), var(--cloth); }
+.op-patch b { display: block; font-size: 12.5px; line-height: 1.25; font-weight: 650; }
+.op-patch small { font-family: var(--font-mono); font-size: 10px; color: var(--ink-faint); }
+.op-mini { display: flex; flex-direction: column; gap: 2px; margin-top: 7px; }
+.op-mini i { height: 3px; background: var(--you); }
+.op-mini i.a { height: 5px; background: color-mix(in srgb, var(--dye) 38%, var(--cloth)); }
+.op-mini i.t { height: 2px; background: var(--ink-faint); }
+
+.op-cloth { flex: 1; min-height: 0; overflow: hidden; display: flex; flex-direction: column; justify-content: flex-end; border-bottom: 3px solid var(--ink);
+  box-shadow: inset 4px 0 0 var(--selv), inset -4px 0 0 var(--selv);
+  background: repeating-linear-gradient(90deg, var(--warp-c) 0 1.2px, transparent 1.2px 9px), repeating-linear-gradient(0deg, var(--weft) 0 1px, transparent 1px 3px), var(--cloth); }
+.op-row { display: grid; grid-template-columns: 92px minmax(0, 1fr) 116px; align-items: baseline; position: relative; }
+.op-lab { padding-left: 18px; font-size: 11.5px; font-weight: 600; color: var(--ink-faint); }
+.op-r { padding-right: 18px; text-align: right; font-family: var(--font-mono); font-size: var(--size-meta); color: var(--ink-faint); white-space: nowrap; }
+.op-wound { display: block; text-align: center; font-size: 11px; color: var(--ink-faint); padding: 0 0 12px; }
+.op-row.you { background: var(--you); color: var(--you-ink); padding: 11px 0 12px; font-size: var(--size-you); font-weight: 600; }
+.op-row.you .op-lab, .op-row.you .op-r { color: inherit; opacity: .6; }
+.op-row.you::after { content: ""; position: absolute; right: -9px; top: 50%; width: 11px; height: 4px; margin-top: -2px; background: var(--you); border-radius: 0 3px 3px 0; }
+.op-row.think { padding: 9px 0 6px; align-items: center; }
+.op-picks { display: flex; flex-direction: column; gap: 3px; max-width: 220px; }
+.op-picks i { height: 1px; background: var(--ink-faint); opacity: .7; }
+.op-row.tool { padding: 8px 0 9px; border-block: 1px solid var(--line);
+  background: repeating-linear-gradient(135deg, var(--weft) 0 1.5px, transparent 1.5px 5px), var(--cloth-tool); }
+.op-row.tool code { font-family: var(--font-mono); font-size: 12.5px; font-weight: 500; color: var(--ink); }
+.op-row.tool pre { font-family: var(--font-mono); font-size: 11.5px; color: var(--ink-soft); margin-top: 3px; }
+.op-row.tool .op-r { color: var(--ok); }
+.op-knot { width: 12px; height: 12px; vertical-align: -2px; margin-right: 5px; }
+.op-row.say { padding: 11px 0 14px; font-size: var(--size-reply); line-height: 1.55; }
+.op-row.say code { font-family: var(--font-mono); font-size: .88em; background: var(--cloth-tool); padding: 1px 5px; border-radius: 4px; }
+.op-row.say .op-lab { color: var(--dye); filter: saturate(1.1); font-weight: 700; }
+.op-wait { color: var(--ink) !important; font-weight: 500; }
+.op-wait::before { content: ""; display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: var(--signal); margin-right: 6px; animation: op-blink 1.6s ease-in-out infinite; }
+
+.op-shed { height: 160px; flex: none; position: relative; margin-top: -9px; }
+.op-shed > svg { position: absolute; left: 0; top: 0; width: 766px; height: 160px; overflow: visible; }
+.op-shuttle { animation: op-rock 3.4s ease-in-out infinite; }
+.op-shuttle path { fill: var(--signal); stroke: var(--signal-deep); stroke-width: 1.5; }
+.op-shuttle path.in { fill: none; stroke: var(--signal-deep); stroke-width: 1; opacity: .55; }
+.op-over line { stroke: var(--warp-f); stroke-width: 1.2; }
+.op-weftline { fill: none; stroke: var(--ink); stroke-width: 2.2; stroke-linecap: round; }
+.op-ask { position: absolute; left: 128px; right: 128px; top: 27px; color: var(--signal-ink); animation: op-rock 3.4s ease-in-out infinite; }
+.op-ask .q { display: flex; align-items: baseline; gap: 8px; font-size: 15.5px; font-weight: 700; }
+.op-ask .q small { margin-left: auto; font-size: 11px; font-weight: 500; opacity: .75; }
+.op-ask > code { display: block; font-family: var(--font-mono); font-size: 13px; font-weight: 500; background: rgb(31 29 26 / .12); border-radius: 6px; padding: 5px 10px; margin: 7px 0 9px; }
+.op-ask .acts { display: flex; gap: 8px; align-items: center; }
+.op-btn { height: 28px; padding: 0 14px; border-radius: 6px; border: 1.5px solid var(--signal-ink); background: none; font-size: 12.5px; font-weight: 700; }
+.op-btn.go { background: var(--signal-ink); color: var(--signal); }
+.op-btn.no { border-color: transparent; text-decoration: underline; text-underline-offset: 3px; }
+.op-ask .acts small { margin-left: auto; font-size: 11px; opacity: .75; }
+
+.op-rod { margin: 0 28px; height: 46px; flex: none; background: var(--field); border: 1.5px solid var(--ink); border-radius: 23px; display: flex; align-items: center; padding: 0 8px 0 22px; gap: 10px; box-shadow: 0 3px 0 rgb(0 0 0 / .14); }
+.op-rod span { font-size: 14.5px; color: var(--ink-faint); flex: 1; }
+.op-rod svg.send { width: 62px; height: 30px; }
+.op-rod svg.send path:first-child { fill: var(--ink); }
+.op-rod svg.send path:last-child { stroke: var(--field); fill: none; stroke-width: 1.8; }
+.op-wts { height: 74px; flex: none; position: relative; }
+.op-wts.sm { height: 96px; }
+.op-fan { position: absolute; left: 0; top: 0; overflow: visible; }
+.op-fan .f { stroke: var(--warp-f); stroke-width: 1.2; }
+.op-fan .b { stroke: var(--warp-b); stroke-width: 1.2; }
+.op-fan .k { fill: var(--dye); }
+.op-stone { position: absolute; transform: translateX(-50%); height: 27px; padding: 0 12px; border-radius: 9px 9px 13px 13px; background: var(--stone); color: var(--stone-ink); font-size: 11.5px; font-weight: 600; display: flex; align-items: center; gap: 6px; white-space: nowrap; box-shadow: inset 0 -3px 0 rgb(0 0 0 / .16); }
+.op-stone.q { font-family: var(--font-mono); font-size: 10px; font-weight: 500; padding: 0 9px; }
+@keyframes op-rock { 0%, 100% { transform: translateX(-4px); } 50% { transform: translateX(4px); } }
+@keyframes op-blink { 0%, 100% { opacity: 1; } 50% { opacity: .25; } }
+
+/* ==========================================================================
+   2. JACQUARD. The first programmable machine ran on a chain of punched
+   cards. Here every turn is a card laced into the chain, a conversation is a
+   deck, and an approval is a card the machine holds until you punch it.
+   ========================================================================== */
+.win[data-dir="jacquard"] {
+  --font-display: "Doto", ui-monospace, monospace;
+  --font-ui: "Hanken Grotesk", system-ui, sans-serif;
+  --font-mono: "Martian Mono", ui-monospace, monospace;
+  --slab: #18241f; --slab-ink: #f3e8c4;
+}
+.win[data-dir="jacquard"][data-theme="light"] {
+  --ground: #a9bfae;          /* enamel on the machine */
+  --ground-deep: #98b09f;     /* the hopper */
+  --ground-line: rgb(24 36 31 / .24);
+  --ink: #18241f; --ink-soft: rgb(24 36 31 / .7);
+  --card: #f4e9c5;            /* manila card stock */
+  --card-print: #e9dcb0;      /* the printed field on a card */
+  --card-ink: #18241f; --card-soft: #4a584e; --card-faint: #7c8570;
+  --hole: #18241f;            /* a punched hole: you see the machine through it */
+  --hole-off: rgb(24 36 31 / .17);
+  --hot: #e4472b; --hot-ink: #200d07;      /* vermilion: the machine is holding */
+  --cord: #8b3d26; --ok: #2c7549;
+  --st-main: #e58ca2; --st-builder: #45a898; --st-coach: #e6a637; --st-post: #9b88d8;
+}
+.win[data-dir="jacquard"][data-theme="dark"] {
+  --ground: #0c1311;
+  --ground-deep: #080d0b;
+  --ground-line: rgb(230 226 207 / .14);
+  --ink: #e6e2cf; --ink-soft: rgb(230 226 207 / .68);
+  --card: #1c2722;
+  --card-print: #141d19;
+  --card-ink: #efe6c8; --card-soft: #b9b59f; --card-faint: #7f8676;
+  --hole: #ffc44d;            /* a punched hole: light comes through */
+  --hole-off: rgb(239 230 200 / .15);
+  --hot: #ff5c3a; --hot-ink: #200d07;
+  --cord: #b9774d; --ok: #7fd3a0;
+  --st-main: #cf7a92; --st-builder: #3fa192; --st-coach: #d39c33; --st-post: #8f7dcc;
+}
+.win[data-dir="jacquard"] { background: var(--ground); color: var(--ink); font-family: var(--font-ui); font-size: 13px; display: grid; grid-template-rows: 34px 1fr; }
+.jq-caps { font-family: var(--font-mono); font-size: 9px; letter-spacing: .1em; text-transform: uppercase; }
+.jq-bar { display: flex; align-items: center; gap: 14px; padding-left: 14px; border-bottom: 1px solid var(--ground-line); }
+.jq-mark { font-family: var(--font-display); font-weight: 900; font-size: 25px; letter-spacing: .06em; text-transform: uppercase; line-height: 1; }
+.jq-plate { border: 1px solid var(--ink); border-radius: 3px; padding: 3px 9px; display: flex; gap: 8px; align-items: center; }
+.jq-plate i { width: 6px; height: 6px; border-radius: 50%; background: var(--ok); }
+.jq-bar .sp { flex: 1; }
+.jq-bar .winctl { margin-left: 0; }
+.jq-body { display: grid; grid-template-columns: 236px 1fr; min-height: 0; }
+.jq-hopper { background: var(--ground-deep); border-right: 1px solid var(--ground-line); padding: 14px 14px 10px; display: flex; flex-direction: column; gap: 9px; min-height: 0; }
+.jq-h { display: flex; justify-content: space-between; opacity: .78; }
+.jq-agents { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-bottom: 8px; }
+.jq-agent { background: var(--card); color: var(--card-ink); height: 56px; padding: 0 8px 5px 9px; clip-path: polygon(10px 0, 100% 0, 100% 100%, 0 100%, 0 10px); border-top: 6px solid var(--stripe); display: flex; flex-direction: column; justify-content: space-between; opacity: .82; }
+.jq-agent svg { align-self: flex-end; margin-top: 6px; }
+.jq-agent b { font-family: var(--font-display); font-weight: 900; font-size: 16px; letter-spacing: .05em; text-transform: uppercase; line-height: 1; display: flex; align-items: center; gap: 6px; }
+.jq-agent.on { opacity: 1; border-top-width: 6px; }
+.jq-agent em { font: 700 10px var(--font-mono); background: var(--hot); color: var(--hot-ink); width: 16px; height: 16px; border-radius: 50%; display: grid; place-items: center; margin-left: auto; }
+.jq-decks { display: flex; flex-direction: column; gap: 11px; }
+.jq-face { background: var(--card); color: var(--card-ink); padding: 5px 9px 6px 12px; clip-path: polygon(9px 0, 100% 0, 100% 100%, 0 100%, 0 9px); border-top: 4px solid var(--stripe); }
+.jq-face b { display: block; font-size: 12.5px; font-weight: 650; line-height: 1.25; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.jq-face small { font-family: var(--font-mono); font-size: 8.5px; letter-spacing: .08em; text-transform: uppercase; color: var(--card-faint); display: flex; justify-content: space-between; }
+.jq-edge { display: flex; flex-direction: column; gap: 1px; margin-top: 1px; }
+.jq-edge i { height: 2px; background: var(--card); opacity: .9; }
+.jq-edge i.a { background: var(--stripe); }
+.jq-deck { opacity: .86; }
+.jq-deck.on { opacity: 1; margin: 0 -26px 0 10px; }
+.jq-foot { margin-top: auto; display: flex; justify-content: space-between; opacity: .78; padding-top: 8px; border-top: 1px solid var(--ground-line); }
+
+.jq-main { display: grid; grid-template-rows: 50px 1fr 70px; min-height: 0; min-width: 0; }
+.jq-head { display: flex; align-items: center; gap: 16px; padding: 0 28px 0 48px; border-bottom: 1px solid var(--ground-line); }
+.jq-head h3 { white-space: nowrap; font-family: var(--font-display); font-weight: 900; font-size: 28px; letter-spacing: .04em; text-transform: uppercase; line-height: 1; }
+.jq-head .jq-caps { opacity: .78; white-space: nowrap; }
+.jq-tape { margin-left: auto; display: flex; align-items: center; gap: 8px; }
+.jq-tape .rows { display: grid; grid-auto-rows: 8.6px; align-items: center; font: 500 6.5px/1 var(--font-mono); letter-spacing: .1em; text-align: right; opacity: .8; }
+.jq-tape svg .bg { fill: var(--card); }
+.jq-tape svg .off { fill: var(--hole-off); }
+.jq-tape svg .on { fill: var(--hole); }
+.jq-tape svg .ask { fill: none; stroke: var(--hot); stroke-width: 1.6; animation: jq-blink 1.2s steps(2, start) infinite; }
+.jq-tape svg .now { stroke: var(--hot); stroke-width: 1.2; }
+.jq-wrap { min-height: 0; overflow: hidden; display: flex; justify-content: center; }
+.jq-chain { position: relative; width: 700px; display: flex; flex-direction: column; justify-content: flex-end; gap: 9px; padding-bottom: 2px; }
+.jq-chain::before, .jq-chain::after { content: ""; position: absolute; top: -40px; bottom: 9px; width: 2px; background: var(--cord); z-index: 3; left: 19px; }
+.jq-chain::after { left: auto; right: 19px; }
+.jq-card { position: relative; flex: none; background: var(--card); color: var(--card-ink); clip-path: polygon(16px 0, 100% 0, 100% 100%, 0 100%, 0 16px); }
+.jq-card::before { content: ""; position: absolute; inset: 0; pointer-events: none; z-index: 2;
+  background: radial-gradient(circle 3.5px at 20px 9px, var(--hole) 96%, transparent), radial-gradient(circle 3.5px at 20px calc(100% - 9px), var(--hole) 96%, transparent), radial-gradient(circle 3.5px at calc(100% - 20px) 9px, var(--hole) 96%, transparent), radial-gradient(circle 3.5px at calc(100% - 20px) calc(100% - 9px), var(--hole) 96%, transparent); }
+.jq-stripe { height: 20px; background: var(--stripe); color: #18241f; display: flex; align-items: center; padding: 0 44px; gap: 10px; font-weight: 500; }
+.jq-stripe svg { margin-left: auto; }
+.jq-stripe svg circle { fill: #18241f; }
+.jq-in { padding: 9px 44px 12px; }
+.jq-you .jq-in { padding: 10px 44px 9px; display: grid; grid-template-columns: 1fr auto; gap: 6px 14px; align-items: end; }
+.jq-you p { font-family: var(--font-mono); font-size: 13.5px; font-weight: 500; letter-spacing: -.01em; }
+.jq-you .jq-caps { color: var(--card-faint); font-size: 8.5px; }
+.jq-you p { grid-column: 1 / -1; }
+.jq-punch .on { fill: var(--hole); }
+.jq-punch .off { fill: var(--hole-off); }
+.jq-think { display: flex; align-items: center; gap: 5px; color: var(--card-faint); }
+.jq-think i { width: 6px; height: 6px; border-radius: 50%; background: var(--hole); }
+.jq-think span { margin-left: 4px; }
+.jq-tool { margin: 7px -10px 9px; padding: 7px 10px 8px; background: var(--card-print); border-block: 1px dashed var(--card-faint); display: grid; grid-template-columns: 1fr auto; gap: 3px 12px; align-items: center; }
+.jq-tool code { font-family: var(--font-mono); font-size: 12px; font-weight: 500; }
+.jq-tool pre { font-family: var(--font-mono); font-size: 10.5px; color: var(--card-soft); grid-column: 1 / -1; }
+.jq-stamp { border: 1.5px solid var(--ok); color: var(--ok); padding: 2px 6px; font-weight: 600; font-size: 8.5px; }
+.jq-say { font-size: 15.5px; line-height: 1.5; }
+.jq-say code { font-family: var(--font-mono); font-size: .8em; background: var(--card-print); padding: 1px 5px; }
+.jq-hold { background: var(--hot); color: var(--hot-ink); padding: 10px 44px 13px; }
+.jq-hold .q { display: flex; align-items: baseline; gap: 12px; }
+.jq-hold .q b { font-family: var(--font-mono); font-weight: 600; font-size: 13px; letter-spacing: .16em; background: var(--slab); color: var(--hot); padding: 4px 8px 4px 10px; align-self: center; }
+.jq-hold .q span { font-weight: 700; font-size: 15.5px; }
+.jq-hold .q small { margin-left: auto; }
+.jq-hold > code { display: block; background: var(--slab); color: var(--slab-ink); font-family: var(--font-mono); font-size: 12.5px; padding: 8px 12px; margin: 8px 0 9px; }
+.jq-keys { display: flex; align-items: center; gap: 8px; }
+.jq-key { white-space: nowrap; height: 30px; padding: 0 12px 0 8px; display: inline-flex; align-items: center; gap: 8px; border: 1.5px solid var(--hot-ink); border-radius: 3px; background: none; font: 600 9.5px var(--font-mono); letter-spacing: .08em; text-transform: uppercase; }
+.jq-key i { width: 13px; height: 13px; border-radius: 50%; border: 1.5px dashed currentColor; }
+.jq-key.go { background: var(--slab); color: var(--slab-ink); border-color: var(--slab); }
+.jq-key.go i { border-style: solid; background: var(--hot); border-color: var(--slab-ink); }
+.jq-keys small { margin-left: auto; }
+.jq-pin { position: absolute; z-index: 4; bottom: 52px; width: 0; height: 0; border-block: 9px solid transparent; animation: jq-blink 1.2s steps(2, start) infinite; }
+.jq-pin.l { left: -22px; border-left: 13px solid var(--hot); }
+.jq-pin.r { right: -22px; border-right: 13px solid var(--hot); }
+.jq-compose { display: flex; justify-content: center; padding: 7px 0 0; border-top: 1px solid var(--ground-line); }
+.jq-blank { width: 700px; height: 50px; background: var(--card); color: var(--card-ink); clip-path: polygon(16px 0, 100% 0, 100% 100%, 0 100%, 0 16px); display: flex; align-items: center; gap: 8px; padding: 0 10px 0 44px; }
+.jq-blank p { font-family: var(--font-mono); font-size: 13px; color: var(--card-faint); flex: 1; }
+.jq-blank p::before { content: ""; display: inline-block; width: 8px; height: 15px; background: var(--card-ink); vertical-align: -3px; margin-right: 8px; animation: jq-blink 1.1s steps(2, start) infinite; }
+.jq-chip { border: 1px solid var(--card-faint); color: var(--card-soft); padding: 4px 7px; font-size: 8.5px; }
+.jq-blank .jq-key { border-color: var(--card-ink); background: var(--card-ink); color: var(--card); padding: 0 12px; }
+@keyframes jq-blink { to { visibility: hidden; } }
+
+/* ==========================================================================
+   3. ÅKLE. A Norwegian åkle is a weft-faced coverlet: solid bands of dyed
+   wool with pattern rows between them. Here every message is a full-width
+   band in its speaker's dye, and the type is big. The loud one.
+   ========================================================================== */
+.win[data-dir="akle"] {
+  --font-ui: "Jost", system-ui, sans-serif;
+  --font-mono: "Azeret Mono", ui-monospace, monospace;
+  --size-you: 26px; --size-reply: 18.5px;
+  --slab: #121212; --slab-ink: #f6f2e7;
+}
+.win[data-dir="akle"][data-theme="light"] {
+  --ground: #f6f2e7;          /* undyed: your own bands */
+  --ink: #121212; --ink-soft: rgb(18 18 18 / .66); --ink-faint: rgb(18 18 18 / .4);
+  --chrome: #121212; --chrome-ink: #f6f2e7;
+  --block: #121212; --block-ink: #f6f2e7;       /* tool calls and pattern rows */
+  --block-soft: rgb(246 242 231 / .68);
+  --c-main: #f2b90c; --c-main-ink: #121212;
+  --c-builder: #2545d3; --c-builder-ink: #ffffff;
+  --c-coach: #0f8a5f; --c-coach-ink: #ffffff;
+  --c-post: #ee6fa0; --c-post-ink: #121212;
+  --hot: #f2481b; --hot-ink: #121212;           /* needs you */
+}
+.win[data-dir="akle"][data-theme="dark"] {
+  --ground: #0f0f0f;
+  --ink: #f4efe2; --ink-soft: rgb(244 239 226 / .7); --ink-faint: rgb(244 239 226 / .42);
+  --chrome: #1f1f1f; --chrome-ink: #f4efe2;
+  --block: #000000; --block-ink: #f4efe2;
+  --block-soft: rgb(244 239 226 / .68);
+  --c-main: #f2b90c; --c-main-ink: #121212;
+  --c-builder: #2a4ae0; --c-builder-ink: #ffffff;
+  --c-coach: #12976a; --c-coach-ink: #ffffff;
+  --c-post: #f07aa8; --c-post-ink: #121212;
+  --hot: #ff5a2a; --hot-ink: #121212;
+}
+.win[data-dir="akle"] { background: var(--ground); color: var(--ink); font-family: var(--font-ui); font-size: 14px; display: grid; grid-template-rows: 58px 1fr 58px 46px; border-radius: 4px; }
+.ak-top { display: grid; grid-template-columns: 178px 92px 1fr 92px 92px 132px; }
+.ak-home { background: var(--chrome); color: var(--chrome-ink); padding: 0 16px; display: flex; flex-direction: column; justify-content: center; }
+.ak-home b { font-weight: 800; font-size: 21px; letter-spacing: -.02em; line-height: 1; }
+.ak-home small { font-size: 11px; opacity: .72; margin-top: 4px; display: flex; align-items: center; gap: 6px; }
+.ak-home small i { width: 7px; height: 7px; background: var(--c-coach); }
+.ak-ag { background: var(--c); color: var(--ci); display: flex; align-items: flex-end; padding: 0 12px 9px; font-weight: 700; font-size: 11.5px; letter-spacing: .15em; text-transform: uppercase; min-width: 0; }
+.ak-ag.on { align-items: center; padding: 0 20px; gap: 14px; }
+.ak-ag.on h3 { font-size: 27px; font-weight: 700; letter-spacing: -.02em; text-transform: none; line-height: 1; white-space: nowrap; }
+.ak-ag.on em { font-style: normal; margin-left: auto; opacity: .85; font-weight: 600; font-size: 10.5px; white-space: nowrap; }
+.ak-badge { background: var(--hot); color: var(--hot-ink); min-width: 24px; height: 24px; display: grid; place-items: center; font-weight: 800; font-size: 13px; letter-spacing: 0; }
+.ak-ctl { background: var(--chrome); color: var(--chrome-ink); display: flex; }
+.ak-ctl .winctl { margin: 0; flex: 1; }
+.ak-ctl .winctl i { flex: 1; width: auto; opacity: .8; }
+
+.ak-cloth { min-height: 0; overflow: hidden; display: flex; flex-direction: column; justify-content: flex-end; }
+.ak-band { display: grid; grid-template-columns: 150px minmax(0, 1fr) 200px; align-items: center; position: relative; flex: none; }
+.ak-lab { padding-left: 20px; font-weight: 700; font-size: 11px; letter-spacing: .16em; text-transform: uppercase; }
+.ak-r { padding-right: 20px; text-align: right; font-family: var(--font-mono); font-size: 10px; letter-spacing: .05em; text-transform: uppercase; opacity: .8; white-space: nowrap; }
+.ak-you { padding: 14px 0 16px; }
+.ak-you p { font-size: var(--size-you); font-weight: 500; line-height: 1.12; letter-spacing: -.015em; }
+.ak-of { background: var(--c-builder); color: var(--c-builder-ink); }
+.ak-think { padding: 10px 0 9px; font-size: 13px; }
+.ak-think p { display: flex; align-items: center; gap: 6px; opacity: .9; }
+.ak-think p i { width: 8px; height: 8px; background: currentColor; transform: rotate(45deg); }
+.ak-think p span { margin-left: 6px; }
+.ak-tool { background: var(--block); color: var(--block-ink); padding: 10px 0 11px; }
+.ak-tool code { font-family: var(--font-mono); font-size: 13px; font-weight: 500; }
+.ak-tool pre { font-family: var(--font-mono); font-size: 11px; color: var(--block-soft); margin-top: 3px; }
+.ak-tool .ak-lab { color: var(--block-soft); }
+.ak-say { padding: 13px 0 16px; }
+.ak-say p { font-size: var(--size-reply); line-height: 1.38; max-width: 730px; }
+.ak-say code { font-family: var(--font-mono); font-size: .78em; background: rgb(0 0 0 / .28); padding: 2px 6px; }
+.ak-border { background: var(--block); color: var(--block-ink); height: 20px; }
+.ak-border svg { display: block; }
+.ak-border .m1 { fill: var(--c-main); } .ak-border .m2 { fill: var(--c-builder); } .ak-border .m3 { fill: var(--block-ink); }
+.ak-border .z { fill: none; stroke: var(--block-ink); stroke-width: 1.4; opacity: .5; }
+.ak-hot { background: var(--hot); color: var(--hot-ink); padding: 26px 0 18px; align-items: start; }
+.ak-hot .ak-lab { padding-top: 8px; }
+.ak-hot .ak-r { padding-top: 8px; opacity: 1; line-height: 1.7; }
+.ak-hot h4 { margin: 0; font-size: 29px; font-weight: 700; line-height: 1; letter-spacing: -.02em; }
+.ak-hot code { display: inline-block; background: var(--slab); color: var(--slab-ink); font-family: var(--font-mono); font-size: 14px; padding: 9px 14px; margin: 11px 0 11px; }
+.ak-acts { display: flex; gap: 8px; align-items: center; }
+.ak-btn { height: 38px; padding: 0 18px; font-weight: 700; font-size: 12.5px; letter-spacing: .12em; text-transform: uppercase; border: 2px solid var(--hot-ink); background: none; white-space: nowrap; }
+.ak-btn.go { background: var(--slab); color: var(--slab-ink); border-color: var(--slab); }
+.ak-btn.no { border-color: transparent; text-decoration: underline; text-underline-offset: 4px; padding: 0 10px; }
+.ak-zig { position: absolute; left: 0; top: 0; display: block; }
+.ak-zig path { fill: var(--c-builder); }
+.ak-zig g { animation: ak-slide 1.6s linear infinite; }
+.ak-compose { display: grid; grid-template-columns: 150px 1fr auto 58px; align-items: center; border-top: 2px solid var(--ink); }
+.ak-compose p { font-size: 24px; color: var(--ink-faint); letter-spacing: -.01em; }
+.ak-compose p::before { content: ""; display: inline-block; width: 2px; height: 26px; background: var(--ink); vertical-align: -5px; margin-right: 6px; }
+.ak-chips { display: flex; gap: 18px; padding-right: 20px; font-weight: 700; font-size: 10.5px; letter-spacing: .14em; text-transform: uppercase; color: var(--ink-soft); }
+.ak-send { align-self: stretch; background: var(--ink); color: var(--ground); display: grid; place-items: center; }
+.ak-send svg { width: 22px; height: 22px; }
+.ak-fringe { display: grid; grid-template-columns: 1.1fr 1fr 1.15fr .8fr 1.15fr; border-top: 2px solid var(--ink); }
+.ak-tassel { display: flex; align-items: center; gap: 10px; padding: 0 14px 0 16px; min-width: 0; border-right: 1px solid var(--ink-faint); }
+.ak-tassel:last-child { border-right: 0; }
+.ak-tassel svg { width: 14px; height: 30px; flex: none; color: var(--c); }
+.ak-tassel b { font-size: 14px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; letter-spacing: -.005em; }
+.ak-tassel small { margin-left: auto; font-family: var(--font-mono); font-size: 9.5px; text-transform: uppercase; letter-spacing: .05em; opacity: .7; white-space: nowrap; }
+.ak-tassel.on { background: var(--c); color: var(--ci); }
+.ak-tassel.on svg { color: var(--ci); }
+@keyframes ak-slide { to { transform: translateX(24px); } }
+
+/* ==========================================================================
+   4. DRAFT. A weaver's draft is the notation for a cloth: threading across
+   the top, tie-up in the corner, treadling down the side, and the cloth
+   itself (the drawdown) in the middle. The window is that sheet.
+   Everything sits on a 16 px grid.
+   ========================================================================== */
+.win[data-dir="draft"] {
+  --font-display: "Instrument Serif", Georgia, serif;
+  --font-ui: "Geist", system-ui, sans-serif;
+  --font-mono: "Geist Mono", ui-monospace, monospace;
+  --cell: 16px;
+  --size-you: 28px; --size-reply: 15.5px;
+}
+.win[data-dir="draft"][data-theme="light"] {
+  --paper: #f1f4fa;
+  --ink: #0c2577;             /* Prussian blue: every filled cell and rule */
+  --text: #0b1b52; --soft: rgb(11 27 82 / .72); --faint: rgb(11 27 82 / .48);
+  --grid: rgb(12 37 119 / .085); --rule: rgb(12 37 119 / .32);
+  --red: #df3a1c; --red-ink: #b02a10; --hatch: rgb(223 58 28 / .1);   /* the second ink: needs you */
+  --ok: #0d7a56;
+}
+.win[data-dir="draft"][data-theme="dark"] {
+  --paper: #0b1b55;           /* cyanotype */
+  --ink: #dbe6ff;
+  --text: #eef3ff; --soft: rgb(238 243 255 / .76); --faint: rgb(238 243 255 / .5);
+  --grid: rgb(219 230 255 / .07); --rule: rgb(219 230 255 / .32);
+  --red: #ff6a4a; --red-ink: #ff977e; --hatch: rgb(255 106 74 / .15);
+  --ok: #7fe0b8;
+}
+.win[data-dir="draft"] { background-color: var(--paper); color: var(--text); font-family: var(--font-ui); font-size: 13px; display: grid; grid-template-rows: 32px 104px 1fr 62px; grid-template-columns: 1fr 172px; border-radius: 3px;
+  background-image: linear-gradient(var(--grid) 1px, transparent 1px), linear-gradient(90deg, var(--grid) 1px, transparent 1px); background-size: 16px 16px; }
+.dr-mono { font-family: var(--font-mono); font-size: 9px; letter-spacing: .09em; text-transform: uppercase; color: var(--faint); }
+.dr-titleblock { grid-column: 1 / -1; display: flex; align-items: stretch; border-bottom: 1.5px solid var(--ink); background: var(--paper); }
+.dr-titleblock > div { display: flex; align-items: center; gap: 8px; padding: 0 14px; border-right: 1px solid var(--rule); white-space: nowrap; }
+.dr-titleblock b { font-weight: 600; }
+.dr-logo { font-family: var(--font-display); font-style: italic; font-size: 23px; color: var(--ink); padding-bottom: 3px !important; width: 112px; }
+.dr-titleblock .sp { flex: 1; border: 0; }
+.dr-titleblock .dot { width: 7px; height: 7px; background: var(--ok); }
+.dr-titleblock .winctl { margin: 0; color: var(--ink); }
+.dr-thread, .dr-tieup { position: relative; }
+.dr-tieup { border-left: 1.5px solid var(--ink); }
+.dr-thread svg, .dr-tieup svg { display: block; position: absolute; left: 0; top: 0; }
+.dr-tieup svg { left: -1.5px; }
+.dr-svg text { font-family: var(--font-ui); font-size: 11.5px; fill: var(--soft); }
+.dr-svg text.on { fill: var(--text); font-weight: 700; }
+.dr-svg text.m { font-family: var(--font-mono); font-size: 8.5px; letter-spacing: .08em; fill: var(--faint); }
+.dr-svg text.s { font-family: var(--font-mono); font-size: 7px; letter-spacing: .04em; fill: var(--faint); }
+.dr-svg text.l { font-size: 11px; font-weight: 600; fill: var(--text); }
+.dr-svg text.l tspan { font-weight: 400; fill: var(--faint); }
+.dr-svg .fill { fill: var(--ink); }
+.dr-svg .box { fill: none; stroke: var(--ink); stroke-width: 1.5; }
+.dr-svg .day { stroke: var(--rule); stroke-width: 1; }
+.dr-svg .back { fill: var(--paper); }
+.dr-svg .next { fill: none; stroke: var(--ink); stroke-width: 1.2; stroke-dasharray: 2.5 2; }
+.dr-svg .ask { fill: var(--hatch); stroke: var(--red); stroke-width: 2; animation: dr-blink 1.3s ease-in-out infinite; }
+.dr-svg .now { stroke: var(--red); stroke-width: 1.2; }
+.dr-svg text.nowt { fill: var(--red-ink); font-family: var(--font-mono); font-size: 8.5px; letter-spacing: .08em; }
+.dr-svg .cellbox { fill: none; stroke: var(--rule); stroke-width: 1; }
+
+.dr-draw { grid-column: 1 / -1; min-height: 0; overflow: hidden; display: flex; flex-direction: column; justify-content: flex-end; position: relative; border-top: 1.5px solid var(--ink); padding-bottom: 12px; }
+.dr-draw::after { content: ""; position: absolute; left: 1006.5px; top: 0; bottom: 0; width: 1.5px; background: var(--ink); }
+.dr-draw::before { content: ""; position: absolute; left: 1024px; top: 0; bottom: 0; width: 97px; border-inline: 1px solid var(--rule); }
+.dr-row { display: grid; grid-template-columns: 112px minmax(0, 1fr) 172px; align-items: start; flex: none; position: relative; }
+.dr-row.you, .dr-row.think { align-items: center; }
+.dr-row.say .dr-lab { padding-top: 3px; }
+.dr-lab { padding-left: 16px; }
+.dr-lab b { display: block; font: 600 12px var(--font-ui); letter-spacing: 0; text-transform: none; color: var(--text); }
+.dr-mid { padding-right: 40px; min-width: 0; }
+.dr-t { position: relative; align-self: stretch; }
+.dr-t i { position: absolute; left: calc(17px + var(--c) * 16px); top: 50%; width: 14px; height: 14px; margin-top: -7px; background: var(--ink); }
+.dr-t i.ask { background: var(--hatch); box-shadow: inset 0 0 0 2px var(--red); animation: dr-blink 1.3s ease-in-out infinite; }
+.dr-t u { position: absolute; left: 16px; width: 96px; top: 50%; height: 3px; margin-top: -1.5px; background: var(--ink); }
+.dr-t time { position: absolute; left: 121px; top: 50%; margin-top: -6px; font-family: var(--font-mono); font-size: 9px; color: var(--faint); letter-spacing: .04em; white-space: nowrap; }
+.dr-row.you { padding: 12px 0 9px; }
+.dr-row.you p { font-family: var(--font-display); font-size: var(--size-you); line-height: 1.08; letter-spacing: -.005em; }
+.dr-row.think { padding: 2px 0 6px; }
+.dr-row.think p { font-family: var(--font-mono); font-size: 10.5px; color: var(--faint); display: flex; align-items: center; gap: 3px; }
+.dr-row.think p i { width: 7px; height: 7px; background: var(--faint); }
+.dr-row.think p span { margin-left: 6px; }
+.dr-tool { border: 1.5px solid var(--ink); background: var(--paper); padding: 7px 12px 8px; display: grid; grid-template-columns: 1fr auto; gap: 4px 12px; max-width: 700px; }
+.dr-tool code { font-family: var(--font-mono); font-size: 12.5px; font-weight: 500; }
+.dr-tool span { font-family: var(--font-mono); font-size: 10px; color: var(--ok); }
+.dr-tool pre { grid-column: 1 / -1; font-family: var(--font-mono); font-size: 11px; color: var(--soft); border-top: 1px dotted var(--rule); padding-top: 5px; }
+.dr-row.say { padding: 9px 0 10px; }
+.dr-row.say p { font-size: var(--size-reply); line-height: 1.55; max-width: 700px; }
+.dr-row.say code { font-family: var(--font-mono); font-size: .86em; border: 1px solid var(--rule); padding: 0 5px; background: var(--paper); }
+.dr-row.end { padding: 2px 0 4px; }
+.dr-row.end hr { border: 0; border-top: 1px solid var(--rule); margin: 0; max-width: 700px; }
+.dr-ask { border: 2px solid var(--red); padding: 12px 16px 14px; max-width: 700px;
+  background: repeating-linear-gradient(135deg, var(--hatch) 0 2px, transparent 2px 9px), var(--paper); }
+.dr-ask h4 { margin: 0; font-family: var(--font-display); font-weight: 400; font-size: 27px; line-height: 1; color: var(--red-ink); display: flex; align-items: baseline; }
+.dr-ask h4 small { margin-left: auto; font-family: var(--font-mono); font-size: 9px; letter-spacing: .09em; text-transform: uppercase; }
+.dr-ask > code { display: block; font-family: var(--font-mono); font-size: 13px; font-weight: 500; background: var(--paper); border: 1.5px solid var(--ink); padding: 7px 11px; margin: 9px 0 10px; }
+.dr-acts { display: flex; gap: 8px; align-items: center; }
+.dr-ch { display: inline-flex; align-items: center; gap: 8px; height: 32px; padding: 0 14px 0 9px; border: 1.5px solid var(--red); background: var(--paper); font: 600 13px var(--font-ui); color: var(--red-ink); white-space: nowrap; }
+.dr-ch i { width: 13px; height: 13px; border: 1.5px solid currentColor; }
+.dr-ch i.h { background: linear-gradient(135deg, transparent 50%, currentColor 50%); }
+.dr-ch.go { background: var(--red); color: var(--paper); }
+.dr-ch.go i { background: currentColor; }
+.dr-acts small { margin-left: auto; font-size: 11.5px; color: var(--soft); }
+.dr-next { display: grid; grid-template-columns: 112px 1fr auto 40px; align-items: center; border-top: 1.5px solid var(--ink); background: var(--paper); padding-right: 16px; gap: 0 14px; }
+.dr-next .dr-lab { padding-right: 0; margin-right: -14px; }
+.dr-next p { font-family: var(--font-display); font-style: italic; font-size: 24px; color: var(--faint); border-bottom: 1.5px solid var(--ink); padding-bottom: 3px; }
+.dr-next p::before { content: ""; display: inline-block; width: 1.5px; height: 24px; background: var(--text); vertical-align: -5px; margin-right: 5px; }
+.dr-chips { display: flex; gap: 6px; }
+.dr-chips span { border: 1px solid var(--rule); padding: 5px 8px; color: var(--soft); }
+.dr-send { width: 40px; height: 40px; background: var(--ink); color: var(--paper); display: grid; place-items: center; }
+.dr-send svg { width: 18px; height: 18px; }
+.dr-status { border-top: 1.5px solid var(--ink); border-left: 1.5px solid var(--ink); background: var(--paper); padding: 0 14px; display: flex; flex-direction: column; justify-content: center; gap: 5px; }
+.dr-status .w { color: var(--red-ink); display: flex; align-items: center; gap: 6px; }
+.dr-status .w::before { content: ""; width: 8px; height: 8px; background: var(--red); animation: dr-blink 1.3s ease-in-out infinite; }
+@keyframes dr-blink { 0%, 100% { opacity: 1; } 50% { opacity: .3; } }
+
+</style>
+</head>
+<body>
+<div class="page">
+  <header>
+    <h1>Loom, round 2: four directions that start from the loom</h1>
+    <p>Round one kept the standard chat app (sidebar, bubbles, composer) and changed its paint. This round starts from the other end. Each direction takes one real thing from weaving, makes it the way the whole window is organised, and then checks that the same conversation still reads well in it. The content is identical in all four, so they compare. Everything is drawn with what GPUI has: fills, lines, paths, gradients and text. No blur, no rotated text, nothing floating over a panel.</p>
+    <div class="bets" id="bets"></div>
+    <div class="pick" id="pick"></div>
+  </header>
+
+  <div class="bar">
+    <div class="tabs" role="tablist" id="tabs"></div>
+    <div class="seg" id="seg">
+      <button data-mode="both" aria-pressed="true">Light and dark</button>
+      <button data-mode="light" aria-pressed="false">Light</button>
+      <button data-mode="dark" aria-pressed="false">Dark</button>
+    </div>
+  </div>
+  <section class="about" id="about"></section>
+  <div class="stack" id="stage"></div>
+</div>
+
+<template id="t-oppstad">
+<div class="win" data-dir="oppstad">
+  <div class="op-bar">
+    <span class="op-mark"><svg class="ic" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M1.5 3h13" stroke-width="2.4"/><path d="M4 3v8M8 3v8M12 3v8"/><circle cx="4" cy="13" r="1.4" fill="currentColor" stroke="none"/><circle cx="8" cy="13" r="1.4" fill="currentColor" stroke="none"/><circle cx="12" cy="13" r="1.4" fill="currentColor" stroke="none"/></svg>loom</span>
+    <span class="op-inst"><i class="op-dot"></i><b>Home</b> &nbsp;on vps · 3 devices</span>
+    <span class="op-sp"></span>
+    <span>Search<kbd>Ctrl K</kbd></span>
+    <span>Settings</span>
+    <!--WINCTL-->
+  </div>
+  <div class="op-beam">
+    <div class="op-peg" style="--dye:var(--dye-main)"><i class="op-spool"></i>Main</div>
+    <div class="op-peg on" style="--dye:var(--dye-builder)"><i class="op-spool"></i><b>Builder</b><span class="op-badge">1</span><span class="op-slash">/</span><span class="op-title">Build checks</span><span class="op-meta">Claude Code · asks first · rev 4</span><span class="op-new">+ New cloth</span></div>
+    <div class="op-peg" style="--dye:var(--dye-coach)"><i class="op-spool"></i>Coach</div>
+    <div class="op-peg" style="--dye:var(--dye-post)"><i class="op-spool"></i>Post</div>
+  </div>
+  <div class="op-loom">
+    <div class="op-lane" style="--dye:var(--dye-main)">
+      <div class="op-hang">
+        <div class="op-patch"><b>Move the VPS backups</b><small>12 Nov</small><div class="op-mini"><i></i><i class="a"></i><i class="t"></i><i class="t"></i><i class="a"></i><i></i><i class="a"></i><i class="t"></i><i class="a"></i></div></div>
+        <div class="op-patch"><b>Calx board triage</b><small>2h ago</small><div class="op-mini"><i></i><i class="t"></i><i class="a"></i><i></i><i class="a"></i><i></i><i class="t"></i><i class="t"></i><i class="t"></i><i class="a"></i></div></div>
+      </div>
+      <div class="op-wts sm"><svg class="op-fan" width="118" height="44" data-w="118" data-h="40" data-knots="59"></svg><span class="op-stone q" style="left:59px;top:41px">idle</span></div>
+    </div>
+
+    <div class="op-lane" style="--dye:var(--dye-builder)">
+      <div class="op-hang">
+        <div class="op-cloth">
+          <span class="op-wound">Earlier rows are wound onto the beam. Scroll to unwind.</span>
+          <div class="op-row you"><span class="op-lab">You</span><p>Did the build pass on main? If it failed, tell me which step.</p><span class="op-r">14:02 · Desk PC</span></div>
+          <div class="op-row think"><span class="op-lab">thought</span><span class="op-picks"><i></i><i></i><i></i></span><span class="op-r">3 s</span></div>
+          <div class="op-row tool"><span class="op-lab"><svg class="op-knot" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M0 6h3.2c1.2-3.6 4.4-3.6 5.6 0h3.2M3.2 6c1.2 3.6 4.4 3.6 5.6 0"/></svg>ran</span><div><code>gh run list --branch main --limit 1</code><pre>completed  success  CI  main  push  2m3s  14:02</pre></div><span class="op-r">✓ done · 2.1 s</span></div>
+          <div class="op-row say"><span class="op-lab">Builder</span><p>Yes. The last build on <code>main</code> passed at 14:02, in 2 minutes. All four jobs were green, and nothing was skipped.</p><span class="op-r">14:03</span></div>
+          <div class="op-row you"><span class="op-lab">You</span><p>Nice. Deploy it to the VPS.</p><span class="op-r">14:04 · Desk PC</span></div>
+          <div class="op-row say"><span class="op-lab">Builder</span><p>I'll run the deploy script on the VPS. It restarts the service, so I'm asking first.</p><span class="op-r op-wait">waiting</span></div>
+        </div>
+        <div class="op-shed">
+          <svg viewBox="0 0 766 160"><path class="op-weftline" d="M734 80 C 752 80, 764 48, 762 2"/><g class="op-shuttle"><path d="M30 80 C 54 40, 86 16, 150 16 H 616 C 680 16, 712 40, 736 80 C 712 120, 680 144, 616 144 H 150 C 86 144, 54 120, 30 80 Z"/><path class="in" d="M44 80 C 64 48, 92 23, 152 23 H 614 C 674 23, 702 48, 722 80 C 702 112, 674 137, 614 137 H 152 C 92 137, 64 112, 44 80 Z"/></g></svg>
+          <div class="op-ask">
+            <div class="q">Run a command on vps? <small>also on iPhone</small></div>
+            <code>ssh vps 'cd /srv/app &amp;&amp; ./deploy.sh'</code>
+            <div class="acts"><button class="op-btn go">Allow once</button><button class="op-btn">Always allow</button><button class="op-btn no">Deny</button><small>The loom is stopped until you answer</small></div>
+          </div>
+          <svg viewBox="0 0 766 160" class="op-over"><line x1="36.6" y1="0" x2="36.6" y2="160"/><line x1="54.6" y1="0" x2="54.6" y2="160"/><line x1="72.6" y1="0" x2="72.6" y2="160"/><line x1="90.6" y1="0" x2="90.6" y2="160"/><line x1="108.6" y1="0" x2="108.6" y2="160"/><line x1="666.6" y1="0" x2="666.6" y2="160"/><line x1="684.6" y1="0" x2="684.6" y2="160"/><line x1="702.6" y1="0" x2="702.6" y2="160"/><line x1="720.6" y1="0" x2="720.6" y2="160"/></svg>
+        </div>
+        <div class="op-rod"><span>Message Builder</span><svg class="send" viewBox="0 0 62 30"><path d="M0 15 C 8 4, 16 0, 26 0 H 36 C 46 0, 54 4, 62 15 C 54 26, 46 30, 36 30 H 26 C 16 30, 8 26, 0 15 Z"/><path d="M24 15h14M33 10l5 5-5 5"/></svg></div>
+        <div style="height:6px;flex:none;margin-top:-9px"></div>
+      </div>
+      <div class="op-wts"><svg class="op-fan" width="766" height="34" data-w="766" data-h="28" data-knots="104,290,476,662"></svg>
+        <span class="op-stone" style="left:104px;top:29px">+ Attach</span>
+        <span class="op-stone" style="left:290px;top:29px">Claude Code</span>
+        <span class="op-stone" style="left:476px;top:29px">Asks first</span>
+        <span class="op-stone" style="left:662px;top:29px">Desk PC · you're here</span>
+      </div>
+    </div>
+
+    <div class="op-lane" style="--dye:var(--dye-coach)">
+      <div class="op-hang">
+        <div class="op-patch"><b>Week 47 training plan</b><small>Mon</small><div class="op-mini"><i></i><i class="a"></i><i class="a"></i><i></i><i class="a"></i></div></div>
+      </div>
+      <div class="op-wts sm"><svg class="op-fan" width="118" height="44" data-w="118" data-h="40" data-knots="59"></svg><span class="op-stone q" style="left:59px;top:41px">next Mon 07:00</span></div>
+    </div>
+
+    <div class="op-lane" style="--dye:var(--dye-post)">
+      <div class="op-hang">
+        <div class="op-patch"><b>Inbox sweep</b><small>Sun</small><div class="op-mini"><i class="t"></i><i class="t"></i><i class="t"></i><i class="a"></i><i class="t"></i><i class="t"></i><i class="a"></i></div></div>
+      </div>
+      <div class="op-wts sm"><svg class="op-fan" width="118" height="44" data-w="118" data-h="40" data-knots="59"></svg><span class="op-stone q" style="left:59px;top:41px">next 18:00</span></div>
+    </div>
+  </div>
+</div>
+</template>
+
+<template id="t-jacquard">
+<div class="win" data-dir="jacquard">
+  <div class="jq-bar">
+    <span class="jq-mark">loom</span>
+    <span class="jq-plate jq-caps"><i></i>Home · on vps · 3 devices</span>
+    <span class="sp"></span>
+    <span class="jq-caps">Search &nbsp;Ctrl K</span>
+    <!--WINCTL-->
+  </div>
+  <div class="jq-body">
+    <aside class="jq-hopper">
+      <div class="jq-h jq-caps"><span>Agents</span><span>+ new</span></div>
+      <div class="jq-agents">
+        <div class="jq-agent" style="--stripe:var(--st-main)"><svg class="jq-punch" data-glyph="10001 01010 10001"></svg><b>Main</b></div>
+        <div class="jq-agent on" style="--stripe:var(--st-builder)"><svg class="jq-punch" data-glyph="11111 10001 10101"></svg><b>Builder<em>1</em></b></div>
+        <div class="jq-agent" style="--stripe:var(--st-coach)"><svg class="jq-punch" data-glyph="00100 01110 11111"></svg><b>Coach</b></div>
+        <div class="jq-agent" style="--stripe:var(--st-post)"><svg class="jq-punch" data-glyph="11111 01010 00100"></svg><b>Post</b></div>
+      </div>
+      <div class="jq-h jq-caps"><span>Decks</span><span>+ new</span></div>
+      <div class="jq-decks">
+        <div class="jq-deck on" style="--stripe:var(--st-builder)"><div class="jq-face"><b>Build checks</b><small><span>Builder</span><span>now · 4 cards</span></small></div><div class="jq-edge"><i></i><i class="a"></i><i></i><i class="a"></i></div></div>
+        <div class="jq-deck" style="--stripe:var(--st-main)"><div class="jq-face"><b>Calx board triage</b><small><span>Main</span><span>2h · 9 cards</span></small></div><div class="jq-edge"><i></i><i class="a"></i><i></i><i class="a"></i><i class="a"></i><i></i><i class="a"></i><i></i><i class="a"></i></div></div>
+        <div class="jq-deck" style="--stripe:var(--st-coach)"><div class="jq-face"><b>Week 47 training plan</b><small><span>Coach</span><span>Mon · 5 cards</span></small></div><div class="jq-edge"><i></i><i class="a"></i><i></i><i class="a"></i><i class="a"></i></div></div>
+        <div class="jq-deck" style="--stripe:var(--st-post)"><div class="jq-face"><b>Inbox sweep</b><small><span>Post</span><span>Sun · 7 cards</span></small></div><div class="jq-edge"><i class="a"></i><i class="a"></i><i class="a"></i><i></i><i class="a"></i><i class="a"></i><i class="a"></i></div></div>
+        <div class="jq-deck" style="--stripe:var(--st-main)"><div class="jq-face"><b>Move the VPS backups</b><small><span>Main</span><span>12 Nov · 12 cards</span></small></div><div class="jq-edge"><i></i><i class="a"></i><i></i><i class="a"></i><i class="a"></i><i></i><i class="a"></i><i></i><i class="a"></i><i></i><i class="a"></i><i class="a"></i></div></div>
+      </div>
+      <div class="jq-foot jq-caps"><span>Elliot</span><span>Settings</span></div>
+    </aside>
+    <main class="jq-main">
+      <header class="jq-head">
+        <h3>Build checks</h3>
+        <span class="jq-caps">Builder · Claude Code · asks first</span>
+        <div class="jq-tape"><div class="rows"><span>YOU</span><span>THINK</span><span>TOOL</span><span>SAY</span><span>ASK</span></div><svg data-tape="0,1,2,3,0,3,4"></svg></div>
+      </header>
+      <div class="jq-wrap"><div class="jq-chain">
+        <div class="jq-card jq-you"><div class="jq-in"><p>Did the build pass on main? If it failed, tell me which step.</p><svg class="jq-punch" data-text="Did the build pass on main? If it failed, tell me which step."></svg><span class="jq-caps">You · Desk PC · 14:02</span></div></div>
+        <div class="jq-card" style="--stripe:var(--st-builder)">
+          <div class="jq-stripe jq-caps"><span>Builder · run 77 · 14:03 · done in 9 s</span><svg data-code="1,2,3"></svg></div>
+          <div class="jq-in">
+            <div class="jq-think jq-caps"><i></i><i></i><i></i><span>thought for 3 s, a hole a second</span></div>
+            <div class="jq-tool"><code>gh run list --branch main --limit 1</code><span class="jq-stamp jq-caps">done 2.1 s</span><pre>completed  success  CI  main  push  2m3s  14:02</pre></div>
+            <p class="jq-say">Yes. The last build on <code>main</code> passed at 14:02, in 2 minutes. All four jobs were green, and nothing was skipped.</p>
+          </div>
+        </div>
+        <div class="jq-card jq-you"><div class="jq-in"><p>Nice. Deploy it to the VPS.</p><svg class="jq-punch" data-text="Nice. Deploy it to the VPS."></svg><span class="jq-caps">You · Desk PC · 14:04</span></div></div>
+        <div class="jq-card" style="--stripe:var(--st-builder)">
+          <div class="jq-stripe jq-caps"><span>Builder · run 78 · 14:04 · on the cylinder, waiting for you</span><svg data-code="3,4"></svg></div>
+          <div class="jq-in" style="padding-bottom:10px"><p class="jq-say">I'll run the deploy script on the VPS. It restarts the service, so I'm asking first.</p></div>
+          <div class="jq-hold">
+            <div class="q"><b>HOLD</b><span>Run a command on vps?</span><small class="jq-caps">also on iPhone</small></div>
+            <code>ssh vps 'cd /srv/app &amp;&amp; ./deploy.sh'</code>
+            <div class="jq-keys"><button class="jq-key go"><i></i>Allow once</button><button class="jq-key"><i></i>Always allow</button><button class="jq-key"><i></i>Deny</button><small class="jq-caps">The chain is stopped</small></div>
+          </div>
+        </div>
+        <i class="jq-pin l"></i><i class="jq-pin r"></i>
+      </div></div>
+      <div class="jq-compose"><div class="jq-blank"><p>Type the next card for Builder</p><span class="jq-chip jq-caps">Attach</span><span class="jq-chip jq-caps">Claude Code</span><span class="jq-chip jq-caps">Asks first</span><button class="jq-key">Punch ↵</button></div></div>
+    </main>
+  </div>
+</div>
+</template>
+
+<template id="t-akle">
+<div class="win" data-dir="akle">
+  <div class="ak-top">
+    <div class="ak-home"><b>loom</b><small><i></i>Home · on vps · 3 devices</small></div>
+    <div class="ak-ag" style="--c:var(--c-main);--ci:var(--c-main-ink)">Main</div>
+    <div class="ak-ag on" style="--c:var(--c-builder);--ci:var(--c-builder-ink)"><span>Builder</span><span class="ak-badge">1</span><h3>Build checks</h3><em>Claude Code · asks first</em></div>
+    <div class="ak-ag" style="--c:var(--c-coach);--ci:var(--c-coach-ink)">Coach</div>
+    <div class="ak-ag" style="--c:var(--c-post);--ci:var(--c-post-ink)">Post</div>
+    <div class="ak-ctl"><!--WINCTL--></div>
+  </div>
+  <div class="ak-cloth">
+    <div class="ak-band ak-you"><span class="ak-lab">You</span><p>Did the build pass on main? If it failed, tell me which step.</p><span class="ak-r">14:02 · Desk PC</span></div>
+    <div class="ak-band ak-of ak-think"><span class="ak-lab">Builder</span><p><i></i><i></i><i></i><span>thought for 3 seconds</span></p><span class="ak-r">14:03</span></div>
+    <div class="ak-band ak-tool"><span class="ak-lab">Ran</span><div><code>gh run list --branch main --limit 1</code><pre>completed  success  CI  main  push  2m3s  14:02</pre></div><span class="ak-r">✓ done · 2.1 s</span></div>
+    <div class="ak-band ak-of ak-say"><span class="ak-lab"></span><p>Yes. The last build on <code>main</code> passed at 14:02, in 2 minutes. All four jobs were green, and nothing was skipped.</p><span class="ak-r"></span></div>
+    <div class="ak-band ak-border"><svg data-motifs="3,1" width="150" height="20"></svg><svg data-wave="830" width="830" height="20"></svg><span class="ak-r">Run 77 · done in 9 s</span></div>
+    <div class="ak-band ak-you"><span class="ak-lab">You</span><p>Nice. Deploy it to the VPS.</p><span class="ak-r">14:04 · Desk PC</span></div>
+    <div class="ak-band ak-of ak-say"><span class="ak-lab">Builder</span><p>I'll run the deploy script on the VPS. It restarts the service, so I'm asking first.</p><span class="ak-r">14:04</span></div>
+    <div class="ak-band ak-hot">
+      <svg class="ak-zig" data-zig="1180" width="1180" height="12"></svg>
+      <span class="ak-lab">Builder asks</span>
+      <div><h4>Run this on the VPS?</h4><code>ssh vps 'cd /srv/app &amp;&amp; ./deploy.sh'</code><div class="ak-acts"><button class="ak-btn go">Allow once</button><button class="ak-btn">Always allow</button><button class="ak-btn no">Deny</button></div></div>
+      <span class="ak-r">Waiting for you<br>also on iPhone</span>
+    </div>
+  </div>
+  <div class="ak-compose"><span class="ak-lab">You</span><p>Write to Builder</p><div class="ak-chips"><span>+ Attach</span><span>Claude Code</span><span>Asks first</span></div><div class="ak-send"><svg viewBox="0 0 22 22" fill="none" stroke="currentColor" stroke-width="2.4"><path d="M11 19V4M4 11l7-7 7 7"/></svg></div></div>
+  <div class="ak-fringe">
+    <div class="ak-tassel on" style="--c:var(--c-builder);--ci:var(--c-builder-ink)"><svg viewBox="0 0 14 30" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M7 0v7M2 30V13c0-3 2-6 5-6s5 3 5 6v17M5.3 30V12M8.7 30V12"/><path d="M3 11h8" stroke-width="2.6"/></svg><b>Build checks</b><small>now</small></div>
+    <div class="ak-tassel" style="--c:var(--c-main)"><svg viewBox="0 0 14 30" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M7 0v7M2 30V13c0-3 2-6 5-6s5 3 5 6v17M5.3 30V12M8.7 30V12"/><path d="M3 11h8" stroke-width="2.6"/></svg><b>Calx board triage</b><small>2h</small></div>
+    <div class="ak-tassel" style="--c:var(--c-coach)"><svg viewBox="0 0 14 30" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M7 0v7M2 30V13c0-3 2-6 5-6s5 3 5 6v17M5.3 30V12M8.7 30V12"/><path d="M3 11h8" stroke-width="2.6"/></svg><b>Week 47 training plan</b><small>Mon</small></div>
+    <div class="ak-tassel" style="--c:var(--c-post)"><svg viewBox="0 0 14 30" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M7 0v7M2 30V13c0-3 2-6 5-6s5 3 5 6v17M5.3 30V12M8.7 30V12"/><path d="M3 11h8" stroke-width="2.6"/></svg><b>Inbox sweep</b><small>Sun</small></div>
+    <div class="ak-tassel" style="--c:var(--c-main)"><svg viewBox="0 0 14 30" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M7 0v7M2 30V13c0-3 2-6 5-6s5 3 5 6v17M5.3 30V12M8.7 30V12"/><path d="M3 11h8" stroke-width="2.6"/></svg><b>Move the VPS backups</b><small>12 Nov</small></div>
+  </div>
+</div>
+</template>
+
+<template id="t-draft">
+<div class="win" data-dir="draft">
+  <div class="dr-titleblock">
+    <div class="dr-logo">loom</div>
+    <div><span class="dr-mono">Sheet</span><b>Build checks</b></div>
+    <div><span class="dr-mono">Agent</span><b>Builder</b> on Claude Code, rev 4</div>
+    <div><span class="dr-mono">Instance</span><i class="dot"></i><b>Home</b> on vps</div>
+    <div><span class="dr-mono">Devices</span><b>3</b></div>
+    <div class="sp"></div>
+    <div style="border-left:1px solid var(--rule)"><span class="dr-mono">Search · Ctrl K</span></div>
+    <!--WINCTL-->
+  </div>
+  <div class="dr-thread"><svg class="dr-svg" data-threading width="1008" height="104" viewBox="0 0 1008 104"></svg></div>
+  <div class="dr-tieup"><svg class="dr-svg" data-tieup width="172" height="104" viewBox="0 0 172 104"></svg></div>
+  <div class="dr-draw">
+    <div class="dr-row you"><span class="dr-lab dr-mono">You</span><div class="dr-mid"><p>Did the build pass on main? If it failed, tell me which step.</p></div><div class="dr-t"><u></u><time>14:02</time></div></div>
+    <div class="dr-row think"><span class="dr-lab dr-mono"><b>Builder</b>run 77</span><div class="dr-mid"><p><i></i><i></i><i></i><span>thought for 3 s</span></p></div><div class="dr-t"><i style="--c:1"></i><time>3 s</time></div></div>
+    <div class="dr-row"><span class="dr-lab"></span><div class="dr-mid"><div class="dr-tool"><code>gh run list --branch main --limit 1</code><span>✓ done · 2.1 s</span><pre>completed  success  CI  main  push  2m3s  14:02</pre></div></div><div class="dr-t"><i style="--c:2"></i><time>2.1 s</time></div></div>
+    <div class="dr-row say"><span class="dr-lab"></span><div class="dr-mid"><p>Yes. The last build on <code>main</code> passed at 14:02, in 2 minutes. All four jobs were green, and nothing was skipped.</p></div><div class="dr-t"><i style="--c:0"></i><time>14:03</time></div></div>
+    <div class="dr-row end"><span class="dr-lab"></span><div class="dr-mid"><hr></div><div class="dr-t"></div></div>
+    <div class="dr-row you"><span class="dr-lab dr-mono">You</span><div class="dr-mid"><p>Nice. Deploy it to the VPS.</p></div><div class="dr-t"><u></u><time>14:04</time></div></div>
+    <div class="dr-row say"><span class="dr-lab dr-mono"><b>Builder</b>run 78</span><div class="dr-mid"><p>I'll run the deploy script on the VPS. It restarts the service, so I'm asking first.</p></div><div class="dr-t"><i style="--c:0"></i><time>14:04</time></div></div>
+    <div class="dr-row"><span class="dr-lab dr-mono" style="color:var(--red-ink)">Asks</span><div class="dr-mid"><div class="dr-ask">
+      <h4>Run a command on vps? <small>also on iPhone</small></h4>
+      <code>ssh vps 'cd /srv/app &amp;&amp; ./deploy.sh'</code>
+      <div class="dr-acts"><button class="dr-ch go"><i></i>Allow once</button><button class="dr-ch"><i class="h"></i>Always allow</button><button class="dr-ch"><i></i>Deny</button><small>"Always" fills Builder's shell cell in the tie-up.</small></div>
+    </div></div><div class="dr-t"><i class="ask" style="--c:2"></i><time style="color:var(--red-ink)">waiting</time></div></div>
+  </div>
+  <div class="dr-next"><span class="dr-lab dr-mono">Next pick</span><p>Write to Builder</p><div class="dr-chips dr-mono"><span>+ Attach</span><span>Claude Code</span><span>Asks first</span></div><div class="dr-send"><svg viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 15V3M3.5 8.5L9 3l5.500 5.500"/></svg></div></div>
+  <div class="dr-status dr-mono"><span class="w">Waiting for you</span><span>Run 78 · from Desk PC</span></div>
+</div>
+</template>
+
+
+<script>
+const WINCTL = `<span class="winctl"><i><svg viewBox="0 0 16 16" fill="none" stroke="currentColor"><path d="M4 8h8"/></svg></i><i><svg viewBox="0 0 16 16" fill="none" stroke="currentColor"><rect x="4.5" y="4.5" width="7" height="7"/></svg></i><i><svg viewBox="0 0 16 16" fill="none" stroke="currentColor"><path d="M4.5 4.5l7 7M11.5 4.5l-7 7"/></svg></i></span>`;
+
+/* Small drawing jobs each direction needs: threads, holes, pattern rows.
+   In the app these are GPUI paths; here they're generated SVG. */
+const INIT = {
+  /* Warp threads gathering into the knots above the loom weights. */
+  oppstad(w) {
+    w.querySelectorAll("svg.op-fan").forEach(s => {
+      const W = +s.dataset.w, H = +s.dataset.h, knots = s.dataset.knots.split(",").map(Number);
+      let out = "";
+      for (let x = 0, i = 0; x <= W; x += 9, i++) {
+        const k = knots.reduce((a, b) => Math.abs(b - x) < Math.abs(a - x) ? b : a);
+        out += `<line x1="${x + .6}" y1="0" x2="${k}" y2="${H}" class="${i % 2 ? "b" : "f"}"/>`;
+      }
+      for (const k of knots) out += `<circle cx="${k}" cy="${H}" r="3.2" class="k"/>`;
+      s.setAttribute("viewBox", `0 0 ${W} ${H + 4}`);
+      s.innerHTML = out;
+    });
+  },
+  /* Punched holes: agent glyphs, the punched line under each of your cards
+     (a real encoding of the text, column by column), and the program tape. */
+  jacquard(w) {
+    const dots = (cols, rows, px, py, r, isOn) => {
+      let out = "";
+      for (let c = 0; c < cols; c++) for (let y = 0; y < rows; y++)
+        out += `<circle cx="${c * px + px / 2}" cy="${y * py + py / 2}" r="${isOn(c, y) ? r : r * .45}" class="${isOn(c, y) ? "on" : "off"}"/>`;
+      return out;
+    };
+    const size = (s, W, H) => { s.setAttribute("width", W); s.setAttribute("height", H); s.setAttribute("viewBox", `0 0 ${W} ${H}`); };
+    w.querySelectorAll("svg[data-glyph]").forEach(s => {
+      const g = s.dataset.glyph.split(" ");
+      size(s, 35, 21); s.innerHTML = dots(5, 3, 7, 7, 2.3, (c, y) => g[y][c] === "1");
+    });
+    w.querySelectorAll("svg[data-text]").forEach(s => {
+      const t = s.dataset.text;
+      size(s, t.length * 6, 25);
+      s.innerHTML = dots(t.length, 5, 6, 5, 1.8, (c, y) => { const k = t.charCodeAt(c); return k !== 32 && (k % 5 === y || (k % 3 === 0 && (k >> 2) % 5 === y)); });
+    });
+    w.querySelectorAll("svg[data-code]").forEach(s => {
+      const q = s.dataset.code.split(",").map(Number);
+      size(s, q.length * 5 + 2, 16);
+      s.innerHTML = q.map((row, c) => `<circle cx="${c * 5 + 3}" cy="${row * 3.2 + 1.6}" r="1.4"/>`).join("");
+    });
+    w.querySelectorAll("svg[data-tape]").forEach(s => {
+      const q = s.dataset.tape.split(",").map(Number), cols = 26, px = 11, py = 8.6;
+      size(s, cols * px + 8, 5 * py);
+      let out = `<rect class="bg" width="${cols * px + 8}" height="${5 * py}" rx="2"/><g transform="translate(4 0)">`;
+      for (let c = 0; c < cols; c++) for (let y = 0; y < 5; y++) {
+        const on = q[c] === y, cx = c * px + px / 2, cy = y * py + py / 2;
+        out += on && y === 4 ? `<circle cx="${cx}" cy="${cy}" r="3" class="ask"/>` : `<circle cx="${cx}" cy="${cy}" r="${on ? 2.7 : 1}" class="${on ? "on" : "off"}"/>`;
+      }
+      s.innerHTML = out + `<line class="now" x1="${q.length * px}" y1="0" x2="${q.length * px}" y2="${5 * py}"/></g>`;
+    });
+  },
+  /* Pattern rows: the border that closes a run (three diamonds for three
+     seconds of thought, a cross for one tool call, then plain zigzag), and
+     the lightning edge on a band that waits for you. */
+  akle(w) {
+    w.querySelectorAll("svg[data-motifs]").forEach(s => {
+      const [think, tools] = s.dataset.motifs.split(",").map(Number);
+      let out = "", x = 24;
+      for (let i = 0; i < think; i++, x += 14) out += `<path class="m1" d="M${x} 10l5-5 5 5-5 5z"/>`;
+      x += 6;
+      for (let i = 0; i < tools; i++, x += 16) out += `<path class="m3" d="M${x} 4h4v4h4v4h-4v4h-4v-4h-4v-4h4z"/>`;
+      s.innerHTML = out;
+    });
+    w.querySelectorAll("svg[data-wave]").forEach(s => {
+      const W = +s.dataset.wave; let d = "M0 14";
+      for (let x = 6; x <= W; x += 6) d += `L${x} ${(x / 6) % 2 ? 6 : 14}`;
+      s.innerHTML = `<path class="z" d="${d}"/>`;
+    });
+    w.querySelectorAll("svg[data-zig]").forEach(s => {
+      const W = +s.dataset.zig; let d = "M-24 0";
+      for (let x = -24; x < W + 24; x += 24) d += `L${x + 12} 11L${x + 24} 0`;
+      s.innerHTML = `<g><path d="${d}Z"/></g>`;
+    });
+  },
+  /* The two charts of a draft. Threading: one row per agent, one cell per
+     four hours, nine days, filled where the agent ran. Tie-up: what each
+     agent may do without asking. */
+  draft(w) {
+    const C = 16, X0 = 112, Y0 = 32;
+    const rows = [
+      { name: "Main", conv: [2, 3, 51], routine: [21, 27, 33, 39], labels: [{ c: 4, t: "Move the VPS backups", d: "12 Nov" }, { c: 51, t: "Calx board triage", d: "2h", before: true }] },
+      { name: "Builder", on: true, conv: [50], routine: [14, 26, 32, 38], ask: 51, labels: [{ c: 50, t: "Build checks", d: "now", before: true }] },
+      { name: "Coach", conv: [25, 26], routine: [1, 7, 31, 37, 43, 49], labels: [{ c: 25, t: "Week 47 training plan", d: "Mon", before: true }] },
+      { name: "Post", conv: [22], routine: [4, 10, 16, 34, 40, 46], next: [52], labels: [{ c: 23, t: "Inbox sweep", d: "Sun" }] },
+    ];
+    const days = ["Thu 12 Nov", "Fri", "Sat", "Sun", "Mon", "Tue", "Wed", "Thu", "Today"];
+    let o = `<text class="m" x="16" y="13">Threading</text><text class="s" x="16" y="24">WHO RAN, WHEN</text>`;
+    days.forEach((d, i) => { o += `<text class="m" x="${X0 + i * 96 + 3}" y="24">${d.toUpperCase()}</text><line class="day" x1="${X0 + i * 96 + .5}" y1="14" x2="${X0 + i * 96 + .5}" y2="96"/>`; });
+    rows.forEach((r, i) => {
+      const y = Y0 + i * C;
+      o += `<text class="${r.on ? "on" : ""}" x="16" y="${y + 12}">${r.on ? "▸ " : ""}${r.name}</text>`;
+      for (const c of r.routine) o += `<rect class="fill" x="${X0 + c * C + 5}" y="${y + 5}" width="7" height="7"/>`;
+      for (const c of r.conv) o += `<rect class="fill" x="${X0 + c * C + 1.5}" y="${y + 1.5}" width="14" height="14"/>`;
+      for (const c of r.next || []) o += `<rect class="next" x="${X0 + c * C + 3}" y="${y + 3}" width="11" height="11"/>`;
+      if (r.ask != null) o += `<rect class="ask" x="${X0 + r.ask * C + 2}" y="${y + 2}" width="13" height="13"/>`;
+      for (const l of r.labels) {
+        const wd = (l.t.length + l.d.length + 3) * 5.9 + 6, x = l.before ? X0 + l.c * C - wd - 2 : X0 + l.c * C + 3;
+        o += `<rect class="back" x="${x}" y="${y + 1}" width="${wd}" height="15"/><text class="l" x="${x + 4}" y="${y + 12}">${l.t} <tspan>· ${l.d}</tspan></text>`;
+      }
+    });
+    o += `<rect class="box" x="${X0}" y="${Y0}" width="${54 * C}" height="${4 * C}"/><line class="now" x1="${X0 + 52 * C + .5}" y1="14" x2="${X0 + 52 * C + .5}" y2="100"/><text class="nowt" x="${X0 + 52 * C + 5}" y="13">NOW</text>`;
+    w.querySelector("svg[data-threading]").innerHTML = o;
+
+    const tie = ["ffaffa", "ffaffo", "ffoafo", "ffoofa"], cols = ["SAY", "THK", "SH", "FS", "WEB", "SND"];
+    let t = `<text class="m" x="16" y="13">Tie-up</text>`;
+    cols.forEach((c, i) => { t += `<text class="s" x="${16 + i * C + 8.5}" y="26" text-anchor="middle">${c}</text>`; });
+    for (let i = 1; i < 6; i++) t += `<line class="day" x1="${16 + i * C + .5}" y1="${Y0}" x2="${16 + i * C + .5}" y2="${Y0 + 4 * C}"/>`;
+    for (let i = 1; i < 4; i++) t += `<line class="day" x1="16" y1="${Y0 + i * C + .5}" x2="${16 + 6 * C}" y2="${Y0 + i * C + .5}"/>`;
+    tie.forEach((row, r) => [...row].forEach((k, c) => {
+      const x = 16 + c * C, y = Y0 + r * C;
+      if (k === "f") t += `<rect class="fill" x="${x + 1.5}" y="${y + 1.5}" width="14" height="14"/>`;
+      if (k === "a") t += `<path class="fill" d="M${x + 15.5} ${y + 1.5}v14h-14z"/>`;
+    }));
+    t += `<rect class="box" x="16" y="${Y0}" width="${6 * C}" height="${4 * C}"/><rect class="ask" x="${16 + 2 * C + 1}" y="${Y0 + C + 1}" width="15" height="15"/>`;
+    [["f", "free"], ["a", "asks"], ["o", "off"]].forEach(([k, n], i) => {
+      const x = 122, y = Y0 + 4 + i * 19;
+      t += `<rect class="cellbox" x="${x}" y="${y}" width="11" height="11"/>` + (k === "f" ? `<rect class="fill" x="${x}" y="${y}" width="11" height="11"/>` : k === "a" ? `<path class="fill" d="M${x + 11} ${y}v11h-11z"/>` : "") + `<text class="m" x="${x + 16}" y="${y + 9}">${n}</text>`;
+    });
+    w.querySelector("svg[data-tieup]").innerHTML = t;
+  },
+};
+
+const DIRS = [
+  { id: "oppstad", name: "1 · Oppstad",
+    bet: "The loom itself can be the layout. No sidebar: agents are warp, the chat is cloth, and whatever needs you stops the loom.",
+    idea: "The window is a warp-weighted loom, the upright loom the Norse wove on (<i>oppstadvev</i>). A beam runs across the top, and each agent is a section of warp hanging from it, dyed its own colour. The open conversation is cloth being woven downwards: your messages are dark rows of wool across the full width, replies are written on the pale cloth, a tool call is a band in a different weave (twill), and a thought is one hairline pick per second. Where the cloth ends is the fell, and below it the warp hangs bare down to the loom weights. An approval is a shuttle stopped in the open warp. It holds the command, and weaving can't go on until you throw it or take it out.",
+    weave: "Agents are the warp and time is the weft. Finished conversations are pieces of cloth higher up each agent's warp, older rows wind onto the beam as you scroll, the composer is a rod across the bare warp, and the weights that keep the warp tight are what the next message depends on: the agent program, the permission mode, the device you're on, and each other agent's next routine.",
+    type: "Schibsted Grotesk (a Norwegian grotesque, OFL) for everything: 16 px semibold for your rows, 15.5 px for replies. DM Mono for commands, output and times.",
+    light: [["#d9dbd5", "wall"], ["#f4f2ea", "cloth"], ["#26231f", "your rows"], ["#ebb720", "weld, needs you"], ["#2c6398", "Builder, woad"], ["#b4492f", "Main, madder"], ["#55843f", "Coach, moss"], ["#7b5a91", "Post, lichen"]],
+    dark: [["#141311", "wall"], ["#23211d", "cloth"], ["#e3dccb", "your rows"], ["#f2c02e", "weld, needs you"], ["#7fb0de", "Builder"], ["#dd7c60", "Main"], ["#9cc383", "Coach"], ["#b998cf", "Post"]],
+    motion: "Sending throws a shuttle: a small boat shape crosses the cloth once and your row is beaten up into place (it lands 3 px low and settles). A streaming reply is woven line by line, so the cloth grows at the fell and the bare warp below gets shorter. While an approval waits, the shuttle rocks slowly from side to side (animated here). Allowing it sends the shuttle through, and the open warp closes into a new row. Scrolling back turns the beam and unwinds older cloth.",
+    risk: "There is no list of conversation names to scan down. Other conversations are pieces of cloth in narrow lanes, which works for four agents with a few recent conversations each, and needs search or an unrolled view once there are forty. Your own messages as dark full-width rows are also much louder than a bubble.",
+    gpui: "Straight lines, fills and a few cubic paths, so it's cheap. Two things to watch. The warp is hundreds of 1 px lines: draw them as one path (or one tiled image) per lane and snap them to device pixels, or they shimmer at 125 % and 150 % scaling on Windows. And the threads that pass over the shuttle's tips mean the shuttle is painted between two layers of thread. The colour mixes in the mock (thread at 80 % and 38 %, the selvedge tint) become plain tokens." },
+  { id: "jacquard", name: "2 · Jacquard",
+    bet: "Loom's best story is that the Jacquard loom was the first programmable machine. Lean on it all the way: every turn is a punched card.",
+    idea: "A conversation is a deck of punched cards laced into a chain, which is how a Jacquard loom was programmed. Each turn is one card. Your cards carry your text and, under it, the same text punched in holes. An agent's card has a stripe in the agent's colour and a printed field for each tool call. The bottom card is on the cylinder: when the agent needs an approval, the machine holds that card, marked in vermilion, until you punch one of three holes (Allow once, Always allow, Deny). Agents have punch patterns where other apps have avatars, and the header carries the whole conversation as a strip of tape, one column per step.",
+    weave: "The chain of cards is the conversation. A deck in the hopper is a conversation put away: its thickness is its length, and its edge shows who spoke. The tape is the trace of the runs, and the hold on the cylinder is the approval. Holes are the one visual language: a hole per second of thought, a hole per step on the tape, a hole per choice.",
+    type: "Doto (a dot-matrix face) for the name, titles and agent names. Hanken Grotesk 15.5 px for replies. Martian Mono for your own messages, commands and the small capitals.",
+    light: [["#a9bfae", "enamel"], ["#f4e9c5", "card"], ["#18241f", "ink and holes"], ["#e4472b", "vermilion, hold"], ["#45a898", "Builder"], ["#e58ca2", "Main"], ["#e6a637", "Coach"], ["#9b88d8", "Post"]],
+    dark: [["#0c1311", "machine"], ["#1c2722", "card"], ["#efe6c8", "print"], ["#ffc44d", "light through a hole"], ["#ff5c3a", "vermilion, hold"], ["#3fa192", "Builder"]],
+    motion: "The chain moves in steps, never smoothly. A new card comes up from below and the chain advances one card with a two-stage clack: fast, a short stop, settle. While a reply streams, its card grows a line at a time and the tape gets a hole for each step. Punching an approval snaps the hole open and the chain advances. The pins either side of a held card and the ring on the tape blink hard, on and off, with no fade (animated here).",
+    risk: "Your own messages are set in a monospace face with a line of holes under them. It's the most characterful thing in the direction, and the first thing that would tire. More broadly, cut corners, lacing cords and holes are charm on day one and furniture on day ninety.",
+    gpui: "Cards have a cut corner. GPUI clips to rectangles, so draw each card as a path, or paint a ground-coloured triangle over the corner. Holes are small round quads, a few hundred per screen: batch them in one paint call, not one element each. The perforated rules and the dashed rings on unpunched holes need a dashed path or dashed border. Doto is a variable font, so bundle the static 900 cut. Check that letter-spacing is available for the small capitals." },
+  { id: "akle", name: "3 · Åkle",
+    bet: "Go loud. Colour and big type carry everything, like a striped coverlet you can read from across the room. The one that may be too much.",
+    idea: "An <i>åkle</i> is a Norwegian woven coverlet. It's weft-faced, so the cloth is solid bands of dyed wool with rows of pattern between them. Here the whole window is that cloth. Every message is a band across the full width in its speaker's dye: yours undyed with large type, Builder's cobalt, a tool call black. A run closes with a pattern row that records it (three diamonds for three seconds of thought, a cross for the tool call). An approval is a red-orange band with a lightning edge, a quarter of the window tall. There is no sidebar and no card anywhere: agents are colour blocks across the top, and conversations are tassels on the fringe at the bottom.",
+    weave: "Speaker is colour, a message is a band, a run is a section closed by a border, and the border's pattern is data. The header is the cloth's first stripe (a block per agent, the open one widest), and the fringe along the bottom edge is the list of conversations.",
+    type: "Jost (a Futura-like geometric, OFL) throughout: 26 px for your messages, 18.5 px for replies, 29 px bold for a question to you, 11 px tracked capitals for labels. Azeret Mono for commands and times.",
+    light: [["#f6f2e7", "undyed, you"], ["#121212", "black, tools"], ["#2545d3", "Builder"], ["#f2b90c", "Main"], ["#0f8a5f", "Coach"], ["#ee6fa0", "Post"], ["#f2481b", "needs you"]],
+    dark: [["#0f0f0f", "ground, you"], ["#000000", "tools"], ["#2a4ae0", "Builder"], ["#f2b90c", "Main"], ["#12976a", "Coach"], ["#f07aa8", "Post"], ["#ff5a2a", "needs you"]],
+    motion: "A new band unrolls downward from the one above it, full width, in about 160 ms. A streaming reply's band grows by lines. The lightning edge on a waiting approval slides sideways, slowly and without stopping (animated here), so that band is never still. Switching agent slides the header blocks so the chosen one widens.",
+    risk: "Reading replies in white on saturated cobalt for hours. It's legible (the contrast is about 7:1), and it's still a lot of colour for long answers and code. If this direction wins, a reply's band probably wants a calmer tint with a full-colour edge, which gives away some of what makes it this direction.",
+    gpui: "The easiest of the four: almost everything is a filled rectangle and text. The zigzag edge and the pattern rows are short paths. The sliding edge repaints one 12 px strip per frame. The tracked capitals need letter-spacing." },
+  { id: "draft", name: "4 · Draft",
+    bet: "Weaving already has a notation for who does what, when, and what's allowed. Use the real thing as the screen.",
+    idea: "A draft is the sheet a weaver works from. It has four parts: the threading across the top, the tie-up in the corner, the treadling down the side, and in the middle the drawdown, a picture of the cloth. Loom's objects fit it with almost no forcing. The threading is a row per agent over the last nine days, filled where the agent ran, so routines show up as a rhythm and conversations as labelled blocks to click. The tie-up is the permission table: which agent may do which kind of thing without asking. The treadling is the trace of this conversation, one mark per step in the column for its kind. The drawdown is the conversation, set like a page: your messages in a large serif, replies in a plain sans.",
+    weave: "Shafts are agents, treadles are kinds of action, the tie-up says which may run unasked, and each pick is one step. An approval is literally a question about the tie-up: the cell for Builder and shell says \"asks\", so it blinks red in all three charts while it waits, and \"Always allow\" fills it in.",
+    type: "Instrument Serif 28 px for your messages, the question in an approval and the wordmark. Geist 15.5 px for replies and labels. Geist Mono for commands and the small capitals.",
+    light: [["#f1f4fa", "paper"], ["#0c2577", "Prussian blue ink"], ["#0b1b52", "text"], ["#df3a1c", "red ink, needs you"], ["#0d7a56", "done"]],
+    dark: [["#0b1b55", "cyanotype"], ["#dbe6ff", "line"], ["#eef3ff", "text"], ["#ff6a4a", "red, needs you"], ["#7fe0b8", "done"]],
+    motion: "Almost none, on purpose. A step fills its treadling cell as it starts. A streaming reply appears word by word with no effect. The one thing that moves on the sheet is whatever waits for you: its cell blinks in the threading, the tie-up and the treadling at once (animated here), so your eye finds it from any corner.",
+    risk: "It asks you to learn to read a chart. The threading and tie-up are small and dense, and until you know that a half-filled cell means \"asks\", they're decoration. It also has the least colour: two inks, with agents told apart by row and not by hue. And the dark theme is blue, not black, which people either love or can't work in.",
+    gpui: "The 16 px grid over the whole window is about 120 lines: draw it once as a path or a tiled image, snapped to device pixels. Half-filled cells are triangles. The hatch in the approval is diagonal lines clipped to a rectangle (or a tiled image). The dashed \"next run\" cell needs a dashed path. Three fonts with different baselines share rows, so labels are centred on their row, not baseline-aligned." },
+];
+
+const PICK = `<p><b>What I'd pick: Oppstad, with two things taken from Draft.</b></p>
+<p>Oppstad is the one where the loom isn't a costume on a chat app. Its layout (warp, cloth, fell, bare warp, weights) answers the questions the screen has to answer anyway: who am I talking to, what's finished, what's being made right now, and what's stopping it. The stopped shuttle is the strongest single image in the round and you can't miss it, yet the screen stays quiet when nothing needs you: wool, thread, and one yellow. It's also cheap for GPUI, since it's nearly all straight lines.</p>
+<p>From <b>Draft</b> I'd take the tie-up as the permissions screen (a better permission table than a list of switches) and the threading as the "what did my agents do this week" view. From <b>Jacquard</b>, the punch patterns as agent marks, and the punched tape as a compact trace of a run. <b>Åkle</b> is the one I'd be sad to lose and wouldn't want to live in. Its pattern rows that close a run would sit well in Oppstad's cloth.</p>`;
+
+let dir = "all", mode = "both", solo = false;
+function readHash() {
+  const h = new URLSearchParams(location.hash.slice(1));
+  if (h.get("dir")) dir = h.get("dir");
+  if (h.get("theme")) mode = h.get("theme");
+  solo = h.get("solo") === "1";
+}
+try { dir = localStorage.getItem("loom2-dir") || dir; mode = localStorage.getItem("loom2-mode") || mode; } catch (e) {}
+readHash();
+
+function make(id, theme) {
+  const box = document.createElement("div");
+  box.innerHTML = document.getElementById("t-" + id).innerHTML.replaceAll("<!--WINCTL-->", WINCTL);
+  const w = box.firstElementChild;
+  w.dataset.theme = theme;
+  if (INIT[id]) INIT[id](w);
+  return w;
+}
+
+const tabs = document.getElementById("tabs");
+for (const d of [{ id: "all", name: "All at a glance" }, ...DIRS]) {
+  const b = document.createElement("button");
+  b.role = "tab"; b.textContent = d.name; b.dataset.id = d.id;
+  b.onclick = () => { dir = d.id; render(true); };
+  tabs.append(b);
+}
+document.querySelectorAll("#seg button").forEach(b => b.onclick = () => { mode = b.dataset.mode; render(true); });
+document.getElementById("bets").innerHTML = DIRS.map(d => `<div class="bet"><b>${d.name}</b>${d.bet}</div>`).join("");
+document.getElementById("pick").innerHTML = PICK;
+
+function sw(list) { return `<span class="swatches">${list.map(([c, n]) => `<span class="sw"><i style="background:${c}"></i>${n} ${c}</span>`).join("")}</span>`; }
+
+function render(user) {
+  if (user) {
+    try { localStorage.setItem("loom2-dir", dir); localStorage.setItem("loom2-mode", mode); } catch (e) {}
+    history.replaceState(null, "", `#dir=${dir}&theme=${mode}`);
+  }
+  document.body.classList.toggle("solo", solo);
+  tabs.querySelectorAll("button").forEach(b => b.setAttribute("aria-selected", String(b.dataset.id === dir)));
+  document.querySelectorAll("#seg button").forEach(b => b.setAttribute("aria-pressed", String(b.dataset.mode === mode)));
+  const about = document.getElementById("about"), stage = document.getElementById("stage");
+  stage.innerHTML = "";
+  const themes = mode === "both" ? ["dark", "light"] : [mode];
+  if (dir === "all" || !DIRS.some(d => d.id === dir)) {
+    dir = "all";
+    about.hidden = true;
+    const ov = document.createElement("div"); ov.className = "overview";
+    for (const d of DIRS) {
+      const sec = document.createElement("section");
+      const h = document.createElement("h2"); h.textContent = d.name + " →"; h.onclick = () => { dir = d.id; render(true); scrollTo(0, 0); };
+      const p = document.createElement("p"); p.textContent = d.weave;
+      const pair = document.createElement("div"); pair.className = "pair";
+      for (const t of themes) { const m = document.createElement("div"); m.className = "mini"; m.append(make(d.id, t)); pair.append(m); }
+      sec.append(h, p, pair); ov.append(sec);
+    }
+    stage.append(ov);
+    return;
+  }
+  const d = DIRS.find(x => x.id === dir);
+  about.hidden = false;
+  about.innerHTML = `<h2>${d.name}</h2><p class="idea">${d.idea}</p><dl class="facts">
+    <div><dt>How weaving organises it</dt><dd>${d.weave}</dd></div>
+    <div><dt>Type</dt><dd>${d.type}</dd></div>
+    <div><dt>Palette, light</dt><dd>${sw(d.light)}</dd></div>
+    <div><dt>Palette, dark</dt><dd>${sw(d.dark)}</dd></div>
+    <div><dt>Motion</dt><dd>${d.motion}</dd></div>
+    <div><dt>The riskiest choice</dt><dd>${d.risk}</dd></div>
+    <div><dt>GPUI notes</dt><dd>${d.gpui}</dd></div>
+    <div><dt>Tokens</dt><dd>All of this direction's colours and fonts are custom properties on <code>.win[data-dir="${d.id}"]</code>, one block for light and one for dark, ready to lift into the tokens file.</dd></div>
+  </dl>`;
+  for (const t of themes) {
+    const wrap = document.createElement("div");
+    wrap.innerHTML = `<p class="label">${t}</p>`;
+    const sc = document.createElement("div"); sc.className = "scroller";
+    sc.append(make(d.id, t)); wrap.append(sc); stage.append(wrap);
+  }
+}
+addEventListener("hashchange", () => { readHash(); render(false); });
+render(false);
+</script>
+</body>
+</html>

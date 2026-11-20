@@ -1,0 +1,242 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Loom logo</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+:root {
+  --page: #e9e9eb; --ink: #141416; --soft: #5c5c64; --line: #d4d4d9; --card: #f6f6f7;
+  --dark: #0b0b0c; --dark-ink: #ededee; --light: #ffffff; --light-ink: #111113;
+  --main: #9ea8ff; --builder: #74d6a6; --coach: #f2a77a; --post: #e893c9;
+  --main-l: #5763e0; --builder-l: #18a06a; --coach-l: #e07a3d; --post-l: #cf4f9d;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) { --page: #19191c; --ink: #ececee; --soft: #9a9aa3; --line: #2c2c31; --card: #202024; }
+}
+:root[data-theme="dark"] { --page: #19191c; --ink: #ececee; --soft: #9a9aa3; --line: #2c2c31; --card: #202024; }
+* { box-sizing: border-box; }
+html, body { margin: 0; }
+body { background: var(--page); color: var(--ink); font: 14px/1.5 Geist, system-ui, sans-serif; padding: 32px 16px 64px; }
+.page { max-width: 1180px; margin: 0 auto; }
+h1 { margin: 0 0 4px; font-size: 24px; font-weight: 600; letter-spacing: -0.02em; }
+.lede { margin: 0 0 8px; color: var(--soft); max-width: 78ch; }
+.opt { background: var(--card); border: 1px solid var(--line); border-radius: 18px; padding: 22px; margin-top: 22px; }
+.opt h2 { margin: 0; font-size: 18px; font-weight: 600; letter-spacing: -0.01em; }
+.opt .idea { margin: 2px 0 16px; color: var(--soft); max-width: 90ch; }
+.rowx { display: grid; grid-template-columns: 1.1fr 1.1fr 1.5fr; gap: 12px; }
+.panel { border-radius: 14px; padding: 18px; display: flex; align-items: center; justify-content: center; gap: 22px; min-height: 170px; }
+.panel.dark { background: var(--dark); color: var(--dark-ink); }
+.panel.light { background: var(--light); color: var(--light-ink); border: 1px solid var(--line); }
+.lockups { display: flex; flex-direction: column; gap: 10px; }
+.lockup { border-radius: 14px; padding: 16px 20px; display: flex; align-items: center; gap: 10px; font-weight: 600; font-size: 30px; letter-spacing: -0.035em; min-height: 80px; }
+.lockup svg { width: 34px; height: 34px; }
+.lockup.dark { background: var(--dark); color: var(--dark-ink); }
+.lockup.light { background: var(--light); color: var(--light-ink); border: 1px solid var(--line); }
+.big svg { width: 120px; height: 120px; }
+.label { font-size: 11.5px; color: var(--soft); text-align: center; margin-top: 6px; }
+.small { display: grid; grid-template-columns: auto 1fr; gap: 12px; margin-top: 12px; align-items: stretch; }
+.ladder { border-radius: 14px; padding: 14px 18px; display: flex; align-items: flex-end; gap: 18px; }
+.ladder.dark { background: var(--dark); color: var(--dark-ink); }
+.ladder.light { background: var(--light); color: var(--light-ink); border: 1px solid var(--line); }
+.ladder figure { margin: 0; display: flex; flex-direction: column; align-items: center; gap: 6px; }
+.ladder figcaption { font-size: 10.5px; opacity: .55; }
+.icons { display: flex; gap: 18px; align-items: flex-end; flex-wrap: wrap; padding: 14px 18px; border-radius: 14px; background: linear-gradient(135deg, #8aa0c8, #c9b8d8); }
+.icons figure { margin: 0; display: flex; flex-direction: column; align-items: center; gap: 6px; }
+.icons figcaption { font-size: 10.5px; color: rgb(0 0 0 / .6); }
+.app { width: 84px; height: 84px; display: grid; place-items: center; }
+.app svg { width: 58%; height: 58%; }
+.mac { border-radius: 19px; background: linear-gradient(180deg, #202024, #0b0b0c); box-shadow: 0 6px 14px -6px rgb(0 0 0 / .6), inset 0 1px 0 rgb(255 255 255 / .08); color: #f2f2f3; }
+.win11 { border-radius: 14px; background: #0f0f11; color: #f2f2f3; }
+.ios { border-radius: 19px; }
+.ios.l { background: #ffffff; color: #111113; }
+.ios.d { background: #000000; color: #ffffff; }
+.ios.t { background: #1a1a1a; color: #c9c0ff; }
+.tray { display: flex; align-items: center; gap: 10px; height: 40px; padding: 0 12px; border-radius: 8px; background: #1f1f1f; color: #fff; font-size: 12px; }
+.tray .ic { width: 16px; height: 16px; display: grid; place-items: center; }
+.tray .ic svg { width: 16px; height: 16px; }
+.tab { display: flex; align-items: center; gap: 8px; height: 32px; padding: 0 12px; border-radius: 8px 8px 0 0; background: #fff; color: #222; font-size: 12px; border: 1px solid var(--line); border-bottom: 0; }
+.tab svg { width: 16px; height: 16px; }
+.mini { display: flex; flex-direction: column; gap: 8px; justify-content: center; }
+.verdict { margin-top: 12px; font-size: 13px; color: var(--soft); }
+.verdict b { color: var(--ink); font-weight: 500; }
+.custom-word { display: inline-flex; align-items: baseline; }
+.custom-word svg { width: 46px; height: 34px; margin: 0 -1px; transform: translateY(5px); }
+</style>
+</head>
+<body>
+<div class="page">
+  <h1>Loom: logo options</h1>
+  <p class="lede">Five marks, all from the thread idea, all a single stroke weight so they stay crisp at 16 px. Each is shown large, with the wordmark, down to 16 px (favicon and tray), and as app icons. The marks are one colour by default; agents' colours are an accent, never needed to read it.</p>
+  <div id="opts"></div>
+</div>
+
+<script>
+// ---------------------------------------------------------------------------
+// The marks, as SVG on a 32 x 32 grid. Every mark is strokes only, round
+// caps, one weight, so GPUI, an .ico and an iOS icon all draw the same thing.
+// "ko" is the background colour, used to cut a gap where one strand passes
+// over another.
+// ---------------------------------------------------------------------------
+const TAU = Math.PI * 2;
+function poly(pts) { return pts.map((p, i) => (i ? "L" : "M") + p[0].toFixed(2) + " " + p[1].toFixed(2)).join(""); }
+
+// A thread with loops: the same knot shape as the "waiting" thread in the app.
+function loopThread(centres, { y = 22, R = 6.4, half = 0.17, k = 1.15, x0 = 3, x1 = 29 } = {}) {
+  const pts = [];
+  for (let i = 0; i <= 400; i++) {
+    const s = i / 400; let x = x0 + (x1 - x0) * s, yy = y;
+    for (const c of centres) {
+      const d = s - c;
+      if (Math.abs(d) < half) { const u = (d + half) / (2 * half), th = TAU * u; x += -R * k * Math.sin(th); yy += -R * (1 - Math.cos(th)); }
+    }
+    pts.push([x, yy]);
+  }
+  return poly(pts);
+}
+
+// One loop that crosses itself, drawn for centre 16 and baseline 22, then
+// moved to centre cx and scaled by k about its foot. "up" climbs the right
+// side and comes over the top; "down" falls down the left side and crosses
+// the rising stroke on its way back to the baseline.
+function loopAt(cx, k, base = 22) {
+  const m = (x, y) => `${(cx + (x - 16) * k).toFixed(2)} ${(base + (y - 22) * k).toFixed(2)}`;
+  return {
+    x0: (cx - 4 * k).toFixed(2),
+    up: ` C ${m(19, 22)}, ${m(22, 16)}, ${m(22, 11.5)} C ${m(22, 7)}, ${m(19, 4.5)}, ${m(16, 4.5)} C ${m(13, 4.5)}, ${m(10, 7)}, ${m(10, 11.5)}`,
+    down: `M${m(10, 11.5)} C ${m(10, 16.5)}, ${m(13.5, 22)}, ${m(20, 22)}`,
+  };
+}
+
+const W = 2.6; // stroke weight on the 32 grid
+function svg(inner, cls = "") { return `<svg viewBox="0 0 32 32" fill="none" stroke-linecap="round" stroke-linejoin="round" class="${cls}">${inner}</svg>`; }
+function s(d, col, w = W) { return `<path d="${d}" stroke="${col}" stroke-width="${w}"/>`; }
+
+const MARKS = {
+  // A: warp and weft. Two strands crossing, one over the other in the middle.
+  crossing(c, ko, colours) {
+    const a = "M3 16 C 7.5 6.5, 12 6.5, 16 16 S 24.5 25.5, 29 16";
+    const b = "M3 16 C 7.5 25.5, 12 25.5, 16 16 S 24.5 6.5, 29 16";
+    const [ca, cb] = colours || [c, c];
+    return svg(s(b, cb) + s(a, ko, W + 3) + s(a, ca));
+  },
+  // B: the knot. One thread with a single loop that crosses itself, the
+  // thread passing over itself where it does: an agent waiting for you.
+  knot(c, ko, colours) {
+    const col = colours ? colours[0] : c;
+    const L = loopAt(16, 1, 23);
+    return svg(s(`M3 23 H${L.x0}` + L.up, col) + s(L.down, ko, W + 3) + s(L.down + ` H29`, col));
+  },
+  // C: the twist. Two strands wound round each other, over and under, as an
+  // agent wears another's strand while it works for it.
+  twist(c, ko, colours) {
+    const [ca, cb] = colours || [c, c];
+    // One and a half turns: crossings inside at x = 11.67 and 20.33.
+    const P = 26 / 1.5;
+    const y = (x, ph) => 16 + 6 * Math.sin(TAU * (x - 3) / P + ph);
+    const strand = ph => { const p = []; for (let x = 3; x <= 29.001; x += 0.25) p.push([x, y(x, ph)]); return poly(p); };
+    const piece = (ph, x0, x1) => { const p = []; for (let x = x0; x <= x1 + 1e-6; x += 0.2) p.push([x, y(x, ph)]); return poly(p); };
+    let out = s(strand(Math.PI), cb) + s(strand(0), ca);
+    // Alternate which strand is on top at each crossing.
+    [[3 + P / 2, Math.PI], [3 + P, 0]].forEach(([x, ph]) => {
+      const seg = piece(ph, x - 1.8, x + 1.8);
+      out += s(seg, ko, W + 2.4) + s(seg, ph === 0 ? ca : cb);
+    });
+    return svg(out);
+  },
+  // D: the double loop. One thread making two loops: the "oo" in loom.
+  oo(c, ko, colours) {
+    const col = colours ? colours[0] : c;
+    const a = loopAt(10, 0.72, 23), b = loopAt(22, 0.72, 23);
+    return svg(
+      s(`M2 23 H${a.x0}` + a.up, col) + s(a.down, ko, W + 3) + s(a.down + ` H${b.x0}` + b.up, col) +
+      s(b.down, ko, W + 3) + s(b.down + ` H30`, col));
+  },
+  // E: plain weave. Two warp threads and two weft threads, over and under.
+  weave(c, ko, colours) {
+    const cs = colours || [c, c, c, c];
+    const xs = [11, 21], ys = [11, 21];
+    let out = "";
+    // weft (horizontal), slightly wavy
+    const h = y => `M4 ${y} C 9 ${y - 1.2}, 13 ${y + 1.2}, 16 ${y} S 23 ${y - 1.2}, 28 ${y}`;
+    const v = x => `M${x} 4 C ${x + 1.2} 9, ${x - 1.2} 13, ${x} 16 S ${x + 1.2} 23, ${x} 28`;
+    out += s(h(ys[0]), cs[2]) + s(h(ys[1]), cs[3]) + s(v(xs[0]), cs[0]) + s(v(xs[1]), cs[1]);
+    // over-under: at (x0,y0) and (x1,y1) the weft is on top; at the others the warp is.
+    const over = [[0, 0, "h"], [1, 1, "h"], [1, 0, "v"], [0, 1, "v"]];
+    for (const [i, j, top] of over) {
+      const x = xs[i], y = ys[j];
+      const seg = top === "h" ? `M${x - 3.2} ${y} L${x + 3.2} ${y}` : `M${x} ${y - 3.2} L${x} ${y + 3.2}`;
+      const col = top === "h" ? cs[2 + j] : cs[i];
+      out += s(seg, ko, W + 1.8) + s(seg, col);
+    }
+    return svg(out);
+  },
+};
+
+const OPTS = [
+  ["crossing", "A · Crossing", "Warp and weft: two strands crossing, one passing over the other in the middle. The plainest weaving sign, and it reads at any size.", ["--main", "--builder"],
+   "Strong at 16 px and in one colour. Safe; could be mistaken for a generic wave or DNA icon."],
+  ["knot", "B · Knot", "One thread with a single loop: the same knot the app ties when an agent is waiting for you. A logo that's also a state you'll see every day.", ["--main"],
+   "Most tied to the app itself, and very simple. The loop also reads as a cursive l, for loom."],
+  ["twist", "C · Twist", "Two strands wound round each other, over and under: the cord an agent wears when it works for another. Agents held together.", ["--main", "--builder"],
+   "Reads as cord or rope, and holds up at 16 px. In colour it's two agents working together."],
+  ["oo", "D · Double loop", "One thread making two loops, the oo in loom. It can stand alone, or sit inside the wordmark as its middle letters.", ["--main"],
+   "Most playful, and it doubles as the wordmark. Two loops at 16 px is the limit of what fits."],
+  ["weave", "E · Weave", "A patch of plain weave: two warp threads and two weft threads, over and under. The most literal.", ["--main", "--builder", "--coach", "--post"],
+   "Unmistakably cloth, but busier than the others and the most like a grid or hash icon."],
+];
+
+const host = document.getElementById("opts");
+for (const [key, name, idea, cols, verdict] of OPTS) {
+  const m = MARKS[key];
+  const colD = cols.map(c => `var(${c})`), colL = cols.map(c => `var(${c}-l)`);
+  const word = key === "oo"
+    ? `<span class="custom-word">l${m("currentColor", "var(--dark)")}m</span>`
+    : "";
+  const html = `
+  <section class="opt">
+    <h2>${name}</h2>
+    <p class="idea">${idea}</p>
+    <div class="rowx">
+      <div class="panel dark big">${m("var(--dark-ink)", "var(--dark)")}${m(null, "var(--dark)", colD)}</div>
+      <div class="panel light big">${m("var(--light-ink)", "var(--light)")}${m(null, "var(--light)", colL)}</div>
+      <div class="lockups">
+        <div class="lockup dark">${m("currentColor", "var(--dark)")}loom</div>
+        <div class="lockup light">${m("currentColor", "var(--light)")}loom</div>
+        ${key === "oo" ? `<div class="lockup dark" style="justify-content:center">${word}</div>` : ""}
+      </div>
+    </div>
+    <div class="small">
+      <div class="mini">
+        <div class="ladder dark">
+          ${[64, 32, 24, 16].map(px => `<figure>${m("var(--dark-ink)", "var(--dark)").replace("<svg", `<svg width="${px}" height="${px}"`)}<figcaption>${px}</figcaption></figure>`).join("")}
+        </div>
+        <div class="ladder light">
+          ${[64, 32, 24, 16].map(px => `<figure>${m("var(--light-ink)", "var(--light)").replace("<svg", `<svg width="${px}" height="${px}"`)}<figcaption>${px}</figcaption></figure>`).join("")}
+        </div>
+      </div>
+      <div class="mini">
+        <div class="icons">
+          <figure><div class="app mac">${m("#f2f2f3", "#151517")}</div><figcaption>macOS</figcaption></figure>
+          <figure><div class="app win11">${m("#f2f2f3", "#0f0f11")}</div><figcaption>Windows</figcaption></figure>
+          <figure><div class="app ios l">${m("#111113", "#ffffff")}</div><figcaption>iOS light</figcaption></figure>
+          <figure><div class="app ios d">${m("#ffffff", "#000000")}</div><figcaption>iOS dark</figcaption></figure>
+          <figure><div class="app ios t">${m("#c9c0ff", "#1a1a1a")}</div><figcaption>iOS tinted</figcaption></figure>
+          <figure><div class="app ios d">${m(null, "#000000", colD)}</div><figcaption>In colour</figcaption></figure>
+        </div>
+        <div style="display:flex; gap:10px; align-items:flex-end">
+          <div class="tray"><span class="ic">${m("#ffffff", "#1f1f1f")}</span>Tray, 16 px</div>
+          <div class="tab">${m("#111113", "#ffffff")}loom · Build checks</div>
+        </div>
+      </div>
+    </div>
+    <p class="verdict"><b>Notes:</b> ${verdict}</p>
+  </section>`;
+  host.insertAdjacentHTML("beforeend", html);
+}
+</script>
+</body>
+</html>
