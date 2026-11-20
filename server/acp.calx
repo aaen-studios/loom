@@ -1,0 +1,154 @@
+module server.acp
+
+// The ACP side of the instance: each agent program runs as a child process,
+// which a thread of its own writes to and reads from, so the instance's loop
+// never waits on an agent. What the agent writes comes to the loop as Lines,
+// and what the loop sends goes to the thread as Outs.
+//
+// ACP is JSON-RPC 2.0 with one message a line (https://agentclientprotocol.com).
+import std.json.{Json}
+import std.process.{Child, Command, Stdio}
+import std.thread.{Task}
+import shared.obj.{Obj}
+
+// A line an agent program wrote, or its end.
+pub struct Line {
+    pub agent: String
+    pub text: String?
+    pub exit: i32?    // set once, when the program has ended
+}
+
+// What the loop asks of an agent's thread.
+pub enum Out {
+    Send(String)
+    Stop
+}
+
+struct Worker {
+    agent: String
+    child: Child
+    outbox: Receiver<Out>
+    lines: Sender<Line>
+}
+
+impl Task for Worker {
+    fn run(own self) {
+        var w = self
+        loop {
+            // Write what's waiting first, so a prompt goes out at once.
+            while let out = w.outbox.next() {
+                match out {
+                    Out.Send(text) => {
+                        match w.child.write_text("{text}\n") {
+                            ok => {},
+                            err(e) => eprintln("loom: can't write to agent {w.agent}: {e}"),
+                        }
+                    },
+                    Out.Stop => {
+                        w.child.kill()
+                    },
+                }
+            }
+            if let line = w.child.read_line(10) {
+                w.lines.send(Line { agent: w.agent.copy(), text: some(line), exit: none })
+                continue
+            }
+            if w.child.ended() {
+                let out = w.child.wait()
+                w.lines.send(Line { agent: w.agent.copy(), text: none, exit: some(out.status.code ?? -1) })
+                return
+            }
+        }
+    }
+}
+
+// Starts an agent program in `dir`, and gives the end that sends to it.
+// Everything it writes comes to `lines`, tagged with `agent`.
+pub fn start(agent: String, command: String, args: List<String>, dir: String, lines: Sender<Line>) -> Sender<Out> ! Error {
+    let child = try Command.new(command).args(args).dir(dir).stdin(Stdio.Pipe).stdout(Stdio.Pipe).spawn()
+    let outbox = Receiver<Out>()
+    let to = outbox.sender()
+    _ = unsafe { Thread.spawn(Worker { agent: agent.copy(), child: child, outbox: outbox, lines: lines.copy() }) }
+    return to
+}
+
+pub fn request(id: i64, method: str, params: Json) -> String {
+    return "{Obj.new().s("jsonrpc", String("2.0")).i("id", id).s("method", String(method)).j("params", params).done()}"
+}
+
+pub fn notify(method: str, params: Json) -> String {
+    return "{Obj.new().s("jsonrpc", String("2.0")).s("method", String(method)).j("params", params).done()}"
+}
+
+pub fn respond(id: Json, result: Json) -> String {
+    return "{Obj.new().s("jsonrpc", String("2.0")).j("id", id).j("result", result).done()}"
+}
+
+pub fn respond_error(id: Json, code: i64, message: String) -> String {
+    let e = Obj.new().i("code", code).s("message", message).done()
+    return "{Obj.new().s("jsonrpc", String("2.0")).j("id", id).j("error", e).done()}"
+}
+
+// What loom tells an agent about itself when it starts one.
+pub fn initialize_params() -> Json {
+    let fs = Obj.new().b("readTextFile", false).b("writeTextFile", false).done()
+    let caps = Obj.new().j("fs", fs).b("terminal", false).done()
+    let info = Obj.new().s("name", String("loom")).s("version", String("0.2.0-dev")).done()
+    return Obj.new().i("protocolVersion", 1).j("clientCapabilities", caps).j("clientInfo", info).done()
+}
+
+// A run's end, from session/prompt's stopReason, as loom's run.finished
+// status names it.
+pub fn status_of(stop_reason: String) -> String {
+    if stop_reason == "end_turn" { return String("done") }
+    if stop_reason == "cancelled" { return String("cancelled") }
+    if stop_reason == "max_tokens" or stop_reason == "max_turn_requests" { return String("limit") }
+    if stop_reason == "refusal" { return String("failed") }
+    return String("done")
+}
+
+// ACP's tool kinds are loom's, apart from ones it doesn't know.
+pub fn tool_kind(kind: String) -> String {
+    for k in "read edit delete move search execute think fetch".split(" ") {
+        if kind == k { return kind.copy() }
+    }
+    return String("other")
+}
+
+// The option of a permission request that matches the person's answer:
+// allow_once, allow_always, reject_once or reject_always, falling back to any
+// allow or reject. none if the agent offered nothing that fits.
+pub fn pick_option(options: Json, allow: bool, always: bool) -> String? {
+    let want = if allow { if always { "allow_always" } else { "allow_once" } } else { if always { "reject_always" } else { "reject_once" } }
+    let prefix = if allow { "allow" } else { "reject" }
+    var fallback: String? = none
+    if let Json.Array(list) = options {
+        for o in list {
+            let kind = (o.get(String("kind")) ?? Json.Null).as_str() ?? String()
+            let id = (o.get(String("optionId")) ?? Json.Null).as_str() ?? String()
+            if kind == want { return some(id) }
+            if fallback == none and kind.starts_with(prefix) { fallback = some(id) }
+        }
+    }
+    return fallback
+}
+
+@test
+fn stop_reasons_map_to_statuses() {
+    assert(status_of(String("end_turn")) == "done")
+    assert(status_of(String("max_tokens")) == "limit")
+    assert(status_of(String("cancelled")) == "cancelled")
+}
+
+@test
+fn picks_the_option_that_fits() {
+    var list = List<Json>()
+    for k in "allow_once reject_once".split(" ") {
+        list.push(Obj.new().s("optionId", "id_{k}").s("kind", k.copy()).done())
+    }
+    let options = Json.Array(list)
+    assert(pick_option(options.copy(), true, false) == some(String("id_allow_once")))
+    assert(pick_option(options.copy(), true, true) == some(String("id_allow_once")))
+    assert(pick_option(options.copy(), false, true) == some(String("id_reject_once")))
+    assert(pick_option(Json.Array(List<Json>()), true, false) == none)
+}

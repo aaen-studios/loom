@@ -9,7 +9,9 @@
 // 1. checks that every .calx file is formatted (calx fmt --check);
 // 2. checks every .calx file builds (calx check), several at once;
 // 3. runs the tests of each file that has any (calx test);
-// 4. checks the generated design tokens are up to date.
+// 4. checks the generated design tokens are up to date;
+// 5. runs each protocol test in tests/protocol/, which starts a real
+//    instance with the fake ACP agent.
 //
 // It exits with 1 if anything failed, after running all of it.
 import std.env
@@ -85,6 +87,14 @@ fn main() ! Error {
     // 4. Design tokens.
     let tokens = try Command.new(calx()).arg(String("scripts/tokens.calx")).arg(String("--check")).status()
     if not tokens.success() { failed.push(String("design tokens")) }
+
+    // 5. Protocol tests.
+    for f in files {
+        if not f.starts_with("tests/protocol/") { continue }
+        println("run {f}")
+        let p = try Command.new(calx()).arg(f.copy()).status()
+        if not p.success() { failed.push("run {f}") }
+    }
 
     if failed.len() > 0 {
         eprintln("\n{failed.len()} failed:")

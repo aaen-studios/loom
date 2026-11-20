@@ -392,6 +392,7 @@ Arguments marked `?` are optional. "—" means `value` is `{}`.
 |---|---|
 | `bad_frame` | Not JSON, or a field has the wrong type |
 | `unknown_frame` | A `t` this version doesn't have |
+| `unknown_command` | A `cmd` whose `name` this version doesn't have |
 | `not_found` | An id that doesn't exist, or isn't this person's (the two look the same) |
 | `already_answered` | An approval someone already answered |
 | `not_allowed` | This person can't do that |

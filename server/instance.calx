@@ -1,0 +1,997 @@
+module server.instance
+
+// The instance: one loop on std.http.server that answers the HTTP routes and
+// the /ws sessions of protocol/protocol.md, runs each agent's turns through
+// ACP, and turns what the agents say into loom's events and deltas.
+//
+// Everything happens on the loop's thread, one thing at a time: a frame, a
+// request, or a line from an agent. So an event is stored and sent before the
+// next frame is read, and a session's catch-up can't interleave with live
+// events.
+import std.bytes
+import std.crypto.{Ed25519Key, PasswordHasher, random_bytes}
+import std.fs
+import std.http.server.{Request, Response, Server, ServerSocket}
+import std.json.{Json, parse}
+import std.signal
+import shared.obj.{Obj, at, bool_at, int_at, str_at}
+import shared.protocol
+import server.acp
+import server.acp.{Line, Out}
+import server.store.{Device, Store, now}
+
+pub struct Config {
+    pub data: String
+    pub port: u16
+    pub host: String
+    pub hasher: PasswordHasher
+}
+
+struct Session {
+    socket: ServerSocket
+    user: String
+    device: String
+    live: bool
+}
+
+struct Block {
+    kind: String
+    text: String
+    call: String
+    entries: Json
+}
+
+struct Run {
+    id: String
+    user: String
+    conversation: String
+    agent: String
+    message: String    // the reply's id
+    answering: String
+    prompt: String
+    session: String    // the ACP session, once there is one
+    blocks: List<Block>
+    tools: LinkedMap<String, String>    // ACP toolCallId -> tc_ id
+    denied: List<String>
+}
+
+struct Approval {
+    call: String
+    run: String
+    agent: String
+    rpc: Json
+    options: Json
+}
+
+// A command's answer: its value, or its error's code and message.
+enum Answer {
+    Value(Json)
+    Refused(String, String)
+}
+
+enum Pending {
+    Init
+    NewSession(String)
+    Prompt(String)
+}
+
+struct Proc {
+    agent: String
+    user: String
+    to: Sender<Out>
+    ready: bool
+    next_id: i64
+    pending: Map<i64, Pending>
+    sessions: Map<String, String>    // conversation -> ACP session
+    waiting: List<String>
+}
+
+pub struct Instance {
+    store: Store
+    server: Server
+    data: String
+    sessions: Map<u32, Session>
+    runs: LinkedMap<String, Run>
+    procs: LinkedMap<String, Proc>
+    approvals: LinkedMap<String, Approval>
+    lines: Receiver<Line>
+    lines_to: Sender<Line>
+}
+
+fn json_response(status: u16, body: Json) -> Response {
+    return Response.new(status, String("application/json"), "{body}".to_bytes())
+}
+
+fn http_error(status: u16, code: str, message: String) -> Response {
+    let e = Obj.new().s("code", String(code)).s("message", message).done()
+    return json_response(status, Obj.new().j("error", e).done())
+}
+
+fn valid_username(name: String) -> bool {
+    if name.len() == 0 or name.len() > 32 { return false }
+    for r in name.runes() {
+        let fine = (r >= 'a' and r <= 'z') or (r >= '0' and r <= '9') or r == '_' or r == '-'
+        if not fine { return false }
+    }
+    return true
+}
+
+fn error_frame(code: str, message: String, ref_id: String?) -> String {
+    return "{Obj.new().s("t", String("error")).s("code", String(code)).s("message", message).maybe("ref", ref_id).done()}"
+}
+
+impl Instance {
+    pub fn open(config: Config) -> Instance ! Error {
+        try fs.make_dir_all(config.data.copy())
+        let store = try Store.open("{config.data}/loom.db", config.hasher)
+        if try store.meta("instance") == none {
+            try store.set_meta("instance", "i_{bytes.hex(random_bytes(4))}")
+            try store.set_meta("key", bytes.hex(random_bytes(32)))
+        }
+        // Runs a crash or a restart cut short.
+        for (user, run, conversation) in try store.unfinished_runs() {
+            try store.finish_run(run.copy(), String("failed"))
+            _ = try store.append(user, "run.finished", Obj.new().s("run", run).s("conversation", conversation).s("status", String("failed")).s("error", String("the instance restarted")).done())
+        }
+        var server = try Server.listen(config.port, config.host.copy())
+        server.log = false
+        server.max_message = protocol.MAX_FRAME
+        let lines = Receiver<Line>()
+        let to = lines.sender()
+        return Instance { store: store, server: server, data: config.data.copy(), sessions: Map<u32, Session>(), runs: LinkedMap<String, Run>(), procs: LinkedMap<String, Proc>(), approvals: LinkedMap<String, Approval>(), lines: lines, lines_to: to }
+    }
+
+    pub fn url(self) -> String {
+        return self.server.url()
+    }
+
+    // The setup code, made on the first start, while there's no owner yet.
+    pub fn setup_code(self) -> String? ! Error {
+        if try self.store.user_count() > 0 { return none }
+        if let code = try self.store.meta("setup_code") { return some(code) }
+        let code = bytes.hex(random_bytes(8))
+        try self.store.set_meta("setup_code", code.copy())
+        return some(code)
+    }
+
+    // Runs until the program is asked to stop.
+    pub fn serve(i: mut Instance) ! Error {
+        signal.handle()
+        try i.server.wake_on_signal()
+        loop {
+            match i.server.next_event(10) {
+                some(Request(req)) => {
+                    if req.path == "/ws" and req.method == "GET" {
+                        // upgrade answers the request itself.
+                        match i.server.upgrade(req.copy()) {
+                            ok(s) => i.sessions.insert(s.id(), Session { socket: s, user: String(), device: String(), live: false }),
+                            err(e) => eprintln("loom: /ws from {req.client}: {e}"),
+                        }
+                        continue
+                    }
+                    match i.http(req.copy()) {
+                        ok(res) => i.server.respond(req, res),
+                        err(e) => {
+                            eprintln("loom: {req.method} {req.path}: {e}")
+                            i.server.respond(req, http_error(500, "internal", String("Something went wrong in the instance.")))
+                        },
+                    }
+                },
+                some(Message(s, Text(text))) => {
+                    match i.frame(s, text) {
+                        ok => {},
+                        err(e) => {
+                            eprintln("loom: frame: {e}")
+                            _ = i.server.send_text(s, error_frame("internal", String("Something went wrong in the instance."), none))
+                        },
+                    }
+                },
+                some(Message(s, Binary(_))) => i.server.close_socket(s, protocol.CLOSE_PROTOCOL, String("binary frames aren't used")),
+                some(Closed(s, _, _)) => {
+                    _ = i.sessions.remove(s.id())
+                },
+                none => {
+                    if signal.take() != none { break }
+                },
+                _ => {},
+            }
+            while let line = i.lines.next() {
+                match i.agent_line(line) {
+                    ok => {},
+                    err(e) => eprintln("loom: agent: {e}"),
+                }
+            }
+        }
+        for (_, p) in i.procs {
+            var to = p.to.copy()
+            to.send(Out.Stop)
+        }
+        i.server.shutdown()
+    }
+
+    // --- Sending ---
+
+    fn publish(i: Instance, user: String, event: Json) {
+        let text = "{event}"
+        for (_, s) in i.sessions {
+            if s.live and s.user == user {
+                _ = i.server.send_text(s.socket, text.copy())
+            }
+        }
+    }
+
+    fn event(i: Instance, user: String, kind: str, fields: Json) ! Error {
+        let e = try i.store.append(user.copy(), kind, fields)
+        i.publish(user, e)
+    }
+
+    // --- HTTP ---
+
+    fn http(i: mut Instance, req: Request) -> Response ! Error {
+        if req.path == "/api/info" and req.method == "GET" {
+            let users = try i.store.user_count()
+            let seed = try i.store.meta("key") ?? String()
+            let key = Ed25519Key.from_seed(bytes.from_hex(seed) ?? List<u8>()) else {
+                fail "the instance's key is damaged"
+            }
+            let versions = Json.Array([Json.Int(i64(protocol.NEWEST))])
+            return json_response(200, Obj.new().s("instance", try i.store.meta("instance") ?? String()).s("key", bytes.base64(key.public_key().bytes())).j("protocol", versions).b("setup", users == 0).done())
+        }
+        if req.method != "POST" {
+            return http_error(404, "not_found", String("There's nothing here."))
+        }
+        let body = match parse(req.text() ?? String()) {
+            ok(j) => j,
+            err(_) => return http_error(400, "bad_request", String("The body isn't JSON.")),
+        }
+        if req.path == "/api/setup" { return try i.setup(body) }
+        if req.path == "/api/login" { return try i.login(body) }
+        if req.path == "/api/logout" { return try i.logout(req) }
+        return http_error(404, "not_found", String("There's nothing here."))
+    }
+
+    fn new_device(i: Instance, user: String, body: Json) -> Json ! Error {
+        let d = at(body, "device")
+        let name = str_at(d.copy(), "name") ?? String("A device")
+        let kind = str_at(d.copy(), "kind") ?? String("cli")
+        let tz = str_at(d, "tz") ?? String("UTC")
+        let (device, token) = try i.store.add_device(user.copy(), name.copy(), kind.copy(), tz)
+        try i.event(user.copy(), "device.added", Obj.new().j("device", Obj.new().s("id", device.id.copy()).s("name", name).s("kind", kind).i("at", now()).done()).done())
+        return Obj.new().s("user", user).s("device", device.id).s("token", token).done()
+    }
+
+    fn setup(i: Instance, body: Json) -> Response ! Error {
+        if try i.store.user_count() > 0 {
+            return http_error(409, "already_set_up", String("This instance has its owner already."))
+        }
+        let code = try i.store.meta("setup_code") ?? String()
+        let given = str_at(body.copy(), "code") ?? String()
+        if code.len() == 0 or given != code {
+            return http_error(403, "bad_code", String("That setup code isn't this instance's."))
+        }
+        let username = str_at(body.copy(), "username") ?? String()
+        let password = str_at(body.copy(), "password") ?? String()
+        if not valid_username(username.copy()) {
+            return http_error(400, "bad_username", String("A username is 1 to 32 of a-z, 0-9, _ and -."))
+        }
+        if password.len() < 8 {
+            return http_error(400, "weak_password", String("A password needs at least 8 characters."))
+        }
+        let user = try i.store.add_user(username, password, "owner")
+        try i.store.delete_meta("setup_code")
+        return json_response(200, try i.new_device(user.id, body))
+    }
+
+    fn login(i: Instance, body: Json) -> Response ! Error {
+        let username = str_at(body.copy(), "username") ?? String()
+        let password = str_at(body.copy(), "password") ?? String()
+        let user = try i.store.check_password(username, password) else {
+            return http_error(401, "bad_password", String("That username and password don't match."))
+        }
+        return json_response(200, try i.new_device(user.id, body))
+    }
+
+    fn bearer(i: Instance, req: Request) -> Device? ! Error {
+        let h = req.header(String("Authorization")) ?? String()
+        if not h.starts_with("Bearer ") { return none }
+        return try i.store.device_for_token(h[7..].copy())
+    }
+
+    fn logout(i: mut Instance, req: Request) -> Response ! Error {
+        let device = try i.bearer(req) else {
+            return http_error(401, "unauthorized", String("That token isn't signed in."))
+        }
+        try i.revoke(device.user, device.id)
+        return Response.text(String(""), 204)
+    }
+
+    fn revoke(i: mut Instance, user: String, device: String) ! Error {
+        try i.store.revoke_device(device.copy())
+        try i.event(user, "device.revoked", Obj.new().s("device", device.copy()).done())
+        for (_, s) in i.sessions {
+            if s.device == device {
+                i.server.close_socket(s.socket, protocol.CLOSE_TOKEN, String("signed out"))
+            }
+        }
+    }
+
+    // --- The WebSocket session ---
+
+    fn frame(i: mut Instance, s: ServerSocket, text: String) ! Error {
+        let f = match parse(text) {
+            ok(j) => j,
+            err(_) => {
+                _ = i.server.send_text(s, error_frame("bad_frame", String("That frame isn't JSON."), none))
+                return
+            },
+        }
+        let t = str_at(f.copy(), "t") ?? String()
+        var user = String()
+        var device = String()
+        if let session = i.sessions.find(s.id()) {
+            user = session.user.copy()
+            device = session.device.copy()
+        } else {
+            return
+        }
+        if user.len() == 0 {
+            if t != "hello" {
+                i.server.close_socket(s, protocol.CLOSE_PROTOCOL, String("the first frame must be hello"))
+                return
+            }
+            try i.hello(s, f)
+            return
+        }
+        if t == "send" {
+            try i.send(s, user, device, f)
+        } else if t == "approve" {
+            try i.approve(s, user, device, f)
+        } else if t == "cancel" {
+            try i.cancel(s, user, str_at(f, "run") ?? String())
+        } else if t == "cmd" {
+            try i.cmd(s, user, device, f)
+        } else if t == "device" {
+            if let tz = str_at(f, "tz") { try i.store.update_device_tz(device, tz) }
+        } else if t == "hello" {
+            i.server.close_socket(s, protocol.CLOSE_PROTOCOL, String("hello was sent already"))
+        } else {
+            _ = i.server.send_text(s, error_frame("unknown_frame", "Version 1 has no frame {t}.", none))
+        }
+    }
+
+    fn hello(i: mut Instance, s: ServerSocket, f: Json) ! Error {
+        let device = try i.store.device_for_token(str_at(f.copy(), "token") ?? String()) else {
+            i.server.close_socket(s, protocol.CLOSE_TOKEN, String("that token isn't signed in"))
+            return
+        }
+        var offered = List<i32>()
+        if let Json.Array(vs) = at(f.copy(), "versions") {
+            for v in vs {
+                if let n = v.as_i64() { offered.push(i32.try_from(n) ?? 0) }
+            }
+        }
+        let version = protocol.pick_version(offered) else {
+            i.server.close_socket(s, protocol.CLOSE_VERSION, String("no protocol version in common"))
+            return
+        }
+        if let tz = str_at(at(f.copy(), "device"), "tz") { try i.store.update_device_tz(device.id.copy(), tz) }
+        let user = device.user.copy()
+        let after = int_at(f, "after") ?? 0
+        let last = try i.store.last_seq(user.copy())
+        let first = try i.store.first_seq(user.copy())
+        let reset = after > last or (after > 0 and first > 1 and after < first - 1)
+        _ = i.server.send_text(s, "{Obj.new().s("t", String("welcome")).i("version", i64(version)).s("user", user.copy()).s("device", device.id.copy()).i("seq", last).b("reset", reset).done()}")
+        if reset {
+            _ = i.server.send_text(s, "{try i.snapshot(user.copy(), last)}")
+        } else {
+            for e in try i.store.events_after(user.copy(), after) {
+                _ = i.server.send_text(s, e)
+            }
+        }
+        // Replies still being written, from position 0.
+        for (_, r) in i.runs {
+            if r.user != user { continue }
+            var b: i64 = 0
+            for block in r.blocks {
+                if block.kind == "text" or block.kind == "thought" {
+                    _ = i.server.send_text(s, "{Obj.new().s("t", String("delta")).s("run", r.id.copy()).s("message", r.message.copy()).i("block", b).s("kind", block.kind.copy()).i("pos", 0).s("text", block.text.copy()).done()}")
+                }
+                b += 1
+            }
+        }
+        _ = i.server.send_text(s, "{Obj.new().s("t", String("synced")).i("seq", last).done()}")
+        i.sessions.insert(s.id(), Session { socket: s, user: user, device: device.id, live: true })
+    }
+
+    fn snapshot(i: Instance, user: String, seq: i64) -> Json ! Error {
+        let conversations = try i.store.conversations(user.copy())
+        var messages = List<Json>()
+        for c in conversations {
+            let (page, _) = try i.store.messages(user.copy(), str_at(c.copy(), "id") ?? String(), none, 50)
+            for m in page {
+                messages.push(m.copy())
+            }
+        }
+        return Obj.new().s("t", String("snapshot")).i("seq", seq).j("agents", Json.Array(try i.store.agents(user))).j("conversations", Json.Array(conversations)).j("messages", Json.Array(messages)).done()
+    }
+
+    fn send(i: mut Instance, s: ServerSocket, user: String, device: String, f: Json) ! Error {
+        let cid = str_at(f.copy(), "cid") ?? String()
+        let conversation_id = str_at(f.copy(), "conversation") ?? String()
+        let text = str_at(f, "text") ?? String()
+        if cid.len() == 0 {
+            _ = i.server.send_text(s, error_frame("bad_frame", String("A send needs a cid."), none))
+            return
+        }
+        if let (message, run) = try i.store.sent(device.copy(), cid.copy()) {
+            _ = i.server.send_text(s, "{Obj.new().s("t", String("ack")).s("cid", cid).s("message", message).maybe("run", if run.len() > 0 { some(run) } else { none }).done()}")
+            return
+        }
+        let conversation = try i.store.conversation(user.copy(), conversation_id.copy()) else {
+            _ = i.server.send_text(s, error_frame("unknown_conversation", "There's no conversation {conversation_id}.", some(cid)))
+            return
+        }
+        let message_id = try i.store.new_id("msg")
+        let block = Obj.new().s("kind", String("text")).s("text", text.copy()).done()
+        let message = Obj.new().s("id", message_id.copy()).s("conversation", conversation_id.copy()).s("role", String("person")).s("from", device.copy()).i("at", now()).j("blocks", Json.Array([block])).done()
+        try i.store.put_message(user.copy(), message.copy())
+        try i.event(user.copy(), "message.created", Obj.new().s("conversation", conversation_id.copy()).j("message", message).done())
+        var busy = false
+        for (_, r) in i.runs {
+            if r.user == user and r.conversation == conversation_id { busy = true }
+        }
+        if busy {
+            try i.store.remember_sent(device, cid.copy(), message_id.copy(), String())
+            _ = i.server.send_text(s, "{Obj.new().s("t", String("ack")).s("cid", cid.copy()).s("message", message_id).done()}")
+            _ = i.server.send_text(s, error_frame("busy", String("The agent is still answering. Send again once it's done."), some(cid)))
+            return
+        }
+        let run_id = try i.store.new_id("run")
+        try i.store.remember_sent(device, cid.copy(), message_id.copy(), run_id.copy())
+        _ = i.server.send_text(s, "{Obj.new().s("t", String("ack")).s("cid", cid).s("message", message_id.copy()).s("run", run_id.copy()).done()}")
+        try i.start_run(user, conversation, run_id, message_id, text)
+    }
+
+    // --- Runs ---
+
+    fn start_run(i: mut Instance, user: String, conversation: Json, run_id: String, answering: String, text: String) ! Error {
+        let conversation_id = str_at(conversation.copy(), "id") ?? String()
+        let agent_id = str_at(conversation, "agent") ?? String()
+        let reply = try i.store.new_id("msg")
+        try i.store.add_run(user.copy(), run_id.copy(), conversation_id.copy())
+        let agent = try i.store.agent(user.copy(), agent_id.copy())
+        let revision = int_at(agent.copy() ?? Json.Null, "revision") ?? 0
+        try i.event(user.copy(), "run.started", Obj.new().s("run", run_id.copy()).s("conversation", conversation_id.copy()).s("agent", agent_id.copy()).i("revision", revision).s("message", reply.copy()).s("answering", answering.copy()).done())
+        i.runs.insert(run_id.copy(), Run { id: run_id.copy(), user: user.copy(), conversation: conversation_id, agent: agent_id.copy(), message: reply, answering: answering.copy(), prompt: text.copy(), session: String(), blocks: List<Block>(), tools: LinkedMap<String, String>(), denied: List<String>() })
+        let a = agent else {
+            try i.finish(run_id, String("failed"), some(String("The conversation's agent was deleted.")))
+            return
+        }
+        if not i.procs.contains(agent_id.copy()) {
+            match i.start_proc(user, a) {
+                ok => {},
+                err(e) => {
+                    try i.finish(run_id, String("failed"), some("The agent program didn't start: {e}"))
+                    return
+                },
+            }
+        }
+        var p = i.procs.remove(agent_id.copy()) else return
+        if p.ready {
+            i.proceed(mut p, run_id)
+        } else {
+            p.waiting.push(run_id.copy())
+        }
+        i.procs.insert(agent_id, p)
+    }
+
+    fn start_proc(i: mut Instance, user: String, agent: Json) ! Error {
+        let id = str_at(agent.copy(), "id") ?? String()
+        let program = str_at(agent.copy(), "acp_agent") ?? String()
+        let acp_agent = try i.store.acp_agent(program.copy()) else {
+            fail "there's no ACP agent named {program}; add one with `loom acp add`"
+        }
+        let folder = str_at(agent.copy(), "folder") ?? "{i.data}/agents/{id}"
+        try fs.make_dir_all(folder.copy())
+        let instructions = str_at(agent, "instructions") ?? String()
+        if instructions.len() > 0 {
+            try fs.write_text("{folder}/AGENTS.md", instructions.copy())
+            try fs.write_text("{folder}/CLAUDE.md", instructions)
+        }
+        let to = try acp.start(id.copy(), acp_agent.command, acp_agent.args, folder, i.lines_to.copy())
+        var p = Proc { agent: id.copy(), user: user.copy(), to: to, ready: false, next_id: 1, pending: Map<i64, Pending>(), sessions: Map<String, String>(), waiting: List<String>() }
+        p.pending.insert(1, Pending.Init)
+        p.to.send(Out.Send(acp.request(1, "initialize", acp.initialize_params())))
+        i.procs.insert(id, p)
+    }
+
+    // Gives a run to its agent: a new ACP session first if the conversation
+    // has none yet in this agent program, then the prompt.
+    fn proceed(i: mut Instance, p: mut Proc, run_id: String) {
+        var conversation = String()
+        var user = String()
+        var agent = String()
+        if let r = i.runs.find(run_id.copy()) {
+            conversation = r.conversation.copy()
+            user = r.user.copy()
+            agent = r.agent.copy()
+        } else {
+            return
+        }
+        p.next_id += 1
+        let id = p.next_id
+        var known = String()
+        if let session = p.sessions.find(conversation.copy()) {
+            known = session.copy()
+        }
+        if known.len() > 0 {
+            if let run = mut i.runs.find(run_id.copy()) {
+                run.session = known.copy()
+            }
+            i.prompt(mut p, run_id, known)
+            return
+        }
+        let folder = match fs.absolute(i.folder_of(user, agent)) {
+            ok(path) => path,
+            err(_) => String("."),
+        }
+        p.pending.insert(id, Pending.NewSession(run_id.copy()))
+        p.to.send(Out.Send(acp.request(id, "session/new", Obj.new().s("cwd", folder).j("mcpServers", Json.Array(List<Json>())).done())))
+    }
+
+    fn folder_of(i: Instance, user: String, agent: String) -> String {
+        match i.store.agent(user, agent.copy()) {
+            ok(some(a)) => return str_at(a, "folder") ?? "{i.data}/agents/{agent}",
+            _ => return "{i.data}/agents/{agent}",
+        }
+    }
+
+    fn prompt(i: Instance, p: mut Proc, run_id: String, session: String) {
+        var text = String()
+        if let r = i.runs.find(run_id.copy()) {
+            text = r.prompt.copy()
+        } else {
+            return
+        }
+        p.next_id += 1
+        let id = p.next_id
+        let block = Obj.new().s("type", String("text")).s("text", text).done()
+        p.pending.insert(id, Pending.Prompt(run_id.copy()))
+        p.to.send(Out.Send(acp.request(id, "session/prompt", Obj.new().s("sessionId", session).j("prompt", Json.Array([block])).done())))
+    }
+
+    fn agent_line(i: mut Instance, line: Line) ! Error {
+        var p = i.procs.remove(line.agent.copy()) else return
+        let text = line.text else {
+            // The program ended: every run it had fails.
+            var ended = List<String>()
+            for (id, r) in i.runs {
+                if r.agent == line.agent { ended.push(id.copy()) }
+            }
+            for id in ended {
+                try i.finish(id, String("failed"), some("The agent program stopped (exit status {line.exit ?? -1})."))
+            }
+            return
+        }
+        let m = match parse(text.copy()) {
+            ok(j) => j,
+            err(_) => {
+                eprintln("loom: agent {line.agent} wrote a line that isn't JSON: {text}")
+                i.procs.insert(line.agent.copy(), p)
+                return
+            },
+        }
+        let method = str_at(m.copy(), "method")
+        let id = m.get(String("id"))
+        match method {
+            some(name) => {
+                if name == "session/update" {
+                    try i.update(at(m, "params"))
+                } else if name == "session/request_permission" {
+                    try i.permission(mut p, id ?? Json.Null, at(m, "params"))
+                } else if let rid = id {
+                    p.to.send(Out.Send(acp.respond_error(rid, -32601, "loom doesn't offer {name}")))
+                }
+            },
+            none => try i.answer(mut p, m),
+        }
+        i.procs.insert(line.agent.copy(), p)
+    }
+
+    // An answer to one of loom's own requests.
+    fn answer(i: mut Instance, p: mut Proc, m: Json) ! Error {
+        let id = int_at(m.copy(), "id") ?? -1
+        let pending = p.pending.remove(id) else return
+        let error = m.get(String("error"))
+        let result = at(m, "result")
+        match pending {
+            Pending.Init => {
+                if let e = error {
+                    eprintln("loom: agent {p.agent} didn't initialize: {e}")
+                    let waiting = p.waiting.copy()
+                    p.waiting = List<String>()
+                    for run in waiting {
+                        try i.finish(run, String("failed"), some("The agent program didn't start: {str_at(e, "message") ?? String()}"))
+                    }
+                    p.to.send(Out.Stop)
+                    return
+                }
+                p.ready = true
+                let waiting = p.waiting.copy()
+                p.waiting = List<String>()
+                for run in waiting {
+                    i.proceed(mut p, run)
+                }
+            },
+            Pending.NewSession(run) => {
+                if let e = error {
+                    try i.finish(run, String("failed"), some("The agent couldn't start a session: {str_at(e, "message") ?? String()}"))
+                    return
+                }
+                let sid = str_at(result, "sessionId") ?? String()
+                var conversation = String()
+                if let rr = mut i.runs.find(run.copy()) {
+                    rr.session = sid.copy()
+                    conversation = rr.conversation.copy()
+                } else {
+                    return
+                }
+                p.sessions.insert(conversation, sid.copy())
+                i.prompt(mut p, run, sid)
+            },
+            Pending.Prompt(run) => {
+                if let e = error {
+                    try i.finish(run, String("failed"), some(str_at(e, "message") ?? String("The agent failed.")))
+                    return
+                }
+                try i.finish(run, acp.status_of(str_at(result, "stopReason") ?? String()), none)
+            },
+        }
+    }
+
+    // Whose run it is, or "" for one that isn't running.
+    fn run_user(i: Instance, run: String) -> String {
+        if let r = i.runs.find(run) { return r.user.copy() }
+        return String()
+    }
+
+    fn run_for_session(i: Instance, session: String) -> String? {
+        for (id, r) in i.runs {
+            if r.session == session { return some(id.copy()) }
+        }
+        return none
+    }
+
+    // A session/update: streamed text and thoughts become deltas, tool calls
+    // tool.* events, and a plan the plan block.
+    fn update(i: mut Instance, params: Json) ! Error {
+        let run_id = i.run_for_session(str_at(params.copy(), "sessionId") ?? String()) else return
+        var r = i.runs.remove(run_id.copy()) else return
+        let u = at(params, "update")
+        let kind = str_at(u.copy(), "sessionUpdate") ?? String()
+        if kind == "agent_message_chunk" or kind == "agent_thought_chunk" {
+            let content = at(u, "content")
+            if (str_at(content.copy(), "type") ?? String()) == "text" {
+                let piece = str_at(content, "text") ?? String()
+                let block_kind = if kind == "agent_message_chunk" { String("text") } else { String("thought") }
+                var n = r.blocks.len()
+                if n == 0 or r.blocks[n - 1].kind != block_kind {
+                    r.blocks.push(Block { kind: block_kind.copy(), text: String(), call: String(), entries: Json.Null })
+                    n += 1
+                }
+                let pos = r.blocks[n - 1].text.len()
+                r.blocks[n - 1].text.push_str(piece.copy())
+                let delta = Obj.new().s("t", String("delta")).s("run", r.id.copy()).s("message", r.message.copy()).i("block", i64.wrap(u64(n - 1))).s("kind", block_kind).i("pos", i64.wrap(u64(pos))).s("text", piece).done()
+                i.publish(r.user.copy(), delta)
+            }
+        } else if kind == "tool_call" {
+            let call = try i.store.new_id("tc")
+            r.tools.insert(str_at(u.copy(), "toolCallId") ?? String(), call.copy())
+            r.blocks.push(Block { kind: String("tool"), text: String(), call: call.copy(), entries: Json.Null })
+            try i.event(r.user.copy(), "tool.started", Obj.new().s("run", r.id.copy()).s("call", call.copy()).s("tool", acp.tool_kind(str_at(u.copy(), "kind") ?? String())).s("title", str_at(u.copy(), "title") ?? String()).j("input", at(u.copy(), "rawInput")).j("locations", at(u.copy(), "locations")).done())
+            let status = str_at(u.copy(), "status") ?? String()
+            if status == "completed" or status == "failed" {
+                try i.tool_finished(r, call, status, at(u, "content"))
+            }
+        } else if kind == "tool_call_update" {
+            let call = if let c = r.tools.find(str_at(u.copy(), "toolCallId") ?? String()) { c.copy() } else { String() }
+            if call.len() == 0 {
+                i.runs.insert(run_id, r)
+                return
+            }
+            let status = str_at(u.copy(), "status") ?? String()
+            if status == "completed" or status == "failed" {
+                try i.tool_finished(r, call, status, at(u, "content"))
+            } else {
+                var fields = Obj.new().s("call", call)
+                if let title = str_at(u.copy(), "title") { fields = fields.s("title", title) }
+                if let Json.Array(_) = at(u.copy(), "content") { fields = fields.j("output", output_blocks(at(u.copy(), "content"))) }
+                try i.event(r.user.copy(), "tool.updated", fields.done())
+            }
+        } else if kind == "plan" {
+            var found = false
+            for b in mut r.blocks {
+                if b.kind == "plan" {
+                    b.entries = at(u.copy(), "entries")
+                    found = true
+                }
+            }
+            if not found {
+                r.blocks.push(Block { kind: String("plan"), text: String(), call: String(), entries: at(u, "entries") })
+            }
+        }
+        i.runs.insert(run_id, r)
+    }
+
+    fn tool_finished(i: Instance, r: Run, call: String, status: String, content: Json) ! Error {
+        var s = if status == "completed" { String("done") } else { String("failed") }
+        if r.denied.contains(call.copy()) { s = String("denied") }
+        try i.event(r.user.copy(), "tool.finished", Obj.new().s("call", call).s("status", s).j("output", output_blocks(content)).done())
+    }
+
+    // A request for permission: answered by the agent's permission mode, or
+    // asked of the person.
+    fn permission(i: mut Instance, p: mut Proc, rpc: Json, params: Json) ! Error {
+        let session = str_at(params.copy(), "sessionId") ?? String()
+        let run_id = i.run_for_session(session) else {
+            p.to.send(Out.Send(acp.respond(rpc, Obj.new().j("outcome", Obj.new().s("outcome", String("cancelled")).done()).done())))
+            return
+        }
+        var r = i.runs.remove(run_id.copy()) else return
+        let tool_call = at(params.copy(), "toolCall")
+        let acp_call = str_at(tool_call.copy(), "toolCallId") ?? String()
+        var call = if let c = r.tools.find(acp_call.copy()) { c.copy() } else { String() }
+        if call.len() == 0 {
+            call = try i.store.new_id("tc")
+            r.tools.insert(acp_call, call.copy())
+            r.blocks.push(Block { kind: String("tool"), text: String(), call: call.copy(), entries: Json.Null })
+        }
+        let options = at(params, "options")
+        let agent = try i.store.agent(r.user.copy(), r.agent.copy()) ?? Json.Null
+        let mode = str_at(agent, "permission") ?? String("ask")
+        let user = r.user.copy()
+        let run = r.id.copy()
+        i.runs.insert(run_id, r)
+        if mode == "allow" {
+            let option = acp.pick_option(options, true, false) ?? String("allow_once")
+            p.to.send(Out.Send(acp.respond(rpc, Obj.new().j("outcome", Obj.new().s("outcome", String("selected")).s("optionId", option).done()).done())))
+            try i.event(user, "approval.answered", Obj.new().s("call", call).b("allow", true).b("always", false).s("by", String("auto")).done())
+            return
+        }
+        let can_always = acp.pick_option(options.copy(), true, true) != acp.pick_option(options.copy(), true, false)
+        i.approvals.insert(call.copy(), Approval { call: call.copy(), run: run.copy(), agent: p.agent.copy(), rpc: rpc.copy(), options: options })
+        try i.event(user, "approval.needed", Obj.new().s("run", run).s("call", call).s("tool", acp.tool_kind(str_at(tool_call.copy(), "kind") ?? String())).s("title", str_at(tool_call.copy(), "title") ?? String()).j("detail", at(tool_call, "rawInput")).b("can_always", can_always).done())
+    }
+
+    fn approve(i: mut Instance, s: ServerSocket, user: String, device: String, f: Json) ! Error {
+        let call = str_at(f.copy(), "call") ?? String()
+        let allow = bool_at(f.copy(), "allow") ?? false
+        let always = bool_at(f, "always") ?? false
+        var run = String()
+        if let a = i.approvals.find(call.copy()) {
+            run = a.run.copy()
+        } else {
+            _ = i.server.send_text(s, error_frame("already_answered", String("That approval was answered already, or there's no such approval."), some(call)))
+            return
+        }
+        if i.run_user(run) != user {
+            _ = i.server.send_text(s, error_frame("not_found", String("There's no such approval."), some(call)))
+            return
+        }
+        try i.answer_approval(call, allow, always, device)
+    }
+
+    fn answer_approval(i: mut Instance, call: String, allow: bool, always: bool, by: String) ! Error {
+        let a = i.approvals.remove(call.copy()) else return
+        let option = acp.pick_option(a.options.copy(), allow, always)
+        let outcome = match option {
+            some(o) => Obj.new().s("outcome", String("selected")).s("optionId", o).done(),
+            none => Obj.new().s("outcome", String("cancelled")).done(),
+        }
+        if let p = i.procs.find(a.agent.copy()) {
+            var to = p.to.copy()
+            to.send(Out.Send(acp.respond(a.rpc.copy(), Obj.new().j("outcome", outcome).done())))
+        }
+        var user = String()
+        if let r = mut i.runs.find(a.run.copy()) {
+            user = r.user.copy()
+            if not allow { r.denied.push(call.copy()) }
+        }
+        if user.len() > 0 {
+            try i.event(user, "approval.answered", Obj.new().s("call", call).b("allow", allow).b("always", always and allow).s("by", by).done())
+        }
+    }
+
+    fn cancel(i: mut Instance, s: ServerSocket, user: String, run_id: String) ! Error {
+        var session = String()
+        var agent = String()
+        var owner = String()
+        if let r = i.runs.find(run_id.copy()) {
+            session = r.session.copy()
+            agent = r.agent.copy()
+            owner = r.user.copy()
+        }
+        if owner != user {
+            _ = i.server.send_text(s, error_frame("not_found", "There's no running run {run_id}.", some(run_id.copy())))
+            return
+        }
+        var open = List<String>()
+        for (call, a) in i.approvals {
+            if a.run == run_id { open.push(call.copy()) }
+        }
+        for call in open {
+            try i.answer_approval(call, false, false, String("cancel"))
+        }
+        if let p = i.procs.find(agent) {
+            var to = p.to.copy()
+            if session.len() > 0 {
+                to.send(Out.Send(acp.notify("session/cancel", Obj.new().s("sessionId", session).done())))
+            }
+        }
+        if session.len() == 0 {
+            try i.finish(run_id, String("cancelled"), none)
+        }
+    }
+
+    // Ends a run: its reply is stored and sent whole, then run.finished.
+    fn finish(i: mut Instance, run_id: String, status: String, error: String?) ! Error {
+        let r = i.runs.remove(run_id.copy()) else return
+        var open = List<String>()
+        for (call, a) in i.approvals {
+            if a.run == run_id { open.push(call.copy()) }
+        }
+        for call in open {
+            _ = i.approvals.remove(call.copy())
+            try i.event(r.user.copy(), "approval.answered", Obj.new().s("call", call).b("allow", false).b("always", false).s("by", String("cancel")).done())
+        }
+        var blocks = List<Json>()
+        for b in r.blocks {
+            if b.kind == "tool" {
+                blocks.push(Obj.new().s("kind", b.kind.copy()).s("call", b.call.copy()).done())
+            } else if b.kind == "plan" {
+                blocks.push(Obj.new().s("kind", b.kind.copy()).j("entries", b.entries.copy()).done())
+            } else {
+                blocks.push(Obj.new().s("kind", b.kind.copy()).s("text", b.text.copy()).done())
+            }
+        }
+        let message = Obj.new().s("id", r.message.copy()).s("conversation", r.conversation.copy()).s("role", String("agent")).s("agent", r.agent.copy()).s("run", r.id.copy()).i("at", now()).j("blocks", Json.Array(blocks)).done()
+        try i.store.put_message(r.user.copy(), message.copy())
+        try i.event(r.user.copy(), "message.created", Obj.new().s("conversation", r.conversation.copy()).j("message", message).done())
+        try i.store.finish_run(r.id.copy(), status.copy())
+        try i.event(r.user.copy(), "run.finished", Obj.new().s("run", r.id.copy()).s("status", status).maybe("error", error).done())
+    }
+
+    // --- Commands ---
+
+    fn cmd(i: mut Instance, s: ServerSocket, user: String, device: String, f: Json) ! Error {
+        let id = str_at(f.copy(), "id") ?? String()
+        let name = str_at(f.copy(), "name") ?? String()
+        let args = at(f, "args")
+        let result = try i.command(user, device, name.copy(), args)
+        let frame = match result {
+            Answer.Value(value) => Obj.new().s("t", String("result")).s("id", id).b("ok", true).j("value", value).done(),
+            Answer.Refused(code, message) => Obj.new().s("t", String("result")).s("id", id).b("ok", false).j("error", Obj.new().s("code", code).s("message", message).done()).done(),
+        }
+        _ = i.server.send_text(s, "{frame}")
+    }
+
+    // A command's value, or its error's code and message.
+    fn command(i: mut Instance, user: String, device: String, name: String, args: Json) -> Answer ! Error {
+        let empty = Obj.new().done()
+        if name == "conversation.create" {
+            let agent = str_at(args.copy(), "agent") ?? String()
+            if try i.store.agent(user.copy(), agent.copy()) == none { return Answer.Refused(String("not_found"), "There's no agent {agent}.") }
+            let c = try i.store.add_conversation(user.copy(), agent, str_at(args, "title") ?? String("New conversation"))
+            try i.event(user, "conversation.created", Obj.new().j("conversation", c.copy()).done())
+            return Answer.Value(Obj.new().s("conversation", str_at(c, "id") ?? String()).done())
+        }
+        if name == "conversation.rename" or name == "conversation.delete" {
+            let id = str_at(args.copy(), "conversation") ?? String()
+            if try i.store.conversation(user.copy(), id.copy()) == none { return Answer.Refused(String("not_found"), "There's no conversation {id}.") }
+            if name == "conversation.rename" {
+                let title = str_at(args, "title") ?? String()
+                try i.store.rename_conversation(user.copy(), id.copy(), title.copy())
+                try i.event(user, "conversation.updated", Obj.new().j("conversation", Obj.new().s("id", id).s("title", title).done()).done())
+            } else {
+                try i.store.delete_conversation(user.copy(), id.copy())
+                try i.event(user, "conversation.deleted", Obj.new().s("conversation", id).done())
+            }
+            return Answer.Value(empty)
+        }
+        if name == "messages.list" {
+            let id = str_at(args.copy(), "conversation") ?? String()
+            if try i.store.conversation(user.copy(), id.copy()) == none { return Answer.Refused(String("not_found"), "There's no conversation {id}.") }
+            let limit = int_at(args.copy(), "limit") ?? 50
+            let n: i64 = if limit < 1 { 1 } else if limit > 100 { 100 } else { limit }
+            let (messages, more) = try i.store.messages(user, id, str_at(args, "before"), usize.try_from(n) ?? 50)
+            return Answer.Value(Obj.new().j("messages", Json.Array(messages)).b("more", more).done())
+        }
+        if name == "agent.create" {
+            let program = str_at(args.copy(), "acp_agent") ?? String()
+            if try i.store.acp_agent(program.copy()) == none { return Answer.Refused(String("not_found"), "There's no ACP agent {program}.") }
+            let id = try i.store.new_id("a")
+            let agent = Obj.new().s("id", id).s("name", str_at(args.copy(), "name") ?? String("Agent")).s("acp_agent", program).s("instructions", str_at(args.copy(), "instructions") ?? String()).maybe("folder", str_at(args.copy(), "folder")).s("permission", str_at(args, "permission") ?? String("ask")).i("revision", 1).i("at", now()).done()
+            try i.store.put_agent(user.copy(), agent.copy())
+            try i.event(user, "agent.created", Obj.new().j("agent", agent.copy()).done())
+            return Answer.Value(Obj.new().j("agent", agent).done())
+        }
+        if name == "agent.update" {
+            let id = str_at(args.copy(), "agent") ?? String()
+            let old = try i.store.agent(user.copy(), id.copy()) else return Answer.Refused(String("not_found"), "There's no agent {id}.")
+            var o = Obj.new()
+            if let Json.Object(m) = old.copy() {
+                for (k, v) in m {
+                    o.m.insert(k.copy(), v.copy())
+                }
+            }
+            let keys: List<str> = ["name", "acp_agent", "instructions", "folder", "permission"]
+            for key in keys {
+                if let v = str_at(args.copy(), key) { o.m.insert(String(key), Json.Str(v)) }
+            }
+            let agent = o.i("revision", (int_at(old, "revision") ?? 0) + 1).done()
+            try i.store.put_agent(user.copy(), agent.copy())
+            try i.event(user, "agent.updated", Obj.new().j("agent", agent.copy()).done())
+            return Answer.Value(Obj.new().j("agent", agent).done())
+        }
+        if name == "agent.delete" {
+            let id = str_at(args, "agent") ?? String()
+            if try i.store.agent(user.copy(), id.copy()) == none { return Answer.Refused(String("not_found"), "There's no agent {id}.") }
+            try i.store.delete_agent(user.copy(), id.copy())
+            try i.event(user, "agent.deleted", Obj.new().s("agent", id).done())
+            return Answer.Value(empty)
+        }
+        if name == "device.rename" or name == "device.revoke" {
+            let id = str_at(args.copy(), "device") ?? String()
+            if try i.store.device(user.copy(), id.copy()) == none { return Answer.Refused(String("not_found"), "There's no device {id}.") }
+            if name == "device.rename" {
+                let title = str_at(args, "name") ?? String()
+                try i.store.rename_device(id.copy(), title.copy())
+                try i.event(user, "device.updated", Obj.new().j("device", Obj.new().s("id", id).s("name", title).done()).done())
+            } else {
+                _ = device
+                try i.revoke(user, id)
+            }
+            return Answer.Value(empty)
+        }
+        return Answer.Refused(String("unknown_command"), "Version 1 has no command {name}.")
+    }
+}
+
+// A tool's output, from ACP's content, as loom's blocks, kept short.
+fn output_blocks(content: Json) -> Json {
+    var out = List<Json>()
+    if let Json.Array(items) = content {
+        for c in items {
+            let inner = at(c.copy(), "content")
+            if let text = str_at(inner, "text") {
+                if text.len() > 4000 {
+                    var cut = String()
+                    for r in text.runes() {
+                        if cut.len() >= 4000 { break }
+                        cut.push(r)
+                    }
+                    out.push(Obj.new().s("kind", String("text")).s("text", cut).b("cut", true).done())
+                } else {
+                    out.push(Obj.new().s("kind", String("text")).s("text", text).done())
+                }
+            }
+        }
+    }
+    return Json.Array(out)
+}
+
+@test
+fn usernames() {
+    assert(valid_username(String("elliot")))
+    assert(valid_username(String("a_b-9")))
+    assert(not valid_username(String("")))
+    assert(not valid_username(String("Elliot")))
+    assert(not valid_username(String("a b")))
+}
+
+@test
+fn outputs_are_cut() {
+    let long = Obj.new().s("type", String("content")).j("content", Obj.new().s("type", String("text")).s("text", "x".repeat(5000)).done()).done()
+    let out = output_blocks(Json.Array([long]))
+    assert("{out}".contains("\"cut\":true"))
+}
