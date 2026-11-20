@@ -1,0 +1,161 @@
+# loom's design tokens: the one place the look is decided.
+#
+# `calx scripts/tokens.calx` generates them into design/generated/:
+# tokens.rs for the GPUI app, Tokens.swift for the iPhone app, and
+# tokens.css for the site, the docs and plugin panels. Change values here,
+# never in the generated files.
+#
+# Sizes are in logical pixels. Colours are #rrggbb.
+
+[font]
+ui = "Geist"
+mono = "Geist Mono"
+
+[size]
+caption = 12
+small = 12.5
+body = 14
+reply = 14
+composer = 15
+heading = 22
+hero = 30
+
+[line]
+body = 1.55
+reply = 1.65
+
+[weight]
+regular = 400
+medium = 500
+semibold = 600
+
+[space]
+xs = 4
+s = 8
+m = 12
+l = 16
+xl = 24
+xxl = 32
+column = 740        # the chat column's widest
+
+[radius]
+window = 12
+input = 10
+row = 10
+chip = 14
+button = 16
+card = 16
+bubble = 20
+composer = 26
+
+[layout]
+sidebar = 260
+titlebar = 48
+
+# The app is near-monochrome. The only colour is the agents' threads.
+[color.dark]
+bg = "#0b0b0c"
+side = "#0f0f10"
+raised = "#161618"
+raised-2 = "#1c1c1f"
+hover = "#18181b"
+active = "#202024"
+line = "#222226"
+line-strong = "#2e2e33"
+ink = "#ededee"
+ink-2 = "#b4b4ba"
+ink-3 = "#7c7c85"
+button = "#ededee"
+button-ink = "#0b0b0c"
+bubble = "#1c1c1f"
+ok = "#6ccf9a"
+bad = "#ff7a6b"
+
+[color.light]
+bg = "#ffffff"
+side = "#f7f7f8"
+raised = "#f3f3f4"
+raised-2 = "#ececee"
+hover = "#f0f0f2"
+active = "#e8e8eb"
+line = "#ebebed"
+line-strong = "#dcdce0"
+ink = "#111113"
+ink-2 = "#4a4a52"
+ink-3 = "#8a8a93"
+button = "#111113"
+button-ink = "#ffffff"
+bubble = "#f1f1f3"
+ok = "#1f8a55"
+bad = "#d4442f"
+
+# An agent's thread colour, picked when the agent is made. Eight, chosen so
+# any two tell apart, in both themes.
+[thread.color.dark]
+periwinkle = "#9ea8ff"
+mint = "#74d6a6"
+apricot = "#f2a77a"
+pink = "#e893c9"
+sky = "#7cc8f0"
+gold = "#e8d27a"
+lavender = "#b49cff"
+grey = "#9aa0a6"
+
+[thread.color.light]
+periwinkle = "#5763e0"
+mint = "#18a06a"
+apricot = "#e07a3d"
+pink = "#cf4f9d"
+sky = "#1f8fc7"
+gold = "#b8961a"
+lavender = "#7d5fd6"
+grey = "#6b7078"
+
+[thread.stroke]
+small = 1.6        # the sidebar, the header, beside a reply
+large = 2.2        # an agent's own page, previews
+
+# How each state moves, as in design/explorations/threads-playground.html.
+# Amplitudes are fractions of the thread's height; speeds are per second.
+[thread.motion.idle]
+amplitude = 0.035
+speed = 0.12
+
+[thread.motion.thinking]
+loop-speed = 0.22   # how far along the thread the loop travels each second
+loop-width = 0.18   # of the thread's length
+amplitude = 0.06
+
+[thread.motion.writing]
+wavelength = 15     # pixels
+speed = 1.9
+amplitude = 0.28    # at the busiest; it follows how fast words arrive
+
+[thread.motion.tool]
+spring-width = 0.32
+slide-speed = 1.4
+amplitude = 0.31
+
+[thread.motion.waiting]
+bob-speed = 2.6
+tug-every = 3.9     # seconds between tugs
+knot-width = 0.07
+
+[thread.motion.sleeping]
+sag = 0.22
+speed = 0.9
+
+[thread.motion.snap]   # the one-time "done", back to idle
+amplitude = 0.34
+damping = 5
+frequency = 28
+
+[thread.motion.pluck]  # hovering or clicking a thread
+amplitude = 0.32
+damping = 3.2
+frequency = 34
+
+[thread.motion.handoff]
+strand-length = 26  # pixels of strand that travel between rows
+travel = 1.2        # seconds down the gutter
+gutter = 7          # the gutter's distance from the list's edge

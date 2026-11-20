@@ -1,0 +1,464 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Thread playground</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600&family=Geist+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+:root {
+  --bg: #0b0b0c; --raised: #141416; --raised-2: #1c1c1f; --line: #232327; --line-strong: #2e2e33;
+  --ink: #ededee; --ink-2: #b4b4ba; --ink-3: #7c7c85; --bubble: #1c1c1f; --ok: #6ccf9a; --bad: #ff7a6b;
+  --main: #9ea8ff; --builder: #74d6a6; --coach: #f2a77a; --post: #e893c9; --scout: #7cc8f0; --ledger: #e8d27a;
+}
+:root[data-theme="light"] {
+  --bg: #ffffff; --raised: #f5f5f6; --raised-2: #ececee; --line: #ebebed; --line-strong: #dcdce0;
+  --ink: #111113; --ink-2: #4a4a52; --ink-3: #8a8a93; --bubble: #f1f1f3; --ok: #1f8a55; --bad: #d4442f;
+  --main: #5763e0; --builder: #18a06a; --coach: #e07a3d; --post: #cf4f9d; --scout: #1f8fc7; --ledger: #b8961a;
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; }
+body { background: var(--bg); color: var(--ink); font: 14px/1.55 Geist, system-ui, sans-serif; padding: 32px 16px 64px; }
+.page { max-width: 1160px; margin: 0 auto; }
+header { display: flex; justify-content: space-between; align-items: flex-start; gap: 16px; flex-wrap: wrap; }
+h1 { margin: 0 0 4px; font-size: 24px; font-weight: 600; letter-spacing: -0.02em; }
+.lede { margin: 0; color: var(--ink-2); max-width: 70ch; }
+.tg { font: inherit; font-size: 13px; color: var(--ink); background: var(--raised); border: 1px solid var(--line-strong); border-radius: 999px; padding: 6px 14px; cursor: pointer; }
+h2 { font-size: 17px; font-weight: 600; margin: 44px 0 4px; letter-spacing: -0.01em; }
+.sub { margin: 0 0 16px; color: var(--ink-3); max-width: 80ch; }
+.grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; }
+.tile { background: var(--raised); border: 1px solid var(--line); border-radius: 16px; padding: 18px 18px 16px; display: flex; flex-direction: column; gap: 10px; cursor: pointer; }
+.tile svg { width: 100%; height: 64px; display: block; overflow: visible; }
+.tile b { font-weight: 500; }
+.tile small { color: var(--ink-3); font-size: 13px; line-height: 1.45; }
+.tile .k { font: 11px "Geist Mono", monospace; color: var(--ink-3); margin-left: 6px; }
+.row2 { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.stage { background: var(--raised); border: 1px solid var(--line); border-radius: 16px; padding: 18px; position: relative; overflow: hidden; }
+.stage h3 { margin: 0 0 2px; font-size: 14px; font-weight: 500; }
+.stage p { margin: 0 0 14px; color: var(--ink-3); font-size: 13px; }
+
+/* sidebar rows */
+.side { width: 100%; display: flex; flex-direction: column; gap: 2px; position: relative; }
+.agent { display: grid; grid-template-columns: 30px 1fr auto; column-gap: 12px; align-items: center; padding: 8px 10px; border-radius: 10px; position: relative; }
+.agent.active { background: var(--raised-2); }
+.agent svg { width: 30px; height: 14px; overflow: visible; }
+.agent .nm { font-weight: 500; }
+.agent .last { grid-column: 2 / 4; font-size: 12.5px; color: var(--ink-3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.agent .r { font-size: 12px; color: var(--ink-3); }
+.overlay { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; overflow: visible; }
+#handoff .agent { padding-left: 22px; }
+
+/* chat demo */
+.chat { display: flex; flex-direction: column; gap: 16px; min-height: 300px; justify-content: flex-end; }
+.you { align-self: flex-end; background: var(--bubble); padding: 9px 15px; border-radius: 18px 18px 6px 18px; max-width: 80%; }
+.reply { position: relative; padding-left: 28px; display: flex; flex-direction: column; gap: 8px; min-height: 40px; }
+.reply svg.spine { position: absolute; left: 0; top: 2px; width: 18px; overflow: visible; }
+.who { font-size: 12.5px; color: var(--ink-3); }
+.who b { color: var(--ink); font-weight: 500; }
+.step { font-size: 13px; color: var(--ink-3); display: flex; gap: 8px; align-items: center; }
+.step code { font: 12.5px "Geist Mono", monospace; color: var(--ink-2); }
+.txt { line-height: 1.6; }
+.cursor { display: inline-block; width: 7px; height: 15px; background: var(--ink-3); vertical-align: -2px; margin-left: 2px; border-radius: 1px; }
+
+/* mark demo */
+.markwrap { display: flex; flex-direction: column; align-items: center; gap: 18px; padding: 10px 0 4px; }
+.markwrap svg { width: 280px; height: 80px; overflow: visible; }
+.fakecomp { width: 100%; max-width: 440px; background: var(--bg); border: 1px solid var(--line-strong); border-radius: 22px; padding: 12px 16px; color: var(--ink); min-height: 46px; }
+.fakecomp .ph { color: var(--ink-3); }
+.notes { columns: 2; column-gap: 32px; color: var(--ink-2); font-size: 13.5px; }
+.notes p { margin: 0 0 10px; break-inside: avoid; }
+.notes b { color: var(--ink); font-weight: 500; }
+</style>
+</head>
+<body>
+<div class="page">
+  <header>
+    <div>
+      <h1>Thread playground</h1>
+      <p class="lede">Threads that behave like thread: slack, springy and a little alive. Each one is a single path recomputed every frame, which is how GPUI would draw it. Hover or click any thread to pluck it.</p>
+    </div>
+    <button class="tg" id="theme">Light</button>
+  </header>
+
+  <h2>States</h2>
+  <p class="sub">The look stays the agent's; the motion says what it's doing. Click a tile to pluck it.</p>
+  <div class="grid" id="states"></div>
+
+  <h2>In context</h2>
+  <p class="sub">Small moments where the threads earn their keep.</p>
+  <div class="row2">
+    <div class="stage">
+      <h3>A reply is sewn as it streams</h3>
+      <p>Builder's thread runs alongside its reply, ripples with each burst of words, ties a bead at each tool call, and snaps taut when the reply is done.</p>
+      <div class="chat" id="chat"></div>
+    </div>
+    <div class="stage">
+      <h3>One agent hands work to another</h3>
+      <p>When Main asks Builder for help (<code style="font:12.5px Geist Mono">message_agent</code>), a short strand of Main's colour runs down the edge of the list to Builder. Builder wears that strand, wound round its own thread, for as long as it works for Main, and sends a strand of its own back up with the answer. Nothing crosses the text.</p>
+      <div class="side" id="handoff"></div>
+    </div>
+  </div>
+  <div class="row2" style="margin-top:12px">
+    <div class="stage">
+      <h3>A new chat listens while you type</h3>
+      <p>Your agents' threads, woven into the mark, twitch at each keystroke and sway the most for the agent you're about to talk to.</p>
+      <div class="markwrap"><svg id="mark" viewBox="0 0 280 80"></svg><div class="fakecomp" id="typing"><span class="ph">Ask Main anything</span></div></div>
+    </div>
+    <div class="stage">
+      <h3>The sidebar, all at once</h3>
+      <p>Six agents, six states. The busy ones move, the quiet ones barely breathe, and the one that needs you tugs at its knot.</p>
+      <div class="side" id="sidebar"></div>
+    </div>
+  </div>
+
+  <h2>More ideas to play with</h2>
+  <div class="notes">
+    <p><b>Pull to pin.</b> Drag an agent by its thread to the top of the sidebar to pin it. Let go and it springs into place.</p>
+    <p><b>Speed is real.</b> A writing thread ripples at the speed tokens arrive, so a slow model looks slow and a fast one hums.</p>
+    <p><b>Done is a snap, then idle.</b> A run finishing is a one-time animation, not a state: the thread pulls taut with a small overshoot and goes back to idle. A reply you haven't read yet could be shown by the agent's row in bold instead.</p>
+    <p><b>Knots you can feel.</b> A waiting thread gives a little tug every few seconds, harder the longer it waits.</p>
+    <p><b>Frays, then mends.</b> A failed agent's thread frays; fix it (log in, install the program) and the strands twist back together.</p>
+    <p><b>Routines doze.</b> An agent waiting for its 07:00 routine hangs slack and sways slowly, then wakes and straightens a minute before.</p>
+    <p><b>Your messages, too.</b> Sending a message gives the agent's thread a quick tug, as if you pulled on it to get its attention.</p>
+    <p><b>Calm when you want it.</b> "Reduce motion" keeps the shapes (knot, frayed end, dots) and drops the movement.</p>
+  </div>
+</div>
+
+<script>
+// ---------------------------------------------------------------------------
+// The thread engine: one polyline per thread, recomputed each frame from its
+// state, plus a decaying "pluck" when you poke it.
+// ---------------------------------------------------------------------------
+const NS = "http://www.w3.org/2000/svg";
+const TAU = Math.PI * 2;
+const threads = [];
+const css = v => getComputedStyle(document.documentElement).getPropertyValue(v).trim();
+const clamp = (x, a, b) => Math.max(a, Math.min(b, x));
+const smooth = u => u * u * (3 - 2 * u);
+
+class Thread {
+  constructor(svg, { w, h, color, state = "idle", vertical = false, width = 1.7, phase = Math.random() * 10 }) {
+    Object.assign(this, { svg, w, h, color, state, vertical, width, phase, pluckAt: -99, pluckAmp: 1, beads: [], tugAt: -99 });
+    svg.setAttribute("viewBox", vertical ? `0 0 ${h} ${w}` : `0 0 ${w} ${h}`);
+    this.path = this.mk("path", { fill: "none", "stroke-linecap": "round", "stroke-linejoin": "round" });
+    // A second strand in another agent's colour, wound around this thread
+    // while it works for that agent.
+    this.strand = null;
+    this.strandPath = this.mk("path", { fill: "none", "stroke-linecap": "round" });
+    this.extras = [0, 1, 2, 3].map(() => this.mk("path", { fill: "none", "stroke-linecap": "round" }));
+    this.beadEls = [];
+    svg.addEventListener("pointerenter", () => this.pluck(0.7));
+    svg.addEventListener("click", () => this.pluck(1.2));
+    threads.push(this);
+  }
+  mk(tag, attrs) { const e = document.createElementNS(NS, tag); for (const k in attrs) e.setAttribute(k, attrs[k]); this.svg.append(e); return e; }
+  pluck(a = 1) { this.pluckAt = now(); this.pluckAmp = a; }
+  // Offset (dx, dy) of the point at s in [0,1], at time t.
+  shape(s, t) {
+    const { w, h } = this, a = h * 0.28;
+    let dx = 0, dy = 0;
+    switch (this.state) {
+      case "idle":
+        dy = Math.sin(TAU * (s * 0.8 - t * 0.12)) * h * 0.035 * Math.sin(Math.PI * s);
+        break;
+      case "sleeping":
+        dy = h * 0.22 * Math.sin(Math.PI * s) * (0.6 + 0.4 * Math.sin(t * 0.9));
+        break;
+      case "writing": {
+        const burst = 0.45 + 0.55 * Math.abs(Math.sin(t * 1.7) * Math.sin(t * 0.63 + 1));
+        const cycles = w / 15;
+        dy = a * burst * Math.sin(TAU * (s * cycles - t * 1.9)) * Math.sin(Math.PI * clamp(s * 1.15, 0, 1));
+        break;
+      }
+      case "thinking": {
+        // A curl that travels along the thread, tying and untying itself.
+        dy = Math.sin(TAU * (s * 1.3 - t * 0.25)) * h * 0.06;
+        const p = ((t * 0.22) % 1.4) - 0.2, half = 0.09, d = s - p;
+        if (Math.abs(d) < half) {
+          const u = (d + half) / (2 * half), th = TAU * smooth(u), R = h * 0.3;
+          dx += -R * Math.sin(th) * 1.25; dy += -R * (1 - Math.cos(th));
+        }
+        break;
+      }
+      case "tool": {
+        // A little spring that slides back and forth while the command runs.
+        const p = 0.5 + 0.32 * Math.sin(t * 1.4), half = 0.16, d = s - p;
+        if (Math.abs(d) < half) {
+          const u = (d + half) / (2 * half), env = Math.sin(Math.PI * u);
+          const comp = 0.75 + 0.25 * Math.sin(t * 6);
+          dy = a * 1.1 * env * Math.sin(TAU * u * 5 / comp);
+          dx = -Math.cos(TAU * u * 5 / comp) * 2.2 * env;
+        }
+        break;
+      }
+      case "waiting": {
+        // A knot in the middle that bobs, and tugs now and then.
+        const tug = Math.pow(Math.max(0, Math.sin(t * 1.6)), 10);
+        const p = 0.5 + tug * 0.03, half = 0.035, d = s - p;
+        dy = Math.sin(t * 2.6) * 0.8 * Math.sin(Math.PI * s);
+        if (Math.abs(d) < half) {
+          // A small closed loop that crosses itself: the knot.
+          const u = (d + half) / (2 * half), th = TAU * u, R = Math.min(h * 0.16, 10);
+          const bob = 1 + 0.12 * Math.sin(t * 2.6);
+          dx += -R * Math.sin(th) * 1.1 * bob; dy += -R * (1 - Math.cos(th)) * bob;
+        }
+        dy += tug * h * 0.06 * Math.sin(TAU * s * 3 + t * 20) * Math.sin(Math.PI * s);
+        break;
+      }
+      case "done": {
+        // Writes for a moment, then snaps taut with a damped overshoot.
+        const T = 4.6, tau = t % T, lead = 1.2;
+        if (tau < lead) {
+          dy = a * 0.8 * Math.sin(TAU * (s * this.w / 15 - t * 1.9)) * Math.sin(Math.PI * s);
+        } else {
+          const k = tau - lead;
+          dy = a * 1.2 * Math.exp(-5 * k) * Math.cos(28 * k) * Math.sin(Math.PI * s);
+        }
+        break;
+      }
+      case "failed": {
+        const end = 0.7;
+        dy = s > 0.45 ? Math.pow((Math.min(s, end) - 0.45) / (end - 0.45), 2) * h * 0.14 : 0;
+        dy += Math.sin(t * 9) * 0.25 * (s > 0.5 ? 1 : 0);
+        break;
+      }
+      case "off":
+        break;
+    }
+    // A pluck: a standing wave that dies away.
+    const dt = now() - this.pluckAt;
+    if (dt < 2) dy += h * 0.32 * this.pluckAmp * Math.exp(-3.2 * dt) * Math.sin(Math.PI * s) * Math.sin(dt * 34);
+    const dtug = now() - this.tugAt;
+    if (dtug < 1) dy += h * 0.25 * Math.exp(-6 * dtug) * Math.sin(TAU * (s * 2 - dtug * 3)) * Math.sin(Math.PI * s);
+    return [dx, dy];
+  }
+  draw(t) {
+    const { w, h } = this, end = this.state === "failed" ? 0.7 : 1;
+    const N = Math.max(60, Math.round(w * 1.5));
+    let d = "", d2 = "";
+    let last = [0, 0];
+    const wrap = Math.min(h * 0.14, 2);
+    for (let i = 0; i <= N; i++) {
+      const s = (i / N) * end;
+      const [dx, dy] = this.shape(s, t + this.phase);
+      const x = s * w + dx, y = h / 2 + dy;
+      last = [x, y];
+      d += (i ? "L" : "M") + (this.vertical ? `${y.toFixed(2)} ${x.toFixed(2)}` : `${x.toFixed(2)} ${y.toFixed(2)}`);
+      if (this.strand) {
+        const y2 = y + wrap * Math.sin(TAU * (s * w / 10) - (t + this.phase) * 3);
+        d2 += (i ? "L" : "M") + (this.vertical ? `${y2.toFixed(2)} ${x.toFixed(2)}` : `${x.toFixed(2)} ${y2.toFixed(2)}`);
+      }
+    }
+    this.strandPath.setAttribute("d", d2);
+    if (this.strand) { this.strandPath.setAttribute("stroke", css(this.strand)); this.strandPath.setAttribute("stroke-width", this.width * 0.75); }
+    const c = css(this.color);
+    const P = this.path;
+    P.setAttribute("d", d); P.setAttribute("stroke", c); P.setAttribute("stroke-width", this.width);
+    P.setAttribute("stroke-dasharray", this.state === "sleeping" ? `0.1 ${this.width * 2.6}` : this.state === "off" ? "4 4" : "none");
+    P.setAttribute("opacity", this.state === "off" ? 0.35 : 1);
+    // Frayed strands at the end of a failed thread.
+    this.extras.forEach((e, i) => {
+      if (this.state !== "failed") { e.setAttribute("d", ""); return; }
+      const [x0, y0] = last, ang = -0.6 + i * 0.42, L = w * 0.12 * (1 - i * 0.08);
+      const droop = (i + 1) * 1.2 + Math.sin((t + this.phase) * 3 + i) * 0.8;
+      const x1 = x0 + Math.cos(ang) * L, y1 = y0 + Math.sin(ang) * L * 0.6 + droop;
+      const pt = (x, y) => this.vertical ? `${y} ${x}` : `${x} ${y}`;
+      e.setAttribute("d", `M${pt(x0, y0)} Q${pt(x0 + L * 0.5, y0 + Math.sin(ang) * L * 0.2)} ${pt(x1, y1)}`);
+      e.setAttribute("stroke", c); e.setAttribute("stroke-width", this.width * 0.6); e.setAttribute("opacity", 0.8);
+    });
+    // Beads: fixed marks along the thread (tool calls in a reply).
+    while (this.beadEls.length < this.beads.length) this.beadEls.push(this.mk("circle", { r: 3.2 }));
+    this.beadEls.forEach((b, i) => {
+      if (i >= this.beads.length) { b.setAttribute("r", 0); return; }
+      const s = this.beads[i], [dx, dy] = this.shape(s, t + this.phase), x = s * w + dx, y = h / 2 + dy;
+      b.setAttribute("cx", this.vertical ? y : x); b.setAttribute("cy", this.vertical ? x : y);
+      b.setAttribute("r", 3.2); b.setAttribute("fill", css("--bg")); b.setAttribute("stroke", c); b.setAttribute("stroke-width", 1.6);
+    });
+  }
+}
+
+const t0 = performance.now();
+const now = () => (performance.now() - t0) / 1000;
+function frame() { const t = now(); for (const th of threads) th.draw(t); tick(t); requestAnimationFrame(frame); }
+
+// ---------------------------------------------------------------------------
+// States grid
+// ---------------------------------------------------------------------------
+const STATES = [
+  ["idle", "--main", "Idle", "Barely breathing. Nothing is happening."],
+  ["thinking", "--scout", "Thinking", "Curls into a loop that travels along it, tying and untying itself."],
+  ["writing", "--builder", "Writing", "Ripples in bursts, as fast as the words arrive."],
+  ["tool", "--post", "Using a tool", "Winds into a little spring that slides back and forth while the command runs."],
+  ["waiting", "--builder", "Waiting for you", "Tied in a knot that bobs, and gives a tug every few seconds."],
+  ["done", "--main", "Finishing (not a state)", "When a run ends, the thread snaps taut once with a small overshoot, then it's simply idle. There's no lasting \"done\" look."],
+  ["sleeping", "--coach", "Routine coming up", "Hangs slack, dotted, swaying slowly until it's time."],
+  ["failed", "--ledger", "Failed", "Frayed at the end, strands drooping and twitching."],
+  ["off", "--main", "Off or unreachable", "Faint and broken. Doesn't move at all."],
+];
+const grid = document.getElementById("states");
+for (const [st, col, name, desc] of STATES) {
+  const tile = document.createElement("div"); tile.className = "tile";
+  const svg = document.createElementNS(NS, "svg"); tile.append(svg);
+  tile.insertAdjacentHTML("beforeend", `<b>${name}</b><small>${desc}</small>`);
+  grid.append(tile);
+  const th = new Thread(svg, { w: 320, h: 64, color: col, state: st, width: 2.2 });
+  tile.addEventListener("click", () => th.pluck(1.2));
+}
+
+// ---------------------------------------------------------------------------
+// Sidebar
+// ---------------------------------------------------------------------------
+function agentRow(parent, { name, color, state, last, r = "", active = false }) {
+  const row = document.createElement("div"); row.className = "agent" + (active ? " active" : "");
+  const svg = document.createElementNS(NS, "svg"); row.append(svg);
+  row.insertAdjacentHTML("beforeend", `<span class="nm">${name}</span><span class="r">${r}</span><span class="last">${last}</span>`);
+  parent.append(row);
+  return { row, th: new Thread(svg, { w: 30, h: 14, color, state, width: 1.6 }), set(last2) { row.querySelector(".last").textContent = last2; } };
+}
+const side = document.getElementById("sidebar");
+agentRow(side, { name: "Builder", color: "--builder", state: "waiting", last: "Wants to run ./deploy.sh on vps", r: "1", active: true });
+agentRow(side, { name: "Main", color: "--main", state: "idle", last: "Moved four cards to Done.", r: "2h" });
+agentRow(side, { name: "Post", color: "--post", state: "tool", last: "Running inbox sweep · 3 of 4", r: "now" });
+agentRow(side, { name: "Scout", color: "--scout", state: "thinking", last: "Thinking about GPUI on Windows…", r: "now" });
+agentRow(side, { name: "Coach", color: "--coach", state: "sleeping", last: "Weekly plan, tomorrow 07:00", r: "07:00" });
+agentRow(side, { name: "Ledger", color: "--ledger", state: "failed", last: "Couldn't start: Codex isn't logged in", r: "Sun" });
+
+// ---------------------------------------------------------------------------
+// Handoff: Main reaches Builder
+// ---------------------------------------------------------------------------
+const ho = document.getElementById("handoff");
+const hMain = agentRow(ho, { name: "Main", color: "--main", state: "writing", last: "Asking Builder to check the build…", r: "now", active: true });
+agentRow(ho, { name: "Coach", color: "--coach", state: "idle", last: "Week 47 plan is ready.", r: "Mon" });
+const hBuild = agentRow(ho, { name: "Builder", color: "--builder", state: "idle", last: "Deployed v0.4.2.", r: "1h" });
+agentRow(ho, { name: "Post", color: "--post", state: "idle", last: "Inbox is clear.", r: "Sun" });
+const ov = document.createElementNS(NS, "svg"); ov.classList.add("overlay"); ho.append(ov);
+const link = document.createElementNS(NS, "path"); link.setAttribute("fill", "none"); link.setAttribute("stroke-width", "1.2"); link.setAttribute("stroke-linecap", "round"); link.setAttribute("stroke-dasharray", "1 3.5"); ov.append(link);
+const runner = document.createElementNS(NS, "path"); runner.setAttribute("fill", "none"); runner.setAttribute("stroke-width", "2"); runner.setAttribute("stroke-linecap", "round"); ov.append(runner);
+
+// ---------------------------------------------------------------------------
+// Chat: a reply sewn as it streams
+// ---------------------------------------------------------------------------
+const chat = document.getElementById("chat");
+chat.innerHTML = `<div class="you">Did the build pass on main?</div>
+<div class="reply"><svg class="spine"></svg><div class="who"><b>Builder</b> · now</div><div class="step" id="st1" hidden>Thought for 3s</div><div class="step" id="st2" hidden>Ran <code>gh run list --limit 1</code> <span style="color:var(--ok)">✓</span></div><div class="txt"><span id="txt"></span><span class="cursor" id="cur"></span></div></div>`;
+const reply = chat.querySelector(".reply"), spineSvg = chat.querySelector(".spine");
+const spine = new Thread(spineSvg, { w: 40, h: 18, color: "--builder", state: "thinking", vertical: true, width: 1.7 });
+const words = "Yes. The last build on main passed at 14:02, in 2 minutes. All four jobs were green, and nothing was skipped.".split(" ");
+
+// ---------------------------------------------------------------------------
+// Mark: listens while you type
+// ---------------------------------------------------------------------------
+const markSvg = document.getElementById("mark");
+const markCols = ["--main", "--builder", "--coach", "--post"];
+const markPaths = markCols.map(() => { const p = document.createElementNS(NS, "path"); p.setAttribute("fill", "none"); p.setAttribute("stroke-width", "2"); p.setAttribute("stroke-linecap", "round"); markSvg.append(p); return p; });
+const markKick = [0, 0, 0, 0];
+const typed = "Plan my week around the deploy on Thursday";
+
+// ---------------------------------------------------------------------------
+// Per-frame scripted moments
+// ---------------------------------------------------------------------------
+let hoPhase = -1;
+let chatStart = 0, lastWords = -1, hoStart = 0, typeStart = 0, lastTyped = -1;
+function tick(t) {
+  // Chat loop: think 1.6 s, tool 1.4 s, write ~3 s, done, hold, repeat.
+  const ct = t - chatStart;
+  const st1 = document.getElementById("st1"), st2 = document.getElementById("st2"), txt = document.getElementById("txt"), cur = document.getElementById("cur");
+  if (ct < 1.6) { spine.state = "thinking"; st1.hidden = true; st2.hidden = true; txt.textContent = ""; cur.hidden = false; spine.beads = []; lastWords = -1; }
+  else if (ct < 3.0) { spine.state = "tool"; st1.hidden = false; st2.hidden = true; }
+  else if (ct < 6.2) {
+    spine.state = "writing"; st2.hidden = false;
+    const n = Math.min(words.length, Math.floor((ct - 3.0) / 3.0 * words.length * 1.05));
+    if (n !== lastWords) { txt.textContent = words.slice(0, n).join(" "); lastWords = n; }
+  } else if (ct < 9.5) {
+    if (spine.state !== "idle") { spine.state = "idle"; spine.pluck(1.3); txt.textContent = words.join(" "); cur.hidden = true; }
+  } else { chatStart = t; }
+  const hgt = Math.max(30, reply.offsetHeight - 4);
+  if (Math.abs(spine.w - hgt) > 0.5) { spine.w = hgt; spineSvg.setAttribute("viewBox", `0 0 ${spine.h} ${hgt}`); spineSvg.style.height = hgt + "px"; }
+  spine.beads = ct > 3.0 ? [clamp((st2.offsetTop + 9) / hgt, 0, 1)] : [];
+
+  // Handoff loop. The route is a faint, slightly slack path down a gutter on
+  // the left of the rows, from the start of Main's thread to the start of
+  // Builder's, so it never crosses text. A short strand travels along it.
+  const ht = t - hoStart;
+  const a = hMain.th.svg.getBoundingClientRect(), b = hBuild.th.svg.getBoundingClientRect(), o = ho.getBoundingClientRect();
+  const x0 = a.left - o.left + 1, y0 = a.top - o.top + a.height / 2;
+  const x1 = b.left - o.left + 1, y1 = b.top - o.top + b.height / 2;
+  const gx = 7, sag = 2.5 + Math.sin(t * 1.3) * 0.6;
+  const route = `M${x0} ${y0} C ${x0 - 10} ${y0}, ${gx} ${y0 + 2}, ${gx} ${y0 + 14} Q ${gx - sag} ${(y0 + y1) / 2}, ${gx} ${y1 - 14} C ${gx} ${y1 - 2}, ${x1 - 10} ${y1}, ${x1} ${y1}`;
+  link.setAttribute("d", route); runner.setAttribute("d", route);
+  const L = link.getTotalLength(), seg = 26;
+  const travel = (u, col, down) => {
+    const k = down ? u : 1 - u, head = k * (L + seg);
+    runner.setAttribute("stroke", css(col));
+    runner.setAttribute("stroke-dasharray", `${seg} ${L + seg * 2}`);
+    runner.setAttribute("stroke-dashoffset", down ? seg - head : seg - head);
+    runner.style.opacity = 1;
+  };
+  link.setAttribute("stroke", css("--ink-3"));
+  const ghost = o2 => (link.style.opacity = o2);
+  // Each phase fully sets both rows, so a skipped frame can't miss a change.
+  // [end time, Main state, Main text, Builder state, Builder strand, Builder text]
+  const PH = [
+    [0.7, "writing", "Asking Builder to check the build…", "idle", null, "Deployed v0.4.2."],
+    [1.9, "writing", "Asking Builder to check the build…", "idle", null, "Deployed v0.4.2."],
+    [3.6, "idle", "Waiting for Builder", "thinking", "--main", "For Main: check the build on main"],
+    [5.2, "idle", "Waiting for Builder", "tool", "--main", "For Main: running gh run list"],
+    [7.0, "idle", "Waiting for Builder", "idle", null, "Told Main: the build passed."],
+    [8.6, "writing", "Builder says the build on main passed.", "idle", null, "Told Main: the build passed."],
+    [9.6, "idle", "Builder says the build on main passed.", "idle", null, "Told Main: the build passed."],
+  ];
+  if (ht >= 9.6) hoStart = t;
+  const pi = PH.findIndex(p => ht < p[0]), ph = PH[Math.max(0, pi)];
+  if (pi !== hoPhase) {
+    if (pi === 2) hBuild.th.pluck(1.2);
+    if (pi === 4) hBuild.th.pluck(1.1);
+    if (pi === 5) hMain.th.pluck(1);
+    hoPhase = pi;
+  }
+  hMain.th.state = ph[1]; hMain.set(ph[2]);
+  hBuild.th.state = ph[3]; hBuild.th.strand = ph[4]; hBuild.set(ph[5]);
+  runner.style.opacity = 0;
+  if (ht < 0.7) ghost(0.22 * smooth(ht / 0.7));
+  else if (ht < 1.9) { ghost(0.22); travel(smooth((ht - 0.7) / 1.2), "--main", true); }
+  else if (ht < 2.6) ghost(0.22 * (1 - (ht - 1.9) / 0.7));
+  else if (ht < 5.2) ghost(0);
+  else if (ht < 5.9) ghost(0.22 * smooth((ht - 5.2) / 0.7));
+  else if (ht < 7.0) { ghost(0.22); travel(smooth((ht - 5.9) / 1.1), "--builder", false); }
+  else if (ht < 7.6) ghost(0.22 * (1 - (ht - 7.0) / 0.6));
+  else ghost(0);
+
+  // Mark loop: type a sentence, each keystroke kicks a thread.
+  const tt = t - typeStart, comp = document.getElementById("typing");
+  const n = Math.floor(clamp((tt - 0.8) * 11, 0, typed.length));
+  if (n !== lastTyped) {
+    if (n > 0 && n > lastTyped) markKick[(n * 7) % 4] = t, markKick[0] = n % 3 === 0 ? t : markKick[0];
+    comp.innerHTML = n ? typed.slice(0, n) + '<span class="cursor"></span>' : '<span class="ph">Ask Main anything</span>';
+    lastTyped = n;
+  }
+  if (tt > 7) { typeStart = t; lastTyped = -1; }
+  const spreads = [22, -22, 11, -11];
+  markPaths.forEach((p, i) => {
+    const k = t - markKick[i], kick = k < 1.5 ? Math.exp(-4 * k) * Math.sin(k * 30) * 7 : 0;
+    const sway = Math.sin(t * (0.7 + i * 0.13) + i) * 1.5 + (i === 0 ? Math.sin(t * 1.4) * 2 : 0);
+    const amp = spreads[i] + sway + kick;
+    let d = "";
+    for (let j = 0; j <= 70; j++) {
+      const s = j / 70, x = s * 280, env = Math.pow(Math.sin(Math.PI * s), 1.6);
+      const y = 40 + amp * env * Math.cos(TAU * (s - 0.5) * 0.5) ;
+      d += (j ? "L" : "M") + x.toFixed(1) + " " + y.toFixed(1);
+    }
+    p.setAttribute("d", d); p.setAttribute("stroke", css(markCols[i]));
+  });
+}
+
+document.getElementById("theme").onclick = e => {
+  const light = document.documentElement.dataset.theme !== "light";
+  document.documentElement.dataset.theme = light ? "light" : "dark";
+  e.target.textContent = light ? "Dark" : "Light";
+};
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>
