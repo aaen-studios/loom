@@ -1,0 +1,112 @@
+module shared.obj
+
+// Building and reading the JSON objects frames are made of.
+//
+//     let f = Obj.new().s("t", "ack").s("cid", cid).done()
+//     let seq = int_at(frame, "after") ?? 0
+import std.json.{Json}
+
+pub struct Obj {
+    pub m: LinkedMap<String, Json>
+}
+
+impl Obj {
+    pub fn new() -> Obj {
+        return Obj { m: LinkedMap<String, Json>() }
+    }
+
+    // A string member.
+    pub fn s(own self, key: str, value: String) -> Obj {
+        var o = self
+        o.m.insert(String(key), Json.Str(value.copy()))
+        return o
+    }
+
+    // An integer member.
+    pub fn i(own self, key: str, value: i64) -> Obj {
+        var o = self
+        o.m.insert(String(key), Json.Int(value))
+        return o
+    }
+
+    pub fn b(own self, key: str, value: bool) -> Obj {
+        var o = self
+        o.m.insert(String(key), Json.Bool(value))
+        return o
+    }
+
+    // Any value.
+    pub fn j(own self, key: str, value: Json) -> Obj {
+        var o = self
+        o.m.insert(String(key), value.copy())
+        return o
+    }
+
+    // A string member, only if there's a value.
+    pub fn maybe(own self, key: str, value: String?) -> Obj {
+        var o = self
+        if let v = value {
+            o.m.insert(String(key), Json.Str(v.copy()))
+        }
+        return o
+    }
+
+    pub fn done(own self) -> Json {
+        return Json.Object(self.m)
+    }
+}
+
+// Member `key` of an object, if it's a string.
+pub fn str_at(j: Json, key: str) -> String? {
+    let v = j.get(String(key)) else return none
+    return v.as_str()
+}
+
+// Member `key` of an object, if it's an integer.
+pub fn int_at(j: Json, key: str) -> i64? {
+    let v = j.get(String(key)) else return none
+    return v.as_i64()
+}
+
+pub fn bool_at(j: Json, key: str) -> bool? {
+    let v = j.get(String(key)) else return none
+    return v.as_bool()
+}
+
+// Member `key`, or null.
+pub fn at(j: Json, key: str) -> Json {
+    return j.get(String(key)) ?? Json.Null
+}
+
+// An object with `extra`'s members added to `base`'s, `extra`'s winning.
+pub fn merge(base: Json, extra: Json) -> Json {
+    var m = LinkedMap<String, Json>()
+    if let Json.Object(b) = base {
+        for (k, v) in b {
+            m.insert(k.copy(), v.copy())
+        }
+    }
+    if let Json.Object(e) = extra {
+        for (k, v) in e {
+            m.insert(k.copy(), v.copy())
+        }
+    }
+    return Json.Object(m)
+}
+
+@test
+fn builds_and_reads() {
+    let o = Obj.new().s("t", String("ack")).i("seq", 4).b("ok", true).maybe("run", none).done()
+    assert("{o}" == "\{\"t\":\"ack\",\"seq\":4,\"ok\":true\}")
+    assert(str_at(o.copy(), "t") == some(String("ack")))
+    assert(int_at(o.copy(), "seq") == some(4))
+    assert(str_at(o.copy(), "seq") == none)
+    assert(bool_at(o.copy(), "ok") == some(true))
+}
+
+@test
+fn merges() {
+    let a = Obj.new().s("t", String("event")).i("seq", 1).done()
+    let b = Obj.new().i("seq", 2).s("kind", String("x")).done()
+    assert("{merge(a, b)}" == "\{\"t\":\"event\",\"seq\":2,\"kind\":\"x\"\}")
+}

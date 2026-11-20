@@ -1,0 +1,475 @@
+module server.store
+
+// The instance's SQLite database. Every row that belongs to someone carries
+// their user id, and every query that reads one filters by it, so one
+// person's data never reaches another.
+//
+// The event log lives here too: every change for a person is an event with a
+// seq counted per person from 1, stored before it's sent (protocol.md, "The
+// event log").
+import std.bytes
+import std.crypto.{PasswordHasher, random_bytes, verify_password}
+import std.hash.{sha256}
+import std.json.{Json, parse}
+import std.sqlite.{Database, Value}
+import std.time.{Timestamp}
+import shared.obj.{Obj, merge}
+
+const SCHEMA: str = #"
+CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS ids (kind TEXT PRIMARY KEY, next INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS users (
+    id TEXT PRIMARY KEY, username TEXT NOT NULL UNIQUE, password TEXT NOT NULL,
+    role TEXT NOT NULL, at INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS devices (
+    id TEXT PRIMARY KEY, user TEXT NOT NULL REFERENCES users(id), name TEXT NOT NULL,
+    kind TEXT NOT NULL, tz TEXT NOT NULL, token TEXT NOT NULL UNIQUE, at INTEGER NOT NULL,
+    revoked INTEGER NOT NULL DEFAULT 0);
+CREATE TABLE IF NOT EXISTS acp_agents (name TEXT PRIMARY KEY, command TEXT NOT NULL, args TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS agents (
+    id TEXT PRIMARY KEY, user TEXT NOT NULL REFERENCES users(id), json TEXT NOT NULL,
+    deleted INTEGER NOT NULL DEFAULT 0);
+CREATE TABLE IF NOT EXISTS conversations (
+    id TEXT PRIMARY KEY, user TEXT NOT NULL REFERENCES users(id), agent TEXT NOT NULL,
+    title TEXT NOT NULL, at INTEGER NOT NULL, deleted INTEGER NOT NULL DEFAULT 0);
+CREATE TABLE IF NOT EXISTS messages (
+    id TEXT PRIMARY KEY, user TEXT NOT NULL REFERENCES users(id), conversation TEXT NOT NULL,
+    json TEXT NOT NULL, at INTEGER NOT NULL);
+CREATE INDEX IF NOT EXISTS messages_by_conversation ON messages (user, conversation, at);
+CREATE TABLE IF NOT EXISTS runs (
+    id TEXT PRIMARY KEY, user TEXT NOT NULL REFERENCES users(id), conversation TEXT NOT NULL,
+    status TEXT NOT NULL, at INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS sent (
+    device TEXT NOT NULL, cid TEXT NOT NULL, message TEXT NOT NULL, run TEXT NOT NULL,
+    PRIMARY KEY (device, cid));
+CREATE TABLE IF NOT EXISTS events (
+    user TEXT NOT NULL REFERENCES users(id), seq INTEGER NOT NULL, json TEXT NOT NULL,
+    at INTEGER NOT NULL, PRIMARY KEY (user, seq));
+"#
+
+pub fn now() -> i64 {
+    return unsafe { Timestamp.now() }.unix_ms
+}
+
+pub struct User {
+    pub id: String
+    pub username: String
+    pub role: String
+}
+
+pub struct Device {
+    pub id: String
+    pub user: String
+    pub name: String
+    pub kind: String
+}
+
+pub struct AcpAgent {
+    pub name: String
+    pub command: String
+    pub args: List<String>
+}
+
+pub struct Store {
+    db: Database
+    hasher: PasswordHasher
+}
+
+fn text(v: Value) -> String {
+    match v {
+        Value.Text(s) => return s.copy(),
+        Value.Int(n) => return "{n}",
+        _ => return String(),
+    }
+}
+
+fn int(v: Value) -> i64 {
+    match v {
+        Value.Int(n) => return n,
+        _ => return 0,
+    }
+}
+
+fn t(s: String) -> Value {
+    return Value.Text(s.copy())
+}
+
+// A device token: 32 random bytes as hex. Only its SHA-256 is stored.
+pub fn new_token() -> String {
+    return bytes.hex(random_bytes(32))
+}
+
+fn token_hash(token: String) -> String {
+    return bytes.hex(sha256(token.to_bytes()))
+}
+
+impl Store {
+    // Opens (or makes) the database at `path`. `hasher` hashes passwords;
+    // tests pass a cheap one.
+    pub fn open(path: String, hasher: PasswordHasher) -> Store ! Error {
+        let db = try Database.open(path)
+        try db.execute_script(String("PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON;"))
+        try db.execute_script(String(SCHEMA))
+        return Store { db: db, hasher: hasher }
+    }
+
+    // The next id of a kind: "u" gives u_1, u_2, ...
+    pub fn new_id(self, kind: str) -> String ! Error {
+        _ = try self.db.execute(String("INSERT INTO ids (kind, next) VALUES (?, 1) ON CONFLICT (kind) DO UPDATE SET next = next + 1"), [t(String(kind))])
+        let row = try self.db.query_one(String("SELECT next FROM ids WHERE kind = ?"), [t(String(kind))])
+        let n = int((row ?? List<Value>())[0].copy())
+        return "{kind}_{n}"
+    }
+
+    pub fn meta(self, key: str) -> String? ! Error {
+        let row = try self.db.query_one(String("SELECT value FROM meta WHERE key = ?"), [t(String(key))])
+        let r = row else return none
+        return some(text(r[0].copy()))
+    }
+
+    pub fn set_meta(self, key: str, value: String) ! Error {
+        _ = try self.db.execute(String("INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value"), [t(String(key)), t(value)])
+    }
+
+    pub fn delete_meta(self, key: str) ! Error {
+        _ = try self.db.execute(String("DELETE FROM meta WHERE key = ?"), [t(String(key))])
+    }
+
+    pub fn begin(self) ! Error {
+        try self.db.begin()
+    }
+
+    pub fn commit(self) ! Error {
+        try self.db.commit()
+    }
+
+    pub fn rollback(self) {
+        if self.db.in_transaction() {
+            match self.db.rollback() {
+                ok => {},
+                err(e) => eprintln("loom: rollback failed: {e}"),
+            }
+        }
+    }
+
+    // --- Accounts ---
+
+    pub fn user_count(self) -> i64 ! Error {
+        let row = try self.db.query_one(String("SELECT count(*) FROM users"))
+        return int((row ?? List<Value>())[0].copy())
+    }
+
+    pub fn add_user(self, username: String, password: String, role: str) -> User ! Error {
+        let id = try self.new_id("u")
+        let hash = self.hasher.hash(password)
+        _ = try self.db.execute(String("INSERT INTO users (id, username, password, role, at) VALUES (?, ?, ?, ?, ?)"), [t(id.copy()), t(username.copy()), t(hash), t(String(role)), Value.Int(now())])
+        return User { id: id, username: username.copy(), role: String(role) }
+    }
+
+    pub fn find_username(self, username: String) -> User? ! Error {
+        let row = try self.db.query_one(String("SELECT id, username, role FROM users WHERE username = ?"), [t(username)])
+        let r = row else return none
+        return some(User { id: text(r[0].copy()), username: text(r[1].copy()), role: text(r[2].copy()) })
+    }
+
+    // The user, if the password is theirs. A username that doesn't exist
+    // still costs a hash, so the two can't be told apart by time.
+    pub fn check_password(self, username: String, password: String) -> User? ! Error {
+        let row = try self.db.query_one(String("SELECT id, username, role, password FROM users WHERE username = ?"), [t(username)])
+        let r = row else {
+            _ = self.hasher.hash(password)
+            return none
+        }
+        let stored = text(r[3].copy())
+        if not verify_password(stored.copy(), password.copy()) { return none }
+        if self.hasher.needs_rehash(stored) {
+            _ = try self.db.execute(String("UPDATE users SET password = ? WHERE id = ?"), [t(self.hasher.hash(password)), r[0].copy()])
+        }
+        return some(User { id: text(r[0].copy()), username: text(r[1].copy()), role: text(r[2].copy()) })
+    }
+
+    pub fn users(self) -> List<User> ! Error {
+        var out = List<User>()
+        for r in try self.db.query(String("SELECT id, username, role FROM users ORDER BY at")) {
+            out.push(User { id: text(r[0].copy()), username: text(r[1].copy()), role: text(r[2].copy()) })
+        }
+        return out
+    }
+
+    // --- Devices ---
+
+    // A new device for `user`, and its token.
+    pub fn add_device(self, user: String, name: String, kind: String, tz: String) -> (Device, String) ! Error {
+        let id = try self.new_id("d")
+        let token = new_token()
+        _ = try self.db.execute(String("INSERT INTO devices (id, user, name, kind, tz, token, at) VALUES (?, ?, ?, ?, ?, ?, ?)"), [t(id.copy()), t(user.copy()), t(name.copy()), t(kind.copy()), t(tz), t(token_hash(token.copy())), Value.Int(now())])
+        return (Device { id: id, user: user.copy(), name: name.copy(), kind: kind.copy() }, token)
+    }
+
+    // The device a token belongs to, unless it was revoked.
+    pub fn device_for_token(self, token: String) -> Device? ! Error {
+        let row = try self.db.query_one(String("SELECT id, user, name, kind FROM devices WHERE token = ? AND revoked = 0"), [t(token_hash(token))])
+        let r = row else return none
+        return some(Device { id: text(r[0].copy()), user: text(r[1].copy()), name: text(r[2].copy()), kind: text(r[3].copy()) })
+    }
+
+    pub fn device(self, user: String, id: String) -> Device? ! Error {
+        let row = try self.db.query_one(String("SELECT id, user, name, kind FROM devices WHERE id = ? AND user = ? AND revoked = 0"), [t(id), t(user)])
+        let r = row else return none
+        return some(Device { id: text(r[0].copy()), user: text(r[1].copy()), name: text(r[2].copy()), kind: text(r[3].copy()) })
+    }
+
+    pub fn rename_device(self, id: String, name: String) ! Error {
+        _ = try self.db.execute(String("UPDATE devices SET name = ? WHERE id = ?"), [t(name), t(id)])
+    }
+
+    pub fn update_device_tz(self, id: String, tz: String) ! Error {
+        _ = try self.db.execute(String("UPDATE devices SET tz = ? WHERE id = ?"), [t(tz), t(id)])
+    }
+
+    pub fn revoke_device(self, id: String) ! Error {
+        _ = try self.db.execute(String("UPDATE devices SET revoked = 1 WHERE id = ?"), [t(id)])
+    }
+
+    // --- ACP agent programs ---
+
+    pub fn set_acp_agent(self, name: String, command: String, args: List<String>) ! Error {
+        var list = List<Json>()
+        for a in args {
+            list.push(Json.Str(a.copy()))
+        }
+        _ = try self.db.execute(String("INSERT INTO acp_agents (name, command, args) VALUES (?, ?, ?) ON CONFLICT (name) DO UPDATE SET command = excluded.command, args = excluded.args"), [t(name), t(command), t("{Json.Array(list)}")])
+    }
+
+    pub fn acp_agent(self, name: String) -> AcpAgent? ! Error {
+        let row = try self.db.query_one(String("SELECT name, command, args FROM acp_agents WHERE name = ?"), [t(name)])
+        let r = row else return none
+        var args = List<String>()
+        if let Json.Array(items) = try parse(text(r[2].copy())) {
+            for a in items {
+                args.push(a.as_str() ?? String())
+            }
+        }
+        return some(AcpAgent { name: text(r[0].copy()), command: text(r[1].copy()), args: args })
+    }
+
+    pub fn acp_agents(self) -> List<AcpAgent> ! Error {
+        var out = List<AcpAgent>()
+        for r in try self.db.query(String("SELECT name FROM acp_agents ORDER BY name")) {
+            if let a = try self.acp_agent(text(r[0].copy())) {
+                out.push(a)
+            }
+        }
+        return out
+    }
+
+    // --- Agents, conversations and messages, each as the JSON the protocol sends ---
+
+    pub fn put_agent(self, user: String, agent: Json) ! Error {
+        let id = (agent.get(String("id")) ?? Json.Null).as_str() ?? String()
+        _ = try self.db.execute(String("INSERT INTO agents (id, user, json) VALUES (?, ?, ?) ON CONFLICT (id) DO UPDATE SET json = excluded.json"), [t(id), t(user), t("{agent}")])
+    }
+
+    pub fn agent(self, user: String, id: String) -> Json? ! Error {
+        let row = try self.db.query_one(String("SELECT json FROM agents WHERE id = ? AND user = ? AND deleted = 0"), [t(id), t(user)])
+        let r = row else return none
+        return some(try parse(text(r[0].copy())))
+    }
+
+    pub fn agents(self, user: String) -> List<Json> ! Error {
+        var out = List<Json>()
+        for r in try self.db.query(String("SELECT json FROM agents WHERE user = ? AND deleted = 0 ORDER BY rowid"), [t(user)]) {
+            out.push(try parse(text(r[0].copy())))
+        }
+        return out
+    }
+
+    pub fn delete_agent(self, user: String, id: String) ! Error {
+        _ = try self.db.execute(String("UPDATE agents SET deleted = 1 WHERE id = ? AND user = ?"), [t(id), t(user)])
+    }
+
+    pub fn add_conversation(self, user: String, agent: String, title: String) -> Json ! Error {
+        let id = try self.new_id("c")
+        let at = now()
+        _ = try self.db.execute(String("INSERT INTO conversations (id, user, agent, title, at) VALUES (?, ?, ?, ?, ?)"), [t(id.copy()), t(user), t(agent.copy()), t(title.copy()), Value.Int(at)])
+        return Obj.new().s("id", id).s("agent", agent).s("title", title).i("at", at).done()
+    }
+
+    pub fn conversation(self, user: String, id: String) -> Json? ! Error {
+        let row = try self.db.query_one(String("SELECT id, agent, title, at FROM conversations WHERE id = ? AND user = ? AND deleted = 0"), [t(id), t(user)])
+        let r = row else return none
+        return some(Obj.new().s("id", text(r[0].copy())).s("agent", text(r[1].copy())).s("title", text(r[2].copy())).i("at", int(r[3].copy())).done())
+    }
+
+    pub fn conversations(self, user: String) -> List<Json> ! Error {
+        var out = List<Json>()
+        for r in try self.db.query(String("SELECT id, agent, title, at FROM conversations WHERE user = ? AND deleted = 0 ORDER BY at"), [t(user)]) {
+            out.push(Obj.new().s("id", text(r[0].copy())).s("agent", text(r[1].copy())).s("title", text(r[2].copy())).i("at", int(r[3].copy())).done())
+        }
+        return out
+    }
+
+    pub fn rename_conversation(self, user: String, id: String, title: String) ! Error {
+        _ = try self.db.execute(String("UPDATE conversations SET title = ? WHERE id = ? AND user = ?"), [t(title), t(id), t(user)])
+    }
+
+    pub fn delete_conversation(self, user: String, id: String) ! Error {
+        _ = try self.db.execute(String("UPDATE conversations SET deleted = 1 WHERE id = ? AND user = ?"), [t(id), t(user)])
+    }
+
+    pub fn put_message(self, user: String, message: Json) ! Error {
+        let id = (message.get(String("id")) ?? Json.Null).as_str() ?? String()
+        let conversation = (message.get(String("conversation")) ?? Json.Null).as_str() ?? String()
+        let at = (message.get(String("at")) ?? Json.Null).as_i64() ?? now()
+        _ = try self.db.execute(String("INSERT INTO messages (id, user, conversation, json, at) VALUES (?, ?, ?, ?, ?) ON CONFLICT (id) DO UPDATE SET json = excluded.json"), [t(id), t(user), t(conversation), t("{message}"), Value.Int(at)])
+    }
+
+    // Up to `limit` messages of a conversation, newest last, before the
+    // message `before` if it's given, and whether there are older ones.
+    pub fn messages(self, user: String, conversation: String, before: String?, limit: usize) -> (List<Json>, bool) ! Error {
+        var rows = List<List<Value>>()
+        if let b = before {
+            rows = try self.db.query(String("SELECT json FROM messages WHERE user = ? AND conversation = ? AND rowid < (SELECT rowid FROM messages WHERE id = ? AND user = ?) ORDER BY rowid DESC LIMIT ?"), [t(user.copy()), t(conversation), t(b), t(user), Value.Int(i64.wrap(u64(limit + 1)))])
+        } else {
+            rows = try self.db.query(String("SELECT json FROM messages WHERE user = ? AND conversation = ? ORDER BY rowid DESC LIMIT ?"), [t(user), t(conversation), Value.Int(i64.wrap(u64(limit + 1)))])
+        }
+        let more = rows.len() > limit
+        var out = List<Json>()
+        var i = if more { limit } else { rows.len() }
+        while i > 0 {
+            i -= 1
+            out.push(try parse(text(rows[i][0].copy())))
+        }
+        return (out, more)
+    }
+
+    pub fn add_run(self, user: String, id: String, conversation: String) ! Error {
+        _ = try self.db.execute(String("INSERT INTO runs (id, user, conversation, status, at) VALUES (?, ?, ?, 'running', ?)"), [t(id), t(user), t(conversation), Value.Int(now())])
+    }
+
+    pub fn finish_run(self, id: String, status: String) ! Error {
+        _ = try self.db.execute(String("UPDATE runs SET status = ? WHERE id = ?"), [t(status), t(id)])
+    }
+
+    // Runs a crash or a restart left unfinished, as (user, run, conversation).
+    pub fn unfinished_runs(self) -> List<(String, String, String)> ! Error {
+        var out = List<(String, String, String)>()
+        for r in try self.db.query(String("SELECT user, id, conversation FROM runs WHERE status = 'running'")) {
+            out.push((text(r[0].copy()), text(r[1].copy()), text(r[2].copy())))
+        }
+        return out
+    }
+
+    // --- Client ids of sent messages, for the outbox's resends ---
+
+    pub fn sent(self, device: String, cid: String) -> (String, String)? ! Error {
+        let row = try self.db.query_one(String("SELECT message, run FROM sent WHERE device = ? AND cid = ?"), [t(device), t(cid)])
+        let r = row else return none
+        return some((text(r[0].copy()), text(r[1].copy())))
+    }
+
+    pub fn remember_sent(self, device: String, cid: String, message: String, run: String) ! Error {
+        _ = try self.db.execute(String("INSERT INTO sent (device, cid, message, run) VALUES (?, ?, ?, ?)"), [t(device), t(cid), t(message), t(run)])
+    }
+
+    // --- The event log ---
+
+    // Stores an event for `user`: `fields` with `t`, `seq`, `kind` and `at`
+    // added. Gives the event frame, ready to send.
+    pub fn append(self, user: String, kind: str, fields: Json) -> Json ! Error {
+        let row = try self.db.query_one(String("SELECT coalesce(max(seq), 0) FROM events WHERE user = ?"), [t(user.copy())])
+        let seq = int((row ?? List<Value>())[0].copy()) + 1
+        let at = now()
+        let head = Obj.new().s("t", String("event")).i("seq", seq).s("kind", String(kind)).i("at", at).done()
+        let event = merge(head, fields)
+        _ = try self.db.execute(String("INSERT INTO events (user, seq, json, at) VALUES (?, ?, ?, ?)"), [t(user), Value.Int(seq), t("{event}"), Value.Int(at)])
+        return event
+    }
+
+    // The newest seq `user` has, or 0.
+    pub fn last_seq(self, user: String) -> i64 ! Error {
+        let row = try self.db.query_one(String("SELECT coalesce(max(seq), 0) FROM events WHERE user = ?"), [t(user)])
+        return int((row ?? List<Value>())[0].copy())
+    }
+
+    // The oldest seq `user` still has, or 0 with none.
+    pub fn first_seq(self, user: String) -> i64 ! Error {
+        let row = try self.db.query_one(String("SELECT coalesce(min(seq), 0) FROM events WHERE user = ?"), [t(user)])
+        return int((row ?? List<Value>())[0].copy())
+    }
+
+    // `user`'s events after `after`, in order, as the text stored.
+    pub fn events_after(self, user: String, after: i64) -> List<String> ! Error {
+        var out = List<String>()
+        for r in try self.db.query(String("SELECT json FROM events WHERE user = ? AND seq > ? ORDER BY seq"), [t(user), Value.Int(after)]) {
+            out.push(text(r[0].copy()))
+        }
+        return out
+    }
+}
+
+fn test_store() -> Store {
+    return Store.open(String(":memory:"), PasswordHasher { memory_kib: 64, iterations: 1, parallelism: 1 })!
+}
+
+@test
+fn ids_count_per_kind() {
+    let s = test_store()
+    assert(s.new_id("u")! == "u_1")
+    assert(s.new_id("u")! == "u_2")
+    assert(s.new_id("d")! == "d_1")
+}
+
+@test
+fn passwords_and_tokens() {
+    let s = test_store()
+    let u = s.add_user(String("elliot"), String("correct horse"), "owner")!
+    assert(s.check_password(String("elliot"), String("correct horse"))! != none)
+    assert(s.check_password(String("elliot"), String("wrong"))! == none)
+    assert(s.check_password(String("nobody"), String("correct horse"))! == none)
+    let (d, token) = s.add_device(u.id.copy(), String("Desk"), String("windows"), String("Europe/Oslo"))!
+    assert((s.device_for_token(token.copy())! ?? Device { id: String(), user: String(), name: String(), kind: String() }).id == d.id)
+    s.revoke_device(d.id.copy())!
+    assert(s.device_for_token(token)! == none)
+}
+
+@test
+fn events_are_counted_per_person() {
+    let s = test_store()
+    let a = s.add_user(String("a"), String("password1"), "owner")!
+    let b = s.add_user(String("b"), String("password2"), "member")!
+    let e1 = s.append(a.id.copy(), "x", Obj.new().s("n", String("one")).done())!
+    _ = s.append(a.id.copy(), "x", Obj.new().done())!
+    let f1 = s.append(b.id.copy(), "x", Obj.new().done())!
+    assert("{e1}".contains("\"seq\":1") and "{e1}".contains("\"n\":\"one\""))
+    assert("{f1}".contains("\"seq\":1"))
+    assert(s.last_seq(a.id.copy())! == 2)
+    assert(s.events_after(a.id.copy(), 1)!.len() == 1)
+    assert(s.events_after(b.id.copy(), 0)!.len() == 1)
+}
+
+@test
+fn conversations_are_per_person() {
+    let s = test_store()
+    let a = s.add_user(String("a"), String("password1"), "owner")!
+    let b = s.add_user(String("b"), String("password2"), "member")!
+    let c = s.add_conversation(a.id.copy(), String("a_1"), String("Builds"))!
+    let id = (c.get(String("id")) ?? Json.Null).as_str() ?? String()
+    assert(s.conversation(a.id.copy(), id.copy())! != none)
+    assert(s.conversation(b.id.copy(), id)! == none)
+    assert(s.conversations(b.id.copy())!.len() == 0)
+}
+
+@test
+fn messages_page_newest_last() {
+    let s = test_store()
+    let a = s.add_user(String("a"), String("password1"), "owner")!
+    for i in 1i64..6 {
+        s.put_message(a.id.copy(), Obj.new().s("id", "msg_{i}").s("conversation", String("c_1")).i("at", i).done())!
+    }
+    let (page, more) = s.messages(a.id.copy(), String("c_1"), none, 2)!
+    assert(more and page.len() == 2)
+    assert("{page[1]}".contains("msg_5") and "{page[0]}".contains("msg_4"))
+    let (older, more2) = s.messages(a.id.copy(), String("c_1"), some(String("msg_4")), 10)!
+    assert(not more2 and older.len() == 3 and "{older[0]}".contains("msg_1"))
+}

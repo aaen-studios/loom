@@ -2,37 +2,163 @@ module server.main
 
 // The `loom` program: the instance, and the commands that look after it.
 //
-//     calx server/main.calx version
+//     loom serve [--data DIR] [--port N] [--host ADDR]
+//     loom user add NAME [--data DIR]          reads the password from standard input
+//     loom user list [--data DIR]
+//     loom acp add NAME COMMAND [ARG...] [--data DIR]
+//     loom acp list [--data DIR]
+//     loom status [--data DIR]
+//     loom version
+//
+// Run from source: calx server/main.calx serve
+import std.crypto.{PasswordHasher}
 import std.env
+import std.fs
+import std.io
 import std.process.{exit}
 import shared.protocol
+import server.instance.{Config, Instance}
+import server.store.{Store}
 
 const VERSION: str = "0.2.0-dev"
 
 fn usage() -> String {
-    return "usage: loom <command>\n\n  version    print loom's version and the protocol versions it speaks\n"
+    return #"
+usage: loom <command>
+
+  serve                     run the instance (--port, default 8790; --host, default 127.0.0.1)
+  user add NAME             add an account; the password comes on standard input
+  user list                 list the accounts
+  acp add NAME COMMAND ...  add an ACP agent program, such as: acp add claude npx @zed-industries/claude-agent-acp
+  acp list                  list the ACP agent programs
+  status                    say what the instance holds
+  version                   print loom's version and the protocol versions it speaks
+
+Every command but version takes --data DIR, the instance's folder (default: loom-data).
+"#
 }
 
 fn version_line() -> String {
     return "loom {VERSION}, protocol {protocol.OLDEST}-{protocol.NEWEST}"
 }
 
-fn main() {
-    let given = env.args()
-    if given.len() == 0 {
+// The arguments, with `--name value` options taken out.
+struct Args {
+    words: List<String>
+    data: String
+    port: u16
+    host: String
+    fast_hashes: bool
+}
+
+fn read_args(given: List<String>) -> Args ! Error {
+    var a = Args { words: List<String>(), data: String("loom-data"), port: 8790, host: String("127.0.0.1"), fast_hashes: false }
+    var i: usize = 0
+    while i < given.len() {
+        let w = given[i].copy()
+        if w == "--data" or w == "--port" or w == "--host" {
+            if i + 1 >= given.len() { fail "{w} needs a value" }
+            let v = given[i + 1].copy()
+            if w == "--data" { a.data = v } else if w == "--host" { a.host = v } else {
+                let port = u16.parse(v.copy()) else { fail "--port takes a number, not {v}" }
+                a.port = port
+            }
+            i += 2
+            continue
+        }
+        // For tests only: hashes that take microseconds instead of 65 ms.
+        if w == "--test-fast-hashes" {
+            a.fast_hashes = true
+            i += 1
+            continue
+        }
+        a.words.push(w)
+        i += 1
+    }
+    return a
+}
+
+fn hasher(a: Args) -> PasswordHasher {
+    if a.fast_hashes { return PasswordHasher { memory_kib: 64, iterations: 1, parallelism: 1 } }
+    return PasswordHasher()
+}
+
+fn open_store(a: Args) -> Store ! Error {
+    try fs.make_dir_all(a.data.copy())
+    return try Store.open("{a.data}/loom.db", hasher(a))
+}
+
+fn serve(a: Args) ! Error {
+    var i = try Instance.open(Config { data: a.data.copy(), port: a.port, host: a.host.copy(), hasher: hasher(a.copy()) })
+    println("loom: serving {a.data} at {i.url()}")
+    if let code = try i.setup_code() {
+        println("loom: no owner yet. Set one up with POST /api/setup and this code:")
+        println("setup code: {code}")
+    }
+    io.flush()
+    try i.serve()
+    println("loom: stopped")
+}
+
+fn main() ! Error {
+    let a = try read_args(env.args())
+    if a.words.len() == 0 {
         eprint(usage())
         exit(2)
     }
-    match given[0].copy() {
-        "version" => println(version_line()),
-        _ => {
-            eprint("unknown command: {given[0]}\n\n{usage()}")
-            exit(2)
-        },
+    let cmd = a.words[0].copy()
+    let sub = if a.words.len() > 1 { a.words[1].copy() } else { String() }
+    if cmd == "version" {
+        println(version_line())
+    } else if cmd == "serve" {
+        try serve(a)
+    } else if cmd == "user" and sub == "add" and a.words.len() == 3 {
+        let store = try open_store(a.copy())
+        var lines = io.Lines()
+        let password = lines.next() ?? String()
+        if password.len() < 8 { fail "a password needs at least 8 characters" }
+        let role = if try store.user_count() == 0 { "owner" } else { "member" }
+        let u = try store.add_user(a.words[2].copy(), password, role)
+        println("added {u.username} ({u.id}, {role})")
+    } else if cmd == "user" and sub == "list" {
+        let store = try open_store(a)
+        for u in try store.users() {
+            println("{u.id}  {u.username}  {u.role}")
+        }
+    } else if cmd == "acp" and sub == "add" and a.words.len() >= 4 {
+        let store = try open_store(a.copy())
+        var args = List<String>()
+        for w in a.words[4..] {
+            args.push(w.copy())
+        }
+        try store.set_acp_agent(a.words[2].copy(), a.words[3].copy(), args)
+        println("added ACP agent {a.words[2]}")
+    } else if cmd == "acp" and sub == "list" {
+        let store = try open_store(a)
+        for p in try store.acp_agents() {
+            println("{p.name}  {p.command} {p.args.join(" ")}")
+        }
+    } else if cmd == "status" {
+        let store = try open_store(a.copy())
+        println(version_line())
+        println("data: {a.data}")
+        println("accounts: {try store.user_count()}")
+        let programs = try store.acp_agents()
+        println("ACP agents: {programs.len()}")
+    } else {
+        eprint("unknown command: {a.words.join(" ")}\n\n{usage()}")
+        exit(2)
     }
 }
 
 @test
 fn version_names_the_protocol() {
     assert(version_line().contains("protocol 1-1"))
+}
+
+@test
+fn reads_options_anywhere() {
+    let given: List<String> = [String("user"), String("--data"), String("d"), String("add"), String("ann")]
+    let a = read_args(given)!
+    assert(a.data == "d" and a.words.len() == 3 and a.words[2] == "ann")
 }
