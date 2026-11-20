@@ -1,0 +1,448 @@
+module tests.fake_agent.main
+
+// A fake ACP agent, for testing loom without a real model.
+//
+// It speaks ACP (JSON-RPC 2.0, one message a line) on standard input and
+// output, as claude-agent-acp does, and plays whatever turn the prompt spells
+// out. Each line of the prompt is one step:
+//
+//     plain text          says that line, streamed a word at a time
+//     /say TEXT           the same
+//     /think TEXT         an agent_thought_chunk
+//     /plan A; B; C       a plan with those entries
+//     /tool TITLE         a tool call that runs and completes
+//     /ask TITLE          a tool call that asks permission first, and runs
+//                         or fails by the answer
+//     /slow MS            waits MS between chunks from here on
+//     /sleep MS           waits MS, or until the turn is cancelled
+//     /stop REASON        ends the turn with that stopReason (max_tokens, ...)
+//     /fail MESSAGE       answers session/prompt with an error
+//     /crash              exits with status 3 in the middle of the turn
+//
+// A turn ends with end_turn after its last step, or with cancelled as soon as
+// session/cancel arrives. Diagnostics go to standard error.
+//
+//     calx tests/fake_agent/main.calx
+import std.io
+import std.json.{Json, parse}
+import std.process.{exit}
+import std.thread.{Task}
+import std.time.{Instant}
+
+// Reads standard input on a thread of its own, so a turn can wait for a
+// message and a deadline at once.
+struct Reader {
+    out: Sender<String>
+}
+
+impl Task for Reader {
+    fn run(own self) {
+        var out = self.out
+        var input = io.Lines()
+        while let line = input.next() {
+            out.send(line)
+        }
+    }
+}
+
+// One step of a scripted turn.
+pub enum Step {
+    Say(String)
+    Think(String)
+    Plan(List<String>)
+    Tool(String)
+    Ask(String)
+    Slow(u64)
+    Sleep(u64)
+    Stop(String)
+    Fail(String)
+    Crash
+}
+
+// The steps a prompt spells out. Blank lines are skipped.
+pub fn script(text: String) -> List<Step> {
+    var steps = List<Step>()
+    for raw in text.split("\n") {
+        let line = raw.trim()
+        if line.len() == 0 { continue }
+        if not line.starts_with("/") {
+            steps.push(Step.Say(line.copy()))
+            continue
+        }
+        let (word, rest) = split_word(line.copy())
+        if word == "/say" {
+            steps.push(Step.Say(rest))
+        } else if word == "/think" {
+            steps.push(Step.Think(rest))
+        } else if word == "/plan" {
+            var entries = List<String>()
+            for e in rest.split(";") {
+                let t = e.trim()
+                if t.len() > 0 { entries.push(t.copy()) }
+            }
+            steps.push(Step.Plan(entries))
+        } else if word == "/tool" {
+            steps.push(Step.Tool(rest))
+        } else if word == "/ask" {
+            steps.push(Step.Ask(rest))
+        } else if word == "/slow" {
+            steps.push(Step.Slow(u64.parse(rest) ?? 0))
+        } else if word == "/sleep" {
+            steps.push(Step.Sleep(u64.parse(rest) ?? 0))
+        } else if word == "/stop" {
+            steps.push(Step.Stop(if rest.len() == 0 { String("end_turn") } else { rest }))
+        } else if word == "/fail" {
+            steps.push(Step.Fail(if rest.len() == 0 { String("the fake agent failed") } else { rest }))
+        } else if word == "/crash" {
+            steps.push(Step.Crash)
+        } else {
+            steps.push(Step.Say(line.copy()))
+        }
+    }
+    return steps
+}
+
+// "/tool ls -la" -> ("/tool", "ls -la")
+fn split_word(line: own String) -> (String, String) {
+    if let i = line.find(" ") {
+        return (line[..i].copy(), line[i + 1..].trim().copy())
+    }
+    return (line, String())
+}
+
+// "one two three" -> ["one ", "two ", "three"]
+pub fn chunks(text: String) -> List<String> {
+    var out = List<String>()
+    var current = String()
+    for r in text.runes() {
+        current.push(r)
+        if r == ' ' {
+            out.push(current.copy())
+            current = String()
+        }
+    }
+    if current.len() > 0 { out.push(current) }
+    return out
+}
+
+fn js(s: String) -> Json {
+    return Json.Str(s.copy())
+}
+
+fn int(n: i64) -> Json {
+    return Json.Int(n)
+}
+
+struct Agent {
+    inbox: Receiver<String>
+    sessions: i64
+    next_id: i64
+    tools: i64
+    // Requests that came in during a turn, answered after it.
+    backlog: List<Json>
+}
+
+fn emit(message: Json) {
+    println("{message}")
+    io.flush()
+}
+
+fn respond(id: Json, result: Json) {
+    var m = LinkedMap<String, Json>()
+    m.insert("jsonrpc", js(String("2.0")))
+    m.insert("id", id.copy())
+    m.insert("result", result.copy())
+    emit(Json.Object(m))
+}
+
+fn respond_error(id: Json, code: i64, message: String) {
+    var e = LinkedMap<String, Json>()
+    e.insert("code", int(code))
+    e.insert("message", js(message))
+    var m = LinkedMap<String, Json>()
+    m.insert("jsonrpc", js(String("2.0")))
+    m.insert("id", id.copy())
+    m.insert("error", Json.Object(e))
+    emit(Json.Object(m))
+}
+
+fn update(session: String, u: LinkedMap<String, Json>) {
+    var p = LinkedMap<String, Json>()
+    p.insert("sessionId", js(session))
+    p.insert("update", Json.Object(u.copy()))
+    var m = LinkedMap<String, Json>()
+    m.insert("jsonrpc", js(String("2.0")))
+    m.insert("method", js(String("session/update")))
+    m.insert("params", Json.Object(p))
+    emit(Json.Object(m))
+}
+
+fn chunk(session: String, kind: str, text: String) {
+    var content = LinkedMap<String, Json>()
+    content.insert("type", js(String("text")))
+    content.insert("text", js(text))
+    var u = LinkedMap<String, Json>()
+    u.insert("sessionUpdate", js(String(kind)))
+    u.insert("content", Json.Object(content))
+    update(session, u)
+}
+
+fn tool_update(session: String, id: String, status: str, output: String) {
+    var u = LinkedMap<String, Json>()
+    u.insert("sessionUpdate", js(String("tool_call_update")))
+    u.insert("toolCallId", js(id))
+    u.insert("status", js(String(status)))
+    if output.len() > 0 {
+        var text = LinkedMap<String, Json>()
+        text.insert("type", js(String("text")))
+        text.insert("text", js(output))
+        var block = LinkedMap<String, Json>()
+        block.insert("type", js(String("content")))
+        block.insert("content", Json.Object(text))
+        u.insert("content", Json.Array([Json.Object(block)]))
+    }
+    update(session, u)
+}
+
+impl Agent {
+    fn tool_call(a: mut Agent, session: String, title: String) -> String {
+        a.tools += 1
+        let id = "tool_{a.tools}"
+        var u = LinkedMap<String, Json>()
+        u.insert("sessionUpdate", js(String("tool_call")))
+        u.insert("toolCallId", js(id.copy()))
+        u.insert("title", js(title))
+        u.insert("kind", js(String("execute")))
+        u.insert("status", js(String("pending")))
+        update(session, u)
+        return id
+    }
+
+    // The next message, waiting at most `ms`. none if nothing came in time.
+    fn next(a: mut Agent, ms: u64) -> Json? {
+        let line = unsafe { a.inbox.wait_for(ms * 1000000) } else return none
+        match parse(line.copy()) {
+            ok(j) => return some(j),
+            err(e) => {
+                eprintln("fake agent: not JSON ({e}): {line}")
+                return none
+            },
+        }
+    }
+
+    // Waits up to `ms` during a turn. Gives true if the turn was cancelled.
+    // Requests that come meanwhile wait in the backlog.
+    fn idle(a: mut Agent, ms: u64) -> bool {
+        let start = unsafe { Instant.now() }
+        loop {
+            let spent = unsafe { Instant.now() }.nanos_since(start) / 1000000
+            if spent >= ms { return false }
+            let m = a.next(ms - spent) else continue
+            if method(m.copy()) == "session/cancel" { return true }
+            a.backlog.push(m)
+        }
+    }
+
+    // Asks the client's permission for a tool call. Gives whether it was
+    // allowed, or none if the turn was cancelled first.
+    fn ask(a: mut Agent, session: String, tool: String, title: String) -> bool? {
+        a.next_id += 1
+        let id = a.next_id
+        var call = LinkedMap<String, Json>()
+        call.insert("toolCallId", js(tool))
+        call.insert("title", js(title))
+        var options = List<Json>()
+        for kind in "allow_once allow_always reject_once reject_always".split(" ") {
+            var o = LinkedMap<String, Json>()
+            o.insert("optionId", js(kind.copy()))
+            o.insert("name", js(kind.replace("_", " ")))
+            o.insert("kind", js(kind.copy()))
+            options.push(Json.Object(o))
+        }
+        var p = LinkedMap<String, Json>()
+        p.insert("sessionId", js(session))
+        p.insert("toolCall", Json.Object(call))
+        p.insert("options", Json.Array(options))
+        var m = LinkedMap<String, Json>()
+        m.insert("jsonrpc", js(String("2.0")))
+        m.insert("id", int(id))
+        m.insert("method", js(String("session/request_permission")))
+        m.insert("params", Json.Object(p))
+        emit(Json.Object(m))
+        loop {
+            let reply = a.next(1000) else continue
+            if method(reply.copy()) == "session/cancel" { return none }
+            if (reply.get(String("id")) ?? Json.Null).as_i64() != some(id) or reply.get(String("method")) != none {
+                a.backlog.push(reply)
+                continue
+            }
+            let outcome = reply.pointer(String("/result/outcome/outcome")) ?? Json.Null
+            if outcome.as_str() != some(String("selected")) { return none }
+            let option = (reply.pointer(String("/result/outcome/optionId")) ?? Json.Null).as_str() ?? String()
+            return some(option.starts_with("allow"))
+        }
+    }
+
+    // Plays one session/prompt. The stopReason, or none if it answered with
+    // an error.
+    fn turn(a: mut Agent, id: Json, params: Json) {
+        let session = (params.get(String("sessionId")) ?? Json.Null).as_str() ?? String()
+        var text = String()
+        if let Json.Array(blocks) = params.get(String("prompt")) ?? Json.Null {
+            for b in blocks {
+                if let t = (b.get(String("text")) ?? Json.Null).as_str() {
+                    if text.len() > 0 { text.push_str("\n") }
+                    text.push_str(t)
+                }
+            }
+        }
+        var slow: u64 = 0
+        var reason = String("end_turn")
+        for step in script(text) {
+            match step {
+                Step.Say(s) => {
+                    for c in chunks(s) {
+                        chunk(session.copy(), "agent_message_chunk", c)
+                        if slow > 0 and a.idle(slow) { reason = String("cancelled"); break }
+                    }
+                },
+                Step.Think(s) => chunk(session.copy(), "agent_thought_chunk", s),
+                Step.Plan(entries) => {
+                    var list = List<Json>()
+                    for e in entries {
+                        var o = LinkedMap<String, Json>()
+                        o.insert("content", js(e))
+                        o.insert("priority", js(String("medium")))
+                        o.insert("status", js(String("pending")))
+                        list.push(Json.Object(o))
+                    }
+                    var u = LinkedMap<String, Json>()
+                    u.insert("sessionUpdate", js(String("plan")))
+                    u.insert("entries", Json.Array(list))
+                    update(session.copy(), u)
+                },
+                Step.Tool(title) => {
+                    let tool = a.tool_call(session.copy(), title.copy())
+                    tool_update(session.copy(), tool.copy(), "in_progress", String())
+                    tool_update(session.copy(), tool, "completed", "ran: {title}")
+                },
+                Step.Ask(title) => {
+                    let tool = a.tool_call(session.copy(), title.copy())
+                    match a.ask(session.copy(), tool.copy(), title.copy()) {
+                        some(true) => {
+                            tool_update(session.copy(), tool.copy(), "in_progress", String())
+                            tool_update(session.copy(), tool, "completed", "ran: {title}")
+                        },
+                        some(false) => tool_update(session.copy(), tool, "failed", String("denied")),
+                        none => {
+                            tool_update(session.copy(), tool, "failed", String("cancelled"))
+                            reason = String("cancelled")
+                        },
+                    }
+                },
+                Step.Slow(ms) => slow = ms,
+                Step.Sleep(ms) => {
+                    if a.idle(ms) { reason = String("cancelled") }
+                },
+                Step.Stop(r) => reason = r.copy(),
+                Step.Fail(message) => {
+                    respond_error(id, -32603, message)
+                    return
+                },
+                Step.Crash => {
+                    eprintln("fake agent: crashing, as the prompt asked")
+                    exit(3)
+                },
+            }
+            if reason != "end_turn" { break }
+        }
+        var r = LinkedMap<String, Json>()
+        r.insert("stopReason", js(reason))
+        respond(id, Json.Object(r))
+    }
+
+    fn handle(a: mut Agent, m: Json) {
+        let name = method(m.copy())
+        let id = m.get(String("id"))
+        let params = m.get(String("params")) ?? Json.Null
+        if name == "initialize" {
+            var prompt = LinkedMap<String, Json>()
+            prompt.insert("image", Json.Bool(false))
+            prompt.insert("audio", Json.Bool(false))
+            prompt.insert("embeddedContext", Json.Bool(false))
+            var caps = LinkedMap<String, Json>()
+            caps.insert("loadSession", Json.Bool(false))
+            caps.insert("promptCapabilities", Json.Object(prompt))
+            var info = LinkedMap<String, Json>()
+            info.insert("name", js(String("fake-agent")))
+            info.insert("version", js(String("1")))
+            var r = LinkedMap<String, Json>()
+            r.insert("protocolVersion", int(1))
+            r.insert("agentCapabilities", Json.Object(caps))
+            r.insert("agentInfo", Json.Object(info))
+            r.insert("authMethods", Json.Array(List<Json>()))
+            respond(id ?? Json.Null, Json.Object(r))
+        } else if name == "session/new" {
+            a.sessions += 1
+            var r = LinkedMap<String, Json>()
+            r.insert("sessionId", js("fake_{a.sessions}"))
+            respond(id ?? Json.Null, Json.Object(r))
+        } else if name == "session/prompt" {
+            a.turn(id ?? Json.Null, params)
+        } else if let i = id {
+            if name.len() > 0 { respond_error(i, -32601, "method not found: {name}") }
+        }
+        // Notifications it doesn't know, such as a session/cancel with no turn
+        // running, and stray responses, are dropped.
+    }
+}
+
+fn method(m: Json) -> String {
+    return (m.get(String("method")) ?? Json.Null).as_str() ?? String()
+}
+
+fn main() {
+    let inbox = Receiver<String>()
+    let reader = Reader { out: inbox.sender() }
+    _ = unsafe { Thread.spawn(reader) }
+    var a = Agent { inbox: inbox, sessions: 0, next_id: 0, tools: 0, backlog: List<Json>() }
+    loop {
+        if a.backlog.len() > 0 {
+            let m = a.backlog.remove(0)
+            a.handle(m)
+            continue
+        }
+        let line = a.inbox.wait() else return
+        match parse(line.copy()) {
+            ok(m) => a.handle(m),
+            err(e) => eprintln("fake agent: not JSON ({e}): {line}"),
+        }
+    }
+}
+
+@test
+fn plain_lines_are_said() {
+    let steps = script(String("hello there\n\n/say again"))
+    assert(steps.len() == 2)
+    assert(steps[0] == Step.Say(String("hello there")))
+    assert(steps[1] == Step.Say(String("again")))
+}
+
+@test
+fn reads_every_step() {
+    let steps = script(String("/think hmm\n/plan a; b ;\n/tool ls\n/ask rm x\n/slow 5\n/sleep 10\n/stop max_tokens\n/fail no\n/crash"))
+    assert(steps.len() == 9)
+    let entries: List<String> = [String("a"), String("b")]
+    assert(steps[1] == Step.Plan(entries))
+    assert(steps[3] == Step.Ask(String("rm x")))
+    assert(steps[5] == Step.Sleep(10))
+    assert(steps[6] == Step.Stop(String("max_tokens")))
+    assert(steps[8] == Step.Crash)
+}
+
+@test
+fn chunks_keep_their_spaces() {
+    let c = chunks(String("one two three"))
+    assert(c.len() == 3)
+    assert(c[0] == "one " and c[2] == "three")
+}
