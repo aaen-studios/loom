@@ -1,0 +1,98 @@
+module tests.fake_agent.fake_agent_test
+
+// Drives the fake ACP agent as loom's server will: as a child process, over
+// its standard input and output. Run from the repository's root:
+//
+//     calx test tests/fake_agent/fake_agent_test.calx
+import std.env
+import std.json.{Json, parse}
+import std.process.{Child, Command, Stdio}
+
+const AGENT: str = "tests/fake_agent/main.calx"
+const WAIT: u64 = 60000    // the first start builds the agent
+
+fn start() -> Child ! Error {
+    let calx = env.variable(String("CALX")) ?? String("calx")
+    let c = try Command.new(calx).arg(String(AGENT)).stdin(Stdio.Pipe).stdout(Stdio.Pipe).spawn()
+    try c.write_text(String("\{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":\{\"protocolVersion\":1\}\}\n"))
+    _ = try expect(c, "\"id\":1,\"result\"")
+    try c.write_text(String("\{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"session/new\",\"params\":\{\"cwd\":\".\",\"mcpServers\":[]\}\}\n"))
+    _ = try expect(c, "\"sessionId\":\"fake_1\"")
+    return c
+}
+
+// Sends a prompt as request 3. Newlines in it are JSON escapes, \n.
+fn prompt(c: Child, text: str) ! Error {
+    try c.write_text("\{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"session/prompt\",\"params\":\{\"sessionId\":\"fake_1\",\"prompt\":[\{\"type\":\"text\",\"text\":\"{text}\"\}]\}\}\n")
+}
+
+// The first line with `text` in it, failing if none comes in time.
+fn expect(c: Child, text: str) -> String ! Error {
+    let line = c.wait_for_line(String(text), WAIT) else {
+        fail "no line with {text} came"
+    }
+    return line
+}
+
+// Answers the permission request in `line` with `option`.
+fn answer(c: Child, line: String, option: str) ! Error {
+    let request = try parse(line)
+    let id = (request.get(String("id")) ?? Json.Null).as_i64() else {
+        fail "the permission request has no id"
+    }
+    try c.write_text("\{\"jsonrpc\":\"2.0\",\"id\":{id},\"result\":\{\"outcome\":\{\"outcome\":\"selected\",\"optionId\":\"{option}\"\}\}\}\n")
+}
+
+@test
+fn an_allowed_tool_runs() ! Error {
+    let c = try start()
+    try prompt(c, "/ask rm build\\ndone")
+    let ask = try expect(c, "session/request_permission")
+    assert(ask.contains("\"title\":\"rm build\""))
+    try answer(c, ask, "allow_once")
+    _ = try expect(c, "\"status\":\"completed\"")
+    _ = try expect(c, "\"text\":\"done\"")
+    _ = try expect(c, "\"stopReason\":\"end_turn\"")
+    c.kill()
+}
+
+@test
+fn a_denied_tool_fails() ! Error {
+    let c = try start()
+    try prompt(c, "/ask rm build")
+    let ask = try expect(c, "session/request_permission")
+    try answer(c, ask, "reject_once")
+    let failed = try expect(c, "\"status\":\"failed\"")
+    assert(failed.contains("denied"))
+    _ = try expect(c, "\"stopReason\":\"end_turn\"")
+    c.kill()
+}
+
+@test
+fn a_cancel_ends_a_slow_reply() ! Error {
+    let c = try start()
+    try prompt(c, "/slow 200\\none two three four five six seven eight nine ten")
+    _ = try expect(c, "\"text\":\"one \"")
+    try c.write_text(String("\{\"jsonrpc\":\"2.0\",\"method\":\"session/cancel\",\"params\":\{\"sessionId\":\"fake_1\"\}\}\n"))
+    let end = try expect(c, "\"id\":3,")
+    assert(end.contains("\"stopReason\":\"cancelled\""), "got {end}")
+    c.kill()
+}
+
+@test
+fn a_fail_answers_with_an_error() ! Error {
+    let c = try start()
+    try prompt(c, "/fail out of credits")
+    let end = try expect(c, "\"id\":3,")
+    assert(end.contains("\"error\"") and end.contains("out of credits"))
+    c.kill()
+}
+
+@test
+fn a_crash_exits_mid_turn() ! Error {
+    var c = try start()
+    try prompt(c, "first\\n/crash")
+    _ = try expect(c, "\"text\":\"first\"")
+    let out = c.wait()
+    assert(out.status.code == some(3), "exited with {out.status.code}")
+}
