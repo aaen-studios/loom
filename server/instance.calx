@@ -9,7 +9,7 @@ module server.instance
 // next frame is read, and a session's catch-up can't interleave with live
 // events.
 import std.bytes
-import std.crypto.{Ed25519Key, PasswordHasher, random_bytes}
+import std.crypto.{Ed25519Key, PasswordHasher, compare_digest, random_bytes}
 import std.fs
 import std.http.server.{Request, Response, Server, ServerSocket}
 import std.json.{Json, parse}
@@ -18,7 +18,9 @@ import shared.obj.{Obj, at, bool_at, int_at, str_at}
 import shared.protocol
 import server.acp
 import server.acp.{Line, Out}
-import server.store.{Device, Store, now}
+import server.hashing
+import server.hashing.{Done, Job}
+import server.store.{Device, Store, User, now}
 
 pub struct Config {
     pub data: String
@@ -96,6 +98,35 @@ pub struct Instance {
     approvals: LinkedMap<String, Approval>
     lines: Receiver<Line>
     lines_to: Sender<Line>
+    hash_to: Sender<Job>
+    hash_done: Receiver<Done>
+    next_job: i64
+    auths: Map<i64, Auth>
+    dummy_hash: String
+    failures: LinkedMap<String, List<i64>>
+}
+
+// A setup or a login waiting on the hashing thread.
+struct Auth {
+    req: Request
+    body: Json
+    user: User?
+    setup: bool
+    username: String
+    address: String
+}
+
+const RATE_TRIES: usize = 10
+const RATE_WINDOW_MS: i64 = 900000
+
+// The address a request came from, without its port.
+fn client_address(client: String) -> String {
+    if let i = client.find_last(":") { return client[..i].copy() }
+    return client.copy()
+}
+
+fn rate_limited(seconds: i64) -> Response {
+    return http_error(429, "rate_limited", "Too many tries. Try again in {seconds} seconds.").with_header(String("Retry-After"), "{seconds}")
 }
 
 fn json_response(status: u16, body: Json) -> Response {
@@ -138,7 +169,9 @@ impl Instance {
         server.max_message = protocol.MAX_FRAME
         let lines = Receiver<Line>()
         let to = lines.sender()
-        return Instance { store: store, server: server, data: config.data.copy(), sessions: Map<u32, Session>(), runs: LinkedMap<String, Run>(), procs: LinkedMap<String, Proc>(), approvals: LinkedMap<String, Approval>(), lines: lines, lines_to: to }
+        let (hash_to, hash_done) = hashing.start(config.hasher)
+        let dummy = config.hasher.hash(bytes.hex(random_bytes(16)))
+        return Instance { store: store, server: server, data: config.data.copy(), sessions: Map<u32, Session>(), runs: LinkedMap<String, Run>(), procs: LinkedMap<String, Proc>(), approvals: LinkedMap<String, Approval>(), lines: lines, lines_to: to, hash_to: hash_to, hash_done: hash_done, next_job: 0, auths: Map<i64, Auth>(), dummy_hash: dummy, failures: LinkedMap<String, List<i64>>() }
     }
 
     pub fn url(self) -> String {
@@ -170,7 +203,8 @@ impl Instance {
                         continue
                     }
                     match i.http(req.copy()) {
-                        ok(res) => i.server.respond(req, res),
+                        ok(some(res)) => i.server.respond(req, res),
+                        ok(none) => {},
                         err(e) => {
                             eprintln("loom: {req.method} {req.path}: {e}")
                             i.server.respond(req, http_error(500, "internal", String("Something went wrong in the instance.")))
@@ -201,6 +235,12 @@ impl Instance {
                     err(e) => eprintln("loom: agent: {e}"),
                 }
             }
+            while let done = i.hash_done.next() {
+                match i.hashed(done) {
+                    ok => {},
+                    err(e) => eprintln("loom: login: {e}"),
+                }
+            }
         }
         for (_, p) in i.procs {
             var to = p.to.copy()
@@ -227,7 +267,7 @@ impl Instance {
 
     // --- HTTP ---
 
-    fn http(i: mut Instance, req: Request) -> Response ! Error {
+    fn http(i: mut Instance, req: Request) -> Response? ! Error {
         if req.path == "/api/info" and req.method == "GET" {
             let users = try i.store.user_count()
             let seed = try i.store.meta("key") ?? String()
@@ -235,19 +275,19 @@ impl Instance {
                 fail "the instance's key is damaged"
             }
             let versions = Json.Array([Json.Int(i64(protocol.NEWEST))])
-            return json_response(200, Obj.new().s("instance", try i.store.meta("instance") ?? String()).s("key", bytes.base64(key.public_key().bytes())).j("protocol", versions).b("setup", users == 0).done())
+            return some(json_response(200, Obj.new().s("instance", try i.store.meta("instance") ?? String()).s("key", bytes.base64(key.public_key().bytes())).j("protocol", versions).b("setup", users == 0).done()))
         }
         if req.method != "POST" {
-            return http_error(404, "not_found", String("There's nothing here."))
+            return some(http_error(404, "not_found", String("There's nothing here.")))
         }
         let body = match parse(req.text() ?? String()) {
             ok(j) => j,
-            err(_) => return http_error(400, "bad_request", String("The body isn't JSON.")),
+            err(_) => return some(http_error(400, "bad_request", String("The body isn't JSON."))),
         }
-        if req.path == "/api/setup" { return try i.setup(body) }
-        if req.path == "/api/login" { return try i.login(body) }
+        if req.path == "/api/setup" { return try i.setup(req, body) }
+        if req.path == "/api/login" { return try i.login(req, body) }
         if req.path == "/api/logout" { return try i.logout(req) }
-        return http_error(404, "not_found", String("There's nothing here."))
+        return some(http_error(404, "not_found", String("There's nothing here.")))
     }
 
     fn new_device(i: Instance, user: String, body: Json) -> Json ! Error {
@@ -260,35 +300,123 @@ impl Instance {
         return Obj.new().s("user", user).s("device", device.id).s("token", token).done()
     }
 
-    fn setup(i: Instance, body: Json) -> Response ! Error {
+    fn setup(i: mut Instance, req: Request, body: Json) -> Response? ! Error {
         if try i.store.user_count() > 0 {
-            return http_error(409, "already_set_up", String("This instance has its owner already."))
+            return some(http_error(409, "already_set_up", String("This instance has its owner already.")))
         }
+        let address = client_address(req.client.copy())
+        if let wait = i.limited(address.copy(), String()) { return some(rate_limited(wait)) }
         let code = try i.store.meta("setup_code") ?? String()
         let given = str_at(body.copy(), "code") ?? String()
-        if code.len() == 0 or given != code {
-            return http_error(403, "bad_code", String("That setup code isn't this instance's."))
+        if code.len() == 0 or not compare_digest(given.to_bytes(), code.to_bytes()) {
+            i.failed(address, String())
+            return some(http_error(403, "bad_code", String("That setup code isn't this instance's.")))
         }
         let username = str_at(body.copy(), "username") ?? String()
         let password = str_at(body.copy(), "password") ?? String()
         if not valid_username(username.copy()) {
-            return http_error(400, "bad_username", String("A username is 1 to 32 of a-z, 0-9, _ and -."))
+            return some(http_error(400, "bad_username", String("A username is 1 to 32 of a-z, 0-9, _ and -.")))
         }
         if password.len() < 8 {
-            return http_error(400, "weak_password", String("A password needs at least 8 characters."))
+            return some(http_error(400, "weak_password", String("A password needs at least 8 characters.")))
         }
-        let user = try i.store.add_user(username, password, "owner")
-        try i.store.delete_meta("setup_code")
-        return json_response(200, try i.new_device(user.id, body))
+        i.hash_later(Auth { req: req.copy(), body: body.copy(), user: none, setup: true, username: username, address: address }, password, String())
+        return none
     }
 
-    fn login(i: Instance, body: Json) -> Response ! Error {
+    fn login(i: mut Instance, req: Request, body: Json) -> Response? ! Error {
         let username = str_at(body.copy(), "username") ?? String()
         let password = str_at(body.copy(), "password") ?? String()
-        let user = try i.store.check_password(username, password) else {
-            return http_error(401, "bad_password", String("That username and password don't match."))
+        let address = client_address(req.client.copy())
+        if let wait = i.limited(address.copy(), username.copy()) { return some(rate_limited(wait)) }
+        // A username that doesn't exist is checked against a hash of nothing,
+        // so it takes as long as a wrong password.
+        var user: User? = none
+        var stored = i.dummy_hash.copy()
+        if let (u, h) = try i.store.login_record(username.copy()) {
+            user = some(u)
+            stored = h
         }
-        return json_response(200, try i.new_device(user.id, body))
+        i.hash_later(Auth { req: req.copy(), body: body.copy(), user: user, setup: false, username: username, address: address }, password, stored)
+        return none
+    }
+
+    fn hash_later(i: mut Instance, auth: own Auth, password: own String, stored: own String) {
+        i.next_job += 1
+        let id = i.next_job
+        i.auths.insert(id, auth)
+        i.hash_to.send(Job { id: id, password: password, stored: stored })
+    }
+
+    // A hash or a check the hashing thread finished: the setup or login
+    // that waited on it is answered.
+    fn hashed(i: mut Instance, done: Done) ! Error {
+        let auth = i.auths.remove(done.id) else return
+        if auth.setup {
+            if try i.store.user_count() > 0 {
+                i.server.respond(auth.req, http_error(409, "already_set_up", String("This instance has its owner already.")))
+                return
+            }
+            let user = try i.store.add_user_hashed(auth.username.copy(), done.hash.copy(), "owner")
+            try i.store.delete_meta("setup_code")
+            i.server.respond(auth.req, json_response(200, try i.new_device(user.id, auth.body.copy())))
+            return
+        }
+        let user = auth.user else {
+            i.failed(auth.address.copy(), auth.username.copy())
+            i.server.respond(auth.req, http_error(401, "bad_password", String("That username and password don't match.")))
+            return
+        }
+        if not done.matches {
+            i.failed(auth.address.copy(), auth.username.copy())
+            i.server.respond(auth.req, http_error(401, "bad_password", String("That username and password don't match.")))
+            return
+        }
+        if done.hash.len() > 0 { try i.store.set_password_hash(user.id.copy(), done.hash.copy()) }
+        i.server.respond(auth.req, json_response(200, try i.new_device(user.id, auth.body.copy())))
+    }
+
+    // --- Rate limits: 10 failed tries in 15 minutes, per address and per username ---
+
+    fn recent(i: Instance, key: String) -> List<i64> {
+        let cutoff = now() - RATE_WINDOW_MS
+        var out = List<i64>()
+        if let times = i.failures.find(key) {
+            for t in times {
+                if t > cutoff { out.push(t) }
+            }
+        }
+        return out
+    }
+
+    // How many seconds to wait, if the address or the username has failed
+    // too often lately.
+    fn limited(i: Instance, address: String, username: String) -> i64? {
+        var keys = List<String>()
+        keys.push("a:{address}")
+        if username.len() > 0 { keys.push("u:{username}") }
+        var wait: i64 = 0
+        for k in keys {
+            let times = i.recent(k)
+            if times.len() >= RATE_TRIES {
+                let free_at = times[times.len() - RATE_TRIES] + RATE_WINDOW_MS
+                let secs = (free_at - now()) / 1000 + 1
+                if secs > wait { wait = secs }
+            }
+        }
+        if wait > 0 { return some(wait) }
+        return none
+    }
+
+    fn failed(i: mut Instance, address: String, username: String) {
+        var keys = List<String>()
+        keys.push("a:{address}")
+        if username.len() > 0 { keys.push("u:{username}") }
+        for k in keys {
+            var times = i.recent(k.copy())
+            times.push(now())
+            i.failures.insert(k.copy(), times)
+        }
     }
 
     fn bearer(i: Instance, req: Request) -> Device? ! Error {
@@ -297,12 +425,12 @@ impl Instance {
         return try i.store.device_for_token(h[7..].copy())
     }
 
-    fn logout(i: mut Instance, req: Request) -> Response ! Error {
+    fn logout(i: mut Instance, req: Request) -> Response? ! Error {
         let device = try i.bearer(req) else {
-            return http_error(401, "unauthorized", String("That token isn't signed in."))
+            return some(http_error(401, "unauthorized", String("That token isn't signed in.")))
         }
         try i.revoke(device.user, device.id)
-        return Response.text(String(""), 204)
+        return some(Response.text(String(""), 204))
     }
 
     fn revoke(i: mut Instance, user: String, device: String) ! Error {

@@ -238,6 +238,17 @@ fn run(server: Child, data: String) ! Error {
     try check(str_at(at(peek, "error"), "code") == some(String("not_found")), "and it can't read the owner's conversation")
     b.close()
 
+    // --- Too many wrong passwords ---
+    var limited_after = 0
+    for n in 1..13 {
+        let (st, body) = try post_json(base.copy(), "/api/login", Obj.new().s("username", String("mallory")).s("password", String("guess")).done())
+        if st == 429 {
+            if "{body}".contains("rate_limited") { limited_after = n }
+            break
+        }
+    }
+    try check(limited_after > 0 and limited_after <= 11, "too many wrong passwords are rate-limited")
+
     // --- Claude, when it's set up ---
     if let claude = env.variable(String("LOOM_TEST_CLAUDE")) {
         let parts = claude.split(" ")
