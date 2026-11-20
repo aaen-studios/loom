@@ -1,0 +1,38 @@
+module server.main
+
+// The `loom` program: the instance, and the commands that look after it.
+//
+//     calx server/main.calx version
+import std.env
+import std.process.{exit}
+import shared.protocol
+
+const VERSION: str = "0.2.0-dev"
+
+fn usage() -> String {
+    return "usage: loom <command>\n\n  version    print loom's version and the protocol versions it speaks\n"
+}
+
+fn version_line() -> String {
+    return "loom {VERSION}, protocol {protocol.OLDEST}-{protocol.NEWEST}"
+}
+
+fn main() {
+    let given = env.args()
+    if given.len() == 0 {
+        eprint(usage())
+        exit(2)
+    }
+    match given[0].copy() {
+        "version" => println(version_line()),
+        _ => {
+            eprint("unknown command: {given[0]}\n\n{usage()}")
+            exit(2)
+        },
+    }
+}
+
+@test
+fn version_names_the_protocol() {
+    assert(version_line().contains("protocol 1-1"))
+}

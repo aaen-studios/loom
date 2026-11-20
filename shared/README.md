@@ -5,4 +5,4 @@ Calx, imported by both [`server/`](../server/) and [`core/`](../core/), so the t
 - The protocol's types: every frame, event and content block in [protocol.md](../protocol/protocol.md), with their JSON.
 - The command list: each command's name, arguments, answer, and whether it asks first when an agent uses it. The app's `cmd` frames and the agents' tools in `loom mcp` are both made from it.
 
-Starts in Phase 1.
+Started in Phase 1 with `protocol.calx`: the protocol versions, the frame size and the close codes.

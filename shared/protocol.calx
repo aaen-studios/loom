@@ -1,0 +1,47 @@
+module shared.protocol
+
+// What protocol/protocol.md fixes for every side: the versions, the frame
+// size and the close codes. The frames themselves come with the server.
+
+// The versions this build speaks, newest first. An instance speaks its newest
+// version and the one before.
+pub const NEWEST: i32 = 1
+pub const OLDEST: i32 = 1
+
+// A frame bigger than this closes the socket with 1009.
+pub const MAX_FRAME: usize = 1048576
+
+// WebSocket close codes.
+pub const CLOSE_TOO_BIG: u16 = 1009
+pub const CLOSE_PROTOCOL: u16 = 4000    // the first frame wasn't hello, or the session broke the protocol
+pub const CLOSE_TOKEN: u16 = 4001       // the token is wrong or was revoked
+pub const CLOSE_VERSION: u16 = 4002     // no protocol version in common
+pub const CLOSE_TOO_SLOW: u16 = 4003    // the app's queue filled up
+
+// The app offers, the instance picks: the newest version both speak, or none.
+pub fn pick_version(offered: List<i32>) -> i32? {
+    var best: i32? = none
+    for v in offered {
+        if v >= OLDEST and v <= NEWEST {
+            if let b = best {
+                if v > b { best = some(v) }
+            } else {
+                best = some(v)
+            }
+        }
+    }
+    return best
+}
+
+@test
+fn picks_the_newest_in_common() {
+    let offered: List<i32> = [3, 1, 2]
+    assert(pick_version(offered) == some(1))
+}
+
+@test
+fn picks_none_without_a_common_version() {
+    let offered: List<i32> = [7, 8]
+    assert(pick_version(offered) == none)
+    assert(pick_version(List<i32>()) == none)
+}

@@ -1,0 +1,95 @@
+// Checks and tests all of loom's Calx code, as CI does.
+//
+//     calx scripts/check.calx
+//
+// Run it from the repository's root, which is the source root of every
+// module: server/main.calx is `module server.main`, and imports shared.protocol
+// from shared/protocol.calx. In order, it:
+//
+// 1. checks that every .calx file is formatted (calx fmt --check);
+// 2. checks every .calx file builds (calx check), several at once;
+// 3. runs the tests of each file that has any (calx test);
+// 4. checks the generated design tokens are up to date.
+//
+// It exits with 1 if anything failed, after running all of it.
+import std.env
+import std.fs
+import std.process.{Command, Output, output_all, exit}
+
+// The folders that hold Calx code. core/ joins when it has some.
+const FOLDERS: str = "shared server core tests scripts"
+
+fn calx() -> String {
+    return env.variable(String("CALX")) ?? String("calx")
+}
+
+fn sources() -> List<String> ! Error {
+    var out = List<String>()
+    for folder in FOLDERS.split(" ") {
+        if not fs.is_dir(folder.copy()) { continue }
+        for path in try fs.glob("{folder}/**/*.calx") {
+            out.push(path.replace("\\", "/"))
+        }
+    }
+    return out
+}
+
+fn has_tests(path: String) -> bool {
+    let text = match fs.read_text(path) { ok(t) => t ?? String(), err(_) => String() }
+    return text.contains("\n@test")
+}
+
+fn show(out: Output) {
+    let o = out.text()
+    let e = out.error_text()
+    if o.len() > 0 { println(o) }
+    if e.len() > 0 { eprintln(e) }
+}
+
+fn main() ! Error {
+    let files = try sources()
+    var failed = List<String>()
+
+    // 1. Formatting.
+    let fmt = try Command.new(calx()).arg(String("fmt")).arg(String("--check")).args(files.copy()).output()
+    if not fmt.status.success() {
+        show(fmt.copy())
+        failed.push(String("formatting"))
+    }
+
+    // 2. Every file builds.
+    var checks = List<Command>()
+    for f in files {
+        checks.push(Command.new(calx()).arg(String("check")).arg(f.copy()))
+    }
+    let results = try output_all(checks, 8)
+    var i: usize = 0
+    for r in results {
+        if not r.status.success() {
+            eprintln("✗ check {files[i]}")
+            show(r.copy())
+            failed.push("check {files[i]}")
+        }
+        i += 1
+    }
+    println("checked {files.len()} files")
+
+    // 3. Tests, a file at a time; each file's tests run in parallel already.
+    for f in files {
+        if not has_tests(f.copy()) { continue }
+        println("test {f}")
+        let t = try Command.new(calx()).arg(String("test")).arg(f.copy()).status()
+        if not t.success() { failed.push("test {f}") }
+    }
+
+    // 4. Design tokens.
+    let tokens = try Command.new(calx()).arg(String("scripts/tokens.calx")).arg(String("--check")).status()
+    if not tokens.success() { failed.push(String("design tokens")) }
+
+    if failed.len() > 0 {
+        eprintln("\n{failed.len()} failed:")
+        for f in failed { eprintln("  {f}") }
+        exit(1)
+    }
+    println("\nall good")
+}
