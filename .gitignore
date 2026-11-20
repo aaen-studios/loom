@@ -1,47 +1,38 @@
+# Calx build output
+build/
+
+# Rust (desktop/)
+target/
+
+# Swift and Xcode (ios/)
+DerivedData/
+xcuserdata/
+*.xcuserstate
+.build/
+.swiftpm/
+
+# Node, for the site if it needs it
+node_modules/
+
+# Local data from running an instance in development
+/data/
+*.db
+*.db-wal
+*.db-shm
+
 # Logs
-logs
 *.log
-npm-debug.log*
-yarn-debug.log*
-yarn-error.log*
-pnpm-debug.log*
-lerna-debug.log*
 
-node_modules
-dist
-dist-ssr
-*.local
-
-# Rust / Tauri
-/target
-src-tauri/gen
-setup/src-tauri/target
-setup/src-tauri/gen
-
-# Generated installer payload (CI builds it from the app)
-setup/src-tauri/payload.zip
-
-# Generated from src-tauri/icons/icon.svg via `bun run icons`
-src-tauri/icons/icon-1024.png
-src-tauri/icons/android
-src-tauri/icons/ios
-
-# Editor directories and files
-.vscode/*
-!.vscode/extensions.json
-.idea
+# Editors and systems
+.vscode/
+.idea/
 .DS_Store
-*.suo
-*.ntvs*
-*.njsproj
-*.sln
-*.sw?
+Thumbs.db
 
-# Marketing site (site/) — its own install, build output and deploy metadata
-site/node_modules
-site/.next
-site/out
-site/.vercel
-site/next-env.d.ts
-site/tsconfig.tsbuildinfo
-site/.env*.local
+# Build output v0.1 left on disk, until it's deleted by hand
+/src-tauri/
+/setup/
+/site/.next/
+/site/out/
+/site/next-env.d.ts
+/site/tsconfig.tsbuildinfo
