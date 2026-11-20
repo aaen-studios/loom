@@ -166,6 +166,24 @@ impl Store {
         return User { id: id, username: username.copy(), role: String(role) }
     }
 
+    // An account whose password hash was made elsewhere, on the hashing thread.
+    pub fn add_user_hashed(self, username: String, hash: String, role: str) -> User ! Error {
+        let id = try self.new_id("u")
+        _ = try self.db.execute(String("INSERT INTO users (id, username, password, role, at) VALUES (?, ?, ?, ?, ?)"), [t(id.copy()), t(username.copy()), t(hash), t(String(role)), Value.Int(now())])
+        return User { id: id, username: username.copy(), role: String(role) }
+    }
+
+    // The account and its stored hash, for checking a login elsewhere.
+    pub fn login_record(self, username: String) -> (User, String)? ! Error {
+        let row = try self.db.query_one(String("SELECT id, username, role, password FROM users WHERE username = ?"), [t(username)])
+        let r = row else return none
+        return some((User { id: text(r[0].copy()), username: text(r[1].copy()), role: text(r[2].copy()) }, text(r[3].copy())))
+    }
+
+    pub fn set_password_hash(self, user: String, hash: String) ! Error {
+        _ = try self.db.execute(String("UPDATE users SET password = ? WHERE id = ?"), [t(hash), t(user)])
+    }
+
     pub fn find_username(self, username: String) -> User? ! Error {
         let row = try self.db.query_one(String("SELECT id, username, role FROM users WHERE username = ?"), [t(username)])
         let r = row else return none

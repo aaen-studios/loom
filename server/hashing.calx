@@ -1,0 +1,77 @@
+module server.hashing
+
+// Password hashing on a thread of its own. argon2id takes about 65 ms on
+// purpose, so the instance's loop hands each hash or check to this thread and
+// answers the request once it's done, while its other sessions carry on.
+import std.crypto.{PasswordHasher, verify_password}
+import std.thread.{Task}
+
+pub struct Job {
+    pub id: i64
+    pub password: String
+    pub stored: String    // the hash to check against, or "" to make a new one
+}
+
+pub struct Done {
+    pub id: i64
+    pub matches: bool
+    pub hash: String    // a new hash, when one was made or the stored one needs remaking; else ""
+}
+
+struct Worker {
+    hasher: PasswordHasher
+    jobs: Receiver<Job>
+    done: Sender<Done>
+}
+
+impl Task for Worker {
+    fn run(own self) {
+        var w = self
+        while let job = w.jobs.wait() {
+            w.done.send(work(w.hasher, job))
+        }
+    }
+}
+
+pub fn work(hasher: PasswordHasher, job: Job) -> Done {
+    if job.stored.len() == 0 {
+        return Done { id: job.id, matches: true, hash: hasher.hash(job.password.copy()) }
+    }
+    let matches = verify_password(job.stored.copy(), job.password.copy())
+    let hash = if matches and hasher.needs_rehash(job.stored.copy()) { hasher.hash(job.password.copy()) } else { String() }
+    return Done { id: job.id, matches: matches, hash: hash }
+}
+
+// Starts the thread. Gives the end that sends it jobs, and the queue its
+// answers come to.
+pub fn start(hasher: PasswordHasher) -> (Sender<Job>, Receiver<Done>) {
+    let jobs = Receiver<Job>()
+    let to = jobs.sender()
+    let done = Receiver<Done>()
+    _ = unsafe { Thread.spawn(Worker { hasher: hasher, jobs: jobs, done: done.sender() }) }
+    return (to, done)
+}
+
+@test
+fn makes_and_checks_hashes() {
+    let h = PasswordHasher { memory_kib: 64, iterations: 1, parallelism: 1 }
+    let made = work(h, Job { id: 1, password: String("correct horse"), stored: String() })
+    assert(made.matches and made.hash.starts_with("$argon2id$"))
+    let good = work(h, Job { id: 2, password: String("correct horse"), stored: made.hash.copy() })
+    assert(good.matches and good.hash.len() == 0)
+    let bad = work(h, Job { id: 3, password: String("wrong"), stored: made.hash.copy() })
+    assert(not bad.matches)
+    // Stronger parameters than the stored hash's: it's remade.
+    let stronger = PasswordHasher { memory_kib: 128, iterations: 1, parallelism: 1 }
+    assert(work(stronger, Job { id: 4, password: String("correct horse"), stored: made.hash }).hash.len() > 0)
+}
+
+@test
+fn works_on_its_thread() {
+    var (to, done) = start(PasswordHasher { memory_kib: 64, iterations: 1, parallelism: 1 })
+    to.send(Job { id: 7, password: String("password1"), stored: String() })
+    let d = done.wait() else {
+        panic("no answer")
+    }
+    assert(d.id == 7 and d.matches)
+}
