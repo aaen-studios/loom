@@ -463,7 +463,7 @@ Checked against Calx nightly 2026-11-14 (`838dc1b`), on 2026-11-20. Calx work ru
 | argon2id in std.crypto, with BLAKE2b in std.hash | No password hashing | [CLX-384](https://acta.aaenz.no/aaen-studios/clx#CLX-384) | Passwords | 1 |
 | `@export_c`, so C can call Calx, and a static library that carries the runtime | Designed, not built. `calx build --lib` makes plugins only Calx programs open | [CLX-334](https://acta.aaenz.no/aaen-studios/clx#CLX-334) | The core's C boundary, linked into the desktop and iPhone apps | 2 |
 | Calling a C function pointer from Calx | Not built | [CLX-333](https://acta.aaenz.no/aaen-studios/clx#CLX-333) | The `on_event` callback | 2 |
-| std.net event loops on two threads of one process, inside a library | Not documented | — | The core and a local instance's server side by side | 2 |
+| std.net event loops on two threads of one process, inside a library | Not documented | [CLX-386](https://acta.aaenz.no/aaen-studios/clx#CLX-386) | The core and a local instance's server side by side | 2 |
 | Static libraries Rust's MSVC toolchain links, on Windows | Calx builds with clang and mingw-w64, or with Visual Studio's SDK | (with CLX-334) | The Windows app | 2 |
 | The system's credential store (std.keyring) | None | [CLX-380](https://acta.aaenz.no/aaen-studios/clx#CLX-380) | Keeping the device token | 2 |
 | AEAD encryption: AES-256-GCM or ChaCha20-Poly1305 | std.crypto has AES-CFB8 and RSA | — | Encrypting secrets in the database | 3 |
