@@ -17,6 +17,7 @@ Version 1. This is what an app (always through its core) and an instance say to 
 - [Messages and streaming](#messages-and-streaming)
 - [Events](#events)
 - [Commands](#commands)
+- [Plugins](#plugins)
 - [Errors and close codes](#errors-and-close-codes)
 - [Versions](#versions)
 - [How ACP maps onto loom](#how-acp-maps-onto-loom)
@@ -441,6 +442,9 @@ An approval nobody answers stays open while the run does. Cancelling the run ans
 | `agent.deleted` | `agent` (the id) | Deleted |
 | `routine.updated` | `routine` (the whole routine, as `routine.list` gives it) | Made, changed, or run: `last` says how its newest run is going |
 | `routine.deleted` | `routine` (the id) | Deleted |
+| `plugin.updated` | `plugin` (as `plugin.list` gives it) | A plugin was put, or its person allowed what it asks |
+| `plugin.deleted` | `id` | Deleted |
+| `plugin.data` | `plugin`, `key` | A panel's data under `key` changed. A panel showing it on another device reads it again |
 | `device.added` | `device` (`id`, `name`, `kind`, `at`) | A login, on any of the person's devices |
 | `device.updated` | `device` (`id` and what changed) | Renamed |
 | `device.revoked` | `device` (the id) | Signed out. The revoked device's own socket is closed with 4001 |
@@ -475,6 +479,14 @@ Version 1's commands:
 | `skill.get` | `name` | `skill`: `name`, `description`, `body`, `at` |
 | `skill.put` | `name` (lowercase letters, digits and hyphens, up to 64), `description`, `body` (Markdown) | `skill`. It reaches every one of the person's agents: through `list_skills` and `read_skill`, and as `.claude/skills/<name>/SKILL.md` in each agent's folder, which Claude agents load by themselves |
 | `skill.delete` | `name` | — |
+| `plugin.list` | — | `plugins`, by id: each `id`, `name`, `version`, `description`, `panel` (`entry`) or null, `tools` (`command`, `args`) or null, `asks`, `allowed`, `waiting` (what's asked and not allowed), `revision`, `by`, `at` ([Plugins](#plugins)) |
+| `plugin.get` | `id` | `plugin`, and `files`: `{path: text}` |
+| `plugin.put` | `id` (lowercase letters, digits and hyphens, up to 64, starting with a letter), `files` (`{path: text}`, `plugin.toml` among them; 200 files and 2 MB at most) | `plugin`, a new revision. From a device, what it asks is allowed. From an agent, only what was allowed before and is still asked stays allowed, and the rest waits. `bad_plugin` says what's wrong with the manifest or a path |
+| `plugin.allow` | `id` | `plugin`, with everything it asks allowed. Only a device: an agent can't |
+| `plugin.revisions` | `id` | `revisions`, newest first, each as `plugin.list` gives it |
+| `plugin.delete` | `id` | —. Its panel's data goes too |
+| `plugin.data.get` | `plugin`, `key` (1 to 200 characters) | `value`, or null |
+| `plugin.data.put` | `plugin`, `key`, `value` (any JSON; null forgets it) | —. A panel keeps 1 MB at most (`too_large`) |
 | `activity.list` | `agent`?, `before`? (an entry's `id`), `limit`? (up to 200, 50 if left out) | `activity`, newest first: each `id`, `agent`, `kind` (`tool`, `approval`, `agent`, `message`, `notify`, `memory`, `routine` or `device`), `text`, `by` (a device, an agent, `auto` for the permission mode, or empty for the agent itself) and `at`. It's kept for good, unlike events |
 | `agent.revisions` | `agent` | `revisions`, newest first: each `revision`, `by` (the device or agent that made it), `at`, and `agent` as it was then |
 | `agent.rollback` | `agent`, `revision` | `agent`: a new revision with that one's name, ACP agent, instructions, folder and colour. The permission mode stays as it is |
@@ -495,6 +507,39 @@ Version 1's commands:
 | `messages.search` | `query`, `agent`?, `after`? and `before`? (Unix ms), `limit`? (up to 100, 30 if left out) | `results`, best first, each with its `message` and a `snippet`: the words around the match, with each matched word between U+0002 and U+0003. Every word of `query` must be in the message, the last as a prefix, so it works while typing. It searches text blocks and file names, in conversations that aren't deleted. A person's message counts as its conversation's agent's |
 
 Arguments marked `?` are optional. "—" means `value` is `{}`.
+
+## Plugins
+
+A plugin is text files, one of them `plugin.toml`, its manifest (PLAN.md, "Plugins"):
+
+```toml
+name = "Build board"
+version = "0.1.0"
+description = "Shows how the builds are doing."
+
+[panel]
+entry = "index.html"          # a small web app, in a web view of its own
+
+[tools]
+command = "calx"              # an MCP server the instance runs for every agent
+args = ["tools.calx"]         # an arg naming one of its files is that file
+
+[permissions]
+commands = ["routine.list"]   # commands the panel may send
+agents = true                 # the panel may message the person's agents
+```
+
+What it asks for is its `asks`: `tools` when it has a tool server, `agents`, and `cmd:<name>` for each command. A panel never gets the commands that would let it allow itself more, run programs on the instance, or reach the person's devices, secrets and sign-in: `plugin.put`, `plugin.allow`, `plugin.delete`, `link.create`, `push.register`, `push.unregister`, `device.revoke`, `device.rename`, `secret.list`, `secret.put`, `secret.delete`, `mcp.put`, `acp.install`, `acp.remove` and `acp.settings`. Until its person allows something, it waits, and the plugin goes without it.
+
+- **A tool server** the person allowed is in every one of their agents' new sessions, as the MCP server `plugin-<id>`. It runs from a folder holding the revision's files, with `LOOM_PLUGIN_DIR` set to that folder.
+- **A panel** talks to the app through one door, `await loom.send(op, args)` (desktop/src/panel.rs). The app answers these, and refuses everything else:
+
+| `op` | `args` | Allowed |
+|---|---|---|
+| `data.get` | `key` | Always: `plugin.data.get` for this plugin |
+| `data.put` | `key`, `value` | Always: `plugin.data.put` for this plugin |
+| `cmd` | `name`, `args` | When `cmd:<name>` is allowed. The command's `value` comes back |
+| `message_agent` | `agent`, `text` | When `agents` is allowed. The agent's reply comes back, as with `message_agent` |
 
 ## Errors and close codes
 
@@ -542,7 +587,7 @@ Inside the instance, each agent runs as an ACP agent program ([PLAN.md](../PLAN.
 | From the agent (ACP) | In loom |
 |---|---|
 | The instance sends the person's message to the session with `session/prompt` | `run.started` |
-| Every session gets `mcpServers` with one server, `loom`: the `loom` program (or the desktop app's own `loom.exe`) with the argument `mcp`, and `LOOM_URL` and that agent's `LOOM_MCP_TOKEN` in its environment. It gives the agent loom's own tools: `message_agent`, `list_agents`, `create_agent`, `update_agent`, `edit_instructions`, `list_acp_agents`, `search_messages`, `list_skills`, `read_skill`, `save_skill`, `notify`, `remember`, `recall`, `forget`, `update_profile` (writes the person's whole profile anew), `list_devices`, `use_device` ([Devices as tools](#devices-as-tools)), `schedule` and `list_routines` (`routine.put` and `routine.list`; a routine is for the calling agent unless it names another), `delete_agent`, `set_permission`, `delete_skill` and `delete_routine`. They act with the person's rights. The last four ask the person every time, whatever the permission mode: the call shows as a tool (`delete` or `other`) in the run that made it, with `approval.needed` (`can_always: false`), and is answered once the person does. With no run going, they refuse; an agent can't delete itself or loosen its own mode | what the tools do: `message.created`, `agent.updated`, `notify` and the rest, as if the person had done it. A yes is done as the device that gave it, so `by` names it |
+| Every session gets `mcpServers` with one server, `loom`: the `loom` program (or the desktop app's own `loom.exe`) with the argument `mcp`, and `LOOM_URL` and that agent's `LOOM_MCP_TOKEN` in its environment. It gives the agent loom's own tools: `message_agent`, `list_agents`, `create_agent`, `update_agent`, `edit_instructions`, `list_acp_agents`, `search_messages`, `list_skills`, `read_skill`, `save_skill`, `notify`, `remember`, `recall`, `forget`, `update_profile` (writes the person's whole profile anew), `list_devices`, `use_device` ([Devices as tools](#devices-as-tools)), `schedule` and `list_routines` (`routine.put` and `routine.list`; a routine is for the calling agent unless it names another), `list_plugins`, `read_plugin` and `save_plugin` ([Plugins](#plugins)), `delete_agent`, `set_permission`, `delete_skill`, `delete_routine` and `delete_plugin`. They act with the person's rights. The last five ask the person every time, whatever the permission mode: the call shows as a tool (`delete` or `other`) in the run that made it, with `approval.needed` (`can_always: false`), and is answered once the person does. With no run going, they refuse; an agent can't delete itself or loosen its own mode | what the tools do: `message.created`, `agent.updated`, `notify` and the rest, as if the person had done it. A yes is done as the device that gave it, so `by` names it |
 | A conversation's first message to an agent program: `session/new`, or after a restart, `session/resume` (where the agent offers `sessionCapabilities.resume`) or `session/load` (where it offers `loadSession`) with the session the conversation had. What `session/load` plays back is dropped, and if the agent can't pick the session up, a new one starts | nothing: the apps see the same conversation |
 | Where the person is writing from, in that prompt | a first text block, `[loom: This message comes from … It's 2026-11-21 13:05 UTC.]`, with the device's name, what it is and its time zone, the agent that sent it with `message_agent`, or the routine that sent it (`the person's routine "Morning brief", run every 30 minutes`), whose message has the routine's id as `from`. It comes when the session hasn't been told yet, or when it changes, never in the instructions |
 | The person's profile, in that prompt | a text block, `[loom: About the person, as they and their agents keep it. update_profile changes it.` and the profile's text `]`, after the one above. It comes when the session hasn't had this revision yet: in the first prompt, and after the person or an agent changes it |

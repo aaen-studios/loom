@@ -88,6 +88,15 @@ CREATE TABLE IF NOT EXISTS link_codes (
 CREATE TABLE IF NOT EXISTS push_tokens (
     device TEXT PRIMARY KEY REFERENCES devices(id), user TEXT NOT NULL REFERENCES users(id),
     token TEXT NOT NULL, env TEXT NOT NULL, at INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS plugins (
+    user TEXT NOT NULL REFERENCES users(id), id TEXT NOT NULL, json TEXT NOT NULL,
+    files TEXT NOT NULL, PRIMARY KEY (user, id));
+CREATE TABLE IF NOT EXISTS plugin_revisions (
+    user TEXT NOT NULL REFERENCES users(id), id TEXT NOT NULL, revision INTEGER NOT NULL,
+    json TEXT NOT NULL, files TEXT NOT NULL, PRIMARY KEY (user, id, revision));
+CREATE TABLE IF NOT EXISTS plugin_data (
+    user TEXT NOT NULL REFERENCES users(id), plugin TEXT NOT NULL, key TEXT NOT NULL,
+    value TEXT NOT NULL, at INTEGER NOT NULL, PRIMARY KEY (user, plugin, key));
 CREATE TABLE IF NOT EXISTS memories (
     id INTEGER PRIMARY KEY, user TEXT NOT NULL REFERENCES users(id), agent TEXT NOT NULL,
     text TEXT NOT NULL, by TEXT NOT NULL, at INTEGER NOT NULL);
@@ -648,6 +657,80 @@ impl Store {
 
     pub fn delete_skill(self, user: String, name: String) -> bool ! Error {
         return try self.db.execute(String("DELETE FROM skills WHERE user = ? AND name = ?"), [t(user), t(name)]) > 0
+    }
+
+    // --- Plugins (PLAN.md, "Plugins") ---
+
+    // Keeps `user`'s plugin, as JSON (its `id`, what its manifest says,
+    // `allowed`, `revision`, `by` and `at`), and its files, a revision too.
+    pub fn put_plugin(self, user: String, plugin: Json, files: Json) ! Error {
+        let id = (plugin.get(String("id")) ?? Json.Null).as_str() ?? String()
+        let revision = (plugin.get(String("revision")) ?? Json.Null).as_i64() ?? 0
+        _ = try self.db.execute(String("INSERT INTO plugins (user, id, json, files) VALUES (?, ?, ?, ?) ON CONFLICT (user, id) DO UPDATE SET json = excluded.json, files = excluded.files"), [t(user.copy()), t(id.copy()), t("{plugin}"), t("{files}")])
+        _ = try self.db.execute(String("INSERT INTO plugin_revisions (user, id, revision, json, files) VALUES (?, ?, ?, ?, ?) ON CONFLICT (user, id, revision) DO UPDATE SET json = excluded.json, files = excluded.files"), [t(user), t(id), Value.Int(revision), t("{plugin}"), t("{files}")])
+    }
+
+    // Changes what's allowed of a plugin, without a new revision.
+    pub fn set_plugin(self, user: String, plugin: Json) ! Error {
+        let id = (plugin.get(String("id")) ?? Json.Null).as_str() ?? String()
+        _ = try self.db.execute(String("UPDATE plugins SET json = ? WHERE user = ? AND id = ?"), [t("{plugin}"), t(user), t(id)])
+    }
+
+    pub fn plugin(self, user: String, id: String) -> Json? ! Error {
+        let r = try self.db.query_one(String("SELECT json FROM plugins WHERE user = ? AND id = ?"), [t(user), t(id)]) else return none
+        return some(try parse(text(r[0].copy())))
+    }
+
+    // A plugin's files, {path: text}.
+    pub fn plugin_files(self, user: String, id: String) -> Json? ! Error {
+        let r = try self.db.query_one(String("SELECT files FROM plugins WHERE user = ? AND id = ?"), [t(user), t(id)]) else return none
+        return some(try parse(text(r[0].copy())))
+    }
+
+    pub fn plugins(self, user: String) -> List<Json> ! Error {
+        var out = List<Json>()
+        for r in try self.db.query(String("SELECT json FROM plugins WHERE user = ? ORDER BY id"), [t(user)]) {
+            out.push(try parse(text(r[0].copy())))
+        }
+        return out
+    }
+
+    // A plugin's revisions, newest first: each as it was, without its files.
+    pub fn plugin_revisions(self, user: String, id: String) -> List<Json> ! Error {
+        var out = List<Json>()
+        for r in try self.db.query(String("SELECT json FROM plugin_revisions WHERE user = ? AND id = ? ORDER BY revision DESC"), [t(user), t(id)]) {
+            out.push(try parse(text(r[0].copy())))
+        }
+        return out
+    }
+
+    // Deletes a plugin, its revisions and its panel's data.
+    pub fn delete_plugin(self, user: String, id: String) -> bool ! Error {
+        let gone = try self.db.execute(String("DELETE FROM plugins WHERE user = ? AND id = ?"), [t(user.copy()), t(id.copy())]) > 0
+        _ = try self.db.execute(String("DELETE FROM plugin_revisions WHERE user = ? AND id = ?"), [t(user.copy()), t(id.copy())])
+        _ = try self.db.execute(String("DELETE FROM plugin_data WHERE user = ? AND plugin = ?"), [t(user), t(id)])
+        return gone
+    }
+
+    // What a plugin's panel kept under `key`, or none.
+    pub fn plugin_data(self, user: String, plugin: String, key: String) -> Json? ! Error {
+        let r = try self.db.query_one(String("SELECT value FROM plugin_data WHERE user = ? AND plugin = ? AND key = ?"), [t(user), t(plugin), t(key)]) else return none
+        return some(try parse(text(r[0].copy())))
+    }
+
+    // Keeps `value` under `key` for a plugin's panel; null forgets it.
+    pub fn put_plugin_data(self, user: String, plugin: String, key: String, value: Json) ! Error {
+        if value == Json.Null {
+            _ = try self.db.execute(String("DELETE FROM plugin_data WHERE user = ? AND plugin = ? AND key = ?"), [t(user), t(plugin), t(key)])
+            return
+        }
+        _ = try self.db.execute(String("INSERT INTO plugin_data (user, plugin, key, value, at) VALUES (?, ?, ?, ?, ?) ON CONFLICT (user, plugin, key) DO UPDATE SET value = excluded.value, at = excluded.at"), [t(user), t(plugin), t(key), t("{value}"), Value.Int(now())])
+    }
+
+    // How many bytes a plugin's panel keeps, in all.
+    pub fn plugin_data_size(self, user: String, plugin: String) -> i64 ! Error {
+        let r = try self.db.query_one(String("SELECT COALESCE(SUM(LENGTH(key) + LENGTH(value)), 0) FROM plugin_data WHERE user = ? AND plugin = ?"), [t(user), t(plugin)]) else return 0
+        return int(r[0].copy())
     }
 
     // --- MCP servers (PLAN.md, "Agents") ---

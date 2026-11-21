@@ -30,6 +30,7 @@ import shared.files.{is_sha, safe_name}
 import server.hashing
 import server.hashing.{Done, Job}
 import server.installer
+import server.plugins
 import server.routines
 import server.store.{AcpAgent, Device, Store, User, now, secret_key}
 import shared.tools
@@ -174,7 +175,7 @@ pub struct Instance {
     install_done: Receiver<installer.Done>
     fetching: List<Waiter>    // commands waiting on the registry
     installs: Map<i64, Install>    // installs on the installer's thread
-    leftovers: List<String>    // folders of removed ACP agents, removed once their programs have let go
+    leftovers: List<String>    // folders of removed ACP agents and plugins, removed once their programs have let go
     device_calls: Map<String, DeviceCall>    // tc_ id -> a call sent to a device
     sealer: XChaCha20Poly1305    // seals and opens secrets, with secret.key, which only the instance reads
     next_sweep: i64
@@ -209,6 +210,8 @@ const PROFILE_MOST: usize = 4000
 const HOOK_MOST: usize = 20000
 // How long a code to add a device by QR code works: five minutes.
 const LINK_MS: i64 = 300000
+// How much a plugin's panel keeps, in bytes, at most.
+const PLUGIN_DATA_MOST: i64 = 1000000
 
 // An agent's right to loom's own tools: `loom mcp` acts as `user`, for `agent`.
 struct Grant {
@@ -670,6 +673,8 @@ impl Instance {
                 if let s = i.session_server(user.copy(), server, http) { out.push(s) }
             }
         }
+        // And every plugin's tool server its person allowed.
+        out.extend(i.plugin_servers(user))
         return Json.Array(out)
     }
 
@@ -918,7 +923,163 @@ impl Instance {
             let action = Obj.new().s("name", String("skill.delete")).j("args", Obj.new().s("name", skill_name.copy()).done()).done()
             return try i.ask_person(req, g, "Delete the skill {skill_name}", "delete", action)
         }
+        if name == "list_plugins" {
+            return some(answer_text(try i.command(g.user, g.agent, String("plugin.list"), Obj.new().done())))
+        }
+        if name == "read_plugin" {
+            return some(answer_text(try i.command(g.user, g.agent, String("plugin.get"), Obj.new().s("id", str_at(args, "id") ?? String()).done())))
+        }
+        if name == "save_plugin" {
+            let a = Obj.new().s("id", str_at(args.copy(), "id") ?? String()).j("files", at(args, "files")).done()
+            return some(match try i.command(g.user, g.agent, String("plugin.put"), a) {
+                Answer.Value(v) => {
+                    let p = at(v, "plugin")
+                    let waits = at(p, "waiting")
+                    if waits == Json.Array(List<Json>()) { tool_text(String("Saved. It's in your person's app now.")) } else { tool_text("Saved. It asks for {waits}, which waits for your person to allow it in the app; until then, it has none of that.") }
+                },
+                Answer.Refused(_, message) => tool_error(message),
+            })
+        }
+        if name == "delete_plugin" {
+            let id = str_at(args, "id") ?? String()
+            let p = try i.store.plugin(g.user.copy(), id.copy()) else return some(tool_error("There's no plugin {id}. list_plugins gives their ids."))
+            let action = Obj.new().s("name", String("plugin.delete")).j("args", Obj.new().s("id", id.copy()).done()).done()
+            return try i.ask_person(req, g, "Delete the plugin {str_at(p, "name") ?? id}", "delete", action)
+        }
         return some(tool_error("loom has no tool {name}."))
+    }
+
+    // --- Plugins (PLAN.md, "Plugins") ---
+
+    // plugin.*: a person's plugins, made and changed by them or their agents.
+    // A person's device allows what the plugin it puts asks for. What an agent
+    // puts keeps only what was allowed already, and the rest waits for the
+    // person's plugin.allow, which an agent can't send.
+    fn plugin_command(i: mut Instance, user: String, device: String, name: String, args: Json) -> Answer ! Error {
+        if name == "plugin.list" {
+            return Answer.Value(Obj.new().j("plugins", Json.Array(try i.store.plugins(user))).done())
+        }
+        let id = str_at(args.copy(), "id") ?? str_at(args.copy(), "plugin") ?? String()
+        if not plugins.valid_id(id.copy()) { return Answer.Refused(String("bad_name"), String("A plugin's id is lowercase letters, digits and hyphens, up to 64, starting with a letter, like \"build-board\".")) }
+        let missing = Answer.Refused(String("not_found"), "There's no plugin {id}.")
+        if name == "plugin.put" {
+            let given = at(args, "files")
+            let m = match plugins.manifest(given.copy()) {
+                ok(m) => m,
+                err(e) => return Answer.Refused(String("bad_plugin"), "{e}"),
+            }
+            let old = try i.store.plugin(user.copy(), id.copy())
+            let asks = at(m.copy(), "asks")
+            var revision: i64 = 1
+            var allowed = Json.Array(List<Json>())
+            if let o = old {
+                revision = (int_at(o.copy(), "revision") ?? 0) + 1
+                allowed = plugins.kept(at(o, "allowed"), asks.copy())
+            }
+            if device.starts_with("d_") { allowed = asks.copy() }
+            let plugin = merge(m, Obj.new().s("id", id.copy()).j("allowed", allowed.copy()).j("waiting", plugins.waiting(asks, allowed)).i("revision", revision).s("by", device.copy()).i("at", now()).done())
+            try i.store.put_plugin(user.copy(), plugin.copy(), given)
+            if not device.starts_with("d_") { i.log(user.copy(), device.copy(), "agent", "Saved the plugin {id}", device.copy()) }
+            try i.event(user, "plugin.updated", Obj.new().j("plugin", plugin.copy()).done())
+            return Answer.Value(Obj.new().j("plugin", plugin).done())
+        }
+        let p = try i.store.plugin(user.copy(), id.copy()) else return missing
+        if name == "plugin.get" {
+            return Answer.Value(Obj.new().j("plugin", p).j("files", try i.store.plugin_files(user, id) ?? Json.Null).done())
+        }
+        if name == "plugin.revisions" {
+            return Answer.Value(Obj.new().j("revisions", Json.Array(try i.store.plugin_revisions(user, id))).done())
+        }
+        if name == "plugin.allow" {
+            if not device.starts_with("d_") { return Answer.Refused(String("forbidden"), String("Only the person, on one of their devices, allows what a plugin asks for.")) }
+            let plugin = merge(p.copy(), Obj.new().j("allowed", at(p, "asks")).j("waiting", Json.Array(List<Json>())).done())
+            try i.store.set_plugin(user.copy(), plugin.copy())
+            try i.event(user, "plugin.updated", Obj.new().j("plugin", plugin.copy()).done())
+            return Answer.Value(Obj.new().j("plugin", plugin).done())
+        }
+        if name == "plugin.delete" {
+            _ = try i.store.delete_plugin(user.copy(), id.copy())
+            // Its tool server's folders go too, once nothing runs from them.
+            let folder = "{i.data}/plugins/{user}/{id}"
+            if fs.exists(folder.copy()) {
+                if let err(_) = fs.remove_dir_all(folder.copy()) { i.leftovers.push(folder) }
+            }
+            try i.event(user, "plugin.deleted", Obj.new().s("id", id).done())
+            return Answer.Value(Obj.new().done())
+        }
+        if name == "plugin.data.get" or name == "plugin.data.put" {
+            let key = str_at(args.copy(), "key") ?? String()
+            if key.len() == 0 or key.len() > 200 { return Answer.Refused(String("bad_request"), String("key is 1 to 200 characters.")) }
+            if name == "plugin.data.get" {
+                return Answer.Value(Obj.new().j("value", try i.store.plugin_data(user, id, key) ?? Json.Null).done())
+            }
+            let value = at(args, "value")
+            let old = try i.store.plugin_data(user.copy(), id.copy(), key.copy())
+            let was: i64 = if let o = old { i64.wrap(key.len() + "{o}".len()) } else { 0 }
+            let will: i64 = if value == Json.Null { 0 } else { i64.wrap(key.len() + "{value}".len()) }
+            if try i.store.plugin_data_size(user.copy(), id.copy()) - was + will > PLUGIN_DATA_MOST { return Answer.Refused(String("too_large"), String("A panel keeps 1 MB of data at most.")) }
+            try i.store.put_plugin_data(user.copy(), id.copy(), key.copy(), value)
+            try i.event(user, "plugin.data", Obj.new().s("plugin", id).s("key", key).done())
+            return Answer.Value(Obj.new().done())
+        }
+        return Answer.Refused(String("unknown_command"), "There's no command {name}.")
+    }
+
+    // Where an allowed plugin's tool server runs from: its files, written once
+    // for each revision, under the data folder.
+    fn plugin_folder(i: Instance, user: String, plugin: Json) -> String ! Error {
+        let id = str_at(plugin.copy(), "id") ?? String()
+        let revision = int_at(plugin, "revision") ?? 0
+        let folder = "{i.data}/plugins/{user}/{id}/{revision}"
+        if fs.exists(folder.copy()) { return folder }
+        let kept = try i.store.plugin_files(user, id) ?? Json.Null
+        let making = "{folder}.making"
+        if fs.exists(making.copy()) { try fs.remove_dir_all(making.copy()) }
+        if let Json.Object(m) = kept {
+            for (path, body) in m {
+                let file = "{making}/{path}"
+                if let slash = file.find_last("/") { try fs.make_dir_all(file[..slash].copy()) }
+                try fs.write_text(file, body.as_str() ?? String())
+            }
+        }
+        try fs.rename(making, folder.copy())
+        return folder
+    }
+
+    // The person's plugins with a tool server they allowed, as ACP's mcpServers
+    // has them: its command, with each arg that names one of its files made
+    // that file's whole path.
+    fn plugin_servers(i: Instance, user: String) -> List<Json> {
+        var out = List<Json>()
+        let all = match i.store.plugins(user.copy()) {
+            ok(list) => list,
+            err(e) => {
+                eprintln("loom: plugins: {e}")
+                return out
+            },
+        }
+        for p in all {
+            let server = at(p.copy(), "tools")
+            if server == Json.Null or not "{at(p.copy(), "allowed")}".contains(#""tools""#) { continue }
+            let id = str_at(p.copy(), "id") ?? String()
+            let folder = match i.plugin_folder(user.copy(), p.copy()) {
+                ok(f) => f,
+                err(e) => {
+                    eprintln("loom: the plugin {id}: {e}")
+                    continue
+                },
+            }
+            var args = List<Json>()
+            if let Json.Array(given) = at(server.copy(), "args") {
+                for a in given {
+                    let text = a.as_str() ?? String()
+                    args.push(Json.Str(if plugins.valid_path(text.copy()) and fs.exists("{folder}/{text}") { "{folder}/{text}" } else { text }))
+                }
+            }
+            let env = Json.Array([Obj.new().s("name", String("LOOM_PLUGIN_DIR")).s("value", folder).done()])
+            out.push(Obj.new().s("name", "plugin-{id}").s("command", str_at(server, "command") ?? String()).j("args", Json.Array(args)).j("env", env).done())
+        }
+        return out
     }
 
     // message_agent: says `text` to another agent, in the conversation the two
@@ -2846,6 +3007,9 @@ impl Instance {
             if not try i.store.delete_skill(user.copy(), skill_name.copy()) { return Answer.Refused(String("not_found"), "There's no skill {skill_name}.") }
             i.sync_skills(user)
             return Answer.Value(empty)
+        }
+        if name.starts_with("plugin.") {
+            return try i.plugin_command(user, device, name, args)
         }
         if name == "activity.list" {
             let limit = int_at(args.copy(), "limit") ?? 50

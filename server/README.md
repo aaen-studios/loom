@@ -9,6 +9,7 @@ Calx: the instance, and the `loom` program.
 - [`hashing.calx`](hashing.calx): argon2id hashing on a thread of its own, so a login doesn't hold up the loop.
 - [`acp.calx`](acp.calx): the ACP client. Each agent program runs as a process of its own, written to and read by a thread of its own.
 - [`installer.calx`](installer.calx): ACP agents from the ACP Registry, on a thread of its own: reading the registry, and downloading, checking and unpacking an agent. `serve --registry` points it at a mirror.
+- [`plugins.calx`](plugins.calx): plugins (PLAN.md, "Plugins"): reading a plugin's `plugin.toml` and checking its files, what it asks for (`tools`, `agents`, `cmd:<name>`), and what of that waits for its person's yes. The instance keeps plugins with a revision for each change, a panel's data (1 MB at most), and runs an allowed plugin's tool server for every agent, from a folder of its files.
 - [`routines.calx`](routines.calx): when a routine runs next, from its schedule: every N minutes, or daily or on weekdays at a time of day in its time zone, through std.time's `TimeZone`. The instance looks for routines that are due once a second, and runs them as a prompt to their agent (PLAN.md, "Routines"). `POST /hooks/<id>` runs one from outside, with its secret. `serve --test-minute-ms` shortens the minute, for tests.
 
 Trying it from source, from the repository's root:
