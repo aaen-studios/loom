@@ -18,7 +18,7 @@ import std.json.{Json, parse}
 import std.process.{Child, Stdio, exit}
 import shared.obj.{Obj, at, int_at, str_at}
 import shared.protocol.{moved_message}
-import tests.kit.{App, Instance, check, fetch, loom, reply_text, upload}
+import tests.kit.{App, Instance, check, remove_scratch, fetch, loom, reply_text, upload}
 
 fn reply_in(app: mut App, conversation: String) -> String ! Error {
     loop {
@@ -148,6 +148,7 @@ fn arrived(i: Instance, seq: i64, key: String, sha: String) ! Error {
 
 fn main() ! Error {
     let inst = try Instance.start()
+    let first = inst.data.copy()
     let (there, seq, key, sha) = match moving(inst.copy()) {
         ok(r) => r,
         err(e) => {
@@ -162,6 +163,8 @@ fn main() ! Error {
         err(e) => some("{e}"),
     }
     moved.stop()
+    // The folder it ran in first.
+    remove_scratch(first)
     if let f = failure {
         eprintln("\n{f}")
         exit(1)

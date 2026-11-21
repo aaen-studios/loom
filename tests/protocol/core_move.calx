@@ -15,7 +15,7 @@ import std.time.{Instant}
 import shared.obj.{Obj, at, str_at}
 import core.cache.{Cache}
 import core.conn.{Conn}
-import tests.kit.{App, Instance, check, loom}
+import tests.kit.{App, Instance, check, remove_scratch, loom}
 
 // The app's side of a core: what it sends the core, and what the core tells it.
 struct Core {
@@ -82,6 +82,7 @@ fn moving(i: Instance, core: mut Core) -> (String, String) ! Error {
 
 fn main() ! Error {
     let inst = try Instance.start()
+    let first = inst.data.copy()
     var random = Random.system()
     let service = "loom-test-move-{random.next_u32()}"
     var core = try Core.start(inst.base.copy(), inst.token.copy(), service.copy(), "{try fs.temp_dir()}/core.db")
@@ -113,6 +114,8 @@ fn main() ! Error {
     }
     core.stop()
     moved.stop()
+    // The folder it ran in first.
+    remove_scratch(first)
     if let f = failure {
         eprintln("\n{f}")
         exit(1)
