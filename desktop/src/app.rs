@@ -1470,13 +1470,14 @@ ACTA_KEY=secret:ACTA_KEY",
                 .child("Opening the page…"),
             _ => div().flex_1(),
         };
-        // An agent's page opens under its thread, across the panel.
+        // The agent's edit panel opens under its thread, across the panel, so a new
+        // colour shows on it at once. Other panels don't have it.
         let hero = self
             .model
             .selected
             .as_ref()
             .and_then(|id| self.model.agent(id))
-            .filter(|_| side != Screen::Plugins && side != Screen::Page)
+            .filter(|_| side == Screen::EditAgent)
             .map(|a| {
                 let (mood, snapped) = fidget(&a.id, self.model.mood(&a.id));
                 div().px(px(space::L)).pt(px(space::S)).child(thread(
@@ -1647,13 +1648,6 @@ ACTA_KEY=secret:ACTA_KEY",
                 pages.push(("pop-people", Ico::Users, "People", Screen::People));
                 pages.push(("pop-device", Ico::Monitor, "This PC", Screen::ThisDevice));
             }
-            pages.push(("pop-move", Ico::Truck, "Move", Screen::Move));
-            pages.push((
-                "pop-add-server",
-                Ico::Plus,
-                "Add a server",
-                Screen::AddServer,
-            ));
             return pages;
         }
         vec![
@@ -1722,8 +1716,28 @@ ACTA_KEY=secret:ACTA_KEY",
                     .on_click(cx.listener(move |this, _, _, cx| this.open(screen, cx))),
             );
         }
+        // What isn't a setting of this server, but something to do: at the bottom.
+        if server {
+            nav = nav.child(div().flex_1());
+            let actions = [
+                ("pop-move", Ico::Truck, "Move", Screen::Move),
+                (
+                    "pop-add-server",
+                    Ico::Plus,
+                    "Add a server",
+                    Screen::AddServer,
+                ),
+            ];
+            for (id, icon, label, screen) in actions {
+                nav = nav.child(
+                    self.menu_item(id, icon, label, false)
+                        .when(screen == open, |d| d.bg(p.active))
+                        .on_click(cx.listener(move |this, _, _, cx| this.open(screen, cx))),
+                );
+            }
+        }
         if server && !self.here.is_empty() {
-            nav = nav.child(div().flex_1()).child(
+            nav = nav.child(
                 self.menu_item(
                     "pop-remove-server",
                     Ico::LogOut,
@@ -1737,7 +1751,7 @@ ACTA_KEY=secret:ACTA_KEY",
             );
         } else if server {
             let local = self.local();
-            nav = nav.child(div().flex_1()).child(
+            nav = nav.child(
                 self.menu_item(
                     "pop-sign-out",
                     if local { Ico::Power } else { Ico::LogOut },
@@ -1823,11 +1837,37 @@ ACTA_KEY=secret:ACTA_KEY",
                 .top_0()
                 .left_0()
                 .size_full()
+                // It takes the pointer: nothing behind it hovers or takes a click, so
+                // the button that opened it doesn't open it again.
+                .occlude()
                 .flex()
                 .items_center()
                 .justify_center()
                 .bg(scrim)
                 .child(card),
+        )
+    }
+
+    /// While a menu is open, a clear sheet over the window that takes the pointer: nothing
+    /// behind it hovers, and a click anywhere, the button that opened it too, closes it.
+    /// The menus themselves are drawn over it.
+    fn menu_scrim(&self, cx: &mut Context<Self>) -> Option<Stateful<Div>> {
+        if self.menu.is_none() && self.plus.is_none() {
+            return None;
+        }
+        Some(
+            div()
+                .id("menu-scrim")
+                .absolute()
+                .top_0()
+                .left_0()
+                .size_full()
+                .occlude()
+                .on_any_mouse_down(cx.listener(|this, _, _, cx| {
+                    this.menu = None;
+                    this.plus = None;
+                    cx.notify();
+                })),
         )
     }
 
@@ -7595,7 +7635,12 @@ ACTA_KEY=secret:ACTA_KEY",
                             cx.notify();
                         })),
                 )
-            });
+            })
+            .child(div().w_full().pt(px(space::L)).child(self.agent_prompt(
+                "add-server-prompt",
+                ADD_SERVER_PROMPT,
+                cx,
+            )));
         let page = div()
             .id("add-server-page")
             .size_full()
@@ -7610,8 +7655,50 @@ ACTA_KEY=secret:ACTA_KEY",
         div().flex_1().min_h_0().child(page)
     }
 
+    /// A technical job an agent can do instead: a line saying so, and a button that copies
+    /// the prompt to give it.
+    fn agent_prompt(&self, id: &'static str, prompt: &'static str, cx: &mut Context<Self>) -> Div {
+        let p = self.p;
+        div()
+            .w_full()
+            .flex()
+            .items_center()
+            .gap(px(space::M))
+            .px(px(space::M))
+            .py(px(space::S))
+            .rounded(px(radius::CARD))
+            .border_1()
+            .border_color(p.line)
+            .bg(p.raised)
+            .child(div().text_color(p.ink_2).child(Icon::new(Ico::Bot).small()))
+            .child(
+                div()
+                    .flex_1()
+                    .text_size(px(size::SMALL))
+                    .text_color(p.ink_2)
+                    .child("Or have one of your agents do it."),
+            )
+            .child(self.button(id, "Copy prompt", false).on_click(cx.listener(
+                move |this, _, _, cx| {
+                    cx.write_to_clipboard(ClipboardItem::new_string(prompt.to_string()));
+                    this.notice = Some((
+                        "Copied. Paste it to one of your agents.".into(),
+                        Instant::now(),
+                    ));
+                    cx.notify();
+                },
+            )))
+    }
+
     fn move_page(&mut self, cx: &mut Context<Self>) -> Div {
-        let body = self.move_section(cx).w_full().max_w(px(560.0));
+        let body = div()
+            .w_full()
+            .max_w(px(560.0))
+            .flex()
+            .flex_col()
+            .gap(px(space::L))
+            .child(self.agent_prompt("move-prompt", MOVE_PROMPT, cx))
+            .child(self.move_section(cx).w_full());
         let page = div()
             .id("move-page")
             .size_full()
@@ -9609,7 +9696,9 @@ impl Render for Loom {
         };
         self.sync_panel(window, cx);
         let header = self.header(cx);
-        let menu = self.menu_panel(cx);
+        // Drawn last, over the sheet that takes the pointer while it's open.
+        let menu = self.menu_panel(cx).map(deferred);
+        let menu_scrim = self.menu_scrim(cx);
         let popup = self.popup_view(window, cx);
         root.flex()
             .child(self.sidebar(cx))
@@ -9635,6 +9724,7 @@ impl Render for Loom {
                     .when_some(unroll, |d, u| d.child(u)),
             )
             .when_some(popup, |d, p| d.child(p))
+            .when_some(menu_scrim, |d, s| d.child(s))
             .when_some(whole, |d, c| d.child(c))
             .when_some(splash, |d, s| d.child(s))
     }
@@ -9670,6 +9760,14 @@ fn thousands(n: i64) -> String {
         out
     }
 }
+
+/// What "Copy prompt" gives for moving the instance, for an agent in loom to do it with
+/// its tools (move_instance, install_server), asking the person what it needs.
+const MOVE_PROMPT: &str = "Move my loom instance to another server for me. Ask me where it should go (a server I can reach, or one to rent) if I haven't said. If loom isn't on it yet, use install_server to get the command that puts it there, and run it or walk me through it. Then use move_instance to move this instance there, and tell me when it's done and what changed for me.";
+
+/// What "Copy prompt" gives for adding a server, for an agent in loom to set it up with
+/// its tools (install_server, add_server).
+const ADD_SERVER_PROMPT: &str = "Set up a new loom server for me and add it to my app. Ask me where it should run (a server I can reach, or a VPS to rent) if I haven't said. Use install_server to get the command that installs loom there, and run it or walk me through it. Then use add_server so my app offers to add it, and tell me what to do next.";
 
 /// The thread colours a new agent can have (design/tokens.toml), in the order the brain
 /// tiles take them. Grey is left for agents that are off.
