@@ -55,6 +55,17 @@ fn run(i: Instance) ! Error {
     try check(empty.starts_with("html_render failed: html is empty"), "an empty page is refused")
     let activity = try app.cmd("q_3", "activity.list", Obj.new().s("agent", agent.copy()).done())
     try check("{activity}".contains("Showed you the page Sales: this week"), "the activity log says so")
+
+    // Each chat's session has a tool token of its own, so a call finds the
+    // run it came from while the agent has another waiting in a second chat.
+    let c2 = try app.cmd("q_4", "conversation.create", Obj.new().s("agent", agent.copy()).done())
+    let other = str_at(at(c2, "value"), "conversation") ?? String()
+    let mine_page = "/sleep 1500\n/mcp html_render {Obj.new().s("html", String("<p>Mine</p>")).s("title", String("Mine")).done()}"
+    try app.send(Obj.new().s("t", String("send")).s("cid", String("m_3")).s("conversation", chat.copy()).s("text", mine_page).done())
+    try app.send(Obj.new().s("t", String("send")).s("cid", String("m_4")).s("conversation", other.copy()).s("text", String("hello there")).done())
+    let mine = try reply_in(mut app, chat.copy())
+    let theirs = try reply_in(mut app, other)
+    try check(files_in(mine).len() == 1 and files_in(theirs).len() == 0, "with the agent in two chats, the page goes in the chat that made it")
     app.close()
 }
 

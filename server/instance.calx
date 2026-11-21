@@ -316,6 +316,7 @@ const PLUGIN_DATA_MOST: i64 = 1000000
 struct Grant {
     user: String
     agent: String
+    conversation: String    // the session's, so a tool call finds its run
 }
 
 // A setup or a login waiting on the hashing thread.
@@ -1060,7 +1061,7 @@ impl Instance {
         let req = i.calls.remove(call) else return
         let site = if host.len() > 0 { host.copy() } else { String("a file on this computer") }
         let action = Obj.new().s("name", String("browser.fill")).j("args", Obj.new().s("secret", f.name.copy()).s("site", host).s("ref", f.ref_id.copy()).b("submit", f.submit).s("agent", f.agent.copy()).done()).done()
-        let g = Grant { user: f.user.copy(), agent: f.agent.copy() }
+        let g = Grant { user: f.user.copy(), agent: f.agent.copy(), conversation: String() }
         let answer = match i.ask_person(req.copy(), g, "Fill your secret {f.name} on {site}", "other", action) {
             ok(a) => a,
             err(e) => some(tool_error("{e}")),
@@ -1450,16 +1451,17 @@ impl Instance {
 
     // --- Loom's own tools (PLAN.md, "Loom's own tools") ---
 
-    // `loom mcp` for an agent's ACP session, with a token for that agent. In a
+    // `loom mcp` for an agent's ACP session, with a token for that agent in
+    // that conversation, so a tool call finds the run that made it. In a
     // sandbox, it's the image's `loom`, reaching the instance through the gate.
-    fn mcp_servers(i: mut Instance, user: String, agent: String, http: bool, boxed: bool) -> Json {
+    fn mcp_servers(i: mut Instance, user: String, agent: String, conversation: String, http: bool, boxed: bool) -> Json {
         var token = String()
         for (t, g) in i.grants {
-            if g.user == user and g.agent == agent { token = t.copy() }
+            if g.user == user and g.agent == agent and g.conversation == conversation { token = t.copy() }
         }
         if token.len() == 0 {
             token = bytes.hex(random_bytes(24))
-            i.grants.insert(token.copy(), Grant { user: user.copy(), agent: agent.copy() })
+            i.grants.insert(token.copy(), Grant { user: user.copy(), agent: agent.copy(), conversation: conversation.copy() })
         }
         let address = i.server.url()
         var base = if address.ends_with("/") { address[..address.len() - 1].copy() } else { address }
@@ -1650,9 +1652,9 @@ impl Instance {
     fn mcp_route(i: mut Instance, req: Request) -> Response? ! Error {
         let h = req.header(String("Authorization")) ?? String()
         let token = if h.starts_with("Bearer ") { h[7..].copy() } else { String() }
-        var grant = Grant { user: String(), agent: String() }
+        var grant = Grant { user: String(), agent: String(), conversation: String() }
         if let g = i.grants.find(token) {
-            grant = Grant { user: g.user.copy(), agent: g.agent.copy() }
+            grant = Grant { user: g.user.copy(), agent: g.agent.copy(), conversation: g.conversation.copy() }
         } else {
             return some(http_error(401, "unauthorized", String("That isn't a token for loom's tools.")))
         }
@@ -2105,13 +2107,7 @@ impl Instance {
         // talking to agents have limits"): at most CHAIN_MOST deep, and never
         // back to one already in it.
         var chain = List<String>()
-        for (id, r) in i.runs {
-            if r.user == g.user and r.agent == g.agent {
-                if let c = i.run_chains.find(id.copy()) {
-                    if c.len() > chain.len() { chain = c.copy() }
-                }
-            }
-        }
+        if let c = i.run_chains.find(i.calling_run(g.copy())) { chain = c.copy() }
         chain.push(g.agent.copy())
         let names = try i.agent_names(g.user.copy())
         if chain.contains(to_id.copy()) {
@@ -2150,6 +2146,16 @@ impl Instance {
         i.run_chains.insert(run_id.copy(), chain)
         try i.start_run(g.user, conversation, run_id, message_id, text, List<Json>(), context, String())
         return none
+    }
+
+    // The run a tool call came from: the one in the conversation its session
+    // is for, or, for a grant with none, the agent's newest.
+    fn calling_run(i: Instance, g: Grant) -> String {
+        var found = String()
+        for (id, r) in i.runs {
+            if r.user == g.user and r.agent == g.agent and (g.conversation.len() == 0 or r.conversation == g.conversation) { found = id.copy() }
+        }
+        return found
     }
 
     // `user`'s agents' names, by id.
@@ -2974,10 +2980,7 @@ impl Instance {
         if html.len() > browser.HTML_MOST { return tool_error("The page is {html.len()} bytes, and html_render takes {browser.HTML_MOST} at most.") }
         let said = cut_short((str_at(args, "title") ?? String()).trim().copy(), 80)
         let title = if said.len() > 0 { said } else { String("Page") }
-        var run_id = String()
-        for (id, r) in i.runs {
-            if r.user == g.user and r.agent == g.agent { run_id = id.copy() }
-        }
+        let run_id = i.calling_run(g.copy())
         if run_id.len() == 0 { return tool_error(String("You aren't answering in a chat right now, so there's nowhere to show it.")) }
         let data = html.to_bytes()
         if let limit = try i.store.meta("file_limit") {
@@ -3955,7 +3958,7 @@ impl Instance {
         // After a restart: the session the conversation had, picked up again
         // where the program can (PLAN.md, "Agents run on ACP").
         if p.resume or p.load {
-            let kept = match i.store.acp_session(user.copy(), conversation, p.program.copy()) {
+            let kept = match i.store.acp_session(user.copy(), conversation.copy(), p.program.copy()) {
                 ok(s) => s,
                 err(e) => {
                     eprintln("loom: looking up an ACP session: {e}")
@@ -3969,7 +3972,7 @@ impl Instance {
                 }
                 let method = if p.resume { "session/resume" } else { "session/load" }
                 p.pending.insert(id, Pending.Resume(run_id.copy(), session.copy()))
-                p.to.send(Out.Send(acp.request(id, method, Obj.new().s("sessionId", session).s("cwd", folder).j("mcpServers", i.mcp_servers(user.copy(), agent.copy(), p.mcp_http, p.boxed)).done())))
+                p.to.send(Out.Send(acp.request(id, method, Obj.new().s("sessionId", session).s("cwd", folder).j("mcpServers", i.mcp_servers(user.copy(), agent.copy(), conversation.copy(), p.mcp_http, p.boxed)).done())))
                 return
             }
         }
@@ -3979,9 +3982,11 @@ impl Instance {
     // Starts a new ACP session for a run, when there's none to pick up.
     fn new_session(i: mut Instance, p: mut Proc, run_id: String) {
         var user = String()
+        var conversation = String()
         var agent = String()
         if let r = i.runs.find(run_id.copy()) {
             user = r.user.copy()
+            conversation = r.conversation.copy()
             agent = r.agent.copy()
         } else {
             return
@@ -3992,7 +3997,7 @@ impl Instance {
         }
         p.next_id += 1
         p.pending.insert(p.next_id, Pending.NewSession(run_id.copy()))
-        p.to.send(Out.Send(acp.request(p.next_id, "session/new", Obj.new().s("cwd", folder).j("mcpServers", i.mcp_servers(user, agent, p.mcp_http, p.boxed)).done())))
+        p.to.send(Out.Send(acp.request(p.next_id, "session/new", Obj.new().s("cwd", folder).j("mcpServers", i.mcp_servers(user, agent, conversation, p.mcp_http, p.boxed)).done())))
     }
 
     // Puts an agent's instructions in its folder, as AGENTS.md and CLAUDE.md,
@@ -4524,10 +4529,7 @@ impl Instance {
         let mode = (at(target, "tools").get(tool_name.copy()) ?? Json.Null).as_str() ?? String("off")
         if mode != "ask" and mode != "allow" { return some(tool_error("{tool_name} is off on {device_name}. Your person can turn it on in that device's app.")) }
         let tool_args = at(args, "args")
-        var run_id = String()
-        for (id, r) in i.runs {
-            if r.user == g.user and r.agent == g.agent { run_id = id.copy() }
-        }
+        let run_id = i.calling_run(g.copy())
         if mode == "ask" and run_id.len() == 0 { return some(tool_error(String("That needs your person's yes, and they can only give it during a chat with you."))) }
         let call = try i.store.new_id("tc")
         let request = "{Obj.new().s("call", call.copy()).s("device", device.copy()).s("tool", tool_name.copy()).j("args", tool_args.copy()).s("agent", g.agent.copy()).i("at", now()).done()}"
@@ -4699,10 +4701,7 @@ impl Instance {
     // agent's call is answered once they do. An agent never answers this
     // itself: only a device's `approve` does.
     fn ask_person(i: mut Instance, req: Request, g: Grant, title: String, kind: str, action: Json) -> Json? ! Error {
-        var run_id = String()
-        for (id, r) in i.runs {
-            if r.user == g.user and r.agent == g.agent { run_id = id.copy() }
-        }
+        let run_id = i.calling_run(g.copy())
         if run_id.len() == 0 { return some(tool_error(String("That needs your person's yes, and they can only give it during a chat with you."))) }
         let call = try i.store.new_id("tc")
         if let r = mut i.runs.find(run_id.copy()) {
