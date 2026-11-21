@@ -547,6 +547,39 @@ fn handoff_path(given: String, mine: String, shared: String) -> String? {
     return none
 }
 
+// How many files a reply names that it shows as chips.
+const MENTIONS_MOST: usize = 10
+
+// The paths a reply names in `code`, as `notes/hours.md`: each span with no
+// spaces whose last part has a type after a dot, and isn't a web address.
+// Each once, in order, and MENTIONS_MOST at most.
+fn named_paths(text: String) -> List<String> {
+    var out = List<String>()
+    let parts = text.split("`")
+    var n: usize = 1
+    while n < parts.len() {
+        let span = parts[n].trim().copy()
+        n += 2
+        if span.len() == 0 or span.len() > 260 or span.contains(" ") or span.contains("\n") or span.contains("://") { continue }
+        let last = if let cut = span.replace("\\", "/").find_last("/") { span[cut + 1..].copy() } else { span.copy() }
+        let dot = last.find_last(".") else continue
+        if dot + 1 >= last.len() { continue }
+        if out.contains(span.copy()) { continue }
+        out.push(span)
+        if out.len() >= MENTIONS_MOST { break }
+    }
+    return out
+}
+
+@test
+fn a_reply_names_paths_in_code() {
+    let found = named_paths(String("See `notes/hours.md` and `report.pdf`, not `ls -la`, `https://x.io/a.md`, `v1.` or `notes/hours.md` again."))
+    assert(found.len() == 2)
+    assert(found[0] == "notes/hours.md")
+    assert(found[1] == "report.pdf")
+    assert(named_paths(String("no code here")).len() == 0)
+}
+
 // A path as two paths to the same place compare: with forward slashes, and on
 // Windows, whose paths ignore case, in lower case.
 fn path_key(path: String) -> String {
@@ -2441,6 +2474,26 @@ impl Instance {
         i.run_chains.insert(run_id.copy(), chain)
         try i.start_run(g.user, conversation, run_id, message_id, text, handed, context, String())
         return none
+    }
+
+    // The files a reply names that are in its agent's folder or the shared
+    // one: each `path` as the reply wrote it, its `name` and its `size`.
+    fn mentions(i: Instance, user: String, agent: String, said: String) -> List<Json> {
+        var out = List<Json>()
+        let named = named_paths(said)
+        if named.len() == 0 { return out }
+        let mine = i.folder_of(user.copy(), agent)
+        let shared = i.shared_folder(user)
+        for p in named {
+            let path = handoff_path(p.copy(), mine.copy(), shared.copy()) else continue
+            let size = match fs.metadata(path.copy()) {
+                ok(m) => i64.wrap(m.size),
+                err(_) => continue,
+            }
+            let name = if let cut = path.replace("\\", "/").find_last("/") { path[cut + 1..].copy() } else { path.copy() }
+            out.push(Obj.new().s("path", p).s("name", name).i("size", size).done())
+        }
+        return out
     }
 
     // The run a tool call came from: the one in the conversation its session
@@ -5210,7 +5263,11 @@ impl Instance {
                 try i.event(r.user.copy(), "message.deleted", Obj.new().s("conversation", r.conversation.copy()).s("message", r.answering.copy()).done())
             }
         } else {
-            let message = Obj.new().s("id", r.message.copy()).s("conversation", r.conversation.copy()).s("role", String("agent")).s("agent", r.agent.copy()).s("run", r.id.copy()).i("at", now()).j("blocks", Json.Array(blocks)).done()
+            var o = Obj.new().s("id", r.message.copy()).s("conversation", r.conversation.copy()).s("role", String("agent")).s("agent", r.agent.copy()).s("run", r.id.copy()).i("at", now()).j("blocks", Json.Array(blocks))
+            // Files it names that are there, for the app to show as chips.
+            let mentions = i.mentions(r.user.copy(), r.agent.copy(), said.copy())
+            if mentions.len() > 0 { o = o.j("mentions", Json.Array(mentions)) }
+            let message = o.done()
             try i.store.put_message(r.user.copy(), message.copy())
             try i.event(r.user.copy(), "message.created", Obj.new().s("conversation", r.conversation.copy()).j("message", message).done())
         }
@@ -5902,6 +5959,19 @@ impl Instance {
                 ])
             }
             return Answer.Value(Obj.new().s("csv", csv.format(rows)).i("entries", i64.wrap(u64(entries.len()))).done())
+        }
+        if name == "agent.file" {
+            // A file a reply names, kept as the person's for the app to open:
+            // only from the agent's folder or the shared one.
+            let id = str_at(args.copy(), "agent") ?? String()
+            if try i.store.agent(user.copy(), id.copy()) == none { return Answer.Refused(String("not_found"), "There's no agent {id}.") }
+            let given = str_at(args, "path") ?? String()
+            let path = handoff_path(given.copy(), i.folder_of(user.copy(), id), i.shared_folder(user.copy())) else return Answer.Refused(String("not_found"), "{given} isn't a file in the agent's folder or the shared folder.")
+            let data = try fs.read(path.copy())
+            if data.len() > HANDOFF_BYTES_MOST { return Answer.Refused(String("too_large"), "{given} is {data.len()} bytes, and a file opened from an agent's folder is {HANDOFF_BYTES_MOST} at most.") }
+            let file_name = if let cut = path.replace("\\", "/").find_last("/") { path[cut + 1..].copy() } else { path.copy() }
+            let mime = files.sniff(data.copy()) ?? content_type(file_name.copy())
+            return Answer.Value(Obj.new().j("file", try i.agent_file(user, file_name, mime, data)).done())
         }
         if name == "agent.revisions" {
             let id = str_at(args, "agent") ?? String()

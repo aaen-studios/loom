@@ -475,6 +475,8 @@ A message is a list of **content blocks**:
 }
 ```
 
+A reply that names files in its text, in `code` like `notes/hours.md`, also has `mentions`: each of them (ten at most) that is a file in its agent's folder or the shared folder, with `path` as the reply wrote it, `name` and `size`. The apps show them as chips, and `agent.file` opens one.
+
 - `role` is `person` or `agent`. A person's message has `from` (a device id) instead of `agent` and `run`. A message one agent sent another with `message_agent` is a `person` message too, in the other agent's conversation, with the sending agent's id as `from`. One a plugin's panel sent with `plugin.message` has `plugin:<id>` as `from`.
 - Block kinds in version 1: `text` (Markdown), `thought` (the agent's reasoning, shown folded), `tool` (a tool call, whose details are in its `tool.*` events), `plan` (the agent's plan, as `entries` with `content` and `status`) and `file` (`file`, `name`, `mime`, `size`).
 
@@ -630,6 +632,7 @@ Version 1's commands:
 | `password.reset` | `user` | `code` (for [`POST /api/reset/<code>`](#post-apiresetcode), shown once), `expires` (a day on). The owner resets anyone but the owner, an admin only members. Each new link replaces the person's last |
 | `people.log` | `before`? (an entry's `id`), `limit`? (50; up to 200) | `entries`, newest first: each `id`, `kind` (`joined`, `invited`, `role`, `removed`, `left`, `reset` or `password`), `text` (what happened, in words, with usernames), `by` (the username of who did it, or empty when it came from the server's command line or the person is gone) and `at`. Owners and admins. It keeps who joined and how, invites made and taken back, role changes, removals, accounts deleted, reset links made and used, and accounts and passwords from the command line |
 | `agent.revisions` | `agent` | `revisions`, newest first: each `revision`, `by` (the device or agent that made it), `at`, and `agent` as it was then |
+| `agent.file` | `agent`, `path` (as a reply's `mentions` has it) | `file`: the file, kept as the person's, as a `file` block, to fetch with `file.get`. Only from the agent's folder or the shared folder, with links followed and `..` resolved, and 25 MiB at most |
 | `agent.rollback` | `agent`, `revision` | `agent`: a new revision with that one's name, ACP agent, instructions, folder and colour. The permission mode stays as it is |
 | `agent.pin` | `agent`, `pinned`? (`false` takes the pin off) | `agent`, with `pinned`: when it was pinned. Pinned agents go at the top of the list, in that order. Not a revision; `agent.updated` tells every device |
 | `agent.delete` | `agent` | — |

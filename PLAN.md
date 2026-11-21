@@ -373,7 +373,7 @@ Ideas taken from OpenBot ([CopilotKit's](https://github.com/CopilotKit/OpenBot),
 
 ### Sharing and learning
 
-- **A shared folder** all of a person's agents can read and write, beside each one's own, and handing a file from one agent to another with `message_agent`.
+- **A shared folder** all of a person's agents can read and write, beside each one's own, and handing a file from one agent to another with `message_agent`. A file an agent names in a reply, such as `notes/hours.md`, shows under it as a chip with its type, which opens it.
 - **Teach a task.** Record yourself doing a task in the agent's browser, and the agent writes it up as a skill. Agents also propose skills and notes from past chats, which the person keeps or drops, and a note can be tied to a site, so the agent is shown it when it visits.
 
 ## Machines and devices

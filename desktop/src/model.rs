@@ -928,6 +928,45 @@ pub struct Message {
     pub from_agent: Option<String>,
     /// Pinned in its conversation.
     pub pinned: bool,
+    /// Files the reply names that are in its agent's folder, shown as chips.
+    pub mentions: Vec<Mention>,
+}
+
+/// A file a reply names, as `notes/hours.md`, in its agent's folder or the shared one.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Mention {
+    pub agent: String,
+    /// As the reply wrote it.
+    pub path: String,
+    pub name: String,
+    pub size: u64,
+}
+
+impl Mention {
+    /// Its type, as the chip shows it: "MD" for hours.md.
+    pub fn kind(&self) -> String {
+        self.name
+            .rsplit_once('.')
+            .map(|(_, ext)| ext.to_uppercase())
+            .unwrap_or_default()
+    }
+}
+
+fn mentions_of(m: &Value) -> Vec<Mention> {
+    let agent = s(m, "agent");
+    m.get("mentions")
+        .and_then(Value::as_array)
+        .map(|list| {
+            list.iter()
+                .map(|v| Mention {
+                    agent: agent.clone(),
+                    path: s(v, "path"),
+                    name: s(v, "name"),
+                    size: v.get("size").and_then(Value::as_u64).unwrap_or(0),
+                })
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 #[derive(Clone, Debug)]
@@ -1070,6 +1109,8 @@ pub struct Model {
     getting: HashMap<String, (String, bool)>,
     /// Files fetched to be opened, for the app to open.
     pub to_open: Vec<String>,
+    /// Frames an answer led to, for the app to send.
+    pub to_send: Vec<Value>,
     /// The page shown beside the chat, from an agent's html_render.
     pub page: Option<FileRef>,
     /// Whether the person's scripts are on (PLAN.md, "Scripts"), and the port the
@@ -1517,6 +1558,7 @@ impl Model {
             live: false,
             queued: false,
             pinned: m.get("pinned").is_some_and(|p| !p.is_null()),
+            mentions: mentions_of(m),
             // `from` is a device, the agent that sent it, or a routine.
             from_agent: m.get("from").and_then(Value::as_str).and_then(|f| {
                 if f.starts_with("a_") {
@@ -1946,6 +1988,19 @@ impl Model {
             return;
         }
         if id.starts_with("browser.input") {
+            return;
+        }
+        // A file a reply named, kept as the person's: it opens once it's here.
+        if id.starts_with("app.agent_file") {
+            match (f.get("error"), f.pointer("/value/file")) {
+                (Some(e), _) => self.notices.push(s(e, "message")),
+                (None, Some(file)) => {
+                    if let Some(frame) = self.open_file(&FileRef::of(file)) {
+                        self.to_send.push(frame);
+                    }
+                }
+                _ => {}
+            }
             return;
         }
         if let Some(conversation) = id.strip_prefix("app.queue:") {
@@ -2666,6 +2721,7 @@ impl Model {
                     live: false,
                     queued: true,
                     from_agent: None,
+                    mentions: Vec::new(),
                     pinned: false,
                 });
             }
@@ -2699,6 +2755,7 @@ impl Model {
                 live: true,
                 queued: false,
                 from_agent: None,
+                mentions: Vec::new(),
                 pinned: false,
             });
         }
@@ -2875,6 +2932,12 @@ impl Model {
         let id = self.id("app.get");
         self.getting.insert(id.clone(), (f.file.clone(), true));
         Some(json!({"t": "file.get", "id": id, "file": f.file, "name": f.name}))
+    }
+
+    /// Opens a file a reply named: the instance keeps it as the person's first.
+    pub fn open_mention(&mut self, m: &Mention) -> Value {
+        let id = self.id("app.agent_file");
+        json!({"t": "cmd", "id": id, "name": "agent.file", "args": {"agent": m.agent, "path": m.path}})
     }
 
     /// Shows a page beside the chat: fetched first, unless it's here already.
@@ -3744,6 +3807,26 @@ mod tests {
             with_skill("review", "Use the review skill. again"),
             "Use the review skill. again"
         );
+    }
+
+    #[test]
+    fn a_file_a_reply_names_is_a_chip_that_opens_it() {
+        let mut m = Model::new();
+        let reply = m.message_of(
+            &json!({"id": "msg_1", "role": "agent", "agent": "a_1", "blocks": [],
+            "mentions": [{"path": "notes/hours.md", "name": "hours.md", "size": 7}]}),
+        );
+        assert_eq!(reply.mentions.len(), 1);
+        let chip = reply.mentions[0].clone();
+        assert_eq!((chip.agent.as_str(), chip.kind().as_str()), ("a_1", "MD"));
+        let asked = m.open_mention(&chip);
+        assert_eq!(asked["name"], "agent.file");
+        assert_eq!(asked["args"]["path"], "notes/hours.md");
+        // Kept as the person's file, it's fetched to be opened.
+        m.result(&json!({"t": "result", "id": asked["id"], "ok": true, "value": {"file": {"kind": "file", "file": "ab12", "name": "hours.md", "mime": "text/markdown", "size": 7}}}));
+        assert_eq!(m.to_send.len(), 1);
+        assert_eq!(m.to_send[0]["t"], "file.get");
+        assert_eq!(m.to_send[0]["file"], "ab12");
     }
 
     #[test]
