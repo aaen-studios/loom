@@ -171,11 +171,19 @@ gpui_kit::assets::icon_assets!(
     ]
 );
 
-/// GPUI Kit's assets, and loom's extra icons.
+/// loom's mark, the knot, beside the wordmark (design/logo/README.md).
+const KNOT: &str = "logo/knot.svg";
+
+/// GPUI Kit's assets, loom's extra icons, and its mark.
 struct AppAssets;
 
 impl AssetSource for AppAssets {
     fn load(&self, path: &str) -> Result<Option<Cow<'static, [u8]>>> {
+        if path == KNOT {
+            return Ok(Some(Cow::Borrowed(include_bytes!(
+                "../../design/logo/knot.svg"
+            ))));
+        }
         if let Some(bytes) = ExtraIcons.load(path)? {
             return Ok(Some(bytes));
         }
@@ -185,6 +193,9 @@ impl AssetSource for AppAssets {
     fn list(&self, path: &str) -> Result<Vec<SharedString>> {
         let mut paths = gpui_kit::assets::Assets.list(path)?;
         paths.extend(ExtraIcons.list(path)?);
+        if KNOT.starts_with(path) {
+            paths.push(KNOT.into());
+        }
         paths.sort();
         paths.dedup();
         Ok(paths)

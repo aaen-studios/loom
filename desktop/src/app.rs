@@ -18,7 +18,7 @@ use serde_json::Value;
 use crate::core::Core;
 use crate::model::{self, Approval, Conn, Message, Model, Mood};
 use crate::shell;
-use crate::thread::{self, thread};
+use crate::thread::{self, spool, thread, Spool};
 use crate::tokens::*;
 
 /// The colours of one theme.
@@ -73,6 +73,7 @@ impl Palette {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Screen {
     Chat,
+    Server,
     NewAgent,
     EditAgent,
     Activity,
@@ -94,7 +95,6 @@ enum Screen {
 enum Menu {
     Agent,
     Permission,
-    Settings,
 }
 
 /// One row of the chat's list.
@@ -115,6 +115,12 @@ pub struct Loom {
     p: Palette,
     screen: Screen,
     menu: Option<Menu>,
+    /// The settings or server popup over the window, open at this page.
+    popup: Option<Screen>,
+    /// The panel beside the chat on the right: an agent's page, or a plugin's panel.
+    side: Option<Screen>,
+    /// The settings page the popup opened at last, to open at again.
+    settings_last: Screen,
     rows: Rc<Vec<Row>>,
     scroller: Entity<MessageScrollerState>,
     composer: Entity<TextareaState>,
@@ -487,6 +493,9 @@ ACTA_KEY=secret:ACTA_KEY",
             p: Palette::new(dark),
             screen: Screen::Chat,
             menu: None,
+            popup: None,
+            side: None,
+            settings_last: Screen::Profile,
             rows: Rc::new(Vec::new()),
             scroller,
             composer,
@@ -564,6 +573,10 @@ ACTA_KEY=secret:ACTA_KEY",
     fn escape(&mut self, cx: &mut Context<Self>) {
         if self.menu.is_some() {
             self.menu = None;
+        } else if self.popup.is_some() {
+            self.popup = None;
+        } else if self.side.is_some() && self.screen == Screen::Chat {
+            self.close_side(cx);
         } else if self.model.conn == Some(Conn::SignedOut) {
             if self.server_form {
                 self.server_form = false;
@@ -661,7 +674,6 @@ ACTA_KEY=secret:ACTA_KEY",
             Screen::Plugins => {
                 let f = self.model.load_plugins();
                 self.send(f);
-                self.model.close_panel();
             }
             Screen::Programs => {
                 for f in self.model.load_programs() {
@@ -706,7 +718,42 @@ ACTA_KEY=secret:ACTA_KEY",
             _ => {}
         }
         self.menu = None;
-        self.screen = screen;
+        // Only making an agent takes the main area from the chat. An agent's own pages
+        // go beside the chat, and everything else in the popup over the window.
+        match screen {
+            Screen::Chat | Screen::NewAgent => {
+                self.screen = screen;
+                self.popup = None;
+                self.side = None;
+            }
+            Screen::EditAgent | Screen::Activity | Screen::Memory => self.show_side(screen, cx),
+            _ => {
+                if !is_server(screen) {
+                    self.settings_last = screen;
+                }
+                self.popup = Some(screen);
+            }
+        }
+        cx.notify();
+    }
+
+    /// Opens `screen` in the panel beside the chat, in place of the browser if it showed.
+    fn show_side(&mut self, screen: Screen, cx: &mut Context<Self>) {
+        if self.model.watching.is_some() {
+            self.watch(None, cx);
+        }
+        self.screen = Screen::Chat;
+        self.popup = None;
+        self.side = Some(screen);
+    }
+
+    /// Closes the panel beside the chat, and a plugin's panel with it.
+    fn close_side(&mut self, cx: &mut Context<Self>) {
+        if self.side == Some(Screen::Plugins) {
+            self.model.close_panel();
+        }
+        self.side = None;
+        self.model.editing = None;
         cx.notify();
     }
 
@@ -906,6 +953,11 @@ ACTA_KEY=secret:ACTA_KEY",
 
     fn select(&mut self, agent: String, cx: &mut Context<Self>) {
         self.screen = Screen::Chat;
+        self.popup = None;
+        // An agent's own page beside the chat is the old agent's: it closes.
+        if self.side.is_some() && self.side != Some(Screen::Plugins) {
+            self.side = None;
+        }
         self.model.editing = None;
         self.menu = None;
         self.model.select(Some(agent));
@@ -918,12 +970,381 @@ ACTA_KEY=secret:ACTA_KEY",
     /// Shows a task's conversation in the chat, or with None, the agent's chat again.
     fn open_task(&mut self, task: Option<String>, cx: &mut Context<Self>) {
         self.screen = Screen::Chat;
+        self.popup = None;
         self.model.editing = None;
         self.menu = None;
         self.model.show_task(task);
         self.fetch();
         self.refresh_rows(cx);
         cx.notify();
+    }
+
+    // --- Beside the chat, and the popup ---
+
+    /// The panel beside the chat on the right: an agent's page, or a plugin's panel,
+    /// whose web view sits over the space left for it under the head.
+    fn side_panel(&mut self, side: Screen, window: &mut Window, cx: &mut Context<Self>) -> Div {
+        let p = self.p;
+        let width = side_width(side, window.viewport_size().width.as_f32());
+        let name = self
+            .model
+            .selected
+            .as_ref()
+            .and_then(|id| self.model.agent(id))
+            .map(|a| a.name.clone())
+            .unwrap_or_default();
+        let (icon, title) = match side {
+            Screen::EditAgent => (Ico::Pencil, format!("Edit {name}")),
+            Screen::Activity => (Ico::Activity, format!("What {name} did")),
+            Screen::Memory => (Ico::Brain, format!("What {name} remembers")),
+            _ => (
+                Ico::Puzzle,
+                self.model
+                    .panel
+                    .as_ref()
+                    .map(|o| o.plugin.name.clone())
+                    .unwrap_or_else(|| "Plugin".into()),
+            ),
+        };
+        let body = match side {
+            Screen::EditAgent => self.edit_agent(cx),
+            Screen::Activity => self.activity_page(),
+            Screen::Memory => self.memory_page(cx),
+            _ => div().flex_1(),
+        };
+        // An agent's page opens under its thread, across the panel.
+        let hero = self
+            .model
+            .selected
+            .as_ref()
+            .and_then(|id| self.model.agent(id))
+            .filter(|_| side != Screen::Plugins)
+            .map(|a| {
+                let (mood, snapped) = fidget(&a.id, self.model.mood(&a.id));
+                div().px(px(space::L)).pt(px(space::S)).child(thread(
+                    format!("side-thread-{}", a.id),
+                    mood,
+                    thread::color(&a.color, p.dark),
+                    width - 2.0 * space::L,
+                    40.0,
+                    snapped.or(self.model.finished_at(&a.id)),
+                ))
+            });
+        div()
+            .w(px(width))
+            .h_full()
+            .flex_none()
+            .flex()
+            .flex_col()
+            .border_l_1()
+            .border_color(p.line)
+            .child(
+                div()
+                    .h(px(SIDE_HEAD))
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .px(px(space::L))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(space::S))
+                            .text_size(px(size::SMALL))
+                            .text_color(p.ink_2)
+                            .child(Icon::new(icon).small())
+                            .child(title),
+                    )
+                    .child(
+                        self.close_button("side-close")
+                            .on_click(cx.listener(|this, _, _, cx| this.close_side(cx))),
+                    ),
+            )
+            .when_some(hero, |d, h| d.child(h))
+            .child(div().flex_1().min_h_0().flex().flex_col().child(body))
+    }
+
+    /// A small round X.
+    fn close_button(&self, id: &'static str) -> Stateful<Div> {
+        let p = self.p;
+        div()
+            .id(id)
+            .size(px(28.0))
+            .flex_none()
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded(px(radius::ROW))
+            .text_color(p.ink_3)
+            .cursor_pointer()
+            .hover(move |s| s.bg(p.hover).text_color(p.ink))
+            .child(Icon::new(Ico::X).small())
+    }
+
+    /// How the server's spool is now.
+    fn spool_state(&self) -> Spool {
+        match &self.model.conn {
+            Some(Conn::Live) if self.model.synced => Spool::Wound,
+            Some(Conn::Offline(_)) | Some(Conn::UpdateNeeded) => Spool::Loose,
+            Some(Conn::SignedOut) => Spool::Empty,
+            _ => Spool::Turning,
+        }
+    }
+
+    /// The spool's colour: the app's ink, or the colour for trouble.
+    fn spool_ink(&self) -> Hsla {
+        match self.spool_state() {
+            Spool::Loose => self.p.bad,
+            Spool::Empty => self.p.ink_3,
+            _ => self.p.ink_2,
+        }
+    }
+
+    /// The connection in words.
+    fn conn_words(&self) -> String {
+        match &self.model.conn {
+            Some(Conn::Live) if self.model.synced => "Connected".into(),
+            Some(Conn::Offline(ms)) => format!("Offline, trying again in {}s", ms.div_ceil(1000)),
+            Some(Conn::SignedOut) => "Signed out".into(),
+            Some(Conn::UpdateNeeded) => "Needs an update".into(),
+            _ => "Connecting…".into(),
+        }
+    }
+
+    /// The popup's pages: the person's settings, or the server's.
+    fn popup_pages(&self, server: bool) -> Vec<(&'static str, Ico, &'static str, Screen)> {
+        if server {
+            let mut pages = vec![
+                ("pop-server", Ico::Monitor, "This server", Screen::Server),
+                (
+                    "pop-phone",
+                    Ico::Smartphone,
+                    "Add a phone",
+                    Screen::AddPhone,
+                ),
+            ];
+            // An instance somewhere else has other people, and reaches this PC as a device.
+            if !local_mode() {
+                pages.push(("pop-people", Ico::Users, "People", Screen::People));
+                pages.push(("pop-device", Ico::Monitor, "This PC", Screen::ThisDevice));
+            }
+            pages.push(("pop-move", Ico::Truck, "Move", Screen::Move));
+            return pages;
+        }
+        vec![
+            (
+                "pop-profile",
+                Ico::CircleUserRound,
+                "About you",
+                Screen::Profile,
+            ),
+            ("pop-routines", Ico::Clock, "Routines", Screen::Routines),
+            ("pop-tasks", Ico::ListTodo, "Tasks", Screen::Tasks),
+            ("pop-skills", Ico::BookOpen, "Skills", Screen::Skills),
+            ("pop-programs", Ico::Bot, "Agent programs", Screen::Programs),
+            ("pop-mcp", Ico::Plug, "MCP servers", Screen::Mcp),
+            ("pop-plugins", Ico::Puzzle, "Plugins", Screen::Plugins),
+        ]
+    }
+
+    /// The popup over the window: its pages down the left, the open one on the right.
+    /// A click outside it, or Esc, closes it.
+    fn popup_view(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Option<Div> {
+        let open = self.popup?;
+        let p = self.p;
+        let server = is_server(open);
+        let pages = self.popup_pages(server);
+        let size = window.viewport_size();
+        let w = (size.width.as_f32() - 2.0 * space::XXL).clamp(320.0, 900.0);
+        let h = (size.height.as_f32() - 2.0 * space::XXL).clamp(320.0, 640.0);
+        let mut nav = div()
+            .w(px(210.0))
+            .flex_none()
+            .h_full()
+            .flex()
+            .flex_col()
+            .gap(px(2.0))
+            .p(px(space::S))
+            .bg(p.side)
+            .border_r_1()
+            .border_color(p.line);
+        // Its head: the gear, or the server's spool, as the sidebar shows them.
+        nav = nav.child(
+            div()
+                .flex()
+                .items_center()
+                .gap(px(space::S))
+                .px(px(space::M))
+                .pt(px(space::S))
+                .pb(px(space::M))
+                .text_size(px(size::SMALL))
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(p.ink)
+                .when(server, |d| {
+                    d.child(spool(self.spool_state(), self.spool_ink(), 30.0, 14.0))
+                        .child("Server")
+                })
+                .when(!server, |d| {
+                    d.child(Icon::new(Ico::Settings).small().text_color(p.ink_2))
+                        .child("Settings")
+                }),
+        );
+        for (id, icon, label, screen) in pages {
+            nav = nav.child(
+                self.menu_item(id, icon, label, false)
+                    .when(screen == open, |d| d.bg(p.active))
+                    .on_click(cx.listener(move |this, _, _, cx| this.open(screen, cx))),
+            );
+        }
+        if server {
+            let local = local_mode();
+            nav = nav.child(div().flex_1()).child(
+                self.menu_item(
+                    "pop-sign-out",
+                    if local { Ico::Power } else { Ico::LogOut },
+                    if local {
+                        "Close this instance"
+                    } else {
+                        "Sign out"
+                    },
+                    false,
+                )
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.popup = None;
+                    this.sign_out(cx)
+                })),
+            );
+        }
+        let page = match open {
+            Screen::Server => self.server_page(),
+            Screen::Profile => self.profile_page(cx),
+            Screen::Skills => self.skills_page(cx),
+            Screen::Routines => self.routines_page(cx),
+            Screen::Tasks => self.tasks_page(cx),
+            Screen::Programs => self.programs_page(cx),
+            Screen::ThisDevice => self.device_page(cx),
+            Screen::Move => self.move_page(cx),
+            Screen::People => self.people_page(cx),
+            Screen::AddPhone => self.add_phone_page(cx),
+            Screen::Mcp => self.mcp_page(cx),
+            Screen::Plugins => self.plugins_page(cx),
+            _ => div(),
+        };
+        let card = div()
+            .id("popup")
+            .occlude()
+            .w(px(w))
+            .h(px(h))
+            .flex()
+            .bg(p.bg)
+            .border_1()
+            .border_color(p.line_strong)
+            .rounded(px(radius::CARD))
+            .overflow_hidden()
+            .shadow_lg()
+            .on_mouse_down_out(cx.listener(|this, _, _, cx| {
+                // A menu of the page's own (a dropdown) closes first.
+                if this.menu.is_none() {
+                    this.popup = None;
+                    cx.notify();
+                }
+            }))
+            .child(nav)
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .h_full()
+                    .relative()
+                    .flex()
+                    .flex_col()
+                    .pt(px(space::L))
+                    .child(div().flex_1().min_h_0().flex().flex_col().child(page))
+                    // The page has its own heading; the popup only its X.
+                    .child(
+                        div()
+                            .absolute()
+                            .top(px(space::S))
+                            .right(px(space::S))
+                            .child(self.close_button("popup-close").on_click(cx.listener(
+                                |this, _, _, cx| {
+                                    this.popup = None;
+                                    cx.notify();
+                                },
+                            ))),
+                    ),
+            );
+        let mut scrim = p.bg;
+        scrim.a = 0.7;
+        Some(
+            div()
+                .absolute()
+                .top_0()
+                .left_0()
+                .size_full()
+                .flex()
+                .items_center()
+                .justify_center()
+                .bg(scrim)
+                .child(card),
+        )
+    }
+
+    /// The popup's first server page: where the instance is, and how it is.
+    fn server_page(&self) -> Div {
+        let p = self.p;
+        let local = local_mode();
+        let where_ = if local {
+            "On this computer".to_string()
+        } else {
+            let address = std::env::var("LOOM_SERVER").unwrap_or_default();
+            if address.is_empty() {
+                "On a server".into()
+            } else {
+                format!("At {address}")
+            }
+        };
+        let body = div()
+            .w_full()
+            .max_w(px(560.0))
+            .flex()
+            .flex_col()
+            .items_center()
+            .gap(px(space::M))
+            .pt(px(space::XXL))
+            .child(spool(self.spool_state(), self.spool_ink(), 120.0, 44.0))
+            .child(
+                div()
+                    .pt(px(space::M))
+                    .text_size(px(size::HEADING))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(p.ink)
+                    .child(where_),
+            )
+            .child(
+                div()
+                    .text_size(px(size::SMALL))
+                    .text_color(if self.spool_state() == Spool::Loose {
+                        p.bad
+                    } else {
+                        p.ink_3
+                    })
+                    .child(self.conn_words()),
+            )
+            .child(
+                div()
+                    .text_size(px(size::CAPTION))
+                    .text_color(p.ink_3)
+                    .child(format!("loom {}", crate::VERSION)),
+            );
+        div()
+            .flex_1()
+            .min_h_0()
+            .flex()
+            .justify_center()
+            .px(px(space::XL))
+            .child(body)
     }
 
     // --- Tasks ---
@@ -1157,7 +1578,8 @@ ACTA_KEY=secret:ACTA_KEY",
             );
         }
         let body = div()
-            .w(px(560.0))
+            .w_full()
+            .max_w(px(560.0))
             .flex()
             .flex_col()
             .gap(px(space::XL))
@@ -1178,7 +1600,8 @@ ACTA_KEY=secret:ACTA_KEY",
             .overflow_y_scroll()
             .flex()
             .justify_center()
-            .pt(px(space::XXL))
+            .pt(px(space::XL))
+            .px(px(space::XL))
             .pb(px(space::XXL))
             .child(body);
         div().flex_1().min_h_0().child(page)
@@ -1188,6 +1611,10 @@ ACTA_KEY=secret:ACTA_KEY",
 
     /// Watches an agent's browser beside the chat, or stops with None.
     fn watch(&mut self, agent: Option<String>, cx: &mut Context<Self>) {
+        // The browser takes the place beside the chat.
+        if agent.is_some() && self.side.is_some() {
+            self.close_side(cx);
+        }
         if let Some(f) = self.model.watch(agent) {
             self.send(f);
         }
@@ -2165,18 +2592,8 @@ ACTA_KEY=secret:ACTA_KEY",
                     ),
             );
         }
-        let status: (String, Hsla) = match &self.model.conn {
-            Some(Conn::Live) if self.model.synced => ("Connected".into(), p.ok),
-            Some(Conn::Live) | Some(Conn::Connecting) | Some(Conn::Starting) | None => {
-                ("Connecting…".into(), p.ink_3)
-            }
-            Some(Conn::Offline(ms)) => (
-                format!("Offline, trying again in {}s", ms.div_ceil(1000)),
-                p.bad,
-            ),
-            Some(Conn::SignedOut) => ("Signed out".into(), p.ink_3),
-            Some(Conn::UpdateNeeded) => ("Needs an update".into(), p.bad),
-        };
+        let server_open = self.popup.is_some_and(is_server);
+        let settings_open = self.popup.is_some() && !server_open;
         // A newer loom, downloaded and checked, waits for a restart.
         let update = self.model.update.clone().map(|(version, path)| {
             div()
@@ -2235,12 +2652,26 @@ ACTA_KEY=secret:ACTA_KEY",
                     .items_center()
                     .justify_between()
                     .px(px(space::L))
+                    // The knot, and the wordmark beside it (design/logo/README.md).
                     .child(
                         div()
-                            .text_size(px(size::BODY))
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(p.ink)
-                            .child("loom"),
+                            .flex()
+                            .items_center()
+                            .gap(px(6.0))
+                            .child(
+                                svg()
+                                    .path("logo/knot.svg")
+                                    .size(px(20.0))
+                                    .flex_none()
+                                    .text_color(p.ink),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(size::BODY))
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .text_color(p.ink)
+                                    .child("loom"),
+                            ),
                     )
                     .child(
                         div()
@@ -2289,13 +2720,41 @@ ACTA_KEY=secret:ACTA_KEY",
                     .child(if searching { self.hits(cx) } else { list }),
             )
             .when_some(update, |d, row| d.child(row))
+            // The server, as its spool, on the left, and the settings on the right: each
+            // opens the popup.
             .child(
                 div()
                     .flex()
                     .items_center()
                     .justify_between()
+                    .gap(px(space::XS))
                     .px(px(space::S))
                     .py(px(space::S))
+                    .child(
+                        div()
+                            .id("server")
+                            .flex()
+                            .items_center()
+                            .gap(px(space::S))
+                            .px(px(space::M))
+                            .py(px(space::S))
+                            .rounded(px(radius::ROW))
+                            .cursor_pointer()
+                            .when(server_open, |d| d.bg(p.active))
+                            .hover(move |s| s.bg(p.hover))
+                            .child(spool(self.spool_state(), self.spool_ink(), 38.0, 18.0))
+                            // The words only while it isn't well.
+                            .when(self.spool_state() != Spool::Wound, |d| {
+                                d.child(
+                                    div()
+                                        .text_size(px(size::CAPTION))
+                                        .text_color(p.ink_3)
+                                        .truncate()
+                                        .child(self.conn_words()),
+                                )
+                            })
+                            .on_click(cx.listener(|this, _, _, cx| this.open(Screen::Server, cx))),
+                    )
                     .child(
                         div()
                             .id("settings")
@@ -2308,119 +2767,16 @@ ACTA_KEY=secret:ACTA_KEY",
                             .text_size(px(size::SMALL))
                             .text_color(p.ink_2)
                             .cursor_pointer()
-                            .when(self.menu == Some(Menu::Settings), |d| d.bg(p.active))
+                            .when(settings_open, |d| d.bg(p.active))
                             .hover(move |s| s.bg(p.hover).text_color(p.ink))
                             .child(Icon::new(Ico::Settings).small())
                             .child("Settings")
                             .on_click(cx.listener(|this, _, _, cx| {
-                                this.menu = if this.menu == Some(Menu::Settings) {
-                                    None
-                                } else {
-                                    Some(Menu::Settings)
-                                };
-                                cx.notify();
+                                let last = this.settings_last;
+                                this.open(last, cx)
                             })),
-                    )
-                    // How the connection is, as a dot; the words only while it isn't well.
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap(px(space::S))
-                            .px(px(space::M))
-                            .when(status.1 != p.ok, |d| {
-                                d.child(
-                                    div()
-                                        .text_size(px(size::CAPTION))
-                                        .text_color(p.ink_3)
-                                        .child(status.0.clone()),
-                                )
-                            })
-                            .child(div().size(px(7.0)).rounded_full().bg(status.1)),
                     ),
             )
-            .when_some(self.settings_menu(cx), |d, m| d.child(m))
-    }
-
-    /// The settings menu, over the bottom of the sidebar: every page that isn't a chat.
-    fn settings_menu(&mut self, cx: &mut Context<Self>) -> Option<Div> {
-        if self.menu != Some(Menu::Settings) {
-            return None;
-        }
-        let p = self.p;
-        let local = local_mode();
-        let mut items: Vec<(&'static str, Ico, &'static str, Screen)> = vec![
-            (
-                "set-profile",
-                Ico::CircleUserRound,
-                "About you",
-                Screen::Profile,
-            ),
-            ("set-routines", Ico::Clock, "Routines", Screen::Routines),
-            ("set-tasks", Ico::ListTodo, "Tasks", Screen::Tasks),
-            ("set-skills", Ico::BookOpen, "Skills", Screen::Skills),
-            ("set-programs", Ico::Bot, "Agent programs", Screen::Programs),
-            ("set-mcp", Ico::Plug, "MCP servers", Screen::Mcp),
-            ("set-plugins", Ico::Puzzle, "Plugins", Screen::Plugins),
-            (
-                "set-phone",
-                Ico::Smartphone,
-                "Add a phone",
-                Screen::AddPhone,
-            ),
-        ];
-        // An instance somewhere else has other people, and reaches this PC as a device.
-        if !local {
-            items.push(("set-people", Ico::Users, "People", Screen::People));
-            items.push(("set-device", Ico::Monitor, "This PC", Screen::ThisDevice));
-        }
-        items.push(("set-move", Ico::Truck, "Move", Screen::Move));
-        let mut panel = div()
-            .absolute()
-            .left(px(space::S))
-            .bottom(px(52.0))
-            .w(px(layout::SIDEBAR - space::S * 2.0))
-            .p(px(space::XS))
-            .flex()
-            .flex_col()
-            .bg(p.raised)
-            .border_1()
-            .border_color(p.line_strong)
-            .rounded(px(radius::CARD))
-            .shadow_lg()
-            .on_mouse_down_out(cx.listener(|this, _, _, cx| {
-                this.menu = None;
-                cx.notify();
-            }));
-        for (id, icon, title, screen) in items {
-            panel = panel.child(
-                self.menu_item(id, icon, title, false)
-                    .on_click(cx.listener(move |this, _, _, cx| this.open(screen, cx))),
-            );
-        }
-        Some(
-            panel
-                .child(
-                    div()
-                        .h(px(1.0))
-                        .mx(px(space::S))
-                        .my(px(space::XS))
-                        .bg(p.line),
-                )
-                .child(
-                    self.menu_item(
-                        "set-sign-out",
-                        if local { Ico::Power } else { Ico::LogOut },
-                        if local {
-                            "Close this instance"
-                        } else {
-                            "Sign out"
-                        },
-                        false,
-                    )
-                    .on_click(cx.listener(|this, _, _, cx| this.sign_out(cx))),
-                ),
-        )
     }
 
     fn header(&mut self, cx: &mut Context<Self>) -> Div {
@@ -2433,65 +2789,6 @@ ACTA_KEY=secret:ACTA_KEY",
             .items_center()
             .justify_between()
             .px(px(space::L));
-        if self.screen == Screen::Plugins {
-            let Some(open) = self.model.panel.clone() else {
-                return bar.child(
-                    div()
-                        .text_size(px(size::BODY))
-                        .text_color(p.ink_3)
-                        .child("Plugins"),
-                );
-            };
-            return bar
-                .child(
-                    div()
-                        .text_size(px(size::BODY))
-                        .text_color(p.ink)
-                        .child(open.plugin.name.clone()),
-                )
-                .child(
-                    div()
-                        .id("close-panel")
-                        .occlude()
-                        .text_size(px(size::CAPTION))
-                        .text_color(p.ink_3)
-                        .cursor_pointer()
-                        .hover(move |s| s.text_color(p.ink))
-                        .child("Close")
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.model.close_panel();
-                            cx.notify();
-                        })),
-                );
-        }
-        if matches!(
-            self.screen,
-            Screen::Skills
-                | Screen::Programs
-                | Screen::ThisDevice
-                | Screen::AddPhone
-                | Screen::Profile
-                | Screen::Routines
-                | Screen::Tasks
-                | Screen::Mcp
-                | Screen::Move
-                | Screen::People
-        ) {
-            return bar.child(div().text_size(px(size::BODY)).text_color(p.ink_3).child(
-                match self.screen {
-                    Screen::Skills => "Skills",
-                    Screen::Routines => "Routines",
-                    Screen::Tasks => "Tasks",
-                    Screen::Programs => "Agent programs",
-                    Screen::Profile => "About you",
-                    Screen::Mcp => "MCP servers",
-                    Screen::AddPhone => "Add a phone",
-                    Screen::Move => "Move this instance",
-                    Screen::People => "People",
-                    _ => "This PC",
-                },
-            ));
-        }
         let Some(agent) = self
             .model
             .selected
@@ -2503,22 +2800,6 @@ ACTA_KEY=secret:ACTA_KEY",
         };
         if self.screen == Screen::NewAgent {
             return bar;
-        }
-        if matches!(
-            self.screen,
-            Screen::EditAgent | Screen::Activity | Screen::Memory
-        ) {
-            let title = match self.screen {
-                Screen::EditAgent => format!("Edit {}", agent.name),
-                Screen::Memory => format!("What {} remembers", agent.name),
-                _ => format!("What {} did", agent.name),
-            };
-            return bar.child(
-                div()
-                    .text_size(px(size::BODY))
-                    .text_color(p.ink_3)
-                    .child(title),
-            );
         }
         let permission = match agent.permission.as_str() {
             "allow" => "Doesn't ask",
@@ -2673,9 +2954,6 @@ ACTA_KEY=secret:ACTA_KEY",
     fn menu_panel(&mut self, cx: &mut Context<Self>) -> Option<Div> {
         let p = self.p;
         let menu = self.menu?;
-        if menu == Menu::Settings {
-            return None;
-        }
         let panel = div()
             .absolute()
             .top(px(layout::TITLEBAR - 4.0))
@@ -2693,7 +2971,6 @@ ACTA_KEY=secret:ACTA_KEY",
                 cx.notify();
             }));
         Some(match menu {
-            Menu::Settings => return None,
             Menu::Agent => panel
                 .left(px(space::S))
                 .child(
@@ -2717,7 +2994,7 @@ ACTA_KEY=secret:ACTA_KEY",
                                 this.instructions_in
                                     .update(cx, |s, cx| s.set_value(instructions, window, cx));
                             }
-                            this.screen = Screen::EditAgent;
+                            this.show_side(Screen::EditAgent, cx);
                             this.menu = None;
                             cx.notify();
                         })),
@@ -2728,7 +3005,7 @@ ACTA_KEY=secret:ACTA_KEY",
                             if let Some(f) = this.model.load_activity() {
                                 this.send(f);
                             }
-                            this.screen = Screen::Activity;
+                            this.show_side(Screen::Activity, cx);
                             this.menu = None;
                             cx.notify();
                         })),
@@ -2740,7 +3017,7 @@ ACTA_KEY=secret:ACTA_KEY",
                             if let Some(f) = this.model.load_notes() {
                                 this.send(f);
                             }
-                            this.screen = Screen::Memory;
+                            this.show_side(Screen::Memory, cx);
                             this.menu = None;
                             cx.notify();
                         })),
@@ -2820,10 +3097,15 @@ ACTA_KEY=secret:ACTA_KEY",
         if self.model.watching.is_some() && self.model.watching != self.model.selected {
             self.watch(None, cx);
         }
-        let panel = agent
+        // Beside the chat: the agent's browser, or an agent's page or a plugin's panel.
+        let watched = agent
             .clone()
-            .filter(|a| self.model.watching.as_deref() == Some(a.id.as_str()))
-            .map(|a| self.browser_panel(&a, window, cx));
+            .filter(|a| self.model.watching.as_deref() == Some(a.id.as_str()));
+        let panel = match (watched, self.side) {
+            (Some(a), _) => Some(self.browser_panel(&a, window, cx)),
+            (None, Some(side)) => Some(self.side_panel(side, window, cx)),
+            (None, None) => None,
+        };
         let ask = agent.as_ref().and_then(|a| self.browser_ask(a, cx));
         let secret = agent.as_ref().and_then(|a| self.secret_ask(a, cx));
         let queue = agent.as_ref().and_then(|a| self.queue_view(a, cx));
@@ -3855,8 +4137,7 @@ ACTA_KEY=secret:ACTA_KEY",
                             if let Some(f) = this.model.roll_back(revision) {
                                 this.send(f);
                             }
-                            this.screen = Screen::Chat;
-                            this.model.editing = None;
+                            this.close_side(cx);
                             cx.notify();
                         })),
                 );
@@ -3902,11 +4183,13 @@ ACTA_KEY=secret:ACTA_KEY",
             .overflow_y_scroll()
             .flex()
             .justify_center()
-            .pt(px(space::XXL))
+            .pt(px(space::XL))
+            .px(px(space::XL))
             .pb(px(space::XXL))
             .child(
                 div()
-                    .w(px(520.0))
+                    .w_full()
+                    .max_w(px(520.0))
                     .flex()
                     .flex_col()
                     .gap(px(space::XL))
@@ -3929,15 +4212,13 @@ ACTA_KEY=secret:ACTA_KEY",
                                         {
                                             this.send(f);
                                         }
-                                        this.screen = Screen::Chat;
-                                        this.model.editing = None;
+                                        this.close_side(cx);
                                         cx.notify();
                                     })),
                             )
                             .child(self.button("cancel-edit", "Cancel", false).on_click(
                                 cx.listener(|this, _, _, cx| {
-                                    this.screen = Screen::Chat;
-                                    this.model.editing = None;
+                                    this.close_side(cx);
                                     cx.notify();
                                 }),
                             )),
@@ -3967,7 +4248,12 @@ ACTA_KEY=secret:ACTA_KEY",
                 .text_color(p.ink_3)
                 .child(text)
         };
-        let mut body = div().w(px(560.0)).flex().flex_col().gap(px(space::XL));
+        let mut body = div()
+            .w_full()
+            .max_w(px(560.0))
+            .flex()
+            .flex_col()
+            .gap(px(space::XL));
         if let Some(open) = self.mcp_open.clone() {
             let mut buttons = div().flex().gap(px(space::S)).child(
                 self.button("save-mcp", "Save", true)
@@ -4169,7 +4455,8 @@ ACTA_KEY=secret:ACTA_KEY",
             .overflow_y_scroll()
             .flex()
             .justify_center()
-            .pt(px(space::XXL))
+            .pt(px(space::XL))
+            .px(px(space::XL))
             .pb(px(space::XXL))
             .child(body);
         div().flex_1().min_h_0().child(page)
@@ -4179,7 +4466,12 @@ ACTA_KEY=secret:ACTA_KEY",
     /// and the form for a new or changed one.
     fn skills_page(&mut self, cx: &mut Context<Self>) -> Div {
         let p = self.p;
-        let mut body = div().w(px(560.0)).flex().flex_col().gap(px(space::XL));
+        let mut body = div()
+            .w_full()
+            .max_w(px(560.0))
+            .flex()
+            .flex_col()
+            .gap(px(space::XL));
         if let Some(open) = self.skill_open.clone() {
             let mut buttons = div()
                 .flex()
@@ -4310,7 +4602,8 @@ ACTA_KEY=secret:ACTA_KEY",
             .overflow_y_scroll()
             .flex()
             .justify_center()
-            .pt(px(space::XXL))
+            .pt(px(space::XL))
+            .px(px(space::XL))
             .pb(px(space::XXL))
             .child(body);
         div().flex_1().min_h_0().child(page)
@@ -4320,10 +4613,12 @@ ACTA_KEY=secret:ACTA_KEY",
     /// its panel to open. An open panel lies over the content area in a web view of its own.
     fn plugins_page(&mut self, cx: &mut Context<Self>) -> Div {
         let p = self.p;
-        if self.model.panel.is_some() {
-            return div().flex_1().min_h_0();
-        }
-        let mut list = div().w(px(560.0)).flex().flex_col().gap(px(space::M));
+        let mut list = div()
+            .w_full()
+            .max_w(px(560.0))
+            .flex()
+            .flex_col()
+            .gap(px(space::M));
         if self.model.plugins.is_empty() {
             list = list.child(
                 div()
@@ -4341,6 +4636,8 @@ ACTA_KEY=secret:ACTA_KEY",
                         .on_click(cx.listener(move |this, _, _, cx| {
                             let f = this.model.open_plugin(&id);
                             this.send(f);
+                            // Its panel opens beside the chat.
+                            this.show_side(Screen::Plugins, cx);
                             cx.notify();
                         })),
                 );
@@ -4414,16 +4711,17 @@ ACTA_KEY=secret:ACTA_KEY",
             .overflow_y_scroll()
             .flex()
             .justify_center()
-            .pt(px(space::XXL))
+            .pt(px(space::XL))
+            .px(px(space::XL))
             .pb(px(space::XXL))
             .child(list);
         div().flex_1().min_h_0().child(page)
     }
 
-    /// Shows the open plugin's panel over the content area, or takes it away when there's
-    /// none to show, and keeps it where the content area is as the window changes size.
+    /// Shows the open plugin's panel beside the chat, or takes it away when there's
+    /// none to show, and keeps it in its place as the window changes size.
     fn sync_panel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let want = if self.screen == Screen::Plugins {
+        let want = if self.side == Some(Screen::Plugins) && self.screen == Screen::Chat {
             self.model.panel.clone()
         } else {
             None
@@ -4436,13 +4734,20 @@ ACTA_KEY=secret:ACTA_KEY",
             self.panel = None;
             return;
         };
+        // In the panel beside the chat, under its head. A web view draws over everything
+        // in the window, so while the popup is open it shrinks to nothing.
         let size = window.viewport_size();
-        let rect = [
-            layout::SIDEBAR,
-            layout::TITLEBAR,
-            f32::from(size.width) - layout::SIDEBAR,
-            f32::from(size.height) - layout::TITLEBAR,
-        ];
+        let w = side_width(Screen::Plugins, f32::from(size.width));
+        let rect = if self.popup.is_some() {
+            [0.0, 0.0, 0.0, 0.0]
+        } else {
+            [
+                f32::from(size.width) - w + 1.0,
+                layout::TITLEBAR + SIDE_HEAD,
+                w - 1.0,
+                f32::from(size.height) - layout::TITLEBAR - SIDE_HEAD,
+            ]
+        };
         if let Some((id, view, at)) = &mut self.panel {
             if *id == open.plugin.id {
                 if *at != rect {
@@ -4496,7 +4801,7 @@ ACTA_KEY=secret:ACTA_KEY",
                 match made {
                     // Unless the person went elsewhere while it was being made.
                     Ok(view) => {
-                        let wanted = this.screen == Screen::Plugins
+                        let wanted = this.side == Some(Screen::Plugins)
                             && this.model.panel.as_ref().is_some_and(|p| p.plugin.id == id);
                         if wanted {
                             this.panel = Some((id, view, rect));
@@ -4542,7 +4847,12 @@ ACTA_KEY=secret:ACTA_KEY",
                 .text_color(p.ink_3)
                 .child(text)
         };
-        let mut body = div().w(px(560.0)).flex().flex_col().gap(px(space::XL));
+        let mut body = div()
+            .w_full()
+            .max_w(px(560.0))
+            .flex()
+            .flex_col()
+            .gap(px(space::XL));
         if let Some(open) = self.routine_open.clone() {
             let mut agents = div().flex().flex_wrap().gap(px(space::XS));
             for a in self.model.agents.clone() {
@@ -4873,7 +5183,8 @@ ACTA_KEY=secret:ACTA_KEY",
             .overflow_y_scroll()
             .flex()
             .justify_center()
-            .pt(px(space::XXL))
+            .pt(px(space::XL))
+            .px(px(space::XL))
             .pb(px(space::XXL))
             .child(body);
         div().flex_1().min_h_0().child(page)
@@ -4953,7 +5264,8 @@ ACTA_KEY=secret:ACTA_KEY",
                 .child(text)
         };
         let mut body = div()
-            .w(px(560.0))
+            .w_full()
+            .max_w(px(560.0))
             .flex()
             .flex_col()
             .gap(px(space::XL))
@@ -5138,7 +5450,8 @@ ACTA_KEY=secret:ACTA_KEY",
             .overflow_y_scroll()
             .flex()
             .justify_center()
-            .pt(px(space::XXL))
+            .pt(px(space::XL))
+            .px(px(space::XL))
             .pb(px(space::XXL))
             .child(body);
         div().flex_1().min_h_0().child(page)
@@ -5207,7 +5520,8 @@ ACTA_KEY=secret:ACTA_KEY",
             .iter()
             .any(|(t, m)| t == "run_command" && m == "allow");
         let body = div()
-            .w(px(560.0))
+            .w_full()
+            .max_w(px(560.0))
             .flex()
             .flex_col()
             .gap(px(space::XL))
@@ -5236,7 +5550,8 @@ ACTA_KEY=secret:ACTA_KEY",
             .overflow_y_scroll()
             .flex()
             .justify_center()
-            .pt(px(space::XXL))
+            .pt(px(space::XL))
+            .px(px(space::XL))
             .pb(px(space::XXL))
             .child(body);
         div().flex_1().min_h_0().child(page)
@@ -5245,14 +5560,15 @@ ACTA_KEY=secret:ACTA_KEY",
     /// Moving the instance (PLAN.md, "Moving an instance"): the new place's address and the
     /// code its `loom receive` printed. The apps follow by themselves once it's there.
     fn move_page(&mut self, cx: &mut Context<Self>) -> Div {
-        let body = self.move_section(cx).w(px(560.0));
+        let body = self.move_section(cx).w_full().max_w(px(560.0));
         let page = div()
             .id("move-page")
             .size_full()
             .overflow_y_scroll()
             .flex()
             .justify_center()
-            .pt(px(space::XXL))
+            .pt(px(space::XL))
+            .px(px(space::XL))
             .pb(px(space::XXL))
             .child(body);
         div().flex_1().min_h_0().child(page)
@@ -5276,7 +5592,8 @@ ACTA_KEY=secret:ACTA_KEY",
                 .child(text)
         };
         let mut body = div()
-            .w(px(560.0))
+            .w_full()
+            .max_w(px(560.0))
             .flex()
             .flex_col()
             .gap(px(space::XL))
@@ -5498,7 +5815,8 @@ ACTA_KEY=secret:ACTA_KEY",
             .overflow_y_scroll()
             .flex()
             .justify_center()
-            .pt(px(space::XXL))
+            .pt(px(space::XL))
+            .px(px(space::XL))
             .pb(px(space::XXL))
             .child(body);
         div().flex_1().min_h_0().child(page)
@@ -5836,7 +6154,8 @@ ACTA_KEY=secret:ACTA_KEY",
             );
         }
         let body = div()
-            .w(px(560.0))
+            .w_full()
+            .max_w(px(560.0))
             .flex()
             .flex_col()
             .gap(px(space::XL))
@@ -5850,7 +6169,8 @@ ACTA_KEY=secret:ACTA_KEY",
             .overflow_y_scroll()
             .flex()
             .justify_center()
-            .pt(px(space::XXL))
+            .pt(px(space::XL))
+            .px(px(space::XL))
             .pb(px(space::XXL))
             .child(body);
         div().flex_1().min_h_0().child(page)
@@ -5867,7 +6187,8 @@ ACTA_KEY=secret:ACTA_KEY",
             None => "Loading…".to_string(),
         };
         let body = div()
-            .w(px(560.0))
+            .w_full()
+            .max_w(px(560.0))
             .flex()
             .flex_col()
             .gap(px(space::L))
@@ -5906,7 +6227,8 @@ ACTA_KEY=secret:ACTA_KEY",
             .overflow_y_scroll()
             .flex()
             .justify_center()
-            .pt(px(space::XXL))
+            .pt(px(space::XL))
+            .px(px(space::XL))
             .pb(px(space::XXL))
             .child(body);
         div().flex_1().min_h_0().child(page)
@@ -5988,7 +6310,8 @@ ACTA_KEY=secret:ACTA_KEY",
             )
         };
         let body = div()
-            .w(px(560.0))
+            .w_full()
+            .max_w(px(560.0))
             .flex()
             .flex_col()
             .gap(px(space::L))
@@ -6010,7 +6333,8 @@ ACTA_KEY=secret:ACTA_KEY",
             .overflow_y_scroll()
             .flex()
             .justify_center()
-            .pt(px(space::XXL))
+            .pt(px(space::XL))
+            .px(px(space::XL))
             .pb(px(space::XXL))
             .child(body);
         div().flex_1().min_h_0().child(page)
@@ -6109,8 +6433,16 @@ ACTA_KEY=secret:ACTA_KEY",
             .flex()
             .justify_center()
             .pt(px(space::XL))
+            .px(px(space::XL))
             .pb(px(space::XXL))
-            .child(div().w(px(640.0)).flex().flex_col().child(list));
+            .child(
+                div()
+                    .w_full()
+                    .max_w(px(640.0))
+                    .flex()
+                    .flex_col()
+                    .child(list),
+            );
         div().flex_1().min_h_0().child(page)
     }
 
@@ -6681,6 +7013,11 @@ impl Render for Loom {
                 .checked_duration_since(Instant::now())
                 .is_some()
             || self.opened().elapsed().as_secs_f32() < 1.5
+            // An agent's page beside the chat, whose thread fidgets at its top.
+            || matches!(
+                self.side,
+                Some(Screen::EditAgent | Screen::Activity | Screen::Memory)
+            ) && self.screen == Screen::Chat
             // Someone typing to an agent, whose thread thinks along.
             || self.screen == Screen::Chat && !self.composer.read(cx).value().trim().is_empty()
         {
@@ -6754,27 +7091,15 @@ impl Render for Loom {
                 .child(div().flex_1().min_h_0().flex().flex_col().child(page))
                 .when_some(splash, |d, s| d.child(s));
         }
+        // The main area is the chat, unless an agent is being made.
         let main = match self.screen {
-            Screen::Chat => self.chat(window, cx),
             Screen::NewAgent => self.new_agent(cx),
-            Screen::EditAgent => self.edit_agent(cx),
-            Screen::Activity => self.activity_page(),
-            Screen::Memory => self.memory_page(cx),
-            Screen::Profile => self.profile_page(cx),
-            Screen::Skills => self.skills_page(cx),
-            Screen::Routines => self.routines_page(cx),
-            Screen::Tasks => self.tasks_page(cx),
-            Screen::Programs => self.programs_page(cx),
-            Screen::ThisDevice => self.device_page(cx),
-            Screen::Move => self.move_page(cx),
-            Screen::People => self.people_page(cx),
-            Screen::AddPhone => self.add_phone_page(cx),
-            Screen::Mcp => self.mcp_page(cx),
-            Screen::Plugins => self.plugins_page(cx),
+            _ => self.chat(window, cx),
         };
         self.sync_panel(window, cx);
         let header = self.header(cx);
         let menu = self.menu_panel(cx);
+        let popup = self.popup_view(window, cx);
         root.flex()
             .child(self.sidebar(cx))
             .child(
@@ -6798,6 +7123,7 @@ impl Render for Loom {
                     .when_some(beside, |d, c| d.child(c))
                     .when_some(unroll, |d, u| d.child(u)),
             )
+            .when_some(popup, |d, p| d.child(p))
             .when_some(whole, |d, c| d.child(c))
             .when_some(splash, |d, s| d.child(s))
     }
@@ -7039,6 +7365,56 @@ impl raw_window_handle::HasWindowHandle for Parent {
 }
 
 /// Where a panel goes, from [x, y, width, height] in the window's logical pixels.
+/// What an agent's thread does at the top of its page: what the agent is doing, or
+/// while it's idle, a flourish every few seconds, a thinking loop, a knot or a twang, picked
+/// at random for each agent and each few seconds. The thread eases between them.
+fn fidget(agent: &str, mood: Mood) -> (Mood, Option<Instant>) {
+    if mood != Mood::Idle {
+        return (mood, None);
+    }
+    const BEAT: f32 = 3.5;
+    let t = thread::now();
+    let slot = (t / BEAT) as u64;
+    let mut h = std::hash::DefaultHasher::new();
+    std::hash::Hash::hash(&(agent, slot), &mut h);
+    let roll = std::hash::Hasher::finish(&h) % 12;
+    let pick = match roll {
+        // Not writing or a tool: their waves are sized for a short thread.
+        0..=3 => Mood::Thinking,
+        4 | 5 => Mood::Waiting,
+        _ => Mood::Idle,
+    };
+    // Some idle beats start with a twang.
+    let snapped = (roll >= 7).then(|| {
+        let into = Duration::from_secs_f32(t - slot as f32 * BEAT);
+        Instant::now()
+            .checked_sub(into)
+            .unwrap_or_else(Instant::now)
+    });
+    (pick, snapped)
+}
+
+/// Whether a popup page is the server's, not the person's settings.
+fn is_server(s: Screen) -> bool {
+    matches!(
+        s,
+        Screen::Server | Screen::AddPhone | Screen::People | Screen::ThisDevice | Screen::Move
+    )
+}
+
+/// The height of the head of the panel beside the chat, and of the popup's page.
+const SIDE_HEAD: f32 = 48.0;
+
+/// How wide the panel beside the chat is, in a window `window` wide: a plugin's panel
+/// as wide as the browser's, an agent's page narrower.
+fn side_width(side: Screen, window: f32) -> f32 {
+    if side == Screen::Plugins {
+        (window * 0.45).clamp(360.0, 820.0)
+    } else {
+        (window * 0.36).clamp(360.0, 560.0)
+    }
+}
+
 fn panel_bounds(r: [f32; 4]) -> wry::Rect {
     wry::Rect {
         position: wry::dpi::LogicalPosition::new(r[0] as f64, r[1] as f64).into(),
