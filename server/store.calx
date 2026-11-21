@@ -647,6 +647,12 @@ impl Store {
         return out
     }
 
+    // The routine whose webhook is `hook`, with whose it is.
+    pub fn routine_by_hook(self, hook: String) -> (String, Json)? ! Error {
+        let r = try self.db.query_one(String("SELECT user, json FROM routines WHERE json_extract(json, '$.hook') = ?"), [t(hook)]) else return none
+        return some((text(r[0].copy()), try parse(text(r[1].copy()))))
+    }
+
     pub fn delete_routine(self, user: String, id: String) -> bool ! Error {
         return try self.db.execute(String("DELETE FROM routines WHERE id = ? AND user = ?"), [t(id), t(user)]) > 0
     }

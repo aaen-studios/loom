@@ -11,12 +11,13 @@ module server.instance
 import std.bytes
 import std.crypto.{Ed25519Key, PasswordHasher, compare_digest, random_bytes}
 import std.fs
-import std.hash.{sha256}
+import std.hash.{hmac_sha256, sha256}
 import std.http.server.{Request, Response, Server, ServerSocket, content_type}
 import std.json.{Json, parse}
 import std.process
 import std.process.{current_exe}
 import std.signal
+import std.text.utf8.{decode_lossy_unicode}
 import std.time.{Timestamp}
 import std.url
 import shared.obj.{Obj, at, bool_at, int_at, merge, str_at}
@@ -202,6 +203,8 @@ struct Install {
 const REGISTRY_FRESH_MS: i64 = 600000
 // How long the person's profile may be: it goes into every session.
 const PROFILE_MOST: usize = 4000
+// How much of what a webhook was sent goes to the agent.
+const HOOK_MOST: usize = 20000
 
 // An agent's right to loom's own tools: `loom mcp` acts as `user`, for `agent`.
 struct Grant {
@@ -255,6 +258,15 @@ fn answer_text(a: Answer) -> Json {
         Answer.Value(v) => tool_text("{v}"),
         Answer.Refused(_, message) => tool_error(message),
     }
+}
+
+// What the schedule tool says it did, with the webhook when there is one.
+fn scheduled(r: Json) -> String {
+    var text = "Scheduled: {str_at(r.copy(), "name") ?? String()}, {str_at(r.copy(), "when") ?? String()}, as routine {str_at(r.copy(), "id") ?? String()}."
+    if let hook = str_at(r.copy(), "hook") {
+        text.push_str(" Its webhook is POST /hooks/{hook} on the instance's address, with the header Authorization: Bearer {str_at(r, "secret") ?? String()}, or signed with that secret as GitHub's webhooks sign (X-Hub-Signature-256).")
+    }
+    return text
 }
 
 fn http_error(status: u16, code: str, message: String) -> Response {
@@ -560,6 +572,9 @@ impl Instance {
         if req.path == "/files" or req.path.starts_with("/files/") {
             return some(try i.files_route(req))
         }
+        if req.path.starts_with("/hooks/") {
+            return some(try i.hook(req))
+        }
         if req.path.starts_with("/api/mcp/") {
             return try i.mcp_route(req)
         }
@@ -731,7 +746,7 @@ impl Instance {
                 }
             }
             return some(match try i.command(g.user, g.agent, String("routine.put"), a) {
-                Answer.Value(v) => tool_text("Scheduled: {str_at(at(v.copy(), "routine"), "name") ?? String()}, {str_at(at(v.copy(), "routine"), "when") ?? String()}, as routine {str_at(at(v, "routine"), "id") ?? String()}."),
+                Answer.Value(v) => tool_text(scheduled(at(v, "routine"))),
                 Answer.Refused(_, message) => tool_error(message),
             })
         }
@@ -852,17 +867,18 @@ impl Instance {
                 if let err(e) = i.routine_ran(user.copy(), skipped) { eprintln("loom: a routine: {e}") }
                 continue
             }
-            match i.fire(user.copy(), timed, String("schedule")) {
+            match i.fire(user.copy(), timed, String("schedule"), String()) {
                 ok(_) => {},
                 err(e) => eprintln("loom: a routine: {e}"),
             }
         }
     }
 
-    // Runs routine `r` now: its prompt goes to its agent, in the routine's own
-    // conversation. `by` is "schedule", or the device or agent that ran it.
-    // Keeps the routine as it is after, and gives the run, or why there's none.
-    fn fire(i: mut Instance, user: String, r: Json, by: String) -> Answer ! Error {
+    // Runs routine `r` now: its prompt goes to its agent, in the agent's chat,
+    // with `came` after it, what a webhook sent, when there's any. `by` is
+    // "schedule", "webhook", or the device or agent that ran it. Keeps the
+    // routine as it is after, and gives the run, or why there's none.
+    fn fire(i: mut Instance, user: String, r: Json, by: String, came: String) -> Answer ! Error {
         let id = str_at(r.copy(), "id") ?? String()
         let name = str_at(r.copy(), "name") ?? String("A routine")
         let agent_id = str_at(r.copy(), "agent") ?? String()
@@ -886,7 +902,8 @@ impl Instance {
             try i.routine_ran(user, merge(r, Obj.new().s("conversation", conversation_id).j("last", Obj.new().i("at", t).s("status", String("skipped")).s("error", String("It was still running from the time before.")).done()).done()))
             return Answer.Refused(String("busy"), String("The routine is still running from the time before."))
         }
-        let prompt = str_at(r.copy(), "prompt") ?? String()
+        var prompt = str_at(r.copy(), "prompt") ?? String()
+        if came.len() > 0 { prompt = "{prompt}\n\n{came}" }
         let message_id = try i.store.new_id("msg")
         let blocks = Json.Array([Obj.new().s("kind", String("text")).s("text", prompt.copy()).done()])
         let message = Obj.new().s("id", message_id.copy()).s("conversation", conversation_id.copy()).s("role", String("person")).s("from", id.copy()).i("at", t).j("blocks", blocks).done()
@@ -894,7 +911,7 @@ impl Instance {
         try i.event(user.copy(), "message.created", Obj.new().s("conversation", conversation_id.copy()).j("message", message).done())
         let run_id = try i.store.new_id("run")
         i.routine_runs.insert(run_id.copy(), RoutineRun { user: user.copy(), routine: id })
-        let how = if by == "schedule" { routines.describe(routines.read(at(r.copy(), "schedule")) ?? routines.Schedule.Every(routines.EVERY_LEAST)) } else { String("now, as the person asked") }
+        let how = if by == "schedule" { routines.describe(routines.read(at(r.copy(), "schedule")) ?? routines.Schedule.Every(routines.EVERY_LEAST)) } else if by == "webhook" { String("by its webhook, with what it sent below the prompt") } else { String("now, as the person asked") }
         i.log(user.copy(), agent_id, "routine", "Ran the routine {name}", by)
         try i.routine_ran(user.copy(), merge(r, Obj.new().s("conversation", conversation_id).j("last", Obj.new().i("at", t).s("status", String("running")).s("run", run_id.copy()).done()).done()))
         let from = "the person's routine \"{name}\", run {how}. The person set it up, but isn't writing this"
@@ -937,8 +954,21 @@ impl Instance {
         let agent_key = str_at(m.copy(), "agent") ?? String()
         let agent = try i.find_agent(user.copy(), agent_key.copy()) else return Answer.Refused(String("not_found"), "There's no agent {agent_key}.")
         let agent_id = str_at(agent, "id") ?? String()
+        // A schedule, a webhook, or both.
         let schedule = at(m.copy(), "schedule")
-        let s = routines.read(schedule.copy()) else return Answer.Refused(String("bad_request"), routines.shape())
+        let s = routines.read(schedule.copy())
+        if schedule != Json.Null and s == none { return Answer.Refused(String("bad_request"), routines.shape()) }
+        let webhook = bool_at(m.copy(), "webhook") ?? (str_at(old.copy(), "hook") != none)
+        if s == none and not webhook { return Answer.Refused(String("bad_request"), String("A routine needs a schedule, a webhook, or both.")) }
+        var hook = String()
+        var secret = String()
+        if webhook {
+            hook = str_at(old.copy(), "hook") ?? "h_{bytes.hex(random_bytes(12))}"
+            secret = str_at(old.copy(), "secret") ?? bytes.hex(random_bytes(32))
+        }
+        var when = String()
+        if let sc = s { when = routines.describe(sc) }
+        if webhook { when = if when.len() > 0 { "{when}, and by webhook" } else { String("by webhook") } }
         var tz = str_at(m.copy(), "tz") ?? String()
         if tz.len() == 0 { tz = try i.store.device_tz(by.copy()) }
         if tz.len() == 0 { tz = try i.store.user_tz(user.copy()) }
@@ -949,14 +979,41 @@ impl Instance {
         // When it runs next stays, unless what decides that changed.
         let same = old != Json.Null and "{at(old.copy(), "schedule")}" == "{schedule}" and str_at(old.copy(), "tz") == some(tz.copy()) and (int_at(old.copy(), "next") ?? 0) > 0
         let t = now()
-        let next: i64 = if not on { 0 } else if same { int_at(old.copy(), "next") ?? 0 } else { routines.next(s, tz.copy(), t, i.minute_ms) }
+        var next: i64 = 0
+        if let sc = s {
+            if on { next = if same { int_at(old.copy(), "next") ?? 0 } else { routines.next(sc, tz.copy(), t, i.minute_ms) } }
+        }
         // Where it last posted, kept while its agent stays the same.
         let conversation = if str_at(old.copy(), "agent") == some(agent_id.copy()) { str_at(old.copy(), "conversation") ?? String() } else { String() }
         let id = if id_given.len() > 0 { id_given } else { try i.store.new_id("rt") }
-        let r = Obj.new().s("id", id).s("name", name.copy()).s("agent", agent_id.copy()).s("prompt", prompt).j("schedule", schedule).s("when", routines.describe(s)).s("tz", tz).b("on", on).b("notify", notify).b("catch_up", catch_up).s("conversation", conversation).i("next", next).j("last", at(old.copy(), "last")).s("by", by.copy()).i("at", t).done()
+        let r = Obj.new().s("id", id).s("name", name.copy()).s("agent", agent_id.copy()).s("prompt", prompt).j("schedule", schedule).maybe("hook", if webhook { some(hook) } else { none }).maybe("secret", if webhook { some(secret) } else { none }).s("when", when).s("tz", tz).b("on", on).b("notify", notify).b("catch_up", catch_up).s("conversation", conversation).i("next", next).j("last", at(old.copy(), "last")).s("by", by.copy()).i("at", t).done()
         i.log(user.copy(), agent_id, "routine", if old == Json.Null { "Made the routine {name}" } else { "Changed the routine {name}" }, by)
         try i.routine_ran(user, r.copy())
         return Answer.Value(Obj.new().j("routine", r).done())
+    }
+
+    // POST /hooks/<id>: runs a routine from outside, such as GitHub Actions
+    // saying a build failed (PLAN.md, "Routines"). The routine's secret comes
+    // as a bearer token, or signs the body as GitHub does: X-Hub-Signature-256
+    // is sha256= and the hex of the body's HMAC-SHA256 under the secret. What
+    // was sent goes to the agent after the routine's prompt.
+    fn hook(i: mut Instance, req: Request) -> Response ! Error {
+        if req.method != "POST" { return http_error(405, "bad_method", String("A webhook takes a POST.")) }
+        let (user, r) = try i.store.routine_by_hook(req.path[7..].copy()) else return http_error(404, "not_found", String("There's no webhook here."))
+        let secret = str_at(r.copy(), "secret") ?? String()
+        let signed = req.header(String("X-Hub-Signature-256")) ?? String()
+        let bearer = req.header(String("Authorization")) ?? String()
+        let good = if signed.len() > 0 { compare_digest(signed.to_bytes(), "sha256={bytes.hex(hmac_sha256(secret.to_bytes(), req.body.copy()))}".to_bytes()) } else { compare_digest(bearer.to_bytes(), "Bearer {secret}".to_bytes()) }
+        if secret.len() == 0 or not good { return http_error(401, "unauthorized", String("That isn't the routine's secret, or its signature.")) }
+        if bool_at(r.copy(), "on") == some(false) { return http_error(409, "paused", String("The routine is paused.")) }
+        var came = String("What its webhook was sent")
+        if let event = req.header(String("X-GitHub-Event")) { came.push_str(", a GitHub {event} event") }
+        let body = cut_short(decode_lossy_unicode(req.body.copy(), 0, req.body.len()), HOOK_MOST)
+        came.push_str(":\n\n```\n{body}\n```")
+        return match try i.fire(user, r, String("webhook"), came) {
+            Answer.Value(v) => json_response(202, v),
+            Answer.Refused(code, message) => json_response(409, Obj.new().j("error", Obj.new().s("code", code).s("message", message).done()).done()),
+        }
     }
 
     // --- Files (protocol.md, "Files") ---
@@ -2484,7 +2541,7 @@ impl Instance {
         if name == "routine.delete" or name == "routine.run" {
             let id = str_at(args, "id") ?? String()
             let r = try i.store.routine(user.copy(), id.copy()) else return Answer.Refused(String("not_found"), "There's no routine {id}.")
-            if name == "routine.run" { return try i.fire(user, r, device) }
+            if name == "routine.run" { return try i.fire(user, r, device, String()) }
             _ = try i.store.delete_routine(user.copy(), id.copy())
             i.log(user.copy(), str_at(r.copy(), "agent") ?? String(), "routine", "Deleted the routine {str_at(r, "name") ?? id.copy()}", device)
             try i.event(user, "routine.deleted", Obj.new().s("routine", id).done())

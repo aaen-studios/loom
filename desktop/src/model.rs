@@ -116,6 +116,9 @@ pub struct Routine {
     pub on: bool,
     /// Whether a run missed while the instance was off happens once it starts again.
     pub catch_up: bool,
+    /// Its webhook's id and secret, when it has one.
+    pub hook: String,
+    pub secret: String,
     /// When it runs next (Unix ms), or 0 while it's paused.
     pub next: i64,
     /// How its last run went: running, done, failed, skipped, or "" before the first.
@@ -140,12 +143,30 @@ impl Routine {
             notify: r.get("notify").and_then(Value::as_bool).unwrap_or(false),
             on: r.get("on").and_then(Value::as_bool).unwrap_or(true),
             catch_up: r.get("catch_up").and_then(Value::as_bool).unwrap_or(true),
+            hook: s(r, "hook"),
+            secret: s(r, "secret"),
             next: r.get("next").and_then(Value::as_i64).unwrap_or(0),
             last_status: s(&last, "status"),
             last_at: last.get("at").and_then(Value::as_i64).unwrap_or(0),
             last_error: s(&last, "error"),
         }
     }
+}
+
+/// What the routine form says, to save.
+#[derive(Clone, Debug, Default)]
+pub struct RoutineForm {
+    /// Empty for a new routine.
+    pub id: String,
+    pub name: String,
+    pub agent: String,
+    pub prompt: String,
+    /// Minutes apart, or none for a routine that only runs by webhook.
+    pub every: Option<i64>,
+    pub notify: bool,
+    pub on: bool,
+    pub catch_up: bool,
+    pub webhook: bool,
 }
 
 /// One entry of the activity log.
@@ -1476,22 +1497,12 @@ impl Model {
     }
 
     /// Saves a routine, new (`id` empty) or changed.
-    #[allow(clippy::too_many_arguments)]
-    pub fn save_routine(
-        &mut self,
-        id: &str,
-        name: &str,
-        agent: &str,
-        prompt: &str,
-        every: i64,
-        notify: bool,
-        on: bool,
-        catch_up: bool,
-    ) -> Value {
+    pub fn save_routine(&mut self, f: &RoutineForm) -> Value {
         let cmd = self.id("app.routine_put");
-        let mut args = json!({"name": name.trim(), "agent": agent, "prompt": prompt, "schedule": {"every": every}, "notify": notify, "on": on, "catch_up": catch_up});
-        if !id.is_empty() {
-            args["id"] = json!(id);
+        let schedule = f.every.map_or(Value::Null, |m| json!({"every": m}));
+        let mut args = json!({"name": f.name.trim(), "agent": f.agent, "prompt": f.prompt, "schedule": schedule, "notify": f.notify, "on": f.on, "catch_up": f.catch_up, "webhook": f.webhook});
+        if !f.id.is_empty() {
+            args["id"] = json!(f.id);
         }
         json!({"t": "cmd", "id": cmd, "name": "routine.put", "args": args})
     }
