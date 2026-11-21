@@ -930,6 +930,8 @@ ACTA_KEY=secret:ACTA_KEY",
                 && self.screen == Screen::Chat;
             let mood = self.model.mood(&a.id);
             let preview = self.model.preview(&a);
+            // A reply that came while its chat wasn't open: the row is bold until it is.
+            let unread = self.model.unread.contains(&a.id);
             let id = a.id.clone();
             list = list.child(
                 div()
@@ -959,7 +961,11 @@ ACTA_KEY=secret:ACTA_KEY",
                             .child(
                                 div()
                                     .text_size(px(size::BODY))
-                                    .font_weight(FontWeight::MEDIUM)
+                                    .font_weight(if unread {
+                                        FontWeight::SEMIBOLD
+                                    } else {
+                                        FontWeight::MEDIUM
+                                    })
                                     .text_color(p.ink)
                                     .truncate()
                                     .child(a.name.clone()),
@@ -967,7 +973,14 @@ ACTA_KEY=secret:ACTA_KEY",
                             .child(
                                 div()
                                     .text_size(px(size::CAPTION))
-                                    .text_color(if mood == Mood::Failed { p.bad } else { p.ink_3 })
+                                    .when(unread, |d| d.font_weight(FontWeight::MEDIUM))
+                                    .text_color(if mood == Mood::Failed {
+                                        p.bad
+                                    } else if unread {
+                                        p.ink
+                                    } else {
+                                        p.ink_3
+                                    })
                                     .truncate()
                                     .child(preview),
                             ),

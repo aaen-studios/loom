@@ -594,6 +594,9 @@ pub struct Model {
     pub messages: Vec<Message>,
     pub more_messages: bool,
     pub selected: Option<String>,
+    /// Agents with a reply that came while their chat wasn't open, until it is: their
+    /// row in the sidebar is bold.
+    pub unread: HashSet<String>,
     /// Replies being written, by message id: their blocks so far.
     live: HashMap<String, Vec<Block>>,
     last_delta: HashMap<String, Instant>,
@@ -823,6 +826,9 @@ impl Model {
     }
 
     pub fn select(&mut self, agent: Option<String>) {
+        if let Some(a) = &agent {
+            self.unread.remove(a);
+        }
         if self.selected != agent {
             self.selected = agent;
             self.messages.clear();
@@ -969,8 +975,21 @@ impl Model {
                 let message = f.get("message").cloned().unwrap_or(Value::Null);
                 let id = s(&message, "id");
                 self.live.remove(&id);
-                if Some(s(f, "conversation")) == self.conversation() {
+                let conversation = s(f, "conversation");
+                if Some(conversation.clone()) == self.conversation() {
                     self.dirty.insert(List::Messages);
+                } else if kind == "message.created" && self.synced && s(&message, "role") == "agent"
+                {
+                    // A reply in another chat, as it comes; catch-up is what was seen before.
+                    let agent = self
+                        .conversations
+                        .iter()
+                        .find(|c| c.id == conversation)
+                        .map(|c| c.agent.clone())
+                        .unwrap_or_else(|| s(&message, "agent"));
+                    if !agent.is_empty() {
+                        self.unread.insert(agent);
+                    }
                 }
                 self.dirty.insert(List::Conversations);
             }
@@ -2437,6 +2456,34 @@ mod tests {
             .last()
             .unwrap()
             .contains("Only the instance's owner"));
+    }
+
+    #[test]
+    fn a_reply_in_another_chat_is_unread_until_it_is_opened() {
+        let mut m = Model::new();
+        m.conversations = vec![
+            Conversation {
+                id: "c_1".into(),
+                agent: "a_1".into(),
+            },
+            Conversation {
+                id: "c_2".into(),
+                agent: "a_2".into(),
+            },
+        ];
+        m.select(Some("a_1".into()));
+        let reply = |conversation: &str, agent: &str| json!({"t": "event", "kind": "message.created", "conversation": conversation, "message": {"id": "msg_1", "conversation": conversation, "role": "agent", "agent": agent}});
+        // During catch-up, replies were seen before.
+        m.take(&reply("c_2", "a_2"));
+        assert!(m.unread.is_empty());
+        m.synced = true;
+        m.take(&reply("c_1", "a_1"));
+        m.take(&json!({"t": "event", "kind": "message.created", "conversation": "c_2", "message": {"id": "msg_2", "conversation": "c_2", "role": "person"}}));
+        assert!(m.unread.is_empty());
+        m.take(&reply("c_2", "a_2"));
+        assert!(m.unread.contains("a_2"));
+        m.select(Some("a_2".into()));
+        assert!(m.unread.is_empty());
     }
 
     #[test]
