@@ -42,6 +42,7 @@ pub fn export(data: String, to: String, version: String) -> Json ! Error {
     }
     let db = try Database.open(live)
     _ = try db.execute(String("VACUUM INTO ?"), [Value.Text(snapshot.copy())])
+    try db.close()
     let copy = try Database.open(snapshot.copy())
     let instance = match try copy.query_one(String("SELECT value FROM meta WHERE key = 'instance'"), List<Value>()) {
         some(r) => text(r[0].copy()),
@@ -51,6 +52,7 @@ pub fn export(data: String, to: String, version: String) -> Json ! Error {
     for r in try copy.query(String("SELECT name FROM acp_agents ORDER BY name"), List<Value>()) {
         programs.push(Json.Str(text(r[0].copy())))
     }
+    try copy.close()
     let manifest = Obj.new().i("format", FORMAT).s("version", version).s("instance", instance).i("at", now()).j("acp_agents", Json.Array(programs)).done()
     var w = StreamWriter.new(zstd.Writer.new(try fs.create(making.copy()), level: 9, checksum: true))
     try w.add(String("loom.json"), "{manifest}".to_bytes(), mode: 0o600)
@@ -69,7 +71,8 @@ pub fn export(data: String, to: String, version: String) -> Json ! Error {
         }
     }
     let z = try w.finish()
-    _ = try z.finish()
+    let file = try z.finish()
+    try file.close()
     try fs.remove_file(snapshot)
     // It holds the key to the instance's secrets: only its owner reads it.
     if fs.separator() == "/" { try fs.set_mode(making.copy(), 0o600) }
@@ -84,10 +87,11 @@ pub fn restore(from: String, data: String) -> Json ! Error {
     try fs.make_dir_all(data.copy())
     var r = StreamReader.new(zstd.Reader.new(try fs.open_read(from.copy())))
     try r.extract(data.copy())
-    _ = try r.finish()
+    let file = (try r.finish()).into_inner()
+    try file.close()
     let told = "{data}/loom.json"
-    let text = try fs.read_text(told.copy()) ?? String()
-    let manifest = match parse(text) {
+    let written = try fs.read_text(told.copy()) ?? String()
+    let manifest = match parse(written) {
         ok(m) => m,
         err(_) => fail "{from} isn't a loom backup: it has no loom.json",
     }
@@ -104,7 +108,7 @@ pub fn restore(from: String, data: String) -> Json ! Error {
 
 fn text(v: Value) -> String {
     return match v {
-        Value.Text(t) => t,
+        Value.Text(t) => t.copy(),
         _ => String(),
     }
 }
