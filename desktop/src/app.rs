@@ -193,6 +193,8 @@ pub struct Loom {
     /// The new task form: what it is, and the agent it goes to.
     task_prompt_in: Entity<TextareaState>,
     task_agent: Option<String>,
+    // Whether the Tasks page shows a new task being written.
+    task_new: bool,
     routine_notify: bool,
     routine_on: bool,
     routine_catch_up: bool,
@@ -709,6 +711,7 @@ ACTA_KEY=secret:ACTA_KEY",
             routine_agent: None,
             task_prompt_in,
             task_agent: None,
+            task_new: false,
             routine_notify: true,
             routine_on: true,
             routine_catch_up: true,
@@ -824,7 +827,6 @@ ACTA_KEY=secret:ACTA_KEY",
     /// elsewhere: keeps the choice, and starts the core again with it.
     /// Opens a page, asking the instance for what it shows.
     fn open(&mut self, screen: Screen, cx: &mut Context<Self>) {
-        self.model.tables_open = screen == Screen::Tables;
         match screen {
             Screen::Server => {
                 let f = self.model.load_scripts();
@@ -916,9 +918,11 @@ ACTA_KEY=secret:ACTA_KEY",
                 self.popup = None;
                 self.side = None;
             }
-            Screen::EditAgent | Screen::Activity | Screen::Memory | Screen::Pins => {
-                self.show_side(screen, cx)
-            }
+            Screen::EditAgent
+            | Screen::Activity
+            | Screen::Memory
+            | Screen::Pins
+            | Screen::Tables => self.show_side(screen, cx),
             _ => {
                 if !is_server(screen) {
                     self.settings_last = screen;
@@ -938,6 +942,7 @@ ACTA_KEY=secret:ACTA_KEY",
         self.popup = None;
         self.side = Some(screen);
         self.model.pins_open = screen == Screen::Pins;
+        self.model.tables_open = screen == Screen::Tables;
         if screen == Screen::Pins {
             if let Some(f) = self.model.load_pins() {
                 self.send(f);
@@ -952,6 +957,7 @@ ACTA_KEY=secret:ACTA_KEY",
         }
         self.model.page = None;
         self.model.pins_open = false;
+        self.model.tables_open = false;
         self.side = None;
         self.model.editing = None;
         cx.notify();
@@ -1434,6 +1440,7 @@ ACTA_KEY=secret:ACTA_KEY",
             Screen::Activity => (Ico::Activity, format!("What {name} did")),
             Screen::Memory => (Ico::Brain, format!("What {name} remembers")),
             Screen::Pins => (Ico::Pin, "Pinned".to_string()),
+            Screen::Tables => (Ico::Sheet, format!("{name}'s tables")),
             Screen::Aside => (
                 Ico::MessageCircleQuestionMark,
                 format!("Ask {name} on the side"),
@@ -1460,6 +1467,7 @@ ACTA_KEY=secret:ACTA_KEY",
             Screen::Activity => self.activity_page(cx),
             Screen::Memory => self.memory_page(cx),
             Screen::Pins => self.pins_page(&name, cx),
+            Screen::Tables => self.tables_panel(cx),
             Screen::Aside => self.aside_page(&name),
             // The page's web view sits over this, once it's here.
             Screen::Page if self.model.page_path().is_none() => div()
@@ -1559,13 +1567,17 @@ ACTA_KEY=secret:ACTA_KEY",
         }
     }
 
-    /// Each server the app is signed in to, as its spool, in a row: the one on screen
-    /// opens the server popup, and another comes on screen, with a dot when one of its
-    /// agents said something there. With one server, only its spool.
+    /// Each server the app is signed in to, in a row. The one on screen is a box with its
+    /// spool, its name and how it is, which opens the server popup; another is its spool
+    /// alone, which comes on screen, with a dot when one of its agents said something there.
     fn spools(&self, server_open: bool, cx: &mut Context<Self>) -> Div {
         let p = self.p;
-        let mut row = div().flex().items_center().gap(px(space::XS)).min_w_0();
-        let several = !self.away.is_empty();
+        let mut row = div()
+            .flex_1()
+            .flex()
+            .items_center()
+            .gap(px(space::XS))
+            .min_w_0();
         for (dir, model) in self.servers() {
             let here = dir == self.here;
             let state = spool_of(model);
@@ -1577,28 +1589,52 @@ ACTA_KEY=secret:ACTA_KEY",
                 .flex()
                 .items_center()
                 .gap(px(space::S))
-                .px(px(if several { space::S } else { space::M }))
-                .py(px(space::S))
                 .rounded(px(radius::ROW))
                 .cursor_pointer()
                 .hover(move |s| s.bg(p.hover));
             if here {
+                let dot = match state {
+                    Spool::Wound => p.ok,
+                    Spool::Loose => p.bad,
+                    _ => p.ink_3,
+                };
                 button = button
+                    .flex_1()
+                    .min_w_0()
+                    .px(px(space::S))
+                    .py(px(6.0))
+                    .border_1()
+                    .border_color(if server_open { p.line_strong } else { p.line })
                     .when(server_open, |d| d.bg(p.active))
-                    .when(several, |d| d.bg(p.hover))
-                    .child(spool(state, ink, 38.0, 18.0))
-                    // The words only while it isn't well.
-                    .when(state != Spool::Wound, |d| {
-                        d.child(
-                            div()
-                                .text_size(px(size::CAPTION))
-                                .text_color(p.ink_3)
-                                .truncate()
-                                .child(self.conn_words()),
-                        )
-                    })
+                    .child(div().flex_none().child(spool(state, ink, 30.0, 14.0)))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .flex()
+                            .flex_col()
+                            .child(
+                                div()
+                                    .text_size(px(size::SMALL))
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .text_color(p.ink)
+                                    .truncate()
+                                    .child(server_name(model, &dir)),
+                            )
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap(px(5.0))
+                                    .text_size(px(size::CAPTION))
+                                    .text_color(p.ink_3)
+                                    .child(div().size(px(6.0)).flex_none().rounded(px(2.0)).bg(dot))
+                                    .child(div().truncate().child(self.conn_words())),
+                            ),
+                    )
                     .on_click(cx.listener(|this, _, _, cx| this.open(Screen::Server, cx)));
             } else {
+                button = button.flex_none().px(px(space::XS)).py(px(space::S));
                 let heard = !model.unread.is_empty();
                 button = button
                     .child(spool(state, ink, 26.0, 13.0))
@@ -1660,7 +1696,6 @@ ACTA_KEY=secret:ACTA_KEY",
             ("pop-routines", Ico::Clock, "Routines", Screen::Routines),
             ("pop-tasks", Ico::ListTodo, "Tasks", Screen::Tasks),
             ("pop-skills", Ico::BookOpen, "Skills", Screen::Skills),
-            ("pop-tables", Ico::Sheet, "Tables", Screen::Tables),
             ("pop-programs", Ico::Bot, "Agent programs", Screen::Programs),
             ("pop-mcp", Ico::Plug, "MCP servers", Screen::Mcp),
             ("pop-plugins", Ico::Puzzle, "Plugins", Screen::Plugins),
@@ -1772,7 +1807,6 @@ ACTA_KEY=secret:ACTA_KEY",
             Screen::Server => self.server_page(cx),
             Screen::Profile => self.profile_page(cx),
             Screen::Skills => self.skills_page(cx),
-            Screen::Tables => self.tables_page(cx),
             Screen::Routines => self.routines_page(cx),
             Screen::Tasks => self.tasks_page(cx),
             Screen::Programs => self.programs_page(cx),
@@ -1871,98 +1905,81 @@ ACTA_KEY=secret:ACTA_KEY",
         )
     }
 
-    /// The popup's first server page: where the instance is, and how it is.
+    /// The popup's first server page: where the instance is and how it is, and scripts.
     fn server_page(&mut self, cx: &mut Context<Self>) -> Div {
         let p = self.p;
         let where_ = if self.local() {
             "On this computer".to_string()
         } else {
             match &self.model.server {
-                Some(_) => format!("At {}", server_name(&self.model, &self.here)),
+                Some(_) => server_name(&self.model, &self.here),
                 None => "On a server".into(),
             }
         };
-        let body = div()
-            .w_full()
-            .max_w(px(560.0))
+        let state = self.spool_state();
+        let words = self.conn_words();
+        let status = div()
             .flex()
-            .flex_col()
             .items_center()
-            .gap(px(space::M))
-            .pt(px(space::XXL))
-            .child(spool(self.spool_state(), self.spool_ink(), 120.0, 44.0))
-            .child(
-                div()
-                    .pt(px(space::M))
-                    .text_size(px(size::HEADING))
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(p.ink)
-                    .child(where_),
+            .gap(px(space::S))
+            .text_size(px(size::SMALL))
+            .text_color(if state == Spool::Loose {
+                p.bad
+            } else {
+                p.ink_2
+            })
+            .child(div().size(px(7.0)).rounded(px(2.0)).bg(match state {
+                Spool::Wound => p.ok,
+                Spool::Loose => p.bad,
+                _ => p.ink_3,
+            }))
+            .child(words);
+        let here = self
+            .row(
+                Some(
+                    div()
+                        .w(px(52.0))
+                        .flex_none()
+                        .flex()
+                        .justify_center()
+                        .child(spool(state, self.spool_ink(), 46.0, 20.0))
+                        .into_any_element(),
+                ),
+                where_,
+                Some(format!("loom {}", crate::VERSION)),
+                Some(status.into_any_element()),
             )
-            .child(
-                div()
-                    .text_size(px(size::SMALL))
-                    .text_color(if self.spool_state() == Spool::Loose {
-                        p.bad
-                    } else {
-                        p.ink_3
-                    })
-                    .child(self.conn_words()),
-            )
-            .child(
-                div()
-                    .text_size(px(size::CAPTION))
-                    .text_color(p.ink_3)
-                    .child(format!("loom {}", crate::VERSION)),
-            )
-            .child(self.scripts_section(cx));
-        div().flex_1().min_h_0().child(
-            div()
-                .id("server-page")
-                .size_full()
-                .overflow_y_scroll()
-                .flex()
-                .justify_center()
-                .items_start()
-                .px(px(space::XL))
-                .pb(px(space::XXL))
-                .child(body),
-        )
+            .min_h(px(68.0));
+        let groups = vec![
+            self.group(None, vec![here.into_any_element()]),
+            self.scripts_group(cx),
+        ];
+        self.settings_page("server-page", "This server", None, groups)
     }
 
     /// Scripts on the instance's computer (PLAN.md, "Scripts"): off until turned on,
     /// with a token shown once, and how to use it.
-    fn scripts_section(&mut self, cx: &mut Context<Self>) -> Div {
+    fn scripts_group(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let p = self.p;
-        let caption = |text: String| {
-            div()
-                .text_size(px(size::CAPTION))
-                .text_color(p.ink_3)
-                .child(text)
-        };
-        let mut section = div()
-            .w_full()
-            .mt(px(space::XL))
-            .pt(px(space::L))
-            .border_t_1()
-            .border_color(p.line)
-            .flex()
-            .flex_col()
-            .gap(px(space::S))
-            .child(
-                div()
-                    .text_size(px(size::SMALL))
-                    .font_weight(FontWeight::MEDIUM)
-                    .text_color(p.ink)
-                    .child("Scripts"),
+        let (on, port) = self.model.scripts.unwrap_or((false, 0));
+        let toggle =
+            self.switch("scripts-switch", on)
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    let f = this.model.set_scripts(!on);
+                    this.send(f);
+                    cx.notify();
+                }));
+        let mut rows = vec![self
+            .row(
+                Some(self.tile(Ico::SquareTerminal)),
+                "Scripts",
+                Some("Your scripts on that computer can use your agents".into()),
+                self.model
+                    .scripts
+                    .is_some()
+                    .then(|| toggle.into_any_element()),
             )
-            .child(caption(
-                "Your own scripts on the computer the instance runs on can ask your agents and wait for the answer, run routines, and answer what waits for you, with loom's command line"
-                    .into(),
-            ));
-        let Some((on, port)) = self.model.scripts else {
-            return section;
-        };
+            .into_any_element()];
         if let Some(token) = self.model.script_token.clone() {
             let agent = self
                 .model
@@ -1970,62 +1987,45 @@ ACTA_KEY=secret:ACTA_KEY",
                 .first()
                 .map(|a| a.name.clone())
                 .unwrap_or_else(|| "Bean".into());
-            let example = format!("loom ask {agent} \"hello\" --port {port} --token {token}");
             let copied = token.clone();
-            section = section
-                .child(
-                    div()
-                        .id("script-token")
-                        .px(px(space::M))
-                        .py(px(space::S))
-                        .rounded(px(radius::ROW))
-                        .bg(p.bubble)
-                        .text_size(px(size::SMALL))
-                        .text_color(p.ink)
-                        .cursor_pointer()
-                        .child(token)
-                        .on_click(move |_, _, cx| {
-                            cx.write_to_clipboard(ClipboardItem::new_string(copied.clone()));
-                        }),
+            let copy =
+                self.small_button("script-token", "Copy", false)
+                    .on_click(move |_, _, cx| {
+                        cx.write_to_clipboard(ClipboardItem::new_string(copied.clone()));
+                    });
+            rows.push(
+                self.row(
+                    None,
+                    token.clone(),
+                    Some("Your token, shown this once".into()),
+                    Some(copy.into_any_element()),
                 )
-                .child(caption(format!(
-                    "Your script token, shown this once: click it to copy. Then, on that computer: {example}"
-                )));
+                .into_any_element(),
+            );
+            rows.push(self.note_row(
+                format!("loom ask {agent} \"hello\" --port {port} --token {token}"),
+                p.ink_2,
+            ));
         } else if on {
-            section = section.child(caption(
-                "On. Its token was shown when you turned them on: make a new one if you need it again".into(),
-            ));
-        }
-        let mut buttons = div().flex().gap(px(space::S));
-        if on {
-            buttons = buttons
-                .child(
-                    self.button("scripts-new", "New token", false)
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            let f = this.model.set_scripts(true);
-                            this.send(f);
-                            cx.notify();
-                        })),
+            rows.push(
+                self.row(
+                    None,
+                    "Token",
+                    Some("Shown once, when it's made".into()),
+                    Some(
+                        self.small_button("scripts-new", "New token", false)
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                let f = this.model.set_scripts(true);
+                                this.send(f);
+                                cx.notify();
+                            }))
+                            .into_any_element(),
+                    ),
                 )
-                .child(
-                    self.button("scripts-off", "Turn off", false)
-                        .text_color(p.bad)
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            let f = this.model.set_scripts(false);
-                            this.send(f);
-                            cx.notify();
-                        })),
-                );
-        } else {
-            buttons = buttons.child(self.button("scripts-on", "Turn on", true).on_click(
-                cx.listener(|this, _, _, cx| {
-                    let f = this.model.set_scripts(true);
-                    this.send(f);
-                    cx.notify();
-                }),
-            ));
+                .into_any_element(),
+            );
         }
-        section.child(buttons)
+        self.group(None, rows)
     }
 
     // --- Tasks ---
@@ -2048,7 +2048,7 @@ ACTA_KEY=secret:ACTA_KEY",
         let add = |row: Div, name: &'static str, label: &str, primary: bool| {
             let id = task.id.clone();
             row.child(
-                self.button_owned(format!("task-{name}-{}", task.id), label, primary)
+                self.small_button(format!("task-{name}-{}", task.id), label, primary)
                     .on_click(cx.listener(move |this, _, _, cx| {
                         let f = this
                             .model
@@ -2236,7 +2236,55 @@ ACTA_KEY=secret:ACTA_KEY",
         cx.notify();
     }
 
-    /// The Tasks page: a new task for an agent, and every task, newest first.
+    /// The agents to pick one from, as chips with their thread's colour.
+    fn agent_chips(
+        &self,
+        prefix: &'static str,
+        picked: Option<&str>,
+        cx: &mut Context<Self>,
+        pick: fn(&mut Loom, String),
+    ) -> Div {
+        let p = self.p;
+        let mut chips = div().flex().flex_wrap().gap(px(space::XS));
+        for a in self.model.agents.clone() {
+            let id = a.id.clone();
+            let on = picked == Some(a.id.as_str());
+            let tint = thread::color(&a.color, p.dark);
+            chips = chips.child(
+                div()
+                    .id(SharedString::from(format!("{prefix}-{}", a.id)))
+                    .h(px(28.0))
+                    .px(px(space::M))
+                    .flex()
+                    .items_center()
+                    .gap(px(space::S))
+                    .rounded(px(radius::CHIP))
+                    .border_1()
+                    .text_size(px(size::SMALL))
+                    .cursor_pointer()
+                    .when(on, |d| {
+                        d.bg(p.bg)
+                            .border_color(p.line_strong)
+                            .text_color(p.ink)
+                            .font_weight(FontWeight::MEDIUM)
+                    })
+                    .when(!on, |d| {
+                        d.border_color(transparent_black())
+                            .text_color(p.ink_3)
+                            .hover(move |s| s.text_color(p.ink))
+                    })
+                    .child(div().w(px(12.0)).h(px(2.0)).rounded(px(1.0)).bg(tint))
+                    .child(a.name.clone())
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        pick(this, id.clone());
+                        cx.notify();
+                    })),
+            );
+        }
+        chips
+    }
+
+    /// The Tasks page: every task, newest first, and a new one for an agent.
     fn tasks_page(&mut self, cx: &mut Context<Self>) -> Div {
         let p = self.p;
         if self
@@ -2250,46 +2298,67 @@ ACTA_KEY=secret:ACTA_KEY",
                 .clone()
                 .or_else(|| self.model.agents.first().map(|a| a.id.clone()));
         }
-        let mut agents = div().flex().flex_wrap().gap(px(space::XS));
-        for a in self.model.agents.clone() {
-            let id = a.id.clone();
-            let picked = self.task_agent.as_deref() == Some(a.id.as_str());
-            agents = agents.child(
-                self.button_owned(format!("task-agent-{}", a.id), &a.name, picked)
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.task_agent = Some(id.clone());
-                        cx.notify();
-                    })),
+        let mut groups = Vec::new();
+        if self.task_new {
+            let start = self
+                .small_button("start-task", "Start", true)
+                .on_click(cx.listener(|this, _, window, cx| {
+                    let prompt = this.task_prompt_in.read(cx).value().trim().to_string();
+                    let Some(agent) = this.task_agent.clone() else {
+                        return;
+                    };
+                    if prompt.is_empty() {
+                        return;
+                    }
+                    let f = this.model.task_cmd(
+                        "task.start",
+                        serde_json::json!({"agent": agent, "prompt": prompt}),
+                    );
+                    this.send(f);
+                    this.task_prompt_in
+                        .update(cx, |s, cx| s.set_value("", window, cx));
+                    this.task_new = false;
+                    cx.notify();
+                }));
+            let cancel = self
+                .small_button("cancel-task", "Cancel", false)
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.task_new = false;
+                    cx.notify();
+                }));
+            let chips = self.agent_chips(
+                "task-agent",
+                self.task_agent.clone().as_deref(),
+                cx,
+                |this, id| this.task_agent = Some(id),
             );
+            groups.push(self.group(
+                Some("New task"),
+                vec![
+                    div()
+                        .px(px(space::L))
+                        .pt(px(space::M))
+                        .child(chips)
+                        .into_any_element(),
+                    div()
+                        .p(px(space::L))
+                        .flex()
+                        .flex_col()
+                        .gap(px(space::M))
+                        .child(Textarea::new(&self.task_prompt_in))
+                        .child(
+                            div()
+                                .flex()
+                                .justify_end()
+                                .gap(px(space::S))
+                                .child(cancel)
+                                .child(start),
+                        )
+                        .into_any_element(),
+                ],
+            ));
         }
-        let start = self
-            .button("start-task", "Start", true)
-            .on_click(cx.listener(|this, _, window, cx| {
-                let prompt = this.task_prompt_in.read(cx).value().trim().to_string();
-                let Some(agent) = this.task_agent.clone() else {
-                    return;
-                };
-                if prompt.is_empty() {
-                    return;
-                }
-                let f = this.model.task_cmd(
-                    "task.start",
-                    serde_json::json!({"agent": agent, "prompt": prompt}),
-                );
-                this.send(f);
-                this.task_prompt_in
-                    .update(cx, |s, cx| s.set_value("", window, cx));
-                cx.notify();
-            }));
-        let mut list = div().flex().flex_col().gap(px(space::XS));
-        if self.model.tasks.is_empty() {
-            list = list.child(
-                div()
-                    .text_size(px(size::CAPTION))
-                    .text_color(p.ink_3)
-                    .child("No tasks yet"),
-            );
-        }
+        let mut rows = Vec::new();
         for t in self.model.tasks.clone() {
             let Some(agent) = self.model.agent(&t.agent).cloned() else {
                 continue;
@@ -2300,87 +2369,55 @@ ACTA_KEY=secret:ACTA_KEY",
             if t.status == "done" && !t.result.is_empty() {
                 words = format!("{words} · {}", t.result.lines().next().unwrap_or_default());
             }
-            list = list.child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(space::M))
-                    .child(
-                        div()
-                            .id(SharedString::from(format!("task-{}", t.id)))
-                            .flex_1()
-                            .min_w_0()
-                            .flex()
-                            .items_center()
-                            .gap(px(space::M))
-                            .py(px(space::S))
-                            .px(px(space::S))
-                            .rounded(px(radius::BUTTON))
-                            .cursor_pointer()
-                            .hover(move |s| s.bg(p.hover))
-                            .child(Icon::new(Ico::ListTodo).small().text_color(tint))
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .min_w_0()
-                                    .flex()
-                                    .flex_col()
-                                    .child(
-                                        div()
-                                            .truncate()
-                                            .text_size(px(size::SMALL))
-                                            .font_weight(FontWeight::MEDIUM)
-                                            .text_color(p.ink)
-                                            .child(t.title.clone()),
-                                    )
-                                    .child(
-                                        div()
-                                            .truncate()
-                                            .text_size(px(size::CAPTION))
-                                            .text_color(if t.status == "failed" {
-                                                p.bad
-                                            } else {
-                                                p.ink_3
-                                            })
-                                            .child(words),
-                                    ),
-                            )
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.open_task(Some(id.clone()), cx)
-                            })),
-                    )
-                    .child(self.task_actions(&t, cx)),
+            let lead = div()
+                .size(px(30.0))
+                .flex_none()
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded(px(radius::ROW))
+                .border_1()
+                .border_color(p.line)
+                .bg(p.bg)
+                .text_color(tint)
+                .child(Icon::new(Ico::ListTodo).small())
+                .into_any_element();
+            rows.push(
+                self.row(
+                    Some(lead),
+                    t.title.clone(),
+                    Some(words),
+                    Some(self.task_actions(&t, cx).into_any_element()),
+                )
+                .id(SharedString::from(format!("task-{}", t.id)))
+                .cursor_pointer()
+                .hover(move |s| s.bg(p.hover))
+                .on_click(cx.listener(move |this, _, _, cx| this.open_task(Some(id.clone()), cx)))
+                .into_any_element(),
             );
         }
-        let body = div()
-            .w_full()
-            .max_w(px(560.0))
-            .flex()
-            .flex_col()
-            .gap(px(space::XL))
-            .child(
-                div()
-                    .text_size(px(size::HEADING))
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(p.ink)
-                    .child("New task"),
-            )
-            .child(self.field("Agent", agents))
-            .child(self.field("What to do", Textarea::new(&self.task_prompt_in)))
-            .child(div().flex().child(start))
-            .child(list);
-        let page = div()
-            .id("tasks-page")
-            .size_full()
-            .overflow_y_scroll()
-            .flex()
-            .justify_center()
-            .items_start()
-            .pt(px(space::XL))
-            .px(px(space::XL))
-            .pb(px(space::XXL))
-            .child(body);
-        div().flex_1().min_h_0().child(page)
+        let new_task = |this: &Self, cx: &mut Context<Self>, primary: bool| {
+            this.small_button("new-task", "New task", primary)
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.task_new = true;
+                    cx.notify();
+                }))
+                .into_any_element()
+        };
+        if !rows.is_empty() {
+            groups.push(self.group(None, rows));
+        } else if !self.task_new {
+            let action = new_task(self, cx, true);
+            groups.push(self.empty(
+                Ico::ListTodo,
+                "No tasks yet",
+                "Hand an agent a job to work on by itself, and come back to what it did",
+                Some(action),
+            ));
+        }
+        let action =
+            (!self.task_new && !self.model.tasks.is_empty()).then(|| new_task(self, cx, false));
+        self.settings_page("tasks-page", "Tasks", action, groups)
     }
 
     // --- The parts ---
@@ -2994,7 +3031,9 @@ ACTA_KEY=secret:ACTA_KEY",
         // Every thread colour, woven through the name. The threads draw in from the left,
         // then the name settles among them, then the rest. The band stays put when the
         // server form takes the place of what's under it.
-        let threads = COLORS.iter().map(|c| thread::color(c, p.dark)).collect();
+        let threads: Vec<Hsla> = COLORS.iter().map(|c| thread::color(c, p.dark)).collect();
+        let over = threads.clone();
+        let (mark, half) = wordmark(p, 72.0);
         let reveal = self.enter(0.15, 1.3);
         let word = self.enter(0.7, 0.6);
         let line = self.enter(1.1, 0.5);
@@ -3034,7 +3073,7 @@ ACTA_KEY=secret:ACTA_KEY",
                                     .items_center()
                                     .justify_center()
                                     .gap(px(space::S))
-                                    .rounded_full()
+                                    .rounded(px(radius::BUTTON))
                                     .bg(p.button)
                                     .text_color(p.button_ink)
                                     .font_weight(FontWeight::SEMIBOLD)
@@ -3084,17 +3123,18 @@ ACTA_KEY=secret:ACTA_KEY",
                     .h(px(190.0))
                     .child(thread::weave(threads, 0.0, reveal, 190.0)),
             )
-            .child(appear(
+            .child(appear(mark, word))
+            // The threads that cross over the mark, so they weave through it.
+            .child(
                 div()
-                    .px(px(space::XL))
-                    .rounded_full()
-                    .bg(p.bg)
-                    .text_size(px(72.0))
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(p.ink)
-                    .child("loom"),
-                word,
-            ));
+                    .absolute()
+                    .top_0()
+                    .left_0()
+                    .w_full()
+                    .h(px(190.0))
+                    .opacity(word)
+                    .child(thread::weave_over(over, 0.0, reveal, 190.0, half)),
+            );
         div()
             .size_full()
             .flex()
@@ -3147,7 +3187,7 @@ ACTA_KEY=secret:ACTA_KEY",
                             .flex()
                             .items_center()
                             .justify_center()
-                            .rounded_full()
+                            .rounded(px(radius::BUTTON))
                             .text_color(p.ink_2)
                             .cursor_pointer()
                             .hover(move |s| s.bg(p.hover).text_color(p.ink))
@@ -3532,7 +3572,7 @@ ACTA_KEY=secret:ACTA_KEY",
             .child(
                 div()
                     .flex()
-                    .items_center()
+                    .items_stretch()
                     .justify_between()
                     .gap(px(space::XS))
                     .px(px(space::S))
@@ -3541,19 +3581,19 @@ ACTA_KEY=secret:ACTA_KEY",
                     .child(
                         div()
                             .id("settings")
+                            .w(px(40.0))
+                            .flex_none()
                             .flex()
                             .items_center()
-                            .gap(px(space::S))
-                            .px(px(space::M))
-                            .py(px(space::S))
+                            .justify_center()
                             .rounded(px(radius::ROW))
-                            .text_size(px(size::SMALL))
+                            .border_1()
+                            .border_color(if settings_open { p.line_strong } else { p.line })
                             .text_color(p.ink_2)
                             .cursor_pointer()
                             .when(settings_open, |d| d.bg(p.active))
                             .hover(move |s| s.bg(p.hover).text_color(p.ink))
                             .child(Icon::new(Ico::Settings).small())
-                            .child("Settings")
                             .on_click(cx.listener(|this, _, _, cx| {
                                 let last = this.settings_last;
                                 this.open(last, cx)
@@ -4354,7 +4394,7 @@ ACTA_KEY=secret:ACTA_KEY",
                                     .flex()
                                     .items_center()
                                     .justify_center()
-                                    .rounded_full()
+                                    .rounded(px(radius::ROW))
                                     .cursor_pointer()
                                     .text_color(p.ink_3)
                                     .opacity(0.0)
@@ -4380,7 +4420,7 @@ ACTA_KEY=secret:ACTA_KEY",
                                     .flex()
                                     .items_center()
                                     .justify_center()
-                                    .rounded_full()
+                                    .rounded(px(radius::ROW))
                                     .cursor_pointer()
                                     .text_color(if pinned { p.ink_2 } else { p.ink_3 })
                                     .when(!pinned, |d| {
@@ -4496,7 +4536,7 @@ ACTA_KEY=secret:ACTA_KEY",
                                         .flex()
                                         .items_center()
                                         .justify_center()
-                                        .rounded_full()
+                                        .rounded(px(radius::BUTTON))
                                         .text_color(p.ink_2)
                                         .cursor_pointer()
                                         .hover(move |s| s.bg(p.hover))
@@ -4540,7 +4580,7 @@ ACTA_KEY=secret:ACTA_KEY",
                                     .flex()
                                     .items_center()
                                     .justify_center()
-                                    .rounded_full()
+                                    .rounded(px(radius::BUTTON))
                                     .text_color(p.ink_2)
                                     .cursor_pointer()
                                     .hover(move |s| s.bg(p.hover))
@@ -4565,7 +4605,7 @@ ACTA_KEY=secret:ACTA_KEY",
                                 .flex()
                                 .items_center()
                                 .justify_center()
-                                .rounded_full()
+                                .rounded(px(radius::BUTTON))
                                 .bg(p.button)
                                 .text_color(p.button_ink)
                                 .cursor_pointer()
@@ -4701,7 +4741,7 @@ ACTA_KEY=secret:ACTA_KEY",
                         .flex()
                         .items_center()
                         .justify_center()
-                        .rounded_full()
+                        .rounded(px(radius::BUTTON))
                         .text_color(p.ink_2)
                         .cursor_pointer()
                         .hover(move |s| s.bg(p.hover).text_color(p.ink))
@@ -4980,7 +5020,7 @@ ACTA_KEY=secret:ACTA_KEY",
                                 .flex()
                                 .items_center()
                                 .justify_center()
-                                .rounded_full()
+                                .rounded(px(radius::BUTTON))
                                 .text_color(p.ink_2)
                                 .cursor_pointer()
                                 .hover(move |s| s.bg(p.hover).text_color(p.ink))
@@ -5008,7 +5048,7 @@ ACTA_KEY=secret:ACTA_KEY",
                     .flex()
                     .items_center()
                     .gap(px(space::S))
-                    .rounded_full()
+                    .rounded(px(radius::BUTTON))
                     .bg(tint)
                     .text_color(p.bg)
                     .font_weight(FontWeight::SEMIBOLD)
@@ -5139,9 +5179,11 @@ ACTA_KEY=secret:ACTA_KEY",
         let word_out = smooth(span(1.35, 1.75));
         let gather = smooth(span(1.45, 2.15));
         let close = smooth(span(2.1, SPLASH_SECONDS));
-        let threads = COLORS.iter().map(|c| thread::color(c, p.dark)).collect();
+        let threads: Vec<Hsla> = COLORS.iter().map(|c| thread::color(c, p.dark)).collect();
+        let over = threads.clone();
+        let (mark, half) = wordmark(p, 80.0);
         const BAND: f32 = 220.0;
-        const WORD: f32 = 110.0;
+        const WORD: f32 = 130.0;
         let band = div()
             .relative()
             .w_full()
@@ -5158,20 +5200,22 @@ ACTA_KEY=secret:ACTA_KEY",
                     .h(px(BAND))
                     .child(thread::weave(threads, gather, reveal, BAND)),
             )
-            // The name, in a slot it rises out of and sinks back into.
+            // The mark, in a slot it rises out of and sinks back into, with the threads
+            // weaving over and under it.
             .child(
-                div().overflow_hidden().child(
-                    div()
-                        .relative()
-                        .top(px(WORD * ((1.0 - word_in) + word_out)))
-                        .px(px(space::XL))
-                        .rounded_full()
-                        .bg(p.bg)
-                        .text_size(px(80.0))
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(p.ink)
-                        .child("loom"),
-                ),
+                div()
+                    .overflow_hidden()
+                    .child(mark.relative().top(px(WORD * ((1.0 - word_in) + word_out)))),
+            )
+            .child(
+                div()
+                    .absolute()
+                    .top_0()
+                    .left_0()
+                    .w_full()
+                    .h(px(BAND))
+                    .opacity(word_in * (1.0 - word_out))
+                    .child(thread::weave_over(over, gather, reveal, BAND, half)),
             );
         Some(self.curtain(h, h / 2.0, close, band, BAND))
     }
@@ -5323,7 +5367,7 @@ ACTA_KEY=secret:ACTA_KEY",
                     .id(("ask", i))
                     .px(px(space::L))
                     .py(px(space::S))
-                    .rounded_full()
+                    .rounded(px(radius::CHIP))
                     .border_1()
                     .border_color(p.line_strong)
                     .text_size(px(size::SMALL))
@@ -5703,114 +5747,176 @@ ACTA_KEY=secret:ACTA_KEY",
         div().flex_1().min_h_0().child(page)
     }
 
-    /// The MCP servers page: the person's servers, which each agent gets if it has them,
-    /// and the secrets their settings name.
-    fn mcp_page(&mut self, cx: &mut Context<Self>) -> Div {
+    /// A form's buttons: Delete on the left when it's one that exists, and Cancel and Save
+    /// on the right.
+    fn form_actions(
+        &self,
+        delete: Option<Stateful<Div>>,
+        cancel: Stateful<Div>,
+        save: Stateful<Div>,
+    ) -> AnyElement {
         let p = self.p;
-        let heading = |text: &'static str| {
-            div()
-                .text_size(px(size::HEADING))
-                .font_weight(FontWeight::SEMIBOLD)
-                .text_color(p.ink)
-                .child(text)
-        };
-        let caption = |text: String| {
-            div()
-                .text_size(px(size::CAPTION))
-                .text_color(p.ink_3)
-                .child(text)
-        };
-        let mut body = div()
-            .w_full()
-            .max_w(px(560.0))
+        div()
+            .flex()
+            .items_center()
+            .justify_between()
+            .child(div().children(delete.map(|d| d.text_color(p.bad))))
+            .child(div().flex().gap(px(space::S)).child(cancel).child(save))
+            .into_any_element()
+    }
+
+    /// A row a long text fills, under its label and a line of how.
+    fn text_row(&self, label: &str, how: Option<&str>, input: impl IntoElement) -> AnyElement {
+        let p = self.p;
+        div()
+            .p(px(space::L))
             .flex()
             .flex_col()
-            .gap(px(space::XL));
+            .gap(px(space::S))
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(2.0))
+                    .child(
+                        div()
+                            .text_size(px(size::BODY))
+                            .text_color(p.ink)
+                            .child(label.to_string()),
+                    )
+                    .when_some(how, |d, h| {
+                        d.child(
+                            div()
+                                .text_size(px(size::CAPTION))
+                                .text_color(p.ink_3)
+                                .child(h.to_string()),
+                        )
+                    }),
+            )
+            .child(input)
+            .into_any_element()
+    }
+
+    /// A row that opens what it names.
+    fn link_row(&self, id: SharedString, row: Div) -> Stateful<Div> {
+        let p = self.p;
+        row.id(id).cursor_pointer().hover(move |s| s.bg(p.hover))
+    }
+
+    /// The MCP servers page: the person's servers, which each agent gets if it has them,
+    /// and the keys their settings name.
+    fn mcp_page(&mut self, cx: &mut Context<Self>) -> Div {
         if let Some(open) = self.mcp_open.clone() {
-            let mut buttons = div().flex().gap(px(space::S)).child(
-                self.button("save-mcp", "Save", true)
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        let name = this.mcp_name_in.read(cx).value().to_string();
-                        let line = this.mcp_cmd_in.read(cx).value().to_string();
-                        let settings = this.mcp_settings_in.read(cx).value().to_string();
-                        if name.trim().is_empty() || line.trim().is_empty() {
-                            this.model
-                                .notices
-                                .push("Needs a name, and a command or an address".into());
-                            cx.notify();
-                            return;
-                        }
-                        let f = this
-                            .model
-                            .put_mcp(crate::model::server_args(&name, &line, &settings));
+            let save = self
+                .small_button("save-mcp", "Save", true)
+                .on_click(cx.listener(|this, _, _, cx| {
+                    let name = this.mcp_name_in.read(cx).value().to_string();
+                    let line = this.mcp_cmd_in.read(cx).value().to_string();
+                    let settings = this.mcp_settings_in.read(cx).value().to_string();
+                    if name.trim().is_empty() || line.trim().is_empty() {
+                        this.model
+                            .notices
+                            .push("Needs a name, and a command or an address".into());
+                        cx.notify();
+                        return;
+                    }
+                    let f = this
+                        .model
+                        .put_mcp(crate::model::server_args(&name, &line, &settings));
+                    this.send(f);
+                    this.mcp_open = None;
+                    cx.notify();
+                }));
+            let cancel = self
+                .small_button("cancel-mcp", "Cancel", false)
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.mcp_open = None;
+                    cx.notify();
+                }));
+            let delete = open.clone().map(|name| {
+                self.small_button("delete-mcp", "Delete", false)
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        let f = this.model.delete_mcp(&name);
                         this.send(f);
                         this.mcp_open = None;
                         cx.notify();
-                    })),
-            );
-            buttons = buttons.child(self.button("cancel-mcp", "Cancel", false).on_click(
-                cx.listener(|this, _, _, cx| {
-                    this.mcp_open = None;
+                    }))
+            });
+            let groups = vec![
+                self.group(
+                    None,
+                    vec![
+                        self.field_row("Name", Input::new(&self.mcp_name_in)),
+                        self.field_row("Command or URL", Input::new(&self.mcp_cmd_in)),
+                        self.text_row(
+                            "Settings",
+                            Some("NAME=value, one a line. NAME=secret:KEY uses one of your keys"),
+                            Textarea::new(&self.mcp_settings_in),
+                        ),
+                    ],
+                ),
+                self.form_actions(delete, cancel, save),
+            ];
+            let title = if open.is_some() {
+                "Change MCP server"
+            } else {
+                "New MCP server"
+            };
+            return self.settings_page("mcp-page", title, None, groups);
+        }
+        let new_server = |this: &Self, cx: &mut Context<Self>, primary: bool| {
+            this.small_button("new-mcp", "New server", primary)
+                .on_click(cx.listener(|this, _, window, cx| {
+                    for s in [&this.mcp_name_in, &this.mcp_cmd_in] {
+                        s.update(cx, |s, cx| s.set_value("", window, cx));
+                    }
+                    this.mcp_settings_in
+                        .update(cx, |s, cx| s.set_value("", window, cx));
+                    this.mcp_open = Some(None);
                     cx.notify();
-                }),
-            ));
-            if let Some(name) = open.clone() {
-                buttons = buttons.child(
-                    self.button("delete-mcp", "Delete", false)
-                        .text_color(p.bad)
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            let f = this.model.delete_mcp(&name);
-                            this.send(f);
-                            this.mcp_open = None;
-                            cx.notify();
-                        })),
-                );
-            }
-            body = body
-                .child(heading(if open.is_some() {
-                    "Change MCP server"
-                } else {
-                    "New MCP server"
                 }))
-                .child(self.field("Name", Input::new(&self.mcp_name_in)))
-                .child(self.field(
-                    "Command, or an https:// address",
-                    Input::new(&self.mcp_cmd_in),
-                ))
-                .child(self.field(
-                    "Settings: NAME=value, one a line. NAME=secret:KEY uses a key from below",
-                    Textarea::new(&self.mcp_settings_in),
-                ))
-                .child(buttons);
+        };
+        // A browser the agent drives, through Microsoft's Playwright MCP server. It needs
+        // Node on the instance's computer.
+        let add_browser = |this: &Self, cx: &mut Context<Self>, primary: bool| {
+            this.small_button("add-browser", "Add a browser", primary)
+                .on_click(cx.listener(|this, _, _, cx| {
+                    let f = this.model.put_mcp(crate::model::server_args(
+                        "browser",
+                        "npx -y @playwright/mcp@latest",
+                        "",
+                    ));
+                    this.send(f);
+                    cx.notify();
+                }))
+        };
+        let mut groups = Vec::new();
+        let servers = self.model.mcp_servers.clone();
+        let has_browser = servers.iter().any(|m| m.name == "browser");
+        if servers.is_empty() {
+            let actions = div()
+                .flex()
+                .gap(px(space::S))
+                .child(add_browser(self, cx, true))
+                .child(new_server(self, cx, false))
+                .into_any_element();
+            groups.push(self.empty(
+                Ico::Plug,
+                "No MCP servers yet",
+                "Tools your agents can use, such as a browser, GitHub or your calendar",
+                Some(actions),
+            ));
         } else {
-            let mut list = div().flex().flex_col();
-            if self.model.mcp_servers.is_empty() {
-                list = list.child(caption("No MCP servers yet".into()));
-            }
-            for m in self.model.mcp_servers.clone() {
+            let mut rows = Vec::new();
+            for m in servers {
                 let what = if m.url.is_empty() {
                     m.command.clone()
                 } else {
                     m.url.clone()
                 };
-                list = list.child(
-                    div()
-                        .id(SharedString::from(format!("mcp-{}", m.name)))
-                        .flex()
-                        .flex_col()
-                        .py(px(space::S))
-                        .px(px(space::S))
-                        .rounded(px(radius::BUTTON))
-                        .cursor_pointer()
-                        .hover(move |s| s.bg(p.hover))
-                        .child(
-                            div()
-                                .text_size(px(size::SMALL))
-                                .font_weight(FontWeight::MEDIUM)
-                                .text_color(p.ink)
-                                .child(m.name.clone()),
-                        )
-                        .child(caption(what))
+                let row = self.row(Some(self.tile(Ico::Plug)), m.name.clone(), Some(what), None);
+                rows.push(
+                    self.link_row(SharedString::from(format!("mcp-{}", m.name)), row)
                         .on_click(cx.listener(move |this, _, window, cx| {
                             let (name, line, settings) = (
                                 m.name.clone(),
@@ -5829,262 +5935,191 @@ ACTA_KEY=secret:ACTA_KEY",
                                 .update(cx, |s, cx| s.set_value(settings, window, cx));
                             this.mcp_open = Some(Some(name));
                             cx.notify();
-                        })),
+                        }))
+                        .into_any_element(),
                 );
             }
-            let mut keys = div().flex().flex_col().gap(px(space::XS));
-            for k in self.model.secrets.clone() {
-                let name = k.clone();
-                keys = keys.child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .justify_between()
-                        .px(px(space::S))
-                        .child(
-                            div()
-                                .text_size(px(size::SMALL))
-                                .text_color(p.ink_2)
-                                .child(format!("{k} = ••••")),
-                        )
-                        .child(
-                            self.button_owned(format!("secret-{k}"), "Remove", false)
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    let f = this.model.delete_secret(&name);
-                                    this.send(f);
-                                    cx.notify();
-                                })),
-                        ),
-                );
-            }
-            body =
-                body.child(heading("Servers"))
-                    .child(list)
-                    .child(
-                        div()
-                            .flex()
-                            .gap(px(space::S))
-                            .child(self.button("new-mcp", "New server", true).on_click(
-                                cx.listener(|this, _, window, cx| {
-                                    for s in [&this.mcp_name_in, &this.mcp_cmd_in] {
-                                        s.update(cx, |s, cx| s.set_value("", window, cx));
-                                    }
-                                    this.mcp_settings_in
-                                        .update(cx, |s, cx| s.set_value("", window, cx));
-                                    this.mcp_open = Some(None);
-                                    cx.notify();
-                                }),
-                            ))
-                            // A browser the agent drives, through Microsoft's Playwright MCP
-                            // server. It needs Node on the instance's computer.
-                            .when(
-                                !self.model.mcp_servers.iter().any(|m| m.name == "browser"),
-                                |d| {
-                                    d.child(
-                                        self.button("add-browser", "Add a browser", false)
-                                            .on_click(cx.listener(|this, _, _, cx| {
-                                                let f =
-                                                    this.model.put_mcp(crate::model::server_args(
-                                                        "browser",
-                                                        "npx -y @playwright/mcp@latest",
-                                                        "",
-                                                    ));
-                                                this.send(f);
-                                                cx.notify();
-                                            })),
-                                    )
-                                },
-                            ),
+            if !has_browser {
+                rows.push(
+                    self.row(
+                        Some(self.tile(Ico::Globe)),
+                        "A browser",
+                        Some("Your agents open and use web pages. Needs Node".into()),
+                        Some(add_browser(self, cx, false).into_any_element()),
                     )
-                    .child(heading("Keys"))
-                    .child(keys)
-                    .child(
-                        div()
-                            .flex()
-                            .gap(px(space::S))
-                            .child(div().flex_1().child(Input::new(&self.set_key_in)))
-                            .child(div().flex_1().child(Input::new(&self.set_value_in)))
-                            .child(self.button("save-secret", "Save key", false).on_click(
-                                cx.listener(|this, _, window, cx| {
-                                    let name = this.set_key_in.read(cx).value().to_string();
-                                    let value = this.set_value_in.read(cx).value().to_string();
-                                    if name.trim().is_empty() {
-                                        return;
-                                    }
-                                    let f = this.model.put_secret(&name, &value);
-                                    this.send(f);
-                                    for s in [&this.set_key_in, &this.set_value_in] {
-                                        s.update(cx, |s, cx| s.set_value("", window, cx));
-                                    }
-                                    cx.notify();
-                                }),
-                            )),
-                    );
+                    .into_any_element(),
+                );
+            }
+            groups.push(self.group(None, rows));
         }
-        let page = div()
-            .id("mcp-page")
-            .size_full()
-            .overflow_y_scroll()
-            .flex()
-            .justify_center()
-            .items_start()
-            .pt(px(space::XL))
-            .px(px(space::XL))
-            .pb(px(space::XXL))
-            .child(body);
-        div().flex_1().min_h_0().child(page)
+        // The keys settings name, sealed on the instance: only their names come here.
+        let mut keys = Vec::new();
+        for k in self.model.secrets.clone() {
+            let name = k.clone();
+            keys.push(
+                self.row(
+                    Some(self.tile(Ico::KeyRound)),
+                    k.clone(),
+                    Some("••••••••".into()),
+                    Some(
+                        self.small_button(format!("secret-{k}"), "Remove", false)
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                let f = this.model.delete_secret(&name);
+                                this.send(f);
+                                cx.notify();
+                            }))
+                            .into_any_element(),
+                    ),
+                )
+                .into_any_element(),
+            );
+        }
+        keys.push(
+            div()
+                .flex()
+                .items_center()
+                .gap(px(space::S))
+                .px(px(space::L))
+                .py(px(space::M))
+                .child(div().flex_1().child(Input::new(&self.set_key_in)))
+                .child(div().flex_1().child(Input::new(&self.set_value_in)))
+                .child(
+                    self.small_button("save-secret", "Add key", false)
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            let name = this.set_key_in.read(cx).value().to_string();
+                            let value = this.set_value_in.read(cx).value().to_string();
+                            if name.trim().is_empty() {
+                                return;
+                            }
+                            let f = this.model.put_secret(&name, &value);
+                            this.send(f);
+                            for s in [&this.set_key_in, &this.set_value_in] {
+                                s.update(cx, |s, cx| s.set_value("", window, cx));
+                            }
+                            cx.notify();
+                        })),
+                )
+                .into_any_element(),
+        );
+        groups.push(self.group(Some("Keys, sealed on the instance"), keys));
+        let action = (!self.model.mcp_servers.is_empty())
+            .then(|| new_server(self, cx, false).into_any_element());
+        self.settings_page("mcp-page", "MCP servers", action, groups)
     }
 
     /// The skills page: the person's skills, which every agent reads when a task fits one,
     /// and the form for a new or changed one.
     fn skills_page(&mut self, cx: &mut Context<Self>) -> Div {
-        let p = self.p;
-        let mut body = div()
-            .w_full()
-            .max_w(px(560.0))
-            .flex()
-            .flex_col()
-            .gap(px(space::XL));
         if let Some(open) = self.skill_open.clone() {
-            let mut buttons = div()
-                .flex()
-                .gap(px(space::S))
-                .child(
-                    self.button("save-skill", "Save", true)
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            let name = this.skill_name_in.read(cx).value().to_string();
-                            let description = this.skill_desc_in.read(cx).value().to_string();
-                            let text = this.skill_body_in.read(cx).value().to_string();
-                            if name.trim().is_empty() || description.trim().is_empty() {
-                                this.model
-                                    .notices
-                                    .push("Needs a name, and when it's for".into());
-                                cx.notify();
-                                return;
-                            }
-                            let f = this.model.save_skill(&name, &description, &text);
-                            this.send(f);
-                            this.skill_open = None;
-                            cx.notify();
-                        })),
-                )
-                .child(
-                    self.button("cancel-skill", "Cancel", false)
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.skill_open = None;
-                            cx.notify();
-                        })),
-                );
-            if let Some(name) = open.clone() {
-                buttons = buttons.child(
-                    self.button("delete-skill", "Delete", false)
-                        .text_color(p.bad)
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            let f = this.model.delete_skill(&name);
-                            this.send(f);
-                            this.skill_open = None;
-                            cx.notify();
-                        })),
-                );
-            }
-            body = body
-                .child(
-                    div()
-                        .text_size(px(size::HEADING))
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(p.ink)
-                        .child(if open.is_some() {
-                            "Change skill"
-                        } else {
-                            "New skill"
-                        }),
-                )
-                .child(self.field("Name", Input::new(&self.skill_name_in)))
-                .child(self.field("When it's for", Input::new(&self.skill_desc_in)))
-                .child(self.field("How to do it", Textarea::new(&self.skill_body_in)))
-                .child(buttons);
-        } else {
-            let mut list = div().flex().flex_col();
-            if self.model.skills.is_empty() {
-                list = list.child(
-                    div()
-                        .text_size(px(size::SMALL))
-                        .text_color(p.ink_3)
-                        .child("No skills yet"),
-                );
-            }
-            for k in self.model.skills.clone() {
-                let id = SharedString::from(format!("skill-{}", k.name));
-                list = list.child(
-                    div()
-                        .id(id)
-                        .flex()
-                        .flex_col()
-                        .py(px(space::S))
-                        .px(px(space::S))
-                        .rounded(px(radius::BUTTON))
-                        .cursor_pointer()
-                        .hover(move |s| s.bg(p.hover))
-                        .child(
-                            div()
-                                .text_size(px(size::SMALL))
-                                .font_weight(FontWeight::MEDIUM)
-                                .text_color(p.ink)
-                                .child(k.name.clone()),
-                        )
-                        .child(
-                            div()
-                                .text_size(px(size::CAPTION))
-                                .text_color(p.ink_3)
-                                .child(k.description.clone()),
-                        )
-                        .on_click(cx.listener(move |this, _, window, cx| {
-                            let (name, description, text) =
-                                (k.name.clone(), k.description.clone(), k.body.clone());
-                            this.skill_name_in
-                                .update(cx, |s, cx| s.set_value(name.clone(), window, cx));
-                            this.skill_desc_in
-                                .update(cx, |s, cx| s.set_value(description, window, cx));
-                            this.skill_body_in
-                                .update(cx, |s, cx| s.set_value(text, window, cx));
-                            this.skill_open = Some(Some(name));
-                            cx.notify();
-                        })),
-                );
-            }
-            body = body.child(list).child(
-                div()
-                    .flex()
-                    .child(
-                        self.button("new-skill", "New skill", true)
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                for s in [&this.skill_name_in, &this.skill_desc_in] {
-                                    s.update(cx, |s, cx| s.set_value("", window, cx));
-                                }
-                                this.skill_body_in
-                                    .update(cx, |s, cx| s.set_value("", window, cx));
-                                this.skill_open = Some(None);
-                                cx.notify();
-                            })),
-                    ),
+            let save = self
+                .small_button("save-skill", "Save", true)
+                .on_click(cx.listener(|this, _, _, cx| {
+                    let name = this.skill_name_in.read(cx).value().to_string();
+                    let description = this.skill_desc_in.read(cx).value().to_string();
+                    let text = this.skill_body_in.read(cx).value().to_string();
+                    if name.trim().is_empty() || description.trim().is_empty() {
+                        this.model
+                            .notices
+                            .push("Needs a name, and when it's for".into());
+                        cx.notify();
+                        return;
+                    }
+                    let f = this.model.save_skill(&name, &description, &text);
+                    this.send(f);
+                    this.skill_open = None;
+                    cx.notify();
+                }));
+            let cancel = self
+                .small_button("cancel-skill", "Cancel", false)
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.skill_open = None;
+                    cx.notify();
+                }));
+            let delete = open.clone().map(|name| {
+                self.small_button("delete-skill", "Delete", false)
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        let f = this.model.delete_skill(&name);
+                        this.send(f);
+                        this.skill_open = None;
+                        cx.notify();
+                    }))
+            });
+            let groups = vec![
+                self.group(
+                    None,
+                    vec![
+                        self.field_row("Name", Input::new(&self.skill_name_in)),
+                        self.field_row("When it's for", Input::new(&self.skill_desc_in)),
+                        self.text_row("How to do it", None, Textarea::new(&self.skill_body_in)),
+                    ],
+                ),
+                self.form_actions(delete, cancel, save),
+            ];
+            let title = if open.is_some() {
+                "Change skill"
+            } else {
+                "New skill"
+            };
+            return self.settings_page("skills-page", title, None, groups);
+        }
+        let new_skill = |this: &Self, cx: &mut Context<Self>, primary: bool| {
+            this.small_button("new-skill", "New skill", primary)
+                .on_click(cx.listener(|this, _, window, cx| {
+                    for s in [&this.skill_name_in, &this.skill_desc_in] {
+                        s.update(cx, |s, cx| s.set_value("", window, cx));
+                    }
+                    this.skill_body_in
+                        .update(cx, |s, cx| s.set_value("", window, cx));
+                    this.skill_open = Some(None);
+                    cx.notify();
+                }))
+                .into_any_element()
+        };
+        if self.model.skills.is_empty() {
+            let action = new_skill(self, cx, true);
+            let groups = vec![self.empty(
+                Ico::BookOpen,
+                "No skills yet",
+                "How you like something done, which every agent reads when a job fits it",
+                Some(action),
+            )];
+            return self.settings_page("skills-page", "Skills", None, groups);
+        }
+        let mut rows = Vec::new();
+        for k in self.model.skills.clone() {
+            let row = self.row(
+                Some(self.tile(Ico::BookOpen)),
+                k.name.clone(),
+                Some(k.description.clone()),
+                None,
+            );
+            rows.push(
+                self.link_row(SharedString::from(format!("skill-{}", k.name)), row)
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        let (name, description, text) =
+                            (k.name.clone(), k.description.clone(), k.body.clone());
+                        this.skill_name_in
+                            .update(cx, |s, cx| s.set_value(name.clone(), window, cx));
+                        this.skill_desc_in
+                            .update(cx, |s, cx| s.set_value(description, window, cx));
+                        this.skill_body_in
+                            .update(cx, |s, cx| s.set_value(text, window, cx));
+                        this.skill_open = Some(Some(name));
+                        cx.notify();
+                    }))
+                    .into_any_element(),
             );
         }
-        let page = div()
-            .id("skills-page")
-            .size_full()
-            .overflow_y_scroll()
-            .flex()
-            .justify_center()
-            .items_start()
-            .pt(px(space::XL))
-            .px(px(space::XL))
-            .pb(px(space::XXL))
-            .child(body);
-        div().flex_1().min_h_0().child(page)
+        let action = new_skill(self, cx, false);
+        self.settings_page(
+            "skills-page",
+            "Skills",
+            Some(action),
+            vec![self.group(None, rows)],
+        )
     }
 
-    /// Who an agent's id is, as the tables page says it: its name, or "you" for the
-    /// person.
+    /// Who an agent's id is, as the tables say it: its name, or "you" for the person.
     fn who(&self, id: &str) -> String {
         if id.is_empty() {
             return "you".into();
@@ -6095,23 +6130,12 @@ ACTA_KEY=secret:ACTA_KEY",
             .unwrap_or_else(|| "an agent that's gone".into())
     }
 
-    /// The tables page: the tables the person's agents share, and one open, with its
-    /// newest rows. What an agent other than the owner wrote is marked, and dropping
-    /// a table asks once more.
-    fn tables_page(&mut self, cx: &mut Context<Self>) -> Div {
+    /// The tables beside the chat: the ones this agent made and the ones it shares with
+    /// the person's other agents, and one open, with its newest rows. What an agent other
+    /// than the owner wrote is marked, and dropping a table asks once more.
+    fn tables_panel(&mut self, cx: &mut Context<Self>) -> Div {
         let p = self.p;
-        let caption = |text: String| {
-            div()
-                .text_size(px(size::CAPTION))
-                .text_color(p.ink_3)
-                .child(text)
-        };
-        let mut body = div()
-            .w_full()
-            .max_w(px(560.0))
-            .flex()
-            .flex_col()
-            .gap(px(space::M));
+        let mut groups: Vec<AnyElement> = Vec::new();
         let open = self
             .model
             .table_open
@@ -6120,179 +6144,198 @@ ACTA_KEY=secret:ACTA_KEY",
         if let Some(t) = open {
             let name = t.name.clone();
             let dropping = self.table_dropping.as_deref() == Some(name.as_str());
-            let drop_label = if dropping {
-                format!("Drop it, with its {} rows", t.rows)
-            } else {
-                "Drop".to_string()
-            };
-            body = body
-                .child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap(px(space::S))
-                        .child(
-                            div()
-                                .id("tables-back")
-                                .cursor_pointer()
-                                .child(Icon::new(Ico::ArrowLeft).small().text_color(p.ink_2))
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.table_dropping = None;
-                                    for f in this.model.open_table(None) {
-                                        this.send(f);
-                                    }
-                                    cx.notify();
-                                })),
-                        )
-                        .child(
-                            div()
-                                .text_size(px(size::HEADING))
-                                .font_weight(FontWeight::SEMIBOLD)
-                                .text_color(p.ink)
-                                .child(name.clone()),
-                        ),
+            let back = div()
+                .id("tables-back")
+                .size(px(28.0))
+                .flex_none()
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded(px(radius::ROW))
+                .text_color(p.ink_2)
+                .cursor_pointer()
+                .hover(move |s| s.bg(p.hover).text_color(p.ink))
+                .child(Icon::new(Ico::ArrowLeft).small())
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.table_dropping = None;
+                    for f in this.model.open_table(None) {
+                        this.send(f);
+                    }
+                    cx.notify();
+                }));
+            let drop = self
+                .small_button(
+                    "drop-table",
+                    if dropping { "Drop it" } else { "Drop" },
+                    dropping,
                 )
-                .child(caption(format!(
-                    "{}Made by {}, {} rows",
-                    if t.description.is_empty() {
-                        String::new()
+                .when(dropping, |d| d.bg(p.bad))
+                .when(!dropping, |d| d.text_color(p.bad))
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    if this.table_dropping.as_deref() == Some(name.as_str()) {
+                        let f = this.model.drop_table(&name);
+                        this.send(f);
+                        this.table_dropping = None;
                     } else {
-                        format!("{} · ", t.description)
-                    },
+                        this.table_dropping = Some(name.clone());
+                    }
+                    cx.notify();
+                }));
+            let sub = if dropping {
+                format!("Drop it, with its {} rows, for good?", t.rows)
+            } else if t.description.is_empty() {
+                format!("Made by {}, {} rows", self.who(&t.owner), t.rows)
+            } else {
+                format!(
+                    "{} · by {}, {} rows",
+                    t.description,
                     self.who(&t.owner),
                     t.rows
-                )))
-                .child(
-                    div().flex().child(
-                        self.button("drop-table", &drop_label, false)
-                            .text_color(p.bad)
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                if this.table_dropping.as_deref() == Some(name.as_str()) {
-                                    let f = this.model.drop_table(&name);
-                                    this.send(f);
-                                    this.table_dropping = None;
-                                } else {
-                                    this.table_dropping = Some(name.clone());
-                                }
-                                cx.notify();
-                            })),
-                    ),
-                );
-            if self.model.table_rows.is_empty() {
-                body = body.child(caption("No rows".into()));
-            }
+                )
+            };
+            groups.push(self.group(
+                None,
+                vec![self
+                    .row(
+                        Some(back.into_any_element()),
+                        t.name.clone(),
+                        Some(sub),
+                        Some(drop.into_any_element()),
+                    )
+                    .into_any_element()],
+            ));
+            let mut rows = Vec::new();
             for r in self.model.table_rows.clone() {
-                let mut head = div()
-                    .flex()
-                    .items_center()
-                    .gap(px(space::S))
-                    .child(caption(format!("#{} · {}", r.id, self.who(&r.by))));
-                if r.untrusted {
-                    head = head.child(
-                        div()
-                            .text_size(px(size::CAPTION))
-                            .text_color(p.bad)
-                            .child("from another agent"),
-                    );
-                }
-                body = body.child(
+                rows.push(
                     div()
+                        .px(px(space::L))
+                        .py(px(space::M))
                         .flex()
                         .flex_col()
                         .gap(px(space::XS))
-                        .py(px(space::S))
-                        .border_b_1()
-                        .border_color(p.line)
-                        .child(head)
                         .child(
                             div()
+                                .flex()
+                                .gap(px(space::S))
+                                .text_size(px(size::CAPTION))
+                                .text_color(p.ink_3)
+                                .child(format!("#{} · {}", r.id, self.who(&r.by)))
+                                .when(r.untrusted, |d| {
+                                    d.child(div().text_color(p.bad).child("from another agent"))
+                                }),
+                        )
+                        .child(
+                            div()
+                                .font_family(font::MONO)
                                 .text_size(px(size::SMALL))
                                 .text_color(p.ink)
                                 .child(r.data.clone()),
-                        ),
+                        )
+                        .into_any_element(),
                 );
+            }
+            if rows.is_empty() {
+                rows.push(self.note_row("No rows yet", p.ink_3));
             }
             if self.model.table_more {
-                body = body.child(caption("Older rows aren't shown".into()));
+                rows.push(self.note_row("Older rows aren't shown", p.ink_3));
             }
+            groups.push(self.group(Some("Newest first"), rows));
+        } else if self.model.tables.is_empty() {
+            groups.push(self.empty(
+                Ico::Sheet,
+                "No tables yet",
+                "Agents keep lists and records in tables, and share them with each other",
+                None,
+            ));
         } else {
-            if self.model.tables.is_empty() {
-                body = body.child(caption(
-                    "No tables yet. Your agents make them to keep lists and records, and share them with each other".into(),
-                ));
-            }
-            for t in self.model.tables.clone() {
-                let id = SharedString::from(format!("table-{}", t.name));
-                let name = t.name.clone();
-                body = body.child(
-                    div()
-                        .id(id)
-                        .flex()
-                        .flex_col()
-                        .py(px(space::S))
-                        .px(px(space::S))
-                        .rounded(px(radius::BUTTON))
-                        .cursor_pointer()
-                        .hover(move |s| s.bg(p.hover))
-                        .child(
-                            div()
-                                .text_size(px(size::SMALL))
-                                .font_weight(FontWeight::MEDIUM)
-                                .text_color(p.ink)
-                                .child(t.name.clone()),
-                        )
-                        .when(!t.description.is_empty(), |d| {
-                            d.child(caption(t.description.clone()))
-                        })
-                        .child(caption(format!("{} · {} rows", self.who(&t.owner), t.rows)))
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.table_dropping = None;
-                            for f in this.model.open_table(Some(name.clone())) {
-                                this.send(f);
-                            }
-                            cx.notify();
-                        })),
-                );
+            let agent = self.model.selected.clone().unwrap_or_default();
+            let (mine, shared): (Vec<model::SharedTable>, Vec<model::SharedTable>) = self
+                .model
+                .tables
+                .clone()
+                .into_iter()
+                .partition(|t| t.owner == agent);
+            for (title, tables, by) in [
+                ("Made by this agent", mine, false),
+                ("Shared with it", shared, true),
+            ] {
+                if tables.is_empty() {
+                    continue;
+                }
+                let mut rows = Vec::new();
+                for t in tables {
+                    let name = t.name.clone();
+                    let mut sub = format!("{} rows", t.rows);
+                    if by {
+                        sub = format!("{sub}, by {}", self.who(&t.owner));
+                    }
+                    if !t.description.is_empty() {
+                        sub = format!("{} · {sub}", t.description);
+                    }
+                    let row =
+                        self.row(Some(self.tile(Ico::Sheet)), t.name.clone(), Some(sub), None);
+                    rows.push(
+                        self.link_row(SharedString::from(format!("table-{}", t.name)), row)
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.table_dropping = None;
+                                for f in this.model.open_table(Some(name.clone())) {
+                                    this.send(f);
+                                }
+                                cx.notify();
+                            }))
+                            .into_any_element(),
+                    );
+                }
+                groups.push(self.group(Some(title), rows));
             }
         }
-        let page = div()
-            .id("tables-page")
-            .size_full()
-            .overflow_y_scroll()
-            .flex()
-            .justify_center()
-            .items_start()
-            .pt(px(space::XL))
-            .px(px(space::XL))
-            .pb(px(space::XXL))
-            .child(body);
-        div().flex_1().min_h_0().child(page)
+        div().flex_1().min_h_0().child(
+            div()
+                .id("tables-panel")
+                .size_full()
+                .overflow_y_scroll()
+                .flex()
+                .flex_col()
+                .gap(px(space::L))
+                .p(px(space::L))
+                .children(groups),
+        )
     }
 
     /// The plugins page: each plugin, what it asks for that waits for the person's yes, and
     /// its panel to open. An open panel lies over the content area in a web view of its own.
     fn plugins_page(&mut self, cx: &mut Context<Self>) -> Div {
         let p = self.p;
-        let mut list = div()
-            .w_full()
-            .max_w(px(560.0))
-            .flex()
-            .flex_col()
-            .gap(px(space::M));
+        let ask = |this: &Self, cx: &mut Context<Self>, primary: bool| {
+            this.small_button("plugin-prompt", "Copy a prompt", primary)
+                .on_click(cx.listener(|this, _, _, cx| {
+                    cx.write_to_clipboard(ClipboardItem::new_string(PLUGIN_PROMPT.to_string()));
+                    this.notice = Some((
+                        "Copied. Paste it to one of your agents.".into(),
+                        Instant::now(),
+                    ));
+                    cx.notify();
+                }))
+                .into_any_element()
+        };
         if self.model.plugins.is_empty() {
-            list = list.child(
-                div()
-                    .text_size(px(size::SMALL))
-                    .text_color(p.ink_3)
-                    .child("No plugins yet. Ask an agent to make one."),
-            );
+            let action = ask(self, cx, true);
+            let groups = vec![self.empty(
+                Ico::Puzzle,
+                "No plugins yet",
+                "Your agents build them: a panel beside the chat, or new tools for every agent",
+                Some(action),
+            )];
+            return self.settings_page("plugins-page", "Plugins", None, groups);
         }
+        let mut rows = Vec::new();
         for pl in self.model.plugins.clone() {
-            let mut buttons = div().flex().gap(px(space::S));
+            let mut buttons = div().flex().gap(px(space::XS));
             if pl.entry.is_some() {
                 let id = pl.id.clone();
                 buttons = buttons.child(
-                    self.button_owned(format!("open-{}", pl.id), "Open", true)
+                    self.small_button(format!("open-{}", pl.id), "Open", true)
                         .on_click(cx.listener(move |this, _, _, cx| {
                             let f = this.model.open_plugin(&id);
                             this.send(f);
@@ -6305,7 +6348,7 @@ ACTA_KEY=secret:ACTA_KEY",
             if !pl.waiting.is_empty() {
                 let id = pl.id.clone();
                 buttons = buttons.child(
-                    self.button_owned(format!("allow-{}", pl.id), "Allow", false)
+                    self.small_button(format!("allow-{}", pl.id), "Allow", false)
                         .on_click(cx.listener(move |this, _, _, cx| {
                             let f = this.model.allow_plugin(&id);
                             this.send(f);
@@ -6315,7 +6358,7 @@ ACTA_KEY=secret:ACTA_KEY",
             }
             let id = pl.id.clone();
             buttons = buttons.child(
-                self.button_owned(format!("delete-{}", pl.id), "Delete", false)
+                self.small_button(format!("delete-{}", pl.id), "Delete", false)
                     .text_color(p.bad)
                     .on_click(cx.listener(move |this, _, _, cx| {
                         let f = this.model.delete_plugin(&id);
@@ -6324,59 +6367,43 @@ ACTA_KEY=secret:ACTA_KEY",
                     })),
             );
             let has = match (pl.entry.is_some(), pl.tools) {
-                (true, true) => "a panel and tools for your agents",
-                (true, false) => "a panel",
-                (false, true) => "tools for your agents",
-                (false, false) => "nothing to show yet",
+                (true, true) => "A panel and tools",
+                (true, false) => "A panel",
+                (false, true) => "Tools for your agents",
+                (false, false) => "Nothing to show yet",
             };
-            list = list.child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap(px(space::XS))
-                    .child(
-                        div()
-                            .text_size(px(size::SMALL))
-                            .font_weight(FontWeight::MEDIUM)
-                            .text_color(p.ink)
-                            .child(format!("{} {}", pl.name, pl.version)),
-                    )
-                    .child(
-                        div()
-                            .text_size(px(size::CAPTION))
-                            .text_color(p.ink_3)
-                            .child(if pl.description.is_empty() {
-                                format!("Has {has}.")
-                            } else {
-                                format!("{} Has {has}.", pl.description)
-                            }),
-                    )
-                    .when(!pl.waiting.is_empty(), |d| {
-                        d.child(
-                            div()
-                                .text_size(px(size::CAPTION))
-                                .text_color(p.ink_2)
-                                .child(format!(
-                                    "Asks to {}. Until you allow it, it can't.",
-                                    model::asking(&pl.waiting)
-                                )),
-                        )
-                    })
-                    .child(buttons),
+            let sub = if pl.description.is_empty() {
+                format!("{has} · {}", pl.version)
+            } else {
+                format!("{} · {}", pl.description, pl.version)
+            };
+            rows.push(
+                self.row(
+                    Some(self.tile(Ico::Puzzle)),
+                    pl.name.clone(),
+                    Some(sub),
+                    Some(buttons.into_any_element()),
+                )
+                .into_any_element(),
             );
+            if !pl.waiting.is_empty() {
+                rows.push(self.note_row(
+                    format!(
+                        "{} asks to {}. Until you allow it, it can't.",
+                        pl.name,
+                        model::asking(&pl.waiting)
+                    ),
+                    p.ink_2,
+                ));
+            }
         }
-        let page = div()
-            .id("plugins-page")
-            .size_full()
-            .overflow_y_scroll()
-            .flex()
-            .justify_center()
-            .items_start()
-            .pt(px(space::XL))
-            .px(px(space::XL))
-            .pb(px(space::XXL))
-            .child(list);
-        div().flex_1().min_h_0().child(page)
+        let action = ask(self, cx, false);
+        self.settings_page(
+            "plugins-page",
+            "Plugins",
+            Some(action),
+            vec![self.group(None, rows)],
+        )
     }
 
     /// What the web view beside the chat shows, by key: the open plugin's panel (by
@@ -6555,478 +6582,463 @@ ACTA_KEY=secret:ACTA_KEY",
         }
     }
 
+    /// Opens the routine form, empty, for a new one.
+    fn new_routine(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.routine_name_in
+            .update(cx, |s, cx| s.set_value("", window, cx));
+        self.routine_at_in
+            .update(cx, |s, cx| s.set_value("30", window, cx));
+        self.routine_kind = "every".into();
+        self.routine_prompt_in
+            .update(cx, |s, cx| s.set_value("", window, cx));
+        self.routine_agent = self.model.selected.clone();
+        self.routine_notify = true;
+        self.routine_on = true;
+        self.routine_catch_up = true;
+        self.routine_thread = false;
+        self.routine_webhook = false;
+        self.set_routine_flow(&[], window, cx);
+        self.routine_open = Some(None);
+        cx.notify();
+    }
+
+    /// A row with a switch, for one of a form's yes-or-no choices.
+    fn switch_row(
+        &self,
+        id: &'static str,
+        title: &str,
+        sub: &str,
+        on: bool,
+        cx: &mut Context<Self>,
+        flip: fn(&mut Loom),
+    ) -> AnyElement {
+        let toggle = self
+            .switch(id, on)
+            .on_click(cx.listener(move |this, _, _, cx| {
+                flip(this);
+                cx.notify();
+            }));
+        self.row(
+            None,
+            title.to_string(),
+            Some(sub.to_string()),
+            Some(toggle.into_any_element()),
+        )
+        .into_any_element()
+    }
+
     /// The routines page: prompts the person's agents are sent on a schedule, each in a
     /// conversation of its own, and the form for a new or changed one.
     fn routines_page(&mut self, cx: &mut Context<Self>) -> Div {
+        if self.routine_open.is_some() {
+            return self.routine_form(cx);
+        }
         let p = self.p;
-        let caption = |text: String| {
-            div()
-                .text_size(px(size::CAPTION))
-                .text_color(p.ink_3)
-                .child(text)
-        };
-        let mut body = div()
-            .w_full()
-            .max_w(px(560.0))
-            .flex()
-            .flex_col()
-            .gap(px(space::XL));
-        if let Some(open) = self.routine_open.clone() {
-            let mut agents = div().flex().flex_wrap().gap(px(space::XS));
-            for a in self.model.agents.clone() {
-                let id = a.id.clone();
-                let picked = self.routine_agent.as_deref() == Some(a.id.as_str());
-                agents = agents.child(
-                    self.button_owned(format!("routine-agent-{}", a.id), &a.name, picked)
+        let mut rows = Vec::new();
+        for r in self.model.routines.clone() {
+            let (agent, tint) = match self.model.agent(&r.agent) {
+                Some(a) => (a.name.clone(), thread::color(&a.color, p.dark)),
+                None => ("a deleted agent".to_string(), p.ink_3),
+            };
+            let next = if !r.on || r.next == 0 {
+                "paused".to_string()
+            } else if day_of(r.next) == "Today" {
+                format!("next at {}", time_of(r.next))
+            } else {
+                format!("next {} at {}", day_of(r.next), time_of(r.next))
+            };
+            let last = match r.last_status.as_str() {
+                "" | "done" | "quiet" => String::new(),
+                "running" => " · running now".into(),
+                "skipped" => format!(" · skipped at {}", time_of(r.last_at)),
+                _ => format!(" · failed at {}: {}", time_of(r.last_at), r.last_error),
+            };
+            let mut sub = format!("{agent} · {} · {next}{last}", r.when);
+            // Its flow, while it runs: how far each step has got, and a Stop.
+            let running = self
+                .model
+                .flows
+                .iter()
+                .find(|f| f.routine == r.id)
+                .map(|f| {
+                    let steps: Vec<String> = f
+                        .steps
+                        .iter()
+                        .skip(1)
+                        .map(|(name, _, status)| format!("step {name} {status}"))
+                        .collect();
+                    (steps.join(" · "), f.stopped)
+                });
+            let mut controls = div().flex().gap(px(space::XS));
+            if let Some((text, stopped)) = running {
+                sub = text;
+                if !stopped {
+                    let routine = r.id.clone();
+                    controls = controls.child(
+                        self.small_button(format!("stop-flow-{}", r.id), "Stop", false)
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                cx.stop_propagation();
+                                let f = this.model.stop_flow(&routine);
+                                this.send(f);
+                                cx.notify();
+                            })),
+                    );
+                }
+            }
+            // A routine with a thread of its own: the way there.
+            if r.post == "thread" && !r.conversation.is_empty() {
+                let conversation = r.conversation.clone();
+                let agent = r.agent.clone();
+                controls = controls.child(
+                    self.small_button(format!("thread-{}", r.id), "Thread", false)
                         .on_click(cx.listener(move |this, _, _, cx| {
-                            this.routine_agent = Some(id.clone());
-                            cx.notify();
+                            cx.stop_propagation();
+                            this.open_thread(&agent, &conversation, cx);
                         })),
                 );
             }
-            let mut kinds = div().flex().gap(px(space::XS));
-            for (kind, label) in [
-                ("every", "Every N minutes"),
-                ("daily", "Daily"),
-                ("weekdays", "On weekdays"),
-            ] {
-                kinds = kinds.child(
-                    self.button_owned(
-                        format!("routine-kind-{kind}"),
-                        label,
-                        self.routine_kind == kind,
-                    )
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        // From minutes to a time of day or back, the box gets an example of
-                        // the other kind, so it isn't left saying "30" for a daily routine.
-                        let was_minutes = this.routine_kind == "every";
-                        if was_minutes != (kind == "every") {
-                            let example = if kind == "every" { "30" } else { "08:00" };
-                            this.routine_at_in
-                                .update(cx, |s, cx| s.set_value(example, window, cx));
-                        }
-                        this.routine_kind = kind.into();
-                        cx.notify();
-                    })),
-                );
-            }
-            let at_label = if self.routine_kind == "every" {
-                "Minutes between runs"
-            } else {
-                "Time, as HH:MM"
-            };
-            let switches = div()
+            let lead = div()
+                .size(px(30.0))
+                .flex_none()
                 .flex()
-                .gap(px(space::XS))
-                .child(
-                    self.button(
-                        "routine-notify",
-                        if self.routine_notify {
-                            "Notify me: on"
-                        } else {
-                            "Notify me: off"
-                        },
-                        self.routine_notify,
-                    )
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.routine_notify = !this.routine_notify;
-                        cx.notify();
-                    })),
+                .items_center()
+                .justify_center()
+                .rounded(px(radius::ROW))
+                .border_1()
+                .border_color(p.line)
+                .bg(p.bg)
+                .text_color(if r.on { tint } else { p.ink_3 })
+                .child(Icon::new(Ico::Clock).small())
+                .into_any_element();
+            rows.push(
+                self.row(
+                    Some(lead),
+                    r.name.clone(),
+                    Some(sub),
+                    Some(controls.into_any_element()),
                 )
-                .child(
-                    self.button(
-                        "routine-on",
-                        if self.routine_on { "On" } else { "Paused" },
-                        self.routine_on,
-                    )
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.routine_on = !this.routine_on;
-                        cx.notify();
-                    })),
-                )
-                .child(
-                    self.button(
-                        "routine-catch-up",
-                        if self.routine_catch_up {
-                            "Missed while off: run once"
-                        } else {
-                            "Missed while off: skip"
-                        },
-                        false,
-                    )
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.routine_catch_up = !this.routine_catch_up;
-                        cx.notify();
-                    })),
-                )
-                .child(
-                    self.button(
-                        "routine-post",
-                        if self.routine_thread {
-                            "Posts in a thread of its own"
-                        } else {
-                            "Posts in the chat"
-                        },
-                        false,
-                    )
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.routine_thread = !this.routine_thread;
-                        cx.notify();
-                    })),
-                )
-                .child(
-                    self.button(
-                        "routine-webhook",
-                        if self.routine_webhook {
-                            "Webhook: on"
-                        } else {
-                            "Webhook: off"
-                        },
-                        self.routine_webhook,
-                    )
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.routine_webhook = !this.routine_webhook;
-                        cx.notify();
-                    })),
-                );
-            // Where to post, once it has a webhook: to give GitHub or anything else.
-            let hook = open
-                .as_ref()
-                .and_then(|id| self.model.routines.iter().find(|r| &r.id == id))
-                .filter(|r| !r.hook.is_empty() && self.routine_webhook)
-                .map(|r| (format!("/hooks/{}", r.hook), r.secret.clone()));
-            let webhook = hook.map(|(path, secret)| {
+                .id(SharedString::from(format!("routine-{}", r.id)))
+                .cursor_pointer()
+                .hover(move |s| s.bg(p.hover))
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    this.routine_name_in
+                        .update(cx, |s, cx| s.set_value(r.name.clone(), window, cx));
+                    this.routine_at_in
+                        .update(cx, |s, cx| s.set_value(r.at.clone(), window, cx));
+                    this.routine_kind = if r.kind.is_empty() {
+                        "every".into()
+                    } else {
+                        r.kind.clone()
+                    };
+                    this.routine_prompt_in
+                        .update(cx, |s, cx| s.set_value(r.prompt.clone(), window, cx));
+                    this.routine_agent = Some(r.agent.clone());
+                    this.routine_notify = r.notify;
+                    this.routine_on = r.on;
+                    this.routine_catch_up = r.catch_up;
+                    this.routine_thread = r.post == "thread";
+                    this.routine_webhook = !r.hook.is_empty();
+                    this.set_routine_flow(&r.flow, window, cx);
+                    this.routine_open = Some(Some(r.id.clone()));
+                    cx.notify();
+                }))
+                .into_any_element(),
+            );
+        }
+        let empty = rows.is_empty();
+        let new = self
+            .small_button("new-routine", "New routine", empty)
+            .on_click(cx.listener(|this, _, window, cx| this.new_routine(window, cx)))
+            .into_any_element();
+        if empty {
+            let groups = vec![self.empty(
+                Ico::Clock,
+                "No routines yet",
+                "Something an agent does on a schedule, such as a summary each morning or a check every hour",
+                Some(new),
+            )];
+            return self.settings_page("routines-page", "Routines", None, groups);
+        }
+        self.settings_page(
+            "routines-page",
+            "Routines",
+            Some(new),
+            vec![self.group(None, rows)],
+        )
+    }
+
+    /// The form for a new routine, or one being changed.
+    fn routine_form(&mut self, cx: &mut Context<Self>) -> Div {
+        let p = self.p;
+        let open = self.routine_open.clone().unwrap_or_default();
+        let mut groups = Vec::new();
+        let chips = self.agent_chips(
+            "routine-agent",
+            self.routine_agent.clone().as_deref(),
+            cx,
+            |this, id| this.routine_agent = Some(id),
+        );
+        groups.push(self.group(
+            None,
+            vec![
+                self.field_row("Name", Input::new(&self.routine_name_in)),
+                self.field_row("Agent", chips),
                 div()
+                    .p(px(space::L))
                     .flex()
                     .flex_col()
-                    .gap(px(space::XS))
-                    .child(caption(format!(
-                        "POST to {path} on your instance's address, with Authorization: Bearer and the secret, or signed with the secret as GitHub signs (X-Hub-Signature-256). What's posted comes after the prompt."
-                    )))
+                    .gap(px(space::S))
                     .child(
+                        div()
+                            .text_size(px(size::BODY))
+                            .text_color(p.ink)
+                            .child("What it's asked each time"),
+                    )
+                    .child(Textarea::new(&self.routine_prompt_in))
+                    .into_any_element(),
+            ],
+        ));
+        let mut kinds = Vec::new();
+        for (kind, label) in [
+            ("every", "Every few minutes"),
+            ("daily", "Daily"),
+            ("weekdays", "Weekdays"),
+        ] {
+            kinds.push(
+                self.segment(
+                    format!("routine-kind-{kind}"),
+                    label,
+                    self.routine_kind == kind,
+                )
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    // From minutes to a time of day or back, the box gets an example of
+                    // the other kind, so it isn't left saying "30" for a daily routine.
+                    let was_minutes = this.routine_kind == "every";
+                    if was_minutes != (kind == "every") {
+                        let example = if kind == "every" { "30" } else { "08:00" };
+                        this.routine_at_in
+                            .update(cx, |s, cx| s.set_value(example, window, cx));
+                    }
+                    this.routine_kind = kind.into();
+                    cx.notify();
+                })),
+            );
+        }
+        let at_label = if self.routine_kind == "every" {
+            "Minutes"
+        } else {
+            "At (HH:MM)"
+        };
+        groups.push(self.group(
+            Some("When"),
+            vec![
+                self.row(
+                    None,
+                    "Repeats",
+                    None,
+                    Some(self.segments(kinds).into_any_element()),
+                )
+                .into_any_element(),
+                self.field_row(at_label, Input::new(&self.routine_at_in)),
+            ],
+        ));
+        let mut options = vec![
+            self.switch_row(
+                "routine-on",
+                "On",
+                "A paused routine doesn't run",
+                self.routine_on,
+                cx,
+                |this| this.routine_on = !this.routine_on,
+            ),
+            self.switch_row(
+                "routine-notify",
+                "Notify me",
+                "When it has something to say",
+                self.routine_notify,
+                cx,
+                |this| this.routine_notify = !this.routine_notify,
+            ),
+            self.switch_row(
+                "routine-catch-up",
+                "Catch up",
+                "Run once for what it missed while off",
+                self.routine_catch_up,
+                cx,
+                |this| this.routine_catch_up = !this.routine_catch_up,
+            ),
+            self.switch_row(
+                "routine-post",
+                "A thread of its own",
+                "Posts there instead of in the chat",
+                self.routine_thread,
+                cx,
+                |this| this.routine_thread = !this.routine_thread,
+            ),
+            self.switch_row(
+                "routine-webhook",
+                "Webhook",
+                "GitHub or anything else can start it",
+                self.routine_webhook,
+                cx,
+                |this| this.routine_webhook = !this.routine_webhook,
+            ),
+        ];
+        // Where to post, once it has a webhook: to give GitHub or anything else.
+        let hook = open
+            .as_ref()
+            .and_then(|id| self.model.routines.iter().find(|r| &r.id == id))
+            .filter(|r| !r.hook.is_empty() && self.routine_webhook)
+            .map(|r| (format!("/hooks/{}", r.hook), r.secret.clone()));
+        if let Some((path, secret)) = hook {
+            let copy_path = path.clone();
+            options.push(
+                self.row(
+                    None,
+                    path,
+                    Some("Bearer the secret, or signed as GitHub signs".into()),
+                    Some(
                         div()
                             .flex()
                             .gap(px(space::XS))
                             .child(
-                                self.button("copy-hook", "Copy address", false).on_click(
-                                    cx.listener(move |_, _, _, cx| {
+                                self.small_button("copy-hook", "Copy address", false)
+                                    .on_click(move |_, _, cx| {
                                         cx.write_to_clipboard(ClipboardItem::new_string(
-                                            path.clone(),
+                                            copy_path.clone(),
                                         ));
                                     }),
-                                ),
                             )
                             .child(
-                                self.button("copy-secret", "Copy secret", false).on_click(
-                                    cx.listener(move |_, _, _, cx| {
+                                self.small_button("copy-secret", "Copy secret", false)
+                                    .on_click(move |_, _, cx| {
                                         cx.write_to_clipboard(ClipboardItem::new_string(
                                             secret.clone(),
                                         ));
                                     }),
-                                ),
-                            ),
-                    )
-            });
-            let flow = self.routine_flow_section(cx);
-            let editing = open.clone().unwrap_or_default();
-            let mut buttons = div()
-                .flex()
-                .gap(px(space::S))
+                            )
+                            .into_any_element(),
+                    ),
+                )
+                .into_any_element(),
+            );
+        }
+        groups.push(self.group(Some("Options"), options));
+        groups.push(self.routine_flow_group(cx));
+        let editing = open.clone().unwrap_or_default();
+        let save = self
+            .small_button("save-routine", "Save", true)
+            .on_click(cx.listener(move |this, _, _, cx| {
+                let name = this.routine_name_in.read(cx).value().to_string();
+                let prompt = this.routine_prompt_in.read(cx).value().to_string();
+                let at = this.routine_at_in.read(cx).value().to_string();
+                let Some(agent) = this.routine_agent.clone() else {
+                    this.model.notices.push("Pick the agent it runs.".into());
+                    cx.notify();
+                    return;
+                };
+                if at.trim().is_empty() && !this.routine_webhook {
+                    this.model
+                        .notices
+                        .push("Needs a schedule or a webhook".into());
+                    cx.notify();
+                    return;
+                }
+                // The flow, one step after another; one an agent made
+                // with steps side by side stays as it is.
+                let flow = if this.routine_flow_kept.is_empty() {
+                    let mut steps = Vec::new();
+                    let mut before = "routine".to_string();
+                    for (k, (agent, prompt_in)) in this.routine_flow.iter().enumerate() {
+                        let Some(agent) = agent.clone() else {
+                            this.model
+                                .notices
+                                .push(format!("Pick step {}'s agent.", k + 1));
+                            cx.notify();
+                            return;
+                        };
+                        let name = (k + 1).to_string();
+                        steps.push(model::FlowStep {
+                            name: name.clone(),
+                            agent,
+                            prompt: prompt_in.read(cx).value().to_string(),
+                            after: vec![before],
+                        });
+                        before = name;
+                    }
+                    Some(steps)
+                } else {
+                    None
+                };
+                let form = model::RoutineForm {
+                    id: editing.clone(),
+                    name,
+                    agent,
+                    prompt,
+                    kind: this.routine_kind.clone(),
+                    at,
+                    notify: this.routine_notify,
+                    on: this.routine_on,
+                    catch_up: this.routine_catch_up,
+                    post: if this.routine_thread {
+                        "thread"
+                    } else {
+                        "chat"
+                    }
+                    .into(),
+                    webhook: this.routine_webhook,
+                    flow,
+                };
+                let f = this.model.save_routine(&form);
+                this.send(f);
+                this.routine_open = None;
+                cx.notify();
+            }));
+        let cancel = self
+            .small_button("cancel-routine", "Cancel", false)
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.routine_open = None;
+                cx.notify();
+            }));
+        let mut left = div().flex().gap(px(space::S));
+        if let Some(id) = open.clone() {
+            let run = id.clone();
+            left = left
                 .child(
-                    self.button("save-routine", "Save", true)
+                    self.small_button("delete-routine", "Delete", false)
+                        .text_color(p.bad)
                         .on_click(cx.listener(move |this, _, _, cx| {
-                            let name = this.routine_name_in.read(cx).value().to_string();
-                            let prompt = this.routine_prompt_in.read(cx).value().to_string();
-                            let at = this.routine_at_in.read(cx).value().to_string();
-                            let Some(agent) = this.routine_agent.clone() else {
-                                this.model.notices.push("Pick the agent it runs.".into());
-                                cx.notify();
-                                return;
-                            };
-                            if at.trim().is_empty() && !this.routine_webhook {
-                                this.model
-                                    .notices
-                                    .push("Needs a schedule or a webhook".into());
-                                cx.notify();
-                                return;
-                            }
-                            // The flow, one step after another; one an agent made
-                            // with steps side by side stays as it is.
-                            let flow = if this.routine_flow_kept.is_empty() {
-                                let mut steps = Vec::new();
-                                let mut before = "routine".to_string();
-                                for (k, (agent, prompt_in)) in this.routine_flow.iter().enumerate()
-                                {
-                                    let Some(agent) = agent.clone() else {
-                                        this.model
-                                            .notices
-                                            .push(format!("Pick step {}'s agent.", k + 1));
-                                        cx.notify();
-                                        return;
-                                    };
-                                    let name = (k + 1).to_string();
-                                    steps.push(model::FlowStep {
-                                        name: name.clone(),
-                                        agent,
-                                        prompt: prompt_in.read(cx).value().to_string(),
-                                        after: vec![before],
-                                    });
-                                    before = name;
-                                }
-                                Some(steps)
-                            } else {
-                                None
-                            };
-                            let form = model::RoutineForm {
-                                id: editing.clone(),
-                                name,
-                                agent,
-                                prompt,
-                                kind: this.routine_kind.clone(),
-                                at,
-                                notify: this.routine_notify,
-                                on: this.routine_on,
-                                catch_up: this.routine_catch_up,
-                                post: if this.routine_thread {
-                                    "thread"
-                                } else {
-                                    "chat"
-                                }
-                                .into(),
-                                webhook: this.routine_webhook,
-                                flow,
-                            };
-                            let f = this.model.save_routine(&form);
+                            let f = this.model.delete_routine(&id);
                             this.send(f);
                             this.routine_open = None;
                             cx.notify();
                         })),
                 )
                 .child(
-                    self.button("cancel-routine", "Cancel", false)
-                        .on_click(cx.listener(|this, _, _, cx| {
+                    self.small_button("run-routine", "Run now", false)
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            let f = this.model.run_routine(&run);
+                            this.send(f);
                             this.routine_open = None;
                             cx.notify();
                         })),
                 );
-            if let Some(id) = open.clone() {
-                let run = id.clone();
-                buttons = buttons
-                    .child(
-                        self.button("run-routine", "Run now", false)
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                let f = this.model.run_routine(&run);
-                                this.send(f);
-                                this.routine_open = None;
-                                cx.notify();
-                            })),
-                    )
-                    .child(
-                        self.button("delete-routine", "Delete", false)
-                            .text_color(p.bad)
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                let f = this.model.delete_routine(&id);
-                                this.send(f);
-                                this.routine_open = None;
-                                cx.notify();
-                            })),
-                    );
-            }
-            body = body
-                .child(
-                    div()
-                        .text_size(px(size::HEADING))
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(p.ink)
-                        .child(if open.is_some() {
-                            "Change routine"
-                        } else {
-                            "New routine"
-                        }),
-                )
-                .child(self.field("Name", Input::new(&self.routine_name_in)))
-                .child(self.field("Agent", agents))
-                .child(self.field(
-                    "What it's asked each time",
-                    Textarea::new(&self.routine_prompt_in),
-                ))
-                .child(self.field("When it runs", kinds))
-                .child(self.field(at_label, Input::new(&self.routine_at_in)))
-                .child(switches)
-                .children(webhook)
-                .child(flow)
-                .child(buttons);
-        } else {
-            let mut list = div().flex().flex_col();
-            if self.model.routines.is_empty() {
-                list = list.child(caption("No routines yet".into()));
-            }
-            for r in self.model.routines.clone() {
-                let agent = self
-                    .model
-                    .agent(&r.agent)
-                    .map(|a| a.name.clone())
-                    .unwrap_or_else(|| "a deleted agent".into());
-                let next = if !r.on || r.next == 0 {
-                    "paused".to_string()
-                } else if day_of(r.next) == "Today" {
-                    format!("next at {}", time_of(r.next))
-                } else {
-                    format!("next {} at {}", day_of(r.next), time_of(r.next))
-                };
-                let last = match r.last_status.as_str() {
-                    "" => String::new(),
-                    "running" => " · running now".into(),
-                    "done" => format!(" · last ran {}", time_of(r.last_at)),
-                    "skipped" => format!(" · skipped at {}", time_of(r.last_at)),
-                    "quiet" => format!(" · nothing new at {}", time_of(r.last_at)),
-                    _ => format!(" · failed at {}: {}", time_of(r.last_at), r.last_error),
-                };
-                // Its flow, while it runs: how far each step has got, and a Stop.
-                let running = self
-                    .model
-                    .flows
-                    .iter()
-                    .find(|f| f.routine == r.id)
-                    .map(|f| {
-                        let steps: Vec<String> = f
-                            .steps
-                            .iter()
-                            .skip(1)
-                            .map(|(name, agent, status)| {
-                                let who = self
-                                    .model
-                                    .agent(agent)
-                                    .map(|a| a.name.clone())
-                                    .unwrap_or_else(|| "a deleted agent".into());
-                                format!("step {name} ({who}) {status}")
-                            })
-                            .collect();
-                        (format!("Flow: {}", steps.join(" · ")), f.stopped)
-                    });
-                let flow_row = running.map(|(text, stopped)| {
-                    let routine = r.id.clone();
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap(px(space::S))
-                        .pt(px(space::XS))
-                        .child(div().flex_1().min_w_0().child(caption(text)))
-                        .when(!stopped, |d| {
-                            d.child(
-                                self.button_owned(format!("stop-flow-{}", r.id), "Stop", false)
-                                    .on_click(cx.listener(move |this, _, _, cx| {
-                                        cx.stop_propagation();
-                                        let f = this.model.stop_flow(&routine);
-                                        this.send(f);
-                                        cx.notify();
-                                    })),
-                            )
-                        })
-                });
-                // A routine with a thread of its own: the way there.
-                let thread_row = (r.post == "thread" && !r.conversation.is_empty()).then(|| {
-                    let conversation = r.conversation.clone();
-                    let agent = r.agent.clone();
-                    div().flex().pt(px(space::XS)).child(
-                        self.button_owned(format!("thread-{}", r.id), "Open its thread", false)
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                cx.stop_propagation();
-                                this.open_thread(&agent, &conversation, cx);
-                            })),
-                    )
-                });
-                let id = SharedString::from(format!("routine-{}", r.id));
-                list = list.child(
-                    div()
-                        .id(id)
-                        .flex()
-                        .flex_col()
-                        .py(px(space::S))
-                        .px(px(space::S))
-                        .rounded(px(radius::BUTTON))
-                        .cursor_pointer()
-                        .hover(move |s| s.bg(p.hover))
-                        .child(
-                            div()
-                                .text_size(px(size::SMALL))
-                                .font_weight(FontWeight::MEDIUM)
-                                .text_color(p.ink)
-                                .child(r.name.clone()),
-                        )
-                        .child(caption(format!(
-                            "{agent}, {}, {next}{last}{}",
-                            r.when,
-                            match r.flow.len() {
-                                0 => String::new(),
-                                1 => " · then 1 more step".into(),
-                                n => format!(" · then {n} more steps"),
-                            }
-                        )))
-                        .children(flow_row)
-                        .children(thread_row)
-                        .on_click(cx.listener(move |this, _, window, cx| {
-                            this.routine_name_in
-                                .update(cx, |s, cx| s.set_value(r.name.clone(), window, cx));
-                            this.routine_at_in
-                                .update(cx, |s, cx| s.set_value(r.at.clone(), window, cx));
-                            this.routine_kind = if r.kind.is_empty() {
-                                "every".into()
-                            } else {
-                                r.kind.clone()
-                            };
-                            this.routine_prompt_in
-                                .update(cx, |s, cx| s.set_value(r.prompt.clone(), window, cx));
-                            this.routine_agent = Some(r.agent.clone());
-                            this.routine_notify = r.notify;
-                            this.routine_on = r.on;
-                            this.routine_catch_up = r.catch_up;
-                            this.routine_thread = r.post == "thread";
-                            this.routine_webhook = !r.hook.is_empty();
-                            this.set_routine_flow(&r.flow, window, cx);
-                            this.routine_open = Some(Some(r.id.clone()));
-                            cx.notify();
-                        })),
-                );
-            }
-            body = body.child(list).child(
-                div()
-                    .flex()
-                    .child(
-                        self.button("new-routine", "New routine", true)
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.routine_name_in
-                                    .update(cx, |s, cx| s.set_value("", window, cx));
-                                this.routine_at_in
-                                    .update(cx, |s, cx| s.set_value("30", window, cx));
-                                this.routine_kind = "every".into();
-                                this.routine_prompt_in
-                                    .update(cx, |s, cx| s.set_value("", window, cx));
-                                this.routine_agent = this.model.selected.clone();
-                                this.routine_notify = true;
-                                this.routine_on = true;
-                                this.routine_catch_up = true;
-                                this.routine_thread = false;
-                                this.routine_webhook = false;
-                                this.set_routine_flow(&[], window, cx);
-                                this.routine_open = Some(None);
-                                cx.notify();
-                            })),
-                    ),
-            );
         }
-        let page = div()
-            .id("routines-page")
-            .size_full()
-            .overflow_y_scroll()
-            .flex()
-            .justify_center()
-            .items_start()
-            .pt(px(space::XL))
-            .px(px(space::XL))
-            .pb(px(space::XXL))
-            .child(body);
-        div().flex_1().min_h_0().child(page)
+        groups.push(
+            div()
+                .flex()
+                .items_center()
+                .justify_between()
+                .child(left)
+                .child(div().flex().gap(px(space::S)).child(cancel).child(save))
+                .into_any_element(),
+        );
+        let title = if open.is_some() {
+            "Change routine"
+        } else {
+            "New routine"
+        };
+        self.settings_page("routines-page", title, None, groups)
     }
 
     /// Fills the routine form's flow from `flow`: steps it edits when they go one after
@@ -7058,27 +7070,15 @@ ACTA_KEY=secret:ACTA_KEY",
 
     /// The routine form's flow (PLAN.md, "Routine flows"): who its answer goes to next,
     /// step by step.
-    fn routine_flow_section(&mut self, cx: &mut Context<Self>) -> Div {
+    fn routine_flow_group(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let p = self.p;
-        let caption = |text: String| {
-            div()
-                .text_size(px(size::CAPTION))
-                .text_color(p.ink_3)
-                .child(text)
-        };
         let name_of = |id: &str| {
             self.model
                 .agent(id)
                 .map(|a| a.name.clone())
                 .unwrap_or_else(|| "a deleted agent".into())
         };
-        let mut section = div().flex().flex_col().gap(px(space::S)).child(
-            div()
-                .text_size(px(size::SMALL))
-                .text_color(p.ink_2)
-                .font_weight(FontWeight::MEDIUM)
-                .child("Then"),
-        );
+        let mut rows = Vec::new();
         if !self.routine_flow_kept.is_empty() {
             let lines: Vec<String> = self
                 .routine_flow_kept
@@ -7093,59 +7093,60 @@ ACTA_KEY=secret:ACTA_KEY",
                     )
                 })
                 .collect();
-            return section
-                .child(caption(format!(
-                    "An agent set up this flow, with steps side by side. It stays as it is.\n{}",
-                    lines.join("\n")
-                )))
-                .child(
-                    div().flex().child(
-                        self.button("flow-off", "Take the flow off", false)
+            rows.push(
+                self.row(
+                    None,
+                    "Steps side by side",
+                    Some("An agent set this flow up, so it stays as it is".into()),
+                    Some(
+                        self.small_button("flow-off", "Take it off", false)
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.routine_flow_kept.clear();
                                 cx.notify();
-                            })),
+                            }))
+                            .into_any_element(),
                     ),
-                );
+                )
+                .into_any_element(),
+            );
+            rows.push(self.note_row(lines.join("\n"), p.ink_2));
+            return self.group(Some("Then"), rows);
         }
-        if self.routine_flow.is_empty() {
-            section = section.child(caption(
-                "Its answer can go on to another agent, and that one's to the next.".into(),
-            ));
-        }
-        let agents = self.model.agents.clone();
         for (k, (picked, prompt_in)) in self.routine_flow.iter().enumerate() {
-            let mut pick = div().flex().flex_wrap().gap(px(space::XS));
-            for a in &agents {
-                let id = a.id.clone();
-                pick = pick.child(
-                    self.button_owned(
-                        format!("flow-{k}-agent-{}", a.id),
-                        &a.name,
-                        picked.as_deref() == Some(a.id.as_str()),
-                    )
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        if let Some(step) = this.routine_flow.get_mut(k) {
-                            step.0 = Some(id.clone());
-                        }
-                        cx.notify();
-                    })),
-                );
-            }
             let from = if k == 0 {
                 "the routine's answer".to_string()
             } else {
                 format!("step {k}'s answer")
             };
-            section = section.child(
+            let remove = self
+                .small_button(format!("flow-{k}-remove"), "Remove", false)
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    if k < this.routine_flow.len() {
+                        this.routine_flow.remove(k);
+                    }
+                    cx.notify();
+                }));
+            let mut pick = div().flex().flex_wrap().gap(px(space::XS));
+            for a in self.model.agents.clone() {
+                let id = a.id.clone();
+                let on = picked.as_deref() == Some(a.id.as_str());
+                pick = pick.child(
+                    self.segment(format!("flow-{k}-agent-{}", a.id), &a.name, on)
+                        .when(!on, |d| d.border_1().border_color(p.line))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            if let Some(step) = this.routine_flow.get_mut(k) {
+                                step.0 = Some(id.clone());
+                            }
+                            cx.notify();
+                        })),
+                );
+            }
+            rows.push(
                 div()
+                    .p(px(space::L))
                     .flex()
                     .flex_col()
-                    .gap(px(space::XS))
-                    .p(px(space::S))
-                    .rounded(px(radius::BUTTON))
-                    .border_1()
-                    .border_color(p.line)
+                    .gap(px(space::S))
                     .child(
                         div()
                             .flex()
@@ -7154,337 +7155,305 @@ ACTA_KEY=secret:ACTA_KEY",
                             .child(
                                 div()
                                     .flex_1()
-                                    .text_size(px(size::SMALL))
+                                    .text_size(px(size::BODY))
                                     .text_color(p.ink)
                                     .child(format!("Step {}, with {from}", k + 1)),
                             )
-                            .child(
-                                self.button_owned(format!("flow-{k}-remove"), "Remove", false)
-                                    .on_click(cx.listener(move |this, _, _, cx| {
-                                        if k < this.routine_flow.len() {
-                                            this.routine_flow.remove(k);
-                                        }
-                                        cx.notify();
-                                    })),
-                            ),
+                            .child(remove),
                     )
                     .child(pick)
-                    .child(Textarea::new(prompt_in)),
+                    .child(Textarea::new(prompt_in))
+                    .into_any_element(),
             );
         }
         if self.routine_flow.len() < 20 {
-            section = section.child(
-                div().flex().child(
-                    self.button("flow-add", "Hand the answer on", false)
-                        .on_click(cx.listener(|this, _, window, cx| {
-                            let input = cx.new(|cx| {
-                                TextareaState::new(window, cx).auto_grow(2, 10).placeholder(
-                                    "What this agent is asked, with the answer before it.",
-                                )
-                            });
-                            this.routine_flow.push((None, input));
-                            cx.notify();
-                        })),
-                ),
+            rows.push(
+                self.row(
+                    None,
+                    "Hand the answer on",
+                    Some("To another agent, and its answer to the next".into()),
+                    Some(
+                        self.small_button("flow-add", "Add a step", false)
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                let input = cx.new(|cx| {
+                                    TextareaState::new(window, cx).auto_grow(2, 10).placeholder(
+                                        "What this agent is asked, with the answer before it.",
+                                    )
+                                });
+                                this.routine_flow.push((None, input));
+                                cx.notify();
+                            }))
+                            .into_any_element(),
+                    ),
+                )
+                .into_any_element(),
             );
         }
-        section
+        self.group(Some("Then"), rows)
     }
 
     /// iPhone notifications through the push relay (PLAN.md, "The push relay"): whether the
-    /// instance uses one, and for the owner, a place to turn it on or off. It says what
-    /// the relay gets.
-    fn relay_section(&mut self, cx: &mut Context<Self>) -> Div {
-        let p = self.p;
-        let caption = |text: String| {
-            div()
-                .text_size(px(size::CAPTION))
-                .text_color(p.ink_3)
-                .child(text)
+    /// instance uses one, and for the owner, a place to turn it on or off.
+    fn relay_group(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let row = match self.model.relay.clone() {
+            None => return None,
+            Some(url) if !url.is_empty() => self.row(
+                Some(self.tile(Ico::Bell)),
+                "Push relay",
+                Some(format!("{url}, sealed end to end")),
+                Some(
+                    self.small_button("relay-off", "Stop", false)
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            let f = this.model.set_relay(Some(""));
+                            this.send(f);
+                            cx.notify();
+                        }))
+                        .into_any_element(),
+                ),
+            ),
+            Some(_) => self.row(
+                Some(self.tile(Ico::Bell)),
+                "Push relay",
+                Some("Notifications while loom is closed".into()),
+                Some(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(space::S))
+                        .child(div().w(px(210.0)).child(Input::new(&self.relay_in).small()))
+                        .child(
+                            self.small_button("relay-on", "Use", false)
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    let url = this.relay_in.read(cx).value().trim().to_string();
+                                    if !url.is_empty() {
+                                        let f = this.model.set_relay(Some(&url));
+                                        this.send(f);
+                                    }
+                                    cx.notify();
+                                })),
+                        )
+                        .into_any_element(),
+                ),
+            ),
         };
-        let section = div().flex().flex_col().gap(px(space::S)).child(
-            div()
-                .text_size(px(size::BODY))
-                .font_weight(FontWeight::SEMIBOLD)
-                .text_color(p.ink)
-                .child("Notifications on iPhone"),
-        );
-        match self.model.relay.clone() {
-            None => section,
-            Some(url) if !url.is_empty() => section
-                .child(caption(format!(
-                    "They go through the push relay at {url}. It gets each phone's token sealed for it and each notification sealed for the phone, so it never reads what they say. It sees only that something is new."
-                )))
-                .child(
-                    div().flex().child(
-                        div()
-                            .id("relay-off")
-                            .text_size(px(size::CAPTION))
-                            .text_color(p.ink_3)
-                            .cursor_pointer()
-                            .hover(move |s| s.text_color(p.ink))
-                            .child("Stop using the relay")
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                let f = this.model.set_relay(Some(""));
-                                this.send(f);
-                                cx.notify();
-                            })),
-                    ),
-                ),
-            Some(_) => section
-                .child(caption(
-                    "Notifications while loom is closed on your phone, sealed end to end"
-                        .into(),
-                ))
-                .child(self.field("Push relay", Input::new(&self.relay_in)))
-                .child(
-                    div().flex().child(
-                        self.button("relay-on", "Use this relay", false)
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                let url = this.relay_in.read(cx).value().trim().to_string();
-                                if !url.is_empty() {
-                                    let f = this.model.set_relay(Some(&url));
-                                    this.send(f);
-                                }
-                                cx.notify();
-                            })),
-                    ),
-                ),
-        }
+        Some(self.group(
+            Some("Notifications on iPhone"),
+            vec![row.into_any_element()],
+        ))
     }
 
     /// The Add a phone page: a QR code the phone's loom app scans to join this account,
     /// with a token of its own. The core makes what's in it; this draws it, dark on white
-    /// in either theme so a camera reads it.
+    /// in either theme so a camera reads it. Then the devices signed in.
     fn add_phone_page(&mut self, cx: &mut Context<Self>) -> Div {
         let p = self.p;
-        let caption = |text: String| {
-            div()
-                .text_size(px(size::CAPTION))
-                .text_color(p.ink_3)
-                .child(text)
-        };
-        let mut body = div()
-            .w_full()
-            .max_w(px(560.0))
-            .flex()
-            .flex_col()
-            .gap(px(space::XL))
-            .child(
-                div()
-                    .text_size(px(size::HEADING))
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(p.ink)
-                    .child("Add a phone"),
-            );
+        let mut groups = Vec::new();
         // The instance in this app listens only on this computer until phones are on.
-        let phones_off = self.local() && self.model.phones != Some(true);
-        if phones_off {
-            body = body
-                .child(caption(
-                    "Over Wi-Fi or Tailscale, encrypted end to end".into(),
-                ))
-                .child(
-                    div().flex().child(
-                        self.button("phones-on", "Let phones reach this computer", true)
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                let f = this.model.set_phones(Some(true));
+        let local = self.local();
+        let phones_on = !local || self.model.phones == Some(true);
+        let mut pair = Vec::new();
+        if local {
+            pair.push(
+                self.row(
+                    Some(self.tile(Ico::Smartphone)),
+                    "Phones can reach this computer",
+                    Some("Over Wi-Fi or Tailscale, encrypted end to end".into()),
+                    Some(
+                        self.switch("phones-switch", phones_on)
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                let f = this.model.set_phones(Some(!phones_on));
                                 this.send(f);
-                                let f = this.model.create_link();
-                                this.send(f);
+                                if !phones_on {
+                                    let f = this.model.create_link();
+                                    this.send(f);
+                                }
                                 cx.notify();
-                            })),
+                            }))
+                            .into_any_element(),
                     ),
-                );
-        } else if let Some(name) = self.model.joined.clone() {
-            body = body.child(
+                )
+                .into_any_element(),
+            );
+        }
+        if phones_on {
+            let caption = |text: String| {
                 div()
-                    .text_size(px(size::BODY))
-                    .text_color(p.ink)
-                    .child(format!(
-                    "{name} joined. It has a sign-in of its own, which you can take away below."
-                )),
-            );
-        } else if let Some((text, expires)) = self.model.link.clone() {
-            body = body
-                .child(caption("Scan it with loom on your phone".into()))
-                .child(qr_view(&text))
-                .child(caption(format!(
-                    "The code works once, until {}.",
-                    time_of(expires)
-                )));
-        } else {
-            body = body.child(caption("Making a code…".into()));
-        }
-        if !phones_off {
-            let mut row = div().flex().items_center().gap(px(space::L)).child(
-                self.button("new-link", "New code", false)
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        let f = this.model.create_link();
-                        this.send(f);
-                        cx.notify();
-                    })),
-            );
-            if self.local() {
-                row = row.child(
-                    div()
-                        .id("phones-off")
-                        .text_size(px(size::CAPTION))
-                        .text_color(p.ink_3)
-                        .cursor_pointer()
-                        .hover(move |s| s.text_color(p.ink))
-                        .child("Stop phones reaching this computer")
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            let f = this.model.set_phones(Some(false));
-                            this.send(f);
-                            cx.notify();
-                        })),
-                );
-            }
-            body = body.child(row);
-        }
-        body = body.child(self.relay_section(cx));
-        // Every device signed in to this account, so one that shouldn't be can be signed out.
-        let mut devices = div().flex().flex_col().gap(px(space::XS)).child(
-            div()
-                .text_size(px(size::BODY))
-                .font_weight(FontWeight::SEMIBOLD)
-                .text_color(p.ink)
-                .child("Signed in"),
-        );
-        for (id, name, kind) in self.model.devices.clone() {
-            let what = match kind.as_str() {
-                "ios" => "iPhone",
-                "macos" => "Mac",
-                "windows" => "Windows PC",
-                _ => "Command line",
+                    .text_size(px(size::SMALL))
+                    .text_color(p.ink_3)
+                    .text_center()
+                    .child(text)
             };
-            let this_one = id == self.model.me;
-            let mut row = div()
+            let mut code = div()
                 .flex()
+                .flex_col()
                 .items_center()
-                .justify_between()
-                .py(px(space::S))
-                .px(px(space::S))
-                .child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .child(
-                            div()
-                                .text_size(px(size::SMALL))
-                                .text_color(p.ink)
-                                .child(name.clone()),
-                        )
-                        .child(caption(if this_one {
-                            format!("{what}, this one")
-                        } else {
-                            what.to_string()
-                        })),
-                );
-            if !this_one {
-                row = row.child(
-                    self.button_owned(format!("revoke-{id}"), "Sign out", false)
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            let f = this.model.revoke_device(&id);
-                            this.send(f);
-                            cx.notify();
-                        })),
-                );
-            }
-            devices = devices.child(row);
-        }
-        body = body.child(devices);
-        // Leaving an instance on a server: the account and everything of it. The instance
-        // refuses the owner's, whose account goes with the instance.
-        if !self.local() {
-            let mut leave = div().flex().flex_col().gap(px(space::S)).child(
-                div()
-                    .text_size(px(size::BODY))
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(p.ink)
-                    .child("Your account"),
-            );
-            if self.confirm_delete {
-                leave = leave
+                .gap(px(space::M))
+                .py(px(space::XL))
+                .px(px(space::L));
+            if let Some(name) = self.model.joined.clone() {
+                code = code
                     .child(
                         div()
-                            .text_size(px(size::SMALL))
-                            .text_color(p.bad)
-                            .child("Delete your account, with every agent, chat, routine and secret of yours? This can't be undone."),
+                            .text_size(px(size::BODY))
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(p.ink)
+                            .child(format!("{name} joined")),
+                    )
+                    .child(caption(
+                        "It's signed in below, where you can sign it out".into(),
+                    ));
+            } else if let Some((text, expires)) = self.model.link.clone() {
+                code = code
+                    .child(
+                        div()
+                            .p(px(space::S))
+                            .rounded(px(radius::ROW))
+                            .bg(gpui::white())
+                            .child(qr_view(&text)),
                     )
                     .child(
                         div()
-                            .flex()
-                            .gap(px(space::S))
-                            .child(self.button("delete-account", "Delete it", true).on_click(
-                                cx.listener(|this, _, _, cx| {
-                                    this.confirm_delete = false;
-                                    let f = this.model.delete_account();
-                                    this.send(f);
-                                    cx.notify();
-                                }),
-                            ))
-                            .child(self.button("keep-account", "Keep it", false).on_click(
-                                cx.listener(|this, _, _, cx| {
-                                    this.confirm_delete = false;
-                                    cx.notify();
-                                }),
-                            )),
-                    );
+                            .text_size(px(size::BODY))
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(p.ink)
+                            .child("Scan it with loom on your phone"),
+                    )
+                    .child(caption(format!("Works once, until {}", time_of(expires))));
             } else {
-                leave = leave.child(
-                    div().child(
-                        self.button("ask-delete-account", "Delete my account", false)
+                code = code.child(caption("Making a code…".into()));
+            }
+            code = code.child(self.small_button("new-link", "New code", false).on_click(
+                cx.listener(|this, _, _, cx| {
+                    let f = this.model.create_link();
+                    this.send(f);
+                    cx.notify();
+                }),
+            ));
+            pair.push(code.into_any_element());
+        }
+        groups.push(self.group(None, pair));
+        if let Some(relay) = self.relay_group(cx) {
+            groups.push(relay);
+        }
+        // Every device signed in to this account, so one that shouldn't be can be signed out.
+        let mut devices = Vec::new();
+        for (id, name, kind) in self.model.devices.clone() {
+            let (what, icon) = match kind.as_str() {
+                "ios" => ("iPhone", Ico::Smartphone),
+                "macos" => ("Mac", Ico::Laptop),
+                "windows" => ("Windows PC", Ico::Monitor),
+                _ => ("Command line", Ico::SquareTerminal),
+            };
+            let this_one = id == self.model.me;
+            let control = if this_one {
+                div()
+                    .px(px(space::S))
+                    .py(px(2.0))
+                    .rounded(px(radius::CHIP))
+                    .bg(p.raised_2)
+                    .text_size(px(size::CAPTION))
+                    .text_color(p.ink_2)
+                    .child("This one")
+                    .into_any_element()
+            } else {
+                self.small_button(format!("revoke-{id}"), "Sign out", false)
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        let f = this.model.revoke_device(&id);
+                        this.send(f);
+                        cx.notify();
+                    }))
+                    .into_any_element()
+            };
+            devices.push(
+                self.row(
+                    Some(self.tile(icon)),
+                    name,
+                    Some(what.into()),
+                    Some(control),
+                )
+                .into_any_element(),
+            );
+        }
+        if !devices.is_empty() {
+            groups.push(self.group(Some("Signed in"), devices));
+        }
+        // Leaving an instance on a server: the account and everything of it. The instance
+        // refuses the owner's, whose account goes with the instance.
+        if !local {
+            let control = if self.confirm_delete {
+                div()
+                    .flex()
+                    .gap(px(space::S))
+                    .child(
+                        self.small_button("keep-account", "Keep it", false)
                             .on_click(cx.listener(|this, _, _, cx| {
-                                this.confirm_delete = true;
+                                this.confirm_delete = false;
                                 cx.notify();
                             })),
-                    ),
-                );
-            }
-            body = body.child(leave);
+                    )
+                    .child(
+                        self.small_button("delete-account", "Delete it", true)
+                            .bg(p.bad)
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.confirm_delete = false;
+                                let f = this.model.delete_account();
+                                this.send(f);
+                                cx.notify();
+                            })),
+                    )
+                    .into_any_element()
+            } else {
+                self.small_button("ask-delete-account", "Delete", false)
+                    .text_color(p.bad)
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.confirm_delete = true;
+                        cx.notify();
+                    }))
+                    .into_any_element()
+            };
+            groups.push(self.group(
+                Some("Your account"),
+                vec![self
+                    .row(
+                        None,
+                        "Delete my account",
+                        Some(if self.confirm_delete {
+                            "Every agent, chat, routine and secret of yours, for good".into()
+                        } else {
+                            "With everything of yours on this server".into()
+                        }),
+                        Some(control),
+                    )
+                    .into_any_element()],
+            ));
         }
-        let page = div()
-            .id("add-phone-page")
-            .size_full()
-            .overflow_y_scroll()
-            .flex()
-            .justify_center()
-            .items_start()
-            .pt(px(space::XL))
-            .px(px(space::XL))
-            .pb(px(space::XXL))
-            .child(body);
-        div().flex_1().min_h_0().child(page)
+        self.settings_page("add-phone-page", "Add a phone", None, groups)
     }
 
     /// The This PC page: what agents may do on this computer, tool by tool. The core keeps
     /// the choice, and checks it before it acts.
     fn device_page(&mut self, cx: &mut Context<Self>) -> Div {
         let p = self.p;
-        let caption = |text: &'static str| {
-            div()
-                .text_size(px(size::CAPTION))
-                .text_color(p.ink_3)
-                .child(text)
-        };
-        let mut list = div().flex().flex_col().gap(px(space::XS));
+        let mut rows = Vec::new();
         for (tool, mode) in self.model.device_tools.clone() {
-            let (name, what) = match tool.as_str() {
-                "run_command" => ("Run commands", "In PowerShell, as you."),
-                "read_file" => ("Read files", "Any file you can read."),
-                "list_files" => ("List folders", "What's in a folder."),
-                "screenshot" => ("Take screenshots", "Of the main screen, as a picture."),
-                "read_clipboard" => ("Read the clipboard", "The text you last copied."),
-                "write_clipboard" => ("Copy to the clipboard", "Text for you to paste."),
-                _ => ("Open files and links", "With their usual program."),
+            let (name, what, icon) = match tool.as_str() {
+                "run_command" => ("Run commands", "In PowerShell, as you", Ico::SquareTerminal),
+                "read_file" => ("Read files", "Any file you can read", Ico::FileText),
+                "list_files" => ("List folders", "What's in a folder", Ico::Folder),
+                "screenshot" => ("Take screenshots", "Of the main screen", Ico::Monitor),
+                "read_clipboard" => ("Read the clipboard", "The text you last copied", Ico::Copy),
+                "write_clipboard" => ("Copy to the clipboard", "Text for you to paste", Ico::Copy),
+                _ => (
+                    "Open files and links",
+                    "With their usual program",
+                    Ico::ExternalLink,
+                ),
             };
-            let mut choices = div().flex().gap(px(space::XS));
+            let mut choices = Vec::new();
             for (choice, label) in [("off", "Off"), ("ask", "Ask"), ("allow", "Allow")] {
                 let t = tool.clone();
-                choices = choices.child(
-                    self.button_owned(format!("{tool}-{choice}"), label, mode == choice)
+                choices.push(
+                    self.segment(format!("{tool}-{choice}"), label, mode == choice)
                         .on_click(cx.listener(move |this, _, _, cx| {
                             let f = this.model.set_device_tool(&t, choice);
                             this.send(f);
@@ -7492,28 +7461,14 @@ ACTA_KEY=secret:ACTA_KEY",
                         })),
                 );
             }
-            list = list.child(
-                div()
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .gap(px(space::M))
-                    .py(px(space::S))
-                    .px(px(space::S))
-                    .child(
-                        div()
-                            .flex()
-                            .flex_col()
-                            .child(
-                                div()
-                                    .text_size(px(size::SMALL))
-                                    .font_weight(FontWeight::MEDIUM)
-                                    .text_color(p.ink)
-                                    .child(name),
-                            )
-                            .child(caption(what)),
-                    )
-                    .child(choices),
+            rows.push(
+                self.row(
+                    Some(self.tile(icon)),
+                    name,
+                    Some(what.into()),
+                    Some(self.segments(choices).into_any_element()),
+                )
+                .into_any_element(),
             );
         }
         let allowed = self
@@ -7521,47 +7476,16 @@ ACTA_KEY=secret:ACTA_KEY",
             .device_tools
             .iter()
             .any(|(t, m)| t == "run_command" && m == "allow");
-        let body = div()
-            .w_full()
-            .max_w(px(560.0))
-            .flex()
-            .flex_col()
-            .gap(px(space::XL))
-            .child(
-                div()
-                    .text_size(px(size::HEADING))
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(p.ink)
-                    .child("What agents may do on this PC"),
-            )
-            .child(caption(
-                "Off until you turn it on. Ask waits for your yes on this PC.",
-            ))
-            .child(list)
-            .when(allowed, |d| {
-                d.child(
-                    div()
-                        .text_size(px(size::CAPTION))
-                        .text_color(p.bad)
-                        .child("Agents can run any command here without asking"),
-                )
-            });
-        let page = div()
-            .id("device-page")
-            .size_full()
-            .overflow_y_scroll()
-            .flex()
-            .justify_center()
-            .items_start()
-            .pt(px(space::XL))
-            .px(px(space::XL))
-            .pb(px(space::XXL))
-            .child(body);
-        div().flex_1().min_h_0().child(page)
+        if allowed {
+            rows.push(self.note_row("Agents can run any command here without asking", p.bad));
+        }
+        let groups = vec![self.group(
+            Some("What agents may do here, Ask waits for your yes"),
+            rows,
+        )];
+        self.settings_page("device-page", "This PC", None, groups)
     }
 
-    /// Moving the instance (PLAN.md, "Moving an instance"): the new place's address and the
-    /// code its `loom receive` printed. The apps follow by themselves once it's there.
     /// Adding a server to the app: its address, the account, and for a new server, its
     /// setup code. It signs in beside the server on screen, and comes on screen once it's in.
     fn add_server_page(&mut self, cx: &mut Context<Self>) -> Div {
@@ -7572,145 +7496,102 @@ ACTA_KEY=secret:ACTA_KEY",
             .and_then(|dir| self.away.iter().find(|a| &a.dir == dir));
         let busy = pending.is_some_and(|a| a.model.logging_in);
         let error = pending.and_then(|a| a.model.login_error.clone());
-        let input = |s: &Entity<InputState>| div().w_full().child(Input::new(s).large());
-        let body = div()
-            .w_full()
-            .max_w(px(380.0))
-            .flex()
-            .flex_col()
-            .items_center()
-            .gap(px(space::M))
-            .child(spool(
-                if busy { Spool::Turning } else { Spool::Empty },
-                p.ink_2,
-                96.0,
-                36.0,
-            ))
-            .child(
-                div()
-                    .pt(px(space::S))
-                    .pb(px(space::S))
-                    .text_size(px(size::HEADING))
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(p.ink)
-                    .child("Add a server"),
-            )
-            .child(input(&self.server_in))
-            .child(input(&self.user_in))
-            .child(input(&self.pass_in))
-            .when(self.show_code, |d| d.child(input(&self.code_in)))
-            .when_some(error, |d, e| {
-                d.child(
-                    div()
-                        .w_full()
-                        .text_size(px(size::SMALL))
-                        .text_color(p.bad)
-                        .child(e),
-                )
-            })
-            .child(
-                div().w_full().pt(px(space::S)).child(
-                    self.button(
-                        "add-server",
-                        if busy { "Signing in…" } else { "Sign in" },
-                        true,
-                    )
-                    .w_full()
-                    .h(px(46.0))
-                    .on_click(cx.listener(|this, _, _, cx| this.sign_in_added(cx))),
-                ),
-            )
-            .when(!self.show_code, |d| {
-                d.child(
-                    div()
-                        .id("add-server-code")
-                        .pt(px(space::S))
-                        .text_size(px(size::SMALL))
-                        .text_color(p.ink_3)
-                        .cursor_pointer()
-                        .hover(move |s| s.text_color(p.ink))
-                        .child("New server? Add its setup code")
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.show_code = true;
-                            cx.notify();
-                        })),
-                )
-            })
-            .child(div().w_full().pt(px(space::L)).child(self.agent_prompt(
-                "add-server-prompt",
-                ADD_SERVER_PROMPT,
-                cx,
-            )));
-        let page = div()
-            .id("add-server-page")
-            .size_full()
-            .overflow_y_scroll()
-            .flex()
-            .justify_center()
-            .items_start()
-            .pt(px(space::XL))
-            .px(px(space::XL))
-            .pb(px(space::XXL))
-            .child(body);
-        div().flex_1().min_h_0().child(page)
-    }
-
-    /// A technical job an agent can do instead: a line saying so, and a button that copies
-    /// the prompt to give it.
-    fn agent_prompt(&self, id: &'static str, prompt: &'static str, cx: &mut Context<Self>) -> Div {
-        let p = self.p;
-        div()
-            .w_full()
+        let mut rows = vec![
+            self.field_row("Address", Input::new(&self.server_in)),
+            self.field_row("Username", Input::new(&self.user_in)),
+            self.field_row("Password", Input::new(&self.pass_in)),
+        ];
+        if self.show_code {
+            rows.push(self.field_row("Setup code", Input::new(&self.code_in)));
+        }
+        if let Some(e) = error {
+            rows.push(self.note_row(e, p.bad));
+        }
+        let actions = div()
             .flex()
             .items_center()
+            .justify_between()
             .gap(px(space::M))
-            .px(px(space::M))
-            .py(px(space::S))
-            .rounded(px(radius::CARD))
-            .border_1()
-            .border_color(p.line)
-            .bg(p.raised)
-            .child(div().text_color(p.ink_2).child(Icon::new(Ico::Bot).small()))
-            .child(
+            .child(if self.show_code {
+                div().into_any_element()
+            } else {
                 div()
-                    .flex_1()
+                    .id("add-server-code")
                     .text_size(px(size::SMALL))
-                    .text_color(p.ink_2)
-                    .child("Or have one of your agents do it."),
-            )
-            .child(self.button(id, "Copy prompt", false).on_click(cx.listener(
-                move |this, _, _, cx| {
-                    cx.write_to_clipboard(ClipboardItem::new_string(prompt.to_string()));
-                    this.notice = Some((
-                        "Copied. Paste it to one of your agents.".into(),
-                        Instant::now(),
-                    ));
-                    cx.notify();
-                },
-            )))
+                    .text_color(p.ink_3)
+                    .cursor_pointer()
+                    .hover(move |s| s.text_color(p.ink))
+                    .child("New server? Add its setup code")
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.show_code = true;
+                        cx.notify();
+                    }))
+                    .into_any_element()
+            })
+            .child(
+                self.button(
+                    "add-server",
+                    if busy { "Signing in…" } else { "Sign in" },
+                    true,
+                )
+                .on_click(cx.listener(|this, _, _, cx| this.sign_in_added(cx))),
+            );
+        let groups = vec![
+            self.group(None, rows),
+            actions.into_any_element(),
+            self.agent_group("add-server-prompt", ADD_SERVER_PROMPT, cx),
+        ];
+        self.settings_page("add-server-page", "Add a server", None, groups)
     }
 
+    /// Moving the instance (PLAN.md, "Moving an instance"): the new place's address and the
+    /// code its `loom receive` printed. The apps follow by themselves once it's there.
     fn move_page(&mut self, cx: &mut Context<Self>) -> Div {
-        let body = div()
-            .w_full()
-            .max_w(px(560.0))
-            .flex()
-            .flex_col()
-            .gap(px(space::L))
-            .child(self.agent_prompt("move-prompt", MOVE_PROMPT, cx))
-            .child(self.move_section(cx).w_full());
-        let page = div()
-            .id("move-page")
-            .size_full()
-            .overflow_y_scroll()
-            .flex()
-            .justify_center()
-            .items_start()
-            .pt(px(space::XL))
-            .px(px(space::XL))
-            .pb(px(space::XXL))
-            .child(body);
-        div().flex_1().min_h_0().child(page)
+        let p = self.p;
+        let mut groups = Vec::new();
+        if let Some(to) = self.model.moving.clone() {
+            groups.push(self.group(
+                None,
+                vec![self
+                    .row(Some(self.tile(Ico::Truck)), format!("Moving to {to}…"), None, None)
+                    .into_any_element()],
+            ));
+        } else {
+            groups.push(self.group(
+                None,
+                vec![
+                    self.field_row("New place", Input::new(&self.move_to_in)),
+                    self.field_row("Move code", Input::new(&self.move_code_in)),
+                ],
+            ));
+            groups.push(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap(px(space::M))
+                    .child(
+                        div()
+                            .text_size(px(size::SMALL))
+                            .text_color(p.ink_3)
+                            .child("loom receive on the new server prints the code"),
+                    )
+                    .child(
+                        self.button("move-instance", "Move", true)
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                let to = this.move_to_in.read(cx).value().trim().to_string();
+                                let code = this.move_code_in.read(cx).value().trim().to_string();
+                                if let Some(f) = this.model.move_instance(&to, &code) {
+                                    this.send(f);
+                                }
+                                cx.notify();
+                            })),
+                    )
+                    .into_any_element(),
+            );
+        }
+        groups.push(self.agent_group("move-prompt", MOVE_PROMPT, cx));
+        self.settings_page("move-page", "Move this instance", None, groups)
     }
 
     /// The People page, for owners and admins of an instance on a server: invite someone,
@@ -7991,50 +7872,435 @@ ACTA_KEY=secret:ACTA_KEY",
         div().flex_1().min_h_0().child(page)
     }
 
-    fn move_section(&mut self, cx: &mut Context<Self>) -> Div {
+    /// The window's title bar: it drags the window, with what's on it, and ends in loom's
+    /// own minimise, maximise and close. On Windows they're the system's hit areas, so
+    /// they behave as the system's do, Snap layouts and all. macOS keeps its traffic
+    /// lights, through GPUI Kit's bar.
+    fn title_bar(&self, window: &Window, content: Div, line: Hsla) -> AnyElement {
         let p = self.p;
-        let caption = |text: String| {
+        if cfg!(target_os = "macos") {
+            return TitleBar::new()
+                .h(px(layout::TITLEBAR))
+                .pl(px(0.0))
+                .bg(p.bg)
+                .border_color(line)
+                .child(content)
+                .into_any_element();
+        }
+        let control = |id: &'static str, icon: Ico, area: WindowControlArea, close: bool| {
             div()
-                .text_size(px(size::CAPTION))
+                .id(id)
+                .w(px(34.0))
+                .h(px(28.0))
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded(px(radius::ROW))
                 .text_color(p.ink_3)
-                .child(text)
+                .hover(move |s| {
+                    if close {
+                        s.bg(p.bad).text_color(gpui::white())
+                    } else {
+                        s.bg(p.hover).text_color(p.ink)
+                    }
+                })
+                .when(cfg!(target_os = "windows"), |d| d.window_control_area(area))
+                .when(!cfg!(target_os = "windows"), |d| {
+                    d.on_click(move |_, window, _| match area {
+                        WindowControlArea::Min => window.minimize_window(),
+                        WindowControlArea::Max => window.zoom_window(),
+                        _ => window.remove_window(),
+                    })
+                })
+                .child(Icon::new(icon).small())
         };
-        let mut section = div()
+        let maximized = window.is_maximized();
+        div()
+            .h(px(layout::TITLEBAR))
+            .flex_none()
             .flex()
-            .flex_col()
-            .gap(px(space::M))
+            .items_center()
+            .bg(p.bg)
+            .border_b_1()
+            .border_color(line)
             .child(
                 div()
-                    .text_size(px(size::HEADING))
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(p.ink)
-                    .child("Move this instance"),
+                    .id("title-drag")
+                    .flex_1()
+                    .min_w_0()
+                    .h_full()
+                    .flex()
+                    .window_control_area(WindowControlArea::Drag)
+                    .when(!cfg!(target_os = "windows"), |d| {
+                        d.on_mouse_down(MouseButton::Left, |_, window, _| {
+                            window.start_window_move()
+                        })
+                    })
+                    .child(content),
             )
-            .child(caption(
-                "Run loom receive there, then give its address and move code".into(),
-            ));
-        if let Some(to) = self.model.moving.clone() {
-            return section.child(caption(format!("Moving to {to}…")));
-        }
-        section = section
-            .child(self.field("New place", Input::new(&self.move_to_in)))
-            .child(self.field("Move code", Input::new(&self.move_code_in)))
             .child(
                 div()
                     .flex()
+                    .items_center()
+                    .gap(px(2.0))
+                    .px(px(space::S))
+                    .child(control(
+                        "win-min",
+                        Ico::Minus,
+                        WindowControlArea::Min,
+                        false,
+                    ))
+                    .child(control(
+                        "win-max",
+                        if maximized { Ico::Copy } else { Ico::Square },
+                        WindowControlArea::Max,
+                        false,
+                    ))
+                    .child(control("win-close", Ico::X, WindowControlArea::Close, true)),
+            )
+            .into_any_element()
+    }
+
+    // --- The settings kit ---
+    //
+    // Every page of the settings and server popups is built from these, the way the
+    // system settings of macOS, iOS and Windows are: a title with the page's one
+    // action beside it, then groups, each a box of rows with what it is on the left
+    // and its control on the right, and one short line under a name at most.
+
+    /// A settings page: its title, with its one action on the right, then its groups,
+    /// in a column that scrolls.
+    fn settings_page(
+        &self,
+        id: &'static str,
+        title: &str,
+        action: Option<AnyElement>,
+        groups: Vec<AnyElement>,
+    ) -> Div {
+        let p = self.p;
+        let column = div()
+            .w_full()
+            .max_w(px(600.0))
+            .flex()
+            .flex_col()
+            .gap(px(space::XL))
+            .child(
+                div()
+                    .min_h(px(34.0))
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap(px(space::M))
                     .child(
-                        self.button("move-instance", "Move", true)
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                let to = this.move_to_in.read(cx).value().trim().to_string();
-                                let code = this.move_code_in.read(cx).value().trim().to_string();
-                                if let Some(f) = this.model.move_instance(&to, &code) {
-                                    this.send(f);
-                                }
-                                cx.notify();
-                            })),
-                    ),
+                        div()
+                            .text_size(px(size::HEADING - 2.0))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(p.ink)
+                            .child(title.to_string()),
+                    )
+                    .children(action),
+            )
+            .children(groups);
+        let page = div()
+            .id(id)
+            .size_full()
+            .overflow_y_scroll()
+            .flex()
+            .justify_center()
+            .items_start()
+            .pt(px(space::XL))
+            .px(px(space::XL))
+            .pb(px(space::XXL))
+            .child(column);
+        div().flex_1().min_h_0().child(page)
+    }
+
+    /// The fill of a group's box: a step off the page.
+    fn card_fill(&self) -> Hsla {
+        if self.p.dark {
+            self.p.raised
+        } else {
+            self.p.side
+        }
+    }
+
+    /// A group: its name over a box of rows, with a hairline between each.
+    fn group(&self, title: Option<&str>, rows: Vec<AnyElement>) -> AnyElement {
+        let p = self.p;
+        let mut boxed = div()
+            .flex()
+            .flex_col()
+            .rounded(px(radius::CARD))
+            .border_1()
+            .border_color(p.line)
+            .bg(self.card_fill())
+            .overflow_hidden();
+        for (i, row) in rows.into_iter().enumerate() {
+            boxed = boxed.child(
+                div()
+                    .when(i > 0, |d| d.border_t_1().border_color(p.line))
+                    .child(row),
             );
-        section
+        }
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(space::S))
+            .when_some(title, |d, t| {
+                d.child(
+                    div()
+                        .px(px(space::XS))
+                        .text_size(px(size::CAPTION))
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(p.ink_3)
+                        .child(t.to_string()),
+                )
+            })
+            .child(boxed)
+            .into_any_element()
+    }
+
+    /// A row's icon, in a small square of its own.
+    fn tile(&self, icon: Ico) -> AnyElement {
+        let p = self.p;
+        div()
+            .size(px(30.0))
+            .flex_none()
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded(px(radius::ROW))
+            .border_1()
+            .border_color(p.line)
+            .bg(p.bg)
+            .text_color(p.ink_2)
+            .child(Icon::new(icon).small())
+            .into_any_element()
+    }
+
+    /// A row: what it is on the left, with one short line under it, and its control
+    /// on the right.
+    fn row(
+        &self,
+        lead: Option<AnyElement>,
+        title: impl Into<SharedString>,
+        sub: Option<String>,
+        control: Option<AnyElement>,
+    ) -> Div {
+        let p = self.p;
+        div()
+            .min_h(px(54.0))
+            .flex()
+            .items_center()
+            .gap(px(space::M))
+            .px(px(space::L))
+            .py(px(space::S + 2.0))
+            .children(lead)
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .flex()
+                    .flex_col()
+                    .gap(px(2.0))
+                    .child(
+                        div()
+                            .text_size(px(size::BODY))
+                            .text_color(p.ink)
+                            .truncate()
+                            .child(title.into()),
+                    )
+                    .when_some(sub, |d, s| {
+                        d.child(
+                            div()
+                                .text_size(px(size::CAPTION))
+                                .text_color(p.ink_3)
+                                .truncate()
+                                .child(s),
+                        )
+                    }),
+            )
+            .when_some(control, |d, c| d.child(div().flex_none().child(c)))
+    }
+
+    /// A row of words alone, wrapping, such as a warning or how to use something.
+    fn note_row(&self, text: impl Into<SharedString>, ink: Hsla) -> AnyElement {
+        div()
+            .px(px(space::L))
+            .py(px(space::M))
+            .text_size(px(size::SMALL))
+            .line_height(rems(1.45))
+            .text_color(ink)
+            .child(text.into())
+            .into_any_element()
+    }
+
+    /// A row a field fills, under its label.
+    fn field_row(&self, label: &str, input: impl IntoElement) -> AnyElement {
+        let p = self.p;
+        div()
+            .flex()
+            .items_center()
+            .gap(px(space::M))
+            .px(px(space::L))
+            .py(px(space::S + 2.0))
+            .child(
+                div()
+                    .w(px(120.0))
+                    .flex_none()
+                    .text_size(px(size::BODY))
+                    .text_color(p.ink)
+                    .child(label.to_string()),
+            )
+            .child(div().flex_1().min_w_0().child(input))
+            .into_any_element()
+    }
+
+    /// A small button, for a row.
+    fn small_button(
+        &self,
+        id: impl Into<SharedString>,
+        label: &str,
+        primary: bool,
+    ) -> Stateful<Div> {
+        self.button_owned(id, label, primary)
+            .h(px(30.0))
+            .px(px(space::M))
+    }
+
+    /// An on and off switch.
+    fn switch(&self, id: impl Into<SharedString>, on: bool) -> Stateful<Div> {
+        let p = self.p;
+        div()
+            .id(id.into())
+            .w(px(38.0))
+            .h(px(22.0))
+            .flex_none()
+            .flex()
+            .items_center()
+            .when(on, |d| d.justify_end())
+            .p(px(3.0))
+            .rounded(px(radius::ROW))
+            .bg(if on { p.button } else { p.line_strong })
+            .cursor_pointer()
+            .child(
+                div()
+                    .size(px(16.0))
+                    .rounded(px(4.0))
+                    .bg(if on { p.button_ink } else { p.bg })
+                    .shadow_sm(),
+            )
+    }
+
+    /// A choice of a few, side by side, as one control.
+    fn segments(&self, items: Vec<Stateful<Div>>) -> Div {
+        let p = self.p;
+        div()
+            .flex()
+            .p(px(2.0))
+            .gap(px(2.0))
+            .rounded(px(radius::ROW + 2.0))
+            .bg(p.raised_2)
+            .children(items)
+    }
+
+    /// One choice of `segments`.
+    fn segment(&self, id: impl Into<SharedString>, label: &str, on: bool) -> Stateful<Div> {
+        let p = self.p;
+        div()
+            .id(id.into())
+            .h(px(26.0))
+            .px(px(space::M))
+            .flex()
+            .items_center()
+            .rounded(px(radius::ROW))
+            .text_size(px(size::SMALL))
+            .cursor_pointer()
+            .when(on, |d| {
+                d.bg(p.bg)
+                    .text_color(p.ink)
+                    .font_weight(FontWeight::MEDIUM)
+                    .shadow_sm()
+            })
+            .when(!on, |d| {
+                d.text_color(p.ink_3).hover(move |s| s.text_color(p.ink))
+            })
+            .child(label.to_string())
+    }
+
+    /// What a page shows with nothing on it yet: what would be here, in a line, and
+    /// the way to make the first.
+    fn empty(&self, icon: Ico, title: &str, line: &str, action: Option<AnyElement>) -> AnyElement {
+        let p = self.p;
+        div()
+            .flex()
+            .flex_col()
+            .items_center()
+            .gap(px(space::S))
+            .py(px(space::XXL + space::S))
+            .px(px(space::XL))
+            .rounded(px(radius::CARD))
+            .border_1()
+            .border_color(p.line)
+            .bg(self.card_fill())
+            .child(
+                div()
+                    .size(px(44.0))
+                    .mb(px(space::XS))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded(px(radius::BUTTON))
+                    .border_1()
+                    .border_color(p.line)
+                    .bg(p.bg)
+                    .text_color(p.ink_2)
+                    .child(Icon::new(icon)),
+            )
+            .child(
+                div()
+                    .text_size(px(size::BODY))
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(p.ink)
+                    .child(title.to_string()),
+            )
+            .child(
+                div()
+                    .max_w(px(340.0))
+                    .text_center()
+                    .text_size(px(size::SMALL))
+                    .text_color(p.ink_3)
+                    .child(line.to_string()),
+            )
+            .when_some(action, |d, a| d.child(div().pt(px(space::M)).child(a)))
+            .into_any_element()
+    }
+
+    /// A technical job an agent can do instead, as a group of its own at the end of a
+    /// page: a row saying so, and a button that copies the prompt to give it.
+    fn agent_group(
+        &self,
+        id: &'static str,
+        prompt: &'static str,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let copy = self
+            .small_button(id, "Copy prompt", false)
+            .on_click(cx.listener(move |this, _, _, cx| {
+                cx.write_to_clipboard(ClipboardItem::new_string(prompt.to_string()));
+                this.notice = Some((
+                    "Copied. Paste it to one of your agents.".into(),
+                    Instant::now(),
+                ));
+                cx.notify();
+            }));
+        let row = self.row(
+            Some(self.tile(Ico::Bot)),
+            "Let an agent do it",
+            Some("A prompt to paste to one of your agents".into()),
+            Some(copy.into_any_element()),
+        );
+        self.group(None, vec![row.into_any_element()])
     }
 
     /// The programs page: the agent programs on the instance, with their settings, and the
@@ -8351,58 +8617,37 @@ ACTA_KEY=secret:ACTA_KEY",
         let p = self.p;
         let said = match &self.model.profile {
             Some((_, revision, by)) if *revision > 0 => {
-                format!("Revision {revision}, by {}.", self.model.made_by(by))
+                format!("Revision {revision}, by {}", self.model.made_by(by))
             }
-            Some(_) => "Nothing yet.".to_string(),
+            Some(_) => "Nothing yet".to_string(),
             None => "Loading…".to_string(),
         };
-        let body = div()
-            .w_full()
-            .max_w(px(560.0))
-            .flex()
-            .flex_col()
-            .gap(px(space::L))
-            .child(
+        let save = self
+            .small_button("save-profile", "Save", true)
+            .on_click(cx.listener(|this, _, _, cx| {
+                let text = this.profile_in.read(cx).value().to_string();
+                let f = this.model.save_profile(&text);
+                this.send(f);
+                cx.notify();
+            }))
+            .into_any_element();
+        let groups = vec![self.group(
+            Some("What every agent knows about you"),
+            vec![
                 div()
-                    .text_size(px(size::HEADING))
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(p.ink)
-                    .child("About you"),
-            )
-            .child(Textarea::new(&self.profile_in))
-            .child(
+                    .p(px(space::L))
+                    .child(Textarea::new(&self.profile_in))
+                    .into_any_element(),
                 div()
-                    .flex()
-                    .items_center()
-                    .gap(px(space::M))
-                    .child(
-                        self.button("save-profile", "Save", true)
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                let text = this.profile_in.read(cx).value().to_string();
-                                let f = this.model.save_profile(&text);
-                                this.send(f);
-                                cx.notify();
-                            })),
-                    )
-                    .child(
-                        div()
-                            .text_size(px(size::CAPTION))
-                            .text_color(p.ink_3)
-                            .child(said),
-                    ),
-            );
-        let page = div()
-            .id("profile-page")
-            .size_full()
-            .overflow_y_scroll()
-            .flex()
-            .justify_center()
-            .items_start()
-            .pt(px(space::XL))
-            .px(px(space::XL))
-            .pb(px(space::XXL))
-            .child(body);
-        div().flex_1().min_h_0().child(page)
+                    .px(px(space::L))
+                    .py(px(space::S + 2.0))
+                    .text_size(px(size::CAPTION))
+                    .text_color(p.ink_3)
+                    .child(said)
+                    .into_any_element(),
+            ],
+        )];
+        self.settings_page("profile-page", "About you", Some(save), groups)
     }
 
     /// The memory page: the selected agent's notes and the shared ones, newest first, to
@@ -8751,7 +8996,7 @@ ACTA_KEY=secret:ACTA_KEY",
                                     .flex()
                                     .items_center()
                                     .justify_center()
-                                    .rounded_full()
+                                    .rounded(px(radius::ROW))
                                     .hover(move |s| s.bg(p.active).text_color(p.ink))
                                     .child(Icon::new(Ico::PinOff).xsmall())
                                     .on_click(cx.listener(move |this, _, _, cx| {
@@ -9677,12 +9922,7 @@ impl Render for Loom {
             return root
                 .flex()
                 .flex_col()
-                .child(
-                    TitleBar::new()
-                        .h(px(layout::TITLEBAR))
-                        .bg(p.bg)
-                        .border_color(transparent_black()),
-                )
+                .child(self.title_bar(window, div(), transparent_black()))
                 .child(div().flex_1().min_h_0().flex().flex_col().child(page))
                 .when_some(splash, |d, s| d.child(s));
         }
@@ -9710,14 +9950,7 @@ impl Render for Loom {
                     .flex()
                     .flex_col()
                     .relative()
-                    .child(
-                        TitleBar::new()
-                            .h(px(layout::TITLEBAR))
-                            .pl(px(0.0))
-                            .bg(p.bg)
-                            .border_color(p.line)
-                            .child(header),
-                    )
+                    .child(self.title_bar(window, header, p.line))
                     .child(main)
                     .when_some(menu, |d, m| d.child(m))
                     .when_some(beside, |d, c| d.child(c))
@@ -9728,6 +9961,37 @@ impl Render for Loom {
             .when_some(whole, |d, c| d.child(c))
             .when_some(splash, |d, s| d.child(s))
     }
+}
+
+/// loom's mark, the knot, with the wordmark beside it (design/logo/README.md), "loom" at
+/// `text` pixels, in a box of a set width, so threads woven through it know where it is.
+/// Gives it, and half its width.
+fn wordmark(p: Palette, text: f32) -> (Div, f32) {
+    let knot = text * 1.2;
+    let gap = text * 0.16;
+    let word = text * 2.3;
+    let width = knot + gap + word;
+    let mark = div()
+        .w(px(width))
+        .flex()
+        .items_center()
+        .justify_center()
+        .gap(px(gap))
+        .child(
+            svg()
+                .path("logo/knot.svg")
+                .size(px(knot))
+                .flex_none()
+                .text_color(p.ink),
+        )
+        .child(
+            div()
+                .text_size(px(text))
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(p.ink)
+                .child("loom"),
+        );
+    (mark, width / 2.0)
 }
 
 /// A program's share, in words: what each person gets, and what's left of the
@@ -9768,6 +10032,10 @@ const MOVE_PROMPT: &str = "Move my loom instance to another server for me. Ask m
 /// What "Copy prompt" gives for adding a server, for an agent in loom to set it up with
 /// its tools (install_server, add_server).
 const ADD_SERVER_PROMPT: &str = "Set up a new loom server for me and add it to my app. Ask me where it should run (a server I can reach, or a VPS to rent) if I haven't said. Use install_server to get the command that installs loom there, and run it or walk me through it. Then use add_server so my app offers to add it, and tell me what to do next.";
+
+/// What "Copy a prompt" gives on the Plugins page, for an agent in loom to build one with
+/// its tools (save_plugin), asking the person what it should do.
+const PLUGIN_PROMPT: &str = "Make me a loom plugin. Ask me what it should do if I haven't said: a panel beside the chat, tools for my agents, or both. Build it with save_plugin, then tell me how to open it and what it asks me to allow.";
 
 /// The thread colours a new agent can have (design/tokens.toml), in the order the brain
 /// tiles take them. Grey is left for agents that are off.

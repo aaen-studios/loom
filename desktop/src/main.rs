@@ -173,7 +173,20 @@ gpui_kit::assets::icon_assets!(
         MessageCircleQuestionMark,
         GitBranch,
         AppWindow,
-        Sheet
+        Sheet,
+        SquareTerminal,
+        Minus,
+        Square,
+        Copy,
+        Laptop,
+        Server,
+        Download,
+        KeyRound,
+        Import,
+        Table2,
+        Folder,
+        ExternalLink,
+        Bell
     ]
 );
 

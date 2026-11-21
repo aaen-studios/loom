@@ -47,14 +47,14 @@ enum Tokens {
     }
 
     enum Radius {
-        static let window: CGFloat = 12
-        static let input: CGFloat = 10
-        static let row: CGFloat = 10
-        static let chip: CGFloat = 14
-        static let button: CGFloat = 16
-        static let card: CGFloat = 16
-        static let bubble: CGFloat = 20
-        static let composer: CGFloat = 26
+        static let window: CGFloat = 10
+        static let input: CGFloat = 8
+        static let row: CGFloat = 6
+        static let chip: CGFloat = 6
+        static let button: CGFloat = 8
+        static let card: CGFloat = 10
+        static let bubble: CGFloat = 14
+        static let composer: CGFloat = 16
     }
 
     enum Layout {

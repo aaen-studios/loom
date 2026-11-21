@@ -414,6 +414,38 @@ pub fn spool(state: Spool, ink: Hsla, w: f32, h: f32) -> impl IntoElement {
 /// one's line, which calms as they come, until there is only that one. `reveal` (0 to 1)
 /// is how far across they've come in from the left, each a little behind the one before.
 pub fn weave(colors: Vec<Hsla>, gather: f32, reveal: f32, h: f32) -> impl IntoElement {
+    weave_layer(colors, gather, reveal, h, None)
+}
+
+/// The part of `weave` that passes over a word laid across its middle, `half` either side
+/// of the centre: each thread goes over a stretch and under the next, neighbours taking
+/// turns. Drawn over the word, with `weave` behind it, the threads weave through it.
+pub fn weave_over(
+    colors: Vec<Hsla>,
+    gather: f32,
+    reveal: f32,
+    h: f32,
+    half: f32,
+) -> impl IntoElement {
+    weave_layer(colors, gather, reveal, h, Some(half))
+}
+
+/// Whether thread `k` is over the word at `u`, 0 to 1 across it: four stretches, one a
+/// letter of "loom", with neighbouring threads over in turn.
+pub fn over_word(k: usize, u: f32) -> bool {
+    if !(0.0..1.0).contains(&u) {
+        return false;
+    }
+    ((u * 4.0).floor() as usize + k) % 2 == 0
+}
+
+fn weave_layer(
+    colors: Vec<Hsla>,
+    gather: f32,
+    reveal: f32,
+    h: f32,
+    over: Option<f32>,
+) -> impl IntoElement {
     let g = gather.clamp(0.0, 1.0);
     canvas(
         |_, _, _| {},
@@ -445,6 +477,8 @@ pub fn weave(colors: Vec<Hsla>, gather: f32, reveal: f32, h: f32) -> impl IntoEl
                 }
                 let last = ((steps as f32) * shown) as usize;
                 let mut pb = PathBuilder::stroke(px(thread_stroke::LARGE));
+                let mut pen = false;
+                let mut drawn = false;
                 for s in 0..=last.max(1) {
                     let u = s as f32 / steps as f32;
                     let first = loose(0.0, u) - (0.0 - (n - 1.0) / 2.0) / n * 0.9;
@@ -452,11 +486,25 @@ pub fn weave(colors: Vec<Hsla>, gather: f32, reveal: f32, h: f32) -> impl IntoEl
                     let y = (own + (first - own) * g) * (1.0 - g * 0.85);
                     // Eased in at the edges of its band, never cut flat.
                     let p = point(px(x0 + u * width), px(mid - y.tanh() * half));
-                    if s == 0 {
-                        pb.move_to(p)
-                    } else {
-                        pb.line_to(p)
+                    // Over a word, only the stretches this thread is on top for.
+                    let on = over.is_none_or(|w| {
+                        let x = u * width - width / 2.0;
+                        over_word(i, (x + w) / (2.0 * w))
+                    });
+                    if !on {
+                        pen = false;
+                        continue;
                     }
+                    if pen {
+                        pb.line_to(p)
+                    } else {
+                        pb.move_to(p)
+                    }
+                    pen = true;
+                    drawn = true;
+                }
+                if !drawn {
+                    continue;
                 }
                 if let Ok(path) = pb.build() {
                     window.paint_path(path, *tint);
@@ -511,6 +559,23 @@ mod tests {
                         assert!(up.abs() <= room * 1.2, "{mood:?} leaves its height");
                     }
                 }
+            }
+        }
+    }
+
+    #[test]
+    fn threads_take_turns_over_the_word() {
+        use super::over_word;
+        // Off the word, nothing is over it.
+        assert!(!over_word(0, -0.1) && !over_word(1, 1.0));
+        // Each thread is over every other stretch, and its neighbour over the rest.
+        for k in 0..7 {
+            let stretches: Vec<bool> = (0..4)
+                .map(|s| over_word(k, s as f32 * 0.25 + 0.1))
+                .collect();
+            assert_eq!(stretches.iter().filter(|o| **o).count(), 2);
+            for s in 0..4 {
+                assert_ne!(stretches[s], over_word(k + 1, s as f32 * 0.25 + 0.1));
             }
         }
     }

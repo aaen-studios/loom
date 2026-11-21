@@ -38,14 +38,14 @@ pub mod space {
 }
 
 pub mod radius {
-    pub const WINDOW: f32 = 12.0;
-    pub const INPUT: f32 = 10.0;
-    pub const ROW: f32 = 10.0;
-    pub const CHIP: f32 = 14.0;
-    pub const BUTTON: f32 = 16.0;
-    pub const CARD: f32 = 16.0;
-    pub const BUBBLE: f32 = 20.0;
-    pub const COMPOSER: f32 = 26.0;
+    pub const WINDOW: f32 = 10.0;
+    pub const INPUT: f32 = 8.0;
+    pub const ROW: f32 = 6.0;
+    pub const CHIP: f32 = 6.0;
+    pub const BUTTON: f32 = 8.0;
+    pub const CARD: f32 = 10.0;
+    pub const BUBBLE: f32 = 14.0;
+    pub const COMPOSER: f32 = 16.0;
 }
 
 pub mod layout {
