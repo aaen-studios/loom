@@ -1470,13 +1470,14 @@ ACTA_KEY=secret:ACTA_KEY",
                 .child("Opening the page…"),
             _ => div().flex_1(),
         };
-        // An agent's page opens under its thread, across the panel.
+        // The agent's edit panel opens under its thread, across the panel, so a new
+        // colour shows on it at once. Other panels don't have it.
         let hero = self
             .model
             .selected
             .as_ref()
             .and_then(|id| self.model.agent(id))
-            .filter(|_| side != Screen::Plugins && side != Screen::Page)
+            .filter(|_| side == Screen::EditAgent)
             .map(|a| {
                 let (mood, snapped) = fidget(&a.id, self.model.mood(&a.id));
                 div().px(px(space::L)).pt(px(space::S)).child(thread(

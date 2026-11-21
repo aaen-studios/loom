@@ -135,11 +135,34 @@ fn blend(key: &SharedString, mood: Mood, tint: Hsla, t: f32) -> (Mood, Mood, f32
     })
 }
 
-/// The height of a thread in `mood` at `u` (0..1 along it), as a fraction of its half
-/// height.
-fn y_at(mood: Mood, u: f32, width: f32, t: f32, since_snap: f32) -> f32 {
+/// The loop a thread curls into, `r` pixels round, centred at `c` along it: how far the
+/// point at `u` is pushed along and up, in pixels. Outside the loop, nothing. The line
+/// goes up, back over itself and down again, smooth at both feet, and stays one line.
+fn curl(u: f32, c: f32, r: f32, width: f32) -> (f32, f32) {
+    if r <= 0.0 || width <= 0.0 {
+        return (0.0, 0.0);
+    }
+    // Room for the loop along the line: tight enough that it crosses itself.
+    let span = (r * 2.2 / width).min(0.9);
+    let s = (u - c) / span + 0.5;
+    if !(0.0..=1.0).contains(&s) {
+        return (0.0, 0.0);
+    }
+    let e = (PI * s).sin();
+    let back = r * (TAU * s).sin() * e;
+    let up = r * (1.0 - (TAU * s).cos()) * e * 0.5;
+    (back, up)
+}
+
+/// Where a thread in `mood` is at `u` (0..1 along it): pushed along it and up, in
+/// pixels, for a thread `width` wide with `room` pixels above and below its middle.
+/// Every mood is the one line bending, twisting or curling; none adds anything to it.
+fn bend(mood: Mood, u: f32, width: f32, room: f32, t: f32, since_snap: f32) -> (f32, f32) {
     let x = u * width;
-    match mood {
+    // The loop's size: as big as the thread's height allows, and no bigger than a
+    // short thread can hold.
+    let loop_r = (room * 0.9).min(width * 0.18);
+    let up = match mood {
         Mood::Idle => {
             let base = (TAU * (u * 1.3 + t * thread_motion_idle::SPEED)).sin()
                 * thread_motion_idle::AMPLITUDE
@@ -156,14 +179,11 @@ fn y_at(mood: Mood, u: f32, width: f32, t: f32, since_snap: f32) -> f32 {
             base + snap
         }
         Mood::Thinking => {
-            // A slow loose wave, with a loop travelling along it.
-            let head = (t * thread_motion_thinking::LOOP_SPEED).fract();
-            let d = (u - head).abs().min(1.0 - (u - head).abs());
-            // Smooth at its top and its feet, so the loop never kinks.
-            let x = (d / thread_motion_thinking::LOOP_WIDTH).min(1.0);
-            let bump = (1.0 - x * x).powi(2);
-            (TAU * (u * 2.0 - t * 0.35)).sin() * thread_motion_thinking::AMPLITUDE * 4.0
-                + bump * 0.55
+            // A slow loose wave, and a loop the line curls into, sliding along it.
+            let head = 0.15 + 0.7 * (t * thread_motion_thinking::LOOP_SPEED).fract();
+            let (back, lift) = curl(u, head, loop_r * 0.8, width);
+            let wave = (TAU * (u * 2.0 - t * 0.35)).sin() * thread_motion_thinking::AMPLITUDE * 4.0;
+            return (back, wave * room + lift);
         }
         Mood::Writing => {
             (TAU * (x / thread_motion_writing::WAVELENGTH - t * thread_motion_writing::SPEED)).sin()
@@ -171,25 +191,27 @@ fn y_at(mood: Mood, u: f32, width: f32, t: f32, since_snap: f32) -> f32 {
                 * 2.4
         }
         Mood::Tool => {
-            // Short stitches sliding along.
-            let phase = (x / 8.0 - t * thread_motion_tool::SLIDE_SPEED * 2.0).fract();
-            let lift = if phase < 0.5 { 1.0 } else { -1.0 };
-            lift * thread_motion_tool::AMPLITUDE * 1.4
+            // A twist running along it: a tight wave whose swell travels, as a cord
+            // turns when it's worked.
+            let swell = (PI * (u - t * thread_motion_tool::SLIDE_SPEED * 0.5).fract()).sin();
+            let wavelength = (room * 1.2).max(7.0);
+            (TAU * (x / wavelength - t * thread_motion_tool::SLIDE_SPEED * 2.0)).sin()
+                * swell
+                * thread_motion_tool::AMPLITUDE
+                * 1.6
         }
         Mood::Waiting => {
-            // Straight, with a knot in the middle that bobs, and a tug now and then.
+            // Still, curled into a loop in the middle that breathes, and draws in now
+            // and then, as if tugged.
             let tug = (t % thread_motion_waiting::TUG_EVERY) < 0.25;
-            let bob = (TAU * t * thread_motion_waiting::BOB_SPEED / 4.0).sin() * 0.25;
-            let d = (u - 0.5).abs();
-            let knot = if d < thread_motion_waiting::KNOT_WIDTH * 2.0 {
-                1.0 - d / (thread_motion_waiting::KNOT_WIDTH * 2.0)
-            } else {
-                0.0
-            };
-            knot * (0.8 + bob) * if tug { 1.3 } else { 1.0 }
+            let breath = 0.85 + 0.15 * (TAU * t * thread_motion_waiting::BOB_SPEED / 4.0).sin();
+            let r = loop_r * breath * if tug { 0.8 } else { 1.0 };
+            return curl(u, 0.5, r, width);
         }
-        Mood::Failed => 0.0,
-    }
+        // Slack: it sags, its far end hanging lowest.
+        Mood::Failed => -0.55 * u * u,
+    };
+    (0.0, up * room)
 }
 
 /// How much of `mood` shows when easing from `from` to `to`, `k` of the way.
@@ -228,18 +250,22 @@ pub fn thread(
             let since_snap = snapped
                 .map(|at| at.elapsed().as_secs_f32())
                 .unwrap_or(f32::MAX);
-            let steps = (width / 1.5).max(8.0) as usize;
-            let y = |u: f32| {
-                let a = y_at(from, u, width, t, since_snap);
-                let b = y_at(to, u, width, t, since_snap);
-                a + (b - a) * k
+            let room = (half - stroke).max(1.0);
+            // Fine enough that a loop a few pixels round is still round.
+            let steps = (width / 1.5).max(48.0).max(width / 0.75) as usize;
+            let at = |u: f32| {
+                let (ax, ay) = bend(from, u, width, room, t, since_snap);
+                let (bx, by) = bend(to, u, width, room, t, since_snap);
+                (ax + (bx - ax) * k, ay + (by - ay) * k)
             };
+            // A failed thread is slack and a little shorter; nothing is added to it.
             let failed = weight(Mood::Failed, from, to, k);
-            let end = 1.0 - 0.38 * failed;
+            let end = 1.0 - 0.2 * failed;
             let mut pb = PathBuilder::stroke(px(stroke));
             for i in 0..=steps {
                 let u = end * i as f32 / steps as f32;
-                let p = point(px(x0 + u * width), px(mid - y(u) * (half - stroke)));
+                let (dx, up) = at(u);
+                let p = point(px(x0 + u * width + dx), px(mid - up));
                 if i == 0 {
                     pb.move_to(p)
                 } else {
@@ -248,39 +274,6 @@ pub fn thread(
             }
             if let Ok(path) = pb.build() {
                 window.paint_path(path, tint);
-            }
-            if failed > 0.01 {
-                // Frayed at the end.
-                let fx = x0 + end * width;
-                let mut fray = PathBuilder::stroke(px(stroke));
-                for (dx, dy) in [(0.22, -0.8), (0.26, -0.2), (0.24, 0.35), (0.18, 0.9)] {
-                    fray.move_to(point(px(fx), px(mid)));
-                    fray.line_to(point(
-                        px(fx + dx * width * failed),
-                        px(mid + dy * failed * (half - stroke)),
-                    ));
-                }
-                if let Ok(path) = fray.build() {
-                    window.paint_path(path, tint);
-                }
-            }
-            let waiting = weight(Mood::Waiting, from, to, k);
-            if waiting > 0.01 {
-                let r = (half * 0.55).max(2.5) * waiting;
-                let mut ring = PathBuilder::stroke(px(stroke + 0.2));
-                let cx0 = x0 + width / 2.0;
-                for i in 0..=24 {
-                    let a = TAU * i as f32 / 24.0;
-                    let p = point(px(cx0 + a.cos() * r), px(mid + a.sin() * r));
-                    if i == 0 {
-                        ring.move_to(p)
-                    } else {
-                        ring.line_to(p)
-                    }
-                }
-                if let Ok(path) = ring.build() {
-                    window.paint_path(path, tint);
-                }
             }
         },
     )
@@ -474,4 +467,62 @@ pub fn weave(colors: Vec<Hsla>, gather: f32, reveal: f32, h: f32) -> impl IntoEl
     .w_full()
     .h(px(h))
     .flex_none()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::bend;
+    use crate::model::Mood;
+
+    const MOODS: [Mood; 6] = [
+        Mood::Idle,
+        Mood::Thinking,
+        Mood::Writing,
+        Mood::Tool,
+        Mood::Waiting,
+        Mood::Failed,
+    ];
+
+    /// The thread's points, as `thread` draws them, for a thread `width` by twice `room`.
+    fn points(mood: Mood, width: f32, room: f32, t: f32) -> Vec<(f32, f32)> {
+        let steps = (width / 1.5).max(48.0).max(width / 0.75) as usize;
+        (0..=steps)
+            .map(|i| {
+                let u = i as f32 / steps as f32;
+                let (dx, up) = bend(mood, u, width, room, t, f32::MAX);
+                (u * width + dx, up)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_thread_is_one_unbroken_line_in_every_mood() {
+        // No jumps from one point to the next: nothing is drawn apart from the line.
+        for (width, room) in [(26.0, 11.0), (14.0, 4.0), (360.0, 18.0)] {
+            for mood in MOODS {
+                for t in [0.0, 1.3, 2.7, 4.1] {
+                    let pts = points(mood, width, room, t);
+                    for w in pts.windows(2) {
+                        let (a, b) = (w[0], w[1]);
+                        let d = ((b.0 - a.0).powi(2) + (b.1 - a.1).powi(2)).sqrt();
+                        assert!(d < 4.0, "{mood:?} jumps {d} at width {width}, t {t}");
+                    }
+                    for (_, up) in &pts {
+                        assert!(up.abs() <= room * 1.2, "{mood:?} leaves its height");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn waiting_curls_into_a_loop() {
+        // A loop: somewhere the line runs back on itself.
+        let pts = points(Mood::Waiting, 26.0, 11.0, 0.5);
+        assert!(pts.windows(2).any(|w| w[1].0 < w[0].0));
+        // And it's straight away from the loop.
+        assert!(pts[0].1.abs() < 0.01 && pts[pts.len() - 1].1.abs() < 0.01);
+        let idle = points(Mood::Idle, 26.0, 11.0, 0.5);
+        assert!(idle.windows(2).all(|w| w[1].0 > w[0].0));
+    }
 }
