@@ -335,6 +335,28 @@ pub struct PeopleEntry {
     pub at: i64,
 }
 
+/// What an agent has, counted, for its settings panel (`agent.summary`).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Summary {
+    pub memories: i64,
+    pub skills: i64,
+    pub tables: i64,
+    pub files: i64,
+    pub bytes: i64,
+    pub routines: i64,
+    pub tokens_today: i64,
+    pub tokens_month: i64,
+}
+
+/// A count of tokens as the panel shows it: "850", "12.4k", "1.2M".
+pub fn tokens_text(n: i64) -> String {
+    match n {
+        n if n < 1000 => n.to_string(),
+        n if n < 1_000_000 => format!("{:.1}k", n as f64 / 1000.0),
+        n => format!("{:.1}M", n as f64 / 1_000_000.0),
+    }
+}
+
 /// One of the person's skills.
 #[derive(Clone, Debug)]
 pub struct Skill {
@@ -1131,6 +1153,8 @@ pub struct Model {
     pub editing: Option<String>,
     pub revisions: Vec<Revision>,
     revisions_stale: bool,
+    /// What the agent the edit page shows has, counted.
+    pub summary: Option<Summary>,
     /// The activity page's entries, newest first.
     pub activity: Vec<Activity>,
     /// The person's skills, by name, for the skills page.
@@ -2433,6 +2457,20 @@ impl Model {
             if let Some(csv) = f.pointer("/value/csv").and_then(Value::as_str) {
                 self.exported = Some(csv.to_string());
             }
+        } else if id.starts_with("app.summary") {
+            self.summary = f.get("value").map(|v| {
+                let n = |k: &str| v.get(k).and_then(Value::as_i64).unwrap_or(0);
+                Summary {
+                    memories: n("memories"),
+                    skills: n("skills"),
+                    tables: n("tables"),
+                    files: n("files"),
+                    bytes: n("bytes"),
+                    routines: n("routines"),
+                    tokens_today: n("tokens_today"),
+                    tokens_month: n("tokens_month"),
+                }
+            });
         } else if id.starts_with("app.revisions") {
             self.revisions = f
                 .pointer("/value/revisions")
@@ -3049,11 +3087,31 @@ impl Model {
     }
 
     /// Opens the edit page for the selected agent: asks for its revisions.
-    pub fn edit_agent(&mut self) -> Option<Value> {
-        let agent = self.selected.clone()?;
-        self.editing = Some(agent);
+    /// Gives the agent on the edit page another thread colour.
+    pub fn set_color(&mut self, color: &str) -> Option<Value> {
+        let agent = self.editing.clone()?;
+        if let Some(a) = self.agents.iter_mut().find(|a| a.id == agent) {
+            a.color = color.to_string();
+        }
+        let id = self.id("app.color");
+        Some(
+            json!({"t": "cmd", "id": id, "name": "agent.update", "args": {"agent": agent, "color": color}}),
+        )
+    }
+
+    /// Opens the agent's settings: its revisions, and what it has, counted.
+    pub fn edit_agent(&mut self) -> Vec<Value> {
+        let Some(agent) = self.selected.clone() else {
+            return Vec::new();
+        };
+        self.editing = Some(agent.clone());
         self.revisions.clear();
-        Some(self.revisions_cmd())
+        self.summary = None;
+        let id = self.id("app.summary");
+        vec![
+            self.revisions_cmd(),
+            json!({"t": "cmd", "id": id, "name": "agent.summary", "args": {"agent": agent}}),
+        ]
     }
 
     fn revisions_cmd(&mut self) -> Value {
@@ -4302,6 +4360,28 @@ mod tests {
             shared["args"],
             json!({"name": "codex", "tokens": 100, "per": "month"})
         );
+    }
+
+    #[test]
+    fn the_settings_panel_counts_what_an_agent_has() {
+        let mut m = Model::new();
+        m.select(Some("a_1".into()));
+        let asked = m.edit_agent();
+        assert_eq!(asked.len(), 2);
+        assert_eq!(asked[1]["name"], "agent.summary");
+        assert_eq!(m.summary, None);
+        m.result(
+            &json!({"t": "result", "id": asked[1]["id"], "ok": true, "value": {
+            "memories": 3, "skills": 2, "tables": 1, "files": 9, "bytes": 2048,
+            "routines": 4, "tokens_today": 850, "tokens_month": 12400}}),
+        );
+        let s = m.summary.clone().unwrap();
+        assert_eq!((s.memories, s.routines, s.bytes), (3, 4, 2048));
+        assert_eq!(tokens_text(850), "850");
+        assert_eq!(tokens_text(12_400), "12.4k");
+        assert_eq!(tokens_text(1_200_000), "1.2M");
+        let f = m.set_color("teal").unwrap();
+        assert_eq!(f["args"]["color"], "teal");
     }
 
     #[test]

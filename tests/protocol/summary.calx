@@ -1,0 +1,60 @@
+module tests.protocol.summary
+
+// An agent's settings panel, counted (PLAN.md, "What an agent has"):
+// agent.summary gives what it knows, its notes, the person's skills, its
+// tables, its files and their size, and what it does, its routines and the
+// tokens its runs used today and this month.
+//
+//     calx tests/protocol/summary.calx
+import std.fs
+import std.process.{exit}
+import shared.obj.{Obj, at, int_at, str_at}
+import tests.kit.{App, Instance, check}
+
+fn reply_in(app: mut App, conversation: String) ! Error {
+    loop {
+        let created = try app.until("event", "message.created")
+        let m = at(created, "message")
+        if str_at(m.copy(), "role") == some(String("agent")) and str_at(m, "conversation") == some(conversation.copy()) { return }
+    }
+}
+
+fn run(i: Instance) ! Error {
+    var app = try App.connect(i.base.copy(), i.token.copy(), 0)
+    let made = try app.cmd("q_1", "agent.create", Obj.new().s("name", String("Main")).s("acp_agent", String("fake")).s("instructions", String("You are a test.")).done())
+    let agent = str_at(at(at(made, "value"), "agent"), "id") ?? String()
+    let other = try app.cmd("q_2", "agent.create", Obj.new().s("name", String("Other")).s("acp_agent", String("fake")).s("instructions", String("You are a test.")).done())
+    let other_id = str_at(at(at(other, "value"), "agent"), "id") ?? String()
+    let c = try app.cmd("q_3", "conversation.create", Obj.new().s("agent", agent.copy()).done())
+    let chat = str_at(at(c, "value"), "conversation") ?? String()
+
+    _ = try app.cmd("q_4", "memory.put", Obj.new().s("agent", agent.copy()).s("text", String("The office closes at five.")).done())
+    _ = try app.cmd("q_5", "memory.put", Obj.new().s("agent", other_id.copy()).s("text", String("Not Main's.")).done())
+    _ = try app.cmd("q_6", "skill.put", Obj.new().s("name", String("release-notes")).s("description", String("Writes release notes.")).s("body", String("Say what changed.")).done())
+    _ = try app.cmd("q_7", "routine.put", Obj.new().s("name", String("Morning")).s("agent", agent.copy()).s("prompt", String("Good morning.")).j("schedule", Obj.new().i("every", 600).done()).done())
+    try fs.write_text("{i.data}/agents/{agent}/notes.md", String("12345"))
+    try app.send(Obj.new().s("t", String("send")).s("cid", String("m_1")).s("conversation", chat.copy()).s("text", String("/tokens 150\ndone")).done())
+    try reply_in(mut app, chat)
+
+    let summary = at(try app.cmd("q_8", "agent.summary", Obj.new().s("agent", agent.copy()).done()), "value")
+    try check(int_at(summary.copy(), "memories") == some(1) and int_at(summary.copy(), "skills") == some(1) and int_at(summary.copy(), "tables") == some(0), "it counts the agent's own notes, the person's skills and its tables")
+    try check((int_at(summary.copy(), "files") ?? 0) >= 3 and (int_at(summary.copy(), "bytes") ?? 0) >= 5, "and the files in its folder, with their size")
+    try check(int_at(summary.copy(), "routines") == some(1) and int_at(summary.copy(), "tokens_today") == some(150) and int_at(summary, "tokens_month") == some(150), "and its routines, and the tokens its runs used")
+    let missing = try app.cmd("q_9", "agent.summary", Obj.new().s("agent", String("a_nothing")).done())
+    try check(str_at(at(missing, "error"), "code") == some(String("not_found")), "an agent that isn't there has none")
+    app.close()
+}
+
+fn main() ! Error {
+    let inst = try Instance.start()
+    let failure: String? = match run(inst.copy()) {
+        ok => none,
+        err(e) => some("{e}"),
+    }
+    inst.stop()
+    if let f = failure {
+        eprintln("\n{f}")
+        exit(1)
+    }
+    println("\nsummary: all good")
+}

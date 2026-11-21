@@ -5973,6 +5973,16 @@ impl Instance {
             let mime = files.sniff(data.copy()) ?? content_type(file_name.copy())
             return Answer.Value(Obj.new().j("file", try i.agent_file(user, file_name, mime, data)).done())
         }
+        if name == "agent.summary" {
+            // What the agent's settings panel shows, counted: what it knows
+            // and what it does.
+            let id = str_at(args, "agent") ?? String()
+            if try i.store.agent(user.copy(), id.copy()) == none { return Answer.Refused(String("not_found"), "There's no agent {id}.") }
+            let moment = now()
+            let counts = try i.store.agent_counts(user.copy(), id.copy(), period_start(String("day"), moment), period_start(String("month"), moment))
+            let (files_in, bytes_in) = i.folder_size(user, id)
+            return Answer.Value(merge(counts, Obj.new().i("files", files_in).i("bytes", bytes_in).done()))
+        }
         if name == "agent.revisions" {
             let id = str_at(args, "agent") ?? String()
             let current = try i.store.agent(user.copy(), id.copy()) else return Answer.Refused(String("not_found"), "There's no agent {id}.")
@@ -6109,7 +6119,36 @@ impl Instance {
         }
         return Answer.Refused(String("unknown_command"), "Version 1 has no command {name}.")
     }
+
+    // What an agent's folder holds: its files and their bytes, all but the
+    // skills loom writes there, AGENT_FILES_MOST files at most.
+    fn folder_size(i: Instance, user: String, agent: String) -> (i64, i64) {
+        let folder = i.folder_of(user, agent)
+        let entries = match fs.walk(folder.copy()) {
+            ok(e) => e,
+            err(_) => return (0, 0),
+        }
+        let skills = path_key("{folder}/.claude/skills/")
+        var count: i64 = 0
+        var bytes_in: i64 = 0
+        for e in entries {
+            if count >= AGENT_FILES_MOST { break }
+            match e.kind {
+                fs.Kind.File => {},
+                _ => continue,
+            }
+            if path_key(e.path.copy()).starts_with(skills.copy()) { continue }
+            if let ok(m) = fs.metadata(e.path.copy()) {
+                count += 1
+                bytes_in += i64.wrap(m.size)
+            }
+        }
+        return (count, bytes_in)
+    }
 }
+
+// The most files agent.summary counts in an agent's folder.
+const AGENT_FILES_MOST: i64 = 20000
 
 // When the budget period `per` (day or month) holding `moment` began, in UTC.
 fn period_start(per: String, moment: i64) -> i64 {
