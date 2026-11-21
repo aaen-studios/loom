@@ -511,18 +511,19 @@ impl Instance {
 
     // Starts the gate and sets up sandboxes run by `runtime`, from `image`.
     fn sandboxes_on(i: mut Instance, runtime: String, image: String) ! Error {
-        if runtime != "podman" { fail "--sandboxes takes podman, not {runtime}" }
-        if let why = sandbox.missing(runtime.copy()) { fail "--sandboxes podman, but Podman doesn't run here ({why}): it runs the sandboxes of everyone but the owner" }
+        if runtime != "podman" and runtime != "docker" { fail "--sandboxes takes podman or docker, not {runtime}" }
+        if let why = sandbox.missing(runtime.copy()) { fail "--sandboxes {runtime}, but it doesn't run here ({why}): it runs the sandboxes of everyone but the owner" }
+        let host = try sandbox.gate_host(runtime.copy())
         let kept = u16.parse(try i.store.meta("gate_port") ?? String()) ?? 0
-        let (t, stop, port) = try gate.start(kept, i.server.port)
+        let (t, stop, port) = try gate.start(host.copy(), kept, i.server.port)
         i.gate = some(t)
         i.stop_gate = some(stop)
         try i.store.set_meta("gate_port", "{port}")
         let root = try fs.absolute("{i.data}/sandboxes")
         let acp_folder = try fs.absolute("{i.data}/acp")
         try fs.make_dir_all(root.copy())
-        i.boxes = some(sandbox.Sandboxes { runtime: runtime.copy(), image: if image.len() > 0 { image.copy() } else { String(sandbox.IMAGE) }, root: root, acp: acp_folder, gate: port })
-        println("loom: the agents of everyone but the owner run in sandboxes")
+        i.boxes = some(sandbox.Sandboxes { runtime: runtime.copy(), image: if image.len() > 0 { image.copy() } else { String(sandbox.IMAGE) }, root: root, acp: acp_folder, gate_host: host.copy(), gate: port })
+        println("loom: the agents of everyone but the owner run in sandboxes, which reach loom's tools at {host}:{port}")
     }
 
     // Whether `user`'s agents run in a sandbox: everyone's but the owner's.
@@ -1006,7 +1007,7 @@ impl Instance {
         var exe = current_exe()
         if boxed {
             if let b = i.boxes {
-                base = "http://127.0.0.1:{b.gate}"
+                base = b.gate_url()
                 exe = String("loom")
             }
         }
@@ -2468,6 +2469,12 @@ impl Instance {
                 return
             }
         }
+        // A sandbox's folder is kept to its disk limit here, since no storage option reaches it.
+        let used = if i.sandboxed(user.copy()) { if let b = i.boxes { b.used(user.copy()) ?? 0 } else { 0 } } else { 0 }
+        if used > sandbox.DISK_BYTES {
+            try i.finish(run_id, String("failed"), some("Your sandbox's folder holds more than the {sandbox.DISK_BYTES / 1073741824} GB each person has. Delete what you don't need from it, then try again."))
+            return
+        }
         if not i.procs.contains(agent_id.copy()) {
             match i.start_proc(user, a) {
                 ok => {},
@@ -2503,7 +2510,7 @@ impl Instance {
         var settings = acp_agent.env.copy()
         if boxed {
             let b = i.boxes else {
-                fail "Agents of people other than the owner run in their own sandbox, and this instance has none: the owner starts it with --sandboxes podman"
+                fail "Agents of people other than the owner run in their own sandbox, and this instance has none: the owner starts it with --sandboxes podman or --sandboxes docker"
             }
             try b.ready(user.copy())
             // The program's settings when the owner shares them, under the person's
