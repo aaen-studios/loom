@@ -858,7 +858,17 @@ impl Conn {
             self.to_app.send("{f}")
             return
         }
-        let l = link.Link { server: self.server.copy() ?? String(), code: str_at(v.copy(), "code") ?? String(), instance: str_at(v.copy(), "instance") ?? String(), key: str_at(v.copy(), "key") ?? String() }
+        // An instance in this desktop app, with phones on: the phone reaches it over
+        // Noise, at this PC's addresses on the network, so the QR code names that place.
+        var server = self.server.copy() ?? String()
+        let noise_on = at(v.copy(), "noise")
+        if bool_at(noise_on.copy(), "on") == some(true) {
+            let port = u16.wrap(int_at(noise_on.copy(), "port") ?? 0)
+            let key = bytes.from_base64(str_at(noise_on, "key") ?? String()) ?? List<u8>()
+            let addresses = relay.own_addresses(port)
+            if key.len() == 32 and addresses.len() > 0 { server = relay.write(relay.Place { key: key, addresses: addresses }) }
+        }
+        let l = link.Link { server: server, code: str_at(v.copy(), "code") ?? String(), instance: str_at(v.copy(), "instance") ?? String(), key: str_at(v.copy(), "key") ?? String() }
         self.tell(merge(f, Obj.new().j("value", merge(v, Obj.new().s("qr", link.qr(l)).done())).done()))
     }
 

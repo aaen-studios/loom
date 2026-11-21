@@ -496,7 +496,7 @@ Version 1's commands:
 | `memory.list` | `agent`? (that agent's notes and the shared ones; every note without it), `query`? (words, any of them, best match first; newest first without), `limit`? (up to 500, 100 if left out) | `memories`: each `id`, `agent` (empty for a shared note), `shared`, `text`, `by` (the agent or device that kept it) and `at` |
 | `memory.put` | `text`, `agent`? (empty or left out: shared by all the person's agents) | `id` |
 | `memory.delete` | `id` | — |
-| `link.create` | — | `code` (one-time, for [`POST /api/link`](#post-apilink)), `expires` (Unix ms, five minutes on), `instance` and `key` (the instance's id and public key, as `/api/info` gives them), and while phones are on, `noise`: `{"on":true,"port":47420,"key":"<its Noise key, base64>"}` ([Over Noise](#over-noise)). The core adds `qr`, the QR code's text. Only a device can ask, never an agent |
+| `link.create` | — | `code` (one-time, for [`POST /api/link`](#post-apilink)), `expires` (Unix ms, five minutes on), `instance` and `key` (the instance's id and public key, as `/api/info` gives them), and while phones are on, `noise`: `{"on":true,"port":47420,"key":"<its Noise key, base64>"}` ([Over Noise](#over-noise)). The core adds `qr`, the QR code's text. While phones are on, its address is a `noise://` place ([Over Noise](#over-noise)) with the instance's Noise key and this computer's IPv4 addresses on its port, in the order to try them: the local network's (10/8, 172.16/12, 192.168/16), then Tailscale's (100.64/10). Interfaces that are down, loopback, or networks inside the machine (Hyper-V's and WSL's switches, Docker's and Podman's bridges) are left out. Only a device can ask, never an agent |
 | `push.register` | `token` (the device's APNs token, hex), `env` (`production`, or `development` for a debug build) | Nothing back. Only a device, for itself. A device signed out loses it |
 | `push.unregister` | — | Nothing back. This device stops taking push |
 | `profile.get` | — | `profile`: `text`, `revision`, `by` (the device or agent that wrote it) and `at`, or `null` when there's none yet |
@@ -638,6 +638,8 @@ A phone reaches an instance in the desktop app ([PLAN.md: Reaching an instance i
 So a phone joins with `POST /api/link`, uploads and fetches files, and runs its session, all on the one socket. A message goes up to 64 MB and a bit more, for a file and its head. When the session ends, as with a 4001 or 4004, the socket closes with the same code and reason. When phones are turned off, or the instance stops, it closes with 1001.
 
 The instance's Noise key is X25519, made from the same seed as its Ed25519 key, so it moves with the instance. `link.create` gives its public half, with the port, while phones are on.
+
+**Found by mDNS.** While phones are on, the instance also says where it is on the local network with mDNS and DNS-SD: the service `_loom._tcp`, named `loom` (or `loom (2)` and so on), on its Noise port, with its Noise public key, hex, as the TXT property `key`. A phone whose addresses from the QR code no longer answer looks for the service whose `key` is the one it has, at most every 30 seconds, and tries its addresses: 192.168/16 and 10/8 first, then 172.16/12, then Tailscale's 100.64/10. Anyone on the network can see the key, which is public, and the handshake still needs the instance to hold its private half.
 
 ## Push
 
