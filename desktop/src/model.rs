@@ -608,6 +608,8 @@ pub struct Model {
     next_id: u64,
     /// The id of the agent the app just asked the instance to make.
     pub made_agent: Option<String>,
+    /// The instance refused to make the agent asked for last.
+    pub make_failed: bool,
     pub notices: Vec<String>,
     /// Where the instance is moving to, while the owner's instance.move is under way.
     pub moving: Option<String>,
@@ -1434,6 +1436,7 @@ impl Model {
         } else if id.starts_with("app.new_agent") {
             if let Some(e) = f.get("error") {
                 self.notices.push(s(e, "message"));
+                self.make_failed = true;
             } else {
                 self.made_agent = f
                     .pointer("/value/agent/id")

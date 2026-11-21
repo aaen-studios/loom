@@ -252,6 +252,37 @@ impl Loom {
         let pass_in = input(window, cx, "Password", true);
         let code_in = input(window, cx, "Setup code", false);
         let name_in = input(window, cx, "Name", false);
+        // Naming a new agent: each change twangs its thread, and Enter weaves it.
+        cx.subscribe_in(
+            &name_in,
+            window,
+            |this: &mut Loom, _, event: &InputEvent, _, cx| {
+                if this.make.step != Step::Name {
+                    return;
+                }
+                match event {
+                    InputEvent::Change => {
+                        this.make.snapped = Some(Instant::now());
+                        cx.notify();
+                    }
+                    InputEvent::PressEnter { .. } => this.weave_agent(cx),
+                    _ => {}
+                }
+            },
+        )
+        .detach();
+        for field in [&pass_in, &code_in] {
+            cx.subscribe_in(
+                field,
+                window,
+                |this: &mut Loom, _, event: &InputEvent, _, cx| {
+                    if let InputEvent::PressEnter { .. } = event {
+                        this.sign_in_server(cx);
+                    }
+                },
+            )
+            .detach();
+        }
         let skill_name_in = input(window, cx, "release-notes", false);
         let note_in = input(window, cx, "Something to remember", false);
         let profile_in = cx.new(|cx| {
@@ -964,6 +995,24 @@ ACTA_KEY=secret:ACTA_KEY",
             .child(div().h(px(340.0)).pt(px(space::L)).child(under))
     }
 
+    /// Signs in to the server in the form, unless that's already under way.
+    fn sign_in_server(&mut self, cx: &mut Context<Self>) {
+        if self.model.logging_in {
+            return;
+        }
+        let server = self.server_in.read(cx).value().to_string();
+        let user = self.user_in.read(cx).value().to_string();
+        let pass = self.pass_in.read(cx).value().to_string();
+        let code = if self.show_code {
+            self.code_in.read(cx).value().to_string()
+        } else {
+            String::new()
+        };
+        let frame = self.model.login(&server, &user, &pass, &code);
+        self.send(frame);
+        cx.notify();
+    }
+
     /// Signing in to an instance on a server: its address, the account, and for a new
     /// server, the setup code it printed.
     fn server_sign_in(&mut self, column: Div, cx: &mut Context<Self>) -> Div {
@@ -1027,22 +1076,8 @@ ACTA_KEY=secret:ACTA_KEY",
                         true,
                     )
                     .w_full()
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        if this.model.logging_in {
-                            return;
-                        }
-                        let server = this.server_in.read(cx).value().to_string();
-                        let user = this.user_in.read(cx).value().to_string();
-                        let pass = this.pass_in.read(cx).value().to_string();
-                        let code = if this.show_code {
-                            this.code_in.read(cx).value().to_string()
-                        } else {
-                            String::new()
-                        };
-                        let frame = this.model.login(&server, &user, &pass, &code);
-                        this.send(frame);
-                        cx.notify();
-                    })),
+                    .h(px(46.0))
+                    .on_click(cx.listener(|this, _, _, cx| this.sign_in_server(cx))),
                 ),
             )
             .when(!self.show_code, |d| {
@@ -1599,7 +1634,7 @@ ACTA_KEY=secret:ACTA_KEY",
                     cx.notify();
                 }))
                 .child(thread(
-                    format!("head-{}", agent.id),
+                    "head",
                     self.model.mood(&agent.id),
                     thread::color(&agent.color, p.dark),
                     26.0,
@@ -2227,14 +2262,26 @@ ACTA_KEY=secret:ACTA_KEY",
                 );
         }
         let mut tiles = div().flex().flex_wrap().justify_center().gap(px(space::L));
+        // Once one's picked, the rest and the heading go, and the picked one's thread keeps
+        // going, to grow into the next step's.
+        let leaving = self.make.picked_at.map_or(0.0, |at| {
+            let x = (at.elapsed().as_secs_f32() / PICK_SECONDS).clamp(0.0, 1.0);
+            x * x * (3.0 - 2.0 * x)
+        });
+        let chosen = self.make.picked_at.and(self.make.program.clone());
         for (i, name) in self.model.programs.clone().into_iter().enumerate() {
             let color = COLORS[i % COLORS.len()];
             let tint = thread::color(color, p.dark);
-            let lit = self.make.hover.as_deref() == Some(name.as_str());
+            let is_chosen = chosen.as_deref() == Some(name.as_str());
+            let lit = is_chosen || self.make.hover.as_deref() == Some(name.as_str());
             let hovered = name.clone();
             let picked = name.clone();
             // The tiles come in one after another.
-            let k = self.enter(0.2 + 0.1 * i as f32, 0.5);
+            let k = if is_chosen {
+                1.0
+            } else {
+                self.enter(0.2 + 0.1 * i as f32, 0.5) * (1.0 - leaving)
+            };
             tiles = tiles.child(appear(
                 div()
                     .id(SharedString::from(format!("brain-{name}")))
@@ -2248,7 +2295,12 @@ ACTA_KEY=secret:ACTA_KEY",
                     .rounded(px(radius::CARD))
                     .border_1()
                     .cursor_pointer()
-                    .when(lit, |d| d.bg(p.raised_2).border_color(tint.opacity(0.7)))
+                    // The picked tile's card and words go too, leaving its thread.
+                    .when(lit, |d| {
+                        let stay = if is_chosen { 1.0 - leaving } else { 1.0 };
+                        d.bg(p.raised_2.opacity(stay))
+                            .border_color(tint.opacity(0.7 * stay))
+                    })
                     .when(!lit, |d| d.bg(p.raised).border_color(p.line))
                     .child(thread(
                         format!("brain-{name}"),
@@ -2258,20 +2310,22 @@ ACTA_KEY=secret:ACTA_KEY",
                         20.0,
                         None,
                     ))
-                    .child(
+                    .child(appear(
                         div()
                             .pt(px(space::S))
                             .text_size(px(size::HEADING))
                             .font_weight(FontWeight::SEMIBOLD)
                             .text_color(p.ink)
                             .child(program_title(&name)),
-                    )
-                    .child(
+                        if is_chosen { 1.0 - leaving } else { 1.0 },
+                    ))
+                    .child(appear(
                         div()
                             .text_size(px(size::CAPTION))
                             .text_color(p.ink_3)
                             .child(program_maker(&name)),
-                    )
+                        if is_chosen { 1.0 - leaving } else { 1.0 },
+                    ))
                     .on_hover(cx.listener(move |this, over: &bool, _, cx| {
                         if *over {
                             this.make.hover = Some(hovered.clone());
@@ -2281,10 +2335,12 @@ ACTA_KEY=secret:ACTA_KEY",
                         cx.notify();
                     }))
                     .on_click(cx.listener(move |this, _, window, cx| {
+                        if this.make.picked_at.is_some() {
+                            return;
+                        }
                         this.make.program = Some(picked.clone());
                         this.make.color = color;
-                        this.make.step = Step::Name;
-                        this.make.snapped = Some(Instant::now());
+                        this.make.picked_at = Some(Instant::now());
                         let current = this.name_in.read(cx).value().to_string();
                         this.name_in.update(cx, |s, cx| {
                             s.set_value(whimsical_name(&current), window, cx);
@@ -2296,7 +2352,10 @@ ACTA_KEY=secret:ACTA_KEY",
             ));
         }
         column
-            .child(appear(heading("Pick a brain"), self.enter(0.0, 0.5)))
+            .child(appear(
+                heading("Pick a brain"),
+                self.enter(0.0, 0.5) * (1.0 - leaving),
+            ))
             .child(tiles)
     }
 
@@ -2309,6 +2368,7 @@ ACTA_KEY=secret:ACTA_KEY",
             .make
             .snapped
             .is_some_and(|at| at.elapsed().as_secs_f32() < 1.2);
+        let grow = self.enter(0.0, 0.6);
         let mut swatches = div().flex().items_center().gap(px(space::S));
         for (i, color) in COLORS.iter().enumerate() {
             let picked = self.make.color() == *color;
@@ -2343,24 +2403,29 @@ ACTA_KEY=secret:ACTA_KEY",
             .flex_col()
             .items_center()
             .gap(px(space::XL))
-            .child(appear(
-                div().child(thread(
-                    "name-preview",
-                    if twang { Mood::Idle } else { Mood::Thinking },
-                    tint,
-                    280.0,
-                    36.0,
-                    self.make.snapped,
-                )),
-                self.enter(0.0, 0.5),
-            ))
+            // The picked brain's thread, grown to full size; it's still writing as it
+            // arrives, and settles into thinking.
+            .child(div().h(px(36.0)).flex().items_center().child(thread(
+                "name-preview",
+                if twang {
+                    Mood::Idle
+                } else if grow < 1.0 {
+                    Mood::Writing
+                } else {
+                    Mood::Thinking
+                },
+                tint,
+                120.0 + 160.0 * grow,
+                20.0 + 16.0 * grow,
+                self.make.snapped,
+            )))
             .child(appear(
                 div()
                     .text_size(px(size::HERO))
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(p.ink)
                     .child("Name it"),
-                self.enter(0.08, 0.5),
+                self.enter(0.25, 0.4),
             ))
             .child(
                 appear(
@@ -2391,11 +2456,11 @@ ACTA_KEY=secret:ACTA_KEY",
                                     cx.notify();
                                 })),
                         ),
-                    self.enter(0.16, 0.5),
+                    self.enter(0.35, 0.4),
                 )
                 .w_full(),
             )
-            .child(appear(swatches, self.enter(0.24, 0.5)))
+            .child(appear(swatches, self.enter(0.45, 0.4)))
             .child(appear(
                 div()
                     .id("weave-it")
@@ -2413,7 +2478,7 @@ ACTA_KEY=secret:ACTA_KEY",
                     .hover(|s| s.opacity(0.88))
                     .child("Weave it")
                     .on_click(cx.listener(|this, _, _, cx| this.weave_agent(cx))),
-                self.enter(0.32, 0.5),
+                self.enter(0.55, 0.4),
             ))
     }
 
@@ -2422,6 +2487,7 @@ ACTA_KEY=secret:ACTA_KEY",
         let Some(program) = self.make.program.clone() else {
             return;
         };
+        self.model.make_failed = false;
         let typed = self.name_in.read(cx).value().trim().to_string();
         let name = if typed.is_empty() {
             program_title(&program)
@@ -2589,6 +2655,16 @@ ACTA_KEY=secret:ACTA_KEY",
 
     /// Once the woven agent is there and the threads have met, its chat opens.
     fn finish_weaving(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // A picked brain moves on to naming once the other tiles have gone.
+        if self.make.step == Step::Brain
+            && self
+                .make
+                .picked_at
+                .is_some_and(|at| at.elapsed().as_secs_f32() >= PICK_SECONDS)
+        {
+            self.make.picked_at = None;
+            self.make.step = Step::Name;
+        }
         if self.make.step != Step::Weaving {
             return;
         }
@@ -2602,8 +2678,9 @@ ACTA_KEY=secret:ACTA_KEY",
             self.make = Making::default();
             self.screen = Screen::Chat;
             self.refresh_rows(cx);
-        } else if !made && t > 20.0 {
-            // The instance said no, or never answered: back to the name, to try again.
+        } else if std::mem::take(&mut self.model.make_failed) || !made && t > 20.0 {
+            // The instance said no (its notice says why), or never answered: back to the
+            // name, to try again.
             self.make.step = Step::Name;
         }
     }
@@ -2656,7 +2733,7 @@ ACTA_KEY=secret:ACTA_KEY",
             .px(px(space::XL))
             .pb(px(60.0))
             .child(thread(
-                format!("hero-{}", a.id),
+                "hero",
                 mood,
                 tint,
                 140.0,
@@ -5698,6 +5775,9 @@ fn appear<E: Styled>(d: E, k: f32) -> E {
 /// How long the opening weave lasts on every launch, in seconds.
 const SPLASH_SECONDS: f32 = 2.8;
 
+/// How long picking a brain takes to move on to naming it, in seconds.
+const PICK_SECONDS: f32 = 0.45;
+
 /// How long the window takes to close on a new agent's thread, in seconds.
 const CLOSE_SECONDS: f32 = 0.7;
 
@@ -5789,6 +5869,8 @@ struct Making {
     started: Option<Instant>,
     agents_before: usize,
     name: String,
+    /// When a brain was picked: the step moves on once the others have gone.
+    picked_at: Option<Instant>,
     /// Whether it's the person's first agent, made full-window before the app opens.
     first: bool,
 }
