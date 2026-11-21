@@ -3243,7 +3243,8 @@ impl Instance {
             }
             let user = try i.store.add_user_hashed(auth.username.copy(), done.hash.copy(), "owner")
             try i.store.delete_meta("setup_code")
-            try i.people_logged("joined", "{user.username} set up the instance, as its owner", user.id.copy())
+            // In the log only: there's no one else yet to tell.
+            try i.store.log_people("joined", "{user.username} set up the instance, as its owner", user.username.copy())
             i.server.respond(auth.req, json_response(200, try i.new_device(user.id, auth.body.copy())))
             return
         }
