@@ -7597,133 +7597,130 @@ ACTA_KEY=secret:ACTA_KEY",
         self.settings_page("move-page", "Move this instance", None, groups)
     }
 
+    /// A link to pass on, as a row: the link, how long it works, and Copy.
+    fn copy_row(&self, id: &'static str, link: String, sub: String) -> AnyElement {
+        let copied = link.clone();
+        self.row(
+            Some(self.tile(Ico::Copy)),
+            link,
+            Some(sub),
+            Some(
+                self.small_button(id, "Copy", true)
+                    .on_click(move |_, _, cx| {
+                        cx.write_to_clipboard(ClipboardItem::new_string(copied.clone()));
+                    })
+                    .into_any_element(),
+            ),
+        )
+        .into_any_element()
+    }
+
     /// The People page, for owners and admins of an instance on a server: invite someone,
     /// with a link to pass on, and see who's in, to make them an admin or remove them.
     fn people_page(&mut self, cx: &mut Context<Self>) -> Div {
         let p = self.p;
-        let caption = |text: String| {
-            div()
-                .text_size(px(size::CAPTION))
-                .text_color(p.ink_3)
-                .child(text)
-        };
-        let heading = |text: &'static str| {
-            div()
-                .text_size(px(size::BODY))
-                .font_weight(FontWeight::SEMIBOLD)
-                .text_color(p.ink)
-                .child(text)
-        };
-        let mut body = div()
-            .w_full()
-            .max_w(px(560.0))
-            .flex()
-            .flex_col()
-            .gap(px(space::XL))
-            .child(
-                div()
-                    .text_size(px(size::HEADING))
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(p.ink)
-                    .child("People"),
-            );
         if let Some(why) = self.model.people_refused.clone() {
-            return self.page("people-page", body.child(caption(why)));
+            let groups = vec![self.empty(Ico::Users, "Not for you", &why, None)];
+            return self.settings_page("people-page", "People", None, groups);
         }
+        let mut groups = Vec::new();
         // Invite someone: the role it gives, and the link to pass on once it's made.
         let admin = self.invite_admin;
-        let mut invite = div()
-            .flex()
-            .flex_col()
-            .gap(px(space::M))
-            .child(heading("Invite someone"))
-            .child(caption("Works once, for a week".into()))
-            .child(
-                div()
-                    .flex()
-                    .gap(px(space::S))
-                    .child(
-                        self.button("invite-member", "Member", !admin)
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.invite_admin = false;
-                                cx.notify();
-                            })),
-                    )
-                    .child(
-                        self.button("invite-admin", "Admin", admin)
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.invite_admin = true;
-                                cx.notify();
-                            })),
-                    )
-                    .child(div().flex_1())
-                    .child(self.button("make-invite", "Make an invite", true).on_click(
-                        cx.listener(|this, _, _, cx| {
-                            let role = if this.invite_admin { "admin" } else { "member" };
-                            let f = this.model.create_invite(role, 1);
-                            this.send(f);
-                            cx.notify();
-                        }),
-                    )),
-            );
-        if let Some((link, role, expires)) = self.model.invite_made.clone() {
-            let copied = link.clone();
-            invite = invite
-                .child(
+        let role = self.segments(vec![
+            self.segment("invite-member", "Member", !admin)
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.invite_admin = false;
+                    cx.notify();
+                })),
+            self.segment("invite-admin", "Admin", admin)
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.invite_admin = true;
+                    cx.notify();
+                })),
+        ]);
+        let mut invite = vec![self
+            .row(
+                Some(self.tile(Ico::Users)),
+                "Invite someone",
+                Some("Works once, for a week".into()),
+                Some(
                     div()
                         .flex()
                         .items_center()
                         .gap(px(space::S))
+                        .child(role)
                         .child(
-                            div()
-                                .flex_1()
-                                .px(px(space::M))
-                                .py(px(space::S))
-                                .rounded(px(radius::BUTTON))
-                                .border_1()
-                                .border_color(p.line_strong)
-                                .text_size(px(size::SMALL))
-                                .text_color(p.ink)
-                                .child(link),
+                            self.small_button("make-invite", "Make an invite", true)
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    let role = if this.invite_admin { "admin" } else { "member" };
+                                    let f = this.model.create_invite(role, 1);
+                                    this.send(f);
+                                    cx.notify();
+                                })),
                         )
-                        .child(self.button("copy-invite", "Copy", false).on_click(
-                            cx.listener(move |_, _, _, cx| {
-                                cx.write_to_clipboard(ClipboardItem::new_string(copied.clone()));
-                            }),
-                        )),
-                )
-                .child(caption(format!(
-                    "Makes one {role}, until {}. It shows only now: send it the way you'd send a password.",
+                        .into_any_element(),
+                ),
+            )
+            .into_any_element()];
+        if let Some((link, role, expires)) = self.model.invite_made.clone() {
+            invite.push(self.copy_row(
+                "copy-invite",
+                link,
+                format!(
+                    "One {role}, until {}. Send it as you'd send a password",
                     moment_of(expires)
-                )));
+                ),
+            ));
         }
-        body = body.child(invite);
+        for inv in self.model.invites.clone() {
+            let id = inv.id.clone();
+            invite.push(
+                self.row(
+                    None,
+                    format!("An open invite for a {}", inv.role),
+                    Some(format!(
+                        "{} {} left, until {}",
+                        inv.uses,
+                        if inv.uses == 1 { "use" } else { "uses" },
+                        moment_of(inv.expires)
+                    )),
+                    Some(
+                        self.small_button(format!("invite-{}", inv.id), "Delete", false)
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                let f = this.model.delete_invite(&id);
+                                this.send(f);
+                                cx.notify();
+                            }))
+                            .into_any_element(),
+                    ),
+                )
+                .into_any_element(),
+            );
+        }
+        groups.push(self.group(None, invite));
         // Who's in.
-        let mut everyone = div()
-            .flex()
-            .flex_col()
-            .gap(px(space::XS))
-            .child(heading("Everyone"));
+        let mut everyone = Vec::new();
         for person in self.model.people.clone() {
-            let mut row = div()
+            let initial = person
+                .username
+                .chars()
+                .next()
+                .map(|c| c.to_uppercase().to_string())
+                .unwrap_or_default();
+            let lead = div()
+                .size(px(30.0))
+                .flex_none()
                 .flex()
                 .items_center()
-                .gap(px(space::M))
-                .py(px(space::XS))
-                .child(
-                    div()
-                        .flex_1()
-                        .flex()
-                        .flex_col()
-                        .child(
-                            div()
-                                .text_size(px(size::SMALL))
-                                .font_weight(FontWeight::MEDIUM)
-                                .text_color(p.ink)
-                                .child(person.username.clone()),
-                        )
-                        .child(caption(person.role.clone())),
-                );
+                .justify_center()
+                .rounded(px(radius::ROW))
+                .bg(p.raised_2)
+                .text_size(px(size::SMALL))
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(p.ink_2)
+                .child(initial)
+                .into_any_element();
+            let mut controls = div().flex().gap(px(space::XS));
             if person.role != "owner" {
                 let (user, to, label) = if person.role == "admin" {
                     (person.id.clone(), "member", "Make member")
@@ -7732,9 +7729,9 @@ ACTA_KEY=secret:ACTA_KEY",
                 };
                 let gone = person.id.clone();
                 let (reset_id, reset_name) = (person.id.clone(), person.username.clone());
-                row = row
+                controls = controls
                     .child(
-                        self.button_owned(format!("reset-{}", person.id), "Reset password", false)
+                        self.small_button(format!("reset-{}", person.id), "Reset password", false)
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 let f = this.model.reset_password(&reset_id, &reset_name);
                                 this.send(f);
@@ -7742,7 +7739,7 @@ ACTA_KEY=secret:ACTA_KEY",
                             })),
                     )
                     .child(
-                        self.button_owned(format!("role-{}", person.id), label, false)
+                        self.small_button(format!("role-{}", person.id), label, false)
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 let f = this.model.set_role(&user, to);
                                 this.send(f);
@@ -7750,7 +7747,7 @@ ACTA_KEY=secret:ACTA_KEY",
                             })),
                     )
                     .child(
-                        self.button_owned(format!("remove-{}", person.id), "Remove", false)
+                        self.small_button(format!("remove-{}", person.id), "Remove", false)
                             .text_color(p.bad)
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 let f = this.model.remove_person(&gone);
@@ -7759,120 +7756,51 @@ ACTA_KEY=secret:ACTA_KEY",
                             })),
                     );
             }
-            everyone = everyone.child(row);
+            everyone.push(
+                self.row(
+                    Some(lead),
+                    person.username.clone(),
+                    Some(person.role.clone()),
+                    Some(controls.into_any_element()),
+                )
+                .into_any_element(),
+            );
         }
         if let Some((who, link, expires)) = self.model.reset_made.clone() {
-            let copied = link.clone();
-            everyone = everyone
-                .child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap(px(space::S))
-                        .child(
-                            div()
-                                .flex_1()
-                                .px(px(space::M))
-                                .py(px(space::S))
-                                .rounded(px(radius::BUTTON))
-                                .border_1()
-                                .border_color(p.line_strong)
-                                .text_size(px(size::SMALL))
-                                .text_color(p.ink)
-                                .child(link),
-                        )
-                        .child(self.button("copy-reset", "Copy", false).on_click(
-                            cx.listener(move |_, _, _, cx| {
-                                cx.write_to_clipboard(ClipboardItem::new_string(copied.clone()));
-                            }),
-                        )),
-                )
-                .child(caption(format!(
-                    "Sets a new password for {who}, once, until {}. It signs them out everywhere else.",
+            everyone.push(self.copy_row(
+                "copy-reset",
+                link,
+                format!(
+                    "A new password for {who}, once, until {}",
                     moment_of(expires)
-                )));
+                ),
+            ));
         }
-        body = body.child(everyone);
-        // Invites still open.
-        if !self.model.invites.is_empty() {
-            let mut open = div()
-                .flex()
-                .flex_col()
-                .gap(px(space::XS))
-                .child(heading("Open invites"));
-            for inv in self.model.invites.clone() {
-                let id = inv.id.clone();
-                open = open.child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap(px(space::M))
-                        .py(px(space::XS))
-                        .child(div().flex_1().child(caption(format!(
-                            "{}, {} {} left, until {}",
-                            inv.role,
-                            inv.uses,
-                            if inv.uses == 1 { "use" } else { "uses" },
-                            moment_of(inv.expires)
-                        ))))
-                        .child(
-                            self.button_owned(format!("invite-{}", inv.id), "Delete", false)
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    let f = this.model.delete_invite(&id);
-                                    this.send(f);
-                                    cx.notify();
-                                })),
-                        ),
-                );
-            }
-            body = body.child(open);
+        if !everyone.is_empty() {
+            groups.push(self.group(Some("Everyone"), everyone));
         }
         // What happened to people here, newest first.
-        if !self.model.people_log.is_empty() {
-            let mut log = div()
-                .flex()
-                .flex_col()
-                .gap(px(space::S))
-                .child(heading("What happened"));
-            for e in self.model.people_log.clone() {
-                let when = moment_of(e.at);
-                let who = if e.by.is_empty() {
-                    "from the server".to_string()
-                } else {
-                    format!("by {}", e.by)
-                };
-                log = log.child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .child(
-                            div()
-                                .text_size(px(size::SMALL))
-                                .text_color(p.ink)
-                                .child(e.text.clone()),
-                        )
-                        .child(caption(format!("{when}, {who}"))),
-                );
-            }
-            body = body.child(log);
+        let mut log = Vec::new();
+        for e in self.model.people_log.clone() {
+            let who = if e.by.is_empty() {
+                "from the server".to_string()
+            } else {
+                format!("by {}", e.by)
+            };
+            log.push(
+                self.row(
+                    None,
+                    e.text.clone(),
+                    Some(format!("{}, {who}", moment_of(e.at))),
+                    None,
+                )
+                .into_any_element(),
+            );
         }
-        self.page("people-page", body)
-    }
-
-    /// A page's body, centred and scrolling, under the header.
-    fn page(&self, id: &'static str, body: Div) -> Div {
-        let page = div()
-            .id(id)
-            .size_full()
-            .overflow_y_scroll()
-            .flex()
-            .justify_center()
-            .items_start()
-            .pt(px(space::XL))
-            .px(px(space::XL))
-            .pb(px(space::XXL))
-            .child(body);
-        div().flex_1().min_h_0().child(page)
+        if !log.is_empty() {
+            groups.push(self.group(Some("What happened"), log));
+        }
+        self.settings_page("people-page", "People", None, groups)
     }
 
     /// The window's title bar: it drags the window, with what's on it, and ends in loom's
