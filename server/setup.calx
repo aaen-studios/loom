@@ -62,6 +62,8 @@ pub fn unit(port: u16, boxes: String?) -> String {
         lines.push("ExecStart={BIN} serve --data {HOME} --port {port} --sandboxes podman")
         lines.push("Environment=XDG_RUNTIME_DIR=/run/user/{uid}")
         lines.push("Environment=DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/{uid}/bus")
+        // ProtectHome covers /run/user too, where rootless Podman keeps its state.
+        lines.push("ReadWritePaths=/run/user/{uid}")
     } else {
         lines.push("ExecStart={BIN} serve --data {HOME} --port {port}")
         lines.push(String("NoNewPrivileges=yes"))
@@ -284,7 +286,7 @@ fn the_unit_runs_it_as_loom() {
     let u = unit(8790, none)
     assert(u.contains("User=loom") and u.contains("ExecStart=/usr/local/bin/loom serve --data /var/lib/loom --port 8790\n") and u.contains("NoNewPrivileges=yes"))
     let boxed = unit(8790, some(String("998")))
-    assert(boxed.contains("--port 8790 --sandboxes podman") and boxed.contains("XDG_RUNTIME_DIR=/run/user/998") and boxed.contains("After=user@998.service"))
+    assert(boxed.contains("--port 8790 --sandboxes podman") and boxed.contains("XDG_RUNTIME_DIR=/run/user/998") and boxed.contains("After=user@998.service") and boxed.contains("ReadWritePaths=/run/user/998"))
     assert(not boxed.contains("NoNewPrivileges"))
 }
 
