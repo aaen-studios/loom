@@ -66,6 +66,8 @@ pub fn all() -> List<Json> {
         tool("browser_back", "Goes back to the page before, as a browser's back button does, and gives its outline.", object(Obj.new(), List<str>())),
         tool("browser_screenshot", "Gives a picture of what your browser shows, for when how the page looks matters.", object(Obj.new(), List<str>())),
         tool("browser_ask_person", "Asks your person to take over your browser for something only they should do, such as logging in, a code sent to their phone, or a CAPTCHA. They get a notification, take over, and hand it back; the result comes then, with the page as it is. Open the page first.", object(Obj.new().j("why", text_arg("What you need them to do, in one sentence.")), ["why"])),
+        tool("list_commands", "Lists loom's commands, which run_command runs: each one's name, its args, what it does, and whether it runs at once or asks your person first.", object(Obj.new(), List<str>())),
+        tool("run_command", "Runs one of loom's commands, as your person's app does, with their rights: almost anything the app can do, such as conversations, agents, routines, tasks, skills, plugins, MCP servers, agent programs, people, invites and devices. list_commands gives their names and args. Reading and everyday changes run at once. What deletes, removes, installs, reaches outside, gives an agent more, or moves the instance asks your person first, every time; their password, their account and their secrets' values stay theirs.", object(Obj.new().j("name", text_arg("The command, such as conversation.create.")).j("args", Obj.new().s("type", String("object")).s("description", String("Its args, by name, as list_commands gives them.")).done()), ["name"])),
         tool("move_instance", "Moves this whole instance to a new place: a server or a computer where loom receive is running, which printed a move code. Everything goes, and your person's apps follow. Your person is asked first, and only the instance's owner can move it.", object(Obj.new().j("to", text_arg("The new place's address, starting with https:// or http://.")).j("code", text_arg("The move code loom receive printed there, starting loom-move-.")), ["to", "code"])),
     ]
 }
@@ -73,7 +75,7 @@ pub fn all() -> List<Json> {
 @test
 fn every_tool_has_a_schema() {
     let tools = all()
-    assert(tools.len() == 40)
+    assert(tools.len() == 42)
     for t in tools {
         assert("{t}".contains("\"inputSchema\":\{\"type\":\"object\""))
     }

@@ -188,8 +188,8 @@ Agents live in the database, and are made and edited in the app.
 
 ### Agents can do anything the app can
 
-- **One list of commands.** Every command the app sends (make an agent, change a routine, add an ACP agent, install a plugin, make an invite, export, move) is defined once in `shared/`. Loom's own tools are made from that same list, so each new feature is a tool from its first day.
-- **The same rules as you.** An agent works with its person's rights and no more. Anything that sends, pays, deletes, lets people in, changes permissions or moves the instance asks first. An agent can't raise its own permission mode or answer its own approval.
+- **One list of commands.** Every command the app sends (make an agent, change a routine, add an ACP agent, install a plugin, make an invite, export, move) is one an agent can send too, with `run_command`, and `list_commands` lists them with their args. `server/commands.calx` says which run at once and which ask, so each new command is an agent's from its first day, asking until it's put among those that don't.
+- **The same rules as you.** An agent works with its person's rights and no more. Reading and everyday changes (conversations, notes, routines, tasks, skills, plugins) run at once, and what changes is in the activity log. Anything that deletes, removes, installs, lets people in, reaches outside, gives an agent more (a looser permission mode, a folder) or moves the instance asks first, every time, and is done as the device that said yes. The person's account, password and secrets' values, and what a plugin is allowed, stay theirs. An agent can't raise its own permission mode, delete itself or answer its own approval.
 - **Scriptable to the end.** The server's command line (`loom install`, `loom receive`, `loom status` and the rest) does everything the app does, and prints JSON when asked, so an agent working over SSH reads it reliably.
 
 Say you ask: "Set up loom on this VPS and move me there." The agent:
@@ -304,7 +304,7 @@ Each agent program runs as its own process. The instance reads each one on a thr
 | `delete_agent`, `set_permission`, `delete_skill`, `delete_routine` | The risky ones. Each asks you every time, whatever the agent's permission mode, and is done as the device you answered on. An agent can't delete itself or loosen its own mode |
 | `list_skills`, `read_skill`, `save_skill` | Skills: read when a task fits one, and saved by an agent for every agent. They're also written into each agent's folder as Claude Code skills |
 | Device tools | Your PC and phone, where you allow it ([Machines and devices](#machines-and-devices)) |
-| Every loom command | Agents, routines, plugins, settings, export, moving ([Agents can do anything the app can](#agents-can-do-anything-the-app-can)) |
+| `list_commands`, `run_command` | Every loom command: agents, routines, tasks, plugins, MCP servers, agent programs, people, devices, moving ([Agents can do anything the app can](#agents-can-do-anything-the-app-can)) |
 
 - **Shell, files and web fetch** come from the agent itself.
 - **MCP servers** (Acta, Cloudflare, Composio for mail and the rest) are passed to the agent, which connects to them itself.
