@@ -35,6 +35,8 @@ import server.noise
 import server.plugins
 import server.push
 import server.routines
+import server.gate
+import server.sandbox
 import server.store.{AcpAgent, Device, Store, User, now, secret_key}
 import shared.tools
 
@@ -49,6 +51,8 @@ pub struct Config {
     pub apns: String    // where APNs is, or "" for Apple's: a test's fake one
     pub version: String    // loom's version, for what a move says it came from
     pub lan: bool    // whether phones may reach it on the network, through the Noise bridge: an instance in the desktop app
+    pub sandboxes: String    // what runs sandboxes for everyone but the owner (podman), or "" for none
+    pub sandbox_image: String    // the image they run
 }
 
 // How long events are kept (PLAN.md, "Sync"): `age_ms`, but always each
@@ -145,6 +149,7 @@ struct Proc {
     resume: bool    // whether it offers session/resume
     load: bool    // whether it offers session/load
     mcp_http: bool    // whether it connects to MCP servers over HTTP itself
+    boxed: bool    // whether it runs in its person's sandbox
     next_id: i64
     pending: Map<i64, Pending>
     sessions: Map<String, String>    // conversation -> ACP session
@@ -198,6 +203,9 @@ pub struct Instance {
     stop_bridge: Sender<bool>?
     lan_port: u16    // its port, while it runs
     to_close: List<ServerSocket>    // sessions of someone removed, closed once the command that did it is answered
+    boxes: sandbox.Sandboxes?    // where the agents of everyone but the owner run (server/sandbox.calx)
+    gate: Thread?    // the sandboxes' way to loom's tools (server/gate.calx)
+    stop_gate: Sender<bool>?
     moving: String    // where the instance is moving to, while it is
     move_waiters: List<Waiter>    // instance.move commands waiting on the move
     moved: Json    // once the instance has moved: the signed moved frame, which every device gets
@@ -447,7 +455,8 @@ impl Instance {
         if let text = try store.meta("moved") {
             if let ok(m) = parse(text) { moved = m }
         }
-        var i = Instance { push_to: push_to, push_gone: push_gone, move_to: move_to, move_done: move_done, lan: config.lan, bridge: none, stop_bridge: none, lan_port: 0, to_close: List<ServerSocket>(), moving: String(), move_waiters: List<Waiter>(), moved: moved, version: config.version.copy(), store: store, server: server, data: config.data.copy(), sessions: Map<u32, Session>(), runs: LinkedMap<String, Run>(), procs: LinkedMap<String, Proc>(), approvals: LinkedMap<String, Approval>(), lines: lines, lines_to: to, hash_to: hash_to, hash_done: hash_done, next_job: 0, auths: Map<i64, Auth>(), dummy_hash: dummy, failures: LinkedMap<String, List<i64>>(), thumbs: files.start(), events: config.events, next_prune: 0, grants: Map<String, Grant>(), calls: Map<String, Request>(), registry_at: config.registry.copy(), registry: Json.Null, registry_time: 0, install_to: install_to, install_done: install_done, fetching: List<Waiter>(), installs: Map<i64, Install>(), leftovers: List<String>(), next_sweep: 0, device_calls: Map<String, DeviceCall>(), minute_ms: config.minute_ms, next_due: 0, routine_runs: Map<String, RoutineRun>(), panel_calls: Map<String, Waiter>(), sealer: try secret_key(config.data.copy()) }
+        var i = Instance { push_to: push_to, push_gone: push_gone, move_to: move_to, move_done: move_done, lan: config.lan, bridge: none, stop_bridge: none, lan_port: 0, to_close: List<ServerSocket>(), boxes: none, gate: none, stop_gate: none, moving: String(), move_waiters: List<Waiter>(), moved: moved, version: config.version.copy(), store: store, server: server, data: config.data.copy(), sessions: Map<u32, Session>(), runs: LinkedMap<String, Run>(), procs: LinkedMap<String, Proc>(), approvals: LinkedMap<String, Approval>(), lines: lines, lines_to: to, hash_to: hash_to, hash_done: hash_done, next_job: 0, auths: Map<i64, Auth>(), dummy_hash: dummy, failures: LinkedMap<String, List<i64>>(), thumbs: files.start(), events: config.events, next_prune: 0, grants: Map<String, Grant>(), calls: Map<String, Request>(), registry_at: config.registry.copy(), registry: Json.Null, registry_time: 0, install_to: install_to, install_done: install_done, fetching: List<Waiter>(), installs: Map<i64, Install>(), leftovers: List<String>(), next_sweep: 0, device_calls: Map<String, DeviceCall>(), minute_ms: config.minute_ms, next_due: 0, routine_runs: Map<String, RoutineRun>(), panel_calls: Map<String, Waiter>(), sealer: try secret_key(config.data.copy()) }
+        if config.sandboxes.len() > 0 and not i.lan { try i.sandboxes_on(config.sandboxes.copy(), config.sandbox_image.copy()) }
         // Phones that were on stay on.
         if i.lan and try i.store.meta("phones") == some(String("on")) {
             match i.phones_on() {
@@ -482,6 +491,86 @@ impl Instance {
         i.stop_bridge = none
         if let t = i.bridge.take() { t.join() }
         i.lan_port = 0
+    }
+
+    // --- Sandboxes (PLAN.md, "Sandboxes: where members' agents run") ---
+
+    // Starts the gate and sets up sandboxes run by `runtime`, from `image`.
+    fn sandboxes_on(i: mut Instance, runtime: String, image: String) ! Error {
+        if runtime != "podman" { fail "--sandboxes takes podman, not {runtime}" }
+        if not sandbox.found(runtime.copy()) { fail "--sandboxes podman, but Podman isn't installed: it runs the sandboxes of everyone but the owner" }
+        let kept = u16.parse(try i.store.meta("gate_port") ?? String()) ?? 0
+        let (t, stop, port) = try gate.start(kept, i.server.port)
+        i.gate = some(t)
+        i.stop_gate = some(stop)
+        try i.store.set_meta("gate_port", "{port}")
+        let root = try fs.absolute("{i.data}/sandboxes")
+        let acp_folder = try fs.absolute("{i.data}/acp")
+        try fs.make_dir_all(root.copy())
+        i.boxes = some(sandbox.Sandboxes { runtime: runtime.copy(), image: if image.len() > 0 { image.copy() } else { String(sandbox.IMAGE) }, root: root, acp: acp_folder, gate: port })
+        println("loom: the agents of everyone but the owner run in sandboxes")
+    }
+
+    // Whether `user`'s agents run in a sandbox: everyone's but the owner's.
+    fn sandboxed(i: Instance, user: String) -> bool {
+        return match i.store.role(user) {
+            ok(r) => r != some(String("owner")),
+            err(_) => true,
+        }
+    }
+
+    // `agent`'s folder, where its program runs and its instructions and skills
+    // are: the folder it names, or one in the data folder. A sandboxed person's
+    // agents always have theirs in the person's own folder, whatever they name.
+    fn agent_folder(i: Instance, user: String, agent: Json) -> String {
+        let id = str_at(agent.copy(), "id") ?? String()
+        if i.sandboxed(user.copy()) {
+            if let b = i.boxes { return "{b.home(user)}/agents/{id}" }
+            return "{i.data}/sandboxes/{user}/agents/{id}"
+        }
+        return str_at(agent, "folder") ?? "{i.data}/agents/{id}"
+    }
+
+    // Writing in an agent's folder: through the person's sandbox when they have
+    // one, since what's in their folder is theirs to make links in.
+    fn box_of(i: Instance, user: String) -> sandbox.Sandboxes? ! Error {
+        if not i.sandboxed(user.copy()) { return none }
+        let b = i.boxes else { fail "this instance has no sandboxes for anyone but the owner" }
+        try b.ready(user)
+        return some(b.copy())
+    }
+
+    fn put_file(i: Instance, user: String, path: String, data: List<u8>) ! Error {
+        if let b = try i.box_of(user.copy()) {
+            try b.write(user, path, data)
+            return
+        }
+        if let cut = path.find_last("/") { try fs.make_dir_all(path[..cut].copy()) }
+        try fs.write(path, data)
+    }
+
+    fn put_dir(i: Instance, user: String, path: String) ! Error {
+        if let b = try i.box_of(user.copy()) {
+            try b.make_dir(user, path)
+            return
+        }
+        try fs.make_dir_all(path)
+    }
+
+    fn drop_file(i: Instance, user: String, path: String) ! Error {
+        if let b = try i.box_of(user.copy()) {
+            try b.remove_file(user, path)
+            return
+        }
+        if fs.exists(path.copy()) { try fs.remove_file(path) }
+    }
+
+    fn drop_dir(i: Instance, user: String, path: String) ! Error {
+        if let b = try i.box_of(user.copy()) {
+            try b.remove_dir(user, path)
+            return
+        }
+        try fs.remove_dir(path)
     }
 
     // What a phone needs to reach the instance over Noise, while phones are on.
@@ -646,6 +735,8 @@ impl Instance {
             var to = p.to.copy()
             to.send(Out.Stop)
         }
+        if let s = mut i.stop_gate { s.send(true) }
+        if let t = i.gate.take() { t.join() }
         i.phones_off()
         i.server.shutdown()
     }
@@ -822,8 +913,9 @@ impl Instance {
 
     // --- Loom's own tools (PLAN.md, "Loom's own tools") ---
 
-    // `loom mcp` for an agent's ACP session, with a token for that agent.
-    fn mcp_servers(i: mut Instance, user: String, agent: String, http: bool) -> Json {
+    // `loom mcp` for an agent's ACP session, with a token for that agent. In a
+    // sandbox, it's the image's `loom`, reaching the instance through the gate.
+    fn mcp_servers(i: mut Instance, user: String, agent: String, http: bool, boxed: bool) -> Json {
         var token = String()
         for (t, g) in i.grants {
             if g.user == user and g.agent == agent { token = t.copy() }
@@ -833,9 +925,16 @@ impl Instance {
             i.grants.insert(token.copy(), Grant { user: user.copy(), agent: agent.copy() })
         }
         let address = i.server.url()
-        let base = if address.ends_with("/") { address[..address.len() - 1].copy() } else { address }
+        var base = if address.ends_with("/") { address[..address.len() - 1].copy() } else { address }
+        var exe = current_exe()
+        if boxed {
+            if let b = i.boxes {
+                base = "http://127.0.0.1:{b.gate}"
+                exe = String("loom")
+            }
+        }
         let env = Json.Array([Obj.new().s("name", String("LOOM_URL")).s("value", base).done(), Obj.new().s("name", String("LOOM_MCP_TOKEN")).s("value", token).done()])
-        let loom = Obj.new().s("name", String("loom")).s("command", current_exe()).j("args", Json.Array([Json.Str(String("mcp"))])).j("env", env).done()
+        let loom = Obj.new().s("name", String("loom")).s("command", exe).j("args", Json.Array([Json.Str(String("mcp"))])).j("env", env).done()
         var out: List<Json> = [loom]
         // And the person's MCP servers the agent has.
         let wanted = match i.store.agent(user.copy(), agent.copy()) {
@@ -852,8 +951,9 @@ impl Instance {
                 if let s = i.session_server(user.copy(), server, http) { out.push(s) }
             }
         }
-        // And every plugin's tool server its person allowed.
-        out.extend(i.plugin_servers(user))
+        // And every plugin's tool server its person allowed, which runs from the
+        // instance's own folders, so not in a sandbox.
+        if not boxed { out.extend(i.plugin_servers(user)) }
         return Json.Array(out)
     }
 
@@ -1695,14 +1795,11 @@ impl Instance {
 
     // Where the agent finds a file sent to it: a copy in its folder, under the name it was
     // sent with, so its tools see the right extension.
-    fn agent_copy(i: Instance, folder: String, f: Json) -> String ! Error {
+    fn agent_copy(i: Instance, user: String, folder: String, f: Json) -> String ! Error {
         let sha = str_at(f.copy(), "file") ?? String()
         let dir = "{folder}/files/{sha[..12]}"
         let path = "{dir}/{str_at(f, "name") ?? String("file")}"
-        if not fs.exists(path.copy()) {
-            try fs.make_dir_all(dir)
-            try fs.write(path.copy(), try fs.read("{i.data}/files/{sha}"))
-        }
+        if not fs.exists(path.copy()) { try i.put_file(user, path.copy(), try fs.read("{i.data}/files/{sha}")) }
         return try fs.absolute(path)
     }
 
@@ -1798,6 +1895,7 @@ impl Instance {
             if agent.len() > 0 { i.leftovers.push("{i.data}/agents/{agent}") }
         }
         if user.len() > 0 { i.leftovers.push("{i.data}/plugins/{user}") }
+        if let b = i.boxes { b.remove(user.copy()) }
         i.next_sweep = 0
         println("loom: removed {name}")
         return Answer.Value(Obj.new().done())
@@ -2296,25 +2394,47 @@ impl Instance {
 
     fn start_proc(i: mut Instance, user: String, agent: Json) ! Error {
         let id = str_at(agent.copy(), "id") ?? String()
-        // Only the owner's agents run as the instance's own user (PLAN.md,
-        // "Sandboxes"). Anyone else's would reach everyone's data and the owner's keys.
-        if try i.store.role(user.copy()) != some(String("owner")) {
-            fail "Agents of people other than the owner run in their own sandbox, which this instance doesn't have yet"
-        }
         let program = str_at(agent.copy(), "acp_agent") ?? String()
         let acp_agent = try i.store.acp_agent(program.copy()) else {
             fail "there's no ACP agent named {program}; add one with `loom acp add`"
         }
-        let folder = str_at(agent.copy(), "folder") ?? "{i.data}/agents/{id}"
-        try fs.make_dir_all(folder.copy())
+        let folder = i.agent_folder(user.copy(), agent.copy())
+        // Only the owner's agents run as the instance's own user (PLAN.md,
+        // "Sandboxes"). Anyone else's would reach everyone's data and the owner's
+        // keys, so theirs run in their sandbox, with their own secrets for settings.
+        let boxed = i.sandboxed(user.copy())
+        var command = acp_agent.command.copy()
+        var args = acp_agent.args.copy()
+        var settings = acp_agent.env.copy()
+        if boxed {
+            let b = i.boxes else {
+                fail "Agents of people other than the owner run in their own sandbox, and this instance has none: the owner starts it with --sandboxes podman"
+            }
+            try b.ready(user.copy())
+            var theirs = Obj.new()
+            var names = List<String>()
+            for s in try i.store.secret_names(user.copy()) {
+                let n = str_at(s, "name") ?? String()
+                if not env_name(n.copy()) { continue }
+                if let v = try i.secret(user.copy(), n.copy()) {
+                    theirs.m.insert(n.copy(), Json.Str(v))
+                    names.push(n)
+                }
+            }
+            settings = theirs.done()
+            let (c, a) = b.wrap(user.copy(), folder.copy(), names, command, args)
+            command = c
+            args = a
+        }
+        try i.put_dir(user.copy(), folder.copy())
         let instructions = str_at(agent, "instructions") ?? String()
         if instructions.len() > 0 {
-            try fs.write_text("{folder}/AGENTS.md", instructions.copy())
-            try fs.write_text("{folder}/CLAUDE.md", instructions)
+            try i.put_file(user.copy(), "{folder}/AGENTS.md", instructions.to_bytes())
+            try i.put_file(user.copy(), "{folder}/CLAUDE.md", instructions.to_bytes())
         }
         i.write_skills(user.copy(), folder.copy())
-        let to = try acp.start(id.copy(), acp_agent.command, acp_agent.args, acp_agent.env, folder, i.lines_to.copy())
-        var p = Proc { agent: id.copy(), user: user.copy(), to: to, ready: false, images: false, program: program, resume: false, load: false, mcp_http: false, next_id: 1, pending: Map<i64, Pending>(), sessions: Map<String, String>(), told: Map<String, String>(), profiled: Map<String, i64>(), waiting: List<String>() }
+        let to = try acp.start(id.copy(), command, args, settings, folder, i.lines_to.copy())
+        var p = Proc { agent: id.copy(), user: user.copy(), to: to, ready: false, images: false, program: program, resume: false, load: false, mcp_http: false, boxed: boxed, next_id: 1, pending: Map<i64, Pending>(), sessions: Map<String, String>(), told: Map<String, String>(), profiled: Map<String, i64>(), waiting: List<String>() }
         p.pending.insert(1, Pending.Init)
         p.to.send(Out.Send(acp.request(1, "initialize", acp.initialize_params())))
         i.procs.insert(id, p)
@@ -2363,7 +2483,7 @@ impl Instance {
                 }
                 let method = if p.resume { "session/resume" } else { "session/load" }
                 p.pending.insert(id, Pending.Resume(run_id.copy(), session.copy()))
-                p.to.send(Out.Send(acp.request(id, method, Obj.new().s("sessionId", session).s("cwd", folder).j("mcpServers", i.mcp_servers(user.copy(), agent.copy(), p.mcp_http)).done())))
+                p.to.send(Out.Send(acp.request(id, method, Obj.new().s("sessionId", session).s("cwd", folder).j("mcpServers", i.mcp_servers(user.copy(), agent.copy(), p.mcp_http, p.boxed)).done())))
                 return
             }
         }
@@ -2386,22 +2506,18 @@ impl Instance {
         }
         p.next_id += 1
         p.pending.insert(p.next_id, Pending.NewSession(run_id.copy()))
-        p.to.send(Out.Send(acp.request(p.next_id, "session/new", Obj.new().s("cwd", folder).j("mcpServers", i.mcp_servers(user, agent, p.mcp_http)).done())))
+        p.to.send(Out.Send(acp.request(p.next_id, "session/new", Obj.new().s("cwd", folder).j("mcpServers", i.mcp_servers(user, agent, p.mcp_http, p.boxed)).done())))
     }
 
     // Puts an agent's instructions in its folder, as AGENTS.md and CLAUDE.md,
     // which its program reads when a session starts.
-    fn write_instructions(i: Instance, agent: Json) {
+    fn write_instructions(i: Instance, user: String, agent: Json) {
         let id = str_at(agent.copy(), "id") ?? String()
-        let folder = str_at(agent.copy(), "folder") ?? "{i.data}/agents/{id}"
+        let folder = i.agent_folder(user.copy(), agent.copy())
         let instructions = str_at(agent, "instructions") ?? String()
-        if let err(e) = fs.make_dir_all(folder.copy()) {
-            eprintln("loom: agent {id}'s folder: {e}")
-            return
-        }
         let names: List<str> = ["AGENTS.md", "CLAUDE.md"]
         for n in names {
-            if let err(e) = fs.write_text("{folder}/{n}", instructions.copy()) { eprintln("loom: agent {id}'s {n}: {e}") }
+            if let err(e) = i.put_file(user.copy(), "{folder}/{n}", instructions.to_bytes()) { eprintln("loom: agent {id}'s {n}: {e}") }
         }
     }
 
@@ -2409,7 +2525,7 @@ impl Instance {
     // and takes out the ones loom put there that are gone. A folder loom made
     // has a `.loom` file in it; others are the person's own and stay.
     fn write_skills(i: Instance, user: String, folder: String) {
-        let skills = match i.store.skills(user, true) {
+        let skills = match i.store.skills(user.copy(), true) {
             ok(s) => s,
             err(e) => {
                 eprintln("loom: skills: {e}")
@@ -2423,12 +2539,8 @@ impl Instance {
             if not valid_skill(name.copy()) { continue }
             names.push(name.copy())
             let dir = "{root}/{name}"
-            if let err(e) = fs.make_dir_all(dir.copy()) {
-                eprintln("loom: skill {name}: {e}")
-                continue
-            }
-            if let err(e) = fs.write_text("{dir}/.loom", String("Written by loom from its skills. Changes here are overwritten.\n")) { eprintln("loom: skill {name}: {e}") }
-            if let err(e) = fs.write_text("{dir}/SKILL.md", skill_file(s)) { eprintln("loom: skill {name}: {e}") }
+            if let err(e) = i.put_file(user.copy(), "{dir}/.loom", "Written by loom from its skills. Changes here are overwritten.\n".to_bytes()) { eprintln("loom: skill {name}: {e}") }
+            if let err(e) = i.put_file(user.copy(), "{dir}/SKILL.md", skill_file(s).to_bytes()) { eprintln("loom: skill {name}: {e}") }
         }
         let present = match fs.list(root.copy()) {
             ok(entries) => entries,
@@ -2442,11 +2554,9 @@ impl Instance {
             // Only the two files loom wrote, then the folder if that left it empty.
             let written: List<str> = ["SKILL.md", ".loom"]
             for f in written {
-                if fs.exists("{dir}/{f}") {
-                    if let err(e) = fs.remove_file("{dir}/{f}") { eprintln("loom: skill {name}: {e}") }
-                }
+                if let err(e) = i.drop_file(user.copy(), "{dir}/{f}") { eprintln("loom: skill {name}: {e}") }
             }
-            if let err(e) = fs.remove_dir(dir) { eprintln("loom: skill {name}'s folder stays: {e}") }
+            if let err(e) = i.drop_dir(user.copy(), dir) { eprintln("loom: skill {name}'s folder stays: {e}") }
         }
     }
 
@@ -2457,15 +2567,14 @@ impl Instance {
             err(_) => return,
         }
         for a in agents {
-            let id = str_at(a.copy(), "id") ?? String()
-            i.write_skills(user.copy(), str_at(a, "folder") ?? "{i.data}/agents/{id}")
+            i.write_skills(user.copy(), i.agent_folder(user.copy(), a))
         }
     }
 
     fn folder_of(i: Instance, user: String, agent: String) -> String {
         match i.store.agent(user, agent.copy()) {
-            ok(some(a)) => return str_at(a, "folder") ?? "{i.data}/agents/{agent}",
-            _ => return "{i.data}/agents/{agent}",
+            ok(some(a)) => return i.agent_folder(user.copy(), a),
+            _ => return i.agent_folder(user.copy(), Obj.new().s("id", agent).done()),
         }
     }
 
@@ -2531,7 +2640,7 @@ impl Instance {
                 err(e) => eprintln("loom: reading {sha} for an agent: {e}"),
             }
         }
-        let path = match i.agent_copy(i.folder_of(user, agent), f) {
+        let path = match i.agent_copy(user.copy(), i.folder_of(user.copy(), agent), f) {
             ok(p) => p,
             err(e) => {
                 eprintln("loom: copying {sha} to the agent's folder: {e}")
@@ -2773,9 +2882,17 @@ impl Instance {
             if path.len() > 2 and path.starts_with("/") and path[2..].starts_with(":") { path = path[1..].copy() }
             name = safe_name(str_at(content.copy(), "name") ?? path.copy())
             mime = str_at(content, "mimeType") ?? String()
-            match fs.read(path.copy()) {
-                ok(d) => data = some(d),
-                err(e) => eprintln("loom: the agent's file {path}: {e}"),
+            // A sandboxed agent's link is read in its sandbox: the instance reads
+            // as its own user, which reads everything.
+            if i.sandboxed(user.copy()) {
+                let b = i.boxes else return none
+                data = b.read(user.copy(), path.copy())
+                if data == none { eprintln("loom: the sandboxed agent's file {path} isn't in its sandbox") }
+            } else {
+                match fs.read(path.copy()) {
+                    ok(d) => data = some(d),
+                    err(e) => eprintln("loom: the agent's file {path}: {e}"),
+                }
             }
         }
         let got = data else return none
@@ -3408,7 +3525,7 @@ impl Instance {
             let agent = o.i("revision", (int_at(old, "revision") ?? 0) + 1).done()
             try i.store.put_agent(user.copy(), agent.copy(), device.copy())
             // New sessions start with the new instructions.
-            if str_at(args.copy(), "instructions") != none { i.write_instructions(agent.copy()) }
+            if str_at(args.copy(), "instructions") != none { i.write_instructions(user.copy(), agent.copy()) }
             i.log(user.copy(), id.copy(), "agent", "Changed: revision {int_at(agent.copy(), "revision") ?? 0}", device.copy())
             try i.event(user, "agent.updated", Obj.new().j("agent", agent.copy()).s("by", device.copy()).done())
             return Answer.Value(Obj.new().j("agent", agent).done())
@@ -3684,6 +3801,20 @@ impl Instance {
         }
         return Answer.Refused(String("unknown_command"), "Version 1 has no command {name}.")
     }
+}
+
+// Whether `name` can be an environment variable's name: letters, digits and _,
+// not starting with a digit.
+fn env_name(name: String) -> bool {
+    if name.len() == 0 { return false }
+    var first = true
+    for b in name.to_bytes() {
+        let letter = (b >= 65u8 and b <= 90u8) or (b >= 97u8 and b <= 122u8) or b == 95u8
+        let digit = b >= 48u8 and b <= 57u8
+        if not letter and not (digit and not first) { return false }
+        first = false
+    }
+    return true
 }
 
 // A path as a file:// URI, for ACP's resource links: file:///C:/x on Windows.

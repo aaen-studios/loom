@@ -27,3 +27,9 @@ sudo -u loom loom user password sam --data /var/lib/loom
 ```
 
 which reads the new password from standard input and signs the owner out everywhere.
+
+## Where their agents run
+
+Only the owner's agents run as the instance's own user, which can read everything on it. Everyone else's run in a sandbox of their own: a container that sees only that person's folder, with the internet but none of the server's own services but loom's tools. Their agents get their own secrets, such as `ANTHROPIC_API_KEY`, as their keys, never the owner's.
+
+Sandboxes need Podman and pasta on the server (`apt install podman passt uidmap` on Debian and Ubuntu), and `--sandboxes podman` on `loom serve`. Without them, only the owner's agents run.

@@ -2,7 +2,7 @@ module server.main
 
 // The `loom` program: the instance, and the commands that look after it.
 //
-//     loom serve [--data DIR] [--port N] [--host ADDR] [--backups DIR [--backups-keep N]] [--allow-root]
+//     loom serve [--data DIR] [--port N] [--host ADDR] [--backups DIR [--backups-keep N]] [--sandboxes podman [--sandbox-image IMAGE]] [--allow-root]
 //     loom user add NAME [--data DIR]          reads the password from standard input
 //     loom user list [--data DIR]
 //     loom acp add NAME COMMAND [ARG...] [--data DIR]
@@ -50,7 +50,9 @@ usage: loom <command>
                             as root or an elevated Administrator, whose rights its agents would get,
                             unless given --allow-root. --backups DIR writes a backup there each day, as
                             export does, and keeps the newest 7 (--backups-keep N). --lan, on a PC, lets
-                            phones reach it on the network over Noise, once the owner turns them on
+                            phones reach it on the network over Noise, once the owner turns them on.
+                            --sandboxes podman runs the agents of everyone but the owner in a sandbox
+                            each, from loom's image or --sandbox-image IMAGE: without, only the owner's run
   user add NAME             add an account; the password comes on standard input
   user list                 list the accounts
   user password NAME        give NAME a new password, from standard input, and sign them out everywhere:
@@ -101,10 +103,12 @@ struct Args {
     backups_keep: usize
     backup_every_ms: i64
     lan: bool    // phones may reach it on the network, over Noise
+    sandboxes: String    // what runs everyone else's agents: podman, or "" for nothing
+    sandbox_image: String
 }
 
 fn read_args(given: List<String>) -> Args ! Error {
-    var a = Args { words: List<String>(), data: String("loom-data"), port: 8790, host: String("127.0.0.1"), fast_hashes: false, keep_events: none, registry: String(installer.REGISTRY), minute_ms: 60000, allow_root: false, json: false, domain: String(), apns: String(), backups: String(), backups_keep: 7, backup_every_ms: 86400000, lan: false }
+    var a = Args { words: List<String>(), data: String("loom-data"), port: 8790, host: String("127.0.0.1"), fast_hashes: false, keep_events: none, registry: String(installer.REGISTRY), minute_ms: 60000, allow_root: false, json: false, domain: String(), apns: String(), backups: String(), backups_keep: 7, backup_every_ms: 86400000, lan: false, sandboxes: String(), sandbox_image: String() }
     var i: usize = 0
     while i < given.len() {
         let w = given[i].copy()
@@ -119,6 +123,13 @@ fn read_args(given: List<String>) -> Args ! Error {
         if w == "--test-minute-ms" {
             if i + 1 >= given.len() { fail "{w} needs a number" }
             a.minute_ms = i64.parse(given[i + 1].copy()) ?? 60000
+            i += 2
+            continue
+        }
+        // Sandboxes for everyone but the owner, and the image they run.
+        if w == "--sandboxes" or w == "--sandbox-image" {
+            if i + 1 >= given.len() { fail "{w} needs a value" }
+            if w == "--sandboxes" { a.sandboxes = given[i + 1].copy() } else { a.sandbox_image = given[i + 1].copy() }
             i += 2
             continue
         }
@@ -239,7 +250,7 @@ fn serve(a: Args) ! Error {
         eprintln(elevated_refusal())
         exit(2)
     }
-    var i = try Instance.open(Config { data: a.data.copy(), port: a.port, host: a.host.copy(), hasher: hasher(a.copy()), events: event_life(a.copy()), registry: a.registry.copy(), minute_ms: a.minute_ms, apns: a.apns.copy(), version: String(VERSION), lan: a.lan })
+    var i = try Instance.open(Config { data: a.data.copy(), port: a.port, host: a.host.copy(), hasher: hasher(a.copy()), events: event_life(a.copy()), registry: a.registry.copy(), minute_ms: a.minute_ms, apns: a.apns.copy(), version: String(VERSION), lan: a.lan, sandboxes: a.sandboxes.copy(), sandbox_image: a.sandbox_image.copy() })
     if a.backups.len() > 0 {
         // Backups inside the instance's folder would go into the next one.
         let dir = try fs.absolute(a.backups.copy())

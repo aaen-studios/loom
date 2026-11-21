@@ -36,6 +36,14 @@ jobs:
       - name: Calx version
         run: calx version
 
+      # The sandbox test runs members' agents in rootless Podman, with pasta.
+      - name: Podman and pasta (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y passt
+          podman --version
+
       - name: Check and test
         run: calx scripts/check.calx
 

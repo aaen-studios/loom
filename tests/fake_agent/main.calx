@@ -23,6 +23,7 @@ module tests.fake_agent.main
 //                         for an image, "link NAME" for a link to a file that
 //                         exists, "missing NAME" for one that doesn't
 //     /image              sends back a small PNG
+//     /link PATH          sends back a link to the file at PATH (resource_link)
 //     /session            says its session id: "session ID"
 //     /env NAME           says NAME=VALUE, its environment variable NAME
 //     /servers            says the MCP servers the session was given, but loom:
@@ -85,6 +86,7 @@ pub enum Step {
     Crash
     Files
     Image
+    Link(String)
     Session
     Context
     Mcp(String, String)
@@ -148,6 +150,8 @@ pub fn script(text: String) -> List<Step> {
             steps.push(Step.Env(rest))
         } else if word == "/image" {
             steps.push(Step.Image)
+        } else if word == "/link" {
+            steps.push(Step.Link(rest))
         } else {
             steps.push(Step.Say(line.copy()))
         }
@@ -547,6 +551,17 @@ impl Agent {
                 Step.Servers => chunk(session.copy(), "agent_message_chunk", a.servers(session.copy())),
                 Step.Context => chunk(session.copy(), "agent_message_chunk", if context.len() > 0 { context.copy() } else { String("no context") }),
                 Step.Mcp(tool, args) => chunk(session.copy(), "agent_message_chunk", a.call_loom(session.copy(), tool, args)),
+                Step.Link(path) => {
+                    var content = LinkedMap<String, Json>()
+                    content.insert("type", js(String("resource_link")))
+                    content.insert("uri", js("file://{path}"))
+                    content.insert("name", js(String("linked.txt")))
+                    content.insert("mimeType", js(String("text/plain")))
+                    var u = LinkedMap<String, Json>()
+                    u.insert("sessionUpdate", js(String("agent_message_chunk")))
+                    u.insert("content", Json.Object(content))
+                    update(session.copy(), u)
+                },
                 Step.Image => {
                     var content = LinkedMap<String, Json>()
                     content.insert("type", js(String("image")))

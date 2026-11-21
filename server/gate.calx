@@ -1,0 +1,111 @@
+module server.gate
+
+// The one way out of a sandbox to the instance (server/sandbox.calx): a
+// listener on 127.0.0.1 that sandboxes reach through pasta, and that passes
+// only `loom mcp`'s two routes, GET /api/mcp/tools and POST /api/mcp/call, on
+// to the instance, with their agent's token. Everything else it turns away,
+// so a sandbox never reaches the instance's sign-in, its sessions or its files.
+import std.http.{Header, Request, get, post}
+import std.http.server.{Response, Server}
+import std.http.server
+import std.thread.{Task}
+import shared.obj.{Obj}
+
+// How long a tool call may take (one that asks the person first waits for them),
+// and the longest answer.
+const CALL_MS: u32 = 900000
+const CALL_LIMIT: usize = 67108864
+
+// A request a sandbox made, until the instance answers it.
+struct Call {
+    id: i64
+    req: Request
+}
+
+struct Gate {
+    port: u16                  // the port to try
+    instance: u16              // the instance's port on 127.0.0.1
+    ready: Sender<String>
+    stop: Receiver<bool>
+    calls: List<Call>
+    asked: Map<i64, server.Request>    // call -> what the sandbox asked, to answer
+    next: i64
+}
+
+// Starts the gate, for the instance on `instance`, on `port` or, if that's
+// taken (or 0), one the system picks. Gives its thread, what stops it, and its port.
+pub fn start(port: u16, instance: u16) -> (Thread, Sender<bool>, u16) ! Error {
+    var ready = Receiver<String>()
+    let stop = Receiver<bool>()
+    let stop_to = stop.sender()
+    let t = unsafe { Thread.spawn(Gate { port: port, instance: instance, ready: ready.sender(), stop: stop, calls: List<Call>(), asked: Map<i64, server.Request>(), next: 0 }) }
+    let said = unsafe { ready.wait_for(10000000000) } else { fail "the sandboxes' gate didn't start" }
+    if said.starts_with("error:") { fail "the sandboxes' gate can't listen: {said[6..]}" }
+    let p = u16.parse(said) else { fail "the sandboxes' gate said {said}" }
+    return (t, stop_to, p)
+}
+
+fn refuse(message: str) -> Response {
+    return Response.json("{Obj.new().j("error", Obj.new().s("code", String("not_found")).s("message", String(message)).done()).done()}", 404)
+}
+
+impl Task for Gate {
+    fn run(own self) {
+        var g = self
+        var listening = match Server.listen(g.port, String("127.0.0.1")) {
+            ok(s) => s,
+            err(_) => match Server.listen(0, String("127.0.0.1")) {
+                ok(s) => s,
+                err(e) => {
+                    g.ready.send("error:{e}")
+                    return
+                },
+            },
+        }
+        listening.log = false
+        g.ready.send("{listening.port}")
+        loop {
+            if g.stop.next() != none { break }
+            match listening.next_event(10) {
+                some(Request(req)) => {
+                    let tools = req.path == "/api/mcp/tools" and req.method == "GET"
+                    let call = req.path == "/api/mcp/call" and req.method == "POST"
+                    if not tools and not call {
+                        listening.respond(req, refuse("From a sandbox, only loom's tools are reached."))
+                        continue
+                    }
+                    var headers = List<Header>()
+                    for name in ["Authorization", "Content-Type"] {
+                        if let v = req.header(String(name)) { headers.push(Header { name: String(name), value: v }) }
+                    }
+                    let url = "http://127.0.0.1:{g.instance}{req.path}"
+                    let out = if call { post(url, headers, req.body.copy(), CALL_MS, CALL_LIMIT) } else { get(url, headers, CALL_MS, CALL_LIMIT) }
+                    g.next += 1
+                    g.calls.push(Call { id: g.next, req: out })
+                    g.asked.insert(g.next, req)
+                },
+                _ => {},
+            }
+            answer(mut listening, mut g)
+        }
+        listening.shutdown()
+    }
+}
+
+// Passes back each answer the instance has given.
+fn answer(listening: mut Server, g: mut Gate) {
+    var waiting = List<Call>()
+    for c in g.calls {
+        if not c.req.done() {
+            waiting.push(c)
+            continue
+        }
+        var r = c.req
+        let res = match r.wait() {
+            ok(got) => Response.new(u16.wrap(got.status), got.header(String("Content-Type")) ?? String("application/json"), got.body),
+            err(e) => Response.json("{Obj.new().j("error", Obj.new().s("code", String("internal")).s("message", "The instance didn't answer: {e}").done()).done()}", 502),
+        }
+        if let from = g.asked.remove(c.id) { listening.respond(from, res) }
+    }
+    g.calls = waiting
+}

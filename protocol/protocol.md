@@ -443,7 +443,7 @@ A run is one turn of an agent, answering one message.
 | Kind | Fields | When |
 |---|---|---|
 | `run.started` | `run`, `conversation`, `agent`, `revision`, `message` (the reply's id), `answering` (the person's message id) | The agent was given the message |
-| `run.finished` | `run`, `status` (`done`, `cancelled`, `failed` or `limit`), `error` (for `failed`), `usage` (`input`, `output`, `cost` where the agent reports them) | The turn is over, after `message.created` for its reply. Only the owner's agents run as the instance's own user; until members have sandboxes, a run of anyone else's agent is `failed`, saying so |
+| `run.finished` | `run`, `status` (`done`, `cancelled`, `failed` or `limit`), `error` (for `failed`), `usage` (`input`, `output`, `cost` where the agent reports them) | The turn is over, after `message.created` for its reply. Only the owner's agents run as the instance's own user. Anyone else's run in their sandbox ([Sandboxes](#sandboxes)), and on an instance without sandboxes their runs are `failed`, saying so |
 
 ### Tool calls
 
@@ -680,6 +680,16 @@ Inside the instance, each agent runs as an ACP agent program ([PLAN.md](../PLAN.
 | The person's `approve` | the permission request's answer, with the `allow_once`, `allow_always`, `reject_once` or `reject_always` option that matches `allow` and `always` |
 | The person's `cancel` | `session/cancel` |
 | `session/prompt`'s result, with its `stopReason` | `message.created` for the reply, then `run.finished`: `end_turn` is `done`, `cancelled` is `cancelled`, `max_tokens` and `max_turn_requests` are `limit`, and an error or a crash is `failed` |
+
+### Sandboxes
+
+Only the owner's agents run as the instance's own user. Everyone else's run in a sandbox of their own ([PLAN.md](../PLAN.md#sandboxes-where-members-agents-run)), on an instance started with `loom serve --sandboxes podman`. On one without, their runs are `failed`, saying so.
+
+- **The sandbox** is a rootless Podman container, `loom-<user>`, from loom's image (`ghcr.io/aaen-studios/loom`, or `--sandbox-image`), made when the person's first agent starts and kept running. It sees the person's folder, `sandboxes/<user>/` in the data folder, and the instance's downloaded agent programs, `acp/`, read-only, both at the same paths as outside, and nothing else of the instance's. It has the internet through pasta, but none of the server's loopback but the gate. It runs with at most 2 GB of memory, 2 CPUs and 512 processes, where the system lets the instance's user set limits.
+- **The agent program** runs in it with `podman exec`, in `sandboxes/<user>/agents/<agent>/`, whatever `folder` the agent names. Its environment is the person's own secrets, each by its name, never the program's settings, which are the owner's.
+- **Loom's tools** reach it as the image's `loom mcp`, with `LOOM_URL` set to the gate: a listener on 127.0.0.1 that sandboxes reach through pasta, which passes on only `GET /api/mcp/tools` and `POST /api/mcp/call`, and answers anything else 404. The person's MCP servers run in the sandbox too, started by the agent. Plugins' tool servers, which run from the instance's own folders, aren't given to sandboxed agents.
+- **Files** go in and out through the sandbox. The instance writes an agent's instructions, skills and the person's files into its folder with `podman exec`, and reads a `file://` link the agent sends the same way, so a link the agent makes can't lead the instance to its own files.
+- **Removing** the person removes their sandbox and their folder.
 
 ## One message's whole trip
 
