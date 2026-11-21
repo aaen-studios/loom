@@ -199,11 +199,15 @@ fn handle(server: Server, p: mut Peer, message: List<u8>, instance: u16) -> Stri
         var headers = List<Header>()
         if let Json.Object(fields) = at(head, "headers") {
             for (name, value) in fields {
+                // X-Loom-Bridge is the bridge's alone to say.
                 if let Json.Str(v) = value {
-                    headers.push(Header { name: name.copy(), value: v.copy() })
+                    if name.to_lower_root() != "x-loom-bridge" { headers.push(Header { name: name.copy(), value: v.copy() }) }
                 }
             }
         }
+        // The instance hears it came through here, from a phone, not from its own
+        // computer: so a script token is no use through it.
+        headers.push(Header { name: String("X-Loom-Bridge"), value: String("noise") })
         let url = "http://127.0.0.1:{instance}{path}"
         let req = if method == "POST" { post(url, headers, body, CALL_MS, CALL_LIMIT) } else { get(url, headers, CALL_MS, CALL_LIMIT) }
         p.calls.push(Call { id: id, req: req })

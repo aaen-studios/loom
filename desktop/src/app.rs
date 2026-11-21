@@ -802,6 +802,10 @@ ACTA_KEY=secret:ACTA_KEY",
     fn open(&mut self, screen: Screen, cx: &mut Context<Self>) {
         self.model.tables_open = screen == Screen::Tables;
         match screen {
+            Screen::Server => {
+                let f = self.model.load_scripts();
+                self.send(f);
+            }
             Screen::Tables => {
                 self.table_dropping = None;
                 for f in self.model.open_table(None) {
@@ -1718,7 +1722,7 @@ ACTA_KEY=secret:ACTA_KEY",
             );
         }
         let page = match open {
-            Screen::Server => self.server_page(),
+            Screen::Server => self.server_page(cx),
             Screen::Profile => self.profile_page(cx),
             Screen::Skills => self.skills_page(cx),
             Screen::Tables => self.tables_page(cx),
@@ -1795,7 +1799,7 @@ ACTA_KEY=secret:ACTA_KEY",
     }
 
     /// The popup's first server page: where the instance is, and how it is.
-    fn server_page(&self) -> Div {
+    fn server_page(&mut self, cx: &mut Context<Self>) -> Div {
         let p = self.p;
         let where_ = if self.local() {
             "On this computer".to_string()
@@ -1837,14 +1841,117 @@ ACTA_KEY=secret:ACTA_KEY",
                     .text_size(px(size::CAPTION))
                     .text_color(p.ink_3)
                     .child(format!("loom {}", crate::VERSION)),
-            );
-        div()
-            .flex_1()
-            .min_h_0()
+            )
+            .child(self.scripts_section(cx));
+        div().flex_1().min_h_0().child(
+            div()
+                .id("server-page")
+                .size_full()
+                .overflow_y_scroll()
+                .flex()
+                .justify_center()
+                .px(px(space::XL))
+                .pb(px(space::XXL))
+                .child(body),
+        )
+    }
+
+    /// Scripts on the instance's computer (PLAN.md, "Scripts"): off until turned on,
+    /// with a token shown once, and how to use it.
+    fn scripts_section(&mut self, cx: &mut Context<Self>) -> Div {
+        let p = self.p;
+        let caption = |text: String| {
+            div()
+                .text_size(px(size::CAPTION))
+                .text_color(p.ink_3)
+                .child(text)
+        };
+        let mut section = div()
+            .w_full()
+            .mt(px(space::XL))
+            .pt(px(space::L))
+            .border_t_1()
+            .border_color(p.line)
             .flex()
-            .justify_center()
-            .px(px(space::XL))
-            .child(body)
+            .flex_col()
+            .gap(px(space::S))
+            .child(
+                div()
+                    .text_size(px(size::SMALL))
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(p.ink)
+                    .child("Scripts"),
+            )
+            .child(caption(
+                "Your own scripts on the computer the instance runs on can ask your agents and wait for the answer, run routines, and answer what waits for you, with loom's command line"
+                    .into(),
+            ));
+        let Some((on, port)) = self.model.scripts else {
+            return section;
+        };
+        if let Some(token) = self.model.script_token.clone() {
+            let agent = self
+                .model
+                .agents
+                .first()
+                .map(|a| a.name.clone())
+                .unwrap_or_else(|| "Bean".into());
+            let example = format!("loom ask {agent} \"hello\" --port {port} --token {token}");
+            let copied = token.clone();
+            section = section
+                .child(
+                    div()
+                        .id("script-token")
+                        .px(px(space::M))
+                        .py(px(space::S))
+                        .rounded(px(radius::ROW))
+                        .bg(p.bubble)
+                        .text_size(px(size::SMALL))
+                        .text_color(p.ink)
+                        .cursor_pointer()
+                        .child(token)
+                        .on_click(move |_, _, cx| {
+                            cx.write_to_clipboard(ClipboardItem::new_string(copied.clone()));
+                        }),
+                )
+                .child(caption(format!(
+                    "Your script token, shown this once: click it to copy. Then, on that computer: {example}"
+                )));
+        } else if on {
+            section = section.child(caption(
+                "On. Its token was shown when you turned them on: make a new one if you need it again".into(),
+            ));
+        }
+        let mut buttons = div().flex().gap(px(space::S));
+        if on {
+            buttons = buttons
+                .child(
+                    self.button("scripts-new", "New token", false)
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            let f = this.model.set_scripts(true);
+                            this.send(f);
+                            cx.notify();
+                        })),
+                )
+                .child(
+                    self.button("scripts-off", "Turn off", false)
+                        .text_color(p.bad)
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            let f = this.model.set_scripts(false);
+                            this.send(f);
+                            cx.notify();
+                        })),
+                );
+        } else {
+            buttons = buttons.child(self.button("scripts-on", "Turn on", true).on_click(
+                cx.listener(|this, _, _, cx| {
+                    let f = this.model.set_scripts(true);
+                    this.send(f);
+                    cx.notify();
+                }),
+            ));
+        }
+        section.child(buttons)
     }
 
     // --- Tasks ---

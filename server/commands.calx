@@ -109,6 +109,7 @@ pub fn access(name: String) -> Access {
     if name.starts_with("push.") or name.starts_with("plugin.data.") or name == "plugin.cmd" { return Access.Never(String("That's for an app or a plugin's panel, not an agent.")) }
     if name.starts_with("browser.") { return Access.Never(String("Use your browser_ tools.")) }
     if name == "queue.steer" { return Access.Never(String("Steering is your person's: it stops the turn that's running.")) }
+    if name.starts_with("scripts.") { return Access.Never(String("Scripts are your person's own: they turn them on in the app.")) }
     let runs = ["conversation.create", "conversation.rename", "conversation.branch", "messages.list", "messages.search", "messages.pinned", "message.pin", "agent.create", "agent.update", "agent.revisions", "agent.rollback", "activity.list", "memory.list", "memory.put", "table.list", "table.create", "table.write", "table.rows", "table.delete_rows", "profile.get", "profile.put", "routine.list", "routine.put", "routine.run", "task.list", "task.start", "task.pause", "task.resume", "task.cancel", "task.retry", "queue.list", "queue.edit", "queue.order", "queue.drop", "skill.list", "skill.get", "skill.put", "plugin.list", "plugin.get", "plugin.put", "plugin.revisions", "mcp.list", "secret.list", "acp.list", "acp.registry"]
     for r in runs {
         if name == r { return Access.Runs }

@@ -1,0 +1,126 @@
+module tests.protocol.scripts
+
+// Scripts (PLAN.md, "Scripts"): the person turns scripts on in the app, which
+// gives a script token, and their scripts on the instance's computer ask an
+// agent and wait for its answer, run a routine, and answer what waits for
+// them, through /api/scripts/ or loom's command line. Only from that computer,
+// straight, and never an agent's.
+//
+//     calx tests/protocol/scripts.calx
+import std.http.{Header, get, post}
+import std.json.{Json, parse}
+import std.process.{exit}
+import shared.obj.{Obj, at, bool_at, str_at}
+import tests.kit.{App, Instance, check, loom, reply_text}
+
+// A call to /api/scripts/OP: its status and its JSON. With `body`, a POST.
+fn call(base: String, token: String, op: str, body: Json?, extra: List<Header>) -> (u32, Json) ! Error {
+    var headers: List<Header> = [Header { name: String("Authorization"), value: "Bearer {token}" }]
+    headers.extend(extra)
+    let url = "http://{base}/api/scripts/{op}"
+    var req = match body {
+        some(b) => post(url, headers, "{b}".to_bytes(), 60000, 1048576),
+        none => get(url, headers, 60000, 1048576),
+    }
+    let got = try req.wait()
+    let j = match parse(String.from_utf8(got.body) ?? String()) {
+        ok(v) => v,
+        err(_) => Json.Null,
+    }
+    return (got.status, j)
+}
+
+fn say(app: mut App, conversation: String, cid: str, text: String) -> String ! Error {
+    try app.send(Obj.new().s("t", String("send")).s("cid", String(cid)).s("conversation", conversation.copy()).s("text", text).done())
+    loop {
+        let m = try app.reply()
+        if str_at(m.copy(), "conversation") == some(conversation.copy()) { return reply_text(m) }
+    }
+}
+
+fn code_of(j: Json) -> String {
+    return str_at(at(j, "error"), "code") ?? String()
+}
+
+fn run(i: Instance) ! Error {
+    var app = try App.connect(i.base.copy(), i.token.copy(), 0)
+    let made = try app.cmd("q_1", "agent.create", Obj.new().s("name", String("Scribe")).s("acp_agent", String("fake")).s("instructions", String("You are a test.")).done())
+    let agent = str_at(at(at(made, "value"), "agent"), "id") ?? String()
+    _ = try app.cmd("q_2", "agent.create", Obj.new().s("name", String("Spare")).s("acp_agent", String("fake")).s("instructions", String("You are a test.")).done())
+
+    let off = try app.cmd("q_3", "scripts.get", Obj.new().done())
+    try check(bool_at(at(off, "value"), "on") == some(false), "scripts are off until the person turns them on")
+    let (none_yet, _) = try call(i.base.copy(), String("loom-script-nothing"), "approvals", none, List<Header>())
+    try check(none_yet == 401, "and no token works then")
+    let on = try app.cmd("q_4", "scripts.on", Obj.new().done())
+    let token = str_at(at(on, "value"), "token") ?? String()
+    try check(token.starts_with("loom-script-"), "scripts.on gives a script token, once")
+
+    let (asked, answer) = try call(i.base.copy(), token.copy(), "ask", some(Obj.new().s("agent", String("scribe")).s("text", String("hello from a script")).done()), List<Header>())
+    try check(asked == 200 and str_at(answer.copy(), "reply") == some(String("hello from a script")) and (str_at(answer.copy(), "conversation") ?? String()).len() > 0, "a script asks an agent, by name, and gets its answer")
+    let shown = try app.cmd("q_5", "messages.list", Obj.new().s("conversation", str_at(answer, "conversation") ?? String()).done())
+    try check("{shown}".contains("\"from\":\"script\"") and "{shown}".contains("hello from a script"), "in the agent's chat, as from a script")
+
+    let (proxied, why) = try call(i.base.copy(), token.copy(), "approvals", none, [Header { name: String("X-Forwarded-For"), value: String("203.0.113.9") }])
+    try check(proxied == 403 and code_of(why) == "not_here", "through a proxy, the token is no use")
+    let (bridged, _) = try call(i.base.copy(), token.copy(), "approvals", none, [Header { name: String("X-Loom-Bridge"), value: String("noise") }])
+    try check(bridged == 403, "nor through the phones' bridge")
+    let (wrong, _) = try call(i.base.copy(), String("loom-script-wrong"), "approvals", none, List<Header>())
+    try check(wrong == 401, "and a wrong token is refused")
+
+    // What waits for the person, answered from a script.
+    let c = try app.cmd("q_6", "conversation.create", Obj.new().s("agent", agent.copy()).done())
+    let chat = str_at(at(c, "value"), "conversation") ?? String()
+    try app.send(Obj.new().s("t", String("send")).s("cid", String("m_1")).s("conversation", chat.copy()).s("text", String(#"/mcp delete_agent {"agent":"Spare"}"#)).done())
+    _ = try app.until("event", "approval.needed")
+    let (listed, waiting) = try call(i.base.copy(), token.copy(), "approvals", none, List<Header>())
+    let first = at(waiting, "approvals").at(0) ?? Json.Null
+    try check(listed == 200 and str_at(first.copy(), "title") == some(String("Delete the agent Spare")) and str_at(first.copy(), "agent_name") == some(String("Scribe")), "a script lists what waits for the person")
+    let (approved, _) = try call(i.base.copy(), token.copy(), "approve", some(Obj.new().s("call", str_at(first, "call") ?? String()).b("allow", true).done()), List<Header>())
+    let answered = try app.until("event", "approval.answered")
+    try check(approved == 200 and str_at(answered, "by") == some(String("script")), "and answers it, as the script")
+    loop {
+        let m = try app.reply()
+        if str_at(m, "conversation") == some(chat.copy()) { break }
+    }
+
+    // A routine, run by name.
+    let routine = try app.cmd("q_7", "routine.put", Obj.new().s("name", String("Morning")).s("agent", agent.copy()).s("prompt", String("good morning")).j("schedule", Obj.new().s("daily", String("07:00")).done()).done())
+    let (ran, _) = try call(i.base.copy(), token.copy(), "routine", some(Obj.new().s("routine", String("morning")).done()), List<Header>())
+    try check(str_at(at(at(routine, "value"), "routine"), "name") == some(String("Morning")) and ran == 200, "a script runs a routine by its name")
+    // Its answer, before the command line asks in the same chat.
+    _ = try app.reply()
+
+    // loom's command line.
+    let url = "http://{i.base}"
+    let said = try loom(i.data.copy(), [String("ask"), String("Scribe"), String("from"), String("the"), String("command"), String("line"), String("--url"), url.copy(), String("--token"), token.copy()]).output()
+    if not (said.status.success() and said.text().trim() == "from the command line") { fail "loom ask said: {said.text()} {said.error_text()}" }
+    try check(true, "loom ask asks and prints the answer")
+    _ = try app.reply()
+    let nothing = try loom(i.data.copy(), [String("approvals"), String("--url"), url.copy(), String("--token"), token.copy()]).output()
+    try check(nothing.text().trim() == "Nothing is waiting for you.", "loom approvals says what waits")
+    let no_token = try loom(i.data.copy(), [String("approvals"), String("--url"), url.copy()]).env(String("LOOM_SCRIPTS_TOKEN"), String()).output()
+    try check(not no_token.status.success() and no_token.error_text().contains("--token"), "and without a token, says how to get one")
+
+    // An agent can't turn them on.
+    let by_agent = try say(mut app, chat.copy(), "m_2", String(#"/mcp run_command {"name":"scripts.on"}"#))
+    try check(by_agent.starts_with("run_command failed"), "an agent can't turn scripts on")
+    _ = try app.cmd("q_8", "scripts.off", Obj.new().done())
+    let (after, _) = try call(i.base.copy(), token, "approvals", none, List<Header>())
+    try check(after == 401, "scripts.off ends the token")
+    app.close()
+}
+
+fn main() ! Error {
+    let inst = try Instance.start()
+    let failure: String? = match run(inst.copy()) {
+        ok => none,
+        err(e) => some("{e}"),
+    }
+    inst.stop()
+    if let f = failure {
+        eprintln("\n{f}")
+        exit(1)
+    }
+    println("\nscripts: all good")
+}

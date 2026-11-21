@@ -154,6 +154,15 @@ Login needed, as above. The file, with its type, for whoever uploaded it or got 
 
 For `loom mcp` alone, which the instance starts for each agent (below, [How ACP maps onto loom](#how-acp-maps-onto-loom)). They take that agent's tool token, `Authorization: Bearer <token>`, not a device's, and an app never calls them. `tools` gives `{"tools": [...]}`, MCP's tool definitions from `shared/tools.calx`. `call` takes `{"name", "arguments"}` and gives an MCP tool result, `{"content": [{"type": "text", "text"}], "isError"?}`. A `message_agent` call is answered when the other agent's reply is done.
 
+### `/api/scripts/*`
+
+The person's own scripts ([PLAN.md](../PLAN.md#scripts)), with the script token `scripts.on` gave, as `Authorization: Bearer <token>`. Only from the instance's computer, straight: a request from anywhere but a loopback address, or with `X-Forwarded-For`, `Forwarded`, `X-Real-IP`, `Via` or `X-Loom-Bridge` (which the phones' bridge adds to everything it forwards, and takes off what a phone sent), gets `403` with `not_here`. A missing or wrong token gets `401`.
+
+- `POST /api/scripts/ask` with `{"agent", "text", "conversation"?}`: the agent (by name or id) is asked, in its chat or the conversation named, as a person's message with `from: "script"`, up to 20,000 bytes. The answer comes once its run ends: `{"reply", "conversation", "message"}`, or `502` with `agent_failed`. `409` with `busy` while it's answering in that conversation, `404` for an agent or conversation that isn't the person's.
+- `POST /api/scripts/routine` with `{"routine"}`, a routine's name or id: `routine.run`'s answer.
+- `GET /api/scripts/approvals`: `{"approvals"}`, what waits for the person's yes, each `call`, `agent`, `agent_name`, `title` and `on_a_device`.
+- `POST /api/scripts/approve` with `{"call", "allow"}`: answers one, as `script` (`approval.answered`'s `by`). One `on_a_device` is refused with `403`: a device signs its yes.
+
 ### `POST /hooks/<id>`
 
 A routine's webhook, for something outside to run it, such as GitHub Actions when a build fails. `<id>` is the routine's `hook`, and its `secret` comes one of two ways: as `Authorization: Bearer <secret>`, or as GitHub's webhooks sign, with `X-Hub-Signature-256: sha256=<hex>`, the HMAC-SHA256 of the body under the secret. The body can be anything. As UTF-8, up to 20,000 bytes of it, it goes to the agent after the routine's prompt, in a code block, with `X-GitHub-Event` named when it comes.
@@ -418,7 +427,7 @@ An agent runs the commands below as its person's app does, with their rights ([P
 - `run_command` (`name`, `args`, an object) runs one. Its result is the command's `value` as JSON, or its error's message. Which run at once and which ask is in `server/commands.calx`.
 - **At once**: `conversation.create`, `rename` and `branch`, `messages.list`, `search` and `pinned`, `message.pin`, `agent.create` (always with `permission: "ask"`), `agent.update`, `agent.revisions`, `agent.rollback`, `activity.list`, `memory.list` and `put`, `table.list`, `create`, `write`, `rows` and `delete_rows`, `profile.get` and `put`, `routine.list`, `put` and `run`, `task.*`, `queue.list`, `edit`, `order` and `drop`, `skill.list`, `get` and `put`, `plugin.list`, `get`, `put` and `revisions`, `mcp.list`, `secret.list`, `acp.list` and `acp.registry`. What changes something is in the activity log as "Ran" and the command's name. A task started by another agent is told so, and an agent can start three running tasks for each agent.
 - **Asks first**, every time, as one of loom's own tools that asks ([How ACP maps onto loom](#how-acp-maps-onto-loom)), titled with what the command does, with its `args` as `detail`: every `.delete` and `.remove`, and `device.revoke` (tool `delete`); `instance.move` (tool `move`); and everything else (tool `other`), among them `mcp.put`, `acp.install`, `acp.settings` and `acp.share`, `invite.*`, `user.list` and `user.role`, `device.rename`, `link.create`, `instance.phones`, `instance.relay` and `server.offer`, any command not listed, and `agent.create` with a `folder` or `agent.update` with a `permission` or a `folder`. A yes runs it as the device that gave it, so commands only a device may send work. `acp.install` answers once it's installed.
-- **Never**: `account.delete`, `password.reset`, `secret.put` (a secret's value is never an agent's), `plugin.allow`, `plugin.cmd`, `plugin.data.*`, `plugin.message` and `chat.ask` (agents have `message_agent`), `push.*`, `browser.*` (agents have their `browser_` tools) and `queue.steer`. An agent can't delete itself or loosen its own permission mode.
+- **Never**: `account.delete`, `password.reset`, `secret.put` (a secret's value is never an agent's), `plugin.allow`, `plugin.cmd`, `plugin.data.*`, `plugin.message` and `chat.ask` (agents have `message_agent`), `push.*`, `browser.*` (agents have their `browser_` tools), `queue.steer` and `scripts.*`. An agent can't delete itself or loosen its own permission mode.
 
 ## The agent's browser
 
@@ -565,6 +574,9 @@ Version 1's commands:
 | `memory.list` | `agent`? (that agent's notes and the shared ones; every note without it), `query`? (words, any of them, best match first; newest first without), `limit`? (up to 500, 100 if left out) | `memories`: each `id`, `agent` (empty for a shared note), `shared`, `text`, `by` (the agent or device that kept it) and `at` |
 | `memory.put` | `text`, `agent`? (empty or left out: shared by all the person's agents) | `id` |
 | `memory.delete` | `id` | — |
+| `scripts.get` | — | `on`, `since` (when they were turned on, Unix ms, or null) and `port`, where the instance listens on its computer ([PLAN.md](../PLAN.md#scripts)). The person's alone, from a device |
+| `scripts.on` | — | `token`, a new script token, shown this once, and `port`. Only its SHA-256 is kept, and it ends the last one |
+| `scripts.off` | — | — . The token stops working |
 | `table.list` | — | `tables`: each `name`, `description`, `owner` (the agent that made it, or empty for the person), `at` and `rows`, how many ([PLAN.md](../PLAN.md#shared-tables)) |
 | `table.create` | `table` (1 to 64 letters, digits, hyphens and underscores), `description`? (up to 500 bytes) | `table`, as `table.list` gives it, owned by the caller. `exists` for a name that's taken, `limit` past 100 tables |
 | `table.write` | `table`, `rows` (1 to 500, each an object of its fields, up to 16 KiB as JSON; with `id`, it changes that row) | `ids`, each row's. Changing a row takes its writer, the table's owner or the person, or it's `forbidden`. `limit` past 100,000 rows in all. Nothing's written unless every row can be |
