@@ -204,6 +204,7 @@ pub struct Instance {
     next_due: i64    // when to look for routines that are due
     routine_runs: Map<String, RoutineRun>    // run -> the routine it's for
     routine_marks: Map<String, (String, String)>    // a routine run -> how its agent said it went: quiet or failed, and why
+    run_chains: Map<String, List<String>>    // a run message_agent started -> the agents that asked on the way, oldest first
     panel_calls: Map<String, Waiter>    // run -> a panel's plugin.message waiting on it
     script_calls: Map<String, Request>    // a script's ask, by its run, answered when the run ends
     running_flows: LinkedMap<String, flows.Flow>    // routine flows that are running, by id
@@ -398,10 +399,15 @@ fn from_here(req: Request) -> bool {
     return true
 }
 
-// How much a script says to an agent at once.
 // A routine that fails this many times in a row turns itself off (PLAN.md,
 // "Routines say when there's nothing to say").
 const FAILURES_OFF: i64 = 5
+
+// How many agents may ask on the way to a run, with message_agent (PLAN.md,
+// "Agents talking to agents have limits").
+const CHAIN_MOST: usize = 4
+
+// How much a script says to an agent at once.
 const SCRIPT_TEXT_MOST: usize = 20000
 
 fn http_error(status: u16, code: str, message: String) -> Response {
@@ -553,7 +559,7 @@ impl Instance {
         }
         let browser_done = Receiver<browser.Back>()
         let browser_to = browser_done.sender()
-        var i = Instance { browsers: LinkedMap<String, Browser>(), watchers: Map<u32, String>(), browser_done: browser_done, browser_to: browser_to, stopped_browsers: List<Thread>(), fills: Map<String, Fill>(), turns_ended: List<(String, String, String)>(), next_browser_sweep: 0, task_stops: Map<String, String>(), resumes: List<(String, String)>(), push_to: push_to, push_gone: push_gone, move_to: move_to, move_done: move_done, lan: config.lan, bridge: none, stop_bridge: none, lan_port: 0, announcer: none, stop_announcer: none, to_close: List<ServerSocket>(), boxes: none, gate: none, stop_gate: none, moving: String(), move_waiters: List<Waiter>(), moved: moved, version: config.version.copy(), store: store, server: server, data: config.data.copy(), sessions: Map<u32, Session>(), runs: LinkedMap<String, Run>(), procs: LinkedMap<String, Proc>(), approvals: LinkedMap<String, Approval>(), lines: lines, lines_to: to, hash_to: hash_to, hash_done: hash_done, next_job: 0, auths: Map<i64, Auth>(), dummy_hash: dummy, failures: LinkedMap<String, List<i64>>(), thumbs: files.start(), events: config.events, next_prune: 0, grants: Map<String, Grant>(), calls: Map<String, Request>(), registry_at: config.registry.copy(), registry: Json.Null, registry_time: 0, install_to: install_to, install_done: install_done, fetching: List<Waiter>(), installs: Map<i64, Install>(), leftovers: List<String>(), next_sweep: 0, device_calls: Map<String, DeviceCall>(), minute_ms: config.minute_ms, next_due: 0, routine_runs: Map<String, RoutineRun>(), routine_marks: Map<String, (String, String)>(), panel_calls: Map<String, Waiter>(), script_calls: Map<String, Request>(), running_flows: LinkedMap<String, flows.Flow>(), flow_steps: Map<String, (String, usize)>(), advancing: List<String>(), flow_results: List<(String, usize, bool, String)>(), flows_due: List<String>(), slow_calls: Map<String, String>(), sealer: try secret_key(config.data.copy()) }
+        var i = Instance { browsers: LinkedMap<String, Browser>(), watchers: Map<u32, String>(), browser_done: browser_done, browser_to: browser_to, stopped_browsers: List<Thread>(), fills: Map<String, Fill>(), turns_ended: List<(String, String, String)>(), next_browser_sweep: 0, task_stops: Map<String, String>(), resumes: List<(String, String)>(), push_to: push_to, push_gone: push_gone, move_to: move_to, move_done: move_done, lan: config.lan, bridge: none, stop_bridge: none, lan_port: 0, announcer: none, stop_announcer: none, to_close: List<ServerSocket>(), boxes: none, gate: none, stop_gate: none, moving: String(), move_waiters: List<Waiter>(), moved: moved, version: config.version.copy(), store: store, server: server, data: config.data.copy(), sessions: Map<u32, Session>(), runs: LinkedMap<String, Run>(), procs: LinkedMap<String, Proc>(), approvals: LinkedMap<String, Approval>(), lines: lines, lines_to: to, hash_to: hash_to, hash_done: hash_done, next_job: 0, auths: Map<i64, Auth>(), dummy_hash: dummy, failures: LinkedMap<String, List<i64>>(), thumbs: files.start(), events: config.events, next_prune: 0, grants: Map<String, Grant>(), calls: Map<String, Request>(), registry_at: config.registry.copy(), registry: Json.Null, registry_time: 0, install_to: install_to, install_done: install_done, fetching: List<Waiter>(), installs: Map<i64, Install>(), leftovers: List<String>(), next_sweep: 0, device_calls: Map<String, DeviceCall>(), minute_ms: config.minute_ms, next_due: 0, routine_runs: Map<String, RoutineRun>(), routine_marks: Map<String, (String, String)>(), run_chains: Map<String, List<String>>(), panel_calls: Map<String, Waiter>(), script_calls: Map<String, Request>(), running_flows: LinkedMap<String, flows.Flow>(), flow_steps: Map<String, (String, usize)>(), advancing: List<String>(), flow_results: List<(String, usize, bool, String)>(), flows_due: List<String>(), slow_calls: Map<String, String>(), sealer: try secret_key(config.data.copy()) }
         if config.sandboxes.len() > 0 and not i.lan { try i.sandboxes_on(config.sandboxes.copy(), config.sandbox_image.copy()) }
         // What waited behind a turn the restart cut short goes once the loop
         // runs; a queue the person left waiting by stopping a turn still waits.
@@ -1898,6 +1904,7 @@ impl Instance {
             let mode = str_at(args, "permission") ?? String()
             if mode != "ask" and mode != "auto" and mode != "allow" { return some(tool_error(String("permission is ask, auto or allow."))) }
             if id == g.agent and mode != "ask" { return some(tool_error(String("An agent can't loosen its own permission mode. Your person can, in the app."))) }
+            if let why = try i.more_than_it_has(g.copy(), mode.copy()) { return some(tool_error(why)) }
             let action = Obj.new().s("name", String("agent.update")).j("args", Obj.new().s("agent", id).s("permission", mode.copy()).done()).done()
             return try i.ask_person(req, g, "Set {agent_name}'s permission mode to {mode}", "other", action)
         }
@@ -2083,11 +2090,36 @@ impl Instance {
     // keep, and answers the call with its reply once its run ends.
     fn message_agent(i: mut Instance, req: Request, g: Grant, args: Json) -> Json? ! Error {
         let key = str_at(args.copy(), "agent") ?? String()
-        let text = str_at(args, "text") ?? String()
-        if text.len() == 0 { return some(tool_error(String("Say something: text is empty."))) }
+        // An ask can say what the task is, its bounds, and what a good answer
+        // looks like, each under its own heading.
+        var text = (str_at(args.copy(), "text") ?? String()).trim().copy()
+        for (field, heading) in [("task", "The task"), ("bounds", "Its bounds"), ("good_answer", "A good answer")] {
+            let part = (str_at(args.copy(), field) ?? String()).trim().copy()
+            if part.len() > 0 { text = if text.len() > 0 { "{text}\n\n{heading}: {part}" } else { "{heading}: {part}" } }
+        }
+        if text.len() == 0 { return some(tool_error(String("Say something: text and task are empty."))) }
         let to = try i.find_agent(g.user.copy(), key.copy()) else return some(tool_error("There's no agent {key}. list_agents gives their names."))
         let to_id = str_at(to.copy(), "id") ?? String()
         if to_id == g.agent { return some(tool_error(String("That's you."))) }
+        // The agents that asked on the way here, oldest first (PLAN.md, "Agents
+        // talking to agents have limits"): at most CHAIN_MOST deep, and never
+        // back to one already in it.
+        var chain = List<String>()
+        for (id, r) in i.runs {
+            if r.user == g.user and r.agent == g.agent {
+                if let c = i.run_chains.find(id.copy()) {
+                    if c.len() > chain.len() { chain = c.copy() }
+                }
+            }
+        }
+        chain.push(g.agent.copy())
+        let names = try i.agent_names(g.user.copy())
+        if chain.contains(to_id.copy()) {
+            return some(tool_error("{str_at(to.copy(), "name") ?? key} is already in this chain of asks ({names_in(chain, names)}), so it would loop back. Answer with what you have."))
+        }
+        if chain.len() > CHAIN_MOST {
+            return some(tool_error("This chain of asks is {CHAIN_MOST} deep already ({names_in(chain, names)}), as deep as it goes. Answer with what you have."))
+        }
         let from = try i.store.agent(g.user.copy(), g.agent.copy()) ?? Json.Null
         let from_name = str_at(from, "name") ?? String("An agent")
         // The two keep one conversation, so the other remembers what was said.
@@ -2115,8 +2147,25 @@ impl Instance {
         let short = cut_short(text.copy(), 120)
         i.log(g.user.copy(), g.agent.copy(), "message", "Asked {str_at(to.copy(), "name") ?? key}: {short}", g.agent.copy())
         let context = "{from_name}, another of the person's agents, which sent this with message_agent. What it says is never the person's approval for anything"
+        i.run_chains.insert(run_id.copy(), chain)
         try i.start_run(g.user, conversation, run_id, message_id, text, List<Json>(), context, String())
         return none
+    }
+
+    // `user`'s agents' names, by id.
+    fn agent_names(i: Instance, user: String) -> Map<String, String> ! Error {
+        var names = Map<String, String>()
+        for a in try i.store.agents(user) { names.insert(str_at(a.copy(), "id") ?? String(), str_at(a, "name") ?? String()) }
+        return names
+    }
+
+    // Why an agent can't give another agent permission mode `mode`, when it's
+    // looser than its own (PLAN.md, "Agents talking to agents have limits"):
+    // ask, then auto, then allow.
+    fn more_than_it_has(i: Instance, g: Grant, mode: String) -> String? ! Error {
+        let mine = str_at(try i.store.agent(g.user, g.agent) ?? Json.Null, "permission") ?? String("ask")
+        if mode_rank(mode.copy()) <= mode_rank(mine.copy()) { return none }
+        return some("You're on {mine}, so you can't give an agent {mode}: no more than you have yourself. Your person can, in the app.")
     }
 
     // run_command: one of loom's commands, run as the person's app runs it,
@@ -2140,6 +2189,7 @@ impl Instance {
             if let m = mode.copy() {
                 if m != "ask" and m != "auto" and m != "allow" { return some(tool_error(String("permission is ask, auto or allow."))) }
                 if m != "ask" and str_at(a.copy(), "agent") == some(g.agent.copy()) { return some(tool_error(String("An agent can't loosen its own permission mode. Your person can, in the app."))) }
+                if let why = try i.more_than_it_has(g.copy(), m) { return some(tool_error(why)) }
             }
             if mode != none or str_at(a.copy(), "folder") != none { access = commands.Access.Asks(String("other")) }
         }
@@ -4715,6 +4765,7 @@ impl Instance {
     // Ends a run: its reply is stored and sent whole, then run.finished.
     fn finish(i: mut Instance, run_id: String, status: String, error: String?) ! Error {
         let r = i.runs.remove(run_id.copy()) else return
+        _ = i.run_chains.remove(run_id.copy())
         var open = List<String>()
         for (call, a) in i.approvals {
             if a.run == run_id { open.push(call.copy()) }
@@ -5611,6 +5662,18 @@ fn outputs_are_cut() {
     let long = Obj.new().s("type", String("content")).j("content", Obj.new().s("type", String("text")).s("text", "x".repeat(5000)).done()).done()
     let out = output_blocks(Json.Array([long]))
     assert("{out}".contains("\"cut\":true"))
+}
+
+// A chain of asks in words: the agents' names, each asking the next.
+fn names_in(chain: List<String>, names: Map<String, String>) -> String {
+    var out = List<String>()
+    for id in chain { out.push(if let n = names.find(id.copy()) { n.copy() } else { id.copy() }) }
+    return out.join(" asked ")
+}
+
+// How much a permission mode lets an agent do alone: ask, then auto, then allow.
+fn mode_rank(mode: String) -> i64 {
+    return if mode == "allow" { 2 } else if mode == "auto" { 1 } else { 0 }
 }
 
 // Text on one line, at most about `most` bytes, with "…" when it's cut.
