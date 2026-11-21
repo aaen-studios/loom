@@ -266,7 +266,8 @@ fn answer_text(a: Answer) -> Json {
 
 // What the schedule tool says it did, with the webhook when there is one.
 fn scheduled(r: Json) -> String {
-    var text = "Scheduled: {str_at(r.copy(), "name") ?? String()}, {str_at(r.copy(), "when") ?? String()}, as routine {str_at(r.copy(), "id") ?? String()}."
+    let zone = if routines.by_clock(at(r.copy(), "schedule")) { " ({str_at(r.copy(), "tz") ?? String("UTC")} time)" } else { String() }
+    var text = "Scheduled: {str_at(r.copy(), "name") ?? String()}, {str_at(r.copy(), "when") ?? String()}{zone}, as routine {str_at(r.copy(), "id") ?? String()}."
     if let hook = str_at(r.copy(), "hook") {
         text.push_str(" Its webhook is POST /hooks/{hook} on the instance's address, with the header Authorization: Bearer {str_at(r, "secret") ?? String()}, or signed with that secret as GitHub's webhooks sign (X-Hub-Signature-256).")
     }
@@ -981,7 +982,7 @@ impl Instance {
             let timed = merge(r.copy(), Obj.new().i("next", when).done())
             // Missed by a whole gap, while the instance was off: it runs once
             // now, or waits for its next time, as the routine says.
-            if routines.next(s, tz, was, i.minute_ms) <= t and bool_at(r.copy(), "catch_up") == some(false) {
+            if routines.missed(s, tz, was, t, i.minute_ms) and bool_at(r.copy(), "catch_up") == some(false) {
                 let skipped = merge(timed, Obj.new().j("last", Obj.new().i("at", t).s("status", String("skipped")).s("error", String("It was missed while the instance was off.")).done()).done())
                 if let err(e) = i.routine_ran(user.copy(), skipped) { eprintln("loom: a routine: {e}") }
                 continue
@@ -1065,6 +1066,8 @@ impl Instance {
             let found = try i.store.routine(user.copy(), id_given.copy()) else return Answer.Refused(String("not_found"), "There's no routine {id_given}.")
             old = found
         }
+        let tz_given = str_at(args.copy(), "tz") ?? String()
+        if tz_given.len() > 0 and not routines.known_zone(tz_given.copy()) { return Answer.Refused(String("bad_request"), "There's no time zone {tz_given}. Name one as the IANA tz database does, such as Europe/Oslo.") }
         let m = merge(old.copy(), args)
         let name = (str_at(m.copy(), "name") ?? String()).trim().copy()
         if name.len() == 0 or name.len() > 100 { return Answer.Refused(String("bad_request"), String("A routine needs a name, of up to 100 bytes.")) }
@@ -1091,7 +1094,8 @@ impl Instance {
         var tz = str_at(m.copy(), "tz") ?? String()
         if tz.len() == 0 { tz = try i.store.device_tz(by.copy()) }
         if tz.len() == 0 { tz = try i.store.user_tz(user.copy()) }
-        if tz.len() == 0 { tz = String("UTC") }
+        // A device's zone loom doesn't know counts as UTC.
+        if not routines.known_zone(tz.copy()) { tz = String("UTC") }
         let on = bool_at(m.copy(), "on") ?? true
         let notify = bool_at(m.copy(), "notify") ?? false
         let catch_up = bool_at(m, "catch_up") ?? true
