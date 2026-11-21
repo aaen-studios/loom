@@ -690,6 +690,77 @@ pub fn unmark(snippet: &str) -> (String, Vec<std::ops::Range<usize>>) {
     (out, marks)
 }
 
+/// What a person typed, for the Markdown view to show as they typed it: each `<` outside
+/// code is escaped, so HTML shows as its tags instead of being dropped. Fenced code blocks
+/// and code spans keep their text, since Markdown shows those as they are already.
+pub fn literal_html(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    // The open fence's character and length, inside a fenced code block.
+    let mut fence: Option<(char, usize)> = None;
+    for line in text.split_inclusive('\n') {
+        let trimmed = line.trim_start_matches(' ');
+        let indented = line.len() - trimmed.len() >= 4;
+        let marker = trimmed.chars().next().filter(|c| *c == '`' || *c == '~');
+        let run = marker.map_or(0, |m| trimmed.chars().take_while(|c| *c == m).count());
+        if let Some((m, n)) = fence {
+            out.push_str(line);
+            if !indented && marker == Some(m) && run >= n && trimmed[run..].trim().is_empty() {
+                fence = None;
+            }
+            continue;
+        }
+        if let Some(m) = marker.filter(|_| !indented && run >= 3) {
+            fence = Some((m, run));
+            out.push_str(line);
+            continue;
+        }
+        escape_tags(line, &mut out);
+    }
+    out
+}
+
+/// One line of `literal_html` outside a fence: `<` escaped, but not in a code span or after
+/// a backslash.
+fn escape_tags(line: &str, out: &mut String) {
+    let mut rest = line;
+    while let Some(c) = rest.chars().next() {
+        match c {
+            '\\' => {
+                // An escape the person wrote stays theirs, with what it escapes.
+                let n = 1 + rest[1..].chars().next().map_or(0, char::len_utf8);
+                out.push_str(&rest[..n]);
+                rest = &rest[n..];
+            }
+            '`' => {
+                let n = rest.chars().take_while(|c| *c == '`').count();
+                // A code span runs to the next run of exactly as many backticks.
+                let mut end = None;
+                let mut at = n;
+                while let Some(found) = rest[at..].find('`') {
+                    let start = at + found;
+                    let len = rest[start..].chars().take_while(|c| *c == '`').count();
+                    if len == n {
+                        end = Some(start + len);
+                        break;
+                    }
+                    at = start + len;
+                }
+                let n = end.unwrap_or(n);
+                out.push_str(&rest[..n]);
+                rest = &rest[n..];
+            }
+            '<' => {
+                out.push_str("\\<");
+                rest = &rest[1..];
+            }
+            c => {
+                out.push(c);
+                rest = &rest[c.len_utf8()..];
+            }
+        }
+    }
+}
+
 /// A size as people read it.
 pub fn size_of(bytes: u64) -> String {
     match bytes {
@@ -3489,6 +3560,26 @@ mod tests {
         m.take(&json!({"t": "core.file", "id": f["id"], "error": {"message": "gone"}}));
         assert!(m.page.is_none());
         assert_eq!(m.notices.last().map(String::as_str), Some("gone"));
+    }
+
+    #[test]
+    fn html_a_person_typed_shows_as_they_typed_it() {
+        assert_eq!(
+            literal_html("<style>body{}</style><h1>Hi</h1>"),
+            r"\<style>body{}\</style>\<h1>Hi\</h1>"
+        );
+        assert_eq!(
+            literal_html("a `<b>` and ``x ` <i>`` c <d>"),
+            r"a `<b>` and ``x ` <i>`` c \<d>",
+            "code spans keep theirs"
+        );
+        assert_eq!(
+            literal_html("see\n```html\n<p>hi</p>\n```\n<p>"),
+            "see\n```html\n<p>hi</p>\n```\n\\<p>",
+            "so does a fenced block, up to its end"
+        );
+        assert_eq!(literal_html(r"\<b> 1 < 2 ✓"), r"\<b> 1 \< 2 ✓");
+        assert_eq!(literal_html("an open `tick <b>"), r"an open `tick \<b>");
     }
 
     #[test]
