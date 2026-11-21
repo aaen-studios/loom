@@ -5,7 +5,8 @@ module tests.protocol.plugins
 // one with save_plugin, and what it asks waits for the person's
 // plugin.allow, which an agent can't send. Once its tool server is allowed,
 // it's in every agent's new sessions, run from the plugin's files. A panel
-// keeps data, 1 MB at most. Each change is a revision, and deleting one from
+// keeps data, 1 MB at most, messages agents and sends commands, only as
+// allowed. Each change is a revision, and deleting one from
 // an agent asks the person first.
 //
 //     calx tests/protocol/plugins.calx
@@ -99,6 +100,19 @@ fn run(i: Instance) ! Error {
     try check("{at(changed.copy(), "allowed")}" == #"["tools"]"# and "{at(changed.copy(), "waiting")}" == #"["agents"]"# and int_at(changed, "revision") == some(2) and count == 2, "an agent's change keeps what was allowed, waits for what's new, and is a revision")
     let self_allow = try say(mut app, fresh.copy(), "m_7", String(#"/mcp plugin.allow {"id":"weather"}"#))
     try check(self_allow.contains("failed"), "and an agent has no way to allow it")
+
+    // --- A panel's door ---
+    let answered = try app.cmd("q_20", "plugin.message", Obj.new().s("plugin", String("build-board")).s("agent", String("main")).s("text", String("hello from the panel")).done())
+    let talk = last(app, "conversation.created")
+    try check(str_at(at(answered, "value"), "reply") == some(String("hello from the panel")) and str_at(at(talk, "conversation"), "title") == some(String("From Build board")), "a panel allowed agents messages one, and gets its reply, in a conversation of their own")
+    _ = try app.cmd("q_21", "plugin.message", Obj.new().s("plugin", String("build-board")).s("agent", agent.copy()).s("text", String("again")).done())
+    let said = at(last(app, "message.created"), "message")
+    try check(str_at(said.copy(), "conversation") == str_at(at(talk, "conversation"), "id") and str_at(said, "role") == some(String("agent")), "and the next message goes to the same one")
+    let not_asked = try app.cmd("q_22", "plugin.message", Obj.new().s("plugin", String("weather")).s("agent", String("main")).s("text", String("hi")).done())
+    try check(code(not_asked) == "not_allowed", "a plugin not allowed agents can't")
+    let listed_routines = try app.cmd("q_23", "plugin.cmd", Obj.new().s("plugin", String("build-board")).s("name", String("routine.list")).j("args", Obj.new().done()).done())
+    let other = try app.cmd("q_24", "plugin.cmd", Obj.new().s("plugin", String("build-board")).s("name", String("agent.list")).j("args", Obj.new().done()).done())
+    try check(at(at(listed_routines, "value"), "routines") != Json.Null and code(other) == "not_allowed", "a panel sends the commands it's allowed, and only those")
 
     // Deleting, from an agent, asks first.
     try app.send(Obj.new().s("t", String("send")).s("cid", String("m_8")).s("conversation", fresh.copy()).s("text", String(#"/mcp delete_plugin {"id":"weather"}"#)).done())
