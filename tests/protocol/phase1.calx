@@ -154,6 +154,14 @@ fn run(server: Child, data: String) ! Error {
 
     let added = try loom(data.copy(), [String("user"), String("add"), String("bob")]).input_text(String("bobs password\n")).output()
     try check(added.status.success(), "a second account comes from the command line")
+    let said = try loom(data.copy(), [String("status")]).output()
+    try check(said.status.success() and said.text().contains("runs as: "), "loom status says which user it runs as")
+    if env.is_elevated() {
+        let refused = try loom(data.copy(), [String("serve"), String("--port"), String("0")]).output()
+        try check(not refused.status.success() and refused.error_text().contains("--allow-root"), "loom serve won't run elevated without --allow-root")
+    } else {
+        println("      (not elevated, so serve's refusal to run elevated isn't tried)")
+    }
     let (s3, _) = try post_json(base.copy(), "/api/login", Obj.new().s("username", String("bob")).s("password", String("not it")).done())
     try check(s3 == 401, "a wrong password is refused")
     let (s4, bob) = try post_json(base.copy(), "/api/login", Obj.new().s("username", String("bob")).s("password", String("bobs password")).j("device", device("Bob's laptop")).done())
@@ -288,7 +296,7 @@ fn main() ! Error {
     let agent = try fs.absolute(String("tests/fake_agent/main.calx"))
     let added = try loom(data.copy(), [String("acp"), String("add"), String("fake"), calx(), agent]).output()
     if not added.status.success() { fail "loom acp add failed: {added.error_text()}" }
-    var server = try loom(data.copy(), [String("serve"), String("--port"), String("0")]).stdout(Stdio.Pipe).spawn()
+    var server = try loom(data.copy(), [String("serve"), String("--port"), String("0"), String("--allow-root")]).stdout(Stdio.Pipe).spawn()
     let failure: String? = match run(server, data) {
         ok => none,
         err(e) => some("{e}"),

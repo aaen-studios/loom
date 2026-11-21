@@ -308,7 +308,7 @@ An agent can work on two kinds of machine: the one its instance runs on, and the
 
 - **The owner's agents** run commands and use files there: as the `loom` user on a server, or as you in the desktop app. Members can only do so inside a [sandbox](#sandboxes-where-members-agents-run).
 - **What an agent may do without asking** is set by its permission mode (`ask`, `auto`, or a list). The risky actions always ask.
-- **No root by default.** On a server, `loom` isn't an administrator. The owner can give it more, such as `sudo` for chosen commands or the Docker group, and the settings say plainly what each one gives away.
+- **No root by default.** On a server, `loom` isn't an administrator. The owner can give it more, such as `sudo` for chosen commands or the Docker group, and the settings say plainly what each one gives away. `loom serve` refuses to run as root, or as an elevated Administrator on Windows, since every agent would get those rights too, and says how to run it otherwise. `--allow-root` serves anyway. `loom status` says which user it runs as.
 
 ### Your devices
 
