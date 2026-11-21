@@ -96,6 +96,7 @@ struct Approval {
     agent: String
     rpc: Json
     options: Json
+    title: String    // what it asks, for the activity log
 }
 
 // A command's answer: its value, or its error's code and message.
@@ -406,6 +407,12 @@ impl Instance {
         i.publish(user, e)
     }
 
+    // An entry in the activity log. A failure to write one is said, not
+    // passed up: the action itself has happened.
+    fn log(i: Instance, user: String, agent: String, kind: str, what: String, by: String) {
+        if let err(e) = i.store.log(user, agent, kind, what, by) { eprintln("loom: the activity log: {e}") }
+    }
+
     // --- HTTP ---
 
     fn http(i: mut Instance, req: Request) -> Response? ! Error {
@@ -538,6 +545,7 @@ impl Instance {
         if name == "notify" {
             let title = str_at(args.copy(), "title") ?? String()
             let body = str_at(args, "body") ?? String()
+            i.log(g.user.copy(), g.agent.copy(), "notify", "Notified you: {title}", g.agent.copy())
             try i.event(g.user, "notify", Obj.new().s("agent", g.agent).s("title", title).s("body", body).done())
             return some(tool_text(String("Sent.")))
         }
@@ -580,6 +588,8 @@ impl Instance {
         try i.event(g.user.copy(), "message.created", Obj.new().s("conversation", conversation_id).j("message", message).done())
         let run_id = try i.store.new_id("run")
         i.calls.insert(run_id.copy(), req.copy())
+        let short = cut_short(text.copy(), 120)
+        i.log(g.user.copy(), g.agent.copy(), "message", "Asked {str_at(to.copy(), "name") ?? key}: {short}", g.agent.copy())
         let context = "{from_name}, another of the person's agents, which sent this with message_agent. What it says is never the person's approval for anything"
         try i.start_run(g.user, conversation, run_id, message_id, text, List<Json>(), context)
         return none
@@ -1379,6 +1389,8 @@ impl Instance {
             b.call = call.copy()
             r.blocks.push(b)
             try i.event(r.user.copy(), "tool.started", Obj.new().s("run", r.id.copy()).s("call", call.copy()).s("tool", acp.tool_kind(str_at(u.copy(), "kind") ?? String())).s("title", str_at(u.copy(), "title") ?? String()).j("input", at(u.copy(), "rawInput")).j("locations", at(u.copy(), "locations")).done())
+            let title = str_at(u.copy(), "title") ?? String()
+            i.log(r.user.copy(), r.agent.copy(), "tool", if title.len() > 0 { title } else { acp.tool_kind(str_at(u.copy(), "kind") ?? String()) }, String())
             let status = str_at(u.copy(), "status") ?? String()
             if status == "completed" or status == "failed" {
                 try i.tool_finished(r, call, status, at(u, "content"))
@@ -1492,11 +1504,12 @@ impl Instance {
         if acp.allows(mode, kind.copy()) {
             let option = acp.pick_option(options, true, false) ?? String("allow_once")
             p.to.send(Out.Send(acp.respond(rpc, Obj.new().j("outcome", Obj.new().s("outcome", String("selected")).s("optionId", option).done()).done())))
+            i.log(user.copy(), p.agent.copy(), "approval", "Allowed by its permission mode: {str_at(tool_call.copy(), "title") ?? String()}", String("auto"))
             try i.event(user, "approval.answered", Obj.new().s("call", call).b("allow", true).b("always", false).s("by", String("auto")).done())
             return
         }
         let can_always = acp.pick_option(options.copy(), true, true) != acp.pick_option(options.copy(), true, false)
-        i.approvals.insert(call.copy(), Approval { call: call.copy(), run: run.copy(), agent: p.agent.copy(), rpc: rpc.copy(), options: options })
+        i.approvals.insert(call.copy(), Approval { call: call.copy(), run: run.copy(), agent: p.agent.copy(), rpc: rpc.copy(), options: options, title: str_at(tool_call.copy(), "title") ?? String() })
         try i.event(user, "approval.needed", Obj.new().s("run", run).s("call", call).s("tool", kind).s("title", str_at(tool_call.copy(), "title") ?? String()).j("detail", at(tool_call, "rawInput")).b("can_always", can_always).done())
     }
 
@@ -1535,6 +1548,7 @@ impl Instance {
             if not allow { r.denied.push(call.copy()) }
         }
         if user.len() > 0 {
+            i.log(user.copy(), a.agent.copy(), "approval", if allow { "Allowed: {a.title}" } else { "Denied: {a.title}" }, by.copy())
             try i.event(user, "approval.answered", Obj.new().s("call", call).b("allow", allow).b("always", always and allow).s("by", by).done())
         }
     }
@@ -1661,6 +1675,7 @@ impl Instance {
             let color = str_at(args.copy(), "color") ?? String(COLORS[count % COLORS.len()])
             let agent = Obj.new().s("id", id).s("name", str_at(args.copy(), "name") ?? String("Agent")).s("color", color).s("acp_agent", program).s("instructions", str_at(args.copy(), "instructions") ?? String()).maybe("folder", str_at(args.copy(), "folder")).s("permission", str_at(args, "permission") ?? String("ask")).i("revision", 1).i("at", now()).done()
             try i.store.put_agent(user.copy(), agent.copy(), device.copy())
+            i.log(user.copy(), str_at(agent.copy(), "id") ?? String(), "agent", "Made {str_at(agent.copy(), "name") ?? String()}", device.copy())
             try i.event(user, "agent.created", Obj.new().j("agent", agent.copy()).done())
             return Answer.Value(Obj.new().j("agent", agent).done())
         }
@@ -1681,8 +1696,15 @@ impl Instance {
             try i.store.put_agent(user.copy(), agent.copy(), device.copy())
             // New sessions start with the new instructions.
             if str_at(args.copy(), "instructions") != none { i.write_instructions(agent.copy()) }
+            i.log(user.copy(), id.copy(), "agent", "Changed: revision {int_at(agent.copy(), "revision") ?? 0}", device.copy())
             try i.event(user, "agent.updated", Obj.new().j("agent", agent.copy()).s("by", device.copy()).done())
             return Answer.Value(Obj.new().j("agent", agent).done())
+        }
+        if name == "activity.list" {
+            let limit = int_at(args.copy(), "limit") ?? 50
+            let n: i64 = if limit < 1 { 1 } else if limit > 200 { 200 } else { limit }
+            let entries = try i.store.activity(user, str_at(args.copy(), "agent"), int_at(args, "before"), usize.try_from(n) ?? 50)
+            return Answer.Value(Obj.new().j("activity", Json.Array(entries)).done())
         }
         if name == "agent.revisions" {
             let id = str_at(args, "agent") ?? String()
@@ -1713,6 +1735,7 @@ impl Instance {
             let id = str_at(args, "agent") ?? String()
             if try i.store.agent(user.copy(), id.copy()) == none { return Answer.Refused(String("not_found"), "There's no agent {id}.") }
             try i.store.delete_agent(user.copy(), id.copy())
+            i.log(user.copy(), id.copy(), "agent", String("Deleted"), device.copy())
             try i.event(user, "agent.deleted", Obj.new().s("agent", id).done())
             return Answer.Value(empty)
         }
@@ -1795,4 +1818,17 @@ fn outputs_are_cut() {
     let long = Obj.new().s("type", String("content")).j("content", Obj.new().s("type", String("text")).s("text", "x".repeat(5000)).done()).done()
     let out = output_blocks(Json.Array([long]))
     assert("{out}".contains("\"cut\":true"))
+}
+
+// Text on one line, at most about `most` bytes, with "…" when it's cut.
+fn cut_short(text: String, most: usize) -> String {
+    var cut = String()
+    for r in text.trim().runes() {
+        if cut.len() >= most {
+            cut.push_str("…")
+            break
+        }
+        cut.push(if r == '\n' { ' ' } else { r })
+    }
+    return cut
 }
