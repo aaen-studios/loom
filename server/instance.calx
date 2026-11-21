@@ -27,6 +27,7 @@ import shared.pushrelay
 import server.acp
 import server.acp.{Line, Out}
 import server.announce
+import server.browser
 import server.files
 import server.files.{Thumb}
 import shared.files.{is_sha, safe_name}
@@ -217,6 +218,19 @@ pub struct Instance {
     move_waiters: List<Waiter>    // instance.move commands waiting on the move
     moved: Json    // once the instance has moved: the signed moved frame, which every device gets
     version: String
+    browsers: LinkedMap<String, Browser>    // "user/agent" -> that agent's browser, while it's open
+    browser_done: Receiver<browser.Done>
+    browser_to: Sender<browser.Done>
+    stopped_browsers: List<Thread>    // browsers told to stop, joined at shutdown
+    next_browser_sweep: i64
+}
+
+// An agent's browser (server/browser.calx), on its thread.
+struct Browser {
+    to: Sender<browser.In>
+    thread: Thread
+    busy: i64    // calls sent that haven't come back
+    used: i64    // when the last one did
 }
 
 // A command answered once the installer's thread is done.
@@ -462,7 +476,9 @@ impl Instance {
         if let text = try store.meta("moved") {
             if let ok(m) = parse(text) { moved = m }
         }
-        var i = Instance { push_to: push_to, push_gone: push_gone, move_to: move_to, move_done: move_done, lan: config.lan, bridge: none, stop_bridge: none, lan_port: 0, announcer: none, stop_announcer: none, to_close: List<ServerSocket>(), boxes: none, gate: none, stop_gate: none, moving: String(), move_waiters: List<Waiter>(), moved: moved, version: config.version.copy(), store: store, server: server, data: config.data.copy(), sessions: Map<u32, Session>(), runs: LinkedMap<String, Run>(), procs: LinkedMap<String, Proc>(), approvals: LinkedMap<String, Approval>(), lines: lines, lines_to: to, hash_to: hash_to, hash_done: hash_done, next_job: 0, auths: Map<i64, Auth>(), dummy_hash: dummy, failures: LinkedMap<String, List<i64>>(), thumbs: files.start(), events: config.events, next_prune: 0, grants: Map<String, Grant>(), calls: Map<String, Request>(), registry_at: config.registry.copy(), registry: Json.Null, registry_time: 0, install_to: install_to, install_done: install_done, fetching: List<Waiter>(), installs: Map<i64, Install>(), leftovers: List<String>(), next_sweep: 0, device_calls: Map<String, DeviceCall>(), minute_ms: config.minute_ms, next_due: 0, routine_runs: Map<String, RoutineRun>(), panel_calls: Map<String, Waiter>(), sealer: try secret_key(config.data.copy()) }
+        let browser_done = Receiver<browser.Done>()
+        let browser_to = browser_done.sender()
+        var i = Instance { browsers: LinkedMap<String, Browser>(), browser_done: browser_done, browser_to: browser_to, stopped_browsers: List<Thread>(), next_browser_sweep: 0, push_to: push_to, push_gone: push_gone, move_to: move_to, move_done: move_done, lan: config.lan, bridge: none, stop_bridge: none, lan_port: 0, announcer: none, stop_announcer: none, to_close: List<ServerSocket>(), boxes: none, gate: none, stop_gate: none, moving: String(), move_waiters: List<Waiter>(), moved: moved, version: config.version.copy(), store: store, server: server, data: config.data.copy(), sessions: Map<u32, Session>(), runs: LinkedMap<String, Run>(), procs: LinkedMap<String, Proc>(), approvals: LinkedMap<String, Approval>(), lines: lines, lines_to: to, hash_to: hash_to, hash_done: hash_done, next_job: 0, auths: Map<i64, Auth>(), dummy_hash: dummy, failures: LinkedMap<String, List<i64>>(), thumbs: files.start(), events: config.events, next_prune: 0, grants: Map<String, Grant>(), calls: Map<String, Request>(), registry_at: config.registry.copy(), registry: Json.Null, registry_time: 0, install_to: install_to, install_done: install_done, fetching: List<Waiter>(), installs: Map<i64, Install>(), leftovers: List<String>(), next_sweep: 0, device_calls: Map<String, DeviceCall>(), minute_ms: config.minute_ms, next_due: 0, routine_runs: Map<String, RoutineRun>(), panel_calls: Map<String, Waiter>(), sealer: try secret_key(config.data.copy()) }
         if config.sandboxes.len() > 0 and not i.lan { try i.sandboxes_on(config.sandboxes.copy(), config.sandbox_image.copy()) }
         // Phones that were on stay on.
         if i.lan and try i.store.meta("phones") == some(String("on")) {
@@ -801,15 +817,87 @@ impl Instance {
                     err(e) => eprintln("loom: push: {e}"),
                 }
             }
+            while let d = i.browser_done.next() {
+                if let b = mut i.browsers.find(d.key.copy()) {
+                    b.busy -= 1
+                    b.used = now()
+                }
+                if let req = i.calls.remove(d.call.copy()) { i.server.respond(req, json_response(200, d.result)) }
+            }
+            if now() >= i.next_browser_sweep { i.close_idle_browsers() }
         }
         for (_, p) in i.procs {
             var to = p.to.copy()
             to.send(Out.Stop)
         }
+        // Each browser is stopped, with what it started, before the instance ends.
+        var keys = List<String>()
+        for (k, _) in i.browsers { keys.push(k.copy()) }
+        for k in keys { i.close_browser(k) }
+        while let t = i.stopped_browsers.pop() { t.join() }
         if let s = mut i.stop_gate { s.send(true) }
         if let t = i.gate.take() { t.join() }
         i.phones_off()
         i.server.shutdown()
+    }
+
+    // --- The agent's browser (PLAN.md, "The agent's browser") ---
+
+    // browser_*: the call goes to the agent's browser, started if it isn't
+    // open, and its result comes back to the loop.
+    fn browse(i: mut Instance, req: Request, g: Grant, name: String, args: Json) -> Json? ! Error {
+        let op = name.trim_prefix("browser_").copy()
+        let key = "{g.user}/{g.agent}"
+        if not i.browsers.contains(key.copy()) {
+            let profile = try fs.absolute("{i.data}/browsers/{g.user}/{g.agent}")
+            let (to, thread) = browser.start(key.copy(), profile, i.sandboxed(g.user.copy()), i.browser_to.copy())
+            i.browsers.insert(key.copy(), Browser { to: to, thread: thread, busy: 0, used: now() })
+        }
+        let call = try i.store.new_id("bc")
+        if op == "open" { i.log(g.user.copy(), g.agent.copy(), "browser", "Opened {cut_short(str_at(args.copy(), "url") ?? String(), 200)}", g.agent.copy()) }
+        let b = mut i.browsers.find(key) else return some(tool_error(String("The browser didn't start.")))
+        b.busy += 1
+        b.used = now()
+        b.to.send(browser.In.Do(browser.Op { call: call.copy(), name: op, args: args.copy() }))
+        i.calls.insert(call, req.copy())
+        return none
+    }
+
+    // Stops a browser. Its thread ends once it has, and is joined at shutdown.
+    fn close_browser(i: mut Instance, key: String) {
+        let b = i.browsers.remove(key) else return
+        var to = b.to.copy()
+        to.send(browser.In.Stop)
+        i.stopped_browsers.push(b.thread)
+    }
+
+    // Stops each browser that's had nothing to do for browser.IDLE_MS.
+    fn close_idle_browsers(i: mut Instance) {
+        i.next_browser_sweep = now() + 30000
+        var idle = List<String>()
+        for (k, b) in i.browsers {
+            if b.busy <= 0 and now() - b.used >= browser.IDLE_MS { idle.push(k.copy()) }
+        }
+        for k in idle { i.close_browser(k) }
+    }
+
+    // Stops `user`'s browsers, or only `agent`'s, and removes their profiles.
+    fn drop_browsers(i: mut Instance, user: String, agent: String?) {
+        var gone = List<String>()
+        for (k, _) in i.browsers {
+            let mine = match agent {
+                some(a) => k == "{user}/{a}",
+                none => k.starts_with("{user}/"),
+            }
+            if mine { gone.push(k.copy()) }
+        }
+        for k in gone { i.close_browser(k) }
+        if user.len() == 0 { return }
+        match agent {
+            some(a) => if a.len() > 0 { i.leftovers.push("{i.data}/browsers/{user}/{a}") },
+            none => i.leftovers.push("{i.data}/browsers/{user}"),
+        }
+        i.next_sweep = 0
     }
 
     // Removes the folders of removed ACP agents. A program that was just
@@ -1203,6 +1291,9 @@ impl Instance {
         }
         if name == "use_device" {
             return try i.use_device(req, g, args)
+        }
+        if name.starts_with("browser_") {
+            return try i.browse(req, g, name, args)
         }
         if name == "remember" {
             let what = (str_at(args.copy(), "text") ?? String()).trim().copy()
@@ -1973,6 +2064,7 @@ impl Instance {
             if agent.len() > 0 { i.leftovers.push("{i.data}/agents/{agent}") }
         }
         if user.len() > 0 { i.leftovers.push("{i.data}/plugins/{user}") }
+        i.drop_browsers(user.copy(), none)
         if let b = i.boxes { b.remove(user.copy()) }
         i.next_sweep = 0
         println("loom: removed {name}")
@@ -3910,6 +4002,7 @@ impl Instance {
             let id = str_at(args, "agent") ?? String()
             if try i.store.agent(user.copy(), id.copy()) == none { return Answer.Refused(String("not_found"), "There's no agent {id}.") }
             try i.store.delete_agent(user.copy(), id.copy())
+            i.drop_browsers(user.copy(), some(id.copy()))
             i.log(user.copy(), id.copy(), "agent", String("Deleted"), device.copy())
             try i.event(user, "agent.deleted", Obj.new().s("agent", id).done())
             return Answer.Value(empty)

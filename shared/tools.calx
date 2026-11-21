@@ -54,6 +54,14 @@ pub fn all() -> List<Json> {
         tool("read_plugin", "Reads one of your person's plugins: what list_plugins says of it, and its files, by path.", object(Obj.new().j("id", text_arg("The plugin's id.")), ["id"])),
         tool("save_plugin", "Makes a plugin for your person, or changes one: a panel (a small web app shown in their app, HTML, CSS and JavaScript, with no network; it reads and keeps data and sends commands with `await loom.send(op, args)`: \"data.get\" and \"data.put\" with key and value, \"cmd\" with name and args for a command its manifest asks for, \"message_agent\" with agent and text) and a tool server (an MCP server, in any language, that the instance runs for every agent). Give every file whole, plugin.toml among them: name, version, description, [panel] entry, [tools] command and args (an arg naming one of its files is that file), and [permissions] commands (a list of loom commands) and agents (true to message agents). Each change is a revision. What it asks for that your person hasn't allowed waits for their yes in the app.", object(Obj.new().j("id", text_arg("Lowercase letters, digits and hyphens, such as build-board.")).j("files", Obj.new().s("type", String("object")).s("description", String("Each file's path and its whole text, plugin.toml among them.")).done()), ["id", "files"])),
         tool("delete_plugin", "Deletes one of your person's plugins, with its panel's data. Your person is asked first.", object(Obj.new().j("id", text_arg("The plugin's id.")), ["id"])),
+        tool("browser_open", "Opens a page in your browser: a real Chrome of your own, which keeps its cookies and logins between calls, and which your person can watch. Gives the page's outline, as browser_snapshot does.", object(Obj.new().j("url", text_arg("The page's address, starting with https:// or http://.")), ["url"])),
+        tool("browser_snapshot", "Gives an outline of the page your browser has open: its headings, links, buttons, fields and text, each part you can act on with a ref such as e12. Refs last until the page changes, so take a new one after.", object(Obj.new(), List<str>())),
+        tool("browser_click", "Clicks a part of the page, by its ref from the last outline, as a person's mouse would. Gives the page's outline after.", object(Obj.new().j("ref", text_arg("The part's ref, such as e12.")), ["ref"])),
+        tool("browser_type", "Types into a field on the page, by its ref, replacing what it holds unless clear is false. With submit, presses Enter after, and gives the page's outline.", object(Obj.new().j("ref", text_arg("The field's ref, such as e12.")).j("text", text_arg("What to type.")).j("submit", Obj.new().s("type", String("boolean")).s("description", String("Whether to press Enter after.")).done()).j("clear", Obj.new().s("type", String("boolean")).s("description", String("false types after what the field holds.")).done()), ["ref", "text"])),
+        tool("browser_press", "Presses a key on the page: Enter, Tab, Escape, Backspace, Delete, ArrowUp, ArrowDown, ArrowLeft, ArrowRight, Home, End, PageUp, PageDown, Space, or a single character. Gives the page's outline after.", object(Obj.new().j("key", text_arg("The key.")), ["key"])),
+        tool("browser_scroll", "Scrolls the page a screen down, or up.", object(Obj.new().j("direction", text_arg("down or up. down if left out.")), List<str>())),
+        tool("browser_back", "Goes back to the page before, as a browser's back button does, and gives its outline.", object(Obj.new(), List<str>())),
+        tool("browser_screenshot", "Gives a picture of what your browser shows, for when how the page looks matters.", object(Obj.new(), List<str>())),
         tool("move_instance", "Moves this whole instance to a new place: a server or a computer where loom receive is running, which printed a move code. Everything goes, and your person's apps follow. Your person is asked first, and only the instance's owner can move it.", object(Obj.new().j("to", text_arg("The new place's address, starting with https:// or http://.")).j("code", text_arg("The move code loom receive printed there, starting loom-move-.")), ["to", "code"])),
     ]
 }
@@ -61,7 +69,7 @@ pub fn all() -> List<Json> {
 @test
 fn every_tool_has_a_schema() {
     let tools = all()
-    assert(tools.len() == 28)
+    assert(tools.len() == 36)
     for t in tools {
         assert("{t}".contains("\"inputSchema\":\{\"type\":\"object\""))
     }
