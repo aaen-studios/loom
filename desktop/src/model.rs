@@ -1120,7 +1120,9 @@ impl Model {
                         .collect()
                 })
                 .unwrap_or_default();
-        } else if id.starts_with("app.device_revoke") {
+        } else if id.starts_with("app.device_revoke") || id.starts_with("app.account_delete") {
+            // A deleted account's sessions close with 4001 and the core signs out, so only
+            // a refusal needs saying.
             if let Some(e) = f.get("error") {
                 self.notices.push(s(e, "message"));
             }
@@ -2147,6 +2149,13 @@ impl Model {
         json!({"t": "cmd", "id": id, "name": "user.remove", "args": {"user": user}})
     }
 
+    /// Deletes the person's own account and everything of theirs. The instance refuses
+    /// the owner's.
+    pub fn delete_account(&mut self) -> Value {
+        let id = self.id("app.account_delete");
+        json!({"t": "cmd", "id": id, "name": "account.delete", "args": {}})
+    }
+
     /// Reads the person's devices from the cache.
     pub fn load_devices(&mut self) -> Value {
         json!({"t": "core.get", "id": "app.devices", "what": "devices"})
@@ -2415,6 +2424,18 @@ mod tests {
             .as_deref()
             .unwrap()
             .contains("Only the owner"));
+    }
+
+    #[test]
+    fn deleting_the_account_says_why_when_refused() {
+        let mut m = Model::new();
+        let f = m.delete_account();
+        assert_eq!(f["name"], "account.delete");
+        m.result(&json!({"t": "result", "id": f["id"], "ok": false, "error": {"code": "not_allowed", "message": "The owner's account goes with the instance."}}));
+        assert!(m
+            .notices
+            .iter()
+            .any(|n| n.contains("goes with the instance")));
     }
 
     #[test]
