@@ -198,6 +198,25 @@ pub struct Note {
     pub at: i64,
 }
 
+/// Someone with an account on the instance, for the People page.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Person {
+    pub id: String,
+    pub username: String,
+    /// owner, admin or member.
+    pub role: String,
+}
+
+/// An invite still open: its id, the role it gives, the uses it has left, and when it
+/// expires (Unix ms).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Invite {
+    pub id: String,
+    pub role: String,
+    pub uses: i64,
+    pub expires: i64,
+}
+
 /// One of the person's skills.
 #[derive(Clone, Debug)]
 pub struct Skill {
@@ -623,6 +642,15 @@ pub struct Model {
     pub joined: Option<String>,
     /// Whether phones reach the instance in this app over the network, once it has said.
     pub phones: Option<bool>,
+    /// The People page: everyone with an account, the invites still open, and the newest
+    /// invite made here, to pass on: its link (or code), the role it gives and when it expires.
+    pub people: Vec<Person>,
+    pub invites: Vec<Invite>,
+    pub invite_made: Option<(String, String, i64)>,
+    /// Why the People page shows nothing, when the instance said no.
+    pub people_refused: Option<String>,
+    pub people_open: bool,
+    people_stale: bool,
     /// The person's devices, as the cache has them: id, name and kind.
     pub devices: Vec<(String, String, String)>,
     /// This device's id, once the instance has welcomed it.
@@ -745,6 +773,9 @@ impl Model {
         }
         if std::mem::take(&mut self.plugins_stale) {
             out.push(self.load_plugins());
+        }
+        if std::mem::take(&mut self.people_stale) {
+            out.extend(self.load_people());
         }
         let dirty: Vec<List> = self.dirty.drain().collect();
         for l in dirty {
@@ -956,6 +987,10 @@ impl Model {
             "plugin" if kind != "plugin.data" => {
                 self.plugins_stale = true;
             }
+            // Someone joined with an invite: the People page lists them, and the invite's uses.
+            "user" if self.people_open => {
+                self.people_stale = true;
+            }
             _ => {}
         }
     }
@@ -1093,6 +1128,63 @@ impl Model {
             } else {
                 self.phones = f.pointer("/value/on").and_then(Value::as_bool);
             }
+        } else if id.starts_with("app.people") {
+            if let Some(e) = f.get("error") {
+                self.people_refused = Some(s(e, "message"));
+                self.people.clear();
+            } else {
+                self.people_refused = None;
+                self.people = f
+                    .pointer("/value/users")
+                    .and_then(Value::as_array)
+                    .map(|us| {
+                        us.iter()
+                            .map(|u| Person {
+                                id: s(u, "user"),
+                                username: s(u, "username"),
+                                role: s(u, "role"),
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+            }
+        } else if id.starts_with("app.invites") {
+            self.invites = f
+                .pointer("/value/invites")
+                .and_then(Value::as_array)
+                .map(|is| {
+                    is.iter()
+                        .map(|i| Invite {
+                            id: s(i, "invite"),
+                            role: s(i, "role"),
+                            uses: i.get("uses").and_then(Value::as_i64).unwrap_or(0),
+                            expires: i.get("expires").and_then(Value::as_i64).unwrap_or(0),
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+        } else if id.starts_with("app.invite_made") {
+            if let Some(e) = f.get("error") {
+                self.notices.push(s(e, "message"));
+            } else if let Some(v) = f.get("value") {
+                // The core adds the link, for an instance at an http:// or https:// address.
+                let link = v
+                    .get("link")
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+                    .unwrap_or_else(|| s(v, "code"));
+                self.invite_made = Some((
+                    link,
+                    s(v, "role"),
+                    v.get("expires").and_then(Value::as_i64).unwrap_or(0),
+                ));
+            }
+            self.people_stale = true;
+        } else if id.starts_with("app.person") {
+            if let Some(e) = f.get("error") {
+                self.notices.push(s(e, "message"));
+            }
+            self.people_stale = true;
         } else if id.starts_with("app.link") {
             if let Some(e) = f.get("error") {
                 self.notices.push(s(e, "message"));
@@ -1996,6 +2088,40 @@ impl Model {
         json!({"t": "cmd", "id": id, "name": "instance.phones", "args": args})
     }
 
+    /// Reads everyone with an account and the invites still open, for the People page.
+    pub fn load_people(&mut self) -> Vec<Value> {
+        let people = self.id("app.people");
+        let invites = self.id("app.invites");
+        vec![
+            json!({"t": "cmd", "id": people, "name": "user.list", "args": {}}),
+            json!({"t": "cmd", "id": invites, "name": "invite.list", "args": {}}),
+        ]
+    }
+
+    /// Makes an invite that gives `role` (member or admin), good for `uses` accounts.
+    pub fn create_invite(&mut self, role: &str, uses: i64) -> Value {
+        let id = self.id("app.invite_made");
+        self.invite_made = None;
+        json!({"t": "cmd", "id": id, "name": "invite.create", "args": {"role": role, "uses": uses}})
+    }
+
+    pub fn delete_invite(&mut self, invite: &str) -> Value {
+        let id = self.id("app.person");
+        json!({"t": "cmd", "id": id, "name": "invite.delete", "args": {"invite": invite}})
+    }
+
+    /// Makes someone an admin or a member again.
+    pub fn set_role(&mut self, user: &str, role: &str) -> Value {
+        let id = self.id("app.person");
+        json!({"t": "cmd", "id": id, "name": "user.role", "args": {"user": user, "role": role}})
+    }
+
+    /// Removes someone, and everything of theirs.
+    pub fn remove_person(&mut self, user: &str) -> Value {
+        let id = self.id("app.person");
+        json!({"t": "cmd", "id": id, "name": "user.remove", "args": {"user": user}})
+    }
+
     /// Reads the person's devices from the cache.
     pub fn load_devices(&mut self) -> Value {
         json!({"t": "core.get", "id": "app.devices", "what": "devices"})
@@ -2225,6 +2351,34 @@ mod tests {
         m.result(&json!({"t": "result", "id": off["id"], "ok": false, "error": {"code": "not_allowed", "message": "Only the owner"}}));
         assert_eq!(m.phones, Some(true));
         assert!(m.notices.last().unwrap().contains("Only the owner"));
+    }
+
+    #[test]
+    fn people_and_invites_are_listed_and_an_invite_is_kept_to_pass_on() {
+        let mut m = Model::new();
+        let [people, invites] = m.load_people().try_into().unwrap();
+        assert_eq!(people["name"], "user.list");
+        m.result(&json!({"t": "result", "id": people["id"], "ok": true, "value": {"users": [{"user": "u_1", "username": "elliot", "role": "owner"}, {"user": "u_2", "username": "ann", "role": "member"}]}}));
+        m.result(&json!({"t": "result", "id": invites["id"], "ok": true, "value": {"invites": [{"invite": "inv_1", "role": "member", "uses": 2, "expires": 9}]}}));
+        assert_eq!(m.people.len(), 2);
+        assert_eq!(m.people[1].username, "ann");
+        assert_eq!(m.invites[0].uses, 2);
+        let made = m.create_invite("admin", 1);
+        assert_eq!(made["args"], json!({"role": "admin", "uses": 1}));
+        m.result(&json!({"t": "result", "id": made["id"], "ok": true, "value": {"invite": "inv_2", "code": "ab", "link": "https://loom.example.com/join/ab", "role": "admin", "uses": 1, "expires": 5}}));
+        assert_eq!(
+            m.invite_made,
+            Some(("https://loom.example.com/join/ab".into(), "admin".into(), 5))
+        );
+        // A member is told why there's nothing to see.
+        let [people, _] = m.load_people().try_into().unwrap();
+        m.result(&json!({"t": "result", "id": people["id"], "ok": false, "error": {"code": "not_allowed", "message": "Only the owner and admins"}}));
+        assert!(m.people.is_empty());
+        assert!(m
+            .people_refused
+            .as_deref()
+            .unwrap()
+            .contains("Only the owner"));
     }
 
     #[test]
