@@ -1,0 +1,198 @@
+module tests.protocol.flows
+
+// Routine flows (PLAN.md, "Routine flows"). A routine's answer goes on to
+// other agents, step by step: each step posts its prompt in its agent's chat,
+// as from the routine, and the agent is told what the steps it comes after
+// answered. A step waits for all of them, and for its agent to be free in its
+// chat; one whose inputs failed is told which, and one whose inputs all failed
+// is skipped. routine.put refuses a flow that loops back or names an agent
+// that isn't there, flow.list says how far each flow has got, and routine.stop
+// stops one. An agent gives a routine a flow with the schedule tool.
+//
+//     calx tests/protocol/flows.calx
+import std.json.{Json}
+import std.process.{exit}
+import shared.obj.{Obj, at, bool_at, str_at}
+import tests.kit.{App, Instance, check, reply_text}
+
+fn step(name: str, agent: str, prompt: str) -> Json {
+    return Obj.new().s("name", String(name)).s("agent", String(agent)).s("prompt", String(prompt)).done()
+}
+
+fn step_after(name: str, agent: str, prompt: str, after: List<str>) -> Json {
+    var a = List<Json>()
+    for x in after { a.push(Json.Str(String(x))) }
+    return Obj.new().s("name", String(name)).s("agent", String(agent)).s("prompt", String(prompt)).j("after", Json.Array(a)).done()
+}
+
+fn put_flow(app: mut App, id: str, name: str, agent: str, prompt: str, flow: List<Json>) -> Json ! Error {
+    return try app.cmd(id, "routine.put", Obj.new().s("name", String(name)).s("agent", String(agent)).s("prompt", String(prompt)).j("schedule", Obj.new().i("every", 600).done()).j("flow", Json.Array(flow.copy())).done())
+}
+
+fn routine_id(put: Json) -> String {
+    return str_at(at(at(put, "value"), "routine"), "id") ?? String()
+}
+
+fn is_flow_of(f: Json, routine: String, finished: bool) -> bool {
+    if str_at(f.copy(), "kind") != some(String("flow.updated")) { return false }
+    let flow = at(f, "flow")
+    return str_at(flow.copy(), "routine") == some(routine.copy()) and (not finished or bool_at(flow, "finished") == some(true))
+}
+
+// The flow.updated that says routine `routine`'s flow finished, or the next
+// one about it that comes.
+fn flow_of(app: mut App, routine: String, finished: bool) -> Json ! Error {
+    for f in app.frames {
+        if is_flow_of(f.copy(), routine.copy(), finished) { return at(f.copy(), "flow") }
+    }
+    loop {
+        let e = try app.until("event", "flow.updated")
+        if is_flow_of(e.copy(), routine.copy(), finished) { return at(e, "flow") }
+    }
+}
+
+// Waits for routine `routine`'s flow to stand as `want`, as states gives it.
+fn flow_reaches(app: mut App, routine: String, want: str) ! Error {
+    for f in app.frames {
+        if is_flow_of(f.copy(), routine.copy(), false) and states(at(f.copy(), "flow")) == want { return }
+    }
+    loop {
+        let e = try app.until("event", "flow.updated")
+        if is_flow_of(e.copy(), routine.copy(), false) and states(at(e, "flow")) == want { return }
+    }
+}
+
+fn first(list: Json) -> Json {
+    if let Json.Array(items) = list {
+        if items.len() > 0 { return items[0].copy() }
+    }
+    return Json.Null
+}
+
+// Each step's state in a flow, as "name:status" joined by spaces.
+fn states(flow: Json) -> String {
+    var out = List<String>()
+    if let Json.Array(steps) = at(flow, "steps") {
+        for s in steps { out.push("{str_at(s.copy(), "name") ?? String()}:{str_at(s, "status") ?? String()}") }
+    }
+    return out.join(" ")
+}
+
+// What the agent answered to each message routine `routine`'s flow posted,
+// by the step's prompt, in the order the steps went.
+fn answers(app: App, routine: String) -> List<(String, String, String)> {
+    var out = List<(String, String, String)>()
+    for f in app.frames {
+        if str_at(f.copy(), "kind") != some(String("message.created")) { continue }
+        let m = at(f.copy(), "message")
+        if str_at(m.copy(), "from") != some(routine.copy()) or str_at(m.copy(), "role") != some(String("person")) { continue }
+        let asked = str_at(m.copy(), "id") ?? String()
+        var reply_id = String()
+        for g in app.frames {
+            if str_at(g.copy(), "kind") == some(String("run.started")) and str_at(g.copy(), "answering") == some(asked.copy()) { reply_id = str_at(g, "message") ?? String() }
+        }
+        var said = String()
+        for g in app.frames {
+            if str_at(g.copy(), "kind") != some(String("message.created")) { continue }
+            let r = at(g, "message")
+            if str_at(r.copy(), "id") == some(reply_id.copy()) { said = reply_text(r) }
+        }
+        out.push((reply_text(m.copy()), str_at(m, "conversation") ?? String(), said))
+    }
+    return out
+}
+
+fn same(got: String, want: str, what: str) ! Error {
+    if got != want { fail "failed: {what}: {got}" }
+    try check(true, what)
+}
+
+fn refused(r: Json, code: str) -> bool {
+    return bool_at(r.copy(), "ok") == some(false) and str_at(at(r, "error"), "code") == some(String(code))
+}
+
+fn run(i: Instance) ! Error {
+    var app = try App.connect(i.base.copy(), i.token.copy(), 0)
+    _ = try app.cmd("q_a1", "agent.create", Obj.new().s("name", String("One")).s("acp_agent", String("fake")).s("instructions", String("Test.")).done())
+    _ = try app.cmd("q_a2", "agent.create", Obj.new().s("name", String("Two")).s("acp_agent", String("fake")).s("instructions", String("Test.")).done())
+    let three = try app.cmd("q_a3", "agent.create", Obj.new().s("name", String("Three")).s("acp_agent", String("fake")).s("instructions", String("Test.")).done())
+
+    // A flow that loops back, or names an agent that isn't there, is refused.
+    let loops = try put_flow(mut app, "q_bad1", "Loop", "One", "go", [step_after("a", "Two", "x", ["b"]), step("b", "Three", "y")])
+    let nobody = try put_flow(mut app, "q_bad2", "Nobody", "One", "go", [step("a", "Four", "x")])
+    try check(refused(loops, "bad_request") and refused(nobody, "not_found"), "a flow that loops back, or names an agent that isn't there, is refused")
+
+    // routine (One) -> sum (Two), note (Two); post (Three) after all three.
+    let morning = try put_flow(mut app, "q_1", "Morning", "One", "morning news", [step("sum", "Two", "summed up"), step_after("note", "Two", "noted", ["routine"]), step_after("post", "Three", "/context", ["routine", "sum", "note"])])
+    let id = routine_id(morning.copy())
+    let kept = at(at(at(morning, "value"), "routine"), "flow")
+    try check(id.len() > 0 and str_at(first(kept), "agent") != some(String("Two")), "a routine keeps its flow, with each step's agent by id")
+    _ = try app.cmd("q_2", "routine.run", Obj.new().s("id", id.copy()).done())
+    let done = try flow_of(mut app, id.copy(), true)
+    try same(states(done), "routine:done sum:done note:done post:done", "every step of the flow runs")
+    let said = answers(app, id.copy())
+    try check(said.len() == 4, "the routine, then each step, posts its prompt in its agent's chat, as from the routine")
+    let (sum_prompt, sum_chat, sum_said) = said[1].copy()
+    let (note_prompt, note_chat, _) = said[2].copy()
+    try check(sum_prompt == "summed up" and note_prompt == "noted" and sum_chat == note_chat and sum_said == "summed up", "two steps for one agent go one after the other, in its chat")
+    let (post_prompt, _, post_said) = said[3].copy()
+    try check(post_prompt == "/context" and post_said.contains("This is step post of the person's routine flow \"Morning\"") and post_said.contains("From the routine \"Morning\" (One):\nmorning news") and post_said.contains("From step sum (Two):\nsummed up") and post_said.contains("From step note (Two):\nnoted") and post_said.contains("routine \"Morning\": step post of its flow"), "a step is told what each step it comes after answered, and that it's the routine's")
+
+    // A step whose input failed is told which; one whose inputs all failed is skipped.
+    let half = routine_id(try put_flow(mut app, "q_3", "Half", "One", "fine", [step("bad", "Two", "/fail no"), step("lost", "Two", "never"), step_after("end", "Three", "/context", ["routine", "bad"])]))
+    _ = try app.cmd("q_4", "routine.run", Obj.new().s("id", half.copy()).done())
+    let half_done = try flow_of(mut app, half.copy(), true)
+    try same(states(half_done), "routine:done bad:failed lost:skipped end:done", "a failed step's own steps are skipped, and the rest go on")
+    let half_said = answers(app, half.copy())
+    let (_, _, end_said) = half_said[half_said.len() - 1].copy()
+    try check(end_said.contains("These failed, so their answers aren't here: step bad (Two).") and end_said.contains("From the routine \"Half\" (One):\nfine"), "a step is told which of its inputs failed")
+    let broken = routine_id(try put_flow(mut app, "q_5", "Broken", "One", "/fail no", [step("a", "Two", "x")]))
+    _ = try app.cmd("q_6", "routine.run", Obj.new().s("id", broken.copy()).done())
+    let broken_done = try flow_of(mut app, broken.copy(), true)
+    try check(states(broken_done) == "routine:failed a:skipped" and answers(app, broken).len() == 1, "when the routine fails, the steps after it are skipped")
+
+    // flow.list says how far a flow has got, and routine.stop stops it.
+    let slow = routine_id(try put_flow(mut app, "q_7", "Slow", "One", "go", [step("wait", "Two", "/sleep 20000"), step("never", "Three", "x")]))
+    _ = try app.cmd("q_8", "routine.run", Obj.new().s("id", slow.copy()).done())
+    try flow_reaches(mut app, slow.copy(), "routine:done wait:running never:waiting")
+    let listed = at(try app.cmd("q_9", "flow.list", Obj.new().done()), "value")
+    try check(str_at(first(at(listed, "flows")), "routine") == some(slow.copy()), "flow.list has the flow that's running")
+    let stopped = try app.cmd("q_10", "routine.stop", Obj.new().s("id", slow.copy()).done())
+    let stop_done = try flow_of(mut app, slow.copy(), true)
+    try check(bool_at(stopped, "ok") == some(true) and bool_at(stop_done.copy(), "stopped") == some(true), "routine.stop stops the flow")
+    try same(states(stop_done), "routine:done wait:failed never:skipped", "the step that's running stops, and the rest are skipped")
+    let again = try app.cmd("q_11", "routine.stop", Obj.new().s("id", slow).done())
+    let none_left = at(try app.cmd("q_12", "flow.list", Obj.new().done()), "value")
+    try check(refused(again, "not_running") and at(none_left, "flows") == Json.Array(List<Json>()), "a flow that isn't running isn't stopped, and a finished one isn't listed")
+
+    // An agent gives a routine a flow with the schedule tool, and takes it off with an empty one.
+    let tool_args = #"{"name": "Agentic", "prompt": "p", "agent": "One", "schedule": {"every": 600}, "flow": [{"name": "s", "agent": "Two", "prompt": "q"}]}"#
+    let conversation = str_at(at(try app.cmd("q_13", "conversation.create", Obj.new().s("agent", str_at(at(at(three, "value"), "agent"), "id") ?? String()).done()), "value"), "conversation") ?? String()
+    try app.send(Obj.new().s("t", String("send")).s("cid", String("c_1")).s("conversation", conversation.copy()).s("text", "/mcp schedule {tool_args}").done())
+    _ = try app.reply()
+    var agentic = Json.Null
+    if let Json.Array(all) = at(at(try app.cmd("q_14", "routine.list", Obj.new().done()), "value"), "routines") {
+        for r in all {
+            if str_at(r.copy(), "name") == some(String("Agentic")) { agentic = r.copy() }
+        }
+    }
+    try check(str_at(first(at(agentic.copy(), "flow")), "name") == some(String("s")), "an agent gives a routine a flow with the schedule tool")
+    let off = try app.cmd("q_15", "routine.put", Obj.new().s("id", str_at(agentic, "id") ?? String()).j("flow", Json.Array(List<Json>())).done())
+    try check(at(at(at(off, "value"), "routine"), "flow") == Json.Null, "an empty flow takes it off")
+    app.close()
+}
+
+fn main() ! Error {
+    let inst = try Instance.start()
+    var failure: String? = none
+    match run(inst.copy()) {
+        ok => {},
+        err(e) => failure = some("{e}"),
+    }
+    inst.stop()
+    if let f = failure {
+        eprintln("\n{f}")
+        exit(1)
+    }
+    println("\nflows: all good")
+}

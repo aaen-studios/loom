@@ -42,6 +42,7 @@ import server.push
 import server.routines
 import server.gate
 import server.tables
+import server.flows
 import server.sandbox
 import server.store.{AcpAgent, Device, Store, User, now, secret_key}
 import shared.tools
@@ -204,6 +205,11 @@ pub struct Instance {
     routine_runs: Map<String, RoutineRun>    // run -> the routine it's for
     panel_calls: Map<String, Waiter>    // run -> a panel's plugin.message waiting on it
     script_calls: Map<String, Request>    // a script's ask, by its run, answered when the run ends
+    running_flows: LinkedMap<String, flows.Flow>    // routine flows that are running, by id
+    flow_steps: Map<String, (String, usize)>    // a step's run -> its flow and which step
+    advancing: List<String>    // flows advance_flow has out of running_flows, newest last
+    flow_results: List<(String, usize, bool, String)>    // steps that ended meanwhile: flow, step, whether it worked, its answer
+    flows_due: List<String>    // flows to move along from the loop, by id
     slow_calls: Map<String, String>    // call -> user, for an agent's slow command its person allowed
     push_to: Sender<push.Job>    // the thread that sends to APNs
     push_gone: Receiver<push.Gone>    // tokens APNs says are gone
@@ -543,7 +549,7 @@ impl Instance {
         }
         let browser_done = Receiver<browser.Back>()
         let browser_to = browser_done.sender()
-        var i = Instance { browsers: LinkedMap<String, Browser>(), watchers: Map<u32, String>(), browser_done: browser_done, browser_to: browser_to, stopped_browsers: List<Thread>(), fills: Map<String, Fill>(), turns_ended: List<(String, String, String)>(), next_browser_sweep: 0, task_stops: Map<String, String>(), resumes: List<(String, String)>(), push_to: push_to, push_gone: push_gone, move_to: move_to, move_done: move_done, lan: config.lan, bridge: none, stop_bridge: none, lan_port: 0, announcer: none, stop_announcer: none, to_close: List<ServerSocket>(), boxes: none, gate: none, stop_gate: none, moving: String(), move_waiters: List<Waiter>(), moved: moved, version: config.version.copy(), store: store, server: server, data: config.data.copy(), sessions: Map<u32, Session>(), runs: LinkedMap<String, Run>(), procs: LinkedMap<String, Proc>(), approvals: LinkedMap<String, Approval>(), lines: lines, lines_to: to, hash_to: hash_to, hash_done: hash_done, next_job: 0, auths: Map<i64, Auth>(), dummy_hash: dummy, failures: LinkedMap<String, List<i64>>(), thumbs: files.start(), events: config.events, next_prune: 0, grants: Map<String, Grant>(), calls: Map<String, Request>(), registry_at: config.registry.copy(), registry: Json.Null, registry_time: 0, install_to: install_to, install_done: install_done, fetching: List<Waiter>(), installs: Map<i64, Install>(), leftovers: List<String>(), next_sweep: 0, device_calls: Map<String, DeviceCall>(), minute_ms: config.minute_ms, next_due: 0, routine_runs: Map<String, RoutineRun>(), panel_calls: Map<String, Waiter>(), script_calls: Map<String, Request>(), slow_calls: Map<String, String>(), sealer: try secret_key(config.data.copy()) }
+        var i = Instance { browsers: LinkedMap<String, Browser>(), watchers: Map<u32, String>(), browser_done: browser_done, browser_to: browser_to, stopped_browsers: List<Thread>(), fills: Map<String, Fill>(), turns_ended: List<(String, String, String)>(), next_browser_sweep: 0, task_stops: Map<String, String>(), resumes: List<(String, String)>(), push_to: push_to, push_gone: push_gone, move_to: move_to, move_done: move_done, lan: config.lan, bridge: none, stop_bridge: none, lan_port: 0, announcer: none, stop_announcer: none, to_close: List<ServerSocket>(), boxes: none, gate: none, stop_gate: none, moving: String(), move_waiters: List<Waiter>(), moved: moved, version: config.version.copy(), store: store, server: server, data: config.data.copy(), sessions: Map<u32, Session>(), runs: LinkedMap<String, Run>(), procs: LinkedMap<String, Proc>(), approvals: LinkedMap<String, Approval>(), lines: lines, lines_to: to, hash_to: hash_to, hash_done: hash_done, next_job: 0, auths: Map<i64, Auth>(), dummy_hash: dummy, failures: LinkedMap<String, List<i64>>(), thumbs: files.start(), events: config.events, next_prune: 0, grants: Map<String, Grant>(), calls: Map<String, Request>(), registry_at: config.registry.copy(), registry: Json.Null, registry_time: 0, install_to: install_to, install_done: install_done, fetching: List<Waiter>(), installs: Map<i64, Install>(), leftovers: List<String>(), next_sweep: 0, device_calls: Map<String, DeviceCall>(), minute_ms: config.minute_ms, next_due: 0, routine_runs: Map<String, RoutineRun>(), panel_calls: Map<String, Waiter>(), script_calls: Map<String, Request>(), running_flows: LinkedMap<String, flows.Flow>(), flow_steps: Map<String, (String, usize)>(), advancing: List<String>(), flow_results: List<(String, usize, bool, String)>(), flows_due: List<String>(), slow_calls: Map<String, String>(), sealer: try secret_key(config.data.copy()) }
         if config.sandboxes.len() > 0 and not i.lan { try i.sandboxes_on(config.sandboxes.copy(), config.sandbox_image.copy()) }
         // What waited behind a turn the restart cut short goes once the loop
         // runs; a queue the person left waiting by stopping a turn still waits.
@@ -932,6 +938,15 @@ impl Instance {
                 match i.next_queued(user, conversation, status) {
                     ok => {},
                     err(e) => eprintln("loom: the queue: {e}"),
+                }
+            }
+            // Then the routine flows a run's end moved along: a step's agent's
+            // program may have been in the middle of being handled then.
+            while i.flows_due.len() > 0 {
+                let id = i.flows_due.remove(0)
+                match i.advance_flow(id) {
+                    ok => {},
+                    err(e) => eprintln("loom: a routine's flow: {e}"),
                 }
             }
         }
@@ -2534,15 +2549,156 @@ impl Instance {
     }
 
     // A routine's run ended: keeps how it went, and notifies when it should.
-    fn routine_done(i: Instance, rr: RoutineRun, agent: String, conversation: String, status: String, error: String?, said: String) ! Error {
+    fn routine_done(i: mut Instance, rr: RoutineRun, agent: String, conversation: String, status: String, error: String?, said: String) ! Error {
         let r = try i.store.routine(rr.user.copy(), rr.routine.copy()) else return
         let last = merge(at(r.copy(), "last"), Obj.new().s("status", status.copy()).maybe("error", error.copy()).done())
         try i.routine_ran(rr.user.copy(), merge(r.copy(), Obj.new().j("last", last).done()))
+        // Its answer goes on to the flow's steps, when it has some.
+        if let Json.Array(steps) = at(r.copy(), "flow") {
+            if steps.len() > 0 { try i.start_flow(rr.user.copy(), r.copy(), agent.copy(), status == "done", said.copy()) }
+        }
         if bool_at(r.copy(), "notify") != some(true) { return }
         let name = str_at(r, "name") ?? String("A routine")
         let body = if status != "done" { "It didn't finish ({status}): {error.copy() ?? String("it stopped")}" } else if said.trim().len() == 0 { String("Done.") } else { cut_short(said, 300) }
         i.log(rr.user.copy(), agent.copy(), "notify", "Notified you: {name}", agent.copy())
         try i.event(rr.user, "notify", Obj.new().s("agent", agent).s("conversation", conversation).s("title", name).s("body", body).done())
+    }
+
+    // --- Routine flows (PLAN.md, "Routine flows") ---
+
+    // The routine `r` ran, and its flow starts: the routine is its first step,
+    // done or failed, and the steps after it go as their inputs finish.
+    fn start_flow(i: mut Instance, user: String, r: Json, agent: String, worked: bool, said: String) ! Error {
+        let given = match flows.read(at(r.copy(), "flow")) {
+            ok(s) => s,
+            err(e) => {
+                eprintln("loom: a routine's flow: {e}")
+                return
+            },
+        }
+        var steps: List<flows.Step> = [flows.Step { name: String("routine"), agent: agent.copy(), prompt: String(), after: List<String>(), state: if worked { flows.State.Done } else { flows.State.Failed }, answer: said.copy(), run: String() }]
+        steps.extend(given)
+        let id = try i.store.new_id("fl")
+        let routine_id = str_at(r.copy(), "id") ?? String()
+        let name = str_at(r, "name") ?? String("A routine")
+        i.log(user.copy(), String(), "routine", "Started the flow of {name}", String("schedule"))
+        var f = flows.Flow { id: id.copy(), user: user.copy(), routine: routine_id, name: name, steps: steps, stopped: false, told: String() }
+        let status = flows.status(f.copy())
+        f.told = "{status}"
+        try i.event(user, "flow.updated", Obj.new().j("flow", status).done())
+        i.running_flows.insert(id.copy(), f)
+        // From the loop, since the routine's run is ending now.
+        i.flows_due.push(id)
+    }
+
+    // Starts each step of flow `id` that's ready and whose agent is free in its
+    // chat, and tells the person's devices how it stands. A flow that's
+    // finished goes.
+    fn advance_flow(i: mut Instance, id: String) ! Error {
+        var f = i.running_flows.remove(id.copy()) else return
+        var names = Map<String, String>()
+        for a in try i.store.agents(f.user.copy()) { names.insert(str_at(a.copy(), "id") ?? String(), str_at(a, "name") ?? String()) }
+        // A step whose agent is gone fails, and one whose run ended as it
+        // started (flow_step_done keeps those while the flow is out here), and
+        // what comes after them is looked at again.
+        i.advancing.push(id.copy())
+        var again = true
+        while again {
+            again = false
+            var kept = List<(String, usize, bool, String)>()
+            for (flow_id, k, worked, said) in i.flow_results.copy() {
+                if flow_id != id {
+                    kept.push((flow_id.copy(), k, worked, said.copy()))
+                    continue
+                }
+                f.steps[k].state = if worked { flows.State.Done } else { flows.State.Failed }
+                f.steps[k].answer = said.copy()
+            }
+            i.flow_results = kept
+            for k in flows.next(mut f) {
+                let agent_id = f.steps[k].agent.copy()
+                if not names.contains(agent_id.copy()) {
+                    f.steps[k].state = flows.State.Failed
+                    again = true
+                    continue
+                }
+                var conversation = try i.store.newest_conversation(f.user.copy(), agent_id.copy()) ?? Json.Null
+                if conversation == Json.Null {
+                    conversation = try i.store.add_conversation(f.user.copy(), agent_id.copy(), f.name.copy())
+                    try i.event(f.user.copy(), "conversation.created", Obj.new().j("conversation", conversation.copy()).done())
+                }
+                let conversation_id = str_at(conversation.copy(), "id") ?? String()
+                // It waits while its agent answers in its chat, and goes when a run ends.
+                var busy = false
+                for (_, run) in i.runs {
+                    if run.user == f.user and run.conversation == conversation_id { busy = true }
+                }
+                if busy { continue }
+                let inputs = flows.inputs_for(f.copy(), k, names.copy())
+                let message_id = try i.store.new_id("msg")
+                let blocks = Json.Array([Obj.new().s("kind", String("text")).s("text", f.steps[k].prompt.copy()).done()])
+                let message = Obj.new().s("id", message_id.copy()).s("conversation", conversation_id.copy()).s("role", String("person")).s("from", f.routine.copy()).i("at", now()).j("blocks", blocks).done()
+                try i.store.put_message(f.user.copy(), message.copy())
+                try i.event(f.user.copy(), "message.created", Obj.new().s("conversation", conversation_id).j("message", message).done())
+                let run_id = try i.store.new_id("run")
+                f.steps[k].state = flows.State.Running
+                f.steps[k].run = run_id.copy()
+                i.flow_steps.insert(run_id.copy(), (f.id.copy(), k))
+                i.log(f.user.copy(), agent_id, "routine", "Ran step {f.steps[k].name} of the flow of {f.name}", String("schedule"))
+                let from = "the person's routine \"{f.name}\": step {f.steps[k].name} of its flow, which hands each agent's answer on to the next. The person set it up, but isn't writing this"
+                try i.start_run(f.user.copy(), conversation, run_id, message_id, f.steps[k].prompt.copy(), List<Json>(), from, inputs)
+                for (flow_id, _, _, _) in i.flow_results {
+                    if flow_id == id { again = true }
+                }
+            }
+        }
+        _ = i.advancing.pop()
+        let after = flows.status(f.copy())
+        if "{after}" != f.told {
+            f.told = "{after}"
+            try i.event(f.user.copy(), "flow.updated", Obj.new().j("flow", after).done())
+        }
+        if flows.finished(f.copy()) {
+            i.log(f.user.copy(), String(), "routine", if f.stopped { "Stopped the flow of {f.name}" } else { "Finished the flow of {f.name}" }, String("schedule"))
+            return
+        }
+        i.running_flows.insert(id.copy(), f)
+    }
+
+    // A step's run ended: its answer goes on, from the loop.
+    fn flow_step_done(i: mut Instance, id: String, k: usize, worked: bool, said: String) {
+        if i.advancing.contains(id.copy()) {
+            i.flow_results.push((id.copy(), k, worked, said.copy()))
+            return
+        }
+        if let f = mut i.running_flows.find(id.copy()) {
+            f.steps[k].state = if worked { flows.State.Done } else { flows.State.Failed }
+            f.steps[k].answer = said.copy()
+        }
+        if not i.flows_due.contains(id.copy()) { i.flows_due.push(id.copy()) }
+    }
+
+    // routine.stop: the routine's running flow stops. Its steps that are
+    // running are stopped, and the rest skipped.
+    fn stop_flow(i: mut Instance, user: String, routine: String) -> Answer ! Error {
+        var stopping = List<String>()
+        var runs = List<String>()
+        for (id, f) in i.running_flows {
+            if f.user == user and f.routine == routine { stopping.push(id.copy()) }
+        }
+        for id in stopping.copy() {
+            if let f = mut i.running_flows.find(id.copy()) {
+                f.stopped = true
+                for k in 0usize..f.steps.len() {
+                    if f.steps[k].state == flows.State.Waiting { f.steps[k].state = flows.State.Skipped }
+                    if f.steps[k].state == flows.State.Running { runs.push(f.steps[k].run.copy()) }
+                }
+            }
+            try i.advance_flow(id)
+        }
+        for run in runs { try i.stop_run(run) }
+        if stopping.len() == 0 { return Answer.Refused(String("not_running"), String("That routine's flow isn't running.")) }
+        return Answer.Value(Obj.new().done())
     }
 
     // routine.put: makes a routine, or changes one, `by` a device or an
@@ -2564,6 +2720,20 @@ impl Instance {
         let agent_key = str_at(m.copy(), "agent") ?? String()
         let agent = try i.find_agent(user.copy(), agent_key.copy()) else return Answer.Refused(String("not_found"), "There's no agent {agent_key}.")
         let agent_id = str_at(agent, "id") ?? String()
+        // The flow after it (PLAN.md, "Routine flows"), its steps' agents found by name or id.
+        var flow = at(m.copy(), "flow")
+        if flow != Json.Null {
+            var steps = match flows.read(flow.copy()) {
+                ok(s) => s,
+                err(e) => return Answer.Refused(String("bad_request"), "{e}"),
+            }
+            for k in 0usize..steps.len() {
+                let key = steps[k].agent.copy()
+                let found = try i.find_agent(user.copy(), key.copy()) else return Answer.Refused(String("not_found"), "Step {steps[k].name}: there's no agent {key}.")
+                steps[k].agent = str_at(found, "id") ?? String()
+            }
+            flow = if steps.len() == 0 { Json.Null } else { flows.to_json(steps) }
+        }
         // A schedule, a webhook, or both.
         let schedule = at(m.copy(), "schedule")
         let s = routines.read(schedule.copy())
@@ -2597,7 +2767,7 @@ impl Instance {
         // Where it last posted, kept while its agent stays the same.
         let conversation = if str_at(old.copy(), "agent") == some(agent_id.copy()) { str_at(old.copy(), "conversation") ?? String() } else { String() }
         let id = if id_given.len() > 0 { id_given } else { try i.store.new_id("rt") }
-        let r = Obj.new().s("id", id).s("name", name.copy()).s("agent", agent_id.copy()).s("prompt", prompt).j("schedule", schedule).maybe("hook", if webhook { some(hook) } else { none }).maybe("secret", if webhook { some(secret) } else { none }).s("when", when).s("tz", tz).b("on", on).b("notify", notify).b("catch_up", catch_up).s("conversation", conversation).i("next", next).j("last", at(old.copy(), "last")).s("by", by.copy()).i("at", t).done()
+        let r = Obj.new().s("id", id).s("name", name.copy()).s("agent", agent_id.copy()).s("prompt", prompt).j("schedule", schedule).maybe("hook", if webhook { some(hook) } else { none }).maybe("secret", if webhook { some(secret) } else { none }).s("when", when).s("tz", tz).b("on", on).b("notify", notify).b("catch_up", catch_up).s("conversation", conversation).i("next", next).j("last", at(old.copy(), "last")).j("flow", flow).s("by", by.copy()).i("at", t).done()
         i.log(user.copy(), agent_id, "routine", if old == Json.Null { "Made the routine {name}" } else { "Changed the routine {name}" }, by)
         try i.routine_ran(user, r.copy())
         return Answer.Value(Obj.new().j("routine", r).done())
@@ -4525,6 +4695,13 @@ impl Instance {
             let answer = if status == "done" { Answer.Value(Obj.new().s("reply", said.copy()).done()) } else { Answer.Refused(String("agent_failed"), "It couldn't answer ({status}): {error.copy() ?? String("it stopped")}") }
             i.answer_cmd(w, answer)
         }
+        // A flow's step: its answer goes on to the steps after it.
+        var step: (String, usize)? = none
+        if let s = i.flow_steps.remove(r.id.copy()) { step = some(s) }
+        if let (flow_id, k) = step {
+            asked = true
+            i.flow_step_done(flow_id, k, status == "done", said.copy())
+        }
         if let rr = i.routine_runs.remove(r.id.copy()) {
             try i.routine_done(rr, r.agent.copy(), r.conversation.copy(), status.copy(), error.copy(), said)
         } else if not asked and (status == "done" or status == "failed") {
@@ -4535,6 +4712,14 @@ impl Instance {
         var finished = Obj.new().s("run", r.id.copy()).s("status", status.copy()).maybe("error", error)
         if r.usage != Json.Null { finished = finished.j("usage", r.usage.copy()) }
         try i.event(r.user.copy(), "run.finished", finished.done())
+        // A flow's step that waited for this agent to be free in its chat goes now.
+        var flows_waiting = List<String>()
+        for (id, f) in i.running_flows {
+            if f.user == r.user { flows_waiting.push(id.copy()) }
+        }
+        for id in flows_waiting {
+            if not i.flows_due.contains(id.copy()) { i.flows_due.push(id.copy()) }
+        }
         // What waited for this turn goes next, from the loop: the agent's
         // program may be in the middle of being handled here.
         i.turns_ended.push((r.user.copy(), r.conversation.copy(), status.copy()))
@@ -4779,6 +4964,14 @@ impl Instance {
         }
         if name == "conversation.branch" { return try i.branch(user, device, args) }
         if name.starts_with("table.") { return try i.table_command(user, device, name, args) }
+        if name == "routine.stop" { return try i.stop_flow(user, str_at(args, "id") ?? String()) }
+        if name == "flow.list" {
+            var out = List<Json>()
+            for (_, f) in i.running_flows {
+                if f.user == user { out.push(flows.status(f.copy())) }
+            }
+            return Answer.Value(Obj.new().j("flows", Json.Array(out)).done())
+        }
         // Scripts (PLAN.md, "Scripts"): the person's own, on the instance's computer,
         // with a token only they make, in the app.
         if name.starts_with("scripts.") {

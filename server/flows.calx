@@ -1,0 +1,243 @@
+module server.flows
+
+// Routine flows (PLAN.md, "Routine flows"): a routine's answer goes on to
+// other agents, step by step. Each step waits for every step it comes after,
+// and gets their answers; a failed one is skipped, and a step whose inputs all
+// failed is skipped too. The first step is the routine itself, "routine". The
+// instance runs the steps and keeps the flows that are running; this is what
+// a flow is, and which steps go next.
+import std.json.{Json}
+import shared.obj.{Obj, at, str_at}
+
+pub const STEPS_MOST: usize = 20
+const NAME_MOST: usize = 40
+const PROMPT_MOST: usize = 20000
+// How much of each input's answer a step gets.
+const INPUT_MOST: usize = 8000
+
+pub enum State {
+    Waiting
+    Running
+    Done
+    Failed
+    Skipped
+}
+
+pub struct Step {
+    pub name: String
+    pub agent: String    // its id once the instance has found it; its name or id as given before
+    pub prompt: String
+    pub after: List<String>
+    pub state: State
+    pub answer: String
+    pub run: String
+}
+
+pub struct Flow {
+    pub id: String
+    pub user: String
+    pub routine: String
+    pub name: String    // the routine's
+    pub steps: List<Step>    // the routine first
+    pub stopped: bool
+    pub told: String    // its status as the apps last heard it
+}
+
+fn state_name(s: State) -> String {
+    return String(match s {
+        State.Waiting => "waiting",
+        State.Running => "running",
+        State.Done => "done",
+        State.Failed => "failed",
+        State.Skipped => "skipped",
+    })
+}
+
+// A routine's `flow` as routine.put takes it: a list of steps, each `name`,
+// `agent`, `prompt` and `after` (the steps it waits for: "routine", or steps
+// before it in the list, so a flow never loops back). Gives the steps, after
+// the routine's, or why it isn't a flow.
+pub fn read(flow: Json) -> List<Step> ! Error {
+    let Json.Array(given) = flow else fail "flow is a list of steps, each with a name, an agent, a prompt, and after: the steps it waits for."
+    if given.len() > STEPS_MOST { fail "A flow has {STEPS_MOST} steps at most." }
+    var steps = List<Step>()
+    var names: List<String> = [String("routine")]
+    for g in given {
+        let name = (str_at(g.copy(), "name") ?? String()).trim().copy()
+        if name.len() == 0 or name.len() > NAME_MOST { fail "Each step has a name, of up to {NAME_MOST} bytes." }
+        if names.contains(name.copy()) { fail "Two steps are named {name}, or one is named routine, which is the routine itself." }
+        let agent = (str_at(g.copy(), "agent") ?? String()).trim().copy()
+        if agent.len() == 0 { fail "Step {name} needs an agent." }
+        let prompt = (str_at(g.copy(), "prompt") ?? String()).trim().copy()
+        if prompt.len() == 0 or prompt.len() > PROMPT_MOST { fail "Step {name} needs a prompt, of up to {PROMPT_MOST} bytes." }
+        var after = List<String>()
+        match at(g.copy(), "after") {
+            Json.Null => after.push(names[names.len() - 1].copy()),
+            Json.Array(list) => {
+                for a in list {
+                    let Json.Str(s) = a else fail "Step {name}'s after is a list of step names."
+                    if not names.contains(s.copy()) { fail "Step {name} comes after {s}, which isn't routine or a step before it." }
+                    if not after.contains(s.copy()) { after.push(s.copy()) }
+                }
+            },
+            _ => fail "Step {name}'s after is a list of step names.",
+        }
+        if after.len() == 0 { fail "Step {name} comes after nothing: give it routine, or a step before it." }
+        names.push(name.copy())
+        steps.push(Step { name: name, agent: agent, prompt: prompt, after: after, state: State.Waiting, answer: String(), run: String() })
+    }
+    return steps
+}
+
+// The steps as routine.list keeps them.
+pub fn to_json(steps: List<Step>) -> Json {
+    var out = List<Json>()
+    for s in steps {
+        var after = List<Json>()
+        for a in s.after { after.push(Json.Str(a.copy())) }
+        out.push(Obj.new().s("name", s.name.copy()).s("agent", s.agent.copy()).s("prompt", s.prompt.copy()).j("after", Json.Array(after)).done())
+    }
+    return Json.Array(out)
+}
+
+// A running flow, as flow.updated tells the apps: each step's name, agent and
+// state.
+pub fn status(f: Flow) -> Json {
+    var steps = List<Json>()
+    for s in f.steps {
+        steps.push(Obj.new().s("name", s.name.copy()).s("agent", s.agent.copy()).s("status", state_name(s.state)).done())
+    }
+    return Obj.new().s("id", f.id.copy()).s("routine", f.routine.copy()).s("name", f.name.copy()).b("stopped", f.stopped).b("finished", finished(f)).j("steps", Json.Array(steps)).done()
+}
+
+fn index_of(f: Flow, name: String) -> usize? {
+    for k in 0usize..f.steps.len() {
+        if f.steps[k].name == name { return some(k) }
+    }
+    return none
+}
+
+// The steps to start now: each waiting one whose inputs have all finished,
+// with at least one done. One whose inputs all failed or were skipped is
+// skipped, and that may skip others after it. A stopped flow starts none.
+pub fn next(f: mut Flow) -> List<usize> {
+    var start = List<usize>()
+    if f.stopped { return start }
+    var changed = true
+    while changed {
+        changed = false
+        for k in 0usize..f.steps.len() {
+            if f.steps[k].state != State.Waiting or start.contains(k) { continue }
+            var all_in = true
+            var any_done = false
+            for a in f.steps[k].after.copy() {
+                let j = index_of(f, a) ?? 0
+                let st = f.steps[j].state
+                if st == State.Done { any_done = true } else if st == State.Waiting or st == State.Running { all_in = false }
+            }
+            if not all_in { continue }
+            if any_done {
+                start.push(k)
+            } else {
+                f.steps[k].state = State.Skipped
+                changed = true
+            }
+        }
+    }
+    return start
+}
+
+// Whether every step has finished, one way or another.
+pub fn finished(f: Flow) -> bool {
+    for s in f.steps {
+        if s.state == State.Waiting or s.state == State.Running { return false }
+    }
+    return true
+}
+
+// What step `k` is told with its prompt: its inputs' answers, and which
+// failed, in a [loom: …] block.
+pub fn inputs_for(f: Flow, k: usize, names: Map<String, String>) -> String {
+    let s = f.steps[k].copy()
+    var said = List<String>()
+    var missing = List<String>()
+    for a in s.after {
+        let j = index_of(f, a.copy()) ?? 0
+        let input = f.steps[j].copy()
+        let who = if let n = names.find(input.agent.copy()) { n.copy() } else { input.agent.copy() }
+        let label = if input.name == "routine" { "the routine \"{f.name}\" ({who})" } else { "step {input.name} ({who})" }
+        if input.state == State.Done {
+            var answer = input.answer.copy()
+            if answer.len() > INPUT_MOST {
+                var cut = String()
+                for r in answer.runes() {
+                    if cut.len() >= INPUT_MOST { break }
+                    cut.push(r)
+                }
+                answer = "{cut}…"
+            }
+            said.push("From {label}:\n{answer}")
+        } else {
+            missing.push(label)
+        }
+    }
+    var block = "This is step {s.name} of the person's routine flow \"{f.name}\". What the steps before it answered:\n\n{said.join("\n\n")}"
+    if missing.len() > 0 { block = "{block}\n\nThese failed, so their answers aren't here: {missing.join(", ")}." }
+    return "[loom: {block}]"
+}
+
+fn flow_of(after: List<List<str>>, states: List<State>) -> Flow {
+    var steps = List<Step>()
+    for k in 0usize..after.len() {
+        var a = List<String>()
+        for x in after[k] { a.push(String(x)) }
+        let name = if k == 0 { String("routine") } else { "s{k}" }
+        steps.push(Step { name: name, agent: "a_{k}", prompt: String("go"), after: a, state: states[k], answer: "answer {k}", run: String() })
+    }
+    return Flow { id: String("f_1"), user: String("u_1"), routine: String("rt_1"), name: String("Morning"), steps: steps, stopped: false, told: String() }
+}
+
+@test
+fn reading_a_flow() {
+    let steps = read(Json.Array([Obj.new().s("name", String("sum")).s("agent", String("Writer")).s("prompt", String("Sum it up")).done(), Obj.new().s("name", String("post")).s("agent", String("Poster")).s("prompt", String("Post it")).j("after", Json.Array([Json.Str(String("routine")), Json.Str(String("sum"))])).done()]))!
+    assert(steps.len() == 2 and steps[0].after == [String("routine")] and steps[1].after == [String("routine"), String("sum")])
+    let loops = read_fails(Json.Array([Obj.new().s("name", String("a")).s("agent", String("X")).s("prompt", String("p")).j("after", Json.Array([Json.Str(String("b"))])).done(), Obj.new().s("name", String("b")).s("agent", String("X")).s("prompt", String("p")).done()]))
+    assert(loops)
+    let twice = read_fails(Json.Array([Obj.new().s("name", String("routine")).s("agent", String("X")).s("prompt", String("p")).done()]))
+    assert(twice)
+    let bare = read_fails(Json.Array([Obj.new().s("name", String("a")).s("agent", String("X")).done()]))
+    assert(bare)
+}
+
+@test
+fn steps_wait_for_every_input() {
+    // routine -> s1, s2; s3 after s1 and s2.
+    var f = flow_of([List<str>(), ["routine"], ["routine"], ["s1", "s2"]], [State.Done, State.Waiting, State.Waiting, State.Waiting])
+    assert(next(mut f) == [1usize, 2usize])
+    f.steps[1].state = State.Done
+    f.steps[2].state = State.Running
+    assert(next(mut f).len() == 0)
+    f.steps[2].state = State.Failed
+    assert(next(mut f) == [3usize])
+    let asked = inputs_for(f.copy(), 3, Map<String, String>())
+    assert(asked.starts_with("[loom: This is step s3") and asked.contains("From step s1 (a_1):\nanswer 1") and asked.contains("These failed, so their answers aren't here: step s2 (a_2)."))
+    assert(not finished(f.copy()))
+}
+
+@test
+fn a_step_whose_inputs_all_failed_is_skipped() {
+    // routine failed: s1 is skipped, and so is s2 after it.
+    var f = flow_of([List<str>(), ["routine"], ["s1"]], [State.Failed, State.Waiting, State.Waiting])
+    assert(next(mut f).len() == 0)
+    assert(f.steps[1].state == State.Skipped and f.steps[2].state == State.Skipped and finished(f.copy()))
+    var stopped = flow_of([List<str>(), ["routine"]], [State.Done, State.Waiting])
+    stopped.stopped = true
+    assert(next(mut stopped).len() == 0)
+}
+
+fn read_fails(flow: Json) -> bool {
+    return match read(flow) {
+        ok(_) => false,
+        err(_) => true,
+    }
+}

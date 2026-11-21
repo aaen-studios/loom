@@ -418,6 +418,15 @@ In a desktop instance, the instance's machine and your PC are the same machine, 
 - Missed while the instance was off, a routine runs once when it starts again, or waits for its next time, as the routine says (`catch_up`). Either way, missed runs never pile up.
 - The person makes, changes, pauses, runs and deletes them on the **Routines** page, and agents do the same with `schedule`, `list_routines` and `delete_routine`, which asks first.
 
+### Routine flows
+
+A routine's answer can go on to other agents, step by step, as a flow: the morning brief one agent writes is summed up by another, and a third posts it.
+
+- A flow is a list of steps after the routine, 20 at most. Each has a `name`, an `agent`, a `prompt` and `after`, the steps it waits for: `routine` (the routine itself) or steps before it in the list, so a flow never loops back. Left out, `after` is the step before it.
+- A step goes once every step it comes after has finished. It posts its prompt in its agent's chat, as from the routine, and the agent is told, beside the prompt, what each of those steps answered, and which of them failed. A step whose inputs all failed, or were skipped, is skipped. A step whose agent is busy in its chat waits for the turn to end, so two steps for one agent go one after the other.
+- The apps hear how a flow stands as each step starts and ends (`flow.updated`), and the person or an agent stops one with `routine.stop`: the step that's running is stopped, and the rest skipped. The person sets a flow up on the **Routines** page, and an agent with `schedule`.
+- A flow lives while it runs. A restart ends the ones that were running; the routine runs again on its schedule.
+
 ## Notifications and push
 
 - **Desktop.** The app lives in the tray and keeps the WebSocket open, so the core shows system notifications itself. No push service needed.

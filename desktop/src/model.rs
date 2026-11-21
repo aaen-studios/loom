@@ -360,6 +360,80 @@ pub struct Routine {
     pub last_status: String,
     pub last_at: i64,
     pub last_error: String,
+    /// What happens to its answer (PLAN.md, "Routine flows"): the steps after it.
+    pub flow: Vec<FlowStep>,
+}
+
+/// A step of a routine's flow: its agent is asked `prompt` once the steps it comes
+/// `after` have answered ("routine" is the routine itself).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct FlowStep {
+    pub name: String,
+    pub agent: String,
+    pub prompt: String,
+    pub after: Vec<String>,
+}
+
+impl FlowStep {
+    fn of(v: &Value) -> FlowStep {
+        FlowStep {
+            name: s(v, "name"),
+            agent: s(v, "agent"),
+            prompt: s(v, "prompt"),
+            after: v
+                .get("after")
+                .and_then(Value::as_array)
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|x| x.as_str().map(String::from))
+                        .collect()
+                })
+                .unwrap_or_default(),
+        }
+    }
+}
+
+/// Whether `flow` goes one step after another, each after the one before it: what the
+/// routine form edits. A flow an agent made with steps side by side is shown, not edited.
+pub fn flow_is_chain(flow: &[FlowStep]) -> bool {
+    let mut before = "routine";
+    for step in flow {
+        if step.after != [before.to_string()] {
+            return false;
+        }
+        before = &step.name;
+    }
+    true
+}
+
+/// A routine's flow while it runs: how far each step has got.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct RunningFlow {
+    pub id: String,
+    pub routine: String,
+    pub stopped: bool,
+    /// Each step's name, agent and status: waiting, running, done, failed or skipped.
+    /// The routine's own run is first, named "routine".
+    pub steps: Vec<(String, String, String)>,
+}
+
+impl RunningFlow {
+    fn of(v: &Value) -> RunningFlow {
+        RunningFlow {
+            id: s(v, "id"),
+            routine: s(v, "routine"),
+            stopped: v.get("stopped").and_then(Value::as_bool).unwrap_or(false),
+            steps: v
+                .get("steps")
+                .and_then(Value::as_array)
+                .map(|a| {
+                    a.iter()
+                        .map(|x| (s(x, "name"), s(x, "agent"), s(x, "status")))
+                        .collect()
+                })
+                .unwrap_or_default(),
+        }
+    }
 }
 
 /// Which of the schedules routine `r` has: "every", "daily", "weekdays", or "".
@@ -404,6 +478,11 @@ impl Routine {
             last_status: s(&last, "status"),
             last_at: last.get("at").and_then(Value::as_i64).unwrap_or(0),
             last_error: s(&last, "error"),
+            flow: r
+                .get("flow")
+                .and_then(Value::as_array)
+                .map(|a| a.iter().map(FlowStep::of).collect())
+                .unwrap_or_default(),
         }
     }
 }
@@ -425,6 +504,8 @@ pub struct RoutineForm {
     pub on: bool,
     pub catch_up: bool,
     pub webhook: bool,
+    /// The flow after it, or none to leave it as it is. An empty one takes it off.
+    pub flow: Option<Vec<FlowStep>>,
 }
 
 /// One entry of the activity log.
@@ -805,6 +886,8 @@ pub struct Model {
     /// The person's routines, oldest first.
     pub routines: Vec<Routine>,
     routines_stale: bool,
+    /// The routine flows running.
+    pub flows: Vec<RunningFlow>,
     /// The person's tasks, newest first.
     pub tasks: Vec<Task>,
     /// The open conversation's pinned messages, the newest pin first, while the pins
@@ -972,6 +1055,7 @@ impl Model {
         }
         if std::mem::take(&mut self.routines_stale) {
             out.push(self.load_routines());
+            out.push(self.load_flows());
         }
         if std::mem::take(&mut self.plugins_stale) {
             out.push(self.load_plugins());
@@ -1476,6 +1560,18 @@ impl Model {
             "routine" => {
                 self.routines_stale = true;
             }
+            // A flow that finished goes from the list.
+            "flow" => {
+                let flow = RunningFlow::of(f.get("flow").unwrap_or(&Value::Null));
+                let finished = f
+                    .pointer("/flow/finished")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false);
+                self.flows.retain(|x| x.id != flow.id);
+                if !finished {
+                    self.flows.push(flow);
+                }
+            }
             // An agent offered another server, and the person said yes here.
             "server" if kind == "server.offered" && s(f, "by") == self.me => {
                 self.offered.push(s(f, "address"));
@@ -1951,6 +2047,12 @@ impl Model {
                 ));
                 self.joined = None;
             }
+        } else if id.starts_with("app.flows") {
+            self.flows = f
+                .pointer("/value/flows")
+                .and_then(Value::as_array)
+                .map(|fs| fs.iter().map(RunningFlow::of).collect())
+                .unwrap_or_default();
         } else if id.starts_with("app.routines") {
             self.routines = f
                 .pointer("/value/routines")
@@ -3005,7 +3107,25 @@ impl Model {
         if !f.id.is_empty() {
             args["id"] = json!(f.id);
         }
+        if let Some(flow) = &f.flow {
+            args["flow"] = flow
+                .iter()
+                .map(|s| json!({"name": s.name, "agent": s.agent, "prompt": s.prompt, "after": s.after}))
+                .collect();
+        }
         json!({"t": "cmd", "id": cmd, "name": "routine.put", "args": args})
+    }
+
+    /// Asks for the routine flows running.
+    pub fn load_flows(&mut self) -> Value {
+        let id = self.id("app.flows");
+        json!({"t": "cmd", "id": id, "name": "flow.list"})
+    }
+
+    /// Stops routine `id`'s running flow.
+    pub fn stop_flow(&mut self, id: &str) -> Value {
+        let cmd = self.id("app.routine_stop");
+        json!({"t": "cmd", "id": cmd, "name": "routine.stop", "args": {"id": id}})
     }
 
     pub fn run_routine(&mut self, id: &str) -> Value {
@@ -3369,6 +3489,58 @@ mod tests {
         m.take(&json!({"t": "core.file", "id": f["id"], "error": {"message": "gone"}}));
         assert!(m.page.is_none());
         assert_eq!(m.notices.last().map(String::as_str), Some("gone"));
+    }
+
+    #[test]
+    fn a_routine_flow_is_saved_shown_while_it_runs_and_stopped() {
+        let mut m = Model::new();
+        let chain = vec![
+            FlowStep {
+                name: "1".into(),
+                agent: "a_2".into(),
+                prompt: "Sum it up".into(),
+                after: vec!["routine".into()],
+            },
+            FlowStep {
+                name: "2".into(),
+                agent: "a_3".into(),
+                prompt: "Post it".into(),
+                after: vec!["1".into()],
+            },
+        ];
+        assert!(flow_is_chain(&chain));
+        let mut side_by_side = chain.clone();
+        side_by_side[1].after = vec!["routine".into(), "1".into()];
+        assert!(!flow_is_chain(&side_by_side));
+        let form = RoutineForm {
+            name: "Morning".into(),
+            agent: "a_1".into(),
+            prompt: "news".into(),
+            kind: "every".into(),
+            at: "30".into(),
+            flow: Some(chain),
+            ..RoutineForm::default()
+        };
+        let f = m.save_routine(&form);
+        assert_eq!(f["args"]["flow"][1]["after"], json!(["1"]));
+        let kept = RoutineForm { flow: None, ..form };
+        assert!(
+            m.save_routine(&kept)["args"].get("flow").is_none(),
+            "no flow leaves it as it is"
+        );
+        let status = |finished: bool| json!({"t": "event", "kind": "flow.updated", "flow": {"id": "fl_1", "routine": "rt_1", "stopped": false, "finished": finished, "steps": [{"name": "routine", "agent": "a_1", "status": "done"}, {"name": "1", "agent": "a_2", "status": "running"}]}});
+        m.take(&status(false));
+        m.take(&status(false));
+        assert_eq!(m.flows.len(), 1, "a flow is listed once while it runs");
+        assert_eq!(
+            m.flows[0].steps[1],
+            ("1".into(), "a_2".into(), "running".into())
+        );
+        let stop = m.stop_flow("rt_1");
+        assert_eq!(stop["name"], "routine.stop");
+        assert_eq!(stop["args"]["id"], "rt_1");
+        m.take(&status(true));
+        assert!(m.flows.is_empty(), "a finished flow goes");
     }
 
     #[test]
