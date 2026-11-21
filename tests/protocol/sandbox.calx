@@ -1,6 +1,6 @@
 module tests.protocol.sandbox
 
-// Sandboxes (PLAN.md, "Sandboxes: where members' agents run"), with Podman. A
+// Sandboxes (PLAN.md, "Sandboxes: where members' agents run"), with Podman and with Docker, each that's here. A
 // member's agent runs in their own container, made from a small image with
 // `loom` and the fake agent in it. It gets the member's own secrets, never the
 // owner's program settings, has its home in the member's folder, and reaches
@@ -8,8 +8,8 @@ module tests.protocol.sandbox
 // so one of the instance's own isn't, and removing the member removes the
 // sandbox and the folder.
 //
-// It needs Linux, Podman and pasta (the passt package), and says it was
-// skipped without them.
+// It needs Linux, and Podman with pasta (the passt package) or Docker, and
+// says which it skipped.
 //
 //     calx tests/protocol/sandbox.calx
 import std.env
@@ -44,7 +44,7 @@ fn file_blocks(message: Json) -> usize {
 }
 
 // The image: loom and the fake agent, built here, on the system's own Ubuntu.
-fn build_image() ! Error {
+fn build_image(runtime: String) ! Error {
     let ctx = "{try fs.temp_dir()}/image"
     try fs.make_dir_all(ctx.copy())
     try sh(calx(), [String("build"), String("server/main.calx"), String("-o"), "{ctx}/loom"])
@@ -56,17 +56,14 @@ fn build_image() ! Error {
         String("RUN ldd /usr/local/bin/loom && loom version"),
     ]
     try fs.write_text("{ctx}/Containerfile", "{lines.join("\n")}\n")
-    try sh(String("podman"), [String("build"), String("-q"), String("-t"), String(IMAGE), ctx])
+    try sh(runtime, [String("build"), String("-q"), String("-t"), String(IMAGE), ctx])
 }
 
-fn run() ! Error {
-    if env.os() != "linux" or not has("podman") or not has("pasta") {
-        println("sandbox: skipped: it needs Linux, Podman and pasta")
-        return
-    }
-    try build_image()
+fn run(runtime: String) ! Error {
+    println("\n{runtime}:")
+    try build_image(runtime.copy())
     try check(true, "the sandbox image builds")
-    let inst = try Instance.start_with([String("--sandboxes"), String("podman"), String("--sandbox-image"), String(IMAGE)])
+    let inst = try Instance.start_with([String("--sandboxes"), runtime.copy(), String("--sandbox-image"), String(IMAGE)])
     let data = try fs.absolute(inst.data.copy())
     // A program that's only in the image, for the member.
     let added = try loom(inst.data.copy(), [String("acp"), String("add"), String("boxed"), String("/usr/local/bin/fake-agent")]).output()
@@ -118,7 +115,7 @@ fn run() ! Error {
     try check(own_key.contains("OWNER_KEY=her own"), "with a key of her own, she's past no budget, and her key wins")
 
     _ = try owner.cmd("q_3", "user.remove", Obj.new().s("user", ann_id.copy()).done())
-    let there = try Command.new(String("podman")).args([String("container"), String("exists"), "loom-{ann_id}"]).output()
+    let there = try Command.new(runtime).args([String("container"), String("inspect"), "loom-{ann_id}"]).output()
     try check(not there.status.success(), "removing her removes her sandbox")
     try check(not fs.exists(home), "and her folder")
     owner.close()
@@ -126,11 +123,20 @@ fn run() ! Error {
 }
 
 fn main() {
-    match run() {
-        ok => println("\nsandbox: all good"),
-        err(e) => {
-            eprintln("\nsandbox: {e}")
-            exit(1)
-        },
+    var ran = 0
+    for runtime in ["podman", "docker"] {
+        let usable = env.os() == "linux" and has(runtime) and (runtime != "podman" or has("pasta"))
+        if not usable {
+            println("sandbox: skipped {runtime}: it needs Linux, and Podman with pasta, or Docker")
+            continue
+        }
+        match run(String(runtime)) {
+            ok => ran += 1,
+            err(e) => {
+                eprintln("\nsandbox, with {runtime}: {e}")
+                exit(1)
+            },
+        }
     }
+    if ran > 0 { println("\nsandbox: all good") }
 }

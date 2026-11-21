@@ -1,7 +1,8 @@
 module server.gate
 
 // The one way out of a sandbox to the instance (server/sandbox.calx): a
-// listener on 127.0.0.1 that sandboxes reach through pasta, and that passes
+// listener on 127.0.0.1 that sandboxes reach through pasta (or, for Docker's,
+// on the gateway of its network `loom`), and that passes
 // only `loom mcp`'s two routes, GET /api/mcp/tools and POST /api/mcp/call, on
 // to the instance, with their agent's token. Everything else it turns away,
 // so a sandbox never reaches the instance's sign-in, its sessions or its files.
@@ -23,6 +24,7 @@ struct Call {
 }
 
 struct Gate {
+    host: String               // where it listens: 127.0.0.1, or Docker's gateway for sandboxes
     port: u16                  // the port to try
     instance: u16              // the instance's port on 127.0.0.1
     ready: Sender<String>
@@ -32,13 +34,13 @@ struct Gate {
     next: i64
 }
 
-// Starts the gate, for the instance on `instance`, on `port` or, if that's
+// Starts the gate, for the instance on `instance`, on `host` at `port` or, if that's
 // taken (or 0), one the system picks. Gives its thread, what stops it, and its port.
-pub fn start(port: u16, instance: u16) -> (Thread, Sender<bool>, u16) ! Error {
+pub fn start(host: String, port: u16, instance: u16) -> (Thread, Sender<bool>, u16) ! Error {
     var ready = Receiver<String>()
     let stop = Receiver<bool>()
     let stop_to = stop.sender()
-    let t = unsafe { Thread.spawn(Gate { port: port, instance: instance, ready: ready.sender(), stop: stop, calls: List<Call>(), asked: Map<i64, server.Request>(), next: 0 }) }
+    let t = unsafe { Thread.spawn(Gate { host: host.copy(), port: port, instance: instance, ready: ready.sender(), stop: stop, calls: List<Call>(), asked: Map<i64, server.Request>(), next: 0 }) }
     let said = unsafe { ready.wait_for(10000000000) } else { fail "the sandboxes' gate didn't start" }
     if said.starts_with("error:") { fail "the sandboxes' gate can't listen: {said[6..]}" }
     let p = u16.parse(said) else { fail "the sandboxes' gate said {said}" }
@@ -52,9 +54,9 @@ fn refuse(message: str) -> Response {
 impl Task for Gate {
     fn run(own self) {
         var g = self
-        var listening = match Server.listen(g.port, String("127.0.0.1")) {
+        var listening = match Server.listen(g.port, g.host.copy()) {
             ok(s) => s,
-            err(_) => match Server.listen(0, String("127.0.0.1")) {
+            err(_) => match Server.listen(0, g.host.copy()) {
                 ok(s) => s,
                 err(e) => {
                     g.ready.send("error:{e}")

@@ -39,7 +39,7 @@ loom.example.com {
 
 Commands go to the same program: `docker exec loom loom user list --data /data`.
 
-In Docker, only the owner's agents run: the sandboxes everyone else's agents run in need rootless Podman on the machine itself ([People](people.md)). For an instance with other people, install loom on the server.
+In Docker, only the owner's agents run: the sandboxes everyone else's agents run in need Podman or Docker on the machine itself, beside loom rather than around it ([People](people.md)). For an instance with other people, install loom on the server.
 
 ## On your PC, with no server
 
