@@ -7,8 +7,15 @@ module server.store
 // The event log lives here too: every change for a person is an event with a
 // seq counted per person from 1, stored before it's sent (protocol.md, "The
 // event log").
+//
+// What only the instance should read is sealed with XChaCha20-Poly1305 under
+// secret.key, which sits beside the database: an ACP program's settings, and
+// a routine's webhook secret. Each is bound to what it belongs to, so a
+// sealed value moved to another row doesn't open.
 import std.bytes
-import std.crypto.{PasswordHasher, random_bytes, verify_password}
+import std.crypto.{PasswordHasher, XChaCha20Poly1305, random_bytes, verify_password}
+import std.env.{os}
+import std.fs
 import std.hash.{sha256}
 import std.json.{Json, parse}
 import std.sqlite.{Database, Value}
@@ -119,6 +126,29 @@ pub struct AcpAgent {
 pub struct Store {
     db: Database
     hasher: PasswordHasher
+    sealer: XChaCha20Poly1305
+}
+
+// How a sealed value starts, in the column that holds it.
+const SEALED: str = "sealed:"
+
+// The instance's key for sealing (PLAN.md, "Accounts and invites"), in
+// secret.key in the data folder: made on the first start, and readable only by
+// the instance's own user. It's kept out of the database, so a copy of loom.db
+// alone opens nothing.
+pub fn secret_key(data: String) -> XChaCha20Poly1305 ! Error {
+    let path = "{data}/secret.key"
+    if fs.exists(path.copy()) {
+        let key = try fs.read(path.copy())
+        if key.len() != 32 { fail "{path} isn't a 32-byte key" }
+        return XChaCha20Poly1305.new(key)
+    }
+    let key = XChaCha20Poly1305.generate_key()
+    let part = "{path}.part"
+    try fs.write(part.copy(), key.copy())
+    if os() != "windows" { try fs.set_mode(part.copy(), 0o600) }
+    try fs.rename(part, path)
+    return XChaCha20Poly1305.new(key)
 }
 
 fn text(v: Value) -> String {
@@ -145,6 +175,16 @@ pub fn new_token() -> String {
     return bytes.hex(random_bytes(32))
 }
 
+// What a program's sealed settings are bound to.
+fn settings_aad(name: String) -> String {
+    return "loom acp settings {name}"
+}
+
+// What a routine's sealed webhook secret is bound to.
+fn hook_aad(routine: String) -> String {
+    return "loom hook {routine}"
+}
+
 fn token_hash(token: String) -> String {
     return bytes.hex(sha256(token.to_bytes()))
 }
@@ -153,10 +193,20 @@ impl Store {
     // Opens (or makes) the database at `path`. `hasher` hashes passwords;
     // tests pass a cheap one.
     pub fn open(path: String, hasher: PasswordHasher) -> Store ! Error {
+        // The key sits beside the database; one in memory gets a key of its own.
+        let sealer = if path == ":memory:" { XChaCha20Poly1305.new(XChaCha20Poly1305.generate_key()) } else { try secret_key(if let cut = path.replace("\\", "/").find_last("/") { path[..cut].copy() } else { String(".") }) }
         let db = try Database.open(path)
         try db.execute_script(String("PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON;"))
         try db.execute_script(String(SCHEMA))
-        let s = Store { db: db, hasher: hasher }
+        let s = Store { db: db, hasher: hasher, sealer: sealer }
+        // Settings kept before they were sealed are sealed once.
+        for r in try s.db.query(String("SELECT name, env FROM acp_settings")) {
+            let env = text(r[1].copy())
+            if env.len() > 0 and not env.starts_with(SEALED) {
+                let name = text(r[0].copy())
+                _ = try s.db.execute(String("UPDATE acp_settings SET env = ? WHERE name = ?"), [t(s.seal(env, settings_aad(name.copy()))), t(name)])
+            }
+        }
         // Messages stored before search came are indexed once.
         if try s.meta("search") == none {
             try s.begin()
@@ -167,6 +217,25 @@ impl Store {
             try s.commit()
         }
         return s
+    }
+
+    // `plain`, sealed under the instance's key and bound to `aad`, as text:
+    // "sealed:", then the nonce and the sealed bytes in hex, with a colon between.
+    fn seal(self, plain: String, aad: String) -> String {
+        let nonce = random_bytes(24)
+        let sealed = self.sealer.encrypt(nonce.copy(), plain.to_bytes(), aad.to_bytes())
+        return "{SEALED}{bytes.hex(nonce)}:{bytes.hex(sealed)}"
+    }
+
+    // What `seal` sealed, or `kept` itself when it isn't sealed.
+    fn unseal(self, kept: String, aad: String) -> String ! Error {
+        if not kept.starts_with(SEALED) { return kept.copy() }
+        let rest = kept[SEALED.len()..].copy()
+        let colon = rest.find(":") else { fail "a sealed value is damaged" }
+        let nonce = bytes.from_hex(rest[..colon].copy()) else { fail "a sealed value is damaged" }
+        let sealed = bytes.from_hex(rest[colon + 1..].copy()) else { fail "a sealed value is damaged" }
+        let opened = self.sealer.decrypt(nonce, sealed, aad.to_bytes()) else { fail "a sealed value doesn't open with this instance's key" }
+        return String.from_utf8(opened) ?? String()
     }
 
     // The next id of a kind: "u" gives u_1, u_2, ...
@@ -336,16 +405,17 @@ impl Store {
                 args.push(a.as_str() ?? String())
             }
         }
-        let env_text = text(r[5].copy())
+        let env_text = try self.unseal(text(r[5].copy()), settings_aad(text(r[0].copy())))
         let env = if env_text.len() > 0 { try parse(env_text) } else { Obj.new().done() }
         return some(AcpAgent { name: text(r[0].copy()), command: text(r[1].copy()), args: args, source: text(r[3].copy()), version: text(r[4].copy()), env: env })
     }
 
     // Where an ACP agent came from (a registry id, or "" for one added by
     // hand), its version, and its settings: the environment variables loom
-    // starts it with, as a JSON object. Keys among them are secrets.
+    // starts it with, as a JSON object. Keys are among them, so they're sealed.
     pub fn set_acp_settings(self, name: String, source: String, version: String, env: Json) ! Error {
-        _ = try self.db.execute(String("INSERT INTO acp_settings (name, source, version, env) VALUES (?, ?, ?, ?) ON CONFLICT (name) DO UPDATE SET source = excluded.source, version = excluded.version, env = excluded.env"), [t(name), t(source), t(version), t("{env}")])
+        let sealed = self.seal("{env}", settings_aad(name.copy()))
+        _ = try self.db.execute(String("INSERT INTO acp_settings (name, source, version, env) VALUES (?, ?, ?, ?) ON CONFLICT (name) DO UPDATE SET source = excluded.source, version = excluded.version, env = excluded.env"), [t(name), t(source), t(version), t(sealed)])
     }
 
     pub fn delete_acp_agent(self, name: String) ! Error {
@@ -666,24 +736,41 @@ impl Store {
 
     // --- Routines (PLAN.md, "Routines") ---
 
+    // A routine as it's kept: its webhook's secret sealed.
+    fn sealed_routine(self, routine: Json) -> Json {
+        let id = (routine.get(String("id")) ?? Json.Null).as_str() ?? String()
+        let secret = (routine.get(String("secret")) ?? Json.Null).as_str() ?? String()
+        if secret.len() == 0 or secret.starts_with(SEALED) { return routine.copy() }
+        return merge(routine, Obj.new().s("secret", self.seal(secret, hook_aad(id))).done())
+    }
+
+    // A routine as it was kept, its secret opened.
+    fn routine_of(self, kept: String) -> Json ! Error {
+        let routine = try parse(kept)
+        let id = (routine.get(String("id")) ?? Json.Null).as_str() ?? String()
+        let secret = (routine.get(String("secret")) ?? Json.Null).as_str() ?? String()
+        if not secret.starts_with(SEALED) { return routine }
+        return merge(routine, Obj.new().s("secret", try self.unseal(secret, hook_aad(id))).done())
+    }
+
     // Adds or replaces one of `user`'s routines, as JSON with its `id`, and
     // `next`, when it runs next (0 when it's off).
     pub fn put_routine(self, user: String, routine: Json) ! Error {
         let id = (routine.get(String("id")) ?? Json.Null).as_str() ?? String()
         let next = (routine.get(String("next")) ?? Json.Null).as_i64() ?? 0
-        _ = try self.db.execute(String("INSERT INTO routines (id, user, json, next) VALUES (?, ?, ?, ?) ON CONFLICT (id) DO UPDATE SET json = excluded.json, next = excluded.next"), [t(id), t(user), t("{routine}"), Value.Int(next)])
+        _ = try self.db.execute(String("INSERT INTO routines (id, user, json, next) VALUES (?, ?, ?, ?) ON CONFLICT (id) DO UPDATE SET json = excluded.json, next = excluded.next"), [t(id), t(user), t("{self.sealed_routine(routine.copy())}"), Value.Int(next)])
     }
 
     pub fn routine(self, user: String, id: String) -> Json? ! Error {
         let r = try self.db.query_one(String("SELECT json FROM routines WHERE id = ? AND user = ?"), [t(id), t(user)]) else return none
-        return some(try parse(text(r[0].copy())))
+        return some(try self.routine_of(text(r[0].copy())))
     }
 
     // `user`'s routines, oldest first.
     pub fn routines(self, user: String) -> List<Json> ! Error {
         var out = List<Json>()
         for r in try self.db.query(String("SELECT json FROM routines WHERE user = ? ORDER BY rowid"), [t(user)]) {
-            out.push(try parse(text(r[0].copy())))
+            out.push(try self.routine_of(text(r[0].copy())))
         }
         return out
     }
@@ -692,7 +779,7 @@ impl Store {
     pub fn every_routine(self) -> List<(String, Json)> ! Error {
         var out = List<(String, Json)>()
         for r in try self.db.query(String("SELECT user, json FROM routines")) {
-            out.push((text(r[0].copy()), try parse(text(r[1].copy()))))
+            out.push((text(r[0].copy()), try self.routine_of(text(r[1].copy()))))
         }
         return out
     }
@@ -701,7 +788,7 @@ impl Store {
     pub fn due_routines(self, time: i64) -> List<(String, Json)> ! Error {
         var out = List<(String, Json)>()
         for r in try self.db.query(String("SELECT user, json FROM routines WHERE next > 0 AND next <= ? ORDER BY next"), [Value.Int(time)]) {
-            out.push((text(r[0].copy()), try parse(text(r[1].copy()))))
+            out.push((text(r[0].copy()), try self.routine_of(text(r[1].copy()))))
         }
         return out
     }
@@ -709,7 +796,7 @@ impl Store {
     // The routine whose webhook is `hook`, with whose it is.
     pub fn routine_by_hook(self, hook: String) -> (String, Json)? ! Error {
         let r = try self.db.query_one(String("SELECT user, json FROM routines WHERE json_extract(json, '$.hook') = ?"), [t(hook)]) else return none
-        return some((text(r[0].copy()), try parse(text(r[1].copy()))))
+        return some((text(r[0].copy()), try self.routine_of(text(r[1].copy()))))
     }
 
     pub fn delete_routine(self, user: String, id: String) -> bool ! Error {
@@ -1062,4 +1149,30 @@ fn memory_is_kept_per_agent_and_shared() {
     assert(not s.forget(a.id.copy(), id, some(String("a_2")))!)
     assert(s.forget(a.id.copy(), id, some(String("a_1")))!)
     assert(s.memories(a.id.copy(), some(String("a_1")), String("1Password"), 10)!.len() == 0)
+}
+
+@test
+fn settings_and_hook_secrets_are_kept_sealed() {
+    let s = test_store()
+    let a = s.add_user(String("ann"), String("pw"), "owner")!
+    s.set_acp_agent(String("x"), String("x"), List<String>())!
+    s.set_acp_settings(String("x"), String(""), String("1"), parse(#"{"X_KEY":"sk-live-123"}"#)!)!
+    s.put_routine(a.id.copy(), parse(#"{"id":"rt_1","name":"Build","hook":"h_1","secret":"hook-secret-456","next":0}"#)!)!
+    var raw = String()
+    for r in s.db.query(String("SELECT env FROM acp_settings UNION ALL SELECT json FROM routines"))! {
+        raw.push_str(text(r[0].copy()))
+    }
+    assert(not raw.contains("sk-live-123") and not raw.contains("hook-secret-456"))
+    assert("{(s.acp_agent(String("x"))! ?? panic("no program")).env}".contains("sk-live-123"))
+    assert("{s.routine(a.id.copy(), String("rt_1"))! ?? Json.Null}".contains("hook-secret-456"))
+    let (_, hooked) = s.routine_by_hook(String("h_1"))! ?? panic("no hook")
+    assert("{hooked}".contains("hook-secret-456"))
+    // Moved to another program, sealed settings don't open.
+    _ = s.db.execute(String("INSERT INTO acp_settings (name, source, version, env) SELECT 'y', source, version, env FROM acp_settings WHERE name = 'x'"), List<Value>())!
+    s.set_acp_agent(String("y"), String("y"), List<String>())!
+    let opens = match s.acp_agent(String("y")) {
+        ok(_) => true,
+        err(_) => false,
+    }
+    assert(not opens)
 }
