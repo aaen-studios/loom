@@ -260,6 +260,12 @@ impl Store {
         return some(Device { id: text(r[0].copy()), user: text(r[1].copy()), name: text(r[2].copy()), kind: text(r[3].copy()) })
     }
 
+    // The time zone a device last said it's in, an IANA name.
+    pub fn device_tz(self, id: String) -> String ! Error {
+        let r = try self.db.query_one(String("SELECT tz FROM devices WHERE id = ?"), [t(id)]) else return String()
+        return text(r[0].copy())
+    }
+
     pub fn rename_device(self, id: String, name: String) ! Error {
         _ = try self.db.execute(String("UPDATE devices SET name = ? WHERE id = ?"), [t(name), t(id)])
     }

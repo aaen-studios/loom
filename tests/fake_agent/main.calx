@@ -24,6 +24,9 @@ module tests.fake_agent.main
 //                         exists, "missing NAME" for one that doesn't
 //     /image              sends back a small PNG
 //     /session            says its session id: "session ID"
+//     /context            says what loom told it this turn about where the person
+//                         is writing from (a "[loom: ...]" text block, which is
+//                         never a step), or "no context"
 //     /mcp TOOL JSON      calls TOOL of loom's own MCP server, the one named "loom"
 //                         in the session's mcpServers, with JSON as its
 //                         arguments, and says "TOOL: RESULT", or "TOOL failed:
@@ -80,6 +83,7 @@ pub enum Step {
     Files
     Image
     Session
+    Context
     Mcp(String, String)
 }
 
@@ -129,6 +133,8 @@ pub fn script(text: String) -> List<Step> {
                 none => (rest.copy(), String(#"{}"#)),
             }
             steps.push(Step.Mcp(tool, args))
+        } else if word == "/context" {
+            steps.push(Step.Context)
         } else if word == "/session" {
             steps.push(Step.Session)
         } else if word == "/image" {
@@ -412,6 +418,7 @@ impl Agent {
         let session = (params.get(String("sessionId")) ?? Json.Null).as_str() ?? String()
         var text = String()
         var got = List<String>()
+        var context = String()
         if let Json.Array(blocks) = params.get(String("prompt")) ?? Json.Null {
             for b in blocks {
                 let kind = (b.get(String("type")) ?? Json.Null).as_str() ?? String()
@@ -422,6 +429,11 @@ impl Agent {
                     let found = fs.exists(path_of((b.get(String("uri")) ?? Json.Null).as_str() ?? String()))
                     got.push(if found { "link {name}" } else { "missing {name}" })
                 } else if let t = (b.get(String("text")) ?? Json.Null).as_str() {
+                    // What loom says about where the person is, not a step.
+                    if t.starts_with("[loom:") {
+                        context = t.copy()
+                        continue
+                    }
                     if text.len() > 0 { text.push_str("\n") }
                     text.push_str(t)
                 }
@@ -486,6 +498,7 @@ impl Agent {
                 },
                 Step.Files => chunk(session.copy(), "agent_message_chunk", if got.len() == 0 { String("no files") } else { got.join(", ") }),
                 Step.Session => chunk(session.copy(), "agent_message_chunk", "session {session}"),
+                Step.Context => chunk(session.copy(), "agent_message_chunk", if context.len() > 0 { context.copy() } else { String("no context") }),
                 Step.Mcp(tool, args) => chunk(session.copy(), "agent_message_chunk", a.call_loom(session.copy(), tool, args)),
                 Step.Image => {
                     var content = LinkedMap<String, Json>()
