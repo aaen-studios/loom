@@ -213,8 +213,11 @@ pub struct Routine {
     pub name: String,
     pub agent: String,
     pub prompt: String,
-    /// Its gap in minutes.
-    pub every: i64,
+    /// How its schedule runs: "every" (minutes apart), "daily" or "weekdays" (at a time of
+    /// day), or "" for a routine that only runs by webhook.
+    pub kind: String,
+    /// The schedule's value as the form shows it: "30", or "08:00".
+    pub at: String,
     /// When it runs, in words: "every 30 minutes".
     pub when: String,
     pub notify: bool,
@@ -232,6 +235,28 @@ pub struct Routine {
     pub last_error: String,
 }
 
+/// Which of the schedules routine `r` has: "every", "daily", "weekdays", or "".
+fn schedule_kind(r: &Value) -> String {
+    for k in ["every", "daily", "weekdays"] {
+        if r.pointer(&format!("/schedule/{k}")).is_some() {
+            return k.into();
+        }
+    }
+    String::new()
+}
+
+/// Its schedule's value, as the form shows it: "30" or "08:00".
+fn schedule_value(r: &Value) -> String {
+    match r.get("schedule") {
+        Some(Value::Object(m)) => m
+            .values()
+            .next()
+            .map(|v| v.as_str().map_or_else(|| v.to_string(), String::from))
+            .unwrap_or_default(),
+        _ => String::new(),
+    }
+}
+
 impl Routine {
     fn of(r: &Value) -> Routine {
         let last = r.get("last").cloned().unwrap_or(Value::Null);
@@ -240,10 +265,8 @@ impl Routine {
             name: s(r, "name"),
             agent: s(r, "agent"),
             prompt: s(r, "prompt"),
-            every: r
-                .pointer("/schedule/every")
-                .and_then(Value::as_i64)
-                .unwrap_or(0),
+            kind: schedule_kind(r),
+            at: schedule_value(r),
             when: s(r, "when"),
             notify: r.get("notify").and_then(Value::as_bool).unwrap_or(false),
             on: r.get("on").and_then(Value::as_bool).unwrap_or(true),
@@ -266,8 +289,11 @@ pub struct RoutineForm {
     pub name: String,
     pub agent: String,
     pub prompt: String,
-    /// Minutes apart, or none for a routine that only runs by webhook.
-    pub every: Option<i64>,
+    /// "every", "daily" or "weekdays", as on `Routine`.
+    pub kind: String,
+    /// Minutes apart, or a time of day as HH:MM. Empty for a routine that only runs by
+    /// webhook. The instance checks it.
+    pub at: String,
     pub notify: bool,
     pub on: bool,
     pub catch_up: bool,
@@ -1740,7 +1766,14 @@ impl Model {
     /// Saves a routine, new (`id` empty) or changed.
     pub fn save_routine(&mut self, f: &RoutineForm) -> Value {
         let cmd = self.id("app.routine_put");
-        let schedule = f.every.map_or(Value::Null, |m| json!({"every": m}));
+        let at = f.at.trim();
+        let schedule = if at.is_empty() {
+            Value::Null
+        } else if f.kind == "every" {
+            json!({"every": at.parse::<i64>().map_or(json!(at), |m| json!(m))})
+        } else {
+            json!({ f.kind.as_str(): at })
+        };
         let mut args = json!({"name": f.name.trim(), "agent": f.agent, "prompt": f.prompt, "schedule": schedule, "notify": f.notify, "on": f.on, "catch_up": f.catch_up, "webhook": f.webhook});
         if !f.id.is_empty() {
             args["id"] = json!(f.id);

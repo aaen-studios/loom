@@ -13,6 +13,7 @@ path = "src/main.rs"
 auto-launch = "0.6.0"
 base64 = "0.23.1"
 qrcode = { version = "0.15.0", default-features = false }
+iana-time-zone = "0.1.65"
 chrono = { version = "0.4.45", default-features = false, features = ["clock"] }
 # GPUI Kit pins the GPUI it's built on and re-exports it, with gpui-base and
 # gpui-component, so this one pin keeps them all in step. Pinned exactly:

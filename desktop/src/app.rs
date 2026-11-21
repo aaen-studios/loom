@@ -125,7 +125,7 @@ pub struct Loom {
     note_in: Entity<InputState>,
     profile_in: Entity<TextareaState>,
     routine_name_in: Entity<InputState>,
-    routine_every_in: Entity<InputState>,
+    routine_at_in: Entity<InputState>,
     routine_prompt_in: Entity<TextareaState>,
     /// On the routines page: none for the list, `Some(None)` for a new routine,
     /// `Some(Some(id))` for one being changed. The form's agent and switches go with it.
@@ -135,6 +135,8 @@ pub struct Loom {
     routine_on: bool,
     routine_catch_up: bool,
     routine_webhook: bool,
+    /// The schedule the form shows: "every", "daily" or "weekdays".
+    routine_kind: String,
     /// The MCP server form: none, a new server, or the one with this name.
     mcp_open: Option<Option<String>>,
     mcp_name_in: Entity<InputState>,
@@ -221,7 +223,7 @@ impl Loom {
                 .placeholder("Elliot, in Oslo. Builds loom. Likes short answers.")
         });
         let routine_name_in = input(window, cx, "Morning brief", false);
-        let routine_every_in = input(window, cx, "30", false);
+        let routine_at_in = input(window, cx, "30", false);
         let routine_prompt_in = cx.new(|cx| {
             TextareaState::new(window, cx)
                 .auto_grow(4, 14)
@@ -374,7 +376,7 @@ ACTA_KEY=secret:ACTA_KEY",
             note_in,
             profile_in,
             routine_name_in,
-            routine_every_in,
+            routine_at_in,
             routine_prompt_in,
             routine_open: None,
             routine_agent: None,
@@ -382,6 +384,7 @@ ACTA_KEY=secret:ACTA_KEY",
             routine_on: true,
             routine_catch_up: true,
             routine_webhook: false,
+            routine_kind: "every".into(),
             program_open: None,
             mcp_open: None,
             mcp_name_in,
@@ -2501,6 +2504,37 @@ ACTA_KEY=secret:ACTA_KEY",
                         })),
                 );
             }
+            let mut kinds = div().flex().gap(px(space::XS));
+            for (kind, label) in [
+                ("every", "Every N minutes"),
+                ("daily", "Daily"),
+                ("weekdays", "On weekdays"),
+            ] {
+                kinds = kinds.child(
+                    self.button_owned(
+                        format!("routine-kind-{kind}"),
+                        label,
+                        self.routine_kind == kind,
+                    )
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        // From minutes to a time of day or back, the box gets an example of
+                        // the other kind, so it isn't left saying "30" for a daily routine.
+                        let was_minutes = this.routine_kind == "every";
+                        if was_minutes != (kind == "every") {
+                            let example = if kind == "every" { "30" } else { "08:00" };
+                            this.routine_at_in
+                                .update(cx, |s, cx| s.set_value(example, window, cx));
+                        }
+                        this.routine_kind = kind.into();
+                        cx.notify();
+                    })),
+                );
+            }
+            let at_label = if self.routine_kind == "every" {
+                "Every how many minutes (5 at least; empty for webhook only)"
+            } else {
+                "At what time, as HH:MM on a 24-hour clock, in your time zone (empty for webhook only)"
+            };
             let switches = div()
                 .flex()
                 .gap(px(space::XS))
@@ -2607,18 +2641,16 @@ ACTA_KEY=secret:ACTA_KEY",
                         .on_click(cx.listener(move |this, _, _, cx| {
                             let name = this.routine_name_in.read(cx).value().to_string();
                             let prompt = this.routine_prompt_in.read(cx).value().to_string();
-                            let every_text = this.routine_every_in.read(cx).value().to_string();
-                            let every = every_text.trim().parse::<i64>().ok();
+                            let at = this.routine_at_in.read(cx).value().to_string();
                             let Some(agent) = this.routine_agent.clone() else {
                                 this.model.notices.push("Pick the agent it runs.".into());
                                 cx.notify();
                                 return;
                             };
-                            if every.is_none() && !this.routine_webhook {
-                                this.model.notices.push(
-                                    "A routine needs how many minutes apart it runs, a webhook, or both."
-                                        .into(),
-                                );
+                            if at.trim().is_empty() && !this.routine_webhook {
+                                this.model
+                                    .notices
+                                    .push("A routine needs a schedule, a webhook, or both.".into());
                                 cx.notify();
                                 return;
                             }
@@ -2627,7 +2659,8 @@ ACTA_KEY=secret:ACTA_KEY",
                                 name,
                                 agent,
                                 prompt,
-                                every,
+                                kind: this.routine_kind.clone(),
+                                at,
                                 notify: this.routine_notify,
                                 on: this.routine_on,
                                 catch_up: this.routine_catch_up,
@@ -2687,10 +2720,8 @@ ACTA_KEY=secret:ACTA_KEY",
                     "What it's asked each time",
                     Textarea::new(&self.routine_prompt_in),
                 ))
-                .child(self.field(
-                    "Every how many minutes (5 at least; empty for webhook only)",
-                    Input::new(&self.routine_every_in),
-                ))
+                .child(self.field("When it runs", kinds))
+                .child(self.field(at_label, Input::new(&self.routine_at_in)))
                 .child(switches)
                 .children(webhook)
                 .child(caption(
@@ -2748,17 +2779,13 @@ ACTA_KEY=secret:ACTA_KEY",
                         .on_click(cx.listener(move |this, _, window, cx| {
                             this.routine_name_in
                                 .update(cx, |s, cx| s.set_value(r.name.clone(), window, cx));
-                            this.routine_every_in.update(cx, |s, cx| {
-                                s.set_value(
-                                    if r.every > 0 {
-                                        r.every.to_string()
-                                    } else {
-                                        String::new()
-                                    },
-                                    window,
-                                    cx,
-                                )
-                            });
+                            this.routine_at_in
+                                .update(cx, |s, cx| s.set_value(r.at.clone(), window, cx));
+                            this.routine_kind = if r.kind.is_empty() {
+                                "every".into()
+                            } else {
+                                r.kind.clone()
+                            };
                             this.routine_prompt_in
                                 .update(cx, |s, cx| s.set_value(r.prompt.clone(), window, cx));
                             this.routine_agent = Some(r.agent.clone());
@@ -2779,8 +2806,9 @@ ACTA_KEY=secret:ACTA_KEY",
                             .on_click(cx.listener(|this, _, window, cx| {
                                 this.routine_name_in
                                     .update(cx, |s, cx| s.set_value("", window, cx));
-                                this.routine_every_in
+                                this.routine_at_in
                                     .update(cx, |s, cx| s.set_value("30", window, cx));
+                                this.routine_kind = "every".into();
                                 this.routine_prompt_in
                                     .update(cx, |s, cx| s.set_value("", window, cx));
                                 this.routine_agent = this.model.selected.clone();
@@ -4122,6 +4150,11 @@ fn local_mode() -> bool {
 /// The core's config (core/README.md, "Config").
 fn core_config() -> String {
     let mut config = serde_json::json!({"data": data_dir()});
+    // The system's time zone, which the core tells the instance, so routines at a time of
+    // day keep this clock.
+    if let Ok(tz) = iana_time_zone::get_timezone() {
+        config["tz"] = tz.into();
+    }
     // Releases update themselves. A build from source doesn't, unless LOOM_UPDATE names a
     // manifest to try.
     match std::env::var("LOOM_UPDATE") {

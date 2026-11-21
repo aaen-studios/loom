@@ -20,7 +20,7 @@ void      loom_core_stop(uint8_t *core);
 
 ## Config
 
-`loom_core_start` takes `{"server": "https://loom.example.com", "data": "C:\Users\…\AppData\Roaming\Loom"}`, both optional. `data` is the folder for the cache, which is kept in memory without one. With `server`, or the one the cache last knew, the core looks for a token kept for it and connects; without a token, it waits for a login. Tests also give `token`, and `keyring`, a service of their own.
+`loom_core_start` takes `{"server": "https://loom.example.com", "data": "C:\Users\…\AppData\Roaming\Loom"}`, both optional. `data` is the folder for the cache, which is kept in memory without one. With `server`, or the one the cache last knew, the core looks for a token kept for it and connects; without a token, it waits for a login. With `tz`, the system's time zone as an IANA name (the desktop app reads it with `iana-time-zone`), the core gives it to the instance in `hello` and in a login's `device`, so routines at a time of day keep the person's clock. Tests also give `token`, and `keyring`, a service of their own.
 
 With `"mode": "local"` the core first starts an instance of its own ([PLAN.md, "An instance in the desktop app"](../PLAN.md#an-instance-in-the-desktop-app)): the server code, on a thread, listening on 127.0.0.1 on a free port, with its data in `{data}/instance`. It finds the ACP agents installed on the computer, makes a device for "This computer" owned by `username` (default `me`) of kind `kind` (default `windows`), and connects with that device's token, which is new every launch. Its cache is `{data}/local.db`, apart from `core.db`, so an instance elsewhere keeps its own. `loom_core_stop` stops the instance too.
 
