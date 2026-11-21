@@ -223,6 +223,7 @@ pub struct Instance {
     watchers: Map<u32, String>    // a session -> the browser it watches, by its key
     browser_to: Sender<browser.Back>
     stopped_browsers: List<Thread>    // browsers told to stop, joined at shutdown
+    fills: Map<String, Fill>    // browser_fill_secret calls on their browser
     next_browser_sweep: i64
 }
 
@@ -238,6 +239,17 @@ struct Browser {
     asks: List<String>    // browser_ask_person calls, answered when the person hands it back
     held: List<browser.Op>    // the agent's calls while the person has it
     actions: i64    // the person's clicks and keys since they took over
+    secret_ask: Json    // browser_ask_secret, while it waits: its call, why, ref and submit; or null
+}
+
+// A browser_fill_secret call, until its secret is in: what it fills, for the
+// person's yes when the page is on a site the secret hasn't gone to.
+struct Fill {
+    user: String
+    agent: String
+    name: String
+    ref_id: String
+    submit: bool
 }
 
 // A command answered once the installer's thread is done.
@@ -485,7 +497,7 @@ impl Instance {
         }
         let browser_done = Receiver<browser.Back>()
         let browser_to = browser_done.sender()
-        var i = Instance { browsers: LinkedMap<String, Browser>(), watchers: Map<u32, String>(), browser_done: browser_done, browser_to: browser_to, stopped_browsers: List<Thread>(), next_browser_sweep: 0, push_to: push_to, push_gone: push_gone, move_to: move_to, move_done: move_done, lan: config.lan, bridge: none, stop_bridge: none, lan_port: 0, announcer: none, stop_announcer: none, to_close: List<ServerSocket>(), boxes: none, gate: none, stop_gate: none, moving: String(), move_waiters: List<Waiter>(), moved: moved, version: config.version.copy(), store: store, server: server, data: config.data.copy(), sessions: Map<u32, Session>(), runs: LinkedMap<String, Run>(), procs: LinkedMap<String, Proc>(), approvals: LinkedMap<String, Approval>(), lines: lines, lines_to: to, hash_to: hash_to, hash_done: hash_done, next_job: 0, auths: Map<i64, Auth>(), dummy_hash: dummy, failures: LinkedMap<String, List<i64>>(), thumbs: files.start(), events: config.events, next_prune: 0, grants: Map<String, Grant>(), calls: Map<String, Request>(), registry_at: config.registry.copy(), registry: Json.Null, registry_time: 0, install_to: install_to, install_done: install_done, fetching: List<Waiter>(), installs: Map<i64, Install>(), leftovers: List<String>(), next_sweep: 0, device_calls: Map<String, DeviceCall>(), minute_ms: config.minute_ms, next_due: 0, routine_runs: Map<String, RoutineRun>(), panel_calls: Map<String, Waiter>(), sealer: try secret_key(config.data.copy()) }
+        var i = Instance { browsers: LinkedMap<String, Browser>(), watchers: Map<u32, String>(), browser_done: browser_done, browser_to: browser_to, stopped_browsers: List<Thread>(), fills: Map<String, Fill>(), next_browser_sweep: 0, push_to: push_to, push_gone: push_gone, move_to: move_to, move_done: move_done, lan: config.lan, bridge: none, stop_bridge: none, lan_port: 0, announcer: none, stop_announcer: none, to_close: List<ServerSocket>(), boxes: none, gate: none, stop_gate: none, moving: String(), move_waiters: List<Waiter>(), moved: moved, version: config.version.copy(), store: store, server: server, data: config.data.copy(), sessions: Map<u32, Session>(), runs: LinkedMap<String, Run>(), procs: LinkedMap<String, Proc>(), approvals: LinkedMap<String, Approval>(), lines: lines, lines_to: to, hash_to: hash_to, hash_done: hash_done, next_job: 0, auths: Map<i64, Auth>(), dummy_hash: dummy, failures: LinkedMap<String, List<i64>>(), thumbs: files.start(), events: config.events, next_prune: 0, grants: Map<String, Grant>(), calls: Map<String, Request>(), registry_at: config.registry.copy(), registry: Json.Null, registry_time: 0, install_to: install_to, install_done: install_done, fetching: List<Waiter>(), installs: Map<i64, Install>(), leftovers: List<String>(), next_sweep: 0, device_calls: Map<String, DeviceCall>(), minute_ms: config.minute_ms, next_due: 0, routine_runs: Map<String, RoutineRun>(), panel_calls: Map<String, Waiter>(), sealer: try secret_key(config.data.copy()) }
         if config.sandboxes.len() > 0 and not i.lan { try i.sandboxes_on(config.sandboxes.copy(), config.sandbox_image.copy()) }
         // Phones that were on stay on.
         if i.lan and try i.store.meta("phones") == some(String("on")) {
@@ -832,6 +844,15 @@ impl Instance {
                             b.busy -= 1
                             b.used = now()
                         }
+                        // A secret for a site it hasn't gone to waits for the person's yes.
+                        let needs = str_at(result.copy(), "needs")
+                        let fill = i.fills.remove(call.copy())
+                        if let f = fill {
+                            if let host = needs {
+                                i.fill_needs_yes(call, f, host)
+                                continue
+                            }
+                        }
                         if let req = i.calls.remove(call) { i.server.respond(req, json_response(200, result)) }
                     },
                     browser.Back.Frame(key, data, width, height) => i.browser_frame(key, data, width, height),
@@ -867,15 +888,26 @@ impl Instance {
     // open, and its result comes back to the loop.
     fn browse(i: mut Instance, req: Request, g: Grant, name: String, args: Json) -> Json? ! Error {
         let op = name.trim_prefix("browser_").copy()
+        if not " open snapshot click type press scroll back screenshot ask_person fill_secret ask_secret ".contains(" {op} ") { return some(tool_error("loom has no tool {name}.")) }
         let key = "{g.user}/{g.agent}"
-        if op == "ask_person" {
+        if op == "ask_person" or op == "ask_secret" {
             let b = i.browsers.find(key.copy()) else return some(tool_error(String("Your browser isn't open. Open the page first, then ask.")))
             if not b.open { return some(tool_error(String("Your browser isn't open. Open the page first, then ask."))) }
+            if op == "ask_secret" and b.secret_ask != Json.Null { return some(tool_error(String("You're asking your person for a secret already. Wait for that one."))) }
+        }
+        // A secret goes to the browser with the sites the person has let it go to.
+        var wire = op.copy()
+        var wire_args = args.copy()
+        if op == "fill_secret" {
+            let secret_name = str_at(args.copy(), "secret") ?? String()
+            let value = try i.secret(g.user.copy(), secret_name.copy()) else return some(tool_error("Your person has no secret {secret_name}. They add secrets in the app, or browser_ask_secret asks them to type one in once."))
+            wire = String("fill")
+            wire_args = Obj.new().s("ref", str_at(args.copy(), "ref") ?? String()).b("submit", bool_at(args.copy(), "submit") ?? false).s("name", secret_name.copy()).s("value", value).j("hosts", try i.secret_hosts(g.user.copy(), secret_name)).done()
         }
         if not i.browsers.contains(key.copy()) {
             let profile = try fs.absolute("{i.data}/browsers/{g.user}/{g.agent}")
             let (to, thread) = browser.start(key.copy(), profile, i.sandboxed(g.user.copy()), i.browser_to.copy())
-            i.browsers.insert(key.copy(), Browser { to: to, thread: thread, busy: 0, used: now(), open: false, person: false, asked: String(), asks: List<String>(), held: List<browser.Op>(), actions: 0 })
+            i.browsers.insert(key.copy(), Browser { to: to, thread: thread, busy: 0, used: now(), open: false, person: false, asked: String(), asks: List<String>(), held: List<browser.Op>(), actions: 0, secret_ask: Json.Null })
             i.watch_changed(key.copy())
         }
         let call = try i.store.new_id("bc")
@@ -896,14 +928,77 @@ impl Instance {
             i.browser_state(key)
             return none
         }
+        if op == "ask_secret" {
+            // Answered once the person types it in the app (browser.secret).
+            if let b = mut i.browsers.find(key.copy()) {
+                b.busy += 1
+                b.used = now()
+                b.secret_ask = Obj.new().s("call", call).s("why", if why.len() > 0 { why.copy() } else { String("It needs something only you know.") }).s("ref", str_at(args.copy(), "ref") ?? String()).b("submit", bool_at(args.copy(), "submit") ?? false).done()
+            }
+            let title = "{i.agent_name(g.user.copy(), g.agent.copy())} needs something from you"
+            i.log(g.user.copy(), g.agent.copy(), "browser", "Asked you for a secret: {cut_short(why.copy(), 200)}", g.agent.copy())
+            try i.event(g.user.copy(), "notify", Obj.new().s("agent", g.agent.copy()).s("title", title).s("body", if why.len() > 0 { why } else { String("Type it into its browser.") }).done())
+            i.browser_state(key)
+            return none
+        }
+        if wire == "fill" { i.fills.insert(call.copy(), Fill { user: g.user.copy(), agent: g.agent.copy(), name: str_at(wire_args.copy(), "name") ?? String(), ref_id: str_at(wire_args.copy(), "ref") ?? String(), submit: bool_at(wire_args.copy(), "submit") ?? false }) }
         if let b = mut i.browsers.find(key) {
             b.busy += 1
             b.used = now()
-            let o = browser.Op { call: call, name: op, args: args.copy() }
+            let o = browser.Op { call: call, name: wire, args: wire_args }
             // While the person has the browser, the agent's calls wait for it back.
             if b.person { b.held.push(o) } else { b.to.send(browser.In.Do(o)) }
         }
         return none
+    }
+
+    // The sites the person has let a secret be filled on, as a JSON list of hosts.
+    fn secret_hosts(i: Instance, user: String, name: String) -> Json ! Error {
+        let text = try i.store.meta("secret_hosts/{user}/{name}") ?? String("[]")
+        return match parse(text) {
+            ok(j) => j,
+            err(_) => Json.Array(List<Json>()),
+        }
+    }
+
+    // browser_fill_secret on a site its secret hasn't gone to: the person is
+    // asked, in the agent's chat, and the call waits for their answer.
+    fn fill_needs_yes(i: mut Instance, call: String, f: Fill, host: String) {
+        let req = i.calls.remove(call) else return
+        let site = if host.len() > 0 { host.copy() } else { String("a file on this computer") }
+        let action = Obj.new().s("name", String("browser.fill")).j("args", Obj.new().s("secret", f.name.copy()).s("site", host).s("ref", f.ref_id.copy()).b("submit", f.submit).s("agent", f.agent.copy()).done()).done()
+        let g = Grant { user: f.user.copy(), agent: f.agent.copy() }
+        let answer = match i.ask_person(req.copy(), g, "Fill your secret {f.name} on {site}", "other", action) {
+            ok(a) => a,
+            err(e) => some(tool_error("{e}")),
+        }
+        if let a = answer { i.server.respond(req, json_response(200, a)) }
+    }
+
+    // The person said yes to a secret on a site: the site is kept for it, and
+    // the call it waited on goes to the browser again.
+    fn fill_allowed(i: mut Instance, user: String, a: Approval, by: String) ! Error {
+        let args = at(a.action.copy(), "args")
+        let secret_name = str_at(args.copy(), "secret") ?? String()
+        let site = str_at(args.copy(), "site") ?? String()
+        var hosts = List<Json>()
+        if let Json.Array(had) = try i.secret_hosts(user.copy(), secret_name.copy()) { hosts = had }
+        if not hosts.contains(Json.Str(site.copy())) { hosts.push(Json.Str(site.copy())) }
+        try i.store.set_meta("secret_hosts/{user}/{secret_name}", "{Json.Array(hosts.copy())}")
+        i.log(user.copy(), a.agent.copy(), "approval", "Allowed: {a.title}", by.copy())
+        try i.event(user.copy(), "approval.answered", Obj.new().s("call", a.call.copy()).b("allow", true).b("always", false).s("by", by).done())
+        try i.event(user.copy(), "tool.finished", Obj.new().s("call", a.call.copy()).s("status", String("done")).j("output", Json.Array([Obj.new().s("kind", String("text")).s("text", "Allowed on {site}.").done()])).done())
+        let value = try i.secret(user.copy(), secret_name.copy()) ?? String()
+        let key = "{user}/{a.agent}"
+        let o = browser.Op { call: a.call.copy(), name: String("fill"), args: Obj.new().s("ref", str_at(args.copy(), "ref") ?? String()).b("submit", bool_at(args.copy(), "submit") ?? false).s("name", secret_name.copy()).s("value", value).j("hosts", Json.Array(hosts)).done() }
+        if let b = mut i.browsers.find(key) {
+            b.busy += 1
+            b.used = now()
+            i.fills.insert(a.call.copy(), Fill { user: user.copy(), agent: a.agent.copy(), name: secret_name, ref_id: str_at(args.copy(), "ref") ?? String(), submit: bool_at(args, "submit") ?? false })
+            if b.person { b.held.push(o) } else { b.to.send(browser.In.Do(o)) }
+            return
+        }
+        if let req = i.calls.remove(a.call.copy()) { i.server.respond(req, json_response(200, tool_error(String("The browser closed.")))) }
     }
 
     // Stops a browser. Its thread ends once it has, and is joined at shutdown.
@@ -947,9 +1042,9 @@ impl Instance {
         let (_, agent) = key.split_once("/") ?? (String(), String())
         var o = Obj.new().s("agent", agent)
         if let b = i.browsers.find(key) {
-            return o.b("open", b.open).b("person", b.person).s("asked", if b.asks.len() > 0 { b.asked.copy() } else { String() })
+            return o.b("open", b.open).b("person", b.person).s("asked", if b.asks.len() > 0 { b.asked.copy() } else { String() }).s("secret", str_at(b.secret_ask.copy(), "why") ?? String())
         }
-        o = o.b("open", false).b("person", false).s("asked", String())
+        o = o.b("open", false).b("person", false).s("asked", String()).s("secret", String())
         return o
     }
 
@@ -1000,6 +1095,28 @@ impl Instance {
             } else if i.watched_by(s.id()) == key {
                 i.unwatch(s.id())
             }
+            return Answer.Value(i.browser_status(key).done())
+        }
+        if name == "browser.secret" {
+            // What the person typed for browser_ask_secret goes into the field;
+            // the agent hears it's in, never what it is.
+            let value = str_at(args.copy(), "value") ?? String()
+            var ask = Json.Null
+            if let b = mut i.browsers.find(key.copy()) {
+                ask = b.secret_ask.copy()
+                b.secret_ask = Json.Null
+                if ask != Json.Null and value.len() > 0 {
+                    let o = browser.Op { call: str_at(ask.copy(), "call") ?? String(), name: String("fill"), args: Obj.new().s("ref", str_at(ask.copy(), "ref") ?? String()).b("submit", bool_at(ask.copy(), "submit") ?? false).s("name", String("what your person typed")).s("value", value.copy()).done() }
+                    if b.person { b.held.push(o) } else { b.to.send(browser.In.Do(o)) }
+                }
+            }
+            if ask == Json.Null { return Answer.Refused(String("not_asked"), String("The agent isn't asking for anything.")) }
+            if value.len() == 0 {
+                if let b = mut i.browsers.find(key.copy()) { b.busy -= 1 }
+                if let req = i.calls.remove(str_at(ask, "call") ?? String()) { i.server.respond(req, json_response(200, tool_error(String("Your person didn't give it.")))) }
+            }
+            i.log(user, agent, "browser", String(if value.len() > 0 { "You typed in what it asked for" } else { "You didn't give what it asked for" }), String())
+            i.browser_state(key.copy())
             return Answer.Value(i.browser_status(key).done())
         }
         if name != "browser.take" and name != "browser.give" and name != "browser.input" { return Answer.Refused(String("unknown_command"), "There's no command {name}.") }
@@ -3528,6 +3645,10 @@ impl Instance {
     fn answer_action(i: mut Instance, a: Approval, allow: bool, by: String) ! Error {
         let user = i.run_user(a.run.copy())
         if user.len() == 0 { return }
+        if allow and str_at(a.action.copy(), "name") == some(String("browser.fill")) {
+            try i.fill_allowed(user, a, by)
+            return
+        }
         var result = tool_error(String("Your person said no."))
         var status = String("denied")
         if allow {

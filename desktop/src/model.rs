@@ -585,6 +585,8 @@ pub struct Browser {
     pub person: bool,
     /// What the agent asked the person for, while it waits.
     pub asked: String,
+    /// What the agent asked the person to type into its page, while it waits.
+    pub secret: String,
 }
 
 /// The newest picture of the watched browser's page.
@@ -1112,6 +1114,7 @@ impl Model {
             open: f.get("open").and_then(Value::as_bool).unwrap_or(false),
             person: f.get("person").and_then(Value::as_bool).unwrap_or(false),
             asked: s(f, "asked"),
+            secret: s(f, "secret"),
         };
         if !b.open && self.watching.as_deref() == Some(agent.as_str()) {
             self.frame = None;
@@ -1142,6 +1145,19 @@ impl Model {
         self.watching = agent;
         self.frame = None;
         Some(frame)
+    }
+
+    /// What the person typed for the selected agent's browser_ask_secret, or
+    /// "" for no.
+    pub fn give_secret(&mut self, value: &str) -> Option<Value> {
+        let agent = self.selected.clone()?;
+        if let Some(b) = self.browsers.get_mut(&agent) {
+            b.secret.clear();
+        }
+        let id = self.id("browser.hand");
+        Some(
+            json!({"t": "cmd", "id": id, "name": "browser.secret", "args": {"agent": agent, "value": value}}),
+        )
     }
 
     /// Takes over the watched browser, or hands it back.

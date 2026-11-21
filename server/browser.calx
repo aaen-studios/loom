@@ -61,6 +61,7 @@ struct Worker {
     page: WebSocket?
     next_id: i64
     refs: Map<String, i64>    // e1, e2, ... -> the node each is, from the last outline
+    hidden: List<(String, String)>    // secrets filled into this browser, and their names, kept out of what the agent reads
     watched: bool
     casting: bool    // whether the page sends frames
 }
@@ -106,7 +107,7 @@ impl Task for Worker {
 pub fn start(key: String, profile: String, guarded: bool, back: Sender<Back>) -> (Sender<In>, Thread) {
     let inbox = Receiver<In>()
     let to = inbox.sender()
-    let t = unsafe { Thread.spawn(Worker { key: key.copy(), profile: profile.copy(), guarded: guarded, inbox: inbox, back: back.copy(), child: none, page: none, next_id: 0, refs: Map<String, i64>(), watched: false, casting: false }) }
+    let t = unsafe { Thread.spawn(Worker { key: key.copy(), profile: profile.copy(), guarded: guarded, inbox: inbox, back: back.copy(), child: none, page: none, next_id: 0, refs: Map<String, i64>(), hidden: List<(String, String)>(), watched: false, casting: false }) }
     return (to, t)
 }
 
@@ -380,7 +381,25 @@ impl Worker {
             cut.push_str("(The page goes on past here.)")
             t = cut
         }
-        return "Page: {try w.where()}\n\n{t}"
+        return w.hide("Page: {try w.where()}\n\n{t}")
+    }
+
+    // `t` with every secret filled into this browser in it named, not said.
+    fn hide(w: Worker, t: String) -> String {
+        var out = t.copy()
+        for (value, label) in w.hidden {
+            if value.len() > 0 { out = out.replace(value.copy(), "[secret {label}]") }
+        }
+        return out
+    }
+
+    // The page's host, as a secret is allowed for it: example.com, or
+    // localhost:8080. A file has none.
+    fn host(w: mut Worker) -> String ! Error {
+        let h = try w.call("Page.getNavigationHistory", Obj.new().done())
+        let k = int_at(h.copy(), "currentIndex") ?? 0
+        let entry = at(h, "entries").at(usize.wrap(k)) ?? Json.Null
+        return host_of(str_at(entry, "url") ?? String())
     }
 
     // The node a ref names, from the last outline.
@@ -462,6 +481,29 @@ impl Worker {
             }
             return text(String("Typed."))
         }
+        // A secret, typed into a field without the agent seeing it. With
+        // `hosts`, only on a page of one of them; otherwise the result names
+        // the host it needs (`needs`), for the person's yes.
+        if name == "fill" {
+            let label = str_at(args.copy(), "name") ?? String()
+            let value = str_at(args.copy(), "value") ?? String()
+            if let Json.Array(hosts) = at(args.copy(), "hosts") {
+                let here = try w.host()
+                if not hosts.contains(Json.Str(here.copy())) { return Obj.new().s("needs", here).done() }
+            }
+            let id = try w.node(args.copy())
+            _ = try w.call("DOM.focus", Obj.new().i("backendNodeId", id).done())
+            let found = try w.call("DOM.resolveNode", Obj.new().i("backendNodeId", id).done())
+            _ = try w.call("Runtime.callFunctionOn", Obj.new().s("objectId", str_at(at(found, "object"), "objectId") ?? String()).s("functionDeclaration", String(SELECT_ALL)).done())
+            if not w.hidden.contains((value.copy(), label.copy())) { w.hidden.push((value.copy(), label.copy())) }
+            _ = try w.call("Input.insertText", Obj.new().s("text", value).done())
+            if bool_at(args, "submit") ?? false {
+                try w.press_key(String("Enter"))
+                w.settle()
+                return text("Filled in {label}, and submitted.\n\n{try w.outline()}")
+            }
+            return text("Filled in {label}.")
+        }
         if name == "press" {
             try w.press_key(str_at(args, "key") ?? String())
             w.settle()
@@ -522,6 +564,18 @@ fn guarded_patterns() -> List<String> {
     var p: List<String> = ["file:*", "*://localhost/*", "*://localhost:*", "*://*.localhost/*", "*://*.localhost:*", "*://127.*", "*://0.*", "*://10.*", "*://192.168.*", "*://169.254.*", "*://[*"]
     for n in 16..32 { p.push("*://172.{n}.*") }
     return p
+}
+
+// An address's host and port, lowercase, without who's logged in: what a
+// secret is allowed for. "" for a file or a page with none.
+pub fn host_of(url: String) -> String {
+    let (_, rest) = url.split_once("://") ?? (String(), String())
+    var host = rest.copy()
+    for end in ["/", "?", "#"] {
+        if let k = host.find(end) { host = host[..k].copy() }
+    }
+    if let k = host.find_last("@") { host = host[k + 1..].copy() }
+    return host.to_lower_root()
 }
 
 // Why the browser won't open `url`, or none if it will. Every browser opens
@@ -654,6 +708,14 @@ fn a_guarded_browser_opens_only_the_web() {
     assert(refused(String("javascript:alert(1)"), false) != none)
     assert(refused(String(""), false) != none)
     assert(guarded_patterns().len() == 27)
+}
+
+@test
+fn hosts_are_what_a_secret_is_for() {
+    assert(host_of(String("https://Example.com/login?next=/")) == "example.com")
+    assert(host_of(String("http://me:pw@localhost:8080#top")) == "localhost:8080")
+    assert(host_of(String("file:///C:/x.html")) == "")
+    assert(host_of(String("about:blank")) == "")
 }
 
 @test

@@ -120,6 +120,7 @@ pub struct Loom {
     server_in: Entity<InputState>,
     user_in: Entity<InputState>,
     pass_in: Entity<InputState>,
+    secret_in: Entity<InputState>,
     code_in: Entity<InputState>,
     name_in: Entity<InputState>,
     skill_name_in: Entity<InputState>,
@@ -283,6 +284,18 @@ impl Loom {
                     }
                     InputEvent::PressEnter { .. } => this.weave_agent(cx),
                     _ => {}
+                }
+            },
+        )
+        .detach();
+        // What an agent asked for with browser_ask_secret: Enter sends it to the page.
+        let secret_in = input(window, cx, "Type it here", true);
+        cx.subscribe_in(
+            &secret_in,
+            window,
+            |this: &mut Loom, _, event: &InputEvent, window, cx| {
+                if let InputEvent::PressEnter { .. } = event {
+                    this.give_secret(true, window, cx);
                 }
             },
         )
@@ -456,6 +469,7 @@ ACTA_KEY=secret:ACTA_KEY",
             server_in,
             user_in,
             pass_in,
+            secret_in,
             code_in,
             name_in,
             skill_name_in,
@@ -1128,6 +1142,93 @@ ACTA_KEY=secret:ACTA_KEY",
                     )
                     .child(hand),
             )
+    }
+
+    /// Sends what the person typed for the agent's browser_ask_secret, or says
+    /// they won't, and clears the box either way.
+    fn give_secret(&mut self, give: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let value = if give {
+            self.secret_in.read(cx).value().to_string()
+        } else {
+            String::new()
+        };
+        if give && value.is_empty() {
+            return;
+        }
+        if let Some(f) = self.model.give_secret(&value) {
+            self.send(f);
+        }
+        self.secret_in
+            .update(cx, |s, cx| s.set_value("", window, cx));
+        cx.notify();
+    }
+
+    /// The agent asking for something only the person should know, typed
+    /// straight into its page: a masked box above the composer.
+    fn secret_ask(&self, agent: &model::Agent, cx: &mut Context<Self>) -> Option<Div> {
+        let state = self.model.browser(&agent.id);
+        if state.secret.is_empty() {
+            return None;
+        }
+        let p = self.p;
+        let tint = thread::color(&agent.color, p.dark);
+        Some(
+            div()
+                .w_full()
+                .flex()
+                .justify_center()
+                .px(px(space::XL))
+                .pb(px(space::S))
+                .child(
+                    div()
+                        .w_full()
+                        .max_w(px(space::COLUMN))
+                        .flex()
+                        .flex_col()
+                        .gap(px(space::S))
+                        .px(px(space::L))
+                        .py(px(space::M))
+                        .rounded(px(radius::BUTTON))
+                        .border_1()
+                        .border_color(tint)
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap(px(space::S))
+                                .text_size(px(size::SMALL))
+                                .text_color(p.ink)
+                                .child(Icon::new(Ico::ShieldCheck).small().text_color(tint))
+                                .child(state.secret.clone()),
+                        )
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap(px(space::S))
+                                .child(div().flex_1().child(Input::new(&self.secret_in)))
+                                .child(self.button("secret-skip", "Not now", false).on_click(
+                                    cx.listener(|this, _, window, cx| {
+                                        this.give_secret(false, window, cx)
+                                    }),
+                                ))
+                                .child(self.button("secret-give", "Fill it in", true).on_click(
+                                    cx.listener(|this, _, window, cx| {
+                                        this.give_secret(true, window, cx)
+                                    }),
+                                )),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(size::CAPTION))
+                                .text_color(p.ink_3)
+                                .child(format!(
+                                    "It goes into the page. {} never sees it.",
+                                    agent.name
+                                )),
+                        ),
+                ),
+        )
     }
 
     /// The agent asking for the person in its browser, above the composer while
@@ -2261,6 +2362,7 @@ ACTA_KEY=secret:ACTA_KEY",
             .filter(|a| self.model.watching.as_deref() == Some(a.id.as_str()))
             .map(|a| self.browser_panel(&a, window, cx));
         let ask = agent.as_ref().and_then(|a| self.browser_ask(a, cx));
+        let secret = agent.as_ref().and_then(|a| self.secret_ask(a, cx));
         let name = agent.as_ref().map(|a| a.name.clone()).unwrap_or_default();
         let tint = agent
             .as_ref()
@@ -2493,6 +2595,7 @@ ACTA_KEY=secret:ACTA_KEY",
                 )
             })
             .when_some(ask, |d, a| d.child(a))
+            .when_some(secret, |d, a| d.child(a))
             .when_some(composer, |d, c| {
                 d.child(
                     div()
