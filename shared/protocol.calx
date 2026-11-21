@@ -26,6 +26,7 @@ pub const CLOSE_PROTOCOL: u16 = 4000    // the first frame wasn't hello, or the 
 pub const CLOSE_TOKEN: u16 = 4001       // the token is wrong or was revoked
 pub const CLOSE_VERSION: u16 = 4002     // no protocol version in common
 pub const CLOSE_TOO_SLOW: u16 = 4003    // the app's queue filled up
+pub const CLOSE_MOVED: u16 = 4004       // the instance moved: the moved frame before it says where
 
 // The app offers, the instance picks: the newest version both speak, or none.
 pub fn pick_version(offered: List<i32>) -> i32? {
@@ -53,4 +54,10 @@ fn picks_none_without_a_common_version() {
     let offered: List<i32> = [7, 8]
     assert(pick_version(offered) == none)
     assert(pick_version(List<i32>()) == none)
+}
+
+// What the instance signs, with its Ed25519 key, to say it moved to
+// `address` at `at` (Unix ms): the moved frame's `signature` is over this.
+pub fn moved_message(instance: String, address: String, at: i64) -> String {
+    return "loom moved {instance} to {address} at {at}"
 }

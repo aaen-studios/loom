@@ -30,6 +30,7 @@ import shared.files.{is_sha, safe_name}
 import server.hashing
 import server.hashing.{Done, Job}
 import server.installer
+import server.move
 import server.plugins
 import server.push
 import server.routines
@@ -45,6 +46,7 @@ pub struct Config {
     pub registry: String    // the ACP Registry's address
     pub minute_ms: i64    // how long a minute is, for routines: 60,000, but less in tests
     pub apns: String    // where APNs is, or "" for Apple's: a test's fake one
+    pub version: String    // loom's version, for what a move says it came from
 }
 
 // How long events are kept (PLAN.md, "Sync"): `age_ms`, but always each
@@ -187,6 +189,12 @@ pub struct Instance {
     panel_calls: Map<String, Waiter>    // run -> a panel's plugin.message waiting on it
     push_to: Sender<push.Job>    // the thread that sends to APNs
     push_gone: Receiver<push.Gone>    // tokens APNs says are gone
+    move_to: Sender<move.Job>    // the thread that sends a move
+    move_done: Receiver<move.Done>
+    moving: String    // where the instance is moving to, while it is
+    move_waiters: List<Waiter>    // instance.move commands waiting on the move
+    moved: Json    // once the instance has moved: the signed moved frame, which every device gets
+    version: String
 }
 
 // A command answered once the installer's thread is done.
@@ -421,7 +429,13 @@ impl Instance {
         let dummy = config.hasher.hash(bytes.hex(random_bytes(16)))
         let (install_to, install_done) = installer.start()
         let (push_to, push_gone) = push.start(config.apns.copy())
-        return Instance { push_to: push_to, push_gone: push_gone, store: store, server: server, data: config.data.copy(), sessions: Map<u32, Session>(), runs: LinkedMap<String, Run>(), procs: LinkedMap<String, Proc>(), approvals: LinkedMap<String, Approval>(), lines: lines, lines_to: to, hash_to: hash_to, hash_done: hash_done, next_job: 0, auths: Map<i64, Auth>(), dummy_hash: dummy, failures: LinkedMap<String, List<i64>>(), thumbs: files.start(), events: config.events, next_prune: 0, grants: Map<String, Grant>(), calls: Map<String, Request>(), registry_at: config.registry.copy(), registry: Json.Null, registry_time: 0, install_to: install_to, install_done: install_done, fetching: List<Waiter>(), installs: Map<i64, Install>(), leftovers: List<String>(), next_sweep: 0, device_calls: Map<String, DeviceCall>(), minute_ms: config.minute_ms, next_due: 0, routine_runs: Map<String, RoutineRun>(), panel_calls: Map<String, Waiter>(), sealer: try secret_key(config.data.copy()) }
+        let (move_to, move_done) = move.start()
+        // A moved instance stays moved, and keeps telling devices where it went.
+        var moved = Json.Null
+        if let text = try store.meta("moved") {
+            if let ok(m) = parse(text) { moved = m }
+        }
+        return Instance { push_to: push_to, push_gone: push_gone, move_to: move_to, move_done: move_done, moving: String(), move_waiters: List<Waiter>(), moved: moved, version: config.version.copy(), store: store, server: server, data: config.data.copy(), sessions: Map<u32, Session>(), runs: LinkedMap<String, Run>(), procs: LinkedMap<String, Proc>(), approvals: LinkedMap<String, Approval>(), lines: lines, lines_to: to, hash_to: hash_to, hash_done: hash_done, next_job: 0, auths: Map<i64, Auth>(), dummy_hash: dummy, failures: LinkedMap<String, List<i64>>(), thumbs: files.start(), events: config.events, next_prune: 0, grants: Map<String, Grant>(), calls: Map<String, Request>(), registry_at: config.registry.copy(), registry: Json.Null, registry_time: 0, install_to: install_to, install_done: install_done, fetching: List<Waiter>(), installs: Map<i64, Install>(), leftovers: List<String>(), next_sweep: 0, device_calls: Map<String, DeviceCall>(), minute_ms: config.minute_ms, next_due: 0, routine_runs: Map<String, RoutineRun>(), panel_calls: Map<String, Waiter>(), sealer: try secret_key(config.data.copy()) }
     }
 
     pub fn url(self) -> String {
@@ -553,6 +567,12 @@ impl Instance {
                 match i.installed(d) {
                     ok => {},
                     err(e) => eprintln("loom: installing: {e}"),
+                }
+            }
+            while let d = i.move_done.next() {
+                match i.move_finished(d) {
+                    ok => {},
+                    err(e) => eprintln("loom: moving: {e}"),
                 }
             }
             while let done = i.hash_done.next() {
@@ -711,7 +731,15 @@ impl Instance {
         if req.path == "/api/info" and req.method == "GET" {
             let users = try i.store.user_count()
             let versions = Json.Array([Json.Int(i64(protocol.NEWEST))])
-            return some(json_response(200, Obj.new().s("instance", try i.store.meta("instance") ?? String()).s("key", try i.public_key()).j("protocol", versions).b("setup", users == 0).done()))
+            return some(json_response(200, Obj.new().s("instance", try i.store.meta("instance") ?? String()).s("key", try i.public_key()).j("protocol", versions).b("setup", users == 0).j("moved", i.moved.copy()).done()))
+        }
+        // Once moved, the rest is at the new place; while moving, nothing changes here.
+        if i.moved != Json.Null {
+            let to = str_at(i.moved.copy(), "address") ?? String()
+            return some(json_response(410, Obj.new().j("error", Obj.new().s("code", String("moved")).s("message", "This instance moved to {to}.").done()).j("moved", i.moved.copy()).done()))
+        }
+        if i.moving.len() > 0 and req.method != "GET" {
+            return some(http_error(503, "moving", "The instance is moving to {i.moving}. It'll be there in a moment."))
         }
         if req.path == "/files" or req.path.starts_with("/files/") {
             return some(try i.files_route(req))
@@ -1041,6 +1069,13 @@ impl Instance {
             let action = Obj.new().s("name", String("plugin.delete")).j("args", Obj.new().s("id", id.copy()).done()).done()
             return try i.ask_person(req, g, "Delete the plugin {str_at(p, "name") ?? id}", "delete", action)
         }
+        if name == "move_instance" {
+            let to = (str_at(args.copy(), "to") ?? String()).trim().copy()
+            let code = (str_at(args, "code") ?? String()).trim().copy()
+            if not move.valid_code(code.copy()) { return some(tool_error(String("code is the move code loom receive printed at the new place, starting loom-move-."))) }
+            let action = Obj.new().s("name", String("instance.move")).j("args", Obj.new().s("to", to.copy()).s("code", code).done()).done()
+            return try i.ask_person(req, g, "Move this instance to {to}", "move", action)
+        }
         return some(tool_error("loom has no tool {name}."))
     }
 
@@ -1279,12 +1314,74 @@ impl Instance {
         try i.start_run(user, conversation, run_id, message_id, text, List<Json>(), context)
     }
 
+    // --- Moving (PLAN.md, "Moving an instance") ---
+
+    // instance.move: the instance goes to `to`, a new place running `loom
+    // receive`, with the `code` it printed. Only the owner moves it, and not
+    // while an agent is answering. Until it's done, nothing changes here, so
+    // the new place gets all of it; then the instance is moved.
+    fn start_move(i: mut Instance, user: String, by: String, args: Json) -> Answer ! Error {
+        if try i.store.role(user.copy()) != some(String("owner")) { return Answer.Refused(String("not_allowed"), String("Only the instance's owner moves it.")) }
+        if i.moved != Json.Null { return Answer.Refused(String("moved"), "This instance has moved already, to {str_at(i.moved.copy(), "address") ?? String()}.") }
+        if i.moving.len() > 0 { return Answer.Refused(String("busy"), "This instance is moving already, to {i.moving}.") }
+        let to = (str_at(args.copy(), "to") ?? String()).trim().trim_suffix("/").copy()
+        let code = (str_at(args, "code") ?? String()).trim().copy()
+        if not (to.starts_with("https://") or to.starts_with("http://")) { return Answer.Refused(String("bad_request"), String("to is the new place's address, starting with https:// or http://.")) }
+        if not move.valid_code(code.copy()) { return Answer.Refused(String("bad_request"), String("code is the move code loom receive printed at the new place, starting loom-move-.")) }
+        if i.runs.len() > 0 { return Answer.Refused(String("busy"), String("An agent is still answering. Move once every run is done, or stop them.")) }
+        i.moving = to.copy()
+        i.move_to.send(move.Job { data: i.data.copy(), to: to.copy(), code: code, version: i.version.copy() })
+        i.log(user, String(), "device", "Started moving the instance to {to}", by)
+        println("loom: moving to {to}")
+        return Answer.Value(Obj.new().s("moving", to).done())
+    }
+
+    // The move is done, or failed. Once it's done, every device connected
+    // gets the moved frame, signed with the instance's key, and so does each
+    // that connects later.
+    fn move_finished(i: mut Instance, d: move.Done) ! Error {
+        let to = i.moving.copy()
+        i.moving = String()
+        if not d.ok {
+            eprintln("loom: the move to {to} failed: {d.message}")
+            while let w = i.move_waiters.pop() {
+                i.answer_cmd(w, Answer.Refused(String("move_failed"), d.message.copy()))
+            }
+            return
+        }
+        let instance = try i.store.meta("instance") ?? String()
+        let when = now()
+        let signature = try i.sign(protocol.moved_message(instance.copy(), to.copy(), when))
+        let frame = Obj.new().s("t", String("moved")).s("instance", instance).s("address", to.copy()).i("at", when).s("signature", signature).done()
+        try i.store.set_meta("moved", "{frame}")
+        i.moved = frame.copy()
+        while let w = i.move_waiters.pop() {
+            i.answer_cmd(w, Answer.Value(Obj.new().s("address", to.copy()).done()))
+        }
+        for (_, s) in i.sessions {
+            _ = i.server.send_text(s.socket, "{frame}")
+            i.server.close_socket(s.socket, protocol.CLOSE_MOVED, "moved to {to}")
+        }
+        println("loom: moved to {to}")
+    }
+
+    // `message` signed with the instance's key, as hex.
+    fn sign(i: Instance, message: String) -> String ! Error {
+        let seed = try i.store.meta("key") ?? String()
+        let key = Ed25519Key.from_seed(bytes.from_hex(seed) ?? List<u8>()) else {
+            fail "the instance's key is damaged"
+        }
+        return bytes.hex(key.sign(message.to_bytes()))
+    }
+
     // --- Routines (PLAN.md, "Routines") ---
 
     // Runs the routines that are due, and sets when each runs next.
     fn due(i: mut Instance) {
         let t = now()
         i.next_due = t + (if i.minute_ms < 1000 { i.minute_ms } else { 1000 })
+        // Routines run at the new place once the instance has moved there.
+        if i.moving.len() > 0 or i.moved != Json.Null { return }
         let due = match i.store.due_routines(t) {
             ok(d) => d,
             err(e) => {
@@ -1765,6 +1862,14 @@ impl Instance {
             try i.approve(s, user, device, f)
         } else if t == "cancel" {
             try i.cancel(s, user, str_at(f, "run") ?? String())
+        } else if i.moving.len() > 0 and (t == "send" or t == "cmd" or t == "approve") {
+            // While it moves, nothing changes, so the new place has it all.
+            let why = "The instance is moving to {i.moving}. It'll be there in a moment."
+            if t == "cmd" {
+                i.answer_cmd(Waiter { socket: s, id: str_at(f, "id") ?? String() }, Answer.Refused(String("moving"), why))
+            } else {
+                _ = i.server.send_text(s, error_frame("moving", why, str_at(f, "cid")))
+            }
         } else if t == "cmd" {
             try i.cmd(s, user, device, f)
         } else if t == "device" {
@@ -1787,6 +1892,12 @@ impl Instance {
             i.server.close_socket(s, protocol.CLOSE_TOKEN, String("that token isn't signed in"))
             return
         }
+        // A device that was away when the instance moved learns where it went.
+        if i.moved != Json.Null {
+            _ = i.server.send_text(s, "{i.moved}")
+            i.server.close_socket(s, protocol.CLOSE_MOVED, "moved to {str_at(i.moved.copy(), "address") ?? String()}")
+            return
+        }
         var offered = List<i32>()
         if let Json.Array(vs) = at(f.copy(), "versions") {
             for v in vs {
@@ -1806,7 +1917,7 @@ impl Instance {
         // once events have been pruned, or one ahead of the newest (the
         // instance was restored from an older backup), gets a snapshot.
         let reset = after > last or (first > 1 and after < first - 1)
-        _ = i.server.send_text(s, "{Obj.new().s("t", String("welcome")).i("version", i64(version)).s("user", user.copy()).s("device", device.id.copy()).i("seq", last).b("reset", reset).done()}")
+        _ = i.server.send_text(s, "{Obj.new().s("t", String("welcome")).i("version", i64(version)).s("user", user.copy()).s("device", device.id.copy()).i("seq", last).b("reset", reset).s("key", try i.public_key()).done()}")
         if reset {
             _ = i.server.send_text(s, "{try i.snapshot(user.copy(), last)}")
         } else {
@@ -2828,6 +2939,14 @@ impl Instance {
             try i.panel_message(Waiter { socket: s, id: id }, user, args)
             return
         }
+        // Answered once the move is done, or has failed.
+        if name == "instance.move" {
+            match try i.start_move(user, device, args) {
+                Answer.Value(_) => i.move_waiters.push(Waiter { socket: s, id: id }),
+                refused => i.answer_cmd(Waiter { socket: s, id: id }, refused),
+            }
+            return
+        }
         let result = try i.command(user, device, name.copy(), args)
         i.answer_cmd(Waiter { socket: s, id: id }, result)
     }
@@ -2979,6 +3098,10 @@ impl Instance {
     // A command's value, or its error's code and message.
     fn command(i: mut Instance, user: String, device: String, name: String, args: Json) -> Answer ! Error {
         let empty = Obj.new().done()
+        // From an agent, once the person said yes: the move is under way.
+        if name == "instance.move" {
+            return try i.start_move(user, device, args)
+        }
         if name == "conversation.create" {
             let agent = str_at(args.copy(), "agent") ?? String()
             if try i.store.agent(user.copy(), agent.copy()) == none { return Answer.Refused(String("not_found"), "There's no agent {agent}.") }
