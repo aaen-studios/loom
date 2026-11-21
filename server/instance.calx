@@ -62,6 +62,16 @@ struct Session {
     user: String
     device: String
     live: bool
+    key: String    // the device's public key, as it says it
+    tools: Json    // what it offers as a tool, and how: {run_command: "ask", ...}
+}
+
+// A call to one of the person's devices, until its result comes.
+struct DeviceCall {
+    user: String
+    device: String
+    agent: String
+    title: String
 }
 
 struct Block {
@@ -160,6 +170,7 @@ pub struct Instance {
     fetching: List<Waiter>    // commands waiting on the registry
     installs: Map<i64, Install>    // installs on the installer's thread
     leftovers: List<String>    // folders of removed ACP agents, removed once their programs have let go
+    device_calls: Map<String, DeviceCall>    // tc_ id -> a call sent to a device
     next_sweep: i64
 }
 
@@ -316,7 +327,7 @@ impl Instance {
         let (hash_to, hash_done) = hashing.start(config.hasher)
         let dummy = config.hasher.hash(bytes.hex(random_bytes(16)))
         let (install_to, install_done) = installer.start()
-        return Instance { store: store, server: server, data: config.data.copy(), sessions: Map<u32, Session>(), runs: LinkedMap<String, Run>(), procs: LinkedMap<String, Proc>(), approvals: LinkedMap<String, Approval>(), lines: lines, lines_to: to, hash_to: hash_to, hash_done: hash_done, next_job: 0, auths: Map<i64, Auth>(), dummy_hash: dummy, failures: LinkedMap<String, List<i64>>(), thumbs: files.start(), events: config.events, next_prune: 0, grants: Map<String, Grant>(), calls: Map<String, Request>(), registry_at: config.registry.copy(), registry: Json.Null, registry_time: 0, install_to: install_to, install_done: install_done, fetching: List<Waiter>(), installs: Map<i64, Install>(), leftovers: List<String>(), next_sweep: 0 }
+        return Instance { store: store, server: server, data: config.data.copy(), sessions: Map<u32, Session>(), runs: LinkedMap<String, Run>(), procs: LinkedMap<String, Proc>(), approvals: LinkedMap<String, Approval>(), lines: lines, lines_to: to, hash_to: hash_to, hash_done: hash_done, next_job: 0, auths: Map<i64, Auth>(), dummy_hash: dummy, failures: LinkedMap<String, List<i64>>(), thumbs: files.start(), events: config.events, next_prune: 0, grants: Map<String, Grant>(), calls: Map<String, Request>(), registry_at: config.registry.copy(), registry: Json.Null, registry_time: 0, install_to: install_to, install_done: install_done, fetching: List<Waiter>(), installs: Map<i64, Install>(), leftovers: List<String>(), next_sweep: 0, device_calls: Map<String, DeviceCall>() }
     }
 
     pub fn url(self) -> String {
@@ -398,7 +409,7 @@ impl Instance {
                     if req.path == "/ws" and req.method == "GET" {
                         // upgrade answers the request itself.
                         match i.server.upgrade(req.copy()) {
-                            ok(s) => i.sessions.insert(s.id(), Session { socket: s, user: String(), device: String(), live: false }),
+                            ok(s) => i.sessions.insert(s.id(), Session { socket: s, user: String(), device: String(), live: false, key: String(), tools: Json.Null }),
                             err(e) => eprintln("loom: /ws from {req.client}: {e}"),
                         }
                         continue
@@ -423,7 +434,12 @@ impl Instance {
                 },
                 some(Message(s, Binary(_))) => i.server.close_socket(s, protocol.CLOSE_PROTOCOL, String("binary frames aren't used")),
                 some(Closed(s, _, _)) => {
-                    _ = i.sessions.remove(s.id())
+                    if let gone = i.sessions.remove(s.id()) {
+                        match i.device_gone(gone.user, gone.device) {
+                            ok => {},
+                            err(e) => eprintln("loom: device: {e}"),
+                        }
+                    }
                 },
                 none => {
                     if signal.take() != none { break }
@@ -658,6 +674,14 @@ impl Instance {
         }
         if name == "message_agent" {
             return try i.message_agent(req, g, args)
+        }
+        if name == "list_devices" {
+            let devices = try i.live_devices(g.user.copy())
+            if devices.len() == 0 { return some(tool_text(String("None of your person's devices offers tools right now. A device offers them while its app runs, once your person turns them on there."))) }
+            return some(tool_text("{Json.Array(devices)}"))
+        }
+        if name == "use_device" {
+            return try i.use_device(req, g, args)
         }
         // These three ask the person first, every time.
         if name == "delete_agent" or name == "set_permission" {
@@ -1010,7 +1034,13 @@ impl Instance {
         } else if t == "cmd" {
             try i.cmd(s, user, device, f)
         } else if t == "device" {
-            if let tz = str_at(f, "tz") { try i.store.update_device_tz(device, tz) }
+            if let tz = str_at(f.copy(), "tz") { try i.store.update_device_tz(device, tz) }
+            if let session = mut i.sessions.find(s.id()) {
+                if let key = str_at(f.copy(), "key") { session.key = key }
+                if let Json.Object(_) = at(f.copy(), "tools") { session.tools = at(f, "tools") }
+            }
+        } else if t == "device.result" {
+            try i.device_result(user, device, f)
         } else if t == "hello" {
             i.server.close_socket(s, protocol.CLOSE_PROTOCOL, String("hello was sent already"))
         } else {
@@ -1062,7 +1092,7 @@ impl Instance {
             }
         }
         _ = i.server.send_text(s, "{Obj.new().s("t", String("synced")).i("seq", last).done()}")
-        i.sessions.insert(s.id(), Session { socket: s, user: user, device: device.id, live: true })
+        i.sessions.insert(s.id(), Session { socket: s, user: user, device: device.id, live: true, key: String(), tools: Json.Null })
     }
 
     fn snapshot(i: Instance, user: String, seq: i64) -> Json ! Error {
@@ -1704,10 +1734,13 @@ impl Instance {
     fn approve(i: mut Instance, s: ServerSocket, user: String, device: String, f: Json) ! Error {
         let call = str_at(f.copy(), "call") ?? String()
         let allow = bool_at(f.copy(), "allow") ?? false
-        let always = bool_at(f, "always") ?? false
+        let always = bool_at(f.copy(), "always") ?? false
+        let signed = at(f, "approval")
         var run = String()
+        var to_device = false
         if let a = i.approvals.find(call.copy()) {
             run = a.run.copy()
+            to_device = str_at(a.action.copy(), "name") == some(String("device.call"))
         } else {
             _ = i.server.send_text(s, error_frame("already_answered", String("That approval was answered already, or there's no such approval."), some(call)))
             return
@@ -1716,7 +1749,143 @@ impl Instance {
             _ = i.server.send_text(s, error_frame("not_found", String("There's no such approval."), some(call)))
             return
         }
+        if to_device {
+            try i.answer_device(call, allow, device, signed)
+            return
+        }
         try i.answer_approval(call, allow, always, device)
+    }
+
+    // --- The person's devices as tools (PLAN.md, "Your devices") ---
+
+    // The person's answer to a call to one of their devices. A yes goes to the
+    // device with the signature the approving device made, and the device
+    // checks it: the instance only carries it.
+    fn answer_device(i: mut Instance, call: String, allow: bool, by: String, approval: Json) ! Error {
+        let a = i.approvals.remove(call.copy()) else return
+        let user = i.run_user(a.run.copy())
+        if user.len() > 0 {
+            i.log(user.copy(), a.agent.copy(), "approval", if allow { "Allowed: {a.title}" } else { "Denied: {a.title}" }, by.copy())
+            try i.event(user, "approval.answered", Obj.new().s("call", call.copy()).b("allow", allow).b("always", false).s("by", by).done())
+        }
+        if not allow {
+            try i.device_done(call, String("denied"), String("Your person said no."))
+            return
+        }
+        try i.send_device_call(call, str_at(a.action.copy(), "device") ?? String(), str_at(a.action, "request") ?? String(), approval)
+    }
+
+    // The person's devices that are connected and offer tools.
+    fn live_devices(i: Instance, user: String) -> List<Json> ! Error {
+        var out = List<Json>()
+        var seen = List<String>()
+        for (_, s) in i.sessions {
+            if s.live and s.user == user and s.tools != Json.Null and not seen.contains(s.device.copy()) {
+                seen.push(s.device.copy())
+                if let d = try i.store.device(user.copy(), s.device.copy()) {
+                    out.push(Obj.new().s("id", d.id).s("name", d.name).s("kind", d.kind).j("tools", s.tools.copy()).done())
+                }
+            }
+        }
+        return out
+    }
+
+    // use_device: one of the device's tools, as the person set it on that
+    // device. One that asks shows in the agent's chat as a question; its
+    // answer is signed on the device that gives it.
+    fn use_device(i: mut Instance, req: Request, g: Grant, args: Json) -> Json? ! Error {
+        let key = str_at(args.copy(), "device") ?? String()
+        let tool_name = str_at(args.copy(), "tool") ?? String()
+        var target = Json.Null
+        for d in try i.live_devices(g.user.copy()) {
+            if str_at(d.copy(), "id") == some(key.trim()) or (str_at(d.copy(), "name") ?? String()).to_lower_root() == key.trim().to_lower_root() { target = d.copy() }
+        }
+        if target == Json.Null { return some(tool_error("{key} isn't connected, or offers no tools. list_devices gives the devices that do.")) }
+        let device = str_at(target.copy(), "id") ?? String()
+        let device_name = str_at(target.copy(), "name") ?? String()
+        let mode = (at(target, "tools").get(tool_name.copy()) ?? Json.Null).as_str() ?? String("off")
+        if mode != "ask" and mode != "allow" { return some(tool_error("{tool_name} is off on {device_name}. Your person can turn it on in that device's app.")) }
+        let tool_args = at(args, "args")
+        var run_id = String()
+        for (id, r) in i.runs {
+            if r.user == g.user and r.agent == g.agent { run_id = id.copy() }
+        }
+        if mode == "ask" and run_id.len() == 0 { return some(tool_error(String("That needs your person's yes, and they can only give it during a chat with you."))) }
+        let call = try i.store.new_id("tc")
+        let request = "{Obj.new().s("call", call.copy()).s("device", device.copy()).s("tool", tool_name.copy()).j("args", tool_args.copy()).s("agent", g.agent.copy()).i("at", now()).done()}"
+        let what = str_at(tool_args.copy(), "command") ?? str_at(tool_args.copy(), "path") ?? str_at(tool_args, "target") ?? String()
+        let (kind, title) = if tool_name == "run_command" {
+            (String("execute"), "Run on {device_name}: {what}")
+        } else if tool_name == "open" {
+            (String("other"), "Open on {device_name}: {what}")
+        } else {
+            (String("read"), "Read on {device_name}: {what}")
+        }
+        if run_id.len() > 0 {
+            if let r = mut i.runs.find(run_id.copy()) {
+                var b = new_block("tool")
+                b.call = call.copy()
+                r.blocks.push(b)
+            }
+            try i.event(g.user.copy(), "tool.started", Obj.new().s("run", run_id.copy()).s("call", call.copy()).s("tool", kind.copy()).s("title", title.copy()).j("input", Obj.new().s("device", device_name.copy()).s("tool", tool_name.copy()).j("args", at(args, "args")).done()).j("locations", Json.Null).done())
+        }
+        i.calls.insert(call.copy(), req.copy())
+        i.device_calls.insert(call.copy(), DeviceCall { user: g.user.copy(), device: device.copy(), agent: g.agent.copy(), title: title.copy() })
+        if mode == "ask" {
+            let action = Obj.new().s("name", String("device.call")).s("device", device.copy()).s("request", request.copy()).done()
+            i.approvals.insert(call.copy(), Approval { call: call.copy(), run: run_id.copy(), agent: g.agent.copy(), rpc: Json.Null, options: Json.Null, title: title.copy(), action: action })
+            try i.event(g.user, "approval.needed", Obj.new().s("run", run_id).s("call", call).s("tool", kind).s("title", title).j("detail", Obj.new().s("device", device_name).s("tool", tool_name).j("args", at(args, "args")).done()).b("can_always", false).s("device", device).s("request", request).done())
+            return none
+        }
+        try i.send_device_call(call, device, request, Json.Null)
+        return none
+    }
+
+    fn send_device_call(i: mut Instance, call: String, device: String, request: String, approval: Json) ! Error {
+        let frame = "{Obj.new().s("t", String("device.call")).s("call", call.copy()).s("request", request).j("approval", approval).done()}"
+        var sent = false
+        for (_, s) in i.sessions {
+            if not sent and s.live and s.device == device and s.tools != Json.Null {
+                _ = i.server.send_text(s.socket, frame.copy())
+                sent = true
+            }
+        }
+        if not sent { try i.device_done(call, String("failed"), String("The device went offline before it got the request.")) }
+    }
+
+    fn device_result(i: mut Instance, user: String, device: String, f: Json) ! Error {
+        let call = str_at(f.copy(), "call") ?? String()
+        var mine = false
+        if let dc = i.device_calls.find(call.copy()) { mine = dc.user == user and dc.device == device }
+        if not mine { return }
+        let worked = bool_at(f.copy(), "ok") ?? false
+        try i.device_done(call, if worked { String("done") } else { String("failed") }, str_at(f, "output") ?? String())
+    }
+
+    // A device call has its answer: the agent's tool call gets it, and the
+    // chat and the activity log show it.
+    fn device_done(i: mut Instance, call: String, status: String, output: String) ! Error {
+        let dc = i.device_calls.remove(call.copy()) else return
+        let result = if status == "done" { tool_text(output.copy()) } else { tool_error(output.copy()) }
+        if let req = i.calls.remove(call.copy()) { i.server.respond(req, json_response(200, result)) }
+        if status != "denied" { i.log(dc.user.copy(), dc.agent.copy(), "device", if status == "done" { dc.title.copy() } else { "Failed: {dc.title}" }, dc.device.copy()) }
+        try i.event(dc.user, "tool.finished", Obj.new().s("call", call).s("status", status).j("output", Json.Array([Obj.new().s("kind", String("text")).s("text", cut_short(output, 4000)).done()])).done())
+    }
+
+    // A device's last connection closed: what was sent to it has no answer coming.
+    fn device_gone(i: mut Instance, user: String, device: String) ! Error {
+        for (_, s) in i.sessions {
+            if s.live and s.user == user and s.device == device { return }
+        }
+        var lost = List<String>()
+        for (call, dc) in i.device_calls {
+            var asking = false
+            if let _ = i.approvals.find(call.copy()) { asking = true }
+            if dc.user == user and dc.device == device and not asking { lost.push(call.copy()) }
+        }
+        for call in lost {
+            try i.device_done(call, String("failed"), String("The device went offline before it answered."))
+        }
     }
 
     fn answer_approval(i: mut Instance, call: String, allow: bool, always: bool, by: String) ! Error {

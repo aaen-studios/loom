@@ -12,6 +12,7 @@ Version 1. This is what an app (always through its core) and an instance say to 
 - [The WebSocket session](#the-websocket-session)
 - [Frames from the app](#frames-from-the-app)
 - [Frames from the instance](#frames-from-the-instance)
+- [Devices as tools](#devices-as-tools)
 - [The event log](#the-event-log)
 - [Messages and streaming](#messages-and-streaming)
 - [Events](#events)
@@ -185,6 +186,8 @@ The person's answer to an [`approval.needed`](#approvals) event.
 
 `always: true` also allows this kind of request from this agent from now on, where the agent offers that. An approval that was already answered, by this device or another, gets an `error` with code `already_answered`.
 
+For a call to one of the person's devices (`approval.needed` with a `request`), a yes carries `approval`: `{ "key": "<the approving device's Ed25519 public key, hex>", "signature": "<hex>" }`, the device's signature of `loom device call\n` followed by the `request`'s exact text. The core adds it. The instance passes it on, and the device doing the work acts only on a signature it trusts ([Devices as tools](#devices-as-tools)).
+
 ### `cancel`
 
 Stops a run. The reply so far is kept, and the run ends with `status: "cancelled"`.
@@ -209,6 +212,20 @@ The device's state changed: the same optional fields as `hello`'s `device`. Sent
 
 ```json
 { "t": "device", "active": false }
+```
+
+A device that offers tools to agents also sends, after `welcome` and whenever the person changes them on it, its `key` (its Ed25519 public key, hex) and its `tools`, each `off`, `ask` or `allow`:
+
+```json
+{ "t": "device", "key": "3d4017c3…", "tools": { "run_command": "ask", "read_file": "allow", "list_files": "off", "open": "off" } }
+```
+
+### `device.result`
+
+The answer to a [`device.call`](#devicecall): `ok`, and `output`, the command's output (with its exit status) or the file, or why it wasn't done.
+
+```json
+{ "t": "device.result", "call": "tc_9", "ok": true, "output": "hi from loom\nExit status 0." }
 ```
 
 ## Frames from the instance
@@ -282,6 +299,16 @@ The answer to a `cmd`.
 
 A command that changes something also makes events, so every other device sees the change. The device that sent the command gets those events too, and applies them like any other.
 
+### `device.call`
+
+A call to one of this device's tools, from an agent's `use_device`. `request` is the call as text: `call`, `device` (this device's id), `tool`, `args`, `agent` and `at` (Unix ms). It's what an approval signs, and what the device runs. `approval` is there when the person said yes to a tool that asks.
+
+```json
+{ "t": "device.call", "call": "tc_9", "request": "{\"call\":\"tc_9\",\"device\":\"d_1\",\"tool\":\"run_command\",\"args\":{\"command\":\"echo hi\"},\"agent\":\"a_1\",\"at\":1795262400000}", "approval": { "key": "3d4017c3…", "signature": "9a0f…" } }
+```
+
+The device answers with [`device.result`](#deviceresult).
+
 ### `error`
 
 Something the app sent couldn't be done. The socket stays open.
@@ -291,6 +318,16 @@ Something the app sent couldn't be done. The socket stays open.
 ```
 
 `ref` is the `cid`, `call` or `run` of the frame it answers, when there is one.
+
+## Devices as tools
+
+The person's devices are tools for their agents while their apps run ([PLAN.md](../PLAN.md#your-devices)). The device decides, not the instance:
+
+- **Each tool is off until the person turns it on, on that device**: `off`, `ask` each time, or `allow`. The device tells the instance (the `device` frame), so agents see it in `list_devices`, and checks it again itself before it acts on a `device.call`.
+- **A tool that asks** shows in the agent's chat as `approval.needed` with `device` (the device's id) and `request`, and `can_always: false`. A yes is signed by the device it's given on (`approve`'s `approval`). The device doing the work acts only on its own key's signature of the exact request. A yes from another device, or one the instance makes up, is refused, and the agent hears so. Approving on one device for another comes with linking devices to each other, which exchanges their keys without the instance in between.
+- **A request is done once.** The device keeps the calls it did, and refuses a request more than 15 minutes from its clock.
+- **The tools:** `run_command` (`command`, in PowerShell on Windows and zsh on a Mac, up to 2 minutes), `read_file` (`path`), `list_files` (`path`, folders with a `/`) and `open` (`target`, a file or a link, with its usual program). Output past 20,000 bytes is cut.
+- Each call goes in the activity log as kind `device`, by the device that did it.
 
 ## The event log
 
@@ -372,7 +409,7 @@ A run is one turn of an agent, answering one message.
 
 | Kind | Fields | When |
 |---|---|---|
-| `approval.needed` | `run`, `call`, `tool`, `title`, `detail` (what exactly would happen: the command, the diff, the file), `can_always` | The agent asks first, and its permission mode sends the question to the person |
+| `approval.needed` | `run`, `call`, `tool`, `title`, `detail` (what exactly would happen: the command, the diff, the file), `can_always`, and for a call to a device, `device` and `request` ([Devices as tools](#devices-as-tools)) | The agent asks first, and its permission mode sends the question to the person |
 | `approval.answered` | `call`, `allow`, `always`, `by` (the device that answered, or `auto` when the permission mode did) | Someone answered, on any device. Every other device stops showing the question |
 
 An approval nobody answers stays open while the run does. Cancelling the run answers it with `allow: false`, `by: "cancel"`.
@@ -467,7 +504,7 @@ Inside the instance, each agent runs as an ACP agent program ([PLAN.md](../PLAN.
 | From the agent (ACP) | In loom |
 |---|---|
 | The instance sends the person's message to the session with `session/prompt` | `run.started` |
-| Every session gets `mcpServers` with one server, `loom`: the `loom` program (or the desktop app's own `loom.exe`) with the argument `mcp`, and `LOOM_URL` and that agent's `LOOM_MCP_TOKEN` in its environment. It gives the agent loom's own tools: `message_agent`, `list_agents`, `create_agent`, `update_agent`, `edit_instructions`, `list_acp_agents`, `search_messages`, `list_skills`, `read_skill`, `save_skill`, `notify`, `delete_agent`, `set_permission` and `delete_skill`. They act with the person's rights. The last three ask the person every time, whatever the permission mode: the call shows as a tool (`delete` or `other`) in the run that made it, with `approval.needed` (`can_always: false`), and is answered once the person does. With no run going, they refuse; an agent can't delete itself or loosen its own mode | what the tools do: `message.created`, `agent.updated`, `notify` and the rest, as if the person had done it. A yes is done as the device that gave it, so `by` names it |
+| Every session gets `mcpServers` with one server, `loom`: the `loom` program (or the desktop app's own `loom.exe`) with the argument `mcp`, and `LOOM_URL` and that agent's `LOOM_MCP_TOKEN` in its environment. It gives the agent loom's own tools: `message_agent`, `list_agents`, `create_agent`, `update_agent`, `edit_instructions`, `list_acp_agents`, `search_messages`, `list_skills`, `read_skill`, `save_skill`, `notify`, `list_devices`, `use_device` ([Devices as tools](#devices-as-tools)), `delete_agent`, `set_permission` and `delete_skill`. They act with the person's rights. The last three ask the person every time, whatever the permission mode: the call shows as a tool (`delete` or `other`) in the run that made it, with `approval.needed` (`can_always: false`), and is answered once the person does. With no run going, they refuse; an agent can't delete itself or loosen its own mode | what the tools do: `message.created`, `agent.updated`, `notify` and the rest, as if the person had done it. A yes is done as the device that gave it, so `by` names it |
 | A conversation's first message to an agent program: `session/new`, or after a restart, `session/resume` (where the agent offers `sessionCapabilities.resume`) or `session/load` (where it offers `loadSession`) with the session the conversation had. What `session/load` plays back is dropped, and if the agent can't pick the session up, a new one starts | nothing: the apps see the same conversation |
 | Where the person is writing from, in that prompt | a first text block, `[loom: This message comes from … It's 2026-11-21 13:05 UTC.]`, with the device's name, what it is and its time zone, or the agent that sent it with `message_agent`. It comes when the session hasn't been told yet, or when it changes, never in the instructions |
 | The person's files, in that prompt | an `image` block for an image of up to 5 MB, when the program says it takes images (`promptCapabilities.image`); otherwise a `resource_link` to a copy in the agent's folder, under `files/`, with its name |

@@ -1,0 +1,149 @@
+module tests.protocol.devices
+
+// The person's devices as tools (PLAN.md, "Your devices"): a real core runs as
+// the device "Desk PC" and turns two of its tools on, one to ask each time and
+// one allowed. Talking from another device, "Laptop", an agent lists the
+// devices, reads a file on the PC, and is refused a tool that's off. A command
+// that asks runs only once the PC itself says yes: a yes from the laptop,
+// which the PC can't check, is refused by the PC, and the instance can't say
+// it for the person.
+//
+//     calx tests/protocol/devices.calx
+import std.fs
+import std.json.{Json, parse}
+import std.process.{exit}
+import std.random.{Random}
+import std.time.{Instant}
+import shared.obj.{Obj, at, str_at}
+import core.cache.{Cache}
+import core.conn.{Conn}
+import tests.kit.{App, Instance, check, device, post_json, reply_text}
+
+// The app's side of a core: what it sends the core, and what the core says.
+struct Core {
+    to_core: Sender<String>
+    from_core: Receiver<String>
+    thread: Thread?
+}
+
+impl Core {
+    fn start(base: String, token: String, cache: String) -> Core ! Error {
+        let inbox = Receiver<String>()
+        let to_core = inbox.sender()
+        let from_core = Receiver<String>()
+        var random = Random.system()
+        let conn = Conn.new(some("http://{base}"), some(token.copy()), "loom-test-{random.next_u32()}", try Cache.open(cache), inbox, from_core.sender())
+        let t = unsafe { Thread.spawn(conn) }
+        return Core { to_core: to_core, from_core: from_core, thread: some(t) }
+    }
+
+    fn send(mut self, frame: Json) {
+        self.to_core.send("{frame}")
+    }
+
+    // Reads what the core says until a frame whose `t` is `t` and whose `field`
+    // is `value`, if `field` isn't empty.
+    fn until(mut self, t: str, field: str, value: str) -> Json ! Error {
+        let start = unsafe { Instant.now() }
+        loop {
+            let waited = unsafe { Instant.now() }.nanos_since(start) / 1000000
+            if waited >= 30000 { fail "the core said no {t} {field}={value} in 30 s" }
+            let m = unsafe { self.from_core.wait_for((30000 - waited) * 1000000) } else { continue }
+            let f = try parse(m)
+            if (str_at(f.copy(), "t") ?? String()) != t { continue }
+            if field.len() == 0 or (str_at(f.copy(), field) ?? String()) == value { return f }
+        }
+    }
+
+    fn stop(mut self) {
+        self.to_core.send(String(#"{"t":"core.stop"}"#))
+        if let t = self.thread.take() {
+            t.join()
+        }
+    }
+}
+
+// The agent's next reply in `conversation`, as text.
+fn reply_in(app: mut App, conversation: String) -> String ! Error {
+    loop {
+        let created = try app.until("event", "message.created")
+        let m = at(created, "message")
+        if str_at(m.copy(), "role") == some(String("agent")) and str_at(m.copy(), "conversation") == some(conversation.copy()) { return reply_text(m) }
+    }
+}
+
+// The fake agent's step that calls use_device on the PC.
+fn use_device(tool: str, key: str, value: String) -> String {
+    let args = Obj.new().s("device", String("Desk PC")).s("tool", String(tool)).j("args", Obj.new().s(key, value).done()).done()
+    return "/mcp use_device {args}"
+}
+
+fn post(app: App, conversation: String, cid: str, text: String) ! Error {
+    try app.send(Obj.new().s("t", String("send")).s("cid", String(cid)).s("conversation", conversation).s("text", text).done())
+}
+
+fn run(i: Instance, pc: mut Core) ! Error {
+    _ = try pc.until("core.conn", "state", "live")
+    pc.send(Obj.new().s("t", String("device.tools")).j("tools", Obj.new().s("run_command", String("ask")).s("read_file", String("allow")).done()).done())
+    let tools = try pc.until("core.device", "", "")
+    try check(str_at(at(tools, "tools"), "list_files") == some(String("off")) and str_at(at(tools.copy(), "tools"), "run_command") == some(String("ask")), "a device's tools are off until the person turns them on there")
+
+    let (_, login) = try post_json(i.base.copy(), "/api/login", Obj.new().s("username", String("elliot")).s("password", String("correct horse")).j("device", device("Laptop")).done())
+    var app = try App.connect(i.base.copy(), str_at(login, "token") ?? String(), 0)
+    let made = try app.cmd("q_1", "agent.create", Obj.new().s("name", String("Main")).s("acp_agent", String("fake")).s("instructions", String("Test.")).done())
+    let agent = str_at(at(at(made, "value"), "agent"), "id") ?? String()
+    let c = try app.cmd("q_2", "conversation.create", Obj.new().s("agent", agent).done())
+    let conversation = str_at(at(c, "value"), "conversation") ?? String()
+
+    try post(app, conversation.copy(), "m_1", String("/mcp list_devices"))
+    let listed = try reply_in(mut app, conversation.copy())
+    try check(listed.contains("Desk PC") and listed.contains(#""run_command":"ask""#) and not listed.contains("Laptop"), "an agent lists the devices that offer tools, and how")
+
+    let folder = (try fs.temp_dir()).replace("\\", "/")
+    let file = "{folder}/note.txt"
+    try fs.write_text(file.copy(), String("hello from the PC"))
+    try post(app, conversation.copy(), "m_2", use_device("read_file", "path", file.copy()))
+    try check(try reply_in(mut app, conversation.copy()) == "use_device: hello from the PC", "it reads a file on the PC, where that's allowed")
+    try post(app, conversation.copy(), "m_3", use_device("list_files", "path", folder.copy()))
+    let off = try reply_in(mut app, conversation.copy())
+    try check(off.starts_with("use_device failed") and off.contains("is off on Desk PC"), "and is refused a tool that's off")
+
+    let command = String(#"/mcp use_device {"device":"Desk PC","tool":"run_command","args":{"command":"echo 'hi from loom'"}}"#)
+    try post(app, conversation.copy(), "m_4", command.copy())
+    let asked = try app.until("event", "approval.needed")
+    let first = str_at(asked.copy(), "call") ?? String()
+    try check(str_at(asked.copy(), "title") == some(String("Run on Desk PC: echo 'hi from loom'")) and str_at(asked.copy(), "request") != none, "a command asks, with the exact request")
+    try app.send(Obj.new().s("t", String("approve")).s("call", first.copy()).b("allow", true).j("approval", Obj.new().s("key", String("00")).s("signature", String("00")).done()).done())
+    let refused = try reply_in(mut app, conversation.copy())
+    try check(refused.starts_with("use_device failed") and refused.contains("didn't come from this device"), "a yes the PC can't check is refused by the PC")
+
+    try post(app, conversation.copy(), "m_5", command)
+    // The PC heard the first question too: it answers the new one.
+    var again = try pc.until("event", "kind", "approval.needed")
+    while str_at(again.copy(), "call") == some(first.copy()) {
+        again = try pc.until("event", "kind", "approval.needed")
+    }
+    pc.send(Obj.new().s("t", String("approve")).s("call", str_at(again, "call") ?? String()).b("allow", true).done())
+    let ran = try reply_in(mut app, conversation.copy())
+    try check(ran.starts_with("use_device:") and ran.contains("hi from loom"), "and a yes given on the PC runs it there")
+
+    let logged = "{at(try app.cmd("q_3", "activity.list", Obj.new().s("agent", agent).done()), "value")}"
+    try check(logged.contains("Run on Desk PC: echo 'hi from loom'") and logged.contains("Read on Desk PC"), "the activity log has what was done on the device")
+    app.close()
+}
+
+fn main() ! Error {
+    let inst = try Instance.start()
+    var pc = try Core.start(inst.base.copy(), inst.token.copy(), "{try fs.temp_dir()}/core.db")
+    let failure: String? = match run(inst.copy(), mut pc) {
+        ok => none,
+        err(e) => some("{e}"),
+    }
+    pc.stop()
+    inst.stop()
+    if let f = failure {
+        eprintln("\n{f}")
+        exit(1)
+    }
+    println("\ndevices: all good")
+}

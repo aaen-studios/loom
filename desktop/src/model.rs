@@ -57,6 +57,9 @@ pub struct Agent {
     pub instructions: String,
 }
 
+/// The tools a device offers agents, as the core names them.
+pub const DEVICE_TOOLS: [&str; 4] = ["run_command", "read_file", "list_files", "open"];
+
 /// An agent program on the instance. Its settings' values stay there: only their names
 /// come.
 #[derive(Clone, Debug)]
@@ -335,6 +338,8 @@ pub struct Model {
     /// The registry agent being installed, while it is.
     pub installing: Option<String>,
     programs_stale: bool,
+    /// What this device offers agents, each tool with `off`, `ask` or `allow`.
+    pub device_tools: Vec<(String, String)>,
 }
 
 #[derive(Clone, Debug)]
@@ -507,6 +512,17 @@ impl Model {
                 self.place_queued();
             }
             "core.file" => self.file_came(f),
+            "core.device" => {
+                if let Some(tools) = f.get("tools").and_then(Value::as_object) {
+                    self.device_tools = DEVICE_TOOLS
+                        .iter()
+                        .map(|t| {
+                            let mode = tools.get(*t).and_then(Value::as_str).unwrap_or("off");
+                            (t.to_string(), mode.to_string())
+                        })
+                        .collect();
+                }
+            }
             "core.update" => {
                 let asked = f.get("id").is_some();
                 if let Some(path) = f.get("path").and_then(Value::as_str) {
@@ -1255,6 +1271,16 @@ impl Model {
         Some(
             json!({"t": "cmd", "id": id, "name": "agent.rollback", "args": {"agent": agent, "revision": revision}}),
         )
+    }
+
+    /// Asks the core what this device offers agents.
+    pub fn device_get(&self) -> Value {
+        json!({"t": "device.get"})
+    }
+
+    /// Sets how agents may use one of this device's tools: `off`, `ask` or `allow`.
+    pub fn set_device_tool(&self, tool: &str, mode: &str) -> Value {
+        json!({"t": "device.tools", "tools": {tool: mode}})
     }
 
     /// Asks for the programs page: the instance's programs, and the registry's.

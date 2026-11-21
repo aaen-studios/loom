@@ -76,6 +76,7 @@ enum Screen {
     Activity,
     Skills,
     Programs,
+    ThisDevice,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -976,7 +977,27 @@ impl Loom {
                                 this.screen = Screen::Programs;
                                 cx.notify();
                             })),
-                    ),
+                    )
+                    // In a desktop instance, agents run on this PC already: its tools are
+                    // for an instance somewhere else.
+                    .when(!local_mode(), |d| {
+                        d.child(
+                            div()
+                                .id("this-device")
+                                .text_size(px(size::CAPTION))
+                                .text_color(p.ink_3)
+                                .cursor_pointer()
+                                .hover(move |s| s.text_color(p.ink))
+                                .child("This PC")
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    let f = this.model.device_get();
+                                    this.send(f);
+                                    this.menu = None;
+                                    this.screen = Screen::ThisDevice;
+                                    cx.notify();
+                                })),
+                        )
+                    }),
             )
             .child(
                 div()
@@ -1033,12 +1054,15 @@ impl Loom {
             .items_center()
             .justify_between()
             .px(px(space::L));
-        if self.screen == Screen::Skills || self.screen == Screen::Programs {
+        if matches!(
+            self.screen,
+            Screen::Skills | Screen::Programs | Screen::ThisDevice
+        ) {
             return bar.child(div().text_size(px(size::BODY)).text_color(p.ink_3).child(
-                if self.screen == Screen::Skills {
-                    "Skills"
-                } else {
-                    "Agent programs"
+                match self.screen {
+                    Screen::Skills => "Skills",
+                    Screen::Programs => "Agent programs",
+                    _ => "This PC",
                 },
             ));
         }
@@ -1957,6 +1981,101 @@ impl Loom {
         div().flex_1().min_h_0().child(page)
     }
 
+    /// The This PC page: what agents may do on this computer, tool by tool. The core keeps
+    /// the choice, and checks it before it acts.
+    fn device_page(&mut self, cx: &mut Context<Self>) -> Div {
+        let p = self.p;
+        let caption = |text: &'static str| {
+            div()
+                .text_size(px(size::CAPTION))
+                .text_color(p.ink_3)
+                .child(text)
+        };
+        let mut list = div().flex().flex_col().gap(px(space::XS));
+        for (tool, mode) in self.model.device_tools.clone() {
+            let (name, what) = match tool.as_str() {
+                "run_command" => ("Run commands", "In PowerShell, as you."),
+                "read_file" => ("Read files", "Any file you can read."),
+                "list_files" => ("List folders", "What's in a folder."),
+                _ => ("Open files and links", "With their usual program."),
+            };
+            let mut choices = div().flex().gap(px(space::XS));
+            for (choice, label) in [("off", "Off"), ("ask", "Ask"), ("allow", "Allow")] {
+                let t = tool.clone();
+                choices = choices.child(
+                    self.button_owned(format!("{tool}-{choice}"), label, mode == choice)
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            let f = this.model.set_device_tool(&t, choice);
+                            this.send(f);
+                            cx.notify();
+                        })),
+                );
+            }
+            list = list.child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap(px(space::M))
+                    .py(px(space::S))
+                    .px(px(space::S))
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .child(
+                                div()
+                                    .text_size(px(size::SMALL))
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .text_color(p.ink)
+                                    .child(name),
+                            )
+                            .child(caption(what)),
+                    )
+                    .child(choices),
+            );
+        }
+        let allowed = self
+            .model
+            .device_tools
+            .iter()
+            .any(|(t, m)| t == "run_command" && m == "allow");
+        let body = div()
+            .w(px(560.0))
+            .flex()
+            .flex_col()
+            .gap(px(space::XL))
+            .child(
+                div()
+                    .text_size(px(size::HEADING))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(p.ink)
+                    .child("What agents may do on this PC"),
+            )
+            .child(caption(
+                "While loom runs here, your agents can use this PC as a tool. Each tool is off until you turn it on. Ask means you say yes on this PC each time, and only a yes given here counts, so the instance can't give it for you.",
+            ))
+            .child(list)
+            .when(allowed, |d| {
+                d.child(
+                    div()
+                        .text_size(px(size::CAPTION))
+                        .text_color(p.bad)
+                        .child("Allow lets your agents run any command here without asking you."),
+                )
+            });
+        let page = div()
+            .id("device-page")
+            .size_full()
+            .overflow_y_scroll()
+            .flex()
+            .justify_center()
+            .pt(px(space::XXL))
+            .pb(px(space::XXL))
+            .child(body);
+        div().flex_1().min_h_0().child(page)
+    }
+
     /// The programs page: the agent programs on the instance, with their settings, and the
     /// ACP Registry's agents to install.
     fn programs_page(&mut self, cx: &mut Context<Self>) -> Div {
@@ -2254,6 +2373,7 @@ impl Loom {
                 "approval" => "Asked",
                 "message" => "Handed over",
                 "notify" => "Notified",
+                "device" => "On a device",
                 _ => "Changed",
             };
             list = list.child(
@@ -2804,6 +2924,7 @@ impl Render for Loom {
             Screen::Activity => self.activity_page(),
             Screen::Skills => self.skills_page(cx),
             Screen::Programs => self.programs_page(cx),
+            Screen::ThisDevice => self.device_page(cx),
         };
         let header = self.header(cx);
         let menu = self.menu_panel(cx);

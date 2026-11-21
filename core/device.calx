@@ -1,0 +1,291 @@
+module core.device
+
+// This device as a tool for the person's agents (PLAN.md, "Your devices"):
+// running commands, reading files and folders, and opening a file or a link,
+// on the computer the app runs on. Each tool is off until the person turns it
+// on here, to ask each time or to be allowed. The device keeps its own key,
+// signs the approvals given on it, and acts on a call that asks only when its
+// approval is signed with a key it trusts: its own. So a hacked instance can't
+// say yes for the person. It runs exactly the request that was signed, once.
+import std.bytes
+import std.crypto.{Ed25519Key, Ed25519PublicKey}
+import std.env
+import std.fs
+import std.json.{Json, parse}
+import std.process.{Child, Command, Stdio}
+import std.text.utf8.{decode_lossy_unicode}
+import shared.obj.{Obj, at, int_at, str_at}
+import core.cache.{Cache}
+
+// What a device offers, as the instance and the app name them.
+pub const TOOLS: [str; 4] = ["run_command", "read_file", "list_files", "open"]
+// How long a command may run, and how much of a result goes back.
+const COMMAND_MS: u64 = 120000
+const MOST: usize = 20000
+// A signed request is good for this long, so an old one can't be played again
+// after the list of done calls has moved on.
+const FRESH_MS: i64 = 900000
+const KEEP_DONE: usize = 500
+// What an approval signs: this line, then the request's exact text.
+pub const SIGNED: str = "loom device call\n"
+
+struct Running {
+    call: String
+    child: Child
+    out: List<u8>
+}
+
+pub struct Device {
+    key: Ed25519Key
+    modes: Map<String, String>    // tool -> off, ask or allow
+    done: List<String>    // the calls done, newest last
+    running: List<Running>
+    pub id: String    // this device's id, from welcome
+}
+
+fn hex(b: List<u8>) -> String {
+    return bytes.hex(b)
+}
+
+fn unhex(s: String) -> List<u8>? {
+    return bytes.from_hex(s)
+}
+
+impl Device {
+    /// This device's key and settings, from the cache, or a new key the first time.
+    pub fn load(cache: Cache) -> Device ! Error {
+        var key = Ed25519Key.generate()
+        var fresh = true
+        if let seed = try cache.meta("device_key") {
+            if let b = unhex(seed) {
+                if let k = Ed25519Key.from_seed(b) {
+                    key = k
+                    fresh = false
+                }
+            }
+        }
+        if fresh { try cache.set_meta("device_key", hex(key.seed())) }
+        var modes = Map<String, String>()
+        if let text = try cache.meta("device_tools") {
+            if let Json.Object(m) = try parse(text) {
+                for (k, v) in m {
+                    if let mode = v.as_str() { modes.insert(k.copy(), mode) }
+                }
+            }
+        }
+        var done = List<String>()
+        if let text = try cache.meta("device_done") {
+            if let Json.Array(ids) = try parse(text) {
+                for id in ids {
+                    if let s = id.as_str() { done.push(s) }
+                }
+            }
+        }
+        return Device { key: key, modes: modes, done: done, running: List<Running>(), id: String() }
+    }
+
+    pub fn public_key(self) -> String {
+        return hex(self.key.public_key().bytes())
+    }
+
+    fn mode(self, tool: String) -> String {
+        if let m = self.modes.find(tool) { return m.copy() }
+        return String("off")
+    }
+
+    /// What the instance hears from this device: its key and its tools' modes.
+    pub fn frame(self) -> Json {
+        return Obj.new().s("t", String("device")).s("key", self.public_key()).j("tools", self.tools()).done()
+    }
+
+    /// Each tool's mode, `off` for one not turned on.
+    pub fn tools(self) -> Json {
+        var o = Obj.new()
+        for t in TOOLS {
+            o = o.s(t, self.mode(String(t)))
+        }
+        return o.done()
+    }
+
+    /// Sets the tools the app's `device.tools` names, and keeps them.
+    pub fn set_modes(mut self, cache: Cache, given: Json) ! Error {
+        if let Json.Object(m) = given {
+            for (k, v) in m {
+                let mode = v.as_str() ?? String()
+                var known = false
+                for t in TOOLS {
+                    if k == t { known = true }
+                }
+                if known and (mode == "off" or mode == "ask" or mode == "allow") { self.modes.insert(k.copy(), mode) }
+            }
+        }
+        try cache.set_meta("device_tools", "{self.tools()}")
+    }
+
+    /// The signature an approval given on this device carries, of `request`.
+    pub fn sign(self, request: String) -> Json {
+        let message = "{SIGNED}{request}"
+        return Obj.new().s("key", self.public_key()).s("signature", hex(self.key.sign(message.to_bytes()))).done()
+    }
+
+    // Whether `approval` is this device's own signature of `request`.
+    fn trusted(self, request: String, approval: Json) -> bool {
+        let key = str_at(approval.copy(), "key") ?? String()
+        if key != self.public_key() { return false }
+        let public = Ed25519PublicKey.from_bytes(unhex(key) ?? List<u8>()) else return false
+        let signature = unhex(str_at(approval, "signature") ?? String()) ?? List<u8>()
+        return public.verify("{SIGNED}{request}".to_bytes(), signature)
+    }
+
+    /// A `device.call` from the instance: its `device.result` now, or none for a
+    /// command, whose result comes from `poll` once it ends.
+    pub fn call(mut self, cache: Cache, f: Json, now_ms: i64) -> Json? {
+        let call = str_at(f.copy(), "call") ?? String()
+        let text = str_at(f.copy(), "request") ?? String()
+        let request = match parse(text.copy()) {
+            ok(r) => r,
+            err(_) => return some(refused(call, String("The request isn't JSON."))),
+        }
+        // The signed request says everything: the outer frame is only its envelope.
+        if str_at(request.copy(), "call") != some(call.copy()) or str_at(request.copy(), "device") != some(self.id.copy()) {
+            return some(refused(call, String("That request isn't for this device.")))
+        }
+        let tool = str_at(request.copy(), "tool") ?? String()
+        let mode = self.mode(tool.copy())
+        if mode == "off" { return some(refused(call, "{tool} is off on this device. The person can turn it on in its app.")) }
+        if mode == "ask" and not self.trusted(text.copy(), at(f, "approval")) {
+            return some(refused(call, String("The person's yes for this didn't come from this device, so it isn't done. Approve it on this device.")))
+        }
+        if self.done.contains(call.copy()) { return some(refused(call, String("That request was done already."))) }
+        let at_ms = int_at(request.copy(), "at") ?? 0
+        if now_ms - at_ms > FRESH_MS or at_ms - now_ms > FRESH_MS { return some(refused(call, String("That request is too old."))) }
+        self.done.push(call.copy())
+        if self.done.len() > KEEP_DONE { _ = self.done.remove(0) }
+        var ids = List<Json>()
+        for d in self.done {
+            ids.push(Json.Str(d.copy()))
+        }
+        if let err(_) = cache.set_meta("device_done", "{Json.Array(ids)}") {}
+        let args = at(request, "args")
+        if tool == "run_command" {
+            let command = str_at(args, "command") ?? String()
+            if command.len() == 0 { return some(refused(call, String("command is empty."))) }
+            match shell(command).stdout(Stdio.Pipe).stderr(Stdio.Stdout).timeout(COMMAND_MS).spawn() {
+                ok(child) => self.running.push(Running { call: call, child: child, out: List<u8>() }),
+                err(e) => return some(refused(call, "It didn't start: {e}")),
+            }
+            return none
+        }
+        let path = str_at(args.copy(), "path") ?? str_at(args, "target") ?? String()
+        if path.len() == 0 { return some(refused(call, String("path is empty."))) }
+        if tool == "read_file" {
+            return some(match fs.read(path.copy()) {
+                ok(data) => answer(call, cut(text_of(data))),
+                err(e) => refused(call, "{path}: {e}"),
+            })
+        }
+        if tool == "list_files" {
+            return some(match fs.list(path.copy()) {
+                ok(names) => {
+                    var lines = List<String>()
+                    for n in names {
+                        let full = "{path}/{n}"
+                        lines.push(if fs.is_dir(full) { "{n}/" } else { n.copy() })
+                    }
+                    answer(call, cut(lines.join("\n")))
+                },
+                err(e) => refused(call, "{path}: {e}"),
+            })
+        }
+        if tool == "open" {
+            return some(match opener(path.copy()).stdout(Stdio.Null).spawn() {
+                ok(_) => answer(call, "Opened {path}."),
+                err(e) => refused(call, "{path} didn't open: {e}"),
+            })
+        }
+        return some(refused(call, "This device has no tool {tool}."))
+    }
+
+    /// The results of commands that have ended.
+    pub fn poll(mut self) -> List<Json> {
+        var out = List<Json>()
+        var still = List<Running>()
+        while self.running.len() > 0 {
+            var run = self.running.remove(0)
+            let got = run.child.read(0)
+            run.out.extend(got)
+            if run.child.ended() {
+                let end = run.child.wait()
+                run.out.extend(end.stdout.copy())
+                let status = if end.status.timed_out { String("It ran out of time.") } else { "Exit status {end.status.code ?? -1}." }
+                let text = cut(text_of(run.out.copy()))
+                out.push(Obj.new().s("t", String("device.result")).s("call", run.call.copy()).b("ok", end.status.success()).s("output", if text.len() > 0 { "{text}\n{status}" } else { status }).done())
+            } else {
+                still.push(run)
+            }
+        }
+        self.running = still
+        return out
+    }
+}
+
+fn answer(call: String, output: String) -> Json {
+    return Obj.new().s("t", String("device.result")).s("call", call).b("ok", true).s("output", output).done()
+}
+
+fn refused(call: String, why: String) -> Json {
+    return Obj.new().s("t", String("device.result")).s("call", call).b("ok", false).s("output", why).done()
+}
+
+// The first MOST bytes of `text`, cut at a character, and saying so.
+fn cut(text: String) -> String {
+    if text.len() <= MOST { return text.copy() }
+    var out = String()
+    for r in text.runes() {
+        if out.len() >= MOST { break }
+        out.push(r)
+    }
+    return "{out}\n[cut: {text.len()} bytes in all]"
+}
+
+// The person's shell, running `command`: PowerShell on Windows, zsh on a Mac.
+fn shell(command: String) -> Command {
+    let os = env.os()
+    if os == "windows" { return Command.new(String("powershell")).arg(String("-NoProfile")).arg(String("-NonInteractive")).arg(String("-Command")).arg(command) }
+    if os == "macos" { return Command.new(String("zsh")).arg(String("-c")).arg(command) }
+    return Command.new(String("sh")).arg(String("-c")).arg(command)
+}
+
+// What opens a file or a link with its usual program.
+fn opener(target: String) -> Command {
+    let os = env.os()
+    if os == "windows" { return Command.new(String("explorer")).arg(target) }
+    if os == "macos" { return Command.new(String("open")).arg(target) }
+    return Command.new(String("xdg-open")).arg(target)
+}
+
+@test
+fn signs_what_it_trusts() {
+    let key = Ed25519Key.generate()
+    let d = Device { key: key, modes: Map<String, String>(), done: List<String>(), running: List<Running>(), id: String("d_1") }
+    let request = String(#"{"call":"tc_1","device":"d_1","tool":"read_file","args":{"path":"x"},"at":1}"#)
+    let approval = d.sign(request.copy())
+    assert(d.trusted(request.copy(), approval.copy()))
+    assert(not d.trusted(request.replace("x", "y"), approval))
+    let other = Device { key: Ed25519Key.generate(), modes: Map<String, String>(), done: List<String>(), running: List<Running>(), id: String("d_1") }
+    assert(not d.trusted(request.copy(), other.sign(request)))
+}
+
+@test
+fn cuts_long_results() {
+    var long = String()
+    for _ in 0..3000 {
+        long.push_str("0123456789")
+    }
+    let c = cut(long)
+    assert(c.len() < 20100 and c.ends_with("[cut: 30000 bytes in all]"))
+}
+
+fn text_of(b: List<u8>) -> String {
+    return decode_lossy_unicode(b.copy(), 0, b.len())
+}
