@@ -26,6 +26,7 @@ import shared.obj.{at, str_at}
 import shared.protocol
 import shared.release.{MANIFEST, RELEASE_KEY, check_manifest, newer}
 import server.instance.{Config, EventLife, Instance}
+import server.mcp
 import server.store.{Store}
 
 const VERSION: str = "0.2.0-dev"
@@ -43,8 +44,9 @@ usage: loom <command>
   status                    say what the instance holds
   update                    update this program to the newest signed release (--check: only say if there's one)
   version                   print loom's version and the protocol versions it speaks
+  mcp                       loom's own tools as an MCP server on standard input and output, which the instance starts for its agents
 
-Every command but version takes --data DIR, the instance's folder (default: loom-data).
+Every command but version and mcp takes --data DIR, the instance's folder (default: loom-data).
 "#
 }
 
@@ -133,6 +135,8 @@ fn main() ! Error {
     let sub = if a.words.len() > 1 { a.words[1].copy() } else { String() }
     if cmd == "version" {
         println(version_line())
+    } else if cmd == "mcp" {
+        try mcp.serve()
     } else if cmd == "serve" {
         try serve(a)
     } else if cmd == "user" and sub == "add" and a.words.len() == 3 {

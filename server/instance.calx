@@ -15,6 +15,7 @@ import std.hash.{sha256}
 import std.http.server.{Request, Response, Server, ServerSocket, content_type}
 import std.json.{Json, parse}
 import std.process
+import std.process.{current_exe}
 import std.signal
 import std.url
 import shared.obj.{Obj, at, bool_at, int_at, merge, str_at}
@@ -27,6 +28,7 @@ import shared.files.{is_sha, safe_name}
 import server.hashing
 import server.hashing.{Done, Job}
 import server.store.{Device, Store, User, now}
+import shared.tools
 
 pub struct Config {
     pub data: String
@@ -141,6 +143,14 @@ pub struct Instance {
     thumbs: Sender<Thumb>
     events: EventLife
     next_prune: i64
+    grants: Map<String, Grant>    // token -> whose tools
+    calls: Map<String, Request>    // run -> a message_agent call waiting on it
+}
+
+// An agent's right to loom's own tools: `loom mcp` acts as `user`, for `agent`.
+struct Grant {
+    user: String
+    agent: String
 }
 
 // A setup or a login waiting on the hashing thread.
@@ -171,6 +181,24 @@ fn rate_limited(seconds: i64) -> Response {
 
 fn json_response(status: u16, body: Json) -> Response {
     return Response.new(status, String("application/json"), "{body}".to_bytes())
+}
+
+// A tool's result: text for the agent to read.
+fn tool_text(text: String) -> Json {
+    return Obj.new().j("content", Json.Array([Obj.new().s("type", String("text")).s("text", text).done()])).done()
+}
+
+// A tool's result when it couldn't do what was asked, and why.
+fn tool_error(text: String) -> Json {
+    return Obj.new().j("content", Json.Array([Obj.new().s("type", String("text")).s("text", text).done()])).b("isError", true).done()
+}
+
+// A command's answer, as a tool's result.
+fn answer_text(a: Answer) -> Json {
+    return match a {
+        Answer.Value(v) => tool_text("{v}"),
+        Answer.Refused(_, message) => tool_error(message),
+    }
 }
 
 fn http_error(status: u16, code: str, message: String) -> Response {
@@ -211,7 +239,7 @@ impl Instance {
         let to = lines.sender()
         let (hash_to, hash_done) = hashing.start(config.hasher)
         let dummy = config.hasher.hash(bytes.hex(random_bytes(16)))
-        return Instance { store: store, server: server, data: config.data.copy(), sessions: Map<u32, Session>(), runs: LinkedMap<String, Run>(), procs: LinkedMap<String, Proc>(), approvals: LinkedMap<String, Approval>(), lines: lines, lines_to: to, hash_to: hash_to, hash_done: hash_done, next_job: 0, auths: Map<i64, Auth>(), dummy_hash: dummy, failures: LinkedMap<String, List<i64>>(), thumbs: files.start(), events: config.events, next_prune: 0 }
+        return Instance { store: store, server: server, data: config.data.copy(), sessions: Map<u32, Session>(), runs: LinkedMap<String, Run>(), procs: LinkedMap<String, Proc>(), approvals: LinkedMap<String, Approval>(), lines: lines, lines_to: to, hash_to: hash_to, hash_done: hash_done, next_job: 0, auths: Map<i64, Auth>(), dummy_hash: dummy, failures: LinkedMap<String, List<i64>>(), thumbs: files.start(), events: config.events, next_prune: 0, grants: Map<String, Grant>(), calls: Map<String, Request>() }
     }
 
     pub fn url(self) -> String {
@@ -388,6 +416,9 @@ impl Instance {
         if req.path == "/files" or req.path.starts_with("/files/") {
             return some(try i.files_route(req))
         }
+        if req.path.starts_with("/api/mcp/") {
+            return try i.mcp_route(req)
+        }
         if req.method != "POST" {
             return some(http_error(404, "not_found", String("There's nothing here.")))
         }
@@ -399,6 +430,153 @@ impl Instance {
         if req.path == "/api/login" { return try i.login(req, body) }
         if req.path == "/api/logout" { return try i.logout(req) }
         return some(http_error(404, "not_found", String("There's nothing here.")))
+    }
+
+    // --- Loom's own tools (PLAN.md, "Loom's own tools") ---
+
+    // `loom mcp` for an agent's ACP session, with a token for that agent.
+    fn mcp_servers(i: mut Instance, user: String, agent: String) -> Json {
+        var token = String()
+        for (t, g) in i.grants {
+            if g.user == user and g.agent == agent { token = t.copy() }
+        }
+        if token.len() == 0 {
+            token = bytes.hex(random_bytes(24))
+            i.grants.insert(token.copy(), Grant { user: user.copy(), agent: agent.copy() })
+        }
+        let address = i.server.url()
+        let base = if address.ends_with("/") { address[..address.len() - 1].copy() } else { address }
+        let env = Json.Array([Obj.new().s("name", String("LOOM_URL")).s("value", base).done(), Obj.new().s("name", String("LOOM_MCP_TOKEN")).s("value", token).done()])
+        let loom = Obj.new().s("name", String("loom")).s("command", current_exe()).j("args", Json.Array([Json.Str(String("mcp"))])).j("env", env).done()
+        return Json.Array([loom])
+    }
+
+    // GET /api/mcp/tools and POST /api/mcp/call, from `loom mcp`. A call
+    // that waits on another agent is answered when that agent's run ends.
+    fn mcp_route(i: mut Instance, req: Request) -> Response? ! Error {
+        let h = req.header(String("Authorization")) ?? String()
+        let token = if h.starts_with("Bearer ") { h[7..].copy() } else { String() }
+        var grant = Grant { user: String(), agent: String() }
+        if let g = i.grants.find(token) {
+            grant = Grant { user: g.user.copy(), agent: g.agent.copy() }
+        } else {
+            return some(http_error(401, "unauthorized", String("That isn't a token for loom's tools.")))
+        }
+        if req.path == "/api/mcp/tools" and req.method == "GET" {
+            return some(json_response(200, Obj.new().j("tools", Json.Array(tools.all())).done()))
+        }
+        if req.path != "/api/mcp/call" or req.method != "POST" {
+            return some(http_error(404, "not_found", String("There's nothing here.")))
+        }
+        let body = match parse(req.text() ?? String()) {
+            ok(j) => j,
+            err(_) => return some(http_error(400, "bad_request", String("The body isn't JSON."))),
+        }
+        let name = str_at(body.copy(), "name") ?? String()
+        let args = at(body, "arguments")
+        match try i.tool(req.copy(), grant, name, args) {
+            some(result) => return some(json_response(200, result)),
+            none => return none,
+        }
+    }
+
+    // The agent `key` names, by id or by name, among `user`'s.
+    fn find_agent(i: Instance, user: String, key: String) -> Json? ! Error {
+        let wanted = key.trim().to_lower_root()
+        for a in try i.store.agents(user) {
+            if (str_at(a.copy(), "id") ?? String()) == key.trim() or (str_at(a.copy(), "name") ?? String()).to_lower_root() == wanted { return some(a.copy()) }
+        }
+        return none
+    }
+
+    // Does what a tool call says: its MCP result, or none when it's answered
+    // later (message_agent, when the other agent's run ends).
+    fn tool(i: mut Instance, req: Request, g: Grant, name: String, args: Json) -> Json? ! Error {
+        if name == "list_agents" {
+            var out = List<Json>()
+            for a in try i.store.agents(g.user.copy()) {
+                out.push(Obj.new().s("id", str_at(a.copy(), "id") ?? String()).s("name", str_at(a.copy(), "name") ?? String()).s("acp_agent", str_at(a.copy(), "acp_agent") ?? String()).s("instructions", str_at(a, "instructions") ?? String()).done())
+            }
+            return some(tool_text("{Json.Array(out)}"))
+        }
+        if name == "list_acp_agents" {
+            return some(answer_text(try i.command(g.user, g.agent, String("acp.list"), Obj.new().done())))
+        }
+        if name == "search_messages" {
+            var a = Obj.new().s("query", str_at(args.copy(), "query") ?? String())
+            if let key = str_at(args, "agent") {
+                let found = try i.find_agent(g.user.copy(), key.copy()) else return some(tool_error("There's no agent {key}."))
+                a = a.s("agent", str_at(found, "id") ?? String())
+            }
+            return some(answer_text(try i.command(g.user, g.agent, String("messages.search"), a.done())))
+        }
+        if name == "create_agent" {
+            // A new agent always starts out asking: only the person changes that.
+            let a = Obj.new().s("name", str_at(args.copy(), "name") ?? String("Agent")).s("acp_agent", str_at(args.copy(), "acp_agent") ?? String()).s("instructions", str_at(args, "instructions") ?? String()).s("permission", String("ask")).done()
+            return some(answer_text(try i.command(g.user, g.agent, String("agent.create"), a)))
+        }
+        if name == "update_agent" or name == "edit_instructions" {
+            var id = g.agent.copy()
+            if name == "update_agent" {
+                let key = str_at(args.copy(), "agent") ?? String()
+                let found = try i.find_agent(g.user.copy(), key.copy()) else return some(tool_error("There's no agent {key}."))
+                id = str_at(found, "id") ?? String()
+            }
+            // Only the name and the instructions: never a permission mode.
+            var a = Obj.new().s("agent", id)
+            if name == "update_agent" {
+                if let n = str_at(args.copy(), "name") { a = a.s("name", n) }
+            }
+            if let text = str_at(args, "instructions") { a = a.s("instructions", text) }
+            return some(answer_text(try i.command(g.user, g.agent, String("agent.update"), a.done())))
+        }
+        if name == "notify" {
+            let title = str_at(args.copy(), "title") ?? String()
+            let body = str_at(args, "body") ?? String()
+            try i.event(g.user, "notify", Obj.new().s("agent", g.agent).s("title", title).s("body", body).done())
+            return some(tool_text(String("Sent.")))
+        }
+        if name == "message_agent" {
+            return try i.message_agent(req, g, args)
+        }
+        return some(tool_error("loom has no tool {name}."))
+    }
+
+    // message_agent: says `text` to another agent, in the conversation the two
+    // keep, and answers the call with its reply once its run ends.
+    fn message_agent(i: mut Instance, req: Request, g: Grant, args: Json) -> Json? ! Error {
+        let key = str_at(args.copy(), "agent") ?? String()
+        let text = str_at(args, "text") ?? String()
+        if text.len() == 0 { return some(tool_error(String("Say something: text is empty."))) }
+        let to = try i.find_agent(g.user.copy(), key.copy()) else return some(tool_error("There's no agent {key}. list_agents gives their names."))
+        let to_id = str_at(to.copy(), "id") ?? String()
+        if to_id == g.agent { return some(tool_error(String("That's you."))) }
+        let from = try i.store.agent(g.user.copy(), g.agent.copy()) ?? Json.Null
+        let from_name = str_at(from, "name") ?? String("An agent")
+        // The two keep one conversation, so the other remembers what was said.
+        let kept = "talk:{g.user}:{g.agent}:{to_id}"
+        var conversation = Json.Null
+        if let id = try i.store.meta(kept.copy()) {
+            conversation = try i.store.conversation(g.user.copy(), id) ?? Json.Null
+        }
+        if conversation == Json.Null {
+            conversation = try i.store.add_conversation(g.user.copy(), to_id.copy(), "From {from_name}")
+            try i.event(g.user.copy(), "conversation.created", Obj.new().j("conversation", conversation.copy()).done())
+            try i.store.set_meta(kept, str_at(conversation.copy(), "id") ?? String())
+        }
+        let conversation_id = str_at(conversation.copy(), "id") ?? String()
+        for (_, r) in i.runs {
+            if r.user == g.user and r.conversation == conversation_id { return some(tool_error("{str_at(to, "name") ?? key} is still answering your last message. Try again once it's done.")) }
+        }
+        let message_id = try i.store.new_id("msg")
+        let blocks = Json.Array([Obj.new().s("kind", String("text")).s("text", text.copy()).done()])
+        let message = Obj.new().s("id", message_id.copy()).s("conversation", conversation_id.copy()).s("role", String("person")).s("from", g.agent.copy()).i("at", now()).j("blocks", blocks).done()
+        try i.store.put_message(g.user.copy(), message.copy())
+        try i.event(g.user.copy(), "message.created", Obj.new().s("conversation", conversation_id).j("message", message).done())
+        let run_id = try i.store.new_id("run")
+        i.calls.insert(run_id.copy(), req.copy())
+        try i.start_run(g.user, conversation, run_id, message_id, text, List<Json>())
+        return none
     }
 
     // --- Files (protocol.md, "Files") ---
@@ -908,7 +1086,7 @@ impl Instance {
                 }
                 let method = if p.resume { "session/resume" } else { "session/load" }
                 p.pending.insert(id, Pending.Resume(run_id.copy(), session.copy()))
-                p.to.send(Out.Send(acp.request(id, method, Obj.new().s("sessionId", session).s("cwd", folder).j("mcpServers", Json.Array(List<Json>())).done())))
+                p.to.send(Out.Send(acp.request(id, method, Obj.new().s("sessionId", session).s("cwd", folder).j("mcpServers", i.mcp_servers(user.copy(), agent.copy())).done())))
                 return
             }
         }
@@ -916,7 +1094,7 @@ impl Instance {
     }
 
     // Starts a new ACP session for a run, when there's none to pick up.
-    fn new_session(i: Instance, p: mut Proc, run_id: String) {
+    fn new_session(i: mut Instance, p: mut Proc, run_id: String) {
         var user = String()
         var agent = String()
         if let r = i.runs.find(run_id.copy()) {
@@ -931,7 +1109,7 @@ impl Instance {
         }
         p.next_id += 1
         p.pending.insert(p.next_id, Pending.NewSession(run_id.copy()))
-        p.to.send(Out.Send(acp.request(p.next_id, "session/new", Obj.new().s("cwd", folder).j("mcpServers", Json.Array(List<Json>())).done())))
+        p.to.send(Out.Send(acp.request(p.next_id, "session/new", Obj.new().s("cwd", folder).j("mcpServers", i.mcp_servers(user, agent)).done())))
     }
 
     fn folder_of(i: Instance, user: String, agent: String) -> String {
@@ -1360,6 +1538,7 @@ impl Instance {
             try i.event(r.user.copy(), "approval.answered", Obj.new().s("call", call).b("allow", false).b("always", false).s("by", String("cancel")).done())
         }
         var blocks = List<Json>()
+        var said = String()
         for b in r.blocks {
             if b.kind == "tool" {
                 blocks.push(Obj.new().s("kind", b.kind.copy()).s("call", b.call.copy()).done())
@@ -1369,12 +1548,18 @@ impl Instance {
                 blocks.push(b.file.copy())
             } else {
                 blocks.push(Obj.new().s("kind", b.kind.copy()).s("text", b.text.copy()).done())
+                if b.kind == "text" { said.push_str(b.text.copy()) }
             }
         }
         let message = Obj.new().s("id", r.message.copy()).s("conversation", r.conversation.copy()).s("role", String("agent")).s("agent", r.agent.copy()).s("run", r.id.copy()).i("at", now()).j("blocks", Json.Array(blocks)).done()
         try i.store.put_message(r.user.copy(), message.copy())
         try i.event(r.user.copy(), "message.created", Obj.new().s("conversation", r.conversation.copy()).j("message", message).done())
         try i.store.finish_run(r.id.copy(), status.copy())
+        // A message_agent call waiting on this run gets the reply.
+        if let req = i.calls.remove(r.id.copy()) {
+            let result = if status == "done" { tool_text(if said.len() > 0 { said } else { String("(It answered with nothing to read.)") }) } else { tool_error("It couldn't answer ({status}): {error.copy() ?? String("it stopped")}") }
+            i.server.respond(req, json_response(200, result))
+        }
         try i.event(r.user.copy(), "run.finished", Obj.new().s("run", r.id.copy()).s("status", status).maybe("error", error).done())
     }
 
@@ -1450,7 +1635,7 @@ impl Instance {
             }
             let agent = o.i("revision", (int_at(old, "revision") ?? 0) + 1).done()
             try i.store.put_agent(user.copy(), agent.copy())
-            try i.event(user, "agent.updated", Obj.new().j("agent", agent.copy()).done())
+            try i.event(user, "agent.updated", Obj.new().j("agent", agent.copy()).s("by", device.copy()).done())
             return Answer.Value(Obj.new().j("agent", agent).done())
         }
         if name == "agent.delete" {

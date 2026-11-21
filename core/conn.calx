@@ -359,10 +359,21 @@ impl Conn {
     }
 
     /// Tells the app what's worth a system notification, while no one is looking at it:
-    /// a reply that's done or failed, and a question an agent is waiting on. Only live
+    /// a reply that's done or failed, and a question an agent is waiting on, and, looking
+    /// or not, what an agent sends with its notify tool. Only live
     /// events count, not catch-up, so waking up doesn't bring a flood of old news.
     fn notify(mut self, e: Json) {
         let kind = str_at(e.copy(), "kind") ?? String()
+        if kind == "notify" {
+            let agent_id = str_at(e.copy(), "agent") ?? String()
+            let name = match self.cache.agent(agent_id.copy()) {
+                ok(some(a)) => str_at(a, "name") ?? String("An agent"),
+                _ => String("An agent"),
+            }
+            let title = str_at(e.copy(), "title") ?? String()
+            self.tell(Obj.new().s("t", String("core.notify")).s("title", if title.len() > 0 { "{name}: {title}" } else { name }).s("body", str_at(e, "body") ?? String()).s("agent", agent_id).s("conversation", String()).s("kind", String("notify")).done())
+            return
+        }
         if kind != "run.finished" and kind != "approval.needed" { return }
         let run = match self.cache.run(str_at(e.copy(), "run") ?? String()) {
             ok(some(r)) => r,
@@ -412,7 +423,8 @@ impl Conn {
             self.synced = true
         } else if t == "event" {
             // Before the cache applies it, while the run it ends is still there to read.
-            if self.synced and not self.active {
+            // An agent's own notify is for now, looking or not.
+            if self.synced and (not self.active or str_at(f.copy(), "kind") == some(String("notify"))) {
                 self.notify(f.copy())
             }
             match self.cache.apply(f.copy()) {
