@@ -106,7 +106,7 @@ A code works once, for five minutes. The device that showed it hears `device.add
 
 ### `POST /api/join/<code>`
 
-An invite (Phase 10). The same body and answer as `/api/setup`, without `code`. Errors: `bad_code`, `expired`, `used_up`, `username_taken`.
+No login. Makes an account from an invite ([`invite.create`](#commands)), with the username and password the person picked, and its first device. The same body and answer as `/api/setup`, without `code`. The account gets the invite's role. Errors: `bad_code` (it counts toward `rate_limited` as a wrong password does), `expired`, `used_up`, `username_taken`, `bad_username`, `weak_password`.
 
 ### `POST /api/logout`
 
@@ -466,6 +466,7 @@ An approval nobody answers stays open while the run does. Cancelling the run ans
 | `device.added` | `device` (`id`, `name`, `kind`, `at`) | A login, on any of the person's devices |
 | `device.updated` | `device` (`id` and what changed) | Renamed |
 | `device.revoked` | `device` (the id) | Signed out. The revoked device's own socket is closed with 4001 |
+| `user.joined` | `user`, `username`, `role` | Someone joined with an invite. To every owner and admin |
 
 ## Commands
 
@@ -510,6 +511,13 @@ Version 1's commands:
 | `activity.list` | `agent`?, `before`? (an entry's `id`), `limit`? (up to 200, 50 if left out) | `activity`, newest first: each `id`, `agent`, `kind` (`tool`, `approval`, `agent`, `message`, `notify`, `memory`, `routine` or `device`), `text`, `by` (a device, an agent, `auto` for the permission mode, or empty for the agent itself) and `at`. It's kept for good, unlike events |
 | `instance.move` | `to` (the new place's `http://` or `https://` address), `code` (the move code `loom receive` printed there) | `address`, once the instance is there. Only the owner, and not while an agent is answering. Until then, sends and commands get `moving`, and routines wait. The instance goes as `loom export` writes it, in chunks of 4 MB, each sealed with XChaCha20-Poly1305 under a key from the code, which also gives the bearer token for the new place's `POST /api/move/chunk?n=<n>` and `POST /api/move/done`. Then every device gets [`moved`](#moved). `move_failed` says why one didn't happen. An agent's `move_instance` asks the person first |
 | `instance.phones` | `on`? (true or false) | `on`, and while they are, `port` and `key` ([Over Noise](#over-noise)). With `on`, turns phones on or off: they reach the instance on the network over Noise, and stay on across a restart. Without it, says how things are. Only the owner, from a device, and only on an instance in the desktop app (or `loom serve --lan`): elsewhere `not_here` |
+| `invite.create` | `role`? (`member`, the default, or `admin`), `uses`? (1 to 100, default 1), `days`? (1 to 30, default 7) | `invite`, `code` (for [`POST /api/join/<code>`](#post-apijoincode), shown once), `role`, `uses`, `expires`. Owners and admins, from a device; only the owner makes admins. On an instance in the desktop app, `not_here`: it's its owner's alone |
+| `invite.list` | — | `invites`: each open one's `invite`, `role`, `uses` left, `expires`, `by` and `at`, newest first. Owners and admins |
+| `invite.delete` | `invite` | — |
+| `user.list` | — | `users`: each person's `user`, `username`, `role` and `at`, oldest first. Owners and admins |
+| `user.role` | `user`, `role` (`member` or `admin`) | —. The owner only, and never for the owner |
+| `user.remove` | `user` | —. Removes the person and everything of theirs, and their sessions close with 4001 once this is answered. The owner removes anyone but the owner, an admin only members, and not while one of their agents is answering (`busy`) |
+| `account.delete` | — | —. The person removes their own account, as `user.remove` does. Not the owner |
 | `agent.revisions` | `agent` | `revisions`, newest first: each `revision`, `by` (the device or agent that made it), `at`, and `agent` as it was then |
 | `agent.rollback` | `agent`, `revision` | `agent`: a new revision with that one's name, ACP agent, instructions, folder and colour. The permission mode stays as it is |
 | `agent.delete` | `agent` | — |
@@ -551,7 +559,7 @@ commands = ["routine.list"]   # commands the panel may send
 agents = true                 # the panel may message the person's agents
 ```
 
-What it asks for is its `asks`: `tools` when it has a tool server, `agents`, and `cmd:<name>` for each command. A panel never gets the commands that would let it allow itself more, borrow another plugin's permissions, run programs on the instance, or reach the person's devices, secrets and sign-in: `plugin.put`, `plugin.allow`, `plugin.delete`, `plugin.cmd`, `plugin.message`, `instance.move`, `instance.phones`, `link.create`, `push.register`, `push.unregister`, `device.revoke`, `device.rename`, `secret.list`, `secret.put`, `secret.delete`, `mcp.put`, `acp.install`, `acp.remove` and `acp.settings`. Until its person allows something, it waits, and the plugin goes without it.
+What it asks for is its `asks`: `tools` when it has a tool server, `agents`, and `cmd:<name>` for each command. A panel never gets the commands that would let it allow itself more, borrow another plugin's permissions, run programs on the instance, or reach the person's devices, secrets and sign-in: `plugin.put`, `plugin.allow`, `plugin.delete`, `plugin.cmd`, `plugin.message`, `instance.move`, `instance.phones`, `invite.create`, `invite.delete`, `user.role`, `user.remove`, `account.delete`, `link.create`, `push.register`, `push.unregister`, `device.revoke`, `device.rename`, `secret.list`, `secret.put`, `secret.delete`, `mcp.put`, `acp.install`, `acp.remove` and `acp.settings`. Until its person allows something, it waits, and the plugin goes without it.
 
 - **A tool server** the person allowed is in every one of their agents' new sessions, as the MCP server `plugin-<id>`. It runs from a folder holding the revision's files, with `LOOM_PLUGIN_DIR` set to that folder.
 - **A panel** talks to the app through one door, `await loom.send(op, args)` (desktop/src/panel.rs). The app sends these on, and refuses everything else, and the instance checks what's allowed:
