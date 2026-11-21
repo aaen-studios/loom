@@ -7088,7 +7088,7 @@ ACTA_KEY=secret:ACTA_KEY",
                 )
                 .child(caption(format!(
                     "Makes one {role}, until {}. It shows only now: send it the way you'd send a password.",
-                    time_of(expires)
+                    moment_of(expires)
                 )));
         }
         body = body.child(invite);
@@ -7183,7 +7183,7 @@ ACTA_KEY=secret:ACTA_KEY",
                 )
                 .child(caption(format!(
                     "Sets a new password for {who}, once, until {}. It signs them out everywhere else.",
-                    time_of(expires)
+                    moment_of(expires)
                 )));
         }
         body = body.child(everyone);
@@ -7207,7 +7207,7 @@ ACTA_KEY=secret:ACTA_KEY",
                             inv.role,
                             inv.uses,
                             if inv.uses == 1 { "use" } else { "uses" },
-                            time_of(inv.expires)
+                            moment_of(inv.expires)
                         ))))
                         .child(
                             self.button_owned(format!("invite-{}", inv.id), "Delete", false)
@@ -7229,11 +7229,7 @@ ACTA_KEY=secret:ACTA_KEY",
                 .gap(px(space::S))
                 .child(heading("What happened"));
             for e in self.model.people_log.clone() {
-                let when = if day_of(e.at) == "Today" {
-                    time_of(e.at)
-                } else {
-                    format!("{} {}", day_of(e.at), time_of(e.at))
-                };
+                let when = moment_of(e.at);
                 let who = if e.by.is_empty() {
                     "from the server".to_string()
                 } else {
@@ -8599,6 +8595,16 @@ fn day_of(ms: i64) -> String {
         "Yesterday".into()
     } else {
         day.format("%-d %B %Y").to_string()
+    }
+}
+
+/// When `ms` is: its time today, or its day and time, such as for an invite a week on.
+fn moment_of(ms: i64) -> String {
+    let day = day_of(ms);
+    if day == "Today" {
+        time_of(ms)
+    } else {
+        format!("{day} {}", time_of(ms))
     }
 }
 
