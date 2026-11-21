@@ -443,7 +443,7 @@ A run is one turn of an agent, answering one message.
 | Kind | Fields | When |
 |---|---|---|
 | `run.started` | `run`, `conversation`, `agent`, `revision`, `message` (the reply's id), `answering` (the person's message id) | The agent was given the message |
-| `run.finished` | `run`, `status` (`done`, `cancelled`, `failed` or `limit`), `error` (for `failed`), `usage` (`input`, `output`, `cost` where the agent reports them) | The turn is over, after `message.created` for its reply |
+| `run.finished` | `run`, `status` (`done`, `cancelled`, `failed` or `limit`), `error` (for `failed`), `usage` (`input`, `output`, `cost` where the agent reports them) | The turn is over, after `message.created` for its reply. Only the owner's agents run as the instance's own user; until members have sandboxes, a run of anyone else's agent is `failed`, saying so |
 
 ### Tool calls
 

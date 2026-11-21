@@ -74,6 +74,13 @@ fn run() ! Error {
     var ann = try App.connect(inst.base.copy(), ann_token.copy(), 0)
     try check(refused(try ann.cmd("q_1", "invite.create", Obj.new().done())) == "not_allowed", "a member can't invite")
     try check(refused(try ann.cmd("q_2", "user.list", Obj.new().done())) == "not_allowed", "or list people")
+    // Her agents don't run as the instance's own user, which would reach everyone's data.
+    let made_agent = try ann.cmd("q_a1", "agent.create", Obj.new().s("name", String("Hers")).s("acp_agent", String("fake")).done())
+    let ann_agent = str_at(at(at(made_agent, "value"), "agent"), "id") ?? String()
+    let ann_chat = str_at(at(try ann.cmd("q_a2", "conversation.create", Obj.new().s("agent", ann_agent).done()), "value"), "conversation") ?? String()
+    try ann.send(Obj.new().s("t", String("send")).s("cid", String("m_1")).s("conversation", ann_chat).s("text", String("hello")).done())
+    let finished = "{try ann.until("event", "run.finished")}"
+    try check(finished.contains("\"failed\"") and finished.contains("sandbox"), "a member's agent doesn't run outside a sandbox")
 
     let people = at(at(try owner.cmd("q_3", "user.list", Obj.new().done()), "value"), "users")
     let ann_id = match people {

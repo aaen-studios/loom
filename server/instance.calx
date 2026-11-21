@@ -2296,6 +2296,11 @@ impl Instance {
 
     fn start_proc(i: mut Instance, user: String, agent: Json) ! Error {
         let id = str_at(agent.copy(), "id") ?? String()
+        // Only the owner's agents run as the instance's own user (PLAN.md,
+        // "Sandboxes"). Anyone else's would reach everyone's data and the owner's keys.
+        if try i.store.role(user.copy()) != some(String("owner")) {
+            fail "Agents of people other than the owner run in their own sandbox, which this instance doesn't have yet"
+        }
         let program = str_at(agent.copy(), "acp_agent") ?? String()
         let acp_agent = try i.store.acp_agent(program.copy()) else {
             fail "there's no ACP agent named {program}; add one with `loom acp add`"
