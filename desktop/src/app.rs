@@ -1246,6 +1246,9 @@ ACTA_KEY=secret:ACTA_KEY",
 
     /// Opens the files that came to be opened, each in its own program.
     fn open_fetched(&mut self, cx: &mut Context<Self>) {
+        for frame in std::mem::take(&mut self.model.to_send) {
+            self.send(frame);
+        }
         for path in std::mem::take(&mut self.model.to_open) {
             cx.open_with_system(std::path::Path::new(&path));
         }
@@ -1258,6 +1261,12 @@ ACTA_KEY=secret:ACTA_KEY",
         }
         self.show_side(Screen::Page, cx);
         cx.notify();
+    }
+
+    /// Opens a file a reply named, from its agent's folder, in its own program.
+    pub fn open_mention(&mut self, m: &model::Mention) {
+        let frame = self.model.open_mention(m);
+        self.send(frame);
     }
 
     /// Opens a file from the chat in its own program.
@@ -8966,6 +8975,46 @@ fn reply(
                 .text_color(p.ink_3)
                 .child("Thinking…"),
         );
+    }
+    // The files it names, each a chip with its type, which opens it.
+    if !m.mentions.is_empty() {
+        let mut chips = div().flex().flex_wrap().gap(px(space::S));
+        for (i, mention) in m.mentions.iter().enumerate() {
+            let this = this.clone();
+            let opened = mention.clone();
+            chips = chips.child(
+                div()
+                    .id(SharedString::from(format!("mention-{}-{i}", m.id)))
+                    .flex()
+                    .items_center()
+                    .gap(px(space::S))
+                    .px(px(space::M))
+                    .py(px(space::XS))
+                    .rounded(px(radius::ROW))
+                    .border_1()
+                    .border_color(p.line)
+                    .bg(p.raised)
+                    .text_size(px(size::SMALL))
+                    .cursor_pointer()
+                    .hover(move |s| s.bg(p.hover).border_color(p.line_strong))
+                    .child(
+                        div()
+                            .text_color(p.ink_3)
+                            .child(Icon::new(Ico::FileText).xsmall()),
+                    )
+                    .child(div().text_color(p.ink).child(mention.name.clone()))
+                    .child(
+                        div()
+                            .text_size(px(size::CAPTION))
+                            .text_color(p.ink_3)
+                            .child(mention.kind()),
+                    )
+                    .on_click(move |_, _, cx| {
+                        let _ = this.update(cx, |loom, _| loom.open_mention(&opened));
+                    }),
+            );
+        }
+        body = body.child(chips);
     }
     div()
         .w_full()
