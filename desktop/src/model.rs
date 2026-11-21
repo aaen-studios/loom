@@ -295,6 +295,8 @@ pub struct Listed {
     pub how: Option<String>,
     /// The version installed, if it is.
     pub installed: Option<String>,
+    /// Its icon, an SVG in currentColor, as the instance fetched it.
+    pub icon: Option<String>,
 }
 
 /// A note an agent keeps, or one shared by all of the person's agents.
@@ -1236,6 +1238,8 @@ pub struct Model {
     pub installed: Vec<Program>,
     /// The ACP Registry's agents, once it's been read.
     pub registry: Vec<Listed>,
+    /// Which registry agent each program on the instance is, by the program's name.
+    pub program_ids: HashMap<String, String>,
     pub registry_loading: bool,
     pub registry_error: Option<String>,
     /// The registry agent being installed, while it is.
@@ -2529,7 +2533,20 @@ impl Model {
                                 .get("installed")
                                 .and_then(Value::as_str)
                                 .map(str::to_string),
+                            icon: a
+                                .get("icon_svg")
+                                .and_then(Value::as_str)
+                                .map(str::to_string),
                         })
+                        .collect()
+                })
+                .unwrap_or_default();
+            self.program_ids = f
+                .pointer("/value/programs")
+                .and_then(Value::as_object)
+                .map(|m| {
+                    m.iter()
+                        .filter_map(|(k, v)| v.as_str().map(|id| (k.clone(), id.to_string())))
                         .collect()
                 })
                 .unwrap_or_default();
@@ -3201,6 +3218,17 @@ impl Model {
     fn registry_cmd(&mut self) -> Value {
         let id = self.id("app.registry");
         json!({"t": "cmd", "id": id, "name": "acp.registry"})
+    }
+
+    /// The registry agent a program on the instance is, for its icon: the one the instance
+    /// matched it to, or the one with its name.
+    pub fn program_listed(&self, program: &str) -> Option<&Listed> {
+        let id = self
+            .program_ids
+            .get(program)
+            .map(String::as_str)
+            .unwrap_or(program);
+        self.registry.iter().find(|l| l.id == id)
     }
 
     /// Installs an agent from the registry, or updates it to the registry's version.
@@ -4360,6 +4388,29 @@ mod tests {
             shared["args"],
             json!({"name": "codex", "tokens": 100, "per": "month"})
         );
+    }
+
+    #[test]
+    fn a_brain_has_its_registry_icon() {
+        let mut m = Model::new();
+        let asked = m.load_programs();
+        let reg = asked.iter().find(|f| f["name"] == "acp.registry").unwrap();
+        m.result(&json!({"t": "result", "id": reg["id"], "ok": true, "value": {
+            "agents": [
+                {"id": "claude-acp", "name": "Claude Agent", "version": "1", "description": "", "how": "npx", "icon_svg": "<svg/>"},
+                {"id": "amp-acp", "name": "Amp", "version": "1", "description": "", "how": null}
+            ],
+            "programs": {"claude": "claude-acp"},
+            "platform": "windows-x86_64"
+        }}));
+        assert_eq!(m.registry[0].icon.as_deref(), Some("<svg/>"));
+        assert_eq!(m.registry[1].icon, None);
+        // A program added by hand has the icon of the registry agent it is.
+        assert_eq!(
+            m.program_listed("claude").map(|l| l.name.as_str()),
+            Some("Claude Agent")
+        );
+        assert!(m.program_listed("codex").is_none());
     }
 
     #[test]

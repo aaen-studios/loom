@@ -11,6 +11,7 @@ mod model;
 mod panel;
 mod panel_test;
 mod shell;
+mod smooth;
 mod thread;
 #[path = "../../design/generated/tokens.rs"]
 #[allow(dead_code)]
@@ -193,8 +194,23 @@ gpui_kit::assets::icon_assets!(
 /// loom's mark, the knot, beside the wordmark (design/logo/README.md).
 const KNOT: &str = "logo/knot.svg";
 
-/// GPUI Kit's assets, loom's extra icons, and its mark.
+/// GPUI Kit's assets, loom's extra icons, its mark, and the SVGs that come while it runs.
 struct AppAssets;
+
+/// SVGs that come while loom runs, by asset path, such as each brain's icon from the ACP
+/// Registry, which the instance fetches.
+static RUNTIME_SVGS: std::sync::LazyLock<
+    std::sync::RwLock<std::collections::HashMap<String, Vec<u8>>>,
+> = std::sync::LazyLock::new(Default::default);
+
+/// Keeps `svg` as the asset at `path`, unless it's there already, and gives the path.
+pub fn runtime_svg(path: &str, svg: &str) -> SharedString {
+    if let Ok(mut m) = RUNTIME_SVGS.write() {
+        m.entry(path.to_string())
+            .or_insert_with(|| svg.as_bytes().to_vec());
+    }
+    SharedString::from(path.to_string())
+}
 
 impl AssetSource for AppAssets {
     fn load(&self, path: &str) -> Result<Option<Cow<'static, [u8]>>> {
@@ -205,6 +221,9 @@ impl AssetSource for AppAssets {
         }
         if let Some(bytes) = ExtraIcons.load(path)? {
             return Ok(Some(bytes));
+        }
+        if let Some(bytes) = RUNTIME_SVGS.read().ok().and_then(|m| m.get(path).cloned()) {
+            return Ok(Some(Cow::Owned(bytes)));
         }
         gpui_kit::assets::Assets.load(path)
     }

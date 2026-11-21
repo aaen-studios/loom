@@ -16,10 +16,12 @@ import std.process
 import std.tar.{Tar}
 import std.thread.{Task}
 import std.zip.{Zip}
-import shared.obj.{Obj, at, str_at}
+import shared.obj.{Obj, at, merge, str_at}
 
 pub const REGISTRY: str = "https://cdn.agentclientprotocol.com/registry/v1/latest/registry.json"
 const REGISTRY_LIMIT: usize = 8000000
+const ICON_LIMIT: usize = 65536
+const ICON_WAIT_MS: u32 = 10000
 const ARCHIVE_LIMIT: usize = 1000000000
 const WAIT_MS: u32 = 600000
 
@@ -59,7 +61,7 @@ impl Task for Worker {
 
 fn work(w: Work) -> Json ! Error {
     return match w {
-        Work.Registry(address) => try fetch_json(address),
+        Work.Registry(address) => try fetch_registry(address),
         Work.Install(how, folder) => try install(how, folder),
     }
 }
@@ -190,6 +192,40 @@ fn fetch(address: String, limit: usize) -> List<u8> ! Error {
     let r = try req.wait()
     if r.status != 200 { fail "{address} answered {r.status}" }
     return r.body.copy()
+}
+
+// The registry, with each agent's icon in `icon_svg`: small SVGs in currentColor,
+// fetched here once with the registry, so the apps draw them in their own ink without
+// reaching the internet. One that can't be fetched, or isn't an SVG, is left out.
+fn fetch_registry(address: String) -> Json ! Error {
+    let registry = try fetch_json(address)
+    var agents = List<Json>()
+    if let Json.Array(list) = at(registry.copy(), "agents") {
+        for a in list {
+            var entry = a.copy()
+            if let icon = str_at(a.copy(), "icon") {
+                if let svg = icon_svg(icon) {
+                    entry = merge(entry, Obj.new().s("icon_svg", svg).done())
+                }
+            }
+            agents.push(entry)
+        }
+    }
+    return merge(registry, Obj.new().j("agents", Json.Array(agents)).done())
+}
+
+// An icon at `address`, if it's a small SVG served over http.
+fn icon_svg(address: String) -> String? {
+    if not address.starts_with("https://") and not address.starts_with("http://") { return none }
+    var req = get(address, [Header { name: String("User-Agent"), value: String("loom") }], ICON_WAIT_MS, ICON_LIMIT)
+    let r = match req.wait() {
+        ok(r) => r,
+        err(_) => return none,
+    }
+    if r.status != 200 { return none }
+    let text = String.from_utf8(r.body.copy()) else return none
+    if not text.contains("<svg") { return none }
+    return some(text)
 }
 
 fn fetch_json(address: String) -> Json ! Error {
