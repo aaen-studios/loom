@@ -1,0 +1,170 @@
+module tests.protocol.move
+
+// Moving an instance (PLAN.md, "Moving an instance"): the new place runs
+// `loom receive`, which prints a one-time move code, and the owner sends
+// `instance.move` with the new place's address and the code. Only the owner
+// moves it, and an agent asks first. A wrong code moves nothing. Once moved,
+// each device gets a moved frame signed with the instance's key, which
+// `welcome` gave it, and the old place keeps saying where it went. The
+// instance started at the new place has it all, takes the same device token
+// from the same event number, and has the same key.
+//
+//     calx tests/protocol/move.calx
+import std.bytes
+import std.crypto.{Ed25519PublicKey, random_bytes}
+import std.fs
+import std.http.websocket.{Message, connect}
+import std.json.{Json, parse}
+import std.process.{Child, Stdio, exit}
+import shared.obj.{Obj, at, int_at, str_at}
+import shared.protocol.{moved_message}
+import tests.kit.{App, Instance, check, fetch, loom, reply_text, upload}
+
+fn reply_in(app: mut App, conversation: String) -> String ! Error {
+    loop {
+        let created = try app.until("event", "message.created")
+        let m = at(created, "message")
+        if str_at(m.copy(), "role") == some(String("agent")) and str_at(m.copy(), "conversation") == some(conversation.copy()) { return reply_text(m) }
+    }
+}
+
+fn say(app: mut App, conversation: String, cid: str, text: String) -> String ! Error {
+    try app.send(Obj.new().s("t", String("send")).s("cid", String(cid)).s("conversation", conversation.copy()).s("text", text).done())
+    return try reply_in(mut app, conversation)
+}
+
+fn code(answer: Json) -> String {
+    return str_at(at(answer, "error"), "code") ?? String()
+}
+
+fn some_code() -> String {
+    return "loom-move-{bytes.hex(random_bytes(32))}"
+}
+
+// The key `welcome` gave the app.
+fn welcome_key(app: App) -> String {
+    for f in app.frames {
+        if str_at(f.copy(), "t") == some(String("welcome")) { return str_at(f.copy(), "key") ?? String() }
+    }
+    return String()
+}
+
+// Starts loom receive into `data`: the process, its address and the move code.
+fn receiving(data: String) -> (Child, String, String) ! Error {
+    let child = try loom(data, [String("receive"), String("--port"), String("0"), String("--json")]).stdout(Stdio.Pipe).spawn()
+    let line = child.wait_for_line(String("\"code\""), 120000) else {
+        child.kill()
+        fail "loom receive didn't print a move code"
+    }
+    let said = match parse(line.trim().copy()) {
+        ok(j) => j,
+        err(_) => Json.Null,
+    }
+    return (child, str_at(said.copy(), "listening") ?? String(), str_at(said, "code") ?? String())
+}
+
+// What the old place says to a hello once it has moved.
+fn hello_there(base: String, token: String) -> Json ! Error {
+    let ws = try connect("ws://{base}/ws")
+    try ws.send_text("{Obj.new().s("t", String("hello")).s("token", token).j("versions", Json.Array([Json.Int(1)])).i("after", 0).done()}")
+    let m = try ws.receive(30000) else { fail "the old place said nothing to a hello" }
+    let Message.Text(text) = m else { fail "the old place sent a binary frame" }
+    ws.close()
+    return try parse(text)
+}
+
+// Fills the instance and moves it. Gives the new place's folder, the app's
+// event number, the key, and the uploaded file's SHA-256.
+fn moving(i: Instance) -> (String, i64, String, String) ! Error {
+    var app = try App.connect(i.base.copy(), i.token.copy(), 0)
+    let key = welcome_key(app)
+    try check(key.len() > 0, "welcome carries the instance's key")
+    let made = try app.cmd("q_1", "agent.create", Obj.new().s("name", String("Main")).s("acp_agent", String("fake")).s("instructions", String("Test.")).done())
+    let agent = str_at(at(at(made, "value"), "agent"), "id") ?? String()
+    let c = try app.cmd("q_2", "conversation.create", Obj.new().s("agent", agent).done())
+    let conversation = str_at(at(c, "value"), "conversation") ?? String()
+    _ = try say(mut app, conversation.copy(), "m_1", String("remember the harbour"))
+    let (_, up) = try upload(i.base.copy(), i.token.copy(), "notes.txt", "text/plain", String("moved with it").to_bytes())
+    let sha = str_at(up, "file") ?? String()
+
+    // Only the owner moves it.
+    let bob = try i.second_account("bob")
+    var bobs = try App.connect(i.base.copy(), bob, 0)
+    let not_owner = try bobs.cmd("q_b", "instance.move", Obj.new().s("to", String("http://127.0.0.1:1")).s("code", some_code()).done())
+    try check(code(not_owner) == "not_allowed", "only the owner moves the instance")
+    bobs.close()
+
+    // An agent asks first.
+    let elsewhere = "http://127.0.0.1:1"
+    try app.send(Obj.new().s("t", String("send")).s("cid", String("m_2")).s("conversation", conversation.copy()).s("text", "/mcp move_instance {Obj.new().s("to", String(elsewhere)).s("code", some_code()).done()}").done())
+    let asked = try app.until("event", "approval.needed")
+    try check(str_at(asked.copy(), "title") == some("Move this instance to {elsewhere}"), "an agent's move asks the person first")
+    try app.send(Obj.new().s("t", String("approve")).s("call", str_at(asked, "call") ?? String()).b("allow", false).done())
+    _ = try reply_in(mut app, conversation.copy())
+
+    let there = "{try fs.temp_dir()}/new"
+    let (receiver, address, move_code) = try receiving(there.copy())
+    var rx = receiver
+    try check(address.starts_with("http://") and move_code.starts_with("loom-move-"), "loom receive prints its address and a move code")
+
+    // A wrong code moves nothing.
+    let wrong = try app.cmd("q_3", "instance.move", Obj.new().s("to", address.copy()).s("code", some_code()).done())
+    let still = try app.cmd("q_4", "skill.list", Obj.new().done())
+    try check(code(wrong) == "move_failed" and at(still, "ok") == Json.Bool(true), "a wrong code is refused by the new place, and the instance goes on")
+
+    // The move.
+    let done = try app.cmd("q_5", "instance.move", Obj.new().s("to", address.copy()).s("code", move_code).done())
+    try check(str_at(at(done, "value"), "address") == some(address.copy()), "the owner moves the instance")
+    let moved = try app.until("moved", "")
+    let public = Ed25519PublicKey.from_bytes(bytes.from_base64(key.copy()) ?? List<u8>()) else { fail "the key isn't an Ed25519 key" }
+    let signed = moved_message(str_at(moved.copy(), "instance") ?? String(), str_at(moved.copy(), "address") ?? String(), int_at(moved.copy(), "at") ?? 0)
+    try check(str_at(moved.copy(), "address") == some(address.copy()) and public.verify(signed.to_bytes(), bytes.from_hex(str_at(moved, "signature") ?? String()) ?? List<u8>()), "each device gets a moved frame with the new address, signed with the instance's key")
+    let received = rx.wait()
+    try check(received.status.success() and received.text().contains(#""received":{"format":1"#), "loom receive takes it, and says so")
+
+    // The old place says where it went.
+    let late = try hello_there(i.base.copy(), i.token.copy())
+    let (status, _, _) = try fetch(i.base.copy(), i.token.copy(), "/files/{sha}")
+    let (info_status, _, info) = try fetch(i.base.copy(), String(), String("/api/info"))
+    try check(str_at(late, "t") == some(String("moved")) and status == 410 and info_status == 200 and (String.from_utf8(info) ?? String()).contains(address.copy()), "and the old place keeps saying where it went")
+    let seq = app.seq
+    app.close()
+    return (there, seq, key, sha)
+}
+
+fn arrived(i: Instance, seq: i64, key: String, sha: String) ! Error {
+    var app = try App.connect(i.base.copy(), i.token.copy(), seq)
+    try check(welcome_key(app) == key, "at the new place, the same token works, and the key is the same")
+    var reset = true
+    for f in app.frames {
+        if str_at(f.copy(), "t") == some(String("welcome")) { reset = at(f.copy(), "reset") == Json.Bool(true) }
+    }
+    try check(not reset, "and it carries on from the same event number")
+    let found = try app.cmd("q_1", "messages.search", Obj.new().s("query", String("harbour")).done())
+    let (status, _, body) = try fetch(i.base.copy(), i.token.copy(), "/files/{sha}")
+    try check("{found}".contains("harbour") and status == 200 and String.from_utf8(body) == some(String("moved with it")), "and the conversations and files are there")
+    app.close()
+}
+
+fn main() ! Error {
+    let inst = try Instance.start()
+    let (there, seq, key, sha) = match moving(inst.copy()) {
+        ok(r) => r,
+        err(e) => {
+            inst.copy().stop()
+            eprintln("\n{e}")
+            exit(1)
+        },
+    }
+    let moved = try Instance { server: inst.server, data: there, base: inst.base, token: inst.token }.restart()
+    let failure: String? = match arrived(moved.copy(), seq, key, sha) {
+        ok => none,
+        err(e) => some("{e}"),
+    }
+    moved.stop()
+    if let f = failure {
+        eprintln("\n{f}")
+        exit(1)
+    }
+    println("\nmove: all good")
+}

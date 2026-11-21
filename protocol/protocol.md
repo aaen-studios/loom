@@ -61,11 +61,14 @@ No login. What an app needs before it logs in.
   "instance": "i_8sk2",
   "key": "<the instance's public key, base64>",
   "protocol": [1],
-  "setup": false
+  "setup": false,
+  "moved": null
 }
 ```
 
-`setup` is `true` until the owner account exists. `key` is checked on every later connection ([PLAN.md: Connecting devices](../PLAN.md#connecting-devices)).
+`setup` is `true` until the owner account exists. `key` is checked on every later connection ([PLAN.md: Connecting devices](../PLAN.md#connecting-devices)). `moved` is the [`moved`](#moved) frame once the instance has moved, and null until then.
+
+Once the instance has moved, every other route answers 410 with `{"error": {"code": "moved", …}, "moved": <the moved frame>}`. While it's moving, every route but a `GET` answers 503 with `moving`.
 
 ### `POST /api/setup`
 
@@ -252,10 +255,11 @@ The answer to a [`device.call`](#devicecall): `ok`, and `output`, the command's 
 ### `welcome`
 
 ```json
-{ "t": "welcome", "version": 1, "user": "u_1", "device": "d_3", "seq": 1046, "reset": false }
+{ "t": "welcome", "version": 1, "user": "u_1", "device": "d_3", "seq": 1046, "reset": false, "key": "<the instance's public key, base64>" }
 ```
 
 - `version`: the one version this connection uses.
+- `key`: the instance's Ed25519 public key, as `GET /api/info` gives it. The app keeps the first one it sees, checks a [`moved`](#moved) frame's signature with it, and expects the same key at the new place.
 - `seq`: the newest event `seq` the person has right now. Catch-up runs from `after` up to this.
 - `reset`: `true` when the app's cursor is too old (its events were pruned, which includes a new device's `0` once any have been) or ahead of the instance's (the instance was restored from an older backup). The app clears its cache, and a [`snapshot`](#snapshot) follows instead of the missed events.
 
@@ -337,6 +341,18 @@ Something the app sent couldn't be done. The socket stays open.
 ```
 
 `ref` is the `cid`, `call` or `run` of the frame it answers, when there is one.
+
+### `moved`
+
+The instance has moved to `address` ([Moving an instance](../PLAN.md#moving-an-instance)). Every connected device gets it the moment the move is done, and a device that connects later gets it instead of `welcome`. The socket closes with 4004 after it.
+
+```json
+{ "t": "moved", "instance": "i_8sk2", "address": "https://loom.example.com", "at": 1795262400000, "signature": "<hex>" }
+```
+
+`signature` is the instance's Ed25519 signature of `loom moved <instance> to <address> at <at>` (`shared/protocol.calx`, `moved_message`). The app checks it with the key `welcome` gave it, moves its token to `address`, and connects there with the same `after`. The instance there has the same key, the same tokens and the same events, so it carries on where it was. An app that finds another key there doesn't send its token.
+
+It isn't an event: the move takes the event log as it was, and the events go on at the new place from the same number.
 
 ## Devices as tools
 
@@ -491,6 +507,7 @@ Version 1's commands:
 | `plugin.cmd` | `plugin`, `name`, `args`? | The command's `value`, when the person allowed the plugin `cmd:<name>`, or `not_allowed`. It's how a panel's door sends commands |
 | `plugin.message` | `plugin`, `agent` (a name or id), `text` (up to 20,000 bytes) | `reply`: the agent's answer, once its run ends, when the person allowed the plugin `agents`, or `not_allowed`. The plugin and the agent keep one conversation, `From <plugin's name>`, where the message is the person's, with `plugin:<id>` as `from`. `busy` while the agent is still answering the last one, and `agent_failed` when its run fails |
 | `activity.list` | `agent`?, `before`? (an entry's `id`), `limit`? (up to 200, 50 if left out) | `activity`, newest first: each `id`, `agent`, `kind` (`tool`, `approval`, `agent`, `message`, `notify`, `memory`, `routine` or `device`), `text`, `by` (a device, an agent, `auto` for the permission mode, or empty for the agent itself) and `at`. It's kept for good, unlike events |
+| `instance.move` | `to` (the new place's `http://` or `https://` address), `code` (the move code `loom receive` printed there) | `address`, once the instance is there. Only the owner, and not while an agent is answering. Until then, sends and commands get `moving`, and routines wait. The instance goes as `loom export` writes it, in chunks of 4 MB, each sealed with XChaCha20-Poly1305 under a key from the code, which also gives the bearer token for the new place's `POST /api/move/chunk?n=<n>` and `POST /api/move/done`. Then every device gets [`moved`](#moved). `move_failed` says why one didn't happen. An agent's `move_instance` asks the person first |
 | `agent.revisions` | `agent` | `revisions`, newest first: each `revision`, `by` (the device or agent that made it), `at`, and `agent` as it was then |
 | `agent.rollback` | `agent`, `revision` | `agent`: a new revision with that one's name, ACP agent, instructions, folder and colour. The permission mode stays as it is |
 | `agent.delete` | `agent` | — |
@@ -532,7 +549,7 @@ commands = ["routine.list"]   # commands the panel may send
 agents = true                 # the panel may message the person's agents
 ```
 
-What it asks for is its `asks`: `tools` when it has a tool server, `agents`, and `cmd:<name>` for each command. A panel never gets the commands that would let it allow itself more, borrow another plugin's permissions, run programs on the instance, or reach the person's devices, secrets and sign-in: `plugin.put`, `plugin.allow`, `plugin.delete`, `plugin.cmd`, `plugin.message`, `link.create`, `push.register`, `push.unregister`, `device.revoke`, `device.rename`, `secret.list`, `secret.put`, `secret.delete`, `mcp.put`, `acp.install`, `acp.remove` and `acp.settings`. Until its person allows something, it waits, and the plugin goes without it.
+What it asks for is its `asks`: `tools` when it has a tool server, `agents`, and `cmd:<name>` for each command. A panel never gets the commands that would let it allow itself more, borrow another plugin's permissions, run programs on the instance, or reach the person's devices, secrets and sign-in: `plugin.put`, `plugin.allow`, `plugin.delete`, `plugin.cmd`, `plugin.message`, `instance.move`, `link.create`, `push.register`, `push.unregister`, `device.revoke`, `device.rename`, `secret.list`, `secret.put`, `secret.delete`, `mcp.put`, `acp.install`, `acp.remove` and `acp.settings`. Until its person allows something, it waits, and the plugin goes without it.
 
 - **A tool server** the person allowed is in every one of their agents' new sessions, as the MCP server `plugin-<id>`. It runs from a folder holding the revision's files, with `LOOM_PLUGIN_DIR` set to that folder.
 - **A panel** talks to the app through one door, `await loom.send(op, args)` (desktop/src/panel.rs). The app sends these on, and refuses everything else, and the instance checks what's allowed:
@@ -562,6 +579,9 @@ What it asks for is its `asks`: `tools` when it has a tool server, `agents`, and
 | `registry_unavailable` | `acp.registry`: the ACP Registry couldn't be read |
 | `unknown_file` | A `send` names a file this person hasn't uploaded |
 | `storage_full` | A file would take the person over the space the owner gives each person |
+| `moving` | The instance is moving: nothing changes until it's at the new place |
+| `moved` | `instance.move` on an instance that has moved already |
+| `move_failed` | `instance.move`: the export, sending it, or the new place failed. The message says which, and the instance goes on where it is |
 | `internal` | A bug in the instance. It's logged there |
 
 WebSocket close codes:
@@ -575,6 +595,7 @@ WebSocket close codes:
 | 4001 | The token is wrong or was revoked | Logs out on this device, and asks for a login |
 | 4002 | No protocol version in common | Says the app needs an update, or the instance does |
 | 4003 | Too slow: the app didn't read fast enough and the instance's queue for it filled up | Reconnects |
+| 4004 | The instance moved. A [`moved`](#moved) frame came just before | Checks it, and connects at the new address |
 
 ## Push
 
@@ -716,4 +737,3 @@ Fields and frames that come with later phases. Where they only add, they come wi
 
 - **Device tools** (Phase 3): the instance sends `{"t":"device.call", …}` with the request, and the signed approval when there is one, and the device answers `{"t":"device.result", …}`. Each device offers its tools in `hello`.
 - **Noise** (Phase 6): a phone reaching a desktop instance runs a Noise handshake against the instance's key from the QR code before `hello`, and every frame after it is encrypted.
-- **Moving** (Phase 7): the `instance.moved` event, signed with the instance's key, with the new address.

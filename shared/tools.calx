@@ -54,13 +54,14 @@ pub fn all() -> List<Json> {
         tool("read_plugin", "Reads one of your person's plugins: what list_plugins says of it, and its files, by path.", object(Obj.new().j("id", text_arg("The plugin's id.")), ["id"])),
         tool("save_plugin", "Makes a plugin for your person, or changes one: a panel (a small web app shown in their app, HTML, CSS and JavaScript, with no network; it reads and keeps data and sends commands with `await loom.send(op, args)`: \"data.get\" and \"data.put\" with key and value, \"cmd\" with name and args for a command its manifest asks for, \"message_agent\" with agent and text) and a tool server (an MCP server, in any language, that the instance runs for every agent). Give every file whole, plugin.toml among them: name, version, description, [panel] entry, [tools] command and args (an arg naming one of its files is that file), and [permissions] commands (a list of loom commands) and agents (true to message agents). Each change is a revision. What it asks for that your person hasn't allowed waits for their yes in the app.", object(Obj.new().j("id", text_arg("Lowercase letters, digits and hyphens, such as build-board.")).j("files", Obj.new().s("type", String("object")).s("description", String("Each file's path and its whole text, plugin.toml among them.")).done()), ["id", "files"])),
         tool("delete_plugin", "Deletes one of your person's plugins, with its panel's data. Your person is asked first.", object(Obj.new().j("id", text_arg("The plugin's id.")), ["id"])),
+        tool("move_instance", "Moves this whole instance to a new place: a server or a computer where loom receive is running, which printed a move code. Everything goes, and your person's apps follow. Your person is asked first, and only the instance's owner can move it.", object(Obj.new().j("to", text_arg("The new place's address, starting with https:// or http://.")).j("code", text_arg("The move code loom receive printed there, starting loom-move-.")), ["to", "code"])),
     ]
 }
 
 @test
 fn every_tool_has_a_schema() {
     let tools = all()
-    assert(tools.len() == 27)
+    assert(tools.len() == 28)
     for t in tools {
         assert("{t}".contains("\"inputSchema\":\{\"type\":\"object\""))
     }

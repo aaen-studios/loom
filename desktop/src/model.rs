@@ -576,6 +576,8 @@ pub struct Model {
     /// The id of the agent the app just asked the instance to make.
     pub made_agent: Option<String>,
     pub notices: Vec<String>,
+    /// Where the instance is moving to, while the owner's instance.move is under way.
+    pub moving: Option<String>,
     /// Files for the next message.
     pub attachments: Vec<Attachment>,
     /// Files the core has fetched, by SHA-256, or SHA-256 and ".thumb": where they are.
@@ -833,6 +835,13 @@ impl Model {
                 self.place_queued();
             }
             "core.file" => self.file_came(f),
+            "core.moved" => {
+                self.moving = None;
+                self.notices.push(format!(
+                    "Your instance moved to {}. The app is connected there now.",
+                    s(f, "address")
+                ));
+            }
             "core.device" => {
                 if let Some(tools) = f.get("tools").and_then(Value::as_object) {
                     self.device_tools = DEVICE_TOOLS
@@ -1028,6 +1037,13 @@ impl Model {
                     Some(p) => open.plugin = p.clone(),
                     None => self.panel = None,
                 }
+            }
+        } else if id.starts_with("app.move") {
+            // Once it's there, the core says so (core.moved); a failure is said now.
+            if let Some(e) = f.get("error") {
+                self.moving = None;
+                self.notices
+                    .push(format!("The move didn't happen: {}", s(e, "message")));
             }
         } else if id.starts_with("app.plugin_get") {
             if let Some(e) = f.get("error") {
@@ -1850,6 +1866,20 @@ impl Model {
     }
 
     /// Asks for a plugin's files, to open its panel.
+    /// The owner's instance.move to `to`, with the move code `loom receive` printed there.
+    pub fn move_instance(&mut self, to: &str, code: &str) -> Option<Value> {
+        if to.is_empty() || code.is_empty() {
+            self.notices
+                .push("Give the new place's address and its move code.".into());
+            return None;
+        }
+        self.moving = Some(to.to_string());
+        let id = self.id("app.move");
+        Some(
+            json!({"t": "cmd", "id": id, "name": "instance.move", "args": {"to": to, "code": code}}),
+        )
+    }
+
     pub fn open_plugin(&mut self, plugin: &str) -> Value {
         self.panel = None;
         self.door_answers.clear();
@@ -2129,6 +2159,28 @@ mod tests {
         let get = m.door(7, "data.get", &json!({"key": "k"})).unwrap();
         m.result(&json!({"t": "result", "id": get["id"], "ok": true, "value": {"value": 41}}));
         assert_eq!(m.door_answers, vec![(7, Ok(json!(41)))]);
+    }
+
+    #[test]
+    fn a_move_waits_for_the_core_and_a_failure_is_said() {
+        let mut m = Model::new();
+        assert!(m.move_instance("", "loom-move-1").is_none());
+        let f = m
+            .move_instance("https://new.example", "loom-move-1")
+            .unwrap();
+        assert_eq!(f["name"], "instance.move");
+        assert_eq!(m.moving.as_deref(), Some("https://new.example"));
+        m.result(&json!({"t": "result", "id": f["id"], "ok": false, "error": {"code": "move_failed", "message": "refused"}}));
+        assert!(m.moving.is_none());
+        assert!(m.notices.last().unwrap().contains("refused"));
+        m.move_instance("https://new.example", "loom-move-1");
+        m.take(&json!({"t": "core.moved", "address": "https://new.example"}));
+        assert!(m.moving.is_none());
+        assert!(m
+            .notices
+            .last()
+            .unwrap()
+            .contains("moved to https://new.example"));
     }
 
     #[test]

@@ -83,6 +83,7 @@ enum Screen {
     AddPhone,
     Mcp,
     Plugins,
+    Move,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -133,6 +134,8 @@ pub struct Loom {
     note_in: Entity<InputState>,
     profile_in: Entity<TextareaState>,
     routine_name_in: Entity<InputState>,
+    move_to_in: Entity<InputState>,
+    move_code_in: Entity<InputState>,
     routine_at_in: Entity<InputState>,
     routine_prompt_in: Entity<TextareaState>,
     /// On the routines page: none for the list, `Some(None)` for a new routine,
@@ -231,6 +234,8 @@ impl Loom {
                 .placeholder("Elliot, in Oslo. Builds loom. Likes short answers.")
         });
         let routine_name_in = input(window, cx, "Morning brief", false);
+        let move_to_in = input(window, cx, "https://loom.example.com", false);
+        let move_code_in = input(window, cx, "loom-move-…", false);
         let routine_at_in = input(window, cx, "30", false);
         let routine_prompt_in = cx.new(|cx| {
             TextareaState::new(window, cx)
@@ -389,6 +394,8 @@ ACTA_KEY=secret:ACTA_KEY",
             note_in,
             profile_in,
             routine_name_in,
+            move_to_in,
+            move_code_in,
             routine_at_in,
             routine_prompt_in,
             routine_open: None,
@@ -1192,6 +1199,20 @@ ACTA_KEY=secret:ACTA_KEY",
                                 cx.notify();
                             })),
                     )
+                    .child(
+                        div()
+                            .id("move")
+                            .text_size(px(size::CAPTION))
+                            .text_color(p.ink_3)
+                            .cursor_pointer()
+                            .hover(move |s| s.text_color(p.ink))
+                            .child("Move")
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.menu = None;
+                                this.screen = Screen::Move;
+                                cx.notify();
+                            })),
+                    )
                     // In a desktop instance, agents run on this PC already: its tools are
                     // for an instance somewhere else.
                     .when(!local_mode(), |d| {
@@ -1326,6 +1347,7 @@ ACTA_KEY=secret:ACTA_KEY",
                 | Screen::Profile
                 | Screen::Routines
                 | Screen::Mcp
+                | Screen::Move
         ) {
             return bar.child(div().text_size(px(size::BODY)).text_color(p.ink_3).child(
                 match self.screen {
@@ -1335,6 +1357,7 @@ ACTA_KEY=secret:ACTA_KEY",
                     Screen::Profile => "About you",
                     Screen::Mcp => "MCP servers",
                     Screen::AddPhone => "Add a phone",
+                    Screen::Move => "Move this instance",
                     _ => "This PC",
                 },
             ));
@@ -3328,6 +3351,68 @@ ACTA_KEY=secret:ACTA_KEY",
         div().flex_1().min_h_0().child(page)
     }
 
+    /// Moving the instance (PLAN.md, "Moving an instance"): the new place's address and the
+    /// code its `loom receive` printed. The apps follow by themselves once it's there.
+    fn move_page(&mut self, cx: &mut Context<Self>) -> Div {
+        let body = self.move_section(cx).w(px(560.0));
+        let page = div()
+            .id("move-page")
+            .size_full()
+            .overflow_y_scroll()
+            .flex()
+            .justify_center()
+            .pt(px(space::XXL))
+            .pb(px(space::XXL))
+            .child(body);
+        div().flex_1().min_h_0().child(page)
+    }
+
+    fn move_section(&mut self, cx: &mut Context<Self>) -> Div {
+        let p = self.p;
+        let caption = |text: String| {
+            div()
+                .text_size(px(size::CAPTION))
+                .text_color(p.ink_3)
+                .child(text)
+        };
+        let mut section = div()
+            .flex()
+            .flex_col()
+            .gap(px(space::M))
+            .child(
+                div()
+                    .text_size(px(size::HEADING))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(p.ink)
+                    .child("Move this instance"),
+            )
+            .child(caption(
+                "Everything goes to the new place: agents, conversations, files and secrets. Run loom receive there, and give its address and the move code it prints. Your apps follow on their own.".into(),
+            ));
+        if let Some(to) = self.model.moving.clone() {
+            return section.child(caption(format!("Moving to {to}…")));
+        }
+        section = section
+            .child(self.field("New place", Input::new(&self.move_to_in)))
+            .child(self.field("Move code", Input::new(&self.move_code_in)))
+            .child(
+                div()
+                    .flex()
+                    .child(
+                        self.button("move-instance", "Move", true)
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                let to = this.move_to_in.read(cx).value().trim().to_string();
+                                let code = this.move_code_in.read(cx).value().trim().to_string();
+                                if let Some(f) = this.model.move_instance(&to, &code) {
+                                    this.send(f);
+                                }
+                                cx.notify();
+                            })),
+                    ),
+            );
+        section
+    }
+
     /// The programs page: the agent programs on the instance, with their settings, and the
     /// ACP Registry's agents to install.
     fn programs_page(&mut self, cx: &mut Context<Self>) -> Div {
@@ -4391,6 +4476,7 @@ impl Render for Loom {
             Screen::Routines => self.routines_page(cx),
             Screen::Programs => self.programs_page(cx),
             Screen::ThisDevice => self.device_page(cx),
+            Screen::Move => self.move_page(cx),
             Screen::AddPhone => self.add_phone_page(cx),
             Screen::Mcp => self.mcp_page(cx),
             Screen::Plugins => self.plugins_page(cx),

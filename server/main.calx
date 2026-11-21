@@ -7,6 +7,7 @@ module server.main
 //     loom user list [--data DIR]
 //     loom acp add NAME COMMAND [ARG...] [--data DIR]
 //     loom acp list [--data DIR]
+//     loom receive [--data DIR] [--port N] [--host ADDR]
 //     loom status [--data DIR]
 //     loom files limit MB|off [--data DIR]
 //     loom install [--domain DOMAIN] [--port N]   as root, on a Linux server
@@ -22,6 +23,7 @@ import std.env
 import std.fs
 import std.hash.{sha256}
 import std.http.{Header, get}
+import std.http.server.{Server}
 import std.io
 import std.json.{Json}
 import std.process.{current_exe, exit}
@@ -33,6 +35,7 @@ import server.mcp
 import server.backup
 import server.push
 import server.installer
+import server.move
 import server.store.{Store}
 import server.setup
 
@@ -58,6 +61,9 @@ usage: loom <command>
   export FILE               write the whole instance to FILE, a .tar.zst, while it runs or not: a backup, which
                             holds the key to its secrets, so keep it as safe
   import FILE               make a new instance in --data from a backup
+  receive                   take a move into --data: prints a one-time move code, listens on --port and
+                            --host, and returns once the instance has come. --data must hold no instance,
+                            or one no one has set up yet
   status                    say what the instance holds
   install                   set loom up on a Linux server, as root: the loom user, a systemd service,
                             and Caddy for TLS with --domain DOMAIN, or Tailscale without one
@@ -223,7 +229,7 @@ fn serve(a: Args) ! Error {
         eprintln(elevated_refusal())
         exit(2)
     }
-    var i = try Instance.open(Config { data: a.data.copy(), port: a.port, host: a.host.copy(), hasher: hasher(a.copy()), events: event_life(a.copy()), registry: a.registry.copy(), minute_ms: a.minute_ms, apns: a.apns.copy() })
+    var i = try Instance.open(Config { data: a.data.copy(), port: a.port, host: a.host.copy(), hasher: hasher(a.copy()), events: event_life(a.copy()), registry: a.registry.copy(), minute_ms: a.minute_ms, apns: a.apns.copy(), version: String(VERSION) })
     if a.backups.len() > 0 {
         // Backups inside the instance's folder would go into the next one.
         let dir = try fs.absolute(a.backups.copy())
@@ -372,6 +378,23 @@ fn run(a: Args) -> Said ! Error {
     if cmd == "install" {
         let d = try setup.install(setup.Plan { domain: a.domain.copy(), port: a.port })
         return said(setup.done_text(d.copy()), setup.done_json(d))
+    }
+    if cmd == "receive" and a.words.len() == 1 {
+        // The move code is said first, and the answer once the instance has come.
+        try move.check_empty(a.data.copy())
+        var server = try Server.listen(a.port, a.host.copy())
+        server.log = false
+        let code = move.new_code()
+        let address = "http://{a.host}:{server.port}"
+        if a.json { println("{Obj.new().s("code", code.copy()).s("listening", address.copy()).done()}") } else {
+            println("loom: waiting for a move into {a.data}, at {address}")
+            println("move code: {code}")
+        }
+        io.flush()
+        let m = try move.receive(mut server, a.data.copy(), code)
+        server.shutdown()
+        let programs = at(m.copy(), "acp_agents")
+        return said("received the instance {str_at(m.copy(), "instance") ?? String()} in {a.data}. Install its ACP agents again here: {programs}. Then start it with loom serve", Obj.new().s("data", a.data.copy()).j("received", m).done())
     }
     if cmd == "update" {
         return try update(a.words.contains(String("--check")))

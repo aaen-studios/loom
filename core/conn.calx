@@ -9,6 +9,9 @@ module core.conn
 // The app's messages come in on `inbox`, and everything for the app goes out
 // on `to_app`, both as JSON text. The C boundary (core/lib.calx) joins them
 // to loom_core_send and on_event; tests use them as they are.
+import std.bytes
+import std.crypto.{Ed25519Key, Ed25519PublicKey}
+import std.http.{Header, Request, get}
 import std.http.websocket.{Message, WebSocket, open}
 import std.http.websocket
 import std.keyring
@@ -17,7 +20,7 @@ import std.random.{Random}
 import std.thread.{Task}
 import std.time.{Instant}
 import shared.obj.{Obj, at, bool_at, int_at, merge, str_at}
-import shared.protocol.{APP_QUIET_MS, APP_WAIT_MS, CLOSE_TOKEN, CLOSE_VERSION, NEWEST}
+import shared.protocol.{APP_QUIET_MS, APP_WAIT_MS, CLOSE_MOVED, CLOSE_TOKEN, CLOSE_VERSION, NEWEST, moved_message}
 import core.cache.{Cache, now}
 import core.files.{Transfer, at_path, kept_at, refused}
 import shared.files.{is_sha}
@@ -30,6 +33,7 @@ import std.fs
 const FIRST_WAIT_MS: u64 = 500
 const LONGEST_WAIT_MS: u64 = 30000
 const TICK_NS: u64 = 10000000    // the loop wakes this often to read the socket
+const FOLLOW_AGAIN_NS: u64 = 2000000000    // how long before asking a new place that didn't answer again
 
 // The id the core gives its own conversation.create commands, before the send's cid.
 const MAKING: str = "core.conversation:"
@@ -111,6 +115,9 @@ pub struct Conn {
     pub updater: Updater?    // looks for new releases of the app; none in tests and dev builds
     pub tz: String?          // the system's time zone, an IANA name, as the app found it
     device: Device?       // this device as a tool for agents; none if its key couldn't be kept
+    follow_to: String     // where the instance moved, while the core checks it's the same one there
+    following: Request?   // GET <follow_to>/api/info, for its key
+    follow_at: Instant?   // when it last asked, so it asks again 2 s later while the new place isn't answering
 }
 
 impl Conn {
@@ -160,6 +167,9 @@ impl Conn {
             updater: none,
             tz: none,
             device: device,
+            follow_to: String(),
+            following: none,
+            follow_at: none,
         }
     }
 
@@ -263,6 +273,13 @@ impl Conn {
                 if code == CLOSE_VERSION {
                     self.state = State.UpdateNeeded
                     self.tell_state(0, reason.copy())
+                    return
+                }
+                // The moved frame came first: the core is checking the new place.
+                if code == CLOSE_MOVED and self.follow_to.len() > 0 {
+                    let to = self.follow_to.copy()
+                    self.state = State.Connecting
+                    self.tell_state(0, "moving to {to}")
                     return
                 }
             },
@@ -431,7 +448,20 @@ impl Conn {
             err(_) => return,
         }
         let t = str_at(f.copy(), "t") ?? String()
+        if t == "moved" {
+            self.moved(f)
+            return
+        }
         if t == "welcome" {
+            // The instance's key, kept from the first welcome: a move is checked with it.
+            if let key = str_at(f.copy(), "key") {
+                if self.known("instance_key") == none {
+                    match self.cache.set_meta("instance_key", key) {
+                        ok => {},
+                        err(e) => self.tell_error("cache", "{e}"),
+                    }
+                }
+            }
             self.state = State.Live
             self.failed = 0
             self.tell_state(0, String())
@@ -990,6 +1020,82 @@ impl Conn {
         }
     }
 
+    // --- Following a move (protocol.md, "moved") ---
+
+    /// The instance moved: if it's signed with the instance's key, ask the new place for
+    /// its key before sending it the token.
+    fn moved(mut self, f: Json) {
+        let to = address(str_at(f.copy(), "address") ?? String())
+        let key = self.known("instance_key") ?? String()
+        if not moved_signed(f.copy(), key) or ws_url(to.copy()) == none {
+            self.tell_error("moved_unsigned", String("The instance says it moved, but it isn't signed with its key, so the app stays where it is."))
+            return
+        }
+        self.follow_to = to.copy()
+        self.following = some(get("{to}/api/info", List<Header>(), 30000, 65536))
+    }
+
+    /// Takes the new place's /api/info, once it has come: the same key, and the app goes
+    /// there, keeping its token, cache and cursor. Another key, and it stays.
+    fn poll_follow(mut self) {
+        if self.following == none and self.follow_to.len() > 0 {
+            if let since = self.follow_at {
+                if unsafe { Instant.now() }.nanos_since(since) < FOLLOW_AGAIN_NS { return }
+            }
+            self.follow_at = none
+            self.following = some(get("{self.follow_to}/api/info", List<Header>(), 30000, 65536))
+            return
+        }
+        let ready = match self.following {
+            some(r) => r.done(),
+            none => false,
+        }
+        if not ready { return }
+        let taken = self.following.take() else { return }
+        var r = taken
+        let to = self.follow_to.copy()
+        var info = Json.Null
+        if let ok(res) = r.wait() {
+            if res.status == 200 {
+                if let ok(j) = parse(String.from_utf8(res.body.copy()) ?? String()) { info = j }
+            }
+        }
+        if info == Json.Null {
+            // Not answering yet, as when it has the instance but hasn't started it:
+            // ask again in a moment.
+            self.follow_at = some(unsafe { Instant.now() })
+            return
+        }
+        self.follow_to = String()
+        if str_at(info, "key") != self.known("instance_key") {
+            self.state = State.Offline
+            self.retry_at = none
+            self.tell_error("moved_elsewhere", "The instance says it moved to {to}, but another instance is there, so the app doesn't sign in to it.")
+            return
+        }
+        let old = self.server.copy() ?? String()
+        let token = self.token.copy() ?? String()
+        match keyring.set(self.keyring.copy(), to.copy(), token) {
+            ok => {
+                if old.len() > 0 {
+                    match keyring.delete(self.keyring.copy(), old.copy()) {
+                        ok(_) => {},
+                        err(_) => {},
+                    }
+                }
+            },
+            err(e) => self.tell_error("keyring", "{e}"),
+        }
+        match self.cache.set_meta("server", to.copy()) {
+            ok => {},
+            err(e) => self.tell_error("cache", "{e}"),
+        }
+        self.server = some(to.copy())
+        self.failed = 0
+        self.tell(Obj.new().s("t", String("core.moved")).s("from", old).s("address", to).done())
+        self.connect()
+    }
+
     /// Starts again if it's time.
     fn tick(mut self) {
         if self.state != State.Offline { return }
@@ -1011,6 +1117,7 @@ impl Task for Conn {
             c.poll_transfers()
             c.poll_update()
             c.poll_device()
+            c.poll_follow()
             c.tick()
             if let m = unsafe { c.inbox.wait_for(TICK_NS) } {
                 if not c.from_app(m) { return }
@@ -1020,6 +1127,25 @@ impl Task for Conn {
             }
         }
     }
+}
+
+/// Whether the moved frame `f` is signed with `key`, the instance's key (base64).
+pub fn moved_signed(f: Json, key: String) -> bool {
+    let public = Ed25519PublicKey.from_bytes(bytes.from_base64(key) ?? List<u8>()) else return false
+    let message = moved_message(str_at(f.copy(), "instance") ?? String(), str_at(f.copy(), "address") ?? String(), int_at(f.copy(), "at") ?? 0)
+    let signature = bytes.from_hex(str_at(f, "signature") ?? String()) ?? List<u8>()
+    return public.verify(message.to_bytes(), signature)
+}
+
+@test
+fn a_move_is_signed_with_the_instance_key() {
+    let k = Ed25519Key.generate()
+    let key = bytes.base64(k.public_key().bytes())
+    let message = moved_message(String("i_1"), String("https://new.example"), 5)
+    let f = Obj.new().s("t", String("moved")).s("instance", String("i_1")).s("address", String("https://new.example")).i("at", 5).s("signature", bytes.hex(k.sign(message.to_bytes()))).done()
+    assert(moved_signed(f.copy(), key.copy()))
+    assert(not moved_signed(merge(f.copy(), Obj.new().s("address", String("https://evil.example")).done()), key))
+    assert(not moved_signed(f, bytes.base64(Ed25519Key.generate().public_key().bytes())))
 }
 
 @test
