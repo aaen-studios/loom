@@ -4048,6 +4048,14 @@ ACTA_KEY=secret:ACTA_KEY",
                 _ => Vec::new(),
             };
             let branch_at = pin.as_ref().map(|(id, _)| id.clone());
+            // Its time, just outside its left edge while the pointer is over it: the
+            // chat has no time separators.
+            let when = match row {
+                Row::Message(m) if !m.live && !m.queued => {
+                    Some(when_sent(m.at, chrono::Local::now())).filter(|w| !w.is_empty())
+                }
+                _ => None,
+            };
             let this = this.clone();
             let to_branch = this.clone();
             let mut links = div().flex().flex_col().gap(px(2.0)).pt(px(space::XS));
@@ -4085,6 +4093,21 @@ ACTA_KEY=secret:ACTA_KEY",
                         .py(px(space::S))
                         .relative()
                         .group("row")
+                        .when_some(when, |d, when| {
+                            d.child(
+                                div()
+                                    .absolute()
+                                    .top(px(space::S + 4.0))
+                                    .right(relative(1.0))
+                                    .pr(px(space::M))
+                                    .whitespace_nowrap()
+                                    .text_size(px(size::CAPTION))
+                                    .text_color(p.ink_3)
+                                    .opacity(0.0)
+                                    .group_hover("row", |s| s.opacity(1.0))
+                                    .child(when),
+                            )
+                        })
                         .child(inner)
                         .child(links)
                         .when_some(branch_at, |d, id| {
@@ -8936,6 +8959,57 @@ fn time_of(ms: i64) -> String {
     match chrono::Local.timestamp_millis_opt(ms) {
         chrono::LocalResult::Single(t) => t.format("%H:%M").to_string(),
         _ => String::new(),
+    }
+}
+
+/// When a message was sent, as its hover shows it: "14:05" today, "Yesterday 14:05",
+/// "21 Nov 14:05" this year, and "21 Nov 2025 14:05" before.
+fn when_sent(ms: i64, now: chrono::DateTime<chrono::Local>) -> String {
+    use chrono::{Datelike, TimeZone};
+    if ms <= 0 || ms == i64::MAX {
+        return String::new();
+    }
+    let chrono::LocalResult::Single(t) = chrono::Local.timestamp_millis_opt(ms) else {
+        return String::new();
+    };
+    let (day, today) = (t.date_naive(), now.date_naive());
+    if day == today {
+        t.format("%H:%M").to_string()
+    } else if today.pred_opt() == Some(day) {
+        t.format("Yesterday %H:%M").to_string()
+    } else if day.year() == today.year() {
+        t.format("%-d %b %H:%M").to_string()
+    } else {
+        t.format("%-d %b %Y %H:%M").to_string()
+    }
+}
+
+#[cfg(test)]
+mod when_tests {
+    use super::when_sent;
+    use chrono::TimeZone;
+
+    #[test]
+    fn a_messages_time_says_the_day_when_it_isnt_today() {
+        let at = |y, mo, d, h, mi| {
+            chrono::Local
+                .with_ymd_and_hms(y, mo, d, h, mi, 0)
+                .single()
+                .unwrap()
+        };
+        let now = at(2026, 11, 21, 20, 0);
+        let ms = |t: chrono::DateTime<chrono::Local>| t.timestamp_millis();
+        assert_eq!(when_sent(ms(at(2026, 11, 21, 14, 5)), now), "14:05");
+        assert_eq!(
+            when_sent(ms(at(2026, 11, 20, 9, 30)), now),
+            "Yesterday 09:30"
+        );
+        assert_eq!(when_sent(ms(at(2026, 3, 2, 8, 0)), now), "2 Mar 08:00");
+        assert_eq!(
+            when_sent(ms(at(2025, 12, 31, 23, 59)), now),
+            "31 Dec 2025 23:59"
+        );
+        assert_eq!(when_sent(0, now), "");
     }
 }
 
