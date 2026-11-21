@@ -27,7 +27,7 @@ Not here yet: the updater (LOO-29), the instance in the app (LOO-27), and files,
 
 ## Trying it
 
-Run an instance (`calx server/main.calx serve`), then start the app and sign in with its address, a username, a password and, the first time, the setup code it printed. While developing:
+Run an instance (`calx server/main.calx serve`), then start the app and sign in with its address, a username, a password and, the first time, the setup code it printed. Or choose **Run one on this computer** on the sign-in page: the app keeps that choice in `mode` in its data folder, and runs the instance itself from then on, with its data in `instance` there. **Sign out** goes back to the sign-in page and stops it; its agents and chats stay for next time. While developing:
 
 - `LOOM_SERVER`: an instance's address, filled in on the sign-in page.
 - `LOOM_DATA`: the folder for the core's cache, instead of `%APPDATA%\Loom`.

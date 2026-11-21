@@ -13,6 +13,7 @@ import std.crypto.{Ed25519Key, PasswordHasher, compare_digest, random_bytes}
 import std.fs
 import std.http.server.{Request, Response, Server, ServerSocket}
 import std.json.{Json, parse}
+import std.process
 import std.signal
 import shared.obj.{Obj, at, bool_at, int_at, str_at}
 import shared.protocol
@@ -190,11 +191,67 @@ impl Instance {
         return some(code)
     }
 
+    // For an instance in the desktop app (PLAN.md, "An instance in the desktop app"):
+    // its owner, made on the first start with a password no one knows, since the person's
+    // account on the computer is the lock; and a token for this launch, on the one device
+    // that is this computer. The last launch's token stops working.
+    pub fn local_token(i: mut Instance, username: String, kind: String) -> String ! Error {
+        var owner = try i.store.meta("local_user") ?? String()
+        if owner.len() == 0 {
+            let users = try i.store.users()
+            if users.len() > 0 {
+                owner = users[0].id.copy()
+            } else {
+                let u = try i.store.add_user(username, bytes.hex(random_bytes(24)), "owner")
+                owner = u.id.copy()
+                try i.store.delete_meta("setup_code")
+            }
+            try i.store.set_meta("local_user", owner.copy())
+        }
+        if let old = try i.store.meta("local_device") {
+            try i.revoke(owner.copy(), old)
+        }
+        let body = Obj.new().j("device", Obj.new().s("name", String("This computer")).s("kind", kind).done()).done()
+        let answer = try i.new_device(owner, body)
+        try i.store.set_meta("local_device", str_at(answer.copy(), "device") ?? String())
+        return str_at(answer, "token") ?? String()
+    }
+
+    // Adds the ACP agent programs found on this computer that the instance doesn't know
+    // yet, so an instance in the desktop app can make agents at once.
+    pub fn find_acp_agents(i: Instance) ! Error {
+        if process.which(String("npx")) != none {
+            if try i.store.acp_agent(String("claude")) == none {
+                try i.store.set_acp_agent(String("claude"), String("npx"), [String("-y"), String("@zed-industries/claude-agent-acp")])
+            }
+            if try i.store.acp_agent(String("codex")) == none {
+                try i.store.set_acp_agent(String("codex"), String("npx"), [String("-y"), String("@zed-industries/codex-acp")])
+            }
+        }
+        if process.which(String("gemini")) != none and try i.store.acp_agent(String("gemini")) == none {
+            try i.store.set_acp_agent(String("gemini"), String("gemini"), [String("--experimental-acp")])
+        }
+    }
+
     // Runs until the program is asked to stop.
     pub fn serve(i: mut Instance) ! Error {
         signal.handle()
         try i.server.wake_on_signal()
+        try i.run(none)
+    }
+
+    // Runs until something comes on `stop`: an instance inside the desktop app, which
+    // leaves the program's signals to the app.
+    pub fn serve_until(i: mut Instance, stop: own Receiver<bool>) ! Error {
+        try i.run(some(stop))
+    }
+
+    fn run(i: mut Instance, until: own Receiver<bool>?) ! Error {
+        var stop = until
         loop {
+            if let s = mut stop {
+                if s.next() != none { break }
+            }
             match i.server.next_event(10) {
                 some(Request(req)) => {
                     if req.path == "/ws" and req.method == "GET" {

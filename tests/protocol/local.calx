@@ -1,0 +1,106 @@
+module tests.protocol.local
+
+// The instance inside the desktop app (core/lib.calx, start_local): it starts
+// on a thread of the program that runs it, makes its owner, gives this
+// launch a token the core connects with, and the last launch's token stops
+// working.
+//
+// Run it from the repository's root:
+//
+//     calx tests/protocol/local.calx
+import std.fs
+import std.json.{Json, parse}
+import std.process.{exit}
+import std.time.{Instant}
+import shared.obj.{Obj, at, str_at}
+import core.cache.{Cache}
+import core.conn.{Conn}
+import core.lib.{start_local}
+
+fn check(passed: bool, what: str) ! Error {
+    if not passed { fail "failed: {what}" }
+    println("ok    {what}")
+}
+
+struct App {
+    to_core: Sender<String>
+    from_core: Receiver<String>
+    thread: Thread?
+}
+
+impl App {
+    fn start(url: String, token: own String) -> App ! Error {
+        let inbox = Receiver<String>()
+        let to_core = inbox.sender()
+        let from_core = Receiver<String>()
+        let conn = Conn.new(some(url.copy()), some(token), String("loom-test-local"), try Cache.open(String(":memory:")), inbox, from_core.sender())
+        let t = unsafe { Thread.spawn(conn) }
+        return App { to_core: to_core, from_core: from_core, thread: some(t) }
+    }
+
+    fn until(mut self, t: str, field: str, value: String, ms: u64) -> Json ! Error {
+        let start = unsafe { Instant.now() }
+        loop {
+            let waited = unsafe { Instant.now() }.nanos_since(start) / 1000000
+            if waited >= ms { fail "no {t} {field}={value} came in {ms} ms" }
+            let m = unsafe { self.from_core.wait_for((ms - waited) * 1000000) } else { continue }
+            let f = try parse(m)
+            if (str_at(f.copy(), "t") ?? String()) != t { continue }
+            if field.len() == 0 or (str_at(f.copy(), field) ?? String()) == value { return f }
+        }
+    }
+
+    fn send(mut self, frame: Json) {
+        self.to_core.send("{frame}")
+    }
+
+    fn stop(mut self) {
+        self.to_core.send(String(#"{"t":"core.stop"}"#))
+        if let t = self.thread.take() {
+            t.join()
+        }
+    }
+}
+
+fn run() ! Error {
+    let data = try fs.temp_dir()
+    let cfg = Obj.new().s("username", String("elliot")).s("kind", String("windows")).done()
+    let (t1, s1, url1, token1) = try start_local(cfg.copy(), data.copy())
+    var stop1 = s1
+    try check(url1.starts_with("http://127.0.0.1:"), "the instance starts inside the program, on 127.0.0.1")
+    var app = try App.start(url1.copy(), token1.copy())
+    _ = try app.until("core.conn", "state", String("live"), 10000)
+    let added = try app.until("event", "kind", String("device.added"), 5000)
+    try check(str_at(at(added, "device"), "name") == some(String("This computer")), "the core connects with this launch's token, as this computer")
+    app.send(Obj.new().s("t", String("cmd")).s("id", String("q_1")).s("name", String("acp.list")).done())
+    _ = try app.until("result", "id", String("q_1"), 5000)
+    try check(true, "and the instance answers it")
+    app.stop()
+    stop1.send(true)
+    t1.join()
+    println("ok    it stops when the app does")
+
+    let (t2, s2, url2, token2) = try start_local(cfg, data)
+    var stop2 = s2
+    try check(token2 != token1, "the next launch gets a new token")
+    var old = try App.start(url2.copy(), token1)
+    _ = try old.until("core.conn", "state", String("signed_out"), 10000)
+    try check(true, "and the last launch's token stops working")
+    old.stop()
+    var again = try App.start(url2, token2)
+    _ = try again.until("synced", "", String(), 10000)
+    try check(true, "the same owner, with what it had, comes back")
+    again.stop()
+    stop2.send(true)
+    t2.join()
+}
+
+fn main() {
+    match run() {
+        ok => println("\nlocal instance: all good"),
+        err(e) => {
+            eprintln("\n{e}")
+            exit(1)
+        },
+    }
+}

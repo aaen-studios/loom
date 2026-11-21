@@ -21,6 +21,8 @@ void      loom_core_stop(uint8_t *core);
 
 `loom_core_start` takes `{"server": "https://loom.example.com", "data": "C:\Users\…\AppData\Roaming\Loom"}`, both optional. `data` is the folder for the cache, which is kept in memory without one. With `server`, or the one the cache last knew, the core looks for a token kept for it and connects; without a token, it waits for a login. Tests also give `token`, and `keyring`, a service of their own.
 
+With `"mode": "local"` the core first starts an instance of its own ([PLAN.md, "An instance in the desktop app"](../PLAN.md#an-instance-in-the-desktop-app)): the server code, on a thread, listening on 127.0.0.1 on a free port, with its data in `{data}/instance`. It finds the ACP agents installed on the computer, makes a device for "This computer" owned by `username` (default `me`) of kind `kind` (default `windows`), and connects with that device's token, which is new every launch. Its cache is `{data}/local.db`, apart from `core.db`, so an instance elsewhere keeps its own. `loom_core_stop` stops the instance too.
+
 ## Between the app and the core
 
 The app sends the core protocol frames (`send`, `cmd`, `approve`, `cancel`, …), which go on to the instance as they are, and these of the core's own:
@@ -56,6 +58,7 @@ The core tells the app every frame the instance sends (`welcome`, `event`, `delt
 | `{"t":"error","code":"not_sent","ref":"m_…","message":"…"}` | A send to an agent the instance couldn't make a conversation with, such as one deleted meanwhile. It leaves the outbox |
 | `{"t":"error","code":"cache","message":"…"}` | The cache couldn't be read or written. An event that wasn't applied isn't in the cursor either, so the next connection gets it again |
 | `{"t":"error","code":"bad_config","message":"…"}` | The config's `server` isn't an `http://` or `https://` address |
+| `{"t":"error","code":"local","message":"…"}` | The instance on this computer didn't start, in `"mode": "local"`. The core waits for a login, as without a server |
 
 Not done yet: treating 45 s with nothing from the instance as a dead connection. The Calx WebSocket client answers pings without showing them to the program, so it waits on CLX-395.
 
