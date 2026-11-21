@@ -84,6 +84,7 @@ enum Screen {
     Mcp,
     Plugins,
     Move,
+    People,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -136,6 +137,8 @@ pub struct Loom {
     routine_name_in: Entity<InputState>,
     move_to_in: Entity<InputState>,
     move_code_in: Entity<InputState>,
+    /// Whether the People page's next invite makes an admin rather than a member.
+    invite_admin: bool,
     routine_at_in: Entity<InputState>,
     routine_prompt_in: Entity<TextareaState>,
     /// On the routines page: none for the list, `Some(None)` for a new routine,
@@ -396,6 +399,7 @@ ACTA_KEY=secret:ACTA_KEY",
             routine_name_in,
             move_to_in,
             move_code_in,
+            invite_admin: false,
             routine_at_in,
             routine_prompt_in,
             routine_open: None,
@@ -1232,6 +1236,25 @@ ACTA_KEY=secret:ACTA_KEY",
                                     cx.notify();
                                 })),
                         )
+                        // Only an instance on a server has other people.
+                        .child(
+                            div()
+                                .id("people")
+                                .text_size(px(size::CAPTION))
+                                .text_color(p.ink_3)
+                                .cursor_pointer()
+                                .hover(move |s| s.text_color(p.ink))
+                                .child("People")
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.model.people_open = true;
+                                    for f in this.model.load_people() {
+                                        this.send(f);
+                                    }
+                                    this.menu = None;
+                                    this.screen = Screen::People;
+                                    cx.notify();
+                                })),
+                        )
                     })
                     .child(
                         div()
@@ -1353,6 +1376,7 @@ ACTA_KEY=secret:ACTA_KEY",
                 | Screen::Routines
                 | Screen::Mcp
                 | Screen::Move
+                | Screen::People
         ) {
             return bar.child(div().text_size(px(size::BODY)).text_color(p.ink_3).child(
                 match self.screen {
@@ -1363,6 +1387,7 @@ ACTA_KEY=secret:ACTA_KEY",
                     Screen::Mcp => "MCP servers",
                     Screen::AddPhone => "Add a phone",
                     Screen::Move => "Move this instance",
+                    Screen::People => "People",
                     _ => "This PC",
                 },
             ));
@@ -3409,6 +3434,216 @@ ACTA_KEY=secret:ACTA_KEY",
         div().flex_1().min_h_0().child(page)
     }
 
+    /// The People page, for owners and admins of an instance on a server: invite someone,
+    /// with a link to pass on, and see who's in, to make them an admin or remove them.
+    fn people_page(&mut self, cx: &mut Context<Self>) -> Div {
+        let p = self.p;
+        let caption = |text: String| {
+            div()
+                .text_size(px(size::CAPTION))
+                .text_color(p.ink_3)
+                .child(text)
+        };
+        let heading = |text: &'static str| {
+            div()
+                .text_size(px(size::BODY))
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(p.ink)
+                .child(text)
+        };
+        let mut body = div()
+            .w(px(560.0))
+            .flex()
+            .flex_col()
+            .gap(px(space::XL))
+            .child(
+                div()
+                    .text_size(px(size::HEADING))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(p.ink)
+                    .child("People"),
+            );
+        if let Some(why) = self.model.people_refused.clone() {
+            return self.page("people-page", body.child(caption(why)));
+        }
+        // Invite someone: the role it gives, and the link to pass on once it's made.
+        let admin = self.invite_admin;
+        let mut invite = div()
+            .flex()
+            .flex_col()
+            .gap(px(space::M))
+            .child(heading("Invite someone"))
+            .child(caption(
+                "They pick a username and password, and they're in. An invite works once, for a week."
+                    .into(),
+            ))
+            .child(
+                div()
+                    .flex()
+                    .gap(px(space::S))
+                    .child(
+                        self.button("invite-member", "Member", !admin)
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.invite_admin = false;
+                                cx.notify();
+                            })),
+                    )
+                    .child(
+                        self.button("invite-admin", "Admin", admin)
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.invite_admin = true;
+                                cx.notify();
+                            })),
+                    )
+                    .child(div().flex_1())
+                    .child(
+                        self.button("make-invite", "Make an invite", true)
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                let role = if this.invite_admin { "admin" } else { "member" };
+                                let f = this.model.create_invite(role, 1);
+                                this.send(f);
+                                cx.notify();
+                            })),
+                    ),
+            );
+        if let Some((link, role, expires)) = self.model.invite_made.clone() {
+            let copied = link.clone();
+            invite = invite
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(space::S))
+                        .child(
+                            div()
+                                .flex_1()
+                                .px(px(space::M))
+                                .py(px(space::S))
+                                .rounded(px(radius::BUTTON))
+                                .border_1()
+                                .border_color(p.line_strong)
+                                .text_size(px(size::SMALL))
+                                .text_color(p.ink)
+                                .child(link),
+                        )
+                        .child(self.button("copy-invite", "Copy", false).on_click(
+                            cx.listener(move |_, _, _, cx| {
+                                cx.write_to_clipboard(ClipboardItem::new_string(copied.clone()));
+                            }),
+                        )),
+                )
+                .child(caption(format!(
+                    "Makes one {role}, until {}. It shows only now: send it the way you'd send a password.",
+                    time_of(expires)
+                )));
+        }
+        body = body.child(invite);
+        // Who's in.
+        let mut everyone = div()
+            .flex()
+            .flex_col()
+            .gap(px(space::XS))
+            .child(heading("Everyone"));
+        for person in self.model.people.clone() {
+            let mut row = div()
+                .flex()
+                .items_center()
+                .gap(px(space::M))
+                .py(px(space::XS))
+                .child(
+                    div()
+                        .flex_1()
+                        .flex()
+                        .flex_col()
+                        .child(
+                            div()
+                                .text_size(px(size::SMALL))
+                                .font_weight(FontWeight::MEDIUM)
+                                .text_color(p.ink)
+                                .child(person.username.clone()),
+                        )
+                        .child(caption(person.role.clone())),
+                );
+            if person.role != "owner" {
+                let (user, to, label) = if person.role == "admin" {
+                    (person.id.clone(), "member", "Make member")
+                } else {
+                    (person.id.clone(), "admin", "Make admin")
+                };
+                let gone = person.id.clone();
+                row = row
+                    .child(
+                        self.button_owned(format!("role-{}", person.id), label, false)
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                let f = this.model.set_role(&user, to);
+                                this.send(f);
+                                cx.notify();
+                            })),
+                    )
+                    .child(
+                        self.button_owned(format!("remove-{}", person.id), "Remove", false)
+                            .text_color(p.bad)
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                let f = this.model.remove_person(&gone);
+                                this.send(f);
+                                cx.notify();
+                            })),
+                    );
+            }
+            everyone = everyone.child(row);
+        }
+        body = body.child(everyone);
+        // Invites still open.
+        if !self.model.invites.is_empty() {
+            let mut open = div()
+                .flex()
+                .flex_col()
+                .gap(px(space::XS))
+                .child(heading("Open invites"));
+            for inv in self.model.invites.clone() {
+                let id = inv.id.clone();
+                open = open.child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(space::M))
+                        .py(px(space::XS))
+                        .child(div().flex_1().child(caption(format!(
+                            "{}, {} {} left, until {}",
+                            inv.role,
+                            inv.uses,
+                            if inv.uses == 1 { "use" } else { "uses" },
+                            time_of(inv.expires)
+                        ))))
+                        .child(
+                            self.button_owned(format!("invite-{}", inv.id), "Delete", false)
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    let f = this.model.delete_invite(&id);
+                                    this.send(f);
+                                    cx.notify();
+                                })),
+                        ),
+                );
+            }
+            body = body.child(open);
+        }
+        self.page("people-page", body)
+    }
+
+    /// A page's body, centred and scrolling, under the header.
+    fn page(&self, id: &'static str, body: Div) -> Div {
+        let page = div()
+            .id(id)
+            .size_full()
+            .overflow_y_scroll()
+            .flex()
+            .justify_center()
+            .pt(px(space::XXL))
+            .pb(px(space::XXL))
+            .child(body);
+        div().flex_1().min_h_0().child(page)
+    }
+
     fn move_section(&mut self, cx: &mut Context<Self>) -> Div {
         let p = self.p;
         let caption = |text: String| {
@@ -4519,6 +4754,7 @@ impl Render for Loom {
             Screen::Programs => self.programs_page(cx),
             Screen::ThisDevice => self.device_page(cx),
             Screen::Move => self.move_page(cx),
+            Screen::People => self.people_page(cx),
             Screen::AddPhone => self.add_phone_page(cx),
             Screen::Mcp => self.mcp_page(cx),
             Screen::Plugins => self.plugins_page(cx),

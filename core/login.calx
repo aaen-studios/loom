@@ -15,6 +15,7 @@ pub enum Kind {
     Login
     Setup
     Link      // with the one-time code from another device's QR code
+    Join      // with an invite's code, as a new account
     Logout
 }
 
@@ -51,9 +52,10 @@ impl Pending {
     /// `base` is where it goes: `server` itself, or the relay to it for a place over Noise.
     pub fn start(kind: Kind, server: own String, base: String, id: own String?, payload: Json) -> Pending {
         let path = match kind {
-            Kind.Setup => "/api/setup",
-            Kind.Link => "/api/link",
-            _ => "/api/login",
+            Kind.Setup => String("/api/setup"),
+            Kind.Link => String("/api/link"),
+            Kind.Join => "/api/join/{str_at(payload.copy(), "code") ?? String()}",
+            _ => String("/api/login"),
         }
         let headers: List<Header> = [Header { name: String("Content-Type"), value: String("application/json") }]
         let req = post("{base}{path}", headers, "{payload}".to_bytes(), TIMEOUT_MS, LIMIT)

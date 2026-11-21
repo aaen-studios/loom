@@ -10,9 +10,15 @@ module tests.protocol.people
 //
 //     calx tests/protocol/people.calx
 import std.http.{Header, post}
-import std.json.{Json}
+import std.fs
+import std.json.{Json, parse}
+import std.keyring
+import std.random.{Random}
+import std.time.{Instant}
 import std.process.{exit}
 import shared.obj.{Obj, at, bool_at, int_at, str_at}
+import core.cache.{Cache}
+import core.conn.{Conn}
 import tests.kit.{App, Instance, check, device, json_of}
 
 fn code_of(answer: Json) -> String {
@@ -108,7 +114,90 @@ fn run() ! Error {
     let after = "{try owner.cmd("q_8", "user.list", Obj.new().done())}"
     try check(not after.contains("\"ann\"") and not after.contains("\"bob\""), "neither is listed")
     owner.close()
+
+    // Through real cores: the owner's gets the link to pass on, and a new one joins from it.
+    var random = Random.system()
+    let service = "loom-test-people-{random.next_u32()}"
+    let dir = try fs.temp_dir()
+    var owners = try Core.start(some("http://{inst.base}"), some(inst.token.copy()), service.copy(), "{dir}/owner.db")
+    var newcomer = try Core.start(none, none, service.copy(), "{dir}/new.db")
+    var failure: String? = none
+    match cores(mut owners, mut newcomer, inst.base.copy()) {
+        ok => {},
+        err(e) => failure = some("{e}"),
+    }
+    owners.stop()
+    newcomer.stop()
+    match keyring.delete(service, "http://{inst.base}") {
+        ok(_) => {},
+        err(_) => {},
+    }
     inst.stop()
+    if let f = failure { fail "{f}" }
+}
+
+fn cores(owners: mut Core, newcomer: mut Core, base: String) ! Error {
+    try owners.until_state("live")
+    owners.send(Obj.new().s("t", String("cmd")).s("id", String("q_1")).s("name", String("invite.create")).j("args", Obj.new().done()).done())
+    let made = try owners.until("result")
+    let link = str_at(at(made, "value"), "link") ?? String()
+    try check(link.starts_with("http://{base}/join/"), "the owner's core gives the invite's link")
+    newcomer.send(Obj.new().s("t", String("invite.join")).s("id", String("l_1")).s("link", link).s("username", String("cora")).s("password", String("cora's password")).j("device", device("Laptop")).done())
+    let joined = try newcomer.until("core.login")
+    try check(bool_at(joined, "ok") == some(true), "a new core joins from the link")
+    try newcomer.until_state("live")
+    try check(true, "and connects")
+    newcomer.send(Obj.new().s("t", String("invite.join")).s("id", String("l_2")).s("link", String("https://example.com/nothing")).done())
+    let bad = try newcomer.until("core.login")
+    try check(code_of(bad) == "bad_link", "a link that isn't an invite is refused")
+}
+
+// The app's side of a real core.
+struct Core {
+    to_core: Sender<String>
+    from_core: Receiver<String>
+    thread: Thread?
+}
+
+impl Core {
+    fn start(server: String?, token: String?, service: String, cache: String) -> Core ! Error {
+        let inbox = Receiver<String>()
+        let to_core = inbox.sender()
+        let from_core = Receiver<String>()
+        let conn = Conn.new(server.copy(), token.copy(), service.copy(), try Cache.open(cache), inbox, from_core.sender())
+        let t = unsafe { Thread.spawn(conn) }
+        return Core { to_core: to_core, from_core: from_core, thread: some(t) }
+    }
+
+    fn send(mut self, frame: Json) {
+        self.to_core.send("{frame}")
+    }
+
+    // What the core says, until a frame whose `t` is `t`, for up to 30 s.
+    fn until(mut self, t: str) -> Json ! Error {
+        let start = unsafe { Instant.now() }
+        loop {
+            let waited = unsafe { Instant.now() }.nanos_since(start) / 1000000
+            if waited >= 30000 { fail "no {t} came in 30 s" }
+            let m = unsafe { self.from_core.wait_for((30000 - waited) * 1000000) } else { continue }
+            let f = try parse(m)
+            if str_at(f.copy(), "t") == some(String(t)) { return f }
+        }
+    }
+
+    fn until_state(mut self, state: str) ! Error {
+        loop {
+            let f = try self.until("core.conn")
+            if str_at(f.copy(), "state") == some(String(state)) { return }
+        }
+    }
+
+    fn stop(mut self) {
+        self.to_core.send(String(#"{"t":"core.stop"}"#))
+        if let t = self.thread.take() {
+            t.join()
+        }
+    }
 }
 
 fn main() {
