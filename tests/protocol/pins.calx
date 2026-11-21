@@ -3,12 +3,13 @@ module tests.protocol.pins
 // Pinned messages (PLAN.md, "Pinned messages"): a person or an agent pins a
 // message in its conversation, every device hears it as message.updated, the
 // message keeps when and by whom, and messages.pinned lists a conversation's
-// pins, the newest first. Unpinning takes it off.
+// pins, the newest first. Unpinning takes it off. agent.pin pins an agent to
+// the top of the list, which isn't a revision of it.
 //
 //     calx tests/protocol/pins.calx
 import std.json.{Json}
 import std.process.{exit}
-import shared.obj.{Obj, at, str_at}
+import shared.obj.{Obj, at, int_at, str_at}
 import tests.kit.{App, Instance, check, reply_text}
 
 fn reply_in(app: mut App, conversation: String) -> Json ! Error {
@@ -75,6 +76,17 @@ fn run(i: Instance) ! Error {
     let by_agent = try say(mut app, chat.copy(), "m_3", "/mcp run_command {Obj.new().s("name", String("message.pin")).j("args", Obj.new().s("message", first_id.copy()).done()).done()}")
     let now = pinned_ids(try app.cmd("q_10", "messages.pinned", Obj.new().s("conversation", chat).done()))
     try check(reply_text(by_agent).starts_with("run_command:") and now.len() == 2 and now[0] == first_id, "an agent pins one too, at once")
+
+    // --- Pinned agents ---
+    let main_id = str_at(at(at(made, "value"), "agent"), "id") ?? String()
+    let pin = try app.cmd("q_11", "agent.pin", Obj.new().s("agent", main_id.copy()).done())
+    let kept = at(at(pin, "value"), "agent")
+    let heard = at(last(app, "agent.updated"), "agent")
+    try check(int_at(kept.copy(), "pinned") != none and int_at(heard, "pinned") == int_at(kept.copy(), "pinned") and int_at(kept.copy(), "revision") == some(1), "pinning an agent keeps when, tells every device, and isn't a revision")
+    let renamed = try app.cmd("q_12", "agent.update", Obj.new().s("agent", main_id.copy()).s("name", String("Renamed")).done())
+    try check(int_at(at(at(renamed, "value"), "agent"), "pinned") == int_at(kept, "pinned"), "it stays pinned when the agent changes")
+    let unpinned = try app.cmd("q_13", "agent.pin", Obj.new().s("agent", main_id).b("pinned", false).done())
+    try check(int_at(at(at(unpinned, "value"), "agent"), "pinned") == none, "and unpinning takes it off")
     app.close()
 }
 
