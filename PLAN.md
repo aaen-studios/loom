@@ -200,7 +200,7 @@ Agents live in the database, and are made and edited in the app.
 - **Agents edit themselves.** An agent can change its own instructions with a tool, as OpenBot's agents (and v0.1's Atelier mode) do. The change shows up as a revision by that agent.
 - **Skills.** Named Markdown bundles with files, loaded only when an agent needs them. Personal or shared.
 - **Agents talk to each other.** `message_agent` starts or continues a conversation with another of your agents, so a main agent can hand work to the others. A message from an agent never counts as your approval for a risky action.
-- **As files.** An agent can be exported and imported as a folder (`agent.toml`, `instructions.md`, `skills/`), for backups, git, and moving between instances. OpenBot's agents come in the same way, from their `AGENTS.md`.
+- **As files.** An agent can be exported and imported as a folder (`agent.toml`, `instructions.md`, `skills/`), for backups, git, and moving between instances. OpenBot's and Grok Bot's agents come over with everything around them ([Importing from OpenBot and Grok Bot](#importing-from-openbot-and-grok-bot)).
 
 ### Agents can do anything the app can
 
@@ -478,6 +478,16 @@ An instance moves whole, in any direction: desktop to server, server to desktop,
 - **The apps follow.** The old instance sends every device a move event, signed with its key, with the new address. The apps switch over, keep their device tokens and cache, and catch up from the same event number. A device that was offline finds the old address answering "moved to …" for 30 days, or until the owner shuts it down.
 - **Backups are the same export**, written to a file, by hand or on a schedule: `loom export FILE` (a `.tar.zst` with a snapshot of the database, the secret key and the folders) and `loom import FILE` into an empty folder (`server/backup.calx`). `loom serve --backups DIR` makes one each day, outside the instance's folder, and keeps the newest 7.
 
+## Importing from OpenBot and Grok Bot
+
+What another agent app keeps on the instance's computer comes over in one go, from **Import** in the settings, `import.run` (an agent's asks first), or `loom import openbot|grokbot [PATH]`. On a server, PATH is a copy of the app's data folder. Only the owner imports, since it reads the computer's files ([protocol.md](protocol/protocol.md#commands)).
+
+- **Only reading, never secrets.** `server/importer.calx` reads the other app's files and opens its SQLite read-only, and never opens what holds a secret: API keys, vaults, logins, OAuth and webhook secrets, MCP servers' environment and headers, and files that look like keys. What needs a key gets it again in loom, as a secret.
+- **Once.** Each thing is kept with the other app's id (`imported`, in the database), so importing again brings only what's new, and never over the person's own skill, MCP server or table of the same name.
+- **Said plainly.** The answer counts what came and says, a sentence each, what couldn't or what changed on the way, such as a weekly routine that became daily.
+- **OpenBot** (its `openbot.db`, an event log whose `projection_*` tables hold things as they are, and its workspace): agents with their `AGENTS.md` (or their title and description), nearest thread colour, model and pin, on the agent program named for their provider; each agent's chat with its messages, times, pins and the files they had that are still there, and the threads beside it as branches of it, or as their routine's own; memories; routines, on loom's schedules (hourly becomes every 60 minutes; weekly and monthly, daily at their time); skills, from its bundles and `~/.agents/skills`, as their `SKILL.md`; MCP servers; and the shared tables, each its owner agent's, with their rows.
+- **Grok Bot** keeps its agents on its own server, and only a cache on the computer: the roster, a recent stretch of each agent's chat, and the pins, as JSON blobs, which are told apart by what they hold, and MCP servers in `~/.grokbot/settings.json`. Those come. Instructions, memory, skills and automations aren't on the computer, and the answer says so; each agent's title and description become its instructions.
+
 ## Files and images
 
 - **Both ways.** People send files and images to agents (drag and drop, paste, the share sheet on the iPhone), and agents send files back: screenshots, reports, exports.
@@ -531,7 +541,7 @@ To try another way from some point without losing the chat, branch it there: by 
 
 ## Storage
 
-One SQLite database on the server, with these tables: `users`, `invites`, `link_codes`, `devices` (with each device's public key), `device_grants`, `sandboxes`, `plugins`, `plugin_revisions`, `acp_agents`, `acp_settings`, `agents`, `agent_revisions`, `skills`, `mcp_servers`, `conversations`, `acp_sessions`, `messages` (content blocks as JSON, with FTS5), `files`, `runs`, `tool_calls`, `approvals`, `activity`, `reports`, `events`, `memories` (with FTS5), `routines`, `push_tokens`, `secrets`, `usage`, `schema_version`. Files themselves sit in the data folder, named by their SHA-256.
+One SQLite database on the server, with these tables: `users`, `invites`, `link_codes`, `devices` (with each device's public key), `device_grants`, `sandboxes`, `plugins`, `plugin_revisions`, `acp_agents`, `acp_settings`, `agents`, `agent_revisions`, `skills`, `mcp_servers`, `conversations`, `acp_sessions`, `messages` (content blocks as JSON, with FTS5), `files`, `runs`, `tool_calls`, `approvals`, `activity`, `reports`, `events`, `memories` (with FTS5), `routines`, `push_tokens`, `secrets`, `usage`, `imported` (what came from another app, by its ids), `schema_version`. Files themselves sit in the data folder, named by their SHA-256.
 
 ## Protocol
 

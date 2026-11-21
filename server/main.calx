@@ -9,6 +9,7 @@ module server.main
 //     loom acp list [--data DIR]
 //     loom receive [--data DIR] [--port N] [--host ADDR]
 //     loom status [--data DIR]
+//     loom import openbot|grokbot [PATH]       through the running instance, with a script token
 //     loom files limit MB|off [--data DIR]
 //     loom install [--domain DOMAIN] [--port N] [--no-sandboxes]   as root, on a Linux server
 //     loom update [--check]
@@ -66,6 +67,9 @@ usage: loom <command>
   export FILE               write the whole instance to FILE, a .tar.zst, while it runs or not: a backup, which
                             holds the key to its secrets, so keep it as safe
   import FILE               make a new instance in --data from a backup
+  import openbot [PATH]     bring agents, chats, memories, routines, skills, MCP servers and tables over
+  import grokbot [PATH]     from OpenBot or Grok Bot on this computer, or from PATH, a copy of its data
+                            folder, without their secrets. Through the running instance, as the four below
   receive                   take a move into --data: prints a one-time move code, listens on --port and
                             --host, and returns once the instance has come. --data must hold no instance,
                             or one no one has set up yet
@@ -486,6 +490,18 @@ fn run(a: Args) -> Said ! Error {
     if cmd == "export" and a.words.len() == 2 {
         let m = try backup.export(a.data.copy(), a.words[1].copy(), String(VERSION))
         return said("wrote {a.words[1]}: the instance {str_at(m.copy(), "instance") ?? String()}, with the key to its secrets, so keep it as safe as them", Obj.new().s("file", a.words[1].copy()).j("backup", m).done())
+    }
+    // From another agent app (PLAN.md, "Importing from OpenBot and Grok Bot"),
+    // through the running instance, as the person's script.
+    if cmd == "import" and (sub == "openbot" or sub == "grokbot") and a.words.len() <= 3 {
+        var body = Obj.new().s("from", sub.copy())
+        if a.words.len() == 3 { body = body.s("path", try fs.absolute(a.words[2].copy())) }
+        let v = try script(a.copy(), "import", some(body.done()))
+        var lines: List<String> = [str_at(v.copy(), "text") ?? String()]
+        if let Json.Array(left) = at(v.copy(), "not") {
+            for n in left { lines.push("- {n.as_str() ?? String()}") }
+        }
+        return said(lines.join("\n"), v)
     }
     if cmd == "import" and a.words.len() == 2 {
         let m = try backup.restore(a.words[1].copy(), a.data.copy())

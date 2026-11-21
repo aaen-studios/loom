@@ -16,7 +16,7 @@ use gpui_kit::*;
 use serde_json::Value;
 
 use crate::core::Core;
-use crate::model::{self, Approval, Conn, Message, Model, Mood};
+use crate::model::{self, Approval, Conn, ImportSource, Message, Model, Mood};
 use crate::shell;
 use crate::thread::{self, spool, thread, Spool};
 use crate::tokens::*;
@@ -94,6 +94,7 @@ enum Screen {
     Aside,
     Page,
     Tables,
+    Import,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -868,6 +869,10 @@ ACTA_KEY=secret:ACTA_KEY",
             }
             Screen::Plugins => {
                 let f = self.model.load_plugins();
+                self.send(f);
+            }
+            Screen::Import => {
+                let f = self.model.load_imports();
                 self.send(f);
             }
             Screen::Programs => {
@@ -1713,6 +1718,7 @@ ACTA_KEY=secret:ACTA_KEY",
             ("pop-programs", Ico::Brain, "Brains", Screen::Programs),
             ("pop-mcp", Ico::Plug, "MCP servers", Screen::Mcp),
             ("pop-plugins", Ico::Puzzle, "Plugins", Screen::Plugins),
+            ("pop-import", Ico::Import, "Import", Screen::Import),
         ]
     }
 
@@ -1830,6 +1836,7 @@ ACTA_KEY=secret:ACTA_KEY",
             Screen::AddPhone => self.add_phone_page(cx),
             Screen::Mcp => self.mcp_page(cx),
             Screen::Plugins => self.plugins_page(cx),
+            Screen::Import => self.import_page(cx),
             Screen::AddServer => self.add_server_page(cx),
             _ => div(),
         };
@@ -6315,6 +6322,82 @@ ACTA_KEY=secret:ACTA_KEY",
                 .p(px(space::L))
                 .children(groups),
         )
+    }
+
+    /// The Import page: OpenBot and Grok Bot, each with what the instance's computer has of
+    /// it and a button to bring it over, then how the last import went.
+    fn import_page(&mut self, cx: &mut Context<Self>) -> Div {
+        let p = self.p;
+        let here = if self.local() {
+            "this computer"
+        } else {
+            "the server's computer"
+        };
+        let mut sources = self.model.import_sources.clone();
+        if sources.is_empty() {
+            for (from, name) in [("openbot", "OpenBot"), ("grokbot", "Grok Bot")] {
+                sources.push(ImportSource {
+                    from: from.into(),
+                    name: name.into(),
+                    ..ImportSource::default()
+                });
+            }
+        }
+        let mut rows = Vec::new();
+        for src in sources {
+            let busy = self.model.importing.is_some();
+            let sub = if self.model.import_loading && !src.found {
+                "Looking…".to_string()
+            } else if src.found {
+                src.text.clone()
+            } else {
+                format!("Not found on {here}")
+            };
+            let control = src.found.then(|| {
+                let from = src.from.clone();
+                let label = if self.model.importing.as_deref() == Some(src.from.as_str()) {
+                    "Importing…"
+                } else {
+                    "Import"
+                };
+                self.small_button(format!("import-{}", src.from), label, false)
+                    .when(!busy, |b| {
+                        b.on_click(cx.listener(move |this, _, _, cx| {
+                            let f = this.model.run_import(&from);
+                            this.send(f);
+                            cx.notify();
+                        }))
+                    })
+                    .into_any_element()
+            });
+            rows.push(
+                self.row(
+                    Some(self.tile(Ico::Import)),
+                    src.name.clone(),
+                    Some(sub),
+                    control,
+                )
+                .into_any_element(),
+            );
+        }
+        let mut groups = vec![self.group(Some("From another app"), rows)];
+        groups.push(
+            div()
+                .px(px(space::XS))
+                .text_size(px(size::CAPTION))
+                .text_color(p.ink_3)
+                .child("Agents, chats, memories, routines, skills and tables come over. Keys and logins don't.")
+                .into_any_element(),
+        );
+        if let Some(done) = self.model.import_done.clone() {
+            let mut lines =
+                vec![self.note_row(done.text.clone(), if done.error { p.bad } else { p.ink })];
+            for n in &done.not {
+                lines.push(self.note_row(n.clone(), p.ink_3));
+            }
+            groups.push(self.group(Some("Last import"), lines));
+        }
+        self.settings_page("import-page", "Import", None, groups)
     }
 
     /// The plugins page: each plugin, what it asks for that waits for the person's yes, and

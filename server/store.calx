@@ -149,6 +149,9 @@ CREATE TABLE IF NOT EXISTS shared_rows (
 CREATE INDEX IF NOT EXISTS shared_rows_by_table ON shared_rows (user, tbl);
 CREATE TABLE IF NOT EXISTS script_tokens (
     user TEXT PRIMARY KEY REFERENCES users(id), hash TEXT NOT NULL UNIQUE, at INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS imported (
+    user TEXT NOT NULL REFERENCES users(id), source TEXT NOT NULL, kind TEXT NOT NULL,
+    id TEXT NOT NULL, loom TEXT NOT NULL, at INTEGER NOT NULL, PRIMARY KEY (user, source, kind, id));
 "#
 
 /// What search marks a matched word with, before and after.
@@ -687,8 +690,12 @@ impl Store {
     }
 
     pub fn add_conversation(self, user: String, agent: String, title: String) -> Json ! Error {
+        return try self.add_conversation_at(user, agent, title, now())
+    }
+
+    // A conversation made at `at`, such as one brought over from another app.
+    pub fn add_conversation_at(self, user: String, agent: String, title: String, at: i64) -> Json ! Error {
         let id = try self.new_id("c")
-        let at = now()
         _ = try self.db.execute(String("INSERT INTO conversations (id, user, agent, title, at) VALUES (?, ?, ?, ?, ?)"), [t(id.copy()), t(user), t(agent.copy()), t(title.copy()), Value.Int(at)])
         return Obj.new().s("id", id).s("agent", agent).s("title", title).i("at", at).done()
     }
@@ -779,6 +786,19 @@ impl Store {
     pub fn script_token_user(self, hash: String) -> String? ! Error {
         let r = try self.db.query_one(String("SELECT user FROM script_tokens WHERE hash = ?"), [t(hash)]) else return none
         return some(text(r[0].copy()))
+    }
+
+    // --- Imports (PLAN.md, "Importing from OpenBot and Grok Bot") ---
+
+    // What the thing another app calls `id`, of `kind` (agent, message, ...),
+    // became in loom when it was brought over from `source`, if it was.
+    pub fn imported(self, user: String, source: String, kind: str, id: String) -> String? ! Error {
+        let r = try self.db.query_one(String("SELECT loom FROM imported WHERE user = ? AND source = ? AND kind = ? AND id = ?"), [t(user), t(source), t(String(kind)), t(id)]) else return none
+        return some(text(r[0].copy()))
+    }
+
+    pub fn mark_imported(self, user: String, source: String, kind: str, id: String, loom: String) ! Error {
+        _ = try self.db.execute(String("INSERT INTO imported (user, source, kind, id, loom, at) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT (user, source, kind, id) DO UPDATE SET loom = excluded.loom"), [t(user), t(source), t(String(kind)), t(id), t(loom), Value.Int(now())])
     }
 
     // --- Shared tables (PLAN.md, "Shared tables") ---
@@ -1221,8 +1241,13 @@ impl Store {
     // Keeps a note for `agent`, or for all of the person's agents when
     // `agent` is "". Gives its id.
     pub fn remember(self, user: String, agent: String, what: String, by: String) -> i64 ! Error {
+        return try self.remember_at(user, agent, what, by, now())
+    }
+
+    // The same, kept at `at`, such as a note brought over from another app.
+    pub fn remember_at(self, user: String, agent: String, what: String, by: String, at: i64) -> i64 ! Error {
         try self.begin()
-        _ = try self.db.execute(String("INSERT INTO memories (user, agent, text, by, at) VALUES (?, ?, ?, ?, ?)"), [t(user.copy()), t(agent.copy()), t(what.copy()), t(by), Value.Int(now())])
+        _ = try self.db.execute(String("INSERT INTO memories (user, agent, text, by, at) VALUES (?, ?, ?, ?, ?)"), [t(user.copy()), t(agent.copy()), t(what.copy()), t(by), Value.Int(at)])
         let id = self.db.last_insert_id()
         _ = try self.db.execute(String("INSERT INTO memories_fts (rowid, text, user, agent) VALUES (?, ?, ?, ?)"), [Value.Int(id), t(what), t(user), t(agent)])
         try self.commit()
@@ -1527,7 +1552,7 @@ impl Store {
 
     fn remove_rows(self, user: String) ! Error {
         _ = try self.db.execute(String("DELETE FROM sent WHERE device IN (SELECT id FROM devices WHERE user = ?)"), [t(user.copy())])
-        for table in ["push_tokens", "link_codes", "resets", "agent_revisions", "agents", "activity", "secrets", "mcp_servers", "skills", "messages", "conversations", "runs", "queue", "tasks", "sides", "branches", "routine_threads", "events", "acp_sessions", "files", "profiles", "routines", "flows", "plugin_data", "plugin_revisions", "plugins", "usage", "memories", "memories_fts", "messages_fts", "shared_rows", "shared_tables", "script_tokens", "devices"] {
+        for table in ["push_tokens", "link_codes", "resets", "agent_revisions", "agents", "activity", "secrets", "mcp_servers", "skills", "messages", "conversations", "runs", "queue", "tasks", "sides", "branches", "routine_threads", "events", "acp_sessions", "files", "profiles", "routines", "flows", "plugin_data", "plugin_revisions", "plugins", "usage", "memories", "memories_fts", "messages_fts", "shared_rows", "shared_tables", "script_tokens", "imported", "devices"] {
             _ = try self.db.execute("DELETE FROM {table} WHERE user = ?", [t(user.copy())])
         }
         _ = try self.db.execute(String("DELETE FROM invites WHERE by = ?"), [t(user.copy())])
