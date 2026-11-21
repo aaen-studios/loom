@@ -9,6 +9,10 @@ The mark is **the knot**: one thread with a loop that crosses itself, the same k
 | `png/dark-<size>.png` | The mark in `#ededee` on transparent, for dark backgrounds. 16 to 1024 px. |
 | `png/app-<size>.png` | The app icon: the mark in white on a dark rounded square. 16 to 1024 px. |
 | [`app.ico`](app.ico) | The Windows icon: the app icon at 16, 24, 32, 48, 64, 128 and 256 px. |
+| [`app.icns`](app.icns) | The Mac icon: the app icon inset on Apple's grid (824 of 1024 px, with room for the shadow macOS adds), 16 to 1024 px. |
+| [`ios/AppIcon.appiconset`](ios/AppIcon.appiconset) | The iPhone icon at 1024 px, for Xcode: the app icon as an opaque square (iOS rounds it), the mark alone in light for dark mode, and in gray for tinted. |
+
+`calx scripts/icons.calx` makes the last two from `png/app-1024.png` and `png/dark-1024.png`.
 
 ## Drawing it
 
@@ -19,5 +23,4 @@ The mark is **the knot**: one thread with a loop that crosses itself, the same k
 
 ## Still to make
 
-- The macOS `.icns` (Phase 6) and the iOS icon set, with dark and tinted versions (Phase 5). Both come from `png/app-1024.png` and `png/dark-1024.png`.
 - The wordmark as outlined paths, for places without Geist.
