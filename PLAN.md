@@ -332,7 +332,7 @@ In a desktop instance, the instance's machine and your PC are the same machine, 
 
 ## Memory
 
-- `remember` and `recall` store and search notes in SQLite with full-text search (FTS5), per person and per agent.
+- `remember`, `recall` and `forget` keep and search notes in SQLite with full-text search (FTS5), per person and per agent. A note can be shared by all the person's agents. `recall` finds any of its words, best match first. The person reads, adds and deletes them on the agent's **Memory** page.
 - A short profile of each person goes into every system prompt, and agents update it as they learn.
 - No embeddings to start. They come in if full-text search isn't enough.
 

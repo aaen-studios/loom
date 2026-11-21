@@ -164,6 +164,26 @@ fn run(i: Instance) ! Error {
         if str_at(f.copy(), "kind") == some(String("agent.updated")) and str_at(at(f.copy(), "agent"), "permission") != some(String("ask")) { loosened = true }
     }
     try check(not left.contains("Third") and not loosened, "Third is gone, and no permission mode changed")
+
+    // --- Memory ---
+    let c4 = try app.cmd("q_m1", "conversation.create", Obj.new().s("agent", main_id.copy()).done())
+    let notes = str_at(at(c4, "value"), "conversation") ?? String()
+    let kept = try say(mut app, notes.copy(), "m_m1", String(#"/mcp remember {"text":"The deploy key is in 1Password, under Servers."}"#))
+    _ = try say(mut app, notes.copy(), "m_m2", String(#"/mcp remember {"text":"Elliot likes short answers.","shared":true}"#))
+    let found = try say(mut app, notes.copy(), "m_m3", String(#"/mcp recall {"query":"deploy keys"}"#))
+    try check(kept.starts_with("remember: Remembered, as note") and found.contains("1Password") and not found.contains("short answers"), "an agent remembers a note, and recalls it by its words")
+    let fourth = try agent(mut app, "q_m2", "Fourth")
+    let c5 = try app.cmd("q_m3", "conversation.create", Obj.new().s("agent", fourth).done())
+    let theirs = str_at(at(c5, "value"), "conversation") ?? String()
+    let other = try say(mut app, theirs.copy(), "m_m4", String("/mcp recall"))
+    try check(other.contains("(shared): Elliot likes short answers.") and not other.contains("1Password"), "another agent reads only the shared notes")
+    let every = "{try app.cmd("q_m4", "memory.list", Obj.new().done())}"
+    try check(every.contains("1Password") and every.contains("short answers"), "the person sees every note")
+    let refused = try say(mut app, theirs, "m_m5", String(#"/mcp forget {"id":1}"#))
+    try check(refused.starts_with("forget failed"), "an agent can't forget another's note")
+    _ = try app.cmd("q_m5", "memory.delete", Obj.new().i("id", 1).done())
+    let gone = try say(mut app, notes, "m_m6", String(#"/mcp recall {"query":"1Password"}"#))
+    try check(gone == "recall: Nothing remembered about 1Password.", "and the person can delete one")
     app.close()
 }
 

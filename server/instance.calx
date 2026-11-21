@@ -683,6 +683,30 @@ impl Instance {
         if name == "use_device" {
             return try i.use_device(req, g, args)
         }
+        if name == "remember" {
+            let what = (str_at(args.copy(), "text") ?? String()).trim().copy()
+            if what.len() == 0 { return some(tool_error(String("text is empty."))) }
+            let shared = bool_at(args, "shared") ?? false
+            let id = try i.store.remember(g.user.copy(), if shared { String() } else { g.agent.copy() }, what.copy(), g.agent.copy())
+            i.log(g.user, g.agent.copy(), "memory", "Remembered: {cut_short(what, 120)}", g.agent)
+            return some(tool_text("Remembered, as note {id}."))
+        }
+        if name == "recall" {
+            let query = str_at(args, "query") ?? String()
+            let notes = try i.store.memories(g.user, some(g.agent.copy()), query.copy(), 20)
+            if notes.len() == 0 { return some(tool_text(if query.trim().len() > 0 { "Nothing remembered about {query}." } else { String("Nothing remembered yet.") })) }
+            var lines = List<String>()
+            for n in notes {
+                let shared = if bool_at(n.copy(), "shared") == some(true) { " (shared)" } else { "" }
+                lines.push("{int_at(n.copy(), "id") ?? 0}{shared}: {str_at(n, "text") ?? String()}")
+            }
+            return some(tool_text(lines.join("\n")))
+        }
+        if name == "forget" {
+            let id = int_at(args, "id") ?? 0
+            if not try i.store.forget(g.user, id, some(g.agent.copy())) { return some(tool_error("There's no note {id} of yours. recall gives their numbers.")) }
+            return some(tool_text(String("Forgotten.")))
+        }
         // These three ask the person first, every time.
         if name == "delete_agent" or name == "set_permission" {
             let key = str_at(args.copy(), "agent") ?? String()
@@ -2249,6 +2273,24 @@ impl Instance {
             i.log(user.copy(), id.copy(), "agent", "Changed: revision {int_at(agent.copy(), "revision") ?? 0}", device.copy())
             try i.event(user, "agent.updated", Obj.new().j("agent", agent.copy()).s("by", device.copy()).done())
             return Answer.Value(Obj.new().j("agent", agent).done())
+        }
+        if name == "memory.list" {
+            let limit = int_at(args.copy(), "limit") ?? 100
+            let n: i64 = if limit < 1 { 1 } else if limit > 500 { 500 } else { limit }
+            let notes = try i.store.memories(user, str_at(args.copy(), "agent"), str_at(args, "query") ?? String(), usize.try_from(n) ?? 100)
+            return Answer.Value(Obj.new().j("memories", Json.Array(notes)).done())
+        }
+        if name == "memory.put" {
+            let what = (str_at(args.copy(), "text") ?? String()).trim().copy()
+            if what.len() == 0 { return Answer.Refused(String("bad_request"), String("The note is empty.")) }
+            let agent = str_at(args, "agent") ?? String()
+            let id = try i.store.remember(user, agent, what, device)
+            return Answer.Value(Obj.new().i("id", id).done())
+        }
+        if name == "memory.delete" {
+            let id = int_at(args, "id") ?? 0
+            if not try i.store.forget(user, id, none) { return Answer.Refused(String("not_found"), "There's no note {id}.") }
+            return Answer.Value(empty)
         }
         if name == "skill.list" {
             return Answer.Value(Obj.new().j("skills", Json.Array(try i.store.skills(user, bool_at(args, "bodies") ?? false))).done())

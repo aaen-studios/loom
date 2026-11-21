@@ -62,6 +62,12 @@ CREATE TABLE IF NOT EXISTS acp_sessions (
 CREATE TABLE IF NOT EXISTS files (
     sha TEXT NOT NULL, user TEXT NOT NULL REFERENCES users(id), name TEXT NOT NULL,
     mime TEXT NOT NULL, size INTEGER NOT NULL, at INTEGER NOT NULL, PRIMARY KEY (sha, user));
+CREATE TABLE IF NOT EXISTS memories (
+    id INTEGER PRIMARY KEY, user TEXT NOT NULL REFERENCES users(id), agent TEXT NOT NULL,
+    text TEXT NOT NULL, by TEXT NOT NULL, at INTEGER NOT NULL);
+CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5 (
+    text, user UNINDEXED, agent UNINDEXED,
+    tokenize = 'unicode61 remove_diacritics 2');
 CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5 (
     text, user UNINDEXED, agent UNINDEXED, at UNINDEXED,
     tokenize = 'unicode61 remove_diacritics 2');
@@ -507,6 +513,63 @@ impl Store {
         return try self.db.execute(String("DELETE FROM skills WHERE user = ? AND name = ?"), [t(user), t(name)]) > 0
     }
 
+    // --- Memory (PLAN.md, "Memory") ---
+
+    // Keeps a note for `agent`, or for all of the person's agents when
+    // `agent` is "". Gives its id.
+    pub fn remember(self, user: String, agent: String, what: String, by: String) -> i64 ! Error {
+        try self.begin()
+        _ = try self.db.execute(String("INSERT INTO memories (user, agent, text, by, at) VALUES (?, ?, ?, ?, ?)"), [t(user.copy()), t(agent.copy()), t(what.copy()), t(by), Value.Int(now())])
+        let id = self.db.last_insert_id()
+        _ = try self.db.execute(String("INSERT INTO memories_fts (rowid, text, user, agent) VALUES (?, ?, ?, ?)"), [Value.Int(id), t(what), t(user), t(agent)])
+        try self.commit()
+        return id
+    }
+
+    // What `agent` remembers (its own notes and the shared ones), best match
+    // first for `query`, or newest first without one. Each note is `id`,
+    // `text`, `shared`, `by` and `at`. With `agent` none, every note of the
+    // person's.
+    pub fn memories(self, user: String, agent: String?, query: String, limit: usize) -> List<Json> ! Error {
+        var out = List<Json>()
+        var sql = String()
+        var args = List<Value>()
+        if let fts = fts_any(query) {
+            sql = String("SELECT m.id, m.agent, m.text, m.by, m.at FROM memories_fts f JOIN memories m ON m.id = f.rowid WHERE memories_fts MATCH ? AND m.user = ?")
+            args = [t(fts), t(user)]
+        } else {
+            sql = String("SELECT m.id, m.agent, m.text, m.by, m.at FROM memories m WHERE m.user = ?")
+            args = [t(user)]
+        }
+        if let a = agent {
+            sql.push_str(" AND (m.agent = ? OR m.agent = '')")
+            args.push(t(a))
+        }
+        sql.push_str(if query.trim().len() > 0 { " ORDER BY rank LIMIT ?" } else { " ORDER BY m.id DESC LIMIT ?" })
+        args.push(Value.Int(i64.wrap(u64(limit))))
+        for r in try self.db.query(sql, args) {
+            let owner = text(r[1].copy())
+            out.push(Obj.new().i("id", int(r[0].copy())).s("agent", owner.copy()).b("shared", owner.len() == 0).s("text", text(r[2].copy())).s("by", text(r[3].copy())).i("at", int(r[4].copy())).done())
+        }
+        return out
+    }
+
+    // Forgets note `id` of the person's, if `agent` (when given) may: its
+    // own, or a shared one.
+    pub fn forget(self, user: String, id: i64, agent: String?) -> bool ! Error {
+        var sql = String("DELETE FROM memories WHERE id = ? AND user = ?")
+        var args: List<Value> = [Value.Int(id), t(user)]
+        if let a = agent {
+            sql.push_str(" AND (agent = ? OR agent = '')")
+            args.push(t(a))
+        }
+        try self.begin()
+        let gone = try self.db.execute(sql, args) > 0
+        if gone { _ = try self.db.execute(String("DELETE FROM memories_fts WHERE rowid = ?"), [Value.Int(id)]) }
+        try self.commit()
+        return gone
+    }
+
     // --- The activity log (PLAN.md, "Machines and devices") ---
 
     // Notes what `agent` did, or what was done to it: `kind` is tool,
@@ -654,6 +717,17 @@ impl Store {
         }
         return out
     }
+}
+
+// A recall as FTS5 reads it: any of the words, each in quotes and a prefix,
+// best match first. None when it has no words.
+fn fts_any(query: String) -> String? {
+    var parts = List<String>()
+    for w in query.split_whitespace() {
+        parts.push("\"{w.replace("\"", "\"\"")}\"*")
+    }
+    if parts.len() == 0 { return none }
+    return some(parts.join(" OR "))
 }
 
 // A search as FTS5 reads it: each word in quotes, so nothing in it is taken as
@@ -822,4 +896,24 @@ fn acp_sessions_are_kept_per_conversation_and_program() {
     s.put_acp_session(a.id.copy(), String("c_1"), String("codex"), String("s_2"))!
     assert(s.acp_session(a.id.copy(), String("c_1"), String("claude"))! == none)
     assert(s.acp_session(a.id.copy(), String("c_1"), String("codex"))! == some(String("s_2")))
+}
+
+@test
+fn memory_is_kept_per_agent_and_shared() {
+    let s = test_store()
+    let a = s.add_user(String("ann"), String("pw"), "owner")!
+    let b = s.add_user(String("bob"), String("pw"), "member")!
+    _ = s.remember(a.id.copy(), String("a_1"), String("The deploy key is in 1Password, under Servers."), String("a_1"))!
+    _ = s.remember(a.id.copy(), String(""), String("Ann prefers short answers."), String("d_1"))!
+    _ = s.remember(a.id.copy(), String("a_2"), String("The deploy runs on Fridays."), String("a_2"))!
+    _ = s.remember(b.id.copy(), String("a_9"), String("Bob's deploy notes."), String("a_9"))!
+    let mine = s.memories(a.id.copy(), some(String("a_1")), String("deploy keys"), 10)!
+    assert(mine.len() == 1 and "{mine[0]}".contains("1Password"))
+    let all = s.memories(a.id.copy(), some(String("a_1")), String(), 10)!
+    assert(all.len() == 2 and "{all[0]}".contains("short answers"))
+    assert(s.memories(a.id.copy(), none, String("deploy"), 10)!.len() == 2)
+    let id = (all[1].get(String("id")) ?? Json.Null).as_i64() ?? 0
+    assert(not s.forget(a.id.copy(), id, some(String("a_2")))!)
+    assert(s.forget(a.id.copy(), id, some(String("a_1")))!)
+    assert(s.memories(a.id.copy(), some(String("a_1")), String("1Password"), 10)!.len() == 0)
 }
