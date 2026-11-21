@@ -1,0 +1,75 @@
+module scripts.wordmark
+
+// The wordmark as outlined paths, for places without Geist (design/logo/README.md):
+// "loom" in Geist SemiBold, tracking −0.035 em, in currentColor, written to
+// design/logo/wordmark.svg. Its box is the letters' own, so it lines up by its edges.
+//
+//     calx scripts/wordmark.calx
+import std.font.{Font}
+import std.fs
+
+const WORD: str = "loom"
+const TRACKING: f64 = -0.035
+const OUT: str = "design/logo/wordmark.svg"
+
+// A number for the SVG, to two places, without trailing zeros.
+fn num(v: f64) -> String {
+    let r = f64.nearest(i64.round(v * 100.0)) / 100.0
+    var s = "{r}"
+    if s.contains(".") {
+        while s.ends_with("0") { s = s[..s.len() - 1].copy() }
+        if s.ends_with(".") { s = s[..s.len() - 1].copy() }
+    }
+    if s == "-0" { return String("0") }
+    return s
+}
+
+@test
+fn numbers_are_short() {
+    assert(num(1.0) == "1")
+    assert(num(1.256) == "1.26")
+    assert(num(-0.001) == "0")
+    assert(num(12.5) == "12.5")
+}
+
+fn main() ! Error {
+    let font = try Font.open(String("desktop/assets/fonts/Geist-SemiBold.ttf"))
+    let size = f64.nearest(i64(font.units_per_em()))
+    let ascent = font.line_metrics(size).ascent
+    // Each letter's outline, moved to its place on the line, y down from the ascender.
+    var d = String()
+    var pen = 0.0
+    var left = 1.0e9
+    var right = -1.0e9
+    var top = 1.0e9
+    var bottom = -1.0e9
+    var previous: rune? = none
+    for c in WORD.runes() {
+        if let p = previous { pen += font.kerning(p, c, size) + TRACKING * size }
+        let o = font.outline(c)
+        var at: usize = 0
+        for v in o.verbs {
+            let n: usize = if v == 0u8 or v == 1u8 { 1 } else if v == 2u8 { 2 } else { 3 }
+            var coords = List<String>()
+            for k in 0..n {
+                let x = pen + f64(o.points[at + k * 2])
+                let y = ascent - f64(o.points[at + k * 2 + 1])
+                if x < left { left = x }
+                if x > right { right = x }
+                if y < top { top = y }
+                if y > bottom { bottom = y }
+                coords.push("{num(x)} {num(y)}")
+            }
+            at += n * 2
+            let letter = if v == 0u8 { "Z M" } else if v == 1u8 { "L" } else if v == 2u8 { "Q" } else { "C" }
+            d = "{d} {letter} {coords.join(" ")}"
+        }
+        pen += font.advance(c, size)
+        previous = some(c)
+    }
+    // The first contour has no Z before it, and the last needs one.
+    let path = "{d.trim().trim_prefix("Z ")} Z"
+    let svg = "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"{num(left)} {num(top)} {num(right - left)} {num(bottom - top)}\" fill=\"currentColor\">\n  <!-- loom's wordmark: \"{WORD}\" in Geist SemiBold, tracking {TRACKING} em, outlined by scripts/wordmark.calx. -->\n  <path d=\"{path}\"/>\n</svg>\n"
+    try fs.write_text(String(OUT), svg)
+    println("made {OUT}")
+}
