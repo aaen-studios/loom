@@ -8182,8 +8182,11 @@ fn person(p: Palette, m: &Message, files: &HashMap<String, String>, this: WeakEn
                 .text_color(p.ink)
                 .when(m.queued, |d| d.opacity(0.6))
                 .child(
-                    TextView::markdown(SharedString::from(format!("m-{}", m.id)), text)
-                        .selectable(true),
+                    TextView::markdown(
+                        SharedString::from(format!("m-{}", m.id)),
+                        model::literal_html(&text),
+                    )
+                    .selectable(true),
                 ),
         )
     })
