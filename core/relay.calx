@@ -15,6 +15,7 @@ import std.crypto.{NoiseHandshake, NoiseTransport, X25519PublicKey}
 import std.http.server.{Request, Response, Server, ServerSocket}
 import std.http.websocket
 import std.http.websocket.{WebSocket}
+import std.net.{Ip, interfaces}
 import std.thread.{Task}
 import shared.noise
 import shared.noise.{Joiner, Opened}
@@ -56,6 +57,43 @@ pub fn place(server: String) -> Place? {
 /// The place's address, as `place` reads it.
 pub fn write(p: Place) -> String {
     return "{SCHEME}{bytes.hex(p.key.copy())}@{p.addresses.join(",")}"
+}
+
+/// This machine's addresses a phone may reach it at on `port`, in the order to
+/// try them: the local network's first (10/8, 172.16/12, 192.168/16), then
+/// Tailscale's (100.64/10), from the interfaces that are up.
+pub fn own_addresses(port: u16) -> List<String> {
+    let found = match interfaces() {
+        ok(list) => list,
+        err(_) => return List<String>(),
+    }
+    var local = List<String>()
+    var tailnet = List<String>()
+    for i in found {
+        if not i.up or i.loopback or virtual(i.name.copy()) { continue }
+        for ip in i.addresses {
+            if let Ip.V4(b) = ip {
+                let text = "{b[0]}.{b[1]}.{b[2]}.{b[3]}:{port}"
+                let private = b[0] == 10u8 or (b[0] == 172u8 and b[1] >= 16u8 and b[1] <= 31u8) or (b[0] == 192u8 and b[1] == 168u8)
+                let tailscale = b[0] == 100u8 and b[1] >= 64u8 and b[1] <= 127u8
+                if private and not local.contains(text.copy()) { local.push(text) } else if tailscale and not tailnet.contains(text.copy()) { tailnet.push(text) }
+            }
+        }
+    }
+    local.extend(tailnet)
+    return local
+}
+
+/// Whether an interface named `name` is a network inside this machine, for
+/// virtual machines and containers, which no phone reaches: Hyper-V's and
+/// WSL's switches on Windows, Docker's, Podman's and libvirt's bridges.
+fn virtual(name: String) -> bool {
+    let n = name.to_lower_root()
+    let inside: List<str> = ["vethernet", "docker", "br-", "veth", "virbr", "vmnet", "vboxnet", "podman", "cni", "lxc", "lxd"]
+    for prefix in inside {
+        if n.starts_with(prefix) { return true }
+    }
+    return n.contains("virtualbox") or n.contains("vmware") or n.contains("hyper-v")
 }
 
 /// What the credential store keeps a place's token under: its key alone, so a
@@ -322,4 +360,11 @@ fn reads_and_writes_a_place() {
     assert(place(String("noise://abcd@1.2.3.4:5")) == none)
     assert(place(String("https://loom.example.com")) == none)
     assert(keyring_name(String("https://loom.example.com")) == "https://loom.example.com")
+}
+
+@test
+fn networks_inside_the_machine_are_left_out() {
+    assert(virtual(String("vEthernet (WSL (Hyper-V firewall))")))
+    assert(virtual(String("docker0")) and virtual(String("br-3f2a")) and virtual(String("virbr0")))
+    assert(not virtual(String("Wi-Fi")) and not virtual(String("wlan0")) and not virtual(String("Tailscale")) and not virtual(String("tailscale0")) and not virtual(String("Ethernet")))
 }
