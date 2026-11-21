@@ -14,7 +14,7 @@ import std.json.{Json}
 import std.process.{exit}
 import std.thread.{sleep}
 import shared.obj.{Obj, at, str_at}
-import tests.kit.{App, Instance, check, fetch, loom, reply_text, upload}
+import tests.kit.{App, Instance, check, remove_scratch, fetch, loom, reply_text, upload}
 
 fn reply_in(app: mut App, conversation: String) -> String ! Error {
     loop {
@@ -100,6 +100,7 @@ fn backed_up(i: Instance, dir: String) ! Error {
 
 fn main() ! Error {
     let inst = try Instance.start()
+    let first = inst.data.copy()
     let (moved, sha) = match before(inst.copy()) {
         ok(r) => r,
         err(e) => {
@@ -128,6 +129,8 @@ fn main() ! Error {
         }
         scheduled.stop()
     }
+    // The folder it ran in first.
+    remove_scratch(first)
     if let f = failure {
         eprintln("\n{f}")
         exit(1)
