@@ -20,7 +20,7 @@ fn main() {
         cmd.arg("--release");
     }
     let status = cmd
-        .arg("core/spike.calx")
+        .arg("core/lib.calx")
         .arg("-o")
         .arg(&lib)
         .status()

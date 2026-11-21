@@ -140,6 +140,16 @@ fn run(server: mut Child, data: String) ! Error {
     app.send(Obj.new().s("t", String("core.get")).s("id", String("g_1")).s("what", String("conversations")).done())
     let listed_convs = try app.until("core.data", "id", "g_1", 5000)
     try check("{at(listed_convs, "items")}".contains("Builds"), "the cache keeps the conversation the events made")
+    app.send(Obj.new().s("t", String("cmd")).s("id", String("q_p")).s("name", String("acp.list")).done())
+    let programs = try app.until("result", "id", "q_p", 5000)
+    try check("{at(at(programs, "value"), "programs")}".contains("\"name\":\"fake\""), "acp.list gives the agent programs installed")
+    app.send(Obj.new().s("t", String("cmd")).s("id", String("q_b")).s("name", String("agent.create")).j("args", Obj.new().s("name", String("Other")).s("acp_agent", String("fake")).s("instructions", String("You are a test.")).done()).done())
+    let other = str_at(at(at(try app.until("result", "id", "q_b", 5000), "value"), "agent"), "id") ?? String()
+    app.send(Obj.new().s("t", String("send")).s("agent", other.copy()).s("text", String("hello, new agent")).done())
+    let made_conv = try app.until("event", "kind", "conversation.created", 5000)
+    let to_agent = try app.until("ack", "", String(), 5000)
+    try check(str_at(at(made_conv, "conversation"), "agent") == some(other) and str_at(to_agent, "message") != none, "a send to an agent with no conversation makes one and goes")
+    _ = try app.until("event", "kind", "run.finished", 20000)
 
     // --- The instance goes away and comes back ---
     server.kill_tree()

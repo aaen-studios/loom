@@ -23,6 +23,7 @@ CREATE INDEX IF NOT EXISTS messages_by_conversation ON messages (conversation, a
 CREATE TABLE IF NOT EXISTS devices (id TEXT PRIMARY KEY, json TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS runs (id TEXT PRIMARY KEY, conversation TEXT NOT NULL, json TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS tools (call TEXT PRIMARY KEY, run TEXT NOT NULL, json TEXT NOT NULL);
+CREATE INDEX IF NOT EXISTS tools_by_run ON tools (run);
 CREATE TABLE IF NOT EXISTS approvals (call TEXT PRIMARY KEY, run TEXT NOT NULL, json TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS outbox (
     cid TEXT PRIMARY KEY, conversation TEXT NOT NULL, json TEXT NOT NULL, at INTEGER NOT NULL);
@@ -147,8 +148,7 @@ impl Cache {
         } else if kind == "run.finished" {
             let id = str_at(e, "run") ?? String()
             _ = try self.db.execute(String("DELETE FROM runs WHERE id = ?"), [t(id.copy())])
-            _ = try self.db.execute(String("DELETE FROM approvals WHERE run = ?"), [t(id.copy())])
-            _ = try self.db.execute(String("DELETE FROM tools WHERE run = ?"), [t(id.copy())])
+            _ = try self.db.execute(String("DELETE FROM approvals WHERE run = ?"), [t(id)])
         } else if kind == "tool.started" {
             let call = str_at(e.copy(), "call") ?? String()
             let run = str_at(e.copy(), "run") ?? String()
@@ -277,7 +277,7 @@ impl Cache {
         return try self.all("SELECT json FROM runs ORDER BY rowid", List<Value>())
     }
 
-    /// The tool calls of the runs still going.
+    /// The tool calls, so a reply's tool blocks can show what ran. They stay after their run.
     pub fn tools(self) -> List<Json> ! Error {
         return try self.all("SELECT json FROM tools ORDER BY rowid", List<Value>())
     }
@@ -309,6 +309,18 @@ impl Cache {
         let cid = str_at(frame.copy(), "cid") ?? String()
         let conversation = str_at(frame.copy(), "conversation") ?? String()
         _ = try self.db.execute(String("INSERT OR REPLACE INTO outbox (cid, conversation, json, at) VALUES (?, ?, ?, ?)"), [t(cid), t(conversation), t("{frame}"), Value.Int(now())])
+    }
+
+    /// The newest conversation with `agent`: the one the app shows as that agent's chat.
+    pub fn conversation_for(self, agent: String) -> String? ! Error {
+        let row = try self.db.query_one(String("SELECT id FROM conversations WHERE json_extract(json, '$.agent') = ? ORDER BY last DESC, rowid DESC LIMIT 1"), [t(agent.copy())])
+        let r = row else return none
+        return some(text(r[0].copy()))
+    }
+
+    /// The send waiting with the client id `cid`.
+    pub fn queued(self, cid: String) -> Json? ! Error {
+        return try self.one("SELECT json FROM outbox WHERE cid = ?", cid.copy())
     }
 
     /// The sends waiting, oldest first.
@@ -355,7 +367,7 @@ fn keeps_runs_and_questions_until_they_end() ! Error {
     _ = try c.apply(ev(5, "approval.answered", Obj.new().s("call", String("tc_1")).done()))
     assert((try c.approvals()).len() == 0)
     _ = try c.apply(ev(6, "run.finished", Obj.new().s("run", String("run_1")).done()))
-    assert((try c.runs()).len() == 0 and (try c.tools()).len() == 0)
+    assert((try c.runs()).len() == 0 and (try c.tools()).len() == 1)
 }
 
 @test

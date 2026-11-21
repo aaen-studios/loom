@@ -6,7 +6,7 @@ GPUI comes from GPUI Kit (`gpui-kit`), pinned exactly in `Cargo.toml`. See [PLAN
 
 ## Building
 
-You need a recent stable Rust (`rustup update stable`) and `calx` on PATH. `build.rs` builds the core into a static library with `calx build --staticlib` and links it, so `cargo` is the only command:
+You need a recent stable Rust (`rustup update stable`) and `calx` on PATH. `build.rs` builds the core (`core/lib.calx`) into a static library with `calx build --staticlib` and links it, so `cargo` is the only command:
 
 ```sh
 cargo run --release
@@ -14,6 +14,20 @@ cargo run --release
 
 Set `CALX` to use a different `calx` binary.
 
-## What's here now
+## What's here
 
-The Phase 2 spike (LOO-4): a window with 3000 Markdown messages in a virtual list, a reply streamed in by the spike core (`core/spike.calx`) through `on_event`, a composer that sends to the core, file drop, a tray icon and a notification. What it showed is in the plan. The app proper replaces it, starting with LOO-25.
+- `src/main.rs`: starts GPUI, loads Geist (in `assets/fonts`, under the OFL), puts GPUI Kit's widgets in loom's colours, and opens the window with loom's own title bar.
+- `src/core.rs`: the core's C boundary. Its events come on the core's thread and go to the window over a channel.
+- `src/model.rs`: what the screens show, as the core tells it. Lists come from the core's cache with `core.get` and are fetched again when an event says they changed. Only a reply still being written lives here alone, from its deltas.
+- `src/app.rs`: the window. It has the sidebar of agents, the header with the agent's menu and its permission mode, and the chat. The chat shows replies, thoughts, tool calls, questions and the composer. There are also the sign-in and new-agent pages. The look follows `design/explorations/round-4.html`, with every value from `design/tokens.toml` (`design/generated/tokens.rs`).
+- `src/thread.rs`: an agent's thread, drawn as one path that moves with what the agent is doing.
+
+Not here yet: the tray, notifications, starting at login and the updater (LOO-26), the instance in the app (LOO-27), and files, images and search (LOO-28).
+
+## Trying it
+
+Run an instance (`calx server/main.calx serve`), then start the app and sign in with its address, a username, a password and, the first time, the setup code it printed. While developing:
+
+- `LOOM_SERVER`: an instance's address, filled in on the sign-in page.
+- `LOOM_DATA`: the folder for the core's cache, instead of `%APPDATA%\Loom`.
+- `LOOM_THEME`: `dark` or `light`, instead of following the system.
