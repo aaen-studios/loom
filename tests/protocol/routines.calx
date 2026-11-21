@@ -119,28 +119,30 @@ fn run(i: Instance) -> i64 ! Error {
     return seq
 }
 
-// The next routine.updated event for the routine named `name`.
-fn updated(app: mut App, name: str) -> Json ! Error {
-    loop {
-        let e = try app.until("event", "routine.updated")
-        let r = at(e, "routine")
-        if str_at(r.copy(), "name") == some(String(name)) { return r }
-    }
-}
-
 // Off for a few of their gaps: Quiet waits for its next time, and Loud runs once.
 fn after_restart(i: Instance, seq: i64) ! Error {
     var app = try App.connect(i.base.copy(), i.token.copy(), seq)
+    // What came while it connected first, as the catch-up replays it, then what comes live.
+    var seen = List<Json>()
+    for f in app.frames {
+        if str_at(f.copy(), "kind") == some(String("routine.updated")) { seen.push(at(f.copy(), "routine")) }
+    }
     var quiet = String()
     var loud = String()
-    while quiet.len() == 0 or loud.len() == 0 {
-        let e = try app.until("event", "routine.updated")
-        let r = at(e, "routine")
+    var loud_done = false
+    var n: usize = 0
+    while quiet.len() == 0 or loud.len() == 0 or not loud_done {
+        let r = if n < seen.len() { seen[n].copy() } else { at(try app.until("event", "routine.updated"), "routine") }
+        n += 1
         let status = str_at(at(r.copy(), "last"), "status") ?? String()
-        if str_at(r.copy(), "name") == some(String("Quiet")) and quiet.len() == 0 { quiet = status } else if str_at(r, "name") == some(String("Loud")) and loud.len() == 0 { loud = status }
+        if str_at(r.copy(), "name") == some(String("Quiet")) {
+            if quiet.len() == 0 { quiet = status }
+        } else if str_at(r, "name") == some(String("Loud")) {
+            if loud.len() == 0 { loud = status.copy() }
+            if status == "done" { loud_done = true }
+        }
     }
     try check(quiet == "skipped" and loud == "running", "missed while the instance was off, one routine runs once and one waits, as each says")
-    _ = try updated(mut app, "Loud")
     app.close()
 }
 
