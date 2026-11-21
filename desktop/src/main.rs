@@ -164,7 +164,10 @@ gpui_kit::assets::icon_assets!(
         Power,
         LogOut,
         Globe,
-        X
+        X,
+        ListTodo,
+        Pause,
+        Play
     ]
 );
 

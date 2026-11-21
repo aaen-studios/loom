@@ -94,6 +94,17 @@ pub fn merge(base: Json, extra: Json) -> Json {
     return Json.Object(m)
 }
 
+// An object without member `key`.
+pub fn without(j: Json, key: str) -> Json {
+    var m = LinkedMap<String, Json>()
+    if let Json.Object(o) = j {
+        for (k, v) in o {
+            if k != key { m.insert(k.copy(), v.copy()) }
+        }
+    }
+    return Json.Object(m)
+}
+
 @test
 fn builds_and_reads() {
     let o = Obj.new().s("t", String("ack")).i("seq", 4).b("ok", true).maybe("run", none).done()

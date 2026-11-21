@@ -13,6 +13,9 @@ Version 1. This is what an app (always through its core) and an instance say to 
 - [Frames from the app](#frames-from-the-app)
 - [Frames from the instance](#frames-from-the-instance)
 - [Devices as tools](#devices-as-tools)
+- [The queue](#the-queue)
+- [Tasks](#tasks)
+- [The agent's browser](#the-agents-browser)
 - [The event log](#the-event-log)
 - [Messages and streaming](#messages-and-streaming)
 - [Events](#events)
@@ -394,6 +397,18 @@ A conversation has one turn at a time. A `send` while its agent is still answeri
 - `queue.list` (`conversation`) gives it as `queue`. `queue.edit` (`id`, `text`) changes an item's text, in its place; it can't leave one with nothing. `queue.order` (`conversation`, `ids`) puts the items in that order, the ones it names first and the rest after, as they were. `queue.drop` (`id`) drops one. `not_found` is an item that's gone, sent or dropped.
 - `queue.steer` (`id`) sends one now: it goes first, and the running turn is stopped (`session/cancel`, so its run finishes `cancelled`). Then it goes, in the same ACP session, so the agent has what it did so far, and its prompt starts with a `[loom: …]` block that says it was stopped for this message. With no turn running, it goes at once.
 
+## Tasks
+
+A task is a long job an agent works on in a conversation of its own, so its chat with the person stays free ([PLAN.md](../PLAN.md#work-that-waits-its-turn)). The conversation has `task` (the task's id) in `conversation.created` and the `conversations` list, and it's never the one an app shows as the agent's chat, or the one a `send` that names only `agent` goes to. Everything else about it is a conversation's: the person can read it, and a `send` naming it, or its queue, goes into the task.
+
+- A task is `id`, `agent`, `conversation`, `title`, `status`, `run` (its run now, or its last), `by` (the device or agent that started it), `attempts`, `at` and `updated` (Unix ms), `result` once it's `done` (the start of the agent's last answer, up to 2000 bytes), and `error` while it's `failed`, or `paused` by a limit.
+- `status` is `running`, `paused`, `done`, `failed` or `cancelled`. Any run in the task's conversation is the task's: it's `running` while one goes, and the run's end ends it. `done` is done, `failed` is failed, and a run stopped any other way (the person's `cancel`, a steer, `limit`) leaves it `paused`, unless `task.cancel` stopped it, which makes it `cancelled`.
+- Every change is a `task.updated` event, with the whole `task`.
+- `task.start` (`agent`, `prompt`, `title`?: the prompt's first line if left out) makes the conversation, puts the prompt in it as the person's message, and starts a run. `task.list` gives `tasks`, newest first, but not those of deleted agents.
+- `task.pause` (`id`) stops a running one, which stays `paused`. `task.resume` (`id`) carries a paused one on, in the same ACP session, with a run whose prompt is only a `[loom: …]` block that says so. `task.cancel` (`id`) stops a running or paused one for good. `task.retry` (`id`) tries a `failed` or `cancelled` one again the same way, as its next `attempts`. A task in the wrong state for the command is refused `not_now`, and one whose agent is working on it already `busy`.
+- A task that was `running` when the instance stopped carries on once it starts again: its run was `failed` by the restart, and a new one starts with a `[loom: …]` block that says the instance restarted.
+- An agent starts one with `start_task` (`title`, `prompt`), with itself as `by`. It may have three running that it started itself.
+
 ## The agent's browser
 
 Each agent has a browser of its own ([PLAN.md](../PLAN.md#the-agents-browser)): a headless Chrome, Edge or Chromium on the instance's computer, which the instance drives over the DevTools protocol, one per agent, on a thread of its own. It starts on the agent's first browser call and stops after 10 minutes with nothing to do, and the next call starts it again. `LOOM_BROWSER` names the one to run; otherwise it's the first Chrome, Edge or Chromium installed in the usual places or on PATH.
@@ -463,7 +478,7 @@ Version 1's kinds. Each event also has `seq`, `kind` and `at`.
 
 | Kind | Fields | When |
 |---|---|---|
-| `conversation.created` | `conversation` (the whole conversation: `id`, `agent`, `title`, `at`) | A conversation is made |
+| `conversation.created` | `conversation` (the whole conversation: `id`, `agent`, `title`, `at`, and `task` for a task's) | A conversation is made |
 | `conversation.updated` | `conversation` (`id` and what changed) | Renamed, or its agent changed |
 | `conversation.deleted` | `conversation` (the id) | Deleted |
 | `message.created` | `conversation`, `message` (the whole message) | A person's message is stored, or an agent's reply is finished |
@@ -477,6 +492,7 @@ A run is one turn of an agent, answering one message.
 | `run.started` | `run`, `conversation`, `agent`, `revision`, `message` (the reply's id), `answering` (the person's message id) | The agent was given the message |
 | `run.finished` | `run`, `status` (`done`, `cancelled`, `failed` or `limit`), `error` (for `failed`), `usage` (`input`, `output` and `total` tokens, where the agent program reports them with ACP's `usage`) | The turn is over, after `message.created` for its reply. Only the owner's agents run as the instance's own user. Anyone else's run in their sandbox ([Sandboxes](#sandboxes)), and on an instance without sandboxes their runs are `failed`, saying so |
 | `queue.changed` | `conversation`, `queue` (the whole queue, first first) | A message waits for its agent, or one that waited was edited, reordered, dropped, steered or sent ([The queue](#the-queue)) |
+| `task.updated` | `task` (the whole task) | A task started, or its status changed ([Tasks](#tasks)) |
 
 ### Tool calls
 
@@ -538,6 +554,9 @@ Version 1's commands:
 | `routine.put` | To make one: `name` (up to 100 bytes), `agent` (by id or name), `prompt` (up to 20,000 bytes), `schedule` (`{"every": minutes}`, 5 to 10,080; `{"daily": "HH:MM"}`; or `{"weekdays": "HH:MM"}`, Monday to Friday; a time of day on a 24-hour clock in `tz`, summer time included), `webhook` (true for a webhook, which gets a new `hook` and `secret`; false takes it away), at least one of the two, and optionally `tz` (an IANA name, such as `Europe/Oslo`; the device's time zone if left out, or UTC when loom doesn't know the device's; one loom doesn't know is refused), `notify` (false), `on` (true) and `catch_up` (true: a run missed while the instance was off happens once when it starts; false: it waits for its next time). To change one: its `id` and what changes | `routine`. Its next run stays unless its schedule or time zone changed |
 | `routine.run` | `id` | `run`. It runs now, whether it's on or not, unless its last run is still going (`busy`) |
 | `routine.delete` | `id` | — |
+| `task.list` | — | `tasks`, newest first ([Tasks](#tasks)) |
+| `task.start` | `agent`, `prompt`, `title`? | `task` |
+| `task.pause`, `task.resume`, `task.cancel`, `task.retry` | `id` | Nothing back for `pause` and `cancel`; `run` for `resume` and `retry`. `not_now` when the task isn't in a state for it |
 | `skill.list` | `bodies`? (`true` for each skill's text too) | `skills`, by name: each `name`, `description` (when it's for) and `at`, and `body` with `bodies` |
 | `skill.get` | `name` | `skill`: `name`, `description`, `body`, `at` |
 | `skill.put` | `name` (lowercase letters, digits and hyphens, up to 64), `description`, `body` (Markdown) | `skill`. It reaches every one of the person's agents: through `list_skills` and `read_skill`, and as `.claude/skills/<name>/SKILL.md` in each agent's folder, which Claude agents load by themselves |
@@ -630,7 +649,8 @@ What it asks for is its `asks`: `tools` when it has a tool server, `agents`, and
 | `not_found` | An id that doesn't exist, or isn't this person's (the two look the same) |
 | `already_answered` | An approval someone already answered |
 | `not_allowed` | This person can't do that |
-| `busy` | `acp.install` for an agent that's being installed already |
+| `busy` | `acp.install` for an agent that's being installed already, or a `task.resume` or `task.retry` for a task its agent is working on already |
+| `not_now` | A `task.pause`, `task.resume`, `task.cancel` or `task.retry` for a task that isn't in a state for it |
 | `unsupported` | `acp.install`: the agent has no build for the instance's computer, and npx or uvx, which it could run with otherwise, isn't there |
 | `install_failed` | `acp.install`: the download, its check or unpacking failed. The message says which |
 | `registry_unavailable` | `acp.registry`: the ACP Registry couldn't be read |
@@ -718,7 +738,7 @@ Inside the instance, each agent runs as an ACP agent program ([PLAN.md](../PLAN.
 | From the agent (ACP) | In loom |
 |---|---|
 | The instance sends the person's message to the session with `session/prompt` | `run.started` |
-| Every session gets `mcpServers` with one server, `loom`: the `loom` program (or the desktop app's own `loom.exe`) with the argument `mcp`, and `LOOM_URL` and that agent's `LOOM_MCP_TOKEN` in its environment. It gives the agent loom's own tools: `message_agent`, `list_agents`, `create_agent`, `update_agent`, `edit_instructions`, `list_acp_agents`, `search_messages`, `list_skills`, `read_skill`, `save_skill`, `notify`, `remember`, `recall`, `forget`, `update_profile` (writes the person's whole profile anew), `list_devices`, `use_device` ([Devices as tools](#devices-as-tools)), `browser_open`, `browser_snapshot`, `browser_click`, `browser_type`, `browser_press`, `browser_scroll`, `browser_back`, `browser_screenshot`, `browser_ask_person`, `browser_fill_secret` and `browser_ask_secret` ([The agent's browser](#the-agents-browser)), `schedule` and `list_routines` (`routine.put` and `routine.list`; a routine is for the calling agent unless it names another), `list_plugins`, `read_plugin` and `save_plugin` ([Plugins](#plugins)), `delete_agent`, `set_permission`, `delete_skill`, `delete_routine` and `delete_plugin`. They act with the person's rights. The last five ask the person every time, whatever the permission mode: the call shows as a tool (`delete` or `other`) in the run that made it, with `approval.needed` (`can_always: false`), and is answered once the person does. With no run going, they refuse; an agent can't delete itself or loosen its own mode | what the tools do: `message.created`, `agent.updated`, `notify` and the rest, as if the person had done it. A yes is done as the device that gave it, so `by` names it |
+| Every session gets `mcpServers` with one server, `loom`: the `loom` program (or the desktop app's own `loom.exe`) with the argument `mcp`, and `LOOM_URL` and that agent's `LOOM_MCP_TOKEN` in its environment. It gives the agent loom's own tools: `message_agent`, `list_agents`, `create_agent`, `update_agent`, `edit_instructions`, `list_acp_agents`, `search_messages`, `list_skills`, `read_skill`, `save_skill`, `notify`, `remember`, `recall`, `forget`, `update_profile` (writes the person's whole profile anew), `list_devices`, `use_device` ([Devices as tools](#devices-as-tools)), `browser_open`, `browser_snapshot`, `browser_click`, `browser_type`, `browser_press`, `browser_scroll`, `browser_back`, `browser_screenshot`, `browser_ask_person`, `browser_fill_secret` and `browser_ask_secret` ([The agent's browser](#the-agents-browser)), `schedule` and `list_routines` (`routine.put` and `routine.list`; a routine is for the calling agent unless it names another), `start_task` ([Tasks](#tasks)), `list_plugins`, `read_plugin` and `save_plugin` ([Plugins](#plugins)), `delete_agent`, `set_permission`, `delete_skill`, `delete_routine` and `delete_plugin`. They act with the person's rights. The last five ask the person every time, whatever the permission mode: the call shows as a tool (`delete` or `other`) in the run that made it, with `approval.needed` (`can_always: false`), and is answered once the person does. With no run going, they refuse; an agent can't delete itself or loosen its own mode | what the tools do: `message.created`, `agent.updated`, `notify` and the rest, as if the person had done it. A yes is done as the device that gave it, so `by` names it |
 | A conversation's first message to an agent program: `session/new`, or after a restart, `session/resume` (where the agent offers `sessionCapabilities.resume`) or `session/load` (where it offers `loadSession`) with the session the conversation had. What `session/load` plays back is dropped, and if the agent can't pick the session up, a new one starts | nothing: the apps see the same conversation |
 | Where the person is writing from, in that prompt | a first text block, `[loom: This message comes from … It's 2026-11-21 13:05 UTC.]`, with the device's name, what it is and its time zone, the agent that sent it with `message_agent`, or the routine that sent it (`the person's routine "Morning brief", run every 30 minutes`), whose message has the routine's id as `from`. It comes when the session hasn't been told yet, or when it changes, never in the instructions |
 | The person's profile, in that prompt | a text block, `[loom: About the person, as they and their agents keep it. update_profile changes it.` and the profile's text `]`, after the one above. It comes when the session hasn't had this revision yet: in the first prompt, and after the person or an agent changes it |
