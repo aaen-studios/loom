@@ -65,3 +65,18 @@ jobs:
       - name: Lint
         working-directory: desktop
         run: cargo clippy --locked -- -D warnings
+
+      - name: Test
+        working-directory: desktop
+        run: cargo test --locked
+
+      # A panel that tries every way out of its sandbox (PLAN.md, "The panel sandbox").
+      - name: Panel break-out test
+        working-directory: desktop
+        shell: bash
+        run: |
+          cargo build --locked
+          status=0
+          timeout 180 ./target/debug/loom.exe --panel-test panel-test.json || status=$?
+          cat panel-test.json || true
+          exit $status
