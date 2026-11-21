@@ -59,6 +59,104 @@ pub struct Agent {
     pub instructions: String,
     /// The names of the person's MCP servers it has.
     pub mcp: Vec<String>,
+    /// What its program offers to pick: its model, reasoning effort and the like.
+    pub options: Vec<ConfigOption>,
+    /// What the person picked, by option id; the rest are what the program starts on.
+    pub config: Vec<(String, String)>,
+}
+
+/// One of the things an agent's program lets the person pick, such as its model.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ConfigOption {
+    pub id: String,
+    pub name: String,
+    /// "model", "thought_level", "mode" or another the program names.
+    pub category: String,
+    /// What a new session starts on.
+    pub default: String,
+    /// Each value: what's sent, and its name.
+    pub values: Vec<(String, String)>,
+}
+
+impl Agent {
+    /// The value option `id` is on: the person's pick, or what the program starts on.
+    pub fn chosen(&self, id: &str) -> String {
+        if let Some((_, v)) = self.config.iter().find(|(k, _)| k == id) {
+            return v.clone();
+        }
+        self.options
+            .iter()
+            .find(|o| o.id == id)
+            .map(|o| o.default.clone())
+            .unwrap_or_default()
+    }
+
+    /// The options the picker shows: the model, then the reasoning effort.
+    pub fn picks(&self) -> Vec<ConfigOption> {
+        let mut out: Vec<ConfigOption> = Vec::new();
+        for category in ["model", "thought_level"] {
+            out.extend(
+                self.options
+                    .iter()
+                    .filter(|o| o.category == category && !o.values.is_empty())
+                    .cloned(),
+            );
+        }
+        out
+    }
+
+    /// What the picker button says, as "Opus · High"; None when there's nothing to pick.
+    pub fn picked(&self) -> Option<String> {
+        let names: Vec<String> = self
+            .picks()
+            .iter()
+            .map(|o| {
+                let v = self.chosen(&o.id);
+                o.values
+                    .iter()
+                    .find(|(value, _)| *value == v)
+                    .map_or(v, |(_, name)| name.clone())
+            })
+            .filter(|n| !n.is_empty())
+            .collect();
+        if names.is_empty() {
+            None
+        } else {
+            Some(names.join(" · "))
+        }
+    }
+}
+
+fn config_options(a: &Value) -> Vec<ConfigOption> {
+    a.get("options")
+        .and_then(Value::as_array)
+        .map(|list| {
+            list.iter()
+                .map(|o| ConfigOption {
+                    id: s(o, "id"),
+                    name: s(o, "name"),
+                    category: s(o, "category"),
+                    default: s(o, "value"),
+                    values: o
+                        .get("options")
+                        .and_then(Value::as_array)
+                        .map(|vs| vs.iter().map(|v| (s(v, "value"), s(v, "name"))).collect())
+                        .unwrap_or_default(),
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn config_values(a: &Value) -> Vec<(String, String)> {
+    a.get("config")
+        .and_then(Value::as_object)
+        .map(|m| {
+            m.iter()
+                .filter_map(|(k, v)| Some((k.clone(), v.as_str()?.to_string())))
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// One of the person's MCP servers.
@@ -2408,6 +2506,8 @@ impl Model {
                                     .collect()
                             })
                             .unwrap_or_default(),
+                        options: config_options(a),
+                        config: config_values(a),
                     })
                     .collect();
                 if let Some(made) = self.made_agent.take() {
@@ -3351,6 +3451,18 @@ impl Model {
         )
     }
 
+    /// Picks a value of one of an agent's options, such as its model. It shows
+    /// at once; the instance sets each session to it before its next prompt.
+    pub fn set_config(&mut self, agent: &str, option: &str, value: &str) -> Option<Value> {
+        let a = self.agents.iter_mut().find(|a| a.id == agent)?;
+        a.config.retain(|(k, _)| k != option);
+        a.config.push((option.to_string(), value.to_string()));
+        let id = self.id("app.config");
+        Some(
+            json!({"t": "cmd", "id": id, "name": "agent.update", "args": {"agent": agent, "config": {option: value}}}),
+        )
+    }
+
     pub fn cancel(&self) -> Option<Value> {
         let conversation = self.conversation()?;
         let run = self.runs.iter().find(|r| r.conversation == conversation)?;
@@ -3542,6 +3654,32 @@ mod tests {
         assert!(m
             .branch_open()
             .is_some_and(|c| c.routine.as_deref() == Some("rt_1")));
+    }
+
+    #[test]
+    fn an_agents_model_and_effort_are_picked() {
+        let mut m = Model::new();
+        let agent = json!({"id": "a_1", "name": "Main", "options": [
+            {"id": "mode", "name": "Mode", "category": "mode", "value": "default", "options": [{"value": "default", "name": "Default"}]},
+            {"id": "effort", "name": "Effort", "category": "thought_level", "value": "medium", "options": [{"value": "medium", "name": "Medium"}, {"value": "high", "name": "High"}]},
+            {"id": "model", "name": "Model", "category": "model", "value": "opus", "options": [{"value": "opus", "name": "Opus"}, {"value": "sonnet", "name": "Sonnet"}]}
+        ], "config": {"effort": "high"}});
+        m.take(&json!({"t": "core.data", "what": "agents", "items": [agent]}));
+        let a = m.agent("a_1").cloned().unwrap();
+        let ids: Vec<String> = a.picks().iter().map(|o| o.id.clone()).collect();
+        assert_eq!(ids, ["model", "effort"]);
+        assert_eq!(a.picked().as_deref(), Some("Opus · High"));
+        let f = m.set_config("a_1", "model", "sonnet").unwrap();
+        assert_eq!(f["args"]["config"]["model"], "sonnet");
+        assert_eq!(
+            m.agent("a_1").unwrap().picked().as_deref(),
+            Some("Sonnet · High")
+        );
+        // A program that offers nothing to pick shows no picker.
+        m.take(
+            &json!({"t": "core.data", "what": "agents", "items": [{"id": "a_1", "name": "Main"}]}),
+        );
+        assert_eq!(m.agent("a_1").unwrap().picked(), None);
     }
 
     #[test]

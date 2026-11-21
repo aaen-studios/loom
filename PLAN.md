@@ -279,7 +279,7 @@ What comes back:
 - `session/update` notifications (message chunks, thoughts, tool calls, plans) become loom events, so every agent looks the same in the apps.
 - `session/request_permission` becomes an approval in the app, and a push on the phone.
 - After a restart, loom picks the session up again with `session/resume` or `session/load`, where the agent supports them.
-- Models and modes the agent offers as config options show in the app.
+- Models and reasoning efforts the agent offers as session config options show in the app: a picker over the chat and on the agent's edit page. What the person picks is kept with the agent, and loom sets each session to it with `session/set_config_option` before its next prompt.
 - The usage the agent reports (tokens and cost) is counted per person.
 
 A turn, from start to end:

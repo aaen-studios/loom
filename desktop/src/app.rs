@@ -99,6 +99,7 @@ enum Screen {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Menu {
     Agent,
+    Model,
     Permission,
 }
 
@@ -3619,6 +3620,38 @@ ACTA_KEY=secret:ACTA_KEY",
                 .gap(px(space::L))
                 .when(pinned > 0 || pins_open, |d| d.child(pins))
                 .when(browsing || watching, |d| d.child(globe))
+                .when_some(agent.picked(), |d, picked| {
+                    d.child(
+                        div()
+                            .id("model-menu")
+                            .occlude()
+                            .px(px(space::S))
+                            .py(px(space::XS))
+                            .rounded(px(radius::ROW))
+                            .text_size(px(size::CAPTION))
+                            .text_color(p.ink_2)
+                            .cursor_pointer()
+                            .hover(move |s| s.bg(p.hover))
+                            .when(self.menu == Some(Menu::Model), |d| d.bg(p.hover))
+                            .flex()
+                            .items_center()
+                            .gap(px(space::XS))
+                            .child(picked)
+                            .child(
+                                Icon::new(IconName::ChevronDown)
+                                    .xsmall()
+                                    .text_color(p.ink_3),
+                            )
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.menu = if this.menu == Some(Menu::Model) {
+                                    None
+                                } else {
+                                    Some(Menu::Model)
+                                };
+                                cx.notify();
+                            })),
+                    )
+                })
                 .child(
                     div()
                         .id("permission-menu")
@@ -3690,6 +3723,58 @@ ACTA_KEY=secret:ACTA_KEY",
                     .child(Icon::new(Ico::Check).small()),
             )
         })
+    }
+
+    /// The model picker's list: each option the agent's program offers (its model,
+    /// then its reasoning effort) under its name, the value it's on ticked.
+    fn model_picks(&self, agent: &model::Agent, cx: &mut Context<Self>) -> Div {
+        let p = self.p;
+        let mut list = div().flex().flex_col();
+        for (n, o) in agent.picks().into_iter().enumerate() {
+            let on = agent.chosen(&o.id);
+            list = list.child(
+                div()
+                    .px(px(space::M))
+                    .pt(px(if n == 0 { space::XS } else { space::M }))
+                    .pb(px(space::XS))
+                    .text_size(px(size::CAPTION))
+                    .text_color(p.ink_3)
+                    .child(o.name.clone()),
+            );
+            for (value, name) in o.values.clone() {
+                let (agent_id, option) = (agent.id.clone(), o.id.clone());
+                let picked = value == on;
+                list = list.child(
+                    div()
+                        .id(SharedString::from(format!("pick-{}-{value}", o.id)))
+                        .flex()
+                        .items_center()
+                        .gap(px(space::M))
+                        .px(px(space::M))
+                        .py(px(space::S))
+                        .rounded(px(radius::ROW))
+                        .cursor_pointer()
+                        .text_size(px(size::SMALL))
+                        .text_color(p.ink)
+                        .hover(move |s| s.bg(p.hover))
+                        .child(div().flex_1().child(name))
+                        .when(picked, |d| {
+                            d.child(
+                                div()
+                                    .text_color(p.ink_2)
+                                    .child(Icon::new(Ico::Check).small()),
+                            )
+                        })
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            if let Some(f) = this.model.set_config(&agent_id, &option, &value) {
+                                this.send(f);
+                            }
+                            cx.notify();
+                        })),
+                );
+            }
+        }
+        list
     }
 
     fn menu_panel(&mut self, cx: &mut Context<Self>) -> Option<Div> {
@@ -3796,6 +3881,17 @@ ACTA_KEY=secret:ACTA_KEY",
                             cx.notify();
                         })),
                 ),
+            Menu::Model => {
+                let agent = self
+                    .model
+                    .selected
+                    .as_ref()
+                    .and_then(|id| self.model.agent(id))
+                    .cloned()?;
+                panel
+                    .right(px(space::S))
+                    .child(self.model_picks(&agent, cx))
+            }
             Menu::Permission => panel
                 .right(px(space::S))
                 .child(
@@ -5044,6 +5140,38 @@ ACTA_KEY=secret:ACTA_KEY",
                 })),
             );
         }
+        // Its model and reasoning effort, as the chat's picker has them, once
+        // its program has said what it offers.
+        let mut picks = Vec::new();
+        if let Some(a) = self
+            .model
+            .editing
+            .as_ref()
+            .and_then(|id| self.model.agent(id))
+            .cloned()
+        {
+            for o in a.picks() {
+                let on = a.chosen(&o.id);
+                let mut row = div().flex().flex_wrap().gap(px(space::S));
+                for (value, name) in o.values.clone() {
+                    let (agent_id, option) = (a.id.clone(), o.id.clone());
+                    row = row.child(
+                        self.button_owned(
+                            format!("edit-pick-{}-{value}", o.id),
+                            &name,
+                            value == on,
+                        )
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            if let Some(f) = this.model.set_config(&agent_id, &option, &value) {
+                                this.send(f);
+                            }
+                            cx.notify();
+                        })),
+                    );
+                }
+                picks.push(self.field(&o.name, row));
+            }
+        }
         let page = div()
             .id("edit-agent")
             .size_full()
@@ -5091,6 +5219,7 @@ ACTA_KEY=secret:ACTA_KEY",
                                 }),
                             )),
                     )
+                    .children(picks)
                     .child(self.field("MCP servers", servers))
                     .when(!self.model.revisions.is_empty(), |d| {
                         d.child(self.field("Versions", list))

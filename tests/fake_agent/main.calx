@@ -94,6 +94,7 @@ pub enum Step {
     Mcp(String, String)
     Env(String)
     Servers
+    Config
 }
 
 // The steps a prompt spells out. Blank lines are skipped.
@@ -150,6 +151,8 @@ pub fn script(text: String) -> List<Step> {
             steps.push(Step.Session)
         } else if word == "/servers" {
             steps.push(Step.Servers)
+        } else if word == "/config" {
+            steps.push(Step.Config)
         } else if word == "/env" {
             steps.push(Step.Env(rest))
         } else if word == "/image" {
@@ -207,6 +210,48 @@ struct Agent {
     stamp: String
     // Requests that came in during a turn, answered after it.
     backlog: List<Json>
+    // Each session's config options' values, by option id: "model" and "effort".
+    config: Map<String, Map<String, String>>
+}
+
+// The config options a session offers (ACP's session config options): a model
+// and a reasoning effort, with their values now.
+fn config_options(values: Map<String, String>) -> Json {
+    return Json.Array([config_option(values.copy(), "model", "Model", "model"), config_option(values, "effort", "Effort", "thought_level")])
+}
+
+// The values option `id` offers.
+fn offered(id: String) -> List<String> {
+    if id == "model" { return [String("fake-1"), String("fake-2")] }
+    if id == "effort" { return [String("low"), String("medium"), String("high")] }
+    return List<String>()
+}
+
+fn config_option(values: Map<String, String>, id: str, name: str, category: str) -> Json {
+    var options = List<Json>()
+    for v in offered(String(id)) {
+        var o = LinkedMap<String, Json>()
+        o.insert("value", js(v.copy()))
+        o.insert("name", js("{name} {v}"))
+        options.push(Json.Object(o))
+    }
+    var c = LinkedMap<String, Json>()
+    c.insert("id", js(String(id)))
+    c.insert("name", js(String(name)))
+    c.insert("category", js(String(category)))
+    c.insert("type", js(String("select")))
+    var current = String()
+    if let v = values.find(String(id)) { current = v.copy() }
+    c.insert("currentValue", js(current))
+    c.insert("options", Json.Array(options))
+    return Json.Object(c)
+}
+
+fn config_default() -> Map<String, String> {
+    var m = Map<String, String>()
+    m.insert(String("model"), String("fake-1"))
+    m.insert(String("effort"), String("medium"))
+    return m
 }
 
 fn emit(message: Json) {
@@ -555,6 +600,10 @@ impl Agent {
                 Step.Session => chunk(session.copy(), "agent_message_chunk", "session {session}"),
                 Step.Env(name) => chunk(session.copy(), "agent_message_chunk", "{name}={env.variable(name.copy()) ?? String()}"),
                 Step.Servers => chunk(session.copy(), "agent_message_chunk", a.servers(session.copy())),
+                Step.Config => {
+                    let values = a.values(session.copy())
+                    chunk(session.copy(), "agent_message_chunk", "model={value_of(values.copy(), "model")} effort={value_of(values, "effort")}")
+                },
                 Step.Context => chunk(session.copy(), "agent_message_chunk", if context.len() > 0 { context.copy() } else { String("no context") }),
                 Step.Mcp(tool, args) => chunk(session.copy(), "agent_message_chunk", a.call_loom(session.copy(), tool, args)),
                 Step.Link(path) => {
@@ -593,6 +642,13 @@ impl Agent {
         respond(id, Json.Object(r))
     }
 
+    // Session `session`'s config values: its own, or the defaults (a session
+    // picked up after the agent restarted).
+    fn values(a: Agent, session: String) -> Map<String, String> {
+        if let v = a.config.find(session) { return v.copy() }
+        return config_default()
+    }
+
     fn handle(a: mut Agent, m: Json) {
         let name = method(m.copy())
         let id = m.get(String("id"))
@@ -629,7 +685,23 @@ impl Agent {
             var r = LinkedMap<String, Json>()
             let new_id = "fake_{a.stamp}_{a.sessions}"
             a.mcp.insert(new_id.copy(), params.get(String("mcpServers")) ?? Json.Null)
+            a.config.insert(new_id.copy(), config_default())
+            r.insert("configOptions", config_options(config_default()))
             r.insert("sessionId", js(new_id))
+            respond(id ?? Json.Null, Json.Object(r))
+        } else if name == "session/set_config_option" {
+            let session = (params.get(String("sessionId")) ?? Json.Null).as_str() ?? String()
+            let option = (params.get(String("configId")) ?? Json.Null).as_str() ?? String()
+            let value = (params.get(String("value")) ?? Json.Null).as_str() ?? String()
+            if not offered(option.copy()).contains(value.copy()) {
+                respond_error(id ?? Json.Null, -32602, "no {option} {value}")
+                return
+            }
+            var values = a.values(session.copy())
+            values.insert(option, value)
+            a.config.insert(session, values.copy())
+            var r = LinkedMap<String, Json>()
+            r.insert("configOptions", config_options(values))
             respond(id ?? Json.Null, Json.Object(r))
         } else if name == "session/load" or name == "session/resume" {
             let session = (params.get(String("sessionId")) ?? Json.Null).as_str() ?? String()
@@ -640,7 +712,9 @@ impl Agent {
             a.mcp.insert(session.copy(), params.get(String("mcpServers")) ?? Json.Null)
             // session/load plays the conversation back first; session/resume doesn't.
             if name == "session/load" { chunk(session.copy(), "agent_message_chunk", String("(the conversation so far)")) }
-            respond(id ?? Json.Null, Json.Object(LinkedMap<String, Json>()))
+            var r = LinkedMap<String, Json>()
+            r.insert("configOptions", config_options(a.values(session)))
+            respond(id ?? Json.Null, Json.Object(r))
         } else if name == "session/prompt" {
             a.turn(id ?? Json.Null, params)
         } else if let i = id {
@@ -661,7 +735,7 @@ fn main() {
     _ = unsafe { Thread.spawn(reader) }
     let given = env.args()
     let picks_up = if given.len() > 0 { given[0].replace("--", "") } else { String() }
-    var a = Agent { inbox: inbox, sessions: 0, next_id: 0, tools: 0, picks_up: picks_up, mcp: Map<String, Json>(), stamp: bytes.hex(random_bytes(3)), backlog: List<Json>() }
+    var a = Agent { inbox: inbox, sessions: 0, next_id: 0, tools: 0, picks_up: picks_up, mcp: Map<String, Json>(), stamp: bytes.hex(random_bytes(3)), backlog: List<Json>(), config: Map<String, Map<String, String>>() }
     loop {
         if a.backlog.len() > 0 {
             let m = a.backlog.remove(0)
@@ -709,4 +783,9 @@ fn path_of(uri: String) -> String {
     let path = url.decode(uri[7..].copy())
     if path.len() > 2 and path.starts_with("/") and path[2..].starts_with(":") { return path[1..].copy() }
     return path
+}
+
+fn value_of(values: Map<String, String>, key: str) -> String {
+    if let v = values.find(String(key)) { return v.copy() }
+    return String()
 }
