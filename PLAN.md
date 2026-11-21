@@ -287,11 +287,11 @@ Each agent program runs as its own process. The instance reads each one on a thr
 |---|---|
 | `message_agent` | Talks to another of your agents |
 | `remember`, `recall`, `forget`, `update_profile` | Memory (below) |
-| `schedule` | Makes a routine |
+| `schedule`, `list_routines` | Make or change a routine, and list them ([Routines](#routines)) |
 | `notify` | Sends you a notification |
 | `edit_instructions` | Changes the agent's own instructions |
 | `list_agents`, `create_agent`, `update_agent`, `list_acp_agents`, `search_messages` | Loom's commands. None of them changes a permission mode or deletes |
-| `delete_agent`, `set_permission`, `delete_skill` | The risky ones. Each asks you every time, whatever the agent's permission mode, and is done as the device you answered on. An agent can't delete itself or loosen its own mode |
+| `delete_agent`, `set_permission`, `delete_skill`, `delete_routine` | The risky ones. Each asks you every time, whatever the agent's permission mode, and is done as the device you answered on. An agent can't delete itself or loosen its own mode |
 | `list_skills`, `read_skill`, `save_skill` | Skills: read when a task fits one, and saved by an agent for every agent. They're also written into each agent's folder as Claude Code skills |
 | Device tools | Your PC and phone, where you allow it ([Machines and devices](#machines-and-devices)) |
 | Every loom command | Agents, routines, plugins, settings, export, moving ([Agents can do anything the app can](#agents-can-do-anything-the-app-can)) |
@@ -338,9 +338,11 @@ In a desktop instance, the instance's machine and your PC are the same machine, 
 
 ## Routines
 
-- **On a schedule:** every N minutes, daily at a time, or on weekdays at a time, in the person's own time zone, summer time included.
+- **On a schedule:** every N minutes (5 at least), daily at a time, or on weekdays at a time, in the person's own time zone, summer time included. A routine takes the time zone of the device that made it.
 - **On a webhook:** `/hooks/<id>`, with a secret. "The build failed" comes from GitHub Actions posting there, not from a timer.
-- A routine runs an agent with a prompt, posts into a conversation, and can notify.
+- A routine sends its agent a prompt in the agent's chat, which is its newest conversation, so it shows where the person reads that agent. The message says it's from the routine, and the agent is told so. With notify on, the reply comes as a notification. If the last run hasn't finished, that time is skipped.
+- Missed while the instance was off, a routine runs once when it starts again, or waits for its next time, as the routine says (`catch_up`). Either way, missed runs never pile up.
+- The person makes, changes, pauses, runs and deletes them on the **Routines** page, and agents do the same with `schedule`, `list_routines` and `delete_routine`, which asks first.
 
 ## Notifications and push
 
@@ -473,7 +475,7 @@ Checked against the Calx board on 2026-11-20: every card below is done, so Phase
 | AEAD encryption: AES-256-GCM or ChaCha20-Poly1305 | std.crypto has AES-CFB8 and RSA | — | Encrypting secrets in the database | 3 |
 | Killing everything a process started (a process group on Linux and macOS, a job object on Windows) | **Done**: `Child.stop` and `Child.kill_tree` | [CLX-376](https://acta.aaenz.no/aaen-studios/clx#CLX-376) | Stopping a runaway agent and all it started, on a server and on a PC | 3 |
 | Ed25519 signing in std.crypto | **Done** | [CLX-379](https://acta.aaenz.no/aaen-studios/clx#CLX-379) | Device keys and signed approvals for device tools, the instance's key, signed releases | 3 |
-| Named time zones in std.time | Only the system's local offset | — | Routines in each person's zone | 4 |
+| Named time zones in std.time | Only the system's local offset | [CLX-404](https://acta.aaenz.no/aaen-studios/clx#CLX-404) | Routines daily or on weekdays at a time, in each person's zone | 4 |
 | An iOS target, for devices and the simulator, as a static library Xcode links | None | — | The iPhone app. Started early, during Phases 3–4 (below) | 5 |
 | Cross-compiling: building for another system or processor | Not documented; builds are for the machine they run on | — | iOS builds from a Mac, Linux arm64 and other release builds | 5 |
 | std.net and std.http on iOS: kqueue, and URLSession since iOS has no libcurl | WinHTTP on Windows, libcurl on Linux and macOS | — | The core on iPhone | 5 |

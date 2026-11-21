@@ -65,6 +65,10 @@ CREATE TABLE IF NOT EXISTS files (
 CREATE TABLE IF NOT EXISTS profiles (
     user TEXT NOT NULL REFERENCES users(id), revision INTEGER NOT NULL, text TEXT NOT NULL,
     by TEXT NOT NULL, at INTEGER NOT NULL, PRIMARY KEY (user, revision));
+CREATE TABLE IF NOT EXISTS routines (
+    id TEXT PRIMARY KEY, user TEXT NOT NULL REFERENCES users(id), json TEXT NOT NULL,
+    next INTEGER NOT NULL);
+CREATE INDEX IF NOT EXISTS routines_by_next ON routines (next);
 CREATE TABLE IF NOT EXISTS memories (
     id INTEGER PRIMARY KEY, user TEXT NOT NULL REFERENCES users(id), agent TEXT NOT NULL,
     text TEXT NOT NULL, by TEXT NOT NULL, at INTEGER NOT NULL);
@@ -289,6 +293,12 @@ impl Store {
         return text(r[0].copy())
     }
 
+    // The time zone `user`'s newest device is in, or "" with none.
+    pub fn user_tz(self, user: String) -> String ! Error {
+        let r = try self.db.query_one(String("SELECT tz FROM devices WHERE user = ? AND revoked = 0 AND tz != '' ORDER BY at DESC LIMIT 1"), [t(user)]) else return String()
+        return text(r[0].copy())
+    }
+
     pub fn rename_device(self, id: String, name: String) ! Error {
         _ = try self.db.execute(String("UPDATE devices SET name = ? WHERE id = ?"), [t(name), t(id)])
     }
@@ -403,6 +413,12 @@ impl Store {
     pub fn conversation(self, user: String, id: String) -> Json? ! Error {
         let row = try self.db.query_one(String("SELECT id, agent, title, at FROM conversations WHERE id = ? AND user = ? AND deleted = 0"), [t(id), t(user)])
         let r = row else return none
+        return some(Obj.new().s("id", text(r[0].copy())).s("agent", text(r[1].copy())).s("title", text(r[2].copy())).i("at", int(r[3].copy())).done())
+    }
+
+    // `agent`'s conversation with the newest message, as the apps show its chat.
+    pub fn newest_conversation(self, user: String, agent: String) -> Json? ! Error {
+        let r = try self.db.query_one(String("SELECT c.id, c.agent, c.title, c.at FROM conversations c LEFT JOIN messages m ON m.conversation = c.id AND m.user = c.user WHERE c.user = ? AND c.agent = ? AND c.deleted = 0 GROUP BY c.id ORDER BY max(coalesce(m.at, c.at)) DESC, c.rowid DESC LIMIT 1"), [t(user), t(agent)]) else return none
         return some(Obj.new().s("id", text(r[0].copy())).s("agent", text(r[1].copy())).s("title", text(r[2].copy())).i("at", int(r[3].copy())).done())
     }
 
@@ -587,6 +603,52 @@ impl Store {
         let at = now()
         _ = try self.db.execute(String("INSERT INTO profiles (user, revision, text, by, at) VALUES (?, ?, ?, ?, ?)"), [t(user), Value.Int(revision + 1), t(what.copy()), t(by.copy()), Value.Int(at)])
         return Obj.new().s("text", what).i("revision", revision + 1).s("by", by).i("at", at).done()
+    }
+
+    // --- Routines (PLAN.md, "Routines") ---
+
+    // Adds or replaces one of `user`'s routines, as JSON with its `id`, and
+    // `next`, when it runs next (0 when it's off).
+    pub fn put_routine(self, user: String, routine: Json) ! Error {
+        let id = (routine.get(String("id")) ?? Json.Null).as_str() ?? String()
+        let next = (routine.get(String("next")) ?? Json.Null).as_i64() ?? 0
+        _ = try self.db.execute(String("INSERT INTO routines (id, user, json, next) VALUES (?, ?, ?, ?) ON CONFLICT (id) DO UPDATE SET json = excluded.json, next = excluded.next"), [t(id), t(user), t("{routine}"), Value.Int(next)])
+    }
+
+    pub fn routine(self, user: String, id: String) -> Json? ! Error {
+        let r = try self.db.query_one(String("SELECT json FROM routines WHERE id = ? AND user = ?"), [t(id), t(user)]) else return none
+        return some(try parse(text(r[0].copy())))
+    }
+
+    // `user`'s routines, oldest first.
+    pub fn routines(self, user: String) -> List<Json> ! Error {
+        var out = List<Json>()
+        for r in try self.db.query(String("SELECT json FROM routines WHERE user = ? ORDER BY rowid"), [t(user)]) {
+            out.push(try parse(text(r[0].copy())))
+        }
+        return out
+    }
+
+    // Every routine on the instance, with whose it is.
+    pub fn every_routine(self) -> List<(String, Json)> ! Error {
+        var out = List<(String, Json)>()
+        for r in try self.db.query(String("SELECT user, json FROM routines")) {
+            out.push((text(r[0].copy()), try parse(text(r[1].copy()))))
+        }
+        return out
+    }
+
+    // Every routine due by `time`, with whose it is, soonest first.
+    pub fn due_routines(self, time: i64) -> List<(String, Json)> ! Error {
+        var out = List<(String, Json)>()
+        for r in try self.db.query(String("SELECT user, json FROM routines WHERE next > 0 AND next <= ? ORDER BY next"), [Value.Int(time)]) {
+            out.push((text(r[0].copy()), try parse(text(r[1].copy()))))
+        }
+        return out
+    }
+
+    pub fn delete_routine(self, user: String, id: String) -> bool ! Error {
+        return try self.db.execute(String("DELETE FROM routines WHERE id = ? AND user = ?"), [t(id), t(user)]) > 0
     }
 
     // --- The activity log (PLAN.md, "Machines and devices") ---

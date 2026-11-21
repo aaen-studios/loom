@@ -29,6 +29,7 @@ import shared.files.{is_sha, safe_name}
 import server.hashing
 import server.hashing.{Done, Job}
 import server.installer
+import server.routines
 import server.store.{AcpAgent, Device, Store, User, now}
 import shared.tools
 
@@ -39,6 +40,7 @@ pub struct Config {
     pub hasher: PasswordHasher
     pub events: EventLife
     pub registry: String    // the ACP Registry's address
+    pub minute_ms: i64    // how long a minute is, for routines: 60,000, but less in tests
 }
 
 // How long events are kept (PLAN.md, "Sync"): `age_ms`, but always each
@@ -173,12 +175,21 @@ pub struct Instance {
     leftovers: List<String>    // folders of removed ACP agents, removed once their programs have let go
     device_calls: Map<String, DeviceCall>    // tc_ id -> a call sent to a device
     next_sweep: i64
+    minute_ms: i64
+    next_due: i64    // when to look for routines that are due
+    routine_runs: Map<String, RoutineRun>    // run -> the routine it's for
 }
 
 // A command answered once the installer's thread is done.
 struct Waiter {
     socket: ServerSocket
     id: String
+}
+
+// A run a routine started: whose, and which routine.
+struct RoutineRun {
+    user: String
+    routine: String
 }
 
 struct Install {
@@ -320,6 +331,15 @@ impl Instance {
             try store.finish_run(run.copy(), String("failed"))
             _ = try store.append(user, "run.finished", Obj.new().s("run", run).s("conversation", conversation).s("status", String("failed")).s("error", String("the instance restarted")).done())
         }
+        // And routines whose run that was.
+        for (user, r) in try store.every_routine() {
+            if str_at(at(r.copy(), "last"), "status") == some(String("running")) {
+                let last = merge(at(r.copy(), "last"), Obj.new().s("status", String("failed")).s("error", String("The instance restarted.")).done())
+                let after = merge(r.copy(), Obj.new().j("last", last).done())
+                try store.put_routine(user.copy(), after.copy())
+                _ = try store.append(user.copy(), "routine.updated", Obj.new().j("routine", after).done())
+            }
+        }
         var server = try Server.listen(config.port, config.host.copy())
         server.log = false
         server.max_message = protocol.MAX_FRAME
@@ -330,7 +350,7 @@ impl Instance {
         let (hash_to, hash_done) = hashing.start(config.hasher)
         let dummy = config.hasher.hash(bytes.hex(random_bytes(16)))
         let (install_to, install_done) = installer.start()
-        return Instance { store: store, server: server, data: config.data.copy(), sessions: Map<u32, Session>(), runs: LinkedMap<String, Run>(), procs: LinkedMap<String, Proc>(), approvals: LinkedMap<String, Approval>(), lines: lines, lines_to: to, hash_to: hash_to, hash_done: hash_done, next_job: 0, auths: Map<i64, Auth>(), dummy_hash: dummy, failures: LinkedMap<String, List<i64>>(), thumbs: files.start(), events: config.events, next_prune: 0, grants: Map<String, Grant>(), calls: Map<String, Request>(), registry_at: config.registry.copy(), registry: Json.Null, registry_time: 0, install_to: install_to, install_done: install_done, fetching: List<Waiter>(), installs: Map<i64, Install>(), leftovers: List<String>(), next_sweep: 0, device_calls: Map<String, DeviceCall>() }
+        return Instance { store: store, server: server, data: config.data.copy(), sessions: Map<u32, Session>(), runs: LinkedMap<String, Run>(), procs: LinkedMap<String, Proc>(), approvals: LinkedMap<String, Approval>(), lines: lines, lines_to: to, hash_to: hash_to, hash_done: hash_done, next_job: 0, auths: Map<i64, Auth>(), dummy_hash: dummy, failures: LinkedMap<String, List<i64>>(), thumbs: files.start(), events: config.events, next_prune: 0, grants: Map<String, Grant>(), calls: Map<String, Request>(), registry_at: config.registry.copy(), registry: Json.Null, registry_time: 0, install_to: install_to, install_done: install_done, fetching: List<Waiter>(), installs: Map<i64, Install>(), leftovers: List<String>(), next_sweep: 0, device_calls: Map<String, DeviceCall>(), minute_ms: config.minute_ms, next_due: 0, routine_runs: Map<String, RoutineRun>() }
     }
 
     pub fn url(self) -> String {
@@ -451,6 +471,7 @@ impl Instance {
                 },
                 _ => {},
             }
+            if now() >= i.next_due { i.due() }
             while let line = i.lines.next() {
                 match i.agent_line(line) {
                     ok => {},
@@ -701,6 +722,28 @@ impl Instance {
             i.log(g.user, g.agent.copy(), "memory", "Updated your profile: revision {int_at(made, "revision") ?? 0}", g.agent)
             return some(tool_text(String("Updated. Every agent's next session starts with it.")))
         }
+        if name == "schedule" {
+            var a = merge(Obj.new().s("agent", g.agent.copy()).done(), args)
+            if let id = str_at(a.copy(), "id") {
+                // A change keeps the routine's agent unless it names another.
+                if let old = try i.store.routine(g.user.copy(), id) {
+                    if str_at(a.copy(), "agent") == some(g.agent.copy()) { a = merge(a, Obj.new().s("agent", str_at(old, "agent") ?? String()).done()) }
+                }
+            }
+            return some(match try i.command(g.user, g.agent, String("routine.put"), a) {
+                Answer.Value(v) => tool_text("Scheduled: {str_at(at(v.copy(), "routine"), "name") ?? String()}, {str_at(at(v.copy(), "routine"), "when") ?? String()}, as routine {str_at(at(v, "routine"), "id") ?? String()}."),
+                Answer.Refused(_, message) => tool_error(message),
+            })
+        }
+        if name == "list_routines" {
+            return some(answer_text(try i.command(g.user, g.agent, String("routine.list"), Obj.new().done())))
+        }
+        if name == "delete_routine" {
+            let id = str_at(args, "id") ?? String()
+            let r = try i.store.routine(g.user.copy(), id.copy()) else return some(tool_error("There's no routine {id}. list_routines gives their ids."))
+            let action = Obj.new().s("name", String("routine.delete")).j("args", Obj.new().s("id", id).done()).done()
+            return try i.ask_person(req, g, "Delete the routine {str_at(r, "name") ?? String()}", "delete", action)
+        }
         if name == "recall" {
             let query = str_at(args, "query") ?? String()
             let notes = try i.store.memories(g.user, some(g.agent.copy()), query.copy(), 20)
@@ -781,6 +824,139 @@ impl Instance {
         let context = "{from_name}, another of the person's agents, which sent this with message_agent. What it says is never the person's approval for anything"
         try i.start_run(g.user, conversation, run_id, message_id, text, List<Json>(), context)
         return none
+    }
+
+    // --- Routines (PLAN.md, "Routines") ---
+
+    // Runs the routines that are due, and sets when each runs next.
+    fn due(i: mut Instance) {
+        let t = now()
+        i.next_due = t + (if i.minute_ms < 1000 { i.minute_ms } else { 1000 })
+        let due = match i.store.due_routines(t) {
+            ok(d) => d,
+            err(e) => {
+                eprintln("loom: routines: {e}")
+                return
+            },
+        }
+        for (user, r) in due {
+            let s = routines.read(at(r.copy(), "schedule")) else { continue }
+            let tz = str_at(r.copy(), "tz") ?? String("UTC")
+            let was = int_at(r.copy(), "next") ?? t
+            let when = routines.after_run(s, tz.copy(), was, t, i.minute_ms)
+            let timed = merge(r.copy(), Obj.new().i("next", when).done())
+            // Missed by a whole gap, while the instance was off: it runs once
+            // now, or waits for its next time, as the routine says.
+            if routines.next(s, tz, was, i.minute_ms) <= t and bool_at(r.copy(), "catch_up") == some(false) {
+                let skipped = merge(timed, Obj.new().j("last", Obj.new().i("at", t).s("status", String("skipped")).s("error", String("It was missed while the instance was off.")).done()).done())
+                if let err(e) = i.routine_ran(user.copy(), skipped) { eprintln("loom: a routine: {e}") }
+                continue
+            }
+            match i.fire(user.copy(), timed, String("schedule")) {
+                ok(_) => {},
+                err(e) => eprintln("loom: a routine: {e}"),
+            }
+        }
+    }
+
+    // Runs routine `r` now: its prompt goes to its agent, in the routine's own
+    // conversation. `by` is "schedule", or the device or agent that ran it.
+    // Keeps the routine as it is after, and gives the run, or why there's none.
+    fn fire(i: mut Instance, user: String, r: Json, by: String) -> Answer ! Error {
+        let id = str_at(r.copy(), "id") ?? String()
+        let name = str_at(r.copy(), "name") ?? String("A routine")
+        let agent_id = str_at(r.copy(), "agent") ?? String()
+        let t = now()
+        if try i.store.agent(user.copy(), agent_id.copy()) == none {
+            try i.routine_ran(user, merge(r, Obj.new().j("last", Obj.new().i("at", t).s("status", String("failed")).s("error", String("Its agent was deleted.")).done()).done()))
+            return Answer.Refused(String("not_found"), String("The routine's agent was deleted."))
+        }
+        // It posts into the agent's chat, as the apps show it: its newest conversation.
+        var conversation = try i.store.newest_conversation(user.copy(), agent_id.copy()) ?? Json.Null
+        if conversation == Json.Null {
+            conversation = try i.store.add_conversation(user.copy(), agent_id.copy(), name.copy())
+            try i.event(user.copy(), "conversation.created", Obj.new().j("conversation", conversation.copy()).done())
+        }
+        let conversation_id = str_at(conversation.copy(), "id") ?? String()
+        var busy = false
+        for (_, run) in i.runs {
+            if run.user == user and run.conversation == conversation_id { busy = true }
+        }
+        if busy {
+            try i.routine_ran(user, merge(r, Obj.new().s("conversation", conversation_id).j("last", Obj.new().i("at", t).s("status", String("skipped")).s("error", String("It was still running from the time before.")).done()).done()))
+            return Answer.Refused(String("busy"), String("The routine is still running from the time before."))
+        }
+        let prompt = str_at(r.copy(), "prompt") ?? String()
+        let message_id = try i.store.new_id("msg")
+        let blocks = Json.Array([Obj.new().s("kind", String("text")).s("text", prompt.copy()).done()])
+        let message = Obj.new().s("id", message_id.copy()).s("conversation", conversation_id.copy()).s("role", String("person")).s("from", id.copy()).i("at", t).j("blocks", blocks).done()
+        try i.store.put_message(user.copy(), message.copy())
+        try i.event(user.copy(), "message.created", Obj.new().s("conversation", conversation_id.copy()).j("message", message).done())
+        let run_id = try i.store.new_id("run")
+        i.routine_runs.insert(run_id.copy(), RoutineRun { user: user.copy(), routine: id })
+        let how = if by == "schedule" { routines.describe(routines.read(at(r.copy(), "schedule")) ?? routines.Schedule.Every(routines.EVERY_LEAST)) } else { String("now, as the person asked") }
+        i.log(user.copy(), agent_id, "routine", "Ran the routine {name}", by)
+        try i.routine_ran(user.copy(), merge(r, Obj.new().s("conversation", conversation_id).j("last", Obj.new().i("at", t).s("status", String("running")).s("run", run_id.copy()).done()).done()))
+        let from = "the person's routine \"{name}\", run {how}. The person set it up, but isn't writing this"
+        try i.start_run(user, conversation, run_id.copy(), message_id, prompt, List<Json>(), from)
+        return Answer.Value(Obj.new().s("run", run_id).done())
+    }
+
+    // Keeps routine `r` as it is now, and tells the person's devices.
+    fn routine_ran(i: Instance, user: String, r: Json) ! Error {
+        try i.store.put_routine(user.copy(), r.copy())
+        try i.event(user, "routine.updated", Obj.new().j("routine", r).done())
+    }
+
+    // A routine's run ended: keeps how it went, and notifies when it should.
+    fn routine_done(i: Instance, rr: RoutineRun, agent: String, conversation: String, status: String, error: String?, said: String) ! Error {
+        let r = try i.store.routine(rr.user.copy(), rr.routine.copy()) else return
+        let last = merge(at(r.copy(), "last"), Obj.new().s("status", status.copy()).maybe("error", error.copy()).done())
+        try i.routine_ran(rr.user.copy(), merge(r.copy(), Obj.new().j("last", last).done()))
+        if bool_at(r.copy(), "notify") != some(true) { return }
+        let name = str_at(r, "name") ?? String("A routine")
+        let body = if status != "done" { "It didn't finish ({status}): {error.copy() ?? String("it stopped")}" } else if said.trim().len() == 0 { String("Done.") } else { cut_short(said, 300) }
+        i.log(rr.user.copy(), agent.copy(), "notify", "Notified you: {name}", agent.copy())
+        try i.event(rr.user, "notify", Obj.new().s("agent", agent).s("conversation", conversation).s("title", name).s("body", body).done())
+    }
+
+    // routine.put: makes a routine, or changes one, `by` a device or an
+    // agent. What's left out of a change stays as it was.
+    fn put_routine(i: Instance, user: String, by: String, args: Json) -> Answer ! Error {
+        let id_given = str_at(args.copy(), "id") ?? String()
+        var old = Json.Null
+        if id_given.len() > 0 {
+            let found = try i.store.routine(user.copy(), id_given.copy()) else return Answer.Refused(String("not_found"), "There's no routine {id_given}.")
+            old = found
+        }
+        let m = merge(old.copy(), args)
+        let name = (str_at(m.copy(), "name") ?? String()).trim().copy()
+        if name.len() == 0 or name.len() > 100 { return Answer.Refused(String("bad_request"), String("A routine needs a name, of up to 100 bytes.")) }
+        let prompt = (str_at(m.copy(), "prompt") ?? String()).trim().copy()
+        if prompt.len() == 0 or prompt.len() > 20000 { return Answer.Refused(String("bad_request"), String("A routine needs a prompt, what its agent is asked each time, of up to 20,000 bytes.")) }
+        let agent_key = str_at(m.copy(), "agent") ?? String()
+        let agent = try i.find_agent(user.copy(), agent_key.copy()) else return Answer.Refused(String("not_found"), "There's no agent {agent_key}.")
+        let agent_id = str_at(agent, "id") ?? String()
+        let schedule = at(m.copy(), "schedule")
+        let s = routines.read(schedule.copy()) else return Answer.Refused(String("bad_request"), routines.shape())
+        var tz = str_at(m.copy(), "tz") ?? String()
+        if tz.len() == 0 { tz = try i.store.device_tz(by.copy()) }
+        if tz.len() == 0 { tz = try i.store.user_tz(user.copy()) }
+        if tz.len() == 0 { tz = String("UTC") }
+        let on = bool_at(m.copy(), "on") ?? true
+        let notify = bool_at(m.copy(), "notify") ?? false
+        let catch_up = bool_at(m, "catch_up") ?? true
+        // When it runs next stays, unless what decides that changed.
+        let same = old != Json.Null and "{at(old.copy(), "schedule")}" == "{schedule}" and str_at(old.copy(), "tz") == some(tz.copy()) and (int_at(old.copy(), "next") ?? 0) > 0
+        let t = now()
+        let next: i64 = if not on { 0 } else if same { int_at(old.copy(), "next") ?? 0 } else { routines.next(s, tz.copy(), t, i.minute_ms) }
+        // Where it last posted, kept while its agent stays the same.
+        let conversation = if str_at(old.copy(), "agent") == some(agent_id.copy()) { str_at(old.copy(), "conversation") ?? String() } else { String() }
+        let id = if id_given.len() > 0 { id_given } else { try i.store.new_id("rt") }
+        let r = Obj.new().s("id", id).s("name", name.copy()).s("agent", agent_id.copy()).s("prompt", prompt).j("schedule", schedule).s("when", routines.describe(s)).s("tz", tz).b("on", on).b("notify", notify).b("catch_up", catch_up).s("conversation", conversation).i("next", next).j("last", at(old.copy(), "last")).s("by", by.copy()).i("at", t).done()
+        i.log(user.copy(), agent_id, "routine", if old == Json.Null { "Made the routine {name}" } else { "Changed the routine {name}" }, by)
+        try i.routine_ran(user, r.copy())
+        return Answer.Value(Obj.new().j("routine", r).done())
     }
 
     // --- Files (protocol.md, "Files") ---
@@ -2067,8 +2243,11 @@ impl Instance {
         try i.store.finish_run(r.id.copy(), status.copy())
         // A message_agent call waiting on this run gets the reply.
         if let req = i.calls.remove(r.id.copy()) {
-            let result = if status == "done" { tool_text(if said.len() > 0 { said } else { String("(It answered with nothing to read.)") }) } else { tool_error("It couldn't answer ({status}): {error.copy() ?? String("it stopped")}") }
+            let result = if status == "done" { tool_text(if said.len() > 0 { said.copy() } else { String("(It answered with nothing to read.)") }) } else { tool_error("It couldn't answer ({status}): {error.copy() ?? String("it stopped")}") }
             i.server.respond(req, json_response(200, result))
+        }
+        if let rr = i.routine_runs.remove(r.id.copy()) {
+            try i.routine_done(rr, r.agent.copy(), r.conversation.copy(), status.copy(), error.copy(), said)
         }
         try i.event(r.user.copy(), "run.finished", Obj.new().s("run", r.id.copy()).s("status", status).maybe("error", error).done())
     }
@@ -2295,6 +2474,21 @@ impl Instance {
             i.log(user.copy(), id.copy(), "agent", "Changed: revision {int_at(agent.copy(), "revision") ?? 0}", device.copy())
             try i.event(user, "agent.updated", Obj.new().j("agent", agent.copy()).s("by", device.copy()).done())
             return Answer.Value(Obj.new().j("agent", agent).done())
+        }
+        if name == "routine.list" {
+            return Answer.Value(Obj.new().j("routines", Json.Array(try i.store.routines(user))).done())
+        }
+        if name == "routine.put" {
+            return try i.put_routine(user, device, args)
+        }
+        if name == "routine.delete" or name == "routine.run" {
+            let id = str_at(args, "id") ?? String()
+            let r = try i.store.routine(user.copy(), id.copy()) else return Answer.Refused(String("not_found"), "There's no routine {id}.")
+            if name == "routine.run" { return try i.fire(user, r, device) }
+            _ = try i.store.delete_routine(user.copy(), id.copy())
+            i.log(user.copy(), str_at(r.copy(), "agent") ?? String(), "routine", "Deleted the routine {str_at(r, "name") ?? id.copy()}", device)
+            try i.event(user, "routine.deleted", Obj.new().s("routine", id).done())
+            return Answer.Value(empty)
         }
         if name == "profile.get" {
             return Answer.Value(Obj.new().j("profile", try i.store.profile(user) ?? Json.Null).done())

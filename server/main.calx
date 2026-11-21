@@ -65,14 +65,14 @@ struct Args {
     fast_hashes: bool
     keep_events: i64?
     registry: String
+    minute_ms: i64
 }
 
 fn read_args(given: List<String>) -> Args ! Error {
-    var a = Args { words: List<String>(), data: String("loom-data"), port: 8790, host: String("127.0.0.1"), fast_hashes: false, keep_events: none, registry: String(installer.REGISTRY) }
+    var a = Args { words: List<String>(), data: String("loom-data"), port: 8790, host: String("127.0.0.1"), fast_hashes: false, keep_events: none, registry: String(installer.REGISTRY), minute_ms: 60000 }
     var i: usize = 0
     while i < given.len() {
         let w = given[i].copy()
-        // For tests only: keeps just the newest N events, of any age.
         // Where the ACP Registry is: a mirror of it, or a test's.
         if w == "--registry" {
             if i + 1 >= given.len() { fail "{w} needs an address" }
@@ -80,6 +80,14 @@ fn read_args(given: List<String>) -> Args ! Error {
             i += 2
             continue
         }
+        // For tests only: a routine's minute lasts this many ms.
+        if w == "--test-minute-ms" {
+            if i + 1 >= given.len() { fail "{w} needs a number" }
+            a.minute_ms = i64.parse(given[i + 1].copy()) ?? 60000
+            i += 2
+            continue
+        }
+        // For tests only: keeps just the newest N events, of any age.
         if w == "--test-keep-events" {
             if i + 1 >= given.len() { fail "{w} needs a number" }
             a.keep_events = some(i64.parse(given[i + 1].copy()) ?? 0)
@@ -124,7 +132,7 @@ fn open_store(a: Args) -> Store ! Error {
 }
 
 fn serve(a: Args) ! Error {
-    var i = try Instance.open(Config { data: a.data.copy(), port: a.port, host: a.host.copy(), hasher: hasher(a.copy()), events: event_life(a.copy()), registry: a.registry.copy() })
+    var i = try Instance.open(Config { data: a.data.copy(), port: a.port, host: a.host.copy(), hasher: hasher(a.copy()), events: event_life(a.copy()), registry: a.registry.copy(), minute_ms: a.minute_ms })
     println("loom: serving {a.data} at {i.url()}")
     if let code = try i.setup_code() {
         println("loom: no owner yet. Set one up with POST /api/setup and this code:")

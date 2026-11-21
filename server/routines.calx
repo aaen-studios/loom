@@ -1,0 +1,74 @@
+module server.routines
+
+// When routines run (PLAN.md, "Routines"). A schedule is JSON, as the
+// protocol has it: {"every": 30}, in minutes.
+import std.json.{Json, parse}
+import shared.obj.{int_at}
+
+// The shortest and longest gap between runs, in minutes.
+pub const EVERY_LEAST: i64 = 5
+pub const EVERY_MOST: i64 = 10080
+
+pub enum Schedule {
+    Every(i64)    // minutes
+}
+
+// The schedule `j` says, or none when it isn't one.
+pub fn read(j: Json) -> Schedule? {
+    if let m = int_at(j, "every") {
+        if m < EVERY_LEAST or m > EVERY_MOST { return none }
+        return some(Schedule.Every(m))
+    }
+    return none
+}
+
+// What's wrong with a schedule, said for whoever sent it.
+pub fn shape() -> String {
+    return "A schedule is \{\"every\": minutes\}, from {EVERY_LEAST} to {EVERY_MOST} minutes."
+}
+
+// The schedule in words: "every 30 minutes".
+pub fn describe(s: Schedule) -> String {
+    match s {
+        Schedule.Every(m) => return if m % 60 == 0 { if m == 60 { String("every hour") } else { "every {m / 60} hours" } } else { "every {m} minutes" },
+    }
+}
+
+// When a routine runs next, after `after` (Unix ms), in the time zone `tz`.
+// `minute_ms` is how long a minute is: 60,000, but less in tests.
+pub fn next(s: Schedule, tz: String, after: i64, minute_ms: i64) -> i64 {
+    _ = tz
+    match s {
+        Schedule.Every(m) => return after + m * minute_ms,
+    }
+}
+
+// When it runs again, once it's run at the time it was due, `due`: the next
+// time after that, or, when the instance was off for longer than a gap, the
+// next time after `now`, so missed runs come as one.
+pub fn after_run(s: Schedule, tz: String, due: i64, now: i64, minute_ms: i64) -> i64 {
+    let t = next(s, tz.copy(), due, minute_ms)
+    if t > now { return t }
+    return next(s, tz, now, minute_ms)
+}
+
+@test
+fn reads_a_gap_in_minutes() {
+    assert(read(parse(#"{"every":30}"#)!) != none)
+    assert(read(parse(#"{"every":1}"#)!) == none)
+    assert(read(parse(#"{"daily":"08:00","every":"x"}"#)!) == none)
+}
+
+@test
+fn says_it_in_words() {
+    assert(describe(Schedule.Every(30)) == "every 30 minutes" and describe(Schedule.Every(60)) == "every hour" and describe(Schedule.Every(180)) == "every 3 hours")
+}
+
+@test
+fn missed_runs_come_as_one() {
+    let s = Schedule.Every(30)
+    let m: i64 = 60000
+    assert(after_run(s, String("UTC"), 0, 1000, m) == 30 * m)
+    // Off for two hours: the next is half an hour from now, not four catching up.
+    assert(after_run(s, String("UTC"), 0, 120 * m, m) == 150 * m)
+}
