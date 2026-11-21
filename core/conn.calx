@@ -23,6 +23,7 @@ import core.files.{Transfer, at_path, kept_at, refused}
 import shared.files.{is_sha}
 import core.login.{Kind, Outcome, Pending, address, request_body}
 import core.update.{Updater}
+import core.device.{Device}
 import std.fs
 
 const FIRST_WAIT_MS: u64 = 500
@@ -106,6 +107,7 @@ pub struct Conn {
     pub files: String?    // where files that come down are kept; the system's temporary folder without one
     transfers: List<Transfer>
     pub updater: Updater?    // looks for new releases of the app; none in tests and dev builds
+    device: Device?       // this device as a tool for agents; none if its key couldn't be kept
 }
 
 impl Conn {
@@ -122,6 +124,13 @@ impl Conn {
                 ok(known) => known,
                 err(_) => none,
             }
+        }
+        let device = match Device.load(cache) {
+            ok(d) => some(d),
+            err(e) => {
+                eprintln("loom: this device's key: {e}")
+                none
+            },
         }
         return Conn {
             server: s,
@@ -145,6 +154,7 @@ impl Conn {
             files: none,
             transfers: List<Transfer>(),
             updater: none,
+            device: device,
         }
     }
 
@@ -420,6 +430,7 @@ impl Conn {
             self.state = State.Live
             self.failed = 0
             self.tell_state(0, String())
+            self.offer(str_at(f.copy(), "device") ?? String())
             self.flush()
         } else if t == "synced" {
             self.synced = true
@@ -452,6 +463,9 @@ impl Conn {
                 ok => {},
                 err(e) => self.tell_error("cache", "{e}"),
             }
+        } else if t == "device.call" {
+            self.device_call(f)
+            return
         } else if t == "delta" {
             self.delta(f, text)
             return
@@ -560,6 +574,15 @@ impl Conn {
                 self.connect()
             }
             return true
+        }
+        if t == "device.tools" or t == "device.get" {
+            self.device_tools(at(m, "tools"))
+            return true
+        }
+        if t == "approve" and (bool_at(m.copy(), "allow") ?? false) {
+            if let signed = self.signed(m.copy()) {
+                if self.state == State.Live and self.put("{signed}") { return true }
+            }
         }
         if t == "core.get" {
             self.get(m)
@@ -820,6 +843,76 @@ impl Conn {
         }
     }
 
+    // --- This device as a tool (core/device.calx) ---
+
+    /// On welcome: this device's id, and its key and tools for the instance.
+    fn offer(mut self, id: String) {
+        var frame = Json.Null
+        if let d = mut self.device {
+            d.id = id.copy()
+            frame = d.frame()
+        }
+        if frame != Json.Null { _ = self.put("{frame}") }
+    }
+
+    /// Sets the tools the app gives (none to only ask), and tells the app and the
+    /// instance what they are now.
+    fn device_tools(mut self, given: Json) {
+        var tools = Json.Null
+        var frame = Json.Null
+        var failed = String()
+        if let d = mut self.device {
+            if given != Json.Null {
+                if let err(e) = d.set_modes(self.cache, given) { failed = "{e}" }
+            }
+            tools = d.tools()
+            frame = d.frame()
+        }
+        if failed.len() > 0 { self.tell_error("cache", failed) }
+        if tools == Json.Null {
+            self.tell_error("device", String("This device's key couldn't be kept, so it offers no tools."))
+            return
+        }
+        self.tell(Obj.new().s("t", String("core.device")).j("tools", tools).done())
+        if given != Json.Null and self.state == State.Live { _ = self.put("{frame}") }
+    }
+
+    /// An approval given here, of a call to a device: signed with this device's key, so
+    /// the device doing the work knows the yes is the person's.
+    fn signed(self, m: Json) -> Json? {
+        let d = self.device else return none
+        let call = str_at(m.copy(), "call") ?? String()
+        let asked = match self.cache.approvals() {
+            ok(all) => all,
+            err(_) => return none,
+        }
+        for a in asked {
+            if str_at(a.copy(), "call") == some(call.copy()) {
+                let request = str_at(a, "request") else return none
+                return some(merge(m.copy(), Obj.new().j("approval", d.sign(request)).done()))
+            }
+        }
+        return none
+    }
+
+    fn device_call(mut self, f: Json) {
+        var result = Json.Null
+        if let d = mut self.device {
+            if let r = d.call(self.cache, f.copy(), now()) { result = r }
+        } else {
+            result = Obj.new().s("t", String("device.result")).s("call", str_at(f, "call") ?? String()).b("ok", false).s("output", String("This device offers no tools.")).done()
+        }
+        if result != Json.Null { _ = self.put("{result}") }
+    }
+
+    fn poll_device(mut self) {
+        var results = List<Json>()
+        if let d = mut self.device { results = d.poll() }
+        for r in results {
+            _ = self.put("{r}")
+        }
+    }
+
     /// Starts again if it's time.
     fn tick(mut self) {
         if self.state != State.Offline { return }
@@ -840,6 +933,7 @@ impl Task for Conn {
             c.poll()
             c.poll_transfers()
             c.poll_update()
+            c.poll_device()
             c.tick()
             if let m = unsafe { c.inbox.wait_for(TICK_NS) } {
                 if not c.from_app(m) { return }
