@@ -476,17 +476,17 @@ Checked against the Calx board on 2026-11-20: every card below is done, so Phase
 | Killing everything a process started (a process group on Linux and macOS, a job object on Windows) | **Done**: `Child.stop` and `Child.kill_tree` | [CLX-376](https://acta.aaenz.no/aaen-studios/clx#CLX-376) | Stopping a runaway agent and all it started, on a server and on a PC | 3 |
 | Ed25519 signing in std.crypto | **Done** | [CLX-379](https://acta.aaenz.no/aaen-studios/clx#CLX-379) | Device keys and signed approvals for device tools, the instance's key, signed releases | 3 |
 | Named time zones in std.time | Only the system's local offset | [CLX-404](https://acta.aaenz.no/aaen-studios/clx#CLX-404) | Routines daily or on weekdays at a time, in each person's zone | 4 |
-| An iOS target, for devices and the simulator, as a static library Xcode links | None | — | The iPhone app. Started early, during Phases 3–4 (below) | 5 |
-| Cross-compiling: building for another system or processor | Not documented; builds are for the machine they run on | — | iOS builds from a Mac, Linux arm64 and other release builds | 5 |
-| std.net and std.http on iOS: kqueue, and URLSession since iOS has no libcurl | WinHTTP on Windows, libcurl on Linux and macOS | — | The core on iPhone | 5 |
-| ES256 (ECDSA P-256) signing | None | — | APNs tokens | 5 |
+| An iOS target, for devices and the simulator, as a static library Xcode links | Being built, on the Mac | [CLX-408](https://acta.aaenz.no/aaen-studios/clx#CLX-408) | The iPhone app. Started early, during Phases 3–4 (below) | 5 |
+| Cross-compiling: building for another system or processor | Not documented; builds are for the machine they run on | [CLX-409](https://acta.aaenz.no/aaen-studios/clx#CLX-409) | iOS builds from a Mac, Linux arm64 and other release builds | 5 |
+| std.net and std.http on iOS: kqueue, and URLSession since iOS has no libcurl | WinHTTP on Windows, libcurl on Linux and macOS | [CLX-410](https://acta.aaenz.no/aaen-studios/clx#CLX-410) | The core on iPhone | 5 |
+| ES256 (ECDSA P-256) signing | Being built | [CLX-406](https://acta.aaenz.no/aaen-studios/clx#CLX-406) | APNs tokens | 5 |
 | HTTP/2 in std.http | **Done** | [CLX-383](https://acta.aaenz.no/aaen-studios/clx#CLX-383) | APNs, which speaks only HTTP/2 | 5 |
-| A library's panic reports to the host instead of ending the app | Not documented | — | A bug in the core shouldn't close the app | 5 |
+| A library's panic reports to the host instead of ending the app | Being built | [CLX-407](https://acta.aaenz.no/aaen-studios/clx#CLX-407) | A bug in the core shouldn't close the app | 5 |
 | A static library for macOS that links with Rust | Not checked yet | — | The Mac app | 6 |
-| X25519 in std.crypto, and a Noise handshake built on it, Ed25519 and AEAD | None | — | End-to-end encryption to a desktop instance, and the push relay's sealed tokens | 6 |
-| UDP sockets with multicast in std.net, and mDNS | No UDP in std.net | — | Finding a desktop instance on the Wi-Fi when its address changes | 6 |
+| X25519 in std.crypto, and a Noise handshake built on it, Ed25519 and AEAD | None | [CLX-411](https://acta.aaenz.no/aaen-studios/clx#CLX-411) | End-to-end encryption to a desktop instance, and the push relay's sealed tokens | 6 |
+| UDP sockets with multicast in std.net, and mDNS | No UDP in std.net | [CLX-412](https://acta.aaenz.no/aaen-studios/clx#CLX-412) | Finding a desktop instance on the Wi-Fi when its address changes | 6 |
 | Choosing the CPU a release build targets, such as x86-64-v2 | **Done**: the `--cpu` level | [CLX-381](https://acta.aaenz.no/aaen-studios/clx#CLX-381) | Installing loom on any VPS | 7 |
-| Writing and reading tar as a stream, to and from a file or a connection | std.tar works in memory | — | Exports and moves of many gigabytes | 7 |
+| Writing and reading tar as a stream, to and from a file or a connection | std.tar works in memory; being built | [CLX-413](https://acta.aaenz.no/aaen-studios/clx#CLX-413) | Exports and moves of many gigabytes | 7 |
 
 Also done: std.http reports a server that doesn't speak HTTP/1.1 or HTTP/2 as a protocol error rather than `BadUrl` ([CLX-385](https://acta.aaenz.no/aaen-studios/clx#CLX-385)), `Child.read_line(0)` takes output already in the pipe ([CLX-358](https://acta.aaenz.no/aaen-studios/clx#CLX-358)), packages with `calx.toml` ([CLX-370](https://acta.aaenz.no/aaen-studios/clx#CLX-370)), and handling SIGTERM, Ctrl+C and a service stop ([CLX-377](https://acta.aaenz.no/aaen-studios/clx#CLX-377)), for `loom serve` to stop cleanly.
 
