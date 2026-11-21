@@ -3571,7 +3571,16 @@ ACTA_KEY=secret:ACTA_KEY",
                     (person.id.clone(), "admin", "Make admin")
                 };
                 let gone = person.id.clone();
+                let (reset_id, reset_name) = (person.id.clone(), person.username.clone());
                 row = row
+                    .child(
+                        self.button_owned(format!("reset-{}", person.id), "Reset password", false)
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                let f = this.model.reset_password(&reset_id, &reset_name);
+                                this.send(f);
+                                cx.notify();
+                            })),
+                    )
                     .child(
                         self.button_owned(format!("role-{}", person.id), label, false)
                             .on_click(cx.listener(move |this, _, _, cx| {
@@ -3591,6 +3600,37 @@ ACTA_KEY=secret:ACTA_KEY",
                     );
             }
             everyone = everyone.child(row);
+        }
+        if let Some((who, link, expires)) = self.model.reset_made.clone() {
+            let copied = link.clone();
+            everyone = everyone
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(space::S))
+                        .child(
+                            div()
+                                .flex_1()
+                                .px(px(space::M))
+                                .py(px(space::S))
+                                .rounded(px(radius::BUTTON))
+                                .border_1()
+                                .border_color(p.line_strong)
+                                .text_size(px(size::SMALL))
+                                .text_color(p.ink)
+                                .child(link),
+                        )
+                        .child(self.button("copy-reset", "Copy", false).on_click(
+                            cx.listener(move |_, _, _, cx| {
+                                cx.write_to_clipboard(ClipboardItem::new_string(copied.clone()));
+                            }),
+                        )),
+                )
+                .child(caption(format!(
+                    "Sets a new password for {who}, once, until {}. It signs them out everywhere else.",
+                    time_of(expires)
+                )));
         }
         body = body.child(everyone);
         // Invites still open.

@@ -88,6 +88,9 @@ CREATE TABLE IF NOT EXISTS link_codes (
 CREATE TABLE IF NOT EXISTS invites (
     id TEXT PRIMARY KEY, hash TEXT NOT NULL UNIQUE, role TEXT NOT NULL, uses INTEGER NOT NULL,
     expires INTEGER NOT NULL, by TEXT NOT NULL, at INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS resets (
+    hash TEXT PRIMARY KEY, user TEXT NOT NULL REFERENCES users(id), by TEXT NOT NULL,
+    expires INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS push_tokens (
     device TEXT PRIMARY KEY REFERENCES devices(id), user TEXT NOT NULL REFERENCES users(id),
     token TEXT NOT NULL, env TEXT NOT NULL, at INTEGER NOT NULL);
@@ -325,6 +328,10 @@ impl Store {
 
     pub fn set_password_hash(self, user: String, hash: String) ! Error {
         _ = try self.db.execute(String("UPDATE users SET password = ? WHERE id = ?"), [t(hash), t(user)])
+    }
+
+    pub fn set_password(self, user: String, password: String) ! Error {
+        try self.set_password_hash(user, self.hasher.hash(password))
     }
 
     pub fn find_username(self, username: String) -> User? ! Error {
@@ -990,6 +997,37 @@ impl Store {
         return try self.db.execute(String("DELETE FROM invites WHERE id = ?"), [t(id)]) > 0
     }
 
+    // --- Password resets (PLAN.md, "Accounts and invites") ---
+
+    // Keeps a reset code, as its SHA-256 `hash`, for `user`, made by `by`, until
+    // `expires`. Any older code of theirs, and codes past their time, go.
+    pub fn add_reset(self, hash: String, user: String, by: String, expires: i64) ! Error {
+        _ = try self.db.execute(String("DELETE FROM resets WHERE expires <= ? OR user = ?"), [Value.Int(now()), t(user.copy())])
+        _ = try self.db.execute(String("INSERT INTO resets (hash, user, by, expires) VALUES (?, ?, ?, ?)"), [t(hash), t(user), t(by), Value.Int(expires)])
+    }
+
+    // Whose the reset code with SHA-256 `hash` is, and when it expires.
+    pub fn reset(self, hash: String) -> (String, i64)? ! Error {
+        let r = try self.db.query_one(String("SELECT user, expires FROM resets WHERE hash = ?"), [t(hash)]) else return none
+        return some((text(r[0].copy()), int(r[1].copy())))
+    }
+
+    // Takes the reset code, once. False if it was taken already.
+    pub fn take_reset(self, hash: String) -> bool ! Error {
+        return try self.db.execute(String("DELETE FROM resets WHERE hash = ?"), [t(hash)]) > 0
+    }
+
+    // Signs `user` out everywhere: every device of theirs, whose ids it gives.
+    pub fn revoke_all(self, user: String) -> List<String> ! Error {
+        var out = List<String>()
+        for r in try self.db.query(String("SELECT id FROM devices WHERE user = ? AND revoked = 0"), [t(user)]) {
+            let id = text(r[0].copy())
+            try self.revoke_device(id.copy())
+            out.push(id)
+        }
+        return out
+    }
+
     // --- People ---
 
     // Everyone's account, oldest first, as user.list gives it.
@@ -1026,7 +1064,7 @@ impl Store {
 
     fn remove_rows(self, user: String) ! Error {
         _ = try self.db.execute(String("DELETE FROM sent WHERE device IN (SELECT id FROM devices WHERE user = ?)"), [t(user.copy())])
-        for table in ["push_tokens", "link_codes", "agent_revisions", "agents", "activity", "secrets", "mcp_servers", "skills", "messages", "conversations", "runs", "events", "acp_sessions", "files", "profiles", "routines", "plugin_data", "plugin_revisions", "plugins", "memories", "memories_fts", "messages_fts", "devices"] {
+        for table in ["push_tokens", "link_codes", "resets", "agent_revisions", "agents", "activity", "secrets", "mcp_servers", "skills", "messages", "conversations", "runs", "events", "acp_sessions", "files", "profiles", "routines", "plugin_data", "plugin_revisions", "plugins", "memories", "memories_fts", "messages_fts", "devices"] {
             _ = try self.db.execute("DELETE FROM {table} WHERE user = ?", [t(user.copy())])
         }
         _ = try self.db.execute(String("DELETE FROM invites WHERE by = ?"), [t(user.copy())])

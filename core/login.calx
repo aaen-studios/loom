@@ -16,6 +16,7 @@ pub enum Kind {
     Setup
     Link      // with the one-time code from another device's QR code
     Join      // with an invite's code, as a new account
+    Reset     // with a reset link's code, and a new password
     Logout
 }
 
@@ -55,6 +56,7 @@ impl Pending {
             Kind.Setup => String("/api/setup"),
             Kind.Link => String("/api/link"),
             Kind.Join => "/api/join/{str_at(payload.copy(), "code") ?? String()}",
+            Kind.Reset => "/api/reset/{str_at(payload.copy(), "code") ?? String()}",
             _ => String("/api/login"),
         }
         let headers: List<Header> = [Header { name: String("Content-Type"), value: String("application/json") }]
