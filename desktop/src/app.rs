@@ -1579,45 +1579,12 @@ ACTA_KEY=secret:ACTA_KEY",
         spool_of(&self.model)
     }
 
-    /// A server as a tile, `size` square: a laptop for the instance on this computer, a
-    /// server for one elsewhere, with a dot on its corner for how it is: green connected,
-    /// grey connecting or signed out, red when it can't be reached.
-    fn server_tile(&self, state: Spool, local: bool, size: f32) -> AnyElement {
-        let p = self.p;
-        let dot = match state {
-            Spool::Wound => p.ok,
-            Spool::Loose => p.bad,
-            _ => p.ink_3,
-        };
-        let ring = (size * 0.3).round().max(8.0);
-        div()
-            .relative()
-            .size(px(size))
-            .flex_none()
-            .flex()
-            .items_center()
-            .justify_center()
-            .rounded(px(radius::ROW + 2.0))
-            .bg(p.bg)
-            .border_1()
-            .border_color(p.line)
-            .text_color(p.ink_2)
-            .child(
-                Icon::new(if local { Ico::Laptop } else { Ico::Server })
-                    .size(px((size * 0.5).round())),
-            )
-            .child(
-                div()
-                    .absolute()
-                    .right(px(-3.0))
-                    .bottom(px(-3.0))
-                    .size(px(ring))
-                    .rounded_full()
-                    .bg(dot)
-                    .border_2()
-                    .border_color(p.side),
-            )
-            .into_any_element()
+    /// A server as its ball of yarn, `size` square: coloured and wound its own way from
+    /// its name, so each server looks like itself, and showing how it is (`thread::yarn`).
+    fn server_yarn(&self, state: Spool, name: &str, size: f32) -> AnyElement {
+        let seed = thread::seed_of(name);
+        let tint = thread::color(COLORS[(seed % COLORS.len() as u64) as usize], self.p.dark);
+        thread::yarn(state, tint, self.p.ink_3, seed, size).into_any_element()
     }
 
     /// Each server the app is signed in to, in a row. The one on screen is a box with its
@@ -1634,7 +1601,7 @@ ACTA_KEY=secret:ACTA_KEY",
         for (dir, model) in self.servers() {
             let here = dir == self.here;
             let state = spool_of(model);
-            let local = dir.is_empty() && local_mode();
+            let name = server_name(model, &dir);
             let id = SharedString::from(format!("server-{dir}"));
             let mut button = div()
                 .id(id)
@@ -1652,7 +1619,7 @@ ACTA_KEY=secret:ACTA_KEY",
                     .h(px(46.0))
                     .px(px(space::S))
                     .when(server_open, |d| d.bg(p.active))
-                    .child(self.server_tile(state, local, 30.0))
+                    .child(self.server_yarn(state, &name, 32.0))
                     .child(
                         div()
                             .flex_1()
@@ -1665,7 +1632,7 @@ ACTA_KEY=secret:ACTA_KEY",
                                     .font_weight(FontWeight::MEDIUM)
                                     .text_color(p.ink)
                                     .truncate()
-                                    .child(server_name(model, &dir)),
+                                    .child(name.clone()),
                             )
                             .child(
                                 div()
@@ -1684,7 +1651,7 @@ ACTA_KEY=secret:ACTA_KEY",
                 button = button.flex_none().p(px(space::S));
                 let heard = !model.unread.is_empty();
                 button = button
-                    .child(self.server_tile(state, local, 30.0))
+                    .child(self.server_yarn(state, &name, 32.0))
                     .when(heard, |d| {
                         d.child(
                             div()
@@ -1771,12 +1738,12 @@ ACTA_KEY=secret:ACTA_KEY",
             .bg(p.side)
             .border_r_1()
             .border_color(p.line);
-        // Its head: the gear, or the server's icon, as the sidebar shows them.
-        let server_icon = if self.local() {
-            Ico::Laptop
-        } else {
-            Ico::Server
-        };
+        // Its head: the gear, or the server's yarn, as the sidebar shows them.
+        let yarn = self.server_yarn(
+            self.spool_state(),
+            &server_name(&self.model, &self.here),
+            20.0,
+        );
         nav = nav.child(
             div()
                 .flex()
@@ -1788,10 +1755,7 @@ ACTA_KEY=secret:ACTA_KEY",
                 .text_size(px(size::SMALL))
                 .font_weight(FontWeight::SEMIBOLD)
                 .text_color(p.ink)
-                .when(server, |d| {
-                    d.child(Icon::new(server_icon).small().text_color(p.ink_2))
-                        .child("Server")
-                })
+                .when(server, |d| d.child(yarn).child("Server"))
                 .when(!server, |d| {
                     d.child(Icon::new(Ico::Settings).small().text_color(p.ink_2))
                         .child("Settings")
@@ -1985,7 +1949,7 @@ ACTA_KEY=secret:ACTA_KEY",
             .child(words);
         let here = self
             .row(
-                Some(self.server_tile(state, self.local(), 40.0)),
+                Some(self.server_yarn(state, &server_name(&self.model, &self.here), 40.0)),
                 where_,
                 Some(format!("loom {}", crate::VERSION)),
                 Some(status.into_any_element()),
