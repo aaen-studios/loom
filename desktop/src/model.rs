@@ -513,6 +513,22 @@ impl FileRef {
             "image/png" | "image/jpeg" | "image/gif" | "image/webp"
         )
     }
+
+    /// Whether it's a page, as an agent's html_render makes: the chat opens it beside
+    /// itself, walled off, not in a browser.
+    pub fn page(&self) -> bool {
+        self.mime.split(';').next().map(str::trim) == Some("text/html")
+    }
+
+    /// What a page is called: its name without ".html".
+    pub fn title(&self) -> String {
+        let t = self.name.strip_suffix(".html").unwrap_or(&self.name);
+        if t.is_empty() {
+            "Page".into()
+        } else {
+            t.to_string()
+        }
+    }
 }
 
 /// A file picked to go with the next message.
@@ -718,6 +734,8 @@ pub struct Model {
     getting: HashMap<String, (String, bool)>,
     /// Files fetched to be opened, for the app to open.
     pub to_open: Vec<String>,
+    /// The page shown beside the chat, from an agent's html_render.
+    pub page: Option<FileRef>,
     /// What's typed in search, and what the newest search found.
     pub query: String,
     pub hits: Vec<Hit>,
@@ -2370,6 +2388,22 @@ impl Model {
         Some(json!({"t": "file.get", "id": id, "file": f.file, "name": f.name}))
     }
 
+    /// Shows a page beside the chat: fetched first, unless it's here already.
+    pub fn open_page(&mut self, f: &FileRef) -> Option<Value> {
+        self.page = Some(f.clone());
+        if self.files.contains_key(&f.file) {
+            return None;
+        }
+        let id = self.id("app.get");
+        self.getting.insert(id.clone(), (f.file.clone(), false));
+        Some(json!({"t": "file.get", "id": id, "file": f.file, "name": f.name}))
+    }
+
+    /// Where the open page is on this computer, once it's fetched.
+    pub fn page_path(&self) -> Option<&String> {
+        self.files.get(&self.page.as_ref()?.file)
+    }
+
     fn file_came(&mut self, f: &Value) {
         let id = s(f, "id");
         let error = f.get("error").map(|e| s(e, "message"));
@@ -2391,7 +2425,11 @@ impl Model {
                 self.files.insert(key, path.to_string());
             }
             (e, _) => {
-                if open {
+                let page = self.page.as_ref().is_some_and(|p| p.file == key);
+                if page {
+                    self.page = None;
+                }
+                if open || page {
                     self.notices
                         .push(e.unwrap_or_else(|| "The file couldn't be fetched.".into()));
                 }
@@ -3088,6 +3126,35 @@ mod tests {
             !m.unread.contains("a_1"),
             "its answer doesn't mark the agent unread"
         );
+    }
+
+    #[test]
+    fn a_page_is_fetched_and_shown_beside_the_chat() {
+        let page = FileRef::of(
+            &json!({"file": "ab12", "name": "Sales this week.html", "mime": "text/html", "size": 90}),
+        );
+        assert!(page.page() && !page.image());
+        assert_eq!(page.title(), "Sales this week");
+        let mut m = Model::new();
+        let f = m.open_page(&page).expect("it's fetched first");
+        assert_eq!(f["t"], "file.get");
+        assert!(m.page_path().is_none(), "not until it's here");
+        m.take(&json!({"t": "core.file", "id": f["id"], "path": "C:/cache/ab12.html"}));
+        assert_eq!(
+            m.page_path().map(String::as_str),
+            Some("C:/cache/ab12.html")
+        );
+        assert!(m.to_open.is_empty(), "it isn't opened in a browser");
+        assert!(m.open_page(&page).is_none(), "and isn't fetched again");
+        // One that can't be fetched closes, and says why.
+        let gone = FileRef {
+            file: "cd34".into(),
+            ..page
+        };
+        let f = m.open_page(&gone).unwrap();
+        m.take(&json!({"t": "core.file", "id": f["id"], "error": {"message": "gone"}}));
+        assert!(m.page.is_none());
+        assert_eq!(m.notices.last().map(String::as_str), Some("gone"));
     }
 
     #[test]

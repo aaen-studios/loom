@@ -174,11 +174,12 @@ impl App {
     }
 
     /// Reads frames until one whose `t` is `t` (and, for events, whose kind is `kind`),
-    /// and gives it. Every frame read is kept in `frames`.
-    pub fn until(a: mut App, t: str, kind: str) -> Json ! Error {
+    /// and gives it. Every frame read is kept in `frames`. Each frame may take
+    /// `wait_ms` to come.
+    pub fn until(a: mut App, t: str, kind: str, wait_ms: u32 = 30000) -> Json ! Error {
         loop {
-            let m = try a.ws.receive(30000) else {
-                fail "no {t} {kind} came in 30 s"
+            let m = try a.ws.receive(wait_ms) else {
+                fail "no {t} {kind} came in {wait_ms / 1000} s"
             }
             let text = match m {
                 Message.Text(s) => s,

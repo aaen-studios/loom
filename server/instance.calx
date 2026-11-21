@@ -939,7 +939,7 @@ impl Instance {
     // open, and its result comes back to the loop.
     fn browse(i: mut Instance, req: Request, g: Grant, name: String, args: Json) -> Json? ! Error {
         let op = name.trim_prefix("browser_").copy()
-        if not " open snapshot click type press scroll back screenshot ask_person fill_secret ask_secret ".contains(" {op} ") { return some(tool_error("loom has no tool {name}.")) }
+        if not " open snapshot click type press scroll back screenshot ask_person fill_secret ask_secret preview ".contains(" {op} ") { return some(tool_error("loom has no tool {name}.")) }
         let key = "{g.user}/{g.agent}"
         if op == "ask_person" or op == "ask_secret" {
             let b = i.browsers.find(key.copy()) else return some(tool_error(String("Your browser isn't open. Open the page first, then ask.")))
@@ -1653,6 +1653,12 @@ impl Instance {
         }
         if name.starts_with("browser_") {
             return try i.browse(req, g, name, args)
+        }
+        if name == "html_preview" {
+            return try i.browse(req, g, String("browser_preview"), args)
+        }
+        if name == "html_render" {
+            return some(try i.render_page(g, args))
         }
         if name == "remember" {
             let what = (str_at(args.copy(), "text") ?? String()).trim().copy()
@@ -2477,6 +2483,35 @@ impl Instance {
             }
         }
         try i.store.add_file(user, sha, name, mime, i64.wrap(u64(data.len())))
+    }
+
+    // html_render (PLAN.md, "Pages in the chat"): the page goes in the chat as a
+    // file block, after what the agent has said so far in its newest turn, and
+    // the apps open it beside the chat, walled off.
+    fn render_page(i: mut Instance, g: Grant, args: Json) -> Json ! Error {
+        let html = str_at(args.copy(), "html") ?? String()
+        if html.trim().len() == 0 { return tool_error(String("html is empty: give the whole page.")) }
+        if html.len() > browser.HTML_MOST { return tool_error("The page is {html.len()} bytes, and html_render takes {browser.HTML_MOST} at most.") }
+        let said = cut_short((str_at(args, "title") ?? String()).trim().copy(), 80)
+        let title = if said.len() > 0 { said } else { String("Page") }
+        var run_id = String()
+        for (id, r) in i.runs {
+            if r.user == g.user and r.agent == g.agent { run_id = id.copy() }
+        }
+        if run_id.len() == 0 { return tool_error(String("You aren't answering in a chat right now, so there's nowhere to show it.")) }
+        let data = html.to_bytes()
+        if let limit = try i.store.meta("file_limit") {
+            let max = i64.parse(limit) ?? 0
+            if max > 0 and try i.store.file_usage(g.user.copy()) + i64.wrap(u64(data.len())) > max { return tool_error(String("Your person's files are at their limit, so the page can't be kept.")) }
+        }
+        let file = try i.agent_file(g.user.copy(), "{safe_name(title.copy())}.html", String("text/html"), data)
+        if let r = mut i.runs.find(run_id) {
+            var b = new_block("file")
+            b.file = file
+            r.blocks.push(b)
+        }
+        i.log(g.user, g.agent.copy(), "page", "Showed you the page {title}", g.agent)
+        return tool_text("It's in the chat, as {title}, after what you've said so far. Your person opens it there.")
     }
 
     // A file an agent made: kept as the person's, and given as a file block.
@@ -3755,7 +3790,7 @@ impl Instance {
             var b = new_block("tool")
             b.call = call.copy()
             r.blocks.push(b)
-            try i.event(r.user.copy(), "tool.started", Obj.new().s("run", r.id.copy()).s("call", call.copy()).s("tool", acp.tool_kind(str_at(u.copy(), "kind") ?? String())).s("title", str_at(u.copy(), "title") ?? String()).j("input", at(u.copy(), "rawInput")).j("locations", at(u.copy(), "locations")).done())
+            try i.event(r.user.copy(), "tool.started", Obj.new().s("run", r.id.copy()).s("call", call.copy()).s("tool", acp.tool_kind(str_at(u.copy(), "kind") ?? String())).s("title", str_at(u.copy(), "title") ?? String()).j("input", cut_input(at(u.copy(), "rawInput"))).j("locations", at(u.copy(), "locations")).done())
             let title = str_at(u.copy(), "title") ?? String()
             i.log(r.user.copy(), r.agent.copy(), "tool", if title.len() > 0 { title } else { acp.tool_kind(str_at(u.copy(), "kind") ?? String()) }, String())
             let status = str_at(u.copy(), "status") ?? String()
@@ -3894,7 +3929,7 @@ impl Instance {
         }
         let can_always = acp.pick_option(options.copy(), true, true) != acp.pick_option(options.copy(), true, false)
         i.approvals.insert(call.copy(), Approval { call: call.copy(), run: run.copy(), agent: p.agent.copy(), rpc: rpc.copy(), options: options, title: str_at(tool_call.copy(), "title") ?? String(), action: Json.Null })
-        try i.event(user, "approval.needed", Obj.new().s("run", run).s("call", call).s("tool", kind).s("title", str_at(tool_call.copy(), "title") ?? String()).j("detail", at(tool_call, "rawInput")).b("can_always", can_always).done())
+        try i.event(user, "approval.needed", Obj.new().s("run", run).s("call", call).s("tool", kind).s("title", str_at(tool_call.copy(), "title") ?? String()).j("detail", cut_input(at(tool_call, "rawInput"))).b("can_always", can_always).done())
     }
 
     fn approve(i: mut Instance, s: ServerSocket, user: String, device: String, f: Json) ! Error {
@@ -3999,14 +4034,14 @@ impl Instance {
                 b.call = call.copy()
                 r.blocks.push(b)
             }
-            try i.event(g.user.copy(), "tool.started", Obj.new().s("run", run_id.copy()).s("call", call.copy()).s("tool", kind.copy()).s("title", title.copy()).j("input", Obj.new().s("device", device_name.copy()).s("tool", tool_name.copy()).j("args", at(args, "args")).done()).j("locations", Json.Null).done())
+            try i.event(g.user.copy(), "tool.started", Obj.new().s("run", run_id.copy()).s("call", call.copy()).s("tool", kind.copy()).s("title", title.copy()).j("input", Obj.new().s("device", device_name.copy()).s("tool", tool_name.copy()).j("args", cut_input(at(args, "args"))).done()).j("locations", Json.Null).done())
         }
         i.calls.insert(call.copy(), req.copy())
         i.device_calls.insert(call.copy(), DeviceCall { user: g.user.copy(), device: device.copy(), agent: g.agent.copy(), title: title.copy() })
         if mode == "ask" {
             let action = Obj.new().s("name", String("device.call")).s("device", device.copy()).s("request", request.copy()).done()
             i.approvals.insert(call.copy(), Approval { call: call.copy(), run: run_id.copy(), agent: g.agent.copy(), rpc: Json.Null, options: Json.Null, title: title.copy(), action: action })
-            try i.event(g.user, "approval.needed", Obj.new().s("run", run_id).s("call", call).s("tool", kind).s("title", title).j("detail", Obj.new().s("device", device_name).s("tool", tool_name).j("args", at(args, "args")).done()).b("can_always", false).s("device", device).s("request", request).done())
+            try i.event(g.user, "approval.needed", Obj.new().s("run", run_id).s("call", call).s("tool", kind).s("title", title).j("detail", Obj.new().s("device", device_name).s("tool", tool_name).j("args", cut_input(at(args, "args"))).done()).b("can_always", false).s("device", device).s("request", request).done())
             return none
         }
         try i.send_device_call(call, device, request, Json.Null)
@@ -4158,10 +4193,10 @@ impl Instance {
             b.call = call.copy()
             r.blocks.push(b)
         }
-        try i.event(g.user.copy(), "tool.started", Obj.new().s("run", run_id.copy()).s("call", call.copy()).s("tool", String(kind)).s("title", title.copy()).j("input", at(action.copy(), "args")).j("locations", Json.Null).done())
+        try i.event(g.user.copy(), "tool.started", Obj.new().s("run", run_id.copy()).s("call", call.copy()).s("tool", String(kind)).s("title", title.copy()).j("input", cut_input(at(action.copy(), "args"))).j("locations", Json.Null).done())
         i.approvals.insert(call.copy(), Approval { call: call.copy(), run: run_id.copy(), agent: g.agent.copy(), rpc: Json.Null, options: Json.Null, title: title.copy(), action: action.copy() })
         i.calls.insert(call.copy(), req.copy())
-        try i.event(g.user, "approval.needed", Obj.new().s("run", run_id).s("call", call).s("tool", String(kind)).s("title", title).j("detail", at(action, "args")).b("can_always", false).done())
+        try i.event(g.user, "approval.needed", Obj.new().s("run", run_id).s("call", call).s("tool", String(kind)).s("title", title).j("detail", cut_input(at(action, "args"))).b("can_always", false).done())
         return none
     }
 
@@ -4990,6 +5025,48 @@ fn output_blocks(content: Json) -> Json {
         }
     }
     return Json.Array(out)
+}
+
+// A tool's input as the apps get it: each string past INPUT_STRING_MOST bytes
+// cut there, with "…", so a big one, as a page for html_render or a file an
+// edit writes, can't make an event past the 1 MiB a frame can be.
+fn cut_input(j: Json) -> Json {
+    match j {
+        Json.Str(s) => {
+            if s.len() <= INPUT_STRING_MOST { return Json.Str(s.copy()) }
+            var cut = String()
+            for r in s.runes() {
+                if cut.len() >= INPUT_STRING_MOST { break }
+                cut.push(r)
+            }
+            cut.push_str("…")
+            return Json.Str(cut)
+        },
+        Json.Array(items) => {
+            var out = List<Json>()
+            for x in items { out.push(cut_input(x.copy())) }
+            return Json.Array(out)
+        },
+        Json.Object(members) => {
+            var out = LinkedMap<String, Json>()
+            for (k, v) in members { out.insert(k.copy(), cut_input(v.copy())) }
+            return Json.Object(out)
+        },
+        other => return other.copy(),
+    }
+}
+
+const INPUT_STRING_MOST: usize = 65536
+
+@test
+fn a_tool_input_is_cut() {
+    let big = Obj.new().s("html", "é".repeat(40000)).j("list", Json.Array([Json.Str("x".repeat(70000)), Json.Int(3)])).s("title", String("Short")).done()
+    let cut = cut_input(big)
+    let html = str_at(cut.copy(), "html") ?? String()
+    assert(html.len() == 65536 + "…".len() and html.ends_with("é…"))
+    assert(str_at(at(cut.copy(), "list").at(0) ?? Json.Null, "") == none)
+    assert("{at(cut.copy(), "list")}".len() < 65600)
+    assert(str_at(cut, "title") == some(String("Short")))
 }
 
 @test

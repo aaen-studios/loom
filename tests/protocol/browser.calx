@@ -13,9 +13,9 @@ import shared.obj.{Obj, at, bool_at, int_at, str_at}
 import server.browser
 import tests.kit.{App, Instance, check, reply_text}
 
-fn reply_in(app: mut App, conversation: String) -> String ! Error {
+fn reply_in(app: mut App, conversation: String, wait_ms: u32 = 30000) -> String ! Error {
     loop {
-        let created = try app.until("event", "message.created")
+        let created = try app.until("event", "message.created", wait_ms)
         let m = at(created, "message")
         if str_at(m.copy(), "role") == some(String("agent")) and str_at(m.copy(), "conversation") == some(conversation.copy()) { return reply_text(m) }
     }
@@ -66,7 +66,10 @@ fn run(i: Instance) ! Error {
     let c = try app.cmd("q_2", "conversation.create", Obj.new().s("agent", agent.copy()).done())
     let conversation = str_at(at(c, "value"), "conversation") ?? String()
 
-    let opened = try say(mut app, conversation.copy(), "m_1", "/mcp browser_open \{\"url\":\"{file_url("{pages}/shop.html")}\"\}")
+    // The browser starts on this first call. On a Linux runner whose AppArmor stops
+    // Chrome making its sandbox, it starts twice, which can take well past 30 s.
+    try app.send(Obj.new().s("t", String("send")).s("cid", String("m_1")).s("conversation", conversation.copy()).s("text", "/mcp browser_open \{\"url\":\"{file_url("{pages}/shop.html")}\"\}").done())
+    let opened = try reply_in(mut app, conversation.copy(), 120000)
     try see(opened.starts_with("browser_open: Page: Shop") and opened.contains("heading \"Welcome\"") and opened.contains("textbox \"Search\""), "browser_open gives the page's outline", opened.copy())
     let field = ref_of(opened.copy(), "textbox \"Search\"")
     try check(field.len() > 0, "with a ref for the field")
@@ -86,6 +89,17 @@ fn run(i: Instance) ! Error {
 
     let shot = try say(mut app, conversation.copy(), "m_6", String("/mcp browser_screenshot"))
     try see(shot.starts_with("browser_screenshot: [image image/jpeg] Page: "), "browser_screenshot gives a picture", shot.copy())
+
+    // --- html_preview ---
+    let card = String(#"<!doctype html><title>Card</title><h1>Hello</h1><script>console.log("drawn", 2); console.error("oops"); missing();</script>"#)
+    let previewed = try say(mut app, conversation.copy(), "m_p1", "/mcp html_preview {Obj.new().s("html", card.copy()).i("width", 640).i("height", 480).done()}")
+    try see(previewed.starts_with("html_preview: [image image/jpeg] The page, at 640 × 480. Its console said:") and previewed.contains("log: drawn 2") and previewed.contains("error: oops") and previewed.contains("missing is not defined"), "html_preview gives a picture of the page and what its console said", previewed.copy())
+    let whole = try say(mut app, conversation.copy(), "m_p2", "/mcp html_preview {Obj.new().s("html", String(#"<!doctype html><div style="height:3000px">tall</div>"#)).i("width", 400).b("full_page", true).done()}")
+    try see(whole.contains("The page, at 400 × 30") and whole.contains("the whole page. Its console said nothing."), "and of the whole page, past the window", whole.copy())
+    let kept = try say(mut app, conversation.copy(), "m_p3", String("/mcp browser_snapshot"))
+    try see(kept.contains("heading \"Welcome\""), "while the agent's own page stays as it was", kept.copy())
+    let blank = try say(mut app, conversation.copy(), "m_p4", String(#"/mcp html_preview {"html":""}"#))
+    try check(blank.starts_with("html_preview failed: html is empty"), "an empty page is refused")
 
     let refused = try say(mut app, conversation.copy(), "m_7", String(#"/mcp browser_open {"url":"javascript:alert(1)"}"#))
     try check(refused.starts_with("browser_open failed"), "it opens only pages")
