@@ -9,6 +9,7 @@ loom-push version
 ```
 
 - **`key`** sets the relay's own APNs key, the `.p8` file from Apple's developer site, with its id, the team and the app's bundle id. It's kept in `DIR/apns.json`, readable only by the relay. Restart the relay to use it.
+- Builds for Linux (x64 and arm64) come with each release, as `loom-push-linux` and `loom-push-linux-arm64`, listed in its signed `manifest.json`.
 - **`serve`** listens on `--host` (127.0.0.1 by default: put Caddy or another proxy in front of it for HTTPS at `push.<domain>`). On the first start it makes `DIR/seal.key`, the X25519 key phones seal their APNs tokens with. Keep that file: phones registered with the old key stop getting push when it changes. Each instance key sends at most `--per-hour` notifications an hour.
 - `DIR` is `loom-push-data` in the current folder unless `--data` says otherwise.
 
