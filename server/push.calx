@@ -1,0 +1,208 @@
+module server.push
+
+// Push to the iPhone app through APNs (PLAN.md, "Notifications and push"):
+// an ES256-signed token from the owner's APNs key, and an HTTP/2 POST per
+// phone. It runs on a thread of its own, so a slow APNs never holds up the
+// instance, and tells the instance which tokens APNs says are gone.
+import std.bytes.{base64_url, from_base64_url}
+import std.crypto.{P256Key}
+import std.hash.{sha256}
+import std.http.{Header, Version, post}
+import std.json.{Json, parse}
+import std.thread.{Task}
+import shared.obj.{Obj, str_at}
+import server.store.{now}
+
+pub const APPLE: str = "https://api.push.apple.com"
+pub const APPLE_SANDBOX: str = "https://api.sandbox.push.apple.com"
+
+// Apple takes a token for an hour, and refuses one made anew more often than
+// every 20 minutes: loom makes one every 50.
+const TOKEN_MS: i64 = 3000000
+const TIMEOUT_MS: u32 = 15000
+
+// A notification for some of one person's phones.
+pub struct Job {
+    pub config: Json    // the APNs key, key_id, team and topic, from Store.apns
+    pub body: Json    // the payload: aps and loom
+    pub collapse: String    // apns-collapse-id, so a newer one takes its place, or ""
+    pub to: List<Phone>
+}
+
+pub struct Phone {
+    pub user: String
+    pub device: String
+    pub token: String
+    pub env: String    // production or development
+}
+
+// A phone APNs says doesn't take push with this token any more.
+pub struct Gone {
+    pub user: String
+    pub device: String
+    pub token: String
+}
+
+struct Worker {
+    jobs: Receiver<Job>
+    gone: Sender<Gone>
+    at: String    // where APNs is, or "" for Apple's
+    signed: String    // the token last made
+    signed_for: String    // the key it was made with, as a hash
+    signed_at: i64
+}
+
+impl Task for Worker {
+    fn run(own self) {
+        var w = self
+        while let job = w.jobs.wait() {
+            w.send(job)
+        }
+    }
+}
+
+impl Worker {
+    fn send(w: mut Worker, job: Job) {
+        for phone in job.to {
+            match w.send_one(job.config.copy(), job.body.copy(), job.collapse.copy(), phone.token.copy(), phone.env.copy(), true) {
+                Sent.Ok => {},
+                Sent.Gone => w.gone.send(Gone { user: phone.user.copy(), device: phone.device.copy(), token: phone.token.copy() }),
+                Sent.Failed(why) => eprintln("loom: push to {phone.device}: {why}"),
+            }
+        }
+    }
+
+    // Sends one notification. A token APNs calls expired is made anew and
+    // tried once more.
+    fn send_one(w: mut Worker, config: Json, body: Json, collapse: String, token: String, env: String, again: bool) -> Sent {
+        let bearer = w.token(config.copy()) else return Sent.Failed(String("the APNs key isn't a P-256 key"))
+        let base = if w.at.len() > 0 { w.at.copy() } else if env == "development" { String(APPLE_SANDBOX) } else { String(APPLE) }
+        var headers: List<Header> = [
+            Header { name: String("authorization"), value: "bearer {bearer}" },
+            Header { name: String("apns-topic"), value: str_at(config.copy(), "topic") ?? String() },
+            Header { name: String("apns-push-type"), value: String("alert") },
+            Header { name: String("apns-priority"), value: String("10") },
+            Header { name: String("content-type"), value: String("application/json") },
+        ]
+        if collapse.len() > 0 { headers.push(Header { name: String("apns-collapse-id"), value: collapse.copy() }) }
+        var req = post("{base}/3/device/{token}", headers, "{body}".to_bytes(), TIMEOUT_MS, 65536, version: Version.Http2)
+        let r = match req.wait() {
+            ok(r) => r,
+            err(e) => return Sent.Failed("{e}"),
+        }
+        if r.status == 200 { return Sent.Ok }
+        let answered = match parse(String.from_utf8(r.body.copy()) ?? String()) {
+            ok(j) => j,
+            err(_) => Json.Null,
+        }
+        let reason = str_at(answered, "reason") ?? String()
+        return match judge(r.status, reason.copy()) {
+            Verdict.Gone => Sent.Gone,
+            Verdict.Resign => {
+                w.signed = String()
+                if again { w.send_one(config, body, collapse, token, env, false) } else { Sent.Failed("APNs refused the token: {reason}") }
+            },
+            Verdict.Failed => Sent.Failed("APNs answered {r.status} {reason}"),
+        }
+    }
+
+    // The provider token, made anew when it's 50 minutes old or the key changed.
+    fn token(w: mut Worker, config: Json) -> String? {
+        let for_key = base64_url(sha256("{config}".to_bytes()))
+        let t = now()
+        if w.signed.len() > 0 and w.signed_for == for_key and t - w.signed_at < TOKEN_MS { return some(w.signed.copy()) }
+        let made = jwt(config, t / 1000) else return none
+        w.signed = made.copy()
+        w.signed_for = for_key
+        w.signed_at = t
+        return some(made)
+    }
+}
+
+enum Sent {
+    Ok
+    Gone
+    Failed(String)
+}
+
+enum Verdict {
+    Gone    // the token isn't the phone's any more
+    Resign    // the provider token wasn't taken: make a new one
+    Failed
+}
+
+// What an answer from APNs means, from its status and reason.
+fn judge(status: u32, reason: String) -> Verdict {
+    if status == 410 or reason == "BadDeviceToken" or reason == "DeviceTokenNotForTopic" or reason == "Unregistered" { return Verdict.Gone }
+    if status == 403 and (reason == "ExpiredProviderToken" or reason == "InvalidProviderToken") { return Verdict.Resign }
+    return Verdict.Failed
+}
+
+// Starts the thread, which sends to `at`, or to Apple when it's "". Gives the
+// end that sends it jobs, and the queue gone tokens come to.
+pub fn start(at: own String) -> (Sender<Job>, Receiver<Gone>) {
+    let jobs = Receiver<Job>()
+    let to = jobs.sender()
+    let gone = Receiver<Gone>()
+    _ = unsafe { Thread.spawn(Worker { jobs: jobs, gone: gone.sender(), at: at, signed: String(), signed_for: String(), signed_at: 0 }) }
+    return (to, gone)
+}
+
+// Whether `pem` is an APNs key: a P-256 key in PKCS#8, as Apple's .p8 files are.
+pub fn is_key(pem: String) -> bool {
+    if let _ = P256Key.from_pem(pem) { return true }
+    return false
+}
+
+// The provider token APNs takes (a JWT): ES256, signed with the key, naming
+// the key's id and the team, made at `now_s` (Unix seconds). None when the key
+// isn't a P-256 key.
+pub fn jwt(config: Json, now_s: i64) -> String? {
+    let key = P256Key.from_pem(str_at(config.copy(), "key") ?? String()) else return none
+    let head = Obj.new().s("alg", String("ES256")).s("kid", str_at(config.copy(), "key_id") ?? String()).done()
+    let claims = Obj.new().s("iss", str_at(config, "team") ?? String()).i("iat", now_s).done()
+    let signing = "{base64_url("{head}".to_bytes())}.{base64_url("{claims}".to_bytes())}"
+    return some("{signing}.{base64_url(key.sign(signing.to_bytes()))}")
+}
+
+// A notification's payload: the alert, grouped by `thread` on the lock
+// screen, with Allow and Deny when `category` is "approval", and what the app
+// needs to open it as `loom`.
+pub fn payload(title: String, subtitle: String, body: String, thread: String, category: String, loom: Json) -> Json {
+    var alert = Obj.new().s("title", title)
+    if subtitle.len() > 0 { alert = alert.s("subtitle", subtitle) }
+    var aps = Obj.new().j("alert", alert.s("body", body).done()).s("sound", String("default"))
+    if thread.len() > 0 { aps = aps.s("thread-id", thread) }
+    if category.len() > 0 { aps = aps.s("category", category) }
+    return Obj.new().j("aps", aps.done()).j("loom", loom).done()
+}
+
+@test
+fn signs_a_token_apns_takes() {
+    let key = P256Key.generate()
+    let config = Obj.new().s("key", key.pem()).s("key_id", String("ABC123DEFG")).s("team", String("TEAM123456")).done()
+    let token = jwt(config, 1700000000)!
+    let parts = token.split(".")
+    assert(parts.len() == 3)
+    let head = parse(String.from_utf8(from_base64_url(parts[0].copy())!)!)!
+    let claims = parse(String.from_utf8(from_base64_url(parts[1].copy())!)!)!
+    assert(str_at(head.copy(), "alg") == some(String("ES256")) and str_at(head, "kid") == some(String("ABC123DEFG")))
+    assert(str_at(claims.copy(), "iss") == some(String("TEAM123456")) and "{claims}".contains("1700000000"))
+    let signed = "{parts[0]}.{parts[1]}"
+    assert(key.public_key().verify(signed.to_bytes(), from_base64_url(parts[2].copy())!))
+    assert(jwt(Obj.new().s("key", String("not a key")).done(), 0) == none)
+}
+
+@test
+fn knows_a_gone_token() {
+    assert(judge(410, String("Unregistered")) == Verdict.Gone and judge(400, String("BadDeviceToken")) == Verdict.Gone)
+    assert(judge(403, String("ExpiredProviderToken")) == Verdict.Resign)
+    assert(judge(429, String("TooManyRequests")) == Verdict.Failed)
+}
+
+@test
+fn makes_an_approval_with_its_buttons() {
+    let p = payload(String("Claude asks first"), String(), String("Run ls"), String("c_1"), String("approval"), Obj.new().s("call", String("tc_1")).done())
+    let text = "{p}"
+    assert(text.contains(#""category":"approval""#) and text.contains(#""thread-id":"c_1""#) and text.contains(#""call":"tc_1""#) and not text.contains("subtitle"))
+}

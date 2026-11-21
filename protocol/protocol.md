@@ -19,6 +19,7 @@ Version 1. This is what an app (always through its core) and an instance say to 
 - [Commands](#commands)
 - [Plugins](#plugins)
 - [Errors and close codes](#errors-and-close-codes)
+- [Push](#push)
 - [Versions](#versions)
 - [How ACP maps onto loom](#how-acp-maps-onto-loom)
 - [One message's whole trip](#one-messages-whole-trip)
@@ -575,6 +576,18 @@ WebSocket close codes:
 | 4002 | No protocol version in common | Says the app needs an update, or the instance does |
 | 4003 | Too slow: the app didn't read fast enough and the instance's queue for it filled up | Reconnects |
 
+## Push
+
+A phone that registered with `push.register` gets push through APNs while it isn't connected, once the owner has set up the APNs key with `loom push key`. Without a key, nothing is sent. The instance sends each one as an HTTP/2 `POST /3/device/<token>` to `api.push.apple.com`, or `api.sandbox.push.apple.com` for a token whose `env` is `development`, with `apns-push-type: alert` and the bundle id as `apns-topic`. Its provider token is a JWT signed ES256 with the key, naming the key's id (`kid`) and the team (`iss`), made again every 50 minutes. A token APNs answers 410, `BadDeviceToken` or `DeviceTokenNotForTopic` for is forgotten.
+
+| Pushed for | When | `aps.alert` | `aps.category` | `loom` |
+|---|---|---|---|---|
+| `notify` | To each phone that isn't connected, even while the person is on another device | `title`, the agent's name as `subtitle`, `body` | — | `kind: "notify"`, `agent`, `conversation` (for a routine's) |
+| `approval.needed` | The same | "<agent> asks first" as `title`, the tool call's title as `body` | `approval`, which has Allow and Deny | `kind: "approval"`, `run`, `call`, `conversation`, `can_always` |
+| An agent's finished reply (`message.created`) | When the person is on none of their devices, for a run they started (not a routine's, nor another agent's) that ended `done` or `failed` | The agent's name as `title`, the start of the reply as `body` | — | `kind: "reply"`, `agent`, `conversation`, `message` |
+
+Each one's `aps.thread-id` is its conversation, so the lock screen groups them, and its `aps.sound` is `default`. An approval's `apns-collapse-id` is its `call`. The app answers Allow and Deny with an `approve` frame, the same as on screen, once it has connected.
+
 ## Versions
 
 - **The app offers, the instance picks.** `hello` lists every version the app speaks, and `welcome` names the one the connection uses: the newest both have.
@@ -702,6 +715,5 @@ The core replaces what the deltas built with the finished message, stores `seq` 
 Fields and frames that come with later phases. Where they only add, they come within version 1.
 
 - **Device tools** (Phase 3): the instance sends `{"t":"device.call", …}` with the request, and the signed approval when there is one, and the device answers `{"t":"device.result", …}`. Each device offers its tools in `hello`.
-- **Push** (Phase 5): sending to APNs once ES256 lands in Calx (CLX-406). `push.register` and `push.unregister` come first.
 - **Noise** (Phase 6): a phone reaching a desktop instance runs a Noise handshake against the instance's key from the QR code before `hello`, and every frame after it is encrypted.
 - **Moving** (Phase 7): the `instance.moved` event, signed with the instance's key, with the new address.
