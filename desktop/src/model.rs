@@ -621,6 +621,8 @@ pub struct Model {
     pub link: Option<(String, i64)>,
     /// The name of the device that joined with it, once one has.
     pub joined: Option<String>,
+    /// Whether phones reach the instance in this app over the network, once it has said.
+    pub phones: Option<bool>,
     /// The person's devices, as the cache has them: id, name and kind.
     pub devices: Vec<(String, String, String)>,
     /// This device's id, once the instance has welcomed it.
@@ -1084,6 +1086,12 @@ impl Model {
         } else if id.starts_with("app.device_revoke") {
             if let Some(e) = f.get("error") {
                 self.notices.push(s(e, "message"));
+            }
+        } else if id.starts_with("app.phones") {
+            if let Some(e) = f.get("error") {
+                self.notices.push(s(e, "message"));
+            } else {
+                self.phones = f.pointer("/value/on").and_then(Value::as_bool);
             }
         } else if id.starts_with("app.link") {
             if let Some(e) = f.get("error") {
@@ -1971,6 +1979,23 @@ impl Model {
         json!({"t": "cmd", "id": id, "name": "link.create"})
     }
 
+    /// Asks whether phones reach the instance in this app over the network, or with `on`,
+    /// lets them or stops them. Turning them off takes the code away, since phones can't
+    /// use it.
+    pub fn set_phones(&mut self, on: Option<bool>) -> Value {
+        let id = self.id("app.phones");
+        let args = match on {
+            Some(on) => {
+                if !on {
+                    self.link = None;
+                }
+                json!({"on": on})
+            }
+            None => json!({}),
+        };
+        json!({"t": "cmd", "id": id, "name": "instance.phones", "args": args})
+    }
+
     /// Reads the person's devices from the cache.
     pub fn load_devices(&mut self) -> Value {
         json!({"t": "core.get", "id": "app.devices", "what": "devices"})
@@ -2181,6 +2206,25 @@ mod tests {
             .last()
             .unwrap()
             .contains("moved to https://new.example"));
+    }
+
+    #[test]
+    fn phones_are_asked_turned_on_and_off() {
+        let mut m = Model::new();
+        let ask = m.set_phones(None);
+        assert_eq!(ask["name"], "instance.phones");
+        assert_eq!(ask["args"], json!({}));
+        m.result(&json!({"t": "result", "id": ask["id"], "ok": true, "value": {"on": false}}));
+        assert_eq!(m.phones, Some(false));
+        let on = m.set_phones(Some(true));
+        m.result(&json!({"t": "result", "id": on["id"], "ok": true, "value": {"on": true, "port": 47420, "key": "k"}}));
+        assert_eq!(m.phones, Some(true));
+        m.link = Some(("loom://link?c=1".into(), 0));
+        let off = m.set_phones(Some(false));
+        assert!(m.link.is_none());
+        m.result(&json!({"t": "result", "id": off["id"], "ok": false, "error": {"code": "not_allowed", "message": "Only the owner"}}));
+        assert_eq!(m.phones, Some(true));
+        assert!(m.notices.last().unwrap().contains("Only the owner"));
     }
 
     #[test]

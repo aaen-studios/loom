@@ -1232,25 +1232,30 @@ ACTA_KEY=secret:ACTA_KEY",
                                     cx.notify();
                                 })),
                         )
-                        .child(
-                            div()
-                                .id("add-phone")
-                                .text_size(px(size::CAPTION))
-                                .text_color(p.ink_3)
-                                .cursor_pointer()
-                                .hover(move |s| s.text_color(p.ink))
-                                .child("Add a phone")
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    let f = this.model.create_link();
+                    })
+                    .child(
+                        div()
+                            .id("add-phone")
+                            .text_size(px(size::CAPTION))
+                            .text_color(p.ink_3)
+                            .cursor_pointer()
+                            .hover(move |s| s.text_color(p.ink))
+                            .child("Add a phone")
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                // An instance in this app reaches phones only once they're on.
+                                if local_mode() {
+                                    let f = this.model.set_phones(None);
                                     this.send(f);
-                                    let d = this.model.load_devices();
-                                    this.send(d);
-                                    this.menu = None;
-                                    this.screen = Screen::AddPhone;
-                                    cx.notify();
-                                })),
-                        )
-                    }),
+                                }
+                                let f = this.model.create_link();
+                                this.send(f);
+                                let d = this.model.load_devices();
+                                this.send(d);
+                                this.menu = None;
+                                this.screen = Screen::AddPhone;
+                                cx.notify();
+                            })),
+                    ),
             )
             .child(
                 div()
@@ -3157,7 +3162,27 @@ ACTA_KEY=secret:ACTA_KEY",
                     .text_color(p.ink)
                     .child("Add a phone"),
             );
-        if let Some(name) = self.model.joined.clone() {
+        // The instance in this app listens only on this computer until phones are on.
+        let phones_off = local_mode() && self.model.phones != Some(true);
+        if phones_off {
+            body = body
+                .child(caption(
+                    "Your phone reaches loom on this computer over the Wi-Fi, and through Tailscale when you're away, encrypted end to end. Until you let it, loom listens only on this computer."
+                        .into(),
+                ))
+                .child(
+                    div().flex().child(
+                        self.button("phones-on", "Let phones reach this computer", true)
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                let f = this.model.set_phones(Some(true));
+                                this.send(f);
+                                let f = this.model.create_link();
+                                this.send(f);
+                                cx.notify();
+                            })),
+                    ),
+                );
+        } else if let Some(name) = self.model.joined.clone() {
             body = body.child(
                 div()
                     .text_size(px(size::BODY))
@@ -3180,16 +3205,33 @@ ACTA_KEY=secret:ACTA_KEY",
         } else {
             body = body.child(caption("Making a code…".into()));
         }
-        body = body.child(
-            div().flex().child(
+        if !phones_off {
+            let mut row = div().flex().items_center().gap(px(space::L)).child(
                 self.button("new-link", "New code", false)
                     .on_click(cx.listener(|this, _, _, cx| {
                         let f = this.model.create_link();
                         this.send(f);
                         cx.notify();
                     })),
-            ),
-        );
+            );
+            if local_mode() {
+                row = row.child(
+                    div()
+                        .id("phones-off")
+                        .text_size(px(size::CAPTION))
+                        .text_color(p.ink_3)
+                        .cursor_pointer()
+                        .hover(move |s| s.text_color(p.ink))
+                        .child("Stop phones reaching this computer")
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            let f = this.model.set_phones(Some(false));
+                            this.send(f);
+                            cx.notify();
+                        })),
+                );
+            }
+            body = body.child(row);
+        }
         // Every device signed in to this account, so one that shouldn't be can be signed out.
         let mut devices = div().flex().flex_col().gap(px(space::XS)).child(
             div()
