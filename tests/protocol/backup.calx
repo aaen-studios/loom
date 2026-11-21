@@ -5,12 +5,14 @@ module tests.protocol.backup
 // in a folder of its own. An instance started there has it all: the same
 // device token works, and the agents, the conversation, the files and the
 // secrets are there, which still open, since the key came too. Importing
-// over an instance is refused.
+// over an instance is refused. `loom serve --backups DIR` makes one on a
+// schedule, and keeps the newest few.
 //
 //     calx tests/protocol/backup.calx
 import std.fs
 import std.json.{Json}
 import std.process.{exit}
+import std.thread.{sleep}
 import shared.obj.{Obj, at, str_at}
 import tests.kit.{App, Instance, check, fetch, loom, reply_text, upload}
 
@@ -79,6 +81,23 @@ fn after(i: Instance, sha: String) ! Error {
     app.close()
 }
 
+// After 5 s of backups every 1.5 s, keeping 2: the newest 2 are there, and
+// they're backups import takes. And backups inside the instance's folder are
+// refused.
+fn backed_up(i: Instance, dir: String) ! Error {
+    var kept = List<String>()
+    for name in try fs.list(dir.copy()) {
+        if name.starts_with("loom-") and name.ends_with(".tar.zst") { kept.push(name.copy()) }
+    }
+    kept.sort()
+    try check(kept.len() == 2, "loom serve --backups writes a backup on schedule, and keeps the newest --backups-keep")
+    let into = "{try fs.temp_dir()}/from-scheduled"
+    let imported = try loom(into.copy(), [String("import"), "{dir}/{kept[1]}", String("--json")]).output()
+    try check(imported.status.success() and fs.exists("{into}/loom.db"), "and each is a backup import makes an instance from")
+    let inside = try loom(i.data.copy(), [String("serve"), String("--port"), String("0"), String("--allow-root"), String("--backups"), "{i.data}/backups"]).output()
+    try check(not inside.status.success() and inside.error_text().contains("outside the instance's folder"), "backups inside the instance's folder are refused")
+}
+
 fn main() ! Error {
     let inst = try Instance.start()
     let (moved, sha) = match before(inst.copy()) {
@@ -91,11 +110,24 @@ fn main() ! Error {
     }
     // The same instance, from the imported folder.
     let there = try Instance { server: inst.server, data: moved, base: inst.base, token: inst.token }.restart()
-    let failure: String? = match after(there.copy(), sha) {
+    var failure: String? = match after(there.copy(), sha) {
         ok => none,
         err(e) => some("{e}"),
     }
-    there.stop()
+    if failure != none {
+        there.stop()
+    } else {
+        // Backups on a schedule, from the same instance started again.
+        let dir = "{try fs.temp_dir()}/scheduled"
+        let extra: List<String> = [String("--backups"), dir.copy(), String("--backups-keep"), String("2"), String("--test-backup-every-ms"), String("1500")]
+        let scheduled = try there.restart_with(extra, 0)
+        unsafe { sleep(5000000000) }
+        failure = match backed_up(scheduled.copy(), dir) {
+            ok => none,
+            err(e) => some("{e}"),
+        }
+        scheduled.stop()
+    }
     if let f = failure {
         eprintln("\n{f}")
         exit(1)

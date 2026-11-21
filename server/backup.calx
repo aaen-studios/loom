@@ -20,6 +20,8 @@ import std.fs
 import std.json.{Json, parse}
 import std.sqlite.{Database, Value}
 import std.tar.{StreamReader, StreamWriter}
+import std.thread.{Task, sleep}
+import std.time.{Timestamp}
 import std.zstd
 import shared.obj.{Obj}
 import server.store.{now}
@@ -111,4 +113,100 @@ fn text(v: Value) -> String {
         Value.Text(t) => t.copy(),
         _ => String(),
     }
+}
+
+// --- Scheduled backups ---
+
+// Backups on a schedule (`loom serve --backups DIR`): on a thread of its own,
+// so the instance goes on while one is written, a backup to `dir` every
+// `every_ms`, named by when it was made, in UTC, as
+// loom-2026-11-21-081200.tar.zst. The newest `keep` stay. The first comes
+// `every_ms` after the newest one in `dir`, or at once when there's none, so
+// restarting the instance doesn't make an extra one.
+pub struct Schedule {
+    pub data: String
+    pub dir: String
+    pub every_ms: i64
+    pub keep: usize
+    pub version: String
+}
+
+// After a backup that failed, the next try is this much later, or `every_ms`
+// if that's sooner.
+const RETRY_MS: i64 = 3600000
+
+impl Task for Schedule {
+    fn run(own self) {
+        var tried: i64 = 0
+        loop {
+            let newest = match self.newest() {
+                ok(n) => n,
+                err(e) => {
+                    eprintln("loom: backups in {self.dir}: {e}")
+                    0
+                },
+            }
+            var due = if newest > 0 { newest + self.every_ms } else { 0 }
+            let retry = tried + (if self.every_ms < RETRY_MS { self.every_ms } else { RETRY_MS })
+            if tried > 0 and retry > due { due = retry }
+            let wait = due - now()
+            if wait > 0 { unsafe { sleep(u64.wrap(wait) * 1000000) } }
+            tried = now()
+            match self.once() {
+                ok(name) => println("loom: backed up to {name}"),
+                err(e) => eprintln("loom: a scheduled backup to {self.dir}: {e}"),
+            }
+        }
+    }
+}
+
+impl Schedule {
+    // Writes one backup, and lets the oldest go past `keep`. Gives its path.
+    fn once(self) -> String ! Error {
+        try fs.make_dir_all(self.dir.copy())
+        let name = "loom-{Timestamp { unix_ms: now() }.format("%Y-%m-%d-%H%M%S", 0)}.tar.zst"
+        let path = "{self.dir}/{name}"
+        _ = try export(self.data.copy(), path.copy(), self.version.copy())
+        let kept = try self.backups()
+        if kept.len() > self.keep {
+            for old in kept[..kept.len() - self.keep] {
+                try fs.remove_file("{self.dir}/{old}")
+            }
+        }
+        return path
+    }
+
+    // When the newest backup in `dir` was made, in Unix ms, or 0 for none.
+    fn newest(self) -> i64 ! Error {
+        let kept = try self.backups()
+        if kept.len() == 0 { return 0 }
+        return (try fs.metadata("{self.dir}/{kept[kept.len() - 1]}")).modified.unix_ms
+    }
+
+    // The backups in `dir`, oldest first, which their names sort.
+    fn backups(self) -> List<String> ! Error {
+        var out = List<String>()
+        if not fs.exists(self.dir.copy()) { return out }
+        for name in try fs.list(self.dir.copy()) {
+            if is_backup(name.copy()) { out.push(name.copy()) }
+        }
+        out.sort()
+        return out
+    }
+}
+
+// Whether `name` is one of the scheduled backups' names.
+fn is_backup(name: String) -> bool {
+    return name.starts_with("loom-") and name.ends_with(".tar.zst") and name.len() == "loom-2026-11-21-081200.tar.zst".len()
+}
+
+// Starts the scheduled backups' thread.
+pub fn start(s: own Schedule) {
+    _ = unsafe { Thread.spawn(s) }
+}
+
+@test
+fn only_backups_are_backups() {
+    assert(is_backup(String("loom-2026-11-21-081200.tar.zst")))
+    assert(not is_backup(String("loom-notes.tar.zst")) and not is_backup(String("other-2026-11-21-081200.tar.zst")))
 }
