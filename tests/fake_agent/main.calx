@@ -446,6 +446,9 @@ impl Agent {
         var text = String()
         if let Json.Array(content) = result.get(String("content")) ?? Json.Null {
             for c in content {
+                if (c.get(String("type")) ?? Json.Null).as_str() == some(String("image")) {
+                    text.push_str("[image {(c.get(String("mimeType")) ?? Json.Null).as_str() ?? String()}] ")
+                }
                 text.push_str((c.get(String("text")) ?? Json.Null).as_str() ?? String())
             }
         }

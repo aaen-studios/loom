@@ -257,3 +257,50 @@ pub fn to_png(bytes: &[u8]) -> Option<Vec<u8>> {
         .ok()?;
     Some(out)
 }
+
+/// The longest side a screenshot is sent at: what models read a picture at best.
+const SHOT_SIDE: u32 = 1568;
+
+/// A picture of the main screen, for an agent's `screenshot` device tool: a JPEG,
+/// scaled down to `SHOT_SIDE` at most, with the size it was taken at.
+pub fn screenshot() -> Result<(Vec<u8>, u32, u32), String> {
+    let monitors = xcap::Monitor::all().map_err(|e| e.to_string())?;
+    let main = monitors
+        .iter()
+        .find(|m| m.is_primary().unwrap_or(false))
+        .or_else(|| monitors.first())
+        .ok_or("This computer has no screen to take.")?;
+    let shot = main.capture_image().map_err(|e| e.to_string())?;
+    let (w, h) = shot.dimensions();
+    let longest = w.max(h).max(1);
+    let shot = if longest > SHOT_SIDE {
+        let scale = f64::from(SHOT_SIDE) / f64::from(longest);
+        let (sw, sh) = (
+            (f64::from(w) * scale).round() as u32,
+            (f64::from(h) * scale).round() as u32,
+        );
+        image::imageops::resize(&shot, sw, sh, image::imageops::FilterType::Triangle)
+    } else {
+        shot
+    };
+    let rgb = image::DynamicImage::ImageRgba8(shot).to_rgb8();
+    let mut out = Vec::new();
+    image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, 80)
+        .encode_image(&rgb)
+        .map_err(|e| e.to_string())?;
+    Ok((out, w, h))
+}
+
+#[cfg(test)]
+mod tests {
+    // Needs a screen, so CI leaves it out: `cargo test -- --ignored` runs it.
+    #[test]
+    #[ignore]
+    fn takes_the_main_screen() {
+        let (jpeg, w, h) = super::screenshot().expect("a screenshot");
+        assert!(w > 0 && h > 0);
+        assert_eq!(&jpeg[..3], &[0xFF, 0xD8, 0xFF]);
+        let shot = image::load_from_memory(&jpeg).expect("a JPEG");
+        assert!(shot.width().max(shot.height()) <= super::SHOT_SIDE);
+    }
+}

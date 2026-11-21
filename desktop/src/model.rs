@@ -152,7 +152,15 @@ pub fn server_args(name: &str, line: &str, settings: &str) -> Value {
 }
 
 /// The tools a device offers agents, as the core names them.
-pub const DEVICE_TOOLS: [&str; 4] = ["run_command", "read_file", "list_files", "open"];
+pub const DEVICE_TOOLS: [&str; 7] = [
+    "run_command",
+    "read_file",
+    "list_files",
+    "open",
+    "screenshot",
+    "read_clipboard",
+    "write_clipboard",
+];
 
 /// An agent program on the instance. Its settings' values stay there: only their names
 /// come.

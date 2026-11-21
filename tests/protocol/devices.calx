@@ -9,7 +9,9 @@ module tests.protocol.devices
 // it for the person.
 //
 //     calx tests/protocol/devices.calx
+import std.bytes
 import std.fs
+import std.image.{Color, Image, Kind}
 import std.json.{Json, parse}
 import std.process.{exit}
 import std.random.{Random}
@@ -84,7 +86,7 @@ fn post(app: App, conversation: String, cid: str, text: String) ! Error {
 
 fn run(i: Instance, pc: mut Core) ! Error {
     _ = try pc.until("core.conn", "state", "live")
-    pc.send(Obj.new().s("t", String("device.tools")).j("tools", Obj.new().s("run_command", String("ask")).s("read_file", String("allow")).done()).done())
+    pc.send(Obj.new().s("t", String("device.tools")).j("tools", Obj.new().s("run_command", String("ask")).s("read_file", String("allow")).s("screenshot", String("allow")).s("write_clipboard", String("allow")).done()).done())
     let tools = try pc.until("core.device", "", "")
     try check(str_at(at(tools, "tools"), "list_files") == some(String("off")) and str_at(at(tools.copy(), "tools"), "run_command") == some(String("ask")), "a device's tools are off until the person turns them on there")
 
@@ -107,6 +109,28 @@ fn run(i: Instance, pc: mut Core) ! Error {
     try post(app, conversation.copy(), "m_3", use_device("list_files", "path", folder.copy()))
     let off = try reply_in(mut app, conversation.copy())
     try check(off.starts_with("use_device failed") and off.contains("is off on Desk PC"), "and is refused a tool that's off")
+
+    // A screenshot and the clipboard: the core checks the call, then asks the app,
+    // which this test plays, and the agent gets the picture.
+    try post(app, conversation.copy(), "m_6", String(#"/mcp use_device {"device":"Desk PC","tool":"screenshot"}"#))
+    let shoot = try pc.until("core.device_ask", "tool", "screenshot")
+    let png = bytes.base64(Image.new(8, 8, Kind.Rgb, Color.rgb(24, 56, 208)).encode_png())
+    pc.send(Obj.new().s("t", String("device.answer")).s("call", str_at(shoot, "call") ?? String()).b("ok", true).s("output", String("The main screen, taken at 8×8.")).s("image", png).s("mime", String("image/png")).done())
+    let shot = try reply_in(mut app, conversation.copy())
+    try check(shot.contains("[image image/png]") and shot.contains("The main screen"), "a screenshot is asked of the app, and the agent gets it as a picture")
+    var kept_file = false
+    for f in app.frames {
+        if str_at(f.copy(), "kind") == some(String("tool.finished")) and "{at(f, "output")}".contains(#""name":"screenshot.png""#) { kept_file = true }
+    }
+    try check(kept_file, "and the chat keeps it as a file")
+    try post(app, conversation.copy(), "m_7", String(#"/mcp use_device {"device":"Desk PC","tool":"write_clipboard","args":{"text":"paste me"}}"#))
+    let copy = try pc.until("core.device_ask", "tool", "write_clipboard")
+    try check(str_at(at(copy.copy(), "args"), "text") == some(String("paste me")), "copying asks the app with the text")
+    pc.send(Obj.new().s("t", String("device.answer")).s("call", String("tc_nothing")).b("ok", true).s("output", String("forged")).done())
+    pc.send(Obj.new().s("t", String("device.answer")).s("call", str_at(copy, "call") ?? String()).b("ok", true).s("output", String("Copied.")).done())
+    try check(try reply_in(mut app, conversation.copy()) == "use_device: Copied.", "and only the answer to a call the app was asked goes back")
+    try post(app, conversation.copy(), "m_8", String(#"/mcp use_device {"device":"Desk PC","tool":"read_clipboard"}"#))
+    try check((try reply_in(mut app, conversation.copy())).contains("is off on Desk PC"), "reading the clipboard is off until the person turns it on")
 
     let command = String(#"/mcp use_device {"device":"Desk PC","tool":"run_command","args":{"command":"echo 'hi from loom'"}}"#)
     try post(app, conversation.copy(), "m_4", command.copy())
