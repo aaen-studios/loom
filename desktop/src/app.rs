@@ -2516,7 +2516,15 @@ ACTA_KEY=secret:ACTA_KEY",
                         label,
                         self.routine_kind == kind,
                     )
-                    .on_click(cx.listener(move |this, _, _, cx| {
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        // From minutes to a time of day or back, the box gets an example of
+                        // the other kind, so it isn't left saying "30" for a daily routine.
+                        let was_minutes = this.routine_kind == "every";
+                        if was_minutes != (kind == "every") {
+                            let example = if kind == "every" { "30" } else { "08:00" };
+                            this.routine_at_in
+                                .update(cx, |s, cx| s.set_value(example, window, cx));
+                        }
                         this.routine_kind = kind.into();
                         cx.notify();
                     })),
@@ -4142,6 +4150,11 @@ fn local_mode() -> bool {
 /// The core's config (core/README.md, "Config").
 fn core_config() -> String {
     let mut config = serde_json::json!({"data": data_dir()});
+    // The system's time zone, which the core tells the instance, so routines at a time of
+    // day keep this clock.
+    if let Ok(tz) = iana_time_zone::get_timezone() {
+        config["tz"] = tz.into();
+    }
     // Releases update themselves. A build from source doesn't, unless LOOM_UPDATE names a
     // manifest to try.
     match std::env::var("LOOM_UPDATE") {

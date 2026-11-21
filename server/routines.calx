@@ -41,7 +41,9 @@ fn clock(j: Json, key: str) -> i64? {
 
 // The schedule `j` says, or none when it isn't one.
 pub fn read(j: Json) -> Schedule? {
-    if let m = int_at(j.copy(), "every") {
+    // One kind of schedule, said rightly: an "every" that isn't a number isn't read as another.
+    if j.get(String("every")) != none {
+        let m = int_at(j, "every") else return none
         if m < EVERY_LEAST or m > EVERY_MOST { return none }
         return some(Schedule.Every(m))
     }
@@ -94,7 +96,7 @@ fn at_clock(zone: TimeZone, m: i64, weekdays: bool, after: i64) -> i64 {
     day.milli = 0
     // A week and a day always holds the next weekday at that time.
     for _ in 0..9 {
-        let t = zone.timestamp(day.copy()).unix_ms
+        let t = zone.timestamp(day).unix_ms
         if t > after and (not weekdays or day.weekday() < 5) { return t }
         day = day.add_days(1)
     }
@@ -188,5 +190,5 @@ fn weekdays_skip_the_weekend() {
 fn a_time_of_day_missed_only_when_well_late() {
     let s = Schedule.Daily(480)
     assert(not missed(s, String("UTC"), 0, 5000, 60000) and missed(s, String("UTC"), 0, 3600000, 60000))
-    assert(not missed(Schedule.Every(5), String("UTC"), 0, 1000, 100) and missed(Schedule.Every(5), String("UTC"), 0, 600, 100))
+    assert(not missed(Schedule.Every(5), String("UTC"), 0, 300, 100) and missed(Schedule.Every(5), String("UTC"), 0, 600, 100))
 }

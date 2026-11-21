@@ -109,6 +109,7 @@ pub struct Conn {
     pub files: String?    // where files that come down are kept; the system's temporary folder without one
     transfers: List<Transfer>
     pub updater: Updater?    // looks for new releases of the app; none in tests and dev builds
+    pub tz: String?          // the system's time zone, an IANA name, as the app found it
     device: Device?       // this device as a tool for agents; none if its key couldn't be kept
 }
 
@@ -157,6 +158,7 @@ impl Conn {
             files: none,
             transfers: List<Transfer>(),
             updater: none,
+            tz: none,
             device: device,
         }
     }
@@ -235,7 +237,7 @@ impl Conn {
         // A connection that died without a close, as a sleeping laptop's does, ends
         // after 45 s with nothing from the instance, and the core reconnects.
         let ws = open(url, ping_interval_ms: APP_QUIET_MS, ping_timeout_ms: APP_WAIT_MS)
-        let hello = Obj.new().s("t", String("hello")).s("token", token).j("versions", Json.Array([Json.Int(i64(NEWEST))])).i("after", after).j("device", Obj.new().b("active", self.active).done()).done()
+        let hello = Obj.new().s("t", String("hello")).s("token", token).j("versions", Json.Array([Json.Int(i64(NEWEST))])).i("after", after).j("device", Obj.new().b("active", self.active).maybe("tz", self.tz.copy()).done()).done()
         match ws.send_text("{hello}") {
             ok => {},
             err(_) => {},    // receive says how it ended
@@ -716,6 +718,16 @@ impl Conn {
         }
     }
 
+    /// A login's body, with this system's time zone in its `device` when the app didn't
+    /// give one, so the instance knows where the person is from the start.
+    fn with_tz(self, body: own Json) -> Json {
+        let tz = self.tz.copy() else return body
+        let device = at(body.copy(), "device")
+        if str_at(device.copy(), "tz") != none { return body }
+        let given = if device == Json.Null { Obj.new().done() } else { device }
+        return merge(body, Obj.new().j("device", merge(given, Obj.new().s("tz", tz).done())).done())
+    }
+
     /// Starts a login or a setup from the app's message `m`. Its `server`, or the one
     /// already known, is where.
     fn log_in(mut self, kind: Kind, m: Json) {
@@ -729,7 +741,7 @@ impl Conn {
             self.tell(Obj.new().s("t", String("core.login")).maybe("id", id).j("error", Obj.new().s("code", String("busy")).s("message", String("A login is already on its way.")).done()).done())
             return
         }
-        self.pending = some(Pending.start(kind, server, id, request_body(kind, m)))
+        self.pending = some(Pending.start(kind, server, id, self.with_tz(request_body(kind, m))))
     }
 
     /// The instance made a code to add a device: the app gets the result with `qr`, the
@@ -759,7 +771,7 @@ impl Conn {
         var body = Obj.new().s("code", l.code.copy())
         let device = at(m, "device")
         if device != Json.Null { body = body.j("device", device) }
-        self.pending = some(Pending.start(Kind.Link, address(l.server.copy()), id, body.done()))
+        self.pending = some(Pending.start(Kind.Link, address(l.server.copy()), id, self.with_tz(body.done())))
     }
 
     /// Takes a login, setup or logout that has ended.
