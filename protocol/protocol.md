@@ -267,10 +267,11 @@ The answer to a [`device.call`](#devicecall): `ok`, and `output`, the command's 
 ### `welcome`
 
 ```json
-{ "t": "welcome", "version": 1, "user": "u_1", "device": "d_3", "seq": 1046, "reset": false, "key": "<the instance's public key, base64>" }
+{ "t": "welcome", "version": 1, "user": "u_1", "device": "d_3", "seq": 1046, "reset": false, "key": "<the instance's public key, base64>", "relay": "<the push relay's key, base64>" }
 ```
 
 - `version`: the one version this connection uses.
+- `relay`: only while the instance pushes through the [push relay](#through-the-push-relay). It's the relay's X25519 public key, which the core seals the phone's APNs token with before `push.register`.
 - `key`: the instance's Ed25519 public key, as `GET /api/info` gives it. The app keeps the first one it sees, checks a [`moved`](#moved) frame's signature with it, and expects the same key at the new place.
 - `seq`: the newest event `seq` the person has right now. Catch-up runs from `after` up to this.
 - `reset`: `true` when the app's cursor is too old (its events were pruned, which includes a new device's `0` once any have been) or ahead of the instance's (the instance was restored from an older backup). The app clears its cache, and a [`snapshot`](#snapshot) follows instead of the missed events.
@@ -497,7 +498,7 @@ Version 1's commands:
 | `memory.put` | `text`, `agent`? (empty or left out: shared by all the person's agents) | `id` |
 | `memory.delete` | `id` | — |
 | `link.create` | — | `code` (one-time, for [`POST /api/link`](#post-apilink)), `expires` (Unix ms, five minutes on), `instance` and `key` (the instance's id and public key, as `/api/info` gives them), and while phones are on, `noise`: `{"on":true,"port":47420,"key":"<its Noise key, base64>"}` ([Over Noise](#over-noise)). The core adds `qr`, the QR code's text. While phones are on, its address is a `noise://` place ([Over Noise](#over-noise)) with the instance's Noise key and this computer's IPv4 addresses on its port, in the order to try them: the local network's (10/8, 172.16/12, 192.168/16), then Tailscale's (100.64/10). Interfaces that are down, loopback, or networks inside the machine (Hyper-V's and WSL's switches, Docker's and Podman's bridges) are left out. Only a device can ask, never an agent |
-| `push.register` | `token` (the device's APNs token, hex), `env` (`production`, or `development` for a debug build) | Nothing back. Only a device, for itself. A device signed out loses it |
+| `push.register` | `token` (the device's APNs token, hex), `env` (`production`, or `development` for a debug build). Or, [through the push relay](#through-the-push-relay): `sealed` (the token and env sealed for the relay, base64) and `box` (the phone's X25519 public key, base64). The core sends these in place of `token` whenever `welcome` had a `relay` | Nothing back. Only a device, for itself. A device signed out loses it. A sealed token while the relay is off is refused `not_here` |
 | `push.unregister` | — | Nothing back. This device stops taking push |
 | `profile.get` | — | `profile`: `text`, `revision`, `by` (the device or agent that wrote it) and `at`, or `null` when there's none yet |
 | `profile.put` | `text` (the whole profile, up to 4000 bytes; empty clears it) | `profile`, as `profile.get` gives it, with its new `revision` |
@@ -522,6 +523,7 @@ Version 1's commands:
 | `activity.list` | `agent`?, `before`? (an entry's `id`), `limit`? (up to 200, 50 if left out) | `activity`, newest first: each `id`, `agent`, `kind` (`tool`, `approval`, `agent`, `message`, `notify`, `memory`, `routine` or `device`), `text`, `by` (a device, an agent, `auto` for the permission mode, or empty for the agent itself) and `at`. It's kept for good, unlike events |
 | `instance.move` | `to` (the new place's `http://` or `https://` address), `code` (the move code `loom receive` printed there) | `address`, once the instance is there. Only the owner, and not while an agent is answering. Until then, sends and commands get `moving`, and routines wait. The instance goes as `loom export` writes it, in chunks of 4 MB, each sealed with XChaCha20-Poly1305 under a key from the code, which also gives the bearer token for the new place's `POST /api/move/chunk?n=<n>` and `POST /api/move/done`. Then every device gets [`moved`](#moved). `move_failed` says why one didn't happen. An agent's `move_instance` asks the person first |
 | `instance.phones` | `on`? (true or false) | `on`, and while they are, `port` and `key` ([Over Noise](#over-noise)). With `on`, turns phones on or off: they reach the instance on the network over Noise, and stay on across a restart. Without it, says how things are. Only the owner, from a device, and only on an instance in the desktop app (or `loom serve --lan`): elsewhere `not_here` |
+| `instance.relay` | `url`? (the push relay's address, such as `https://push.loom.example`; empty turns it off) | `on`, and while it is, `url` and `key` (the relay's X25519 public key, base64). Anyone sees it. With `url`, the owner, from a device, turns the [push relay](#through-the-push-relay) on or off. The instance asks the address for its key at once, and refuses it `unreachable` when it doesn't answer as a relay. Phones that connect after that seal their tokens for that key |
 | `invite.create` | `role`? (`member`, the default, or `admin`), `uses`? (1 to 100, default 1), `days`? (1 to 30, default 7) | `invite`, `code` (for [`POST /api/join/<code>`](#post-apijoincode), shown once), `role`, `uses`, `expires`. Owners and admins, from a device; only the owner makes admins. On an instance in the desktop app, `not_here`: it's its owner's alone |
 | `invite.list` | — | `invites`: each open one's `invite`, `role`, `uses` left, `expires`, `by` and `at`, newest first. Owners and admins |
 | `invite.delete` | `invite` | — |
@@ -572,7 +574,7 @@ commands = ["routine.list"]   # commands the panel may send
 agents = true                 # the panel may message the person's agents
 ```
 
-What it asks for is its `asks`: `tools` when it has a tool server, `agents`, and `cmd:<name>` for each command. A panel never gets the commands that would let it allow itself more, borrow another plugin's permissions, run programs on the instance, or reach the person's devices, secrets and sign-in: `plugin.put`, `plugin.allow`, `plugin.delete`, `plugin.cmd`, `plugin.message`, `instance.move`, `instance.phones`, `invite.create`, `invite.delete`, `user.role`, `user.remove`, `account.delete`, `password.reset`, `link.create`, `push.register`, `push.unregister`, `device.revoke`, `device.rename`, `secret.list`, `secret.put`, `secret.delete`, `mcp.put`, `acp.install`, `acp.remove`, `acp.settings` and `acp.share`. Until its person allows something, it waits, and the plugin goes without it.
+What it asks for is its `asks`: `tools` when it has a tool server, `agents`, and `cmd:<name>` for each command. A panel never gets the commands that would let it allow itself more, borrow another plugin's permissions, run programs on the instance, or reach the person's devices, secrets and sign-in: `plugin.put`, `plugin.allow`, `plugin.delete`, `plugin.cmd`, `plugin.message`, `instance.move`, `instance.phones`, `instance.relay`, `invite.create`, `invite.delete`, `user.role`, `user.remove`, `account.delete`, `password.reset`, `link.create`, `push.register`, `push.unregister`, `device.revoke`, `device.rename`, `secret.list`, `secret.put`, `secret.delete`, `mcp.put`, `acp.install`, `acp.remove`, `acp.settings` and `acp.share`. Until its person allows something, it waits, and the plugin goes without it.
 
 - **A tool server** the person allowed is in every one of their agents' new sessions, as the MCP server `plugin-<id>`. It runs from a folder holding the revision's files, with `LOOM_PLUGIN_DIR` set to that folder.
 - **A panel** talks to the app through one door, `await loom.send(op, args)` (desktop/src/panel.rs). The app sends these on, and refuses everything else, and the instance checks what's allowed:
@@ -605,7 +607,8 @@ What it asks for is its `asks`: `tools` when it has a tool server, `agents`, and
 | `moving` | The instance is moving: nothing changes until it's at the new place |
 | `moved` | `instance.move` on an instance that has moved already |
 | `move_failed` | `instance.move`: the export, sending it, or the new place failed. The message says which, and the instance goes on where it is |
-| `not_here` | `instance.phones` on an instance on a server, which phones reach at its own address |
+| `not_here` | `instance.phones` on an instance on a server, which phones reach at its own address, or `push.register` with a sealed token while the push relay is off |
+| `unreachable` | `instance.relay`: the address didn't answer, or isn't a push relay |
 | `internal` | A bug in the instance. It's logged there |
 
 WebSocket close codes:
@@ -653,6 +656,21 @@ A phone that registered with `push.register` gets push through APNs while it isn
 | An agent's finished reply (`message.created`) | When the person is on none of their devices, for a run they started (not a routine's, nor another agent's) that ended `done` or `failed` | The agent's name as `title`, the start of the reply as `body` | — | `kind: "reply"`, `agent`, `conversation`, `message` |
 
 Each one's `aps.thread-id` is its conversation, so the lock screen groups them, and its `aps.sound` is `default`. An approval's `apns-collapse-id` is its `call`. The app answers Allow and Deny with an `approve` frame, the same as on screen, once it has connected.
+
+### Through the push relay
+
+An instance without an APNs key of its own can push through the relay ([PLAN.md](../PLAN.md#the-push-relay-opt-in), [push/](../push/README.md)), once its owner turns it on with `instance.relay`. Neither the instance nor the relay can read what the other has.
+
+1. **The phone's token is sealed for the relay.** `welcome` gives the relay's key as `relay`. When the app sends `push.register` with its `token`, the core seals `{"token": "<hex>", "env": "production"}` for that key. It sends that as `sealed`, with its own `box` key beside it. The instance keeps only these, so it never sees the token.
+2. **Each notification is sealed for the phone.** For a phone with a `box`, the instance seals the notification it would have sent APNs (the table above) for that key. It hands the relay `{"aps": {"alert": {"title": "loom", "body": "Something new"}, "mutable-content": 1, "sound": "default", "thread-id"?, "category"?}, "sealed": "<base64>"}`. APNs and the relay see only that something is new, and in which conversation. The app's notification service extension opens `sealed` with `loom_push_open` and shows what's in it.
+3. **The instance signs each request.** `POST <relay>/v1/push` with the body `{"token": "<sealed>", "payload": <the notification>, "collapse": "<apns-collapse-id or empty>"}`, and three headers:
+   - `X-Loom-Instance`: its Ed25519 public key, base64.
+   - `X-Loom-Time`: Unix ms.
+   - `X-Loom-Signature`: base64, its Ed25519 signature over `loom push 1\n<time>\n<SHA-256 of the body, hex>`.
+
+   The relay refuses a request more than five minutes from its clock or not signed by that key with 401, and one past its limit an hour for that key with 429. It opens the token, sends the notification to APNs with its own key, and passes APNs's answer back: 200, or 410 when the token is gone, which the instance forgets as it does a direct one.
+
+A sealed box is the sender's one-time X25519 public key (32 bytes), a 24-byte nonce, and the message sealed with XChaCha20-Poly1305. Its key is HMAC-SHA256, keyed with the X25519 shared secret, over the sender's public key and then the recipient's, and the associated data is `loom seal 1` ([shared/seal.calx](../shared/seal.calx)). The phone's box key stays in the system's credential store, under the core's keyring service, as `push box`.
 
 ## Versions
 

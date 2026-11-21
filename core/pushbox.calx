@@ -1,0 +1,64 @@
+module core.pushbox
+
+// The phone's side of the push relay (PLAN.md, "The push relay"). The phone
+// keeps an X25519 key, its box, in the credential store: an instance seals each
+// notification for it, and the app's notification service extension opens them
+// with it. Its APNs token goes to the instance sealed for the relay, so only
+// the relay reads it.
+import std.bytes
+import std.crypto.{X25519Key}
+import std.json.{Json, parse}
+import std.keyring
+import shared.obj.{Obj, str_at}
+import shared.seal
+
+/// The account the box key is kept under, in the app's credential store service.
+const ACCOUNT: str = "push box"
+
+/// The phone's box key, made and kept the first time.
+pub fn box_key(service: String) -> X25519Key ! keyring.Error {
+    if let kept = try keyring.get_bytes(service.copy(), String(ACCOUNT)) {
+        if let key = X25519Key.from_bytes(kept) { return key }
+    }
+    let made = X25519Key.generate()
+    try keyring.set_bytes(service, String(ACCOUNT), made.bytes())
+    return made
+}
+
+/// push.register's arguments for the APNs `token` (hex) in `env`, through the relay
+/// whose key is `relay` (base64): the token sealed for the relay, and the phone's
+/// box. none if `relay` isn't a key.
+pub fn register_args(relay: String, token: String, env: String, box: X25519Key) -> Json? {
+    let to = bytes.from_base64(relay) else return none
+    let inner = Obj.new().s("token", token).s("env", env).done()
+    let sealed = seal.seal(to, "{inner}".to_bytes()) else return none
+    return some(Obj.new().s("sealed", bytes.base64(sealed)).s("box", bytes.base64(box.public_key().bytes())).done())
+}
+
+/// What an instance sealed in a notification's `sealed` (base64), opened with `box`:
+/// the notification as the instance would have sent it straight to APNs. none if it
+/// wasn't sealed for this box.
+pub fn open(box: X25519Key, sealed: String) -> Json? {
+    let raw = bytes.from_base64(sealed) else return none
+    let opened = seal.open(box, raw) else return none
+    let text = String.from_utf8(opened) else return none
+    return match parse(text) {
+        ok(j) => some(j),
+        err(_) => none,
+    }
+}
+
+@test
+fn a_registration_opens_for_the_relay_and_a_notification_for_the_box() {
+    let relay = X25519Key.generate()
+    let box = X25519Key.generate()
+    let args = register_args(bytes.base64(relay.public_key().bytes()), String("ab12"), String("development"), box.copy()) ?? Json.Null
+    let sealed = bytes.from_base64(str_at(args.copy(), "sealed") ?? String()) ?? List<u8>()
+    let inner = String.from_utf8(seal.open(relay, sealed) ?? List<u8>()) ?? String()
+    assert(inner == #"{"token":"ab12","env":"development"}"#)
+    assert(str_at(args, "box") == some(bytes.base64(box.public_key().bytes())))
+    let note = seal.seal(box.public_key().bytes(), #"{"aps":{"alert":"hi"}}"#.to_bytes()) ?? List<u8>()
+    assert(open(box.copy(), bytes.base64(note.copy())) != none)
+    assert(open(X25519Key.generate(), bytes.base64(note)) == none)
+    assert(register_args(String("not a key"), String("ab12"), String("production"), box) == none)
+}

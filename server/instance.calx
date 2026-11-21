@@ -12,6 +12,7 @@ import std.bytes
 import std.crypto.{Ed25519Key, PasswordHasher, X25519Key, XChaCha20Poly1305, compare_digest, random_bytes}
 import std.fs
 import std.hash.{hmac_sha256, sha256}
+import std.http.{Header, get}
 import std.http.server.{Request, Response, Server, ServerSocket, content_type}
 import std.json.{Json, parse}
 import std.process
@@ -22,6 +23,7 @@ import std.time.{DateTime, Timestamp}
 import std.url
 import shared.obj.{Obj, at, bool_at, int_at, merge, str_at}
 import shared.protocol
+import shared.pushrelay
 import server.acp
 import server.acp.{Line, Out}
 import server.announce
@@ -921,15 +923,22 @@ impl Instance {
     }
 
     fn try_send_push(i: Instance, user: String, body: own Json, collapse: own String) ! Error {
+        // Each phone through the instance's own APNs key, or through the relay, with
+        // its notifications sealed for it, once the owner has set up one or the other.
+        let config = try i.store.apns() ?? Json.Null
+        let relay_url = try i.store.meta("relay_url") ?? String()
         var phones = List<push.Phone>()
         for (device, token, env) in try i.store.push_tokens(user.copy()) {
             if i.connected(device.copy()) { continue }
-            phones.push(push.Phone { user: user.copy(), device: device.copy(), token: token.copy(), env: env.copy() })
+            let box = if env.starts_with("relay:") { env[6..].copy() } else { String() }
+            if box.len() > 0 and relay_url.len() == 0 { continue }
+            if box.len() == 0 and config == Json.Null { continue }
+            phones.push(push.Phone { user: user.copy(), device: device.copy(), token: token.copy(), env: env.copy(), box: box })
         }
         if phones.len() == 0 { return }
-        let config = try i.store.apns() else return
+        let relay = if relay_url.len() > 0 { Obj.new().s("url", relay_url).s("seed", try i.store.meta("key") ?? String()).done() } else { Json.Null }
         var to = i.push_to.copy()
-        to.send(push.Job { config: config, body: body, collapse: collapse, to: phones })
+        to.send(push.Job { config: config, relay: relay, body: body, collapse: collapse, to: phones })
     }
 
     // An entry in the activity log. A failure to write one is said, not
@@ -2107,6 +2116,15 @@ impl Instance {
         return bytes.base64(key.public_key().bytes())
     }
 
+    // The push relay's key, base64, when the instance pushes through it: a phone
+    // seals its APNs token for it (PLAN.md, "The push relay").
+    fn relay_key(i: Instance) -> String? ! Error {
+        if (try i.store.meta("relay_url") ?? String()).len() == 0 { return none }
+        let key = try i.store.meta("relay_key") ?? String()
+        if key.len() == 0 { return none }
+        return some(key)
+    }
+
     // A device joins with the one-time code from another device's QR code
     // (PLAN.md, "Connecting devices"), and gets a token of its own for the
     // same account. A wrong code counts against the address, as a wrong
@@ -2322,7 +2340,7 @@ impl Instance {
         // once events have been pruned, or one ahead of the newest (the
         // instance was restored from an older backup), gets a snapshot.
         let reset = after > last or (first > 1 and after < first - 1)
-        _ = i.server.send_text(s, "{Obj.new().s("t", String("welcome")).i("version", i64(version)).s("user", user.copy()).s("device", device.id.copy()).i("seq", last).b("reset", reset).s("key", try i.public_key()).done()}")
+        _ = i.server.send_text(s, "{Obj.new().s("t", String("welcome")).i("version", i64(version)).s("user", user.copy()).s("device", device.id.copy()).i("seq", last).b("reset", reset).s("key", try i.public_key()).maybe("relay", try i.relay_key()).done()}")
         if reset {
             _ = i.server.send_text(s, "{try i.snapshot(user.copy(), last)}")
         } else {
@@ -3686,11 +3704,55 @@ impl Instance {
             }
             return Answer.Value(try i.phones())
         }
+        // The push relay (PLAN.md, "The push relay"): anyone sees whether it's on and
+        // its key, to seal their phone's token with; only the owner turns it on or off.
+        if name == "instance.relay" {
+            if at(args.copy(), "url") == Json.Null {
+                let relay_address = try i.store.meta("relay_url") ?? String()
+                if relay_address.len() == 0 { return Answer.Value(Obj.new().b("on", false).done()) }
+                return Answer.Value(Obj.new().b("on", true).s("url", relay_address).s("key", try i.store.meta("relay_key") ?? String()).done())
+            }
+            if try i.store.role(user.copy()) != some(String("owner")) { return Answer.Refused(String("not_allowed"), String("Only the instance's owner turns the push relay on or off.")) }
+            if not device.starts_with("d_") { return Answer.Refused(String("forbidden"), String("Only the owner, on one of their devices, turns the push relay on or off.")) }
+            let relay_address = (str_at(args, "url") ?? String()).trim().trim_suffix("/").copy()
+            if relay_address.len() == 0 {
+                try i.store.set_meta("relay_url", String())
+                try i.store.set_meta("relay_key", String())
+                return Answer.Value(Obj.new().b("on", false).done())
+            }
+            if not relay_address.starts_with("https://") and not relay_address.starts_with("http://") { return Answer.Refused(String("bad_request"), "{relay_address} isn't an http:// or https:// address.") }
+            // Its key, asked for once now: a relay that doesn't give one isn't one.
+            var asked = get("{relay_address}{pushrelay.KEY_PATH}", List<Header>(), 10000, 65536)
+            let got = match asked.wait() {
+                ok(r) => r,
+                err(e) => return Answer.Refused(String("unreachable"), "The push relay at {relay_address} didn't answer: {e}"),
+            }
+            let said = match parse(String.from_utf8(got.body) ?? String()) {
+                ok(j) => j,
+                err(_) => Json.Null,
+            }
+            let key = str_at(said, "key") ?? String()
+            if got.status != 200 or (bytes.from_base64(key.copy()) ?? List<u8>()).len() != 32 { return Answer.Refused(String("unreachable"), "{relay_address} isn't a push relay: it gave no key.") }
+            try i.store.set_meta("relay_url", relay_address.copy())
+            try i.store.set_meta("relay_key", key.copy())
+            return Answer.Value(Obj.new().b("on", true).s("url", relay_address).s("key", key).done())
+        }
         if name == "push.register" or name == "push.unregister" {
             // A phone hands over its own APNs token, never another device's, and never an agent.
             if not device.starts_with("d_") { return Answer.Refused(String("forbidden"), String("Only a device can take push.")) }
             if name == "push.unregister" {
                 try i.store.delete_push_token(device)
+                return Answer.Value(empty)
+            }
+            // Through the relay: the token sealed for it, which only it opens, and the
+            // phone's key, which each notification is sealed for.
+            if let sealed = str_at(args.copy(), "sealed") {
+                if (try i.store.meta("relay_url") ?? String()).len() == 0 { return Answer.Refused(String("not_here"), String("This instance doesn't push through the relay: its owner turns it on with instance.relay.")) }
+                let box = str_at(args, "box") ?? String()
+                let opened = bytes.from_base64(sealed.copy()) ?? List<u8>()
+                if opened.len() < 72 or opened.len() > 1024 { return Answer.Refused(String("bad_request"), String("sealed is the APNs token sealed for the relay, in base64.")) }
+                if (bytes.from_base64(box.copy()) ?? List<u8>()).len() != 32 { return Answer.Refused(String("bad_request"), String("box is the phone's X25519 public key, in base64.")) }
+                try i.store.set_push_token(user, device, sealed, "relay:{box}", now())
                 return Answer.Value(empty)
             }
             let token = str_at(args.copy(), "token") ?? String()

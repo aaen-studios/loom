@@ -423,7 +423,8 @@ impl Store {
     // --- Push (PLAN.md, "Notifications and push") ---
 
     // Keeps device `device`'s APNs token, `env` production or development,
-    // in place of any it had.
+    // in place of any it had. A phone that takes push through the relay keeps its
+    // sealed token, base64, with `env` `relay:` and its X25519 key, base64.
     pub fn set_push_token(self, user: String, device: String, token: String, env: String, time: i64) ! Error {
         _ = try self.db.execute(String("INSERT OR REPLACE INTO push_tokens (device, user, token, env, at) VALUES (?, ?, ?, ?, ?)"), [t(device), t(user), t(token), t(env), Value.Int(time)])
     }

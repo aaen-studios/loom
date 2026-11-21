@@ -14,6 +14,7 @@ import std.thread.{Task}
 import shared.obj.{Obj, str_at}
 import core.cache.{Cache}
 import core.conn.{Conn}
+import core.pushbox
 import core.update.{Updater}
 import shared.release.{MANIFEST}
 import server.instance.{Config, EventLife, Instance}
@@ -230,6 +231,26 @@ fn core_stop(core: *u8) {
     if let t = c.value.local.take() {
         t.join()
     }
+}
+
+/// Opens a notification the push relay brought (PLAN.md, "The push relay"), for the
+/// iPhone's notification service extension: `sealed` is the notification's `sealed`
+/// field, the `slen` bytes at it, and `keyring` (`klen` bytes) the credential store's
+/// service the core was started with, where the phone's box key is. Hands `on_text`,
+/// with `ctx`, the notification as the instance made it, JSON, and gives true; gives
+/// false, without calling it, when it doesn't open.
+@export_c("loom_push_open")
+fn push_open(keyring: *const u8, klen: usize, sealed: *const u8, slen: usize, on_text: extern "C" fn(*const u8, usize, *u8), ctx: *u8) -> bool {
+    let service = unsafe { text_at(keyring, klen) } ?? String(KEYRING)
+    let given = unsafe { text_at(sealed, slen) } else return false
+    let box = match pushbox.box_key(if service.len() == 0 { String(KEYRING) } else { service }) {
+        ok(b) => b,
+        err(_) => return false,
+    }
+    let opened = pushbox.open(box, given) else return false
+    let sink = unsafe { Sink { on_event: on_text, ctx: ctx } }
+    sink.tell("{opened}")
+    return true
 }
 
 /// `loom mcp`, for the desktop app started as `loom.exe mcp` by an agent of the

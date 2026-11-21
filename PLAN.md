@@ -70,8 +70,10 @@ typedef void (*loom_event_fn)(const uint8_t *json, size_t len, uint8_t *ctx);
 uint8_t *loom_core_start(const uint8_t *config_json, size_t len, loom_event_fn on_event, uint8_t *ctx);
 void      loom_core_send(uint8_t *core, const uint8_t *json, size_t len);
 void      loom_core_stop(uint8_t *core);
+bool      loom_push_open(const uint8_t *keyring, size_t klen, const uint8_t *sealed, size_t slen, loom_event_fn on_text, uint8_t *ctx);
 ```
 
+- `loom_push_open` is the one call that needs no core. The iPhone's notification service extension uses it to open a notification that came [through the push relay](#the-push-relay-opt-in).
 - The app calls `calx_init` once, which starts the Calx runtime (`calx build --staticlib` makes it and the header). `loom_core_start` then starts the core's own thread, which runs std.net's event loop. The config holds the data folder and the server's address. It gives back the core: Calx has no global variables, so what the core keeps lives in a box the app holds and passes to the other two calls.
 - The app passes JSON to `loom_core_send`, and the core answers through `on_event` on its own thread. The app hands each event to its UI thread: a GPUI entity update on desktop, the main actor on iPhone.
 - What happens to the app (sleep, going to the background on iPhone, a new network) comes in as messages too, such as `{"t":"app.background"}`.
@@ -370,6 +372,14 @@ A small Calx service at `push.<domain>` that only sends notifications. It passes
 - **It's cheap.** Pushes are tiny and Apple charges nothing for them, so one small server carries a lot.
 
 It needs no Calx beyond what APNs and the QR code already need (ES256, HTTP/2, X25519 and AEAD).
+
+How it works ([protocol.md, "Through the push relay"](protocol/protocol.md#through-the-push-relay)):
+
+- **The relay** is `loom-push` ([push/](push/README.md)). It has an X25519 key that phones seal their tokens for, and an APNs key of its own, which `loom-push key` sets. It answers `GET /v1/key` and `POST /v1/push`, nothing else.
+- **The owner turns it on** with `instance.relay` and the relay's address. The instance asks the relay for its key once, keeps it, and gives it to every app in `welcome`.
+- **The core seals the token.** When the app hands it an APNs token, the core seals it for the relay's key. It sends that to the instance with the phone's own X25519 key, its box, which the credential store keeps.
+- **The instance seals the notification** for the phone's box, and signs each request to the relay with its Ed25519 key. The relay checks the signature and the time, counts the request against that key's limit, opens the token, and sends the notification on to APNs.
+- **The phone opens it.** The notification service extension calls `loom_push_open` with what came, and shows the notification the instance made. Without the extension, the phone shows "Something new".
 
 ## Moving an instance
 

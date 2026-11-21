@@ -1,0 +1,275 @@
+module tests.protocol.relay
+
+// The push relay (PLAN.md, "The push relay"), with a fake APNs behind it: the
+// owner turns it on with instance.relay, which takes only a relay; a phone's
+// core seals its APNs token for the relay, so the instance never keeps it, and
+// the notification reaches APNs with the real token and a provider token
+// signed with the relay's key, sealed so only the phone's box key opens it.
+// The relay takes only requests an instance signed now, answers 410 for a
+// token APNs calls gone and 400 for one not sealed for it, and stops an
+// instance at its limit an hour.
+//
+//     calx tests/protocol/relay.calx
+import std.bytes.{base64, from_base64, from_base64_url}
+import std.crypto.{Ed25519Key, P256Key, X25519Key, random_bytes}
+import std.fs
+import std.http.{Header, post}
+import std.http.server.{Response, Server}
+import std.json.{Json, parse}
+import std.keyring
+import std.process.{Child, Command, Stdio, exit}
+import std.random.{Random}
+import std.text.utf8.{decode_lossy_unicode}
+import std.thread.{Task, sleep}
+import std.time.{Instant}
+import shared.obj.{Obj, at, bool_at, str_at}
+import shared.pushrelay
+import shared.seal
+import core.cache.{Cache}
+import core.conn.{Conn}
+import core.pushbox
+import server.push.{relay_request}
+import server.store.{now}
+import tests.kit.{App, Instance, calx, check, device, post_json}
+
+const TOKEN: str = "a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90"
+const GONE: str = "ffeeddccbbaa99887766554433221100ffeeddccbbaa99887766554433221100"
+const PER_HOUR: i64 = 4
+const WAIT: u64 = 120000    // the first start builds the relay
+
+// APNs, as far as the relay sees it: each request is told to the test, and
+// answered 200, or 410 Unregistered for the GONE token.
+struct FakeApns {
+    server: Server
+    seen: Sender<String>
+}
+
+impl Task for FakeApns {
+    fn run(own self) {
+        var f = self
+        while let req = f.server.next(-1) {
+            let body = match parse(req.text() ?? String()) {
+                ok(j) => j,
+                err(_) => Json.Null,
+            }
+            let o = Obj.new().s("path", req.path.copy()).s("auth", req.header(String("authorization")) ?? String()).s("topic", req.header(String("apns-topic")) ?? String()).s("collapse", req.header(String("apns-collapse-id")) ?? String()).j("body", body).done()
+            f.seen.send("{o}")
+            if req.path.ends_with(GONE) {
+                f.server.respond(req, Response.json(String(#"{"reason":"Unregistered"}"#), 410))
+            } else {
+                f.server.respond(req, Response.json(String(), 200))
+            }
+        }
+    }
+}
+
+// The next request APNs got.
+fn pushed(seen: mut Receiver<String>) -> Json ! Error {
+    let until = now() + 20000
+    loop {
+        if let text = seen.next() { return try parse(text) }
+        if now() > until { fail "no push came to APNs in 20 s" }
+        unsafe { sleep(20000000) }
+    }
+}
+
+// Whether the provider token is one APNs takes from `key`: ES256, naming the
+// key's id and the team, and signed with it.
+fn signed_by(auth: String, key: P256Key) -> bool {
+    if not auth.starts_with("bearer ") { return false }
+    let parts = auth[7..].split(".")
+    if parts.len() != 3 { return false }
+    let head_bytes = from_base64_url(parts[0].copy()) else return false
+    let claim_bytes = from_base64_url(parts[1].copy()) else return false
+    let sig = from_base64_url(parts[2].copy()) else return false
+    let head = decode_lossy_unicode(head_bytes.copy(), 0, head_bytes.len())
+    let claims = decode_lossy_unicode(claim_bytes.copy(), 0, claim_bytes.len())
+    return head.contains(#""alg":"ES256""#) and head.contains(#""kid":"TESTKEY123""#) and claims.contains(#""iss":"TEAM123456""#) and key.public_key().verify("{parts[0]}.{parts[1]}".to_bytes(), sig)
+}
+
+// The relay, with its APNs key set and APNs at `apns`: the process, its address and its key.
+fn start_relay(data: String, apns: String, key: P256Key) -> (Child, String, String) ! Error {
+    let key_file = "{data}/AuthKey_TESTKEY123.p8"
+    try fs.write_text(key_file.copy(), key.pem())
+    let set = try Command.new(calx()).arg(String("push/main.calx")).arg(String("key")).arg(key_file).args([String("--key-id"), String("TESTKEY123"), String("--team"), String("TEAM123456"), String("--topic"), String("no.aaenz.loom"), String("--data"), data.copy()]).output()
+    if not set.status.success() { fail "loom-push key failed: {set.error_text()}" }
+    let relay = try Command.new(calx()).arg(String("push/main.calx")).arg(String("serve")).args([String("--data"), data.copy(), String("--port"), String("0"), String("--apns"), apns.copy(), String("--per-hour"), "{PER_HOUR}"]).stdout(Stdio.Pipe).own_group().spawn()
+    let line = relay.wait_for_line(String("loom-push: serving on"), WAIT) else {
+        relay.kill()
+        fail "the relay didn't start"
+    }
+    // loom-push: serving on http://127.0.0.1:PORT/, key KEY
+    let from = line.find("http://") ?? 0
+    let slash = line.find("/, key ") ?? line.len()
+    let url = line[from..slash].copy()
+    let relay_key = line[slash + 7..].trim().copy()
+    return (relay, url, relay_key)
+}
+
+// The app's side of a phone's core.
+struct Phone {
+    to_core: Sender<String>
+    from_core: Receiver<String>
+    thread: Thread?
+}
+
+impl Phone {
+    fn start(base: String, token: String, service: String) -> Phone ! Error {
+        let inbox = Receiver<String>()
+        let to_core = inbox.sender()
+        let from_core = Receiver<String>()
+        let conn = Conn.new(some("http://{base}"), some(token.copy()), service.copy(), try Cache.open(String(":memory:")), inbox, from_core.sender())
+        let t = unsafe { Thread.spawn(conn) }
+        return Phone { to_core: to_core, from_core: from_core, thread: some(t) }
+    }
+
+    fn send(mut self, frame: Json) {
+        self.to_core.send("{frame}")
+    }
+
+    // What the core says, until a frame whose `t` is `t` and, if `field` isn't
+    // empty, whose `field` is `value`. Fails after 20 s.
+    fn until(mut self, t: str, field: str, value: String) -> Json ! Error {
+        let start = unsafe { Instant.now() }
+        loop {
+            let waited = unsafe { Instant.now() }.nanos_since(start) / 1000000
+            if waited >= 20000 { fail "no {t} {field}={value} came in 20 s" }
+            let m = unsafe { self.from_core.wait_for((20000 - waited) * 1000000) } else { continue }
+            let f = try parse(m)
+            if (str_at(f.copy(), "t") ?? String()) != t { continue }
+            if field.len() == 0 or (str_at(f.copy(), field) ?? String()) == value { return f }
+        }
+    }
+
+    fn stop(mut self) {
+        self.to_core.send(String(#"{"t":"core.stop"}"#))
+        if let t = self.thread.take() {
+            t.join()
+        }
+    }
+}
+
+// The phone's token, sealed for the relay whose key is `relay_key`.
+fn sealed_for(relay_key: String, token: str, apns_env: str) -> String {
+    let inner = Obj.new().s("token", String(token)).s("env", String(apns_env)).done()
+    return base64(seal.seal(from_base64(relay_key) ?? List<u8>(), "{inner}".to_bytes()) ?? List<u8>())
+}
+
+// What the relay answers a request signed with `seed` at `time`, for `body` but
+// with `sent_body` sent instead when it isn't empty.
+fn ask_relay(url: String, seed: List<u8>, time: i64, token: String, sent_body: str) -> (u32, String) ! Error {
+    let notification = Obj.new().j("aps", Obj.new().j("alert", Obj.new().s("title", String("loom")).done()).done()).done()
+    let (body, headers) = relay_request(seed, time, token, notification, String()) ?? (List<u8>(), List<Header>())
+    let data = if sent_body.len() > 0 { String(sent_body).to_bytes() } else { body }
+    var req = post("{url}{pushrelay.PUSH_PATH}", headers, data, 20000, 65536)
+    let r = try req.wait()
+    let said = match parse(String.from_utf8(r.body) ?? String()) {
+        ok(j) => j,
+        err(_) => Json.Null,
+    }
+    return (r.status, str_at(at(said, "error"), "code") ?? String())
+}
+
+fn through(inst: Instance, relay_url: String, relay_key: String, apns_base: String, service: String, key: P256Key, seen: mut Receiver<String>) ! Error {
+    // The owner turns it on, at a relay, and anyone sees it.
+    var desk = try App.connect(inst.base.copy(), inst.token.copy(), 0)
+    let off = try desk.cmd("q_1", "instance.relay", Obj.new().done())
+    try check(bool_at(at(off, "value"), "on") == some(false), "the push relay is off at first")
+    let wrong = try desk.cmd("q_2", "instance.relay", Obj.new().s("url", apns_base).done())
+    try check(str_at(at(wrong, "error"), "code") == some(String("unreachable")), "an address that isn't a push relay is refused")
+    _ = try pushed(mut seen)    // it asked the fake APNs for a key
+    let member = try inst.second_account("sam")
+    var theirs = try App.connect(inst.base.copy(), member, 0)
+    let not_owner = try theirs.cmd("q_1", "instance.relay", Obj.new().s("url", relay_url.copy()).done())
+    let early = try theirs.cmd("q_2", "push.register", Obj.new().s("sealed", sealed_for(relay_key.copy(), TOKEN, "production")).s("box", base64(X25519Key.generate().public_key().bytes())).done())
+    try check(str_at(at(not_owner, "error"), "code") == some(String("not_allowed")) and str_at(at(early, "error"), "code") == some(String("not_here")), "only the owner turns it on, and a sealed token waits for it")
+    let on = try desk.cmd("q_3", "instance.relay", Obj.new().s("url", relay_url.copy()).done())
+    try check(bool_at(at(on.copy(), "value"), "on") == some(true) and str_at(at(on, "value"), "key") == some(relay_key.copy()), "the owner turns it on, and the instance keeps the relay's key")
+    let seen_by = try theirs.cmd("q_3", "instance.relay", Obj.new().done())
+    try check(str_at(at(seen_by, "value"), "key") == some(relay_key.copy()), "and everyone sees it")
+    theirs.close()
+
+    // A phone's core seals its token for the relay.
+    let (_, login) = try post_json(inst.base.copy(), "/api/login", Obj.new().s("username", String("elliot")).s("password", String("correct horse")).j("device", device("iPhone")).done())
+    var phone = try Phone.start(inst.base.copy(), str_at(login, "token") ?? String(), service.copy())
+    _ = try phone.until("core.conn", "state", String("live"))
+    phone.send(Obj.new().s("t", String("cmd")).s("id", String("p_1")).s("name", String("push.register")).j("args", Obj.new().s("token", String(TOKEN)).s("env", String("development")).done()).done())
+    let taken = try phone.until("result", "id", String("p_1"))
+    phone.stop()
+    try check(bool_at(taken, "ok") == some(true), "a phone registers through the relay")
+    var kept = List<u8>()
+    for name in ["loom.db", "loom.db-wal"] {
+        if fs.exists("{inst.data}/{name}") { kept.extend(try fs.read("{inst.data}/{name}")) }
+    }
+    try check(not decode_lossy_unicode(kept.copy(), 0, kept.len()).contains(TOKEN), "and the instance never has its APNs token")
+
+    // The phone is away: an agent's notify goes through the relay.
+    let made = try desk.cmd("q_4", "agent.create", Obj.new().s("name", String("Main")).s("acp_agent", String("fake")).s("instructions", String("Test.")).done())
+    let agent = str_at(at(at(made, "value"), "agent"), "id") ?? String()
+    let c = try desk.cmd("q_5", "conversation.create", Obj.new().s("agent", agent).done())
+    let conversation = str_at(at(c, "value"), "conversation") ?? String()
+    try desk.send(Obj.new().s("t", String("send")).s("cid", String("m_1")).s("conversation", conversation.copy()).s("text", String(#"/mcp notify {"title":"Build","body":"It failed."}"#)).done())
+    let note = try pushed(mut seen)
+    _ = try desk.until("event", "run.finished")
+    desk.close()
+    let body = at(note.copy(), "body")
+    try check(str_at(note.copy(), "path") == some("/3/device/{TOKEN}") and str_at(note.copy(), "topic") == some(String("no.aaenz.loom")) and signed_by(str_at(note, "auth") ?? String(), key), "the relay sends it to APNs with the phone's token and its own key")
+    try check(not "{body}".contains("It failed.") and str_at(at(at(body.copy(), "aps"), "alert"), "title") == some(String("loom")), "and APNs sees only that something is new")
+    let box = try pushbox.box_key(service.copy())
+    let opened = pushbox.open(box, str_at(body, "sealed") ?? String()) ?? Json.Null
+    let alert = at(at(opened.copy(), "aps"), "alert")
+    try check(str_at(alert.copy(), "title") == some(String("Build")) and str_at(alert, "body") == some(String("It failed.")) and str_at(at(opened, "loom"), "kind") == some(String("notify")), "the phone's box key opens the notification")
+
+    // The relay itself, asked as an instance would.
+    let seed = Ed25519Key.generate().seed()
+    let real = sealed_for(relay_key.copy(), TOKEN, "production")
+    let (stale, stale_code) = try ask_relay(relay_url.copy(), seed.copy(), now() - 600000, real.copy(), "")
+    let (forged, forged_code) = try ask_relay(relay_url.copy(), seed.copy(), now(), real.copy(), #"{"token":"x","payload":{}}"#)
+    try check(stale == 401 and stale_code == "stale" and forged == 401 and forged_code == "bad_signature", "the relay takes only what an instance signed, now")
+    let (gone, gone_code) = try ask_relay(relay_url.copy(), seed.copy(), now(), sealed_for(relay_key.copy(), GONE, "production"), "")
+    _ = try pushed(mut seen)
+    let (bad, bad_code) = try ask_relay(relay_url.copy(), seed.copy(), now(), base64(random_bytes(80)), "")
+    try check(gone == 410 and gone_code == "gone" and bad == 400 and bad_code == "bad_token", "it says when APNs calls a token gone, and when a token wasn't sealed for it")
+    var statuses = List<u32>()
+    for _ in 0..3 {
+        let (status, _) = try ask_relay(relay_url.copy(), seed.copy(), now(), real.copy(), "")
+        statuses.push(status)
+    }
+    try check(statuses == [200u32, 200u32, 429u32], "and an instance sends at most four an hour")
+}
+
+fn main() ! Error {
+    var apns = try Server.listen(0)
+    apns.log = false
+    let apns_base = apns.url()[..apns.url().len() - 1].copy()
+    var seen = Receiver<String>()
+    _ = unsafe { Thread.spawn(FakeApns { server: apns, seen: seen.sender() }) }
+    let key = P256Key.generate()
+    let relay_data = try fs.temp_dir()
+    let (relay, relay_url, relay_key) = try start_relay(relay_data, apns_base.copy(), key.copy())
+    var random = Random.system()
+    let service = "loom-test-relay-{random.next_u32()}"
+    var failure: String? = none
+    match Instance.start() {
+        ok(inst) => {
+            failure = match through(inst.copy(), relay_url, relay_key, apns_base, service.copy(), key, mut seen) {
+                ok => none,
+                err(e) => some("{e}"),
+            }
+            inst.stop()
+        },
+        err(e) => failure = some("{e}"),
+    }
+    var r = relay
+    r.kill()
+    _ = r.wait()
+    match keyring.delete(service, String("push box")) {
+        ok(_) => {},
+        err(_) => {},
+    }
+    if let f = failure {
+        eprintln("\n{f}")
+        exit(1)
+    }
+    println("\nrelay: all good")
+}
