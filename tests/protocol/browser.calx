@@ -1,0 +1,116 @@
+module tests.protocol.browser
+
+// The agent's browser (PLAN.md, "The agent's browser"): the fake agent opens
+// a page through loom's tools, reads its outline, types into a field and
+// submits it, follows a link, goes back and takes a picture. Deleting the
+// agent stops its browser. Without Chrome, Edge or Chromium on the computer,
+// it says it was skipped.
+//
+//     calx tests/protocol/browser.calx
+import std.fs
+import std.process.{exit}
+import shared.obj.{Obj, at, str_at}
+import server.browser
+import tests.kit.{App, Instance, check, reply_text}
+
+fn reply_in(app: mut App, conversation: String) -> String ! Error {
+    loop {
+        let created = try app.until("event", "message.created")
+        let m = at(created, "message")
+        if str_at(m.copy(), "role") == some(String("agent")) and str_at(m.copy(), "conversation") == some(conversation.copy()) { return reply_text(m) }
+    }
+}
+
+fn say(app: mut App, conversation: String, cid: str, text: String) -> String ! Error {
+    try app.send(Obj.new().s("t", String("send")).s("cid", String(cid)).s("conversation", conversation.copy()).s("text", text).done())
+    return try reply_in(mut app, conversation)
+}
+
+// check, saying what came when it fails.
+fn see(passed: bool, what: str, got: String) ! Error {
+    if not passed { fail "failed: {what}, from:\n{got}" }
+    println("ok    {what}")
+}
+
+// The ref of the first line of an outline that has `part` in it.
+fn ref_of(outline: String, part: str) -> String {
+    for line in outline.lines() {
+        if line.contains(part) {
+            if let start = line.find("[ref=") {
+                let rest = line[start + 5..].copy()
+                if let end = rest.find("]") { return rest[..end].copy() }
+            }
+        }
+    }
+    return String()
+}
+
+// A file's address, as a browser opens it.
+fn file_url(path: String) -> String {
+    let p = path.replace("\\", "/")
+    return if p.starts_with("/") { "file://{p}" } else { "file:///{p}" }
+}
+
+fn run(i: Instance) ! Error {
+    let pages = try fs.temp_dir()
+    try fs.write_text("{pages}/shop.html", String(#"
+        <!doctype html><title>Shop</title><h1>Welcome</h1>
+        <form onsubmit="document.title = 'Sent ' + this.q.value; return false"><input name="q" aria-label="Search"><button>Go</button></form>
+        <a href="second.html">Next page</a>
+        "#))
+    try fs.write_text("{pages}/second.html", String("<!doctype html><title>Second</title><h1>Second page</h1>"))
+
+    var app = try App.connect(i.base.copy(), i.token.copy(), 0)
+    let made = try app.cmd("q_1", "agent.create", Obj.new().s("name", String("Browser")).s("acp_agent", String("fake")).s("instructions", String("You are a test.")).done())
+    let agent = str_at(at(at(made, "value"), "agent"), "id") ?? String()
+    let c = try app.cmd("q_2", "conversation.create", Obj.new().s("agent", agent.copy()).done())
+    let conversation = str_at(at(c, "value"), "conversation") ?? String()
+
+    let opened = try say(mut app, conversation.copy(), "m_1", "/mcp browser_open \{\"url\":\"{file_url("{pages}/shop.html")}\"\}")
+    try see(opened.starts_with("browser_open: Page: Shop") and opened.contains("heading \"Welcome\"") and opened.contains("textbox \"Search\""), "browser_open gives the page's outline", opened.copy())
+    let field = ref_of(opened.copy(), "textbox \"Search\"")
+    try check(field.len() > 0, "with a ref for the field")
+
+    let typed = try say(mut app, conversation.copy(), "m_2", "/mcp browser_type \{\"ref\":\"{field}\",\"text\":\"socks\",\"submit\":true\}")
+    try see(typed.contains("Page: Sent socks"), "browser_type types into the field and submits it", typed.copy())
+
+    let link = ref_of(typed, "link \"Next page\"")
+    let clicked = try say(mut app, conversation.copy(), "m_3", "/mcp browser_click \{\"ref\":\"{link}\"\}")
+    try see(clicked.contains("Page: Second") and clicked.contains("heading \"Second page\""), "browser_click follows a link", clicked.copy())
+
+    let stale = try say(mut app, conversation.copy(), "m_4", "/mcp browser_click \{\"ref\":\"e999\"\}")
+    try check(stale.starts_with("browser_click failed: There's no e999"), "a ref that isn't on the page is refused")
+
+    let back = try say(mut app, conversation.copy(), "m_5", String("/mcp browser_back"))
+    try see(back.contains("Page: ") and back.contains("heading \"Welcome\""), "browser_back goes back", back.copy())
+
+    let shot = try say(mut app, conversation.copy(), "m_6", String("/mcp browser_screenshot"))
+    try see(shot.starts_with("browser_screenshot: [image image/jpeg] Page: "), "browser_screenshot gives a picture", shot.copy())
+
+    let refused = try say(mut app, conversation.copy(), "m_7", String(#"/mcp browser_open {"url":"javascript:alert(1)"}"#))
+    try check(refused.starts_with("browser_open failed"), "it opens only pages")
+
+    let profile = "{i.data}/browsers"
+    try check(fs.is_dir(profile.copy()), "the browser's profile is in the instance's data")
+    _ = try app.cmd("q_3", "agent.delete", Obj.new().s("agent", agent).done())
+    app.close()
+    try fs.remove_dir_all(pages)
+}
+
+fn main() ! Error {
+    if browser.find() == none {
+        println("browser: skipped, there's no Chrome, Edge or Chromium here")
+        return
+    }
+    let inst = try Instance.start()
+    let failure: String? = match run(inst.copy()) {
+        ok => none,
+        err(e) => some("{e}"),
+    }
+    inst.stop()
+    if let f = failure {
+        eprintln("\n{f}")
+        exit(1)
+    }
+    println("\nbrowser: all good")
+}

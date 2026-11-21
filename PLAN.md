@@ -308,7 +308,38 @@ Each agent program runs as its own process. The instance reads each one on a thr
 
 - **Shell, files and web fetch** come from the agent itself.
 - **MCP servers** (Acta, Cloudflare, Composio for mail and the rest) are passed to the agent, which connects to them itself.
-- **A browser** comes through a browser MCP server, as OpenBot's screenshots do.
+- **A browser** is loom's own, below ([The agent's browser](#the-agents-browser)), so you can watch it and take over.
+
+## Agents that do things
+
+Ideas taken from OpenBot ([CopilotKit's](https://github.com/CopilotKit/OpenBot), MIT, and [nightly-labs'](https://github.com/nightly-labs/openbot), noncommercial, so ideas only), built loom's way: in Calx on the instance, drawn by the apps.
+
+### The agent's browser
+
+- **Each agent has a browser of its own**, which the instance starts when the agent first uses it: Chromium on a server, and on a PC the Edge or Chrome that's there (`LOOM_BROWSER` names another). It runs headless with a profile per agent in the agent's data, so logins stay between runs, and stops after ten idle minutes.
+- **The instance drives it over the DevTools protocol** (CDP, a WebSocket), and offers it as loom's tools: `browser_open`, `browser_snapshot` (the page as its accessibility tree, each thing to act on with a ref), `browser_click`, `browser_type`, `browser_press`, `browser_scroll`, `browser_back`, `browser_screenshot` and `browser_ask_person`. A ref goes stale when the page changes, and the tool says so.
+- **You can watch it.** An app showing an agent with its browser open asks for its screen (`browser.watch`), and the instance sends frames as they come (`browser.frame`, JPEG), only while someone watches. It's a panel beside the chat on the desktop, and a sheet on the phone.
+- **You can take over** for a login, a 2FA code or a CAPTCHA: the agent asks with `browser_ask_person`, or you press Take over. Your clicks and keys go to the page (`browser.input`), the agent's browser tools wait meanwhile, and Hand back lets it carry on, with the tool's result saying what you did.
+- **Secrets go in without the agent seeing them.** `browser_fill_secret` types one of the person's secrets into a field by name, and `browser_ask_secret` shows the person a card to type it into once. The agent is told it's filled, never what it was.
+
+### Work that waits its turn
+
+- **A message to a busy agent queues**, instead of being refused. The person sees the queue under the chat and can edit, reorder or drop what waits, or **steer**: send it into the running turn, which the agent reads at its next step.
+- **Long jobs are tasks**: each one a run of an agent with its own state, which survives a restart of the instance, and which the person can pause, resume, cancel or retry.
+- **Routines say when there's nothing to say.** A run can end with `routine_quiet` (no message, no notification), report a failure with `routine_failed`, or pause its own routine. A routine that fails five times in a row turns itself off and tells its person. A routine can post into its agent's chat or a thread of its own.
+- **A backup brain.** An agent can have a second program, which takes over when the first one's usage runs out, and the person can move a chat to another program with a handoff: the new one starts with a summary of what came before.
+
+### Rules, records and limits
+
+- **Rules can read what's touched.** Beside its permission mode, an agent can have rules on the site a browser tool visits, the file path, the command, an MCP tool's effect, and who started the turn (the person, a routine, or another agent): allow, ask or deny. Deny is checked first, and a rule that can't be read denies. The app has a "what if" tester.
+- **Every action is recorded before it happens**, then marked done or failed. A refusal names its rule, secrets show only as their length, and the log exports as CSV.
+- **Agents talking to agents have limits.** A chain of `message_agent` goes at most four deep and can't loop back to an agent already in it. An ask can carry the task, its bounds and what a good answer looks like. An agent can't give an agent it makes or changes more than it has itself.
+- **Anyone's agents can be sandboxed**, the owner's too: an agent marked Isolated runs in a sandbox like a member's ([Sandboxes](#sandboxes-where-members-agents-run)), and a sandbox can have an outbound allowlist, from everything to nothing.
+
+### Sharing and learning
+
+- **A shared folder** all of a person's agents can read and write, beside each one's own, and handing a file from one agent to another with `message_agent`.
+- **Teach a task.** Record yourself doing a task in the agent's browser, and the agent writes it up as a skill. Agents also propose skills and notes from past chats, which the person keeps or drops, and a note can be tied to a site, so the agent is shown it when it visits.
 
 ## Machines and devices
 
@@ -527,6 +558,7 @@ Not needed: a TLS server in Calx, since Caddy or Cloudflare handles TLS in front
 | 8 | Your own integrations | T3 Code threads, Acta, the VPS dashboard and deploys, built in | As they come up | It does things OpenBot can't |
 | 9 | iPhone extras | Widgets, Live Activities in the Dynamic Island, Action Button, Siri and Shortcuts, Control Center. The calendar, reminders, contacts, Health and Shortcuts as device tools | As they come up | Whenever you want, one by one |
 | 10 | For others | Inviting and managing people (invites, roles, budgets, member sandboxes), release builds for every platform, Docker image, docs, setting up agents and keys, a guide to Tailscale, the opt-in push relay with encrypted notifications, a guide to building the iPhone app with your own Apple account | — | Someone else runs their own instance, on a server or on their PC, and invites someone to it |
+| 11 | Agents that do things | Can come before 8–10. The agent's browser, watching it and taking over, secrets filled unseen; queued and steered messages, durable tasks, quieter routines, a backup brain; rules on what's touched, the record before each action, limits on agents messaging agents, sandboxes for anyone; the shared folder, teaching a task ([Agents that do things](#agents-that-do-things)) | — (WebSockets, processes and JSON are there) | An agent signs up for something in its browser, asks you to log in partway, you take over from your phone, and it finishes |
 
 ### How the work runs
 

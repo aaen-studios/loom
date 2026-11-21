@@ -1,0 +1,578 @@
+module server.browser
+
+// The agent's browser (PLAN.md, "The agent's browser"): a headless Chrome,
+// Edge or Chromium for each agent that uses one, which the instance drives
+// over the DevTools protocol. Each runs on a thread of its own, which starts
+// the browser on its first call, does each call in turn, and answers the
+// instance's loop with the call's MCP result, so the loop never waits on a
+// page. The loop stops one that's been idle, and the next call starts it again.
+//
+// The browser's profile, its cookies and logins among them, is in the
+// instance's data, not in the agent's folder, so the agent can't read it. A
+// guarded browser, a sandboxed person's, opens only http and https pages, and
+// loads nothing from the instance's computer or the network it's on.
+import std.env
+import std.fs
+import std.http.{Header, get}
+import std.http.websocket.{Message, WebSocket, connect}
+import std.json.{Json, parse}
+import std.process.{Child, Command, Stdio, which}
+import std.thread.{Task, sleep}
+import shared.obj.{Obj, at, bool_at, int_at, str_at}
+import server.store.{now}
+
+// How long a browser stays open with nothing to do: ten minutes.
+pub const IDLE_MS: i64 = 600000
+
+// How long one DevTools call may take, and how long a page may take to load.
+const CALL_MS: i64 = 30000
+const LOAD_MS: i64 = 15000
+// How much of a page's outline goes to the agent.
+const OUTLINE_MOST: usize = 40000
+
+// A tool call for the browser: browser_open's name is "open", and so on.
+pub struct Op {
+    pub call: String
+    pub name: String
+    pub args: Json
+}
+
+pub enum In {
+    Do(Op)
+    Stop
+}
+
+// A call's MCP result, for the agent `key` names.
+pub struct Done {
+    pub key: String
+    pub call: String
+    pub result: Json
+}
+
+struct Worker {
+    key: String
+    profile: String
+    guarded: bool
+    inbox: Receiver<In>
+    done: Sender<Done>
+    child: Child?
+    page: WebSocket?
+    next_id: i64
+    refs: Map<String, i64>    // e1, e2, ... -> the node each is, from the last outline
+}
+
+impl Task for Worker {
+    fn run(own self) {
+        var w = self
+        loop {
+            match unsafe { w.inbox.wait_for(1000000000) } {
+                some(In.Do(op)) => {
+                    let result = match w.op(op.name.copy(), op.args.copy()) {
+                        ok(r) => r,
+                        err(e) => {
+                            // A browser that's gone is started again on the next call.
+                            if not w.alive() { w.close() }
+                            error("{e}")
+                        },
+                    }
+                    w.done.send(Done { key: w.key.copy(), call: op.call.copy(), result: result })
+                },
+                some(In.Stop) => {
+                    w.close()
+                    return
+                },
+                none => w.drain(),
+            }
+        }
+    }
+}
+
+// Starts the thread for the agent `key` names, whose browser keeps its profile
+// in `profile`. Each call's result comes to `done`. The thread ends once it's
+// sent Stop, with its browser stopped.
+pub fn start(key: String, profile: String, guarded: bool, done: Sender<Done>) -> (Sender<In>, Thread) {
+    let inbox = Receiver<In>()
+    let to = inbox.sender()
+    let t = unsafe { Thread.spawn(Worker { key: key.copy(), profile: profile.copy(), guarded: guarded, inbox: inbox, done: done.copy(), child: none, page: none, next_id: 0, refs: Map<String, i64>() }) }
+    return (to, t)
+}
+
+// The browser to run: LOOM_BROWSER, or the first Chrome, Edge or Chromium found
+// where they're installed, or on PATH.
+pub fn find() -> String? {
+    if let set = env.variable(String("LOOM_BROWSER")) {
+        if set.trim().len() > 0 { return some(set.trim().copy()) }
+    }
+    var places = List<String>()
+    for base in ["PROGRAMFILES", "PROGRAMFILES(X86)", "LOCALAPPDATA"] {
+        if let root = env.variable(String(base)) {
+            places.push("{root}\\Google\\Chrome\\Application\\chrome.exe")
+            places.push("{root}\\Microsoft\\Edge\\Application\\msedge.exe")
+            places.push("{root}\\Chromium\\Application\\chrome.exe")
+        }
+    }
+    places.push(String("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"))
+    places.push(String("/Applications/Chromium.app/Contents/MacOS/Chromium"))
+    places.push(String("/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge"))
+    for p in places {
+        if fs.is_file(p.copy()) { return some(p.copy()) }
+    }
+    for name in ["chromium", "chromium-browser", "google-chrome", "google-chrome-stable", "microsoft-edge", "chrome"] {
+        if let found = which(String(name)) { return some(found) }
+    }
+    return none
+}
+
+fn text(t: String) -> Json {
+    return Obj.new().j("content", Json.Array([Obj.new().s("type", String("text")).s("text", t).done()])).done()
+}
+
+fn error(t: String) -> Json {
+    return Obj.new().j("content", Json.Array([Obj.new().s("type", String("text")).s("text", t).done()])).b("isError", true).done()
+}
+
+impl Worker {
+    fn alive(w: Worker) -> bool {
+        if let p = w.page { return p.is_open() }
+        return false
+    }
+
+    // Stops the browser and what it started.
+    fn close(w: mut Worker) {
+        if let p = w.page.take() { p.close() }
+        if let c = w.child {
+            c.kill_tree()
+            _ = c.wait_timeout(5000)
+        }
+        w.child = none
+        w.refs.clear()
+    }
+
+    // Takes the events the page sent meanwhile, which nothing here reads, and
+    // what the browser wrote, so it never waits on a full pipe.
+    fn drain(w: Worker) {
+        if let c = w.child {
+            while let _ = c.read_line(0) {}
+        }
+        if let p = w.page {
+            loop {
+                match p.receive(0) {
+                    ok(some(_)) => {},
+                    _ => break,
+                }
+            }
+        }
+    }
+
+    // Starts the browser, and opens the DevTools connection to its page.
+    fn open_browser(w: mut Worker) ! Error {
+        let exe = find() else fail "There's no Chrome, Edge or Chromium on the computer the instance runs on. Your person can install one, or set LOOM_BROWSER to the one to use."
+        try fs.make_dir_all(w.profile.copy())
+        let port = match w.launch(exe.copy(), true) {
+            ok(p) => p,
+            err(e) => {
+                // Linux may not let the browser make its sandbox, as Ubuntu's AppArmor
+                // doesn't for a Chrome it has no profile for, and a container doesn't.
+                // Then it runs without one, and says so.
+                if env.os() != "linux" or not "{e}".contains("sandbox") { fail "{e}" }
+                eprintln("loom: the browser can't make its sandbox here, so it runs without one: {e}")
+                try w.launch(exe, false)
+            },
+        }
+        var asked = get("http://127.0.0.1:{port}/json/list", List<Header>(), 10000, 4000000)
+        let got = try asked.wait()
+        let targets = try parse(String.from_utf8(got.body) ?? String())
+        var address = String()
+        if let Json.Array(list) = targets {
+            for t in list {
+                if address.len() == 0 and str_at(t.copy(), "type") == some(String("page")) { address = str_at(t, "webSocketDebuggerUrl") ?? String() }
+            }
+        }
+        if address.len() == 0 {
+            w.close()
+            fail "The browser started without a page."
+        }
+        w.page = some(try connect(address))
+        w.next_id = 0
+        // Headless Chrome says so in its user agent, and some sites turn it away.
+        let version = try w.call("Browser.getVersion", Obj.new().done())
+        let agent = (str_at(version, "userAgent") ?? String()).replace("HeadlessChrome", "Chrome")
+        _ = try w.call("Emulation.setUserAgentOverride", Obj.new().s("userAgent", agent).done())
+        _ = try w.call("Page.setDownloadBehavior", Obj.new().s("behavior", String("deny")).done())
+        if w.guarded {
+            var blocked = List<Json>()
+            for p in guarded_patterns() { blocked.push(Json.Str(p.copy())) }
+            _ = try w.call("Network.enable", Obj.new().done())
+            _ = try w.call("Network.setBlockedURLs", Obj.new().j("urls", Json.Array(blocked)).done())
+        }
+    }
+
+    // Starts the browser and gives the port it listens on, or fails with why it
+    // didn't start, in its own words.
+    fn launch(w: mut Worker, exe: String, sandbox: bool) -> String ! Error {
+        let port_file = "{w.profile}/DevToolsActivePort"
+        if fs.exists(port_file.copy()) { try fs.remove_file(port_file.copy()) }
+        var args: List<String> = ["--headless=new", "--remote-debugging-port=0", "--user-data-dir={w.profile}", "--no-first-run", "--no-default-browser-check", "--disable-background-networking", "--window-size=1280,800"]
+        if not sandbox { args.push(String("--no-sandbox")) }
+        args.push(String("about:blank"))
+        let child = try Command.new(exe).args(args).stdin(Stdio.Null).stdout(Stdio.Pipe).stderr(Stdio.Stdout).own_group().spawn()
+        // The browser writes the port it took, and its own address, once it listens.
+        var said = List<String>()
+        let until = now() + 20000
+        loop {
+            while let line = child.read_line(0) {
+                said.push(line)
+                // The first lines say why, as "No usable sandbox!"; a crash's stack comes after.
+                if said.len() > 8 { _ = said.pop() }
+            }
+            if let ok(some(t)) = fs.read_text(port_file.copy()) {
+                let lines = t.lines()
+                if lines.len() >= 2 {
+                    w.child = some(child)
+                    return lines[0].trim().copy()
+                }
+            }
+            if child.try_wait() != none or now() > until {
+                child.kill_tree()
+                _ = child.wait_timeout(5000)
+                let why = said.join(" ").trim().copy()
+                fail if why.len() > 0 { "The browser didn't start: {short(why, 600)}" } else { String("The browser didn't start.") }
+            }
+            unsafe { sleep(100000000) }
+        }
+    }
+
+    // One DevTools call, and its result. The page's events that come
+    // meanwhile are passed over.
+    fn call(w: mut Worker, method: str, params: Json) -> Json ! Error {
+        w.next_id += 1
+        let id = w.next_id
+        let p = w.page else fail "The browser isn't open."
+        try p.send_text("{Obj.new().i("id", id).s("method", String(method)).j("params", params).done()}")
+        let until = now() + CALL_MS
+        loop {
+            let left = until - now()
+            if left <= 0 { fail "The browser didn't answer {method} in time." }
+            let m = try p.receive(u32.wrap(left)) else continue
+            let Message.Text(t) = m else continue
+            let reply = try parse(t)
+            if int_at(reply.copy(), "id") != some(id) { continue }
+            if let e = reply.get(String("error")) { fail "{str_at(e, "message") ?? String("The browser refused it.")}" }
+            return at(reply, "result")
+        }
+    }
+
+    // Waits for the page to finish loading, after something that may have
+    // started a new one.
+    fn settle(w: mut Worker) {
+        unsafe { sleep(300000000) }
+        let until = now() + LOAD_MS
+        while now() < until {
+            match w.call("Runtime.evaluate", Obj.new().s("expression", String("document.readyState")).b("returnByValue", true).done()) {
+                ok(r) => if str_at(at(r, "result"), "value") == some(String("complete")) { return },
+                err(_) => {},
+            }
+            unsafe { sleep(200000000) }
+        }
+    }
+
+    // Where the page is: its title and address.
+    fn where(w: mut Worker) -> String ! Error {
+        let h = try w.call("Page.getNavigationHistory", Obj.new().done())
+        let k = int_at(h.copy(), "currentIndex") ?? 0
+        let entry = at(h, "entries").at(usize.wrap(k)) ?? Json.Null
+        return "{str_at(entry.copy(), "title") ?? String()} ({str_at(entry, "url") ?? String()})"
+    }
+
+    // The page as the agent reads it, with a ref for each part it can act on.
+    fn outline(w: mut Worker) -> String ! Error {
+        let tree = try w.call("Accessibility.getFullAXTree", Obj.new().done())
+        let Json.Array(nodes) = at(tree, "nodes") else fail "The browser gave no outline of the page."
+        w.refs.clear()
+        var t = outline_of(nodes, mut w.refs)
+        if t.len() > OUTLINE_MOST {
+            var cut = String()
+            for line in t.lines() {
+                if cut.len() + line.len() > OUTLINE_MOST { break }
+                cut.push_str(line)
+                cut.push('\n')
+            }
+            cut.push_str("(The page goes on past here.)")
+            t = cut
+        }
+        return "Page: {try w.where()}\n\n{t}"
+    }
+
+    // The node a ref names, from the last outline.
+    fn node(w: Worker, args: Json) -> i64 ! Error {
+        let r = str_at(args, "ref") ?? String()
+        let id = w.refs.get(r.copy()) else fail "There's no {r} on the page now. Take a new browser_snapshot, and use a ref from it."
+        return id
+    }
+
+    // The middle of a node on the screen, scrolled into view.
+    fn middle(w: mut Worker, id: i64) -> (f64, f64) ! Error {
+        match w.call("DOM.scrollIntoViewIfNeeded", Obj.new().i("backendNodeId", id).done()) {
+            ok(_) => {},
+            err(_) => {},
+        }
+        let box = try w.call("DOM.getBoxModel", Obj.new().i("backendNodeId", id).done())
+        let Json.Array(q) = at(at(box, "model"), "content") else fail "That isn't on the screen."
+        if q.len() < 8 { fail "That isn't on the screen." }
+        var x = 0.0
+        var y = 0.0
+        for k in 0usize..4 {
+            x += q[k * 2].as_f64() ?? 0.0
+            y += q[k * 2 + 1].as_f64() ?? 0.0
+        }
+        return (x / 4.0, y / 4.0)
+    }
+
+    fn mouse(w: mut Worker, kind: str, x: f64, y: f64, extra: own Obj) ! Error {
+        let params = extra.s("type", String(kind)).j("x", Json.Float(x)).j("y", Json.Float(y)).done()
+        _ = try w.call("Input.dispatchMouseEvent", params)
+    }
+
+    fn press_key(w: mut Worker, name: String) ! Error {
+        let (code, typed) = key_code(name.copy()) else fail "browser_press takes a key such as Enter, Tab, Escape, Backspace, ArrowDown or PageDown, or a single character."
+        var down = Obj.new().s("type", String(if typed.len() > 0 { "keyDown" } else { "rawKeyDown" })).s("key", name.copy()).i("windowsVirtualKeyCode", code)
+        if typed.len() > 0 { down = down.s("text", typed.copy()) }
+        _ = try w.call("Input.dispatchKeyEvent", down.done())
+        _ = try w.call("Input.dispatchKeyEvent", Obj.new().s("type", String("keyUp")).s("key", name).i("windowsVirtualKeyCode", code).done())
+    }
+
+    fn op(w: mut Worker, name: String, args: Json) -> Json ! Error {
+        if w.page == none { try w.open_browser() }
+        if name == "open" {
+            let url = (str_at(args, "url") ?? String()).trim().copy()
+            if let why = refused(url.copy(), w.guarded) { return error(why) }
+            let r = try w.call("Page.navigate", Obj.new().s("url", url.copy()).done())
+            if let failed = str_at(r, "errorText") { return error("Couldn't open {url}: {failed}.") }
+            w.settle()
+            return text(try w.outline())
+        }
+        if name == "snapshot" { return text(try w.outline()) }
+        if name == "click" {
+            let id = try w.node(args)
+            let (x, y) = try w.middle(id)
+            try w.mouse("mouseMoved", x, y, Obj.new())
+            try w.mouse("mousePressed", x, y, Obj.new().s("button", String("left")).i("clickCount", 1))
+            try w.mouse("mouseReleased", x, y, Obj.new().s("button", String("left")).i("clickCount", 1))
+            w.settle()
+            return text(try w.outline())
+        }
+        if name == "type" {
+            let id = try w.node(args.copy())
+            _ = try w.call("DOM.focus", Obj.new().i("backendNodeId", id).done())
+            if bool_at(args.copy(), "clear") ?? true {
+                let found = try w.call("DOM.resolveNode", Obj.new().i("backendNodeId", id).done())
+                let object = str_at(at(found, "object"), "objectId") ?? String()
+                _ = try w.call("Runtime.callFunctionOn", Obj.new().s("objectId", object).s("functionDeclaration", String(SELECT_ALL)).done())
+            }
+            let what = str_at(args.copy(), "text") ?? String()
+            if what.len() > 0 {
+                _ = try w.call("Input.insertText", Obj.new().s("text", what).done())
+            } else {
+                try w.press_key(String("Backspace"))
+            }
+            if bool_at(args, "submit") ?? false {
+                try w.press_key(String("Enter"))
+                w.settle()
+                return text(try w.outline())
+            }
+            return text(String("Typed."))
+        }
+        if name == "press" {
+            try w.press_key(str_at(args, "key") ?? String())
+            w.settle()
+            return text(try w.outline())
+        }
+        if name == "scroll" {
+            let down = str_at(args, "direction") != some(String("up"))
+            try w.mouse("mouseWheel", 640.0, 400.0, Obj.new().j("deltaX", Json.Float(0.0)).j("deltaY", Json.Float(if down { 600.0 } else { -600.0 })))
+            return text(String("Scrolled."))
+        }
+        if name == "back" {
+            let h = try w.call("Page.getNavigationHistory", Obj.new().done())
+            let k = int_at(h.copy(), "currentIndex") ?? 0
+            if k <= 0 { return error(String("There's no page to go back to.")) }
+            let entry = at(h, "entries").at(usize.wrap(k - 1)) ?? Json.Null
+            _ = try w.call("Page.navigateToHistoryEntry", Obj.new().i("entryId", int_at(entry, "id") ?? 0).done())
+            w.settle()
+            return text(try w.outline())
+        }
+        if name == "screenshot" {
+            let shot = try w.call("Page.captureScreenshot", Obj.new().s("format", String("jpeg")).i("quality", 70).done())
+            let image = Obj.new().s("type", String("image")).s("data", str_at(shot, "data") ?? String()).s("mimeType", String("image/jpeg")).done()
+            return Obj.new().j("content", Json.Array([image, Obj.new().s("type", String("text")).s("text", "Page: {try w.where()}").done()])).done()
+        }
+        return error("The browser has no {name}.")
+    }
+}
+
+// Selects what an element holds, so typing replaces it.
+const SELECT_ALL: str = "function() \{ if (this.select) \{ this.select(); return; \} const r = document.createRange(); r.selectNodeContents(this); const s = getSelection(); s.removeAllRanges(); s.addRange(r); \}"
+
+// A key's Windows virtual key code, which Chrome goes by, and the text it types.
+fn key_code(name: String) -> (i64, String)? {
+    let named: List<(str, i64, str)> = [("Enter", 13, "\r"), ("Tab", 9, ""), ("Escape", 27, ""), ("Backspace", 8, ""), ("Delete", 46, ""), ("ArrowUp", 38, ""), ("ArrowDown", 40, ""), ("ArrowLeft", 37, ""), ("ArrowRight", 39, ""), ("Home", 36, ""), ("End", 35, ""), ("PageUp", 33, ""), ("PageDown", 34, ""), ("Space", 32, " ")]
+    for (n, code, typed) in named {
+        if name == n { return some((code, String(typed))) }
+    }
+    var count = 0
+    var code: i64 = 0
+    for r in name.to_upper_root().runes() {
+        count += 1
+        if (r >= 'A' and r <= 'Z') or (r >= '0' and r <= '9') { code = i64(u32(r)) }
+    }
+    if count != 1 { return none }
+    return some((code, name.copy()))
+}
+
+// What a guarded browser loads nothing from: files, the computer itself, and
+// the private networks it may be on. Chrome matches them against each request's
+// address as it writes it, so 2130706433 is 127.0.0.1 here too.
+fn guarded_patterns() -> List<String> {
+    var p: List<String> = ["file:*", "*://localhost/*", "*://localhost:*", "*://*.localhost/*", "*://*.localhost:*", "*://127.*", "*://0.*", "*://10.*", "*://192.168.*", "*://169.254.*", "*://[*"]
+    for n in 16..32 { p.push("*://172.{n}.*") }
+    return p
+}
+
+// Why the browser won't open `url`, or none if it will. Every browser opens
+// web pages; a guarded one opens nothing else.
+pub fn refused(url: String, guarded: bool) -> String? {
+    if url.len() == 0 { return some(String("url is empty.")) }
+    let lower = url.to_lower_root()
+    let web = lower.starts_with("http://") or lower.starts_with("https://")
+    if guarded and not web { return some(String("The browser opens only http and https pages.")) }
+    if not web and not lower.starts_with("file:") and not lower.starts_with("about:") { return some(String("The browser opens http, https, file and about pages.")) }
+    return none
+}
+
+// The accessibility tree DevTools gives, as an outline: a line for each part
+// of the page that means something, indented under what it's in, each that can
+// be acted on with a ref. `refs` gets the node each ref is.
+pub fn outline_of(nodes: List<Json>, refs: mut Map<String, i64>) -> String {
+    var index = Map<String, usize>()
+    for (k, n) in nodes.enumerate() {
+        if let id = str_at(n.copy(), "nodeId") { index.insert(id, k) }
+    }
+    var lines = List<String>()
+    if nodes.len() > 0 { walk(nodes, index, 0, 0, String(), mut lines, mut refs) }
+    return lines.join("\n")
+}
+
+// Roles that only hold other parts, shown only when they're named.
+const PLAIN: str = " generic none presentation group LayoutTable LayoutTableRow LayoutTableCell section Section paragraph div ListMarker "
+// Roles whose words are what's in them, said by the text under them already.
+const SAID: str = " InlineTextBox LineBreak "
+
+fn walk(nodes: List<Json>, index: Map<String, usize>, k: usize, depth: usize, parent_name: String, lines: mut List<String>, refs: mut Map<String, i64>) {
+    let n = nodes[k].copy()
+    let role = str_at(at(n.copy(), "role"), "value") ?? String()
+    let name = (str_at(at(n.copy(), "name"), "value") ?? String()).trim().copy()
+    let ignored = bool_at(n.copy(), "ignored") ?? false
+    var shown = not ignored and role != "RootWebArea" and not SAID.contains(" {role} ")
+    if shown and PLAIN.contains(" {role} ") and name.len() == 0 { shown = false }
+    if shown and role == "StaticText" and (name.len() == 0 or name == parent_name) { shown = false }
+    var inner = depth
+    var named = parent_name.copy()
+    if shown {
+        var line = "{"  ".repeat(depth)}- "
+        if role == "StaticText" {
+            line.push_str("text \"{short(name.copy(), 300)}\"")
+        } else {
+            line.push_str(role.copy())
+            if name.len() > 0 { line.push_str(" \"{short(name.copy(), 200)}\"") }
+            if let value = str_at(at(n.copy(), "value"), "value") {
+                if value.len() > 0 { line.push_str(": {short(value, 200)}") }
+            }
+            line.push_str(states(at(n.copy(), "properties")))
+            if let backend = int_at(n.copy(), "backendDOMNodeId") {
+                let r = "e{refs.len() + 1}"
+                line.push_str(" [ref={r}]")
+                refs.insert(r, backend)
+            }
+        }
+        lines.push(line)
+        inner = depth + 1
+        named = name.copy()
+    }
+    if let Json.Array(children) = at(n, "childIds") {
+        for c in children {
+            if let id = c.as_str() {
+                if let child = index.get(id) { walk(nodes, index, child, inner, named.copy(), mut lines, mut refs) }
+            }
+        }
+    }
+}
+
+// The states of a node worth saying: checked, disabled and so on.
+fn states(properties: Json) -> String {
+    var out = String()
+    let Json.Array(list) = properties else return out
+    for p in list {
+        let name = str_at(p.copy(), "name") ?? String()
+        let value = at(at(p, "value"), "value")
+        if name == "checked" or name == "pressed" or name == "selected" or name == "expanded" {
+            if value == Json.Str(String("true")) or value == Json.Bool(true) { out.push_str(" [{name}]") }
+            if name == "checked" and value == Json.Str(String("mixed")) { out.push_str(" [mixed]") }
+        }
+        if (name == "disabled" or name == "required") and value == Json.Bool(true) { out.push_str(" [{name}]") }
+        if name == "level" {
+            if let l = value.as_i64() { out.push_str(" [level={l}]") }
+        }
+    }
+    return out
+}
+
+fn short(t: String, most: usize) -> String {
+    let one = t.replace("\n", " ")
+    if one.len() <= most { return one }
+    var cut = String()
+    for r in one.runes() {
+        if cut.len() >= most { break }
+        cut.push(r)
+    }
+    cut.push_str("…")
+    return cut
+}
+
+@test
+fn outlines_a_page() {
+    let tree = parse(#"
+        {"nodes":[
+        {"nodeId":"1","ignored":false,"role":{"value":"RootWebArea"},"name":{"value":"Shop"},"childIds":["2","3","6"],"backendDOMNodeId":1},
+        {"nodeId":"2","ignored":false,"role":{"value":"heading"},"name":{"value":"Welcome"},"properties":[{"name":"level","value":{"type":"integer","value":1}}],"childIds":["7"],"backendDOMNodeId":5},
+        {"nodeId":"7","ignored":false,"role":{"value":"StaticText"},"name":{"value":"Welcome"},"childIds":[]},
+        {"nodeId":"3","ignored":false,"role":{"value":"generic"},"name":{"value":""},"childIds":["4","5"],"backendDOMNodeId":8},
+        {"nodeId":"4","ignored":false,"role":{"value":"textbox"},"name":{"value":"Search"},"value":{"value":"socks"},"childIds":[],"backendDOMNodeId":9},
+        {"nodeId":"5","ignored":false,"role":{"value":"checkbox"},"name":{"value":"In stock"},"properties":[{"name":"checked","value":{"type":"tristate","value":"true"}}],"childIds":[],"backendDOMNodeId":10},
+        {"nodeId":"6","ignored":true,"role":{"value":"none"},"childIds":["8"]},
+        {"nodeId":"8","ignored":false,"role":{"value":"StaticText"},"name":{"value":"Free returns"},"childIds":[]}
+    ]}
+    "#)!
+    let Json.Array(nodes) = at(tree, "nodes") else return
+    var refs = Map<String, i64>()
+    let t = outline_of(nodes, mut refs)
+    assert(t == "- heading \"Welcome\" [level=1] [ref=e1]\n- textbox \"Search\": socks [ref=e2]\n- checkbox \"In stock\" [checked] [ref=e3]\n- text \"Free returns\"")
+    assert(refs.get(String("e2")) == some(9))
+    assert(refs.len() == 3)
+}
+
+@test
+fn a_guarded_browser_opens_only_the_web() {
+    assert(refused(String("https://example.com"), true) == none)
+    assert(refused(String("file:///etc/passwd"), true) != none)
+    assert(refused(String("file:///C:/notes.txt"), false) == none)
+    assert(refused(String("javascript:alert(1)"), false) != none)
+    assert(refused(String(""), false) != none)
+    assert(guarded_patterns().len() == 27)
+}
+
+@test
+fn keys_have_codes() {
+    assert(key_code(String("Enter")) == some((13, String("\r"))))
+    assert(key_code(String("a")) == some((65, String("a"))))
+    assert(key_code(String("Banana")) == none)
+}
