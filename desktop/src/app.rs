@@ -4481,6 +4481,33 @@ ACTA_KEY=secret:ACTA_KEY",
                                 }))
                                 .child(Textarea::new(&self.composer).appearance(false)),
                         )
+                        // Dictation: the system's own voice typing, into the composer.
+                        .when(cfg!(windows), |d| {
+                            d.child(
+                                div()
+                                    .id("dictate")
+                                    .size(px(32.0))
+                                    .flex_none()
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .rounded_full()
+                                    .text_color(p.ink_2)
+                                    .cursor_pointer()
+                                    .hover(move |s| s.bg(p.hover))
+                                    .child(Icon::new(Ico::Mic).small())
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.composer.update(cx, |c, cx| c.focus(window, cx));
+                                        if !shell::dictate() {
+                                            this.model.notices.push(
+                                                "Voice typing didn't start. Press Windows+H in the message box."
+                                                    .into(),
+                                            );
+                                            this.take_notice(cx);
+                                        }
+                                    })),
+                            )
+                        })
                         .child(
                             div()
                                 .id("send")
