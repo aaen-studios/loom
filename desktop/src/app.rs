@@ -7939,7 +7939,10 @@ ACTA_KEY=secret:ACTA_KEY",
             .or_else(|_| std::env::var("HOME"))
             .map(|h| std::path::Path::new(&h).join("Downloads"))
             .unwrap_or_else(|_| std::path::PathBuf::from("."));
-        let name = format!("loom activity {}.csv", chrono::Local::now().format("%Y-%m-%d"));
+        let name = format!(
+            "loom activity {}.csv",
+            chrono::Local::now().format("%Y-%m-%d")
+        );
         let picked = cx.prompt_for_new_path(&downloads, Some(&name));
         cx.spawn(async move |this, cx| {
             if let Ok(Ok(Some(path))) = picked.await {
