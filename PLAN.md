@@ -280,6 +280,7 @@ What comes back:
 - `session/update` notifications (message chunks, thoughts, tool calls, plans) become loom events, so every agent looks the same in the apps.
 - `session/request_permission` becomes an approval in the app, and a push on the phone.
 - After a restart, loom picks the session up again with `session/resume` or `session/load`, where the agent supports them.
+- **One endless chat.** There are no chat tabs: each agent's chat is one conversation that never ends. The agent's `usage_update` says how full the session's context is, and once it's 80% full, the next message goes to a fresh session instead. That one is given the newest of the chat (up to 24,000 characters) and told `search_messages` finds the rest, so nothing breaks for the person and the whole history isn't sent again. The chat keeps every message, and the activity log says when it happened.
 - Models and reasoning efforts the agent offers as session config options show in the app: a picker over the chat and on the agent's edit page. What the person picks is kept with the agent, and loom sets each session to it with `session/set_config_option` before its next prompt.
 - The usage the agent reports (tokens and cost) is counted per person.
 
