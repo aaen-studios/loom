@@ -3998,7 +3998,7 @@ ACTA_KEY=secret:ACTA_KEY",
                             for f in this.model.load_mcp() {
                                 this.send(f);
                             }
-                            if let Some(f) = this.model.edit_agent() {
+                            for f in this.model.edit_agent() {
                                 this.send(f);
                             }
                             if let Some(a) = this
@@ -5304,6 +5304,42 @@ ACTA_KEY=secret:ACTA_KEY",
 
     /// The edit page: an agent's name and instructions, and its earlier versions to go
     /// back to. Each save is a new revision, so nothing is lost.
+    /// A line of the agent's settings: what's counted, and how many; one that opens
+    /// where they're kept has a chevron.
+    fn stat_row(
+        &self,
+        id: &'static str,
+        label: &str,
+        value: String,
+        opens: bool,
+        on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+    ) -> Stateful<Div> {
+        let p = self.p;
+        div()
+            .id(id)
+            .flex()
+            .items_center()
+            .gap(px(space::M))
+            .px(px(space::S))
+            .py(px(space::S))
+            .rounded(px(radius::ROW))
+            .text_size(px(size::SMALL))
+            .when(opens, |d| {
+                d.cursor_pointer()
+                    .hover(move |s| s.bg(p.hover))
+                    .on_click(on_click)
+            })
+            .child(div().flex_1().text_color(p.ink).child(label.to_string()))
+            .child(div().text_color(p.ink_2).child(value))
+            .when(opens, |d| {
+                d.child(
+                    Icon::new(IconName::ChevronRight)
+                        .xsmall()
+                        .text_color(p.ink_3),
+                )
+            })
+    }
+
     fn edit_agent(&mut self, cx: &mut Context<Self>) -> Div {
         let p = self.p;
         let mut list = div().flex().flex_col();
@@ -5428,6 +5464,108 @@ ACTA_KEY=secret:ACTA_KEY",
                 picks.push(self.field(&o.name, row));
             }
         }
+        // Its thread's colour.
+        let color = self
+            .model
+            .editing
+            .as_ref()
+            .and_then(|id| self.model.agent(id))
+            .map(|a| a.color.clone())
+            .unwrap_or_default();
+        let mut swatches = div().flex().flex_wrap().items_center().gap(px(space::S));
+        for (i, c) in COLORS.iter().enumerate() {
+            let picked = color == *c;
+            let dot = thread::color(c, p.dark);
+            swatches = swatches.child(
+                div()
+                    .id(("edit-swatch", i))
+                    .size(px(28.0))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded_full()
+                    .border_2()
+                    .border_color(if picked { dot } else { transparent_black() })
+                    .cursor_pointer()
+                    .child(div().size(px(16.0)).rounded_full().bg(dot))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        if let Some(f) = this.model.set_color(c) {
+                            this.send(f);
+                        }
+                        cx.notify();
+                    })),
+            );
+        }
+        // What it knows and does, counted, each opening where it's kept.
+        let summary = self.model.summary.clone();
+        let count = |n: Option<i64>| n.map_or(String::from("…"), |n| n.to_string());
+        let memories = self.stat_row(
+            "edit-memories",
+            "Memories",
+            count(summary.as_ref().map(|s| s.memories)),
+            true,
+            cx.listener(|this, _, _, cx| {
+                this.model.notes.clear();
+                if let Some(f) = this.model.load_notes() {
+                    this.send(f);
+                }
+                this.show_side(Screen::Memory, cx);
+                cx.notify();
+            }),
+        );
+        let skills = self.stat_row(
+            "edit-skills",
+            "Skills",
+            count(summary.as_ref().map(|s| s.skills)),
+            true,
+            cx.listener(|this, _, _, cx| this.open(Screen::Skills, cx)),
+        );
+        let tables = self.stat_row(
+            "edit-tables",
+            "Tables",
+            count(summary.as_ref().map(|s| s.tables)),
+            true,
+            cx.listener(|this, _, _, cx| this.open(Screen::Tables, cx)),
+        );
+        let files = self.stat_row(
+            "edit-files",
+            "Files",
+            summary.as_ref().map_or(String::from("…"), |s| {
+                format!("{} · {}", s.files, model::size_of(s.bytes.max(0) as u64))
+            }),
+            false,
+            |_, _, _| {},
+        );
+        let routines = self.stat_row(
+            "edit-routines",
+            "Routines",
+            count(summary.as_ref().map(|s| s.routines)),
+            true,
+            cx.listener(|this, _, _, cx| this.open(Screen::Routines, cx)),
+        );
+        let usage = self.stat_row(
+            "edit-usage",
+            "Tokens",
+            summary.as_ref().map_or(String::from("…"), |s| {
+                format!(
+                    "{} today · {} this month",
+                    model::tokens_text(s.tokens_today),
+                    model::tokens_text(s.tokens_month)
+                )
+            }),
+            false,
+            |_, _, _| {},
+        );
+        let group = |title: &'static str| {
+            div()
+                .pt(px(space::M))
+                .border_t_1()
+                .border_color(p.line)
+                .text_size(px(size::CAPTION))
+                .font_weight(FontWeight::MEDIUM)
+                .text_color(p.ink_3)
+                .child(title)
+        };
         let page = div()
             .id("edit-agent")
             .size_full()
@@ -5444,8 +5582,12 @@ ACTA_KEY=secret:ACTA_KEY",
                     .max_w(px(520.0))
                     .flex()
                     .flex_col()
-                    .gap(px(space::XL))
+                    .gap(px(space::L))
+                    .child(group("Brain"))
                     .child(self.field("Name", Input::new(&self.name_in)))
+                    .children(picks)
+                    .child(self.field("Colour", swatches))
+                    .child(group("Knows"))
                     .child(self.field("Instructions", Textarea::new(&self.instructions_in)))
                     .child(
                         div()
@@ -5475,8 +5617,18 @@ ACTA_KEY=secret:ACTA_KEY",
                                 }),
                             )),
                     )
-                    .children(picks)
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .child(memories)
+                            .child(skills)
+                            .child(tables)
+                            .child(files),
+                    )
                     .child(self.field("MCP servers", servers))
+                    .child(group("Does"))
+                    .child(div().flex().flex_col().child(routines).child(usage))
                     .when(!self.model.revisions.is_empty(), |d| {
                         d.child(self.field("Versions", list))
                     }),

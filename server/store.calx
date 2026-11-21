@@ -601,6 +601,28 @@ impl Store {
         _ = try self.db.execute(String("INSERT INTO usage (user, program, run, input, output, total, shared, at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)"), [t(user), t(program), t(run), Value.Int(input), Value.Int(output), Value.Int(total), Value.Int(if shared { 1 } else { 0 }), Value.Int(now())])
     }
 
+    // What an agent has, counted: its own `memories`, the person's `skills`
+    // (every agent has them), the shared `tables` it owns, its `routines`, and
+    // the `tokens_today` and `tokens_month` its runs used since `day` and
+    // `month`.
+    pub fn agent_counts(self, user: String, agent: String, day: i64, month: i64) -> Json ! Error {
+        let used = "SELECT COALESCE(SUM(u.total), 0) FROM usage u JOIN runs r ON r.id = u.run JOIN conversations c ON c.id = r.conversation WHERE u.user = ? AND c.agent = ? AND u.at >= ?"
+        let memories = try self.count("SELECT COUNT(*) FROM memories WHERE user = ? AND agent = ?", [t(user.copy()), t(agent.copy())])
+        let skills = try self.count("SELECT COUNT(*) FROM skills WHERE user = ?", [t(user.copy())])
+        let tables = try self.count("SELECT COUNT(*) FROM shared_tables WHERE user = ? AND owner = ?", [t(user.copy()), t(agent.copy())])
+        let routines = try self.count("SELECT COUNT(*) FROM routines WHERE user = ? AND json_extract(json, '$.agent') = ?", [t(user.copy()), t(agent.copy())])
+        let today = try self.count(used, [t(user.copy()), t(agent.copy()), Value.Int(day)])
+        let this_month = try self.count(used, [t(user), t(agent), Value.Int(month)])
+        return Obj.new().i("memories", memories).i("skills", skills).i("tables", tables).i("routines", routines).i("tokens_today", today).i("tokens_month", this_month).done()
+    }
+
+    // The one number a query gives.
+    fn count(self, sql: str, args: List<Value>) -> i64 ! Error {
+        let row = try self.db.query_one(String(sql), args)
+        let r = row else return 0
+        return int(r[0].copy())
+    }
+
     // The tokens `user` used on `program`'s shared settings since `since`.
     pub fn shared_used(self, user: String, program: String, since: i64) -> i64 ! Error {
         let row = try self.db.query_one(String("SELECT COALESCE(SUM(total), 0) FROM usage WHERE user = ? AND program = ? AND shared = 1 AND at >= ?"), [t(user), t(program), Value.Int(since)])
