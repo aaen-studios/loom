@@ -1251,6 +1251,43 @@ pub struct Model {
     pub mcp_servers: Vec<McpServer>,
     pub secrets: Vec<String>,
     mcp_stale: bool,
+    /// The Import page: what each other app has on the instance's computer, once it has
+    /// said, the app being imported from while it is, and how the last import went.
+    pub import_sources: Vec<ImportSource>,
+    pub import_loading: bool,
+    pub importing: Option<String>,
+    pub import_done: Option<ImportDone>,
+}
+
+/// Another agent app the instance can import from, as import.scan says.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ImportSource {
+    /// openbot or grokbot.
+    pub from: String,
+    pub name: String,
+    pub found: bool,
+    /// What it holds, in words, such as "3 agents, 120 messages".
+    pub text: String,
+}
+
+impl ImportSource {
+    fn of(v: &Value) -> ImportSource {
+        ImportSource {
+            from: s(v, "from"),
+            name: s(v, "name"),
+            found: v.get("found").and_then(Value::as_bool).unwrap_or(false),
+            text: s(v, "text"),
+        }
+    }
+}
+
+/// How an import went: from where, what came in words, and what couldn't.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ImportDone {
+    pub from: String,
+    pub text: String,
+    pub not: Vec<String>,
+    pub error: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -2106,6 +2143,53 @@ impl Model {
             if let Some(e) = f.get("error") {
                 self.notices.push(s(e, "message"));
             }
+            return;
+        }
+        if id.starts_with("app.import_scan") {
+            self.import_loading = false;
+            self.import_sources = f
+                .pointer("/value/sources")
+                .and_then(Value::as_array)
+                .map(|ss| ss.iter().map(ImportSource::of).collect())
+                .unwrap_or_default();
+            if let Some(e) = f.get("error") {
+                self.import_done = Some(ImportDone {
+                    text: s(e, "message"),
+                    error: true,
+                    ..ImportDone::default()
+                });
+            }
+            return;
+        }
+        if id.starts_with("app.import_run") {
+            let from = self.importing.take().unwrap_or_default();
+            self.import_done = Some(match f.get("error") {
+                Some(e) => ImportDone {
+                    from,
+                    text: s(e, "message"),
+                    not: Vec::new(),
+                    error: true,
+                },
+                None => ImportDone {
+                    from,
+                    text: f
+                        .pointer("/value/text")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_string(),
+                    not: f
+                        .pointer("/value/not")
+                        .and_then(Value::as_array)
+                        .map(|ns| {
+                            ns.iter()
+                                .filter_map(Value::as_str)
+                                .map(str::to_string)
+                                .collect()
+                        })
+                        .unwrap_or_default(),
+                    error: false,
+                },
+            });
             return;
         }
         if id == "app.tasks" {
@@ -3287,6 +3371,21 @@ impl Model {
         json!({"t": "cmd", "id": id, "name": "acp.remove", "args": {"name": program}})
     }
 
+    /// Asks what OpenBot and Grok Bot keep on the instance's computer, for the Import page.
+    pub fn load_imports(&mut self) -> Value {
+        self.import_loading = true;
+        let id = self.id("app.import_scan");
+        json!({"t": "cmd", "id": id, "name": "import.scan"})
+    }
+
+    /// Imports from `from` (openbot or grokbot): the answer says what came.
+    pub fn run_import(&mut self, from: &str) -> Value {
+        self.importing = Some(from.to_string());
+        self.import_done = None;
+        let id = self.id("app.import_run");
+        json!({"t": "cmd", "id": id, "name": "import.run", "args": {"from": from}})
+    }
+
     /// Asks for the person's plugins, for the plugins page.
     pub fn load_plugins(&mut self) -> Value {
         let id = self.id("app.plugins");
@@ -3780,6 +3879,31 @@ mod tests {
             .last()
             .unwrap()
             .contains("moved to https://new.example"));
+    }
+
+    #[test]
+    fn imports_are_scanned_run_and_said() {
+        let mut m = Model::new();
+        let scan = m.load_imports();
+        assert_eq!(scan["name"], "import.scan");
+        assert!(m.import_loading);
+        m.result(&json!({"t": "result", "id": scan["id"], "ok": true, "value": {"sources": [
+            {"from": "openbot", "name": "OpenBot", "found": true, "text": "2 agents, 3 messages"},
+            {"from": "grokbot", "name": "Grok Bot", "found": false, "why": "There's no Grok Bot data here"}
+        ]}}));
+        assert!(!m.import_loading);
+        assert_eq!(m.import_sources.len(), 2);
+        assert!(m.import_sources[0].found && !m.import_sources[1].found);
+        let run = m.run_import("openbot");
+        assert_eq!(run["args"], json!({"from": "openbot"}));
+        assert_eq!(m.importing.as_deref(), Some("openbot"));
+        m.result(&json!({"t": "result", "id": run["id"], "ok": true, "value": {"text": "Brought over from OpenBot: 2 agents.", "not": ["Keys stay in OpenBot."]}}));
+        let done = m.import_done.clone().unwrap();
+        assert!(m.importing.is_none() && !done.error && done.from == "openbot");
+        assert_eq!(done.not, vec!["Keys stay in OpenBot.".to_string()]);
+        let again = m.run_import("grokbot");
+        m.result(&json!({"t": "result", "id": again["id"], "ok": false, "error": {"code": "not_allowed", "message": "Only the instance's owner imports"}}));
+        assert!(m.import_done.unwrap().error);
     }
 
     #[test]

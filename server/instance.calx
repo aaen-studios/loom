@@ -35,6 +35,7 @@ import server.files
 import server.files.{Thumb}
 import shared.files.{is_sha, safe_name}
 import server.hashing
+import server.importer
 import server.hashing.{Done, Job}
 import server.installer
 import server.move
@@ -1892,6 +1893,13 @@ impl Instance {
             err(_) => return some(http_error(400, "bad_request", String("The body isn't JSON."))),
         }
         if op == "ask" { return try i.script_ask(req.copy(), user, body) }
+        // loom import openbot|grokbot [PATH]: import.run, as the person's script.
+        if op == "import" {
+            return some(match try i.command(user, String("script"), String("import.run"), body) {
+                Answer.Value(v) => json_response(200, v),
+                Answer.Refused(code, message) => json_response(400, Obj.new().j("error", Obj.new().s("code", code).s("message", message).done()).done()),
+            })
+        }
         if op == "routine" {
             let key = (str_at(body, "routine") ?? String()).trim().copy()
             var id = String()
@@ -2658,6 +2666,381 @@ impl Instance {
         try i.event(user.copy(), "conversation.created", Obj.new().j("conversation", c).done())
         if device.starts_with("a_") { i.log(user, device.copy(), "agent", String("Branched a chat"), device) }
         return Answer.Value(Obj.new().s("conversation", made_id).done())
+    }
+
+    // import.scan and import.run (PLAN.md, "Importing from OpenBot and Grok
+    // Bot"): what another agent app keeps on the instance's computer, read by
+    // server.importer and brought into the person's data. Only the owner, since
+    // it reads the computer's files. What came before, by the other app's ids,
+    // isn't brought again.
+    fn import_cmd(i: mut Instance, user: String, device: String, name: String, args: Json) -> Answer ! Error {
+        if try i.store.role(user.copy()) != some(String("owner")) { return Answer.Refused(String("not_allowed"), String("Only the instance's owner imports from another app: it reads this computer's files.")) }
+        if name == "import.scan" {
+            var out = List<Json>()
+            for s in importer.SOURCES {
+                out.push(importer.scan(String(s), str_at(args.copy(), s) ?? String()))
+            }
+            return Answer.Value(Obj.new().j("sources", Json.Array(out)).done())
+        }
+        if name != "import.run" { return Answer.Refused(String("unknown_command"), "Version 1 has no command {name}.") }
+        let from = str_at(args.copy(), "from") ?? String()
+        var known = false
+        for s in importer.SOURCES {
+            if from == s { known = true }
+        }
+        if not known { return Answer.Refused(String("bad_request"), String("from is openbot or grokbot.")) }
+        let bundle = match importer.read(from.copy(), str_at(args, "path") ?? String()) {
+            ok(b) => b,
+            err(e) => return Answer.Refused(String("not_found"), "{e}"),
+        }
+        return Answer.Value(try i.bring(user, device, from, bundle))
+    }
+
+    // Writes what server.importer read into `user`'s data, and says what came.
+    fn bring(i: mut Instance, user: String, device: String, from: String, b: Json) -> Json ! Error {
+        let by = "import:{from}"
+        let app = importer.title(from.copy())
+        var left = List<String>()
+        if let Json.Array(notes) = at(b.copy(), "not") {
+            for n in notes { left.push(n.as_str() ?? String()) }
+        }
+        var came = Map<String, i64>()
+        var already: i64 = 0
+
+        // MCP servers, without their environment and headers.
+        if let Json.Array(list) = at(b.copy(), "mcp") {
+            for s in list {
+                let source_name = str_at(s.copy(), "name") ?? String()
+                if try i.store.imported(user.copy(), from.copy(), "mcp", source_name.copy()) != none {
+                    already += 1
+                    continue
+                }
+                let server_name = importer.skill_name(source_name.copy())
+                if server_name.len() == 0 or server_name == "loom" or try i.store.mcp_server(user.copy(), server_name.copy()) != none {
+                    left.push("MCP server {source_name}: you have one named {server_name} already, so yours stays.")
+                    continue
+                }
+                let command = str_at(s.copy(), "command") ?? String()
+                let address = str_at(s.copy(), "url") ?? String()
+                var server = Obj.new().s("name", server_name.copy())
+                if command.len() > 0 {
+                    server = server.s("command", command).j("args", at(s.copy(), "args")).j("env", Obj.new().done())
+                } else if address.starts_with("https://") or address.starts_with("http://") {
+                    server = server.s("url", address).j("headers", Obj.new().done())
+                } else {
+                    left.push("MCP server {source_name}: it has neither a command nor an address loom can use.")
+                    continue
+                }
+                try i.store.put_mcp_server(user.copy(), server.done())
+                try i.store.mark_imported(user.copy(), from.copy(), "mcp", source_name.copy(), server_name.copy())
+                if bool_at(s, "had_secrets") == some(true) { left.push("MCP server {server_name} came without its environment and headers: add its keys with mcp.put, as secrets.") }
+                tally(mut came, "mcp")
+            }
+        }
+
+        // Skills, for every agent of the person's.
+        var skills_changed = false
+        if let Json.Array(list) = at(b.copy(), "skills") {
+            for s in list {
+                let skill_name = str_at(s.copy(), "name") ?? String()
+                if try i.store.imported(user.copy(), from.copy(), "skill", skill_name.copy()) != none {
+                    already += 1
+                    continue
+                }
+                if not valid_skill(skill_name.copy()) { continue }
+                if try i.store.skill(user.copy(), skill_name.copy()) != none {
+                    left.push("Skill {skill_name}: you have one by that name already, so yours stays.")
+                    continue
+                }
+                try i.store.put_skill(user.copy(), skill_name.copy(), str_at(s.copy(), "description") ?? String(), str_at(s, "body") ?? String())
+                try i.store.mark_imported(user.copy(), from.copy(), "skill", skill_name.copy(), skill_name)
+                skills_changed = true
+                tally(mut came, "skills")
+            }
+        }
+
+        // Agents, each on the nearest agent program here.
+        var agents = Map<String, String>()    // the other app's id → loom's
+        let pin_base = now()
+        if let Json.Array(list) = at(b.copy(), "agents") {
+            for a in list {
+                let source_id = str_at(a.copy(), "id") ?? String()
+                let agent_name = str_at(a.copy(), "name") ?? String("Agent")
+                if let had = try i.store.imported(user.copy(), from.copy(), "agent", source_id.copy()) {
+                    if try i.store.agent(user.copy(), had.copy()) != none {
+                        agents.insert(source_id, had)
+                        already += 1
+                        continue
+                    }
+                }
+                let program = try i.import_program(str_at(a.copy(), "provider") ?? String()) else {
+                    left.push("Agent {agent_name}: there's no agent program on this instance to run it on. Install one on the Brains page, then import again.")
+                    continue
+                }
+                let id = try i.store.new_id("a")
+                let count_now = (try i.store.agents(user.copy())).len()
+                let color = str_at(a.copy(), "color") ?? String()
+                var config = Obj.new()
+                let model = str_at(a.copy(), "model") ?? String()
+                if model.len() > 0 { config = config.s("model", model) }
+                let effort = str_at(a.copy(), "effort") ?? String()
+                if effort.len() > 0 { config = config.s("effort", effort) }
+                var agent = Obj.new().s("id", id.copy()).s("name", agent_name.copy()).s("color", if color.len() > 0 { color } else { String(COLORS[count_now % COLORS.len()]) }).s("acp_agent", program).s("instructions", str_at(a.copy(), "instructions") ?? String()).j("mcp", Json.Array(List<Json>())).s("permission", String("ask")).j("config", config.done()).i("revision", 1).i("at", now())
+                if bool_at(a.copy(), "pinned") == some(true) { agent = agent.i("pinned", pin_base + (int_at(a, "pin_order") ?? 0)) }
+                let made = agent.done()
+                try i.store.put_agent(user.copy(), made.copy(), by.copy())
+                try i.store.mark_imported(user.copy(), from.copy(), "agent", source_id.copy(), id.copy())
+                i.write_instructions(user.copy(), made.copy())
+                i.write_skills(user.copy(), i.agent_folder(user.copy(), made.copy()))
+                try i.event(user.copy(), "agent.created", Obj.new().j("agent", made).done())
+                agents.insert(source_id, id)
+                tally(mut came, "agents")
+            }
+        }
+        if skills_changed { i.sync_skills(user.copy()) }
+
+        // Routines, on loom's schedules.
+        var routines_made = Map<String, String>()
+        if let Json.Array(list) = at(b.copy(), "routines") {
+            for r in list {
+                let source_id = str_at(r.copy(), "id") ?? String()
+                if let had = try i.store.imported(user.copy(), from.copy(), "routine", source_id.copy()) {
+                    routines_made.insert(source_id, had)
+                    already += 1
+                    continue
+                }
+                let routine_name = str_at(r.copy(), "name") ?? String("Routine")
+                let agent = if let a = agents.find(str_at(r.copy(), "agent") ?? String()) { a.copy() } else { String() }
+                if agent.len() == 0 {
+                    left.push("Routine {routine_name}: its agent didn't come, so it stayed.")
+                    continue
+                }
+                var tz = str_at(r.copy(), "tz") ?? String()
+                if not routines.known_zone(tz.copy()) { tz = String() }
+                let put = Obj.new().s("name", cut_short(routine_name.copy(), 100)).s("agent", agent).s("prompt", str_at(r.copy(), "prompt") ?? String()).j("schedule", at(r.copy(), "schedule")).s("tz", tz).b("on", bool_at(r.copy(), "on") ?? true).b("catch_up", bool_at(r.copy(), "catch_up") ?? false).s("post", str_at(r, "post") ?? String("chat")).done()
+                match try i.put_routine(user.copy(), device.copy(), put) {
+                    Answer.Value(v) => {
+                        let id = str_at(at(v, "routine"), "id") ?? String()
+                        try i.store.mark_imported(user.copy(), from.copy(), "routine", source_id.copy(), id.copy())
+                        routines_made.insert(source_id, id)
+                        tally(mut came, "routines")
+                    },
+                    Answer.Refused(_, why) => left.push("Routine {routine_name}: {why}"),
+                }
+            }
+        }
+
+        // Conversations and their messages, with their own times.
+        var conversations = Map<String, String>()
+        var fresh = List<String>()    // the conversations made now, to announce
+        var newest = Map<String, List<Json>>()    // and the messages each got
+        var missing_files: i64 = 0
+        if let Json.Array(list) = at(b.copy(), "conversations") {
+            for c in list {
+                let source_id = str_at(c.copy(), "id") ?? String()
+                let agent = if let a = agents.find(str_at(c.copy(), "agent") ?? String()) { a.copy() } else { String() }
+                if agent.len() == 0 { continue }
+                var conversation = String()
+                if let had = try i.store.imported(user.copy(), from.copy(), "conversation", source_id.copy()) {
+                    if try i.store.conversation(user.copy(), had.copy()) != none { conversation = had }
+                }
+                if conversation.len() == 0 {
+                    let title = str_at(c.copy(), "title") ?? String()
+                    let made = try i.store.add_conversation_at(user.copy(), agent.copy(), title, int_at(c.copy(), "at") ?? now())
+                    conversation = str_at(made, "id") ?? String()
+                    try i.store.mark_imported(user.copy(), from.copy(), "conversation", source_id.copy(), conversation.copy())
+                    fresh.push(conversation.copy())
+                    tally(mut came, "conversations")
+                } else {
+                    already += 1
+                }
+                conversations.insert(source_id, conversation.copy())
+                var got = List<Json>()
+                try i.store.begin()
+                if let Json.Array(ms) = at(c, "messages") {
+                    for m in ms {
+                        let message_source = str_at(m.copy(), "id") ?? String()
+                        if try i.store.imported(user.copy(), from.copy(), "message", message_source.copy()) != none { continue }
+                        var blocks = List<Json>()
+                        let words = str_at(m.copy(), "text") ?? String()
+                        if words.trim().len() > 0 { blocks.push(Obj.new().s("kind", String("text")).s("text", words).done()) }
+                        if let Json.Array(fs_list) = at(m.copy(), "files") {
+                            for f in fs_list {
+                                match try i.import_file(user.copy(), f) {
+                                    some(block) => {
+                                        blocks.push(block)
+                                        tally(mut came, "files")
+                                    },
+                                    none => missing_files += 1,
+                                }
+                            }
+                        }
+                        if blocks.len() == 0 { continue }
+                        let id = try i.store.new_id("msg")
+                        let role = str_at(m.copy(), "role") ?? String("agent")
+                        var message = Obj.new().s("id", id.copy()).s("conversation", conversation.copy()).s("role", role.copy())
+                        message = if role == "person" { message.s("from", by.copy()) } else { message.s("agent", agent.copy()) }
+                        message = message.i("at", int_at(m.copy(), "at") ?? now()).j("blocks", Json.Array(blocks))
+                        if let p = int_at(m, "pinned") {
+                            message = message.j("pinned", Obj.new().i("at", p).s("by", by.copy()).done())
+                            tally(mut came, "pins")
+                        }
+                        let done = message.done()
+                        try i.store.put_message(user.copy(), done.copy())
+                        try i.store.mark_imported(user.copy(), from.copy(), "message", message_source, id)
+                        got.push(done)
+                        tally(mut came, "messages")
+                    }
+                }
+                try i.store.commit()
+                newest.insert(conversation, got)
+            }
+        }
+        if missing_files > 0 { left.push("{missing_files} file{if missing_files == 1 { "" } else { "s" }} named in the chats {if missing_files == 1 { "isn't" } else { "aren't" }} on this computer any more, or {if missing_files == 1 { "is" } else { "are" }} over 25 MB, so {if missing_files == 1 { "it" } else { "they" }} didn't come.") }
+        // Where each thread beside a chat goes: a branch of the chat, or a routine's own.
+        if let Json.Array(list) = at(b.copy(), "conversations") {
+            for c in list {
+                let source_id = str_at(c.copy(), "id") ?? String()
+                let mine = if let x = conversations.find(source_id) { x.copy() } else { continue }
+                if not fresh.contains(mine.copy()) { continue }
+                if let routine = str_at(c.copy(), "routine") {
+                    if let r = routines_made.find(routine) { try i.store.mark_routine_thread(user.copy(), mine.copy(), r.copy()) }
+                    continue
+                }
+                let of = str_at(c.copy(), "branch_of") ?? String()
+                let at_message = str_at(c, "branch_at") ?? String()
+                if of.len() == 0 { continue }
+                let chat = if let x = conversations.find(of) { x.copy() } else { continue }
+                let message = try i.store.imported(user.copy(), from.copy(), "message", at_message) else continue
+                try i.store.add_branch(user.copy(), mine.copy(), chat, message)
+                try i.store.branch_handed(mine)
+            }
+        }
+        // Every device hears of the new conversations, and of the newest of
+        // each one's messages, as a snapshot gives them; older ones come with messages.list.
+        for id in fresh {
+            if let c = try i.store.conversation(user.copy(), id.copy()) { try i.event(user.copy(), "conversation.created", Obj.new().j("conversation", c).done()) }
+        }
+        for (conversation, got) in newest {
+            let from_k = if got.len() > IMPORT_ANNOUNCED { got.len() - IMPORT_ANNOUNCED } else { 0 }
+            for k in from_k..got.len() {
+                try i.event(user.copy(), "message.created", Obj.new().s("conversation", conversation.copy()).j("message", got[k].copy()).done())
+            }
+        }
+
+        // Memories, each its agent's.
+        if let Json.Array(list) = at(b.copy(), "memories") {
+            for m in list {
+                let source_id = str_at(m.copy(), "id") ?? String()
+                if try i.store.imported(user.copy(), from.copy(), "memory", source_id.copy()) != none {
+                    already += 1
+                    continue
+                }
+                let agent = if let a = agents.find(str_at(m.copy(), "agent") ?? String()) { a.copy() } else { continue }
+                let what = (str_at(m.copy(), "text") ?? String()).trim().copy()
+                if what.len() == 0 { continue }
+                let id = try i.store.remember_at(user.copy(), agent, what, by.copy(), int_at(m, "at") ?? now())
+                try i.store.mark_imported(user.copy(), from.copy(), "memory", source_id, "{id}")
+                tally(mut came, "memories")
+            }
+        }
+
+        // Shared tables, each its owner agent's, with their rows.
+        if let Json.Array(list) = at(b.copy(), "tables") {
+            for t in list {
+                let table = str_at(t.copy(), "name") ?? String()
+                if try i.store.imported(user.copy(), from.copy(), "table", table.copy()) == none {
+                    if try i.store.shared_table(user.copy(), table.copy()) != none {
+                        left.push("Table {table}: you have one by that name already, so yours stays.")
+                        continue
+                    }
+                    if (try i.store.shared_tables(user.copy())).len() >= tables.TABLES_MOST {
+                        left.push("Table {table}: you have {tables.TABLES_MOST} tables, as many as you can.")
+                        continue
+                    }
+                    let owner = if let a = agents.find(str_at(t.copy(), "owner") ?? String()) { a.copy() } else { String() }
+                    try i.store.add_shared_table(user.copy(), table.copy(), str_at(t.copy(), "description") ?? String(), owner)
+                    try i.store.mark_imported(user.copy(), from.copy(), "table", table.copy(), table.copy())
+                    tally(mut came, "tables")
+                } else {
+                    already += 1
+                }
+                let owner = (try i.store.shared_table(user.copy(), table.copy())).map(|x| str_at(x, "owner") ?? String()) ?? String()
+                var full = false
+                var big: i64 = 0
+                try i.store.begin()
+                if let Json.Array(rs) = at(t, "rows") {
+                    for r in rs {
+                        let key = "{table}:{str_at(r.copy(), "id") ?? String()}"
+                        if try i.store.imported(user.copy(), from.copy(), "row", key.copy()) != none { continue }
+                        let data = "{at(r, "data")}"
+                        if data.len() > tables.ROW_MOST {
+                            big += 1
+                            continue
+                        }
+                        if try i.store.shared_row_count(user.copy()) >= tables.ROWS_MOST {
+                            full = true
+                            break
+                        }
+                        let id = try i.store.add_shared_row(user.copy(), table.copy(), data, owner.copy())
+                        try i.store.mark_imported(user.copy(), from.copy(), "row", key, "{id}")
+                        tally(mut came, "rows")
+                    }
+                }
+                try i.store.commit()
+                if big > 0 { left.push("Table {table}: {big} row{if big == 1 { " was" } else { "s were" }} over {tables.ROW_MOST} bytes, loom's most.") }
+                if full { left.push("Table {table}: you have {tables.ROWS_MOST} rows, as many as you can, so the rest stayed.") }
+                try i.event(user.copy(), "table.changed", Obj.new().s("table", table).s("by", device.copy()).done())
+            }
+        }
+
+        // What came, in words.
+        var counts = Obj.new()
+        let kinds: List<str> = ["agents", "conversations", "messages", "files", "pins", "memories", "routines", "skills", "mcp", "tables", "rows"]
+        for k in kinds {
+            counts = counts.i(k, came.get(String(k)) ?? 0)
+        }
+        let counted = counts.done()
+        let said = importer.summary(counted.copy())
+        let text = if said == "Nothing to bring over" { if already > 0 { "Everything from {app} is here already." } else { "Nothing came from {app}." } } else { "Brought over from {app}: {said}." }
+        i.log(user.copy(), String(), "import", text.copy(), device.copy())
+        return Obj.new().s("from", from).s("where", str_at(b, "where") ?? String()).j("came", counted).i("already", already).j("not", Json.Array(left.map(|s| Json.Str(s.copy())))).s("text", text).done()
+    }
+
+    // The agent program an imported agent runs on: one named for its provider
+    // (Claude, Codex, Gemini, OpenCode) if there is one here, or the first there
+    // is, or none when there's none at all.
+    fn import_program(i: Instance, provider: String) -> String? ! Error {
+        let programs = try i.store.acp_agents()
+        if programs.len() == 0 { return none }
+        let p = provider.to_lower_root()
+        let families: List<(str, str)> = [("claude", "claude"), ("anthropic", "claude"), ("codex", "codex"), ("openai", "codex"), ("gpt", "codex"), ("gemini", "gemini"), ("google", "gemini"), ("opencode", "opencode")]
+        for (word, family) in families {
+            if not p.contains(word) { continue }
+            for a in programs {
+                if a.name.contains(family) or a.source.contains(family) { return some(a.name.copy()) }
+            }
+        }
+        return some(programs[0].name.copy())
+    }
+
+    // A file a message named, kept as the person's and given as a file block:
+    // none when it isn't on this computer any more, is over 25 MB, or looks like a secret.
+    fn import_file(i: mut Instance, user: String, f: Json) -> Json? ! Error {
+        let path = str_at(f.copy(), "path") ?? String()
+        if path.len() == 0 or importer.secret_file(path.copy()) or not fs.is_file(path.copy()) { return none }
+        let size = match fs.metadata(path.copy()) {
+            ok(m) => m.size,
+            err(_) => return none,
+        }
+        if size == 0 or size > importer.FILE_MOST { return none }
+        let data = match fs.read(path.copy()) {
+            ok(d) => d,
+            err(_) => return none,
+        }
+        let file_name = safe_name(str_at(f, "name") ?? String("file"))
+        let mime = files.sniff(data.copy()) ?? content_type(file_name.copy())
+        return some(try i.agent_file(user, file_name, mime, data))
     }
 
     // table.*: the person's shared tables (PLAN.md, "Shared tables"). Every
@@ -5659,6 +6042,7 @@ impl Instance {
         }
         if name == "conversation.branch" { return try i.branch(user, device, args) }
         if name.starts_with("table.") { return try i.table_command(user, device, name, args) }
+        if name.starts_with("import.") { return try i.import_cmd(user, device, name, args) }
         if name == "routine.stop" { return try i.stop_flow(user, str_at(args, "id") ?? String()) }
         if name == "flow.list" {
             var out = List<Json>()
@@ -6227,6 +6611,16 @@ impl Instance {
         }
         return (count, bytes_in)
     }
+}
+
+// How many of each imported conversation's newest messages every device hears of
+// at once; older ones come with messages.list.
+const IMPORT_ANNOUNCED: usize = 50
+
+// One more of `key` in a count.
+fn tally(m: mut Map<String, i64>, key: str) {
+    let n = m.get(String(key)) ?? 0
+    m.insert(String(key), n + 1)
 }
 
 // The most files agent.summary counts in an agent's folder.

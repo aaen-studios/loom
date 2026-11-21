@@ -1,0 +1,256 @@
+module tests.protocol.imports
+
+// Importing from OpenBot and Grok Bot (PLAN.md, "Importing from OpenBot and
+// Grok Bot"), against small copies of their data folders made here: an
+// OpenBot-like openbot.db with a workspace, shared tables and a skill bundle,
+// and a Grok Bot-like folder of cache blobs. import.scan finds them, import.run
+// brings each kind over with its own times, none of their secrets come, and a
+// second import brings nothing twice. Only the owner imports, and loom import
+// does the same from the command line.
+//
+//     calx tests/protocol/imports.calx
+import std.fs
+import std.json.{Json}
+import std.process.{exit}
+import std.sqlite.{Database, Value}
+import std.time.{Timestamp}
+import std.zip.{Writer}
+import shared.obj.{Obj, at, int_at, str_at}
+import tests.kit.{App, Instance, check, loom, reply_text}
+
+// What the copies hold that must never come over.
+const SECRETS: [str; 7] = ["VAULT_SECRET_VALUE", "API_KEY_SECRET", "MCP_ENV_SECRET", "MCP_HEADER_SECRET", "GROK_SECRET", "GROK_ENV_SECRET", "GROK_HEADER_SECRET"]
+
+const OPENBOT_SCHEMA: str = #"
+CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY);
+INSERT INTO schema_migrations VALUES (66);
+CREATE TABLE projection_agents (agent_id TEXT PRIMARY KEY, thread_id TEXT, model TEXT NOT NULL, updated_at TEXT, sort_order INTEGER NOT NULL, agent_json TEXT NOT NULL, last_event_sequence INTEGER NOT NULL DEFAULT 0);
+CREATE TABLE projection_threads (thread_id TEXT PRIMARY KEY, agent_id TEXT NOT NULL, title TEXT NOT NULL, active_turn_id TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, last_event_sequence INTEGER NOT NULL DEFAULT 0);
+CREATE TABLE projection_agent_threads (thread_id TEXT PRIMARY KEY, agent_id TEXT NOT NULL, legacy_task_id TEXT, origin TEXT NOT NULL, title TEXT NOT NULL, title_source TEXT NOT NULL, outcome TEXT, error TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, archived_at TEXT, last_event_sequence INTEGER NOT NULL DEFAULT 0, branch_source_thread_id TEXT, branch_source_message_id TEXT, branch_through_message_id TEXT, routine_id TEXT);
+CREATE TABLE projection_thread_messages (thread_id TEXT NOT NULL, message_id TEXT NOT NULL, turn_id TEXT, author TEXT NOT NULL, status TEXT NOT NULL, item_type TEXT, created_at TEXT NOT NULL, ordinal INTEGER NOT NULL, message_json TEXT NOT NULL, last_event_sequence INTEGER NOT NULL DEFAULT 0);
+CREATE TABLE projection_pinned_thread_messages (thread_id TEXT NOT NULL, message_id TEXT NOT NULL, pinned_at TEXT NOT NULL, pinned_by_kind TEXT NOT NULL, pinned_by_id TEXT, pinned_by_name TEXT);
+CREATE TABLE projection_agent_memories (memory_id TEXT PRIMARY KEY, agent_id TEXT NOT NULL, text TEXT NOT NULL, normalized_text TEXT NOT NULL, origin TEXT NOT NULL, source_turn_id TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, last_event_sequence INTEGER NOT NULL DEFAULT 0, site TEXT);
+CREATE TABLE projection_agent_routines (routine_id TEXT PRIMARY KEY, agent_id TEXT NOT NULL, name TEXT NOT NULL, instruction TEXT NOT NULL, active INTEGER NOT NULL, timezone TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, last_event_sequence INTEGER NOT NULL DEFAULT 0, limit_policy TEXT NOT NULL DEFAULT 'wait', missed_policy TEXT NOT NULL DEFAULT 'skip', run_in TEXT NOT NULL DEFAULT 'chat');
+CREATE TABLE projection_routine_triggers (trigger_id TEXT PRIMARY KEY, routine_id TEXT NOT NULL, schedule_json TEXT NOT NULL, next_run_at TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, last_event_sequence INTEGER NOT NULL DEFAULT 0);
+CREATE TABLE projection_mcp_servers (mcp_server_id TEXT PRIMARY KEY, name TEXT NOT NULL, transport TEXT NOT NULL, enabled INTEGER NOT NULL, command TEXT NOT NULL, args_json TEXT NOT NULL, env_json TEXT NOT NULL, env_passthrough_json TEXT NOT NULL, working_directory TEXT NOT NULL, url TEXT NOT NULL, headers_json TEXT NOT NULL, position INTEGER NOT NULL);
+CREATE TABLE projection_attachments (attachment_id TEXT PRIMARY KEY, owner_kind TEXT NOT NULL, owner_id TEXT NOT NULL, name TEXT NOT NULL, path TEXT NOT NULL, metadata_json TEXT NOT NULL, created_at TEXT NOT NULL, last_event_sequence INTEGER NOT NULL DEFAULT 0);
+INSERT INTO projection_threads VALUES ('th_main', 'ag_main', 'Main', NULL, '2026-01-02T03:00:00.000Z', '2026-01-02T03:10:00.000Z', 1);
+INSERT INTO projection_threads VALUES ('th_side', 'ag_main', 'A side job', NULL, '2026-01-02T03:04:07.000Z', '2026-01-02T03:06:00.000Z', 1);
+INSERT INTO projection_agent_threads (thread_id, agent_id, origin, title, title_source, created_at, updated_at) VALUES ('th_side', 'ag_main', 'user', 'A side job', 'user', '2026-01-02T03:05:00.000Z', '2026-01-02T03:06:00.000Z');
+INSERT INTO projection_thread_messages VALUES ('th_main', 'm1', 't1', 'user', 'done', 'message', '2026-01-02T03:04:05.000Z', 1, '{"id":"m1","author":"user","text":"Hello there","source":"user","status":"done"}', 1);
+INSERT INTO projection_thread_messages VALUES ('th_main', 'm2', 't1', 'assistant', 'done', 'message', '2026-01-02T03:04:09.000Z', 2, '{"id":"m2","author":"assistant","text":"Hi! Here is the report.","source":"assistant","status":"done"}', 1);
+INSERT INTO projection_thread_messages VALUES ('th_main', 'm3', 't1', 'system', 'done', 'message', '2026-01-02T03:04:10.000Z', 3, '{"id":"m3","author":"system","text":"Compacted","source":"system"}', 1);
+INSERT INTO projection_thread_messages VALUES ('th_side', 's1', 't2', 'user', 'done', 'message', '2026-01-02T03:05:30.000Z', 1, '{"id":"s1","author":"user","text":"Do the side job","source":"user"}', 1);
+INSERT INTO projection_pinned_thread_messages VALUES ('th_main', 'm2', '2026-01-02T04:00:00.000Z', 'person', NULL, NULL);
+INSERT INTO projection_agent_memories VALUES ('mem1', 'ag_main', 'Elliot likes short answers', 'elliot likes short answers', 'manual', NULL, '2026-01-01T10:00:00.000Z', '2026-01-01T10:00:00.000Z', 1, NULL);
+INSERT INTO projection_agent_routines VALUES ('rt1', 'ag_main', 'Morning brief', 'Write the morning brief', 1, 'Europe/Oslo', '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z', 1, 'wait', 'run-once', 'chat');
+INSERT INTO projection_routine_triggers VALUES ('tr1', 'rt1', '{"kind":"daily","time":"07:30"}', '2026-01-03T06:30:00.000Z', '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z', 1);
+INSERT INTO projection_agent_routines VALUES ('rt2', 'ag_main', 'Weekly review', 'Review the week', 0, 'Europe/Oslo', '2026-01-01T00:00:01.000Z', '2026-01-01T00:00:01.000Z', 1, 'wait', 'skip', 'thread');
+INSERT INTO projection_routine_triggers VALUES ('tr2', 'rt2', '{"kind":"weekly","weekday":5,"time":"16:00"}', '2026-01-09T15:00:00.000Z', '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z', 1);
+INSERT INTO projection_mcp_servers VALUES ('mcp1', 'Acta', 'stdio', 1, 'npx', '["-y","acta-mcp"]', '{"ACTA_KEY":"MCP_ENV_SECRET"}', '[]', '', '', '{}', 0);
+INSERT INTO projection_mcp_servers VALUES ('mcp2', 'Remote', 'http', 1, '', '[]', '{}', '[]', '', 'https://mcp.example.com/mcp', '{"Authorization":"Bearer MCP_HEADER_SECRET"}', 1);
+"#
+
+fn sql_text(s: String) -> Value {
+    return Value.Text(s.copy())
+}
+
+// A small OpenBot data folder in `root`: its database, a workspace with the main
+// agent's AGENTS.md and a shared table, a skill bundle, the sidebar's pins, a
+// file a message has, and secrets beside them that must stay.
+fn openbot_fixture(root: String) ! Error {
+    let ws = "{root}/workspace"
+    try fs.make_dir_all("{ws}/Agents/main")
+    try fs.make_dir_all("{ws}/Shared/Data")
+    try fs.make_dir_all("{root}/attachments")
+    try fs.make_dir_all("{root}/agent-api-keys")
+    try fs.make_dir_all("{root}/local-skills/local-skill-1/1.0.0")
+    try fs.write_text("{ws}/Agents/main/AGENTS.md", String("# Main\n\nYou are Main. Keep it short."))
+    try fs.write_text("{root}/attachments/report.txt", String("The report."))
+    try fs.write_text("{root}/agent-api-keys/key.txt", String("API_KEY_SECRET"))
+    try fs.write_text("{root}/openbot-vault-v1.json", String(#"{"keys":"VAULT_SECRET_VALUE"}"#))
+    try fs.write_text("{root}/openbot-sidebar-pins-v1.json", String(#"{"version":1,"pinned":["ag_main"]}"#))
+    var z = Writer.new()
+    z.add(String("weekly-report/SKILL.md"), String("---\nname: Weekly Report\ndescription: When asked for the week's report\n---\n\n# Steps\n\nGather the week.").to_bytes())
+    z.add(String("weekly-report/template.md"), String("# Week").to_bytes())
+    try fs.write("{root}/local-skills/local-skill-1/1.0.0/bundle.zip", z.finish())
+
+    let db = try Database.open("{root}/openbot.db")
+    try db.execute_script(String(OPENBOT_SCHEMA))
+    let main_agent = Obj.new().s("id", String("ag_main")).s("name", String("Main")).s("title", String("Helps")).s("description", String("Does things")).s("provider", String("claude")).s("model", String("claude-sonnet-4-5")).s("reasoningEffort", String("high")).s("chatColor", String("blue")).s("threadId", String("th_main")).s("workspacePath", "{ws}/Agents/main").done()
+    let helper = Obj.new().s("id", String("ag_helper")).s("name", String("Helper")).s("title", String("Researcher")).s("description", String("Finds things out.")).s("provider", String("codex")).s("avatarColor", String("#18a06a")).s("workspacePath", String("/nowhere/Agents/helper")).done()
+    _ = try db.execute(String("INSERT INTO projection_agents VALUES (?, ?, ?, ?, ?, ?, 1)"), [sql_text(String("ag_main")), sql_text(String("th_main")), sql_text(String("claude-sonnet-4-5")), Value.Null, Value.Int(0), sql_text("{main_agent}")])
+    _ = try db.execute(String("INSERT INTO projection_agents VALUES (?, ?, ?, ?, ?, ?, 1)"), [sql_text(String("ag_helper")), Value.Null, sql_text(String("gpt-5")), Value.Null, Value.Int(1), sql_text("{helper}")])
+    // The report is there; one file is gone; one is a secret, which isn't read.
+    _ = try db.execute(String("INSERT INTO projection_attachments VALUES ('at1', 'message', 'th_main:m2', 'report.txt', ?, '[]', '2026-01-02T03:04:09.000Z', 1)"), [sql_text("{root}/attachments/report.txt")])
+    _ = try db.execute(String("INSERT INTO projection_attachments VALUES ('at2', 'message', 'th_main:m2', 'gone.png', ?, '[]', '2026-01-02T03:04:09.000Z', 1)"), [sql_text("{root}/attachments/gone.png")])
+    _ = try db.execute(String("INSERT INTO projection_attachments VALUES ('at3', 'message', 'th_main:m1', 'key.txt', ?, '[]', '2026-01-02T03:04:05.000Z', 1)"), [sql_text("{root}/agent-api-keys/key.txt")])
+    try db.close()
+
+    let tables = try Database.open("{ws}/Shared/Data/agent-data.db")
+    try tables.execute_script(String("CREATE TABLE openbot_metadata (table_name TEXT PRIMARY KEY, owner_agent_id TEXT, created_at TEXT); INSERT INTO openbot_metadata VALUES ('reading_list', 'ag_main', '2026-01-01'); CREATE TABLE reading_list (title TEXT, pages INTEGER, done INTEGER); INSERT INTO reading_list VALUES ('Dune', 412, 0); INSERT INTO reading_list VALUES ('Emma', 300, 1);"))
+    try tables.close()
+}
+
+// A small Grok Bot data folder in `root`: the roster, one agent's recent chat
+// and the pins as cache blobs, settings with an MCP server, and its secrets.
+fn grok_fixture(root: String) ! Error {
+    let cache = "{root}/sand-client-persistence"
+    try fs.make_dir_all(cache.copy())
+    try fs.make_dir_all("{root}/.grokbot")
+    let roster = #"{"schemaVersion":1,"value":{"rows":[{"id":"g_scout","name":"Scout","title":"Scouts the web","description":"Looks things up.","avatarColor":"yellow","harness":"cursor","isGroup":false,"memberIds":[]},{"id":"g_team","name":"Team","isGroup":true,"memberIds":["g_scout"]}]}}"#
+    let chat = #"{"schemaVersion":1,"value":{"entries":[{"kind":"message","id":"e1","seq":1,"role":"user","content":"Find me a cafe","timestampMs":1767225600000,"author":{"kind":"user","id":"u1","name":"Elliot"}},{"kind":"message","id":"e2","seq":2,"role":"assistant","content":"Try the one on the corner.","timestampMs":1767225660000,"author":{"kind":"agent","id":"g_scout","name":"Scout"}}]}}"#
+    try fs.write_text("{cache}/onxw4zbo.blob", String(roster))
+    try fs.write_text("{cache}/mfzgk3tf.blob", String(chat))
+    try fs.write_text("{cache}/nbsxg5dp.blob", String(#"{"schemaVersion":1,"value":{"pinnedAgentIds":["g_scout"]}}"#))
+    try fs.write_text("{root}/sand-secrets.json", String(#"{"token":"GROK_SECRET"}"#))
+    try fs.write_text("{root}/.grokbot/credentials.json", String(#"{"token":"GROK_SECRET"}"#))
+    try fs.write_text("{root}/.grokbot/settings.json", String(#"{"mcpBoxServers":{"search":{"command":"npx","args":["-y","search-mcp"],"env":{"KEY":"GROK_ENV_SECRET"}},"docs":{"url":"https://docs.example.com/mcp","headers":{"Authorization":"GROK_HEADER_SECRET"}}}}"#))
+}
+
+fn value(r: Json) -> Json {
+    return at(r, "value")
+}
+
+// Every agent.created event the app has read, by name.
+fn agent_named(app: App, name: str) -> Json {
+    var found = Json.Null
+    for f in app.frames {
+        if str_at(f.copy(), "kind") == some(String("agent.created")) and str_at(at(f.copy(), "agent"), "name") == some(String(name)) { found = at(f.copy(), "agent") }
+    }
+    return found
+}
+
+// The conversations made for an agent, as conversation.created told the app.
+fn conversations_of(app: App, agent: String) -> List<Json> {
+    var out = List<Json>()
+    for f in app.frames {
+        let c = at(f.copy(), "conversation")
+        if str_at(f.copy(), "kind") == some(String("conversation.created")) and str_at(c.copy(), "agent") == some(agent.copy()) { out.push(c) }
+    }
+    return out
+}
+
+// How many things came, of every kind.
+fn total(came: Json) -> i64 {
+    var n: i64 = 0
+    if let Json.Object(m) = came {
+        for (_, v) in m { n += v.as_i64() ?? 0 }
+    }
+    return n
+}
+
+fn ms(iso: str) -> i64 {
+    return (Timestamp.parse_iso(String(iso)) ?? Timestamp { unix_ms: 0 }).unix_ms
+}
+
+fn run(inst: Instance) ! Error {
+    let root = (try fs.temp_dir()).replace("\\", "/")
+    let ob = "{root}/OpenBot"
+    let gb = "{root}/Grok Bot"
+    try openbot_fixture(ob.copy())
+    try grok_fixture(gb.copy())
+    var app = try App.connect(inst.base.copy(), inst.token.copy(), 0)
+
+    // --- What's there ---
+    let scan = value(try app.cmd("q_1", "import.scan", Obj.new().s("openbot", ob.copy()).s("grokbot", gb.copy()).done()))
+    let sources = at(scan, "sources")
+    let o = sources.at(0) ?? Json.Null
+    let g = sources.at(1) ?? Json.Null
+    try check(str_at(o.copy(), "from") == some(String("openbot")) and at(o.copy(), "found") == Json.Bool(true) and int_at(at(o.copy(), "counts"), "agents") == some(2) and int_at(at(o.copy(), "counts"), "messages") == some(3), "import.scan finds OpenBot's data, with how much of each kind")
+    try check(at(g.copy(), "found") == Json.Bool(true) and int_at(at(g.copy(), "counts"), "agents") == some(1) and (str_at(g, "text") ?? String()).contains("1 agent"), "and Grok Bot's, in words")
+    let nowhere = value(try app.cmd("q_2", "import.scan", Obj.new().s("openbot", "{root}/nothing").done()))
+    try check(at(at(nowhere, "sources").at(0) ?? Json.Null, "found") == Json.Bool(false), "an app that isn't there is said not to be")
+
+    // --- OpenBot ---
+    let first = try app.cmd("q_3", "import.run", Obj.new().s("from", String("openbot")).s("path", ob.copy()).done())
+    let r = value(first.copy())
+    let came = at(r.copy(), "came")
+    println("      {str_at(r.copy(), "text") ?? String()}")
+    try check(int_at(came.copy(), "agents") == some(2) and int_at(came.copy(), "messages") == some(3) and int_at(came.copy(), "memories") == some(1) and int_at(came.copy(), "routines") == some(2) and int_at(came.copy(), "skills") == some(1) and int_at(came.copy(), "mcp") == some(2) and int_at(came.copy(), "tables") == some(1) and int_at(came.copy(), "rows") == some(2) and int_at(came.copy(), "files") == some(1) and int_at(came.copy(), "pins") == some(1), "import.run brings each kind over from OpenBot, and says how many")
+    let left = "{at(r.copy(), "not")}"
+    try check(left.contains("Weekly review") and left.contains("weekly on Friday") and left.contains("file") and left.contains("template") == false and left.contains("only its SKILL.md") and left.contains("environment and headers"), "and says plainly what changed or couldn't come")
+
+    let main_one = agent_named(app, "Main")
+    let main_id = str_at(main_one.copy(), "id") ?? String()
+    try check((str_at(main_one.copy(), "instructions") ?? String()).contains("You are Main") and str_at(main_one.copy(), "color") == some(String("periwinkle")) and str_at(at(main_one.copy(), "config"), "model") == some(String("sonnet")) and int_at(main_one.copy(), "pinned") != none and str_at(main_one.copy(), "acp_agent") == some(String("fake")), "an agent comes with its AGENTS.md, its colour, its model and its pin")
+    let helper = agent_named(app, "Helper")
+    try check((str_at(helper.copy(), "instructions") ?? String()).contains("Finds things out") and str_at(helper.copy(), "color") == some(String("mint")) and int_at(helper, "pinned") == none, "one without its AGENTS.md takes its title and description, and the nearest colour")
+
+    let convs = conversations_of(app, main_id.copy())
+    var chat = String()
+    var side = Json.Null
+    for c in convs {
+        if str_at(c.copy(), "branch_of") != none { side = c.copy() } else { chat = str_at(c, "id") ?? String() }
+    }
+    let listed = value(try app.cmd("q_4", "messages.list", Obj.new().s("conversation", chat.copy()).done()))
+    let ms_list = at(listed, "messages")
+    let hello = ms_list.at(0) ?? Json.Null
+    let report = ms_list.at(1) ?? Json.Null
+    try check(ms_list.len() == 2 and reply_text(hello.copy()) == "Hello there" and str_at(hello.copy(), "role") == some(String("person")) and str_at(hello.copy(), "from") == some(String("import:openbot")) and int_at(hello.copy(), "at") == some(ms("2026-01-02T03:04:05.000Z")), "the chat's messages come with their own times, a system note left out")
+    try check(str_at(report.copy(), "agent") == some(main_id.copy()) and "{at(report.copy(), "blocks")}".contains("report.txt") and at(report.copy(), "pinned") != Json.Null, "a reply keeps the file it had, and its pin")
+    try check(str_at(side.copy(), "branch_of") == some(chat.copy()) and str_at(side, "branch_at") == some(str_at(hello, "id") ?? String()), "a thread beside the chat is a branch of it, from before it began")
+
+    let notes = "{value(try app.cmd("q_5", "memory.list", Obj.new().s("agent", main_id.copy()).done()))}"
+    try check(notes.contains("Elliot likes short answers") and notes.contains("import:openbot"), "memories come, each its agent's")
+    let rs = "{value(try app.cmd("q_6", "routine.list", Obj.new().done()))}"
+    try check(rs.contains(#""daily":"07:30""#) and rs.contains(#""daily":"16:00""#) and rs.contains("Europe/Oslo") and rs.contains(#""post":"thread""#), "routines come on loom's schedules, in their time zone")
+    let skill = value(try app.cmd("q_7", "skill.get", Obj.new().s("name", String("weekly-report")).done()))
+    try check((str_at(at(skill, "skill"), "body") ?? String()).contains("Gather the week"), "a skill comes from its bundle")
+    let mcp = "{value(try app.cmd("q_8", "mcp.list", Obj.new().done()))}"
+    try check(mcp.contains("acta") and mcp.contains("acta-mcp") and mcp.contains("https://mcp.example.com/mcp"), "MCP servers come")
+    let rows = "{value(try app.cmd("q_9", "table.rows", Obj.new().s("table", String("reading_list")).done()))}"
+    try check(rows.contains("Dune") and rows.contains("Emma") and rows.contains("\"owner\":\"{main_id}\""), "a shared table comes with its rows, its owner's")
+
+    // --- Grok Bot ---
+    let grok = value(try app.cmd("q_10", "import.run", Obj.new().s("from", String("grokbot")).s("path", gb.copy()).done()))
+    let gcame = at(grok.copy(), "came")
+    let scout = agent_named(app, "Scout")
+    let scout_chat = conversations_of(app, str_at(scout.copy(), "id") ?? String())
+    let gmessages = at(value(try app.cmd("q_11", "messages.list", Obj.new().s("conversation", str_at(if scout_chat.len() > 0 { scout_chat[0].copy() } else { Json.Null }, "id") ?? String()).done())), "messages")
+    try check(int_at(gcame.copy(), "agents") == some(1) and int_at(gcame, "mcp") == some(2) and gmessages.len() == 2 and int_at(gmessages.at(0) ?? Json.Null, "at") == some(1767225600000) and int_at(scout.copy(), "pinned") != none and str_at(scout, "color") == some(String("gold")), "Grok Bot's agents, recent chats, pins and MCP servers come")
+    let gleft = "{at(grok, "not")}"
+    try check(gleft.contains("own server") and gleft.contains("Team"), "and it says what Grok Bot doesn't keep on this computer")
+
+    // --- No secrets ---
+    var everything = String()
+    for (k, name) in [("q_12", "mcp.list"), ("q_13", "memory.list"), ("q_14", "skill.list"), ("q_15", "activity.list"), ("q_16", "routine.list"), ("q_17", "table.list")] {
+        everything.push_str("{try app.cmd(k, name, Obj.new().b("bodies", true).done())}")
+    }
+    for f in app.frames { everything.push_str("{f}") }
+    var leaked = String()
+    for s in SECRETS {
+        if everything.contains(s) { leaked = String(s) }
+    }
+    try check(leaked.len() == 0 and everything.contains("Brought over from OpenBot"), "no secret comes over, and the activity log says what did")
+
+    // --- Twice ---
+    let again = value(try app.cmd("q_18", "import.run", Obj.new().s("from", String("openbot")).s("path", ob.copy()).done()))
+    let relisted = at(value(try app.cmd("q_19", "messages.list", Obj.new().s("conversation", chat.copy()).done())), "messages")
+    try check(total(at(again.copy(), "came")) == 0 and (int_at(again.copy(), "already") ?? 0) > 0 and relisted.len() == 2 and (str_at(again, "text") ?? String()).contains("here already"), "importing again brings nothing twice")
+
+    // --- Only the owner, and from the command line ---
+    let member = try inst.second_account("ann")
+    var theirs = try App.connect(inst.base.copy(), member, 0)
+    let refused = try theirs.cmd("q_20", "import.scan", Obj.new().done())
+    try check(str_at(at(refused, "error"), "code") == some(String("not_allowed")), "only the owner imports")
+    theirs.close()
+    let token = str_at(value(try app.cmd("q_21", "scripts.on", Obj.new().done())), "token") ?? String()
+    let out = try loom(inst.data.copy(), [String("import"), String("grokbot"), gb.copy(), String("--url"), "http://{inst.base}", String("--token"), token]).output()
+    try check(out.status.success() and out.text().contains("here already"), "loom import grokbot does it from the command line")
+    app.close()
+}
+
+fn main() ! Error {
+    let inst = try Instance.start()
+    let failure: String? = match run(inst.copy()) {
+        ok => none,
+        err(e) => some("{e}"),
+    }
+    inst.stop()
+    if let f = failure {
+        eprintln("\n{f}")
+        exit(1)
+    }
+    println("\nimports: all good")
+}

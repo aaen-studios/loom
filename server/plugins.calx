@@ -35,7 +35,7 @@ pub const MOST_BYTES: usize = 2000000
 // from a device has what it asks, and plugin.cmd and plugin.message would
 // borrow another plugin's yes), run programs on the instance, or reach
 // the person's devices, secrets and sign-in.
-const NEVER: [str; 27] = ["plugin.put", "plugin.allow", "plugin.delete", "plugin.cmd", "plugin.message", "instance.move", "instance.phones", "invite.create", "invite.delete", "user.role", "user.remove", "account.delete", "password.reset", "link.create", "push.register", "push.unregister", "device.revoke", "device.rename", "secret.list", "secret.put", "secret.delete", "mcp.put", "acp.install", "acp.remove", "acp.settings", "acp.share", "instance.relay"]
+const NEVER: [str; 29] = ["plugin.put", "plugin.allow", "plugin.delete", "plugin.cmd", "plugin.message", "instance.move", "instance.phones", "invite.create", "invite.delete", "user.role", "user.remove", "account.delete", "password.reset", "link.create", "push.register", "push.unregister", "device.revoke", "device.rename", "secret.list", "secret.put", "secret.delete", "mcp.put", "acp.install", "acp.remove", "acp.settings", "acp.share", "instance.relay", "import.scan", "import.run"]
 
 // Whether `id` is a plugin's id: lowercase letters, digits and hyphens, up
 // to 64, starting with a letter, as `build-board`.
