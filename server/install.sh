@@ -15,6 +15,7 @@ base="${LOOM_RELEASES:-https://github.com/aaen-studios/loom/releases/latest/down
 
 case "$(uname -s)-$(uname -m)" in
   Linux-x86_64 | Linux-amd64) kind=linux-server ;;
+  Linux-aarch64 | Linux-arm64) kind=linux-arm64-server ;;
   *)
     echo "loom: there's no release of loom for $(uname -s) on $(uname -m) yet" >&2
     exit 1

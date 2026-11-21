@@ -71,12 +71,16 @@ jobs:
             out: loom-linux
           - os: windows-latest
             out: loom-windows.exe
+          - os: ubuntu-24.04-arm
+            out: loom-linux-arm64
+          - os: macos-latest
+            out: loom-macos
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Calx (Linux)
-        if: runner.os == 'Linux'
+      - name: Install Calx (Linux, macOS)
+        if: runner.os != 'Windows'
         run: |
           curl -fsSL https://calxlang.com/install.sh | sh
           echo "$HOME/.calx/bin" >> "$GITHUB_PATH"
@@ -92,7 +96,7 @@ jobs:
         shell: bash
         run: |
           if [ "$GITHUB_REF_TYPE" = tag ]; then version="${GITHUB_REF_NAME#v}"; else version="0.0.0-dry"; fi
-          sed -i "s/^const VERSION: str = \".*\"/const VERSION: str = \"$version\"/" server/main.calx
+          perl -pi -e "s/^const VERSION: str = \".*\"/const VERSION: str = \"$version\"/" server/main.calx
           grep -q "const VERSION: str = \"$version\"" server/main.calx
           mkdir -p dist
           calx build --release server/main.calx -o "dist/${{ matrix.out }}"
@@ -134,7 +138,8 @@ jobs:
           base="https://github.com/${GITHUB_REPOSITORY}/releases/download/${GITHUB_REF_NAME}"
           calx scripts/release.calx sign dist "$version" "$base" notes.md \
             windows-desktop=loom.exe windows-installer=loom-setup.exe \
-            linux-server=loom-linux windows-server=loom-windows.exe
+            linux-server=loom-linux windows-server=loom-windows.exe \
+            linux-arm64-server=loom-linux-arm64 macos-server=loom-macos
           calx scripts/release.calx verify dist
 
       - name: Publish
