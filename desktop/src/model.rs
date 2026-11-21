@@ -2081,3 +2081,50 @@ fn device_name() -> String {
 pub fn approve(call: &str, allow: bool, always: bool) -> Value {
     json!({"t": "approve", "call": call, "allow": allow, "always": always})
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn with_panel(allowed: &[&str]) -> Model {
+        let mut m = Model::new();
+        m.panel = Some(OpenPanel {
+            plugin: Plugin {
+                id: String::from("board"),
+                allowed: allowed.iter().map(|a| a.to_string()).collect(),
+                ..Plugin::default()
+            },
+            files: Vec::new(),
+        });
+        m
+    }
+
+    #[test]
+    fn the_door_sends_only_what_was_allowed() {
+        let mut m = with_panel(&["cmd:routine.list"]);
+        let put = m
+            .door(1, "data.put", &json!({"key": "k", "value": 3}))
+            .unwrap();
+        assert_eq!(put["name"], "plugin.data.put");
+        assert_eq!(put["args"]["plugin"], "board");
+        let cmd = m.door(2, "cmd", &json!({"name": "routine.list"})).unwrap();
+        assert_eq!(cmd["name"], "routine.list");
+        assert!(m.door(3, "cmd", &json!({"name": "agent.delete"})).is_err());
+        assert!(m.door(4, "fetch", &json!({})).is_err());
+        assert!(m.door(5, "message_agent", &json!({})).is_err());
+    }
+
+    #[test]
+    fn the_door_answers_by_message() {
+        let mut m = with_panel(&[]);
+        let get = m.door(7, "data.get", &json!({"key": "k"})).unwrap();
+        m.result(&json!({"t": "result", "id": get["id"], "ok": true, "value": {"value": 41}}));
+        assert_eq!(m.door_answers, vec![(7, Ok(json!(41)))]);
+    }
+
+    #[test]
+    fn no_door_without_a_panel() {
+        let mut m = Model::new();
+        assert!(m.door(1, "data.get", &json!({"key": "k"})).is_err());
+    }
+}
