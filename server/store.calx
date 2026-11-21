@@ -514,6 +514,15 @@ impl Store {
         return int((row ?? List<Value>())[0].copy())
     }
 
+    // Removes everyone's events from before `before` (ms), but keeps each
+    // person's newest `keep`, so the next seq still follows on. A device whose
+    // cursor is older than what's left gets reset: true and a snapshot.
+    // Gives how many went.
+    pub fn prune_events(self, before: i64, keep: i64) -> i64 ! Error {
+        let gone = try self.db.execute(String("DELETE FROM events WHERE at < ? AND seq <= (SELECT max(e.seq) FROM events e WHERE e.user = events.user) - ?"), [Value.Int(before), Value.Int(keep)])
+        return i64.wrap(u64(gone))
+    }
+
     // `user`'s events after `after`, in order, as the text stored.
     pub fn events_after(self, user: String, after: i64) -> List<String> ! Error {
         var out = List<String>()
@@ -576,6 +585,25 @@ fn events_are_counted_per_person() {
     assert(s.last_seq(a.id.copy())! == 2)
     assert(s.events_after(a.id.copy(), 1)!.len() == 1)
     assert(s.events_after(b.id.copy(), 0)!.len() == 1)
+}
+
+@test
+fn old_events_are_pruned_but_the_newest_kept() {
+    let s = test_store()
+    let a = s.add_user(String("a"), String("password1"), "owner")!
+    let b = s.add_user(String("b"), String("password2"), "member")!
+    for _ in 0..5 {
+        _ = s.append(a.id.copy(), "x", Obj.new().done())!
+    }
+    _ = s.append(b.id.copy(), "x", Obj.new().done())!
+    // Nothing is old yet.
+    assert(s.prune_events(0, 2)! == 0)
+    // Everything is old: a keeps its newest 2, b its only one.
+    assert(s.prune_events(now() + 1000, 2)! == 3)
+    assert(s.first_seq(a.id.copy())! == 4 and s.last_seq(a.id.copy())! == 5)
+    assert(s.last_seq(b.id.copy())! == 1)
+    let next = s.append(a.id.copy(), "x", Obj.new().done())!
+    assert("{next}".contains("\"seq\":6"))
 }
 
 @test

@@ -33,6 +33,23 @@ pub struct Config {
     pub port: u16
     pub host: String
     pub hasher: PasswordHasher
+    pub events: EventLife
+}
+
+// How long events are kept (PLAN.md, "Sync"): `age_ms`, but always each
+// person's newest `keep`, looked at every `every_ms`. A device further behind
+// gets reset: true and a snapshot.
+pub struct EventLife {
+    pub age_ms: i64
+    pub keep: i64
+    pub every_ms: i64
+}
+
+impl EventLife {
+    // 30 days, the newest 10,000, looked at every hour.
+    pub fn standard() -> EventLife {
+        return EventLife { age_ms: 30 * 86400000, keep: 10000, every_ms: 3600000 }
+    }
 }
 
 struct Session {
@@ -118,6 +135,8 @@ pub struct Instance {
     dummy_hash: String
     failures: LinkedMap<String, List<i64>>
     thumbs: Sender<Thumb>
+    events: EventLife
+    next_prune: i64
 }
 
 // A setup or a login waiting on the hashing thread.
@@ -188,7 +207,7 @@ impl Instance {
         let to = lines.sender()
         let (hash_to, hash_done) = hashing.start(config.hasher)
         let dummy = config.hasher.hash(bytes.hex(random_bytes(16)))
-        return Instance { store: store, server: server, data: config.data.copy(), sessions: Map<u32, Session>(), runs: LinkedMap<String, Run>(), procs: LinkedMap<String, Proc>(), approvals: LinkedMap<String, Approval>(), lines: lines, lines_to: to, hash_to: hash_to, hash_done: hash_done, next_job: 0, auths: Map<i64, Auth>(), dummy_hash: dummy, failures: LinkedMap<String, List<i64>>(), thumbs: files.start() }
+        return Instance { store: store, server: server, data: config.data.copy(), sessions: Map<u32, Session>(), runs: LinkedMap<String, Run>(), procs: LinkedMap<String, Proc>(), approvals: LinkedMap<String, Approval>(), lines: lines, lines_to: to, hash_to: hash_to, hash_done: hash_done, next_job: 0, auths: Map<i64, Auth>(), dummy_hash: dummy, failures: LinkedMap<String, List<i64>>(), thumbs: files.start(), events: config.events, next_prune: 0 }
     }
 
     pub fn url(self) -> String {
@@ -299,6 +318,7 @@ impl Instance {
                 },
                 none => {
                     if signal.take() != none { break }
+                    i.prune()
                 },
                 _ => {},
             }
@@ -320,6 +340,17 @@ impl Instance {
             to.send(Out.Stop)
         }
         i.server.shutdown()
+    }
+
+    // Removes old events, when it's time to look again.
+    fn prune(i: mut Instance) {
+        let t = now()
+        if t < i.next_prune { return }
+        i.next_prune = t + i.events.every_ms
+        match i.store.prune_events(t - i.events.age_ms, i.events.keep) {
+            ok(gone) => if gone > 0 { println("loom: pruned {gone} old events") },
+            err(e) => eprintln("loom: pruning events: {e}"),
+        }
     }
 
     // --- Sending ---
@@ -679,7 +710,10 @@ impl Instance {
         let after = int_at(f, "after") ?? 0
         let last = try i.store.last_seq(user.copy())
         let first = try i.store.first_seq(user.copy())
-        let reset = after > last or (after > 0 and first > 1 and after < first - 1)
+        // A cursor from before the oldest event left, including a new device's 0
+        // once events have been pruned, or one ahead of the newest (the
+        // instance was restored from an older backup), gets a snapshot.
+        let reset = after > last or (first > 1 and after < first - 1)
         _ = i.server.send_text(s, "{Obj.new().s("t", String("welcome")).i("version", i64(version)).s("user", user.copy()).s("device", device.id.copy()).i("seq", last).b("reset", reset).done()}")
         if reset {
             _ = i.server.send_text(s, "{try i.snapshot(user.copy(), last)}")
