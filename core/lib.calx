@@ -175,7 +175,10 @@ fn core_start(config: *const u8, len: usize, on_event: extern "C" fn(*const u8, 
     let inbox = Receiver<String>()
     let to_core = inbox.sender()
     let from_core = Receiver<String>()
-    let conn = Conn.new(server, token, service, cache, inbox, from_core.sender())
+    var conn = Conn.new(server, token, service, cache, inbox, from_core.sender())
+    if let d = data {
+        conn.files = some("{d}/files")
+    }
     let conn_thread = unsafe { Thread.spawn(conn) }
     let relay_thread = unsafe { Thread.spawn(Relay { sink: sink, from_core: from_core }) }
     unsafe {

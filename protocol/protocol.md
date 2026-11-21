@@ -98,9 +98,28 @@ Login needed. Revokes this device's token. No body, and `204` back.
 
 The WebSocket upgrade. It takes no token in the URL or headers: the token goes in the first frame, [`hello`](#hello), so it never ends up in a proxy's log.
 
+### `POST /files?name=<name>`
+
+Login needed, with the device token in `Authorization: Bearer <token>`. The body is the file, as it is, with its type in `Content-Type`, and its name, percent-encoded, in `name`. Bodies go up to 64 MB.
+
+```json
+{ "file": "9f86d0…", "name": "shot.png", "mime": "image/png", "size": 48213 }
+```
+
+- `file` is the file's SHA-256 in lowercase hex. The instance keeps each file once, by it, so sending one again costs nothing and gives the same answer.
+- `name` is the name made safe for any system: no folders, and nothing Windows refuses.
+- `mime` is what the bytes say for PNG, JPEG, GIF, WebP and PDF, else the `Content-Type` sent, else what the name's extension says.
+- `413` with `storage_full` when the file would take the person over the space the owner gives each person (`loom files limit`).
+
+A file goes in a message by its `file`, in [`send`](#send)'s `files`.
+
+### `GET /files/<sha256>`
+
+Login needed, as above. The file, with its type, for whoever uploaded it or got it from an agent, and `404` for anyone else. With `?thumb`, a thumbnail of a PNG or JPEG image instead, at most 512 pixels a side, as a JPEG, or a PNG when it has transparency. It's made just after the upload; until it's there, and for files that have none, `?thumb` gives the file itself. Both are cached for good (`Cache-Control: private, immutable`), since a file's name is its content.
+
 ### Later routes
 
-`POST /files` and `GET /files/<sha256>` for files (Phase 2), `POST /hooks/<id>` for webhooks (Phase 4).
+`POST /hooks/<id>` for webhooks (Phase 4).
 
 ## The WebSocket session
 
@@ -148,7 +167,7 @@ A message from the person into a conversation.
 ```
 
 - `cid`: a client id the app makes when the message is written, before it's sent. The instance remembers each device's client ids. A `send` with a `cid` it has seen gets the same `ack` again and does nothing else, so an outbox can send again after a reconnect without making a second message.
-- `files`: file ids uploaded first with `POST /files` (Phase 2).
+- `files`: the `file`s of files uploaded first with [`POST /files`](#post-filesnamename). Each becomes a `file` block after the text. A send needs `text`, `files` or both.
 
 Answered by [`ack`](#ack), or [`error`](#error) with `ref` set to the `cid`.
 
@@ -382,6 +401,7 @@ Version 1's commands:
 | `device.rename` | `device`, `name` | — |
 | `device.revoke` | `device` | — |
 | `acp.list` | — | `programs`: the agent programs installed on the instance, each with `name` and `command` |
+| `messages.search` | `query`, `agent`?, `after`? and `before`? (Unix ms), `limit`? (up to 100, 30 if left out) | `results`, best first, each with its `message` and a `snippet`: the words around the match, with each matched word between U+0002 and U+0003. Every word of `query` must be in the message, the last as a prefix, so it works while typing. It searches text blocks and file names, in conversations that aren't deleted. A person's message counts as its conversation's agent's |
 
 Arguments marked `?` are optional. "—" means `value` is `{}`.
 
@@ -398,6 +418,8 @@ Arguments marked `?` are optional. "—" means `value` is `{}`.
 | `already_answered` | An approval someone already answered |
 | `not_allowed` | This person can't do that |
 | `busy` | The conversation's agent is still answering. Version 1 has one run per conversation at a time; the message is stored, and the app can send again after `run.finished` |
+| `unknown_file` | A `send` names a file this person hasn't uploaded |
+| `storage_full` | A file would take the person over the space the owner gives each person |
 | `internal` | A bug in the instance. It's logged there |
 
 WebSocket close codes:
@@ -426,8 +448,10 @@ Inside the instance, each agent runs as an ACP agent program ([PLAN.md](../PLAN.
 | From the agent (ACP) | In loom |
 |---|---|
 | The instance sends the person's message to the session with `session/prompt` | `run.started` |
+| The person's files, in that prompt | an `image` block for an image of up to 5 MB, when the program says it takes images (`promptCapabilities.image`); otherwise a `resource_link` to a copy in the agent's folder, under `files/`, with its name |
 | `session/update`, `agent_message_chunk` | `delta` with `kind: "text"` |
 | `session/update`, `agent_thought_chunk` | `delta` with `kind: "thought"` |
+| `session/update`, `agent_message_chunk` with an `image`, a `resource` with a `blob`, or a `resource_link` to a `file://` on the instance's machine | a `file` block: the file is kept as the person's, as if they'd uploaded it |
 | `session/update`, `tool_call` | a `tool` block, and `tool.started` |
 | `session/update`, `tool_call_update` | `tool.updated`, or `tool.finished` when its status is `completed` or `failed` |
 | `session/update`, `plan` | a `plan` block (replaced whole each time) |
@@ -532,7 +556,6 @@ The core replaces what the deltas built with the finished message, stores `seq` 
 
 Fields and frames that come with later phases. Where they only add, they come within version 1.
 
-- **Files** (Phase 2): `POST /files`, `GET /files/<sha256>`, and `file` blocks.
 - **Device tools** (Phase 3): the instance sends `{"t":"device.call", …}` with the request, and the signed approval when there is one, and the device answers `{"t":"device.result", …}`. Each device offers its tools in `hello`.
 - **Memory, routines and notifications** (Phase 4): `routine.*` and `notification` events.
 - **Push** (Phase 5): the `push.register` command.

@@ -76,39 +76,60 @@ fn theme(cx: &mut App, dark: bool) {
 }
 
 fn main() {
-    gpui_kit::application()
-        .with_assets(gpui_kit::assets::Assets)
-        .run(|cx| {
-            gpui_kit::init(cx);
-            let fonts: Vec<Cow<'static, [u8]>> = FONTS.iter().map(|f| Cow::Borrowed(*f)).collect();
-            if let Err(e) = cx.text_system().add_fonts(fonts) {
-                eprintln!("loom: the fonts didn't load: {e}");
-            }
-            let dark = match std::env::var("LOOM_THEME").as_deref() {
-                Ok("dark") => true,
-                Ok("light") => false,
-                _ => !matches!(
-                    cx.window_appearance(),
-                    WindowAppearance::Light | WindowAppearance::VibrantLight
-                ),
-            };
-            theme(cx, dark);
-            let bounds = Bounds::centered(None, size(px(1120.), px(760.)), cx);
-            gpui_kit::open_window(
-                WindowOptions {
-                    window_bounds: Some(WindowBounds::Windowed(bounds)),
-                    window_min_size: Some(size(px(720.), px(480.))),
-                    titlebar: Some(TitlebarOptions {
-                        title: Some("loom".into()),
-                        ..TitleBar::title_bar_options()
-                    }),
-                    app_owns_titlebar_drag: true,
-                    ..Default::default()
-                },
-                cx,
-                |window, cx| cx.new(|cx| Loom::new(window, cx)),
-            )
-            .expect("failed to open the window");
-            cx.activate(true);
-        });
+    gpui_kit::application().with_assets(AppAssets).run(|cx| {
+        gpui_kit::init(cx);
+        let fonts: Vec<Cow<'static, [u8]>> = FONTS.iter().map(|f| Cow::Borrowed(*f)).collect();
+        if let Err(e) = cx.text_system().add_fonts(fonts) {
+            eprintln!("loom: the fonts didn't load: {e}");
+        }
+        let dark = match std::env::var("LOOM_THEME").as_deref() {
+            Ok("dark") => true,
+            Ok("light") => false,
+            _ => !matches!(
+                cx.window_appearance(),
+                WindowAppearance::Light | WindowAppearance::VibrantLight
+            ),
+        };
+        theme(cx, dark);
+        let bounds = Bounds::centered(None, size(px(1120.), px(760.)), cx);
+        gpui_kit::open_window(
+            WindowOptions {
+                window_bounds: Some(WindowBounds::Windowed(bounds)),
+                window_min_size: Some(size(px(720.), px(480.))),
+                titlebar: Some(TitlebarOptions {
+                    title: Some("loom".into()),
+                    ..TitleBar::title_bar_options()
+                }),
+                app_owns_titlebar_drag: true,
+                ..Default::default()
+            },
+            cx,
+            |window, cx| cx.new(|cx| Loom::new(window, cx)),
+        )
+        .expect("failed to open the window");
+        cx.activate(true);
+    });
+}
+
+// The icons loom uses beyond GPUI Kit's own, from the same Lucide set.
+gpui_kit::assets::icon_assets!(ExtraIcons, [Paperclip, FileText]);
+
+/// GPUI Kit's assets, and loom's extra icons.
+struct AppAssets;
+
+impl AssetSource for AppAssets {
+    fn load(&self, path: &str) -> Result<Option<Cow<'static, [u8]>>> {
+        if let Some(bytes) = ExtraIcons.load(path)? {
+            return Ok(Some(bytes));
+        }
+        gpui_kit::assets::Assets.load(path)
+    }
+
+    fn list(&self, path: &str) -> Result<Vec<SharedString>> {
+        let mut paths = gpui_kit::assets::Assets.list(path)?;
+        paths.extend(ExtraIcons.list(path)?);
+        paths.sort();
+        paths.dedup();
+        Ok(paths)
+    }
 }

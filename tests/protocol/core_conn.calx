@@ -151,6 +151,26 @@ fn run(server: mut Child, data: String) ! Error {
     try check(str_at(at(made_conv, "conversation"), "agent") == some(other.copy()) and str_at(to_agent, "message") != none, "a send to an agent with no conversation makes one and goes")
     _ = try app.until("event", "kind", "run.finished", 20000)
 
+    // --- Files, up and down ---
+    let sample = "{try fs.temp_dir()}/report.txt"
+    try fs.write_text(sample.copy(), String("the quarterly numbers"))
+    app.send(Obj.new().s("t", String("file.upload")).s("id", String("u_1")).s("path", sample).done())
+    let up = at(try app.until("core.file", "id", "u_1", 10000), "file")
+    let sha = str_at(up.copy(), "file") ?? String()
+    try check(sha.len() == 64 and str_at(up, "name") == some(String("report.txt")), "file.upload sends a file and gives its SHA-256")
+    app.send(Obj.new().s("t", String("send")).s("agent", other.copy()).s("text", String("/files")).j("files", Json.Array([Json.Str(sha.copy())])).done())
+    var with_file = try app.until("event", "kind", "message.created", 10000)
+    while str_at(at(with_file.copy(), "message"), "role") != some(String("agent")) {
+        with_file = try app.until("event", "kind", "message.created", 10000)
+    }
+    try check("{with_file}".contains("link report.txt"), "a send with files gives them to the agent")
+    _ = try app.until("event", "kind", "run.finished", 20000)
+    app.send(Obj.new().s("t", String("file.get")).s("id", String("f_1")).s("file", sha.copy()).done())
+    let down = str_at(try app.until("core.file", "id", "f_1", 10000), "path") ?? String()
+    try check(try fs.read_text(down.copy()) == some(String("the quarterly numbers")), "file.get fetches a file to the data folder")
+    app.send(Obj.new().s("t", String("file.get")).s("id", String("f_2")).s("file", sha).done())
+    try check(str_at(try app.until("core.file", "id", "f_2", 1000), "path") == some(down), "and a file it has is answered at once")
+
     // --- Notifications, while no one is looking ---
     app.send(Obj.new().s("t", String("app.active")).b("active", false).done())
     app.send(Obj.new().s("t", String("send")).s("agent", other).s("text", String("tell me when you're done")).done())

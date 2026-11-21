@@ -19,7 +19,10 @@ import std.time.{Instant}
 import shared.obj.{Obj, at, bool_at, int_at, merge, str_at}
 import shared.protocol.{CLOSE_TOKEN, CLOSE_VERSION, NEWEST}
 import core.cache.{Cache, now}
+import core.files.{Transfer, at_path, kept_at, refused}
+import shared.files.{is_sha}
 import core.login.{Kind, Outcome, Pending, address, request_body}
+import std.fs
 
 const FIRST_WAIT_MS: u64 = 500
 const LONGEST_WAIT_MS: u64 = 30000
@@ -99,6 +102,8 @@ pub struct Conn {
     inbox: Receiver<String>
     to_app: Sender<String>
     random: Random
+    pub files: String?    // where files that come down are kept; the system's temporary folder without one
+    transfers: List<Transfer>
 }
 
 impl Conn {
@@ -135,6 +140,8 @@ impl Conn {
             inbox: inbox,
             to_app: to_app,
             random: Random.system(),
+            files: none,
+            transfers: List<Transfer>(),
         }
     }
 
@@ -545,6 +552,10 @@ impl Conn {
             self.send(m)
             return true
         }
+        if t == "file.upload" or t == "file.get" {
+            self.transfer(t == "file.upload", m)
+            return true
+        }
         if t == "cmd" and (str_at(m.copy(), "name") ?? String()) == "messages.list" {
             if let id = str_at(m.copy(), "id") {
                 self.lists.push(id)
@@ -582,7 +593,11 @@ impl Conn {
             ok => {},
             err(e) => self.tell_error("cache", "{e}"),
         }
-        self.tell(Obj.new().s("t", String("core.queued")).s("cid", cid).maybe("conversation", str_at(frame.copy(), "conversation")).maybe("agent", str_at(frame.copy(), "agent")).maybe("text", str_at(m, "text")).i("at", now()).done())
+        var queued = Obj.new().s("t", String("core.queued")).s("cid", cid).maybe("conversation", str_at(frame.copy(), "conversation")).maybe("agent", str_at(frame.copy(), "agent")).maybe("text", str_at(m.copy(), "text")).i("at", now())
+        if let Json.Array(_) = at(m, "files") {
+            queued = queued.j("files", at(frame.copy(), "files"))
+        }
+        self.tell(queued.done())
         if self.state == State.Live {
             if str_at(frame.copy(), "conversation") == none {
                 self.make_conversation(frame)
@@ -704,6 +719,71 @@ impl Conn {
         }
     }
 
+    /// Starts a file going up (`file.upload`, with `path`) or coming down (`file.get`, with
+    /// `file` and `thumb`). A file that's down already is answered at once.
+    fn transfer(mut self, up: bool, m: Json) {
+        let id = str_at(m.copy(), "id")
+        let server = self.server.copy() ?? String()
+        let token = self.token.copy() ?? String()
+        if server.len() == 0 or token.len() == 0 {
+            self.tell(refused(id, "signed_out", String("Sign in to an instance first.")))
+            return
+        }
+        if up {
+            match Transfer.upload(server, token, id.copy(), str_at(m, "path") ?? String()) {
+                ok(t) => self.transfers.push(t),
+                err(why) => self.tell(refused(id, "unreadable", why)),
+            }
+            return
+        }
+        let sha = str_at(m.copy(), "file") ?? String()
+        if not is_sha(sha.copy()) {
+            self.tell(refused(id, "not_found", "There's no file {sha}."))
+            return
+        }
+        let thumb = bool_at(m.copy(), "thumb") ?? false
+        let name = str_at(m, "name")
+        var dir = self.files.copy() ?? String()
+        if dir.len() == 0 {
+            dir = match fs.temp_dir() {
+                ok(d) => d,
+                err(e) => {
+                    self.tell(refused(id, "cache", "{e}"))
+                    return
+                },
+            }
+            self.files = some(dir.copy())
+        }
+        // A file gets a folder of its own, by its SHA-256, to keep its name in.
+        let folder = if thumb { dir.copy() } else { "{dir}/{sha}" }
+        match fs.make_dir_all(folder.copy()) {
+            ok => {},
+            err(e) => {
+                self.tell(refused(id, "cache", "can't make {folder}: {e}"))
+                return
+            },
+        }
+        let dest = kept_at(dir, sha.copy(), thumb, name)
+        if fs.exists(dest.copy()) {
+            self.tell(at_path(id, dest))
+            return
+        }
+        self.transfers.push(Transfer.download(server, token, id, sha, thumb, dest))
+    }
+
+    /// Answers the transfers that have ended.
+    fn poll_transfers(mut self) {
+        var i: usize = 0
+        while i < self.transfers.len() {
+            if self.transfers[i].done() {
+                var t = self.transfers.remove(i)
+                self.tell(t.outcome())
+            } else {
+                i += 1
+            }
+        }
+    }
+
     /// Starts again if it's time.
     fn tick(mut self) {
         if self.state != State.Offline { return }
@@ -722,6 +802,7 @@ impl Task for Conn {
         loop {
             c.read()
             c.poll()
+            c.poll_transfers()
             c.tick()
             if let m = unsafe { c.inbox.wait_for(TICK_NS) } {
                 if not c.from_app(m) { return }

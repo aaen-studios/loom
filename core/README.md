@@ -37,6 +37,8 @@ The app sends the core protocol frames (`send`, `cmd`, `approve`, `cancel`, …)
 | `{"t":"app.active","active":false}` | Someone started or stopped looking at the app. The core notifies only while no one is, and tells the instance (the `device` frame) |
 | `{"t":"app.wake"}` | The system woke from sleep. The core opens a new connection at once |
 | `{"t":"app.network"}` | The network changed. The same |
+| `{"t":"file.upload","id":"u_1","path":"C:\\Users\\…\\shot.png"}` | Sends a file to the instance (`POST /files`), up to 64 MB. `core.file` answers with its `file`, which goes in a `send`'s `files` |
+| `{"t":"file.get","id":"f_1","file":"9f86d0…","thumb":true}` | Fetches a file, or with `thumb` its thumbnail, into `{data}/files/`, and `core.file` says where. A file goes in a folder of its own, under its `name` if one is given, so the program that opens it knows its kind. One it has already is answered at once |
 | `{"t":"core.stop"}` | Sent by `loom_core_stop`. The core closes the connection and ends |
 
 The core tells the app every frame the instance sends (`welcome`, `event`, `delta`, `synced`, `ack`, `result`, `error`, …), after the cache has taken it. Events it has applied already aren't sent again. Deltas go on only when they add text: a repeat is dropped, and a gap means one was lost, so the core reconnects and gets the reply again from position 0. And these of its own:
@@ -54,6 +56,7 @@ The core tells the app every frame the instance sends (`welcome`, `event`, `delt
 | `{"t":"core.queued","cid":"m_…","conversation":"c_9","text":"…","at":…}` | A `send` is in the outbox. The `ack` with its `cid` follows once the instance has it |
 | `{"t":"core.data","id":"g_1","what":"messages","items":[…],"more":true}` | The answer to `core.get`, oldest first for messages. `more` says the cache has older ones |
 | `{"t":"core.notify","title":"Builder","body":"…","agent":"a_2","conversation":"c_9","kind":"run.finished"}` | Worth a system notification: a reply that finished or failed, or a question waiting (`approval.needed`). Only for live events while no one is looking, not for catch-up |
+| `{"t":"core.file","id":"u_1","file":{"file":"9f86d0…","name":"shot.png","mime":"image/png","size":48213}}` | A `file.upload` went up. For a `file.get`, `"path":"…"` instead: where the file is. Either can have `error`, with `code` and `message`, instead |
 | `{"t":"error","code":"offline","for":"q_2"}` | A frame other than `send` came while the core wasn't connected, so it didn't go |
 | `{"t":"error","code":"not_sent","ref":"m_…","message":"…"}` | A send to an agent the instance couldn't make a conversation with, such as one deleted meanwhile. It leaves the outbox |
 | `{"t":"error","code":"cache","message":"…"}` | The cache couldn't be read or written. An event that wasn't applied isn't in the cursor either, so the next connection gets it again |

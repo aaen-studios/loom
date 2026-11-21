@@ -3810,6 +3810,7 @@ dependencies = [
  "auto-launch",
  "chrono",
  "gpui-kit",
+ "image",
  "notify-rust",
  "png 0.18.1",
  "raw-window-handle",

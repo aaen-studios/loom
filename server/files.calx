@@ -1,0 +1,92 @@
+module server.files
+
+// Files and images (PLAN.md, "Files and images"). Each file is kept once, in
+// the data folder's files/ under its SHA-256, and belongs to everyone who
+// uploaded it. Thumbnails of PNG and JPEG images are made on a thread of their
+// own, since decoding a photo takes long enough to hold up the loop, and are
+// written beside the file as <sha256>.thumb.
+import std.fs
+import std.image.{Image, Kind}
+import std.thread.{Task}
+
+/// The longest side of a thumbnail, in pixels.
+pub const THUMB: usize = 512
+
+/// The biggest image sent to an agent inline, as an image block. Bigger ones go as a link.
+pub const INLINE_IMAGE: i64 = 5000000
+
+pub struct Thumb {
+    pub src: String
+    pub dst: String
+}
+
+struct Worker {
+    jobs: Receiver<Thumb>
+}
+
+impl Task for Worker {
+    fn run(own self) {
+        var w = self
+        while let job = w.jobs.wait() {
+            match make_thumb(job.src.copy(), job.dst.copy()) {
+                ok => {},
+                err(e) => eprintln("loom: the thumbnail of {job.src}: {e}"),
+            }
+        }
+    }
+}
+
+/// Starts the thumbnail thread, and gives the end that sends it work.
+pub fn start() -> Sender<Thumb> {
+    let jobs = Receiver<Thumb>()
+    let to = jobs.sender()
+    _ = unsafe { Thread.spawn(Worker { jobs: jobs }) }
+    return to
+}
+
+/// Writes a thumbnail of the image at `src` to `dst`: a JPEG, or a PNG when it has
+/// alpha. It's written beside `dst` first and moved, so half a thumbnail is never served.
+pub fn make_thumb(src: String, dst: String) ! Error {
+    let data = try fs.read(src)
+    let im = match Image.decode(data) {
+        ok(i) => i,
+        err(why) => fail "it isn't an image loom can read: {why}",
+    }
+    let small = im.thumbnail(THUMB, THUMB)
+    let part = "{dst}.part"
+    if small.kind().has_alpha() {
+        try fs.write(part.copy(), small.encode_png())
+    } else {
+        try fs.write(part.copy(), small.to(Kind.Rgb).encode_jpeg(80))
+    }
+    try fs.rename(part, dst)
+}
+
+/// The type of an image or a PDF, from how its bytes start, or none.
+pub fn sniff(head: List<u8>) -> String? {
+    let n = head.len()
+    if n >= 8 and head[0] == 0x89 and head[1] == 0x50 and head[2] == 0x4e and head[3] == 0x47 { return some(String("image/png")) }
+    if n >= 3 and head[0] == 0xff and head[1] == 0xd8 and head[2] == 0xff { return some(String("image/jpeg")) }
+    if n >= 6 and head[0] == 0x47 and head[1] == 0x49 and head[2] == 0x46 and head[3] == 0x38 { return some(String("image/gif")) }
+    if n >= 12 and head[0] == 0x52 and head[1] == 0x49 and head[2] == 0x46 and head[3] == 0x46 and head[8] == 0x57 and head[9] == 0x45 and head[10] == 0x42 and head[11] == 0x50 { return some(String("image/webp")) }
+    if n >= 5 and head[0] == 0x25 and head[1] == 0x50 and head[2] == 0x44 and head[3] == 0x46 and head[4] == 0x2d { return some(String("application/pdf")) }
+    return none
+}
+
+/// Whether loom makes thumbnails of this type.
+pub fn thumbable(mime: String) -> bool {
+    return mime == "image/png" or mime == "image/jpeg"
+}
+
+/// Whether an agent can be given this type as an image.
+pub fn agent_image(mime: String) -> bool {
+    return mime == "image/png" or mime == "image/jpeg" or mime == "image/gif" or mime == "image/webp"
+}
+
+@test
+fn types_are_sniffed() {
+    assert(sniff([0x89u8, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]) == some(String("image/png")))
+    assert(sniff([0xffu8, 0xd8, 0xff, 0xe0]) == some(String("image/jpeg")))
+    assert(sniff([0x25u8, 0x50, 0x44, 0x46, 0x2d, 0x31]) == some(String("application/pdf")))
+    assert(sniff([1u8, 2, 3]) == none)
+}

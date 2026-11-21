@@ -1,0 +1,49 @@
+module shared.files
+
+// What the instance and the core both need to know of files: how they're
+// named on disk.
+
+/// A file's name, safe to write in a folder on any system: no path, nothing Windows
+/// refuses, at most 120 bytes, and "file" when nothing is left.
+pub fn safe_name(name: String) -> String {
+    var base = name.copy()
+    if let i = base.find_last("/") { base = base[i + 1..].copy() }
+    if let i = base.find_last("\\") { base = base[i + 1..].copy() }
+    var out = String()
+    for r in base.runes() {
+        if out.len() >= 120 { break }
+        let bad = r < ' ' or r == ':' or r == '*' or r == '?' or r == '"' or r == '<' or r == '>' or r == '|'
+        out.push(if bad { '_' } else { r })
+    }
+    var trimmed = out.trim().copy()
+    while trimmed.ends_with(".") or trimmed.ends_with(" ") {
+        trimmed = trimmed[..trimmed.len() - 1].copy()
+    }
+    if trimmed.len() == 0 or trimmed == ".." { return String("file") }
+    return trimmed
+}
+
+/// Whether `text` is a SHA-256 as files are named: 64 lowercase hex digits.
+pub fn is_sha(text: String) -> bool {
+    if text.len() != 64 { return false }
+    for r in text.runes() {
+        if not ((r >= '0' and r <= '9') or (r >= 'a' and r <= 'f')) { return false }
+    }
+    return true
+}
+
+@test
+fn names_are_made_safe() {
+    assert(safe_name(String("report.pdf")) == "report.pdf")
+    assert(safe_name(String("C:\\Users\\me\\a:b?.txt")) == "a_b_.txt")
+    assert(safe_name(String("../../etc/passwd")) == "passwd")
+    assert(safe_name(String("..")) == "file")
+    assert(safe_name(String("")) == "file")
+}
+
+@test
+fn shas_are_checked() {
+    assert(is_sha("a".repeat(64)))
+    assert(not is_sha("A".repeat(64)))
+    assert(not is_sha(String("../x")))
+}
