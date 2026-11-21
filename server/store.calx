@@ -82,6 +82,9 @@ CREATE TABLE IF NOT EXISTS routines (
     id TEXT PRIMARY KEY, user TEXT NOT NULL REFERENCES users(id), json TEXT NOT NULL,
     next INTEGER NOT NULL);
 CREATE INDEX IF NOT EXISTS routines_by_next ON routines (next);
+CREATE TABLE IF NOT EXISTS link_codes (
+    hash TEXT PRIMARY KEY, user TEXT NOT NULL REFERENCES users(id), by TEXT NOT NULL,
+    expires INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS memories (
     id INTEGER PRIMARY KEY, user TEXT NOT NULL REFERENCES users(id), agent TEXT NOT NULL,
     text TEXT NOT NULL, by TEXT NOT NULL, at INTEGER NOT NULL);
@@ -801,6 +804,23 @@ impl Store {
 
     pub fn delete_routine(self, user: String, id: String) -> bool ! Error {
         return try self.db.execute(String("DELETE FROM routines WHERE id = ? AND user = ?"), [t(id), t(user)]) > 0
+    }
+
+    // --- Codes that add a device by QR code (PLAN.md, "Connecting devices") ---
+
+    // Keeps a one-time code, as its SHA-256 `hash`, for `user`, made on device
+    // `by`, until `expires` (Unix ms). Codes already past their time go.
+    pub fn add_link_code(self, hash: String, user: String, by: String, expires: i64, time: i64) ! Error {
+        _ = try self.db.execute(String("DELETE FROM link_codes WHERE expires <= ?"), [Value.Int(time)])
+        _ = try self.db.execute(String("INSERT INTO link_codes (hash, user, by, expires) VALUES (?, ?, ?, ?)"), [t(hash), t(user), t(by), Value.Int(expires)])
+    }
+
+    // Takes the code whose SHA-256 is `hash`, once: whose it is and when it
+    // expires, or none for a code there isn't. Taken, it's gone.
+    pub fn take_link_code(self, hash: String) -> (String, i64)? ! Error {
+        let r = try self.db.query_one(String("SELECT user, expires FROM link_codes WHERE hash = ?"), [t(hash.copy())]) else return none
+        _ = try self.db.execute(String("DELETE FROM link_codes WHERE hash = ?"), [t(hash)])
+        return some((text(r[0].copy()), int(r[1].copy())))
     }
 
     // --- The activity log (PLAN.md, "Machines and devices") ---

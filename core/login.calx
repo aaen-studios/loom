@@ -14,6 +14,7 @@ const LIMIT: usize = 1048576
 pub enum Kind {
     Login
     Setup
+    Link      // with the one-time code from another device's QR code
     Logout
 }
 
@@ -46,10 +47,11 @@ pub fn address(server: String) -> String {
 }
 
 impl Pending {
-    /// Starts a login or a setup: POSTs `body` to /api/login or /api/setup.
+    /// Starts a login, a setup or a link: POSTs `body` to /api/login, /api/setup or /api/link.
     pub fn start(kind: Kind, server: own String, id: own String?, payload: Json) -> Pending {
         let path = match kind {
             Kind.Setup => "/api/setup",
+            Kind.Link => "/api/link",
             _ => "/api/login",
         }
         let headers: List<Header> = [Header { name: String("Content-Type"), value: String("application/json") }]

@@ -80,6 +80,7 @@ enum Screen {
     Routines,
     Programs,
     ThisDevice,
+    AddPhone,
     Mcp,
 }
 
@@ -1177,6 +1178,24 @@ ACTA_KEY=secret:ACTA_KEY",
                                     cx.notify();
                                 })),
                         )
+                        .child(
+                            div()
+                                .id("add-phone")
+                                .text_size(px(size::CAPTION))
+                                .text_color(p.ink_3)
+                                .cursor_pointer()
+                                .hover(move |s| s.text_color(p.ink))
+                                .child("Add a phone")
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    let f = this.model.create_link();
+                                    this.send(f);
+                                    let d = this.model.load_devices();
+                                    this.send(d);
+                                    this.menu = None;
+                                    this.screen = Screen::AddPhone;
+                                    cx.notify();
+                                })),
+                        )
                     }),
             )
             .child(
@@ -1239,6 +1258,7 @@ ACTA_KEY=secret:ACTA_KEY",
             Screen::Skills
                 | Screen::Programs
                 | Screen::ThisDevice
+                | Screen::AddPhone
                 | Screen::Profile
                 | Screen::Routines
                 | Screen::Mcp
@@ -1250,6 +1270,7 @@ ACTA_KEY=secret:ACTA_KEY",
                     Screen::Programs => "Agent programs",
                     Screen::Profile => "About you",
                     Screen::Mcp => "MCP servers",
+                    Screen::AddPhone => "Add a phone",
                     _ => "This PC",
                 },
             ));
@@ -2785,6 +2806,125 @@ ACTA_KEY=secret:ACTA_KEY",
         div().flex_1().min_h_0().child(page)
     }
 
+    /// The Add a phone page: a QR code the phone's loom app scans to join this account,
+    /// with a token of its own. The core makes what's in it; this draws it, dark on white
+    /// in either theme so a camera reads it.
+    fn add_phone_page(&mut self, cx: &mut Context<Self>) -> Div {
+        let p = self.p;
+        let caption = |text: String| {
+            div()
+                .text_size(px(size::CAPTION))
+                .text_color(p.ink_3)
+                .child(text)
+        };
+        let mut body = div()
+            .w(px(560.0))
+            .flex()
+            .flex_col()
+            .gap(px(space::XL))
+            .child(
+                div()
+                    .text_size(px(size::HEADING))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(p.ink)
+                    .child("Add a phone"),
+            );
+        if let Some(name) = self.model.joined.clone() {
+            body = body.child(
+                div()
+                    .text_size(px(size::BODY))
+                    .text_color(p.ink)
+                    .child(format!(
+                    "{name} joined. It has a sign-in of its own, which you can take away below."
+                )),
+            );
+        } else if let Some((text, expires)) = self.model.link.clone() {
+            body = body
+                .child(caption(
+                    "In loom on your phone, choose Scan a code and point the camera here. It joins this account, on this instance."
+                        .into(),
+                ))
+                .child(qr_view(&text))
+                .child(caption(format!(
+                    "The code works once, until {}.",
+                    time_of(expires)
+                )));
+        } else {
+            body = body.child(caption("Making a code…".into()));
+        }
+        body = body.child(
+            div().flex().child(
+                self.button("new-link", "New code", false)
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        let f = this.model.create_link();
+                        this.send(f);
+                        cx.notify();
+                    })),
+            ),
+        );
+        // Every device signed in to this account, so one that shouldn't be can be signed out.
+        let mut devices = div().flex().flex_col().gap(px(space::XS)).child(
+            div()
+                .text_size(px(size::BODY))
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(p.ink)
+                .child("Signed in"),
+        );
+        for (id, name, kind) in self.model.devices.clone() {
+            let what = match kind.as_str() {
+                "ios" => "iPhone",
+                "macos" => "Mac",
+                "windows" => "Windows PC",
+                _ => "Command line",
+            };
+            let this_one = id == self.model.me;
+            let mut row = div()
+                .flex()
+                .items_center()
+                .justify_between()
+                .py(px(space::S))
+                .px(px(space::S))
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .child(
+                            div()
+                                .text_size(px(size::SMALL))
+                                .text_color(p.ink)
+                                .child(name.clone()),
+                        )
+                        .child(caption(if this_one {
+                            format!("{what}, this one")
+                        } else {
+                            what.to_string()
+                        })),
+                );
+            if !this_one {
+                row = row.child(
+                    self.button_owned(format!("revoke-{id}"), "Sign out", false)
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            let f = this.model.revoke_device(&id);
+                            this.send(f);
+                            cx.notify();
+                        })),
+                );
+            }
+            devices = devices.child(row);
+        }
+        body = body.child(devices);
+        let page = div()
+            .id("add-phone-page")
+            .size_full()
+            .overflow_y_scroll()
+            .flex()
+            .justify_center()
+            .pt(px(space::XXL))
+            .pb(px(space::XXL))
+            .child(body);
+        div().flex_1().min_h_0().child(page)
+    }
+
     /// The This PC page: what agents may do on this computer, tool by tool. The core keeps
     /// the choice, and checks it before it acts.
     fn device_page(&mut self, cx: &mut Context<Self>) -> Div {
@@ -3856,6 +3996,43 @@ fn day_of(ms: i64) -> String {
     }
 }
 
+/// The side of one module of a drawn QR code, in pixels.
+const QR_CELL: f32 = 6.0;
+
+/// A QR code of `text`, dark on white with the quiet zone around it, each row's runs of
+/// dark modules drawn as one box.
+fn qr_view(text: &str) -> Div {
+    let white: Hsla = rgb(0xffffff).into();
+    let black: Hsla = rgb(0x000000).into();
+    let Ok(code) = qrcode::QrCode::new(text.as_bytes()) else {
+        return div().child("This code is too long to draw.");
+    };
+    let width = code.width();
+    let colors = code.to_colors();
+    let mut grid = div()
+        .flex()
+        .flex_col()
+        .p(px(QR_CELL * 4.0))
+        .bg(white)
+        .rounded(px(radius::BUTTON));
+    for row in colors.chunks(width) {
+        let mut line = div().flex().h(px(QR_CELL));
+        let mut x = 0;
+        while x < width {
+            let dark = row[x] == qrcode::Color::Dark;
+            let mut n = 1;
+            while x + n < width && (row[x + n] == qrcode::Color::Dark) == dark {
+                n += 1;
+            }
+            let cell = div().w(px(QR_CELL * n as f32)).h(px(QR_CELL));
+            line = line.child(if dark { cell.bg(black) } else { cell });
+            x += n;
+        }
+        grid = grid.child(line);
+    }
+    div().flex().child(grid)
+}
+
 fn time_of(ms: i64) -> String {
     use chrono::TimeZone;
     if ms <= 0 || ms == i64::MAX {
@@ -3909,6 +4086,7 @@ impl Render for Loom {
             Screen::Routines => self.routines_page(cx),
             Screen::Programs => self.programs_page(cx),
             Screen::ThisDevice => self.device_page(cx),
+            Screen::AddPhone => self.add_phone_page(cx),
             Screen::Mcp => self.mcp_page(cx),
         };
         let header = self.header(cx);

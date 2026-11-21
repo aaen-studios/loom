@@ -18,6 +18,7 @@ pub enum List {
     Approvals,
     Outbox,
     Messages,
+    Devices,
 }
 
 impl List {
@@ -30,6 +31,7 @@ impl List {
             List::Approvals => "approvals",
             List::Outbox => "outbox",
             List::Messages => "messages",
+            List::Devices => "devices",
         }
     }
 
@@ -42,6 +44,7 @@ impl List {
             "approvals" => List::Approvals,
             "outbox" => List::Outbox,
             "messages" => List::Messages,
+            "devices" => List::Devices,
             _ => return None,
         })
     }
@@ -512,6 +515,15 @@ pub struct Model {
     /// The person's routines, oldest first.
     pub routines: Vec<Routine>,
     routines_stale: bool,
+    /// The QR code that adds a phone, while one is shown: its text, and when it expires
+    /// (Unix ms).
+    pub link: Option<(String, i64)>,
+    /// The name of the device that joined with it, once one has.
+    pub joined: Option<String>,
+    /// The person's devices, as the cache has them: id, name and kind.
+    pub devices: Vec<(String, String, String)>,
+    /// This device's id, once the instance has welcomed it.
+    pub me: String,
     /// What the selected agent remembers, for the memory page, newest first.
     pub notes: Vec<Note>,
     notes_stale: bool,
@@ -712,6 +724,7 @@ impl Model {
                     self.dirty.insert(l);
                 }
             }
+            "welcome" => self.me = s(f, "device"),
             "core.data" => self.data(f),
             "core.queued" => {
                 self.queued.push(Queued::of(f));
@@ -772,6 +785,14 @@ impl Model {
         let kind = s(f, "kind");
         let (family, _) = kind.split_once('.').unwrap_or((kind.as_str(), ""));
         match family {
+            // A device that joined with the QR code being shown: the code is used up.
+            "device" => {
+                self.dirty.insert(List::Devices);
+                if kind == "device.added" && self.link.is_some() {
+                    self.link = None;
+                    self.joined = Some(s(f.get("device").unwrap_or(&Value::Null), "name"));
+                }
+            }
             "agent" => {
                 self.dirty.insert(List::Agents);
                 // A change to the agent being edited is a new revision to list.
@@ -895,6 +916,20 @@ impl Model {
                         .collect()
                 })
                 .unwrap_or_default();
+        } else if id.starts_with("app.device_revoke") {
+            if let Some(e) = f.get("error") {
+                self.notices.push(s(e, "message"));
+            }
+        } else if id.starts_with("app.link") {
+            if let Some(e) = f.get("error") {
+                self.notices.push(s(e, "message"));
+            } else if let Some(v) = f.get("value") {
+                self.link = Some((
+                    s(v, "qr"),
+                    v.get("expires").and_then(Value::as_i64).unwrap_or(0),
+                ));
+                self.joined = None;
+            }
         } else if id.starts_with("app.routines") {
             self.routines = f
                 .pointer("/value/routines")
@@ -1087,6 +1122,12 @@ impl Model {
             .cloned()
             .unwrap_or_default();
         match what {
+            List::Devices => {
+                self.devices = items
+                    .iter()
+                    .map(|d| (s(d, "id"), s(d, "name"), s(d, "kind")))
+                    .collect();
+            }
             List::Agents => {
                 self.agents = items
                     .iter()
@@ -1668,6 +1709,26 @@ impl Model {
     pub fn delete_skill(&mut self, name: &str) -> Value {
         let id = self.id("app.skill_delete");
         json!({"t": "cmd", "id": id, "name": "skill.delete", "args": {"name": name}})
+    }
+
+    /// Asks the instance for a one-time code that adds a phone; the core gives it back with
+    /// the QR code's text.
+    pub fn create_link(&mut self) -> Value {
+        let id = self.id("app.link");
+        self.link = None;
+        self.joined = None;
+        json!({"t": "cmd", "id": id, "name": "link.create"})
+    }
+
+    /// Reads the person's devices from the cache.
+    pub fn load_devices(&mut self) -> Value {
+        json!({"t": "core.get", "id": "app.devices", "what": "devices"})
+    }
+
+    /// Signs one of the person's devices out, for good: its token stops working.
+    pub fn revoke_device(&mut self, device: &str) -> Value {
+        let id = self.id("app.device_revoke");
+        json!({"t": "cmd", "id": id, "name": "device.revoke", "args": {"device": device}})
     }
 
     /// Asks for the person's routines.
