@@ -1,0 +1,110 @@
+module server.backup
+
+// Backups, and what moving sends (PLAN.md, "Moving an instance"): an
+// instance's data folder as one .tar.zst, written a file at a time, so a
+// folder bigger than memory fits. It has:
+//
+// - loom.json: the format, loom's version, the instance's id, when, and the
+//   ACP agents to install again where it lands;
+// - loom.db: the database as a consistent snapshot, from SQLite's VACUUM
+//   INTO, which is safe while the instance runs;
+// - secret.key, which the sealed secrets need, so the archive is as secret
+//   as they are;
+// - everything else in the folder: files, agents' folders, the rest.
+//
+// Installed ACP agent programs (acp/) stay out, as they're for one machine
+// and are installed again from the registry, and so do plugins' tool
+// folders (plugins/), which the instance writes again from the database.
+// `loom import` makes a new data folder from one, with `restore`.
+import std.fs
+import std.json.{Json, parse}
+import std.sqlite.{Database, Value}
+import std.tar.{StreamReader, StreamWriter}
+import std.zstd
+import shared.obj.{Obj}
+import server.store.{now}
+
+pub const FORMAT: i64 = 1
+
+// The top of the data folder that doesn't go: the live database, which goes
+// as its snapshot, and what's made again where it lands.
+const LEFT_OUT: [str; 5] = ["loom.db", "loom.db-wal", "loom.db-shm", "acp", "plugins"]
+
+// Writes the instance in `data` to the file `to`, and gives its loom.json.
+// The file appears whole or not at all.
+pub fn export(data: String, to: String, version: String) -> Json ! Error {
+    let live = "{data}/loom.db"
+    if not fs.exists(live.copy()) { fail "{data} has no loom.db, so it isn't an instance's folder" }
+    let snapshot = "{to}.db.making"
+    let making = "{to}.making"
+    for leftover in [snapshot.copy(), making.copy()] {
+        if fs.exists(leftover.copy()) { try fs.remove_file(leftover) }
+    }
+    let db = try Database.open(live)
+    _ = try db.execute(String("VACUUM INTO ?"), [Value.Text(snapshot.copy())])
+    let copy = try Database.open(snapshot.copy())
+    let instance = match try copy.query_one(String("SELECT value FROM meta WHERE key = 'instance'"), List<Value>()) {
+        some(r) => text(r[0].copy()),
+        none => String(),
+    }
+    var programs = List<Json>()
+    for r in try copy.query(String("SELECT name FROM acp_agents ORDER BY name"), List<Value>()) {
+        programs.push(Json.Str(text(r[0].copy())))
+    }
+    let manifest = Obj.new().i("format", FORMAT).s("version", version).s("instance", instance).i("at", now()).j("acp_agents", Json.Array(programs)).done()
+    var w = StreamWriter.new(zstd.Writer.new(try fs.create(making.copy()), level: 9, checksum: true))
+    try w.add(String("loom.json"), "{manifest}".to_bytes(), mode: 0o600)
+    try w.add_file(String("loom.db"), snapshot.copy())
+    for name in try fs.list(data.copy()) {
+        var skip = name.ends_with(".making")
+        for out in LEFT_OUT {
+            if name == out { skip = true }
+        }
+        if skip { continue }
+        let path = "{data}/{name}"
+        if fs.is_dir(path.copy()) {
+            try w.add_tree(name, path)
+        } else {
+            try w.add_file(name, path)
+        }
+    }
+    let z = try w.finish()
+    _ = try z.finish()
+    try fs.remove_file(snapshot)
+    // It holds the key to the instance's secrets: only its owner reads it.
+    if fs.separator() == "/" { try fs.set_mode(making.copy(), 0o600) }
+    try fs.rename_synced(making, to)
+    return manifest
+}
+
+// Makes a new instance's data folder, `data`, from the file `from`, and gives
+// its loom.json. `data` must hold no instance already.
+pub fn restore(from: String, data: String) -> Json ! Error {
+    if fs.exists("{data}/loom.db") { fail "{data} holds an instance already: import makes a new one, in a folder of its own" }
+    try fs.make_dir_all(data.copy())
+    var r = StreamReader.new(zstd.Reader.new(try fs.open_read(from.copy())))
+    try r.extract(data.copy())
+    _ = try r.finish()
+    let told = "{data}/loom.json"
+    let text = try fs.read_text(told.copy()) ?? String()
+    let manifest = match parse(text) {
+        ok(m) => m,
+        err(_) => fail "{from} isn't a loom backup: it has no loom.json",
+    }
+    let format = (manifest.get(String("format")) ?? Json.Null).as_i64() ?? 0
+    if format != FORMAT { fail "{from} is a backup of format {format}, and this loom reads format {FORMAT}: update loom" }
+    try fs.remove_file(told)
+    if not fs.exists("{data}/loom.db") { fail "{from} has no database in it" }
+    if fs.separator() == "/" {
+        try fs.set_mode(data.copy(), 0o700)
+        if fs.exists("{data}/secret.key") { try fs.set_mode("{data}/secret.key", 0o600) }
+    }
+    return manifest
+}
+
+fn text(v: Value) -> String {
+    return match v {
+        Value.Text(t) => t,
+        _ => String(),
+    }
+}

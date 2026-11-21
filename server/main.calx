@@ -29,6 +29,7 @@ import shared.protocol
 import shared.release.{MANIFEST, RELEASE_KEY, check_manifest, newer}
 import server.instance.{Config, EventLife, Instance}
 import server.mcp
+import server.backup
 import server.installer
 import server.store.{Store}
 
@@ -50,6 +51,9 @@ usage: loom <command>
   push key FILE KEY_ID TEAM_ID BUNDLE_ID
                             send push to the iPhone app through APNs, signed with Apple's AuthKey_<id>.p8
   push off                  send no push
+  export FILE               write the whole instance to FILE, a .tar.zst, while it runs or not: a backup, which
+                            holds the key to its secrets, so keep it as safe
+  import FILE               make a new instance in --data from a backup
   status                    say what the instance holds
   update                    update this program to the newest signed release (--check: only say if there's one)
   version                   print loom's version and the protocol versions it speaks
@@ -305,6 +309,15 @@ fn run(a: Args) -> Said ! Error {
         }
         try store.set_meta("file_limit", "{mb * 1000000}")
         return said("each person can keep {mb} MB of files", Obj.new().i("limit_mb", mb).done())
+    }
+    if cmd == "export" and a.words.len() == 2 {
+        let m = try backup.export(a.data.copy(), a.words[1].copy(), String(VERSION))
+        return said("wrote {a.words[1]}: the instance {str_at(m.copy(), "instance") ?? String()}, with the key to its secrets, so keep it as safe as them", Obj.new().s("file", a.words[1].copy()).j("backup", m).done())
+    }
+    if cmd == "import" and a.words.len() == 2 {
+        let m = try backup.restore(a.words[1].copy(), a.data.copy())
+        let programs = at(m.copy(), "acp_agents")
+        return said("made the instance {str_at(m.copy(), "instance") ?? String()} in {a.data}. Install its ACP agents again here: {programs}", Obj.new().s("data", a.data.copy()).j("backup", m).done())
     }
     if cmd == "update" {
         return try update(a.words.contains(String("--check")))
