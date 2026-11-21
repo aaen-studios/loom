@@ -1,0 +1,213 @@
+module server.setup
+
+// `loom install`: sets loom up on a Linux server, as root, once the install
+// script has put this program on it (PLAN.md, "Agents can do anything the
+// app can"). It makes the `loom` user, which has no rights beyond its own
+// folder, keeps the instance in /var/lib/loom, runs `loom serve` as that user
+// from a systemd unit, and puts Caddy in front for TLS when there's a domain,
+// or Tailscale when there isn't. Then it starts it, and gives the address and
+// the setup code.
+import std.env
+import std.fs
+import std.json.{Json}
+import std.process.{Command, current_exe, which}
+import std.thread.{sleep}
+import shared.obj.{Obj}
+
+pub const USER: str = "loom"
+pub const HOME: str = "/var/lib/loom"
+pub const BIN: str = "/usr/local/bin/loom"
+pub const UNIT: str = "/etc/systemd/system/loom.service"
+pub const CADDYFILE: str = "/etc/caddy/Caddyfile"
+// Marks the files loom wrote, so a second install may write them again.
+const MARK: str = "# Written by loom install."
+
+/// How to install: a domain for Caddy, or none.
+pub struct Plan {
+    pub domain: String
+    pub port: u16
+}
+
+/// What an install did, for `loom install` to say, in words or as JSON.
+pub struct Done {
+    pub address: String
+    pub setup_code: String?
+    pub steps: List<String>
+}
+
+/// The systemd unit that runs the instance as `loom`, with as little else as it needs.
+pub fn unit(port: u16) -> String {
+    let lines: List<String> = [
+        String(MARK),
+        String("[Unit]"),
+        String("Description=loom, an instance of agents"),
+        String("After=network-online.target"),
+        String("Wants=network-online.target"),
+        String(),
+        String("[Service]"),
+        "User={USER}",
+        "Group={USER}",
+        "ExecStart={BIN} serve --data {HOME} --port {port}",
+        String("Restart=on-failure"),
+        String("RestartSec=2"),
+        "WorkingDirectory={HOME}",
+        String("NoNewPrivileges=yes"),
+        String("PrivateTmp=yes"),
+        String("ProtectSystem=full"),
+        String("ProtectHome=read-only"),
+        "ReadWritePaths={HOME}",
+        String("UMask=0077"),
+        String(),
+        String("[Install]"),
+        String("WantedBy=multi-user.target"),
+        String(),
+    ]
+    return lines.join("\n")
+}
+
+/// Caddy's file for `domain`, with TLS from Let's Encrypt, in front of the instance.
+pub fn caddyfile(domain: String, port: u16) -> String {
+    return "{MARK}\n{domain} \{\n    reverse_proxy 127.0.0.1:{port}\n\}\n"
+}
+
+/// Whether a Caddyfile that's there may be written over: one loom wrote, or the one
+/// Debian's caddy package comes with, which only serves its welcome page.
+pub fn caddyfile_ours(text: String) -> bool {
+    return text.contains(MARK) or (text.contains(":80") and text.contains("/usr/share/caddy"))
+}
+
+/// Runs `program` with `args`, and fails with what it said when it doesn't work.
+fn sh(program: str, args: List<String>) -> String ! Error {
+    let out = try Command.new(String(program)).args(args).output()
+    if not out.status.success() { fail "{program} {args.join(" ")} didn't work: {out.error_text().trim()}" }
+    return out.text()
+}
+
+fn words(list: List<str>) -> List<String> {
+    var out = List<String>()
+    for w in list {
+        out.push(String(w))
+    }
+    return out
+}
+
+/// Installs loom as `plan` says. Linux with systemd, as root.
+pub fn install(plan: Plan) -> Done ! Error {
+    if env.os() != "linux" { fail "loom install sets loom up on a Linux server; on a PC, the desktop app runs an instance itself" }
+    if not env.is_elevated() { fail "loom install needs root, to make the loom user and the service: run it with sudo" }
+    if which(String("systemctl")) == none { fail "loom install needs systemd, which this system doesn't have" }
+    var steps = List<String>()
+
+    // The user, with no shell and no rights beyond its own folder.
+    let known = try Command.new(String("id")).arg(String(USER)).output()
+    if not known.status.success() {
+        _ = try sh("useradd", words(["--system", "--home-dir", HOME, "--shell", "/usr/sbin/nologin", "--user-group", USER]))
+        steps.push("made the user {USER}")
+    }
+    try fs.make_dir_all(String(HOME))
+    _ = try sh("chown", words(["-R", "loom:loom", HOME]))
+    try fs.set_mode(String(HOME), 0o700)
+    steps.push("keeps the instance in {HOME}, which only {USER} can read")
+
+    // The program, where the unit runs it.
+    let exe = current_exe()
+    if exe != BIN {
+        try fs.copy(exe, String(BIN))
+        try fs.set_mode(String(BIN), 0o755)
+        steps.push("put loom in {BIN}")
+    }
+
+    // The service.
+    let existing = try fs.read_text(String(UNIT)) ?? String()
+    if existing.len() > 0 and not existing.contains(MARK) { fail "{UNIT} is there already, and loom didn't write it, so it's left as it is" }
+    try fs.write_text(String(UNIT), unit(plan.port))
+    _ = try sh("systemctl", words(["daemon-reload"]))
+    _ = try sh("systemctl", words(["enable", "--now", "loom"]))
+    _ = try sh("systemctl", words(["restart", "loom"]))
+    steps.push("runs loom serve as {USER}, from {UNIT}")
+
+    // In front of it: Caddy for a domain, or Tailscale.
+    var address = "http://127.0.0.1:{plan.port}"
+    if plan.domain.len() > 0 {
+        if which(String("caddy")) == none {
+            if which(String("apt-get")) == none { fail "Caddy isn't installed, and this system has no apt-get to install it with: install Caddy, then run loom install again" }
+            _ = try sh("apt-get", words(["install", "-y", "caddy"]))
+            steps.push("installed Caddy")
+        }
+        let there = try fs.read_text(String(CADDYFILE)) ?? String()
+        if there.len() > 0 and not caddyfile_ours(there) { fail "{CADDYFILE} has a site in it already, so loom leaves it: add `{plan.domain} \{ reverse_proxy 127.0.0.1:{plan.port} \}` to it yourself" }
+        try fs.make_dir_all(String("/etc/caddy"))
+        try fs.write_text(String(CADDYFILE), caddyfile(plan.domain.copy(), plan.port))
+        _ = try sh("systemctl", words(["enable", "caddy"]))
+        _ = try sh("systemctl", words(["reload-or-restart", "caddy"]))
+        address = "https://{plan.domain}"
+        steps.push("Caddy serves it at {address}, with TLS")
+    } else if which(String("tailscale")) != none {
+        let served = try Command.new(String("tailscale")).args(words(["serve", "--bg", "--https=443"])).arg("http://127.0.0.1:{plan.port}").output()
+        if served.status.success() {
+            steps.push("Tailscale serves it on your tailnet: `tailscale serve status` gives its address")
+        } else {
+            steps.push("Tailscale didn't take it ({served.error_text().trim()}); it's at {address} on this machine")
+        }
+    } else {
+        steps.push("it listens only on this machine: give a --domain for Caddy, or install Tailscale and run loom install again")
+    }
+
+    return Done { address: address, setup_code: try setup_code(), steps: steps }
+}
+
+/// The setup code the instance printed on its first start, from its log. None once the
+/// owner is set up, or if it doesn't come within 30 seconds.
+fn setup_code() -> String? ! Error {
+    var waited: i64 = 0
+    while waited < 30000 {
+        let log = try Command.new(String("journalctl")).args(words(["-u", "loom", "--no-pager", "-o", "cat", "-n", "50"])).output()
+        let text = log.text()
+        if text.contains("loom: serving") and not text.contains("setup code:") and waited >= 3000 { return none }
+        for line in text.split("\n") {
+            if line.starts_with("setup code: ") { return some(line["setup code: ".len()..].trim().copy()) }
+        }
+        unsafe { sleep(500000000) }
+        waited += 500
+    }
+    return none
+}
+
+/// What `loom install` says once it's done, as JSON.
+pub fn done_json(d: Done) -> Json {
+    var steps = List<Json>()
+    for s in d.steps {
+        steps.push(Json.Str(s.copy()))
+    }
+    return Obj.new().s("address", d.address.copy()).maybe("setup_code", d.setup_code.copy()).j("steps", Json.Array(steps)).done()
+}
+
+/// The same, in words.
+pub fn done_text(d: Done) -> String {
+    var lines = List<String>()
+    for s in d.steps {
+        lines.push("- {s}")
+    }
+    lines.push("")
+    lines.push("loom is at {d.address}")
+    if let code = d.setup_code.copy() {
+        lines.push("setup code: {code}")
+        lines.push("Open the app, give it the address and this code, and choose your username and password.")
+    }
+    return lines.join("\n")
+}
+
+@test
+fn the_unit_runs_it_as_loom() {
+    let u = unit(8790)
+    assert(u.contains("User=loom") and u.contains("ExecStart=/usr/local/bin/loom serve --data /var/lib/loom --port 8790") and u.contains("NoNewPrivileges=yes"))
+}
+
+@test
+fn caddy_proxies_the_domain() {
+    let c = caddyfile(String("loom.example.com"), 8790)
+    assert(c.contains("loom.example.com \{\n    reverse_proxy 127.0.0.1:8790\n\}"))
+    assert(caddyfile_ours(c))
+    assert(caddyfile_ours(String(":80 \{\n\troot * /usr/share/caddy\n\tfile_server\n\}\n")))
+    assert(not caddyfile_ours(String("example.org \{\n\treverse_proxy :3000\n\}\n")))
+}
