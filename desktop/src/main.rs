@@ -162,7 +162,9 @@ gpui_kit::assets::icon_assets!(
         Monitor,
         Truck,
         Power,
-        LogOut
+        LogOut,
+        Globe,
+        X
     ]
 );
 

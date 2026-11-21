@@ -9,7 +9,7 @@ module tests.protocol.browser
 //     calx tests/protocol/browser.calx
 import std.fs
 import std.process.{exit}
-import shared.obj.{Obj, at, str_at}
+import shared.obj.{Obj, at, bool_at, int_at, str_at}
 import server.browser
 import tests.kit.{App, Instance, check, reply_text}
 
@@ -89,6 +89,32 @@ fn run(i: Instance) ! Error {
 
     let refused = try say(mut app, conversation.copy(), "m_7", String(#"/mcp browser_open {"url":"javascript:alert(1)"}"#))
     try check(refused.starts_with("browser_open failed"), "it opens only pages")
+
+    // --- Watching, and taking over ---
+    let watched = try app.cmd("q_w1", "browser.watch", Obj.new().s("agent", agent.copy()).b("on", true).done())
+    try check(bool_at(at(watched, "value"), "open") == some(true), "browser.watch says the browser is open")
+    let frame = try app.until("browser.frame", "")
+    let data = str_at(frame.copy(), "data") ?? String()
+    try check(str_at(frame.copy(), "agent") == some(agent.copy()) and data.starts_with("/9j/") and (int_at(frame, "width") ?? 0) > 0, "and frames of the page come, as JPEGs")
+    let early = try app.cmd("q_w2", "browser.input", Obj.new().s("agent", agent.copy()).s("kind", String("key")).s("key", String("Tab")).done())
+    try check(bool_at(early, "ok") == some(false), "the person's input waits for them to take over")
+
+    try app.send(Obj.new().s("t", String("send")).s("cid", String("m_8")).s("conversation", conversation.copy()).s("text", String(#"/mcp browser_ask_person {"why":"Type the code from your phone."}"#)).done())
+    loop {
+        let state = try app.until("browser.state", "")
+        if str_at(state, "asked") == some(String("Type the code from your phone.")) { break }
+    }
+    try check(true, "browser_ask_person asks the person, with browser.state")
+    let took = try app.cmd("q_w3", "browser.take", Obj.new().s("agent", agent.copy()).done())
+    try check(bool_at(at(took, "value"), "person") == some(true), "browser.take gives them the browser")
+    let tab = try app.cmd("q_i1", "browser.input", Obj.new().s("agent", agent.copy()).s("kind", String("key")).s("key", String("Tab")).done())
+    let typed_in = try app.cmd("q_i2", "browser.input", Obj.new().s("agent", agent.copy()).s("kind", String("text")).s("text", String("boots")).done())
+    let enter = try app.cmd("q_i3", "browser.input", Obj.new().s("agent", agent.copy()).s("kind", String("key")).s("key", String("Enter")).done())
+    try check(bool_at(tab, "ok") == some(true) and bool_at(typed_in, "ok") == some(true) and bool_at(enter, "ok") == some(true), "browser.input takes their keys and text")
+    _ = try app.cmd("q_w4", "browser.give", Obj.new().s("agent", agent.copy()).done())
+    let handed = try reply_in(mut app, conversation.copy())
+    try see(handed.starts_with("browser_ask_person: Your person handed the browser back after 3 clicks and keys") and handed.contains("Page: Sent boots"), "browser.give answers the agent, with what they did and the page", handed.copy())
+    _ = try app.cmd("q_w5", "browser.watch", Obj.new().s("agent", agent.copy()).b("on", false).done())
 
     let profile = "{i.data}/browsers"
     try check(fs.is_dir(profile.copy()), "the browser's profile is in the instance's data")

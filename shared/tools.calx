@@ -62,6 +62,7 @@ pub fn all() -> List<Json> {
         tool("browser_scroll", "Scrolls the page a screen down, or up.", object(Obj.new().j("direction", text_arg("down or up. down if left out.")), List<str>())),
         tool("browser_back", "Goes back to the page before, as a browser's back button does, and gives its outline.", object(Obj.new(), List<str>())),
         tool("browser_screenshot", "Gives a picture of what your browser shows, for when how the page looks matters.", object(Obj.new(), List<str>())),
+        tool("browser_ask_person", "Asks your person to take over your browser for something only they should do, such as logging in, a code sent to their phone, or a CAPTCHA. They get a notification, take over, and hand it back; the result comes then, with the page as it is. Open the page first.", object(Obj.new().j("why", text_arg("What you need them to do, in one sentence.")), ["why"])),
         tool("move_instance", "Moves this whole instance to a new place: a server or a computer where loom receive is running, which printed a move code. Everything goes, and your person's apps follow. Your person is asked first, and only the instance's owner can move it.", object(Obj.new().j("to", text_arg("The new place's address, starting with https:// or http://.")).j("code", text_arg("The move code loom receive printed there, starting loom-move-.")), ["to", "code"])),
     ]
 }
@@ -69,7 +70,7 @@ pub fn all() -> List<Json> {
 @test
 fn every_tool_has_a_schema() {
     let tools = all()
-    assert(tools.len() == 36)
+    assert(tools.len() == 37)
     for t in tools {
         assert("{t}".contains("\"inputSchema\":\{\"type\":\"object\""))
     }
