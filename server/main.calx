@@ -27,6 +27,7 @@ import shared.protocol
 import shared.release.{MANIFEST, RELEASE_KEY, check_manifest, newer}
 import server.instance.{Config, EventLife, Instance}
 import server.mcp
+import server.installer
 import server.store.{Store}
 
 const VERSION: str = "0.2.0-dev"
@@ -35,10 +36,11 @@ fn usage() -> String {
     return #"
 usage: loom <command>
 
-  serve                     run the instance (--port, default 8790; --host, default 127.0.0.1)
+  serve                     run the instance (--port, default 8790; --host, default 127.0.0.1;
+                            --registry, the ACP Registry's address, for a mirror of it)
   user add NAME             add an account; the password comes on standard input
   user list                 list the accounts
-  acp add NAME COMMAND ...  add an ACP agent program, such as: acp add claude npx @zed-industries/claude-agent-acp
+  acp add NAME COMMAND ...  add an ACP agent program, such as: acp add claude npx -y @agentclientprotocol/claude-agent-acp
   acp list                  list the ACP agent programs
   files limit MB|off        cap the files each person can keep, in megabytes
   status                    say what the instance holds
@@ -62,14 +64,22 @@ struct Args {
     host: String
     fast_hashes: bool
     keep_events: i64?
+    registry: String
 }
 
 fn read_args(given: List<String>) -> Args ! Error {
-    var a = Args { words: List<String>(), data: String("loom-data"), port: 8790, host: String("127.0.0.1"), fast_hashes: false, keep_events: none }
+    var a = Args { words: List<String>(), data: String("loom-data"), port: 8790, host: String("127.0.0.1"), fast_hashes: false, keep_events: none, registry: String(installer.REGISTRY) }
     var i: usize = 0
     while i < given.len() {
         let w = given[i].copy()
         // For tests only: keeps just the newest N events, of any age.
+        // Where the ACP Registry is: a mirror of it, or a test's.
+        if w == "--registry" {
+            if i + 1 >= given.len() { fail "{w} needs an address" }
+            a.registry = given[i + 1].copy()
+            i += 2
+            continue
+        }
         if w == "--test-keep-events" {
             if i + 1 >= given.len() { fail "{w} needs a number" }
             a.keep_events = some(i64.parse(given[i + 1].copy()) ?? 0)
@@ -114,7 +124,7 @@ fn open_store(a: Args) -> Store ! Error {
 }
 
 fn serve(a: Args) ! Error {
-    var i = try Instance.open(Config { data: a.data.copy(), port: a.port, host: a.host.copy(), hasher: hasher(a.copy()), events: event_life(a.copy()) })
+    var i = try Instance.open(Config { data: a.data.copy(), port: a.port, host: a.host.copy(), hasher: hasher(a.copy()), events: event_life(a.copy()), registry: a.registry.copy() })
     println("loom: serving {a.data} at {i.url()}")
     if let code = try i.setup_code() {
         println("loom: no owner yet. Set one up with POST /api/setup and this code:")

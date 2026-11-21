@@ -1,0 +1,230 @@
+module server.installer
+
+// ACP agents from the ACP Registry (PLAN.md, "Agents run on ACP"), on a thread
+// of its own: fetching the registry, and downloading, checking and unpacking an
+// agent's archive, take seconds, while the instance's loop carries on. The
+// registry is https://cdn.agentclientprotocol.com/registry/v1/latest/registry.json,
+// each entry as https://github.com/agentclientprotocol/registry's
+// agent.schema.json has it.
+import std.bytes
+import std.env
+import std.fs
+import std.hash.{sha256}
+import std.http.{Header, get}
+import std.json.{Json, parse}
+import std.process
+import std.tar.{Tar}
+import std.thread.{Task}
+import std.zip.{Zip}
+import shared.obj.{Obj, at, str_at}
+
+pub const REGISTRY: str = "https://cdn.agentclientprotocol.com/registry/v1/latest/registry.json"
+const REGISTRY_LIMIT: usize = 8000000
+const ARCHIVE_LIMIT: usize = 1000000000
+const WAIT_MS: u32 = 600000
+
+pub enum Work {
+    Registry(String)    // the registry, from this address
+    Install(Json, String)    // a program, as `pick` gave it, into this folder
+}
+
+pub struct Job {
+    pub id: i64
+    pub work: Work
+}
+
+pub struct Done {
+    pub id: i64
+    pub value: Json    // the registry, or the installed program's `command`, `args` and `env`
+    pub error: String    // why it couldn't be done, or ""
+}
+
+struct Worker {
+    jobs: Receiver<Job>
+    done: Sender<Done>
+}
+
+impl Task for Worker {
+    fn run(own self) {
+        var w = self
+        while let job = w.jobs.wait() {
+            let id = job.id
+            match work(job.work) {
+                ok(value) => w.done.send(Done { id: id, value: value, error: String() }),
+                err(e) => w.done.send(Done { id: id, value: Json.Null, error: "{e}" }),
+            }
+        }
+    }
+}
+
+fn work(w: Work) -> Json ! Error {
+    return match w {
+        Work.Registry(address) => try fetch_json(address),
+        Work.Install(how, folder) => try install(how, folder),
+    }
+}
+
+// Starts the thread. Gives the end that sends it jobs, and the queue its
+// answers come to.
+pub fn start() -> (Sender<Job>, Receiver<Done>) {
+    let jobs = Receiver<Job>()
+    let to = jobs.sender()
+    let done = Receiver<Done>()
+    _ = unsafe { Thread.spawn(Worker { jobs: jobs, done: done.sender() }) }
+    return (to, done)
+}
+
+// This machine, as the registry names the targets of a binary.
+pub fn platform() -> String {
+    let os = env.os()
+    let system = if os == "macos" { String("darwin") } else { os }
+    return "{system}-{env.native_arch()}"
+}
+
+// How to run the agent `entry` describes on `system`: its binary for that
+// platform, or else npx or uvx where they're installed. Gives `kind`
+// (`binary`, `npx` or `uvx`), `version`, and the registry's target for it
+// (`archive`, `sha256`, `cmd`, or `package`; `args`, `env`), or none when
+// there's no way to run it here.
+pub fn pick(entry: Json, system: String, npx: bool, uvx: bool) -> Json? {
+    let dist = at(entry.copy(), "distribution")
+    let version = str_at(entry, "version") ?? String()
+    let binary = at(dist.copy(), "binary")
+    var target = binary.get(system.copy()) ?? Json.Null
+    // A Linux machine runs a musl build too, where that's all there is.
+    if target == Json.Null and system.starts_with("linux-") { target = binary.get("{system}-musl") ?? Json.Null }
+    if target != Json.Null { return some(with_kind(target, "binary", version)) }
+    let by_npx = at(dist.copy(), "npx")
+    if npx and by_npx != Json.Null { return some(with_kind(by_npx, "npx", version)) }
+    let by_uvx = at(dist, "uvx")
+    if uvx and by_uvx != Json.Null { return some(with_kind(by_uvx, "uvx", version)) }
+    return none
+}
+
+fn with_kind(target: Json, kind: str, version: String) -> Json {
+    var o = Obj.new().s("kind", String(kind)).s("version", version)
+    if let Json.Object(m) = target {
+        for (k, v) in m {
+            o.m.insert(k.copy(), v.copy())
+        }
+    }
+    return o.done()
+}
+
+fn strings(list: Json) -> List<Json> {
+    if let Json.Array(items) = list { return items.copy() }
+    return List<Json>()
+}
+
+// Installs what `pick` gave into `folder`, and gives how to start it.
+pub fn install(how: Json, folder: String) -> Json ! Error {
+    let kind = str_at(how.copy(), "kind") ?? String()
+    let env_vars = if at(how.copy(), "env") == Json.Null { Obj.new().done() } else { at(how.copy(), "env") }
+    var args = List<Json>()
+    if kind == "npx" or kind == "uvx" {
+        let package = str_at(how.copy(), "package") ?? String()
+        // npx asks before it downloads a package, unless it's told not to.
+        if kind == "npx" { args.push(Json.Str(String("-y"))) }
+        args.push(Json.Str(package))
+        args.extend(strings(at(how, "args")))
+        return Obj.new().s("command", kind).j("args", Json.Array(args)).j("env", env_vars).done()
+    }
+    if kind != "binary" { fail "the registry has no way to run that agent here" }
+    // Only ever a folder of its own under the instance's acp/, since what was
+    // there is removed.
+    if not folder.contains("/acp/") { fail "{folder} isn't an ACP agent's folder" }
+    let address = str_at(how.copy(), "archive") ?? String()
+    let cmd = str_at(how.copy(), "cmd") ?? String()
+    if cmd.len() == 0 { fail "the registry doesn't say which program to run" }
+    let data = try fetch(address.copy(), ARCHIVE_LIMIT)
+    if let want = str_at(how.copy(), "sha256") {
+        let got = bytes.hex(sha256(data.copy()))
+        if got != want.to_lower_root() { fail "the download isn't the file the registry names: its SHA-256 is {got}" }
+    }
+    // A fresh folder, so what an older install left is gone.
+    let part = "{folder}.part"
+    if fs.exists(part.copy()) { try fs.remove_dir_all(part.copy()) }
+    try fs.make_dir_all(part.copy())
+    var name = address.copy()
+    if let q = name.find("?") { name = name[..q].copy() }
+    let lower = name.to_lower_root()
+    if lower.ends_with(".zip") {
+        match Zip.open(data) {
+            ok(z) => {
+                if let err(e) = z.extract(part.copy()) { fail "the archive can't be unpacked: {e}" }
+            },
+            err(e) => fail "the archive can't be read: {e}",
+        }
+    } else if lower.ends_with(".tar.gz") or lower.ends_with(".tgz") or lower.ends_with(".tar.xz") or lower.ends_with(".tar.zst") {
+        match Tar.open(data) {
+            ok(t) => {
+                if let err(e) = t.extract(part.copy()) { fail "the archive can't be unpacked: {e}" }
+            },
+            err(e) => fail "the archive can't be read: {e}",
+        }
+    } else if lower.ends_with(".tar.bz2") or lower.ends_with(".tbz2") {
+        fail "loom can't unpack bzip2 archives yet"
+    } else {
+        // The program itself, not in an archive.
+        try fs.write("{part}/{program_name(cmd.copy())}", data)
+    }
+    let program = "{part}/{program_name(cmd.copy())}"
+    if not fs.exists(program.copy()) { fail "the archive has no {cmd}" }
+    if env.os() != "windows" { try fs.set_mode(program, 0o755) }
+    if fs.exists(folder.copy()) { try fs.remove_dir_all(folder.copy()) }
+    try fs.rename(part, folder.copy())
+    let command = "{folder}/{program_name(cmd)}"
+    args.extend(strings(at(how, "args")))
+    return Obj.new().s("command", command).j("args", Json.Array(args)).j("env", env_vars).done()
+}
+
+// The program's path in its folder: `cmd` without a leading ./.
+fn program_name(cmd: String) -> String {
+    var c = cmd.copy()
+    while c.starts_with("./") or c.starts_with(".\\") {
+        c = c[2..].copy()
+    }
+    return c
+}
+
+fn fetch(address: String, limit: usize) -> List<u8> ! Error {
+    var req = get(address.copy(), [Header { name: String("User-Agent"), value: String("loom") }], WAIT_MS, limit)
+    let r = try req.wait()
+    if r.status != 200 { fail "{address} answered {r.status}" }
+    return r.body.copy()
+}
+
+fn fetch_json(address: String) -> Json ! Error {
+    let body = try fetch(address.copy(), REGISTRY_LIMIT)
+    let text = String.from_utf8(body) else { fail "{address} isn't UTF-8" }
+    return try parse(text)
+}
+
+// Whether a program is on the PATH, as npx and uvx need to be.
+pub fn on_path(name: str) -> bool {
+    return process.which(String(name)) != none
+}
+
+@test
+fn picks_a_way_to_run_it() {
+    let entry = parse(#"{"id":"x","version":"1.2.3","distribution":{"binary":{"linux-x86_64-musl":{"archive":"https://e/x.tar.gz","cmd":"./x"},"windows-x86_64":{"archive":"https://e/x.zip","cmd":"x.exe","args":["acp"]}},"npx":{"package":"x@1.2.3","env":{"A":"1"}}}}"#)!
+    let win = pick(entry.copy(), String("windows-x86_64"), true, false) ?? Json.Null
+    assert(str_at(win.copy(), "kind") == some(String("binary")) and str_at(win, "cmd") == some(String("x.exe")))
+    let musl = pick(entry.copy(), String("linux-x86_64"), false, false) ?? Json.Null
+    assert(str_at(musl, "archive") == some(String("https://e/x.tar.gz")))
+    let mac = pick(entry.copy(), String("darwin-aarch64"), true, false) ?? Json.Null
+    assert(str_at(mac.copy(), "kind") == some(String("npx")) and str_at(mac, "version") == some(String("1.2.3")))
+    assert(pick(entry, String("darwin-aarch64"), false, true) == none)
+}
+
+@test
+fn runs_a_package_with_npx() {
+    let how = parse(#"{"kind":"npx","package":"x@1.2.3","args":["--acp"],"env":{"A":"1"}}"#)!
+    let got = install(how, String("unused"))!
+    assert("{got}" == #"{"command":"npx","args":["-y","x@1.2.3","--acp"],"env":{"A":"1"}}"#)
+}
+
+@test
+fn leaves_dots_off_the_program() {
+    assert(program_name(String("./amp-acp")) == "amp-acp" and program_name(String("bin/x.exe")) == "bin/x.exe")
+}

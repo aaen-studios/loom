@@ -75,6 +75,7 @@ enum Screen {
     EditAgent,
     Activity,
     Skills,
+    Programs,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -111,6 +112,10 @@ pub struct Loom {
     /// On the skills page: none for the list, `Some(None)` for a new skill, `Some(Some(name))`
     /// for one being changed.
     skill_open: Option<Option<String>>,
+    /// The program whose settings form is open, on the programs page.
+    program_open: Option<String>,
+    set_key_in: Entity<InputState>,
+    set_value_in: Entity<InputState>,
     instructions_in: Entity<TextareaState>,
     search_in: Entity<InputState>,
     program: Option<String>,
@@ -180,6 +185,8 @@ impl Loom {
         let code_in = input(window, cx, "Setup code, for a new instance", false);
         let name_in = input(window, cx, "Scribe", false);
         let skill_name_in = input(window, cx, "release-notes", false);
+        let set_key_in = input(window, cx, "ANTHROPIC_API_KEY", false);
+        let set_value_in = input(window, cx, "Its value", true);
         let skill_desc_in = input(window, cx, "When it's for, in one sentence", false);
         let skill_body_in = cx.new(|cx| {
             TextareaState::new(window, cx)
@@ -300,6 +307,9 @@ impl Loom {
             skill_desc_in,
             skill_body_in,
             skill_open: None,
+            program_open: None,
+            set_key_in,
+            set_value_in,
             instructions_in,
             search_in,
             program: None,
@@ -927,6 +937,50 @@ impl Loom {
             .child(
                 div()
                     .flex()
+                    .gap(px(space::L))
+                    .px(px(space::L))
+                    .py(px(space::S))
+                    .border_t_1()
+                    .border_color(p.line)
+                    .child(
+                        div()
+                            .id("skills")
+                            .text_size(px(size::CAPTION))
+                            .text_color(p.ink_3)
+                            .cursor_pointer()
+                            .hover(move |s| s.text_color(p.ink))
+                            .child("Skills")
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                let f = this.model.load_skills();
+                                this.send(f);
+                                this.skill_open = None;
+                                this.menu = None;
+                                this.screen = Screen::Skills;
+                                cx.notify();
+                            })),
+                    )
+                    .child(
+                        div()
+                            .id("programs")
+                            .text_size(px(size::CAPTION))
+                            .text_color(p.ink_3)
+                            .cursor_pointer()
+                            .hover(move |s| s.text_color(p.ink))
+                            .child("Agent programs")
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                for f in this.model.load_programs() {
+                                    this.send(f);
+                                }
+                                this.program_open = None;
+                                this.menu = None;
+                                this.screen = Screen::Programs;
+                                cx.notify();
+                            })),
+                    ),
+            )
+            .child(
+                div()
+                    .flex()
                     .items_center()
                     .justify_between()
                     .px(px(space::L))
@@ -947,44 +1001,24 @@ impl Loom {
                             ),
                     )
                     .child(
-                        div()
-                            .flex()
-                            .gap(px(space::M))
-                            .child(
-                                div()
-                                    .id("skills")
-                                    .text_size(px(size::CAPTION))
-                                    .text_color(p.ink_3)
-                                    .cursor_pointer()
-                                    .hover(move |s| s.text_color(p.ink))
-                                    .child("Skills")
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        let f = this.model.load_skills();
-                                        this.send(f);
-                                        this.skill_open = None;
-                                        this.menu = None;
-                                        this.screen = Screen::Skills;
-                                        cx.notify();
-                                    })),
-                            )
-                            .child(
-                                div()
-                                    .id("sign-out")
-                                    .text_size(px(size::CAPTION))
-                                    .text_color(p.ink_3)
-                                    .cursor_pointer()
-                                    .hover(move |s| s.text_color(p.ink))
-                                    .child("Sign out")
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        if local_mode() {
-                                            // Stops the instance here; its agents and chats stay for next time.
-                                            this.set_local(false, cx);
-                                            return;
-                                        }
-                                        this.send(serde_json::json!({"t": "logout"}));
-                                        cx.notify();
-                                    })),
-                            ),
+                        div().flex().gap(px(space::M)).child(
+                            div()
+                                .id("sign-out")
+                                .text_size(px(size::CAPTION))
+                                .text_color(p.ink_3)
+                                .cursor_pointer()
+                                .hover(move |s| s.text_color(p.ink))
+                                .child("Sign out")
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    if local_mode() {
+                                        // Stops the instance here; its agents and chats stay for next time.
+                                        this.set_local(false, cx);
+                                        return;
+                                    }
+                                    this.send(serde_json::json!({"t": "logout"}));
+                                    cx.notify();
+                                })),
+                        ),
                     ),
             )
     }
@@ -999,13 +1033,14 @@ impl Loom {
             .items_center()
             .justify_between()
             .px(px(space::L));
-        if self.screen == Screen::Skills {
-            return bar.child(
-                div()
-                    .text_size(px(size::BODY))
-                    .text_color(p.ink_3)
-                    .child("Skills"),
-            );
+        if self.screen == Screen::Skills || self.screen == Screen::Programs {
+            return bar.child(div().text_size(px(size::BODY)).text_color(p.ink_3).child(
+                if self.screen == Screen::Skills {
+                    "Skills"
+                } else {
+                    "Agent programs"
+                },
+            ));
         }
         let Some(agent) = self
             .model
@@ -1575,7 +1610,7 @@ impl Loom {
                 div()
                     .text_size(px(size::SMALL))
                     .text_color(p.ink_3)
-                    .child("No agent programs are installed on the instance yet. Add one there with `loom acp add`."),
+                    .child("No agent programs are installed on the instance yet. Install one from Agent programs, at the bottom of the sidebar."),
             );
         }
         for name in self.model.programs.clone() {
@@ -1912,6 +1947,265 @@ impl Loom {
         }
         let page = div()
             .id("skills-page")
+            .size_full()
+            .overflow_y_scroll()
+            .flex()
+            .justify_center()
+            .pt(px(space::XXL))
+            .pb(px(space::XXL))
+            .child(body);
+        div().flex_1().min_h_0().child(page)
+    }
+
+    /// The programs page: the agent programs on the instance, with their settings, and the
+    /// ACP Registry's agents to install.
+    fn programs_page(&mut self, cx: &mut Context<Self>) -> Div {
+        let p = self.p;
+        let heading = |text: &'static str| {
+            div()
+                .text_size(px(size::HEADING))
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(p.ink)
+                .child(text)
+        };
+        let caption = |text: String| {
+            div()
+                .text_size(px(size::CAPTION))
+                .text_color(p.ink_3)
+                .child(text)
+        };
+        let mut mine = div().flex().flex_col().gap(px(space::XS));
+        if self.model.installed.is_empty() {
+            mine = mine.child(caption(
+                "None yet. Install one from the registry below.".into(),
+            ));
+        }
+        for prog in self.model.installed.clone() {
+            let open = self.program_open.as_deref() == Some(prog.name.as_str());
+            let newer = self
+                .model
+                .registry
+                .iter()
+                .find(|l| l.id == prog.source && !prog.source.is_empty())
+                .filter(|l| l.version != prog.version)
+                .map(|l| l.version.clone());
+            let shown = self
+                .model
+                .registry
+                .iter()
+                .find(|l| l.id == prog.source && !prog.source.is_empty())
+                .map_or(prog.name.clone(), |l| l.name.clone());
+            let what = if prog.source.is_empty() {
+                "Added on the instance".to_string()
+            } else {
+                format!("From the ACP Registry, version {}", prog.version)
+            };
+            let name = prog.name.clone();
+            let mut row = div()
+                .flex()
+                .flex_col()
+                .gap(px(space::S))
+                .py(px(space::S))
+                .px(px(space::S))
+                .rounded(px(radius::BUTTON))
+                .child(
+                    div()
+                        .id(SharedString::from(format!("program-{}", prog.name)))
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .cursor_pointer()
+                        .child(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .child(
+                                    div()
+                                        .text_size(px(size::SMALL))
+                                        .font_weight(FontWeight::MEDIUM)
+                                        .text_color(p.ink)
+                                        .child(shown),
+                                )
+                                .child(caption(what)),
+                        )
+                        .child(caption(match prog.settings.len() {
+                            0 => "No settings".to_string(),
+                            1 => "1 setting".to_string(),
+                            n => format!("{n} settings"),
+                        }))
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            this.program_open =
+                                if this.program_open.as_deref() == Some(name.as_str()) {
+                                    None
+                                } else {
+                                    Some(name.clone())
+                                };
+                            for s in [&this.set_key_in, &this.set_value_in] {
+                                s.update(cx, |s, cx| s.set_value("", window, cx));
+                            }
+                            cx.notify();
+                        })),
+                );
+            if open {
+                let mut settings = div().flex().flex_col().gap(px(space::XS));
+                for key in prog.settings.clone() {
+                    let (program, k) = (prog.name.clone(), key.clone());
+                    settings = settings.child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .child(
+                                div()
+                                    .text_size(px(size::SMALL))
+                                    .text_color(p.ink_2)
+                                    .child(format!("{key} = ••••")),
+                            )
+                            .child(
+                                self.button_owned(
+                                    format!("unset-{}-{key}", prog.name),
+                                    "Remove",
+                                    false,
+                                )
+                                .on_click(cx.listener(
+                                    move |this, _, _, cx| {
+                                        let f = this.model.set_setting(&program, &k, None);
+                                        this.send(f);
+                                        cx.notify();
+                                    },
+                                )),
+                            ),
+                    );
+                }
+                let program = prog.name.clone();
+                let mut buttons = div().flex().gap(px(space::S)).child(
+                    self.button_owned(format!("set-{}", prog.name), "Save setting", true)
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            let key = this.set_key_in.read(cx).value().to_string();
+                            let value = this.set_value_in.read(cx).value().to_string();
+                            if key.trim().is_empty() {
+                                this.model.notices.push(
+                                    "A setting needs a name, such as ANTHROPIC_API_KEY.".into(),
+                                );
+                                cx.notify();
+                                return;
+                            }
+                            let f = this.model.set_setting(&program, &key, Some(&value));
+                            this.send(f);
+                            for s in [&this.set_key_in, &this.set_value_in] {
+                                s.update(cx, |s, cx| s.set_value("", window, cx));
+                            }
+                            cx.notify();
+                        })),
+                );
+                if let Some(version) = newer {
+                    let source = prog.source.clone();
+                    buttons = buttons.child(
+                        self.button_owned(
+                            format!("update-{}", prog.name),
+                            &format!("Update to {version}"),
+                            false,
+                        )
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            let f = this.model.install(&source);
+                            this.send(f);
+                            cx.notify();
+                        })),
+                    );
+                }
+                let program = prog.name.clone();
+                buttons = buttons.child(
+                    self.button_owned(format!("remove-{}", prog.name), "Remove", false)
+                        .text_color(p.bad)
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            let f = this.model.remove_program(&program);
+                            this.send(f);
+                            this.program_open = None;
+                            cx.notify();
+                        })),
+                );
+                row = row
+                    .bg(p.hover)
+                    .child(caption(
+                        "Settings are the environment variables it starts with, such as an API key or a model. They stay on the instance.".into(),
+                    ))
+                    .child(settings)
+                    .child(
+                        div()
+                            .flex()
+                            .gap(px(space::S))
+                            .child(div().flex_1().child(Input::new(&self.set_key_in)))
+                            .child(div().flex_1().child(Input::new(&self.set_value_in))),
+                    )
+                    .child(buttons);
+            }
+            mine = mine.child(row);
+        }
+
+        let mut registry = div().flex().flex_col().gap(px(space::XS));
+        if self.model.registry_loading {
+            registry = registry.child(caption("Reading the registry…".into()));
+        } else if let Some(e) = self.model.registry_error.clone() {
+            registry = registry.child(caption(e));
+        }
+        for l in self.model.registry.clone() {
+            if l.installed.is_some() {
+                continue;
+            }
+            let action: AnyElement = if self.model.installing.as_deref() == Some(l.id.as_str()) {
+                caption("Installing…".into()).into_any_element()
+            } else if l.how.is_some() {
+                let id = l.id.clone();
+                self.button_owned(format!("install-{}", l.id), "Install", false)
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        let f = this.model.install(&id);
+                        this.send(f);
+                        cx.notify();
+                    }))
+                    .into_any_element()
+            } else {
+                caption("Not for this computer".into()).into_any_element()
+            };
+            registry = registry.child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap(px(space::M))
+                    .py(px(space::S))
+                    .px(px(space::S))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .flex()
+                            .flex_col()
+                            .child(
+                                div()
+                                    .text_size(px(size::SMALL))
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .text_color(p.ink)
+                                    .child(l.name.clone()),
+                            )
+                            .child(caption(l.description.clone())),
+                    )
+                    .child(div().flex_none().child(action)),
+            );
+        }
+        let body = div()
+            .w(px(560.0))
+            .flex()
+            .flex_col()
+            .gap(px(space::XL))
+            .child(heading("On this instance"))
+            .child(mine)
+            .child(heading("From the ACP Registry"))
+            .child(caption(
+                "Each uses the login it already has on the instance's computer, or the key you give it in its settings.".into(),
+            ))
+            .child(registry);
+        let page = div()
+            .id("programs-page")
             .size_full()
             .overflow_y_scroll()
             .flex()
@@ -2509,6 +2803,7 @@ impl Render for Loom {
             Screen::EditAgent => self.edit_agent(cx),
             Screen::Activity => self.activity_page(),
             Screen::Skills => self.skills_page(cx),
+            Screen::Programs => self.programs_page(cx),
         };
         let header = self.header(cx);
         let menu = self.menu_panel(cx);

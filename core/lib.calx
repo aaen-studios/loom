@@ -18,6 +18,7 @@ import core.update.{Updater}
 import shared.release.{MANIFEST}
 import server.instance.{Config, EventLife, Instance}
 import server.mcp
+import server.installer
 
 /// The credential store's service the device token is kept under, by the instance's address.
 const KEYRING: str = "loom"
@@ -65,7 +66,7 @@ struct Local {
 impl Task for Local {
     fn run(own self) {
         var l = self
-        let config = Config { data: l.data.copy(), port: 0, host: String("127.0.0.1"), hasher: PasswordHasher(), events: EventLife.standard() }
+        let config = Config { data: l.data.copy(), port: 0, host: String("127.0.0.1"), hasher: PasswordHasher(), events: EventLife.standard(), registry: String(installer.REGISTRY) }
         var i = match Instance.open(config) {
             ok(i) => i,
             err(e) => {

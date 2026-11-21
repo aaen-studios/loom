@@ -28,7 +28,8 @@ import server.files.{Thumb}
 import shared.files.{is_sha, safe_name}
 import server.hashing
 import server.hashing.{Done, Job}
-import server.store.{Device, Store, User, now}
+import server.installer
+import server.store.{AcpAgent, Device, Store, User, now}
 import shared.tools
 
 pub struct Config {
@@ -37,6 +38,7 @@ pub struct Config {
     pub host: String
     pub hasher: PasswordHasher
     pub events: EventLife
+    pub registry: String    // the ACP Registry's address
 }
 
 // How long events are kept (PLAN.md, "Sync"): `age_ms`, but always each
@@ -150,7 +152,31 @@ pub struct Instance {
     next_prune: i64
     grants: Map<String, Grant>    // token -> whose tools
     calls: Map<String, Request>    // run -> a message_agent call waiting on it
+    registry_at: String    // the ACP Registry's address
+    registry: Json    // what it last said, or null
+    registry_time: i64    // when
+    install_to: Sender<installer.Job>
+    install_done: Receiver<installer.Done>
+    fetching: List<Waiter>    // commands waiting on the registry
+    installs: Map<i64, Install>    // installs on the installer's thread
+    leftovers: List<String>    // folders of removed ACP agents, removed once their programs have let go
+    next_sweep: i64
 }
+
+// A command answered once the installer's thread is done.
+struct Waiter {
+    socket: ServerSocket
+    id: String
+}
+
+struct Install {
+    waiter: Waiter
+    name: String
+    version: String
+    env: Json    // the person's settings for it
+}
+
+const REGISTRY_FRESH_MS: i64 = 600000
 
 // An agent's right to loom's own tools: `loom mcp` acts as `user`, for `agent`.
 struct Grant {
@@ -213,6 +239,31 @@ fn http_error(status: u16, code: str, message: String) -> Response {
 
 // A skill's name, as Claude Code's skills have them: lowercase letters,
 // digits and hyphens, up to 64.
+// An ACP agent program as acp.list gives it. Its settings' values stay on the
+// instance, since keys are among them: only their names go out.
+fn program_json(a: AcpAgent) -> Json {
+    var settings = List<Json>()
+    if let Json.Object(m) = a.env {
+        for (k, _) in m {
+            settings.push(Json.Str(k.copy()))
+        }
+    }
+    return Obj.new().s("name", a.name).s("command", a.command).s("source", a.source).s("version", a.version).j("settings", Json.Array(settings)).done()
+}
+
+// A JSON object with only its string values.
+fn strings_only(j: Json) -> Json {
+    var o = Obj.new()
+    if let Json.Object(m) = j {
+        for (k, v) in m {
+            if let s = v.as_str() { o.m.insert(k.copy(), Json.Str(s)) }
+        }
+    }
+    return o.done()
+}
+
+// A skill's name, or an ACP agent's: lowercase letters, digits and hyphens,
+// so it's always one folder's name.
 fn valid_skill(name: String) -> bool {
     if name.len() == 0 or name.len() > 64 or name.starts_with("-") { return false }
     for r in name.runes() {
@@ -264,7 +315,8 @@ impl Instance {
         let to = lines.sender()
         let (hash_to, hash_done) = hashing.start(config.hasher)
         let dummy = config.hasher.hash(bytes.hex(random_bytes(16)))
-        return Instance { store: store, server: server, data: config.data.copy(), sessions: Map<u32, Session>(), runs: LinkedMap<String, Run>(), procs: LinkedMap<String, Proc>(), approvals: LinkedMap<String, Approval>(), lines: lines, lines_to: to, hash_to: hash_to, hash_done: hash_done, next_job: 0, auths: Map<i64, Auth>(), dummy_hash: dummy, failures: LinkedMap<String, List<i64>>(), thumbs: files.start(), events: config.events, next_prune: 0, grants: Map<String, Grant>(), calls: Map<String, Request>() }
+        let (install_to, install_done) = installer.start()
+        return Instance { store: store, server: server, data: config.data.copy(), sessions: Map<u32, Session>(), runs: LinkedMap<String, Run>(), procs: LinkedMap<String, Proc>(), approvals: LinkedMap<String, Approval>(), lines: lines, lines_to: to, hash_to: hash_to, hash_done: hash_done, next_job: 0, auths: Map<i64, Auth>(), dummy_hash: dummy, failures: LinkedMap<String, List<i64>>(), thumbs: files.start(), events: config.events, next_prune: 0, grants: Map<String, Grant>(), calls: Map<String, Request>(), registry_at: config.registry.copy(), registry: Json.Null, registry_time: 0, install_to: install_to, install_done: install_done, fetching: List<Waiter>(), installs: Map<i64, Install>(), leftovers: List<String>(), next_sweep: 0 }
     }
 
     pub fn url(self) -> String {
@@ -311,10 +363,10 @@ impl Instance {
     pub fn find_acp_agents(i: Instance) ! Error {
         if process.which(String("npx")) != none {
             if try i.store.acp_agent(String("claude")) == none {
-                try i.store.set_acp_agent(String("claude"), String("npx"), [String("-y"), String("@zed-industries/claude-agent-acp")])
+                try i.store.set_acp_agent(String("claude"), String("npx"), [String("-y"), String("@agentclientprotocol/claude-agent-acp")])
             }
             if try i.store.acp_agent(String("codex")) == none {
-                try i.store.set_acp_agent(String("codex"), String("npx"), [String("-y"), String("@zed-industries/codex-acp")])
+                try i.store.set_acp_agent(String("codex"), String("npx"), [String("-y"), String("@agentclientprotocol/codex-acp")])
             }
         }
         if process.which(String("gemini")) != none and try i.store.acp_agent(String("gemini")) == none {
@@ -376,6 +428,7 @@ impl Instance {
                 none => {
                     if signal.take() != none { break }
                     i.prune()
+                    if i.leftovers.len() > 0 and now() >= i.next_sweep { i.sweep() }
                 },
                 _ => {},
             }
@@ -383,6 +436,12 @@ impl Instance {
                 match i.agent_line(line) {
                     ok => {},
                     err(e) => eprintln("loom: agent: {e}"),
+                }
+            }
+            while let d = i.install_done.next() {
+                match i.installed(d) {
+                    ok => {},
+                    err(e) => eprintln("loom: installing: {e}"),
                 }
             }
             while let done = i.hash_done.next() {
@@ -397,6 +456,20 @@ impl Instance {
             to.send(Out.Stop)
         }
         i.server.shutdown()
+    }
+
+    // Removes the folders of removed ACP agents. A program that was just
+    // stopped may still hold its own file for a moment, on Windows, so one
+    // that can't go yet is tried again a second later.
+    fn sweep(i: mut Instance) {
+        var kept = List<String>()
+        for folder in i.leftovers {
+            if fs.exists(folder.copy()) {
+                if let err(_) = fs.remove_dir_all(folder.copy()) { kept.push(folder.copy()) }
+            }
+        }
+        i.leftovers = kept
+        i.next_sweep = now() + 1000
     }
 
     // Removes old events, when it's time to look again.
@@ -1121,7 +1194,7 @@ impl Instance {
             try fs.write_text("{folder}/CLAUDE.md", instructions)
         }
         i.write_skills(user.copy(), folder.copy())
-        let to = try acp.start(id.copy(), acp_agent.command, acp_agent.args, folder, i.lines_to.copy())
+        let to = try acp.start(id.copy(), acp_agent.command, acp_agent.args, acp_agent.env, folder, i.lines_to.copy())
         var p = Proc { agent: id.copy(), user: user.copy(), to: to, ready: false, images: false, program: program, resume: false, load: false, next_id: 1, pending: Map<i64, Pending>(), sessions: Map<String, String>(), told: Map<String, String>(), waiting: List<String>() }
         p.pending.insert(1, Pending.Init)
         p.to.send(Out.Send(acp.request(1, "initialize", acp.initialize_params())))
@@ -1791,12 +1864,156 @@ impl Instance {
         let id = str_at(f.copy(), "id") ?? String()
         let name = str_at(f.copy(), "name") ?? String()
         let args = at(f, "args")
-        let result = try i.command(user, device, name.copy(), args)
-        let frame = match result {
-            Answer.Value(value) => Obj.new().s("t", String("result")).s("id", id).b("ok", true).j("value", value).done(),
-            Answer.Refused(code, message) => Obj.new().s("t", String("result")).s("id", id).b("ok", false).j("error", Obj.new().s("code", code).s("message", message).done()).done(),
+        if name == "acp.registry" or name == "acp.install" {
+            try i.slow_cmd(Waiter { socket: s, id: id }, user, name, args)
+            return
         }
-        _ = i.server.send_text(s, "{frame}")
+        let result = try i.command(user, device, name.copy(), args)
+        i.answer_cmd(Waiter { socket: s, id: id }, result)
+    }
+
+    fn answer_cmd(i: Instance, w: Waiter, result: Answer) {
+        let frame = match result {
+            Answer.Value(value) => Obj.new().s("t", String("result")).s("id", w.id).b("ok", true).j("value", value).done(),
+            Answer.Refused(code, message) => Obj.new().s("t", String("result")).s("id", w.id).b("ok", false).j("error", Obj.new().s("code", code).s("message", message).done()).done(),
+        }
+        _ = i.server.send_text(w.socket, "{frame}")
+    }
+
+    // --- ACP agents from the ACP Registry (PLAN.md, "Agents run on ACP") ---
+
+    // acp.registry and acp.install, which the installer's thread answers.
+    fn slow_cmd(i: mut Instance, w: Waiter, user: String, name: String, args: Json) ! Error {
+        if name == "acp.registry" {
+            let fresh = i.registry != Json.Null and now() - i.registry_time < REGISTRY_FRESH_MS
+            if fresh and not (bool_at(args, "again") ?? false) {
+                i.answer_cmd(w, Answer.Value(try i.registry_list()))
+                return
+            }
+            if i.fetching.len() == 0 {
+                i.next_job += 1
+                i.install_to.send(installer.Job { id: i.next_job, work: installer.Work.Registry(i.registry_at.copy()) })
+            }
+            i.fetching.push(w.copy())
+            return
+        }
+        if try i.store.role(user) != some(String("owner")) {
+            i.answer_cmd(w, Answer.Refused(String("not_allowed"), String("Only the instance's owner installs ACP agents.")))
+            return
+        }
+        let wanted = str_at(args.copy(), "id") ?? String()
+        var entry = Json.Null
+        if let Json.Array(agents) = at(i.registry.copy(), "agents") {
+            for a in agents {
+                if str_at(a.copy(), "id") == some(wanted.copy()) { entry = a.copy() }
+            }
+        }
+        if entry == Json.Null or not valid_skill(wanted.copy()) {
+            i.answer_cmd(w, Answer.Refused(String("not_found"), "There's no {wanted} in the ACP Registry. acp.registry lists what's there."))
+            return
+        }
+        let how = installer.pick(entry.copy(), installer.platform(), installer.on_path("npx"), installer.on_path("uvx")) else {
+            i.answer_cmd(w, Answer.Refused(String("unsupported"), "{str_at(entry, "name") ?? wanted} has no build for this computer, and it needs npx or uvx to run otherwise."))
+            return
+        }
+        for (_, job) in i.installs {
+            if job.name == wanted {
+                i.answer_cmd(w, Answer.Refused(String("busy"), "{wanted} is being installed already."))
+                return
+            }
+        }
+        // The person's settings stay as they were, with what they gave now on top.
+        var env = Obj.new().done()
+        if let had = try i.store.acp_agent(wanted.copy()) { env = had.env }
+        env = merge(env, strings_only(at(args, "env")))
+        i.next_job += 1
+        let folder = "{try fs.absolute(i.data.copy())}/acp/{wanted}"
+        // An update replaces the folder, which a running program holds.
+        i.stop_program(wanted.copy())
+        i.installs.insert(i.next_job, Install { waiter: w.copy(), name: wanted, version: str_at(how.copy(), "version") ?? String(), env: env })
+        i.install_to.send(installer.Job { id: i.next_job, work: installer.Work.Install(how, folder) })
+    }
+
+    // What the installer's thread finished: the registry, or an install.
+    fn installed(i: mut Instance, d: installer.Done) ! Error {
+        if let job = i.installs.remove(d.id) {
+            if d.error.len() > 0 {
+                i.answer_cmd(job.waiter, Answer.Refused(String("install_failed"), "{job.name} didn't install: {d.error}"))
+                return
+            }
+            let command = str_at(d.value.copy(), "command") ?? String()
+            var args = List<String>()
+            if let Json.Array(items) = at(d.value.copy(), "args") {
+                for a in items {
+                    args.push(a.as_str() ?? String())
+                }
+            }
+            try i.store.set_acp_agent(job.name.copy(), command, args)
+            // The registry's own settings for it, under the person's.
+            try i.store.set_acp_settings(job.name.copy(), job.name.copy(), job.version, merge(strings_only(at(d.value, "env")), job.env))
+            i.stop_program(job.name.copy())
+            let program = try i.store.acp_agent(job.name.copy()) else return
+            i.answer_cmd(job.waiter, Answer.Value(Obj.new().j("program", program_json(program)).done()))
+            return
+        }
+        let waiting = i.fetching.copy()
+        i.fetching = List<Waiter>()
+        if d.error.len() > 0 {
+            for w in waiting {
+                i.answer_cmd(w, Answer.Refused(String("registry_unavailable"), "The ACP Registry couldn't be read: {d.error}"))
+            }
+            return
+        }
+        i.registry = d.value.copy()
+        i.registry_time = now()
+        let list = try i.registry_list()
+        for w in waiting {
+            i.answer_cmd(w, Answer.Value(list.copy()))
+        }
+    }
+
+    // The registry's agents as acp.registry gives them: each with how it
+    // would run here, and the version installed, if it is.
+    fn registry_list(i: Instance) -> Json ! Error {
+        let system = installer.platform()
+        let npx = installer.on_path("npx")
+        let uvx = installer.on_path("uvx")
+        var out = List<Json>()
+        if let Json.Array(agents) = at(i.registry.copy(), "agents") {
+            for a in agents {
+                let id = str_at(a.copy(), "id") ?? String()
+                var o = Obj.new().s("id", id.copy()).s("name", str_at(a.copy(), "name") ?? id.copy()).s("version", str_at(a.copy(), "version") ?? String()).s("description", str_at(a.copy(), "description") ?? String()).maybe("website", str_at(a.copy(), "website")).maybe("icon", str_at(a.copy(), "icon"))
+                o = match installer.pick(a.copy(), system.copy(), npx, uvx) {
+                    some(how) => o.s("how", str_at(how, "kind") ?? String()),
+                    none => o.j("how", Json.Null),
+                }
+                if let had = try i.store.acp_agent(id) { o = o.s("installed", had.version) }
+                out.push(o.done())
+            }
+        }
+        return Obj.new().j("agents", Json.Array(out)).s("platform", system).done()
+    }
+
+    // Stops the agents that run `program` and aren't answering anyone, so
+    // the next message starts it again, new or with new settings. One that's
+    // answering keeps the old until it next starts.
+    fn stop_program(i: mut Instance, program: String) {
+        var idle = List<String>()
+        for (agent, p) in i.procs {
+            if p.program == program {
+                var busy = false
+                for (_, r) in i.runs {
+                    if r.agent == agent { busy = true }
+                }
+                if not busy { idle.push(agent.copy()) }
+            }
+        }
+        for agent in idle {
+            if let p = i.procs.remove(agent) {
+                var to = p.to.copy()
+                to.send(Out.Stop)
+            }
+        }
     }
 
     // A command's value, or its error's code and message.
@@ -1944,9 +2161,46 @@ impl Instance {
             // The agent programs installed on the instance, for picking one when an agent is made.
             var programs = List<Json>()
             for a in try i.store.acp_agents() {
-                programs.push(Obj.new().s("name", a.name.copy()).s("command", a.command.copy()).done())
+                programs.push(program_json(a))
             }
             return Answer.Value(Obj.new().j("programs", Json.Array(programs)).done())
+        }
+        if name == "acp.settings" or name == "acp.remove" {
+            if try i.store.role(user.copy()) != some(String("owner")) { return Answer.Refused(String("not_allowed"), String("Only the instance's owner changes ACP agents.")) }
+            let program_name = str_at(args.copy(), "name") ?? String()
+            let program = try i.store.acp_agent(program_name.copy()) else return Answer.Refused(String("not_found"), "There's no ACP agent {program_name}.")
+            if name == "acp.remove" {
+                try i.store.delete_acp_agent(program_name.copy())
+                i.stop_program(program_name.copy())
+                // What loom installed, it removes: only ever its own folder for it.
+                if program.source.len() > 0 and valid_skill(program_name.copy()) {
+                    let folder = "{try fs.absolute(i.data.copy())}/acp/{program_name}"
+                    i.leftovers.push(folder)
+                    i.sweep()
+                }
+                return Answer.Value(empty)
+            }
+            // Settings given a value are set, and ones given null are removed.
+            var env = Obj.new()
+            if let Json.Object(had) = program.env.copy() {
+                for (k, v) in had {
+                    env.m.insert(k.copy(), v.copy())
+                }
+            }
+            if let Json.Object(given) = at(args, "env") {
+                for (k, v) in given {
+                    if v == Json.Null {
+                        _ = env.m.remove(k.copy())
+                    } else if let value = v.as_str() {
+                        if k.len() == 0 or k.contains("=") { return Answer.Refused(String("bad_request"), "{k} can't be the name of a setting.") }
+                        env.m.insert(k.copy(), Json.Str(value))
+                    }
+                }
+            }
+            try i.store.set_acp_settings(program_name.copy(), program.source.copy(), program.version.copy(), env.done())
+            i.stop_program(program_name.copy())
+            let changed = try i.store.acp_agent(program_name) else return Answer.Value(empty)
+            return Answer.Value(Obj.new().j("program", program_json(changed)).done())
         }
         if name == "messages.search" {
             // Full-text search over every conversation (PLAN.md, "Search").

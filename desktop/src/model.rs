@@ -57,6 +57,29 @@ pub struct Agent {
     pub instructions: String,
 }
 
+/// An agent program on the instance. Its settings' values stay there: only their names
+/// come.
+#[derive(Clone, Debug)]
+pub struct Program {
+    pub name: String,
+    pub source: String,
+    pub version: String,
+    pub settings: Vec<String>,
+}
+
+/// An agent in the ACP Registry.
+#[derive(Clone, Debug)]
+pub struct Listed {
+    pub id: String,
+    pub name: String,
+    pub version: String,
+    pub description: String,
+    /// How it would run on the instance (`binary`, `npx` or `uvx`), or none.
+    pub how: Option<String>,
+    /// The version installed, if it is.
+    pub installed: Option<String>,
+}
+
 /// One of the person's skills.
 #[derive(Clone, Debug)]
 pub struct Skill {
@@ -303,6 +326,15 @@ pub struct Model {
     /// The person's skills, by name, for the skills page.
     pub skills: Vec<Skill>,
     skills_stale: bool,
+    /// The agent programs on the instance, for the programs page.
+    pub installed: Vec<Program>,
+    /// The ACP Registry's agents, once it's been read.
+    pub registry: Vec<Listed>,
+    pub registry_loading: bool,
+    pub registry_error: Option<String>,
+    /// The registry agent being installed, while it is.
+    pub installing: Option<String>,
+    programs_stale: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -378,6 +410,10 @@ impl Model {
         let mut out = Vec::new();
         if std::mem::take(&mut self.revisions_stale) && self.editing.is_some() {
             out.push(self.revisions_cmd());
+        }
+        if std::mem::take(&mut self.programs_stale) {
+            out.push(self.programs());
+            out.push(self.registry_cmd());
         }
         if std::mem::take(&mut self.skills_stale) {
             out.push(self.load_skills());
@@ -673,11 +709,68 @@ impl Model {
                         .collect()
                 })
                 .unwrap_or_default();
+        } else if id.starts_with("app.registry") {
+            self.registry_loading = false;
+            if let Some(e) = f.get("error") {
+                self.registry_error = Some(s(e, "message"));
+                return;
+            }
+            self.registry_error = None;
+            self.registry = f
+                .pointer("/value/agents")
+                .and_then(Value::as_array)
+                .map(|as_| {
+                    as_.iter()
+                        .map(|a| Listed {
+                            id: s(a, "id"),
+                            name: s(a, "name"),
+                            version: s(a, "version"),
+                            description: s(a, "description"),
+                            how: a.get("how").and_then(Value::as_str).map(str::to_string),
+                            installed: a
+                                .get("installed")
+                                .and_then(Value::as_str)
+                                .map(str::to_string),
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+        } else if id.starts_with("app.install") || id.starts_with("app.program") {
+            if id.starts_with("app.install") {
+                self.installing = None;
+            }
+            if let Some(e) = f.get("error") {
+                self.notices.push(s(e, "message"));
+            }
+            self.programs_stale = true;
         } else if id.starts_with("app.acp") {
             self.programs = f
                 .pointer("/value/programs")
                 .and_then(Value::as_array)
                 .map(|ps| ps.iter().map(|p| s(p, "name")).collect())
+                .unwrap_or_default();
+            self.installed = f
+                .pointer("/value/programs")
+                .and_then(Value::as_array)
+                .map(|ps| {
+                    ps.iter()
+                        .map(|p| Program {
+                            name: s(p, "name"),
+                            source: s(p, "source"),
+                            version: s(p, "version"),
+                            settings: p
+                                .get("settings")
+                                .and_then(Value::as_array)
+                                .map(|ks| {
+                                    ks.iter()
+                                        .filter_map(Value::as_str)
+                                        .map(str::to_string)
+                                        .collect()
+                                })
+                                .unwrap_or_default(),
+                        })
+                        .collect()
+                })
                 .unwrap_or_default();
         } else if id.starts_with("app.new_agent") {
             if let Some(e) = f.get("error") {
@@ -1162,6 +1255,41 @@ impl Model {
         Some(
             json!({"t": "cmd", "id": id, "name": "agent.rollback", "args": {"agent": agent, "revision": revision}}),
         )
+    }
+
+    /// Asks for the programs page: the instance's programs, and the registry's.
+    pub fn load_programs(&mut self) -> Vec<Value> {
+        self.registry_loading = self.registry.is_empty();
+        self.registry_error = None;
+        vec![self.programs(), self.registry_cmd()]
+    }
+
+    fn registry_cmd(&mut self) -> Value {
+        let id = self.id("app.registry");
+        json!({"t": "cmd", "id": id, "name": "acp.registry"})
+    }
+
+    /// Installs an agent from the registry, or updates it to the registry's version.
+    pub fn install(&mut self, registry_id: &str) -> Value {
+        self.installing = Some(registry_id.to_string());
+        let id = self.id("app.install");
+        json!({"t": "cmd", "id": id, "name": "acp.install", "args": {"id": registry_id}})
+    }
+
+    /// Sets a program's setting, or removes it with `None`.
+    pub fn set_setting(&mut self, program: &str, key: &str, value: Option<&str>) -> Value {
+        let id = self.id("app.program");
+        let mut env = serde_json::Map::new();
+        env.insert(
+            key.trim().to_string(),
+            value.map_or(Value::Null, |v| json!(v)),
+        );
+        json!({"t": "cmd", "id": id, "name": "acp.settings", "args": {"name": program, "env": env}})
+    }
+
+    pub fn remove_program(&mut self, program: &str) -> Value {
+        let id = self.id("app.program");
+        json!({"t": "cmd", "id": id, "name": "acp.remove", "args": {"name": program}})
     }
 
     /// Asks for the person's skills, with what each says, for the skills page.

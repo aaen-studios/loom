@@ -8,11 +8,12 @@ Calx: the instance, and the `loom` program.
 - [`store.calx`](store.calx): SQLite. Every row is kept per person, and that includes the event log.
 - [`hashing.calx`](hashing.calx): argon2id hashing on a thread of its own, so a login doesn't hold up the loop.
 - [`acp.calx`](acp.calx): the ACP client. Each agent program runs as a process of its own, written to and read by a thread of its own.
+- [`installer.calx`](installer.calx): ACP agents from the ACP Registry, on a thread of its own: reading the registry, and downloading, checking and unpacking an agent. `serve --registry` points it at a mirror.
 
 Trying it from source, from the repository's root:
 
 ```sh
-calx server/main.calx acp add claude npx -y @zed-industries/claude-agent-acp
+calx server/main.calx acp add claude npx -y @agentclientprotocol/claude-agent-acp
 calx server/main.calx serve                       # prints a setup code on the first start
 ```
 

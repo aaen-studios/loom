@@ -20,7 +20,7 @@ module tests.protocol.phase1
 //     calx tests/protocol/phase1.calx
 //
 // With LOOM_TEST_CLAUDE set to an ACP command line for Claude, such as
-// "npx @zed-industries/claude-agent-acp", it also chats with Claude itself.
+// "npx @agentclientprotocol/claude-agent-acp", it also chats with Claude itself.
 import std.env
 import std.fs
 import std.http.{Header, post}

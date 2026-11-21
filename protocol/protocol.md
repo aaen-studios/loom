@@ -412,7 +412,11 @@ Version 1's commands:
 | `agent.delete` | `agent` | — |
 | `device.rename` | `device`, `name` | — |
 | `device.revoke` | `device` | — |
-| `acp.list` | — | `programs`: the agent programs installed on the instance, each with `name` and `command` |
+| `acp.list` | — | `programs`: the agent programs installed on the instance, each with `name`, `command`, `source` (the ACP Registry id it came from, or empty for one added with `loom acp add`), `version`, and `settings`: the names of its settings, never their values |
+| `acp.registry` | `again`? (`true` to read it again now, not from the last 10 minutes) | `agents`: the [ACP Registry](https://agentclientprotocol.com/get-started/registry)'s, each with `id`, `name`, `version`, `description`, `website`?, `icon`?, `how` (how it would run on the instance: `binary`, `npx`, `uvx`, or null when it can't), and `installed` (the version installed) if it is; and `platform`, such as `windows-x86_64`. The answer comes once the registry has been read |
+| `acp.install` | `id` (a registry id), `env`? (settings to give it, `{NAME: value}`) | `program`, as `acp.list` gives it, once it's installed. A binary is downloaded into the instance's `acp/<id>/`, checked against the registry's SHA-256 and unpacked; an npx or uvx agent is run with `npx -y <package>` or `uvx <package>`. Installing one that's installed updates it, keeping its settings. Only the owner installs. `install_failed` says why it didn't |
+| `acp.settings` | `name`, `env` (`{NAME: value}` sets one, `{NAME: null}` removes it) | `program`. Settings are the environment variables the program starts with: an API key, a model. Agents that aren't answering start again with them at their next message. Only the owner |
+| `acp.remove` | `name` | —. Removes the program and, for one installed from the registry, its folder. Only the owner |
 | `messages.search` | `query`, `agent`?, `after`? and `before`? (Unix ms), `limit`? (up to 100, 30 if left out) | `results`, best first, each with its `message` and a `snippet`: the words around the match, with each matched word between U+0002 and U+0003. Every word of `query` must be in the message, the last as a prefix, so it works while typing. It searches text blocks and file names, in conversations that aren't deleted. A person's message counts as its conversation's agent's |
 
 Arguments marked `?` are optional. "—" means `value` is `{}`.
@@ -429,7 +433,10 @@ Arguments marked `?` are optional. "—" means `value` is `{}`.
 | `not_found` | An id that doesn't exist, or isn't this person's (the two look the same) |
 | `already_answered` | An approval someone already answered |
 | `not_allowed` | This person can't do that |
-| `busy` | The conversation's agent is still answering. Version 1 has one run per conversation at a time; the message is stored, and the app can send again after `run.finished` |
+| `busy` | The conversation's agent is still answering. Version 1 has one run per conversation at a time; the message is stored, and the app can send again after `run.finished`. Or `acp.install` for an agent that's being installed already |
+| `unsupported` | `acp.install`: the agent has no build for the instance's computer, and npx or uvx, which it could run with otherwise, isn't there |
+| `install_failed` | `acp.install`: the download, its check or unpacking failed. The message says which |
+| `registry_unavailable` | `acp.registry`: the ACP Registry couldn't be read |
 | `unknown_file` | A `send` names a file this person hasn't uploaded |
 | `storage_full` | A file would take the person over the space the owner gives each person |
 | `internal` | A bug in the instance. It's logged there |
