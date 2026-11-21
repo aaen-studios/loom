@@ -1,0 +1,145 @@
+module tests.protocol.core_noise
+
+// A real core reaches an instance in the desktop app over Noise
+// (protocol.md, "Over Noise"), as a phone does: it scans a QR code whose
+// address is a noise:// place, joins with its code through the relay
+// (core/relay.calx), connects, and sends and fetches a file. The place's
+// first address answers nothing, so the relay goes on to the next. A place
+// with another key goes nowhere.
+//
+//     calx tests/protocol/core_noise.calx
+import std.bytes
+import std.crypto.{X25519Key}
+import std.fs
+import std.json.{Json, parse}
+import std.keyring
+import std.process.{exit}
+import std.random.{Random}
+import std.time.{Instant}
+import shared.obj.{Obj, at, bool_at, int_at, str_at}
+import core.cache.{Cache}
+import core.conn.{Conn}
+import core.link
+import core.relay
+import tests.kit.{App, Instance, check}
+
+// The app's side of a core with no instance yet.
+struct Core {
+    to_core: Sender<String>
+    from_core: Receiver<String>
+    thread: Thread?
+}
+
+impl Core {
+    fn start(service: String, cache: String, files: String) -> Core ! Error {
+        let inbox = Receiver<String>()
+        let to_core = inbox.sender()
+        let from_core = Receiver<String>()
+        var conn = Conn.new(none, none, service.copy(), try Cache.open(cache), inbox, from_core.sender())
+        conn.files = some(files.copy())
+        let t = unsafe { Thread.spawn(conn) }
+        return Core { to_core: to_core, from_core: from_core, thread: some(t) }
+    }
+
+    fn send(mut self, frame: Json) {
+        self.to_core.send("{frame}")
+    }
+
+    // What the core says, until a frame whose `t` is `t`. Fails after `ms`.
+    fn until(mut self, t: str, ms: u64) -> Json ! Error {
+        let start = unsafe { Instant.now() }
+        loop {
+            let waited = unsafe { Instant.now() }.nanos_since(start) / 1000000
+            if waited >= ms { fail "no {t} came in {ms} ms" }
+            let m = unsafe { self.from_core.wait_for((ms - waited) * 1000000) } else { continue }
+            let f = try parse(m)
+            if str_at(f.copy(), "t") == some(String(t)) { return f }
+        }
+    }
+
+    // The core's connection state, once it's `state`.
+    fn until_state(mut self, state: str, ms: u64) ! Error {
+        loop {
+            let f = try self.until("core.conn", ms)
+            if str_at(f.copy(), "state") == some(String(state)) { return }
+        }
+    }
+
+    fn stop(mut self) {
+        self.to_core.send(String(#"{"t":"core.stop"}"#))
+        if let t = self.thread.take() {
+            t.join()
+        }
+    }
+}
+
+fn phone() -> Json {
+    return Obj.new().s("name", String("iPhone")).s("kind", String("ios")).s("tz", String("Europe/Oslo")).done()
+}
+
+fn run(inst: Instance, core: mut Core, service: String) ! Error {
+    var app = try App.connect(inst.base.copy(), inst.token.copy(), 0)
+    let on = at(try app.cmd("q_1", "instance.phones", Obj.new().b("on", true).done()), "value")
+    let port = int_at(on.copy(), "port") ?? 0
+    let noise_key = bytes.from_base64(str_at(on, "key") ?? String()) ?? List<u8>()
+    let v = at(try app.cmd("q_2", "link.create", Obj.new().done()), "value")
+    app.close()
+    // Port 1 answers nothing, so the relay goes on to the next address.
+    let place = relay.write(relay.Place { key: noise_key, addresses: [String("127.0.0.1:1"), "127.0.0.1:{port}"] })
+    let qr = link.qr(link.Link { server: place.copy(), code: str_at(v.copy(), "code") ?? String(), instance: str_at(v.copy(), "instance") ?? String(), key: str_at(v, "key") ?? String() })
+
+    // A place with another key goes nowhere.
+    let other = relay.write(relay.Place { key: X25519Key.generate().public_key().bytes(), addresses: ["127.0.0.1:{port}"] })
+    core.send(Obj.new().s("t", String("link")).s("id", String("l_0")).s("qr", link.qr(link.Link { server: other, code: String("0f"), instance: String("i_x"), key: String("k") })).j("device", phone()).done())
+    let refused = try core.until("core.login", 30000)
+    try check(str_at(at(refused, "error"), "code") == some(String("unreachable")), "a place with another Noise key is unreachable")
+
+    core.send(Obj.new().s("t", String("link")).s("id", String("l_1")).s("qr", qr).j("device", phone()).done())
+    let joined = try core.until("core.login", 30000)
+    try check(bool_at(joined.copy(), "ok") == some(true), "the core joins over Noise with the QR code's code, past an address that answers nothing")
+    if bool_at(joined.copy(), "kept") == some(true) {
+        println("ok    and keeps its token")
+    } else {
+        println("      the token wasn't kept: {str_at(joined, "why") ?? String()}")
+    }
+    try core.until_state("live", 30000)
+    _ = try core.until("synced", 30000)
+    try check(true, "and connects over Noise")
+
+    let path = "{try fs.temp_dir()}/big.bin"
+    var big = List<u8>()
+    for n in 0..200000 { big.push(u8.wrap(n * 13)) }
+    try fs.write(path.copy(), big.copy())
+    core.send(Obj.new().s("t", String("file.upload")).s("id", String("u_1")).s("path", path).done())
+    let up = try core.until("core.file", 30000)
+    let sha = str_at(at(up, "file"), "file") ?? String()
+    try check(sha.len() == 64, "a file goes up over Noise")
+    core.send(Obj.new().s("t", String("file.get")).s("id", String("f_1")).s("file", sha).done())
+    let down = try core.until("core.file", 30000)
+    let got = try fs.read(str_at(down, "path") ?? String())
+    try check(got == big, "and comes back the same")
+    match keyring.delete(service, relay.keyring_name(place)) {
+        ok(_) => {},
+        err(_) => {},
+    }
+}
+
+fn main() ! Error {
+    let inst = try Instance.start_with([String("--lan")])
+    var random = Random.system()
+    let service = "loom-test-noise-{random.next_u32()}"
+    let dir = try fs.temp_dir()
+    var core = try Core.start(service.copy(), "{dir}/core.db", "{dir}/files")
+    var failure: String? = none
+    match run(inst.copy(), mut core, service) {
+        ok => {},
+        err(e) => failure = some("{e}"),
+    }
+    core.stop()
+    inst.stop()
+    if let f = failure {
+        eprintln("\n{f}")
+        exit(1)
+    }
+    println("\ncore_noise: all good")
+}

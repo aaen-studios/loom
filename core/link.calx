@@ -41,7 +41,7 @@ pub fn read(text: String) -> Link? {
             l.key = v.copy()
         }
     }
-    if l.code.len() == 0 or not (l.server.starts_with("https://") or l.server.starts_with("http://")) { return none }
+    if l.code.len() == 0 or not (l.server.starts_with("https://") or l.server.starts_with("http://") or l.server.starts_with("noise://")) { return none }
     return some(l)
 }
 
