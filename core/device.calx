@@ -14,11 +14,14 @@ import std.fs
 import std.json.{Json, parse}
 import std.process.{Child, Command, Stdio}
 import std.text.utf8.{decode_lossy_unicode}
-import shared.obj.{Obj, at, int_at, str_at}
+import shared.obj.{Obj, at, bool_at, int_at, str_at}
 import core.cache.{Cache}
 
 // What a device offers, as the instance and the app name them.
-pub const TOOLS: [str; 4] = ["run_command", "read_file", "list_files", "open"]
+pub const TOOLS: [str; 7] = ["run_command", "read_file", "list_files", "open", "screenshot", "read_clipboard", "write_clipboard"]
+// The ones the app does, since they need the system's screen and clipboard:
+// the core checks the call as for any tool, then asks the app.
+const APP_TOOLS: [str; 3] = ["screenshot", "read_clipboard", "write_clipboard"]
 // How long a command may run, and how much of a result goes back.
 const COMMAND_MS: u64 = 120000
 const MOST: usize = 20000
@@ -40,6 +43,7 @@ pub struct Device {
     modes: Map<String, String>    // tool -> off, ask or allow
     done: List<String>    // the calls done, newest last
     running: List<Running>
+    asked: List<String>    // calls handed to the app, whose answers it gives with `answered`
     pub id: String    // this device's id, from welcome
 }
 
@@ -81,7 +85,7 @@ impl Device {
                 }
             }
         }
-        return Device { key: key, modes: modes, done: done, running: List<Running>(), id: String() }
+        return Device { key: key, modes: modes, done: done, running: List<Running>(), asked: List<String>(), id: String() }
     }
 
     pub fn public_key(self) -> String {
@@ -167,6 +171,13 @@ impl Device {
         }
         if let err(_) = cache.set_meta("device_done", "{Json.Array(ids)}") {}
         let args = at(request, "args")
+        for t in APP_TOOLS {
+            if tool == t {
+                if tool == "write_clipboard" and (str_at(args.copy(), "text") ?? String()).len() == 0 { return some(refused(call, String("text is empty."))) }
+                self.asked.push(call.copy())
+                return some(Obj.new().s("t", String("core.device_ask")).s("call", call).s("tool", tool.copy()).j("args", args).done())
+            }
+        }
         if tool == "run_command" {
             let command = str_at(args, "command") ?? String()
             if command.len() == 0 { return some(refused(call, String("command is empty."))) }
@@ -204,6 +215,19 @@ impl Device {
             })
         }
         return some(refused(call, "This device has no tool {tool}."))
+    }
+
+    /// The app's `device.answer` to a call it was asked: its `device.result`, with a
+    /// picture as `image` and `mime` when there is one. None for a call it wasn't asked.
+    pub fn answered(mut self, f: Json) -> Json? {
+        let call = str_at(f.copy(), "call") ?? String()
+        let i = self.asked.position(|c| c == call) else return none
+        _ = self.asked.remove(i)
+        var r = Obj.new().s("t", String("device.result")).s("call", call).b("ok", bool_at(f.copy(), "ok") ?? false).s("output", cut(str_at(f.copy(), "output") ?? String()))
+        if let image = str_at(f.copy(), "image") {
+            r = r.s("image", image).s("mime", str_at(f, "mime") ?? String("image/jpeg"))
+        }
+        return some(r.done())
     }
 
     /// The results of commands that have ended.
@@ -267,12 +291,12 @@ fn opener(target: String) -> Command {
 @test
 fn signs_what_it_trusts() {
     let key = Ed25519Key.generate()
-    let d = Device { key: key, modes: Map<String, String>(), done: List<String>(), running: List<Running>(), id: String("d_1") }
+    let d = Device { key: key, modes: Map<String, String>(), done: List<String>(), running: List<Running>(), asked: List<String>(), id: String("d_1") }
     let request = String(#"{"call":"tc_1","device":"d_1","tool":"read_file","args":{"path":"x"},"at":1}"#)
     let approval = d.sign(request.copy())
     assert(d.trusted(request.copy(), approval.copy()))
     assert(not d.trusted(request.replace("x", "y"), approval))
-    let other = Device { key: Ed25519Key.generate(), modes: Map<String, String>(), done: List<String>(), running: List<Running>(), id: String("d_1") }
+    let other = Device { key: Ed25519Key.generate(), modes: Map<String, String>(), done: List<String>(), running: List<Running>(), asked: List<String>(), id: String("d_1") }
     assert(not d.trusted(request.copy(), other.sign(request)))
 }
 

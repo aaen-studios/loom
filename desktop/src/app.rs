@@ -100,6 +100,10 @@ pub struct Loom {
     model: Model,
     core: Core,
     events: std::sync::mpsc::Receiver<String>,
+    /// Answers to the core's device asks that finish on another thread, such as a
+    /// screenshot, sent on from the window's task.
+    device_tx: std::sync::mpsc::Sender<Value>,
+    device_rx: std::sync::mpsc::Receiver<Value>,
     p: Palette,
     screen: Screen,
     menu: Option<Menu>,
@@ -170,6 +174,7 @@ impl Loom {
             ),
         };
         let (core, events) = Core::start(&core_config());
+        let (device_tx, device_rx) = std::sync::mpsc::channel();
 
         let composer = cx.new(|cx| {
             TextareaState::new(window, cx)
@@ -285,12 +290,19 @@ ACTA_KEY=secret:ACTA_KEY",
                     }
                     loom.tray_actions(cx);
                     loom.take_notice(cx);
+                    while let Ok(answer) = loom.device_rx.try_recv() {
+                        loom.send(answer);
+                    }
                     if got.is_empty() {
                         return;
                     }
                     let mut changed = false;
                     for e in got {
                         if let Ok(v) = serde_json::from_str::<Value>(&e) {
+                            if v.get("t").and_then(Value::as_str) == Some("core.device_ask") {
+                                loom.device_ask(&v, cx);
+                                continue;
+                            }
                             if v.get("t").and_then(Value::as_str) == Some("core.notify") {
                                 let s = |k: &str| {
                                     v.get(k)
@@ -341,6 +353,8 @@ ACTA_KEY=secret:ACTA_KEY",
             model: Model::new(),
             core,
             events,
+            device_tx,
+            device_rx,
             p: Palette::new(dark),
             screen: Screen::Chat,
             menu: None,
@@ -388,6 +402,55 @@ ACTA_KEY=secret:ACTA_KEY",
 
     fn send(&self, frame: Value) {
         self.core.send(&frame.to_string());
+    }
+
+    /// Does what the core asks of this computer for an agent, once it has checked the
+    /// call is allowed: the clipboard here, and a screenshot on a thread of its own,
+    /// answered with `device.answer`.
+    fn device_ask(&mut self, ask: &Value, cx: &mut Context<Self>) {
+        let call = ask
+            .get("call")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        let answer = |ok: bool, output: &str| serde_json::json!({"t": "device.answer", "call": call, "ok": ok, "output": output});
+        match ask.get("tool").and_then(Value::as_str).unwrap_or_default() {
+            "read_clipboard" => {
+                let text = cx.read_from_clipboard().and_then(|c| c.text());
+                self.send(match text {
+                    Some(t) => answer(true, &t),
+                    None => answer(true, "The clipboard has no text."),
+                });
+            }
+            "write_clipboard" => {
+                let text = ask
+                    .pointer("/args/text")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
+                cx.write_to_clipboard(ClipboardItem::new_string(text.to_string()));
+                self.send(answer(true, "Copied."));
+            }
+            "screenshot" => {
+                let tx = self.device_tx.clone();
+                std::thread::spawn(move || {
+                    use base64::Engine as _;
+                    let frame = match shell::screenshot() {
+                        Ok((jpeg, w, h)) => serde_json::json!({
+                            "t": "device.answer", "call": call, "ok": true,
+                            "output": format!("The main screen, taken at {w}×{h}."),
+                            "image": base64::engine::general_purpose::STANDARD.encode(jpeg),
+                            "mime": "image/jpeg",
+                        }),
+                        Err(e) => serde_json::json!({
+                            "t": "device.answer", "call": call, "ok": false,
+                            "output": format!("The screenshot didn't work: {e}"),
+                        }),
+                    };
+                    let _ = tx.send(frame);
+                });
+            }
+            _ => self.send(answer(false, "This app has no such tool.")),
+        }
     }
 
     /// Runs the instance on this computer, or stops and goes back to signing in to one
@@ -2738,6 +2801,9 @@ ACTA_KEY=secret:ACTA_KEY",
                 "run_command" => ("Run commands", "In PowerShell, as you."),
                 "read_file" => ("Read files", "Any file you can read."),
                 "list_files" => ("List folders", "What's in a folder."),
+                "screenshot" => ("Take screenshots", "Of the main screen, as a picture."),
+                "read_clipboard" => ("Read the clipboard", "The text you last copied."),
+                "write_clipboard" => ("Copy to the clipboard", "Text for you to paste."),
                 _ => ("Open files and links", "With their usual program."),
             };
             let mut choices = div().flex().gap(px(space::XS));

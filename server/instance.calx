@@ -2189,7 +2189,7 @@ impl Instance {
             try i.event(user, "approval.answered", Obj.new().s("call", call.copy()).b("allow", allow).b("always", false).s("by", by).done())
         }
         if not allow {
-            try i.device_done(call, String("denied"), String("Your person said no."))
+            try i.device_done(call, String("denied"), String("Your person said no."), Json.Null)
             return
         }
         try i.send_device_call(call, str_at(a.action.copy(), "device") ?? String(), str_at(a.action, "request") ?? String(), approval)
@@ -2233,11 +2233,17 @@ impl Instance {
         if mode == "ask" and run_id.len() == 0 { return some(tool_error(String("That needs your person's yes, and they can only give it during a chat with you."))) }
         let call = try i.store.new_id("tc")
         let request = "{Obj.new().s("call", call.copy()).s("device", device.copy()).s("tool", tool_name.copy()).j("args", tool_args.copy()).s("agent", g.agent.copy()).i("at", now()).done()}"
-        let what = str_at(tool_args.copy(), "command") ?? str_at(tool_args.copy(), "path") ?? str_at(tool_args, "target") ?? String()
+        let what = str_at(tool_args.copy(), "command") ?? str_at(tool_args.copy(), "path") ?? str_at(tool_args.copy(), "target") ?? cut_short(str_at(tool_args, "text") ?? String(), 80)
         let (kind, title) = if tool_name == "run_command" {
             (String("execute"), "Run on {device_name}: {what}")
         } else if tool_name == "open" {
             (String("other"), "Open on {device_name}: {what}")
+        } else if tool_name == "screenshot" {
+            (String("read"), "Screenshot on {device_name}")
+        } else if tool_name == "read_clipboard" {
+            (String("read"), "Read the clipboard on {device_name}")
+        } else if tool_name == "write_clipboard" {
+            (String("edit"), "Copy to the clipboard on {device_name}: {what}")
         } else {
             (String("read"), "Read on {device_name}: {what}")
         }
@@ -2270,7 +2276,7 @@ impl Instance {
                 sent = true
             }
         }
-        if not sent { try i.device_done(call, String("failed"), String("The device went offline before it got the request.")) }
+        if not sent { try i.device_done(call, String("failed"), String("The device went offline before it got the request."), Json.Null) }
     }
 
     fn device_result(i: mut Instance, user: String, device: String, f: Json) ! Error {
@@ -2279,17 +2285,37 @@ impl Instance {
         if let dc = i.device_calls.find(call.copy()) { mine = dc.user == user and dc.device == device }
         if not mine { return }
         let worked = bool_at(f.copy(), "ok") ?? false
-        try i.device_done(call, if worked { String("done") } else { String("failed") }, str_at(f, "output") ?? String())
+        // A screenshot comes as a picture: the agent sees it, and the chat keeps it as a file.
+        var picture = Json.Null
+        if let image = str_at(f.copy(), "image") {
+            let mime = str_at(f.copy(), "mime") ?? String("image/jpeg")
+            if worked and (mime == "image/jpeg" or mime == "image/png") {
+                if let data = bytes.from_base64(image.copy()) {
+                    let name = if mime == "image/png" { "screenshot.png" } else { "screenshot.jpg" }
+                    let file = try i.agent_file(user.copy(), String(name), mime.copy(), data)
+                    picture = Obj.new().s("data", image).s("mime", mime).j("file", file).done()
+                }
+            }
+        }
+        try i.device_done(call, if worked { String("done") } else { String("failed") }, str_at(f, "output") ?? String(), picture)
     }
 
     // A device call has its answer: the agent's tool call gets it, and the
-    // chat and the activity log show it.
-    fn device_done(i: mut Instance, call: String, status: String, output: String) ! Error {
+    // chat and the activity log show it. `picture`, when it isn't null, is a
+    // screenshot: its `data` in base64, its `mime`, and the `file` it's kept as.
+    fn device_done(i: mut Instance, call: String, status: String, output: String, picture: Json) ! Error {
         let dc = i.device_calls.remove(call.copy()) else return
-        let result = if status == "done" { tool_text(output.copy()) } else { tool_error(output.copy()) }
+        var result = if status == "done" { tool_text(output.copy()) } else { tool_error(output.copy()) }
+        var shown = List<Json>()
+        if picture != Json.Null {
+            let image = Obj.new().s("type", String("image")).s("data", str_at(picture.copy(), "data") ?? String()).s("mimeType", str_at(picture.copy(), "mime") ?? String()).done()
+            result = Obj.new().j("content", Json.Array([image, Obj.new().s("type", String("text")).s("text", output.copy()).done()])).done()
+            shown.push(at(picture, "file"))
+        }
         if let req = i.calls.remove(call.copy()) { i.server.respond(req, json_response(200, result)) }
         if status != "denied" { i.log(dc.user.copy(), dc.agent.copy(), "device", if status == "done" { dc.title.copy() } else { "Failed: {dc.title}" }, dc.device.copy()) }
-        try i.event(dc.user, "tool.finished", Obj.new().s("call", call).s("status", status).j("output", Json.Array([Obj.new().s("kind", String("text")).s("text", cut_short(output, 4000)).done()])).done())
+        shown.push(Obj.new().s("kind", String("text")).s("text", cut_short(output, 4000)).done())
+        try i.event(dc.user, "tool.finished", Obj.new().s("call", call).s("status", status).j("output", Json.Array(shown)).done())
     }
 
     // A device's last connection closed: what was sent to it has no answer coming.
@@ -2304,7 +2330,7 @@ impl Instance {
             if dc.user == user and dc.device == device and not asking { lost.push(call.copy()) }
         }
         for call in lost {
-            try i.device_done(call, String("failed"), String("The device went offline before it answered."))
+            try i.device_done(call, String("failed"), String("The device went offline before it answered."), Json.Null)
         }
     }
 

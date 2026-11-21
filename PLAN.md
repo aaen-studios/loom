@@ -326,7 +326,7 @@ Your PC and phone can be tools too, even when the instance runs somewhere else. 
 | Windows PC, Mac | Running commands, files in the folders you pick, screenshots, the clipboard, opening a file or a link, notifications. Later: controlling the screen, mouse and keyboard (v0.1 had this on Windows) |
 | iPhone | Location, a photo or file you pick, the camera, the clipboard, opening a link. Later (Phase 9): the calendar, reminders, contacts, Health, running a Shortcut |
 
-Commands and files run in the core (std.process and std.fs). Screenshots and the clipboard on desktop come from Rust crates in the GPUI app. Location, the camera and photos on iPhone come from Apple's frameworks in the Swift app. The core asks the app for them and passes the answers back.
+Commands and files run in the core (std.process and std.fs). Screenshots (`xcap`) and the clipboard (GPUI's own) on desktop come from the GPUI app: the core checks the call as for any tool, then asks the app. Location, the camera and photos on iPhone come from Apple's frameworks in the Swift app. The core asks the app for them and passes the answers back.
 
 In a desktop instance, the instance's machine and your PC are the same machine, so device tools are for your other devices: the phone, and other computers.
 

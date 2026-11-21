@@ -332,7 +332,8 @@ The person's devices are tools for their agents while their apps run ([PLAN.md](
 - **Each tool is off until the person turns it on, on that device**: `off`, `ask` each time, or `allow`. The device tells the instance (the `device` frame), so agents see it in `list_devices`, and checks it again itself before it acts on a `device.call`.
 - **A tool that asks** shows in the agent's chat as `approval.needed` with `device` (the device's id) and `request`, and `can_always: false`. A yes is signed by the device it's given on (`approve`'s `approval`). The device doing the work acts only on its own key's signature of the exact request. A yes from another device, or one the instance makes up, is refused, and the agent hears so. Approving on one device for another comes with linking devices to each other, which exchanges their keys without the instance in between.
 - **A request is done once.** The device keeps the calls it did, and refuses a request more than 15 minutes from its clock.
-- **The tools:** `run_command` (`command`, in PowerShell on Windows and zsh on a Mac, up to 2 minutes), `read_file` (`path`), `list_files` (`path`, folders with a `/`) and `open` (`target`, a file or a link, with its usual program). Output past 20,000 bytes is cut.
+- **The tools:** `run_command` (`command`, in PowerShell on Windows and zsh on a Mac, up to 2 minutes), `read_file` (`path`), `list_files` (`path`, folders with a `/`), `open` (`target`, a file or a link, with its usual program), `screenshot` (the main screen, as a JPEG up to 1568 pixels on its longest side), `read_clipboard` (its text) and `write_clipboard` (`text`). Output past 20,000 bytes is cut.
+- **A screenshot** comes back in `device.result` as `image` (base64) and `mime`. The agent's tool call gets it as an MCP `image`, and the chat keeps it as a file block in `tool.finished`'s `output`.
 - Each call goes in the activity log as kind `device`, by the device that did it.
 
 ## The event log

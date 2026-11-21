@@ -579,6 +579,10 @@ impl Conn {
             self.device_tools(at(m, "tools"))
             return true
         }
+        if t == "device.answer" {
+            self.device_answer(m)
+            return true
+        }
         if t == "approve" and (bool_at(m.copy(), "allow") ?? false) {
             if let signed = self.signed(m.copy()) {
                 if self.state == State.Live and self.put("{signed}") { return true }
@@ -902,7 +906,21 @@ impl Conn {
         } else {
             result = Obj.new().s("t", String("device.result")).s("call", str_at(f, "call") ?? String()).b("ok", false).s("output", String("This device offers no tools.")).done()
         }
+        // A screenshot or the clipboard: the app does it, and answers with device.answer.
+        if str_at(result.copy(), "t") == some(String("core.device_ask")) {
+            self.tell(result)
+            return
+        }
         if result != Json.Null { _ = self.put("{result}") }
+    }
+
+    /// The app's answer to a call it was asked, on to the instance.
+    fn device_answer(mut self, m: Json) {
+        var result = Json.Null
+        if let d = mut self.device {
+            if let r = d.answered(m) { result = r }
+        }
+        if result != Json.Null and self.state == State.Live { _ = self.put("{result}") }
     }
 
     fn poll_device(mut self) {
