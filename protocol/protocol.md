@@ -377,7 +377,7 @@ A message is a list of **content blocks**:
 }
 ```
 
-- `role` is `person` or `agent`. A person's message has `from` (a device id) instead of `agent` and `run`. A message one agent sent another with `message_agent` is a `person` message too, in the other agent's conversation, with the sending agent's id as `from`.
+- `role` is `person` or `agent`. A person's message has `from` (a device id) instead of `agent` and `run`. A message one agent sent another with `message_agent` is a `person` message too, in the other agent's conversation, with the sending agent's id as `from`. One a plugin's panel sent with `plugin.message` has `plugin:<id>` as `from`.
 - Block kinds in version 1: `text` (Markdown), `thought` (the agent's reasoning, shown folded), `tool` (a tool call, whose details are in its `tool.*` events), `plan` (the agent's plan, as `entries` with `content` and `status`) and `file` (`file`, `name`, `mime`, `size`).
 
 **While a reply is being written**, its message exists but isn't finished. `run.started` gives its id, and deltas fill its blocks:
@@ -487,6 +487,8 @@ Version 1's commands:
 | `plugin.delete` | `id` | —. Its panel's data goes too |
 | `plugin.data.get` | `plugin`, `key` (1 to 200 characters) | `value`, or null |
 | `plugin.data.put` | `plugin`, `key`, `value` (any JSON; null forgets it) | —. A panel keeps 1 MB at most (`too_large`) |
+| `plugin.cmd` | `plugin`, `name`, `args`? | The command's `value`, when the person allowed the plugin `cmd:<name>`, or `not_allowed`. It's how a panel's door sends commands |
+| `plugin.message` | `plugin`, `agent` (a name or id), `text` (up to 20,000 bytes) | `reply`: the agent's answer, once its run ends, when the person allowed the plugin `agents`, or `not_allowed`. The plugin and the agent keep one conversation, `From <plugin's name>`, where the message is the person's, with `plugin:<id>` as `from`. `busy` while the agent is still answering the last one, and `agent_failed` when its run fails |
 | `activity.list` | `agent`?, `before`? (an entry's `id`), `limit`? (up to 200, 50 if left out) | `activity`, newest first: each `id`, `agent`, `kind` (`tool`, `approval`, `agent`, `message`, `notify`, `memory`, `routine` or `device`), `text`, `by` (a device, an agent, `auto` for the permission mode, or empty for the agent itself) and `at`. It's kept for good, unlike events |
 | `agent.revisions` | `agent` | `revisions`, newest first: each `revision`, `by` (the device or agent that made it), `at`, and `agent` as it was then |
 | `agent.rollback` | `agent`, `revision` | `agent`: a new revision with that one's name, ACP agent, instructions, folder and colour. The permission mode stays as it is |
@@ -529,17 +531,17 @@ commands = ["routine.list"]   # commands the panel may send
 agents = true                 # the panel may message the person's agents
 ```
 
-What it asks for is its `asks`: `tools` when it has a tool server, `agents`, and `cmd:<name>` for each command. A panel never gets the commands that would let it allow itself more, run programs on the instance, or reach the person's devices, secrets and sign-in: `plugin.put`, `plugin.allow`, `plugin.delete`, `link.create`, `push.register`, `push.unregister`, `device.revoke`, `device.rename`, `secret.list`, `secret.put`, `secret.delete`, `mcp.put`, `acp.install`, `acp.remove` and `acp.settings`. Until its person allows something, it waits, and the plugin goes without it.
+What it asks for is its `asks`: `tools` when it has a tool server, `agents`, and `cmd:<name>` for each command. A panel never gets the commands that would let it allow itself more, borrow another plugin's permissions, run programs on the instance, or reach the person's devices, secrets and sign-in: `plugin.put`, `plugin.allow`, `plugin.delete`, `plugin.cmd`, `plugin.message`, `link.create`, `push.register`, `push.unregister`, `device.revoke`, `device.rename`, `secret.list`, `secret.put`, `secret.delete`, `mcp.put`, `acp.install`, `acp.remove` and `acp.settings`. Until its person allows something, it waits, and the plugin goes without it.
 
 - **A tool server** the person allowed is in every one of their agents' new sessions, as the MCP server `plugin-<id>`. It runs from a folder holding the revision's files, with `LOOM_PLUGIN_DIR` set to that folder.
-- **A panel** talks to the app through one door, `await loom.send(op, args)` (desktop/src/panel.rs). The app answers these, and refuses everything else:
+- **A panel** talks to the app through one door, `await loom.send(op, args)` (desktop/src/panel.rs). The app sends these on, and refuses everything else, and the instance checks what's allowed:
 
 | `op` | `args` | Allowed |
 |---|---|---|
 | `data.get` | `key` | Always: `plugin.data.get` for this plugin |
 | `data.put` | `key`, `value` | Always: `plugin.data.put` for this plugin |
-| `cmd` | `name`, `args` | When `cmd:<name>` is allowed. The command's `value` comes back |
-| `message_agent` | `agent`, `text` | When `agents` is allowed. The agent's reply comes back, as with `message_agent` |
+| `cmd` | `name`, `args` | When `cmd:<name>` is allowed: `plugin.cmd`. The command's `value` comes back |
+| `message_agent` | `agent`, `text` | When `agents` is allowed: `plugin.message`. The agent's reply comes back as `reply` |
 
 ## Errors and close codes
 

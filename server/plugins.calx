@@ -32,9 +32,10 @@ pub const MOST_BYTES: usize = 2000000
 
 // Commands a panel never gets, whatever it asks. Its commands go out as its
 // person's device, so these would let it allow itself more (a plugin put
-// from a device has what it asks), run programs on the instance, or reach
+// from a device has what it asks, and plugin.cmd and plugin.message would
+// borrow another plugin's yes), run programs on the instance, or reach
 // the person's devices, secrets and sign-in.
-const NEVER: [str; 15] = ["plugin.put", "plugin.allow", "plugin.delete", "link.create", "push.register", "push.unregister", "device.revoke", "device.rename", "secret.list", "secret.put", "secret.delete", "mcp.put", "acp.install", "acp.remove", "acp.settings"]
+const NEVER: [str; 17] = ["plugin.put", "plugin.allow", "plugin.delete", "plugin.cmd", "plugin.message", "link.create", "push.register", "push.unregister", "device.revoke", "device.rename", "secret.list", "secret.put", "secret.delete", "mcp.put", "acp.install", "acp.remove", "acp.settings"]
 
 // Whether `id` is a plugin's id: lowercase letters, digits and hyphens, up
 // to 64, starting with a letter, as `build-board`.
@@ -151,6 +152,22 @@ pub fn waiting(asks: Json, allowed: Json) -> Json {
         }
     }
     return Json.Array(out)
+}
+
+// Whether a plugin, `p`, has `what` allowed: "agents", or "cmd:<name>" for
+// a command that isn't one a panel never gets.
+pub fn allows(p: Json, what: String) -> bool {
+    if what.starts_with("cmd:") {
+        for never in NEVER {
+            if what.trim_prefix("cmd:") == never { return false }
+        }
+    }
+    if let Json.Array(g) = p.get(String("allowed")) ?? Json.Null {
+        for y in g {
+            if y.as_str() == some(what.copy()) { return true }
+        }
+    }
+    return false
 }
 
 // What of `allowed` is still in `asks`: what stays allowed after a change.
