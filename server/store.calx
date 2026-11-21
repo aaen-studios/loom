@@ -70,6 +70,9 @@ CREATE INDEX IF NOT EXISTS messages_by_conversation ON messages (user, conversat
 CREATE TABLE IF NOT EXISTS runs (
     id TEXT PRIMARY KEY, user TEXT NOT NULL REFERENCES users(id), conversation TEXT NOT NULL,
     status TEXT NOT NULL, at INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS queue (
+    id TEXT PRIMARY KEY, user TEXT NOT NULL REFERENCES users(id), conversation TEXT NOT NULL,
+    pos INTEGER NOT NULL, json TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS sent (
     device TEXT NOT NULL, cid TEXT NOT NULL, message TEXT NOT NULL, run TEXT NOT NULL,
     PRIMARY KEY (device, cid));
@@ -616,7 +619,59 @@ impl Store {
     }
 
     pub fn delete_conversation(self, user: String, id: String) ! Error {
+        _ = try self.db.execute(String("DELETE FROM queue WHERE conversation = ? AND user = ?"), [t(id.copy()), t(user.copy())])
         _ = try self.db.execute(String("UPDATE conversations SET deleted = 1 WHERE id = ? AND user = ?"), [t(id), t(user)])
+    }
+
+    // --- The queue (PLAN.md, "Work that waits its turn") ---
+
+    // What waits in a conversation for its agent to finish, first first: each
+    // the item as put, with its `id`, `text`, `files`, `from` and `at`.
+    pub fn queued(self, user: String, conversation: String) -> List<Json> ! Error {
+        var out = List<Json>()
+        for r in try self.db.query(String("SELECT json FROM queue WHERE user = ? AND conversation = ? ORDER BY pos"), [t(user), t(conversation)]) {
+            if let ok(j) = parse(text(r[0].copy())) { out.push(j) }
+        }
+        return out
+    }
+
+    // Puts an item at the end of a conversation's queue, or first. One that's
+    // there already keeps its place, unless it goes first.
+    pub fn put_queued(self, user: String, conversation: String, item: Json, first: bool) ! Error {
+        let id = (item.get(String("id")) ?? Json.Null).as_str() ?? String()
+        if not first and try self.db.query_one(String("SELECT pos FROM queue WHERE user = ? AND id = ?"), [t(user.copy()), t(id.copy())]) != none {
+            _ = try self.db.execute(String("UPDATE queue SET json = ? WHERE user = ? AND id = ?"), [t("{item}"), t(user), t(id)])
+            return
+        }
+        let edge = try self.db.query_one(String(if first { "SELECT COALESCE(MIN(pos), 0) - 1 FROM queue WHERE user = ? AND conversation = ?" } else { "SELECT COALESCE(MAX(pos), 0) + 1 FROM queue WHERE user = ? AND conversation = ?" }), [t(user.copy()), t(conversation.copy())])
+        let pos = if let r = edge { int(r[0].copy()) } else { 0 }
+        _ = try self.db.execute(String("INSERT INTO queue (id, user, conversation, pos, json) VALUES (?, ?, ?, ?, ?) ON CONFLICT (id) DO UPDATE SET pos = excluded.pos, json = excluded.json"), [t(id), t(user), t(conversation), Value.Int(pos), t("{item}")])
+    }
+
+    // One queued item, and the conversation it waits in.
+    pub fn queued_item(self, user: String, id: String) -> (String, Json)? ! Error {
+        let row = try self.db.query_one(String("SELECT conversation, json FROM queue WHERE user = ? AND id = ?"), [t(user), t(id)]) else return none
+        let ok(item) = parse(text(row[1].copy())) else return none
+        return some((text(row[0].copy()), item))
+    }
+
+    pub fn drop_queued(self, user: String, id: String) -> bool ! Error {
+        return try self.db.execute(String("DELETE FROM queue WHERE user = ? AND id = ?"), [t(user), t(id)]) > 0
+    }
+
+    // Puts a conversation's queue in the order of `ids`, the ones it names
+    // first and the rest after, as they were.
+    pub fn order_queued(self, user: String, conversation: String, ids: List<String>) ! Error {
+        var order = ids.copy()
+        for item in try self.queued(user.copy(), conversation.copy()) {
+            let id = (item.get(String("id")) ?? Json.Null).as_str() ?? String()
+            if not order.contains(id.copy()) { order.push(id) }
+        }
+        try self.begin()
+        for (k, id) in order.enumerate() {
+            _ = try self.db.execute(String("UPDATE queue SET pos = ? WHERE user = ? AND conversation = ? AND id = ?"), [Value.Int(i64.wrap(u64(k))), t(user.copy()), t(conversation.copy()), t(id.copy())])
+        }
+        try self.commit()
     }
 
     pub fn put_message(self, user: String, message: Json) ! Error {
@@ -1102,7 +1157,7 @@ impl Store {
 
     fn remove_rows(self, user: String) ! Error {
         _ = try self.db.execute(String("DELETE FROM sent WHERE device IN (SELECT id FROM devices WHERE user = ?)"), [t(user.copy())])
-        for table in ["push_tokens", "link_codes", "resets", "agent_revisions", "agents", "activity", "secrets", "mcp_servers", "skills", "messages", "conversations", "runs", "events", "acp_sessions", "files", "profiles", "routines", "plugin_data", "plugin_revisions", "plugins", "usage", "memories", "memories_fts", "messages_fts", "devices"] {
+        for table in ["push_tokens", "link_codes", "resets", "agent_revisions", "agents", "activity", "secrets", "mcp_servers", "skills", "messages", "conversations", "runs", "queue", "events", "acp_sessions", "files", "profiles", "routines", "plugin_data", "plugin_revisions", "plugins", "usage", "memories", "memories_fts", "messages_fts", "devices"] {
             _ = try self.db.execute("DELETE FROM {table} WHERE user = ?", [t(user.copy())])
         }
         _ = try self.db.execute(String("DELETE FROM invites WHERE by = ?"), [t(user.copy())])

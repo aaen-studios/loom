@@ -324,7 +324,7 @@ Ideas taken from OpenBot ([CopilotKit's](https://github.com/CopilotKit/OpenBot),
 
 ### Work that waits its turn
 
-- **A message to a busy agent queues**, instead of being refused. The person sees the queue under the chat and can edit, reorder or drop what waits, or **steer**: send it into the running turn, which the agent reads at its next step.
+- **A message to a busy agent queues**, instead of being refused. The person sees the queue above the composer and can edit, reorder or drop what waits, or **steer**: stop the running turn and send it now, in the same ACP session, so the agent carries on from where it was with it in mind. ACP has no way into a turn that's running, so stopping it is how a message gets in.
 - **Long jobs are tasks**: each one a run of an agent with its own state, which survives a restart of the instance, and which the person can pause, resume, cancel or retry.
 - **Routines say when there's nothing to say.** A run can end with `routine_quiet` (no message, no notification), report a failure with `routine_failed`, or pause its own routine. A routine that fails five times in a row turns itself off and tells its person. A routine can post into its agent's chat or a thread of its own.
 - **A backup brain.** An agent can have a second program, which takes over when the first one's usage runs out, and the person can move a chat to another program with a handoff: the new one starts with a summary of what came before.

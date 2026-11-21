@@ -322,7 +322,7 @@ A `send` was stored.
 { "t": "ack", "cid": "m_4f2", "message": "msg_310", "run": "run_77" }
 ```
 
-`run` is the run it started, if the conversation's agent was asked to answer, which it always is in version 1.
+`run` is the run it started. While the conversation's agent is still answering, the message waits in the conversation's queue instead ([The queue](#the-queue)): the `ack` has `queued: true` and no `run`, and `message` is the id it gets once it goes.
 
 ### `result`
 
@@ -385,6 +385,14 @@ The person's devices are tools for their agents while their apps run ([PLAN.md](
 - **The tools:** `run_command` (`command`, in PowerShell on Windows and zsh on a Mac, up to 2 minutes), `read_file` (`path`), `list_files` (`path`, folders with a `/`), `open` (`target`, a file or a link, with its usual program), `screenshot` (the main screen, as a JPEG up to 1568 pixels on its longest side), `read_clipboard` (its text) and `write_clipboard` (`text`). Output past 20,000 bytes is cut.
 - **A screenshot** comes back in `device.result` as `image` (base64) and `mime`. The agent's tool call gets it as an MCP `image`, and the chat keeps it as a file block in `tool.finished`'s `output`.
 - Each call goes in the activity log as kind `device`, by the device that did it.
+
+## The queue
+
+A conversation has one turn at a time. A `send` while its agent is still answering waits in the conversation's queue ([PLAN.md](../PLAN.md#work-that-waits-its-turn)), kept in the instance's database, and goes once the turn ends: as the person's message, with the id the `ack` gave, and a run of its own. One goes at a time, first first. A turn that ends `done` or `failed` lets the next go. One the person stops (`cancel`) or that runs out (`limit`) leaves the queue waiting, until they send again or steer. A turn the instance's restart cut short finished `failed`, so once it's running again the next goes.
+
+- Every change to a queue is a `queue.changed` event: `conversation`, and `queue`, the whole queue, first first, each item its `id`, `text`, `files`, `from` (the device that sent it), `at`, and `steered` once it's been steered.
+- `queue.list` (`conversation`) gives it as `queue`. `queue.edit` (`id`, `text`) changes an item's text, in its place; it can't leave one with nothing. `queue.order` (`conversation`, `ids`) puts the items in that order, the ones it names first and the rest after, as they were. `queue.drop` (`id`) drops one. `not_found` is an item that's gone, sent or dropped.
+- `queue.steer` (`id`) sends one now: it goes first, and the running turn is stopped (`session/cancel`, so its run finishes `cancelled`). Then it goes, in the same ACP session, so the agent has what it did so far, and its prompt starts with a `[loom: …]` block that says it was stopped for this message. With no turn running, it goes at once.
 
 ## The agent's browser
 
@@ -468,6 +476,7 @@ A run is one turn of an agent, answering one message.
 |---|---|---|
 | `run.started` | `run`, `conversation`, `agent`, `revision`, `message` (the reply's id), `answering` (the person's message id) | The agent was given the message |
 | `run.finished` | `run`, `status` (`done`, `cancelled`, `failed` or `limit`), `error` (for `failed`), `usage` (`input`, `output` and `total` tokens, where the agent program reports them with ACP's `usage`) | The turn is over, after `message.created` for its reply. Only the owner's agents run as the instance's own user. Anyone else's run in their sandbox ([Sandboxes](#sandboxes)), and on an instance without sandboxes their runs are `failed`, saying so |
+| `queue.changed` | `conversation`, `queue` (the whole queue, first first) | A message waits for its agent, or one that waited was edited, reordered, dropped, steered or sent ([The queue](#the-queue)) |
 
 ### Tool calls
 
@@ -621,7 +630,7 @@ What it asks for is its `asks`: `tools` when it has a tool server, `agents`, and
 | `not_found` | An id that doesn't exist, or isn't this person's (the two look the same) |
 | `already_answered` | An approval someone already answered |
 | `not_allowed` | This person can't do that |
-| `busy` | The conversation's agent is still answering. Version 1 has one run per conversation at a time; the message is stored, and the app can send again after `run.finished`. Or `acp.install` for an agent that's being installed already |
+| `busy` | `acp.install` for an agent that's being installed already |
 | `unsupported` | `acp.install`: the agent has no build for the instance's computer, and npx or uvx, which it could run with otherwise, isn't there |
 | `install_failed` | `acp.install`: the download, its check or unpacking failed. The message says which |
 | `registry_unavailable` | `acp.registry`: the ACP Registry couldn't be read |

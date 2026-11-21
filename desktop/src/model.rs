@@ -577,6 +577,15 @@ pub enum Conn {
     UpdateNeeded,
 }
 
+/// A message waiting for its agent to finish (protocol.md, "The queue").
+#[derive(Clone, Debug, PartialEq)]
+pub struct QueueItem {
+    pub id: String,
+    pub text: String,
+    pub files: usize,
+    pub steered: bool,
+}
+
 /// An agent's browser, as `browser.state` says it.
 #[derive(Clone, Default, Debug, PartialEq)]
 pub struct Browser {
@@ -607,6 +616,9 @@ pub struct Model {
     pub watching: Option<String>,
     pub frame: Option<PageFrame>,
     rewatch: bool,
+    /// Each conversation's queue, by conversation id.
+    pub queues: HashMap<String, Vec<QueueItem>>,
+    queue_stale: bool,
     pub conn: Option<Conn>,
     pub synced: bool,
     pub login_error: Option<String>,
@@ -826,6 +838,11 @@ impl Model {
         if std::mem::take(&mut self.people_stale) {
             out.extend(self.load_people());
         }
+        if std::mem::take(&mut self.queue_stale) {
+            if let Some(conversation) = self.conversation() {
+                out.push(json!({"t": "cmd", "id": format!("app.queue:{conversation}"), "name": "queue.list", "args": {"conversation": conversation}}));
+            }
+        }
         // After a reconnect the instance has forgotten what this device watched.
         if std::mem::take(&mut self.rewatch) {
             if let Some(agent) = self.watching.clone() {
@@ -871,7 +888,58 @@ impl Model {
             self.selected = agent;
             self.messages.clear();
             self.dirty.insert(List::Messages);
+            self.queue_stale = true;
         }
+    }
+
+    /// What waits for the open conversation's agent, first first.
+    pub fn queue(&self) -> Vec<QueueItem> {
+        self.conversation()
+            .and_then(|c| self.queues.get(&c).cloned())
+            .unwrap_or_default()
+    }
+
+    fn queue_of(v: &Value) -> Vec<QueueItem> {
+        v.get("queue")
+            .and_then(Value::as_array)
+            .map(|items| {
+                items
+                    .iter()
+                    .map(|q| QueueItem {
+                        id: s(q, "id"),
+                        text: s(q, "text"),
+                        files: q.get("files").and_then(Value::as_array).map_or(0, Vec::len),
+                        steered: q.get("steered").and_then(Value::as_bool).unwrap_or(false),
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// A command on one item of the open conversation's queue:
+    /// `queue.drop`, `queue.steer` or `queue.edit` with its new text.
+    pub fn queue_cmd(&mut self, name: &str, item: &str, text: Option<&str>) -> Value {
+        let id = self.id("app.queue_cmd");
+        let mut args = json!({"id": item});
+        if let Some(t) = text {
+            args["text"] = json!(t);
+        }
+        json!({"t": "cmd", "id": id, "name": name, "args": args})
+    }
+
+    /// Moves an item of the open conversation's queue one place up.
+    pub fn queue_up(&mut self, item: &str) -> Option<Value> {
+        let conversation = self.conversation()?;
+        let mut ids: Vec<String> = self.queue().into_iter().map(|q| q.id).collect();
+        let k = ids.iter().position(|i| i == item)?;
+        if k == 0 {
+            return None;
+        }
+        ids.swap(k, k - 1);
+        let id = self.id("app.queue_cmd");
+        Some(
+            json!({"t": "cmd", "id": id, "name": "queue.order", "args": {"conversation": conversation, "ids": ids}}),
+        )
     }
 
     /// Takes a frame from the core. Gives whether the screen should redraw.
@@ -909,6 +977,7 @@ impl Model {
                 self.synced = true;
                 self.routines_stale = true;
                 self.rewatch = true;
+                self.queue_stale = true;
                 for l in [
                     List::Agents,
                     List::Conversations,
@@ -1077,6 +1146,9 @@ impl Model {
             "routine" => {
                 self.routines_stale = true;
             }
+            "queue" => {
+                self.queues.insert(s(f, "conversation"), Model::queue_of(f));
+            }
             "plugin" if kind != "plugin.data" => {
                 self.plugins_stale = true;
             }
@@ -1193,6 +1265,19 @@ impl Model {
             return;
         }
         if id.starts_with("browser.input") {
+            return;
+        }
+        if let Some(conversation) = id.strip_prefix("app.queue:") {
+            if let Some(v) = f.get("value") {
+                self.queues
+                    .insert(conversation.to_string(), Model::queue_of(v));
+            }
+            return;
+        }
+        if id.starts_with("app.queue_cmd") {
+            if let Some(e) = f.get("error") {
+                self.notices.push(s(e, "message"));
+            }
             return;
         }
         if id.starts_with("app.search") {
@@ -2640,6 +2725,41 @@ mod tests {
         assert!(m.unread.contains("a_2"));
         m.select(Some("a_2".into()));
         assert!(m.unread.is_empty());
+    }
+
+    #[test]
+    fn the_queue_is_heard_asked_and_reordered() {
+        let mut m = Model::new();
+        m.conversations = vec![Conversation {
+            id: "c_1".into(),
+            agent: "a_1".into(),
+        }];
+        m.select(Some("a_1".into()));
+        // Opening the chat asks for its queue.
+        let asked = m.fetches();
+        assert!(asked
+            .iter()
+            .any(|f| f["name"] == "queue.list" && f["args"]["conversation"] == "c_1"));
+        m.take(&json!({"t": "result", "id": "app.queue:c_1", "value": {"queue": [{"id": "q_1", "text": "first"}]}}));
+        assert_eq!(m.queue().len(), 1);
+        m.take(
+            &json!({"t": "event", "kind": "queue.changed", "conversation": "c_1", "queue": [
+                {"id": "q_1", "text": "first"},
+                {"id": "q_2", "text": "", "files": ["f_1", "f_2"], "steered": true},
+            ]}),
+        );
+        let q = m.queue();
+        assert_eq!(q[1].files, 2);
+        assert!(q[1].steered);
+        assert!(m.queue_up("q_1").is_none(), "the first can't go higher");
+        let up = m.queue_up("q_2").unwrap();
+        assert_eq!(up["name"], "queue.order");
+        assert_eq!(up["args"]["ids"], json!(["q_2", "q_1"]));
+        let edit = m.queue_cmd("queue.edit", "q_1", Some("changed"));
+        assert_eq!(edit["args"], json!({"id": "q_1", "text": "changed"}));
+        // Another conversation's queue isn't this chat's.
+        m.take(&json!({"t": "event", "kind": "queue.changed", "conversation": "c_9", "queue": []}));
+        assert_eq!(m.queue().len(), 2);
     }
 
     #[test]

@@ -121,6 +121,9 @@ pub struct Loom {
     user_in: Entity<InputState>,
     pass_in: Entity<InputState>,
     secret_in: Entity<InputState>,
+    queue_in: Entity<InputState>,
+    /// The queued message being edited, by id.
+    queue_editing: Option<String>,
     code_in: Entity<InputState>,
     name_in: Entity<InputState>,
     skill_name_in: Entity<InputState>,
@@ -300,6 +303,18 @@ impl Loom {
             },
         )
         .detach();
+        // A queued message being edited: Enter saves it.
+        let queue_in = input(window, cx, "", false);
+        cx.subscribe_in(
+            &queue_in,
+            window,
+            |this: &mut Loom, _, event: &InputEvent, window, cx| {
+                if let InputEvent::PressEnter { .. } = event {
+                    this.save_queued(window, cx);
+                }
+            },
+        )
+        .detach();
         for field in [&pass_in, &code_in] {
             cx.subscribe_in(
                 field,
@@ -470,6 +485,8 @@ ACTA_KEY=secret:ACTA_KEY",
             user_in,
             pass_in,
             secret_in,
+            queue_in,
+            queue_editing: None,
             code_in,
             name_in,
             skill_name_in,
@@ -1161,6 +1178,164 @@ ACTA_KEY=secret:ACTA_KEY",
         self.secret_in
             .update(cx, |s, cx| s.set_value("", window, cx));
         cx.notify();
+    }
+
+    /// Starts editing a queued message in place.
+    fn edit_queued(
+        &mut self,
+        item: &model::QueueItem,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.queue_editing = Some(item.id.clone());
+        let text = item.text.clone();
+        self.queue_in.update(cx, |s, cx| {
+            s.set_value(text, window, cx);
+            s.focus(window, cx);
+        });
+        cx.notify();
+    }
+
+    /// Saves the queued message being edited; empty text keeps what it was.
+    fn save_queued(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        let Some(id) = self.queue_editing.take() else {
+            return;
+        };
+        let text = self.queue_in.read(cx).value().trim().to_string();
+        if !text.is_empty() {
+            let f = self.model.queue_cmd("queue.edit", &id, Some(&text));
+            self.send(f);
+        }
+        cx.notify();
+    }
+
+    /// What waits for the agent in this conversation, above the composer:
+    /// each one can go now (steer), move up, be edited or be dropped.
+    fn queue_view(&self, agent: &model::Agent, cx: &mut Context<Self>) -> Option<Div> {
+        let items = self.model.queue();
+        if items.is_empty() {
+            return None;
+        }
+        let p = self.p;
+        let tint = thread::color(&agent.color, p.dark);
+        let mut list = div()
+            .w_full()
+            .max_w(px(space::COLUMN))
+            .flex()
+            .flex_col()
+            .gap(px(space::XS));
+        for (k, item) in items.iter().enumerate() {
+            let editing = self.queue_editing.as_deref() == Some(item.id.as_str());
+            let tool = |name: &str, icon: Icon| {
+                div()
+                    .id(SharedString::from(format!("queue-{name}-{}", item.id)))
+                    .size(px(26.0))
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded(px(radius::ROW))
+                    .text_color(p.ink_3)
+                    .cursor_pointer()
+                    .hover(move |s| s.bg(p.hover).text_color(p.ink))
+                    .child(icon.xsmall())
+            };
+            let (steer_id, up_id, edit_item, drop_id) = (
+                item.id.clone(),
+                item.id.clone(),
+                item.clone(),
+                item.id.clone(),
+            );
+            let text = if item.files > 0 {
+                let files = if item.files == 1 {
+                    "1 file".to_string()
+                } else {
+                    format!("{} files", item.files)
+                };
+                if item.text.is_empty() {
+                    files
+                } else {
+                    format!("{} · {files}", item.text)
+                }
+            } else {
+                item.text.clone()
+            };
+            let row = div()
+                .w_full()
+                .flex()
+                .items_center()
+                .gap(px(space::S))
+                .pl(px(space::M))
+                .pr(px(space::XS))
+                .py(px(space::XS))
+                .rounded(px(radius::ROW))
+                .bg(p.bubble)
+                .text_size(px(size::SMALL))
+                .child(Icon::new(Ico::Clock).xsmall().text_color(tint))
+                .child(if editing {
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .child(Input::new(&self.queue_in))
+                        .into_any_element()
+                } else {
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .truncate()
+                        .text_color(p.ink)
+                        .child(text)
+                        .into_any_element()
+                })
+                .child(tool("steer", Icon::new(Ico::Zap)).on_click(cx.listener(
+                    move |this, _, _, cx| {
+                        let f = this.model.queue_cmd("queue.steer", &steer_id, None);
+                        this.send(f);
+                        cx.notify();
+                    },
+                )))
+                .when(k > 0, |d| {
+                    d.child(
+                        tool("up", Icon::new(IconName::ArrowUp)).on_click(cx.listener(
+                            move |this, _, _, cx| {
+                                if let Some(f) = this.model.queue_up(&up_id) {
+                                    this.send(f);
+                                }
+                                cx.notify();
+                            },
+                        )),
+                    )
+                })
+                // The first can't go higher; its buttons still line up.
+                .when(k == 0, |d| d.child(div().size(px(26.0)).flex_none()))
+                .child(if editing {
+                    tool("save", Icon::new(Ico::Check))
+                        .on_click(cx.listener(|this, _, window, cx| this.save_queued(window, cx)))
+                } else {
+                    tool("edit", Icon::new(Ico::Pencil)).on_click(cx.listener(
+                        move |this, _, window, cx| this.edit_queued(&edit_item, window, cx),
+                    ))
+                })
+                .child(
+                    tool("drop", Icon::new(IconName::Close)).on_click(cx.listener(
+                        move |this, _, _, cx| {
+                            let f = this.model.queue_cmd("queue.drop", &drop_id, None);
+                            this.send(f);
+                            cx.notify();
+                        },
+                    )),
+                );
+            list = list.child(row);
+        }
+        Some(
+            div()
+                .w_full()
+                .flex()
+                .justify_center()
+                .px(px(space::XL))
+                .pb(px(space::XS))
+                .child(list),
+        )
     }
 
     /// The agent asking for something only the person should know, typed
@@ -2363,6 +2538,7 @@ ACTA_KEY=secret:ACTA_KEY",
             .map(|a| self.browser_panel(&a, window, cx));
         let ask = agent.as_ref().and_then(|a| self.browser_ask(a, cx));
         let secret = agent.as_ref().and_then(|a| self.secret_ask(a, cx));
+        let queue = agent.as_ref().and_then(|a| self.queue_view(a, cx));
         let name = agent.as_ref().map(|a| a.name.clone()).unwrap_or_default();
         let tint = agent
             .as_ref()
@@ -2412,7 +2588,10 @@ ACTA_KEY=secret:ACTA_KEY",
         .with_bottom_fade(p.bg);
 
         let empty = self.rows.is_empty();
-        let busy = self.model.busy();
+        // While the agent answers, the button stops it, unless there's something to send: that waits in the queue.
+        let busy = self.model.busy()
+            && self.composer.read(cx).value().trim().is_empty()
+            && self.model.attachments.is_empty();
         let who = agent
             .as_ref()
             .map(|a| a.name.as_str())
@@ -2596,6 +2775,7 @@ ACTA_KEY=secret:ACTA_KEY",
             })
             .when_some(ask, |d, a| d.child(a))
             .when_some(secret, |d, a| d.child(a))
+            .when_some(queue, |d, q| d.child(q))
             .when_some(composer, |d, c| {
                 d.child(
                     div()
