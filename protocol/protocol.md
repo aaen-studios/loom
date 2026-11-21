@@ -19,6 +19,7 @@ Version 1. This is what an app (always through its core) and an instance say to 
 - [Commands](#commands)
 - [Plugins](#plugins)
 - [Errors and close codes](#errors-and-close-codes)
+- [Over Noise](#over-noise)
 - [Push](#push)
 - [Versions](#versions)
 - [How ACP maps onto loom](#how-acp-maps-onto-loom)
@@ -29,7 +30,7 @@ Version 1. This is what an app (always through its core) and an instance say to 
 
 - **HTTP/1.1** for what isn't a live session: setup, login, invites, files and webhooks.
 - **One WebSocket** (RFC 6455) per device for everything live, at `/ws`.
-- **TLS** comes from whatever is in front of the instance (Caddy, a Cloudflare tunnel). The instance itself listens on 127.0.0.1. A desktop instance's own app connects over loopback without TLS. Phones reaching a desktop instance use a Noise handshake ([Later versions](#later-versions)).
+- **TLS** comes from whatever is in front of the instance (Caddy, a Cloudflare tunnel). The instance itself listens on 127.0.0.1. A desktop instance's own app connects over loopback without TLS. Phones reaching a desktop instance use a Noise handshake, over one WebSocket that carries their HTTP requests too ([Over Noise](#over-noise)).
 - **One JSON object per WebSocket text frame**, UTF-8. Binary frames aren't used in version 1; files go over HTTP.
 - **Frame size:** at most 1 MiB. A bigger frame closes the socket with 1009.
 
@@ -483,7 +484,7 @@ Version 1's commands:
 | `memory.list` | `agent`? (that agent's notes and the shared ones; every note without it), `query`? (words, any of them, best match first; newest first without), `limit`? (up to 500, 100 if left out) | `memories`: each `id`, `agent` (empty for a shared note), `shared`, `text`, `by` (the agent or device that kept it) and `at` |
 | `memory.put` | `text`, `agent`? (empty or left out: shared by all the person's agents) | `id` |
 | `memory.delete` | `id` | — |
-| `link.create` | — | `code` (one-time, for [`POST /api/link`](#post-apilink)), `expires` (Unix ms, five minutes on), `instance` and `key` (the instance's id and public key, as `/api/info` gives them). The core adds `qr`, the QR code's text. Only a device can ask, never an agent |
+| `link.create` | — | `code` (one-time, for [`POST /api/link`](#post-apilink)), `expires` (Unix ms, five minutes on), `instance` and `key` (the instance's id and public key, as `/api/info` gives them), and while phones are on, `noise`: `{"on":true,"port":47420,"key":"<its Noise key, base64>"}` ([Over Noise](#over-noise)). The core adds `qr`, the QR code's text. Only a device can ask, never an agent |
 | `push.register` | `token` (the device's APNs token, hex), `env` (`production`, or `development` for a debug build) | Nothing back. Only a device, for itself. A device signed out loses it |
 | `push.unregister` | — | Nothing back. This device stops taking push |
 | `profile.get` | — | `profile`: `text`, `revision`, `by` (the device or agent that wrote it) and `at`, or `null` when there's none yet |
@@ -508,6 +509,7 @@ Version 1's commands:
 | `plugin.message` | `plugin`, `agent` (a name or id), `text` (up to 20,000 bytes) | `reply`: the agent's answer, once its run ends, when the person allowed the plugin `agents`, or `not_allowed`. The plugin and the agent keep one conversation, `From <plugin's name>`, where the message is the person's, with `plugin:<id>` as `from`. `busy` while the agent is still answering the last one, and `agent_failed` when its run fails |
 | `activity.list` | `agent`?, `before`? (an entry's `id`), `limit`? (up to 200, 50 if left out) | `activity`, newest first: each `id`, `agent`, `kind` (`tool`, `approval`, `agent`, `message`, `notify`, `memory`, `routine` or `device`), `text`, `by` (a device, an agent, `auto` for the permission mode, or empty for the agent itself) and `at`. It's kept for good, unlike events |
 | `instance.move` | `to` (the new place's `http://` or `https://` address), `code` (the move code `loom receive` printed there) | `address`, once the instance is there. Only the owner, and not while an agent is answering. Until then, sends and commands get `moving`, and routines wait. The instance goes as `loom export` writes it, in chunks of 4 MB, each sealed with XChaCha20-Poly1305 under a key from the code, which also gives the bearer token for the new place's `POST /api/move/chunk?n=<n>` and `POST /api/move/done`. Then every device gets [`moved`](#moved). `move_failed` says why one didn't happen. An agent's `move_instance` asks the person first |
+| `instance.phones` | `on`? (true or false) | `on`, and while they are, `port` and `key` ([Over Noise](#over-noise)). With `on`, turns phones on or off: they reach the instance on the network over Noise, and stay on across a restart. Without it, says how things are. Only the owner, from a device, and only on an instance in the desktop app (or `loom serve --lan`): elsewhere `not_here` |
 | `agent.revisions` | `agent` | `revisions`, newest first: each `revision`, `by` (the device or agent that made it), `at`, and `agent` as it was then |
 | `agent.rollback` | `agent`, `revision` | `agent`: a new revision with that one's name, ACP agent, instructions, folder and colour. The permission mode stays as it is |
 | `agent.delete` | `agent` | — |
@@ -549,7 +551,7 @@ commands = ["routine.list"]   # commands the panel may send
 agents = true                 # the panel may message the person's agents
 ```
 
-What it asks for is its `asks`: `tools` when it has a tool server, `agents`, and `cmd:<name>` for each command. A panel never gets the commands that would let it allow itself more, borrow another plugin's permissions, run programs on the instance, or reach the person's devices, secrets and sign-in: `plugin.put`, `plugin.allow`, `plugin.delete`, `plugin.cmd`, `plugin.message`, `instance.move`, `link.create`, `push.register`, `push.unregister`, `device.revoke`, `device.rename`, `secret.list`, `secret.put`, `secret.delete`, `mcp.put`, `acp.install`, `acp.remove` and `acp.settings`. Until its person allows something, it waits, and the plugin goes without it.
+What it asks for is its `asks`: `tools` when it has a tool server, `agents`, and `cmd:<name>` for each command. A panel never gets the commands that would let it allow itself more, borrow another plugin's permissions, run programs on the instance, or reach the person's devices, secrets and sign-in: `plugin.put`, `plugin.allow`, `plugin.delete`, `plugin.cmd`, `plugin.message`, `instance.move`, `instance.phones`, `link.create`, `push.register`, `push.unregister`, `device.revoke`, `device.rename`, `secret.list`, `secret.put`, `secret.delete`, `mcp.put`, `acp.install`, `acp.remove` and `acp.settings`. Until its person allows something, it waits, and the plugin goes without it.
 
 - **A tool server** the person allowed is in every one of their agents' new sessions, as the MCP server `plugin-<id>`. It runs from a folder holding the revision's files, with `LOOM_PLUGIN_DIR` set to that folder.
 - **A panel** talks to the app through one door, `await loom.send(op, args)` (desktop/src/panel.rs). The app sends these on, and refuses everything else, and the instance checks what's allowed:
@@ -582,6 +584,7 @@ What it asks for is its `asks`: `tools` when it has a tool server, `agents`, and
 | `moving` | The instance is moving: nothing changes until it's at the new place |
 | `moved` | `instance.move` on an instance that has moved already |
 | `move_failed` | `instance.move`: the export, sending it, or the new place failed. The message says which, and the instance goes on where it is |
+| `not_here` | `instance.phones` on an instance on a server, which phones reach at its own address |
 | `internal` | A bug in the instance. It's logged there |
 
 WebSocket close codes:
@@ -596,6 +599,25 @@ WebSocket close codes:
 | 4002 | No protocol version in common | Says the app needs an update, or the instance does |
 | 4003 | Too slow: the app didn't read fast enough and the instance's queue for it filled up | Reconnects |
 | 4004 | The instance moved. A [`moved`](#moved) frame came just before | Checks it, and connects at the new address |
+| 4005 | Over Noise: the handshake failed, or a message didn't open | Checks the Noise key it has, and reconnects |
+
+## Over Noise
+
+A phone reaches an instance in the desktop app ([PLAN.md: Reaching an instance in a desktop app](../PLAN.md#connecting-devices)) without TLS, so the connection is encrypted end to end with a [Noise](https://noiseprotocol.org/noise.html) handshake against the instance's Noise key. The instance itself listens only on 127.0.0.1. Once the owner turns phones on (`instance.phones`), a bridge listens on every address too, on port 47420 if it's free and on the same port after that, and takes only one route there:
+
+- **`GET /ws/noise`**, a WebSocket of binary messages. Any other request on that port gets 404 with `noise_only`, `/ws` and `/api/info` included, and a text message closes the socket with 4000.
+- **The handshake** is `Noise_NK_25519_ChaChaPoly_SHA256` with the prologue `loom noise 1`: the phone knows the instance's static key from the QR code, and has none of its own, since its device token says who it is. The phone sends the first message and the instance answers with the second, each one binary WebSocket message with an empty payload. If it fails, the socket closes with 4005.
+- **After it**, each binary message is one Noise transport message, sealed with the handshake's keys in order: a piece of a message. A piece is a flag byte, `1` if more pieces of the same message follow and `0` on its last, then up to 65,518 bytes of it. A message is one kind byte, then:
+
+| Kind | Holds | Means |
+|---|---|---|
+| `f` | A frame's JSON, as `/ws` carries it | A frame of the WebSocket session, both ways. The first one the phone sends opens its session, so `hello` goes first, as on `/ws` |
+| `q` | `{"id":1,"method":"POST","path":"/api/link","headers":{"Content-Type":"application/json"}}`, a newline, the body | An HTTP request from the phone to one of the instance's routes, `GET` or `POST` but not `/ws`, with the device token in `Authorization` as over HTTP. `id` is the phone's own |
+| `r` | `{"id":1,"status":200,"headers":{"Content-Type":"…"}}`, a newline, the body | The instance's answer to request `id`, with its `Content-Type` and any `Content-Disposition`. Requests are answered as they finish, not in order |
+
+So a phone joins with `POST /api/link`, uploads and fetches files, and runs its session, all on the one socket. A message goes up to 64 MB and a bit more, for a file and its head. When the session ends, as with a 4001 or 4004, the socket closes with the same code and reason. When phones are turned off, or the instance stops, it closes with 1001.
+
+The instance's Noise key is X25519, made from the same seed as its Ed25519 key, so it moves with the instance. `link.create` gives its public half, with the port, while phones are on.
 
 ## Push
 
@@ -736,4 +758,4 @@ The core replaces what the deltas built with the finished message, stores `seq` 
 Fields and frames that come with later phases. Where they only add, they come within version 1.
 
 - **Device tools** (Phase 3): the instance sends `{"t":"device.call", …}` with the request, and the signed approval when there is one, and the device answers `{"t":"device.result", …}`. Each device offers its tools in `hello`.
-- **Noise** (Phase 6): a phone reaching a desktop instance runs a Noise handshake against the instance's key from the QR code before `hello`, and every frame after it is encrypted.
+- **Noise** (Phase 6): done, within version 1 ([Over Noise](#over-noise)).

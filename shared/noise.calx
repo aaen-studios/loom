@@ -1,0 +1,168 @@
+module shared.noise
+
+// A phone reaching an instance in a desktop app (protocol/protocol.md, "Over
+// Noise"): one WebSocket to /ws/noise on the PC's network port. Its first two
+// binary messages are a Noise NK handshake, against the instance's Noise key
+// from the QR code. After it, each binary message is one Noise transport
+// message, a piece of a message: a flag byte, 1 if more pieces follow and 0
+// on the last, then up to PIECE bytes. A message is a kind byte, then:
+//
+//     f  a protocol frame, as /ws carries it, UTF-8 JSON
+//     q  an HTTP request:  {"id":1,"method":"POST","path":"/api/link","headers":{…}} \n body
+//     r  its response:     {"id":1,"status":200,"headers":{…}} \n body
+//
+// so the phone reaches the instance's HTTP routes through the same socket.
+// The instance's side is server/noise.calx and the phone's core/noise.calx.
+import std.crypto.{NoiseHandshake, NoiseTransport, X25519Key, X25519PublicKey}
+import std.json.{Json, parse}
+import shared.obj.{Obj}
+
+pub const NAME: str = "Noise_NK_25519_ChaChaPoly_SHA256"
+pub const PROLOGUE: str = "loom noise 1"
+pub const PATH: str = "/ws/noise"
+
+// What a piece carries: the most a Noise transport message encrypts, less its flag.
+pub const PIECE: usize = 65518
+// The longest message, a 64 MB file and its head.
+pub const LONGEST: usize = 67174400
+
+pub const FRAME: u8 = 102       // 'f'
+pub const REQUEST: u8 = 113     // 'q'
+pub const RESPONSE: u8 = 114    // 'r'
+
+// The instance's side of the handshake, with its Noise key.
+pub fn responder(key: X25519Key) -> NoiseHandshake {
+    var h = NoiseHandshake.responder(String(NAME))
+    h.set_static(key)
+    h.set_prologue(PROLOGUE.to_bytes())
+    return h
+}
+
+// The phone's side, with the instance's public Noise key from the QR code.
+pub fn initiator(key: X25519PublicKey) -> NoiseHandshake {
+    var h = NoiseHandshake.initiator(String(NAME))
+    h.set_remote_static(key)
+    h.set_prologue(PROLOGUE.to_bytes())
+    return h
+}
+
+// `message` sealed for the other side, a Noise message for each piece.
+pub fn seal(t: mut NoiseTransport, message: List<u8>) -> List<List<u8>> {
+    var out = List<List<u8>>()
+    var start: usize = 0
+    loop {
+        let end = if message.len() - start > PIECE { start + PIECE } else { message.len() }
+        var piece = List<u8>()
+        piece.reserve(end - start + 1)
+        piece.push(if end < message.len() { 1 } else { 0 })
+        piece.extend(message[start..end].copy())
+        out.push(t.encrypt(piece))
+        if end >= message.len() { break }
+        start = end
+    }
+    return out
+}
+
+// What a piece that came gave.
+pub enum Opened {
+    Bad          // it didn't decrypt, or the message grew too long: the connection ends
+    More         // a piece of a message still coming
+    Whole(List<u8>)
+}
+
+// Joins the pieces of each message that comes.
+pub struct Joiner {
+    buf: List<u8>
+}
+
+impl Joiner {
+    pub fn new() -> Joiner {
+        return Joiner { buf: List<u8>() }
+    }
+
+    pub fn take(mut self, t: mut NoiseTransport, sealed: List<u8>) -> Opened {
+        let piece = t.decrypt(sealed) else return Opened.Bad
+        if piece.len() == 0 or piece[0] > 1 { return Opened.Bad }
+        if self.buf.len() + piece.len() - 1 > LONGEST { return Opened.Bad }
+        self.buf.extend(piece[1..].copy())
+        if piece[0] == 1 { return Opened.More }
+        let whole = self.buf.copy()
+        self.buf = List<u8>()
+        return Opened.Whole(whole)
+    }
+}
+
+// A frame, as a message.
+pub fn frame(text: String) -> List<u8> {
+    var out: List<u8> = [FRAME]
+    out.extend(text.to_bytes())
+    return out
+}
+
+// A request or a response, as a message: its kind, its head, a newline and its body.
+pub fn with_head(kind: u8, head: Json, body: List<u8>) -> List<u8> {
+    var out: List<u8> = [kind]
+    out.extend("{head}\n".to_bytes())
+    out.extend(body)
+    return out
+}
+
+// A request or a response's head and body, or none if it isn't one.
+pub fn head_of(message: List<u8>) -> (Json, List<u8>)? {
+    var nl: usize = 1
+    while nl < message.len() and message[nl] != 10 { nl += 1 }
+    if nl >= message.len() { return none }
+    let text = String.from_utf8(message[1..nl].copy()) else return none
+    let head = match parse(text) {
+        ok(j) => j,
+        err(_) => return none,
+    }
+    return some((head, message[nl + 1..].copy()))
+}
+
+// A response's head: its id and status, and the headers that matter to the phone.
+pub fn response_head(id: i64, status: i64, kind: String?, name: String?) -> Json {
+    var headers = Obj.new()
+    if let k = kind { headers = headers.s("Content-Type", k) }
+    if let n = name { headers = headers.s("Content-Disposition", n) }
+    return Obj.new().i("id", id).i("status", status).j("headers", headers.done()).done()
+}
+
+@test
+fn a_long_message_goes_in_pieces_and_comes_back_whole() {
+    let instance = X25519Key.generate()
+    var phone = initiator(instance.public_key())
+    var desk = responder(instance.copy())
+    _ = desk.read_message(phone.write_message([])!)!
+    _ = phone.read_message(desk.write_message([])!)!
+    var out = phone.transport()
+    var back = desk.transport()
+    var body = List<u8>()
+    for n in 0..200000 { body.push(u8.wrap(n)) }
+    let message = with_head(REQUEST, Obj.new().i("id", 7).s("method", String("POST")).s("path", String("/files?name=a.bin")).done(), body.copy())
+    let pieces = seal(mut out, message)
+    assert(pieces.len() == 4)
+    var j = Joiner.new()
+    var whole: List<u8>? = none
+    for p in pieces {
+        match j.take(mut back, p.copy()) {
+            Opened.Whole(m) => whole = some(m),
+            Opened.More => {},
+            Opened.Bad => panic("a piece didn't open"),
+        }
+    }
+    let m = whole else panic("the message didn't come whole")
+    assert(m[0] == REQUEST)
+    let (head, got) = head_of(m) else panic("no head")
+    assert("{head}" == #"{"id":7,"method":"POST","path":"/files?name=a.bin"}"#)
+    assert(got == body)
+    // A short frame is one piece, and a changed one doesn't open.
+    let one = seal(mut out, frame(String(#"{"t":"hello"}"#)))
+    assert(one.len() == 1)
+    var bad = one[0].copy()
+    bad[5] = bad[5] ^ 1
+    match j.take(mut back, bad) {
+        Opened.Bad => {},
+        _ => panic("a changed piece opened"),
+    }
+}
