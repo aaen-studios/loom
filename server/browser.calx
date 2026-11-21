@@ -27,6 +27,9 @@ pub const IDLE_MS: i64 = 600000
 // How long one DevTools call may take, and how long a page may take to load.
 const CALL_MS: i64 = 30000
 const LOAD_MS: i64 = 15000
+// How long the browser may take to start: a cold start on a slow machine, as a
+// CI runner, can take well past 20 s.
+const LAUNCH_MS: i64 = 60000
 // How much of a page's outline goes to the agent.
 const OUTLINE_MOST: usize = 40000
 
@@ -300,7 +303,7 @@ impl Worker {
         let child = try Command.new(exe).args(args).stdin(Stdio.Null).stdout(Stdio.Pipe).stderr(Stdio.Stdout).own_group().spawn()
         // The browser writes the port it took, and its own address, once it listens.
         var said = List<String>()
-        let until = now() + 20000
+        let until = now() + LAUNCH_MS
         loop {
             while let line = child.read_line(0) {
                 said.push(line)
