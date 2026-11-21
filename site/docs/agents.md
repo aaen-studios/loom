@@ -35,3 +35,7 @@ Choose **+** in the sidebar. An agent has a name, the program it runs on, its in
 ## MCP servers and secrets
 
 Set up MCP servers once, on the **MCP servers** page, and pick which each agent gets on its edit page. A setting can name one of your secrets, such as `ACTA_KEY=secret:ACTA_KEY`, which loom fills in only for the agent's process. Secrets are yours alone, sealed like program settings.
+
+## Sharing keys with the people you invite
+
+The people you invite run their agents in sandboxes of their own ([People](people.md)), with their own secrets as their agent programs' settings. To let them use yours, open the program on **Agent programs** and **Share** its settings, with a number of tokens each person may use a day or a month. Loom counts what each turn uses, as the program reports it. Someone past their budget waits for the next day or month, or adds their own key as a secret with the setting's name, which then wins.

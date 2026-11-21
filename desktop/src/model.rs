@@ -173,6 +173,16 @@ pub struct Program {
     pub source: String,
     pub version: String,
     pub settings: Vec<String>,
+    /// Its settings shared with everyone but the owner: tokens a person may use each
+    /// day or month, and, for someone it applies to, how many are left.
+    pub share: Option<Share>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct Share {
+    pub tokens: i64,
+    pub per: String,
+    pub left: Option<i64>,
 }
 
 /// An agent in the ACP Registry.
@@ -1375,6 +1385,11 @@ impl Model {
                                         .collect()
                                 })
                                 .unwrap_or_default(),
+                            share: p.get("share").filter(|v| v.is_object()).map(|sh| Share {
+                                tokens: sh.get("tokens").and_then(Value::as_i64).unwrap_or(0),
+                                per: s(sh, "per"),
+                                left: sh.get("left").and_then(Value::as_i64),
+                            }),
                         })
                         .collect()
                 })
@@ -1974,6 +1989,13 @@ impl Model {
         json!({"t": "cmd", "id": id, "name": "acp.settings", "args": {"name": program, "env": env}})
     }
 
+    /// Shares a program's settings with everyone but the owner, `tokens` each `per` day
+    /// or month; 0 stops sharing them.
+    pub fn share_program(&mut self, program: &str, tokens: i64, per: &str) -> Value {
+        let id = self.id("app.program");
+        json!({"t": "cmd", "id": id, "name": "acp.share", "args": {"name": program, "tokens": tokens, "per": per}})
+    }
+
     pub fn remove_program(&mut self, program: &str) -> Value {
         let id = self.id("app.program");
         json!({"t": "cmd", "id": id, "name": "acp.remove", "args": {"name": program}})
@@ -2436,6 +2458,31 @@ mod tests {
             .notices
             .iter()
             .any(|n| n.contains("goes with the instance")));
+    }
+
+    #[test]
+    fn a_program_shared_with_a_budget() {
+        let mut m = Model::new();
+        let list = m.programs();
+        m.result(&json!({"t": "result", "id": list["id"], "ok": true, "value": {"programs": [
+            {"name": "claude", "source": "", "version": "", "settings": ["ANTHROPIC_API_KEY"], "share": {"tokens": 5000, "per": "day", "left": 1200}},
+            {"name": "codex", "source": "", "version": "", "settings": []}
+        ]}}));
+        assert_eq!(
+            m.installed[0].share,
+            Some(Share {
+                tokens: 5000,
+                per: "day".into(),
+                left: Some(1200)
+            })
+        );
+        assert_eq!(m.installed[1].share, None);
+        let shared = m.share_program("codex", 100, "month");
+        assert_eq!(shared["name"], "acp.share");
+        assert_eq!(
+            shared["args"],
+            json!({"name": "codex", "tokens": 100, "per": "month"})
+        );
     }
 
     #[test]

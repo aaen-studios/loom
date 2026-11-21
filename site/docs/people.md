@@ -32,6 +32,6 @@ which reads the new password from standard input and signs the owner out everywh
 
 ## Where their agents run
 
-Only the owner's agents run as the instance's own user, which can read everything on it. Everyone else's run in a sandbox of their own: a container that sees only that person's folder, with the internet but none of the server's own services but loom's tools. Their agents get their own secrets, such as `ANTHROPIC_API_KEY`, as their keys, never the owner's.
+Only the owner's agents run as the instance's own user, which can read everything on it. Everyone else's run in a sandbox of their own: a container that sees only that person's folder, with the internet but none of the server's own services but loom's tools. Their agents get their own secrets, such as `ANTHROPIC_API_KEY`, as their keys, and the owner's only when the owner shares them, with a budget ([Agents and keys](agents.md#sharing-keys-with-the-people-you-invite)).
 
 `loom install` sets sandboxes up on the server: it installs Podman and pasta and runs `loom serve --sandboxes podman` (unless you give it `--no-sandboxes`). Elsewhere, start `loom serve` with `--sandboxes podman` on a machine with rootless Podman and pasta. Without sandboxes, only the owner's agents run.
