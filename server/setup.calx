@@ -5,8 +5,10 @@ module server.setup
 // app can"). It makes the `loom` user, which has no rights beyond its own
 // folder, keeps the instance in /var/lib/loom, runs `loom serve` as that user
 // from a systemd unit, and puts Caddy in front for TLS when there's a domain,
-// or Tailscale when there isn't. Then it starts it, and gives the address and
-// the setup code.
+// or Tailscale when there isn't. Unless told not to, it sets up rootless Podman
+// for the `loom` user, for the sandboxes everyone but the owner runs their
+// agents in (server/sandbox.calx). Then it starts it, and gives the address
+// and the setup code.
 import std.env
 import std.fs
 import std.json.{Json}
@@ -22,10 +24,11 @@ pub const CADDYFILE: str = "/etc/caddy/Caddyfile"
 // Marks the files loom wrote, so a second install may write them again.
 const MARK: str = "# Written by loom install."
 
-/// How to install: a domain for Caddy, or none.
+/// How to install: a domain for Caddy, or none, and whether to set sandboxes up.
 pub struct Plan {
     pub domain: String
     pub port: u16
+    pub sandboxes: bool
 }
 
 /// What an install did, for `loom install` to say, in words or as JSON.
@@ -36,22 +39,37 @@ pub struct Done {
 }
 
 /// The systemd unit that runs the instance as `loom`, with as little else as it needs.
-pub fn unit(port: u16) -> String {
-    let lines: List<String> = [
+/// With `boxes`, the `loom` user's id, it runs sandboxes with rootless Podman, which
+/// needs the user's own session (lingering) and newuidmap, a setuid program, so
+/// the unit can't forbid new privileges.
+pub fn unit(port: u16, boxes: String?) -> String {
+    var lines: List<String> = [
         String(MARK),
         String("[Unit]"),
         String("Description=loom, an instance of agents"),
         String("After=network-online.target"),
         String("Wants=network-online.target"),
-        String(),
-        String("[Service]"),
-        "User={USER}",
-        "Group={USER}",
-        "ExecStart={BIN} serve --data {HOME} --port {port}",
+    ]
+    if let uid = boxes.copy() {
+        lines.push("Wants=user@{uid}.service")
+        lines.push("After=user@{uid}.service")
+    }
+    lines.push(String())
+    lines.push(String("[Service]"))
+    lines.push("User={USER}")
+    lines.push("Group={USER}")
+    if let uid = boxes.copy() {
+        lines.push("ExecStart={BIN} serve --data {HOME} --port {port} --sandboxes podman")
+        lines.push("Environment=XDG_RUNTIME_DIR=/run/user/{uid}")
+        lines.push("Environment=DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/{uid}/bus")
+    } else {
+        lines.push("ExecStart={BIN} serve --data {HOME} --port {port}")
+        lines.push(String("NoNewPrivileges=yes"))
+    }
+    let rest: List<String> = [
         String("Restart=on-failure"),
         String("RestartSec=2"),
         "WorkingDirectory={HOME}",
-        String("NoNewPrivileges=yes"),
         String("PrivateTmp=yes"),
         String("ProtectSystem=full"),
         String("ProtectHome=read-only"),
@@ -62,7 +80,53 @@ pub fn unit(port: u16) -> String {
         String("WantedBy=multi-user.target"),
         String(),
     ]
+    lines.extend(rest)
     return lines.join("\n")
+}
+
+/// The first id of a free range of 65,536 for `/etc/subuid` or `/etc/subgid`, after
+/// every range `text` gives out already, and never below 100,000.
+pub fn free_range(text: String) -> i64 {
+    var next: i64 = 100000
+    for line in text.split("\n") {
+        let parts = line.trim().split(":")
+        if parts.len() != 3 { continue }
+        let start = i64.parse(parts[1].copy()) ?? 0
+        let count = i64.parse(parts[2].copy()) ?? 0
+        if start + count > next { next = start + count }
+    }
+    return next
+}
+
+/// Sets up rootless Podman for the `loom` user: Podman, pasta and newuidmap, ids
+/// for its containers, and a session of its own that outlives a login. Gives
+/// its id, or says why sandboxes aren't set up.
+fn podman_for_loom(steps: mut List<String>) -> String? ! Error {
+    if which(String("podman")) == none or which(String("pasta")) == none or which(String("newuidmap")) == none {
+        if which(String("apt-get")) == none {
+            steps.push(String("no sandboxes: install Podman, pasta (passt) and newuidmap (uidmap), then run loom install again. Until then, only the owner's agents run"))
+            return none
+        }
+        _ = try sh("apt-get", words(["install", "-y", "podman", "passt", "uidmap"]))
+        steps.push(String("installed Podman, for sandboxes"))
+    }
+    for file in ["/etc/subuid", "/etc/subgid"] {
+        let text = if fs.exists(String(file)) { try fs.read_text(String(file)) ?? String() } else { String() }
+        var has = false
+        for line in text.split("\n") {
+            if line.starts_with("{USER}:") { has = true }
+        }
+        if not has {
+            let start = free_range(text)
+            let flag = if file == "/etc/subuid" { "--add-subuids" } else { "--add-subgids" }
+            _ = try sh("usermod", [String(flag), "{start}-{start + 65535}", String(USER)])
+        }
+    }
+    _ = try sh("loginctl", words(["enable-linger", USER]))
+    let id_text = try sh("id", words(["-u", USER]))
+    let uid = id_text.trim().copy()
+    steps.push("sandboxes: the agents of everyone but the owner run in rootless Podman, as {USER}")
+    return some(uid)
 }
 
 /// Caddy's file for `domain`, with TLS from Let's Encrypt, in front of the instance.
@@ -122,10 +186,13 @@ pub fn install(plan: Plan) -> Done ! Error {
         steps.push("put loom in {BIN}")
     }
 
+    // Sandboxes, for everyone but the owner.
+    let boxes = if plan.sandboxes { try podman_for_loom(mut steps) } else { none }
+
     // The service.
     let existing = if fs.exists(String(UNIT)) { try fs.read_text(String(UNIT)) ?? String() } else { String() }
     if existing.len() > 0 and not existing.contains(MARK) { fail "{UNIT} is there already, and loom didn't write it, so it's left as it is" }
-    try fs.write_text(String(UNIT), unit(plan.port))
+    try fs.write_text(String(UNIT), unit(plan.port, boxes))
     _ = try sh("systemctl", words(["daemon-reload"]))
     _ = try sh("systemctl", words(["enable", "--now", "loom"]))
     _ = try sh("systemctl", words(["restart", "loom"]))
@@ -204,8 +271,17 @@ pub fn done_text(d: Done) -> String {
 
 @test
 fn the_unit_runs_it_as_loom() {
-    let u = unit(8790)
-    assert(u.contains("User=loom") and u.contains("ExecStart=/usr/local/bin/loom serve --data /var/lib/loom --port 8790") and u.contains("NoNewPrivileges=yes"))
+    let u = unit(8790, none)
+    assert(u.contains("User=loom") and u.contains("ExecStart=/usr/local/bin/loom serve --data /var/lib/loom --port 8790\n") and u.contains("NoNewPrivileges=yes"))
+    let boxed = unit(8790, some(String("998")))
+    assert(boxed.contains("--port 8790 --sandboxes podman") and boxed.contains("XDG_RUNTIME_DIR=/run/user/998") and boxed.contains("After=user@998.service"))
+    assert(not boxed.contains("NoNewPrivileges"))
+}
+
+@test
+fn a_free_range_comes_after_the_others() {
+    assert(free_range(String()) == 100000)
+    assert(free_range(String("ann:100000:65536\nbob:165536:65536\n")) == 231072)
 }
 
 @test

@@ -10,7 +10,7 @@ module server.main
 //     loom receive [--data DIR] [--port N] [--host ADDR]
 //     loom status [--data DIR]
 //     loom files limit MB|off [--data DIR]
-//     loom install [--domain DOMAIN] [--port N]   as root, on a Linux server
+//     loom install [--domain DOMAIN] [--port N] [--no-sandboxes]   as root, on a Linux server
 //     loom update [--check]
 //     loom version
 //
@@ -71,7 +71,8 @@ usage: loom <command>
                             or one no one has set up yet
   status                    say what the instance holds
   install                   set loom up on a Linux server, as root: the loom user, a systemd service,
-                            and Caddy for TLS with --domain DOMAIN, or Tailscale without one
+                            and Caddy for TLS with --domain DOMAIN, or Tailscale without one, and Podman
+                            for the sandboxes of everyone but the owner, unless given --no-sandboxes
   update                    update this program to the newest signed release (--check: only say if there's one)
   version                   print loom's version and the protocol versions it speaks
   mcp                       loom's own tools as an MCP server on standard input and output, which the instance starts for its agents
@@ -105,10 +106,11 @@ struct Args {
     lan: bool    // phones may reach it on the network, over Noise
     sandboxes: String    // what runs everyone else's agents: podman, or "" for nothing
     sandbox_image: String
+    no_sandboxes: bool    // loom install sets no sandboxes up
 }
 
 fn read_args(given: List<String>) -> Args ! Error {
-    var a = Args { words: List<String>(), data: String("loom-data"), port: 8790, host: String("127.0.0.1"), fast_hashes: false, keep_events: none, registry: String(installer.REGISTRY), minute_ms: 60000, allow_root: false, json: false, domain: String(), apns: String(), backups: String(), backups_keep: 7, backup_every_ms: 86400000, lan: false, sandboxes: String(), sandbox_image: String() }
+    var a = Args { words: List<String>(), data: String("loom-data"), port: 8790, host: String("127.0.0.1"), fast_hashes: false, keep_events: none, registry: String(installer.REGISTRY), minute_ms: 60000, allow_root: false, json: false, domain: String(), apns: String(), backups: String(), backups_keep: 7, backup_every_ms: 86400000, lan: false, sandboxes: String(), sandbox_image: String(), no_sandboxes: false }
     var i: usize = 0
     while i < given.len() {
         let w = given[i].copy()
@@ -157,6 +159,11 @@ fn read_args(given: List<String>) -> Args ! Error {
             if i + 1 >= given.len() { fail "{w} needs a number" }
             a.keep_events = some(i64.parse(given[i + 1].copy()) ?? 0)
             i += 2
+            continue
+        }
+        if w == "--no-sandboxes" {
+            a.no_sandboxes = true
+            i += 1
             continue
         }
         if w == "--domain" {
@@ -409,7 +416,7 @@ fn run(a: Args) -> Said ! Error {
         return said("made the instance {str_at(m.copy(), "instance") ?? String()} in {a.data}. Install its ACP agents again here: {programs}", Obj.new().s("data", a.data.copy()).j("backup", m).done())
     }
     if cmd == "install" {
-        let d = try setup.install(setup.Plan { domain: a.domain.copy(), port: a.port })
+        let d = try setup.install(setup.Plan { domain: a.domain.copy(), port: a.port, sandboxes: not a.no_sandboxes })
         return said(setup.done_text(d.copy()), setup.done_json(d))
     }
     if cmd == "receive" and a.words.len() == 1 {

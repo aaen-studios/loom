@@ -87,6 +87,17 @@ jobs:
           curl -fsS http://127.0.0.1:8790/api/info | grep -q '"setup":true'
           sudo -u loom /usr/local/bin/loom status --json --data /var/lib/loom | grep -q '"user":"loom"'
 
+      - name: Sandboxes
+        run: |
+          # The service runs members' agents in rootless Podman, as loom, and a
+          # container with pasta starts for loom from the service's session.
+          systemctl show -p ExecStart --value loom | grep -q -- '--sandboxes podman'
+          sudo journalctl -u loom --no-pager | grep -q 'run in sandboxes'
+          grep -q '^loom:' /etc/subuid
+          uid="$(id -u loom)"
+          cd /tmp
+          sudo -u loom -H env XDG_RUNTIME_DIR="/run/user/$uid" podman run --rm --network pasta docker.io/library/alpine:3.20 true
+
       - name: Install again
         run: |
           sudo env LOOM_RELEASES="file://$PWD/release" sh server/install.sh
