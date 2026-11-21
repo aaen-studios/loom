@@ -457,6 +457,10 @@ Ask an agent about its chat without adding to it: "what did we decide about the 
 
 A message worth keeping at hand is pinned in its chat, as in Discord: by the person, from the pin in its corner, or by an agent, with `run_command`. The pin is kept on the message, with when and who, so every device sees it. The chat's header shows how many there are, and opens them beside the chat, the newest pin first, each to jump to or take off.
 
+## Branching a chat
+
+To try another way from some point without losing the chat, branch it there: by the person, from the branch in a message's corner, or by an agent, with `run_command`. A branch is a conversation of its own with the same agent, marked with the chat and the message it goes on from, and named after that message's first words. The first time the agent answers in it, it's handed the chat up to that message (its 40 newest messages, up to 24,000 bytes), and nothing after it. The chat goes on as it was. The chat shows its branches under the messages they go on from. Opening one shows it in the chat's place with a strip over it, which goes back to the chat. Side questions don't branch.
+
 ## Security
 
 - **What a model reads is data, not orders.** Web pages, mail and tool results can carry instructions meant to trick an agent. Nothing in them can approve a risky action or change a permission. Only a person can, in the app.

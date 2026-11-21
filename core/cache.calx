@@ -323,7 +323,7 @@ impl Cache {
     /// The newest conversation with `agent`: the one the app shows as that agent's chat.
     /// A task's conversation is the task's, not the chat.
     pub fn conversation_for(self, agent: String) -> String? ! Error {
-        let row = try self.db.query_one(String("SELECT id FROM conversations WHERE json_extract(json, '$.agent') = ? AND json_extract(json, '$.task') IS NULL AND json_extract(json, '$.side') IS NULL ORDER BY last DESC, rowid DESC LIMIT 1"), [t(agent.copy())])
+        let row = try self.db.query_one(String("SELECT id FROM conversations WHERE json_extract(json, '$.agent') = ? AND json_extract(json, '$.task') IS NULL AND json_extract(json, '$.side') IS NULL AND json_extract(json, '$.branch_of') IS NULL ORDER BY last DESC, rowid DESC LIMIT 1"), [t(agent.copy())])
         let r = row else return none
         return some(text(r[0].copy()))
     }

@@ -731,6 +731,9 @@ ACTA_KEY=secret:ACTA_KEY",
         } else if self.screen != Screen::Chat {
             self.model.editing = None;
             self.screen = Screen::Chat;
+        } else if self.model.open_branch.is_some() {
+            self.open_branch(None, cx);
+            return;
         }
         cx.notify();
     }
@@ -1917,6 +1920,76 @@ ACTA_KEY=secret:ACTA_KEY",
                     )
                     .child(self.task_actions(task, cx)),
             )
+    }
+
+    /// Over a branch in the chat: its title, and the way back to the chat it goes on from.
+    fn branch_strip(&self, title: String, tint: Hsla, cx: &mut Context<Self>) -> Div {
+        let p = self.p;
+        div()
+            .w_full()
+            .flex()
+            .justify_center()
+            .px(px(space::XL))
+            .pt(px(space::S))
+            .child(
+                div()
+                    .w_full()
+                    .max_w(px(space::COLUMN))
+                    .flex()
+                    .items_center()
+                    .gap(px(space::M))
+                    .px(px(space::M))
+                    .py(px(space::S))
+                    .rounded(px(radius::BUTTON))
+                    .border_1()
+                    .border_color(p.line)
+                    .child(
+                        div()
+                            .id("branch-back")
+                            .size(px(28.0))
+                            .flex_none()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .rounded(px(radius::ROW))
+                            .text_color(p.ink_2)
+                            .cursor_pointer()
+                            .hover(move |s| s.bg(p.hover).text_color(p.ink))
+                            .child(Icon::new(Ico::ArrowLeft).small())
+                            .on_click(cx.listener(|this, _, _, cx| this.open_branch(None, cx))),
+                    )
+                    .child(Icon::new(Ico::GitBranch).small().text_color(tint))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .flex()
+                            .flex_col()
+                            .child(
+                                div()
+                                    .truncate()
+                                    .text_size(px(size::SMALL))
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .text_color(p.ink)
+                                    .child(title),
+                            )
+                            .child(
+                                div()
+                                    .truncate()
+                                    .text_size(px(size::CAPTION))
+                                    .text_color(p.ink_3)
+                                    .child("A branch: the chat goes on as it was"),
+                            ),
+                    ),
+            )
+    }
+
+    /// Shows a branch in the chat, or the chat again.
+    fn open_branch(&mut self, branch: Option<String>, cx: &mut Context<Self>) {
+        self.model.show_branch(branch);
+        self.fetch();
+        self.refresh_rows(cx);
+        cx.notify();
     }
 
     /// The Tasks page: a new task for an agent, and every task, newest first.
@@ -3605,10 +3678,26 @@ ACTA_KEY=secret:ACTA_KEY",
         let ask = agent.as_ref().and_then(|a| self.browser_ask(a, cx));
         let secret = agent.as_ref().and_then(|a| self.secret_ask(a, cx));
         let queue = agent.as_ref().and_then(|a| self.queue_view(a, cx));
-        let strip = match (self.model.task_open().cloned(), agent.as_ref()) {
-            (Some(t), Some(a)) => Some(self.task_strip(&t, thread::color(&a.color, p.dark), cx)),
+        // Named "Branch" until the list of conversations has it.
+        let branch_title = self.model.open_branch.as_ref().map(|_| {
+            self.model
+                .branch_open()
+                .map(|c| c.title.clone())
+                .unwrap_or_else(|| "Branch".into())
+        });
+        let strip = match (
+            self.model.task_open().cloned(),
+            agent.as_ref(),
+            branch_title,
+        ) {
+            (Some(t), Some(a), _) => Some(self.task_strip(&t, thread::color(&a.color, p.dark), cx)),
+            (None, Some(a), Some(title)) => {
+                Some(self.branch_strip(title, thread::color(&a.color, p.dark), cx))
+            }
             _ => None,
         };
+        // Where each message's branches go, for the links under it.
+        let branches = Rc::new(self.model.branches());
         let name = agent.as_ref().map(|a| a.name.clone()).unwrap_or_default();
         let tint = agent
             .as_ref()
@@ -3647,7 +3736,36 @@ ACTA_KEY=secret:ACTA_KEY",
                 Row::Message(m) if !m.live && !m.queued => Some((m.id.clone(), m.pinned)),
                 _ => None,
             };
+            // Under it, a link to each branch that goes on from it; and beside it, on
+            // hover, a way to branch there.
+            let gone_on = match row {
+                Row::Message(m) => branches.get(&m.id).cloned().unwrap_or_default(),
+                _ => Vec::new(),
+            };
+            let branch_at = pin.as_ref().map(|(id, _)| id.clone());
             let this = this.clone();
+            let to_branch = this.clone();
+            let mut links = div().flex().flex_col().gap(px(2.0)).pt(px(space::XS));
+            for (i, (id, title)) in gone_on.into_iter().enumerate() {
+                let this = this.clone();
+                links = links.child(
+                    div()
+                        .id(SharedString::from(format!("branch-link-{ix}-{i}")))
+                        .flex()
+                        .items_center()
+                        .gap(px(space::XS))
+                        .text_size(px(size::CAPTION))
+                        .text_color(p.ink_3)
+                        .cursor_pointer()
+                        .hover(move |s| s.text_color(p.ink))
+                        .child(Icon::new(Ico::GitBranch).xsmall())
+                        .child(title)
+                        .on_click(move |_, _, cx| {
+                            let _ =
+                                this.update(cx, |loom, cx| loom.open_branch(Some(id.clone()), cx));
+                        }),
+                );
+            }
             div()
                 .w_full()
                 .flex()
@@ -3661,6 +3779,33 @@ ACTA_KEY=secret:ACTA_KEY",
                         .relative()
                         .group("row")
                         .child(inner)
+                        .child(links)
+                        .when_some(branch_at, |d, id| {
+                            d.child(
+                                div()
+                                    .id(SharedString::from(format!("branch-row-{id}")))
+                                    .absolute()
+                                    .top(px(space::S + 28.0))
+                                    .right(px(-30.0))
+                                    .size(px(24.0))
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .rounded_full()
+                                    .cursor_pointer()
+                                    .text_color(p.ink_3)
+                                    .opacity(0.0)
+                                    .group_hover("row", |s| s.opacity(1.0))
+                                    .hover(move |s| s.bg(p.hover).text_color(p.ink))
+                                    .child(Icon::new(Ico::GitBranch).xsmall())
+                                    .on_click(move |_, _, cx| {
+                                        let _ = to_branch.update(cx, |loom, _| {
+                                            let f = loom.model.branch(&id);
+                                            loom.send(f);
+                                        });
+                                    }),
+                            )
+                        })
                         .when_some(pin, |d, (id, pinned)| {
                             d.child(
                                 div()
@@ -3694,7 +3839,8 @@ ACTA_KEY=secret:ACTA_KEY",
         .with_bottom_fade(p.bg);
 
         let empty = self.rows.is_empty();
-        let in_task = self.model.task_open().is_some();
+        // A task or a branch shows its strip over the list, even before it has messages.
+        let in_task = self.model.task_open().is_some() || self.model.open_branch.is_some();
         // While the agent answers, the button stops it, unless there's something to send: that waits in the queue.
         let busy = self.model.busy()
             && self.composer.read(cx).value().trim().is_empty()

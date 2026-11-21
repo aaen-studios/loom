@@ -170,7 +170,8 @@ gpui_kit::assets::icon_assets!(
         Play,
         Pin,
         PinOff,
-        MessageCircleQuestionMark
+        MessageCircleQuestionMark,
+        GitBranch
     ]
 );
 
