@@ -1,0 +1,126 @@
+import SwiftUI
+import UIKit
+
+// loom's look on the phone, from the design tokens (design/tokens.toml, generated into
+// Tokens.swift). Each colour follows the system's light or dark appearance by itself.
+
+extension UIColor {
+    convenience init(loom hex: UInt32) {
+        self.init(red: CGFloat((hex >> 16) & 0xff) / 255, green: CGFloat((hex >> 8) & 0xff) / 255, blue: CGFloat(hex & 0xff) / 255, alpha: 1)
+    }
+}
+
+extension Color {
+    /// A colour with a value for light and one for dark.
+    static func loom(_ light: UInt32, _ dark: UInt32) -> Color {
+        Color(UIColor { $0.userInterfaceStyle == .dark ? UIColor(loom: dark) : UIColor(loom: light) })
+    }
+}
+
+enum P {
+    typealias L = Tokens.ColorLight
+    typealias D = Tokens.ColorDark
+    static let bg = Color.loom(L.bg, D.bg)
+    static let side = Color.loom(L.side, D.side)
+    static let raised = Color.loom(L.raised, D.raised)
+    static let raised2 = Color.loom(L.raised2, D.raised2)
+    static let hover = Color.loom(L.hover, D.hover)
+    static let active = Color.loom(L.active, D.active)
+    static let line = Color.loom(L.line, D.line)
+    static let lineStrong = Color.loom(L.lineStrong, D.lineStrong)
+    static let ink = Color.loom(L.ink, D.ink)
+    static let ink2 = Color.loom(L.ink2, D.ink2)
+    static let ink3 = Color.loom(L.ink3, D.ink3)
+    static let button = Color.loom(L.button, D.button)
+    static let buttonInk = Color.loom(L.buttonInk, D.buttonInk)
+    static let bubble = Color.loom(L.bubble, D.bubble)
+    static let ok = Color.loom(L.ok, D.ok)
+    static let bad = Color.loom(L.bad, D.bad)
+
+    /// An agent's thread colour, by the name the instance gives it.
+    static func thread(_ name: String) -> Color {
+        typealias TL = Tokens.ThreadColorLight
+        typealias TD = Tokens.ThreadColorDark
+        switch name {
+        case "mint": return .loom(TL.mint, TD.mint)
+        case "apricot": return .loom(TL.apricot, TD.apricot)
+        case "pink": return .loom(TL.pink, TD.pink)
+        case "sky": return .loom(TL.sky, TD.sky)
+        case "gold": return .loom(TL.gold, TD.gold)
+        case "lavender": return .loom(TL.lavender, TD.lavender)
+        case "grey": return .loom(TL.grey, TD.grey)
+        default: return .loom(TL.periwinkle, TD.periwinkle)
+        }
+    }
+}
+
+/// The type: Geist and Geist Mono at the phone's sizes, scaled with Dynamic Type.
+enum Fonts {
+    typealias S = Tokens.PhoneSize
+
+    static func ui(_ size: CGFloat, _ weight: Font.Weight = .regular, relativeTo style: Font.TextStyle = .body) -> Font {
+        .custom(Tokens.Font.ui, size: size, relativeTo: style).weight(weight)
+    }
+
+    static func mono(_ size: CGFloat, relativeTo style: Font.TextStyle = .body) -> Font {
+        .custom(Tokens.Font.mono, size: size, relativeTo: style)
+    }
+
+    static let body = ui(S.body)
+    static let reply = ui(S.reply)
+    static let small = ui(S.small, relativeTo: .subheadline)
+    static let caption = ui(S.caption, relativeTo: .caption)
+    static let heading = ui(S.heading, .semibold, relativeTo: .title)
+    static let hero = ui(S.hero, .semibold, relativeTo: .largeTitle)
+    static let code = mono(S.small - 0.5, relativeTo: .subheadline)
+}
+
+/// A plain button in loom's style: filled for the main action, outlined otherwise.
+struct LoomButtonStyle: ButtonStyle {
+    var primary = true
+    var wide = false
+
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .font(Fonts.ui(Tokens.PhoneSize.small, .medium))
+            .padding(.horizontal, Tokens.Space.l)
+            .frame(maxWidth: wide ? .infinity : nil, minHeight: 44)
+            .foregroundStyle(primary ? P.buttonInk : P.ink)
+            .background {
+                RoundedRectangle(cornerRadius: Tokens.Radius.button, style: .continuous)
+                    .fill(primary ? P.button : Color.clear)
+                    .strokeBorder(primary ? Color.clear : P.lineStrong, lineWidth: 1)
+            }
+            .opacity(configuration.isPressed ? 0.7 : 1)
+            .contentShape(Rectangle())
+    }
+}
+
+extension ButtonStyle where Self == LoomButtonStyle {
+    static var loom: LoomButtonStyle { LoomButtonStyle() }
+    static var loomWide: LoomButtonStyle { LoomButtonStyle(wide: true) }
+    static var loomQuiet: LoomButtonStyle { LoomButtonStyle(primary: false) }
+}
+
+/// Times as the chat says them.
+enum When {
+    static func time(_ ms: Int) -> String {
+        guard ms > 0, ms != .max else { return "" }
+        let date = Date(timeIntervalSince1970: Double(ms) / 1000)
+        if Calendar.current.isDateInToday(date) {
+            return date.formatted(date: .omitted, time: .shortened)
+        }
+        if Calendar.current.isDateInYesterday(date) {
+            return "Yesterday " + date.formatted(date: .omitted, time: .shortened)
+        }
+        return date.formatted(.dateTime.day().month(.abbreviated).hour().minute())
+    }
+
+    static func size(_ bytes: Int) -> String {
+        switch bytes {
+        case ..<1000: return "\(bytes) B"
+        case ..<1_000_000: return "\(bytes / 1000) KB"
+        default: return String(format: "%.1f MB", Double(bytes) / 1_000_000)
+        }
+    }
+}

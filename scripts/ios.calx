@@ -1,0 +1,78 @@
+// Builds the core for the iPhone app and makes its Xcode project.
+//
+//     calx scripts/ios.calx            the core for a phone and the simulator, then the project
+//     calx scripts/ios.calx --sim      the core for the simulator alone, which builds faster
+//     calx scripts/ios.calx --sample   no core: the project alone, with the app on sample frames
+//
+// Run it from the repository's root, on a Mac with Xcode and XcodeGen. It:
+//
+// 1. builds core/lib.calx as a static library for each of `aarch64-ios` and
+//    `aarch64-ios-sim`, into build/ios/<platform>/, with its header loomcore.h;
+// 2. gives the header a module map, so Swift imports it as `LoomCore`;
+// 3. puts the libraries in build/ios/LoomCore.xcframework, which the app links;
+// 4. runs `xcodegen` in ios/, with LOOM_CORE=YES so ios/core.yml links it.
+//
+// CALX names the compiler to build with, `calx` otherwise.
+import std.env
+import std.fs
+import std.process.{Command, exit}
+
+const OUT: str = "build/ios"
+
+fn calx() -> String {
+    return env.variable(String("CALX")) ?? String("calx")
+}
+
+fn has(flag: str) -> bool {
+    for a in env.args() {
+        if a == flag { return true }
+    }
+    return false
+}
+
+/// Builds the core for one target into build/ios/<folder>/.
+fn core(target: str, folder: str, release: bool) ! Error {
+    let dir = "{OUT}/{folder}"
+    try fs.make_dir_all(dir.copy())
+    var c = Command.new(calx()).arg(String("build")).arg(String("--staticlib"))
+    if release { c = c.arg(String("--release")) }
+    c = c.arg(String("--target")).arg(String(target)).arg(String("core/lib.calx")).arg(String("-o")).arg("{dir}/libloomcore.a")
+    println("building the core for {target}")
+    try c.run()
+    // Swift imports the header as a module.
+    try fs.make_dir_all("{dir}/include")
+    try fs.write_text("{dir}/include/module.modulemap", String("module LoomCore \{\n    header \"loomcore.h\"\n    export *\n\}\n"))
+    try fs.copy("{dir}/loomcore.h", "{dir}/include/loomcore.h")
+}
+
+fn main() ! Error {
+    if not fs.is_file(String("core/lib.calx")) or not fs.is_file(String("ios/project.yml")) {
+        eprintln("run it from loom's root: calx scripts/ios.calx")
+        exit(2)
+    }
+    let sample = has("--sample")
+    if not sample {
+        let sim_only = has("--sim")
+        let release = not has("--debug")
+        try core("aarch64-ios-sim", "iphonesimulator", release)
+        if not sim_only {
+            try core("aarch64-ios", "iphoneos", release)
+        }
+        let root = try fs.real_path(String("."))
+        let framework = "{root}/{OUT}/LoomCore.xcframework"
+        if fs.exists(framework.copy()) {
+            try fs.remove_dir_all(framework.copy())
+        }
+        var x = Command.new(String("xcodebuild")).arg(String("-create-xcframework"))
+        x = x.arg(String("-library")).arg("{OUT}/iphonesimulator/libloomcore.a").arg(String("-headers")).arg("{OUT}/iphonesimulator/include")
+        if not sim_only {
+            x = x.arg(String("-library")).arg("{OUT}/iphoneos/libloomcore.a").arg(String("-headers")).arg("{OUT}/iphoneos/include")
+        }
+        try x.arg(String("-output")).arg(framework.copy()).run()
+        println("made {OUT}/LoomCore.xcframework")
+    }
+    var gen = Command.new(String("xcodegen")).arg(String("--quiet")).dir(String("ios"))
+    gen = gen.env(String("LOOM_CORE"), String(if sample { "NO" } else { "YES" }))
+    try gen.run()
+    println("made ios/Loom.xcodeproj{if sample { ", on sample frames" } else { "" }}")
+}

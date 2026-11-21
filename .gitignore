@@ -36,3 +36,6 @@ Thumbs.db
 /site/out/
 /site/next-env.d.ts
 /site/tsconfig.tsbuildinfo
+
+# The iPhone app's Xcode project, generated from ios/project.yml
+/ios/Loom.xcodeproj/

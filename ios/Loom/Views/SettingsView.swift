@@ -1,0 +1,140 @@
+import SwiftUI
+import UserNotifications
+
+/// The account, the instance, notifications, and signing out.
+struct SettingsView: View {
+    @Environment(Session.self) private var session
+    @Environment(\.dismiss) private var dismiss
+    @AppStorage("loom.server") private var server = ""
+    @AppStorage("loom.username") private var username = ""
+    @State private var notifications: UNAuthorizationStatus = .notDetermined
+    @State private var confirmSignOut = false
+
+    var body: some View {
+        let model = session.model
+        NavigationStack {
+            List {
+                Section("Account") {
+                    Row(label: "Username", value: username.isEmpty ? "—" : username)
+                    Row(label: "This phone", value: model.thisDevice?.name ?? UIDevice.current.name)
+                }
+                Section("Instance") {
+                    Row(label: "Address", value: server.isEmpty ? "—" : server)
+                    Row(label: "Connection", value: connection(model.conn))
+                }
+                if !model.devices.isEmpty {
+                    Section("Your devices") {
+                        ForEach(model.devices) { d in
+                            HStack {
+                                Image(systemName: icon(d.kind)).foregroundStyle(P.ink3).frame(width: 22)
+                                Text(d.name).font(Fonts.body).foregroundStyle(P.ink)
+                                Spacer()
+                                if d.id == model.me?.device {
+                                    Text("This phone").font(Fonts.caption).foregroundStyle(P.ink3)
+                                }
+                            }
+                        }
+                    }
+                }
+                Section {
+                    HStack {
+                        Text("Notifications").font(Fonts.body).foregroundStyle(P.ink)
+                        Spacer()
+                        switch notifications {
+                        case .authorized, .provisional, .ephemeral:
+                            Text("On").font(Fonts.body).foregroundStyle(P.ink3)
+                        case .denied:
+                            Button("Open Settings") {
+                                if let url = URL(string: UIApplication.openSettingsURLString) {
+                                    UIApplication.shared.open(url)
+                                }
+                            }
+                            .font(Fonts.body)
+                        default:
+                            Button("Turn on") {
+                                Task {
+                                    _ = await Notifications.ask()
+                                    notifications = await Notifications.status()
+                                }
+                            }
+                            .font(Fonts.body)
+                        }
+                    }
+                } header: {
+                    Text("Notifications")
+                } footer: {
+                    Text("While loom is open, it tells you when a reply is done or an agent asks something. Notifications on the lock screen come once your instance sends push.")
+                        .font(Fonts.caption)
+                }
+                Section {
+                    Button(role: .destructive) {
+                        confirmSignOut = true
+                    } label: {
+                        Text("Sign out").font(Fonts.body).foregroundStyle(P.bad)
+                    }
+                } footer: {
+                    Text("loom \(Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "")\(session.sample ? ", on sample data" : "")")
+                        .font(Fonts.caption)
+                }
+            }
+            .scrollContentBackground(.hidden)
+            .background(P.side)
+            .navigationTitle("Settings")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Done") { dismiss() }.font(Fonts.ui(Tokens.PhoneSize.body, .semibold))
+                }
+            }
+            .confirmationDialog("Sign out of this instance?", isPresented: $confirmSignOut, titleVisibility: .visible) {
+                Button("Sign out", role: .destructive) {
+                    session.signOut()
+                    dismiss()
+                }
+            } message: {
+                Text("This phone forgets its sign-in. Your agents and chats stay on the instance.")
+            }
+        }
+        .task { notifications = await Notifications.status() }
+    }
+
+    private func connection(_ c: Conn) -> String {
+        switch c {
+        case .live: return "Connected"
+        case .starting, .connecting: return "Connecting"
+        case .offline: return "Offline"
+        case .signedOut: return "Signed out"
+        case .updateNeeded: return "Needs an update"
+        }
+    }
+
+    private func icon(_ kind: String) -> String {
+        switch kind {
+        case "ios": return "iphone"
+        case "macos": return "laptopcomputer"
+        case "cli": return "terminal"
+        default: return "desktopcomputer"
+        }
+    }
+}
+
+private struct Row: View {
+    var label: String
+    var value: String
+
+    var body: some View {
+        HStack {
+            Text(label).font(Fonts.body).foregroundStyle(P.ink)
+            Spacer()
+            Text(value).font(Fonts.body).foregroundStyle(P.ink3).lineLimit(1).truncationMode(.middle)
+        }
+    }
+}
+
+#Preview("Settings") {
+    SettingsView().environment(Session(sample: true))
+}
+
+#Preview("Settings, dark") {
+    SettingsView().environment(Session(sample: true)).preferredColorScheme(.dark)
+}
