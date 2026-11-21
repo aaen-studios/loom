@@ -1026,6 +1026,10 @@ pub struct Model {
     /// Agents with a reply that came while their chat wasn't open, until it is: their
     /// row in the sidebar is bold.
     pub unread: HashSet<String>,
+    /// Each unread agent's first reply that came while its chat was shut.
+    first_unread: HashMap<String, String>,
+    /// The message the open chat's NEW line is above, while that chat stays open.
+    pub new_line: Option<String>,
     /// Replies being written, by message id: their blocks so far.
     live: HashMap<String, Vec<Block>>,
     last_delta: HashMap<String, Instant>,
@@ -1414,6 +1418,15 @@ impl Model {
     pub fn select(&mut self, agent: Option<String>) {
         if let Some(a) = &agent {
             self.unread.remove(a);
+            // The NEW line goes above the first reply that came while the chat was
+            // shut, and stays while it's open.
+            if let Some(first) = self.first_unread.remove(a) {
+                self.new_line = Some(first);
+            } else if self.selected != agent {
+                self.new_line = None;
+            }
+        } else {
+            self.new_line = None;
         }
         if self.selected != agent {
             self.selected = agent;
@@ -1738,6 +1751,7 @@ impl Model {
                         .map(|c| c.agent.clone())
                         .unwrap_or_else(|| s(&message, "agent"));
                     if !agent.is_empty() {
+                        self.first_unread.entry(agent.clone()).or_insert(id);
                         self.unread.insert(agent);
                     }
                 }
@@ -3621,8 +3635,15 @@ mod tests {
         assert!(m.unread.is_empty());
         m.take(&reply("c_2", "a_2"));
         assert!(m.unread.contains("a_2"));
+        m.take(&json!({"t": "event", "kind": "message.created", "conversation": "c_2", "message": {"id": "msg_3", "conversation": "c_2", "role": "agent", "agent": "a_2"}}));
         m.select(Some("a_2".into()));
         assert!(m.unread.is_empty());
+        // The NEW line is above the first of them, while the chat stays open.
+        assert_eq!(m.new_line.as_deref(), Some("msg_1"));
+        m.select(Some("a_2".into()));
+        assert_eq!(m.new_line.as_deref(), Some("msg_1"));
+        m.select(Some("a_1".into()));
+        assert_eq!(m.new_line, None);
     }
 
     #[test]
