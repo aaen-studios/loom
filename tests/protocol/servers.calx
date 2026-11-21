@@ -1,0 +1,87 @@
+module tests.protocol.servers
+
+// The person's MCP servers (PLAN.md, "Agents"): set up once, and given to
+// the agents that have them, in each new ACP session, with loom's own. One
+// runs a command with its environment, another is reached over HTTP with its
+// headers, and a value can be one of the person's secrets, which is filled in
+// only for the agent's process, and kept sealed. A server that's gone isn't
+// given any more.
+//
+//     calx tests/protocol/servers.calx
+import std.fs
+import std.json.{Json}
+import std.process.{exit}
+import std.text.utf8.{decode_lossy_unicode}
+import shared.obj.{Obj, at, str_at}
+import tests.kit.{App, Instance, check, reply_text}
+
+fn reply_in(app: mut App, conversation: String) -> String ! Error {
+    loop {
+        let created = try app.until("event", "message.created")
+        let m = at(created, "message")
+        if str_at(m.copy(), "role") == some(String("agent")) and str_at(m.copy(), "conversation") == some(conversation.copy()) { return reply_text(m) }
+    }
+}
+
+// What a new conversation with `agent` says its session got.
+fn servers_of(app: mut App, agent: String, id: str) -> String ! Error {
+    let c = try app.cmd(id, "conversation.create", Obj.new().s("agent", agent).done())
+    let conversation = str_at(at(c, "value"), "conversation") ?? String()
+    try app.send(Obj.new().s("t", String("send")).s("cid", "m_{id}").s("conversation", conversation.copy()).s("text", String("/servers")).done())
+    return try reply_in(mut app, conversation)
+}
+
+fn code(answer: Json) -> String {
+    return str_at(at(answer, "error"), "code") ?? String()
+}
+
+fn run(i: Instance) ! Error {
+    var app = try App.connect(i.base.copy(), i.token.copy(), 0)
+    _ = try app.cmd("q_s1", "secret.put", Obj.new().s("name", String("ACTA_KEY")).s("value", String("s3cret-acta-key")).done())
+    let names = "{try app.cmd("q_s2", "secret.list", Obj.new().done())}"
+    try check(names.contains("ACTA_KEY") and not names.contains("s3cret"), "a secret is kept, and only its name comes back")
+    try check(code(try app.cmd("q_s3", "secret.put", Obj.new().s("name", String("no spaces")).s("value", String("x")).done())) == "bad_request", "a secret's name is checked")
+    var kept = List<u8>()
+    for name in ["loom.db", "loom.db-wal"] {
+        if fs.exists("{i.data}/{name}") { kept.extend(try fs.read("{i.data}/{name}")) }
+    }
+    try check(not decode_lossy_unicode(kept.copy(), 0, kept.len()).contains("s3cret-acta-key"), "and the database has it only sealed")
+    let acta = Obj.new().s("name", String("acta")).s("command", String("npx")).j("args", Json.Array([Json.Str(String("-y")), Json.Str(String("acta-mcp"))])).j("env", Obj.new().s("ACTA_URL", String("https://acta.example.com")).j("ACTA_KEY", Obj.new().s("secret", String("ACTA_KEY")).done()).done()).done()
+    _ = try app.cmd("q_1", "mcp.put", acta)
+    let web = Obj.new().s("name", String("web")).s("url", String("https://mcp.example.com/mcp")).j("headers", Obj.new().s("Authorization", String("Bearer t0")).done()).done()
+    _ = try app.cmd("q_2", "mcp.put", web)
+    let listed = "{try app.cmd("q_3", "mcp.list", Obj.new().done())}"
+    try check(listed.contains(#""name":"acta""#) and listed.contains(#""url":"https://mcp.example.com/mcp""#), "the person sets up MCP servers")
+
+    try check(code(try app.cmd("q_4", "mcp.put", Obj.new().s("name", String("loom")).s("command", String("x")).done())) == "bad_request", "loom's own name is taken")
+    try check(code(try app.cmd("q_5", "mcp.put", Obj.new().s("name", String("both")).s("command", String("x")).s("url", String("https://x")).done())) == "bad_request", "and a server has a command or a url, not both")
+    try check(code(try app.cmd("q_6", "mcp.put", Obj.new().s("name", String("odd")).s("url", String("ftp://x")).done())) == "bad_request", "and a url is http or https")
+
+    let made = try app.cmd("q_7", "agent.create", Obj.new().s("name", String("Main")).s("acp_agent", String("fake")).s("instructions", String("Test.")).j("mcp", Json.Array([Json.Str(String("acta")), Json.Str(String("web"))])).done())
+    let main_id = str_at(at(at(made, "value"), "agent"), "id") ?? String()
+    let plain = try app.cmd("q_8", "agent.create", Obj.new().s("name", String("Plain")).s("acp_agent", String("fake")).s("instructions", String("Test.")).done())
+    let plain_id = str_at(at(at(plain, "value"), "agent"), "id") ?? String()
+
+    let got = try servers_of(mut app, main_id.copy(), "q_9")
+    try check(got.contains("acta npx -y acta-mcp ACTA_URL=https://acta.example.com ACTA_KEY=s3cret-acta-key") and got.contains("web https://mcp.example.com/mcp Authorization=Bearer t0"), "an agent's session gets its MCP servers, with their settings and secrets")
+    try check(try servers_of(mut app, plain_id, "q_10") == "no servers", "and an agent without any gets only loom's own")
+
+    _ = try app.cmd("q_11", "mcp.delete", Obj.new().s("name", String("web")).done())
+    let after = try servers_of(mut app, main_id, "q_12")
+    try check(after.contains("acta") and not after.contains("web"), "a server that's deleted isn't given any more")
+    app.close()
+}
+
+fn main() ! Error {
+    let inst = try Instance.start()
+    let failure: String? = match run(inst.copy()) {
+        ok => none,
+        err(e) => some("{e}"),
+    }
+    inst.stop()
+    if let f = failure {
+        eprintln("\n{f}")
+        exit(1)
+    }
+    println("\nservers: all good")
+}

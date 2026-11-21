@@ -445,7 +445,7 @@ Version 1's commands:
 | `conversation.rename` | `conversation`, `title` | — |
 | `conversation.delete` | `conversation` | — |
 | `messages.list` | `conversation`, `before`? (a message id), `limit`? (up to 100) | `messages`, newest last, and `more` |
-| `agent.create` | `name`, `acp_agent`, `instructions`, `folder`?, `permission`? (the permission mode: `ask`, the default, asks about everything; `auto` allows the tools that only look, of kind `read`, `search`, `think` and `fetch`, and asks about the rest; `allow` allows everything; or a list of kinds to allow, like `"read,search,edit"`), `color`? (one of the eight thread colours in `design/tokens.toml`; left out, they go round in turn) | `agent` |
+| `agent.create` | `name`, `acp_agent`, `instructions`, `folder`?, `mcp`? (the names of the person's MCP servers it gets), `permission`? (the permission mode: `ask`, the default, asks about everything; `auto` allows the tools that only look, of kind `read`, `search`, `think` and `fetch`, and asks about the rest; `allow` allows everything; or a list of kinds to allow, like `"read,search,edit"`), `color`? (one of the eight thread colours in `design/tokens.toml`; left out, they go round in turn) | `agent` |
 | `agent.update` | `agent`, and what changes | `agent`, with its new `revision` |
 | `memory.list` | `agent`? (that agent's notes and the shared ones; every note without it), `query`? (words, any of them, best match first; newest first without), `limit`? (up to 500, 100 if left out) | `memories`: each `id`, `agent` (empty for a shared note), `shared`, `text`, `by` (the agent or device that kept it) and `at` |
 | `memory.put` | `text`, `agent`? (empty or left out: shared by all the person's agents) | `id` |
@@ -471,6 +471,12 @@ Version 1's commands:
 | `acp.install` | `id` (a registry id), `env`? (settings to give it, `{NAME: value}`) | `program`, as `acp.list` gives it, once it's installed. A binary is downloaded into the instance's `acp/<id>/`, checked against the registry's SHA-256 and unpacked; an npx or uvx agent is run with `npx -y <package>` or `uvx <package>`. Installing one that's installed updates it, keeping its settings. Only the owner installs. `install_failed` says why it didn't |
 | `acp.settings` | `name`, `env` (`{NAME: value}` sets one, `{NAME: null}` removes it) | `program`. Settings are the environment variables the program starts with: an API key, a model. Agents that aren't answering start again with them at their next message. Only the owner |
 | `acp.remove` | `name` | —. Removes the program and, for one installed from the registry, its folder. Only the owner |
+| `mcp.list` | — | `servers`: the person's MCP servers, each with `name`, and `command`, `args` and `env`, or `url` and `headers`. A value in `env` or `headers` is text, or `{"secret": NAME}` |
+| `mcp.put` | `name` (lowercase letters, digits and hyphens; not `loom`), and `command` with `args`? and `env`?, or `url` (http or https) with `headers`? | `server`. Each agent whose `mcp` names it gets it in its next new session, with its secrets filled in, beside loom's own. One over `url` goes only to agent programs that offer `mcpCapabilities.http` |
+| `mcp.delete` | `name` | — |
+| `secret.list` | — | `secrets`: the person's secrets, each `name` and `at`. Never their values |
+| `secret.put` | `name` (letters, digits, `_`, `-` and `.`), `value` | `name`. It's sealed with XChaCha20-Poly1305 under the instance's `secret.key`, bound to the person and the name, and opened only to start an agent's MCP server |
+| `secret.delete` | `name` | — |
 | `messages.search` | `query`, `agent`?, `after`? and `before`? (Unix ms), `limit`? (up to 100, 30 if left out) | `results`, best first, each with its `message` and a `snippet`: the words around the match, with each matched word between U+0002 and U+0003. Every word of `query` must be in the message, the last as a prefix, so it works while typing. It searches text blocks and file names, in conversations that aren't deleted. A person's message counts as its conversation's agent's |
 
 Arguments marked `?` are optional. "—" means `value` is `{}`.

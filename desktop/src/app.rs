@@ -80,6 +80,7 @@ enum Screen {
     Routines,
     Programs,
     ThisDevice,
+    Mcp,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -129,6 +130,11 @@ pub struct Loom {
     routine_on: bool,
     routine_catch_up: bool,
     routine_webhook: bool,
+    /// The MCP server form: none, a new server, or the one with this name.
+    mcp_open: Option<Option<String>>,
+    mcp_name_in: Entity<InputState>,
+    mcp_cmd_in: Entity<InputState>,
+    mcp_settings_in: Entity<TextareaState>,
     /// The program whose settings form is open, on the programs page.
     program_open: Option<String>,
     set_key_in: Entity<InputState>,
@@ -216,6 +222,19 @@ impl Loom {
                 .placeholder("What the agent is asked each time.")
         });
         let set_key_in = input(window, cx, "ANTHROPIC_API_KEY", false);
+        let mcp_name_in = input(window, cx, "acta", false);
+        let mcp_cmd_in = input(
+            window,
+            cx,
+            "npx -y acta-mcp, or https://mcp.example.com/mcp",
+            false,
+        );
+        let mcp_settings_in = cx.new(|cx| {
+            TextareaState::new(window, cx).auto_grow(3, 12).placeholder(
+                "ACTA_URL=https://acta.example.com
+ACTA_KEY=secret:ACTA_KEY",
+            )
+        });
         let set_value_in = input(window, cx, "Its value", true);
         let skill_desc_in = input(window, cx, "When it's for, in one sentence", false);
         let skill_body_in = cx.new(|cx| {
@@ -349,6 +368,10 @@ impl Loom {
             routine_catch_up: true,
             routine_webhook: false,
             program_open: None,
+            mcp_open: None,
+            mcp_name_in,
+            mcp_cmd_in,
+            mcp_settings_in,
             set_key_in,
             set_value_in,
             instructions_in,
@@ -1054,6 +1077,24 @@ impl Loom {
                                 cx.notify();
                             })),
                     )
+                    .child(
+                        div()
+                            .id("mcp")
+                            .text_size(px(size::CAPTION))
+                            .text_color(p.ink_3)
+                            .cursor_pointer()
+                            .hover(move |s| s.text_color(p.ink))
+                            .child("MCP servers")
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                for f in this.model.load_mcp() {
+                                    this.send(f);
+                                }
+                                this.mcp_open = None;
+                                this.menu = None;
+                                this.screen = Screen::Mcp;
+                                cx.notify();
+                            })),
+                    )
                     // In a desktop instance, agents run on this PC already: its tools are
                     // for an instance somewhere else.
                     .when(!local_mode(), |d| {
@@ -1137,6 +1178,7 @@ impl Loom {
                 | Screen::ThisDevice
                 | Screen::Profile
                 | Screen::Routines
+                | Screen::Mcp
         ) {
             return bar.child(div().text_size(px(size::BODY)).text_color(p.ink_3).child(
                 match self.screen {
@@ -1144,6 +1186,7 @@ impl Loom {
                     Screen::Routines => "Routines",
                     Screen::Programs => "Agent programs",
                     Screen::Profile => "About you",
+                    Screen::Mcp => "MCP servers",
                     _ => "This PC",
                 },
             ));
@@ -1334,6 +1377,9 @@ impl Loom {
                         false,
                     )
                     .on_click(cx.listener(|this, _, window, cx| {
+                        for f in this.model.load_mcp() {
+                            this.send(f);
+                        }
                         if let Some(f) = this.model.edit_agent() {
                             this.send(f);
                         }
@@ -1889,6 +1935,41 @@ impl Loom {
             }
             list = list.child(row);
         }
+        // The person's MCP servers, each on or off for this agent.
+        let has: Vec<String> = self
+            .model
+            .editing
+            .as_ref()
+            .and_then(|id| self.model.agent(id))
+            .map(|a| a.mcp.clone())
+            .unwrap_or_default();
+        let mut servers = div().flex().flex_wrap().gap(px(space::S));
+        if self.model.mcp_servers.is_empty() {
+            servers = servers.child(
+                div()
+                    .text_size(px(size::CAPTION))
+                    .text_color(p.ink_3)
+                    .child(
+                        "None set up yet. Add them on MCP servers, at the bottom of the sidebar.",
+                    ),
+            );
+        }
+        for m in self.model.mcp_servers.clone() {
+            let name = m.name.clone();
+            servers = servers.child(
+                self.button_owned(
+                    format!("agent-mcp-{}", m.name),
+                    &m.name,
+                    has.contains(&m.name),
+                )
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    if let Some(f) = this.model.toggle_mcp(&name) {
+                        this.send(f);
+                    }
+                    cx.notify();
+                })),
+            );
+        }
         let page = div()
             .id("edit-agent")
             .size_full()
@@ -1935,10 +2016,239 @@ impl Loom {
                                 }),
                             )),
                     )
+                    .child(self.field("MCP servers", servers))
                     .when(!self.model.revisions.is_empty(), |d| {
                         d.child(self.field("Versions", list))
                     }),
             );
+        div().flex_1().min_h_0().child(page)
+    }
+
+    /// The MCP servers page: the person's servers, which each agent gets if it has them,
+    /// and the secrets their settings name.
+    fn mcp_page(&mut self, cx: &mut Context<Self>) -> Div {
+        let p = self.p;
+        let heading = |text: &'static str| {
+            div()
+                .text_size(px(size::HEADING))
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(p.ink)
+                .child(text)
+        };
+        let caption = |text: String| {
+            div()
+                .text_size(px(size::CAPTION))
+                .text_color(p.ink_3)
+                .child(text)
+        };
+        let mut body = div().w(px(560.0)).flex().flex_col().gap(px(space::XL));
+        if let Some(open) = self.mcp_open.clone() {
+            let mut buttons = div().flex().gap(px(space::S)).child(
+                self.button("save-mcp", "Save", true)
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        let name = this.mcp_name_in.read(cx).value().to_string();
+                        let line = this.mcp_cmd_in.read(cx).value().to_string();
+                        let settings = this.mcp_settings_in.read(cx).value().to_string();
+                        if name.trim().is_empty() || line.trim().is_empty() {
+                            this.model
+                                .notices
+                                .push("A server needs a name, and a command or an address.".into());
+                            cx.notify();
+                            return;
+                        }
+                        let f = this
+                            .model
+                            .put_mcp(crate::model::server_args(&name, &line, &settings));
+                        this.send(f);
+                        this.mcp_open = None;
+                        cx.notify();
+                    })),
+            );
+            buttons = buttons.child(self.button("cancel-mcp", "Cancel", false).on_click(
+                cx.listener(|this, _, _, cx| {
+                    this.mcp_open = None;
+                    cx.notify();
+                }),
+            ));
+            if let Some(name) = open.clone() {
+                buttons = buttons.child(
+                    self.button("delete-mcp", "Delete", false)
+                        .text_color(p.bad)
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            let f = this.model.delete_mcp(&name);
+                            this.send(f);
+                            this.mcp_open = None;
+                            cx.notify();
+                        })),
+                );
+            }
+            body = body
+                .child(heading(if open.is_some() {
+                    "Change MCP server"
+                } else {
+                    "New MCP server"
+                }))
+                .child(self.field("Name", Input::new(&self.mcp_name_in)))
+                .child(self.field(
+                    "Command, or an https:// address",
+                    Input::new(&self.mcp_cmd_in),
+                ))
+                .child(self.field(
+                    "Settings: NAME=value, one a line. NAME=secret:KEY uses a key from below",
+                    Textarea::new(&self.mcp_settings_in),
+                ))
+                .child(buttons);
+        } else {
+            let mut list = div().flex().flex_col();
+            if self.model.mcp_servers.is_empty() {
+                list = list.child(caption(
+                    "None yet. An MCP server gives agents more tools: Acta, a browser, mail. Each agent gets the ones you pick on its edit page.".into(),
+                ));
+            }
+            for m in self.model.mcp_servers.clone() {
+                let what = if m.url.is_empty() {
+                    m.command.clone()
+                } else {
+                    m.url.clone()
+                };
+                list = list.child(
+                    div()
+                        .id(SharedString::from(format!("mcp-{}", m.name)))
+                        .flex()
+                        .flex_col()
+                        .py(px(space::S))
+                        .px(px(space::S))
+                        .rounded(px(radius::BUTTON))
+                        .cursor_pointer()
+                        .hover(move |s| s.bg(p.hover))
+                        .child(
+                            div()
+                                .text_size(px(size::SMALL))
+                                .font_weight(FontWeight::MEDIUM)
+                                .text_color(p.ink)
+                                .child(m.name.clone()),
+                        )
+                        .child(caption(what))
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            let (name, line, settings) = (
+                                m.name.clone(),
+                                if m.url.is_empty() {
+                                    m.command.clone()
+                                } else {
+                                    m.url.clone()
+                                },
+                                m.settings_text(),
+                            );
+                            this.mcp_name_in
+                                .update(cx, |s, cx| s.set_value(name.clone(), window, cx));
+                            this.mcp_cmd_in
+                                .update(cx, |s, cx| s.set_value(line, window, cx));
+                            this.mcp_settings_in
+                                .update(cx, |s, cx| s.set_value(settings, window, cx));
+                            this.mcp_open = Some(Some(name));
+                            cx.notify();
+                        })),
+                );
+            }
+            let mut keys = div().flex().flex_col().gap(px(space::XS));
+            for k in self.model.secrets.clone() {
+                let name = k.clone();
+                keys = keys.child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .px(px(space::S))
+                        .child(
+                            div()
+                                .text_size(px(size::SMALL))
+                                .text_color(p.ink_2)
+                                .child(format!("{k} = ••••")),
+                        )
+                        .child(
+                            self.button_owned(format!("secret-{k}"), "Remove", false)
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    let f = this.model.delete_secret(&name);
+                                    this.send(f);
+                                    cx.notify();
+                                })),
+                        ),
+                );
+            }
+            body = body
+                .child(heading("Servers"))
+                .child(list)
+                .child(
+                    div()
+                        .flex()
+                        .gap(px(space::S))
+                        .child(self.button("new-mcp", "New server", true).on_click(
+                            cx.listener(|this, _, window, cx| {
+                                for s in [&this.mcp_name_in, &this.mcp_cmd_in] {
+                                    s.update(cx, |s, cx| s.set_value("", window, cx));
+                                }
+                                this.mcp_settings_in
+                                    .update(cx, |s, cx| s.set_value("", window, cx));
+                                this.mcp_open = Some(None);
+                                cx.notify();
+                            }),
+                        ))
+                        // A browser the agent drives, through Microsoft's Playwright MCP
+                        // server. It needs Node on the instance's computer.
+                        .when(
+                            !self.model.mcp_servers.iter().any(|m| m.name == "browser"),
+                            |d| {
+                                d.child(self.button("add-browser", "Add a browser", false).on_click(
+                                    cx.listener(|this, _, _, cx| {
+                                        let f = this.model.put_mcp(crate::model::server_args(
+                                            "browser",
+                                            "npx -y @playwright/mcp@latest",
+                                            "",
+                                        ));
+                                        this.send(f);
+                                        cx.notify();
+                                    }),
+                                ))
+                            },
+                        ),
+                )
+                .child(heading("Keys"))
+                .child(caption(
+                    "Keys are kept encrypted on the instance, and go only to the agents whose servers name them. They never come back to the app.".into(),
+                ))
+                .child(keys)
+                .child(
+                    div()
+                        .flex()
+                        .gap(px(space::S))
+                        .child(div().flex_1().child(Input::new(&self.set_key_in)))
+                        .child(div().flex_1().child(Input::new(&self.set_value_in)))
+                        .child(self.button("save-secret", "Save key", false).on_click(
+                            cx.listener(|this, _, window, cx| {
+                                let name = this.set_key_in.read(cx).value().to_string();
+                                let value = this.set_value_in.read(cx).value().to_string();
+                                if name.trim().is_empty() {
+                                    return;
+                                }
+                                let f = this.model.put_secret(&name, &value);
+                                this.send(f);
+                                for s in [&this.set_key_in, &this.set_value_in] {
+                                    s.update(cx, |s, cx| s.set_value("", window, cx));
+                                }
+                                cx.notify();
+                            }),
+                        )),
+                );
+        }
+        let page = div()
+            .id("mcp-page")
+            .size_full()
+            .overflow_y_scroll()
+            .flex()
+            .justify_center()
+            .pt(px(space::XXL))
+            .pb(px(space::XXL))
+            .child(body);
         div().flex_1().min_h_0().child(page)
     }
 
@@ -3533,6 +3843,7 @@ impl Render for Loom {
             Screen::Routines => self.routines_page(cx),
             Screen::Programs => self.programs_page(cx),
             Screen::ThisDevice => self.device_page(cx),
+            Screen::Mcp => self.mcp_page(cx),
         };
         let header = self.header(cx);
         let menu = self.menu_panel(cx);

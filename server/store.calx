@@ -37,6 +37,12 @@ CREATE TABLE IF NOT EXISTS agent_revisions (
 CREATE TABLE IF NOT EXISTS activity (
     id INTEGER PRIMARY KEY, user TEXT NOT NULL REFERENCES users(id), agent TEXT NOT NULL,
     kind TEXT NOT NULL, text TEXT NOT NULL, by TEXT NOT NULL, at INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS secrets (
+    user TEXT NOT NULL REFERENCES users(id), name TEXT NOT NULL, nonce TEXT NOT NULL,
+    sealed TEXT NOT NULL, at INTEGER NOT NULL, PRIMARY KEY (user, name));
+CREATE TABLE IF NOT EXISTS mcp_servers (
+    user TEXT NOT NULL REFERENCES users(id), name TEXT NOT NULL, json TEXT NOT NULL,
+    at INTEGER NOT NULL, PRIMARY KEY (user, name));
 CREATE TABLE IF NOT EXISTS skills (
     user TEXT NOT NULL REFERENCES users(id), name TEXT NOT NULL, description TEXT NOT NULL,
     body TEXT NOT NULL, at INTEGER NOT NULL, PRIMARY KEY (user, name));
@@ -530,6 +536,59 @@ impl Store {
 
     pub fn delete_skill(self, user: String, name: String) -> bool ! Error {
         return try self.db.execute(String("DELETE FROM skills WHERE user = ? AND name = ?"), [t(user), t(name)]) > 0
+    }
+
+    // --- MCP servers (PLAN.md, "Agents") ---
+
+    // A person's MCP server, as JSON: `name`, and `command` with `args` and
+    // `env`, or `url` with `headers`. A value in `env` or `headers` is text,
+    // or {"secret": NAME} for one of the person's secrets.
+    pub fn put_mcp_server(self, user: String, server: Json) ! Error {
+        let name = (server.get(String("name")) ?? Json.Null).as_str() ?? String()
+        _ = try self.db.execute(String("INSERT INTO mcp_servers (user, name, json, at) VALUES (?, ?, ?, ?) ON CONFLICT (user, name) DO UPDATE SET json = excluded.json, at = excluded.at"), [t(user), t(name), t("{server}"), Value.Int(now())])
+    }
+
+    pub fn mcp_servers(self, user: String) -> List<Json> ! Error {
+        var out = List<Json>()
+        for r in try self.db.query(String("SELECT json FROM mcp_servers WHERE user = ? ORDER BY name"), [t(user)]) {
+            out.push(try parse(text(r[0].copy())))
+        }
+        return out
+    }
+
+    pub fn mcp_server(self, user: String, name: String) -> Json? ! Error {
+        let r = try self.db.query_one(String("SELECT json FROM mcp_servers WHERE user = ? AND name = ?"), [t(user), t(name)]) else return none
+        return some(try parse(text(r[0].copy())))
+    }
+
+    pub fn delete_mcp_server(self, user: String, name: String) -> bool ! Error {
+        return try self.db.execute(String("DELETE FROM mcp_servers WHERE user = ? AND name = ?"), [t(user), t(name)]) > 0
+    }
+
+    // --- Secrets (PLAN.md, "Accounts and invites") ---
+
+    // A secret as the instance sealed it: its nonce and the sealed bytes, in
+    // hex. Only the instance holds the key that opens it.
+    pub fn put_secret(self, user: String, name: String, nonce: String, sealed: String) ! Error {
+        _ = try self.db.execute(String("INSERT INTO secrets (user, name, nonce, sealed, at) VALUES (?, ?, ?, ?, ?) ON CONFLICT (user, name) DO UPDATE SET nonce = excluded.nonce, sealed = excluded.sealed, at = excluded.at"), [t(user), t(name), t(nonce), t(sealed), Value.Int(now())])
+    }
+
+    pub fn sealed_secret(self, user: String, name: String) -> (String, String)? ! Error {
+        let r = try self.db.query_one(String("SELECT nonce, sealed FROM secrets WHERE user = ? AND name = ?"), [t(user), t(name)]) else return none
+        return some((text(r[0].copy()), text(r[1].copy())))
+    }
+
+    // `user`'s secrets' names, with when each was set: never their values.
+    pub fn secret_names(self, user: String) -> List<Json> ! Error {
+        var out = List<Json>()
+        for r in try self.db.query(String("SELECT name, at FROM secrets WHERE user = ? ORDER BY name"), [t(user)]) {
+            out.push(Obj.new().s("name", text(r[0].copy())).i("at", int(r[1].copy())).done())
+        }
+        return out
+    }
+
+    pub fn delete_secret(self, user: String, name: String) -> bool ! Error {
+        return try self.db.execute(String("DELETE FROM secrets WHERE user = ? AND name = ?"), [t(user), t(name)]) > 0
     }
 
     // --- Memory (PLAN.md, "Memory") ---

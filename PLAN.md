@@ -134,7 +134,7 @@ What the owner controls for each member:
 
 A member's agents always run in that member's sandbox (below).
 
-Secrets (MCP keys, tokens) are encrypted in the database with a key only the server holds.
+Secrets (MCP keys, tokens) are encrypted in the database with a key only the server holds. The key is `secret.key` in the data folder, made on the first start and readable only by the instance's user, never in the database. Each secret is sealed with XChaCha20-Poly1305 and a random nonce, bound to its person and name.
 
 ### Sandboxes: where members' agents run
 
@@ -171,7 +171,7 @@ The QR code holds the instance's id and public key, the addresses to reach it, a
 
 Agents live in the database, and are made and edited in the app.
 
-- **What an agent has:** a name and a look, the ACP agent it runs on with that agent's model and mode ([Agents run on ACP](#agents-run-on-acp)), instructions (Markdown, like an `AGENTS.md`), its permission mode, its MCP servers, its skills, and a workspace folder.
+- **What an agent has:** a name and a look, the ACP agent it runs on with that agent's model and mode ([Agents run on ACP](#agents-run-on-acp)), instructions (Markdown, like an `AGENTS.md`), its permission mode, its MCP servers, its skills, and a workspace folder. MCP servers are set up once, on the app's **MCP servers** page, and each agent picks the ones it gets on its edit page. A setting can name one of the person's secrets (`ACTA_KEY=secret:ACTA_KEY`), which is filled in only for the agent's process.
 - **Revisions.** Each change to an agent is saved as a revision, and each run records the revision it used. You can see which instructions gave an answer, and roll back.
 - **Agents edit themselves.** An agent can change its own instructions with a tool, as OpenBot's agents (and v0.1's Atelier mode) do. The change shows up as a revision by that agent.
 - **Skills.** Named Markdown bundles with files, loaded only when an agent needs them. Personal or shared.
@@ -416,7 +416,7 @@ Full-text search over every conversation, with FTS5 as memory uses, filtered by 
 
 ## Storage
 
-One SQLite database on the server, with these tables: `users`, `invites`, `link_codes`, `devices` (with each device's public key), `device_grants`, `sandboxes`, `plugins`, `plugin_revisions`, `acp_agents`, `acp_settings`, `agents`, `agent_revisions`, `skills`, `conversations`, `acp_sessions`, `messages` (content blocks as JSON, with FTS5), `files`, `runs`, `tool_calls`, `approvals`, `activity`, `reports`, `events`, `memories` (with FTS5), `routines`, `push_tokens`, `secrets`, `usage`, `schema_version`. Files themselves sit in the data folder, named by their SHA-256.
+One SQLite database on the server, with these tables: `users`, `invites`, `link_codes`, `devices` (with each device's public key), `device_grants`, `sandboxes`, `plugins`, `plugin_revisions`, `acp_agents`, `acp_settings`, `agents`, `agent_revisions`, `skills`, `mcp_servers`, `conversations`, `acp_sessions`, `messages` (content blocks as JSON, with FTS5), `files`, `runs`, `tool_calls`, `approvals`, `activity`, `reports`, `events`, `memories` (with FTS5), `routines`, `push_tokens`, `secrets`, `usage`, `schema_version`. Files themselves sit in the data folder, named by their SHA-256.
 
 ## Protocol
 

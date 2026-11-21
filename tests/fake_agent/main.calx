@@ -25,6 +25,8 @@ module tests.fake_agent.main
 //     /image              sends back a small PNG
 //     /session            says its session id: "session ID"
 //     /env NAME           says NAME=VALUE, its environment variable NAME
+//     /servers            says the MCP servers the session was given, but loom:
+//                         "NAME command ARGS K=V" or "NAME url K=V" each, or "no servers"
 //     /context            says what loom told it this turn about where the person
 //                         is writing from (a "[loom: ...]" text block, which is
 //                         never a step), or "no context"
@@ -87,6 +89,7 @@ pub enum Step {
     Context
     Mcp(String, String)
     Env(String)
+    Servers
 }
 
 // The steps a prompt spells out. Blank lines are skipped.
@@ -139,6 +142,8 @@ pub fn script(text: String) -> List<Step> {
             steps.push(Step.Context)
         } else if word == "/session" {
             steps.push(Step.Session)
+        } else if word == "/servers" {
+            steps.push(Step.Servers)
         } else if word == "/env" {
             steps.push(Step.Env(rest))
         } else if word == "/image" {
@@ -338,6 +343,38 @@ impl Agent {
         }
     }
 
+    // The session's MCP servers but loom's own, one a line.
+    fn servers(a: Agent, session: String) -> String {
+        var lines = List<String>()
+        var servers = Json.Null
+        if let s = a.mcp.find(session.copy()) { servers = s.copy() }
+        if let Json.Array(list) = servers {
+            for s in list {
+                let name = (s.get(String("name")) ?? Json.Null).as_str() ?? String()
+                if name == "loom" { continue }
+                var line = name.copy()
+                if let address = (s.get(String("url")) ?? Json.Null).as_str() {
+                    line = "{line} {address}"
+                } else {
+                    line = "{line} {(s.get(String("command")) ?? Json.Null).as_str() ?? String()}"
+                    if let Json.Array(xs) = s.get(String("args")) ?? Json.Null {
+                        for x in xs {
+                            line = "{line} {x.as_str() ?? String()}"
+                        }
+                    }
+                }
+                let pairs = s.get(String("env")) ?? s.get(String("headers")) ?? Json.Null
+                if let Json.Array(vars) = pairs {
+                    for v in vars {
+                        line = "{line} {(v.get(String("name")) ?? Json.Null).as_str() ?? String()}={(v.get(String("value")) ?? Json.Null).as_str() ?? String()}"
+                    }
+                }
+                lines.push(line)
+            }
+        }
+        return if lines.len() == 0 { String("no servers") } else { lines.join("\n") }
+    }
+
     // Calls `tool` of loom's own MCP server, as a real agent would: starts the
     // server the session was given, says initialize, then tools/call (or
     // tools/list for "list"). Gives what to say.
@@ -504,6 +541,7 @@ impl Agent {
                 Step.Files => chunk(session.copy(), "agent_message_chunk", if got.len() == 0 { String("no files") } else { got.join(", ") }),
                 Step.Session => chunk(session.copy(), "agent_message_chunk", "session {session}"),
                 Step.Env(name) => chunk(session.copy(), "agent_message_chunk", "{name}={env.variable(name.copy()) ?? String()}"),
+                Step.Servers => chunk(session.copy(), "agent_message_chunk", a.servers(session.copy())),
                 Step.Context => chunk(session.copy(), "agent_message_chunk", if context.len() > 0 { context.copy() } else { String("no context") }),
                 Step.Mcp(tool, args) => chunk(session.copy(), "agent_message_chunk", a.call_loom(session.copy(), tool, args)),
                 Step.Image => {
@@ -541,6 +579,11 @@ impl Agent {
                 caps.insert("sessionCapabilities", Json.Object(resume))
             }
             caps.insert("promptCapabilities", Json.Object(prompt))
+            // It takes MCP servers over HTTP, as claude-agent-acp does.
+            var mcp = LinkedMap<String, Json>()
+            mcp.insert("http", Json.Bool(true))
+            mcp.insert("sse", Json.Bool(false))
+            caps.insert("mcpCapabilities", Json.Object(mcp))
             var info = LinkedMap<String, Json>()
             info.insert("name", js(String("fake-agent")))
             info.insert("version", js(String("1")))
