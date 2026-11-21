@@ -14,6 +14,7 @@ The script downloads the newest `loom` for the machine (x64 or Arm) and checks i
 
 - makes a `loom` user, which has no rights beyond its own folder, `/var/lib/loom`;
 - runs `loom serve` as that user from a systemd service, `loom.service`;
+- sets up rootless Podman, for the sandboxes the agents of everyone but the owner run in ([People](people.md)), unless you give `--no-sandboxes`;
 - puts Caddy in front for TLS when you give `--domain`, or, without one, serves it on your tailnet if Tailscale is installed ([Tailscale](tailscale.md));
 - prints the address and the one-time **setup code**.
 
@@ -37,6 +38,8 @@ loom.example.com {
 ```
 
 Commands go to the same program: `docker exec loom loom user list --data /data`.
+
+In Docker, only the owner's agents run: the sandboxes everyone else's agents run in need rootless Podman on the machine itself ([People](people.md)). For an instance with other people, install loom on the server.
 
 ## On your PC, with no server
 
