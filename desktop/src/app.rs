@@ -180,6 +180,15 @@ pub struct Loom {
     /// Whether the agent programs were asked for, for the first agent's picker.
     asked_programs: bool,
     make: Making,
+    /// When the window opened, for the opening weave.
+    launched: Option<Instant>,
+    /// What the window shows, and since when, so each new view eases in.
+    scene: (&'static str, Instant),
+    /// The window closing on a new agent's thread: since when, its colour, and whether it
+    /// was the first agent, made full-window.
+    closing: Option<(Instant, Hsla, bool)>,
+    /// When the welcome last swapped between its buttons and the server form.
+    form_at: Instant,
     /// The newest thing that went wrong, shown for a while above the composer.
     notice: Option<(String, Instant)>,
 }
@@ -421,6 +430,10 @@ ACTA_KEY=secret:ACTA_KEY",
             show_code: false,
             asked_programs: false,
             make: Making::default(),
+            launched: None,
+            scene: ("", Instant::now()),
+            closing: None,
+            form_at: Instant::now(),
             confirm_delete: false,
             routine_at_in,
             routine_prompt_in,
@@ -835,107 +848,120 @@ ACTA_KEY=secret:ACTA_KEY",
     fn sign_in(&mut self, cx: &mut Context<Self>) -> Div {
         let p = self.p;
         let column = div().w(px(340.0)).flex().flex_col().items_center();
-        let body = if self.server_form {
-            self.server_sign_in(column, cx)
+        // Every thread colour, woven through the name. The threads draw in from the left,
+        // then the name settles among them, then the rest. The band stays put when the
+        // server form takes the place of what's under it.
+        let threads = COLORS.iter().map(|c| thread::color(c, p.dark)).collect();
+        let reveal = self.enter(0.15, 1.3);
+        let word = self.enter(0.7, 0.6);
+        let line = self.enter(1.1, 0.5);
+        let buttons = self.enter(1.3, 0.5);
+        let swapped = self.form_at.elapsed().as_secs_f32();
+        let swap = |delay: f32| {
+            let x = ((swapped - delay) / 0.35).clamp(0.0, 1.0);
+            x * x * (3.0 - 2.0 * x)
+        };
+        let under = if self.server_form {
+            appear(self.server_sign_in(column, cx), swap(0.0))
         } else {
-            // Every thread colour, woven through the name.
-            let threads = COLORS.iter().map(|c| thread::color(c, p.dark)).collect();
-            let woven = div()
-                .relative()
-                .w_full()
-                .h(px(190.0))
-                .flex()
-                .items_center()
-                .justify_center()
-                .child(
-                    div()
-                        .absolute()
-                        .top_0()
-                        .left_0()
-                        .w_full()
-                        .h(px(190.0))
-                        .child(thread::weave(threads, 0.0, 190.0)),
-                )
-                .child(
-                    div()
-                        .px(px(space::XL))
-                        .rounded_full()
-                        .bg(p.bg)
-                        .text_size(px(72.0))
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(p.ink)
-                        .child("loom"),
-                );
-            let start = column
+            column
                 .gap(px(space::XL))
-                .child(
+                .child(appear(
                     div()
                         .text_size(px(size::HEADING))
                         .text_color(p.ink_2)
                         .child("Little agents that live with you"),
-                )
+                    line.min(swap(0.0)),
+                ))
                 .child(
-                    div()
-                        .w_full()
-                        .pt(px(space::L))
-                        .flex()
-                        .flex_col()
-                        .items_center()
-                        .gap(px(space::L))
-                        .child(
-                            div()
-                                .id("local")
-                                .w_full()
-                                .h(px(50.0))
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .gap(px(space::S))
-                                .rounded_full()
-                                .bg(p.button)
-                                .text_color(p.button_ink)
-                                .font_weight(FontWeight::SEMIBOLD)
-                                .cursor_pointer()
-                                .hover(|s| s.opacity(0.9))
-                                .child("Let's begin")
-                                .child(Icon::new(IconName::ArrowRight).small())
-                                .on_click(cx.listener(|this, _, _, cx| this.set_local(true, cx))),
-                        )
-                        .child(
-                            div()
-                                .id("use-server")
-                                .text_size(px(size::SMALL))
-                                .text_color(p.ink_3)
-                                .cursor_pointer()
-                                .hover(move |s| s.text_color(p.ink))
-                                .child("I have a server")
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.server_form = true;
-                                    cx.notify();
-                                })),
-                        ),
+                    appear(
+                        div()
+                            .w_full()
+                            .pt(px(space::L))
+                            .flex()
+                            .flex_col()
+                            .items_center()
+                            .gap(px(space::L))
+                            .child(
+                                div()
+                                    .id("local")
+                                    .w_full()
+                                    .h(px(50.0))
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .gap(px(space::S))
+                                    .rounded_full()
+                                    .bg(p.button)
+                                    .text_color(p.button_ink)
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .cursor_pointer()
+                                    .hover(|s| s.opacity(0.9))
+                                    .child("Let's begin")
+                                    .child(Icon::new(IconName::ArrowRight).small())
+                                    .on_click(
+                                        cx.listener(|this, _, _, cx| this.set_local(true, cx)),
+                                    ),
+                            )
+                            .child(
+                                div()
+                                    .id("use-server")
+                                    .text_size(px(size::SMALL))
+                                    .text_color(p.ink_3)
+                                    .cursor_pointer()
+                                    .hover(move |s| s.text_color(p.ink))
+                                    .child("I have a server")
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.server_form = true;
+                                        this.form_at = Instant::now();
+                                        cx.notify();
+                                    })),
+                            ),
+                        buttons.min(swap(0.0)),
+                    )
+                    .w_full(),
                 )
                 .when_some(self.model.login_error.clone(), |d, e| {
                     d.child(div().text_size(px(size::SMALL)).text_color(p.bad).child(e))
-                });
-            div()
-                .w_full()
-                .flex()
-                .flex_col()
-                .items_center()
-                .gap(px(space::L))
-                .child(woven)
-                .child(start)
+                })
         };
+        let woven = div()
+            .relative()
+            .w_full()
+            .h(px(190.0))
+            .flex()
+            .items_center()
+            .justify_center()
+            .child(
+                div()
+                    .absolute()
+                    .top_0()
+                    .left_0()
+                    .w_full()
+                    .h(px(190.0))
+                    .child(thread::weave(threads, 0.0, reveal, 190.0)),
+            )
+            .child(appear(
+                div()
+                    .px(px(space::XL))
+                    .rounded_full()
+                    .bg(p.bg)
+                    .text_size(px(72.0))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(p.ink)
+                    .child("loom"),
+                word,
+            ));
         div()
             .size_full()
             .flex()
             .flex_col()
             .items_center()
             .justify_center()
-            .pb(px(40.0))
             .bg(p.bg)
-            .child(body)
+            .child(woven)
+            // A fixed height under the band, so swapping what's in it doesn't move it.
+            .child(div().h(px(340.0)).pt(px(space::L)).child(under))
     }
 
     /// Signing in to an instance on a server: its address, the account, and for a new
@@ -967,6 +993,7 @@ ACTA_KEY=secret:ACTA_KEY",
                             .child(Icon::new(Ico::ArrowLeft).small())
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.server_form = false;
+                                this.form_at = Instant::now();
                                 this.model.login_error = None;
                                 cx.notify();
                             })),
@@ -1090,6 +1117,7 @@ ACTA_KEY=secret:ACTA_KEY",
                             .items_center()
                             .gap(px(space::S))
                             .child(thread(
+                                format!("hit-{i}"),
                                 Mood::Idle,
                                 thread::color(&a.color, p.dark),
                                 14.0,
@@ -1152,6 +1180,7 @@ ACTA_KEY=secret:ACTA_KEY",
                     .when(!selected, move |d| d.hover(move |s| s.bg(p.hover)))
                     .on_click(cx.listener(move |this, _, _, cx| this.select(id.clone(), cx)))
                     .child(thread(
+                        format!("side-{}", a.id),
                         mood,
                         thread::color(&a.color, p.dark),
                         26.0,
@@ -1384,7 +1413,7 @@ ACTA_KEY=secret:ACTA_KEY",
                 Screen::Profile,
             ),
             ("set-routines", Ico::Clock, "Routines", Screen::Routines),
-            ("set-skills", Ico::WandSparkles, "Skills", Screen::Skills),
+            ("set-skills", Ico::BookOpen, "Skills", Screen::Skills),
             ("set-programs", Ico::Bot, "Agent programs", Screen::Programs),
             ("set-mcp", Ico::Plug, "MCP servers", Screen::Mcp),
             ("set-plugins", Ico::Puzzle, "Plugins", Screen::Plugins),
@@ -1570,6 +1599,7 @@ ACTA_KEY=secret:ACTA_KEY",
                     cx.notify();
                 }))
                 .child(thread(
+                    format!("head-{}", agent.id),
                     self.model.mood(&agent.id),
                     thread::color(&agent.color, p.dark),
                     26.0,
@@ -2055,7 +2085,7 @@ ACTA_KEY=secret:ACTA_KEY",
 
     /// The first screen of a new account: making its first agent.
     fn first_agent(&mut self, cx: &mut Context<Self>) -> Div {
-        if !self.asked_programs {
+        if !self.asked_programs && self.model.synced {
             self.asked_programs = true;
             let f = self.model.programs();
             self.send(f);
@@ -2068,6 +2098,9 @@ ACTA_KEY=secret:ACTA_KEY",
     fn making(&mut self, first: bool, cx: &mut Context<Self>) -> Div {
         let p = self.p;
         let step = self.make.step;
+        if step != Step::Weaving {
+            self.make.first = first;
+        }
         let back = step == Step::Name || (step == Step::Brain && !first);
         let body = match step {
             Step::Brain => self.brain_step(cx),
@@ -2083,7 +2116,7 @@ ACTA_KEY=secret:ACTA_KEY",
             .items_center()
             .justify_center()
             .gap(px(space::XXL))
-            .pb(px(60.0))
+            .when(step != Step::Weaving, |d| d.pb(px(60.0)))
             .when(back, |d| {
                 d.child(
                     div()
@@ -2111,7 +2144,18 @@ ACTA_KEY=secret:ACTA_KEY",
                 )
             })
             .child(body)
-            .when(step != Step::Weaving, |d| d.child(self.step_marks(step)))
+            .when(step != Step::Weaving, |d| {
+                d.child(
+                    div()
+                        .absolute()
+                        .bottom(px(48.0))
+                        .left_0()
+                        .right_0()
+                        .flex()
+                        .justify_center()
+                        .child(self.step_marks(step)),
+                )
+            })
     }
 
     /// Where making an agent is up to: a short thread per step, moving on the current one.
@@ -2131,7 +2175,7 @@ ACTA_KEY=secret:ACTA_KEY",
             } else {
                 (Mood::Idle, grey)
             };
-            row = row.child(thread(mood, color, 34.0, 10.0, None));
+            row = row.child(thread(format!("mark-{i}"), mood, color, 34.0, 10.0, None));
         }
         row
     }
@@ -2150,6 +2194,7 @@ ACTA_KEY=secret:ACTA_KEY",
         };
         if !self.model.programs_known {
             return column.child(thread(
+                "brain-wait",
                 Mood::Thinking,
                 thread::color("periwinkle", p.dark),
                 160.0,
@@ -2160,7 +2205,11 @@ ACTA_KEY=secret:ACTA_KEY",
         if self.model.programs.is_empty() {
             let greys = (0..4).map(|_| thread::color("grey", p.dark)).collect();
             return column
-                .child(div().w(px(360.0)).child(thread::weave(greys, 0.0, 70.0)))
+                .child(
+                    div()
+                        .w(px(360.0))
+                        .child(thread::weave(greys, 0.0, 1.0, 70.0)),
+                )
                 .child(heading("It needs a brain first"))
                 .child(
                     div()
@@ -2184,7 +2233,9 @@ ACTA_KEY=secret:ACTA_KEY",
             let lit = self.make.hover.as_deref() == Some(name.as_str());
             let hovered = name.clone();
             let picked = name.clone();
-            tiles = tiles.child(
+            // The tiles come in one after another.
+            let k = self.enter(0.2 + 0.1 * i as f32, 0.5);
+            tiles = tiles.child(appear(
                 div()
                     .id(SharedString::from(format!("brain-{name}")))
                     .w(px(200.0))
@@ -2200,6 +2251,7 @@ ACTA_KEY=secret:ACTA_KEY",
                     .when(lit, |d| d.bg(p.raised_2).border_color(tint.opacity(0.7)))
                     .when(!lit, |d| d.bg(p.raised).border_color(p.line))
                     .child(thread(
+                        format!("brain-{name}"),
                         if lit { Mood::Writing } else { Mood::Idle },
                         tint,
                         120.0,
@@ -2240,9 +2292,12 @@ ACTA_KEY=secret:ACTA_KEY",
                         });
                         cx.notify();
                     })),
-            );
+                k,
+            ));
         }
-        column.child(heading("Pick a brain")).child(tiles)
+        column
+            .child(appear(heading("Pick a brain"), self.enter(0.0, 0.5)))
+            .child(tiles)
     }
 
     /// The second step: its name, with a die for one, and its colour, shown on its own
@@ -2288,51 +2343,60 @@ ACTA_KEY=secret:ACTA_KEY",
             .flex_col()
             .items_center()
             .gap(px(space::XL))
-            .child(thread(
-                if twang { Mood::Idle } else { Mood::Thinking },
-                tint,
-                280.0,
-                36.0,
-                self.make.snapped,
+            .child(appear(
+                div().child(thread(
+                    "name-preview",
+                    if twang { Mood::Idle } else { Mood::Thinking },
+                    tint,
+                    280.0,
+                    36.0,
+                    self.make.snapped,
+                )),
+                self.enter(0.0, 0.5),
             ))
-            .child(
+            .child(appear(
                 div()
                     .text_size(px(size::HERO))
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(p.ink)
                     .child("Name it"),
-            )
+                self.enter(0.08, 0.5),
+            ))
             .child(
-                div()
-                    .w_full()
-                    .flex()
-                    .items_center()
-                    .gap(px(space::S))
-                    .child(div().flex_1().child(Input::new(&self.name_in).large()))
-                    .child(
-                        div()
-                            .id("dice")
-                            .size(px(40.0))
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .rounded_full()
-                            .text_color(p.ink_2)
-                            .cursor_pointer()
-                            .hover(move |s| s.bg(p.hover).text_color(p.ink))
-                            .child(Icon::new(Ico::Dices))
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                let current = this.name_in.read(cx).value().to_string();
-                                this.name_in.update(cx, |s, cx| {
-                                    s.set_value(whimsical_name(&current), window, cx)
-                                });
-                                this.make.snapped = Some(Instant::now());
-                                cx.notify();
-                            })),
-                    ),
+                appear(
+                    div()
+                        .w_full()
+                        .flex()
+                        .items_center()
+                        .gap(px(space::S))
+                        .child(div().flex_1().child(Input::new(&self.name_in).large()))
+                        .child(
+                            div()
+                                .id("dice")
+                                .size(px(40.0))
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .rounded_full()
+                                .text_color(p.ink_2)
+                                .cursor_pointer()
+                                .hover(move |s| s.bg(p.hover).text_color(p.ink))
+                                .child(Icon::new(Ico::Dices))
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    let current = this.name_in.read(cx).value().to_string();
+                                    this.name_in.update(cx, |s, cx| {
+                                        s.set_value(whimsical_name(&current), window, cx)
+                                    });
+                                    this.make.snapped = Some(Instant::now());
+                                    cx.notify();
+                                })),
+                        ),
+                    self.enter(0.16, 0.5),
+                )
+                .w_full(),
             )
-            .child(swatches)
-            .child(
+            .child(appear(swatches, self.enter(0.24, 0.5)))
+            .child(appear(
                 div()
                     .id("weave-it")
                     .mt(px(space::S))
@@ -2347,10 +2411,10 @@ ACTA_KEY=secret:ACTA_KEY",
                     .font_weight(FontWeight::SEMIBOLD)
                     .cursor_pointer()
                     .hover(|s| s.opacity(0.88))
-                    .child(Icon::new(Ico::Sparkles).small())
                     .child("Weave it")
                     .on_click(cx.listener(|this, _, _, cx| this.weave_agent(cx))),
-            )
+                self.enter(0.32, 0.5),
+            ))
     }
 
     /// Makes the agent and lets the threads weave it while the instance does.
@@ -2389,19 +2453,138 @@ ACTA_KEY=secret:ACTA_KEY",
             .started
             .map_or(0.0, |s| s.elapsed().as_secs_f32() / WEAVE_SECONDS);
         let gather = 1.0 - (1.0 - t.min(1.0)).powi(3);
+        // The words sink away as the threads finish meeting, before the window closes.
+        let x = ((t * WEAVE_SECONDS - (WEAVE_SECONDS - 0.2)) / 0.45).clamp(0.0, 1.0);
+        let leave = x * x * (3.0 - 2.0 * x);
+        // The threads sit exactly in the middle of the page, where the curtain that
+        // opens the app closes on them (`curtain`); the words hang under them.
         div()
+            .relative()
             .w_full()
-            .flex()
-            .flex_col()
-            .items_center()
-            .gap(px(space::XL))
-            .child(thread::weave(colors, gather, 150.0))
+            .child(thread::weave(
+                colors,
+                gather,
+                self.enter(0.0, 0.7),
+                WEAVE_BAND,
+            ))
             .child(
                 div()
-                    .text_size(px(size::HEADING))
-                    .text_color(p.ink_2)
-                    .child(format!("Weaving {}…", self.make.name)),
+                    .absolute()
+                    .top(px(WEAVE_BAND + space::XL))
+                    .left_0()
+                    .right_0()
+                    .flex()
+                    .justify_center()
+                    .child(appear(
+                        div()
+                            .text_size(px(size::HEADING))
+                            .text_color(p.ink_2)
+                            .child(format!("Weaving {}…", self.make.name)),
+                        self.enter(0.25, 0.5) - leave,
+                    )),
             )
+    }
+
+    /// How far something has come in (0 to 1, eased), starting `delay` seconds after the
+    /// view it's in appeared and taking `dur`.
+    fn enter(&self, delay: f32, dur: f32) -> f32 {
+        let t = self.scene.1.elapsed().as_secs_f32();
+        let x = ((t - delay) / dur).clamp(0.0, 1.0);
+        x * x * (3.0 - 2.0 * x)
+    }
+
+    /// A screen over the window, `h` high, closing on the line `center` down from its top,
+    /// `close` of the way (0 to 1): its top and bottom edges meet there, showing what's
+    /// under it as they come. `band`, `band_h` high, stays centred on that line.
+    fn curtain(&self, h: f32, center: f32, close: f32, band: Div, band_h: f32) -> Div {
+        let top = center * close;
+        let bottom = (h - center) * close;
+        div()
+            .absolute()
+            .left_0()
+            .right_0()
+            .top(px(top))
+            .bottom(px(bottom))
+            .occlude()
+            .overflow_hidden()
+            .bg(self.p.bg)
+            .child(
+                div()
+                    .absolute()
+                    .left_0()
+                    .right_0()
+                    .top(px(center - top - band_h / 2.0))
+                    .h(px(band_h))
+                    .child(band),
+            )
+    }
+
+    /// The opening weave, over everything for a moment on every launch: the threads come
+    /// in from the left, the name rises among them and sinks away, they draw together
+    /// into one, and the window closes on that line to open the app.
+    fn splash(&self, h: f32) -> Option<Div> {
+        let t = self.launched?.elapsed().as_secs_f32();
+        if t >= SPLASH_SECONDS {
+            return None;
+        }
+        let p = self.p;
+        let span = |a: f32, b: f32| ((t - a) / (b - a)).clamp(0.0, 1.0);
+        let smooth = |x: f32| x * x * (3.0 - 2.0 * x);
+        let reveal = smooth(span(0.05, 1.2));
+        let word_in = smooth(span(0.55, 1.1));
+        let word_out = smooth(span(1.35, 1.75));
+        let gather = smooth(span(1.45, 2.15));
+        let close = smooth(span(2.1, SPLASH_SECONDS));
+        let threads = COLORS.iter().map(|c| thread::color(c, p.dark)).collect();
+        const BAND: f32 = 220.0;
+        const WORD: f32 = 110.0;
+        let band = div()
+            .relative()
+            .w_full()
+            .h(px(BAND))
+            .flex()
+            .items_center()
+            .justify_center()
+            .child(
+                div()
+                    .absolute()
+                    .top_0()
+                    .left_0()
+                    .w_full()
+                    .h(px(BAND))
+                    .child(thread::weave(threads, gather, reveal, BAND)),
+            )
+            // The name, in a slot it rises out of and sinks back into.
+            .child(
+                div().overflow_hidden().child(
+                    div()
+                        .relative()
+                        .top(px(WORD * ((1.0 - word_in) + word_out)))
+                        .px(px(space::XL))
+                        .rounded_full()
+                        .bg(p.bg)
+                        .text_size(px(80.0))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(p.ink)
+                        .child("loom"),
+                ),
+            );
+        Some(self.curtain(h, h / 2.0, close, band, BAND))
+    }
+
+    /// The app opening under a new agent's weave: the window closes on its thread.
+    fn closing(&self, h: f32) -> Option<Div> {
+        let (at, tint, _) = self.closing?;
+        let t = at.elapsed().as_secs_f32() / CLOSE_SECONDS;
+        if t >= 1.0 {
+            return None;
+        }
+        let close = t * t * (3.0 - 2.0 * t);
+        let center = layout::TITLEBAR + (h - layout::TITLEBAR) / 2.0;
+        let band = div()
+            .w_full()
+            .child(thread::weave(vec![tint], 1.0, 1.0, WEAVE_BAND));
+        Some(self.curtain(h, center, close, band, WEAVE_BAND))
     }
 
     /// Once the woven agent is there and the threads have met, its chat opens.
@@ -2413,6 +2596,8 @@ ACTA_KEY=secret:ACTA_KEY",
         let made =
             self.model.agents.len() > self.make.agents_before && self.model.made_agent.is_none();
         if made && t > WEAVE_SECONDS + 0.3 {
+            let tint = thread::color(self.make.color(), self.p.dark);
+            self.closing = Some((Instant::now(), tint, self.make.first));
             self.name_in.update(cx, |s, cx| s.set_value("", window, cx));
             self.make = Making::default();
             self.screen = Screen::Chat;
@@ -2471,6 +2656,7 @@ ACTA_KEY=secret:ACTA_KEY",
             .px(px(space::XL))
             .pb(px(60.0))
             .child(thread(
+                format!("hero-{}", a.id),
                 mood,
                 tint,
                 140.0,
@@ -5126,11 +5312,14 @@ fn reply(
         .w_full()
         .flex()
         .gap(px(space::M))
-        .child(
-            div()
-                .pt(px(4.0))
-                .child(thread(mood, tint, 14.0, 10.0, None)),
-        )
+        .child(div().pt(px(4.0)).child(thread(
+            format!("msg-{}", m.id),
+            mood,
+            tint,
+            14.0,
+            10.0,
+            None,
+        )))
         .child(body)
 }
 
@@ -5310,6 +5499,36 @@ impl Render for Loom {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let p = self.p;
         self.finish_weaving(window, cx);
+        let signed_out = self.model.conn == Some(Conn::SignedOut);
+        // The opening weave plays once the app knows it's signed in. Signed out, the
+        // welcome comes in on its own instead.
+        if self.launched.is_none() {
+            if signed_out {
+                self.launched = Instant::now().checked_sub(Duration::from_secs(60));
+            } else if self.model.conn.is_some() {
+                self.launched = Some(Instant::now());
+            }
+        }
+        let first = self.screen == Screen::Chat && self.model.agents.is_empty()
+            || self.make.step == Step::Weaving && self.make.first;
+        let scene = if self.model.conn.is_none() {
+            "blank"
+        } else if signed_out {
+            "welcome"
+        } else if first || self.screen == Screen::NewAgent {
+            match self.make.step {
+                // The tiles come in once the programs are known, not before.
+                Step::Brain if !self.model.programs_known => "brain-wait",
+                Step::Brain => "brain",
+                Step::Name => "name",
+                Step::Weaving => "weaving",
+            }
+        } else {
+            "app"
+        };
+        if self.scene.0 != scene {
+            self.scene = (scene, Instant::now());
+        }
         if std::mem::take(&mut self.model.profile_came) {
             let text = self
                 .model
@@ -5329,17 +5548,56 @@ impl Render for Loom {
             || (self.screen == Screen::Chat && self.model.agents.is_empty())
             || self.screen == Screen::NewAgent
             || self.make.step == Step::Weaving
+            || self
+                .launched
+                .is_some_and(|at| at.elapsed().as_secs_f32() < SPLASH_SECONDS)
+            || self.scene.1.elapsed().as_secs_f32() < 2.5
+            || self
+                .closing
+                .is_some_and(|c| c.0.elapsed().as_secs_f32() < CLOSE_SECONDS)
         {
             window.request_animation_frame();
         }
+        let h = window.viewport_size().height.as_f32();
+        let splash = self.splash(h);
+        // A new agent's curtain covers what its weave covered: the whole window for the
+        // first, the content beside the sidebar for another.
+        let closing = self.closing(h);
+        let first_closing = self.closing.is_some_and(|c| c.2);
+        let (whole, beside) = if first_closing {
+            (closing, None)
+        } else {
+            (None, closing)
+        };
         let root = div()
+            .relative()
             .size_full()
             .bg(p.bg)
             .text_color(p.ink)
             .font_family(font::UI)
             .text_size(px(size::BODY));
-        if self.model.conn == Some(Conn::SignedOut) {
-            return root.child(self.sign_in(cx));
+        // Until the core says how things are, only the window's background: nothing to
+        // pop in and out.
+        // The welcome and making the first agent fill the window, with no app around them.
+        if scene == "blank" || signed_out || first {
+            let page = if scene == "blank" {
+                div()
+            } else if signed_out {
+                self.sign_in(cx)
+            } else {
+                self.first_agent(cx)
+            };
+            return root
+                .flex()
+                .flex_col()
+                .child(
+                    TitleBar::new()
+                        .h(px(layout::TITLEBAR))
+                        .bg(p.bg)
+                        .border_color(transparent_black()),
+                )
+                .child(div().flex_1().min_h_0().flex().flex_col().child(page))
+                .when_some(splash, |d, s| d.child(s));
         }
         let main = match self.screen {
             Screen::Chat => self.chat(window, cx),
@@ -5361,25 +5619,30 @@ impl Render for Loom {
         self.sync_panel(window, cx);
         let header = self.header(cx);
         let menu = self.menu_panel(cx);
-        root.flex().child(self.sidebar(cx)).child(
-            div()
-                .flex_1()
-                .min_w_0()
-                .h_full()
-                .flex()
-                .flex_col()
-                .relative()
-                .child(
-                    TitleBar::new()
-                        .h(px(layout::TITLEBAR))
-                        .pl(px(0.0))
-                        .bg(p.bg)
-                        .border_color(p.line)
-                        .child(header),
-                )
-                .child(main)
-                .when_some(menu, |d, m| d.child(m)),
-        )
+        root.flex()
+            .child(self.sidebar(cx))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .h_full()
+                    .flex()
+                    .flex_col()
+                    .relative()
+                    .child(
+                        TitleBar::new()
+                            .h(px(layout::TITLEBAR))
+                            .pl(px(0.0))
+                            .bg(p.bg)
+                            .border_color(p.line)
+                            .child(header),
+                    )
+                    .child(main)
+                    .when_some(menu, |d, m| d.child(m))
+                    .when_some(beside, |d, c| d.child(c)),
+            )
+            .when_some(whole, |d, c| d.child(c))
+            .when_some(splash, |d, s| d.child(s))
     }
 }
 
@@ -5425,6 +5688,21 @@ const COLORS: [&str; 7] = [
     "gold",
     "lavender",
 ];
+
+/// A small thing coming in, `k` of the way (0 to 1): a button, a tile, a line of text.
+/// Whole screens never fade; they change through the threads.
+fn appear<E: Styled>(d: E, k: f32) -> E {
+    d.opacity(k)
+}
+
+/// How long the opening weave lasts on every launch, in seconds.
+const SPLASH_SECONDS: f32 = 2.8;
+
+/// How long the window takes to close on a new agent's thread, in seconds.
+const CLOSE_SECONDS: f32 = 0.7;
+
+/// How high the band the weaving threads move in is.
+const WEAVE_BAND: f32 = 150.0;
 
 /// How long the threads take to weave a new agent together, in seconds.
 const WEAVE_SECONDS: f32 = 2.2;
@@ -5511,6 +5789,8 @@ struct Making {
     started: Option<Instant>,
     agents_before: usize,
     name: String,
+    /// Whether it's the person's first agent, made full-window before the app opens.
+    first: bool,
 }
 
 impl Making {
