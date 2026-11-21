@@ -12,6 +12,8 @@ module server.main
 //     loom update [--check]
 //     loom version
 //
+// Each but serve and mcp takes --json, to answer in JSON.
+//
 // Run from source: calx server/main.calx serve
 import std.bytes
 import std.crypto.{PasswordHasher}
@@ -54,6 +56,7 @@ usage: loom <command>
   mcp                       loom's own tools as an MCP server on standard input and output, which the instance starts for its agents
 
 Every command but version and mcp takes --data DIR, the instance's folder (default: loom-data).
+Every command but serve and mcp takes --json, to answer in JSON: an object, or {"error": {"code", "message"}} with a non-zero exit.
 "#
 }
 
@@ -72,10 +75,11 @@ struct Args {
     registry: String
     minute_ms: i64
     allow_root: bool
+    json: bool
 }
 
 fn read_args(given: List<String>) -> Args ! Error {
-    var a = Args { words: List<String>(), data: String("loom-data"), port: 8790, host: String("127.0.0.1"), fast_hashes: false, keep_events: none, registry: String(installer.REGISTRY), minute_ms: 60000, allow_root: false }
+    var a = Args { words: List<String>(), data: String("loom-data"), port: 8790, host: String("127.0.0.1"), fast_hashes: false, keep_events: none, registry: String(installer.REGISTRY), minute_ms: 60000, allow_root: false, json: false }
     var i: usize = 0
     while i < given.len() {
         let w = given[i].copy()
@@ -108,6 +112,12 @@ fn read_args(given: List<String>) -> Args ! Error {
                 a.port = port
             }
             i += 2
+            continue
+        }
+        // JSON instead of words, for programs and agents.
+        if w == "--json" {
+            a.json = true
+            i += 1
             continue
         }
         // To serve as root or an elevated Administrator anyway.
@@ -177,85 +187,139 @@ fn serve(a: Args) ! Error {
     println("loom: stopped")
 }
 
+// What a command answers: words for a person, and the same as JSON for a
+// program, which `--json` prints instead (PLAN.md, "Scriptable to the end").
+struct Said {
+    text: String
+    value: Json
+}
+
+fn said(text: own String, value: own Json) -> Said {
+    return Said { text: text, value: value }
+}
+
 fn main() ! Error {
     let a = try read_args(env.args())
     if a.words.len() == 0 {
-        eprint(usage())
+        if a.json { println("{failure("usage", String("Give a command, such as status."))}") } else { eprint(usage()) }
         exit(2)
     }
     let cmd = a.words[0].copy()
+    // These two don't answer once: one serves until it's stopped, the other speaks MCP.
+    if cmd == "mcp" {
+        try mcp.serve()
+        return
+    }
+    if cmd == "serve" {
+        try serve(a)
+        return
+    }
+    match run(a.copy()) {
+        ok(s) => if a.json { println("{s.value}") } else if s.text.len() > 0 { println(s.text) },
+        err(e) => {
+            let message = "{e}"
+            let code = if message.starts_with("unknown command") { "unknown_command" } else { "failed" }
+            if a.json { println("{failure(code, message.copy())}") } else if code == "unknown_command" { eprint("{message}\n\n{usage()}") } else { eprintln("loom: {message}") }
+            exit(if code == "unknown_command" { 2 } else { 1 })
+        },
+    }
+}
+
+// An error, as --json gives it.
+fn failure(code: str, message: String) -> Json {
+    return Obj.new().j("error", Obj.new().s("code", String(code)).s("message", message).done()).done()
+}
+
+// Runs every command but serve and mcp.
+fn run(a: Args) -> Said ! Error {
+    let cmd = a.words[0].copy()
     let sub = if a.words.len() > 1 { a.words[1].copy() } else { String() }
     if cmd == "version" {
-        println(version_line())
-    } else if cmd == "mcp" {
-        try mcp.serve()
-    } else if cmd == "serve" {
-        try serve(a)
-    } else if cmd == "user" and sub == "add" and a.words.len() == 3 {
+        return said(version_line(), Obj.new().s("version", String(VERSION)).i("protocol_oldest", i64(protocol.OLDEST)).i("protocol_newest", i64(protocol.NEWEST)).done())
+    }
+    if cmd == "user" and sub == "add" and a.words.len() == 3 {
         let store = try open_store(a.copy())
         var lines = io.Lines()
         let password = lines.next() ?? String()
         if password.len() < 8 { fail "a password needs at least 8 characters" }
         let role = if try store.user_count() == 0 { "owner" } else { "member" }
         let u = try store.add_user(a.words[2].copy(), password, role)
-        println("added {u.username} ({u.id}, {role})")
-    } else if cmd == "user" and sub == "list" {
+        return said("added {u.username} ({u.id}, {role})", Obj.new().s("id", u.id.copy()).s("username", u.username.copy()).s("role", String(role)).done())
+    }
+    if cmd == "user" and sub == "list" {
         let store = try open_store(a)
+        var lines = List<String>()
+        var users = List<Json>()
         for u in try store.users() {
-            println("{u.id}  {u.username}  {u.role}")
+            lines.push("{u.id}  {u.username}  {u.role}")
+            users.push(Obj.new().s("id", u.id.copy()).s("username", u.username.copy()).s("role", u.role.copy()).done())
         }
-    } else if cmd == "acp" and sub == "add" and a.words.len() >= 4 {
+        return said(lines.join("\n"), Obj.new().j("users", Json.Array(users)).done())
+    }
+    if cmd == "acp" and sub == "add" and a.words.len() >= 4 {
         let store = try open_store(a.copy())
         var args = List<String>()
+        var given = List<Json>()
         for w in a.words[4..] {
             args.push(w.copy())
+            given.push(Json.Str(w.copy()))
         }
         try store.set_acp_agent(a.words[2].copy(), a.words[3].copy(), args)
-        println("added ACP agent {a.words[2]}")
-    } else if cmd == "acp" and sub == "list" {
+        return said("added ACP agent {a.words[2]}", Obj.new().s("name", a.words[2].copy()).s("command", a.words[3].copy()).j("args", Json.Array(given)).done())
+    }
+    if cmd == "acp" and sub == "list" {
         let store = try open_store(a)
+        var lines = List<String>()
+        var programs = List<Json>()
         for p in try store.acp_agents() {
-            println("{p.name}  {p.command} {p.args.join(" ")}")
+            lines.push("{p.name}  {p.command} {p.args.join(" ")}")
+            var args = List<Json>()
+            for w in p.args {
+                args.push(Json.Str(w.copy()))
+            }
+            programs.push(Obj.new().s("name", p.name.copy()).s("command", p.command.copy()).j("args", Json.Array(args)).done())
         }
-    } else if cmd == "push" and sub == "key" and a.words.len() == 6 {
+        return said(lines.join("\n"), Obj.new().j("programs", Json.Array(programs)).done())
+    }
+    if cmd == "push" and sub == "key" and a.words.len() == 6 {
         // The APNs key (Apple's AuthKey_<id>.p8) loom signs push with, kept sealed.
         let store = try open_store(a.copy())
         let pem = try fs.read_text(a.words[2].copy()) ?? String()
         if not pem.contains("-----BEGIN PRIVATE KEY-----") { fail "{a.words[2]} isn't an APNs key: Apple gives it as AuthKey_<key id>.p8" }
         try store.set_apns(Obj.new().s("key", pem).s("key_id", a.words[3].copy()).s("team", a.words[4].copy()).s("topic", a.words[5].copy()).done())
-        println("push goes to APNs for {a.words[5]}, signed with key {a.words[3]} of team {a.words[4]}")
-    } else if cmd == "push" and sub == "off" {
+        return said("push goes to APNs for {a.words[5]}, signed with key {a.words[3]} of team {a.words[4]}", Obj.new().j("push", Obj.new().s("topic", a.words[5].copy()).s("key_id", a.words[3].copy()).s("team", a.words[4].copy()).done()).done())
+    }
+    if cmd == "push" and sub == "off" {
         let store = try open_store(a.copy())
         try store.delete_meta("apns")
-        println("no push; phones get notifications while the app is open")
-    } else if cmd == "files" and sub == "limit" and a.words.len() == 3 {
+        return said(String("no push; phones get notifications while the app is open"), Obj.new().j("push", Json.Null).done())
+    }
+    if cmd == "files" and sub == "limit" and a.words.len() == 3 {
         let store = try open_store(a.copy())
         if a.words[2] == "off" {
             try store.delete_meta("file_limit")
-            println("each person can keep as many files as fit")
-        } else {
-            let mb = i64.parse(a.words[2].copy()) else {
-                fail "the limit is a number of megabytes, or off"
-            }
-            try store.set_meta("file_limit", "{mb * 1000000}")
-            println("each person can keep {mb} MB of files")
+            return said(String("each person can keep as many files as fit"), Obj.new().j("limit_mb", Json.Null).done())
         }
-    } else if cmd == "update" {
-        try update(a.words.contains(String("--check")))
-    } else if cmd == "status" {
-        let store = try open_store(a.copy())
-        println(version_line())
-        println("data: {a.data}")
-        println("accounts: {try store.user_count()}")
-        let programs = try store.acp_agents()
-        println("ACP agents: {programs.len()}")
-        println("runs as: {runs_as()}")
-        let apns = try store.apns()
-        println("push: {if let c = apns { "APNs, for {str_at(c, "topic") ?? String()}" } else { String("off") }}")
-    } else {
-        eprint("unknown command: {a.words.join(" ")}\n\n{usage()}")
-        exit(2)
+        let mb = i64.parse(a.words[2].copy()) else {
+            fail "the limit is a number of megabytes, or off"
+        }
+        try store.set_meta("file_limit", "{mb * 1000000}")
+        return said("each person can keep {mb} MB of files", Obj.new().i("limit_mb", mb).done())
     }
+    if cmd == "update" {
+        return try update(a.words.contains(String("--check")))
+    }
+    if cmd == "status" {
+        let store = try open_store(a.copy())
+        let accounts = try store.user_count()
+        let programs = try store.acp_agents()
+        let apns = try store.apns()
+        let topic = if let c = apns.copy() { str_at(c, "topic") ?? String() } else { String() }
+        let push = if apns != none { "APNs, for {topic}" } else { String("off") }
+        let text = "{version_line()}\ndata: {a.data}\naccounts: {accounts}\nACP agents: {programs.len()}\nruns as: {runs_as()}\npush: {push}"
+        return said(text, Obj.new().s("version", String(VERSION)).s("data", a.data.copy()).i("accounts", accounts).i("acp_agents", i64.wrap(programs.len())).s("user", env.user_name() ?? String()).b("elevated", env.is_elevated()).j("push", if apns != none { Obj.new().s("topic", topic).done() } else { Json.Null }).done())
+    }
+    fail "unknown command: {a.words.join(" ")}"
 }
 
 @test
@@ -282,20 +346,19 @@ fn fetch(url: String) -> List<u8> ! Error {
 // it's newer, takes this program's place once its SHA-256 is the manifest's. The old
 // program stays beside it, as .old, until the next update. The instance runs the new one
 // once it's restarted.
-fn update(check_only: bool) ! Error {
+fn update(check_only: bool) -> Said ! Error {
     let text = try fetch(String(MANIFEST))
     let sig = String.from_utf8(try fetch("{MANIFEST}.sig")) ?? String()
     let manifest = check_manifest(text, sig, String(RELEASE_KEY)) else {
         fail "the release manifest isn't signed with loom's release key, so it isn't used"
     }
     let version = str_at(manifest.copy(), "version") ?? String()
+    let answer = Obj.new().s("version", String(VERSION)).s("newest", version.copy())
     if not newer(version.copy(), String(VERSION)) {
-        println("loom {VERSION} is the newest")
-        return
+        return said("loom {VERSION} is the newest", answer.b("updated", false).done())
     }
     if check_only {
-        println("loom {version} is out; this is {VERSION}. `loom update` takes it.")
-        return
+        return said("loom {version} is out; this is {VERSION}. `loom update` takes it.", answer.b("updated", false).done())
     }
     let kind = "{env.os()}-server"
     let file = at(manifest.copy(), "files").get(kind.copy()) ?? Json.Null
@@ -316,5 +379,5 @@ fn update(check_only: bool) ! Error {
     if fs.exists(old.copy()) { try fs.remove_file(old.copy()) }
     try fs.rename(exe.copy(), old)
     try fs.rename(new, exe)
-    println("updated loom {VERSION} to {version}; restart the instance to run it")
+    return said("updated loom {VERSION} to {version}; restart the instance to run it", answer.b("updated", true).done())
 }
