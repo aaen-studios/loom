@@ -1,18 +1,26 @@
 module server.sandbox
 
 // Where the agents of everyone but the owner run (PLAN.md, "Sandboxes"): a
-// rootless Podman container for each person, which sees their own folder,
+// container for each person, in rootless Podman or Docker, which sees their own folder,
 // `sandboxes/<user>` in the data folder, and the instance's downloaded agent
 // programs, `acp/`, read-only, and nothing else of the instance's. Both are
 // mounted at the same paths as outside, so an agent's folder, the files loom
 // copies into it and the links the agent sends back mean the same inside and out.
 //
-// The container has the internet, through pasta, but not the server's
-// loopback, except one port: the gate (server/gate.calx), which passes only
-// `loom mcp`'s calls on to the instance. The person's agent programs run in it
-// with `podman exec`, and loom's own tools reach them through the image's `loom
-// mcp`. It keeps running between agents, so what the person installs in it
-// stays until the instance moves or the person is removed.
+// The container has the internet, but not the server's loopback, except one
+// port: the gate (server/gate.calx), which passes only `loom mcp`'s calls on to
+// the instance. Podman's reaches it through pasta, at 127.0.0.1; Docker's are on
+// a network of loom's own, `loom`, and reach the gate at its gateway, as loom's
+// own user rather than root, with no capabilities. The person's agent programs
+// run in it with `exec`, and loom's own tools reach them through the image's
+// `loom mcp`. It keeps running between agents, so what the person installs in
+// it stays until the instance moves or the person is removed.
+//
+// Each has at most 2 GB of memory, two CPUs and 512 processes, and its own
+// layer at most DISK, where the system's storage lets loom say so (overlay on
+// XFS with project quotas). The person's folder is outside that layer, so loom
+// measures it before each run, and a run doesn't start while it's over DISK.
+import std.env
 import std.fs
 import std.process.{Command}
 
@@ -25,13 +33,67 @@ pub const IMAGE: str = "ghcr.io/aaen-studios/loom"
 const MEMORY: str = "2g"
 const CPUS: str = "2"
 const PIDS: str = "512"
+const DISK: str = "10g"
+pub const DISK_BYTES: i64 = 10737418240
+
+// Docker's network for sandboxes, on the server's bridge `loom0`.
+const NETWORK: str = "loom"
 
 pub struct Sandboxes {
-    pub runtime: String    // podman
+    pub runtime: String    // podman or docker
     pub image: String
     pub root: String       // the data folder's sandboxes/, absolute
     pub acp: String        // the data folder's acp/, absolute
-    pub gate: u16          // the gate's port on 127.0.0.1
+    pub gate_host: String  // where the gate listens: 127.0.0.1, or Docker's gateway on `loom`
+    pub gate: u16          // and its port
+}
+
+impl Sandboxes {
+    // Where a sandbox reaches the gate.
+    pub fn gate_url(self) -> String {
+        return "http://{self.gate_host}:{self.gate}"
+    }
+}
+
+// Where the gate listens for `runtime`'s sandboxes: 127.0.0.1 for Podman's, which
+// reach it through pasta, or the gateway of Docker's network `loom`, made the first time.
+pub fn gate_host(runtime: String) -> String ! Error {
+    if runtime != "docker" { return String("127.0.0.1") }
+    let format = String(#"{{range .IPAM.Config}}{{.Gateway}}{{end}}"#)
+    var looked = try Command.new(runtime.copy()).args([String("network"), String("inspect"), String("--format"), format.copy(), String(NETWORK)]).output()
+    if not looked.status.success() {
+        let made = try Command.new(runtime.copy()).args([String("network"), String("create"), String("--driver"), String("bridge"), String("--opt"), String("com.docker.network.bridge.name=loom0"), String(NETWORK)]).output()
+        if not made.status.success() { fail "docker didn't make the network {NETWORK}: {made.error_text().trim()}" }
+        looked = try Command.new(runtime).args([String("network"), String("inspect"), String("--format"), format, String(NETWORK)]).output()
+    }
+    let gateway = looked.text().trim().copy()
+    if not looked.status.success() or gateway.len() == 0 { fail "docker's network {NETWORK} has no gateway: {looked.error_text().trim()}" }
+    return gateway
+}
+
+// What `runtime run` takes to make a sandbox, after the name and the label, but
+// before the limits: its network, and for Docker, loom's own user and no capabilities.
+fn isolation(runtime: String, gate: u16) -> List<String> {
+    if runtime != "docker" { return [String("--network"), "pasta:-T,{gate}"] }
+    var out: List<String> = [String("--network"), String(NETWORK), String("--cap-drop"), String("ALL"), String("--security-opt"), String("no-new-privileges")]
+    if let uid = env.user_id() {
+        out.push(String("--user"))
+        out.push("{uid}")
+    }
+    return out
+}
+
+// The size of a folder, in bytes, from what `du -sk` says.
+fn kilobytes(said: String) -> i64? {
+    let first = said.trim().split("\t")[0].split(" ")[0].copy()
+    let k = i64.parse(first) else return none
+    return some(k * 1024)
+}
+
+@test
+fn du_says_kilobytes() {
+    assert(kilobytes(String("2048\t/data/sandboxes/u_2\n")) == some(2097152))
+    assert(kilobytes(String("du: cannot read")) == none)
 }
 
 // The container's name for `user`.
@@ -63,33 +125,62 @@ impl Sandboxes {
         let looked = try Command.new(self.runtime.copy()).args([String("inspect"), String("--format"), String(#"{{.State.Running}} {{index .Config.Labels "loom.gate"}}"#), box.copy()]).output()
         if looked.status.success() {
             let said = looked.text().trim().copy()
-            if said == "true {self.gate}" { return }
-            if said == "false {self.gate}" {
+            let gate = self.gate_url()
+            if said == "true {gate}" { return }
+            if said == "false {gate}" {
                 try self.run([String("start"), box])
                 return
             }
-            // Made for a gate on another port: made again, keeping the person's folder.
+            // Made for a gate somewhere else: made again, keeping the person's folder.
             try self.run([String("rm"), String("-f"), box.copy()])
         }
-        var args: List<String> = [String("run"), String("-d"), String("--name"), box.copy(), String("--label"), "loom.gate={self.gate}", String("--init")]
-        let limits: List<String> = [String("--memory"), String(MEMORY), String("--cpus"), String(CPUS), String("--pids-limit"), String(PIDS)]
-        let rest: List<String> = [String("--network"), "pasta:-T,{self.gate}", String("-v"), "{home}:{home}:Z", String("-v"), "{self.acp}:{self.acp}:ro,z", String("-e"), "HOME={home}", String("-w"), home.copy(), String("--entrypoint"), String("sleep"), self.image.copy(), String("infinity")]
-        var limited = args.copy()
-        limited.extend(limits)
-        limited.extend(rest.copy())
-        let made = try Command.new(self.runtime.copy()).args(limited).output()
-        if made.status.success() { return }
-        let why = made.error_text().trim().copy()
-        // Where the system doesn't let the instance's user set limits (no cgroup
-        // controllers delegated to it), the sandbox still keeps the person apart.
-        if not why.contains("cgroup") { fail "{self.runtime} didn't start the sandbox: {why}" }
-        eprintln("loom: {user}'s sandbox runs without limits on memory and CPU, which this system doesn't let loom set: {why}")
-        match Command.new(self.runtime.copy()).args([String("rm"), String("-f"), box]).output() {
-            ok(_) => {},
-            err(_) => {},
+        let head: List<String> = [String("run"), String("-d"), String("--name"), box.copy(), String("--label"), "loom.gate={self.gate_url()}", String("--init")]
+        let rest: List<String> = [String("-v"), "{home}:{home}:Z", String("-v"), "{self.acp}:{self.acp}:ro,z", String("-e"), "HOME={home}", String("-w"), home.copy(), String("--entrypoint"), String("sleep"), self.image.copy(), String("infinity")]
+        // With every limit first. Where the system doesn't let loom set one (no
+        // cgroup controllers delegated to its user, or storage without quotas), the
+        // sandbox goes without that one, and still keeps the person apart.
+        var limits = true
+        var disk = true
+        loop {
+            var args = head.copy()
+            args.extend(isolation(self.runtime.copy(), self.gate))
+            if limits {
+                args.extend([String("--memory"), String(MEMORY), String("--cpus"), String(CPUS), String("--pids-limit"), String(PIDS)])
+            }
+            if disk {
+                args.extend([String("--storage-opt"), "size={DISK}"])
+            }
+            args.extend(rest.copy())
+            let made = try Command.new(self.runtime.copy()).args(args).output()
+            if made.status.success() { return }
+            let why = made.error_text().trim().copy()
+            match Command.new(self.runtime.copy()).args([String("rm"), String("-f"), box.copy()]).output() {
+                ok(_) => {},
+                err(_) => {},
+            }
+            let lower = why.to_lower_root()
+            if disk and (lower.contains("storage-opt") or lower.contains("storage opt") or lower.contains("quota") or lower.contains("size")) {
+                eprintln("loom: {user}'s sandbox has no limit on its own disk, which this system's storage doesn't let loom set (it takes overlay on XFS with project quotas); their folder is still kept to {DISK}: {why}")
+                disk = false
+            } else if limits and lower.contains("cgroup") {
+                eprintln("loom: {user}'s sandbox runs without limits on memory and CPU, which this system doesn't let loom set: {why}")
+                limits = false
+            } else {
+                fail "{self.runtime} didn't start the sandbox: {why}"
+            }
         }
-        args.extend(rest)
-        try self.run(args)
+    }
+
+    // How much `user`'s folder holds, in bytes, measured in their sandbox, or none
+    // when it can't be told (the sandbox isn't running).
+    pub fn used(self, user: String) -> i64? {
+        let home = self.home(user.copy())
+        let out = match Command.new(self.runtime.copy()).args([String("exec"), name(user), String("du"), String("-sk"), String("--"), home]).output() {
+            ok(o) => o,
+            err(_) => return none,
+        }
+        // du gives the total even past a folder it can't read, saying so on stderr.
+        return kilobytes(out.text())
     }
 
     // What runs `command` with `args` in `user`'s sandbox, in `folder`, with the
@@ -106,18 +197,29 @@ impl Sandboxes {
         return (self.runtime.copy(), out)
     }
 
-    // Stops `user`'s sandbox and removes it, with their folder. What their agents
-    // made there may belong to other ids of the sandbox's, so the folder goes in
-    // the sandboxes' user namespace (`podman unshare`).
+    // Stops `user`'s sandbox and removes it, with their folder. In Podman, what
+    // their agents made there may belong to other ids of the sandbox's, so the
+    // folder goes in the sandboxes' user namespace (`podman unshare`). In Docker
+    // it's all loom's own user's, which may first need to be let into folders an
+    // agent closed.
     pub fn remove(self, user: String) {
         if user.len() == 0 or user.contains("/") or user.contains(".") { return }
-        match Command.new(self.runtime.copy()).args([String("rm"), String("-f"), String("-t"), String("0"), name(user.copy())]).output() {
+        let docker = self.runtime == "docker"
+        let stop: List<String> = if docker { [String("rm"), String("-f"), name(user.copy())] } else { [String("rm"), String("-f"), String("-t"), String("0"), name(user.copy())] }
+        match Command.new(self.runtime.copy()).args(stop).output() {
             ok(_) => {},
             err(e) => eprintln("loom: removing a sandbox: {e}"),
         }
         let home = self.home(user)
         if self.root.len() < 2 or not home.starts_with("{self.root}/") or not fs.exists(home.copy()) { return }
-        match Command.new(self.runtime.copy()).args([String("unshare"), String("rm"), String("-rf"), String("--"), home.copy()]).output() {
+        if docker {
+            match Command.new(String("chmod")).args([String("-R"), String("u+rwX"), String("--"), home.copy()]).output() {
+                ok(_) => {},
+                err(_) => {},
+            }
+        }
+        let removing = if docker { Command.new(String("rm")).args([String("-rf"), String("--"), home.copy()]) } else { Command.new(self.runtime.copy()).args([String("unshare"), String("rm"), String("-rf"), String("--"), home.copy()]) }
+        match removing.output() {
             ok(out) => if not out.status.success() { eprintln("loom: removing {home}: {out.error_text().trim()}") },
             err(e) => eprintln("loom: removing {home}: {e}"),
         }

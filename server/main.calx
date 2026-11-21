@@ -2,7 +2,7 @@ module server.main
 
 // The `loom` program: the instance, and the commands that look after it.
 //
-//     loom serve [--data DIR] [--port N] [--host ADDR] [--backups DIR [--backups-keep N]] [--sandboxes podman [--sandbox-image IMAGE]] [--allow-root]
+//     loom serve [--data DIR] [--port N] [--host ADDR] [--backups DIR [--backups-keep N]] [--sandboxes podman|docker [--sandbox-image IMAGE]] [--allow-root]
 //     loom user add NAME [--data DIR]          reads the password from standard input
 //     loom user list [--data DIR]
 //     loom acp add NAME COMMAND [ARG...] [--data DIR]
@@ -51,7 +51,7 @@ usage: loom <command>
                             unless given --allow-root. --backups DIR writes a backup there each day, as
                             export does, and keeps the newest 7 (--backups-keep N). --lan, on a PC, lets
                             phones reach it on the network over Noise, once the owner turns them on.
-                            --sandboxes podman runs the agents of everyone but the owner in a sandbox
+                            --sandboxes podman (or docker) runs the agents of everyone but the owner in a sandbox
                             each, from loom's image or --sandbox-image IMAGE: without, only the owner's run
   user add NAME             add an account; the password comes on standard input
   user list                 list the accounts
