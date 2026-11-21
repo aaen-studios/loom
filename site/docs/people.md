@@ -20,6 +20,8 @@ In the app, open **People** and choose **Make an invite**, for a member or an ad
 - make a **password reset link** for someone who forgot theirs. It works once, for a day, and signs them out on every other device;
 - **remove** someone, with everything of theirs.
 
+Anyone but the owner can delete their own account, with everything of theirs: **Delete my account**, on the **Add a phone** page.
+
 The owner's own password is reset on the server:
 
 ```sh
