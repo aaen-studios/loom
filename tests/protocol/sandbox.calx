@@ -56,7 +56,7 @@ fn build_image(runtime: String) ! Error {
         String("RUN ldd /usr/local/bin/loom && loom version"),
     ]
     try fs.write_text("{ctx}/Containerfile", "{lines.join("\n")}\n")
-    try sh(runtime, [String("build"), String("-q"), String("-t"), String(IMAGE), ctx])
+    try sh(runtime, [String("build"), String("-q"), String("-f"), "{ctx}/Containerfile", String("-t"), String(IMAGE), ctx])
 }
 
 fn run(runtime: String) ! Error {

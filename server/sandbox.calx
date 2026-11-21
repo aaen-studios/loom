@@ -76,6 +76,7 @@ pub fn gate_host(runtime: String) -> String ! Error {
 fn isolation(runtime: String, gate: u16) -> List<String> {
     if runtime != "docker" { return [String("--network"), "pasta:-T,{gate}"] }
     var out: List<String> = [String("--network"), String(NETWORK), String("--cap-drop"), String("ALL"), String("--security-opt"), String("no-new-privileges")]
+    // Its group too, once std.env gives it (CLX-425).
     if let uid = env.user_id() {
         out.push(String("--user"))
         out.push("{uid}")
@@ -160,7 +161,7 @@ impl Sandboxes {
             }
             let lower = why.to_lower_root()
             if disk and (lower.contains("storage-opt") or lower.contains("storage opt") or lower.contains("quota") or lower.contains("size")) {
-                eprintln("loom: {user}'s sandbox has no limit on its own disk, which this system's storage doesn't let loom set (it takes overlay on XFS with project quotas); their folder is still kept to {DISK}: {why}")
+                eprintln("loom: {user}'s sandbox has no limit on its own disk, which this system's storage doesn't let loom set (it takes overlay on XFS with project quotas); their folder is still kept to 10 GB: {why}")
                 disk = false
             } else if limits and lower.contains("cgroup") {
                 eprintln("loom: {user}'s sandbox runs without limits on memory and CPU, which this system doesn't let loom set: {why}")
