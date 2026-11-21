@@ -90,6 +90,7 @@ enum Screen {
     Move,
     People,
     AddServer,
+    Pins,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -851,7 +852,9 @@ ACTA_KEY=secret:ACTA_KEY",
                 self.popup = None;
                 self.side = None;
             }
-            Screen::EditAgent | Screen::Activity | Screen::Memory => self.show_side(screen, cx),
+            Screen::EditAgent | Screen::Activity | Screen::Memory | Screen::Pins => {
+                self.show_side(screen, cx)
+            }
             _ => {
                 if !is_server(screen) {
                     self.settings_last = screen;
@@ -870,6 +873,12 @@ ACTA_KEY=secret:ACTA_KEY",
         self.screen = Screen::Chat;
         self.popup = None;
         self.side = Some(screen);
+        self.model.pins_open = screen == Screen::Pins;
+        if screen == Screen::Pins {
+            if let Some(f) = self.model.load_pins() {
+                self.send(f);
+            }
+        }
     }
 
     /// Closes the panel beside the chat, and a plugin's panel with it.
@@ -877,6 +886,7 @@ ACTA_KEY=secret:ACTA_KEY",
         if self.side == Some(Screen::Plugins) {
             self.model.close_panel();
         }
+        self.model.pins_open = false;
         self.side = None;
         self.model.editing = None;
         cx.notify();
@@ -1340,6 +1350,7 @@ ACTA_KEY=secret:ACTA_KEY",
             Screen::EditAgent => (Ico::Pencil, format!("Edit {name}")),
             Screen::Activity => (Ico::Activity, format!("What {name} did")),
             Screen::Memory => (Ico::Brain, format!("What {name} remembers")),
+            Screen::Pins => (Ico::Pin, "Pinned".to_string()),
             _ => (
                 Ico::Puzzle,
                 self.model
@@ -1353,6 +1364,7 @@ ACTA_KEY=secret:ACTA_KEY",
             Screen::EditAgent => self.edit_agent(cx),
             Screen::Activity => self.activity_page(),
             Screen::Memory => self.memory_page(cx),
+            Screen::Pins => self.pins_page(&name, cx),
             _ => div().flex_1(),
         };
         // An agent's page opens under its thread, across the panel.
@@ -3249,6 +3261,32 @@ ACTA_KEY=secret:ACTA_KEY",
                 let next = if this.model.watching == id { None } else { id };
                 this.watch(next, cx);
             }));
+        // The chat's pins, while it has some, or they're open beside it.
+        let pinned = self.model.messages.iter().filter(|m| m.pinned).count();
+        let pins_open = self.side == Some(Screen::Pins);
+        let pins = div()
+            .id("pins-toggle")
+            .occlude()
+            .flex()
+            .items_center()
+            .gap(px(space::XS))
+            .px(px(space::S))
+            .py(px(space::XS))
+            .rounded(px(radius::ROW))
+            .text_size(px(size::CAPTION))
+            .text_color(if pins_open { p.ink } else { p.ink_2 })
+            .when(pins_open, |d| d.bg(p.hover))
+            .cursor_pointer()
+            .hover(move |s| s.bg(p.hover))
+            .child(Icon::new(Ico::Pin).small())
+            .when(pinned > 0, |d| d.child(pinned.to_string()))
+            .on_click(cx.listener(move |this, _, _, cx| {
+                if this.side == Some(Screen::Pins) {
+                    this.close_side(cx);
+                } else {
+                    this.open(Screen::Pins, cx);
+                }
+            }));
         bar.child(
             div()
                 .id("agent-menu")
@@ -3295,6 +3333,7 @@ ACTA_KEY=secret:ACTA_KEY",
                 .flex()
                 .items_center()
                 .gap(px(space::L))
+                .when(pinned > 0 || pins_open, |d| d.child(pins))
                 .when(browsing || watching, |d| d.child(globe))
                 .child(
                     div()
@@ -3563,6 +3602,13 @@ ACTA_KEY=secret:ACTA_KEY",
                 ),
                 Row::Approval(a) => approval(p, a, this.clone()),
             };
+            // A message's pin, just outside its corner: there while it's pinned, and
+            // on hover to pin it.
+            let pin = match row {
+                Row::Message(m) if !m.live && !m.queued => Some((m.id.clone(), m.pinned)),
+                _ => None,
+            };
+            let this = this.clone();
             div()
                 .w_full()
                 .flex()
@@ -3573,7 +3619,36 @@ ACTA_KEY=secret:ACTA_KEY",
                         .w_full()
                         .max_w(px(space::COLUMN))
                         .py(px(space::S))
-                        .child(inner),
+                        .relative()
+                        .group("row")
+                        .child(inner)
+                        .when_some(pin, |d, (id, pinned)| {
+                            d.child(
+                                div()
+                                    .id(SharedString::from(format!("pin-row-{id}")))
+                                    .absolute()
+                                    .top(px(space::S))
+                                    .right(px(-30.0))
+                                    .size(px(24.0))
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .rounded_full()
+                                    .cursor_pointer()
+                                    .text_color(if pinned { p.ink_2 } else { p.ink_3 })
+                                    .when(!pinned, |d| {
+                                        d.opacity(0.0).group_hover("row", |s| s.opacity(1.0))
+                                    })
+                                    .hover(move |s| s.bg(p.hover).text_color(p.ink))
+                                    .child(Icon::new(Ico::Pin).xsmall())
+                                    .on_click(move |_, _, cx| {
+                                        let _ = this.update(cx, |loom, _| {
+                                            let f = loom.model.pin(&id, !pinned);
+                                            loom.send(f);
+                                        });
+                                    }),
+                            )
+                        }),
                 )
                 .into_any_element()
         })
@@ -6949,6 +7024,129 @@ ACTA_KEY=secret:ACTA_KEY",
                     .child(list),
             );
         div().flex_1().min_h_0().child(page)
+    }
+
+    /// The open chat's pinned messages, beside it: who, when and the start of each, to
+    /// jump to, or to take the pin off.
+    fn pins_page(&mut self, agent: &str, cx: &mut Context<Self>) -> Div {
+        let p = self.p;
+        let mut list = div().flex().flex_col().gap(px(space::S));
+        if self.model.pins.is_empty() {
+            list = list.child(
+                div()
+                    .pt(px(space::L))
+                    .text_size(px(size::SMALL))
+                    .text_color(p.ink_3)
+                    .child("Nothing pinned yet. Pin a message from its corner."),
+            );
+        }
+        for m in self.model.pins.clone() {
+            let who = if m.role == "person" {
+                "You".to_string()
+            } else {
+                agent.to_string()
+            };
+            let words: String = m
+                .blocks
+                .iter()
+                .filter(|b| b.kind == "text")
+                .map(|b| b.text.as_str())
+                .collect::<Vec<_>>()
+                .join(" ");
+            let words = if words.trim().is_empty() {
+                "A file".to_string()
+            } else {
+                let short: String = words.chars().take(240).collect();
+                if short.len() < words.len() {
+                    format!("{}…", short.trim_end())
+                } else {
+                    short
+                }
+            };
+            let id = m.id.clone();
+            let unpin = m.id.clone();
+            list = list.child(
+                div()
+                    .id(SharedString::from(format!("pin-{}", m.id)))
+                    .flex()
+                    .flex_col()
+                    .gap(px(space::XS))
+                    .p(px(space::M))
+                    .rounded(px(radius::CARD))
+                    .border_1()
+                    .border_color(p.line)
+                    .cursor_pointer()
+                    .hover(move |s| s.bg(p.hover))
+                    .on_click(cx.listener(move |this, _, _, cx| this.jump_to(&id, cx)))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(space::S))
+                            .text_size(px(size::CAPTION))
+                            .text_color(p.ink_3)
+                            .child(
+                                div()
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .text_color(p.ink_2)
+                                    .child(who),
+                            )
+                            .child(format!("{} {}", day_of(m.at), time_of(m.at)))
+                            .child(div().flex_1())
+                            .child(
+                                div()
+                                    .id(SharedString::from(format!("unpin-{}", m.id)))
+                                    .size(px(22.0))
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .rounded_full()
+                                    .hover(move |s| s.bg(p.active).text_color(p.ink))
+                                    .child(Icon::new(Ico::PinOff).xsmall())
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        cx.stop_propagation();
+                                        let f = this.model.pin(&unpin, false);
+                                        this.send(f);
+                                    })),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(size::SMALL))
+                            .text_color(p.ink)
+                            .child(words),
+                    ),
+            );
+        }
+        let page = div()
+            .id("pins")
+            .size_full()
+            .overflow_y_scroll()
+            .px(px(space::L))
+            .pt(px(space::M))
+            .pb(px(space::XXL))
+            .child(list);
+        div().flex_1().min_h_0().child(page)
+    }
+
+    /// Scrolls the chat to a message, when it's among those loaded.
+    fn jump_to(&mut self, message: &str, cx: &mut Context<Self>) {
+        let at = self
+            .rows
+            .iter()
+            .position(|r| matches!(r, Row::Message(m) if m.id == message));
+        match at {
+            Some(ix) => {
+                self.scroller.update(cx, |s, cx| {
+                    s.scroll_to_item(ix, cx);
+                });
+            }
+            None => self
+                .model
+                .notices
+                .push("That one is further back than the chat has loaded.".into()),
+        }
+        cx.notify();
     }
 
     pub fn toggle_thought(&mut self, key: String, cx: &mut Context<Self>) {

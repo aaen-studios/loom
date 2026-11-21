@@ -416,7 +416,7 @@ An agent runs the commands below as its person's app does, with their rights ([P
 
 - `list_commands` gives each command an agent can run: `name`, `args` (in words), `does`, and `how`: `runs at once` or `asks your person first`.
 - `run_command` (`name`, `args`, an object) runs one. Its result is the command's `value` as JSON, or its error's message. Which run at once and which ask is in `server/commands.calx`.
-- **At once**: `conversation.create` and `rename`, `messages.list` and `search`, `agent.create` (always with `permission: "ask"`), `agent.update`, `agent.revisions`, `agent.rollback`, `activity.list`, `memory.list` and `put`, `profile.get` and `put`, `routine.list`, `put` and `run`, `task.*`, `queue.list`, `edit`, `order` and `drop`, `skill.list`, `get` and `put`, `plugin.list`, `get`, `put` and `revisions`, `mcp.list`, `secret.list`, `acp.list` and `acp.registry`. What changes something is in the activity log as "Ran" and the command's name. A task started by another agent is told so, and an agent can start three running tasks for each agent.
+- **At once**: `conversation.create` and `rename`, `messages.list`, `search` and `pinned`, `message.pin`, `agent.create` (always with `permission: "ask"`), `agent.update`, `agent.revisions`, `agent.rollback`, `activity.list`, `memory.list` and `put`, `profile.get` and `put`, `routine.list`, `put` and `run`, `task.*`, `queue.list`, `edit`, `order` and `drop`, `skill.list`, `get` and `put`, `plugin.list`, `get`, `put` and `revisions`, `mcp.list`, `secret.list`, `acp.list` and `acp.registry`. What changes something is in the activity log as "Ran" and the command's name. A task started by another agent is told so, and an agent can start three running tasks for each agent.
 - **Asks first**, every time, as one of loom's own tools that asks ([How ACP maps onto loom](#how-acp-maps-onto-loom)), titled with what the command does, with its `args` as `detail`: every `.delete` and `.remove`, and `device.revoke` (tool `delete`); `instance.move` (tool `move`); and everything else (tool `other`), among them `mcp.put`, `acp.install`, `acp.settings` and `acp.share`, `invite.*`, `user.list` and `user.role`, `device.rename`, `link.create`, `instance.phones`, `instance.relay` and `server.offer`, any command not listed, and `agent.create` with a `folder` or `agent.update` with a `permission` or a `folder`. A yes runs it as the device that gave it, so commands only a device may send work. `acp.install` answers once it's installed.
 - **Never**: `account.delete`, `password.reset`, `secret.put` (a secret's value is never an agent's), `plugin.allow`, `plugin.cmd`, `plugin.data.*`, `plugin.message` (agents have `message_agent`), `push.*`, `browser.*` (agents have their `browser_` tools) and `queue.steer`. An agent can't delete itself or loosen its own permission mode.
 
@@ -493,6 +493,7 @@ Version 1's kinds. Each event also has `seq`, `kind` and `at`.
 | `conversation.updated` | `conversation` (`id` and what changed) | Renamed, or its agent changed |
 | `conversation.deleted` | `conversation` (the id) | Deleted |
 | `message.created` | `conversation`, `message` (the whole message) | A person's message is stored, or an agent's reply is finished |
+| `message.updated` | `conversation`, `message` (the whole message, as it is now) | A stored message changed: it was pinned (it has `pinned`: `at` and `by`) or unpinned (it hasn't) |
 
 ### Runs
 
@@ -552,6 +553,8 @@ Version 1's commands:
 | `conversation.rename` | `conversation`, `title` | — |
 | `conversation.delete` | `conversation` | — |
 | `messages.list` | `conversation`, `before`? (a message id), `limit`? (up to 100) | `messages`, newest last, and `more` |
+| `message.pin` | `message`, `pinned`? (`false` takes the pin off) | `message`, as it is now, and `message.updated` to every device ([PLAN.md](../PLAN.md#pinned-messages)) |
+| `messages.pinned` | `conversation` | `messages`: the pinned ones, the newest pin first |
 | `agent.create` | `name`, `acp_agent`, `instructions`, `folder`?, `mcp`? (the names of the person's MCP servers it gets), `permission`? (the permission mode: `ask`, the default, asks about everything; `auto` allows the tools that only look, of kind `read`, `search`, `think` and `fetch`, and asks about the rest; `allow` allows everything; or a list of kinds to allow, like `"read,search,edit"`), `color`? (one of the eight thread colours in `design/tokens.toml`; left out, they go round in turn) | `agent` |
 | `agent.update` | `agent`, and what changes | `agent`, with its new `revision` |
 | `memory.list` | `agent`? (that agent's notes and the shared ones; every note without it), `query`? (words, any of them, best match first; newest first without), `limit`? (up to 500, 100 if left out) | `memories`: each `id`, `agent` (empty for a shared note), `shared`, `text`, `by` (the agent or device that kept it) and `at` |

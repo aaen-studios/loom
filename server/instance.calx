@@ -4377,6 +4377,23 @@ impl Instance {
             try i.event(user, "server.offered", Obj.new().s("address", address).s("by", device).done())
             return Answer.Value(empty)
         }
+        // Pins: a message is pinned in its conversation, for every device to see.
+        if name == "message.pin" {
+            let id = str_at(args.copy(), "message") ?? String()
+            let m = try i.store.message(user.copy(), id.copy()) else return Answer.Refused(String("not_found"), "There's no message {id}.")
+            let conversation = str_at(m.copy(), "conversation") ?? String()
+            let pin = bool_at(args, "pinned") ?? true
+            let changed = if pin { merge(m, Obj.new().j("pinned", Obj.new().i("at", now()).s("by", device.copy()).done()).done()) } else { without(m, "pinned") }
+            try i.store.put_message(user.copy(), changed.copy())
+            try i.event(user.copy(), "message.updated", Obj.new().s("conversation", conversation).j("message", changed.copy()).done())
+            if device.starts_with("a_") { i.log(user, device.copy(), "agent", if pin { "Pinned a message" } else { "Unpinned a message" }, device) }
+            return Answer.Value(Obj.new().j("message", changed).done())
+        }
+        if name == "messages.pinned" {
+            let id = str_at(args, "conversation") ?? String()
+            if try i.store.conversation(user.copy(), id.copy()) == none { return Answer.Refused(String("not_found"), "There's no conversation {id}.") }
+            return Answer.Value(Obj.new().j("messages", Json.Array(try i.store.pinned(user, id))).done())
+        }
         if name.starts_with("queue.") { return try i.queue_cmd(user, name, args) }
         if name.starts_with("task.") { return try i.task_cmd(user, device, name, args) }
         // From an agent, once the person said yes: the move is under way.

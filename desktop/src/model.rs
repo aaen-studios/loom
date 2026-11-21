@@ -561,6 +561,8 @@ pub struct Message {
     pub queued: bool,
     /// For a message another agent sent with message_agent, that agent's name.
     pub from_agent: Option<String>,
+    /// Pinned in its conversation.
+    pub pinned: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -721,6 +723,11 @@ pub struct Model {
     routines_stale: bool,
     /// The person's tasks, newest first.
     pub tasks: Vec<Task>,
+    /// The open conversation's pinned messages, the newest pin first, while the pins
+    /// are open beside the chat, and whether they changed since.
+    pub pins: Vec<Message>,
+    pub pins_open: bool,
+    pins_stale: bool,
     tasks_stale: bool,
     /// The task whose conversation the chat shows instead of the agent's chat.
     pub open_task: Option<String>,
@@ -878,6 +885,9 @@ impl Model {
         if std::mem::take(&mut self.plugins_stale) {
             out.push(self.load_plugins());
         }
+        if self.pins_stale && self.pins_open {
+            out.extend(self.load_pins());
+        }
         if std::mem::take(&mut self.people_stale) {
             out.extend(self.load_people());
         }
@@ -948,6 +958,8 @@ impl Model {
             self.messages.clear();
             self.dirty.insert(List::Messages);
             self.queue_stale = true;
+            self.pins.clear();
+            self.pins_stale = true;
         }
     }
 
@@ -976,6 +988,8 @@ impl Model {
             self.messages.clear();
             self.dirty.insert(List::Messages);
             self.queue_stale = true;
+            self.pins.clear();
+            self.pins_stale = true;
         }
     }
 
@@ -1027,6 +1041,53 @@ impl Model {
         Some(
             json!({"t": "cmd", "id": id, "name": "queue.order", "args": {"conversation": conversation, "ids": ids}}),
         )
+    }
+
+    /// A stored message, as the instance keeps it.
+    fn message_of(&self, m: &Value) -> Message {
+        Message {
+            id: s(m, "id"),
+            role: s(m, "role"),
+            at: m.get("at").and_then(Value::as_i64).unwrap_or(0),
+            blocks: blocks_of(m),
+            live: false,
+            queued: false,
+            pinned: m.get("pinned").is_some_and(|p| !p.is_null()),
+            // `from` is a device, the agent that sent it, or a routine.
+            from_agent: m.get("from").and_then(Value::as_str).and_then(|f| {
+                if f.starts_with("a_") {
+                    Some(
+                        self.agent(f)
+                            .map(|a| a.name.clone())
+                            .unwrap_or_else(|| "Another agent".into()),
+                    )
+                } else if f.starts_with("rt_") {
+                    Some(
+                        self.routines
+                            .iter()
+                            .find(|r| r.id == f)
+                            .map(|r| format!("the routine {}", r.name))
+                            .unwrap_or_else(|| "a routine".into()),
+                    )
+                } else {
+                    None
+                }
+            }),
+        }
+    }
+
+    /// The open conversation's pinned messages, for the pins beside the chat.
+    pub fn load_pins(&mut self) -> Option<Value> {
+        let conversation = self.conversation()?;
+        self.pins_stale = false;
+        Some(
+            json!({"t": "cmd", "id": "app.pins", "name": "messages.pinned", "args": {"conversation": conversation}}),
+        )
+    }
+
+    /// Pins a message, or takes its pin off.
+    pub fn pin(&mut self, message: &str, pinned: bool) -> Value {
+        json!({"t": "cmd", "id": self.id("app.pin"), "name": "message.pin", "args": {"message": message, "pinned": pinned}})
     }
 
     /// Takes a frame from the core. Gives whether the screen should redraw.
@@ -1197,6 +1258,10 @@ impl Model {
                 let conversation = s(f, "conversation");
                 if Some(conversation.clone()) == self.conversation() {
                     self.dirty.insert(List::Messages);
+                    // A pin put on or taken off here.
+                    if kind == "message.updated" {
+                        self.pins_stale = true;
+                    }
                 } else if kind == "message.created" && self.synced && s(&message, "role") == "agent"
                 {
                     // A reply in another chat, as it comes; catch-up is what was seen before.
@@ -1377,6 +1442,21 @@ impl Model {
             if let Some(v) = f.get("value") {
                 self.queues
                     .insert(conversation.to_string(), Model::queue_of(v));
+            }
+            return;
+        }
+        if id == "app.pins" {
+            let pins: Vec<Message> = f
+                .pointer("/value/messages")
+                .and_then(Value::as_array)
+                .map(|ms| ms.iter().map(|m| self.message_of(m)).collect())
+                .unwrap_or_default();
+            self.pins = pins;
+            return;
+        }
+        if id.starts_with("app.pin_") {
+            if let Some(e) = f.get("error") {
+                self.notices.push(s(e, "message"));
             }
             return;
         }
@@ -1912,37 +1992,7 @@ impl Model {
             }
             List::Messages => {
                 self.more_messages = f.get("more").and_then(Value::as_bool).unwrap_or(false);
-                let messages: Vec<Message> = items
-                    .iter()
-                    .map(|m| Message {
-                        id: s(m, "id"),
-                        role: s(m, "role"),
-                        at: m.get("at").and_then(Value::as_i64).unwrap_or(0),
-                        blocks: blocks_of(m),
-                        live: false,
-                        queued: false,
-                        // `from` is a device, the agent that sent it, or a routine.
-                        from_agent: m.get("from").and_then(Value::as_str).and_then(|f| {
-                            if f.starts_with("a_") {
-                                Some(
-                                    self.agent(f)
-                                        .map(|a| a.name.clone())
-                                        .unwrap_or_else(|| "Another agent".into()),
-                                )
-                            } else if f.starts_with("rt_") {
-                                Some(
-                                    self.routines
-                                        .iter()
-                                        .find(|r| r.id == f)
-                                        .map(|r| format!("the routine {}", r.name))
-                                        .unwrap_or_else(|| "a routine".into()),
-                                )
-                            } else {
-                                None
-                            }
-                        }),
-                    })
-                    .collect();
+                let messages: Vec<Message> = items.iter().map(|m| self.message_of(m)).collect();
                 self.messages = messages;
                 self.place_queued();
             }
@@ -1981,6 +2031,7 @@ impl Model {
                     live: false,
                     queued: true,
                     from_agent: None,
+                    pinned: false,
                 });
             }
         }
@@ -2013,6 +2064,7 @@ impl Model {
                 live: true,
                 queued: false,
                 from_agent: None,
+                pinned: false,
             });
         }
         out
