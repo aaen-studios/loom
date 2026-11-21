@@ -141,6 +141,8 @@ impl Cache {
             _ = try self.db.execute(String("DELETE FROM messages WHERE conversation = ?"), [t(id.copy())])
         } else if kind == "message.created" or kind == "message.updated" {
             try self.put_message(at(e, "message"))
+        } else if kind == "message.deleted" {
+            _ = try self.db.execute(String("DELETE FROM messages WHERE id = ?"), [t(str_at(e, "message") ?? String())])
         } else if kind == "run.started" {
             let id = str_at(e.copy(), "run") ?? String()
             let conversation = str_at(e.copy(), "conversation") ?? String()
@@ -362,6 +364,10 @@ fn applies_events_with_the_cursor() ! Error {
     assert(cs.len() == 1 and str_at(cs[0].copy(), "title") == some(String("CI")) and str_at(cs[0].copy(), "agent") == some(String("a_1")))
     let (ms, more) = try c.messages(String("c_1"), none, 50)
     assert(ms.len() == 1 and not more)
+    // A routine run that ended quietly takes its message back.
+    _ = try c.apply(ev(4, "message.deleted", Obj.new().s("conversation", String("c_1")).s("message", String("msg_1")).done()))
+    let (left, _) = try c.messages(String("c_1"), none, 50)
+    assert(left.len() == 0)
 }
 
 @test

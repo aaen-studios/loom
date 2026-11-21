@@ -309,6 +309,7 @@ Each agent program runs as its own process. The instance reads each one on a thr
 | `message_agent` | Talks to another of your agents |
 | `remember`, `recall`, `forget`, `update_profile` | Memory (below) |
 | `schedule`, `list_routines` | Make or change a routine, and list them ([Routines](#routines)) |
+| `routine_quiet`, `routine_failed`, `pause_routine` | While answering for a routine: end the run with nothing to say, say it failed and why, or pause the routine ([Routines](#routines)) |
 | `notify` | Sends you a notification |
 | `edit_instructions` | Changes the agent's own instructions |
 | `list_agents`, `create_agent`, `update_agent`, `list_acp_agents`, `search_messages` | Loom's commands. None of them changes a permission mode or deletes |
@@ -353,7 +354,7 @@ Ideas taken from OpenBot ([CopilotKit's](https://github.com/CopilotKit/OpenBot),
 
 - **A message to a busy agent queues**, instead of being refused. The person sees the queue above the composer and can edit, reorder or drop what waits, or **steer**: stop the running turn and send it now, in the same ACP session, so the agent carries on from where it was with it in mind. ACP has no way into a turn that's running, so stopping it is how a message gets in.
 - **Long jobs are tasks**: each one an agent working in a conversation of its own, beside its chat, so the chat stays free. The person starts one from the Tasks page, or an agent starts one itself (`start_task`) when it's asked for something long. A task survives a restart of the instance, carrying on in the same ACP session, and the person can watch it, talk to it, pause, resume, cancel or retry it.
-- **Routines say when there's nothing to say.** A run can end with `routine_quiet` (no message, no notification), report a failure with `routine_failed`, or pause its own routine. A routine that fails five times in a row turns itself off and tells its person. A routine can post into its agent's chat or a thread of its own.
+- **Routines say when there's nothing to say.** A run can end with `routine_quiet` (no message, no notification), report a failure with `routine_failed`, or pause its own routine. A routine that fails five times in a row turns itself off and tells its person ([Routines](#routines)). A routine can post into its agent's chat or, still to come, a thread of its own.
 - **A backup brain.** An agent can have a second program, which takes over when the first one's usage runs out, and the person can move a chat to another program with a handoff: the new one starts with a summary of what came before.
 
 ### Scripts
@@ -418,6 +419,7 @@ In a desktop instance, the instance's machine and your PC are the same machine, 
 - A routine sends its agent a prompt in the agent's chat, which is its newest conversation, so it shows where the person reads that agent. The message says it's from the routine, and the agent is told so. With notify on, the reply comes as a notification. If the last run hasn't finished, that time is skipped.
 - Missed while the instance was off, a routine runs once when it starts again, or waits for its next time, as the routine says (`catch_up`). Either way, missed runs never pile up.
 - The person makes, changes, pauses, runs and deletes them on the **Routines** page, and agents do the same with `schedule`, `list_routines` and `delete_routine`, which asks first.
+- **Nothing to say, or a failure.** The agent answering for a routine can end the run with `routine_quiet` when there's no news: its answer isn't kept, the routine's message is taken back from the chat, and no one is notified. `routine_failed` makes the run a failure, with why, and `pause_routine` turns the routine off and tells its person why. A routine that fails five times in a row turns itself off, with a notification that says so. A change to it starts the count again.
 
 ### Routine flows
 

@@ -930,6 +930,15 @@ impl Store {
 
     // Puts a message's words in the search index: its text, and its files' names.
     // A message's row there has the message's rowid, so storing it again replaces it.
+    // Deletes `user`'s message `id`, and its words from the search. False if
+    // there was no such message.
+    pub fn delete_message(self, user: String, id: String) -> bool ! Error {
+        let row = try self.db.query_one(String("SELECT rowid FROM messages WHERE id = ? AND user = ?"), [t(id), t(user)]) else return false
+        _ = try self.db.execute(String("DELETE FROM messages_fts WHERE rowid = ?"), [row[0].copy()])
+        _ = try self.db.execute(String("DELETE FROM messages WHERE rowid = ?"), [row[0].copy()])
+        return true
+    }
+
     fn index_message(self, user: String, message: Json) ! Error {
         let id = (message.get(String("id")) ?? Json.Null).as_str() ?? String()
         let row = try self.db.query_one(String("SELECT rowid, conversation, at FROM messages WHERE id = ?"), [t(id)]) else return

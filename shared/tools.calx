@@ -51,6 +51,9 @@ pub fn all() -> List<Json> {
         tool("start_task", "Starts a task: a long job you work on in a conversation of its own, beside your chat with your person, so the chat stays free. The task's prompt is your first message there, so give it all it needs. It goes on after a restart, and your person can watch it, pause, resume or cancel it, and retry it if it fails. Use it when your person asks for something that will take a long time.", object(Obj.new().j("title", text_arg("A few words your person will know it by, such as Tidy the photo library.")).j("prompt", text_arg("Everything the job needs: what to do, what done looks like, and anything your person said.")), ["title", "prompt"])),
         tool("list_routines", "Lists your person's routines: each one's id, name, agent, prompt, schedule, when it runs next (Unix ms) and how its last run went.", object(Obj.new(), List<str>())),
         tool("delete_routine", "Deletes one of your person's routines. Your person is asked first.", object(Obj.new().j("id", text_arg("The routine's id, as list_routines gives it.")), ["id"])),
+        tool("routine_quiet", "Ends this routine run quietly, when there's nothing new to tell your person: the routine's message and your answer go from the chat, and no one is notified. Only while you answer for a routine.", object(Obj.new(), List<str>())),
+        tool("routine_failed", "Says this routine run failed, and why, such as a site that wouldn't load. Your person sees it, and a routine that fails five times in a row turns itself off. Only while you answer for a routine.", object(Obj.new().j("why", text_arg("What went wrong, in a sentence.")), ["why"])),
+        tool("pause_routine", "Pauses the routine you're answering for, until your person turns it back on, such as when what it watches has ended. Your person is told. Only while you answer for a routine.", object(Obj.new().j("why", text_arg("Why, in a sentence.")), ["why"])),
         tool("list_plugins", "Lists your person's plugins: each one's id, name, version, whether it has a panel or a tool server, what it asks for, what your person allowed, and what still waits for their yes.", object(Obj.new(), List<str>())),
         tool("read_plugin", "Reads one of your person's plugins: what list_plugins says of it, and its files, by path.", object(Obj.new().j("id", text_arg("The plugin's id.")), ["id"])),
         tool("save_plugin", "Makes a plugin for your person, or changes one: a panel (a small web app shown in their app, HTML, CSS and JavaScript, with no network; it reads and keeps data and sends commands with `await loom.send(op, args)`: \"data.get\" and \"data.put\" with key and value, \"cmd\" with name and args for a command its manifest asks for, \"message_agent\" with agent and text) and a tool server (an MCP server, in any language, that the instance runs for every agent). Give every file whole, plugin.toml among them: name, version, description, [panel] entry, [tools] command and args (an arg naming one of its files is that file), and [permissions] commands (a list of loom commands) and agents (true to message agents). Each change is a revision. What it asks for that your person hasn't allowed waits for their yes in the app.", object(Obj.new().j("id", text_arg("Lowercase letters, digits and hyphens, such as build-board.")).j("files", Obj.new().s("type", String("object")).s("description", String("Each file's path and its whole text, plugin.toml among them.")).done()), ["id", "files"])),
@@ -85,7 +88,7 @@ pub fn all() -> List<Json> {
 @test
 fn every_tool_has_a_schema() {
     let tools = all()
-    assert(tools.len() == 52)
+    assert(tools.len() == 55)
     for t in tools {
         assert("{t}".contains("\"inputSchema\":\{\"type\":\"object\""))
     }
