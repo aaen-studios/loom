@@ -1,0 +1,170 @@
+module scripts.icons
+
+// The Apple app icons, made from the PNGs in design/logo/png (design/logo/README.md):
+//
+// - design/logo/ios/AppIcon.appiconset: the iPhone's icon at 1024 px, in three
+//   appearances. The light one is the app icon with its corners filled, since iOS
+//   rounds them itself and takes no transparency. The dark one is the mark alone,
+//   light on clear, where the app icon has it; iOS puts it on its own dark. The
+//   tinted one is the same mark in gray, which iOS colours.
+// - design/logo/app.icns: the Mac's, the app icon inset on Apple's grid (824 of
+//   1024 px, leaving room for the shadow macOS adds), from 16 to 1024 px.
+//
+//     calx scripts/icons.calx
+import std.fs
+import std.image.{Color, Filter, Image, Kind}
+
+const PNG: str = "design/logo/png"
+const IOS: str = "design/logo/ios/AppIcon.appiconset"
+
+// `front` over `under`, `front` as opaque as `a` of 255.
+fn mix(front: u8, under: u8, a: u32) -> u8 {
+    return u8.wrap((u32(front) * a + u32(under) * (255 - a) + 127) / 255)
+}
+
+// The app icon as one opaque square: each clear or partly clear pixel at the rounded
+// corners laid over the colour of its row at the middle, where the square is solid.
+fn full_bleed(app: Image) -> Image {
+    var out = Image.new(app.width(), app.height(), Kind.Rgb, Color.rgb(0u8, 0u8, 0u8))
+    let middle = app.width() / 2
+    for y in 0..app.height() {
+        let back = app.get(middle, y)
+        for x in 0..app.width() {
+            let c = app.get(x, y)
+            let a = u32(c.a)
+            out.set(x, y, Color.rgb(mix(c.r, back.r, a), mix(c.g, back.g, a), mix(c.b, back.b, a)))
+        }
+    }
+    return out
+}
+
+// The smallest box around the pixels `inside` says are part of the mark: left, top,
+// right and bottom, the last two past the end.
+fn bounds(img: Image, inside: fn(Color) -> bool) -> (usize, usize, usize, usize) {
+    var left = img.width()
+    var top = img.height()
+    var right: usize = 0
+    var bottom: usize = 0
+    for y in 0..img.height() {
+        for x in 0..img.width() {
+            if inside(img.get(x, y)) {
+                if x < left { left = x }
+                if y < top { top = y }
+                if x + 1 > right { right = x + 1 }
+                if y + 1 > bottom { bottom = y + 1 }
+            }
+        }
+    }
+    return (left, top, right, bottom)
+}
+
+// The mark from `mark` (clear around it), scaled and placed where the app icon has it,
+// on a clear square the app icon's size.
+fn mark_where_app_has_it(app: Image, mark: Image) -> Image {
+    let (al, at, ar, _) = bounds(app.copy(), |c| c.a == 255u8 and c.r > 128u8)
+    let (ml, mt, mr, _) = bounds(mark.copy(), |c| c.a > 128u8)
+    let scale = f64.nearest(ar - al) / f64.nearest(mr - ml)
+    let w = usize.wrap(i64.round(f64.nearest(mark.width()) * scale))
+    let h = usize.wrap(i64.round(f64.nearest(mark.height()) * scale))
+    let sized = mark.resize(w, h, Filter.Lanczos)
+    var out = Image.new(app.width(), app.height(), Kind.Rgba, Color.rgba(0u8, 0u8, 0u8, 0u8))
+    let x = i64.wrap(al) - i64.round(f64.nearest(ml) * scale)
+    let y = i64.wrap(at) - i64.round(f64.nearest(mt) * scale)
+    out.overlay(sized, x, y)
+    return out
+}
+
+// The same, each pixel's brightness kept as gray, for iOS to tint.
+fn gray(img: Image) -> Image {
+    var out = img.copy()
+    for y in 0..img.height() {
+        for x in 0..img.width() {
+            let c = img.get(x, y)
+            let v = c.luma()
+            out.set(x, y, Color.rgba(v, v, v, c.a))
+        }
+    }
+    return out
+}
+
+fn be32(out: mut List<u8>, n: usize) {
+    out.push(u8.wrap(n >> 24))
+    out.push(u8.wrap(n >> 16))
+    out.push(u8.wrap(n >> 8))
+    out.push(u8.wrap(n))
+}
+
+// A Mac .icns of `icon` (1024 px): each size Apple's types name, as PNG.
+fn icns(icon: Image) -> List<u8> {
+    let types: List<(str, usize)> = [("icp4", 16), ("icp5", 32), ("ic11", 32), ("icp6", 64), ("ic12", 64), ("ic07", 128), ("ic08", 256), ("ic13", 256), ("ic09", 512), ("ic14", 512), ("ic10", 1024)]
+    var body = List<u8>()
+    for (kind, size) in types {
+        let png = if size == icon.width() { icon.encode_png(9) } else { icon.resize(size, size, Filter.Lanczos).encode_png(9) }
+        body.extend(kind.to_bytes())
+        be32(mut body, png.len() + 8)
+        body.extend(png)
+    }
+    var out = "icns".to_bytes()
+    be32(mut out, body.len() + 8)
+    out.extend(body)
+    return out
+}
+
+const CONTENTS: str = #"
+{
+  "images" : [
+    {
+      "filename" : "icon-1024.png",
+      "idiom" : "universal",
+      "platform" : "ios",
+      "size" : "1024x1024"
+    },
+    {
+      "appearances" : [
+        {
+          "appearance" : "luminosity",
+          "value" : "dark"
+        }
+      ],
+      "filename" : "icon-1024-dark.png",
+      "idiom" : "universal",
+      "platform" : "ios",
+      "size" : "1024x1024"
+    },
+    {
+      "appearances" : [
+        {
+          "appearance" : "luminosity",
+          "value" : "tinted"
+        }
+      ],
+      "filename" : "icon-1024-tinted.png",
+      "idiom" : "universal",
+      "platform" : "ios",
+      "size" : "1024x1024"
+    }
+  ],
+  "info" : {
+    "author" : "xcode",
+    "version" : 1
+  }
+}
+"#
+
+fn main() ! Error {
+    let app = try Image.open("{PNG}/app-1024.png")
+    let dark = try Image.open("{PNG}/dark-1024.png")
+    try fs.make_dir_all(String(IOS))
+    try full_bleed(app.copy()).save("{IOS}/icon-1024.png")
+    let mark = mark_where_app_has_it(app.copy(), dark)
+    try mark.save("{IOS}/icon-1024-dark.png")
+    try gray(mark).save("{IOS}/icon-1024-tinted.png")
+    try fs.write_text("{IOS}/Contents.json", String(CONTENTS))
+    println("made {IOS}")
+
+    // Apple's grid for a Mac icon: the rounded square 824 px of 1024, in the middle.
+    var mac = Image.new(1024, 1024, Kind.Rgba, Color.rgba(0u8, 0u8, 0u8, 0u8))
+    mac.overlay(app.resize(824, 824, Filter.Lanczos), 100, 100)
+    try fs.write(String("design/logo/app.icns"), icns(mac))
+    println("made design/logo/app.icns")
+}
