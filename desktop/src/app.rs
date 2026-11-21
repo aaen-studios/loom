@@ -339,6 +339,9 @@ impl Loom {
 
     /// Shows the newest notice from the model, and hides one that's been up 8 seconds.
     fn take_notice(&mut self, cx: &mut Context<Self>) {
+        if let Some(words) = self.model.checked.take() {
+            shell::notify("loom", &words);
+        }
         if let Some(words) = self.model.notices.pop() {
             self.model.notices.clear();
             self.notice = Some((words, Instant::now()));
@@ -775,6 +778,45 @@ impl Loom {
             Some(Conn::SignedOut) => ("Signed out".into(), p.ink_3),
             Some(Conn::UpdateNeeded) => ("Needs an update".into(), p.bad),
         };
+        // A newer loom, downloaded and checked, waits for a restart.
+        let update = self.model.update.clone().map(|(version, path)| {
+            div()
+                .id("update")
+                .mx(px(space::S))
+                .mb(px(space::S))
+                .px(px(space::M))
+                .py(px(space::S))
+                .rounded(px(radius::ROW))
+                .bg(p.hover)
+                .cursor_pointer()
+                .hover(move |s| s.bg(p.active))
+                .flex()
+                .flex_col()
+                .child(
+                    div()
+                        .text_size(px(size::SMALL))
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(p.ink)
+                        .child(format!("loom {version} is ready")),
+                )
+                .child(
+                    div()
+                        .text_size(px(size::CAPTION))
+                        .text_color(p.ink_3)
+                        .child("Restart to update"),
+                )
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    match shell::apply_update(std::path::Path::new(&path)) {
+                        Ok(()) => cx.quit(),
+                        Err(e) => {
+                            this.model
+                                .notices
+                                .push(format!("loom couldn't update itself: {e}"));
+                            cx.notify();
+                        }
+                    }
+                }))
+        });
         div()
             .w(px(layout::SIDEBAR))
             .h_full()
@@ -850,6 +892,7 @@ impl Loom {
                     .overflow_y_scroll()
                     .child(if searching { self.hits(cx) } else { list }),
             )
+            .when_some(update, |d, row| d.child(row))
             .child(
                 div()
                     .flex()
@@ -1511,6 +1554,9 @@ impl Loom {
             match a {
                 shell::TrayAction::Open => shell::show_window(self.hwnd, true),
                 shell::TrayAction::StartAtLogin(on) => shell::set_start_at_login(on),
+                shell::TrayAction::CheckUpdates => {
+                    self.send(serde_json::json!({"t": "update.check", "id": "app.update"}));
+                }
                 shell::TrayAction::Quit => {
                     self.send(serde_json::json!({"t": "app.active", "active": false}));
                     cx.quit();
@@ -1990,6 +2036,16 @@ fn local_mode() -> bool {
 /// The core's config (core/README.md, "Config").
 fn core_config() -> String {
     let mut config = serde_json::json!({"data": data_dir()});
+    // Releases update themselves. A build from source doesn't, unless LOOM_UPDATE names a
+    // manifest to try.
+    match std::env::var("LOOM_UPDATE") {
+        Ok(url) => {
+            config["version"] = crate::VERSION.into();
+            config["update"] = url.into();
+        }
+        Err(_) if !crate::VERSION.contains("-dev") => config["version"] = crate::VERSION.into(),
+        Err(_) => {}
+    }
     if local_mode() {
         config["mode"] = "local".into();
         config["username"] = std::env::var("USERNAME")

@@ -75,7 +75,14 @@ fn theme(cx: &mut App, dark: bool) {
     c.selection = sel;
 }
 
+/// This build's version: the release's, when CI builds one, and Cargo's otherwise.
+pub const VERSION: &str = match option_env!("LOOM_VERSION") {
+    Some(v) => v,
+    None => env!("CARGO_PKG_VERSION"),
+};
+
 fn main() {
+    shell::after_update();
     gpui_kit::application().with_assets(AppAssets).run(|cx| {
         gpui_kit::init(cx);
         let fonts: Vec<Cow<'static, [u8]>> = FONTS.iter().map(|f| Cow::Borrowed(*f)).collect();

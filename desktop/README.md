@@ -32,3 +32,10 @@ Run an instance (`calx server/main.calx serve`), then start the app and sign in 
 - `LOOM_SERVER`: an instance's address, filled in on the sign-in page.
 - `LOOM_DATA`: the folder for the core's cache, instead of `%APPDATA%\Loom`.
 - `LOOM_THEME`: `dark` or `light`, instead of following the system.
+- `LOOM_UPDATE`: a release manifest's address, for trying updates in a build from source, which doesn't update itself otherwise.
+
+## Releases
+
+A tag like `v0.3.0` runs `.github/workflows/release.yml`. It builds `loom.exe` with the version in it (`LOOM_VERSION`), and `loom-setup.exe` from `installer.iss` with Inno Setup. It also builds the server for Linux and Windows, and publishes them all with a `manifest.json` that `scripts/release.calx` signs with the release key, from the CI secret `LOOM_RELEASE_KEY`. The tag's message is the release notes.
+
+The installer puts loom in `%LOCALAPPDATA%\Programs\loom`, for the person alone, and gives its Start menu shortcut the AppUserModelID `AaenStudios.Loom`, so notifications show as loom. From then on loom updates itself. The core finds and checks a release, the sidebar offers "Restart to update", and `shell::apply_update` renames the running `loom.exe` to `loom.old.exe`, puts the new one in its place and starts it. The new one waits for the old one to end, then removes it. "Check for updates" in the tray looks at once.

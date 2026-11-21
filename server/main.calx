@@ -8,15 +8,23 @@ module server.main
 //     loom acp add NAME COMMAND [ARG...] [--data DIR]
 //     loom acp list [--data DIR]
 //     loom status [--data DIR]
+//     loom files limit MB|off [--data DIR]
+//     loom update [--check]
 //     loom version
 //
 // Run from source: calx server/main.calx serve
+import std.bytes
 import std.crypto.{PasswordHasher}
 import std.env
 import std.fs
+import std.hash.{sha256}
+import std.http.{Header, get}
 import std.io
-import std.process.{exit}
+import std.json.{Json}
+import std.process.{current_exe, exit}
+import shared.obj.{at, str_at}
 import shared.protocol
+import shared.release.{MANIFEST, RELEASE_KEY, check_manifest, newer}
 import server.instance.{Config, Instance}
 import server.store.{Store}
 
@@ -33,6 +41,7 @@ usage: loom <command>
   acp list                  list the ACP agent programs
   files limit MB|off        cap the files each person can keep, in megabytes
   status                    say what the instance holds
+  update                    update this program to the newest signed release (--check: only say if there's one)
   version                   print loom's version and the protocol versions it speaks
 
 Every command but version takes --data DIR, the instance's folder (default: loom-data).
@@ -151,6 +160,8 @@ fn main() ! Error {
             try store.set_meta("file_limit", "{mb * 1000000}")
             println("each person can keep {mb} MB of files")
         }
+    } else if cmd == "update" {
+        try update(a.words.contains(String("--check")))
     } else if cmd == "status" {
         let store = try open_store(a.copy())
         println(version_line())
@@ -174,4 +185,53 @@ fn reads_options_anywhere() {
     let given: List<String> = [String("user"), String("--data"), String("d"), String("add"), String("ann")]
     let a = read_args(given)!
     assert(a.data == "d" and a.words.len() == 3 and a.words[2] == "ann")
+}
+
+// The body of a GET, or why there's none.
+fn fetch(url: String) -> List<u8> ! Error {
+    var req = get(url.copy(), List<Header>(), 600000, 400000000)
+    let r = try req.wait()
+    if r.status != 200 { fail "{url} answered {r.status}" }
+    return r.body.copy()
+}
+
+// `loom update`: the newest release, if its manifest is signed with the release key and
+// it's newer, takes this program's place once its SHA-256 is the manifest's. The old
+// program stays beside it, as .old, until the next update. The instance runs the new one
+// once it's restarted.
+fn update(check_only: bool) ! Error {
+    let text = try fetch(String(MANIFEST))
+    let sig = String.from_utf8(try fetch("{MANIFEST}.sig")) ?? String()
+    let manifest = check_manifest(text, sig, String(RELEASE_KEY)) else {
+        fail "the release manifest isn't signed with loom's release key, so it isn't used"
+    }
+    let version = str_at(manifest.copy(), "version") ?? String()
+    if not newer(version.copy(), String(VERSION)) {
+        println("loom {VERSION} is the newest")
+        return
+    }
+    if check_only {
+        println("loom {version} is out; this is {VERSION}. `loom update` takes it.")
+        return
+    }
+    let kind = "{env.os()}-server"
+    let file = at(manifest.copy(), "files").get(kind.copy()) ?? Json.Null
+    let url = str_at(file.copy(), "url") else {
+        fail "release {version} has no program for {kind}"
+    }
+    let data = try fetch(url)
+    if bytes.hex(sha256(data.copy())) != (str_at(file, "sha256") ?? String()) {
+        fail "the downloaded program isn't the one the release names, so it isn't used"
+    }
+    let exe = current_exe()
+    let new = "{exe}.new"
+    let old = "{exe}.old"
+    try fs.write(new.copy(), data)
+    if env.os() != "windows" {
+        try fs.set_mode(new.copy(), 0o755)
+    }
+    if fs.exists(old.copy()) { try fs.remove_file(old.copy()) }
+    try fs.rename(exe.copy(), old)
+    try fs.rename(new, exe)
+    println("updated loom {VERSION} to {version}; restart the instance to run it")
 }

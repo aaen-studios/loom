@@ -258,6 +258,10 @@ pub struct Model {
     pub query: String,
     pub hits: Vec<Hit>,
     search_id: String,
+    /// A newer release, downloaded and checked: its version and where it is.
+    pub update: Option<(String, String)>,
+    /// What a check the person asked for found, for the app to say.
+    pub checked: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -420,6 +424,23 @@ impl Model {
                 self.place_queued();
             }
             "core.file" => self.file_came(f),
+            "core.update" => {
+                let asked = f.get("id").is_some();
+                if let Some(path) = f.get("path").and_then(Value::as_str) {
+                    let version = s(f, "version");
+                    if asked {
+                        self.checked = Some(format!(
+                            "loom {version} is ready. Restart it from the sidebar."
+                        ));
+                    }
+                    self.update = Some((version, path.to_string()));
+                } else if asked {
+                    self.checked = Some(match f.get("error") {
+                        Some(e) => format!("The update check didn't work: {}", s(e, "message")),
+                        None => format!("loom {} is the newest.", s(f, "version")),
+                    });
+                }
+            }
             "ack" => {
                 let cid = s(f, "cid");
                 self.queued.retain(|q| q.cid != cid);

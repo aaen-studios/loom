@@ -14,6 +14,8 @@ import std.thread.{Task}
 import shared.obj.{Obj, str_at}
 import core.cache.{Cache}
 import core.conn.{Conn}
+import core.update.{Updater}
+import shared.release.{MANIFEST}
 import server.instance.{Config, Instance}
 
 /// The credential store's service the device token is kept under, by the instance's address.
@@ -178,6 +180,13 @@ fn core_start(config: *const u8, len: usize, on_event: extern "C" fn(*const u8, 
     var conn = Conn.new(server, token, service, cache, inbox, from_core.sender())
     if let d = data {
         conn.files = some("{d}/files")
+        // Updates, for an app that says its version. An empty `update` turns them off.
+        let feed = str_at(cfg.copy(), "update") ?? String(MANIFEST)
+        if let v = str_at(cfg.copy(), "version") {
+            if feed.len() > 0 {
+                conn.updater = some(Updater.new(v, str_at(cfg.copy(), "platform") ?? String("windows-desktop"), feed, "{d}/update"))
+            }
+        }
     }
     let conn_thread = unsafe { Thread.spawn(conn) }
     let relay_thread = unsafe { Thread.spawn(Relay { sink: sink, from_core: from_core }) }

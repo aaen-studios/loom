@@ -1,0 +1,128 @@
+module scripts.release
+
+// Signs loom's releases (PLAN.md, "Updates and versions"). A release has a
+// manifest.json naming each of its files with its SHA-256, and
+// manifest.json.sig, the Ed25519 signature of the manifest's exact bytes, as
+// base64. The apps and `loom update` check both before they use a file.
+//
+//     calx scripts/release.calx key SEED_FILE
+//         makes the release key: writes its seed, as hex, to SEED_FILE for the
+//         CI secret LOOM_RELEASE_KEY, keeps a copy in the credential store
+//         (service "loom-release"), and prints the public key for
+//         core/update.calx. It won't make a second one.
+//     calx scripts/release.calx seed
+//         prints the seed from the credential store, to set the CI secret:
+//         calx scripts/release.calx seed | gh secret set LOOM_RELEASE_KEY
+//     calx scripts/release.calx sign DIR VERSION BASE_URL NOTES_FILE KIND=FILE ...
+//         writes DIR/manifest.json and DIR/manifest.json.sig for the files in
+//         DIR, each under its kind (windows-desktop, windows-installer,
+//         linux-server, windows-server), with the seed from LOOM_RELEASE_KEY.
+//     calx scripts/release.calx verify DIR
+//         checks DIR's manifest against the public key, and each file's hash.
+import std.bytes
+import std.crypto.{Ed25519Key}
+import std.env
+import std.fs
+import std.hash.{sha256}
+import std.json.{Json}
+import std.keyring
+import std.process.{exit}
+import std.time.{Timestamp}
+import shared.obj.{Obj, at, int_at, str_at}
+import shared.release.{RELEASE_KEY, check_manifest}
+
+const SERVICE: str = "loom-release"
+const ACCOUNT: str = "ed25519-seed"
+
+fn usage() -> String {
+    return String("usage: calx scripts/release.calx key SEED_FILE | seed | sign DIR VERSION BASE_URL NOTES_FILE KIND=FILE ... | verify DIR\n")
+}
+
+fn make_key(out: String) ! Error {
+    if try keyring.get(String(SERVICE), String(ACCOUNT)) != none {
+        fail "there's a release key already, in the credential store under {SERVICE}; a second one would lock out every app that has the first"
+    }
+    let key = Ed25519Key.generate()
+    let seed = bytes.hex(key.seed())
+    try keyring.set(String(SERVICE), String(ACCOUNT), seed.copy())
+    try fs.write_text(out.copy(), seed)
+    println("the seed is in {out}, for the CI secret LOOM_RELEASE_KEY, and in the credential store")
+    println("public key: {bytes.hex(key.public_key().bytes())}")
+}
+
+fn sign(args: List<String>) ! Error {
+    if args.len() < 6 { fail "{usage()}" }
+    let dir = args[1].copy()
+    let version = args[2].copy()
+    let base = args[3].copy()
+    let notes = try fs.read_text(args[4].copy()) ?? String()
+    let seed_hex = env.variable(String("LOOM_RELEASE_KEY")) else {
+        fail "LOOM_RELEASE_KEY isn't set"
+    }
+    let key = Ed25519Key.from_seed(bytes.from_hex(seed_hex.trim().copy()) ?? List<u8>()) else {
+        fail "LOOM_RELEASE_KEY isn't a 32-byte seed in hex"
+    }
+    if bytes.hex(key.public_key().bytes()) != RELEASE_KEY {
+        fail "LOOM_RELEASE_KEY isn't the key core/update.calx trusts"
+    }
+    var files = Obj.new()
+    for pair in args[5..] {
+        let eq = pair.find("=") else {
+            fail "{pair} isn't KIND=FILE"
+        }
+        let kind = pair[..eq].copy()
+        let name = pair[eq + 1..].copy()
+        let data = try fs.read("{dir}/{name}")
+        let entry = Obj.new().s("name", name.copy()).s("url", "{base}/{name}").s("sha256", bytes.hex(sha256(data.copy()))).i("size", i64.wrap(u64(data.len()))).done()
+        files.m.insert(kind, entry)
+    }
+    let now = unsafe { Timestamp.now() }.unix_ms
+    let manifest = Obj.new().s("version", version.copy()).i("at", now).s("notes", notes.trim().copy()).j("files", files.done()).done()
+    let text = "{manifest}"
+    try fs.write_text("{dir}/manifest.json", text.copy())
+    try fs.write_text("{dir}/manifest.json.sig", bytes.base64(key.sign(text.to_bytes())))
+    println("signed {dir}/manifest.json for {version}")
+}
+
+fn verify(dir: String) ! Error {
+    let text = try fs.read("{dir}/manifest.json")
+    let sig = try fs.read_text("{dir}/manifest.json.sig") ?? String()
+    let manifest = check_manifest(text, sig, String(RELEASE_KEY)) else {
+        fail "the manifest's signature isn't the release key's"
+    }
+    if let Json.Object(files) = at(manifest.copy(), "files") {
+        for (kind, f) in files {
+            let name = str_at(f.copy(), "name") ?? String()
+            let data = try fs.read("{dir}/{name}")
+            if bytes.hex(sha256(data.copy())) != (str_at(f.copy(), "sha256") ?? String()) or int_at(f, "size") != some(i64.wrap(u64(data.len()))) {
+                fail "{kind}: {name} isn't the file the manifest names"
+            }
+            println("ok    {kind}: {name}")
+        }
+    }
+    println("{dir}/manifest.json is signed, version {str_at(manifest, "version") ?? String()}")
+}
+
+fn main() ! Error {
+    let args = env.args()
+    if args.len() < 1 or (args.len() < 2 and args[0] != "seed") {
+        eprint(usage())
+        exit(2)
+    }
+    let cmd = args[0].copy()
+    if cmd == "seed" {
+        let seed = try keyring.get(String(SERVICE), String(ACCOUNT)) else {
+            fail "there's no release key in the credential store"
+        }
+        print(seed)
+    } else if cmd == "key" {
+        try make_key(args[1].copy())
+    } else if cmd == "sign" {
+        try sign(args)
+    } else if cmd == "verify" {
+        try verify(args[1].copy())
+    } else {
+        eprint(usage())
+        exit(2)
+    }
+}
