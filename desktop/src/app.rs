@@ -136,6 +136,7 @@ pub struct Loom {
     profile_in: Entity<TextareaState>,
     routine_name_in: Entity<InputState>,
     move_to_in: Entity<InputState>,
+    relay_in: Entity<InputState>,
     move_code_in: Entity<InputState>,
     /// Whether the People page's next invite makes an admin rather than a member.
     invite_admin: bool,
@@ -243,6 +244,7 @@ impl Loom {
         });
         let routine_name_in = input(window, cx, "Morning brief", false);
         let move_to_in = input(window, cx, "https://loom.example.com", false);
+        let relay_in = input(window, cx, "https://push.loom.example", false);
         let move_code_in = input(window, cx, "loom-move-…", false);
         let routine_at_in = input(window, cx, "30", false);
         let routine_prompt_in = cx.new(|cx| {
@@ -404,6 +406,7 @@ ACTA_KEY=secret:ACTA_KEY",
             profile_in,
             routine_name_in,
             move_to_in,
+            relay_in,
             move_code_in,
             invite_admin: false,
             confirm_delete: false,
@@ -1283,6 +1286,8 @@ ACTA_KEY=secret:ACTA_KEY",
                                 this.send(f);
                                 let d = this.model.load_devices();
                                 this.send(d);
+                                let r = this.model.set_relay(None);
+                                this.send(r);
                                 this.menu = None;
                                 this.screen = Screen::AddPhone;
                                 cx.notify();
@@ -3173,6 +3178,68 @@ ACTA_KEY=secret:ACTA_KEY",
         div().flex_1().min_h_0().child(page)
     }
 
+    /// iPhone notifications through the push relay (PLAN.md, "The push relay"): whether the
+    /// instance uses one, and for the owner, a place to turn it on or off. It says what
+    /// the relay gets.
+    fn relay_section(&mut self, cx: &mut Context<Self>) -> Div {
+        let p = self.p;
+        let caption = |text: String| {
+            div()
+                .text_size(px(size::CAPTION))
+                .text_color(p.ink_3)
+                .child(text)
+        };
+        let section = div().flex().flex_col().gap(px(space::S)).child(
+            div()
+                .text_size(px(size::BODY))
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(p.ink)
+                .child("Notifications on iPhone"),
+        );
+        match self.model.relay.clone() {
+            None => section,
+            Some(url) if !url.is_empty() => section
+                .child(caption(format!(
+                    "They go through the push relay at {url}. It gets each phone's token sealed for it and each notification sealed for the phone, so it never reads what they say. It sees only that something is new."
+                )))
+                .child(
+                    div().flex().child(
+                        div()
+                            .id("relay-off")
+                            .text_size(px(size::CAPTION))
+                            .text_color(p.ink_3)
+                            .cursor_pointer()
+                            .hover(move |s| s.text_color(p.ink))
+                            .child("Stop using the relay")
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                let f = this.model.set_relay(Some(""));
+                                this.send(f);
+                                cx.notify();
+                            })),
+                    ),
+                ),
+            Some(_) => section
+                .child(caption(
+                    "An instance needs an APNs key of its own, or a push relay, to reach an iPhone that isn't open. A relay gets each phone's token sealed for it and each notification sealed for the phone, so it never reads what they say. Phones that connect after you turn it on use it."
+                        .into(),
+                ))
+                .child(self.field("Push relay", Input::new(&self.relay_in)))
+                .child(
+                    div().flex().child(
+                        self.button("relay-on", "Use this relay", false)
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                let url = this.relay_in.read(cx).value().trim().to_string();
+                                if !url.is_empty() {
+                                    let f = this.model.set_relay(Some(&url));
+                                    this.send(f);
+                                }
+                                cx.notify();
+                            })),
+                    ),
+                ),
+        }
+    }
+
     /// The Add a phone page: a QR code the phone's loom app scans to join this account,
     /// with a token of its own. The core makes what's in it; this draws it, dark on white
     /// in either theme so a camera reads it.
@@ -3266,6 +3333,7 @@ ACTA_KEY=secret:ACTA_KEY",
             }
             body = body.child(row);
         }
+        body = body.child(self.relay_section(cx));
         // Every device signed in to this account, so one that shouldn't be can be signed out.
         let mut devices = div().flex().flex_col().gap(px(space::XS)).child(
             div()

@@ -69,10 +69,12 @@ jobs:
         include:
           - os: ubuntu-latest
             out: loom-linux
+            push: loom-push-linux
           - os: windows-latest
             out: loom-windows.exe
           - os: ubuntu-24.04-arm
             out: loom-linux-arm64
+            push: loom-push-linux-arm64
           - os: macos-latest
             out: loom-macos
     runs-on: ${{ matrix.os }}
@@ -100,6 +102,12 @@ jobs:
           grep -q "const VERSION: str = \"$version\"" server/main.calx
           mkdir -p dist
           calx build --release server/main.calx -o "dist/${{ matrix.out }}"
+          # The push relay, for Linux servers (push/README.md).
+          if [ -n "${{ matrix.push }}" ]; then
+            perl -pi -e "s/^const VERSION: str = \".*\"/const VERSION: str = \"$version\"/" push/main.calx
+            grep -q "const VERSION: str = \"$version\"" push/main.calx
+            calx build --release push/main.calx -o "dist/${{ matrix.push }}"
+          fi
 
       - uses: actions/upload-artifact@v4
         with:
@@ -139,7 +147,8 @@ jobs:
           calx scripts/release.calx sign dist "$version" "$base" notes.md \
             windows-desktop=loom.exe windows-installer=loom-setup.exe \
             linux-server=loom-linux windows-server=loom-windows.exe \
-            linux-arm64-server=loom-linux-arm64 macos-server=loom-macos
+            linux-arm64-server=loom-linux-arm64 macos-server=loom-macos \
+            linux-push=loom-push-linux linux-arm64-push=loom-push-linux-arm64
           calx scripts/release.calx verify dist
 
       - name: Publish

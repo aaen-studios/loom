@@ -1,0 +1,30 @@
+module shared.pushrelay
+
+// What the push relay (push/main.calx) and an instance agree on (PLAN.md, "The
+// push relay"). An instance asks the relay for its X25519 key at KEY_PATH, and
+// posts each notification to PUSH_PATH, signed with its Ed25519 key:
+//
+//     X-Loom-Instance: <its Ed25519 public key, base64>
+//     X-Loom-Time: <Unix ms>
+//     X-Loom-Signature: <Ed25519 over `signed_text(time, body)`, base64>
+//
+// with the body {"token": <the phone's sealed token, base64>, "payload": <what
+// APNs gets>, "collapse": <apns-collapse-id, or "">}. The sealed token opens, with
+// the relay's key, to {"token": <the APNs token, hex>, "env": "production" or
+// "development"}.
+import std.bytes
+import std.hash.{sha256}
+
+pub const KEY_PATH: str = "/v1/key"
+pub const PUSH_PATH: str = "/v1/push"
+pub const INSTANCE: str = "X-Loom-Instance"
+pub const TIME: str = "X-Loom-Time"
+pub const SIGNATURE: str = "X-Loom-Signature"
+
+// How far a request's time may be from the relay's clock.
+pub const SKEW_MS: i64 = 300000
+
+/// What an instance signs for a request with `body`, sent at `time` (Unix ms).
+pub fn signed_text(time: i64, body: List<u8>) -> List<u8> {
+    return "loom push 1\n{time}\n{bytes.hex(sha256(body))}".to_bytes()
+}

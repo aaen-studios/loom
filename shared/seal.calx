@@ -1,0 +1,61 @@
+module shared.seal
+
+// Sealed boxes, as libsodium's crypto_box_seal makes them: a message only the
+// holder of an X25519 key opens, from a sender who keeps no key. The push
+// relay's uses (PLAN.md, "The push relay"): a phone seals its APNs token for
+// the relay, so the instance it gives it to never sees it, and an instance
+// seals each notification for the phone, so neither the relay nor Apple reads it.
+//
+// A box is the sender's one-time public key (32 bytes), a nonce (24), and the
+// message sealed with XChaCha20-Poly1305 under HMAC-SHA256(the shared secret,
+// both public keys), with `loom seal 1` as associated data.
+import std.crypto.{X25519Key, X25519PublicKey, XChaCha20Poly1305, random_bytes}
+import std.hash.{hmac_sha256}
+
+const AAD: str = "loom seal 1"
+const KEY: usize = 32
+const NONCE: usize = 24
+
+fn cipher(secret: List<u8>, sender: List<u8>, recipient: List<u8>) -> XChaCha20Poly1305 {
+    var both = sender.copy()
+    both.extend(recipient)
+    return XChaCha20Poly1305.new(hmac_sha256(secret, both))
+}
+
+/// `message` sealed for the holder of the X25519 key whose public half is
+/// `recipient`. none when `recipient` isn't a key that can be sealed for.
+pub fn seal(recipient: List<u8>, message: List<u8>) -> List<u8>? {
+    let to = X25519PublicKey.from_bytes(recipient.copy()) else return none
+    let once = X25519Key.generate()
+    let secret = once.exchange(to) else return none
+    let sender = once.public_key().bytes()
+    let nonce = random_bytes(NONCE)
+    let sealed = cipher(secret, sender.copy(), recipient).encrypt(nonce.copy(), message, AAD.to_bytes())
+    var out = sender.copy()
+    out.extend(nonce)
+    out.extend(sealed)
+    return some(out)
+}
+
+/// The message in `box`, opened with `key`, or none if it wasn't sealed for it
+/// or was changed.
+pub fn open(key: X25519Key, box: List<u8>) -> List<u8>? {
+    if box.len() < KEY + NONCE + 16 { return none }
+    let sender = box[..KEY].copy()
+    let nonce = box[KEY..KEY + NONCE].copy()
+    let from = X25519PublicKey.from_bytes(sender.copy()) else return none
+    let secret = key.exchange(from) else return none
+    return cipher(secret, sender, key.public_key().bytes()).decrypt(nonce, box[KEY + NONCE..].copy(), AAD.to_bytes())
+}
+
+@test
+fn a_box_opens_only_with_its_key() {
+    let relay = X25519Key.generate()
+    let box = seal(relay.public_key().bytes(), "apns-token".to_bytes()) ?? List<u8>()
+    assert(open(relay, box.copy()) == some("apns-token".to_bytes()))
+    assert(open(X25519Key.generate(), box.copy()) == none)
+    var changed = box.copy()
+    changed[60] = changed[60] ^ 1u8
+    assert(open(relay, changed) == none)
+    assert(open(relay, [1u8, 2u8]) == none)
+}
