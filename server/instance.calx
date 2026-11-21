@@ -2728,6 +2728,20 @@ impl Instance {
             try i.store.add_link_code(bytes.hex(sha256(code.to_bytes())), user, device, expires, now())
             return Answer.Value(Obj.new().s("code", code).i("expires", expires).s("instance", try i.store.meta("instance") ?? String()).s("key", try i.public_key()).done())
         }
+        if name == "push.register" or name == "push.unregister" {
+            // A phone hands over its own APNs token, never another device's, and never an agent.
+            if not device.starts_with("d_") { return Answer.Refused(String("forbidden"), String("Only a device can take push.")) }
+            if name == "push.unregister" {
+                try i.store.delete_push_token(device)
+                return Answer.Value(empty)
+            }
+            let token = str_at(args.copy(), "token") ?? String()
+            let env = str_at(args, "env") ?? String("production")
+            if token.len() < 64 or token.len() > 200 or bytes.from_hex(token.copy()) == none { return Answer.Refused(String("bad_request"), String("The token is the device's APNs token, in hex.")) }
+            if env != "production" and env != "development" { return Answer.Refused(String("bad_request"), String("env is production or development.")) }
+            try i.store.set_push_token(user, device, token, env, now())
+            return Answer.Value(empty)
+        }
         if name == "profile.get" {
             return Answer.Value(Obj.new().j("profile", try i.store.profile(user) ?? Json.Null).done())
         }

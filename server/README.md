@@ -2,7 +2,7 @@
 
 Calx: the instance, and the `loom` program.
 
-- [`main.calx`](main.calx): the `loom` command line: `serve`, `user add`, `user list`, `acp add`, `acp list`, `files limit`, `status`, `update`, `mcp` and `version`. `serve` won't run as root or an elevated Administrator unless given `--allow-root`, and the tests pass it, since GitHub's Windows runners are elevated. Later `loom install` and `loom receive`.
+- [`main.calx`](main.calx): the `loom` command line: `serve`, `user add`, `user list`, `acp add`, `acp list`, `files limit`, `push key` (the APNs key, kept sealed) and `push off`, `status` (which also says the user it runs as and whether push is on), `update`, `mcp` and `version`. `serve` won't run as root or an elevated Administrator unless given `--allow-root`, and the tests pass it, since GitHub's Windows runners are elevated. Later `loom install` and `loom receive`.
 - [`mcp.calx`](mcp.calx): `loom mcp`, loom's own tools as an MCP server on standard input and output. The instance gives it to every agent's session, and it hands each call back to the instance. The tools are in [`shared/tools.calx`](../shared/tools.calx).
 - [`instance.calx`](instance.calx): one loop on std.http.server, listening on 127.0.0.1. It serves the HTTP routes and the `/ws` WebSocket from [protocol.md](../protocol/protocol.md), and runs each agent's turns through ACP, turning what the agents say into events and deltas.
 - [`store.calx`](store.calx): SQLite. Every row is kept per person, and that includes the event log. What only the instance should read (secrets, ACP programs' settings, webhook secrets) is sealed under `secret.key`, beside the database.
