@@ -10,12 +10,14 @@ module core.conn
 // on `to_app`, both as JSON text. The C boundary (core/lib.calx) joins them
 // to loom_core_send and on_event; tests use them as they are.
 import std.http.websocket.{Error, Message, WebSocket, open}
+import std.keyring
 import std.json.{Json, parse}
 import std.random.{Random}
 import std.thread.{Task}
 import std.time.{Instant}
 import shared.obj.{Obj, bool_at, int_at, str_at}
 import shared.protocol.{CLOSE_TOKEN, CLOSE_VERSION, NEWEST}
+import core.login.{Kind, Outcome, Pending, address, request_body}
 
 const FIRST_WAIT_MS: u64 = 500
 const LONGEST_WAIT_MS: u64 = 30000
@@ -34,12 +36,9 @@ pub fn wait_ms(failed: u32) -> u64 {
 
 /// The WebSocket address of an instance at `server`, an http:// or https:// address.
 pub fn ws_url(server: String) -> String? {
-    var base = server.trim().copy()
-    while base.ends_with("/") {
-        base = base[0..base.len() - 1].copy()
-    }
-    if base.starts_with("https://") { return some("wss://{base[8..]}/ws") }
-    if base.starts_with("http://") { return some("ws://{base[7..]}/ws") }
+    let a = address(server)
+    if a.starts_with("https://") { return some("wss://{a[8..]}/ws") }
+    if a.starts_with("http://") { return some("ws://{a[7..]}/ws") }
     return none
 }
 
@@ -74,37 +73,45 @@ impl State {
 
 /// The connection, run by the core's thread.
 pub struct Conn {
-    url: String
-    token: String
+    server: String?       // the instance's http:// or https:// address, once it's known
+    token: String?        // this device's token, kept in the credential store
+    keyring: String       // the credential store's service the token is kept under
     after: i64            // the newest event seq the app has; LOO-24 keeps it in the cache
     ws: WebSocket?
     state: State
     failed: u32           // tries in a row that didn't reach welcome
     retry_at: Instant?
     wait: u64             // how long after retry_at to try again
+    pending: Pending?     // a login, setup or logout on its way
     inbox: Receiver<String>
     to_app: Sender<String>
     random: Random
 }
 
 impl Conn {
-    /// A connection to the instance at `server` with the device `token`, from the cursor
-    /// `after`. It starts when it's run.
-    pub fn new(server: String, token: own String, after: i64, inbox: own Receiver<String>, to_app: own Sender<String>) -> Conn? {
-        let url = ws_url(server) else { return none }
-        return some(Conn {
-            url: url,
+    /// A connection to the instance at `server`, from the cursor `after`. Its token is
+    /// `token`, or the one kept for `server` under the credential store's service
+    /// `keyring`; with neither, it waits for the app's login. It starts when it's run.
+    pub fn new(server: String?, token: own String?, after: i64, service: own String, inbox: own Receiver<String>, to_app: own Sender<String>) -> Conn {
+        var s: String? = none
+        if let given = server {
+            s = some(address(given.copy()))
+        }
+        return Conn {
+            server: s,
             token: token,
+            keyring: service,
             after: after,
             ws: none,
-            state: State.Offline,
+            state: State.SignedOut,
             failed: 0,
             retry_at: none,
             wait: 0,
+            pending: none,
             inbox: inbox,
             to_app: to_app,
             random: Random.system(),
-        })
+        }
     }
 
     fn tell(mut self, frame: Json) {
@@ -118,11 +125,54 @@ impl Conn {
         self.tell(o.done())
     }
 
+    /// Finds the token if the app gave none, and connects, or waits for a login.
+    fn begin(mut self) {
+        let server = self.server.copy() ?? String()
+        if self.token == none and server.len() > 0 {
+            match keyring.get(self.keyring.copy(), server.copy()) {
+                ok(t) => self.token = t,
+                err(e) => self.tell(Obj.new().s("t", String("error")).s("code", String("keyring")).s("message", "{e}").done()),
+            }
+        }
+        if server.len() > 0 and ws_url(server.copy()) == none {
+            self.tell(Obj.new().s("t", String("error")).s("code", String("bad_config")).s("message", "not an http:// or https:// address: {server}").done())
+            self.server = none
+        }
+        if self.server != none and self.token != none {
+            self.connect()
+        } else {
+            self.tell_state(0, String("not logged in"))
+        }
+    }
+
+    /// Forgets the token, here and in the credential store, and closes the socket.
+    fn forget(mut self) {
+        if let ws = self.ws.take() {
+            ws.close()
+        }
+        self.token = none
+        self.retry_at = none
+        if let server = self.server.copy() {
+            match keyring.delete(self.keyring.copy(), server) {
+                ok(_) => {},
+                err(_) => {},    // a store that can't answer has nothing kept to delete
+            }
+        }
+        self.state = State.SignedOut
+    }
+
     /// Opens the socket and says hello. What's sent while it opens goes once it's open.
     fn connect(mut self) {
         self.retry_at = none
-        let ws = open(self.url.copy())
-        let hello = Obj.new().s("t", String("hello")).s("token", self.token.copy()).j("versions", Json.Array([Json.Int(i64(NEWEST))])).i("after", self.after).j("device", Obj.new().b("active", true).done()).done()
+        let url = ws_url(self.server.copy() ?? String()) ?? String()
+        let token = self.token.copy() ?? String()
+        if url.len() == 0 or token.len() == 0 {
+            self.state = State.SignedOut
+            self.tell_state(0, String("not logged in"))
+            return
+        }
+        let ws = open(url)
+        let hello = Obj.new().s("t", String("hello")).s("token", token).j("versions", Json.Array([Json.Int(i64(NEWEST))])).i("after", self.after).j("device", Obj.new().b("active", true).done()).done()
         match ws.send_text("{hello}") {
             ok => {},
             err(_) => {},    // receive says how it ended
@@ -140,7 +190,8 @@ impl Conn {
         match e {
             Error.Closed(code, reason) => {
                 if code == CLOSE_TOKEN {
-                    self.state = State.SignedOut
+                    // The token is wrong or was revoked: log out on this device.
+                    self.forget()
                     self.tell_state(0, reason.copy())
                     return
                 }
@@ -156,8 +207,8 @@ impl Conn {
     }
 
     fn retry_later(mut self, why: String) {
-        let base = wait_ms(self.failed)
-        let ms = base + self.random.below(base / 5 + 1)
+        let ms_base = wait_ms(self.failed)
+        let ms = ms_base + self.random.below(ms_base / 5 + 1)
         self.failed += 1
         self.retry_at = some(unsafe { Instant.now() })
         self.state = State.Offline
@@ -225,6 +276,22 @@ impl Conn {
             }
             return false
         }
+        if t == "login" or t == "setup" {
+            self.log_in(if t == "setup" { Kind.Setup } else { Kind.Login }, m)
+            return true
+        }
+        if t == "logout" {
+            if let server = self.server.copy() {
+                if let token = self.token.copy() {
+                    if self.pending == none {
+                        self.pending = some(Pending.logout(server, token))
+                    }
+                }
+            }
+            self.forget()
+            self.tell_state(0, String("logged out"))
+            return true
+        }
         if t == "app.wake" or t == "app.network" {
             // The socket may have died while the system slept or the network changed, with
             // nothing to say so: open a new one now. The cursor makes it lossless.
@@ -250,6 +317,61 @@ impl Conn {
         return true
     }
 
+    /// Starts a login or a setup from the app's message `m`. Its `server`, or the one
+    /// already known, is where.
+    fn log_in(mut self, kind: Kind, m: Json) {
+        let id = str_at(m.copy(), "id")
+        let server = address(str_at(m.copy(), "server") ?? (self.server.copy() ?? String()))
+        if ws_url(server.copy()) == none {
+            self.tell(Obj.new().s("t", String("core.login")).maybe("id", id).j("error", Obj.new().s("code", String("bad_server")).s("message", String("Give the instance's address, starting with https:// or http://.")).done()).done())
+            return
+        }
+        if self.pending != none {
+            self.tell(Obj.new().s("t", String("core.login")).maybe("id", id).j("error", Obj.new().s("code", String("busy")).s("message", String("A login is already on its way.")).done()).done())
+            return
+        }
+        self.pending = some(Pending.start(kind, server, id, request_body(kind, m)))
+    }
+
+    /// Takes a login, setup or logout that has ended.
+    fn poll(mut self) {
+        let ready = match self.pending {
+            some(p) => p.done(),
+            none => false,
+        }
+        if not ready { return }
+        let taken = self.pending.take() else { return }
+        var p = taken
+        let server = p.server.copy()
+        let id = p.id.copy()
+        match p.outcome() {
+            Outcome.Token(user, device, token) => {
+                var reply = Obj.new().s("t", String("core.login")).maybe("id", id).b("ok", true).s("user", user).s("device", device)
+                match keyring.set(self.keyring.copy(), server.copy(), token.copy()) {
+                    ok => reply = reply.b("kept", true),
+                    // Logged in for this run, but the next start asks again.
+                    err(e) => reply = reply.b("kept", false).s("why", "{e}"),
+                }
+                if let ws = self.ws.take() {
+                    ws.close()
+                }
+                // A login is a new device, and maybe another person: catch up from the start.
+                self.after = 0
+                self.server = some(server)
+                self.token = some(token)
+                self.failed = 0
+                self.tell(reply.done())
+                self.connect()
+            },
+            Outcome.Refused(code, words, wait) => {
+                var e = Obj.new().s("code", code).s("message", words)
+                if wait > 0 { e = e.i("retry_after", wait) }
+                self.tell(Obj.new().s("t", String("core.login")).maybe("id", id).j("error", e.done()).done())
+            },
+            Outcome.Done => {},
+        }
+    }
+
     /// Starts again if it's time.
     fn tick(mut self) {
         if self.state != State.Offline { return }
@@ -264,9 +386,10 @@ impl Conn {
 impl Task for Conn {
     fn run(own self) {
         var c = self
-        c.connect()
+        c.begin()
         loop {
             c.read()
+            c.poll()
             c.tick()
             if let m = unsafe { c.inbox.wait_for(TICK_NS) } {
                 if not c.from_app(m) { return }

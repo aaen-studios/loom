@@ -13,6 +13,9 @@ import std.thread.{Task}
 import shared.obj.{Obj, int_at, str_at}
 import core.conn.{Conn}
 
+/// The credential store's service the device token is kept under, by the instance's address.
+const KEYRING: str = "loom"
+
 /// Where the core tells the app what happened: the app's function, and the context it gave.
 struct Sink {
     on_event: extern "C" fn(*const u8, usize, *u8)
@@ -60,9 +63,9 @@ unsafe fn text_at(p: *const u8, len: usize) -> String? {
 }
 
 /// Starts the core with its config, JSON in the `len` bytes at `config`:
-/// `{"server": "https://…", "token": "…", "after": 1046}`. It tells `on_event`, with
-/// `ctx`, what happens, from a thread of its own. Gives back the core, which
-/// loom_core_send and loom_core_stop take.
+/// `{"server": "https://…", "after": 1046}`, each optional (core/README.md, "Config").
+/// It tells `on_event`, with `ctx`, what happens, from a thread of its own. Gives back
+/// the core, which loom_core_send and loom_core_stop take.
 @export_c("loom_core_start")
 fn core_start(config: *const u8, len: usize, on_event: extern "C" fn(*const u8, usize, *u8), ctx: *u8) -> *u8 {
     let sink = unsafe { Sink { on_event: on_event, ctx: ctx } }
@@ -72,18 +75,14 @@ fn core_start(config: *const u8, len: usize, on_event: extern "C" fn(*const u8, 
         err(_) => none,
     }
     let cfg = parsed ?? Obj.new().done()
-    let server = str_at(cfg.copy(), "server") ?? String()
-    let token = str_at(cfg.copy(), "token") ?? String()
+    let server = str_at(cfg.copy(), "server")
+    let token = str_at(cfg.copy(), "token")
+    let service = str_at(cfg.copy(), "keyring") ?? String(KEYRING)
     let after = int_at(cfg, "after") ?? 0
     let inbox = Receiver<String>()
     let to_core = inbox.sender()
     let from_core = Receiver<String>()
-    let conn = Conn.new(server.copy(), token, after, inbox, from_core.sender()) else {
-        sink.tell("{Obj.new().s("t", String("error")).s("code", String("bad_config")).s("message", "no http:// or https:// server in the config: {server}").done()}")
-        unsafe {
-            return Box(Core { to_core: none, conn: none, relay: none }).into_ptr().cast<u8>()
-        }
-    }
+    let conn = Conn.new(server, token, after, service, inbox, from_core.sender())
     let conn_thread = unsafe { Thread.spawn(conn) }
     let relay_thread = unsafe { Thread.spawn(Relay { sink: sink, from_core: from_core }) }
     unsafe {

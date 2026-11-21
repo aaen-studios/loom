@@ -1,0 +1,128 @@
+module core.login
+
+// Logging in, setting up and logging out, over the instance's HTTP API
+// (protocol/protocol.md, "HTTP"). Each is a request the core's loop starts and
+// then looks at on each turn, so the socket and the app's messages are never
+// held up while a password is hashed.
+import std.http.{Header, Request, post}
+import std.json.{Json, parse}
+import shared.obj.{Obj, at, str_at}
+
+const TIMEOUT_MS: u32 = 30000
+const LIMIT: usize = 1048576
+
+pub enum Kind {
+    Login
+    Setup
+    Logout
+}
+
+/// A request on its way.
+pub struct Pending {
+    pub kind: Kind
+    pub server: String    // the instance's http:// or https:// address, with no / at the end
+    pub id: String?       // the app's id for it, given back in the answer
+    req: Request
+}
+
+/// How a request ended.
+pub enum Outcome {
+    /// Logged in or set up: the device and its token.
+    Token(String, String, String)    // user, device, token
+    /// The instance said no, or couldn't be reached: the code, the words and, for
+    /// rate_limited, the seconds to wait.
+    Refused(String, String, i64)
+    /// Logged out.
+    Done
+}
+
+/// `server` with no spaces or / at the end.
+pub fn address(server: String) -> String {
+    var b = server.trim().copy()
+    while b.ends_with("/") {
+        b = b[0..b.len() - 1].copy()
+    }
+    return b
+}
+
+impl Pending {
+    /// Starts a login or a setup: POSTs `body` to /api/login or /api/setup.
+    pub fn start(kind: Kind, server: own String, id: own String?, payload: Json) -> Pending {
+        let path = match kind {
+            Kind.Setup => "/api/setup",
+            _ => "/api/login",
+        }
+        let headers: List<Header> = [Header { name: String("Content-Type"), value: String("application/json") }]
+        let req = post("{server}{path}", headers, "{payload}".to_bytes(), TIMEOUT_MS, LIMIT)
+        return Pending { kind: kind, server: server, id: id, req: req }
+    }
+
+    /// Starts a logout, which revokes `token` on the instance.
+    pub fn logout(server: own String, token: String) -> Pending {
+        let headers: List<Header> = [Header { name: String("Authorization"), value: "Bearer {token}" }]
+        let req = post("{server}/api/logout", headers, List<u8>(), TIMEOUT_MS, LIMIT)
+        return Pending { kind: Kind.Logout, server: server, id: none, req: req }
+    }
+
+    /// Whether it has ended, so `outcome` won't wait.
+    pub fn done(self) -> bool {
+        return self.req.done()
+    }
+
+    /// How it ended.
+    pub fn outcome(mut self) -> Outcome {
+        let r = match self.req.wait() {
+            ok(r) => r,
+            err(e) => return Outcome.Refused(String("unreachable"), "{e}", 0),
+        }
+        if r.status == 204 or self.kind == Kind.Logout {
+            return Outcome.Done
+        }
+        let answer = match parse(String.from_utf8(r.body.copy()) ?? String()) {
+            ok(j) => j,
+            err(_) => Json.Null,
+        }
+        if r.status == 200 {
+            let token = str_at(answer.copy(), "token") else {
+                return Outcome.Refused(String("bad_answer"), String("The instance's answer had no token."), 0)
+            }
+            return Outcome.Token(str_at(answer.copy(), "user") ?? String(), str_at(answer, "device") ?? String(), token)
+        }
+        let e = at(answer, "error")
+        let code = str_at(e.copy(), "code") ?? "http_{r.status}"
+        let words = str_at(e, "message") ?? "The instance answered {r.status}."
+        var wait: i64 = 0
+        if let after = r.header(String("Retry-After")) {
+            wait = i64.parse(after) ?? 0
+        }
+        return Outcome.Refused(code, words, wait)
+    }
+}
+
+/// The body of a login or a setup from the app's message `m`: its username, password,
+/// device and, for a setup, code.
+pub fn request_body(kind: Kind, m: Json) -> Json {
+    var o = Obj.new().maybe("username", str_at(m.copy(), "username")).maybe("password", str_at(m.copy(), "password"))
+    if kind == Kind.Setup {
+        o = o.maybe("code", str_at(m.copy(), "code"))
+    }
+    let device = at(m, "device")
+    if device != Json.Null {
+        o = o.j("device", device)
+    }
+    return o.done()
+}
+
+@test
+fn trims_the_address() {
+    assert(address(String(" https://loom.example.com/ ")) == "https://loom.example.com")
+}
+
+@test
+fn makes_the_body() {
+    let m = Obj.new().s("t", String("setup")).s("username", String("elliot")).s("password", String("pw")).s("code", String("c1")).done()
+    let b = request_body(Kind.Setup, m.copy())
+    assert(str_at(b.copy(), "code") == some(String("c1")))
+    assert(str_at(b, "t") == none)
+    assert(str_at(request_body(Kind.Login, m), "code") == none)
+}
