@@ -6220,6 +6220,7 @@ ACTA_KEY=secret:ACTA_KEY",
                     "running" => " · running now".into(),
                     "done" => format!(" · last ran {}", time_of(r.last_at)),
                     "skipped" => format!(" · skipped at {}", time_of(r.last_at)),
+                    "quiet" => format!(" · nothing new at {}", time_of(r.last_at)),
                     _ => format!(" · failed at {}: {}", time_of(r.last_at), r.last_error),
                 };
                 // Its flow, while it runs: how far each step has got, and a Stop.
