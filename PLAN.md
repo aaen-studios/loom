@@ -377,7 +377,7 @@ An instance moves whole, in any direction: desktop to server, server to desktop,
 - **How:** the new place runs `loom receive`, which prints a one-time move code. The old instance connects with it, pauses runs and routines, and streams everything over an encrypted connection: a snapshot of the database, and the folders as a zstd tar stream. The new instance checks it all, then takes over.
 - **Secrets** travel encrypted with a key from the move code, never in plain text, and are encrypted again with the new instance's key.
 - **The apps follow.** The old instance sends every device a move event, signed with its key, with the new address. The apps switch over, keep their device tokens and cache, and catch up from the same event number. A device that was offline finds the old address answering "moved to …" for 30 days, or until the owner shuts it down.
-- **Backups are the same export**, written to a file, by hand or on a schedule.
+- **Backups are the same export**, written to a file, by hand or on a schedule: `loom export FILE` (a `.tar.zst` with a snapshot of the database, the secret key and the folders) and `loom import FILE` into an empty folder (`server/backup.calx`).
 
 ## Files and images
 
