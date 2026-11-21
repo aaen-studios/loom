@@ -41,6 +41,7 @@ import server.plugins
 import server.push
 import server.routines
 import server.gate
+import server.tables
 import server.sandbox
 import server.store.{AcpAgent, Device, Store, User, now, secret_key}
 import shared.tools
@@ -1660,6 +1661,17 @@ impl Instance {
         if name == "html_render" {
             return some(try i.render_page(g, args))
         }
+        // Shared tables: each tool is a table command, as the agent; dropping asks first.
+        if name == "drop_table" {
+            let table = str_at(args.copy(), "table") ?? String()
+            let found = try i.store.shared_table(g.user.copy(), table.copy()) else return some(tool_error("There's no table {table}. list_tables gives their names."))
+            let action = Obj.new().s("name", String("table.drop")).j("args", Obj.new().s("table", table.copy()).done()).done()
+            return try i.ask_person(req, g, "Drop the table {table}, with its {int_at(found, "rows") ?? 0} rows", "delete", action)
+        }
+        let table_tools = [("list_tables", "table.list"), ("create_table", "table.create"), ("write_rows", "table.write"), ("query_rows", "table.rows"), ("delete_rows", "table.delete_rows")]
+        for (tool_name, command) in table_tools {
+            if name == tool_name { return some(answer_text(try i.command(g.user.copy(), g.agent.copy(), String(command), args.copy()))) }
+        }
         if name == "remember" {
             let what = (str_at(args.copy(), "text") ?? String()).trim().copy()
             if what.len() == 0 { return some(tool_error(String("text is empty."))) }
@@ -2055,6 +2067,98 @@ impl Instance {
         try i.event(user.copy(), "conversation.created", Obj.new().j("conversation", c).done())
         if device.starts_with("a_") { i.log(user, device.copy(), "agent", String("Branched a chat"), device) }
         return Answer.Value(Obj.new().s("conversation", made_id).done())
+    }
+
+    // table.*: the person's shared tables (PLAN.md, "Shared tables"). Every
+    // agent of theirs reads and writes every table, but a table is its owner's:
+    // only the owner, the person or a row's writer changes or deletes a row,
+    // and what other agents wrote is marked untrusted when it's read.
+    fn table_command(i: Instance, user: String, device: String, name: String, args: Json) -> Answer ! Error {
+        // The agent writing, or empty for the person.
+        let writer = if device.starts_with("a_") { device.copy() } else { String() }
+        if name == "table.list" {
+            return Answer.Value(Obj.new().j("tables", Json.Array(try i.store.shared_tables(user))).done())
+        }
+        let table = (str_at(args.copy(), "table") ?? String()).trim().copy()
+        if name == "table.create" {
+            if let why = tables.bad_name(table.copy(), "A table's name", true) { return Answer.Refused(String("bad_request"), why) }
+            if try i.store.shared_table(user.copy(), table.copy()) != none { return Answer.Refused(String("exists"), "There's a table {table} already. Write to it, or pick another name.") }
+            if (try i.store.shared_tables(user.copy())).len() >= tables.TABLES_MOST { return Answer.Refused(String("limit"), "Your person has {tables.TABLES_MOST} tables, as many as they can have. Drop one first.") }
+            let description = cut_short(str_at(args, "description") ?? String(), 500)
+            try i.store.add_shared_table(user.copy(), table.copy(), description, writer.copy())
+            if writer.len() > 0 { i.log(user.copy(), writer.copy(), "table", "Made the table {table}", writer.copy()) }
+            try i.event(user.copy(), "table.changed", Obj.new().s("table", table.copy()).s("by", device).done())
+            return Answer.Value(Obj.new().j("table", try i.store.shared_table(user, table) ?? Json.Null).done())
+        }
+        let found = try i.store.shared_table(user.copy(), table.copy()) else return Answer.Refused(String("not_found"), "There's no table {table}. table.list gives their names.")
+        let owner = str_at(found.copy(), "owner") ?? String()
+        if name == "table.rows" {
+            let q = match tables.query_of(args) {
+                ok(q) => q,
+                err(e) => return Answer.Refused(String("bad_request"), "{e}"),
+            }
+            var out = List<Json>()
+            for r in try i.store.shared_rows(user, table, q.filters, q.order, q.desc, q.limit + 1, q.offset) {
+                let by = str_at(r.copy(), "by") ?? String()
+                out.push(if tables.untrusted(by, owner.copy()) { merge(r, Obj.new().b("untrusted", true).done()) } else { r.copy() })
+            }
+            let more = i64.wrap(u64(out.len())) > q.limit
+            if more { _ = out.pop() }
+            return Answer.Value(Obj.new().s("owner", owner).j("rows", Json.Array(out)).b("more", more).done())
+        }
+        if name == "table.write" {
+            let Json.Array(given) = at(args, "rows") else return Answer.Refused(String("bad_request"), String("rows is a list of rows, each an object of its fields."))
+            if given.len() == 0 or given.len() > tables.WRITE_MOST { return Answer.Refused(String("bad_request"), "rows is 1 to {tables.WRITE_MOST} rows.") }
+            // Each row is checked before any is written.
+            var writes = List<(i64?, String)>()
+            var new_rows: i64 = 0
+            for row in given {
+                let (id, text) = match tables.row_to_write(row.copy()) {
+                    ok(w) => w,
+                    err(e) => return Answer.Refused(String("bad_request"), "{e}"),
+                }
+                if let n = id {
+                    let old = try i.store.shared_row(user.copy(), table.copy(), n) else return Answer.Refused(String("not_found"), "There's no row {n} in {table}.")
+                    if not tables.may_change(writer.copy(), str_at(old, "by") ?? String(), owner.copy()) { return Answer.Refused(String("forbidden"), "Row {n} is another agent's, in a table that isn't yours: write a new row instead.") }
+                } else {
+                    new_rows += 1
+                }
+                writes.push((id, text))
+            }
+            if try i.store.shared_row_count(user.copy()) + new_rows > tables.ROWS_MOST { return Answer.Refused(String("limit"), "Your person's tables hold {tables.ROWS_MOST} rows at most. Delete some first.") }
+            var ids = List<Json>()
+            for (id, text) in writes {
+                if let n = id {
+                    try i.store.put_shared_row(user.copy(), n, text.copy(), writer.copy())
+                    ids.push(Json.Int(n))
+                } else {
+                    ids.push(Json.Int(try i.store.add_shared_row(user.copy(), table.copy(), text.copy(), writer.copy())))
+                }
+            }
+            try i.event(user, "table.changed", Obj.new().s("table", table).s("by", device).done())
+            return Answer.Value(Obj.new().j("ids", Json.Array(ids)).done())
+        }
+        if name == "table.delete_rows" {
+            let Json.Array(given) = at(args, "ids") else return Answer.Refused(String("bad_request"), String("ids is a list of the rows' numbers."))
+            var ids = List<i64>()
+            for g in given {
+                let Json.Int(n) = g else return Answer.Refused(String("bad_request"), String("ids is a list of the rows' numbers."))
+                let old = try i.store.shared_row(user.copy(), table.copy(), n) else return Answer.Refused(String("not_found"), "There's no row {n} in {table}.")
+                if not tables.may_change(writer.copy(), str_at(old, "by") ?? String(), owner.copy()) { return Answer.Refused(String("forbidden"), "Row {n} is another agent's, in a table that isn't yours.") }
+                ids.push(n)
+            }
+            for n in ids { try i.store.delete_shared_row(user.copy(), n) }
+            try i.event(user, "table.changed", Obj.new().s("table", table).s("by", device).done())
+            return Answer.Value(Obj.new().i("deleted", i64.wrap(u64(ids.len()))).done())
+        }
+        if name == "table.drop" {
+            // An agent's drop_table asks the person, and runs as the device that said yes.
+            if writer.len() > 0 { return Answer.Refused(String("forbidden"), String("Only your person drops a table: drop_table asks them.")) }
+            try i.store.drop_shared_table(user.copy(), table.copy())
+            try i.event(user, "table.changed", Obj.new().s("table", table).s("by", device).b("dropped", true).done())
+            return Answer.Value(Obj.new().done())
+        }
+        return Answer.Refused(String("bad_request"), "There's no command {name}.")
     }
 
     // chat.ask: a side question about a chat (PLAN.md, "Side questions"). The
@@ -4555,6 +4659,7 @@ impl Instance {
             return Answer.Value(empty)
         }
         if name == "conversation.branch" { return try i.branch(user, device, args) }
+        if name.starts_with("table.") { return try i.table_command(user, device, name, args) }
         // Pins: a message is pinned in its conversation, for every device to see.
         if name == "message.pin" {
             let id = str_at(args.copy(), "message") ?? String()

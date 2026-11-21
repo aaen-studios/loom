@@ -131,6 +131,13 @@ CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5 (
 CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5 (
     text, user UNINDEXED, agent UNINDEXED, at UNINDEXED,
     tokenize = 'unicode61 remove_diacritics 2');
+CREATE TABLE IF NOT EXISTS shared_tables (
+    user TEXT NOT NULL REFERENCES users(id), name TEXT NOT NULL, description TEXT NOT NULL,
+    owner TEXT NOT NULL, at INTEGER NOT NULL, PRIMARY KEY (user, name));
+CREATE TABLE IF NOT EXISTS shared_rows (
+    id INTEGER PRIMARY KEY, user TEXT NOT NULL REFERENCES users(id), tbl TEXT NOT NULL,
+    data TEXT NOT NULL, by TEXT NOT NULL, at INTEGER NOT NULL, updated INTEGER NOT NULL);
+CREATE INDEX IF NOT EXISTS shared_rows_by_table ON shared_rows (user, tbl);
 "#
 
 /// What search marks a matched word with, before and after.
@@ -222,6 +229,15 @@ fn int(v: Value) -> i64 {
         Value.Int(n) => return n,
         _ => return 0,
     }
+}
+
+// A shared table's row, from id, data, by, at and updated.
+fn row_of(r: List<Value>) -> Json {
+    let data = match parse(text(r[1].copy())) {
+        ok(j) => j,
+        err(_) => Obj.new().done(),
+    }
+    return Obj.new().i("id", int(r[0].copy())).s("by", text(r[2].copy())).i("at", int(r[3].copy())).i("updated", int(r[4].copy())).j("data", data).done()
 }
 
 fn t(s: String) -> Value {
@@ -669,6 +685,110 @@ impl Store {
 
     pub fn branch_handed(self, conversation: String) ! Error {
         _ = try self.db.execute(String("UPDATE branches SET handed = 1 WHERE conversation = ?"), [t(conversation)])
+    }
+
+    // --- Shared tables (PLAN.md, "Shared tables") ---
+
+    // The person's tables: name, description, owner (an agent's id, or empty
+    // for the person), at, and how many rows each has.
+    pub fn shared_tables(self, user: String) -> List<Json> ! Error {
+        var out = List<Json>()
+        for r in try self.db.query(String("SELECT t.name, t.description, t.owner, t.at, (SELECT count(*) FROM shared_rows r WHERE r.user = t.user AND r.tbl = t.name) FROM shared_tables t WHERE t.user = ? ORDER BY t.name"), [t(user)]) {
+            out.push(Obj.new().s("name", text(r[0].copy())).s("description", text(r[1].copy())).s("owner", text(r[2].copy())).i("at", int(r[3].copy())).i("rows", int(r[4].copy())).done())
+        }
+        return out
+    }
+
+    pub fn shared_table(self, user: String, name: String) -> Json? ! Error {
+        let r = try self.db.query_one(String("SELECT t.name, t.description, t.owner, t.at, (SELECT count(*) FROM shared_rows r WHERE r.user = t.user AND r.tbl = t.name) FROM shared_tables t WHERE t.user = ? AND t.name = ?"), [t(user), t(name)]) else return none
+        return some(Obj.new().s("name", text(r[0].copy())).s("description", text(r[1].copy())).s("owner", text(r[2].copy())).i("at", int(r[3].copy())).i("rows", int(r[4].copy())).done())
+    }
+
+    pub fn add_shared_table(self, user: String, name: String, description: String, owner: String) ! Error {
+        _ = try self.db.execute(String("INSERT INTO shared_tables (user, name, description, owner, at) VALUES (?, ?, ?, ?, ?)"), [t(user), t(name), t(description), t(owner), Value.Int(now())])
+    }
+
+    pub fn drop_shared_table(self, user: String, name: String) ! Error {
+        _ = try self.db.execute(String("DELETE FROM shared_rows WHERE user = ? AND tbl = ?"), [t(user.copy()), t(name.copy())])
+        _ = try self.db.execute(String("DELETE FROM shared_tables WHERE user = ? AND name = ?"), [t(user), t(name)])
+    }
+
+    // How many rows the person's tables hold in all.
+    pub fn shared_row_count(self, user: String) -> i64 ! Error {
+        let r = try self.db.query_one(String("SELECT count(*) FROM shared_rows WHERE user = ?"), [t(user)]) else return 0
+        return int(r[0].copy())
+    }
+
+    // A row of `tbl`: id, by (an agent's id, or empty for the person), at,
+    // updated, and its data.
+    pub fn shared_row(self, user: String, tbl: String, id: i64) -> Json? ! Error {
+        let r = try self.db.query_one(String("SELECT id, data, by, at, updated FROM shared_rows WHERE user = ? AND tbl = ? AND id = ?"), [t(user), t(tbl), Value.Int(id)]) else return none
+        return some(row_of(r))
+    }
+
+    pub fn add_shared_row(self, user: String, tbl: String, data: String, by: String) -> i64 ! Error {
+        let at = now()
+        _ = try self.db.execute(String("INSERT INTO shared_rows (user, tbl, data, by, at, updated) VALUES (?, ?, ?, ?, ?, ?)"), [t(user), t(tbl), t(data), t(by), Value.Int(at), Value.Int(at)])
+        let r = try self.db.query_one(String("SELECT last_insert_rowid()"), List<Value>()) else return 0
+        return int(r[0].copy())
+    }
+
+    pub fn put_shared_row(self, user: String, id: i64, data: String, by: String) ! Error {
+        _ = try self.db.execute(String("UPDATE shared_rows SET data = ?, by = ?, updated = ? WHERE user = ? AND id = ?"), [t(data), t(by), Value.Int(now()), t(user), Value.Int(id)])
+    }
+
+    pub fn delete_shared_row(self, user: String, id: i64) ! Error {
+        _ = try self.db.execute(String("DELETE FROM shared_rows WHERE user = ? AND id = ?"), [t(user), Value.Int(id)])
+    }
+
+    // Rows of `tbl` whose fields equal what `filters` says, in the order of
+    // the field `order` (or their ids, for "id"), `limit` of them from `offset`.
+    pub fn shared_rows(self, user: String, tbl: String, filters: List<(String, Json)>, order: String, desc: bool, limit: i64, offset: i64) -> List<Json> ! Error {
+        var sql = String("SELECT id, data, by, at, updated FROM shared_rows WHERE user = ? AND tbl = ?")
+        var params: List<Value> = [t(user), t(tbl)]
+        for (name, value) in filters {
+            let path = "$.{name}"
+            match value {
+                Json.Null => {
+                    sql.push_str(" AND json_extract(data, ?) IS NULL")
+                    params.push(t(path))
+                },
+                Json.Bool(b) => {
+                    sql.push_str(" AND json_extract(data, ?) = ?")
+                    params.push(t(path))
+                    params.push(Value.Int(if b { 1 } else { 0 }))
+                },
+                Json.Int(n) => {
+                    sql.push_str(" AND json_extract(data, ?) = ?")
+                    params.push(t(path))
+                    params.push(Value.Int(n))
+                },
+                Json.Float(f) => {
+                    sql.push_str(" AND json_extract(data, ?) = ?")
+                    params.push(t(path))
+                    params.push(Value.Real(f))
+                },
+                Json.Str(s) => {
+                    sql.push_str(" AND json_extract(data, ?) = ?")
+                    params.push(t(path))
+                    params.push(t(s.copy()))
+                },
+                _ => {},
+            }
+        }
+        let dir = if desc { " DESC" } else { "" }
+        if order == "id" {
+            sql.push_str(" ORDER BY id{dir}")
+        } else {
+            sql.push_str(" ORDER BY json_extract(data, ?){dir}, id{dir}")
+            params.push(t("$.{order}"))
+        }
+        sql.push_str(" LIMIT ? OFFSET ?")
+        params.push(Value.Int(limit))
+        params.push(Value.Int(offset))
+        var out = List<Json>()
+        for r in try self.db.query(sql, params) { out.push(row_of(r)) }
+        return out
     }
 
     // --- Side questions (PLAN.md, "Side questions") ---
@@ -1255,7 +1375,7 @@ impl Store {
 
     fn remove_rows(self, user: String) ! Error {
         _ = try self.db.execute(String("DELETE FROM sent WHERE device IN (SELECT id FROM devices WHERE user = ?)"), [t(user.copy())])
-        for table in ["push_tokens", "link_codes", "resets", "agent_revisions", "agents", "activity", "secrets", "mcp_servers", "skills", "messages", "conversations", "runs", "queue", "tasks", "sides", "branches", "events", "acp_sessions", "files", "profiles", "routines", "plugin_data", "plugin_revisions", "plugins", "usage", "memories", "memories_fts", "messages_fts", "devices"] {
+        for table in ["push_tokens", "link_codes", "resets", "agent_revisions", "agents", "activity", "secrets", "mcp_servers", "skills", "messages", "conversations", "runs", "queue", "tasks", "sides", "branches", "events", "acp_sessions", "files", "profiles", "routines", "plugin_data", "plugin_revisions", "plugins", "usage", "memories", "memories_fts", "messages_fts", "shared_rows", "shared_tables", "devices"] {
             _ = try self.db.execute("DELETE FROM {table} WHERE user = ?", [t(user.copy())])
         }
         _ = try self.db.execute(String("DELETE FROM invites WHERE by = ?"), [t(user.copy())])

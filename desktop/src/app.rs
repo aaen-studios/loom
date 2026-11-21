@@ -93,6 +93,7 @@ enum Screen {
     Pins,
     Aside,
     Page,
+    Tables,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -154,6 +155,8 @@ pub struct Loom {
     /// On the skills page: none for the list, `Some(None)` for a new skill, `Some(Some(name))`
     /// for one being changed.
     skill_open: Option<Option<String>>,
+    /// The table the tables page is asking whether to drop.
+    table_dropping: Option<String>,
     /// The open plugin panel: its plugin, the web view, and where it is (x, y, w, h).
     panel: Option<(String, crate::panel::Panel, [f32; 4])>,
     panel_context: Option<wry::WebContext>,
@@ -653,6 +656,7 @@ ACTA_KEY=secret:ACTA_KEY",
             skill_desc_in,
             skill_body_in,
             skill_open: None,
+            table_dropping: None,
             panel: None,
             panel_context: None,
             panel_opening: None,
@@ -796,7 +800,14 @@ ACTA_KEY=secret:ACTA_KEY",
     /// elsewhere: keeps the choice, and starts the core again with it.
     /// Opens a page, asking the instance for what it shows.
     fn open(&mut self, screen: Screen, cx: &mut Context<Self>) {
+        self.model.tables_open = screen == Screen::Tables;
         match screen {
+            Screen::Tables => {
+                self.table_dropping = None;
+                for f in self.model.open_table(None) {
+                    self.send(f);
+                }
+            }
             Screen::Profile => {
                 let f = self.model.load_profile();
                 self.send(f);
@@ -1618,6 +1629,7 @@ ACTA_KEY=secret:ACTA_KEY",
             ("pop-routines", Ico::Clock, "Routines", Screen::Routines),
             ("pop-tasks", Ico::ListTodo, "Tasks", Screen::Tasks),
             ("pop-skills", Ico::BookOpen, "Skills", Screen::Skills),
+            ("pop-tables", Ico::Sheet, "Tables", Screen::Tables),
             ("pop-programs", Ico::Bot, "Agent programs", Screen::Programs),
             ("pop-mcp", Ico::Plug, "MCP servers", Screen::Mcp),
             ("pop-plugins", Ico::Puzzle, "Plugins", Screen::Plugins),
@@ -1709,6 +1721,7 @@ ACTA_KEY=secret:ACTA_KEY",
             Screen::Server => self.server_page(),
             Screen::Profile => self.profile_page(cx),
             Screen::Skills => self.skills_page(cx),
+            Screen::Tables => self.tables_page(cx),
             Screen::Routines => self.routines_page(cx),
             Screen::Tasks => self.tasks_page(cx),
             Screen::Programs => self.programs_page(cx),
@@ -5302,6 +5315,191 @@ ACTA_KEY=secret:ACTA_KEY",
         }
         let page = div()
             .id("skills-page")
+            .size_full()
+            .overflow_y_scroll()
+            .flex()
+            .justify_center()
+            .pt(px(space::XL))
+            .px(px(space::XL))
+            .pb(px(space::XXL))
+            .child(body);
+        div().flex_1().min_h_0().child(page)
+    }
+
+    /// Who an agent's id is, as the tables page says it: its name, or "you" for the
+    /// person.
+    fn who(&self, id: &str) -> String {
+        if id.is_empty() {
+            return "you".into();
+        }
+        self.model
+            .agent(id)
+            .map(|a| a.name.clone())
+            .unwrap_or_else(|| "an agent that's gone".into())
+    }
+
+    /// The tables page: the tables the person's agents share, and one open, with its
+    /// newest rows. What an agent other than the owner wrote is marked, and dropping
+    /// a table asks once more.
+    fn tables_page(&mut self, cx: &mut Context<Self>) -> Div {
+        let p = self.p;
+        let caption = |text: String| {
+            div()
+                .text_size(px(size::CAPTION))
+                .text_color(p.ink_3)
+                .child(text)
+        };
+        let mut body = div()
+            .w_full()
+            .max_w(px(560.0))
+            .flex()
+            .flex_col()
+            .gap(px(space::M));
+        let open = self
+            .model
+            .table_open
+            .clone()
+            .and_then(|name| self.model.tables.iter().find(|t| t.name == name).cloned());
+        if let Some(t) = open {
+            let name = t.name.clone();
+            let dropping = self.table_dropping.as_deref() == Some(name.as_str());
+            let drop_label = if dropping {
+                format!("Drop it, with its {} rows", t.rows)
+            } else {
+                "Drop".to_string()
+            };
+            body = body
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(space::S))
+                        .child(
+                            div()
+                                .id("tables-back")
+                                .cursor_pointer()
+                                .child(Icon::new(Ico::ArrowLeft).small().text_color(p.ink_2))
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.table_dropping = None;
+                                    for f in this.model.open_table(None) {
+                                        this.send(f);
+                                    }
+                                    cx.notify();
+                                })),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(size::HEADING))
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_color(p.ink)
+                                .child(name.clone()),
+                        ),
+                )
+                .child(caption(format!(
+                    "{}Made by {}, {} rows",
+                    if t.description.is_empty() {
+                        String::new()
+                    } else {
+                        format!("{} · ", t.description)
+                    },
+                    self.who(&t.owner),
+                    t.rows
+                )))
+                .child(
+                    div().flex().child(
+                        self.button("drop-table", &drop_label, false)
+                            .text_color(p.bad)
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                if this.table_dropping.as_deref() == Some(name.as_str()) {
+                                    let f = this.model.drop_table(&name);
+                                    this.send(f);
+                                    this.table_dropping = None;
+                                } else {
+                                    this.table_dropping = Some(name.clone());
+                                }
+                                cx.notify();
+                            })),
+                    ),
+                );
+            if self.model.table_rows.is_empty() {
+                body = body.child(caption("No rows".into()));
+            }
+            for r in self.model.table_rows.clone() {
+                let mut head = div()
+                    .flex()
+                    .items_center()
+                    .gap(px(space::S))
+                    .child(caption(format!("#{} · {}", r.id, self.who(&r.by))));
+                if r.untrusted {
+                    head = head.child(
+                        div()
+                            .text_size(px(size::CAPTION))
+                            .text_color(p.bad)
+                            .child("from another agent"),
+                    );
+                }
+                body = body.child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap(px(space::XS))
+                        .py(px(space::S))
+                        .border_b_1()
+                        .border_color(p.line)
+                        .child(head)
+                        .child(
+                            div()
+                                .text_size(px(size::SMALL))
+                                .text_color(p.ink)
+                                .child(r.data.clone()),
+                        ),
+                );
+            }
+            if self.model.table_more {
+                body = body.child(caption("Older rows aren't shown".into()));
+            }
+        } else {
+            if self.model.tables.is_empty() {
+                body = body.child(caption(
+                    "No tables yet. Your agents make them to keep lists and records, and share them with each other".into(),
+                ));
+            }
+            for t in self.model.tables.clone() {
+                let id = SharedString::from(format!("table-{}", t.name));
+                let name = t.name.clone();
+                body = body.child(
+                    div()
+                        .id(id)
+                        .flex()
+                        .flex_col()
+                        .py(px(space::S))
+                        .px(px(space::S))
+                        .rounded(px(radius::BUTTON))
+                        .cursor_pointer()
+                        .hover(move |s| s.bg(p.hover))
+                        .child(
+                            div()
+                                .text_size(px(size::SMALL))
+                                .font_weight(FontWeight::MEDIUM)
+                                .text_color(p.ink)
+                                .child(t.name.clone()),
+                        )
+                        .when(!t.description.is_empty(), |d| {
+                            d.child(caption(t.description.clone()))
+                        })
+                        .child(caption(format!("{} · {} rows", self.who(&t.owner), t.rows)))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.table_dropping = None;
+                            for f in this.model.open_table(Some(name.clone())) {
+                                this.send(f);
+                            }
+                            cx.notify();
+                        })),
+                );
+            }
+        }
+        let page = div()
+            .id("tables-page")
             .size_full()
             .overflow_y_scroll()
             .flex()

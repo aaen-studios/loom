@@ -172,7 +172,8 @@ gpui_kit::assets::icon_assets!(
         PinOff,
         MessageCircleQuestionMark,
         GitBranch,
-        AppWindow
+        AppWindow,
+        Sheet
     ]
 );
 
