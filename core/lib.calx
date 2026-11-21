@@ -10,7 +10,8 @@ module core.lib
 // for them, so no on_event comes after it returns.
 import std.json.{parse}
 import std.thread.{Task}
-import shared.obj.{Obj, int_at, str_at}
+import shared.obj.{Obj, str_at}
+import core.cache.{Cache}
 import core.conn.{Conn}
 
 /// The credential store's service the device token is kept under, by the instance's address.
@@ -63,7 +64,7 @@ unsafe fn text_at(p: *const u8, len: usize) -> String? {
 }
 
 /// Starts the core with its config, JSON in the `len` bytes at `config`:
-/// `{"server": "https://…", "after": 1046}`, each optional (core/README.md, "Config").
+/// `{"server": "https://…", "data": "C:\Users\…\Loom"}`, each optional (core/README.md, "Config").
 /// It tells `on_event`, with `ctx`, what happens, from a thread of its own. Gives back
 /// the core, which loom_core_send and loom_core_stop take.
 @export_c("loom_core_start")
@@ -78,11 +79,22 @@ fn core_start(config: *const u8, len: usize, on_event: extern "C" fn(*const u8, 
     let server = str_at(cfg.copy(), "server")
     let token = str_at(cfg.copy(), "token")
     let service = str_at(cfg.copy(), "keyring") ?? String(KEYRING)
-    let after = int_at(cfg, "after") ?? 0
+    var path = String(":memory:")
+    if let data = str_at(cfg, "data") {
+        path = "{data}/core.db"
+    }
+    let cache = match Cache.open(path.copy()) {
+        ok(c) => c,
+        err(e) => {
+            // The app still works, from the instance alone, and hears why it can't read offline.
+            sink.tell("{Obj.new().s("t", String("error")).s("code", String("cache")).s("message", "can't open {path}: {e}").done()}")
+            Cache.open(String(":memory:"))!
+        },
+    }
     let inbox = Receiver<String>()
     let to_core = inbox.sender()
     let from_core = Receiver<String>()
-    let conn = Conn.new(server, token, after, service, inbox, from_core.sender())
+    let conn = Conn.new(server, token, service, cache, inbox, from_core.sender())
     let conn_thread = unsafe { Thread.spawn(conn) }
     let relay_thread = unsafe { Thread.spawn(Relay { sink: sink, from_core: from_core }) }
     unsafe {

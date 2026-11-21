@@ -9,19 +9,24 @@ module core.conn
 // The app's messages come in on `inbox`, and everything for the app goes out
 // on `to_app`, both as JSON text. The C boundary (core/lib.calx) joins them
 // to loom_core_send and on_event; tests use them as they are.
-import std.http.websocket.{Error, Message, WebSocket, open}
+import std.http.websocket.{Message, WebSocket, open}
+import std.http.websocket
 import std.keyring
 import std.json.{Json, parse}
 import std.random.{Random}
 import std.thread.{Task}
 import std.time.{Instant}
-import shared.obj.{Obj, bool_at, int_at, str_at}
+import shared.obj.{Obj, at, int_at, merge, str_at}
 import shared.protocol.{CLOSE_TOKEN, CLOSE_VERSION, NEWEST}
+import core.cache.{Cache, now}
 import core.login.{Kind, Outcome, Pending, address, request_body}
 
 const FIRST_WAIT_MS: u64 = 500
 const LONGEST_WAIT_MS: u64 = 30000
 const TICK_NS: u64 = 10000000    // the loop wakes this often to read the socket
+
+// What core.get reads from the cache.
+const GETS: [str; 8] = ["conversations", "agents", "devices", "runs", "tools", "approvals", "outbox", "messages"]
 
 /// How long to wait after `failed` tries in a row: 0.5 s, doubling up to 30 s.
 pub fn wait_ms(failed: u32) -> u64 {
@@ -47,7 +52,7 @@ enum Got {
     Text(String)
     Skip
     Nothing
-    Ended(Error)
+    Ended(websocket.Error)
 }
 
 /// Where the connection is.
@@ -76,7 +81,9 @@ pub struct Conn {
     server: String?       // the instance's http:// or https:// address, once it's known
     token: String?        // this device's token, kept in the credential store
     keyring: String       // the credential store's service the token is kept under
-    after: i64            // the newest event seq the app has; LOO-24 keeps it in the cache
+    cache: Cache          // what came from the instance, the cursor and the outbox
+    lists: List<String>   // the ids of messages.list commands, whose results the cache keeps
+    have: Map<String, usize>    // bytes of each streaming block so far, by "message/block"
     ws: WebSocket?
     state: State
     failed: u32           // tries in a row that didn't reach welcome
@@ -89,19 +96,27 @@ pub struct Conn {
 }
 
 impl Conn {
-    /// A connection to the instance at `server`, from the cursor `after`. Its token is
-    /// `token`, or the one kept for `server` under the credential store's service
-    /// `keyring`; with neither, it waits for the app's login. It starts when it's run.
-    pub fn new(server: String?, token: own String?, after: i64, service: own String, inbox: own Receiver<String>, to_app: own Sender<String>) -> Conn {
+    /// A connection to the instance at `server`, or the one the cache last knew, keeping
+    /// what comes in `cache`. Its token is `token`, or the one kept for the server under
+    /// the credential store's service `service`; with neither, it waits for the app's
+    /// login. It starts when it's run.
+    pub fn new(server: String?, token: own String?, service: own String, cache: own Cache, inbox: own Receiver<String>, to_app: own Sender<String>) -> Conn {
         var s: String? = none
         if let given = server {
             s = some(address(given.copy()))
+        } else {
+            s = match cache.meta("server") {
+                ok(known) => known,
+                err(_) => none,
+            }
         }
         return Conn {
             server: s,
             token: token,
             keyring: service,
-            after: after,
+            cache: cache,
+            lists: List<String>(),
+            have: Map<String, usize>(),
             ws: none,
             state: State.SignedOut,
             failed: 0,
@@ -116,6 +131,10 @@ impl Conn {
 
     fn tell(mut self, frame: Json) {
         self.to_app.send("{frame}")
+    }
+
+    fn tell_error(mut self, code: str, message: String) {
+        self.tell(Obj.new().s("t", String("error")).s("code", String(code)).s("message", message).done())
     }
 
     fn tell_state(mut self, retry_ms: u64, why: String) {
@@ -171,8 +190,15 @@ impl Conn {
             self.tell_state(0, String("not logged in"))
             return
         }
+        let after = match self.cache.cursor() {
+            ok(c) => c,
+            err(e) => {
+                self.tell_error("cache", "{e}")
+                0
+            },
+        }
         let ws = open(url)
-        let hello = Obj.new().s("t", String("hello")).s("token", token).j("versions", Json.Array([Json.Int(i64(NEWEST))])).i("after", self.after).j("device", Obj.new().b("active", true).done()).done()
+        let hello = Obj.new().s("t", String("hello")).s("token", token).j("versions", Json.Array([Json.Int(i64(NEWEST))])).i("after", after).j("device", Obj.new().b("active", true).done()).done()
         match ws.send_text("{hello}") {
             ok => {},
             err(_) => {},    // receive says how it ended
@@ -183,12 +209,12 @@ impl Conn {
     }
 
     /// The socket ended with `e`: try again later, or stop for good on 4001 and 4002.
-    fn ended(mut self, e: Error) {
+    fn ended(mut self, e: websocket.Error) {
         if let ws = self.ws.take() {
             ws.close()
         }
         match e {
-            Error.Closed(code, reason) => {
+            websocket.Error.Closed(code, reason) => {
                 if code == CLOSE_TOKEN {
                     // The token is wrong or was revoked: log out on this device.
                     self.forget()
@@ -216,8 +242,54 @@ impl Conn {
         self.tell_state(ms, why)
     }
 
-    /// A frame from the instance. Every frame goes on to the app; the connection keeps
-    /// the cursor and its own state.
+    /// Sends a frame on the socket, if it's open.
+    fn put(self, frame: String) -> bool {
+        if let ws = self.ws {
+            match ws.send_text(frame) {
+                ok => return true,
+                err(_) => return false,
+            }
+        }
+        return false
+    }
+
+    /// Sends what's waiting in the outbox, oldest first. The instance ignores a cid it has
+    /// seen, so sending again after a lost ack does no harm.
+    fn flush(mut self) {
+        let waiting = match self.cache.outbox() {
+            ok(w) => w,
+            err(e) => {
+                self.tell_error("cache", "{e}")
+                return
+            },
+        }
+        for f in waiting {
+            if not self.put("{f}") { return }
+        }
+    }
+
+    /// A delta: goes to the app when it adds to what's there, is dropped when it's there
+    /// already, and a gap means something was lost, so the connection starts again.
+    fn delta(mut self, f: Json, text: own String) {
+        let key = "{str_at(f.copy(), "message") ?? String()}/{int_at(f.copy(), "block") ?? 0}"
+        let pos = usize.try_from(int_at(f.copy(), "pos") ?? 0) ?? 0
+        let piece = str_at(f, "text") ?? String()
+        let have = self.have.get(key.copy()) ?? 0
+        if pos > have {
+            if let ws = self.ws.take() {
+                ws.close()
+            }
+            _ = self.have.remove(key)
+            self.retry_later(String("a delta came after a gap"))
+            return
+        }
+        if pos + piece.len() <= have { return }
+        self.have.insert(key, pos + piece.len())
+        self.to_app.send(text)
+    }
+
+    /// A frame from the instance. What changes the cache is applied before the app hears
+    /// of it, so a crash between the two loses nothing.
     fn frame(mut self, text: own String) {
         let f = match parse(text.copy()) {
             ok(j) => j,
@@ -227,13 +299,58 @@ impl Conn {
         if t == "welcome" {
             self.state = State.Live
             self.failed = 0
-            if bool_at(f.copy(), "reset") == some(true) {
-                self.after = int_at(f.copy(), "seq") ?? self.after
-            }
             self.tell_state(0, String())
+            self.flush()
         } else if t == "event" {
-            if let seq = int_at(f.copy(), "seq") {
-                if seq > self.after { self.after = seq }
+            match self.cache.apply(f.copy()) {
+                ok(applied) => if not applied { return },
+                err(e) => {
+                    // Not applied, so not in the cursor either: the next hello gets it again.
+                    self.tell_error("cache", "{e}")
+                    return
+                },
+            }
+            if (str_at(f.copy(), "kind") ?? String()) == "message.created" {
+                let id = str_at(at(f.copy(), "message"), "id") ?? String()
+                var done = List<String>()
+                for (k, _) in self.have {
+                    if k.starts_with("{id}/") { done.push(k.copy()) }
+                }
+                for k in done {
+                    _ = self.have.remove(k)
+                }
+            }
+        } else if t == "snapshot" {
+            match self.cache.replace(f.copy()) {
+                ok => {},
+                err(e) => self.tell_error("cache", "{e}"),
+            }
+        } else if t == "delta" {
+            self.delta(f, text)
+            return
+        } else if t == "ack" {
+            match self.cache.sent(str_at(f.copy(), "cid") ?? String()) {
+                ok => {},
+                err(e) => self.tell_error("cache", "{e}"),
+            }
+        } else if t == "error" {
+            // A send the instance can't take, ever: it leaves the outbox.
+            if (str_at(f.copy(), "code") ?? String()) == "unknown_conversation" {
+                if let cid = str_at(f.copy(), "ref") {
+                    match self.cache.sent(cid) {
+                        ok => {},
+                        err(e) => self.tell_error("cache", "{e}"),
+                    }
+                }
+            }
+        } else if t == "result" {
+            let id = str_at(f.copy(), "id") ?? String()
+            if let i = self.lists.position(|x| x == id) {
+                _ = self.lists.remove(i)
+                match self.cache.put_messages(at(at(f.copy(), "value"), "messages")) {
+                    ok => {},
+                    err(e) => self.tell_error("cache", "{e}"),
+                }
             }
         }
         self.to_app.send(text)
@@ -304,17 +421,84 @@ impl Conn {
             }
             return true
         }
-        if self.state == State.Live {
-            if let ws = self.ws {
-                match ws.send_text(text) {
-                    ok => return true,
-                    err(_) => {},
-                }
+        if t == "core.get" {
+            self.get(m)
+            return true
+        }
+        if t == "send" {
+            self.send(m)
+            return true
+        }
+        if t == "cmd" and (str_at(m.copy(), "name") ?? String()) == "messages.list" {
+            if let id = str_at(m.copy(), "id") {
+                self.lists.push(id)
             }
         }
-        // Not connected: the outbox (LOO-24) keeps sends for later. Until then, say so.
+        if self.state == State.Live {
+            if self.put(text) { return true }
+        }
+        // Not connected. A send waits in the outbox, but anything else would act on what
+        // may have changed meanwhile, so the app hears it didn't go.
         self.tell(Obj.new().s("t", String("error")).s("code", String("offline")).maybe("for", str_at(m.copy(), "id")).done())
         return true
+    }
+
+    /// A message the person wrote: kept in the outbox with a client id, and sent when the
+    /// connection is up. The app hears `core.queued` at once, and the `ack` once it's stored.
+    fn send(mut self, m: Json) {
+        var cid = str_at(m.copy(), "cid") ?? String()
+        if cid.len() == 0 {
+            cid = "m_{self.random.next_u64()}"
+        }
+        let frame = merge(m.copy(), Obj.new().s("cid", cid.copy()).done())
+        match self.cache.queue(frame.copy()) {
+            ok => {},
+            err(e) => self.tell_error("cache", "{e}"),
+        }
+        self.tell(Obj.new().s("t", String("core.queued")).s("cid", cid).maybe("conversation", str_at(m.copy(), "conversation")).maybe("text", str_at(m, "text")).i("at", now()).done())
+        if self.state == State.Live {
+            _ = self.put("{frame}")
+        }
+    }
+
+    /// Answers the app's `core.get` from the cache: `what` is conversations, agents,
+    /// devices, runs, tools, approvals, outbox or messages (with `conversation`, and
+    /// `before` and `limit` if it likes).
+    fn get(mut self, m: Json) {
+        let id = str_at(m.copy(), "id")
+        let what = str_at(m.copy(), "what") ?? String()
+        var known = false
+        for g in GETS {
+            if what == g { known = true }
+        }
+        if not known {
+            self.tell(Obj.new().s("t", String("core.data")).maybe("id", id).j("error", Obj.new().s("code", String("unknown_what")).s("message", "There's no {what} to get.").done()).done())
+            return
+        }
+        match self.read_cache(what.copy(), m) {
+            ok((list, more)) => self.tell(Obj.new().s("t", String("core.data")).maybe("id", id).s("what", what).j("items", Json.Array(list)).b("more", more).done()),
+            err(e) => self.tell(Obj.new().s("t", String("core.data")).maybe("id", id).j("error", Obj.new().s("code", String("cache")).s("message", "{e}").done()).done()),
+        }
+    }
+
+    fn read_cache(self, what: String, m: Json) -> (List<Json>, bool) ! Error {
+        if what == "conversations" { return (try self.cache.conversations(), false) }
+        if what == "agents" { return (try self.cache.agents(), false) }
+        if what == "devices" { return (try self.cache.devices(), false) }
+        if what == "runs" { return (try self.cache.runs(), false) }
+        if what == "tools" { return (try self.cache.tools(), false) }
+        if what == "approvals" { return (try self.cache.approvals(), false) }
+        if what == "outbox" { return (try self.cache.outbox(), false) }
+        let limit = int_at(m.copy(), "limit") ?? 50
+        return try self.cache.messages(str_at(m.copy(), "conversation") ?? String(), str_at(m, "before"), if limit < 1 or limit > 500 { 50 } else { limit })
+    }
+
+    /// A value the cache keeps, or none if it has none or can't be read.
+    fn known(self, key: str) -> String? {
+        return match self.cache.meta(key) {
+            ok(v) => v,
+            err(_) => none,
+        }
     }
 
     /// Starts a login or a setup from the app's message `m`. Its `server`, or the one
@@ -346,6 +530,7 @@ impl Conn {
         let id = p.id.copy()
         match p.outcome() {
             Outcome.Token(user, device, token) => {
+                let user_id = user.copy()
                 var reply = Obj.new().s("t", String("core.login")).maybe("id", id).b("ok", true).s("user", user).s("device", device)
                 match keyring.set(self.keyring.copy(), server.copy(), token.copy()) {
                     ok => reply = reply.b("kept", true),
@@ -355,8 +540,24 @@ impl Conn {
                 if let ws = self.ws.take() {
                     ws.close()
                 }
-                // A login is a new device, and maybe another person: catch up from the start.
-                self.after = 0
+                // The cache is one person's on one instance: another person, or another
+                // instance, starts it again.
+                let same = self.known("server") == some(server.copy()) and self.known("user") == some(user_id.copy())
+                if not same {
+                    match self.cache.clear() {
+                        ok => {},
+                        err(e) => self.tell_error("cache", "{e}"),
+                    }
+                    self.have = Map<String, usize>()
+                }
+                match self.cache.set_meta("server", server.copy()) {
+                    ok => {},
+                    err(e) => self.tell_error("cache", "{e}"),
+                }
+                match self.cache.set_meta("user", user_id) {
+                    ok => {},
+                    err(e) => self.tell_error("cache", "{e}"),
+                }
                 self.server = some(server)
                 self.token = some(token)
                 self.failed = 0

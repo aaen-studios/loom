@@ -1,7 +1,8 @@
 module tests.protocol.core_conn
 
 // The core's connection (core/conn.calx) against a real instance: it sets
-// the instance up and keeps the token, logs out, and
+// the instance up and keeps the token, logs out, keeps a cache it reads
+// offline and an outbox that sends what was written offline, and
 // connects and catches up, takes the app's frames to the instance, starts
 // again when the instance goes away and comes back, reconnects at once on
 // wake, stops on a refused token, and stops when it's told to.
@@ -16,6 +17,7 @@ import std.process.{Child, Command, Stdio, exit}
 import std.random.{Random}
 import std.time.{Instant}
 import shared.obj.{Obj, at, bool_at, int_at, str_at}
+import core.cache.{Cache}
 import core.conn.{Conn}
 
 const WAIT: u64 = 120000    // the first start builds the server
@@ -44,12 +46,12 @@ struct App {
 
 impl App {
     // Starts a core for the instance at `base`, keeping its token under the
-    // credential store's service `service`.
-    fn start(base: String, token: own String?, service: String) -> App {
+    // credential store's service `service`, and its cache at `cache`.
+    fn start(base: String, token: own String?, service: String, cache: String) -> App ! Error {
         let inbox = Receiver<String>()
         let to_core = inbox.sender()
         let from_core = Receiver<String>()
-        let conn = Conn.new(some("http://{base}"), token, 0, service.copy(), inbox, from_core.sender())
+        let conn = Conn.new(some("http://{base}"), token, service.copy(), try Cache.open(cache.copy()), inbox, from_core.sender())
         let t = unsafe { Thread.spawn(conn) }
         return App { to_core: to_core, from_core: from_core, thread: some(t) }
     }
@@ -60,7 +62,7 @@ impl App {
 
     // Reads what the core says until a frame whose `t` is `t` and, if `field` isn't
     // empty, whose `field` is `value`. Fails after `ms`.
-    fn until(mut self, t: str, field: str, value: str, ms: u64) -> Json ! Error {
+    fn until(mut self, t: str, field: str, value: String, ms: u64) -> Json ! Error {
         let start = unsafe { Instant.now() }
         loop {
             let waited = unsafe { Instant.now() }.nanos_since(start) / 1000000
@@ -95,8 +97,10 @@ fn run(server: mut Child, data: String) ! Error {
     let service = "loom-test-{random.next_u32()}"
     let device = Obj.new().s("name", String("Desk PC")).s("kind", String("windows")).done()
 
+    let cache = "{try fs.temp_dir()}/core.db"
+
     // --- Setup through the core ---
-    var app = App.start(base.copy(), none, service.copy())
+    var app = try App.start(base.copy(), none, service.copy(), cache.copy())
     let waiting = try app.until("core.conn", "state", "signed_out", 5000)
     try check(str_at(waiting, "why") == some(String("not logged in")), "with no token kept, it waits for a login")
     app.send(Obj.new().s("t", String("setup")).s("id", String("l_1")).s("code", String("wrong")).s("username", String("elliot")).s("password", String("correct horse")).done())
@@ -126,6 +130,17 @@ fn run(server: mut Child, data: String) ! Error {
     let listed = try app.until("result", "id", "q_1", 5000)
     try check(str_at(at(listed, "error"), "code") == some(String("unknown_command")), "a cmd from the app reaches the instance and its result comes back")
 
+    // --- The cache ---
+    app.send(Obj.new().s("t", String("cmd")).s("id", String("q_a")).s("name", String("agent.create")).j("args", Obj.new().s("name", String("Fake")).s("acp_agent", String("fake")).s("instructions", String("You are a test.")).done()).done())
+    let made = try app.until("result", "id", "q_a", 5000)
+    let agent = str_at(at(at(made, "value"), "agent"), "id") ?? String()
+    app.send(Obj.new().s("t", String("cmd")).s("id", String("q_c")).s("name", String("conversation.create")).j("args", Obj.new().s("agent", agent).s("title", String("Builds")).done()).done())
+    let conv = try app.until("result", "id", "q_c", 5000)
+    let conversation = str_at(at(conv, "value"), "conversation") ?? String()
+    app.send(Obj.new().s("t", String("core.get")).s("id", String("g_1")).s("what", String("conversations")).done())
+    let listed_convs = try app.until("core.data", "id", "g_1", 5000)
+    try check("{at(listed_convs, "items")}".contains("Builds"), "the cache keeps the conversation the events made")
+
     // --- The instance goes away and comes back ---
     server.kill_tree()
     _ = server.wait()
@@ -140,14 +155,23 @@ fn run(server: mut Child, data: String) ! Error {
     app.send(Obj.new().s("t", String("cmd")).s("id", String("q_2")).s("name", String("nothing.here")).done())
     let offline = try app.until("error", "code", "offline", 5000)
     try check(str_at(offline, "for") == some(String("q_2")), "a frame sent while offline is answered with offline")
+    app.send(Obj.new().s("t", String("send")).s("conversation", conversation.copy()).s("text", String("written while offline")).done())
+    let queued = try app.until("core.queued", "", "", 2000)
+    let cid = str_at(queued, "cid") ?? String()
+    try check(cid.starts_with("m_"), "a message written offline goes in the outbox with a client id")
 
     server = try serve(data.copy(), port)
     if server.wait_for_line(String("loom: serving"), WAIT) == none {
         fail "the server didn't start again"
     }
     _ = try app.until("core.conn", "state", "live", 40000)
-    _ = try app.until("synced", "", "", 5000)
     try check(true, "it connects again once the instance is back")
+    _ = try app.until("synced", "", "", 5000)
+    _ = try app.until("ack", "cid", cid.copy(), 10000)
+    app.send(Obj.new().s("t", String("core.get")).s("id", String("g_2")).s("what", String("outbox")).done())
+    let outbox = try app.until("core.data", "id", "g_2", 5000)
+    try check("{at(outbox, "items")}" == "[]", "and the outbox sends it, and lets it go once it's acked")
+    _ = try app.until("event", "kind", "run.finished", 20000)
 
     // --- Wake ---
     app.send(Obj.new().s("t", String("app.wake")).done())
@@ -159,9 +183,18 @@ fn run(server: mut Child, data: String) ! Error {
     app.stop()
     try check(true, "core.stop closes it and its thread ends")
 
+    // --- Reading offline, from the cache ---
+    var reader = try App.start(base.copy(), none, "{service}-none", cache.copy())
+    _ = try reader.until("core.conn", "state", "signed_out", 5000)
+    reader.send(Obj.new().s("t", String("core.get")).s("id", String("g_3")).s("what", String("messages")).s("conversation", conversation.copy()).done())
+    let read = try reader.until("core.data", "id", "g_3", 5000)
+    let shown = "{at(read, "items")}"
+    try check(shown.contains("written while offline") and shown.contains("\"role\":\"agent\""), "with no connection, the app reads the conversation from the cache")
+    reader.stop()
+
     // --- Started again, from the credential store ---
     if kept {
-        var next = App.start(base.copy(), none, service.copy())
+        var next = try App.start(base.copy(), none, service.copy(), cache.copy())
         _ = try next.until("core.conn", "state", "live", 10000)
         try check(true, "a new start finds the token in the credential store and connects")
 
@@ -173,14 +206,14 @@ fn run(server: mut Child, data: String) ! Error {
         let out = try next.until("core.conn", "state", "signed_out", 5000)
         try check(str_at(out, "why") == some(String("logged out")), "logout signs out")
         next.stop()
-        var after_logout = App.start(base.copy(), none, service.copy())
+        var after_logout = try App.start(base.copy(), none, service.copy(), String(":memory:"))
         let gone_token = try after_logout.until("core.conn", "state", "signed_out", 5000)
         try check(str_at(gone_token, "why") == some(String("not logged in")), "and forgets the token")
         after_logout.stop()
     }
 
     // --- A refused token ---
-    var wrong = App.start(base.copy(), some(String("not a token")), service.copy())
+    var wrong = try App.start(base.copy(), some(String("not a token")), service.copy(), String(":memory:"))
     let out = try wrong.until("core.conn", "state", "signed_out", 10000)
     try check(str_at(out, "state") == some(String("signed_out")), "a refused token signs out and doesn't try again")
     wrong.stop()
@@ -188,6 +221,9 @@ fn run(server: mut Child, data: String) ! Error {
 
 fn main() ! Error {
     let data = try fs.temp_dir()
+    let agent = try fs.absolute(String("tests/fake_agent/main.calx"))
+    let added = try Command.new(calx()).arg(String("server/main.calx")).arg(String("acp")).arg(String("add")).arg(String("fake")).arg(calx()).arg(agent).arg(String("--data")).arg(data.copy()).output()
+    if not added.status.success() { fail "loom acp add failed: {added.error_text()}" }
     var server = try serve(data.copy(), String("0"))
     let failure: String? = match run(mut server, data) {
         ok => none,
