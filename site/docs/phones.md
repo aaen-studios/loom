@@ -16,3 +16,15 @@ The instance listens only on your computer until you choose **Let phones reach t
 - **Away from home**, it goes through [Tailscale](tailscale.md), if you use it: the QR code holds the computer's Tailscale address too, and the phone tries the Wi-Fi first and Tailscale next.
 
 **Stop phones reaching this computer** turns it off again.
+
+## Notifications
+
+While the loom app is open, it shows notifications as they come. To reach a phone while the app is closed, the instance needs Apple's push service, and Apple takes only pushes signed with the key of the account that built the app. So an instance does one of these:
+
+- **It has that key itself.** `loom push key AuthKey_….p8 KEY_ID TEAM_ID BUNDLE_ID` sets it up, if you build the app with your own Apple account.
+- **It uses a push relay.** On **Add a phone**, under **Notifications on iPhone**, the owner gives the relay's address and chooses **Use this relay**. Phones that connect after that use it. The relay never reads a notification:
+  - Each phone seals its push token for the relay, so your instance never has it.
+  - Your instance seals each notification for the phone it goes to, so the relay and Apple see only that something is new.
+  - Your instance signs every request, and the relay takes only so many an hour from each instance.
+  - The relay keeps nothing but that count. Anyone can run one: it's `loom-push`, in the [push](../../push/README.md) folder.
+- **Neither**, which is how every instance starts. The phone gets notifications only while the app is open.

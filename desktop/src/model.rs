@@ -652,6 +652,9 @@ pub struct Model {
     pub joined: Option<String>,
     /// Whether phones reach the instance in this app over the network, once it has said.
     pub phones: Option<bool>,
+    /// The push relay the instance sends iPhone notifications through, once it has said:
+    /// its address while it's on, or an empty one while it's off.
+    pub relay: Option<String>,
     /// The People page: everyone with an account, the invites still open, and the newest
     /// invite made here, to pass on: its link (or code), the role it gives and when it expires.
     pub people: Vec<Person>,
@@ -1141,6 +1144,19 @@ impl Model {
                 self.notices.push(s(e, "message"));
             } else {
                 self.phones = f.pointer("/value/on").and_then(Value::as_bool);
+            }
+        } else if id.starts_with("app.relay") {
+            if let Some(e) = f.get("error") {
+                self.notices.push(s(e, "message"));
+            } else if f.pointer("/value/on").and_then(Value::as_bool) == Some(true) {
+                self.relay = Some(
+                    f.pointer("/value/url")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_string(),
+                );
+            } else {
+                self.relay = Some(String::new());
             }
         } else if id.starts_with("app.people") {
             if let Some(e) = f.get("error") {
@@ -2130,6 +2146,17 @@ impl Model {
         json!({"t": "cmd", "id": id, "name": "instance.phones", "args": args})
     }
 
+    /// Asks which push relay the instance sends iPhone notifications through, or with
+    /// `url`, has it use that one (the owner only; an empty one stops it).
+    pub fn set_relay(&mut self, url: Option<&str>) -> Value {
+        let id = self.id("app.relay");
+        let args = match url {
+            Some(url) => json!({"url": url}),
+            None => json!({}),
+        };
+        json!({"t": "cmd", "id": id, "name": "instance.relay", "args": args})
+    }
+
     /// Reads everyone with an account and the invites still open, for the People page.
     pub fn load_people(&mut self) -> Vec<Value> {
         let people = self.id("app.people");
@@ -2388,6 +2415,28 @@ mod tests {
             .last()
             .unwrap()
             .contains("moved to https://new.example"));
+    }
+
+    #[test]
+    fn the_push_relay_is_asked_set_and_turned_off() {
+        let mut m = Model::new();
+        let ask = m.set_relay(None);
+        assert_eq!(ask["name"], "instance.relay");
+        assert_eq!(ask["args"], json!({}));
+        m.result(&json!({"t": "result", "id": ask["id"], "ok": true, "value": {"on": false}}));
+        assert_eq!(m.relay.as_deref(), Some(""));
+        let on = m.set_relay(Some("https://push.loom.example"));
+        assert_eq!(on["args"], json!({"url": "https://push.loom.example"}));
+        m.result(&json!({"t": "result", "id": on["id"], "ok": true, "value": {"on": true, "url": "https://push.loom.example", "key": "k"}}));
+        assert_eq!(m.relay.as_deref(), Some("https://push.loom.example"));
+        let off = m.set_relay(Some(""));
+        m.result(&json!({"t": "result", "id": off["id"], "ok": false, "error": {"code": "not_allowed", "message": "Only the instance's owner"}}));
+        assert_eq!(m.relay.as_deref(), Some("https://push.loom.example"));
+        assert!(m
+            .notices
+            .last()
+            .unwrap()
+            .contains("Only the instance's owner"));
     }
 
     #[test]
