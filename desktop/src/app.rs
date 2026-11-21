@@ -82,6 +82,7 @@ enum Screen {
     ThisDevice,
     AddPhone,
     Mcp,
+    Plugins,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -122,6 +123,13 @@ pub struct Loom {
     /// On the skills page: none for the list, `Some(None)` for a new skill, `Some(Some(name))`
     /// for one being changed.
     skill_open: Option<Option<String>>,
+    /// The open plugin panel: its plugin, the web view, and where it is (x, y, w, h).
+    panel: Option<(String, crate::panel::Panel, [f32; 4])>,
+    panel_context: Option<wry::WebContext>,
+    /// The plugin whose panel is being made, while it is.
+    panel_opening: Option<String>,
+    /// What came through the open panel's door, waiting for the window's task.
+    door_in: Rc<std::cell::RefCell<Vec<crate::panel::Message>>>,
     note_in: Entity<InputState>,
     profile_in: Entity<TextareaState>,
     routine_name_in: Entity<InputState>,
@@ -296,6 +304,7 @@ ACTA_KEY=secret:ACTA_KEY",
                     while let Ok(answer) = loom.device_rx.try_recv() {
                         loom.send(answer);
                     }
+                    loom.pump_door();
                     if got.is_empty() {
                         return;
                     }
@@ -373,6 +382,10 @@ ACTA_KEY=secret:ACTA_KEY",
             skill_desc_in,
             skill_body_in,
             skill_open: None,
+            panel: None,
+            panel_context: None,
+            panel_opening: None,
+            door_in: Rc::new(std::cell::RefCell::new(Vec::new())),
             note_in,
             profile_in,
             routine_name_in,
@@ -1128,6 +1141,23 @@ ACTA_KEY=secret:ACTA_KEY",
                     )
                     .child(
                         div()
+                            .id("plugins")
+                            .text_size(px(size::CAPTION))
+                            .text_color(p.ink_3)
+                            .cursor_pointer()
+                            .hover(move |s| s.text_color(p.ink))
+                            .child("Plugins")
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                let f = this.model.load_plugins();
+                                this.send(f);
+                                this.model.close_panel();
+                                this.menu = None;
+                                this.screen = Screen::Plugins;
+                                cx.notify();
+                            })),
+                    )
+                    .child(
+                        div()
                             .id("programs")
                             .text_size(px(size::CAPTION))
                             .text_color(p.ink_3)
@@ -1256,6 +1286,37 @@ ACTA_KEY=secret:ACTA_KEY",
             .items_center()
             .justify_between()
             .px(px(space::L));
+        if self.screen == Screen::Plugins {
+            let Some(open) = self.model.panel.clone() else {
+                return bar.child(
+                    div()
+                        .text_size(px(size::BODY))
+                        .text_color(p.ink_3)
+                        .child("Plugins"),
+                );
+            };
+            return bar
+                .child(
+                    div()
+                        .text_size(px(size::BODY))
+                        .text_color(p.ink)
+                        .child(open.plugin.name.clone()),
+                )
+                .child(
+                    div()
+                        .id("close-panel")
+                        .occlude()
+                        .text_size(px(size::CAPTION))
+                        .text_color(p.ink_3)
+                        .cursor_pointer()
+                        .hover(move |s| s.text_color(p.ink))
+                        .child("Close")
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.model.close_panel();
+                            cx.notify();
+                        })),
+                );
+        }
         if matches!(
             self.screen,
             Screen::Skills
@@ -2478,6 +2539,222 @@ ACTA_KEY=secret:ACTA_KEY",
             .pb(px(space::XXL))
             .child(body);
         div().flex_1().min_h_0().child(page)
+    }
+
+    /// The plugins page: each plugin, what it asks for that waits for the person's yes, and
+    /// its panel to open. An open panel lies over the content area in a web view of its own.
+    fn plugins_page(&mut self, cx: &mut Context<Self>) -> Div {
+        let p = self.p;
+        if self.model.panel.is_some() {
+            return div().flex_1().min_h_0();
+        }
+        let mut list = div().w(px(560.0)).flex().flex_col().gap(px(space::M));
+        if self.model.plugins.is_empty() {
+            list = list.child(
+                div()
+                    .text_size(px(size::SMALL))
+                    .text_color(p.ink_3)
+                    .child("No plugins yet. A plugin is a small app of your own in loom: a panel, tools for your agents, or both. Ask an agent to make one."),
+            );
+        }
+        for pl in self.model.plugins.clone() {
+            let mut buttons = div().flex().gap(px(space::S));
+            if pl.entry.is_some() {
+                let id = pl.id.clone();
+                buttons = buttons.child(
+                    self.button_owned(format!("open-{}", pl.id), "Open", true)
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            let f = this.model.open_plugin(&id);
+                            this.send(f);
+                            cx.notify();
+                        })),
+                );
+            }
+            if !pl.waiting.is_empty() {
+                let id = pl.id.clone();
+                buttons = buttons.child(
+                    self.button_owned(format!("allow-{}", pl.id), "Allow", false)
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            let f = this.model.allow_plugin(&id);
+                            this.send(f);
+                            cx.notify();
+                        })),
+                );
+            }
+            let id = pl.id.clone();
+            buttons = buttons.child(
+                self.button_owned(format!("delete-{}", pl.id), "Delete", false)
+                    .text_color(p.bad)
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        let f = this.model.delete_plugin(&id);
+                        this.send(f);
+                        cx.notify();
+                    })),
+            );
+            let has = match (pl.entry.is_some(), pl.tools) {
+                (true, true) => "a panel and tools for your agents",
+                (true, false) => "a panel",
+                (false, true) => "tools for your agents",
+                (false, false) => "nothing to show yet",
+            };
+            list = list.child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(space::XS))
+                    .child(
+                        div()
+                            .text_size(px(size::SMALL))
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(p.ink)
+                            .child(format!("{} {}", pl.name, pl.version)),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(size::CAPTION))
+                            .text_color(p.ink_3)
+                            .child(if pl.description.is_empty() {
+                                format!("Has {has}.")
+                            } else {
+                                format!("{} Has {has}.", pl.description)
+                            }),
+                    )
+                    .when(!pl.waiting.is_empty(), |d| {
+                        d.child(
+                            div()
+                                .text_size(px(size::CAPTION))
+                                .text_color(p.ink_2)
+                                .child(format!(
+                                    "Asks to {}. Until you allow it, it can't.",
+                                    model::asking(&pl.waiting)
+                                )),
+                        )
+                    })
+                    .child(buttons),
+            );
+        }
+        let page = div()
+            .id("plugins-page")
+            .size_full()
+            .overflow_y_scroll()
+            .flex()
+            .justify_center()
+            .pt(px(space::XXL))
+            .pb(px(space::XXL))
+            .child(list);
+        div().flex_1().min_h_0().child(page)
+    }
+
+    /// Shows the open plugin's panel over the content area, or takes it away when there's
+    /// none to show, and keeps it where the content area is as the window changes size.
+    fn sync_panel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let want = if self.screen == Screen::Plugins {
+            self.model.panel.clone()
+        } else {
+            None
+        };
+        let Some(open) = want else {
+            self.panel = None;
+            return;
+        };
+        let Some(entry) = open.plugin.entry.clone() else {
+            self.panel = None;
+            return;
+        };
+        let size = window.viewport_size();
+        let rect = [
+            layout::SIDEBAR,
+            layout::TITLEBAR,
+            f32::from(size.width) - layout::SIDEBAR,
+            f32::from(size.height) - layout::TITLEBAR,
+        ];
+        if let Some((id, view, at)) = &mut self.panel {
+            if *id == open.plugin.id {
+                if *at != rect {
+                    view.set_bounds(panel_bounds(rect));
+                    *at = rect;
+                }
+                return;
+            }
+        }
+        self.panel = None;
+        if self.panel_opening.is_some() {
+            return;
+        }
+        // Making a web view runs a message loop of its own until WebView2 is ready, and
+        // the window's tasks run in it. So it's made from a task, with nothing borrowed,
+        // not here, where the window is.
+        let Ok(parent) =
+            raw_window_handle::HasWindowHandle::window_handle(&*window).map(|h| Parent(h.as_raw()))
+        else {
+            return;
+        };
+        let mut context = self
+            .panel_context
+            .take()
+            .unwrap_or_else(|| crate::panel::context(std::path::Path::new(&data_dir())));
+        let source = crate::panel::Source {
+            id: open.plugin.id.clone(),
+            files: std::sync::Arc::new(
+                open.files
+                    .into_iter()
+                    .map(|(k, v)| (k, v.into_bytes()))
+                    .collect(),
+            ),
+            entry,
+        };
+        let door = self.door_in.clone();
+        let id = open.plugin.id.clone();
+        self.panel_opening = Some(id.clone());
+        cx.spawn(async move |this, cx| {
+            let made = crate::panel::Panel::open(
+                &parent,
+                &mut context,
+                &source,
+                panel_bounds(rect),
+                move |m| door.borrow_mut().push(m),
+                |what| eprintln!("loom: a panel was refused: {what}"),
+            );
+            let _ = this.update(cx, |this, cx| {
+                this.panel_opening = None;
+                this.panel_context = Some(context);
+                match made {
+                    // Unless the person went elsewhere while it was being made.
+                    Ok(view) => {
+                        let wanted = this.screen == Screen::Plugins
+                            && this.model.panel.as_ref().is_some_and(|p| p.plugin.id == id);
+                        if wanted {
+                            this.panel = Some((id, view, rect));
+                        }
+                    }
+                    Err(e) => {
+                        this.model
+                            .notices
+                            .push(format!("The panel didn't open: {e}"));
+                        this.model.close_panel();
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// The open panel's door: what came in goes to the instance as commands, or is
+    /// refused, and the answers that came back go to the panel.
+    fn pump_door(&mut self) {
+        let came: Vec<crate::panel::Message> = self.door_in.borrow_mut().drain(..).collect();
+        for m in came {
+            match self.model.door(m.id, &m.op, &m.args) {
+                Ok(frame) => self.send(frame),
+                Err(why) => self.model.door_answers.push((m.id, Err(why))),
+            }
+        }
+        if let Some((_, view, _)) = &self.panel {
+            for (id, answer) in self.model.door_answers.drain(..) {
+                view.answer(id, answer);
+            }
+        }
     }
 
     /// The routines page: prompts the person's agents are sent on a schedule, each in a
@@ -4116,7 +4393,9 @@ impl Render for Loom {
             Screen::ThisDevice => self.device_page(cx),
             Screen::AddPhone => self.add_phone_page(cx),
             Screen::Mcp => self.mcp_page(cx),
+            Screen::Plugins => self.plugins_page(cx),
         };
+        self.sync_panel(window, cx);
         let header = self.header(cx);
         let menu = self.menu_panel(cx);
         root.flex().child(self.sidebar(cx)).child(
@@ -4180,4 +4459,25 @@ fn core_config() -> String {
         config["server"] = Value::String(server);
     }
     config.to_string()
+}
+
+/// The window a panel is made in, by its handle, for the task that makes it.
+struct Parent(raw_window_handle::RawWindowHandle);
+
+impl raw_window_handle::HasWindowHandle for Parent {
+    fn window_handle(
+        &self,
+    ) -> Result<raw_window_handle::WindowHandle<'_>, raw_window_handle::HandleError> {
+        // SAFETY: the handle is the app's one window, which lives as long as the app, and
+        // the panel is made on its thread.
+        Ok(unsafe { raw_window_handle::WindowHandle::borrow_raw(self.0) })
+    }
+}
+
+/// Where a panel goes, from [x, y, width, height] in the window's logical pixels.
+fn panel_bounds(r: [f32; 4]) -> wry::Rect {
+    wry::Rect {
+        position: wry::dpi::LogicalPosition::new(r[0] as f64, r[1] as f64).into(),
+        size: wry::dpi::LogicalSize::new(r[2].max(0.0) as f64, r[3].max(0.0) as f64).into(),
+    }
 }
