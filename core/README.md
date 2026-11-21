@@ -81,6 +81,8 @@ The core tells the app every frame the instance sends (`welcome`, `event`, `delt
 | `{"t":"error","code":"bad_config","message":"…"}` | The config's `server` isn't an `http://` or `https://` address |
 | `{"t":"error","code":"local","message":"…"}` | The instance on this computer didn't start, in `"mode": "local"`. The core waits for a login, as without a server |
 
+Each `core.conn` also has `server`, the instance's address, once the core has one, so an app signed in to several tells them apart.
+
 A connection that died without a close, as a sleeping laptop's does, is noticed after 45 s with nothing from the instance (the socket pings after 25 s of quiet and waits 20 s more), and the core reconnects.
 
 [`tests/protocol/core_conn.calx`](../tests/protocol/core_conn.calx) runs the connection against a real instance.

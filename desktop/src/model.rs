@@ -653,6 +653,11 @@ pub struct Model {
     pub queues: HashMap<String, Vec<QueueItem>>,
     queue_stale: bool,
     pub conn: Option<Conn>,
+    /// The instance's address, as the core says it.
+    pub server: Option<String>,
+    /// Servers an agent offered and the person said yes to on this device, for the
+    /// app to add.
+    pub offered: Vec<String>,
     pub synced: bool,
     pub login_error: Option<String>,
     pub logging_in: bool,
@@ -1029,6 +1034,9 @@ impl Model {
         let t = s(f, "t");
         match t.as_str() {
             "core.conn" => {
+                if let Some(server) = f.get("server").and_then(Value::as_str) {
+                    self.server = Some(server.to_string());
+                }
                 let state = s(f, "state");
                 self.conn = Some(match state.as_str() {
                     "connecting" => Conn::Connecting,
@@ -1229,8 +1237,16 @@ impl Model {
             "routine" => {
                 self.routines_stale = true;
             }
+            // An agent offered another server, and the person said yes here.
+            "server" if kind == "server.offered" && s(f, "by") == self.me => {
+                self.offered.push(s(f, "address"));
+            }
             "queue" => {
                 self.queues.insert(s(f, "conversation"), Model::queue_of(f));
+            }
+            // An agent offered another server, and the person said yes here.
+            "server" if kind == "server.offered" && s(f, "by") == self.me => {
+                self.offered.push(s(f, "address"));
             }
             "task" => {
                 let task = Task::of(f.get("task").unwrap_or(&Value::Null));
@@ -2836,6 +2852,21 @@ mod tests {
         assert!(m.unread.contains("a_2"));
         m.select(Some("a_2".into()));
         assert!(m.unread.is_empty());
+    }
+
+    #[test]
+    fn a_server_says_where_it_is_and_an_offered_one_is_kept_for_this_device() {
+        let mut m = Model::new();
+        m.take(&json!({"t": "core.conn", "state": "live", "server": "https://loom.example.com"}));
+        assert_eq!(m.server.as_deref(), Some("https://loom.example.com"));
+        m.take(&json!({"t": "welcome", "device": "d_1"}));
+        m.take(&json!({"t": "event", "kind": "server.offered", "address": "https://two.example.com", "by": "d_2"}));
+        assert!(
+            m.offered.is_empty(),
+            "one said yes to on another device is that one's"
+        );
+        m.take(&json!({"t": "event", "kind": "server.offered", "address": "https://two.example.com", "by": "d_1"}));
+        assert_eq!(m.offered, vec!["https://two.example.com".to_string()]);
     }
 
     #[test]

@@ -25,7 +25,7 @@ struct Command {
     does: str
 }
 
-const COMMANDS: [Command; 62] = [
+const COMMANDS: [Command; 63] = [
     Command { name: "conversation.create", args: "agent, title?", does: "Makes a conversation with an agent." },
     Command { name: "conversation.rename", args: "conversation, title", does: "Renames a conversation." },
     Command { name: "conversation.delete", args: "conversation", does: "Deletes a conversation and its messages." },
@@ -87,6 +87,7 @@ const COMMANDS: [Command; 62] = [
     Command { name: "link.create", args: "", does: "A one-time code for a phone to join the account." },
     Command { name: "instance.phones", args: "on?", does: "Lets phones reach the instance on this computer, or stops them." },
     Command { name: "instance.relay", args: "url? (empty turns it off)", does: "Sets the push relay phones are reached through." },
+    Command { name: "server.offer", args: "address", does: "Adds another server to the person's app, for them to sign in to." },
     Command { name: "instance.move", args: "to (the new place's address), code (from loom receive)", does: "Moves the whole instance to another computer." },
 ]
 
@@ -144,7 +145,7 @@ fn reading_runs_and_harm_asks() {
     for c in COMMANDS {
         if let Access.Never(_) = access(String(c.name)) { panic("{c.name} is listed but never runs") }
     }
-    assert(catalog().len() == 62)
+    assert(catalog().len() == 63)
     assert(does(String("mcp.delete")) == "Removes an MCP server")
     assert(does(String("agent.update")) == "Changes an agent")
 }

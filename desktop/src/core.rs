@@ -39,10 +39,10 @@ impl Core {
         let (tx, rx) = channel();
         let tx = Box::new(tx);
         let ctx = &*tx as *const Sender<String> as *mut u8;
-        let handle = unsafe {
-            calx_init();
-            loom_core_start(config.as_ptr(), config.len(), on_event, ctx)
-        };
+        // The Calx runtime starts once, however many cores (one for each server) start.
+        static INIT: std::sync::Once = std::sync::Once::new();
+        INIT.call_once(|| unsafe { calx_init() });
+        let handle = unsafe { loom_core_start(config.as_ptr(), config.len(), on_event, ctx) };
         (Core { handle, _tx: tx }, rx)
     }
 
