@@ -31,6 +31,7 @@ import server.hashing
 import server.hashing.{Done, Job}
 import server.installer
 import server.plugins
+import server.push
 import server.routines
 import server.store.{AcpAgent, Device, Store, User, now, secret_key}
 import shared.tools
@@ -43,6 +44,7 @@ pub struct Config {
     pub events: EventLife
     pub registry: String    // the ACP Registry's address
     pub minute_ms: i64    // how long a minute is, for routines: 60,000, but less in tests
+    pub apns: String    // where APNs is, or "" for Apple's: a test's fake one
 }
 
 // How long events are kept (PLAN.md, "Sync"): `age_ms`, but always each
@@ -183,6 +185,8 @@ pub struct Instance {
     next_due: i64    // when to look for routines that are due
     routine_runs: Map<String, RoutineRun>    // run -> the routine it's for
     panel_calls: Map<String, Waiter>    // run -> a panel's plugin.message waiting on it
+    push_to: Sender<push.Job>    // the thread that sends to APNs
+    push_gone: Receiver<push.Gone>    // tokens APNs says are gone
 }
 
 // A command answered once the installer's thread is done.
@@ -416,7 +420,8 @@ impl Instance {
         let (hash_to, hash_done) = hashing.start(config.hasher)
         let dummy = config.hasher.hash(bytes.hex(random_bytes(16)))
         let (install_to, install_done) = installer.start()
-        return Instance { store: store, server: server, data: config.data.copy(), sessions: Map<u32, Session>(), runs: LinkedMap<String, Run>(), procs: LinkedMap<String, Proc>(), approvals: LinkedMap<String, Approval>(), lines: lines, lines_to: to, hash_to: hash_to, hash_done: hash_done, next_job: 0, auths: Map<i64, Auth>(), dummy_hash: dummy, failures: LinkedMap<String, List<i64>>(), thumbs: files.start(), events: config.events, next_prune: 0, grants: Map<String, Grant>(), calls: Map<String, Request>(), registry_at: config.registry.copy(), registry: Json.Null, registry_time: 0, install_to: install_to, install_done: install_done, fetching: List<Waiter>(), installs: Map<i64, Install>(), leftovers: List<String>(), next_sweep: 0, device_calls: Map<String, DeviceCall>(), minute_ms: config.minute_ms, next_due: 0, routine_runs: Map<String, RoutineRun>(), panel_calls: Map<String, Waiter>(), sealer: try secret_key(config.data.copy()) }
+        let (push_to, push_gone) = push.start(config.apns.copy())
+        return Instance { push_to: push_to, push_gone: push_gone, store: store, server: server, data: config.data.copy(), sessions: Map<u32, Session>(), runs: LinkedMap<String, Run>(), procs: LinkedMap<String, Proc>(), approvals: LinkedMap<String, Approval>(), lines: lines, lines_to: to, hash_to: hash_to, hash_done: hash_done, next_job: 0, auths: Map<i64, Auth>(), dummy_hash: dummy, failures: LinkedMap<String, List<i64>>(), thumbs: files.start(), events: config.events, next_prune: 0, grants: Map<String, Grant>(), calls: Map<String, Request>(), registry_at: config.registry.copy(), registry: Json.Null, registry_time: 0, install_to: install_to, install_done: install_done, fetching: List<Waiter>(), installs: Map<i64, Install>(), leftovers: List<String>(), next_sweep: 0, device_calls: Map<String, DeviceCall>(), minute_ms: config.minute_ms, next_due: 0, routine_runs: Map<String, RoutineRun>(), panel_calls: Map<String, Waiter>(), sealer: try secret_key(config.data.copy()) }
     }
 
     pub fn url(self) -> String {
@@ -556,6 +561,13 @@ impl Instance {
                     err(e) => eprintln("loom: login: {e}"),
                 }
             }
+            // A phone that's let go of its token, or had the app removed, takes no more push.
+            while let g = i.push_gone.next() {
+                match i.store.drop_push_token(g.device, g.token) {
+                    ok => {},
+                    err(e) => eprintln("loom: push: {e}"),
+                }
+            }
         }
         for (_, p) in i.procs {
             var to = p.to.copy()
@@ -601,8 +613,90 @@ impl Instance {
     }
 
     fn event(i: Instance, user: String, kind: str, fields: Json) ! Error {
+        let pushed = if kind == "notify" or kind == "approval.needed" { fields.copy() } else { Json.Null }
         let e = try i.store.append(user.copy(), kind, fields)
-        i.publish(user, e)
+        i.publish(user.copy(), e)
+        if pushed != Json.Null { i.push_event(user, kind, pushed) }
+    }
+
+    // --- Push (PLAN.md, "Notifications and push") ---
+
+    // Whether `device` is connected now.
+    fn connected(i: Instance, device: String) -> bool {
+        for (_, s) in i.sessions {
+            if s.live and s.device == device { return true }
+        }
+        return false
+    }
+
+    // Whether any of `user`'s devices is connected now.
+    fn looking(i: Instance, user: String) -> bool {
+        for (_, s) in i.sessions {
+            if s.live and s.user == user { return true }
+        }
+        return false
+    }
+
+    // The agent's name, for a notification's title.
+    fn agent_name(i: Instance, user: String, agent: String) -> String {
+        if let ok(some(a)) = i.store.agent(user, agent.copy()) {
+            return str_at(a, "name") ?? agent.copy()
+        }
+        return agent.copy()
+    }
+
+    // A notify or an approval.needed, pushed to each of the person's phones
+    // that isn't connected. A notify comes even while someone's looking on
+    // another device, as the apps show it; so does a question, which the
+    // person may answer on whichever is nearest.
+    fn push_event(i: Instance, user: String, kind: str, fields: Json) {
+        if kind == "notify" {
+            let agent = str_at(fields.copy(), "agent") ?? String()
+            let conversation = str_at(fields.copy(), "conversation") ?? String()
+            let body = push.payload(str_at(fields.copy(), "title") ?? String(), i.agent_name(user.copy(), agent.copy()), str_at(fields.copy(), "body") ?? String(), conversation.copy(), String(), Obj.new().s("kind", String("notify")).s("agent", agent).maybe("conversation", if conversation.len() > 0 { some(conversation) } else { none }).done())
+            i.send_push(user, body, String())
+            return
+        }
+        let run = str_at(fields.copy(), "run") ?? String()
+        let call = str_at(fields.copy(), "call") ?? String()
+        var agent = String()
+        var conversation = String()
+        if let r = i.runs.find(run.copy()) {
+            agent = r.agent.copy()
+            conversation = r.conversation.copy()
+        }
+        let name = if agent.len() > 0 { i.agent_name(user.copy(), agent.copy()) } else { String("An agent") }
+        let body = push.payload("{name} asks first", String(), str_at(fields.copy(), "title") ?? String("It wants to use a tool."), conversation.copy(), String("approval"), Obj.new().s("kind", String("approval")).s("run", run).s("call", call.copy()).s("conversation", conversation).b("can_always", bool_at(fields, "can_always") ?? false).done())
+        i.send_push(user, body, call)
+    }
+
+    // An agent's reply, pushed when the person is on none of their devices.
+    fn push_reply(i: Instance, user: String, agent: String, conversation: String, message: String, text: String) {
+        if i.looking(user.copy()) { return }
+        let body = push.payload(i.agent_name(user.copy(), agent.copy()), String(), text, conversation.copy(), String(), Obj.new().s("kind", String("reply")).s("agent", agent).s("conversation", conversation).s("message", message).done())
+        i.send_push(user, body, String())
+    }
+
+    // Hands `body` to the push thread for each of `user`'s phones that isn't
+    // connected, once the owner has set up APNs. A failure is said, not
+    // passed up: what was pushed has happened already.
+    fn send_push(i: Instance, user: String, body: own Json, collapse: own String) {
+        match i.try_send_push(user, body, collapse) {
+            ok => {},
+            err(e) => eprintln("loom: push: {e}"),
+        }
+    }
+
+    fn try_send_push(i: Instance, user: String, body: own Json, collapse: own String) ! Error {
+        var phones = List<push.Phone>()
+        for (device, token, env) in try i.store.push_tokens(user.copy()) {
+            if i.connected(device.copy()) { continue }
+            phones.push(push.Phone { user: user.copy(), device: device.copy(), token: token.copy(), env: env.copy() })
+        }
+        if phones.len() == 0 { return }
+        let config = try i.store.apns() else return
+        var to = i.push_to.copy()
+        to.send(push.Job { config: config, body: body, collapse: collapse, to: phones })
     }
 
     // An entry in the activity log. A failure to write one is said, not
@@ -2699,7 +2793,9 @@ impl Instance {
         try i.event(r.user.copy(), "message.created", Obj.new().s("conversation", r.conversation.copy()).j("message", message).done())
         try i.store.finish_run(r.id.copy(), status.copy())
         // A message_agent call waiting on this run gets the reply.
+        var asked = false
         if let req = i.calls.remove(r.id.copy()) {
+            asked = true
             let result = if status == "done" { tool_text(if said.len() > 0 { said.copy() } else { String("(It answered with nothing to read.)") }) } else { tool_error("It couldn't answer ({status}): {error.copy() ?? String("it stopped")}") }
             i.server.respond(req, json_response(200, result))
         }
@@ -2710,6 +2806,10 @@ impl Instance {
         }
         if let rr = i.routine_runs.remove(r.id.copy()) {
             try i.routine_done(rr, r.agent.copy(), r.conversation.copy(), status.copy(), error.copy(), said)
+        } else if not asked and (status == "done" or status == "failed") {
+            // A reply to someone on none of their devices comes to their phone.
+            let body = if status == "failed" { "It couldn't answer: {error.copy() ?? String("it stopped")}" } else if said.trim().len() == 0 { String("Done.") } else { cut_short(said, 300) }
+            i.push_reply(r.user.copy(), r.agent.copy(), r.conversation.copy(), r.message.copy(), body)
         }
         try i.event(r.user.copy(), "run.finished", Obj.new().s("run", r.id.copy()).s("status", status).maybe("error", error).done())
     }

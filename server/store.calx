@@ -415,6 +415,12 @@ impl Store {
         _ = try self.db.execute(String("DELETE FROM push_tokens WHERE device = ?"), [t(device)])
     }
 
+    // Forgets `device`'s token if it's still `token`, which APNs says is
+    // gone; one the phone has handed over since stays.
+    pub fn drop_push_token(self, device: String, token: String) ! Error {
+        _ = try self.db.execute(String("DELETE FROM push_tokens WHERE device = ? AND token = ?"), [t(device), t(token)])
+    }
+
     // `user`'s devices that take push: each one's id, token and env.
     pub fn push_tokens(self, user: String) -> List<(String, String, String)> ! Error {
         var out = List<(String, String, String)>()
