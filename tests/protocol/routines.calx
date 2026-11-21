@@ -71,7 +71,7 @@ fn run(i: Instance) -> i64 ! Error {
     _ = try app.cmd("q_d5", "routine.delete", Obj.new().s("id", str_at(daily, "id") ?? String()).done())
     _ = try app.cmd("q_d6", "routine.delete", Obj.new().s("id", str_at(weekly, "id") ?? String()).done())
 
-    let put = try app.cmd("q_3", "routine.put", Obj.new().s("name", String("Pulse")).s("agent", String("Main")).s("prompt", String("/context\npulse")).j("schedule", Obj.new().i("every", 5).done()).b("notify", true).done())
+    let put = try app.cmd("q_3", "routine.put", Obj.new().s("name", String("Pulse")).s("agent", String("Main")).s("prompt", String("pulse\n/context")).j("schedule", Obj.new().i("every", 5).done()).b("notify", true).done())
     let r = at(at(put, "value"), "routine")
     let id = str_at(r.copy(), "id") ?? String()
     try check(str_at(r.copy(), "agent") == some(agent.copy()) and str_at(r.copy(), "when") == some(String("every 5 minutes")) and str_at(r.copy(), "tz") == some(String("Europe/Oslo")) and (int_at(r, "next") ?? 0) > 0, "a routine is made, for the agent named, in the device's time zone")

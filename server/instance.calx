@@ -16,6 +16,7 @@ import std.hash.{hmac_sha256, sha256}
 import std.http.{Header, get}
 import std.http.server.{Request, Response, Server, ServerSocket, content_type}
 import std.json.{Json, parse}
+import std.env.{os}
 import std.process
 import std.process.{current_exe}
 import std.signal
@@ -498,6 +499,41 @@ const CHAIN_MOST: usize = 4
 // The most entries activity.export gives: the newest, when there are more.
 const ACTIVITY_EXPORT_MOST: usize = 100000
 
+// How many files message_agent hands over at once, and how big each may be.
+const HANDOFF_MOST: usize = 20
+const HANDOFF_BYTES_MOST: usize = 26214400
+
+// Where a file an agent hands over is, when it's in `mine`, the agent's
+// folder, or `shared`, with links followed and each `..` resolved. none for a
+// file anywhere else, or for nothing there.
+fn handoff_path(given: String, mine: String, shared: String) -> String? {
+    let raw = given.trim().copy()
+    if raw.len() == 0 { return none }
+    let absolute = raw.starts_with("/") or raw.starts_with("\\") or (raw.len() > 1 and raw[1..].starts_with(":"))
+    let joined = if absolute { raw } else { "{mine}/{raw}" }
+    let real = match fs.real_path(joined) {
+        ok(p) => p,
+        err(_) => return none,
+    }
+    if not fs.is_file(real.copy()) { return none }
+    let found = path_key(real.copy())
+    for root in [mine.copy(), shared.copy()] {
+        let base = match fs.real_path(root) {
+            ok(p) => path_key(p),
+            err(_) => continue,
+        }
+        if found.starts_with("{base}/") { return some(real.copy()) }
+    }
+    return none
+}
+
+// A path as two paths to the same place compare: with forward slashes, and on
+// Windows, whose paths ignore case, in lower case.
+fn path_key(path: String) -> String {
+    let slashed = path.replace("\\", "/")
+    return if os() == "windows" { slashed.to_lower_root() } else { slashed }
+}
+
 // How much a script says to an agent at once.
 const SCRIPT_TEXT_MOST: usize = 20000
 
@@ -734,6 +770,23 @@ impl Instance {
     // `agent`'s folder, where its program runs and its instructions and skills
     // are: the folder it names, or one in the data folder. A sandboxed person's
     // agents always have theirs in the person's own folder, whatever they name.
+    // The folder all of `user`'s agents read and write (PLAN.md, "Sharing and
+    // learning"), made when it's first given. A sandboxed person's is in their
+    // own folder, so their sandbox has it.
+    fn shared_folder(i: Instance, user: String) -> String {
+        var path = "{i.data}/shared/{user}"
+        if i.sandboxed(user.copy()) {
+            path = if let b = i.boxes { "{b.home(user)}/shared" } else { "{i.data}/sandboxes/{user}/shared" }
+        }
+        if not fs.exists(path.copy()) {
+            if let err(e) = fs.make_dir_all(path.copy()) { eprintln("loom: making the shared folder: {e}") }
+        }
+        return match fs.absolute(path.copy()) {
+            ok(p) => p,
+            err(_) => path,
+        }
+    }
+
     fn agent_folder(i: Instance, user: String, agent: Json) -> String {
         let id = str_at(agent.copy(), "id") ?? String()
         if i.sandboxed(user.copy()) {
@@ -2291,7 +2344,12 @@ impl Instance {
             let part = (str_at(args.copy(), field) ?? String()).trim().copy()
             if part.len() > 0 { text = if text.len() > 0 { "{text}\n\n{heading}: {part}" } else { "{heading}: {part}" } }
         }
-        if text.len() == 0 { return some(tool_error(String("Say something: text and task are empty."))) }
+        var paths = List<String>()
+        if let Json.Array(given) = at(args.copy(), "files") {
+            for p in given { paths.push(p.as_str() ?? String()) }
+        }
+        if paths.len() > HANDOFF_MOST { return some(tool_error("Hand over {HANDOFF_MOST} files at most at once.")) }
+        if text.len() == 0 and paths.len() == 0 { return some(tool_error(String("Say something: text and task are empty."))) }
         let to = try i.find_agent(g.user.copy(), key.copy()) else return some(tool_error("There's no agent {key}. list_agents gives their names."))
         let to_id = str_at(to.copy(), "id") ?? String()
         if to_id == g.agent { return some(tool_error(String("That's you."))) }
@@ -2325,8 +2383,27 @@ impl Instance {
         for (_, r) in i.runs {
             if r.user == g.user and r.conversation == conversation_id { return some(tool_error("{str_at(to, "name") ?? key} is still answering your last message. Try again once it's done.")) }
         }
+        // Files it hands over (PLAN.md, "Sharing and learning"): from its own
+        // folder or the shared one, kept as the person's and sent with the
+        // message, as the person's own are.
+        var handed = List<Json>()
+        if paths.len() > 0 {
+            let mine = i.folder_of(g.user.copy(), g.agent.copy())
+            let shared = i.shared_folder(g.user.copy())
+            for p in paths {
+                let path = handoff_path(p.copy(), mine.copy(), shared.copy()) else return some(tool_error("{p} isn't a file in your folder or the shared folder ({shared}), so it can't be handed over."))
+                let data = try fs.read(path.copy())
+                if data.len() > HANDOFF_BYTES_MOST { return some(tool_error("{p} is {data.len()} bytes, and a file handed over is {HANDOFF_BYTES_MOST} at most. Put it in the shared folder and say where instead.")) }
+                let name = if let cut = path.replace("\\", "/").find_last("/") { path[cut + 1..].copy() } else { path.copy() }
+                let mime = files.sniff(data.copy()) ?? content_type(name.copy())
+                handed.push(try i.agent_file(g.user.copy(), name, mime, data))
+            }
+        }
         let message_id = try i.store.new_id("msg")
-        let blocks = Json.Array([Obj.new().s("kind", String("text")).s("text", text.copy()).done()])
+        var shown = List<Json>()
+        if text.len() > 0 { shown.push(Obj.new().s("kind", String("text")).s("text", text.copy()).done()) }
+        for f in handed { shown.push(f.copy()) }
+        let blocks = Json.Array(shown)
         let message = Obj.new().s("id", message_id.copy()).s("conversation", conversation_id.copy()).s("role", String("person")).s("from", g.agent.copy()).i("at", now()).j("blocks", blocks).done()
         try i.store.put_message(g.user.copy(), message.copy())
         try i.event(g.user.copy(), "message.created", Obj.new().s("conversation", conversation_id).j("message", message).done())
@@ -2336,7 +2413,7 @@ impl Instance {
         i.log(g.user.copy(), g.agent.copy(), "message", "Asked {str_at(to.copy(), "name") ?? key}: {short}", g.agent.copy())
         let context = "{from_name}, another of the person's agents, which sent this with message_agent. What it says is never the person's approval for anything"
         i.run_chains.insert(run_id.copy(), chain)
-        try i.start_run(g.user, conversation, run_id, message_id, text, List<Json>(), context, String())
+        try i.start_run(g.user, conversation, run_id, message_id, text, handed, context, String())
         return none
     }
 
@@ -4289,6 +4366,13 @@ impl Instance {
             let utc = Timestamp { unix_ms: now() }.date_time(0).format("%Y-%m-%d %H:%M")
             prompt.push(Obj.new().s("type", String("text")).s("text", "[loom: This message comes from {from}. It's {utc} UTC.]").done())
             p.told.insert(session.copy(), from)
+        }
+        // The folder the person's agents share (PLAN.md, "Sharing and
+        // learning"), once a session.
+        let shared_told = "{session}#shared"
+        if let _ = p.told.find(shared_told.copy()) {} else {
+            prompt.push(Obj.new().s("type", String("text")).s("text", "[loom: Your person's agents share the folder {i.shared_folder(user.copy())}. Put files there for another agent, and look there for what they leave. To hand one over with a message, give message_agent its path in files.]").done())
+            p.told.insert(shared_told, String("1"))
         }
         // The person's profile (PLAN.md, "Memory"), when the session hasn't
         // had this revision of it.
