@@ -1305,6 +1305,7 @@ ACTA_KEY=secret:ACTA_KEY",
                 .child(
                     div()
                         .id("close-panel")
+                        .occlude()
                         .text_size(px(size::CAPTION))
                         .text_color(p.ink_3)
                         .cursor_pointer()
