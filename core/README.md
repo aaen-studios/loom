@@ -32,6 +32,7 @@ The app sends the core protocol frames (`send`, `cmd`, `approve`, `cancel`, …)
 | `{"t":"logout"}` | Revokes this device's token (`POST /api/logout`), forgets it, and signs out |
 | `{"t":"send","conversation":"c_9","text":"…"}` | A message the person wrote. It goes in the outbox, with a `cid` if it has none, and out when the connection is up. With `agent` instead of `conversation`, it goes to that agent's newest conversation, which the core makes first if there's none: the desktop app shows each agent as one ongoing chat |
 | `{"t":"core.get","id":"g_1","what":"messages","conversation":"c_9","before":"msg_40","limit":50}` | Reads the cache: `what` is `conversations`, `agents`, `devices`, `runs`, `tools`, `approvals`, `outbox` or `messages`. Older messages than the cache has come from the `messages.list` command, whose result the cache keeps |
+| `{"t":"app.active","active":false}` | Someone started or stopped looking at the app. The core notifies only while no one is, and tells the instance (the `device` frame) |
 | `{"t":"app.wake"}` | The system woke from sleep. The core opens a new connection at once |
 | `{"t":"app.network"}` | The network changed. The same |
 | `{"t":"core.stop"}` | Sent by `loom_core_stop`. The core closes the connection and ends |
@@ -50,6 +51,7 @@ The core tells the app every frame the instance sends (`welcome`, `event`, `delt
 | `{"t":"error","code":"keyring","message":"…"}` | The credential store couldn't be read at start |
 | `{"t":"core.queued","cid":"m_…","conversation":"c_9","text":"…","at":…}` | A `send` is in the outbox. The `ack` with its `cid` follows once the instance has it |
 | `{"t":"core.data","id":"g_1","what":"messages","items":[…],"more":true}` | The answer to `core.get`, oldest first for messages. `more` says the cache has older ones |
+| `{"t":"core.notify","title":"Builder","body":"…","agent":"a_2","conversation":"c_9","kind":"run.finished"}` | Worth a system notification: a reply that finished or failed, or a question waiting (`approval.needed`). Only for live events while no one is looking, not for catch-up |
 | `{"t":"error","code":"offline","for":"q_2"}` | A frame other than `send` came while the core wasn't connected, so it didn't go |
 | `{"t":"error","code":"not_sent","ref":"m_…","message":"…"}` | A send to an agent the instance couldn't make a conversation with, such as one deleted meanwhile. It leaves the outbox |
 | `{"t":"error","code":"cache","message":"…"}` | The cache couldn't be read or written. An event that wasn't applied isn't in the cursor either, so the next connection gets it again |

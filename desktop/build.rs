@@ -33,7 +33,15 @@ fn main() {
         println!("cargo:rustc-link-lib=dylib=pthread");
         println!("cargo:rustc-link-lib=dylib=dl");
     }
-    for dir in ["core", "shared"] {
+    // The exe's icon, which the taskbar, the window and Explorer show.
+    if env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {
+        let mut res = winresource::WindowsResource::new();
+        res.set_icon(&root.join("design/logo/app.ico").to_string_lossy());
+        res.set("ProductName", "loom");
+        res.set("FileDescription", "loom");
+        res.compile().expect("the Windows resources didn't build");
+    }
+    for dir in ["core", "shared", "server"] {
         println!("cargo:rerun-if-changed={}", root.join(dir).display());
     }
 }

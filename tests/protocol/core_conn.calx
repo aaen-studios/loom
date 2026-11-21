@@ -148,8 +148,15 @@ fn run(server: mut Child, data: String) ! Error {
     app.send(Obj.new().s("t", String("send")).s("agent", other.copy()).s("text", String("hello, new agent")).done())
     let made_conv = try app.until("event", "kind", "conversation.created", 5000)
     let to_agent = try app.until("ack", "", String(), 5000)
-    try check(str_at(at(made_conv, "conversation"), "agent") == some(other) and str_at(to_agent, "message") != none, "a send to an agent with no conversation makes one and goes")
+    try check(str_at(at(made_conv, "conversation"), "agent") == some(other.copy()) and str_at(to_agent, "message") != none, "a send to an agent with no conversation makes one and goes")
     _ = try app.until("event", "kind", "run.finished", 20000)
+
+    // --- Notifications, while no one is looking ---
+    app.send(Obj.new().s("t", String("app.active")).b("active", false).done())
+    app.send(Obj.new().s("t", String("send")).s("agent", other).s("text", String("tell me when you're done")).done())
+    let note = try app.until("core.notify", "kind", String("run.finished"), 20000)
+    try check(str_at(note.copy(), "title") == some(String("Other")) and (str_at(note, "body") ?? String()).len() > 0, "a reply that's done while the app isn't looked at becomes a notification")
+    app.send(Obj.new().s("t", String("app.active")).b("active", true).done())
 
     // --- The instance goes away and comes back ---
     server.kill_tree()
