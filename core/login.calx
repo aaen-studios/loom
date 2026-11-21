@@ -48,21 +48,22 @@ pub fn address(server: String) -> String {
 
 impl Pending {
     /// Starts a login, a setup or a link: POSTs `body` to /api/login, /api/setup or /api/link.
-    pub fn start(kind: Kind, server: own String, id: own String?, payload: Json) -> Pending {
+    /// `base` is where it goes: `server` itself, or the relay to it for a place over Noise.
+    pub fn start(kind: Kind, server: own String, base: String, id: own String?, payload: Json) -> Pending {
         let path = match kind {
             Kind.Setup => "/api/setup",
             Kind.Link => "/api/link",
             _ => "/api/login",
         }
         let headers: List<Header> = [Header { name: String("Content-Type"), value: String("application/json") }]
-        let req = post("{server}{path}", headers, "{payload}".to_bytes(), TIMEOUT_MS, LIMIT)
+        let req = post("{base}{path}", headers, "{payload}".to_bytes(), TIMEOUT_MS, LIMIT)
         return Pending { kind: kind, server: server, id: id, req: req }
     }
 
     /// Starts a logout, which revokes `token` on the instance.
-    pub fn logout(server: own String, token: String) -> Pending {
+    pub fn logout(server: own String, base: String, token: String) -> Pending {
         let headers: List<Header> = [Header { name: String("Authorization"), value: "Bearer {token}" }]
-        let req = post("{server}/api/logout", headers, List<u8>(), TIMEOUT_MS, LIMIT)
+        let req = post("{base}/api/logout", headers, List<u8>(), TIMEOUT_MS, LIMIT)
         return Pending { kind: Kind.Logout, server: server, id: none, req: req }
     }
 

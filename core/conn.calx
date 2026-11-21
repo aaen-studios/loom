@@ -26,6 +26,7 @@ import core.files.{Transfer, at_path, kept_at, refused}
 import shared.files.{is_sha}
 import core.login.{Kind, Outcome, Pending, address, request_body}
 import core.link
+import core.relay
 import core.update.{Updater}
 import core.device.{Device}
 import std.fs
@@ -58,6 +59,11 @@ pub fn ws_url(server: String) -> String? {
     if a.starts_with("https://") { return some("wss://{a[8..]}/ws") }
     if a.starts_with("http://") { return some("ws://{a[7..]}/ws") }
     return none
+}
+
+/// Whether `server` is an address the core can reach: http://, https://, or a place over Noise.
+pub fn valid_server(server: String) -> bool {
+    return ws_url(server.copy()) != none or relay.place(server) != none
 }
 
 /// What one read of the socket gave.
@@ -118,6 +124,10 @@ pub struct Conn {
     follow_to: String     // where the instance moved, while the core checks it's the same one there
     following: Request?   // GET <follow_to>/api/info, for its key
     follow_at: Instant?   // when it last asked, so it asks again 2 s later while the new place isn't answering
+    relay: Thread?        // the relay to a place over Noise (core/relay.calx), while there's one
+    stop_relay: Sender<bool>?
+    relay_place: String   // the place it goes to
+    relay_url: String     // and where it listens
 }
 
 impl Conn {
@@ -170,7 +180,41 @@ impl Conn {
             follow_to: String(),
             following: none,
             follow_at: none,
+            relay: none,
+            stop_relay: none,
+            relay_place: String(),
+            relay_url: String(),
         }
+    }
+
+    /// Where to reach `server`: itself, or for a place over Noise, the relay to it,
+    /// which starts the first time. Empty if the relay couldn't start.
+    fn reach(mut self, server: String) -> String {
+        if not relay.is_place(server.copy()) { return server.copy() }
+        if self.relay_place == server and self.relay_url.len() > 0 { return self.relay_url.copy() }
+        self.stop_relaying()
+        let p = relay.place(server.copy()) else { return String() }
+        match relay.start(p) {
+            ok((t, stop, url)) => {
+                self.relay = some(t)
+                self.stop_relay = some(stop)
+                self.relay_place = server.copy()
+                self.relay_url = url.copy()
+                return url
+            },
+            err(e) => {
+                self.tell_error("relay", "{e}")
+                return String()
+            },
+        }
+    }
+
+    fn stop_relaying(mut self) {
+        if let s = mut self.stop_relay { s.send(true) }
+        self.stop_relay = none
+        if let t = self.relay.take() { t.join() }
+        self.relay_place = String()
+        self.relay_url = String()
     }
 
     fn tell(mut self, frame: Json) {
@@ -192,13 +236,13 @@ impl Conn {
     fn begin(mut self) {
         let server = self.server.copy() ?? String()
         if self.token == none and server.len() > 0 {
-            match keyring.get(self.keyring.copy(), server.copy()) {
+            match keyring.get(self.keyring.copy(), relay.keyring_name(server.copy())) {
                 ok(t) => self.token = t,
                 err(e) => self.tell(Obj.new().s("t", String("error")).s("code", String("keyring")).s("message", "{e}").done()),
             }
         }
-        if server.len() > 0 and ws_url(server.copy()) == none {
-            self.tell(Obj.new().s("t", String("error")).s("code", String("bad_config")).s("message", "not an http:// or https:// address: {server}").done())
+        if server.len() > 0 and not valid_server(server.copy()) {
+            self.tell(Obj.new().s("t", String("error")).s("code", String("bad_config")).s("message", "not an http://, https:// or noise:// address: {server}").done())
             self.server = none
         }
         if self.server != none and self.token != none {
@@ -216,7 +260,7 @@ impl Conn {
         self.token = none
         self.retry_at = none
         if let server = self.server.copy() {
-            match keyring.delete(self.keyring.copy(), server) {
+            match keyring.delete(self.keyring.copy(), relay.keyring_name(server)) {
                 ok(_) => {},
                 err(_) => {},    // a store that can't answer has nothing kept to delete
             }
@@ -230,7 +274,9 @@ impl Conn {
         self.synced = false
         // Commands sent on an old socket get no result: the outbox asks again on welcome.
         self.making = List<String>()
-        let url = ws_url(self.server.copy() ?? String()) ?? String()
+        let known = self.server.copy() ?? String()
+        let base = self.reach(known)
+        let url = ws_url(base) ?? String()
         let token = self.token.copy() ?? String()
         if url.len() == 0 or token.len() == 0 {
             self.state = State.SignedOut
@@ -586,7 +632,8 @@ impl Conn {
             if let server = self.server.copy() {
                 if let token = self.token.copy() {
                     if self.pending == none {
-                        self.pending = some(Pending.logout(server, token))
+                        let base = self.reach(server.copy())
+                        self.pending = some(Pending.logout(server, base, token))
                     }
                 }
             }
@@ -763,7 +810,7 @@ impl Conn {
     fn log_in(mut self, kind: Kind, m: Json) {
         let id = str_at(m.copy(), "id")
         let server = address(str_at(m.copy(), "server") ?? (self.server.copy() ?? String()))
-        if ws_url(server.copy()) == none {
+        if not valid_server(server.copy()) {
             self.tell(Obj.new().s("t", String("core.login")).maybe("id", id).j("error", Obj.new().s("code", String("bad_server")).s("message", String("Give the instance's address, starting with https:// or http://.")).done()).done())
             return
         }
@@ -771,7 +818,8 @@ impl Conn {
             self.tell(Obj.new().s("t", String("core.login")).maybe("id", id).j("error", Obj.new().s("code", String("busy")).s("message", String("A login is already on its way.")).done()).done())
             return
         }
-        self.pending = some(Pending.start(kind, server, id, self.with_tz(request_body(kind, m))))
+        let base = self.reach(server.copy())
+        self.pending = some(Pending.start(kind, server, base, id, self.with_tz(request_body(kind, m))))
     }
 
     /// The instance made a code to add a device: the app gets the result with `qr`, the
@@ -801,7 +849,9 @@ impl Conn {
         var body = Obj.new().s("code", l.code.copy())
         let device = at(m, "device")
         if device != Json.Null { body = body.j("device", device) }
-        self.pending = some(Pending.start(Kind.Link, address(l.server.copy()), id, self.with_tz(body.done())))
+        let server = address(l.server.copy())
+        let base = self.reach(server.copy())
+        self.pending = some(Pending.start(Kind.Link, server, base, id, self.with_tz(body.done())))
     }
 
     /// Takes a login, setup or logout that has ended.
@@ -819,7 +869,7 @@ impl Conn {
             Outcome.Token(user, device, token) => {
                 let user_id = user.copy()
                 var reply = Obj.new().s("t", String("core.login")).maybe("id", id).b("ok", true).s("user", user).s("device", device)
-                match keyring.set(self.keyring.copy(), server.copy(), token.copy()) {
+                match keyring.set(self.keyring.copy(), relay.keyring_name(server.copy()), token.copy()) {
                     ok => reply = reply.b("kept", true),
                     // Logged in for this run, but the next start asks again.
                     err(e) => reply = reply.b("kept", false).s("why", "{e}"),
@@ -864,7 +914,8 @@ impl Conn {
     /// `file` and `thumb`). A file that's down already is answered at once.
     fn transfer(mut self, up: bool, m: Json) {
         let id = str_at(m.copy(), "id")
-        let server = self.server.copy() ?? String()
+        let known = self.server.copy() ?? String()
+        let server = self.reach(known)
         let token = self.token.copy() ?? String()
         if server.len() == 0 or token.len() == 0 {
             self.tell(refused(id, "signed_out", String("Sign in to an instance first.")))
@@ -1075,10 +1126,10 @@ impl Conn {
         }
         let old = self.server.copy() ?? String()
         let token = self.token.copy() ?? String()
-        match keyring.set(self.keyring.copy(), to.copy(), token) {
+        match keyring.set(self.keyring.copy(), relay.keyring_name(to.copy()), token) {
             ok => {
                 if old.len() > 0 {
-                    match keyring.delete(self.keyring.copy(), old.copy()) {
+                    match keyring.delete(self.keyring.copy(), relay.keyring_name(old.copy())) {
                         ok(_) => {},
                         err(_) => {},
                     }
@@ -1120,12 +1171,15 @@ impl Task for Conn {
             c.poll_follow()
             c.tick()
             if let m = unsafe { c.inbox.wait_for(TICK_NS) } {
-                if not c.from_app(m) { return }
-                while let more = c.inbox.next() {
-                    if not c.from_app(more) { return }
+                var going = c.from_app(m)
+                while going {
+                    let more = c.inbox.next() else break
+                    going = c.from_app(more)
                 }
+                if not going { break }
             }
         }
+        c.stop_relaying()
     }
 }
 
