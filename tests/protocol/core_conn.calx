@@ -27,7 +27,7 @@ fn calx() -> String {
 }
 
 fn serve(data: String, port: String) -> Child ! Error {
-    let cmd = Command.new(calx()).arg(String("server/main.calx")).arg(String("serve")).arg(String("--port")).arg(port).arg(String("--data")).arg(data).arg(String("--test-fast-hashes"))
+    let cmd = Command.new(calx()).arg(String("server/main.calx")).arg(String("serve")).arg(String("--port")).arg(port).arg(String("--data")).arg(data).arg(String("--test-fast-hashes")).arg(String("--allow-root"))
     return try cmd.stdout(Stdio.Pipe).own_group().spawn()
 }
 

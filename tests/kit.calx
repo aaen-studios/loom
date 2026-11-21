@@ -45,7 +45,7 @@ impl Instance {
         let agent = try fs.absolute(String("tests/fake_agent/main.calx"))
         let added = try loom(data.copy(), [String("acp"), String("add"), String("fake"), calx(), agent]).output()
         if not added.status.success() { fail "loom acp add failed: {added.error_text()}" }
-        var args: List<String> = [String("serve"), String("--port"), String("0")]
+        var args: List<String> = [String("serve"), String("--port"), String("0"), String("--allow-root")]
         args.extend(extra)
         let server = try loom(data.copy(), args).stdout(Stdio.Pipe).spawn()
         let serving = server.wait_for_line(String("loom: serving"), WAIT) else {
@@ -94,7 +94,7 @@ impl Instance {
         old.kill()
         _ = old.wait()
         if off_ms > 0 { unsafe { sleep(u64.wrap(off_ms) * 1000000) } }
-        var args: List<String> = [String("serve"), String("--port"), String("0")]
+        var args: List<String> = [String("serve"), String("--port"), String("0"), String("--allow-root")]
         args.extend(extra)
         let server = try loom(self.data.copy(), args).stdout(Stdio.Pipe).spawn()
         let serving = server.wait_for_line(String("loom: serving"), WAIT) else {

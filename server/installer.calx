@@ -155,15 +155,13 @@ pub fn install(how: Json, folder: String) -> Json ! Error {
             },
             err(e) => fail "the archive can't be read: {e}",
         }
-    } else if lower.ends_with(".tar.gz") or lower.ends_with(".tgz") or lower.ends_with(".tar.xz") or lower.ends_with(".tar.zst") {
+    } else if lower.ends_with(".tar.gz") or lower.ends_with(".tgz") or lower.ends_with(".tar.bz2") or lower.ends_with(".tbz2") or lower.ends_with(".tar.xz") or lower.ends_with(".tar.zst") {
         match Tar.open(data) {
             ok(t) => {
                 if let err(e) = t.extract(part.copy()) { fail "the archive can't be unpacked: {e}" }
             },
             err(e) => fail "the archive can't be read: {e}",
         }
-    } else if lower.ends_with(".tar.bz2") or lower.ends_with(".tbz2") {
-        fail "loom can't unpack bzip2 archives yet"
     } else {
         // The program itself, not in an archive.
         try fs.write("{part}/{program_name(cmd.copy())}", data)
