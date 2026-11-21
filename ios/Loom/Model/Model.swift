@@ -567,8 +567,12 @@ final class Model {
     func login(server: String, username: String, password: String, device: JSON) -> JSON {
         loggingIn = true
         loginError = nil
-        return ["t": "login", "id": JSON(id("app.login")), "server": JSON(server.trimmingCharacters(in: .whitespaces)),
-                "username": JSON(username.trimmingCharacters(in: .whitespaces)), "password": JSON(password), "device": device]
+        var frame: [String: JSON] = ["t": "login", "id": JSON(id("app.login")), "username": JSON(username.trimmingCharacters(in: .whitespaces)),
+                                     "password": JSON(password), "device": device]
+        // Left out, the core uses the instance it last knew.
+        let server = server.trimmingCharacters(in: .whitespaces)
+        if !server.isEmpty { frame["server"] = JSON(server) }
+        return .object(frame)
     }
 
     /// Joins the instance in a QR code the desktop app shows under Add a phone.
