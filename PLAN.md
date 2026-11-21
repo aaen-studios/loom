@@ -134,7 +134,7 @@ What the owner controls for each member:
 
 A member's agents always run in that member's sandbox (below).
 
-Secrets (MCP keys, tokens) are encrypted in the database with a key only the server holds. The key is `secret.key` in the data folder, made on the first start and readable only by the instance's user, never in the database. Each secret is sealed with XChaCha20-Poly1305 and a random nonce, bound to its person and name.
+Secrets (MCP keys, tokens) are encrypted in the database with a key only the server holds. The key is `secret.key` in the data folder, made on the first start and readable only by the instance's user, never in the database. Each secret is sealed with XChaCha20-Poly1305 and a random nonce, bound to its person and name. So are the other things only the instance should read: an ACP program's settings, its API keys among them, bound to the program, and a routine's webhook secret, bound to the routine. Settings kept before sealing came are sealed on the next start.
 
 ### Sandboxes: where members' agents run
 

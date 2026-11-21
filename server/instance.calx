@@ -10,7 +10,6 @@ module server.instance
 // events.
 import std.bytes
 import std.crypto.{Ed25519Key, PasswordHasher, XChaCha20Poly1305, compare_digest, random_bytes}
-import std.env.{os}
 import std.fs
 import std.hash.{hmac_sha256, sha256}
 import std.http.server.{Request, Response, Server, ServerSocket, content_type}
@@ -32,7 +31,7 @@ import server.hashing
 import server.hashing.{Done, Job}
 import server.installer
 import server.routines
-import server.store.{AcpAgent, Device, Store, User, now}
+import server.store.{AcpAgent, Device, Store, User, now, secret_key}
 import shared.tools
 
 pub struct Config {
@@ -289,25 +288,6 @@ fn program_json(a: AcpAgent) -> Json {
         }
     }
     return Obj.new().s("name", a.name).s("command", a.command).s("source", a.source).s("version", a.version).j("settings", Json.Array(settings)).done()
-}
-
-// The cipher that seals the instance's secrets (PLAN.md, "Accounts and
-// invites"), with the key in secret.key in the data folder: made on the first
-// start, and readable only by the instance's own user. It's kept out of the
-// database, so a copy of loom.db alone opens nothing.
-fn secret_key(data: String) -> XChaCha20Poly1305 ! Error {
-    let path = "{data}/secret.key"
-    if fs.exists(path.copy()) {
-        let key = try fs.read(path.copy())
-        if key.len() != 32 { fail "{path} isn't a 32-byte key" }
-        return XChaCha20Poly1305.new(key)
-    }
-    let key = XChaCha20Poly1305.generate_key()
-    let part = "{path}.part"
-    try fs.write(part.copy(), key.copy())
-    if os() != "windows" { try fs.set_mode(part.copy(), 0o600) }
-    try fs.rename(part, path)
-    return XChaCha20Poly1305.new(key)
 }
 
 // What a secret's seal is bound to, so a sealed value moved to another
