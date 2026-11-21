@@ -149,6 +149,8 @@ Every ACP agent runs commands and reads and writes files. On a server, all of th
   The member's ACP agents and their logins live in the sandbox, and they can install what they like there. Loom's own tools reach in through `loom mcp`, with only that member's rights.
 - **An instance with members needs Podman or Docker** on its server. The install script sets it up.
 
+Until sandboxes are built, only the owner's agents run: a member's run fails and says why.
+
 ## Connecting devices
 
 A device joins an instance in one of three ways:
