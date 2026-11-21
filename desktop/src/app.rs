@@ -7221,6 +7221,39 @@ ACTA_KEY=secret:ACTA_KEY",
             }
             body = body.child(open);
         }
+        // What happened to people here, newest first.
+        if !self.model.people_log.is_empty() {
+            let mut log = div()
+                .flex()
+                .flex_col()
+                .gap(px(space::S))
+                .child(heading("What happened"));
+            for e in self.model.people_log.clone() {
+                let when = if day_of(e.at) == "Today" {
+                    time_of(e.at)
+                } else {
+                    format!("{} {}", day_of(e.at), time_of(e.at))
+                };
+                let who = if e.by.is_empty() {
+                    "from the server".to_string()
+                } else {
+                    format!("by {}", e.by)
+                };
+                log = log.child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .child(
+                            div()
+                                .text_size(px(size::SMALL))
+                                .text_color(p.ink)
+                                .child(e.text.clone()),
+                        )
+                        .child(caption(format!("{when}, {who}"))),
+                );
+            }
+            body = body.child(log);
+        }
         self.page("people-page", body)
     }
 

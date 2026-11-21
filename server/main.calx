@@ -407,6 +407,7 @@ fn run(a: Args) -> Said ! Error {
         if password.len() < 8 { fail "a password needs at least 8 characters" }
         let role = if try store.user_count() == 0 { "owner" } else { "member" }
         let u = try store.add_user(a.words[2].copy(), password, role)
+        try store.log_people("joined", "{u.username} was added from the command line, as {if role == "owner" { "the owner" } else { "a member" }}", String())
         return said("added {u.username} ({u.id}, {role})", Obj.new().s("id", u.id.copy()).s("username", u.username.copy()).s("role", String(role)).done())
     }
     // The owner's own reset (PLAN.md, "Accounts and invites"), or anyone's: a new
@@ -419,6 +420,7 @@ fn run(a: Args) -> Said ! Error {
         if password.len() < 8 { fail "a password needs at least 8 characters" }
         try store.set_password(u.id.copy(), password)
         let gone = try store.revoke_all(u.id.copy())
+        try store.log_people("password", "{u.username} was given a new password from the command line, and signed out everywhere", String())
         return said("{u.username} has a new password, and is signed out on {gone.len()} devices", Obj.new().s("id", u.id.copy()).s("username", u.username.copy()).i("signed_out", i64.wrap(gone.len())).done())
     }
     if cmd == "user" and sub == "list" {
