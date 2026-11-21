@@ -198,6 +198,7 @@ pub struct Instance {
     registry_at: String    // the ACP Registry's address
     registry: Json    // what it last said, or null
     registry_time: i64    // when
+    registry_fetching: bool    // whether a read of it is under way
     install_to: Sender<installer.Job>
     install_done: Receiver<installer.Done>
     fetching: List<Waiter>    // commands waiting on the registry
@@ -781,10 +782,11 @@ impl Instance {
         }
         let browser_done = Receiver<browser.Back>()
         let browser_to = browser_done.sender()
-        var i = Instance { browsers: LinkedMap<String, Browser>(), watchers: Map<u32, String>(), browser_done: browser_done, browser_to: browser_to, stopped_browsers: List<Thread>(), fills: Map<String, Fill>(), turns_ended: List<(String, String, String)>(), next_browser_sweep: 0, task_stops: Map<String, String>(), resumes: List<(String, String)>(), push_to: push_to, push_gone: push_gone, move_to: move_to, move_done: move_done, lan: config.lan, bridge: none, stop_bridge: none, lan_port: 0, announcer: none, stop_announcer: none, to_close: List<ServerSocket>(), boxes: none, gate: none, stop_gate: none, moving: String(), move_waiters: List<Waiter>(), moved: moved, version: config.version.copy(), store: store, server: server, data: config.data.copy(), sessions: Map<u32, Session>(), runs: LinkedMap<String, Run>(), procs: LinkedMap<String, Proc>(), approvals: LinkedMap<String, Approval>(), lines: lines, lines_to: to, hash_to: hash_to, hash_done: hash_done, next_job: 0, auths: Map<i64, Auth>(), dummy_hash: dummy, failures: LinkedMap<String, List<i64>>(), thumbs: files.start(), events: config.events, next_prune: 0, grants: Map<String, Grant>(), calls: Map<String, Request>(), context: Map<String, (i64, i64)>(), registry_at: config.registry.copy(), registry: Json.Null, registry_time: 0, install_to: install_to, install_done: install_done, fetching: List<Waiter>(), installs: Map<i64, Install>(), leftovers: List<String>(), next_sweep: 0, device_calls: Map<String, DeviceCall>(), minute_ms: config.minute_ms, next_due: 0, routine_runs: Map<String, RoutineRun>(), routine_marks: Map<String, (String, String)>(), run_chains: Map<String, List<String>>(), panel_calls: Map<String, Waiter>(), script_calls: Map<String, Request>(), running_flows: LinkedMap<String, flows.Flow>(), flow_steps: Map<String, (String, usize)>(), advancing: List<String>(), flow_results: List<(String, usize, bool, String)>(), flows_due: List<String>(), slow_calls: Map<String, String>(), acting: 0, call_actions: Map<String, i64>(), tool_actions: Map<String, i64>(), sealer: try secret_key(config.data.copy()) }
+        var i = Instance { browsers: LinkedMap<String, Browser>(), watchers: Map<u32, String>(), browser_done: browser_done, browser_to: browser_to, stopped_browsers: List<Thread>(), fills: Map<String, Fill>(), turns_ended: List<(String, String, String)>(), next_browser_sweep: 0, task_stops: Map<String, String>(), resumes: List<(String, String)>(), push_to: push_to, push_gone: push_gone, move_to: move_to, move_done: move_done, lan: config.lan, bridge: none, stop_bridge: none, lan_port: 0, announcer: none, stop_announcer: none, to_close: List<ServerSocket>(), boxes: none, gate: none, stop_gate: none, moving: String(), move_waiters: List<Waiter>(), moved: moved, version: config.version.copy(), store: store, server: server, data: config.data.copy(), sessions: Map<u32, Session>(), runs: LinkedMap<String, Run>(), procs: LinkedMap<String, Proc>(), approvals: LinkedMap<String, Approval>(), lines: lines, lines_to: to, hash_to: hash_to, hash_done: hash_done, next_job: 0, auths: Map<i64, Auth>(), dummy_hash: dummy, failures: LinkedMap<String, List<i64>>(), thumbs: files.start(), events: config.events, next_prune: 0, grants: Map<String, Grant>(), calls: Map<String, Request>(), context: Map<String, (i64, i64)>(), registry_at: config.registry.copy(), registry: Json.Null, registry_time: 0, registry_fetching: false, install_to: install_to, install_done: install_done, fetching: List<Waiter>(), installs: Map<i64, Install>(), leftovers: List<String>(), next_sweep: 0, device_calls: Map<String, DeviceCall>(), minute_ms: config.minute_ms, next_due: 0, routine_runs: Map<String, RoutineRun>(), routine_marks: Map<String, (String, String)>(), run_chains: Map<String, List<String>>(), panel_calls: Map<String, Waiter>(), script_calls: Map<String, Request>(), running_flows: LinkedMap<String, flows.Flow>(), flow_steps: Map<String, (String, usize)>(), advancing: List<String>(), flow_results: List<(String, usize, bool, String)>(), flows_due: List<String>(), slow_calls: Map<String, String>(), acting: 0, call_actions: Map<String, i64>(), tool_actions: Map<String, i64>(), sealer: try secret_key(config.data.copy()) }
         if config.sandboxes.len() > 0 and not i.lan { try i.sandboxes_on(config.sandboxes.copy(), config.sandbox_image.copy()) }
         // An action the last run of the instance left started, it never finished.
         try i.store.settle_cut_short()
+        i.pick_up_registry()
         // What waited behind a turn the restart cut short goes once the loop
         // runs; a queue the person left waiting by stopping a turn still waits.
         i.turns_ended = restarted
@@ -5936,17 +5938,16 @@ impl Instance {
     // acp.registry and acp.install, which the installer's thread answers.
     fn slow_cmd(i: mut Instance, w: Waiter, user: String, name: String, args: Json) ! Error {
         if name == "acp.registry" {
-            let fresh = i.registry != Json.Null and now() - i.registry_time < REGISTRY_FRESH_MS
-            if fresh and not (bool_at(args, "again") ?? false) {
+            // What it last read is answered at once, even after a restart. Once
+            // that's old, it's read again behind the answer, for the next one.
+            if i.registry != Json.Null and not (bool_at(args, "again") ?? false) {
                 let list = try i.registry_list()
                 i.answer_cmd(w, Answer.Value(list))
+                if now() - i.registry_time >= REGISTRY_FRESH_MS { i.read_registry() }
                 return
             }
-            if i.fetching.len() == 0 {
-                i.next_job += 1
-                i.install_to.send(installer.Job { id: i.next_job, work: installer.Work.Registry(i.registry_at.copy()) })
-            }
             i.fetching.push(w.copy())
+            i.read_registry()
             return
         }
         if try i.store.role(user) != some(String("owner")) {
@@ -6010,6 +6011,7 @@ impl Instance {
             i.answer_cmd(job.waiter, Answer.Value(Obj.new().j("program", program_json(program)).done()))
             return
         }
+        i.registry_fetching = false
         let waiting = i.fetching.copy()
         i.fetching = List<Waiter>()
         if d.error.len() > 0 {
@@ -6020,10 +6022,57 @@ impl Instance {
         }
         i.registry = d.value.copy()
         i.registry_time = now()
+        i.keep_registry()
         let list = try i.registry_list()
         for w in waiting {
             i.answer_cmd(w, Answer.Value(list.copy()))
         }
+    }
+
+    // Reads the ACP Registry again on the installer's thread, unless a read is
+    // under way already.
+    fn read_registry(i: mut Instance) {
+        if i.registry_fetching { return }
+        i.registry_fetching = true
+        i.next_job += 1
+        i.install_to.send(installer.Job { id: i.next_job, work: installer.Work.Registry(i.registry_at.copy()) })
+    }
+
+    // Where what the registry last said is kept, so a restart answers at once.
+    fn registry_file(i: Instance) -> String {
+        return "{i.data}/acp/registry.json"
+    }
+
+    // Keeps what the registry said, with when and where from. A failure only
+    // means the next start reads it again.
+    fn keep_registry(i: Instance) {
+        let kept = Obj.new().s("address", i.registry_at.copy()).i("at", i.registry_time).j("registry", i.registry.copy()).done()
+        match fs.make_dir_all("{i.data}/acp") {
+            ok => {},
+            err(_) => return,
+        }
+        match fs.write_text(i.registry_file(), "{kept}") {
+            ok => {},
+            err(e) => eprintln("loom: the ACP Registry wasn't kept: {e}"),
+        }
+    }
+
+    // What the registry said when the instance last read it, if it was read
+    // from the same address. Once that's old, it's read again at once.
+    fn pick_up_registry(i: mut Instance) {
+        let text = match fs.read_text(i.registry_file()) {
+            ok(t) => t ?? String(),
+            err(_) => String(),
+        }
+        if text.len() == 0 { return }
+        let kept = match parse(text) {
+            ok(j) => j,
+            err(_) => return,
+        }
+        if str_at(kept.copy(), "address") != some(i.registry_at.copy()) { return }
+        i.registry = at(kept.copy(), "registry")
+        i.registry_time = int_at(kept, "at") ?? 0
+        if i.registry != Json.Null and now() - i.registry_time >= REGISTRY_FRESH_MS { i.read_registry() }
     }
 
     // The registry's agents as acp.registry gives them: each with how it
