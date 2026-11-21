@@ -148,6 +148,7 @@ enum Pending {
     NewSession(String)
     Resume(String, String)    // the run, and the session picked up again
     Prompt(String)
+    Config(String, String, String, String)    // the run, its session, and the option and value being set
 }
 
 struct Proc {
@@ -167,6 +168,7 @@ struct Proc {
     sessions: Map<String, String>    // conversation -> ACP session
     told: Map<String, String>    // ACP session -> where it was last told the person is
     profiled: Map<String, i64>    // ACP session -> the revision of the person's profile it has
+    configs: Map<String, Json>    // ACP session -> its configOptions, as it last gave them
     waiting: List<String>
 }
 
@@ -451,6 +453,24 @@ fn hide_secrets(j: Json, secrets: List<(String, String)>) -> Json {
 }
 
 // A command's answer, as a tool's result.
+// Whether an agent's `config` may set option `id` to `value`: yes when its
+// program offers it, and when loom hasn't seen the option yet (it's checked
+// again against the session when set).
+fn config_allowed(options: Json, id: String, value: String) -> bool {
+    if let Json.Array(list) = options {
+        for o in list {
+            if str_at(o.copy(), "id") != some(id.copy()) { continue }
+            if let Json.Array(values) = at(o, "options") {
+                for v in values {
+                    if str_at(v, "value") == some(value.copy()) { return true }
+                }
+            }
+            return false
+        }
+    }
+    return true
+}
+
 fn answer_text(a: Answer) -> Json {
     return match a {
         Answer.Value(v) => tool_text("{v}"),
@@ -4231,7 +4251,7 @@ impl Instance {
         }
         i.write_skills(user.copy(), folder.copy())
         let to = try acp.start(id.copy(), command, args, settings, folder, i.lines_to.copy())
-        var p = Proc { agent: id.copy(), user: user.copy(), to: to, ready: false, images: false, program: program, resume: false, load: false, mcp_http: false, boxed: boxed, shared: shared, next_id: 1, pending: Map<i64, Pending>(), sessions: Map<String, String>(), told: Map<String, String>(), profiled: Map<String, i64>(), waiting: List<String>() }
+        var p = Proc { agent: id.copy(), user: user.copy(), to: to, ready: false, images: false, program: program, resume: false, load: false, mcp_http: false, boxed: boxed, shared: shared, next_id: 1, pending: Map<i64, Pending>(), sessions: Map<String, String>(), told: Map<String, String>(), profiled: Map<String, i64>(), configs: Map<String, Json>(), waiting: List<String>() }
         p.pending.insert(1, Pending.Init)
         p.to.send(Out.Send(acp.request(1, "initialize", acp.initialize_params())))
         i.procs.insert(id, p)
@@ -4260,7 +4280,7 @@ impl Instance {
             if let run = mut i.runs.find(run_id.copy()) {
                 run.session = known.copy()
             }
-            i.prompt(mut p, run_id, known)
+            i.configure(mut p, run_id, known)
             return
         }
         // After a restart: the session the conversation had, picked up again
@@ -4538,8 +4558,8 @@ impl Instance {
                     try i.finish(run, String("failed"), some("The agent couldn't start a session: {str_at(e, "message") ?? String()}"))
                     return
                 }
-                let sid = str_at(result, "sessionId") ?? String()
-                try i.session_ready(mut p, run, sid, true)
+                let sid = str_at(result.copy(), "sessionId") ?? String()
+                try i.session_ready(mut p, run, sid, true, at(result, "configOptions"))
             },
             Pending.Resume(run, sid) => {
                 if let e = error {
@@ -4548,7 +4568,20 @@ impl Instance {
                     i.new_session(mut p, run)
                     return
                 }
-                try i.session_ready(mut p, run, sid, false)
+                try i.session_ready(mut p, run, sid, false, at(result, "configOptions"))
+            },
+            Pending.Config(run, sid, option, value) => {
+                if let e = error {
+                    // The prompt goes in anyway, on what the session has.
+                    eprintln("loom: agent {p.agent} couldn't set {option} to {value}: {str_at(e, "message") ?? String()}")
+                    i.prompt(mut p, run, sid)
+                    return
+                }
+                let config = at(result, "configOptions")
+                if let Json.Array(_) = config { p.configs.insert(sid.copy(), config.copy()) }
+                // What the agent said yes to without taking isn't asked again.
+                let took = if let c = p.configs.find(sid.copy()) { acp.current(c.copy(), option) == some(value) } else { false }
+                if took { i.configure(mut p, run, sid) } else { i.prompt(mut p, run, sid) }
             },
             Pending.Prompt(run) => {
                 if let e = error {
@@ -4562,8 +4595,8 @@ impl Instance {
     }
 
     // A run's session is there, new (and kept for after a restart) or picked
-    // up again: the prompt goes in.
-    fn session_ready(i: mut Instance, p: mut Proc, run: String, sid: String, new: bool) ! Error {
+    // up again: set to the agent's model and the like, then the prompt goes in.
+    fn session_ready(i: mut Instance, p: mut Proc, run: String, sid: String, new: bool, config: Json) ! Error {
         var conversation = String()
         var user = String()
         if let rr = mut i.runs.find(run.copy()) {
@@ -4573,9 +4606,48 @@ impl Instance {
         } else {
             return
         }
-        if new { try i.store.put_acp_session(user, conversation.copy(), p.program.copy(), sid.copy()) }
+        if new { try i.store.put_acp_session(user.copy(), conversation.copy(), p.program.copy(), sid.copy()) }
         p.sessions.insert(conversation, sid.copy())
-        i.prompt(mut p, run, sid)
+        if let Json.Array(_) = config {
+            p.configs.insert(sid.copy(), config.copy())
+            // What a new session starts on is what the agent offers.
+            if new { try i.learn_options(user, p.agent.copy(), config) }
+        }
+        i.configure(mut p, run, sid)
+    }
+
+    // Keeps what an agent's program offers (its session config options) with
+    // the agent, for the person to pick from, when it's new or changed.
+    fn learn_options(i: Instance, user: String, id: String, config: Json) ! Error {
+        let agent = try i.store.agent(user.copy(), id.copy()) else return
+        let options = acp.offered(config)
+        if at(agent.copy(), "options") == options { return }
+        var o = Obj.new()
+        if let Json.Object(m) = agent {
+            for (k, v) in m { o.m.insert(k.copy(), v.copy()) }
+        }
+        let kept = o.j("options", options).done()
+        try i.store.put_agent_json(user.copy(), kept.copy())
+        try i.event(user, "agent.updated", Obj.new().j("agent", kept).s("by", id).done())
+    }
+
+    // Sets a run's session to what its agent's `config` says, one option at a
+    // time, then gives it the prompt.
+    fn configure(i: Instance, p: mut Proc, run: String, sid: String) {
+        let config = if let c = p.configs.find(sid.copy()) { c.copy() } else { Json.Null }
+        let wanted = match i.store.agent(p.user.copy(), p.agent.copy()) {
+            ok(some(a)) => at(a, "config"),
+            _ => Json.Null,
+        }
+        let todo = acp.config_todo(config, wanted)
+        if todo.len() == 0 {
+            i.prompt(mut p, run, sid)
+            return
+        }
+        let (option, value) = todo[0].copy()
+        p.next_id += 1
+        p.pending.insert(p.next_id, Pending.Config(run.copy(), sid.copy(), option.copy(), value.copy()))
+        p.to.send(Out.Send(acp.request(p.next_id, "session/set_config_option", Obj.new().s("sessionId", sid).s("configId", option).s("value", value).done())))
     }
 
     // Whose run it is, or "" for one that isn't running.
@@ -5553,6 +5625,33 @@ impl Instance {
                 if let v = str_at(args.copy(), key) { o.m.insert(String(key), Json.Str(v)) }
             }
             if let Json.Array(_) = at(args.copy(), "mcp") { o.m.insert(String("mcp"), names_of(at(args.copy(), "mcp"))) }
+            // Another program offers other options: what it had goes.
+            var switched = false
+            if let program = str_at(args.copy(), "acp_agent") { switched = str_at(old.copy(), "acp_agent") != some(program) }
+            if switched {
+                _ = o.m.remove(String("options"))
+                _ = o.m.remove(String("config"))
+            }
+            // Its model, effort and the like, by option id; "" goes back to
+            // what the program starts on. A value the program doesn't offer
+            // is refused.
+            if let Json.Object(changes) = at(args.copy(), "config") {
+                var config = LinkedMap<String, Json>()
+                if let Json.Object(c) = at(old.copy(), "config") {
+                    if not switched { config = c.copy() }
+                }
+                let offered = if switched { Json.Null } else { at(old.copy(), "options") }
+                for (k, v) in changes {
+                    let value = v.as_str() else return Answer.Refused(String("bad_request"), "config.{k} is a string.")
+                    if value.len() == 0 {
+                        _ = config.remove(k.copy())
+                        continue
+                    }
+                    if not config_allowed(offered.copy(), k.copy(), value.copy()) { return Answer.Refused(String("bad_request"), "The agent's program doesn't offer {value} for {k}.") }
+                    config.insert(k.copy(), Json.Str(value))
+                }
+                o.m.insert(String("config"), Json.Object(config))
+            }
             let agent = o.i("revision", (int_at(old, "revision") ?? 0) + 1).done()
             try i.store.put_agent(user.copy(), agent.copy(), device.copy())
             // New sessions start with the new instructions.

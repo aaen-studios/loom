@@ -1,0 +1,78 @@
+module tests.protocol.models
+
+// An agent's model and reasoning effort (PLAN.md, "Agents run on ACP"): what
+// its program offers comes with the agent as `options`, the person picks with
+// agent.update's `config`, and each session is set to it before its next
+// prompt. A value the program doesn't offer is refused.
+//
+//     calx tests/protocol/models.calx
+import std.json.{Json}
+import std.process.{exit}
+import shared.obj.{Obj, at, str_at}
+import tests.kit.{App, Instance, check, reply_text}
+
+// The agent's next reply in `conversation`, as text.
+fn reply_in(app: mut App, conversation: String) -> String ! Error {
+    loop {
+        let created = try app.until("event", "message.created")
+        let m = at(created, "message")
+        if str_at(m.copy(), "role") == some(String("agent")) and str_at(m.copy(), "conversation") == some(conversation.copy()) { return reply_text(m) }
+    }
+}
+
+fn say(app: mut App, conversation: String, cid: str, text: String) -> String ! Error {
+    try app.send(Obj.new().s("t", String("send")).s("cid", String(cid)).s("conversation", conversation.copy()).s("text", text).done())
+    return try reply_in(mut app, conversation)
+}
+
+fn set(app: mut App, id: str, agent: String, config: Json) -> Json ! Error {
+    return try app.cmd(id, "agent.update", Obj.new().s("agent", agent).j("config", config).done())
+}
+
+fn run(i: Instance) ! Error {
+    var app = try App.connect(i.base.copy(), i.token.copy(), 0)
+    let made = try app.cmd("q_1", "agent.create", Obj.new().s("name", String("Main")).s("acp_agent", String("fake")).s("instructions", String("You are a test.")).done())
+    let agent = str_at(at(at(made, "value"), "agent"), "id") ?? String()
+    let c = try app.cmd("q_2", "conversation.create", Obj.new().s("agent", agent.copy()).done())
+    let chat = str_at(at(c, "value"), "conversation") ?? String()
+
+    // --- What the program offers ---
+    let first = try say(mut app, chat.copy(), "m_1", String("/config"))
+    try check(first == "model=fake-1 effort=medium", "a session starts on what the program starts on")
+    var offered = Json.Null
+    for f in app.frames {
+        if str_at(f.copy(), "kind") == some(String("agent.updated")) { offered = at(at(f, "agent"), "options") }
+    }
+    let shown = "{offered}"
+    try check(shown.contains(#""id":"model""#) and shown.contains(#""category":"thought_level""#) and shown.contains(#""value":"fake-2""#) and shown.contains(#""value":"fake-1","options""#), "and what it offers comes with the agent")
+
+    // --- Picking ---
+    let picked = try set(mut app, "q_3", agent.copy(), Obj.new().s("model", String("fake-2")).s("effort", String("high")).done())
+    try check(str_at(at(at(at(picked, "value"), "agent"), "config"), "model") == some(String("fake-2")), "the person picks a model and an effort")
+    let now = try say(mut app, chat.copy(), "m_2", String("/config"))
+    try check(now == "model=fake-2 effort=high", "and the session is set to them before its next prompt")
+    let wrong = try set(mut app, "q_4", agent.copy(), Obj.new().s("model", String("fake-9")).done())
+    try check(str_at(at(wrong, "error"), "code") == some(String("bad_request")), "a model the program doesn't offer is refused")
+
+    // --- Back to what it starts on ---
+    _ = try set(mut app, "q_5", agent.copy(), Obj.new().s("effort", String("")).done())
+    let c2 = try app.cmd("q_6", "conversation.create", Obj.new().s("agent", agent.copy()).done())
+    let other = str_at(at(c2, "value"), "conversation") ?? String()
+    let fresh = try say(mut app, other, "m_3", String("/config"))
+    try check(fresh == "model=fake-2 effort=medium", "\"\" takes an option back to what the program starts on, in a new session")
+    app.close()
+}
+
+fn main() ! Error {
+    let inst = try Instance.start()
+    let failure: String? = match run(inst.copy()) {
+        ok => none,
+        err(e) => some("{e}"),
+    }
+    inst.stop()
+    if let f = failure {
+        eprintln("\n{f}")
+        exit(1)
+    }
+    println("\nmodels: all good")
+}

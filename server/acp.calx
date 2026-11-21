@@ -162,6 +162,100 @@ pub fn pick_option(options: Json, allow: bool, always: bool) -> String? {
     return fallback
 }
 
+// --- Session config options: an agent's model, reasoning effort and the like ---
+
+// A select option's values, from a flat list or from its groups.
+fn values_of(option: Json) -> List<Json> {
+    var out = List<Json>()
+    if let Json.Array(list) = option.get(String("options")) ?? Json.Null {
+        for o in list {
+            if let Json.Array(grouped) = o.get(String("options")) ?? Json.Null {
+                for g in grouped { out.push(g.copy()) }
+            } else {
+                out.push(o.copy())
+            }
+        }
+    }
+    return out
+}
+
+fn str_of(j: Json, key: str) -> String? {
+    return (j.get(String(key)) ?? Json.Null).as_str()
+}
+
+// What a session's configOptions offer, as loom keeps it with the agent:
+// each select option's `id`, `name`, `category`, `value` (what a new session
+// starts on) and `options`, flat, each with `value`, `name` and maybe
+// `description`. Options of other types are left out.
+pub fn offered(config: Json) -> Json {
+    var out = List<Json>()
+    if let Json.Array(list) = config {
+        for c in list {
+            if (str_of(c.copy(), "type") ?? String("select")) != "select" { continue }
+            var values = List<Json>()
+            for v in values_of(c.copy()) {
+                values.push(Obj.new().s("value", str_of(v.copy(), "value") ?? String()).s("name", str_of(v.copy(), "name") ?? String()).maybe("description", str_of(v, "description")).done())
+            }
+            out.push(Obj.new().s("id", str_of(c.copy(), "id") ?? String()).s("name", str_of(c.copy(), "name") ?? String()).s("category", str_of(c.copy(), "category") ?? String()).s("value", str_of(c, "currentValue") ?? String()).j("options", Json.Array(values)).done())
+        }
+    }
+    return Json.Array(out)
+}
+
+// Whether option `id` of a session's configOptions offers `value`.
+pub fn offers(config: Json, id: String, value: String) -> bool {
+    if let Json.Array(list) = config {
+        for c in list {
+            if str_of(c.copy(), "id") != some(id.copy()) { continue }
+            for v in values_of(c) {
+                if str_of(v, "value") == some(value.copy()) { return true }
+            }
+        }
+    }
+    return false
+}
+
+// Option `id`'s value now, in a session's configOptions.
+pub fn current(config: Json, id: String) -> String? {
+    if let Json.Array(list) = config {
+        for c in list {
+            if str_of(c.copy(), "id") == some(id.copy()) { return str_of(c, "currentValue") }
+        }
+    }
+    return none
+}
+
+// What to set in a session so it runs as the agent's `config` (option id ->
+// value) says: each option the session offers that value for, and isn't on
+// it yet, as (id, value). Values it doesn't offer are let be.
+pub fn config_todo(config: Json, wanted: Json) -> List<(String, String)> {
+    var out = List<(String, String)>()
+    if let Json.Object(m) = wanted {
+        for (id, v) in m {
+            let value = v.as_str() else continue
+            if offers(config.copy(), id.copy(), value.copy()) and current(config.copy(), id.copy()) != some(value.copy()) { out.push((id.copy(), value)) }
+        }
+    }
+    return out
+}
+
+@test
+fn config_options_are_set_to_what_the_agent_says() {
+    let model = Obj.new().s("id", String("model")).s("name", String("Model")).s("category", String("model")).s("type", String("select")).s("currentValue", String("a")).j("options", Json.Array([Obj.new().s("value", String("a")).s("name", String("A")).done(), Obj.new().s("group", String("more")).s("name", String("More")).j("options", Json.Array([Obj.new().s("value", String("b")).s("name", String("B")).done()])).done()])).done()
+    let config = Json.Array([model])
+    assert(offers(config.copy(), String("model"), String("b")))
+    assert(not offers(config.copy(), String("model"), String("c")))
+    assert(current(config.copy(), String("model")) == some(String("a")))
+    let todo = config_todo(config.copy(), Obj.new().s("model", String("b")).s("effort", String("high")).done())
+    assert(todo.len() == 1)
+    assert(todo[0].1 == "b")
+    assert(config_todo(config.copy(), Obj.new().s("model", String("a")).done()).len() == 0)
+    assert(config_todo(config.copy(), Obj.new().s("model", String("zzz")).done()).len() == 0)
+    let shown = "{offered(config)}"
+    assert(shown.contains(#""value":"b""#))
+    assert(shown.contains(#""value":"a","options""#))
+}
+
 @test
 fn stop_reasons_map_to_statuses() {
     assert(status_of(String("end_turn")) == "done")

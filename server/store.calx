@@ -629,6 +629,13 @@ impl Store {
         _ = try self.db.execute(String("INSERT INTO agent_revisions (agent, user, revision, json, by, at) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT (agent, revision) DO UPDATE SET json = excluded.json, by = excluded.by, at = excluded.at"), [t(id), t(user), Value.Int(revision), t("{agent}"), t(by), Value.Int(now())])
     }
 
+    // Stores an agent without a revision of it: for what loom learns about
+    // it, such as the options its program offers, rather than a change made.
+    pub fn put_agent_json(self, user: String, agent: Json) ! Error {
+        let id = (agent.get(String("id")) ?? Json.Null).as_str() ?? String()
+        _ = try self.db.execute(String("UPDATE agents SET json = ? WHERE id = ? AND user = ?"), [t("{agent}"), t(id), t(user)])
+    }
+
     // An agent's revisions, newest first: `revision`, `by`, `at`, and the
     // agent as it was.
     pub fn agent_revisions(self, user: String, id: String) -> List<Json> ! Error {
