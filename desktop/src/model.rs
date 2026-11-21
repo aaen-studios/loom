@@ -216,7 +216,6 @@ pub struct Plugin {
     /// Its panel's first page, when it has a panel.
     pub entry: Option<String>,
     pub tools: bool,
-    pub allowed: Vec<String>,
     /// What it asks for that the person hasn't allowed yet.
     pub waiting: Vec<String>,
 }
@@ -243,7 +242,6 @@ impl Plugin {
                 .and_then(Value::as_str)
                 .map(String::from),
             tools: p.get("tools").is_some_and(|t| !t.is_null()),
-            allowed: list("allowed"),
             waiting: list("waiting"),
         }
     }
@@ -1899,22 +1897,17 @@ impl Model {
                 json!({"plugin": plugin, "key": key, "value": args.get("value").cloned().unwrap_or(Value::Null)}),
                 "/value",
             ),
-            "cmd" => {
-                let name = s(args, "name");
-                if !open.plugin.allowed.contains(&format!("cmd:{name}")) {
-                    return Err(format!(
-                        "{name} isn't allowed for this panel: its plugin.toml asks for it, and the person allows it"
-                    ));
-                }
-                (
-                    name,
-                    args.get("args").cloned().unwrap_or(json!({})),
-                    "/value",
-                )
-            }
-            "message_agent" => {
-                return Err(String::from("message_agent isn't there yet for panels"))
-            }
+            // The instance checks what the person allowed the plugin.
+            "cmd" => (
+                String::from("plugin.cmd"),
+                json!({"plugin": plugin, "name": s(args, "name"), "args": args.get("args").cloned().unwrap_or(json!({}))}),
+                "/value",
+            ),
+            "message_agent" => (
+                String::from("plugin.message"),
+                json!({"plugin": plugin, "agent": s(args, "agent"), "text": s(args, "text")}),
+                "/value/reply",
+            ),
             other => return Err(format!("A panel can't {other}.")),
         };
         let id = self.id("app.door");
@@ -2086,12 +2079,11 @@ pub fn approve(call: &str, allow: bool, always: bool) -> Value {
 mod tests {
     use super::*;
 
-    fn with_panel(allowed: &[&str]) -> Model {
+    fn with_panel() -> Model {
         let mut m = Model::new();
         m.panel = Some(OpenPanel {
             plugin: Plugin {
                 id: String::from("board"),
-                allowed: allowed.iter().map(|a| a.to_string()).collect(),
                 ..Plugin::default()
             },
             files: Vec::new(),
@@ -2100,23 +2092,40 @@ mod tests {
     }
 
     #[test]
-    fn the_door_sends_only_what_was_allowed() {
-        let mut m = with_panel(&["cmd:routine.list"]);
+    fn the_door_sends_as_its_plugin() {
+        let mut m = with_panel();
         let put = m
             .door(1, "data.put", &json!({"key": "k", "value": 3}))
             .unwrap();
         assert_eq!(put["name"], "plugin.data.put");
         assert_eq!(put["args"]["plugin"], "board");
         let cmd = m.door(2, "cmd", &json!({"name": "routine.list"})).unwrap();
-        assert_eq!(cmd["name"], "routine.list");
-        assert!(m.door(3, "cmd", &json!({"name": "agent.delete"})).is_err());
+        assert_eq!(cmd["name"], "plugin.cmd");
+        assert_eq!(cmd["args"]["plugin"], "board");
+        assert_eq!(cmd["args"]["name"], "routine.list");
+        let said = m
+            .door(3, "message_agent", &json!({"agent": "Main", "text": "hi"}))
+            .unwrap();
+        assert_eq!(said["name"], "plugin.message");
+        assert_eq!(said["args"]["text"], "hi");
         assert!(m.door(4, "fetch", &json!({})).is_err());
-        assert!(m.door(5, "message_agent", &json!({})).is_err());
+    }
+
+    #[test]
+    fn a_message_is_answered_with_the_reply() {
+        let mut m = with_panel();
+        let said = m
+            .door(8, "message_agent", &json!({"agent": "Main", "text": "hi"}))
+            .unwrap();
+        m.result(
+            &json!({"t": "result", "id": said["id"], "ok": true, "value": {"reply": "hello"}}),
+        );
+        assert_eq!(m.door_answers, vec![(8, Ok(json!("hello")))]);
     }
 
     #[test]
     fn the_door_answers_by_message() {
-        let mut m = with_panel(&[]);
+        let mut m = with_panel();
         let get = m.door(7, "data.get", &json!({"key": "k"})).unwrap();
         m.result(&json!({"t": "result", "id": get["id"], "ok": true, "value": {"value": 41}}));
         assert_eq!(m.door_answers, vec![(7, Ok(json!(41)))]);
