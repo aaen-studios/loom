@@ -683,6 +683,19 @@ fn names_of(j: Json) -> Json {
     return Json.Array(out)
 }
 
+// Why a person's agent can't run on `program`: the owner kept it to others.
+fn not_given(program: String) -> String {
+    return "The owner hasn't given you the agent program {program}. Ask them for it, or switch this agent to one you have."
+}
+
+fn strings_json(list: List<String>) -> Json {
+    var out = List<Json>()
+    for s in list {
+        out.push(Json.Str(s.copy()))
+    }
+    return Json.Array(out)
+}
+
 // A JSON object with only its string values.
 fn strings_only(j: Json) -> Json {
     var o = Obj.new()
@@ -893,6 +906,9 @@ impl Instance {
     fn share_for(i: Instance, user: String, program: String) -> (i64, String)? ! Error {
         if not i.sandboxed(user.copy()) { return none }
         let share = try i.store.share(program.copy()) else return none
+        if let given = try i.store.acp_people(program.copy(), "keys") {
+            if not given.contains(user.copy()) { return none }
+        }
         let a = try i.store.acp_agent(program) else return none
         var theirs = List<String>()
         for s in try i.store.secret_names(user) {
@@ -909,15 +925,64 @@ impl Instance {
     }
 
     // A program as acp.list gives it, with its share: to the owner, the budget;
-    // to anyone it applies to, what's left of theirs too.
+    // to anyone it applies to, what's left of theirs too. To the owner, who
+    // it's for: `members`, and the share's `members`, when not everyone.
     fn program_shared(i: Instance, user: String, a: AcpAgent) -> Json ! Error {
         let name = a.name.copy()
+        let owner = not i.sandboxed(user.copy())
         var out = program_json(a)
+        if owner {
+            if let users = try i.store.acp_people(name.copy(), "use") {
+                if let Json.Object(m) = mut out { m.insert(String("members"), strings_json(users)) }
+            }
+        }
         let (tokens, per) = try i.store.share(name.copy()) else return out
         var share = Obj.new().i("tokens", tokens).s("per", per)
+        if owner {
+            if let users = try i.store.acp_people(name.copy(), "keys") { share = share.j("members", strings_json(users)) }
+        }
         if let (left, _) = try i.budget_left(user, name) { share = share.i("left", if left < 0 { 0 } else { left }) }
         if let Json.Object(m) = mut out { m.insert(String("share"), share.done()) }
         return out
+    }
+
+    // Whether `user` may run agents on `program`: the owner always, and anyone
+    // else unless the owner gave it only to some people, not them.
+    fn may_use(i: Instance, user: String, program: String) -> bool ! Error {
+        if not i.sandboxed(user.copy()) { return true }
+        let given = try i.store.acp_people(program, "use") else return true
+        return given.contains(user)
+    }
+
+    // Who a program or its keys go to, in words for the people log.
+    fn who_of(i: Instance, users: List<String>?) -> String ! Error {
+        let list = users else return String("everyone")
+        if list.len() == 0 { return String("no one") }
+        var out = String()
+        var n: usize = 0
+        for u in list {
+            if n > 0 { out = "{out}{if n + 1 == list.len() { " and " } else { ", " }}" }
+            out = "{out}{try i.store.username(u.copy()) ?? u.copy()}"
+            n += 1
+        }
+        return out
+    }
+
+    // The `members` a command names: none, for everyone, when it's absent or
+    // null, or the ids of people here other than the owner. The text is why
+    // not, when it isn't empty.
+    fn members_of(i: Instance, args: Json) -> (List<String>?, String) ! Error {
+        let given = at(args, "members")
+        if given == Json.Null { return (none, String()) }
+        let Json.Array(items) = given else return (none, String("members is a list of people's ids, or null for everyone."))
+        var out = List<String>()
+        for item in items {
+            let id = item.as_str() ?? String()
+            let role = try i.store.role(id.copy()) else return (none, "There's no one {id} here.")
+            if role == "owner" { return (none, String("The owner has every agent program and its settings already.")) }
+            if not out.contains(id.copy()) { out.push(id) }
+        }
+        return (some(out), String())
     }
 
     // The tokens `user` has used of `program`'s budget since it last began again.
@@ -4629,8 +4694,13 @@ impl Instance {
             try i.finish(run_id, String("failed"), some(String("The conversation's agent was deleted.")))
             return
         }
+        let program = str_at(a.copy(), "acp_agent") ?? String()
+        if not try i.may_use(user.copy(), program.copy()) {
+            try i.finish(run_id, String("failed"), some(not_given(program)))
+            return
+        }
         // A person past their budget on the owner's shared settings waits for it to begin again.
-        if let (left, per) = try i.budget_left(user.copy(), str_at(a.copy(), "acp_agent") ?? String()) {
+        if let (left, per) = try i.budget_left(user.copy(), program) {
             if left <= 0 {
                 let when = if per == "month" { "this month" } else { "today" }
                 try i.finish(run_id, String("limit"), some("The tokens the owner shares for this agent program are used up {when}. Add your own key as a secret, or wait."))
@@ -6124,6 +6194,7 @@ impl Instance {
         if name == "agent.create" {
             let program = str_at(args.copy(), "acp_agent") ?? String()
             if try i.store.acp_agent(program.copy()) == none { return Answer.Refused(String("not_found"), "There's no ACP agent {program}.") }
+            if not try i.may_use(user.copy(), program.copy()) { return Answer.Refused(String("not_allowed"), not_given(program.copy())) }
             let id = try i.store.new_id("a")
             // Each new agent takes the next of the eight thread colours, unless it names one.
             let count = (try i.store.agents(user.copy())).len()
@@ -6150,7 +6221,10 @@ impl Instance {
             if let Json.Array(_) = at(args.copy(), "mcp") { o.m.insert(String("mcp"), names_of(at(args.copy(), "mcp"))) }
             // Another program offers other options: what it had goes.
             var switched = false
-            if let program = str_at(args.copy(), "acp_agent") { switched = str_at(old.copy(), "acp_agent") != some(program) }
+            if let program = str_at(args.copy(), "acp_agent") {
+                switched = str_at(old.copy(), "acp_agent") != some(program.copy())
+                if switched and not try i.may_use(user.copy(), program.copy()) { return Answer.Refused(String("not_allowed"), not_given(program)) }
+            }
             if switched {
                 _ = o.m.remove(String("options"))
                 _ = o.m.remove(String("config"))
@@ -6515,23 +6589,45 @@ impl Instance {
             return Answer.Value(empty)
         }
         if name == "acp.list" {
-            // The agent programs installed on the instance, for picking one when an agent is made.
+            // The agent programs installed on the instance, for picking one when
+            // an agent is made: the ones this person may use.
             var programs = List<Json>()
             for a in try i.store.acp_agents() {
-                programs.push(try i.program_shared(user.copy(), a))
+                if try i.may_use(user.copy(), a.name.copy()) { programs.push(try i.program_shared(user.copy(), a)) }
             }
-            return Answer.Value(Obj.new().j("programs", Json.Array(programs)).done())
+            // Whether they're the owner, who gives programs and their settings to people.
+            return Answer.Value(Obj.new().j("programs", Json.Array(programs)).b("owner", not i.sandboxed(user)).done())
         }
-        if name == "acp.share" {
-            if try i.store.role(user.copy()) != some(String("owner")) { return Answer.Refused(String("not_allowed"), String("Only the instance's owner shares an agent program's settings.")) }
+        if name == "acp.share" or name == "acp.members" {
+            if try i.store.role(user.copy()) != some(String("owner")) { return Answer.Refused(String("not_allowed"), String("Only the instance's owner shares an agent program or its settings.")) }
             let program_name = str_at(args.copy(), "name") ?? String()
             if try i.store.acp_agent(program_name.copy()) == none { return Answer.Refused(String("not_found"), "There's no ACP agent {program_name}.") }
-            let tokens = int_at(args.copy(), "tokens") ?? 0
-            let per = str_at(args, "per") ?? String("day")
-            if per != "day" and per != "month" { return Answer.Refused(String("bad_request"), String("per is day or month.")) }
-            if tokens < 0 { return Answer.Refused(String("bad_request"), String("tokens is a number of tokens, or 0 to stop sharing.")) }
-            try i.store.set_share(program_name.copy(), tokens, per)
-            // Agents already running keep the settings they started with until they start again.
+            let (members, wrong) = try i.members_of(args.copy())
+            if wrong.len() > 0 { return Answer.Refused(String("bad_request"), wrong) }
+            if name == "acp.members" {
+                try i.store.set_acp_people(program_name.copy(), "use", members.copy())
+                try i.people_logged("programs", "Gave {program_name} to {try i.who_of(members)}", user.copy())
+            } else {
+                let tokens = int_at(args.copy(), "tokens") ?? 0
+                let per = str_at(args.copy(), "per") ?? String("day")
+                if per != "day" and per != "month" { return Answer.Refused(String("bad_request"), String("per is day or month.")) }
+                if tokens < 0 { return Answer.Refused(String("bad_request"), String("tokens is a number of tokens, or 0 to stop sharing.")) }
+                try i.store.set_share(program_name.copy(), tokens, per.copy())
+                // Without members, who it went to stays as it was.
+                var to = try i.store.acp_people(program_name.copy(), "keys")
+                if tokens == 0 {
+                    to = none
+                } else if args.get(String("members")) != none {
+                    to = members
+                }
+                try i.store.set_acp_people(program_name.copy(), "keys", to.copy())
+                if tokens == 0 {
+                    try i.people_logged("programs", "Stopped sharing {program_name}'s settings", user.copy())
+                } else {
+                    try i.people_logged("programs", "Shared {program_name}'s settings with {try i.who_of(to)}, {tokens} tokens a {per} each", user.copy())
+                }
+            }
+            // Agents already running keep what they started with until they start again.
             i.stop_program(program_name.copy())
             let a = try i.store.acp_agent(program_name) else return Answer.Value(empty)
             return Answer.Value(Obj.new().j("program", try i.program_shared(user, a)).done())

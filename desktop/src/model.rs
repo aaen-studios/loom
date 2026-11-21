@@ -275,6 +275,8 @@ pub struct Program {
     /// Its settings shared with everyone but the owner: tokens a person may use each
     /// day or month, and, for someone it applies to, how many are left.
     pub share: Option<Share>,
+    /// To the owner, the people it's kept to, by id; none is everyone.
+    pub members: Option<Vec<String>>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -282,6 +284,35 @@ pub struct Share {
     pub tokens: i64,
     pub per: String,
     pub left: Option<i64>,
+    /// To the owner, the people the settings go to, by id; none is everyone.
+    pub members: Option<Vec<String>>,
+}
+
+/// The ids in a JSON list, or none when it isn't one: everyone.
+fn ids(v: Option<&Value>) -> Option<Vec<String>> {
+    v.and_then(Value::as_array).map(|list| {
+        list.iter()
+            .filter_map(Value::as_str)
+            .map(str::to_string)
+            .collect()
+    })
+}
+
+/// Who a program or its settings go to once `who` is clicked: everyone for none,
+/// otherwise that person added or taken away. From everyone, it's that person alone.
+pub fn toggle_member(now: Option<&[String]>, who: Option<&str>) -> Option<Vec<String>> {
+    let who = who?;
+    let Some(list) = now else {
+        return Some(vec![who.to_string()]);
+    };
+    let mut list = list.to_vec();
+    match list.iter().position(|id| id == who) {
+        Some(at) => {
+            list.remove(at);
+        }
+        None => list.push(who.to_string()),
+    }
+    Some(list)
 }
 
 /// An agent in the ACP Registry.
@@ -1236,6 +1267,9 @@ pub struct Model {
     pub profile_came: bool,
     /// The agent programs on the instance, for the programs page.
     pub installed: Vec<Program>,
+    /// Whether this person is the instance's owner, who gives programs and their settings
+    /// to people, as acp.list said.
+    pub programs_owner: bool,
     /// The ACP Registry's agents, once it's been read.
     pub registry: Vec<Listed>,
     /// Which registry agent each program on the instance is, by the program's name.
@@ -2698,11 +2732,17 @@ impl Model {
                                 tokens: sh.get("tokens").and_then(Value::as_i64).unwrap_or(0),
                                 per: s(sh, "per"),
                                 left: sh.get("left").and_then(Value::as_i64),
+                                members: ids(sh.get("members")),
                             }),
+                            members: ids(p.get("members")),
                         })
                         .collect()
                 })
                 .unwrap_or_default();
+            self.programs_owner = f
+                .pointer("/value/owner")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
         } else if id.starts_with("app.new_agent") {
             if let Some(e) = f.get("error") {
                 self.notices.push(s(e, "message"));
@@ -3364,6 +3404,24 @@ impl Model {
     pub fn share_program(&mut self, program: &str, tokens: i64, per: &str) -> Value {
         let id = self.id("app.program");
         json!({"t": "cmd", "id": id, "name": "acp.share", "args": {"name": program, "tokens": tokens, "per": per}})
+    }
+
+    /// Gives a program's shared settings to `members` (by id), or everyone, on the
+    /// budget they have.
+    pub fn share_to(
+        &mut self,
+        program: &str,
+        share: &Share,
+        members: Option<Vec<String>>,
+    ) -> Value {
+        let id = self.id("app.program");
+        json!({"t": "cmd", "id": id, "name": "acp.share", "args": {"name": program, "tokens": share.tokens, "per": share.per, "members": members}})
+    }
+
+    /// Gives a program to `members` (by id), or everyone.
+    pub fn program_members(&mut self, program: &str, members: Option<Vec<String>>) -> Value {
+        let id = self.id("app.program");
+        json!({"t": "cmd", "id": id, "name": "acp.members", "args": {"name": program, "members": members}})
     }
 
     pub fn remove_program(&mut self, program: &str) -> Value {
@@ -4528,15 +4586,60 @@ mod tests {
             Some(Share {
                 tokens: 5000,
                 per: "day".into(),
-                left: Some(1200)
+                left: Some(1200),
+                members: None,
             })
         );
         assert_eq!(m.installed[1].share, None);
+        assert!(!m.programs_owner);
         let shared = m.share_program("codex", 100, "month");
         assert_eq!(shared["name"], "acp.share");
         assert_eq!(
             shared["args"],
             json!({"name": "codex", "tokens": 100, "per": "month"})
+        );
+    }
+
+    #[test]
+    fn the_owner_gives_a_program_to_some_people() {
+        let mut m = Model::new();
+        let list = m.programs();
+        m.result(&json!({"t": "result", "id": list["id"], "ok": true, "value": {"owner": true, "programs": [
+            {"name": "claude", "source": "", "version": "", "settings": ["ANTHROPIC_API_KEY"], "members": ["u_ann"], "share": {"tokens": 5000, "per": "day", "members": []}},
+            {"name": "codex", "source": "", "version": "", "settings": []}
+        ]}}));
+        assert!(m.programs_owner);
+        assert_eq!(m.installed[0].members, Some(vec!["u_ann".to_string()]));
+        assert_eq!(m.installed[0].share.as_ref().unwrap().members, Some(vec![]));
+        assert_eq!(m.installed[1].members, None);
+
+        // From everyone, a person clicked is the only one; then each click adds or takes away.
+        let ann = "u_ann".to_string();
+        let bo = "u_bo".to_string();
+        assert_eq!(toggle_member(None, Some("u_ann")), Some(vec![ann.clone()]));
+        assert_eq!(
+            toggle_member(Some(std::slice::from_ref(&ann)), Some("u_bo")),
+            Some(vec![ann.clone(), bo.clone()])
+        );
+        assert_eq!(
+            toggle_member(Some(&[ann.clone(), bo]), Some("u_ann")),
+            Some(vec!["u_bo".to_string()])
+        );
+        assert_eq!(toggle_member(Some(std::slice::from_ref(&ann)), None), None);
+
+        let given = m.program_members("claude", Some(vec![ann.clone()]));
+        assert_eq!(given["name"], "acp.members");
+        assert_eq!(
+            given["args"],
+            json!({"name": "claude", "members": ["u_ann"]})
+        );
+        let everyone = m.program_members("claude", None);
+        assert_eq!(everyone["args"], json!({"name": "claude", "members": null}));
+        let share = m.installed[0].share.clone().unwrap();
+        let keys = m.share_to("claude", &share, Some(vec![ann]));
+        assert_eq!(
+            keys["args"],
+            json!({"name": "claude", "tokens": 5000, "per": "day", "members": ["u_ann"]})
         );
     }
 

@@ -879,6 +879,12 @@ ACTA_KEY=secret:ACTA_KEY",
                 for f in self.model.load_programs() {
                     self.send(f);
                 }
+                // Who's here, for the owner to give each program to.
+                if !self.local() {
+                    for f in self.model.load_people() {
+                        self.send(f);
+                    }
+                }
                 self.program_open = None;
             }
             Screen::Mcp => {
@@ -2300,6 +2306,76 @@ ACTA_KEY=secret:ACTA_KEY",
                         pick(this, id.clone());
                         cx.notify();
                     })),
+            );
+        }
+        chips
+    }
+
+    /// Everyone, then each person but the owner, as chips to pick who a program or its
+    /// settings go to. `on` gets who it goes to once one is clicked.
+    fn member_chips(
+        &self,
+        prefix: &str,
+        now: Option<Vec<String>>,
+        people: &[model::Person],
+        cx: &mut Context<Self>,
+        on: impl Fn(&mut Loom, Option<Vec<String>>) + Clone + 'static,
+    ) -> Div {
+        let p = self.p;
+        let chip = |id: String, label: String, picked: bool| {
+            div()
+                .id(SharedString::from(id))
+                .h(px(28.0))
+                .px(px(space::M))
+                .flex()
+                .items_center()
+                .rounded(px(radius::CHIP))
+                .border_1()
+                .text_size(px(size::SMALL))
+                .cursor_pointer()
+                .when(picked, |d| {
+                    d.bg(p.bg)
+                        .border_color(p.line_strong)
+                        .text_color(p.ink)
+                        .font_weight(FontWeight::MEDIUM)
+                })
+                .when(!picked, |d| {
+                    d.border_color(p.line)
+                        .text_color(p.ink_3)
+                        .hover(move |s| s.text_color(p.ink))
+                })
+                .child(label)
+        };
+        let everyone = on.clone();
+        let mut chips = div()
+            .flex()
+            .flex_wrap()
+            .justify_end()
+            .gap(px(space::XS))
+            .child(
+                chip(
+                    format!("{prefix}-everyone"),
+                    "Everyone".into(),
+                    now.is_none(),
+                )
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    everyone(this, None);
+                    cx.notify();
+                })),
+            );
+        for person in people {
+            let picked = now.as_ref().is_some_and(|l| l.contains(&person.id));
+            let (on, now, id) = (on.clone(), now.clone(), person.id.clone());
+            chips = chips.child(
+                chip(
+                    format!("{prefix}-{}", person.id),
+                    person.username.clone(),
+                    picked,
+                )
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    on(this, model::toggle_member(now.as_deref(), Some(&id)));
+                    cx.notify();
+                })),
             );
         }
         chips
@@ -8590,11 +8666,64 @@ ACTA_KEY=secret:ACTA_KEY",
                 self.row(
                     Some(div().w(px(34.0)).flex_none().into_any_element()),
                     "Share it",
-                    Some("With the people you invited".into()),
+                    Some("A budget for each".into()),
                     Some(share.into_any_element()),
                 )
                 .into_any_element(),
             );
+            // Who has it, and who gets the settings shared: the owner's to say.
+            let people: Vec<model::Person> = self
+                .model
+                .people
+                .iter()
+                .filter(|person| person.role != "owner")
+                .cloned()
+                .collect();
+            if self.model.programs_owner && !people.is_empty() {
+                let program = prog.name.clone();
+                let chips = self.member_chips(
+                    &format!("has-{}", prog.name),
+                    prog.members.clone(),
+                    &people,
+                    cx,
+                    move |this, members| {
+                        let f = this.model.program_members(&program, members);
+                        this.send(f);
+                    },
+                );
+                mine.push(
+                    self.row(
+                        Some(div().w(px(34.0)).flex_none().into_any_element()),
+                        "Who has it",
+                        Some(who_words(prog.members.as_deref(), &people)),
+                        Some(chips.into_any_element()),
+                    )
+                    .into_any_element(),
+                );
+                if let Some(sh) = prog.share.clone() {
+                    let program = prog.name.clone();
+                    let given = sh.members.clone();
+                    let chips = self.member_chips(
+                        &format!("keys-{}", prog.name),
+                        given.clone(),
+                        &people,
+                        cx,
+                        move |this, members| {
+                            let f = this.model.share_to(&program, &sh, members);
+                            this.send(f);
+                        },
+                    );
+                    mine.push(
+                        self.row(
+                            Some(div().w(px(34.0)).flex_none().into_any_element()),
+                            "Who gets your settings",
+                            Some(who_words(given.as_deref(), &people)),
+                            Some(chips.into_any_element()),
+                        )
+                        .into_any_element(),
+                    );
+                }
+            }
             let mut actions = div().flex().gap(px(space::S));
             if let Some(version) = newer {
                 let source = prog.source.clone();
@@ -10147,6 +10276,23 @@ fn wordmark(p: Palette, text: f32) -> (Div, f32) {
                 .child("loom"),
         );
     (mark, width / 2.0)
+}
+
+/// Who a program or its settings go to, in words: everyone, only the owner, or names.
+fn who_words(members: Option<&[String]>, people: &[model::Person]) -> String {
+    let Some(ids) = members else {
+        return "Everyone you invited".into();
+    };
+    let names: Vec<&str> = people
+        .iter()
+        .filter(|person| ids.contains(&person.id))
+        .map(|person| person.username.as_str())
+        .collect();
+    match names.as_slice() {
+        [] => "Only you".into(),
+        [one] => format!("Only {one}"),
+        [rest @ .., last] => format!("{} and {last}", rest.join(", ")),
+    }
 }
 
 /// A program's share, in words: what each person gets, and what's left of the
