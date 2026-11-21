@@ -458,7 +458,8 @@ fn update(check_only: bool) -> Said ! Error {
     if check_only {
         return said("loom {version} is out; this is {VERSION}. `loom update` takes it.", answer.b("updated", false).done())
     }
-    let kind = "{env.os()}-server"
+    // linux-server and windows-server are x64; Linux on Arm has a build of its own, and macOS's is for Apple silicon.
+    let kind = if env.os() == "linux" and env.native_arch() == "aarch64" { String("linux-arm64-server") } else { "{env.os()}-server" }
     let file = at(manifest.copy(), "files").get(kind.copy()) ?? Json.Null
     let url = str_at(file.copy(), "url") else {
         fail "release {version} has no program for {kind}"
