@@ -541,7 +541,7 @@ GPUI is Zed's UI framework. It makes nothing in this plan impossible, but it's y
 
 ### What the Windows spike showed (LOO-4)
 
-The throwaway test that opens Phase 2: `core/spike.calx` built with `calx build --staticlib` by `desktop/build.rs`, linked into a GPUI Kit window, streaming a Markdown reply through `on_event` from the core's own thread, below 3000 older Markdown messages.
+The throwaway test that opens Phase 2: a stand-in core (since replaced by `core/lib.calx`) built with `calx build --staticlib` by `desktop/build.rs`, linked into a GPUI Kit window, streaming a Markdown reply through `on_event` from the core's own thread, below 3000 older Markdown messages.
 
 - **It works.** The core's 71 deltas arrive over 1.1 s, and GPUI draws each one as it comes, with code blocks, lists and inline code.
 - **Release build:** the window is up in about 0.55 s, the process holds about 85 MB, and the exe is 26 MB.

@@ -25,6 +25,9 @@ const FIRST_WAIT_MS: u64 = 500
 const LONGEST_WAIT_MS: u64 = 30000
 const TICK_NS: u64 = 10000000    // the loop wakes this often to read the socket
 
+// The id the core gives its own conversation.create commands, before the send's cid.
+const MAKING: str = "core.conversation:"
+
 // What core.get reads from the cache.
 const GETS: [str; 8] = ["conversations", "agents", "devices", "runs", "tools", "approvals", "outbox", "messages"]
 
@@ -83,6 +86,7 @@ pub struct Conn {
     keyring: String       // the credential store's service the token is kept under
     cache: Cache          // what came from the instance, the cursor and the outbox
     lists: List<String>   // the ids of messages.list commands, whose results the cache keeps
+    making: List<String>  // the ids of conversation.create commands the core sent for a send
     have: Map<String, usize>    // bytes of each streaming block so far, by "message/block"
     ws: WebSocket?
     state: State
@@ -116,6 +120,7 @@ impl Conn {
             keyring: service,
             cache: cache,
             lists: List<String>(),
+            making: List<String>(),
             have: Map<String, usize>(),
             ws: none,
             state: State.SignedOut,
@@ -183,6 +188,8 @@ impl Conn {
     /// Opens the socket and says hello. What's sent while it opens goes once it's open.
     fn connect(mut self) {
         self.retry_at = none
+        // Commands sent on an old socket get no result: the outbox asks again on welcome.
+        self.making = List<String>()
         let url = ws_url(self.server.copy() ?? String()) ?? String()
         let token = self.token.copy() ?? String()
         if url.len() == 0 or token.len() == 0 {
@@ -264,8 +271,56 @@ impl Conn {
             },
         }
         for f in waiting {
-            if not self.put("{f}") { return }
+            if str_at(f.copy(), "conversation") == none {
+                self.make_conversation(f)
+            } else if not self.put("{f}") {
+                return
+            }
         }
+    }
+
+    /// A send to an agent with no conversation yet: asks the instance for one, and sends
+    /// the message when it comes (`made_conversation`).
+    fn make_conversation(mut self, f: Json) {
+        let cid = str_at(f.copy(), "cid") ?? String()
+        let id = "{MAKING}{cid}"
+        if self.making.contains(id.copy()) { return }
+        let cmd = Obj.new().s("t", String("cmd")).s("id", id.copy()).s("name", String("conversation.create")).j("args", Obj.new().maybe("agent", str_at(f, "agent")).done()).done()
+        if self.put("{cmd}") {
+            self.making.push(id)
+        }
+    }
+
+    /// The instance made the conversation a waiting send needed: the send gets it, and goes.
+    fn made_conversation(mut self, f: Json) {
+        let id = str_at(f.copy(), "id") ?? String()
+        if let i = self.making.position(|x| x == id) {
+            _ = self.making.remove(i)
+        }
+        let cid = id[MAKING.len()..].copy()
+        let conversation = str_at(at(f.copy(), "value"), "conversation") else {
+            // The agent is gone: the send can never go.
+            match self.cache.sent(cid.copy()) {
+                ok => {},
+                err(e) => self.tell_error("cache", "{e}"),
+            }
+            self.tell(Obj.new().s("t", String("error")).s("code", String("not_sent")).s("ref", cid).s("message", str_at(at(f, "error"), "message") ?? String("The agent has no conversation.")).done())
+            return
+        }
+        let waiting = match self.cache.queued(cid.copy()) {
+            ok(w) => w,
+            err(e) => {
+                self.tell_error("cache", "{e}")
+                return
+            },
+        }
+        let w = waiting else { return }
+        let frame = merge(w, Obj.new().s("conversation", conversation).done())
+        match self.cache.queue(frame.copy()) {
+            ok => {},
+            err(e) => self.tell_error("cache", "{e}"),
+        }
+        _ = self.put("{frame}")
     }
 
     /// A delta: goes to the app when it adds to what's there, is dropped when it's there
@@ -345,6 +400,10 @@ impl Conn {
             }
         } else if t == "result" {
             let id = str_at(f.copy(), "id") ?? String()
+            if id.starts_with(MAKING) {
+                self.made_conversation(f)
+                return
+            }
             if let i = self.lists.position(|x| x == id) {
                 _ = self.lists.remove(i)
                 match self.cache.put_messages(at(at(f.copy(), "value"), "messages")) {
@@ -445,19 +504,34 @@ impl Conn {
 
     /// A message the person wrote: kept in the outbox with a client id, and sent when the
     /// connection is up. The app hears `core.queued` at once, and the `ack` once it's stored.
+    /// A send may name an `agent` instead of a `conversation`: it goes to that agent's
+    /// newest conversation, which the core makes first if there's none.
     fn send(mut self, m: Json) {
         var cid = str_at(m.copy(), "cid") ?? String()
         if cid.len() == 0 {
             cid = "m_{self.random.next_u64()}"
         }
-        let frame = merge(m.copy(), Obj.new().s("cid", cid.copy()).done())
+        var extra = Obj.new().s("cid", cid.copy())
+        if str_at(m.copy(), "conversation") == none {
+            if let agent = str_at(m.copy(), "agent") {
+                match self.cache.conversation_for(agent) {
+                    ok(found) => extra = extra.maybe("conversation", found),
+                    err(e) => self.tell_error("cache", "{e}"),
+                }
+            }
+        }
+        let frame = merge(m.copy(), extra.done())
         match self.cache.queue(frame.copy()) {
             ok => {},
             err(e) => self.tell_error("cache", "{e}"),
         }
-        self.tell(Obj.new().s("t", String("core.queued")).s("cid", cid).maybe("conversation", str_at(m.copy(), "conversation")).maybe("text", str_at(m, "text")).i("at", now()).done())
+        self.tell(Obj.new().s("t", String("core.queued")).s("cid", cid).maybe("conversation", str_at(frame.copy(), "conversation")).maybe("agent", str_at(frame.copy(), "agent")).maybe("text", str_at(m, "text")).i("at", now()).done())
         if self.state == State.Live {
-            _ = self.put("{frame}")
+            if str_at(frame.copy(), "conversation") == none {
+                self.make_conversation(frame)
+            } else {
+                _ = self.put("{frame}")
+            }
         }
     }
 

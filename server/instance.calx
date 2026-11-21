@@ -119,6 +119,9 @@ struct Auth {
 const RATE_TRIES: usize = 10
 const RATE_WINDOW_MS: i64 = 900000
 
+// The agents' thread colours, as design/tokens.toml names them.
+const COLORS: [str; 8] = ["periwinkle", "mint", "apricot", "pink", "sky", "gold", "lavender", "grey"]
+
 // The address a request came from, without its port.
 fn client_address(client: String) -> String {
     if let i = client.find_last(":") { return client[..i].copy() }
@@ -1038,7 +1041,10 @@ impl Instance {
             let program = str_at(args.copy(), "acp_agent") ?? String()
             if try i.store.acp_agent(program.copy()) == none { return Answer.Refused(String("not_found"), "There's no ACP agent {program}.") }
             let id = try i.store.new_id("a")
-            let agent = Obj.new().s("id", id).s("name", str_at(args.copy(), "name") ?? String("Agent")).s("acp_agent", program).s("instructions", str_at(args.copy(), "instructions") ?? String()).maybe("folder", str_at(args.copy(), "folder")).s("permission", str_at(args, "permission") ?? String("ask")).i("revision", 1).i("at", now()).done()
+            // Each new agent takes the next of the eight thread colours, unless it names one.
+            let count = (try i.store.agents(user.copy())).len()
+            let color = str_at(args.copy(), "color") ?? String(COLORS[count % COLORS.len()])
+            let agent = Obj.new().s("id", id).s("name", str_at(args.copy(), "name") ?? String("Agent")).s("color", color).s("acp_agent", program).s("instructions", str_at(args.copy(), "instructions") ?? String()).maybe("folder", str_at(args.copy(), "folder")).s("permission", str_at(args, "permission") ?? String("ask")).i("revision", 1).i("at", now()).done()
             try i.store.put_agent(user.copy(), agent.copy())
             try i.event(user, "agent.created", Obj.new().j("agent", agent.copy()).done())
             return Answer.Value(Obj.new().j("agent", agent).done())
@@ -1052,7 +1058,7 @@ impl Instance {
                     o.m.insert(k.copy(), v.copy())
                 }
             }
-            let keys: List<str> = ["name", "acp_agent", "instructions", "folder", "permission"]
+            let keys: List<str> = ["name", "acp_agent", "instructions", "folder", "permission", "color"]
             for key in keys {
                 if let v = str_at(args.copy(), key) { o.m.insert(String(key), Json.Str(v)) }
             }
@@ -1080,6 +1086,14 @@ impl Instance {
                 try i.revoke(user, id)
             }
             return Answer.Value(empty)
+        }
+        if name == "acp.list" {
+            // The agent programs installed on the instance, for picking one when an agent is made.
+            var programs = List<Json>()
+            for a in try i.store.acp_agents() {
+                programs.push(Obj.new().s("name", a.name.copy()).s("command", a.command.copy()).done())
+            }
+            return Answer.Value(Obj.new().j("programs", Json.Array(programs)).done())
         }
         return Answer.Refused(String("unknown_command"), "Version 1 has no command {name}.")
     }

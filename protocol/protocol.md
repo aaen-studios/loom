@@ -376,11 +376,12 @@ Version 1's commands:
 | `conversation.rename` | `conversation`, `title` | — |
 | `conversation.delete` | `conversation` | — |
 | `messages.list` | `conversation`, `before`? (a message id), `limit`? (up to 100) | `messages`, newest last, and `more` |
-| `agent.create` | `name`, `acp_agent`, `instructions`, `folder`?, `permission`? | `agent` |
+| `agent.create` | `name`, `acp_agent`, `instructions`, `folder`?, `permission`?, `color`? (one of the eight thread colours in `design/tokens.toml`; left out, they go round in turn) | `agent` |
 | `agent.update` | `agent`, and what changes | `agent`, with its new `revision` |
 | `agent.delete` | `agent` | — |
 | `device.rename` | `device`, `name` | — |
 | `device.revoke` | `device` | — |
+| `acp.list` | — | `programs`: the agent programs installed on the instance, each with `name` and `command` |
 
 Arguments marked `?` are optional. "—" means `value` is `{}`.
 

@@ -16,7 +16,6 @@ void      loom_core_stop(uint8_t *core);
 - [`conn.calx`](conn.calx): the connection to the instance (LOO-22). It opens one WebSocket to `/ws`, says `hello` with its cursor, then forwards catch-up and live frames to the app. When the connection ends, it opens again after 0.5 s, doubling up to 30 s, plus up to 20% at random. It opens again at once on wake or a network change. It stops for good on 4001 (signed out) and 4002 (update needed).
 - [`login.calx`](login.calx): login, setup and logout over the instance's HTTP API (LOO-23). The core's loop starts each request and checks it on every turn, so nothing waits while the instance hashes a password. The device token is kept in the system's credential store with std.keyring (Credential Manager, the Keychain), under the service `loom` and the instance's address. A 4001 close forgets it.
 - [`cache.calx`](cache.calx): the local SQLite cache (LOO-24), `core.db` in the app's data folder: agents, conversations, messages, devices, the runs still going, their tool calls and the questions still open. Each event is applied in one transaction with the cursor, its `seq`, and before the app hears of it, so the two never drift apart. A snapshot after `reset: true` replaces it all, and a login as someone else, or to another instance, clears it. The outbox is here too: a `send` waits with its client id until the instance acks it, and goes again on each reconnect.
-- [`spike.calx`](spike.calx): the LOO-4 spike's stand-in, which the desktop spike still links. LOO-25 moves the desktop app to `lib.calx`.
 
 ## Config
 
@@ -31,7 +30,7 @@ The app sends the core protocol frames (`send`, `cmd`, `approve`, `cancel`, …)
 | `{"t":"login","id":"l_1","server":"https://…","username":"…","password":"…","device":{"name":"Desk PC","kind":"windows","tz":"Europe/Oslo"}}` | Logs in (`POST /api/login`). `server` may be left out once one is known |
 | `{"t":"setup", …, "code":"…"}` | Sets a new instance up (`POST /api/setup`), with the code it printed |
 | `{"t":"logout"}` | Revokes this device's token (`POST /api/logout`), forgets it, and signs out |
-| `{"t":"send","conversation":"c_9","text":"…"}` | A message the person wrote. It goes in the outbox, with a `cid` if it has none, and out when the connection is up |
+| `{"t":"send","conversation":"c_9","text":"…"}` | A message the person wrote. It goes in the outbox, with a `cid` if it has none, and out when the connection is up. With `agent` instead of `conversation`, it goes to that agent's newest conversation, which the core makes first if there's none: the desktop app shows each agent as one ongoing chat |
 | `{"t":"core.get","id":"g_1","what":"messages","conversation":"c_9","before":"msg_40","limit":50}` | Reads the cache: `what` is `conversations`, `agents`, `devices`, `runs`, `tools`, `approvals`, `outbox` or `messages`. Older messages than the cache has come from the `messages.list` command, whose result the cache keeps |
 | `{"t":"app.wake"}` | The system woke from sleep. The core opens a new connection at once |
 | `{"t":"app.network"}` | The network changed. The same |
@@ -52,6 +51,7 @@ The core tells the app every frame the instance sends (`welcome`, `event`, `delt
 | `{"t":"core.queued","cid":"m_…","conversation":"c_9","text":"…","at":…}` | A `send` is in the outbox. The `ack` with its `cid` follows once the instance has it |
 | `{"t":"core.data","id":"g_1","what":"messages","items":[…],"more":true}` | The answer to `core.get`, oldest first for messages. `more` says the cache has older ones |
 | `{"t":"error","code":"offline","for":"q_2"}` | A frame other than `send` came while the core wasn't connected, so it didn't go |
+| `{"t":"error","code":"not_sent","ref":"m_…","message":"…"}` | A send to an agent the instance couldn't make a conversation with, such as one deleted meanwhile. It leaves the outbox |
 | `{"t":"error","code":"cache","message":"…"}` | The cache couldn't be read or written. An event that wasn't applied isn't in the cursor either, so the next connection gets it again |
 | `{"t":"error","code":"bad_config","message":"…"}` | The config's `server` isn't an `http://` or `https://` address |
 
