@@ -222,7 +222,8 @@ impl Worker {
         loop {
             while let line = child.read_line(0) {
                 said.push(line)
-                if said.len() > 12 { _ = said.remove(0) }
+                // The first lines say why, as "No usable sandbox!"; a crash's stack comes after.
+                if said.len() > 8 { _ = said.pop() }
             }
             if let ok(some(t)) = fs.read_text(port_file.copy()) {
                 let lines = t.lines()
