@@ -868,7 +868,7 @@ impl Conn {
             let addresses = relay.own_addresses(port)
             if key.len() == 32 and addresses.len() > 0 { server = relay.write(relay.Place { key: key, addresses: addresses }) }
         }
-        let l = link.Link { server: server, code:str_at(v.copy(), "code") ?? String(), instance: str_at(v.copy(), "instance") ?? String(), key: str_at(v.copy(), "key") ?? String() }
+        let l = link.Link { server: server, code: str_at(v.copy(), "code") ?? String(), instance: str_at(v.copy(), "instance") ?? String(), key: str_at(v.copy(), "key") ?? String() }
         self.tell(merge(f, Obj.new().j("value", merge(v, Obj.new().s("qr", link.qr(l)).done())).done()))
     }
 
