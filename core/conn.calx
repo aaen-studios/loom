@@ -68,6 +68,13 @@ pub fn valid_server(server: String) -> bool {
 }
 
 /// What one read of the socket gave.
+// What becomes of the app's push.register (Conn.through_relay).
+enum Sealing {
+    AsIs
+    Sealed(Json)
+    Failed(String)
+}
+
 enum Got {
     Text(String)
     Skip
@@ -743,8 +750,14 @@ impl Conn {
         }
         var frame = text
         if t == "cmd" and (str_at(m.copy(), "name") ?? String()) == "push.register" {
-            if let sealed = self.through_relay(m.copy()) {
-                frame = "{sealed}"
+            match self.through_relay(m.copy()) {
+                Sealing.AsIs => {},
+                Sealing.Sealed(sealed) => frame = "{sealed}",
+                Sealing.Failed(why) => {
+                    // Never the bare token to an instance that pushes through the relay.
+                    self.tell(Obj.new().s("t", String("error")).s("code", String("keyring")).s("message", why).maybe("for", str_at(m.copy(), "id")).done())
+                    return true
+                },
             }
         }
         if self.state == State.Live {
@@ -758,21 +771,19 @@ impl Conn {
 
     /// The app's push.register, with its APNs token sealed for the push relay and the
     /// phone's box key beside it, when the instance pushes through one (PLAN.md, "The push
-    /// relay"). none when it goes as it is.
-    fn through_relay(mut self, m: Json) -> Json? {
-        let key = self.push_relay.copy() else return none
+    /// relay"). It goes as it is when the instance doesn't, and not at all when the
+    /// phone's box key can't be kept.
+    fn through_relay(self, m: Json) -> Sealing {
+        let key = self.push_relay.copy() else return Sealing.AsIs
         let args = at(m.copy(), "args")
-        let token = str_at(args.copy(), "token") else return none
+        let token = str_at(args.copy(), "token") else return Sealing.AsIs
         let env = str_at(args, "env") ?? String("production")
         let box = match pushbox.box_key(self.keyring.copy()) {
             ok(b) => b,
-            err(e) => {
-                self.tell_error("keyring", "{e}")
-                return none
-            },
+            err(e) => return Sealing.Failed("This device can't keep the key notifications are sealed for, so it takes no push through the relay: {e}"),
         }
-        let sealed = pushbox.register_args(key, token, env, box) else return none
-        return some(merge(m, Obj.new().j("args", sealed).done()))
+        let sealed = pushbox.register_args(key, token, env, box) else return Sealing.Failed(String("The instance's push relay key isn't one."))
+        return Sealing.Sealed(merge(m, Obj.new().j("args", sealed).done()))
     }
 
     /// A message the person wrote: kept in the outbox with a client id, and sent when the

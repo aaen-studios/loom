@@ -239,6 +239,17 @@ fn through(inst: Instance, relay_url: String, relay_key: String, apns_base: Stri
 }
 
 fn main() ! Error {
+    // The phone's box key is kept in the system's credential store, which a Linux
+    // server without a Secret Service doesn't have.
+    var random = Random.system()
+    let service = "loom-test-relay-{random.next_u32()}"
+    match keyring.get(service.copy(), String("push box")) {
+        ok(_) => {},
+        err(e) => {
+            println("relay: skipped: it needs the system's credential store ({e})")
+            return
+        },
+    }
     var apns = try Server.listen(0)
     apns.log = false
     let apns_base = apns.url()[..apns.url().len() - 1].copy()
@@ -247,8 +258,6 @@ fn main() ! Error {
     let key = P256Key.generate()
     let relay_data = try fs.temp_dir()
     let (relay, relay_url, relay_key) = try start_relay(relay_data, apns_base.copy(), key.copy())
-    var random = Random.system()
-    let service = "loom-test-relay-{random.next_u32()}"
     var failure: String? = none
     match Instance.start() {
         ok(inst) => {
