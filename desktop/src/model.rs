@@ -206,6 +206,71 @@ pub struct Skill {
     pub body: String,
 }
 
+/// One of the person's plugins (protocol.md, "Plugins").
+#[derive(Clone, Debug, Default)]
+pub struct Plugin {
+    pub id: String,
+    pub name: String,
+    pub version: String,
+    pub description: String,
+    /// Its panel's first page, when it has a panel.
+    pub entry: Option<String>,
+    pub tools: bool,
+    pub allowed: Vec<String>,
+    /// What it asks for that the person hasn't allowed yet.
+    pub waiting: Vec<String>,
+}
+
+impl Plugin {
+    fn of(p: &Value) -> Plugin {
+        let list = |key: &str| -> Vec<String> {
+            p.get(key)
+                .and_then(Value::as_array)
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|x| x.as_str().map(String::from))
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
+        Plugin {
+            id: s(p, "id"),
+            name: s(p, "name"),
+            version: s(p, "version"),
+            description: s(p, "description"),
+            entry: p
+                .pointer("/panel/entry")
+                .and_then(Value::as_str)
+                .map(String::from),
+            tools: p.get("tools").is_some_and(|t| !t.is_null()),
+            allowed: list("allowed"),
+            waiting: list("waiting"),
+        }
+    }
+}
+
+/// A plugin's panel that's open: the plugin, and its files.
+#[derive(Clone, Debug)]
+pub struct OpenPanel {
+    pub plugin: Plugin,
+    pub files: Vec<(String, String)>,
+}
+
+/// What `asks` means, in words, for the plugins page.
+pub fn asking(asks: &[String]) -> String {
+    asks.iter()
+        .map(|a| match a.as_str() {
+            "tools" => String::from("run its tool server for your agents"),
+            "agents" => String::from("message your agents"),
+            other => match other.strip_prefix("cmd:") {
+                Some(c) => format!("send {c}"),
+                None => other.to_string(),
+            },
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 /// One of the person's routines: a prompt an agent is sent on a schedule.
 #[derive(Clone, Debug, Default)]
 pub struct Routine {
@@ -541,6 +606,16 @@ pub struct Model {
     /// The person's routines, oldest first.
     pub routines: Vec<Routine>,
     routines_stale: bool,
+    /// The person's plugins, by id.
+    pub plugins: Vec<Plugin>,
+    plugins_stale: bool,
+    /// The plugin whose panel is open, once its files have come.
+    pub panel: Option<OpenPanel>,
+    /// Answers for the open panel's door: the message's id, and its value or why not.
+    pub door_answers: Vec<(i64, Result<Value, String>)>,
+    /// The panel's messages sent on as commands: the command's id, the message's id, and
+    /// where its answer is in the command's value.
+    door_waiting: HashMap<String, (i64, &'static str)>,
     /// The QR code that adds a phone, while one is shown: its text, and when it expires
     /// (Unix ms).
     pub link: Option<(String, i64)>,
@@ -665,6 +740,9 @@ impl Model {
         }
         if std::mem::take(&mut self.routines_stale) {
             out.push(self.load_routines());
+        }
+        if std::mem::take(&mut self.plugins_stale) {
+            out.push(self.load_plugins());
         }
         let dirty: Vec<List> = self.dirty.drain().collect();
         for l in dirty {
@@ -866,6 +944,9 @@ impl Model {
             "routine" => {
                 self.routines_stale = true;
             }
+            "plugin" if kind != "plugin.data" => {
+                self.plugins_stale = true;
+            }
             _ => {}
         }
     }
@@ -928,6 +1009,50 @@ impl Model {
                     })
                 })
                 .collect();
+        } else if id.starts_with("app.door") {
+            let Some((message, at)) = self.door_waiting.remove(&id) else {
+                return;
+            };
+            let answer = match f.get("error") {
+                Some(e) => Err(s(e, "message")),
+                None => Ok(f.pointer(at).cloned().unwrap_or(Value::Null)),
+            };
+            self.door_answers.push((message, answer));
+        } else if id.starts_with("app.plugins") {
+            self.plugins = f
+                .pointer("/value/plugins")
+                .and_then(Value::as_array)
+                .map(|ps| ps.iter().map(Plugin::of).collect())
+                .unwrap_or_default();
+            // The open panel's plugin may have been allowed more, or less.
+            if let Some(open) = &mut self.panel {
+                match self.plugins.iter().find(|p| p.id == open.plugin.id) {
+                    Some(p) => open.plugin = p.clone(),
+                    None => self.panel = None,
+                }
+            }
+        } else if id.starts_with("app.plugin_get") {
+            if let Some(e) = f.get("error") {
+                self.notices.push(s(e, "message"));
+                return;
+            }
+            let Some(v) = f.get("value") else { return };
+            let plugin = Plugin::of(v.get("plugin").unwrap_or(&Value::Null));
+            let files = v
+                .get("files")
+                .and_then(Value::as_object)
+                .map(|m| {
+                    m.iter()
+                        .map(|(k, v)| (k.clone(), v.as_str().unwrap_or("").to_string()))
+                        .collect()
+                })
+                .unwrap_or_default();
+            self.panel = Some(OpenPanel { plugin, files });
+        } else if id.starts_with("app.plugin_") {
+            if let Some(e) = f.get("error") {
+                self.notices.push(s(e, "message"));
+            }
+            self.plugins_stale = true;
         } else if id.starts_with("app.skills") {
             self.skills = f
                 .pointer("/value/skills")
@@ -1718,6 +1843,83 @@ impl Model {
     pub fn remove_program(&mut self, program: &str) -> Value {
         let id = self.id("app.program");
         json!({"t": "cmd", "id": id, "name": "acp.remove", "args": {"name": program}})
+    }
+
+    /// Asks for the person's plugins, for the plugins page.
+    pub fn load_plugins(&mut self) -> Value {
+        let id = self.id("app.plugins");
+        json!({"t": "cmd", "id": id, "name": "plugin.list"})
+    }
+
+    /// Asks for a plugin's files, to open its panel.
+    pub fn open_plugin(&mut self, plugin: &str) -> Value {
+        self.panel = None;
+        self.door_answers.clear();
+        self.door_waiting.clear();
+        let id = self.id("app.plugin_get");
+        json!({"t": "cmd", "id": id, "name": "plugin.get", "args": {"id": plugin}})
+    }
+
+    pub fn close_panel(&mut self) {
+        self.panel = None;
+        self.door_answers.clear();
+        self.door_waiting.clear();
+    }
+
+    /// Allows all a plugin asks for.
+    pub fn allow_plugin(&mut self, plugin: &str) -> Value {
+        let id = self.id("app.plugin_allow");
+        json!({"t": "cmd", "id": id, "name": "plugin.allow", "args": {"id": plugin}})
+    }
+
+    pub fn delete_plugin(&mut self, plugin: &str) -> Value {
+        if self.panel.as_ref().is_some_and(|p| p.plugin.id == plugin) {
+            self.close_panel();
+        }
+        let id = self.id("app.plugin_delete");
+        json!({"t": "cmd", "id": id, "name": "plugin.delete", "args": {"id": plugin}})
+    }
+
+    /// A message through the open panel's door (protocol.md, "Plugins"): the command it
+    /// becomes, or why it's refused. Its answer comes in `door_answers`, by `message`.
+    pub fn door(&mut self, message: i64, op: &str, args: &Value) -> Result<Value, String> {
+        let Some(open) = &self.panel else {
+            return Err(String::from("The panel isn't open."));
+        };
+        let plugin = open.plugin.id.clone();
+        let key = args.get("key").cloned().unwrap_or(Value::Null);
+        let (name, cmd_args, answer_at) = match op {
+            "data.get" => (
+                String::from("plugin.data.get"),
+                json!({"plugin": plugin, "key": key}),
+                "/value/value",
+            ),
+            "data.put" => (
+                String::from("plugin.data.put"),
+                json!({"plugin": plugin, "key": key, "value": args.get("value").cloned().unwrap_or(Value::Null)}),
+                "/value",
+            ),
+            "cmd" => {
+                let name = s(args, "name");
+                if !open.plugin.allowed.contains(&format!("cmd:{name}")) {
+                    return Err(format!(
+                        "{name} isn't allowed for this panel: its plugin.toml asks for it, and the person allows it"
+                    ));
+                }
+                (
+                    name,
+                    args.get("args").cloned().unwrap_or(json!({})),
+                    "/value",
+                )
+            }
+            "message_agent" => {
+                return Err(String::from("message_agent isn't there yet for panels"))
+            }
+            other => return Err(format!("A panel can't {other}.")),
+        };
+        let id = self.id("app.door");
+        self.door_waiting.insert(id.clone(), (message, answer_at));
+        Ok(json!({"t": "cmd", "id": id, "name": name, "args": cmd_args}))
     }
 
     /// Asks for the person's skills, with what each says, for the skills page.

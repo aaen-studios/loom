@@ -211,6 +211,11 @@ impl Panel {
             .view
             .evaluate_script(&format!("window.__loom_answer({id}, {ok}, {value});"));
     }
+
+    /// Moves the panel, as the window changes size.
+    pub fn set_bounds(&self, bounds: Rect) {
+        let _ = self.view.set_bounds(bounds);
+    }
 }
 
 /// Whether `url` is the panel's own: its origin, then a path or nothing.
