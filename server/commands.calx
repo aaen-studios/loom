@@ -25,7 +25,7 @@ struct Command {
     does: str
 }
 
-const COMMANDS: [Command; 74] = [
+const COMMANDS: [Command; 75] = [
     Command { name: "conversation.create", args: "agent, title?", does: "Makes a conversation with an agent." },
     Command { name: "conversation.rename", args: "conversation, title", does: "Renames a conversation." },
     Command { name: "conversation.branch", args: "message, title?", does: "Branches a chat at a message: a new conversation that goes on from there, apart from the chat." },
@@ -90,6 +90,7 @@ const COMMANDS: [Command; 74] = [
     Command { name: "user.list", args: "", does: "Everyone with an account here." },
     Command { name: "user.role", args: "user, role (member or admin)", does: "Makes someone an admin or a member." },
     Command { name: "user.remove", args: "user", does: "Removes someone, with everything of theirs." },
+    Command { name: "people.log", args: "before?, limit? (up to 200)", does: "What happened to people here, newest first: who joined, was invited, changed role, was removed or reset a password." },
     Command { name: "invite.list", args: "", does: "Invites still open." },
     Command { name: "invite.create", args: "role?, uses?, days?", does: "Makes an invite link for someone to join." },
     Command { name: "invite.delete", args: "invite", does: "Takes back an invite." },
@@ -148,6 +149,7 @@ fn reading_runs_and_harm_asks() {
     assert(access(String("agent.delete")) == Access.Asks(String("delete")))
     assert(access(String("user.remove")) == Access.Asks(String("delete")))
     assert(access(String("user.list")) == Access.Asks(String("other")))
+    assert(access(String("people.log")) == Access.Asks(String("other")))
     assert(access(String("acp.install")) == Access.Asks(String("other")))
     assert(access(String("instance.move")) == Access.Asks(String("move")))
     assert(access(String("something.new")) == Access.Asks(String("other")))
@@ -157,7 +159,7 @@ fn reading_runs_and_harm_asks() {
     for c in COMMANDS {
         if let Access.Never(_) = access(String(c.name)) { panic("{c.name} is listed but never runs") }
     }
-    assert(catalog().len() == 74)
+    assert(catalog().len() == 75)
     assert(access(String("table.write")) == Access.Runs and access(String("table.delete_rows")) == Access.Runs)
     assert(access(String("table.drop")) == Access.Asks(String("delete")))
     assert(does(String("mcp.delete")) == "Removes an MCP server")

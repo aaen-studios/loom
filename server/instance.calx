@@ -2931,8 +2931,8 @@ impl Instance {
 
     // --- People (PLAN.md, "Accounts and invites") ---
 
-    // invite.create, invite.list and invite.delete; user.list, user.role and
-    // user.remove; and account.delete. Owners and admins invite and manage
+    // invite.create, invite.list and invite.delete; user.list, user.role,
+    // user.remove and people.log; and account.delete. Owners and admins invite and manage
     // people, from a device: an admin invites and removes members, and only
     // the owner makes admins. An instance in the desktop app is its owner's alone.
     fn people_cmd(i: mut Instance, user: String, device: String, name: String, args: Json) -> Answer ! Error {
@@ -2941,7 +2941,11 @@ impl Instance {
         let role = try i.store.role(user.copy()) ?? String()
         if name == "account.delete" {
             if role == "owner" { return Answer.Refused(String("not_allowed"), String("The owner's account goes with the instance. Move or stop the instance instead.")) }
-            return try i.remove_person(user)
+            let me = try i.store.username(user.copy()) ?? String()
+            let gone = try i.remove_person(user)
+            // Who did it is gone too, so it's in the words.
+            if let Answer.Value(_) = gone { try i.people_logged("left", "{me} deleted their account", String()) }
+            return gone
         }
         if i.lan { return Answer.Refused(String("not_here"), String("An instance in the desktop app is yours alone. Invite people to an instance on a server.")) }
         if role != "owner" and role != "admin" { return Answer.Refused(String("not_allowed"), String("Only the owner and admins invite and manage people.")) }
@@ -2955,7 +2959,9 @@ impl Instance {
             if days < 1 or days > 30 { return Answer.Refused(String("bad_request"), String("days is from 1 to 30.")) }
             let code = bytes.hex(random_bytes(16))
             let expires = now() + days * 86400000
-            let id = try i.store.add_invite(bytes.hex(sha256(code.to_bytes())), gives.copy(), uses, expires, user)
+            let id = try i.store.add_invite(bytes.hex(sha256(code.to_bytes())), gives.copy(), uses, expires, user.copy())
+            let who = if uses == 1 { if gives == "admin" { String("an admin") } else { String("a member") } } else { "{uses} {gives}s" }
+            try i.people_logged("invited", "Made an invite for {who}, for {days} days", user)
             return Answer.Value(Obj.new().s("invite", id).s("code", code).s("role", gives).i("uses", uses).i("expires", expires).done())
         }
         if name == "invite.list" {
@@ -2964,34 +2970,58 @@ impl Instance {
         if name == "invite.delete" {
             let id = str_at(args, "invite") ?? String()
             if not try i.store.delete_invite(id.copy()) { return Answer.Refused(String("not_found"), "There's no invite {id}.") }
+            try i.people_logged("invited", String("Took back an invite"), user)
             return Answer.Value(empty)
         }
         if name == "user.list" {
             return Answer.Value(Obj.new().j("users", Json.Array(try i.store.people())).done())
         }
+        if name == "people.log" {
+            let limit = int_at(args.copy(), "limit") ?? 50
+            if limit < 1 or limit > 200 { return Answer.Refused(String("bad_request"), String("limit is from 1 to 200.")) }
+            let entries = try i.store.people_log(int_at(args, "before"), usize.wrap(u64.wrap(limit)))
+            return Answer.Value(Obj.new().j("entries", Json.Array(entries)).done())
+        }
         let target = str_at(args.copy(), "user") ?? String()
         let theirs = try i.store.role(target.copy()) else return Answer.Refused(String("not_found"), "There's no one {target} here.")
         if target == user { return Answer.Refused(String("not_allowed"), String("Not your own account: account.delete removes it.")) }
         if theirs == "owner" { return Answer.Refused(String("not_allowed"), String("The owner stays the owner.")) }
+        let them = try i.store.username(target.copy()) ?? String()
         if name == "user.role" {
             if role != "owner" { return Answer.Refused(String("not_allowed"), String("Only the owner changes roles.")) }
             let to = str_at(args, "role") ?? String()
             if to != "member" and to != "admin" { return Answer.Refused(String("bad_request"), String("role is member or admin.")) }
-            try i.store.set_role(target, to)
+            if to == theirs { return Answer.Value(empty) }
+            try i.store.set_role(target, to.copy())
+            try i.people_logged("role", "Made {them} {if to == "admin" { "an admin" } else { "a member" }}", user)
             return Answer.Value(empty)
         }
         if name == "user.remove" {
             if theirs == "admin" and role != "owner" { return Answer.Refused(String("not_allowed"), String("Only the owner removes admins.")) }
-            return try i.remove_person(target)
+            let gone = try i.remove_person(target)
+            if let Answer.Value(_) = gone { try i.people_logged("removed", "Removed {them}, {if theirs == "admin" { "an admin" } else { "a member" }}, with everything of theirs", user) }
+            return gone
         }
         if name == "password.reset" {
             if theirs == "admin" and role != "owner" { return Answer.Refused(String("not_allowed"), String("Only the owner resets an admin's password.")) }
             let code = bytes.hex(random_bytes(16))
             let expires = now() + RESET_MS
-            try i.store.add_reset(bytes.hex(sha256(code.to_bytes())), target, user, expires)
+            try i.store.add_reset(bytes.hex(sha256(code.to_bytes())), target, user.copy(), expires)
+            try i.people_logged("reset", "Made a reset link for {them}", user)
             return Answer.Value(Obj.new().s("code", code).i("expires", expires).done())
         }
         return Answer.Refused(String("unknown_command"), "Version 1 has no command {name}.")
+    }
+
+    // Keeps what happened in the people log, done by `by` (a person's id, or ""
+    // when no one here did it), and tells the owner and admins.
+    fn people_logged(i: Instance, kind: str, what: String, by: String) ! Error {
+        let name = if by.len() > 0 { try i.store.username(by) ?? String() } else { String() }
+        try i.store.log_people(kind, what.copy(), name.copy())
+        let entry = Obj.new().s("kind", String(kind)).s("text", what).s("by", name).i("at", now()).done()
+        for p in try i.store.users() {
+            if p.role == "owner" or p.role == "admin" { try i.event(p.id.copy(), "people.logged", Obj.new().j("entry", entry.copy()).done()) }
+        }
     }
 
     // Removes a person and everything of theirs: their sessions end as signed
@@ -3047,6 +3077,8 @@ impl Instance {
             return
         }
         try i.store.set_password_hash(who.id.copy(), hash)
+        let name = try i.store.username(who.id.copy()) ?? String()
+        try i.people_logged("password", "{name} set a new password with a reset link, and was signed out everywhere else", who.id.copy())
         for device in try i.store.revoke_all(who.id.copy()) {
             try i.event(who.id.copy(), "device.revoked", Obj.new().s("device", device.copy()).done())
             for (_, s) in i.sessions {
@@ -3090,12 +3122,15 @@ impl Instance {
             i.server.respond(auth.req, http_error(409, "username_taken", "Someone here has the username {auth.username} already. Pick another."))
             return
         }
+        let inviter = try i.store.invite_by(auth.invite.copy()) ?? String()
         if not try i.store.use_invite(auth.invite.copy()) {
             i.server.respond(auth.req, http_error(410, "used_up", String("That invite has been used as many times as it could be. Ask for a new one.")))
             return
         }
         let user = try i.store.add_user_hashed(auth.username.copy(), hash, if auth.role == "admin" { "admin" } else { "member" })
         println("loom: {user.username} joined, as {user.role}")
+        let from = try i.store.username(inviter) ?? String("someone no longer here")
+        try i.people_logged("joined", "{user.username} joined as {if user.role == "admin" { "an admin" } else { "a member" }}, with an invite from {from}", user.id.copy())
         // Those who invite people hear who came.
         let joined = Obj.new().s("user", user.id.copy()).s("username", user.username.copy()).s("role", user.role.copy()).done()
         for p in try i.store.users() {
@@ -3208,6 +3243,8 @@ impl Instance {
             }
             let user = try i.store.add_user_hashed(auth.username.copy(), done.hash.copy(), "owner")
             try i.store.delete_meta("setup_code")
+            // In the log only: there's no one else yet to tell.
+            try i.store.log_people("joined", "{user.username} set up the instance, as its owner", user.username.copy())
             i.server.respond(auth.req, json_response(200, try i.new_device(user.id, auth.body.copy())))
             return
         }
@@ -5103,7 +5140,7 @@ impl Instance {
             if i.bridge != none { value = value.j("noise", try i.phones()) }
             return Answer.Value(value.done())
         }
-        if name.starts_with("invite.") or name.starts_with("user.") or name == "account.delete" or name == "password.reset" {
+        if name.starts_with("invite.") or name.starts_with("user.") or name == "account.delete" or name == "password.reset" or name == "people.log" {
             return try i.people_cmd(user, device, name, args)
         }
         if name == "instance.phones" {

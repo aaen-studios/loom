@@ -38,6 +38,16 @@ fn refused(r: Json) -> String {
 }
 
 // Whether the instance closes `app`'s socket as signed out.
+// The people log's entries, oldest first, as "by: text".
+fn entries(log: Json) -> List<String> {
+    var out = List<String>()
+    if let Json.Array(list) = at(log, "entries") {
+        for e in list { out.push("{str_at(e.copy(), "by") ?? String()}: {str_at(e, "text") ?? String()}") }
+    }
+    out.reverse()
+    return out
+}
+
 fn signed_out(app: mut App) -> bool {
     loop {
         match app.until("never", "") {
@@ -104,6 +114,7 @@ fn run() ! Error {
 
     let (_, bob_joined) = try join(inst.base.copy(), bob_code, "bob", "bob's password")
     var bob = try App.connect(inst.base.copy(), str_at(bob_joined, "token") ?? String(), 0)
+    try check(refused(try bob.cmd("q_0", "people.log", Obj.new().done())) == "not_allowed", "a member can't read the people log")
     try check(refused(try bob.cmd("q_1", "account.delete", Obj.new().done())) == "", "bob deletes his own account")
     try check(signed_out(mut bob), "and his session ends")
     try check(refused(try owner.cmd("q_6", "account.delete", Obj.new().done())) == "not_allowed", "the owner can't delete the owner's account")
@@ -120,6 +131,34 @@ fn run() ! Error {
     try check(gone, "and her token is gone")
     let after = "{try owner.cmd("q_8", "user.list", Obj.new().done())}"
     try check(not after.contains("\"ann\"") and not after.contains("\"bob\""), "neither is listed")
+
+    // The people log keeps all that, oldest last, with who did it, past their going.
+    let log = at(try owner.cmd("q_9", "people.log", Obj.new().done()), "value")
+    let want = [
+        "elliot: elliot set up the instance, as its owner",
+        "elliot: Made an invite for a member, for 7 days",
+        "ann: ann joined as a member, with an invite from elliot",
+        "elliot: Made ann an admin",
+        "ann: Made an invite for 2 members, for 7 days",
+        "bob: bob joined as a member, with an invite from ann",
+        ": bob deleted their account",
+        "elliot: Removed ann, an admin, with everything of theirs",
+    ]
+    let got = entries(log)
+    var wanted = List<String>()
+    for w in want { wanted.push(String(w)) }
+    if got != wanted { eprintln("the people log:\n{got.join("\n")}") }
+    try check(got == wanted, "the people log says who joined, was invited, made an admin, left and was removed, and by whom")
+    var logged = false
+    for f in owner.frames {
+        if str_at(f.copy(), "kind") == some(String("people.logged")) { logged = true }
+    }
+    try check(logged, "the owner hears of each as it happens")
+    let first_page = at(try owner.cmd("q_10", "people.log", Obj.new().i("limit", 2).done()), "value")
+    let Json.Array(page) = at(first_page, "entries") else fail "people.log gave no entries"
+    let oldest = int_at(page[1].copy(), "id") ?? 0
+    let rest = entries(at(try owner.cmd("q_11", "people.log", Obj.new().i("before", oldest).done()), "value"))
+    try check(page.len() == 2 and rest.len() == 6 and rest[5] == "bob: bob joined as a member, with an invite from ann", "it comes a page at a time")
     owner.close()
 
     // Through real cores: the owner's gets the link to pass on, and a new one joins from it.
@@ -143,8 +182,13 @@ fn run() ! Error {
         // The owner's own reset, from the command line, signs them out everywhere.
         let done = try loom(inst.data.copy(), [String("user"), String("password"), String("elliot")]).input_text(String("the owner's new one\n")).output()
         try check(done.status.success(), "loom user password gives the owner a new password")
-        let (status, _) = try post_json(inst.base.copy(), "/api/login", Obj.new().s("username", String("elliot")).s("password", String("the owner's new one")).j("device", device("Laptop")).done())
+        let (status, login) = try post_json(inst.base.copy(), "/api/login", Obj.new().s("username", String("elliot")).s("password", String("the owner's new one")).j("device", device("Laptop")).done())
         try check(status == 200, "which logs in")
+        var laptop = try App.connect(inst.base.copy(), str_at(login, "token") ?? String(), 0)
+        let later = entries(at(try laptop.cmd("q_1", "people.log", Obj.new().i("limit", 4).done()), "value"))
+        laptop.close()
+        if later.len() != 4 { eprintln("the people log:\n{later.join("\n")}") }
+        try check(later.contains(String("elliot: Made a reset link for cora")) and later.contains(String("cora: cora set a new password with a reset link, and was signed out everywhere else")) and later[3] == ": elliot was given a new password from the command line, and signed out everywhere", "so do a reset link, its use and a new password from the command line")
         let old_gone = match App.connect(inst.base.copy(), inst.token.copy(), 0) {
             ok(a) => {
                 a.close()

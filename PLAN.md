@@ -132,6 +132,7 @@ The data is kept per person from the first day, so a second person never needs a
 - **Forgotten passwords.** An owner or admin makes a reset link. The owner's own reset comes from the server's command line.
 - **Deleting.** People delete their own account in the app, which removes their data (the App Store requires this). The owner can remove people.
 - **Taking your data.** Each person can export their own conversations, agents and files, apart from moving the whole instance.
+- **The people log.** Owners and admins see what happened to people, on the People page: who joined and with whose invite, invites made and taken back, role changes, removals, accounts deleted, reset links made and used, and accounts and passwords set from the server's command line. Each entry says who did it, by name, so it outlives the people in it.
 
 What's private and what's shared:
 

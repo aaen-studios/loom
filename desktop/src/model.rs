@@ -226,6 +226,15 @@ pub struct Invite {
     pub expires: i64,
 }
 
+/// An entry of the people log: what happened, who did it ("" for the command line), and
+/// when (Unix ms).
+#[derive(Clone, Debug, PartialEq)]
+pub struct PeopleEntry {
+    pub text: String,
+    pub by: String,
+    pub at: i64,
+}
+
 /// One of the person's skills.
 #[derive(Clone, Debug)]
 pub struct Skill {
@@ -931,6 +940,8 @@ pub struct Model {
     pub reset_made: Option<(String, String, i64)>,
     /// Why the People page shows nothing, when the instance said no.
     pub people_refused: Option<String>,
+    /// The people log, newest first (PLAN.md, "Accounts and invites").
+    pub people_log: Vec<PeopleEntry>,
     pub people_open: bool,
     people_stale: bool,
     /// The person's devices, as the cache has them: id, name and kind.
@@ -1593,8 +1604,9 @@ impl Model {
             "plugin" if kind != "plugin.data" => {
                 self.plugins_stale = true;
             }
-            // Someone joined with an invite: the People page lists them, and the invite's uses.
-            "user" if self.people_open => {
+            // Someone joined with an invite: the People page lists them, and the invite's uses;
+            // and the people log grew.
+            "user" | "people" if self.people_open => {
                 self.people_stale = true;
             }
             _ => {}
@@ -1984,6 +1996,20 @@ impl Model {
                     })
                     .unwrap_or_default();
             }
+        } else if id.starts_with("app.plog") {
+            self.people_log = f
+                .pointer("/value/entries")
+                .and_then(Value::as_array)
+                .map(|es| {
+                    es.iter()
+                        .map(|e| PeopleEntry {
+                            text: s(e, "text"),
+                            by: s(e, "by"),
+                            at: e.get("at").and_then(Value::as_i64).unwrap_or(0),
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
         } else if id.starts_with("app.invites") {
             self.invites = f
                 .pointer("/value/invites")
@@ -3027,13 +3053,17 @@ impl Model {
         json!({"t": "cmd", "id": id, "name": "instance.relay", "args": args})
     }
 
-    /// Reads everyone with an account and the invites still open, for the People page.
+    /// Reads everyone with an account, the invites still open and the newest of the people
+    /// log, for the People page.
     pub fn load_people(&mut self) -> Vec<Value> {
         let people = self.id("app.people");
         let invites = self.id("app.invites");
+        // Not "app.people…", which is user.list's.
+        let log = self.id("app.plog");
         vec![
             json!({"t": "cmd", "id": people, "name": "user.list", "args": {}}),
             json!({"t": "cmd", "id": invites, "name": "invite.list", "args": {}}),
+            json!({"t": "cmd", "id": log, "name": "people.log", "args": {"limit": 30}}),
         ]
     }
 
@@ -3544,6 +3574,32 @@ mod tests {
     }
 
     #[test]
+    fn the_people_page_reads_the_people_log_and_reads_it_again_when_it_grows() {
+        let mut m = Model::new();
+        m.people_open = true;
+        let frames = m.load_people();
+        assert_eq!(frames[2]["name"], "people.log");
+        let id = frames[2]["id"].as_str().unwrap().to_string();
+        m.take(
+            &json!({"t": "result", "id": id, "ok": true, "value": {"entries": [
+                {"id": 2, "kind": "role", "text": "Made ann an admin", "by": "elliot", "at": 5},
+                {"id": 1, "kind": "joined", "text": "ann joined as a member", "by": "ann", "at": 4},
+            ]}}),
+        );
+        assert_eq!(m.people_log.len(), 2);
+        assert_eq!(m.people_log[0].text, "Made ann an admin");
+        assert!(
+            m.people.is_empty(),
+            "the log's answer isn't taken for user.list's"
+        );
+        m.take(&json!({"t": "event", "kind": "people.logged", "entry": {"kind": "invited", "text": "Took back an invite", "by": "elliot", "at": 6}}));
+        assert!(
+            m.fetches().iter().any(|f| f["name"] == "people.log"),
+            "a new entry reads the log again"
+        );
+    }
+
+    #[test]
     fn a_branch_opens_once_made_and_is_listed_under_its_message() {
         let chat = Conversation {
             id: "c_chat".into(),
@@ -3714,7 +3770,7 @@ mod tests {
     #[test]
     fn people_and_invites_are_listed_and_an_invite_is_kept_to_pass_on() {
         let mut m = Model::new();
-        let [people, invites] = m.load_people().try_into().unwrap();
+        let [people, invites, _log] = m.load_people().try_into().unwrap();
         assert_eq!(people["name"], "user.list");
         m.result(&json!({"t": "result", "id": people["id"], "ok": true, "value": {"users": [{"user": "u_1", "username": "elliot", "role": "owner"}, {"user": "u_2", "username": "ann", "role": "member"}]}}));
         m.result(&json!({"t": "result", "id": invites["id"], "ok": true, "value": {"invites": [{"invite": "inv_1", "role": "member", "uses": 2, "expires": 9}]}}));
@@ -3740,7 +3796,7 @@ mod tests {
             ))
         );
         // A member is told why there's nothing to see.
-        let [people, _] = m.load_people().try_into().unwrap();
+        let [people, _, _] = m.load_people().try_into().unwrap();
         m.result(&json!({"t": "result", "id": people["id"], "ok": false, "error": {"code": "not_allowed", "message": "Only the owner and admins"}}));
         assert!(m.people.is_empty());
         assert!(m

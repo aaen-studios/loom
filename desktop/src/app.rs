@@ -7088,7 +7088,7 @@ ACTA_KEY=secret:ACTA_KEY",
                 )
                 .child(caption(format!(
                     "Makes one {role}, until {}. It shows only now: send it the way you'd send a password.",
-                    time_of(expires)
+                    moment_of(expires)
                 )));
         }
         body = body.child(invite);
@@ -7183,7 +7183,7 @@ ACTA_KEY=secret:ACTA_KEY",
                 )
                 .child(caption(format!(
                     "Sets a new password for {who}, once, until {}. It signs them out everywhere else.",
-                    time_of(expires)
+                    moment_of(expires)
                 )));
         }
         body = body.child(everyone);
@@ -7207,7 +7207,7 @@ ACTA_KEY=secret:ACTA_KEY",
                             inv.role,
                             inv.uses,
                             if inv.uses == 1 { "use" } else { "uses" },
-                            time_of(inv.expires)
+                            moment_of(inv.expires)
                         ))))
                         .child(
                             self.button_owned(format!("invite-{}", inv.id), "Delete", false)
@@ -7220,6 +7220,35 @@ ACTA_KEY=secret:ACTA_KEY",
                 );
             }
             body = body.child(open);
+        }
+        // What happened to people here, newest first.
+        if !self.model.people_log.is_empty() {
+            let mut log = div()
+                .flex()
+                .flex_col()
+                .gap(px(space::S))
+                .child(heading("What happened"));
+            for e in self.model.people_log.clone() {
+                let when = moment_of(e.at);
+                let who = if e.by.is_empty() {
+                    "from the server".to_string()
+                } else {
+                    format!("by {}", e.by)
+                };
+                log = log.child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .child(
+                            div()
+                                .text_size(px(size::SMALL))
+                                .text_color(p.ink)
+                                .child(e.text.clone()),
+                        )
+                        .child(caption(format!("{when}, {who}"))),
+                );
+            }
+            body = body.child(log);
         }
         self.page("people-page", body)
     }
@@ -8566,6 +8595,16 @@ fn day_of(ms: i64) -> String {
         "Yesterday".into()
     } else {
         day.format("%-d %B %Y").to_string()
+    }
+}
+
+/// When `ms` is: its time today, or its day and time, such as for an invite a week on.
+fn moment_of(ms: i64) -> String {
+    let day = day_of(ms);
+    if day == "Today" {
+        time_of(ms)
+    } else {
+        format!("{day} {}", time_of(ms))
     }
 }
 

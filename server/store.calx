@@ -107,6 +107,9 @@ CREATE TABLE IF NOT EXISTS link_codes (
 CREATE TABLE IF NOT EXISTS invites (
     id TEXT PRIMARY KEY, hash TEXT NOT NULL UNIQUE, role TEXT NOT NULL, uses INTEGER NOT NULL,
     expires INTEGER NOT NULL, by TEXT NOT NULL, at INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS people_log (
+    id INTEGER PRIMARY KEY, kind TEXT NOT NULL, text TEXT NOT NULL, by TEXT NOT NULL,
+    at INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS resets (
     hash TEXT PRIMARY KEY, user TEXT NOT NULL REFERENCES users(id), by TEXT NOT NULL,
     expires INTEGER NOT NULL);
@@ -1324,6 +1327,12 @@ impl Store {
         return some((text(r[0].copy()), text(r[1].copy()), int(r[2].copy()), int(r[3].copy())))
     }
 
+    // Who made the invite `id`, if it's still kept.
+    pub fn invite_by(self, id: String) -> String? ! Error {
+        let r = try self.db.query_one(String("SELECT by FROM invites WHERE id = ?"), [t(id)]) else return none
+        return some(text(r[0].copy()))
+    }
+
     // Takes one use of the invite `id`. False if it had none left.
     pub fn use_invite(self, id: String) -> bool ! Error {
         return try self.db.execute(String("UPDATE invites SET uses = uses - 1 WHERE id = ? AND uses > 0"), [t(id)]) > 0
@@ -1362,6 +1371,30 @@ impl Store {
             out.push(id)
         }
         return out
+    }
+
+    // --- The people log (PLAN.md, "Accounts and invites") ---
+
+    // Keeps what happened to people here: `kind` (joined, invited, role,
+    // removed, left, reset, password), what in words, and the username of who
+    // did it ("" for the command line). Names, not ids, so it outlives them.
+    pub fn log_people(self, kind: str, what: String, by: String) ! Error {
+        _ = try self.db.execute(String("INSERT INTO people_log (kind, text, by, at) VALUES (?, ?, ?, ?)"), [t(String(kind)), t(what), t(by), Value.Int(now())])
+    }
+
+    // The people log, newest first: up to `limit` entries before entry `before`.
+    pub fn people_log(self, before: i64?, limit: usize) -> List<Json> ! Error {
+        var out = List<Json>()
+        for r in try self.db.query(String("SELECT id, kind, text, by, at FROM people_log WHERE id < ? ORDER BY id DESC LIMIT ?"), [Value.Int(before ?? i64.MAX), Value.Int(i64.wrap(u64(limit)))]) {
+            out.push(Obj.new().i("id", int(r[0].copy())).s("kind", text(r[1].copy())).s("text", text(r[2].copy())).s("by", text(r[3].copy())).i("at", int(r[4].copy())).done())
+        }
+        return out
+    }
+
+    // The username of `user`, if they're here.
+    pub fn username(self, user: String) -> String? ! Error {
+        let r = try self.db.query_one(String("SELECT username FROM users WHERE id = ?"), [t(user)]) else return none
+        return some(text(r[0].copy()))
     }
 
     // --- People ---

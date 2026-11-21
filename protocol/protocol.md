@@ -553,6 +553,7 @@ An approval nobody answers stays open while the run does. Cancelling the run ans
 | `device.updated` | `device` (`id` and what changed) | Renamed |
 | `device.revoked` | `device` (the id) | Signed out. The revoked device's own socket is closed with 4001 |
 | `user.joined` | `user`, `username`, `role` | Someone joined with an invite. To every owner and admin |
+| `people.logged` | `entry`: its `kind`, `text`, `by` and `at`, as `people.log` gives each | Something went in the people log. To every owner and admin |
 
 ## Commands
 
@@ -625,6 +626,7 @@ Version 1's commands:
 | `user.remove` | `user` | —. Removes the person and everything of theirs, and their sessions close with 4001 once this is answered. The owner removes anyone but the owner, an admin only members, and not while one of their agents is answering (`busy`) |
 | `account.delete` | — | —. The person removes their own account, as `user.remove` does. Not the owner |
 | `password.reset` | `user` | `code` (for [`POST /api/reset/<code>`](#post-apiresetcode), shown once), `expires` (a day on). The owner resets anyone but the owner, an admin only members. Each new link replaces the person's last |
+| `people.log` | `before`? (an entry's `id`), `limit`? (50; up to 200) | `entries`, newest first: each `id`, `kind` (`joined`, `invited`, `role`, `removed`, `left`, `reset` or `password`), `text` (what happened, in words, with usernames), `by` (the username of who did it, or empty when it came from the server's command line or the person is gone) and `at`. Owners and admins. It keeps who joined and how, invites made and taken back, role changes, removals, accounts deleted, reset links made and used, and accounts and passwords from the command line |
 | `agent.revisions` | `agent` | `revisions`, newest first: each `revision`, `by` (the device or agent that made it), `at`, and `agent` as it was then |
 | `agent.rollback` | `agent`, `revision` | `agent`: a new revision with that one's name, ACP agent, instructions, folder and colour. The permission mode stays as it is |
 | `agent.delete` | `agent` | — |
