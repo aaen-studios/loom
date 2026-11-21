@@ -660,7 +660,7 @@ The throwaway test that opens Phase 2: a stand-in core (since replaced by `core/
 
 - **It works.** The core's 71 deltas arrive over 1.1 s, and GPUI draws each one as it comes, with code blocks, lists and inline code.
 - **Release build:** the window is up in about 0.55 s, the process holds about 85 MB, and the exe is 26 MB.
-- **The composer** takes typing and Enter, sends to the core, and the list follows the new message. Dropping files gives their paths (`ExternalPaths`). Its + opens a small menu above it: attach files, start the message with one of the person's skills, or run one of the agent's routines now. The tray icon and a notification come from the crates above, on GPUI's own message loop.
+- **The composer** takes typing and Enter, sends to the core, and the list follows the new message. Dropping files gives their paths (`ExternalPaths`). Its + opens a small menu above it: attach files, start the message with one of the person's skills, or run one of the agent's routines now. Its mic dictates: on Windows it puts the focus in the composer and opens the system's voice typing (Windows+H), which types what's said there, so no audio goes through loom; macOS gets its own dictation the same way when the Mac app is checked. The tray icon and a notification come from the crates above, on GPUI's own message loop.
 - **Not yet checked by hand:** an IME (Japanese, say), and Narrator. Both are on the Phase 2 desktop chat task.
 - **Geist isn't bundled yet,** so text falls back to a system font.
 - **For the real core:** `loom_core_stop` must join the core's threads before it returns, so no `on_event` call comes after the app frees its side.
