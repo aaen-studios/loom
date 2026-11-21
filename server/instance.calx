@@ -138,6 +138,7 @@ struct Proc {
     pending: Map<i64, Pending>
     sessions: Map<String, String>    // conversation -> ACP session
     told: Map<String, String>    // ACP session -> where it was last told the person is
+    profiled: Map<String, i64>    // ACP session -> the revision of the person's profile it has
     waiting: List<String>
 }
 
@@ -188,6 +189,8 @@ struct Install {
 }
 
 const REGISTRY_FRESH_MS: i64 = 600000
+// How long the person's profile may be: it goes into every session.
+const PROFILE_MOST: usize = 4000
 
 // An agent's right to loom's own tools: `loom mcp` acts as `user`, for `agent`.
 struct Grant {
@@ -690,6 +693,13 @@ impl Instance {
             let id = try i.store.remember(g.user.copy(), if shared { String() } else { g.agent.copy() }, what.copy(), g.agent.copy())
             i.log(g.user, g.agent.copy(), "memory", "Remembered: {cut_short(what, 120)}", g.agent)
             return some(tool_text("Remembered, as note {id}."))
+        }
+        if name == "update_profile" {
+            let what = (str_at(args, "text") ?? String()).trim().copy()
+            if what.len() == 0 or what.len() > PROFILE_MOST { return some(tool_error("The profile is empty, or over {PROFILE_MOST} bytes. Keep it short.")) }
+            let made = try i.store.put_profile(g.user.copy(), what, g.agent.copy())
+            i.log(g.user, g.agent.copy(), "memory", "Updated your profile: revision {int_at(made, "revision") ?? 0}", g.agent)
+            return some(tool_text(String("Updated. Every agent's next session starts with it.")))
         }
         if name == "recall" {
             let query = str_at(args, "query") ?? String()
@@ -1249,7 +1259,7 @@ impl Instance {
         }
         i.write_skills(user.copy(), folder.copy())
         let to = try acp.start(id.copy(), acp_agent.command, acp_agent.args, acp_agent.env, folder, i.lines_to.copy())
-        var p = Proc { agent: id.copy(), user: user.copy(), to: to, ready: false, images: false, program: program, resume: false, load: false, next_id: 1, pending: Map<i64, Pending>(), sessions: Map<String, String>(), told: Map<String, String>(), waiting: List<String>() }
+        var p = Proc { agent: id.copy(), user: user.copy(), to: to, ready: false, images: false, program: program, resume: false, load: false, next_id: 1, pending: Map<i64, Pending>(), sessions: Map<String, String>(), told: Map<String, String>(), profiled: Map<String, i64>(), waiting: List<String>() }
         p.pending.insert(1, Pending.Init)
         p.to.send(Out.Send(acp.request(1, "initialize", acp.initialize_params())))
         i.procs.insert(id, p)
@@ -1430,6 +1440,18 @@ impl Instance {
             let utc = Timestamp { unix_ms: now() }.date_time(0).format("%Y-%m-%d %H:%M")
             prompt.push(Obj.new().s("type", String("text")).s("text", "[loom: This message comes from {from}. It's {utc} UTC.]").done())
             p.told.insert(session.copy(), from)
+        }
+        // The person's profile (PLAN.md, "Memory"), when the session hasn't
+        // had this revision of it.
+        let profile = match i.store.profile(user.copy()) {
+            ok(some(pr)) => pr,
+            _ => Json.Null,
+        }
+        let revision = int_at(profile.copy(), "revision") ?? 0
+        let had = p.profiled.get(session.copy()) ?? 0
+        if revision > 0 and revision != had {
+            prompt.push(Obj.new().s("type", String("text")).s("text", "[loom: About the person, as they and their agents keep it. update_profile changes it.\n{str_at(profile, "text") ?? String()}]").done())
+            p.profiled.insert(session.copy(), revision)
         }
         if text.len() > 0 {
             prompt.push(Obj.new().s("type", String("text")).s("text", text).done())
@@ -2273,6 +2295,14 @@ impl Instance {
             i.log(user.copy(), id.copy(), "agent", "Changed: revision {int_at(agent.copy(), "revision") ?? 0}", device.copy())
             try i.event(user, "agent.updated", Obj.new().j("agent", agent.copy()).s("by", device.copy()).done())
             return Answer.Value(Obj.new().j("agent", agent).done())
+        }
+        if name == "profile.get" {
+            return Answer.Value(Obj.new().j("profile", try i.store.profile(user) ?? Json.Null).done())
+        }
+        if name == "profile.put" {
+            let what = (str_at(args, "text") ?? String()).trim().copy()
+            if what.len() > PROFILE_MOST { return Answer.Refused(String("bad_request"), "The profile is over {PROFILE_MOST} bytes.") }
+            return Answer.Value(Obj.new().j("profile", try i.store.put_profile(user, what, device)).done())
         }
         if name == "memory.list" {
             let limit = int_at(args.copy(), "limit") ?? 100

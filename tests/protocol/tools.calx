@@ -184,6 +184,18 @@ fn run(i: Instance) ! Error {
     _ = try app.cmd("q_m5", "memory.delete", Obj.new().i("id", 1).done())
     let gone = try say(mut app, notes, "m_m6", String(#"/mcp recall {"query":"1Password"}"#))
     try check(gone == "recall: Nothing remembered about 1Password.", "and the person can delete one")
+
+    // --- The person's profile ---
+    _ = try app.cmd("q_p1", "profile.put", Obj.new().s("text", String("Elliot, in Oslo. Short answers.")).done())
+    let c6 = try app.cmd("q_p2", "conversation.create", Obj.new().s("agent", main_id.copy()).done())
+    let about = str_at(at(c6, "value"), "conversation") ?? String()
+    let told = try say(mut app, about.copy(), "m_p1", String("/context"))
+    try check(told.contains("About the person") and told.contains("Elliot, in Oslo. Short answers."), "a new session starts with the person's profile")
+    try check(try say(mut app, about.copy(), "m_p2", String("/context")) == "no context", "and isn't told it again")
+    _ = try say(mut app, about.copy(), "m_p3", String(#"/mcp update_profile {"text":"Elliot, in Oslo. Short answers. Builds loom."}"#))
+    let retold = try say(mut app, about, "m_p4", String("/context"))
+    let profile = at(at(try app.cmd("q_p3", "profile.get", Obj.new().done()), "value"), "profile")
+    try check(retold.contains("Builds loom.") and int_at(profile.copy(), "revision") == some(2) and str_at(profile, "by") == some(main_id.copy()), "an agent updates it, and every session hears the new one")
     app.close()
 }
 

@@ -342,6 +342,10 @@ pub struct Model {
     /// What the selected agent remembers, for the memory page, newest first.
     pub notes: Vec<Note>,
     notes_stale: bool,
+    /// The person's profile: its text, revision and who wrote it, once it's come.
+    pub profile: Option<(String, i64, String)>,
+    /// The profile came, and the page's text should show it.
+    pub profile_came: bool,
     /// The agent programs on the instance, for the programs page.
     pub installed: Vec<Program>,
     /// The ACP Registry's agents, once it's been read.
@@ -730,6 +734,18 @@ impl Model {
                 self.notices.push(s(e, "message"));
             }
             self.notes_stale = true;
+        } else if id.starts_with("app.profile") {
+            if let Some(e) = f.get("error") {
+                self.notices.push(s(e, "message"));
+                return;
+            }
+            let pr = f.pointer("/value/profile").cloned().unwrap_or(Value::Null);
+            self.profile = Some((
+                s(&pr, "text"),
+                pr.get("revision").and_then(Value::as_i64).unwrap_or(0),
+                s(&pr, "by"),
+            ));
+            self.profile_came = true;
         } else if id.starts_with("app.activity") {
             self.activity = f
                 .pointer("/value/activity")
@@ -1372,6 +1388,17 @@ impl Model {
     pub fn delete_skill(&mut self, name: &str) -> Value {
         let id = self.id("app.skill_delete");
         json!({"t": "cmd", "id": id, "name": "skill.delete", "args": {"name": name}})
+    }
+
+    /// Asks for the person's profile, for the About you page.
+    pub fn load_profile(&mut self) -> Value {
+        let id = self.id("app.profile_get");
+        json!({"t": "cmd", "id": id, "name": "profile.get"})
+    }
+
+    pub fn save_profile(&mut self, text: &str) -> Value {
+        let id = self.id("app.profile_put");
+        json!({"t": "cmd", "id": id, "name": "profile.put", "args": {"text": text}})
     }
 
     /// Asks for what the selected agent remembers, for the memory page.

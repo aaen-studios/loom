@@ -43,6 +43,7 @@ pub fn all() -> List<Json> {
         tool("set_permission", "Sets how an agent asks before it acts: ask (before every command and edit), auto (only when it's risky) or allow (never). Your person is asked first. You can tighten your own to ask, but not loosen it.", object(Obj.new().j("agent", text_arg("The agent's name or id.")).j("permission", text_arg("ask, auto or allow.")), ["agent", "permission"])),
         tool("delete_skill", "Deletes one of your person's skills, for every agent. Your person is asked first.", object(Obj.new().j("name", text_arg("The skill's name.")), ["name"])),
         tool("remember", "Keeps a note for later: something your person told you, a decision, where a thing is. Your notes are yours; with shared, every agent of your person's reads it. Keep each to one fact.", object(Obj.new().j("text", text_arg("The note.")).j("shared", Obj.new().s("type", String("boolean")).s("description", String("Whether every agent of your person's may read it.")).done()), ["text"])),
+        tool("update_profile", "Rewrites your person's profile: a few lines about them (name, what they do, how they like answers) that every agent's session starts with. Give it whole. Change it when you learn something lasting about them.", object(Obj.new().j("text", text_arg("The whole profile, in a few short lines.")), ["text"])),
         tool("recall", "Searches your notes and the shared ones, best match first, or gives the newest without a query. Look here before you ask your person something they may have told you already.", object(Obj.new().j("query", text_arg("Words to find.")), List<str>())),
         tool("forget", "Forgets one of your notes, or a shared one, that's wrong or out of date.", object(Obj.new().j("id", Obj.new().s("type", String("integer")).s("description", String("The note's number, as recall gives it.")).done()), ["id"])),
         tool("notify", "Sends your person a notification on their devices. Keep it for what they'd want to know now.", object(Obj.new().j("title", text_arg("A few words.")).j("body", text_arg("One or two sentences.")), ["title", "body"])),
@@ -52,7 +53,7 @@ pub fn all() -> List<Json> {
 @test
 fn every_tool_has_a_schema() {
     let tools = all()
-    assert(tools.len() == 19)
+    assert(tools.len() == 20)
     for t in tools {
         assert("{t}".contains("\"inputSchema\":\{\"type\":\"object\""))
     }
