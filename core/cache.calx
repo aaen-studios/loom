@@ -139,7 +139,7 @@ impl Cache {
             let id = str_at(e, "conversation") ?? String()
             _ = try self.db.execute(String("DELETE FROM conversations WHERE id = ?"), [t(id.copy())])
             _ = try self.db.execute(String("DELETE FROM messages WHERE conversation = ?"), [t(id.copy())])
-        } else if kind == "message.created" {
+        } else if kind == "message.created" or kind == "message.updated" {
             try self.put_message(at(e, "message"))
         } else if kind == "run.started" {
             let id = str_at(e.copy(), "run") ?? String()

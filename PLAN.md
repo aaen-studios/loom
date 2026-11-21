@@ -449,6 +449,10 @@ An instance moves whole, in any direction: desktop to server, server to desktop,
 
 Full-text search over every conversation, with FTS5 as memory uses, filtered by agent and date.
 
+## Pinned messages
+
+A message worth keeping at hand is pinned in its chat, as in Discord: by the person, from the pin in its corner, or by an agent, with `run_command`. The pin is kept on the message, with when and who, so every device sees it. The chat's header shows how many there are, and opens them beside the chat, the newest pin first, each to jump to or take off.
+
 ## Security
 
 - **What a model reads is data, not orders.** Web pages, mail and tool results can carry instructions meant to trick an agent. Nothing in them can approve a risky action or change a permission. Only a person can, in the app.
