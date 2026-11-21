@@ -45,6 +45,9 @@ CREATE TABLE IF NOT EXISTS sent (
 CREATE TABLE IF NOT EXISTS events (
     user TEXT NOT NULL REFERENCES users(id), seq INTEGER NOT NULL, json TEXT NOT NULL,
     at INTEGER NOT NULL, PRIMARY KEY (user, seq));
+CREATE TABLE IF NOT EXISTS acp_sessions (
+    user TEXT NOT NULL REFERENCES users(id), conversation TEXT NOT NULL, program TEXT NOT NULL,
+    session TEXT NOT NULL, at INTEGER NOT NULL, PRIMARY KEY (user, conversation));
 CREATE TABLE IF NOT EXISTS files (
     sha TEXT NOT NULL, user TEXT NOT NULL REFERENCES users(id), name TEXT NOT NULL,
     mime TEXT NOT NULL, size INTEGER NOT NULL, at INTEGER NOT NULL, PRIMARY KEY (sha, user));
@@ -421,6 +424,19 @@ impl Store {
         return out
     }
 
+    // --- ACP sessions ---
+
+    // The ACP session `conversation` last had in the agent program `program`, to pick up
+    // again after a restart.
+    pub fn acp_session(self, user: String, conversation: String, program: String) -> String? ! Error {
+        let r = try self.db.query_one(String("SELECT session FROM acp_sessions WHERE user = ? AND conversation = ? AND program = ?"), [t(user), t(conversation), t(program)]) else return none
+        return some(text(r[0].copy()))
+    }
+
+    pub fn put_acp_session(self, user: String, conversation: String, program: String, session: String) ! Error {
+        _ = try self.db.execute(String("INSERT INTO acp_sessions (user, conversation, program, session, at) VALUES (?, ?, ?, ?, ?) ON CONFLICT (user, conversation) DO UPDATE SET program = excluded.program, session = excluded.session, at = excluded.at"), [t(user), t(conversation), t(program), t(session), Value.Int(now())])
+    }
+
     // --- Files ---
 
     // Notes that `user` has the file `sha`. The first name and type they gave it stay.
@@ -685,4 +701,18 @@ fn files_are_per_person() {
     assert("{s.file(a.id.copy(), sha.copy())!}".contains("x.png"))
     assert(s.file(b.id.copy(), sha)! == none)
     assert(s.file_usage(a.id.copy())! == 10 and s.file_usage(b.id.copy())! == 0)
+}
+
+@test
+fn acp_sessions_are_kept_per_conversation_and_program() {
+    let s = test_store()
+    let a = s.add_user(String("a"), String("password1"), "owner")!
+    assert(s.acp_session(a.id.copy(), String("c_1"), String("claude"))! == none)
+    s.put_acp_session(a.id.copy(), String("c_1"), String("claude"), String("s_1"))!
+    assert(s.acp_session(a.id.copy(), String("c_1"), String("claude"))! == some(String("s_1")))
+    // Another program can't take up claude's session.
+    assert(s.acp_session(a.id.copy(), String("c_1"), String("codex"))! == none)
+    s.put_acp_session(a.id.copy(), String("c_1"), String("codex"), String("s_2"))!
+    assert(s.acp_session(a.id.copy(), String("c_1"), String("claude"))! == none)
+    assert(s.acp_session(a.id.copy(), String("c_1"), String("codex"))! == some(String("s_2")))
 }

@@ -448,6 +448,7 @@ Inside the instance, each agent runs as an ACP agent program ([PLAN.md](../PLAN.
 | From the agent (ACP) | In loom |
 |---|---|
 | The instance sends the person's message to the session with `session/prompt` | `run.started` |
+| A conversation's first message to an agent program: `session/new`, or after a restart, `session/resume` (where the agent offers `sessionCapabilities.resume`) or `session/load` (where it offers `loadSession`) with the session the conversation had. What `session/load` plays back is dropped, and if the agent can't pick the session up, a new one starts | nothing: the apps see the same conversation |
 | The person's files, in that prompt | an `image` block for an image of up to 5 MB, when the program says it takes images (`promptCapabilities.image`); otherwise a `resource_link` to a copy in the agent's folder, under `files/`, with its name |
 | `session/update`, `agent_message_chunk` | `delta` with `kind: "text"` |
 | `session/update`, `agent_thought_chunk` | `delta` with `kind: "thought"` |
