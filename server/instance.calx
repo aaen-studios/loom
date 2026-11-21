@@ -193,6 +193,7 @@ pub struct Instance {
     next_prune: i64
     grants: Map<String, Grant>    // token -> whose tools
     calls: Map<String, Request>    // run -> a message_agent call waiting on it
+    context: Map<String, (i64, i64)>    // ACP session -> the tokens in its context, and its window, as usage_update last said
     registry_at: String    // the ACP Registry's address
     registry: Json    // what it last said, or null
     registry_time: i64    // when
@@ -302,6 +303,11 @@ const PROFILE_MOST: usize = 4000
 const SIDE_QUESTION_MOST: usize = 4000
 const SIDE_MESSAGES: usize = 40
 const SIDE_TRANSCRIPT_MOST: usize = 24000
+
+// How full a session's context may get, in percent of its window, before the
+// next prompt goes to a fresh session that carries on from the newest of the
+// chat (PLAN.md, "One endless chat").
+const CONTEXT_RENEW_PERCENT: i64 = 80
 
 // Tasks (PLAN.md, "Work that waits its turn"): how many an agent may have
 // running that it started itself, and what it's told when one carries on.
@@ -739,7 +745,7 @@ impl Instance {
         }
         let browser_done = Receiver<browser.Back>()
         let browser_to = browser_done.sender()
-        var i = Instance { browsers: LinkedMap<String, Browser>(), watchers: Map<u32, String>(), browser_done: browser_done, browser_to: browser_to, stopped_browsers: List<Thread>(), fills: Map<String, Fill>(), turns_ended: List<(String, String, String)>(), next_browser_sweep: 0, task_stops: Map<String, String>(), resumes: List<(String, String)>(), push_to: push_to, push_gone: push_gone, move_to: move_to, move_done: move_done, lan: config.lan, bridge: none, stop_bridge: none, lan_port: 0, announcer: none, stop_announcer: none, to_close: List<ServerSocket>(), boxes: none, gate: none, stop_gate: none, moving: String(), move_waiters: List<Waiter>(), moved: moved, version: config.version.copy(), store: store, server: server, data: config.data.copy(), sessions: Map<u32, Session>(), runs: LinkedMap<String, Run>(), procs: LinkedMap<String, Proc>(), approvals: LinkedMap<String, Approval>(), lines: lines, lines_to: to, hash_to: hash_to, hash_done: hash_done, next_job: 0, auths: Map<i64, Auth>(), dummy_hash: dummy, failures: LinkedMap<String, List<i64>>(), thumbs: files.start(), events: config.events, next_prune: 0, grants: Map<String, Grant>(), calls: Map<String, Request>(), registry_at: config.registry.copy(), registry: Json.Null, registry_time: 0, install_to: install_to, install_done: install_done, fetching: List<Waiter>(), installs: Map<i64, Install>(), leftovers: List<String>(), next_sweep: 0, device_calls: Map<String, DeviceCall>(), minute_ms: config.minute_ms, next_due: 0, routine_runs: Map<String, RoutineRun>(), routine_marks: Map<String, (String, String)>(), run_chains: Map<String, List<String>>(), panel_calls: Map<String, Waiter>(), script_calls: Map<String, Request>(), running_flows: LinkedMap<String, flows.Flow>(), flow_steps: Map<String, (String, usize)>(), advancing: List<String>(), flow_results: List<(String, usize, bool, String)>(), flows_due: List<String>(), slow_calls: Map<String, String>(), acting: 0, call_actions: Map<String, i64>(), tool_actions: Map<String, i64>(), sealer: try secret_key(config.data.copy()) }
+        var i = Instance { browsers: LinkedMap<String, Browser>(), watchers: Map<u32, String>(), browser_done: browser_done, browser_to: browser_to, stopped_browsers: List<Thread>(), fills: Map<String, Fill>(), turns_ended: List<(String, String, String)>(), next_browser_sweep: 0, task_stops: Map<String, String>(), resumes: List<(String, String)>(), push_to: push_to, push_gone: push_gone, move_to: move_to, move_done: move_done, lan: config.lan, bridge: none, stop_bridge: none, lan_port: 0, announcer: none, stop_announcer: none, to_close: List<ServerSocket>(), boxes: none, gate: none, stop_gate: none, moving: String(), move_waiters: List<Waiter>(), moved: moved, version: config.version.copy(), store: store, server: server, data: config.data.copy(), sessions: Map<u32, Session>(), runs: LinkedMap<String, Run>(), procs: LinkedMap<String, Proc>(), approvals: LinkedMap<String, Approval>(), lines: lines, lines_to: to, hash_to: hash_to, hash_done: hash_done, next_job: 0, auths: Map<i64, Auth>(), dummy_hash: dummy, failures: LinkedMap<String, List<i64>>(), thumbs: files.start(), events: config.events, next_prune: 0, grants: Map<String, Grant>(), calls: Map<String, Request>(), context: Map<String, (i64, i64)>(), registry_at: config.registry.copy(), registry: Json.Null, registry_time: 0, install_to: install_to, install_done: install_done, fetching: List<Waiter>(), installs: Map<i64, Install>(), leftovers: List<String>(), next_sweep: 0, device_calls: Map<String, DeviceCall>(), minute_ms: config.minute_ms, next_due: 0, routine_runs: Map<String, RoutineRun>(), routine_marks: Map<String, (String, String)>(), run_chains: Map<String, List<String>>(), panel_calls: Map<String, Waiter>(), script_calls: Map<String, Request>(), running_flows: LinkedMap<String, flows.Flow>(), flow_steps: Map<String, (String, usize)>(), advancing: List<String>(), flow_results: List<(String, usize, bool, String)>(), flows_due: List<String>(), slow_calls: Map<String, String>(), acting: 0, call_actions: Map<String, i64>(), tool_actions: Map<String, i64>(), sealer: try secret_key(config.data.copy()) }
         if config.sandboxes.len() > 0 and not i.lan { try i.sandboxes_on(config.sandboxes.copy(), config.sandbox_image.copy()) }
         // An action the last run of the instance left started, it never finished.
         try i.store.settle_cut_short()
@@ -4310,6 +4316,37 @@ impl Instance {
         i.procs.insert(id, p)
     }
 
+    // Whether an ACP session's context is CONTEXT_RENEW_PERCENT full or more,
+    // as its last usage_update said.
+    fn nearly_full(i: Instance, session: String) -> bool {
+        let (used, size): (i64, i64) = i.context.get(session) ?? (i64(0), i64(0))
+        return size > 0 and used * 100 >= size * CONTEXT_RENEW_PERCENT
+    }
+
+    // A run that goes into a fresh session in place of a full one: it's given
+    // the newest of the chat before its message, and told where the rest is.
+    fn carry_over(i: mut Instance, user: String, agent: String, run_id: String) ! Error {
+        var conversation = String()
+        var answering = String()
+        if let r = i.runs.find(run_id.copy()) {
+            conversation = r.conversation.copy()
+            answering = r.answering.copy()
+        } else {
+            return
+        }
+        let (before, _) = try i.store.messages(user.copy(), conversation.copy(), some(answering), 1)
+        var said = String()
+        if before.len() > 0 {
+            let last = str_at(before[before.len() - 1].copy(), "id") ?? String()
+            said = try i.transcript(user.copy(), conversation, some(last))
+        }
+        let carried = "[loom: Your chat with your person goes on from an earlier session, which grew too long, so this one starts fresh. To them it's one conversation: carry on as if nothing changed, and don't mention it. The newest of it, newest last:\n\n{if said.len() > 0 { said } else { String("(Nothing said yet.)") }}\n\nFor anything older, search_messages finds it.]"
+        if let r = mut i.runs.find(run_id) {
+            r.note = if r.note.len() > 0 { "{carried}\n\n{r.note}" } else { carried }
+        }
+        i.log(user, agent.copy(), "session", String("Carried the chat on in a fresh session: the last one's context was nearly full"), agent)
+    }
+
     // Gives a run to its agent: a new ACP session first if the conversation
     // has none yet in this agent program, then the prompt.
     fn proceed(i: mut Instance, p: mut Proc, run_id: String) {
@@ -4328,6 +4365,16 @@ impl Instance {
         var known = String()
         if let session = p.sessions.find(conversation.copy()) {
             known = session.copy()
+        }
+        // One endless chat (PLAN.md): a session whose context is nearly full
+        // gives way to a fresh one, which carries on from the newest of the
+        // chat, so the conversation never overflows or resends all of itself.
+        if known.len() > 0 and i.nearly_full(known.copy()) {
+            _ = i.context.remove(known.copy())
+            _ = p.sessions.remove(conversation.copy())
+            if let err(e) = i.carry_over(user.copy(), agent.copy(), run_id.copy()) { eprintln("loom: carrying a chat over to a fresh session: {e}") }
+            i.new_session(mut p, run_id)
+            return
         }
         if known.len() > 0 {
             if let run = mut i.runs.find(run_id.copy()) {
@@ -4746,6 +4793,12 @@ impl Instance {
                     r.blocks.push(b)
                 }
             }
+        } else if kind == "usage_update" {
+            // How full the session's context is, to start a fresh one before
+            // it overflows (PLAN.md, "One endless chat").
+            let used = int_at(u.copy(), "used") ?? 0
+            let size = int_at(u, "size") ?? 0
+            if size > 0 { i.context.insert(r.session.copy(), (used, size)) }
         } else if kind == "tool_call" {
             let call = try i.store.new_id("tc")
             r.tools.insert(str_at(u.copy(), "toolCallId") ?? String(), call.copy())
