@@ -104,6 +104,7 @@ pub struct Conn {
     lists: List<String>   // the ids of messages.list commands, whose results the cache keeps
     making: List<String>  // the ids of conversation.create commands the core sent for a send
     linking: List<String> // the ids of link.create commands, whose results get the QR code's text
+    inviting: List<String> // the ids of invite.create commands, whose results get the invite's link
     synced: bool          // catch-up is over on this connection
     active: bool          // someone is looking at the app
     have: Map<String, usize>    // bytes of each streaming block so far, by "message/block"
@@ -160,6 +161,7 @@ impl Conn {
             lists: List<String>(),
             making: List<String>(),
             linking: List<String>(),
+            inviting: List<String>(),
             synced: false,
             active: true,
             have: Map<String, usize>(),
@@ -576,6 +578,11 @@ impl Conn {
                 self.linked(f)
                 return
             }
+            if let i = self.inviting.position(|x| x == id) {
+                _ = self.inviting.remove(i)
+                self.invited(f)
+                return
+            }
             if let i = self.lists.position(|x| x == id) {
                 _ = self.lists.remove(i)
                 match self.cache.put_messages(at(at(f.copy(), "value"), "messages")) {
@@ -698,6 +705,15 @@ impl Conn {
         if t == "link" {
             self.join(m)
             return true
+        }
+        if t == "invite.join" {
+            self.join_invite(m)
+            return true
+        }
+        if t == "cmd" and (str_at(m.copy(), "name") ?? String()) == "invite.create" {
+            if let id = str_at(m.copy(), "id") {
+                self.inviting.push(id)
+            }
         }
         if t == "cmd" and (str_at(m.copy(), "name") ?? String()) == "messages.list" {
             if let id = str_at(m.copy(), "id") {
@@ -832,6 +848,46 @@ impl Conn {
         }
         let l = link.Link { server: self.server.copy() ?? String(), code: str_at(v.copy(), "code") ?? String(), instance: str_at(v.copy(), "instance") ?? String(), key: str_at(v.copy(), "key") ?? String() }
         self.tell(merge(f, Obj.new().j("value", merge(v, Obj.new().s("qr", link.qr(l)).done())).done()))
+    }
+
+    /// The instance made an invite: the app gets the result with `link`, the address to
+    /// pass on, `<the instance's address>/join/<code>`, for an instance on a server.
+    fn invited(mut self, f: Json) {
+        let v = at(f.copy(), "value")
+        let server = self.server.copy() ?? String()
+        let code = str_at(v.copy(), "code") else {
+            self.to_app.send("{f}")
+            return
+        }
+        if not (server.starts_with("https://") or server.starts_with("http://")) {
+            self.to_app.send("{f}")
+            return
+        }
+        self.tell(merge(f, Obj.new().j("value", merge(v, Obj.new().s("link", "{server}/join/{code}").done())).done()))
+    }
+
+    /// Someone with an invite link (`link`) makes their account, with the username and
+    /// password they picked, as a login does.
+    fn join_invite(mut self, m: Json) {
+        let id = str_at(m.copy(), "id")
+        let given = (str_at(m.copy(), "link") ?? String()).trim().copy()
+        let at_join = given.find("/join/") else {
+            self.tell(Obj.new().s("t", String("core.login")).maybe("id", id).j("error", Obj.new().s("code", String("bad_link")).s("message", String("That isn't an invite link. It looks like https://loom.example.com/join/…")).done()).done())
+            return
+        }
+        let server = address(given[..at_join].copy())
+        let code = given[at_join + 6..].trim_suffix("/").copy()
+        if not valid_server(server.copy()) or code.len() == 0 {
+            self.tell(Obj.new().s("t", String("core.login")).maybe("id", id).j("error", Obj.new().s("code", String("bad_link")).s("message", String("That isn't an invite link. It looks like https://loom.example.com/join/…")).done()).done())
+            return
+        }
+        if self.pending != none {
+            self.tell(Obj.new().s("t", String("core.login")).maybe("id", id).j("error", Obj.new().s("code", String("busy")).s("message", String("A login is already on its way.")).done()).done())
+            return
+        }
+        let body = merge(request_body(Kind.Login, m), Obj.new().s("code", code).done())
+        let base = self.reach(server.copy())
+        self.pending = some(Pending.start(Kind.Join, server, base, id, self.with_tz(body)))
     }
 
     /// The app scanned a QR code (its text in `qr`) on a device that isn't signed in: the
