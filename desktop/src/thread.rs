@@ -179,3 +179,54 @@ pub fn thread(
     .h(px(h))
     .flex_none()
 }
+
+/// Several threads woven across the full width, `h` high: each its own wave, so they
+/// cross over and under one another. `gather` (0 to 1) pulls them in to one line in the
+/// middle, the first thread on top; at 1 only the first is left.
+pub fn weave(colors: Vec<Hsla>, gather: f32, h: f32) -> impl IntoElement {
+    let g = gather.clamp(0.0, 1.0);
+    canvas(
+        |_, _, _| {},
+        move |bounds, _, window, _| {
+            let t = now();
+            let x0 = bounds.origin.x.as_f32();
+            let width = bounds.size.width.as_f32();
+            let mid = bounds.origin.y.as_f32() + bounds.size.height.as_f32() / 2.0;
+            let half = bounds.size.height.as_f32() / 2.0 - thread_stroke::LARGE;
+            let n = colors.len().max(1) as f32;
+            let steps = (width / 3.0).max(16.0) as usize;
+            // Drawn back to front, so the first colour is the one on top.
+            for (i, tint) in colors.iter().enumerate().rev() {
+                let k = i as f32;
+                let lane = (k - (n - 1.0) / 2.0) / n * 0.9 * (1.0 - g);
+                let amp = (0.55 + 0.25 * (k * 1.7).sin()) * (1.0 - g * 0.85);
+                let wave = 0.9 + 0.35 * (k * 0.9).cos();
+                let speed = 0.10 + 0.04 * (k * 2.3).sin().abs();
+                let phase = k * 1.37;
+                let fade = if i == 0 { 1.0 } else { 1.0 - g };
+                if fade <= 0.01 {
+                    continue;
+                }
+                let mut pb = PathBuilder::stroke(px(thread_stroke::LARGE));
+                for s in 0..=steps {
+                    let u = s as f32 / steps as f32;
+                    // Calmer at the edges, so the threads come in from nowhere.
+                    let edge = (std::f32::consts::PI * u).sin().max(0.0).powf(0.6);
+                    let y = lane + amp * edge * (TAU * (u * wave - t * speed) + phase).sin();
+                    let p = point(px(x0 + u * width), px(mid - y.clamp(-1.0, 1.0) * half));
+                    if s == 0 {
+                        pb.move_to(p)
+                    } else {
+                        pb.line_to(p)
+                    }
+                }
+                if let Ok(path) = pb.build() {
+                    window.paint_path(path, tint.opacity(fade));
+                }
+            }
+        },
+    )
+    .w_full()
+    .h(px(h))
+    .flex_none()
+}

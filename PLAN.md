@@ -89,7 +89,7 @@ bool      loom_push_open(const uint8_t *keyring, size_t klen, const uint8_t *sea
 
 ### An instance in the desktop app
 
-People who don't want a server run their instance in the desktop app. On first start the app asks: connect to an instance, or run one here.
+People who don't want a server run their instance in the desktop app. On first start the app offers to begin, which runs one here, or to sign in to an instance on a server. Then it makes the first agent with the person: a brain (the agent program it runs on), a name (or one from the die) and a colour.
 
 - **The same server code, in the same library.** The server is compiled into the app's static library beside the core, since a process can hold only one Calx runtime. With `{"mode":"local"}` in its config, `loom_core_start` also starts the server on its own thread, listening on 127.0.0.1 on a free port with a token made for that launch. The core then connects to it as it would to any instance. One protocol and one code path, so whatever works on a server works here.
 - **Data** goes in the app's data folder (`%APPDATA%\Loom`, `~/Library/Application Support/Loom`), and the agents' folders go there or wherever you choose.

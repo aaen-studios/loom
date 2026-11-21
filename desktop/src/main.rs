@@ -133,7 +133,39 @@ fn main() {
 }
 
 // The icons loom uses beyond GPUI Kit's own, from the same Lucide set.
-gpui_kit::assets::icon_assets!(ExtraIcons, [Paperclip, FileText]);
+gpui_kit::assets::icon_assets!(
+    ExtraIcons,
+    [
+        Paperclip,
+        FileText,
+        Settings,
+        ArrowLeft,
+        ArrowRight,
+        Dices,
+        Sparkles,
+        Pencil,
+        Activity,
+        Brain,
+        RotateCcw,
+        Trash,
+        Hand,
+        ShieldCheck,
+        Zap,
+        Check,
+        CircleUserRound,
+        Clock,
+        WandSparkles,
+        Bot,
+        Plug,
+        Puzzle,
+        Smartphone,
+        Users,
+        Monitor,
+        Truck,
+        Power,
+        LogOut
+    ]
+);
 
 /// GPUI Kit's assets, and loom's extra icons.
 struct AppAssets;
