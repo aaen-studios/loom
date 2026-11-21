@@ -21,8 +21,9 @@ Set `CALX` to use a different `calx` binary.
 - `src/model.rs`: what the screens show, as the core tells it. Lists come from the core's cache with `core.get` and are fetched again when an event says they changed. Only a reply still being written lives here alone, from its deltas.
 - `src/app.rs`: the window. It has the sidebar of agents, the header with the agent's menu and its permission mode, and the chat. The chat shows replies, thoughts, tool calls, questions and the composer. There are also the sign-in and new-agent pages. The look follows `design/explorations/round-4.html`, with every value from `design/tokens.toml` (`design/generated/tokens.rs`).
 - `src/thread.rs`: an agent's thread, drawn as one path that moves with what the agent is doing.
+- `src/shell.rs`: the tray (Open, Start at login, Quit), Windows notifications for what the core says is worth one, starting at login with `--background`, and hiding the window to the tray when it's closed. A tick that comes long after the last means the computer slept, so the app tells the core (`app.wake`).
 
-Not here yet: the tray, notifications, starting at login and the updater (LOO-26), the instance in the app (LOO-27), and files, images and search (LOO-28).
+Not here yet: the updater (LOO-29), the instance in the app (LOO-27), and files, images and search (LOO-28).
 
 ## Trying it
 

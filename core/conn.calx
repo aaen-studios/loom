@@ -16,7 +16,7 @@ import std.json.{Json, parse}
 import std.random.{Random}
 import std.thread.{Task}
 import std.time.{Instant}
-import shared.obj.{Obj, at, int_at, merge, str_at}
+import shared.obj.{Obj, at, bool_at, int_at, merge, str_at}
 import shared.protocol.{CLOSE_TOKEN, CLOSE_VERSION, NEWEST}
 import core.cache.{Cache, now}
 import core.login.{Kind, Outcome, Pending, address, request_body}
@@ -87,6 +87,8 @@ pub struct Conn {
     cache: Cache          // what came from the instance, the cursor and the outbox
     lists: List<String>   // the ids of messages.list commands, whose results the cache keeps
     making: List<String>  // the ids of conversation.create commands the core sent for a send
+    synced: bool          // catch-up is over on this connection
+    active: bool          // someone is looking at the app
     have: Map<String, usize>    // bytes of each streaming block so far, by "message/block"
     ws: WebSocket?
     state: State
@@ -121,6 +123,8 @@ impl Conn {
             cache: cache,
             lists: List<String>(),
             making: List<String>(),
+            synced: false,
+            active: true,
             have: Map<String, usize>(),
             ws: none,
             state: State.SignedOut,
@@ -188,6 +192,7 @@ impl Conn {
     /// Opens the socket and says hello. What's sent while it opens goes once it's open.
     fn connect(mut self) {
         self.retry_at = none
+        self.synced = false
         // Commands sent on an old socket get no result: the outbox asks again on welcome.
         self.making = List<String>()
         let url = ws_url(self.server.copy() ?? String()) ?? String()
@@ -205,7 +210,7 @@ impl Conn {
             },
         }
         let ws = open(url)
-        let hello = Obj.new().s("t", String("hello")).s("token", token).j("versions", Json.Array([Json.Int(i64(NEWEST))])).i("after", after).j("device", Obj.new().b("active", true).done()).done()
+        let hello = Obj.new().s("t", String("hello")).s("token", token).j("versions", Json.Array([Json.Int(i64(NEWEST))])).i("after", after).j("device", Obj.new().b("active", self.active).done()).done()
         match ws.send_text("{hello}") {
             ok => {},
             err(_) => {},    // receive says how it ended
@@ -343,6 +348,43 @@ impl Conn {
         self.to_app.send(text)
     }
 
+    /// Tells the app what's worth a system notification, while no one is looking at it:
+    /// a reply that's done or failed, and a question an agent is waiting on. Only live
+    /// events count, not catch-up, so waking up doesn't bring a flood of old news.
+    fn notify(mut self, e: Json) {
+        let kind = str_at(e.copy(), "kind") ?? String()
+        if kind != "run.finished" and kind != "approval.needed" { return }
+        let run = match self.cache.run(str_at(e.copy(), "run") ?? String()) {
+            ok(some(r)) => r,
+            _ => return,
+        }
+        let agent_id = str_at(run.copy(), "agent") ?? String()
+        let conversation = str_at(run, "conversation") ?? String()
+        let name = match self.cache.agent(agent_id.copy()) {
+            ok(some(a)) => str_at(a, "name") ?? String("An agent"),
+            _ => String("An agent"),
+        }
+        var title = name.copy()
+        var body = String()
+        if kind == "approval.needed" {
+            title = "{name} is asking"
+            body = str_at(e.copy(), "title") ?? String("Can it go ahead?")
+        } else {
+            let status = str_at(e.copy(), "status") ?? String()
+            if status == "cancelled" { return }
+            if status == "failed" {
+                body = "Couldn't finish: {str_at(e.copy(), "error") ?? String("it stopped")}"
+            } else {
+                body = match self.cache.messages(conversation.copy(), none, 1) {
+                    ok((ms, _)) => if ms.len() > 0 { summary(ms[0].copy()) } else { String() },
+                    err(_) => String(),
+                }
+                if body.len() == 0 { body = String("Done.") }
+            }
+        }
+        self.tell(Obj.new().s("t", String("core.notify")).s("title", title).s("body", body).s("agent", agent_id).s("conversation", conversation).s("kind", kind).done())
+    }
+
     /// A frame from the instance. What changes the cache is applied before the app hears
     /// of it, so a crash between the two loses nothing.
     fn frame(mut self, text: own String) {
@@ -356,7 +398,13 @@ impl Conn {
             self.failed = 0
             self.tell_state(0, String())
             self.flush()
+        } else if t == "synced" {
+            self.synced = true
         } else if t == "event" {
+            // Before the cache applies it, while the run it ends is still there to read.
+            if self.synced and not self.active {
+                self.notify(f.copy())
+            }
             match self.cache.apply(f.copy()) {
                 ok(applied) => if not applied { return },
                 err(e) => {
@@ -466,6 +514,15 @@ impl Conn {
             }
             self.forget()
             self.tell_state(0, String("logged out"))
+            return true
+        }
+        if t == "app.active" {
+            // Someone started or stopped looking at the app: it notifies only when no one is,
+            // and the instance hears it too (the `device` frame).
+            self.active = bool_at(m.copy(), "active") ?? true
+            if self.state == State.Live {
+                _ = self.put("{Obj.new().s("t", String("device")).b("active", self.active).done()}")
+            }
             return true
         }
         if t == "app.wake" or t == "app.network" {
@@ -690,4 +747,25 @@ fn makes_the_websocket_address() {
     assert(ws_url(String("http://127.0.0.1:8080")) == some(String("ws://127.0.0.1:8080/ws")))
     assert(ws_url(String("https://loom.example.com/")) == some(String("wss://loom.example.com/ws")))
     assert(ws_url(String("ftp://x")) == none)
+}
+
+/// A message's text, cut short for a notification.
+fn summary(message: Json) -> String {
+    var out = String()
+    if let Json.Array(blocks) = at(message, "blocks") {
+        for b in blocks {
+            if (str_at(b.copy(), "kind") ?? String()) == "text" {
+                out.push_str(str_at(b, "text") ?? String())
+            }
+        }
+    }
+    var cut = String()
+    for r in out.trim().runes() {
+        if cut.len() >= 160 {
+            cut.push_str("…")
+            break
+        }
+        cut.push(if r == '\n' { ' ' } else { r })
+    }
+    return cut
 }

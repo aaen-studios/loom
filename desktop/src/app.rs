@@ -3,7 +3,7 @@
 
 use std::collections::HashSet;
 use std::rc::Rc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use gpui_kit::component::input::{Input, InputEvent, InputState, Textarea, TextareaState};
 use gpui_kit::component::message_scroller::{MessageScroller, MessageScrollerState};
@@ -15,6 +15,7 @@ use serde_json::Value;
 
 use crate::core::Core;
 use crate::model::{self, Approval, Conn, Message, Model, Mood};
+use crate::shell;
 use crate::thread::{self, thread};
 use crate::tokens::*;
 
@@ -103,6 +104,8 @@ pub struct Loom {
     instructions_in: Entity<TextareaState>,
     program: Option<String>,
     open_thoughts: HashSet<String>,
+    tray: Option<shell::Tray>,
+    hwnd: isize,
 }
 
 fn data_dir() -> String {
@@ -177,35 +180,74 @@ impl Loom {
         }
 
         // The core's events come on its thread; this task brings them to the window.
-        cx.spawn(async move |this, cx| loop {
-            cx.background_executor()
-                .timer(Duration::from_millis(8))
-                .await;
-            let mut got = Vec::new();
-            while let Ok(e) = events.try_recv() {
-                got.push(e);
-            }
-            if got.is_empty() {
-                continue;
-            }
-            let alive = this.update(cx, |loom, cx| {
-                let mut changed = false;
-                for e in got {
-                    if let Ok(v) = serde_json::from_str::<Value>(&e) {
-                        changed |= loom.model.take(&v);
+        // It also looks at the tray, and notices the system waking: a tick that comes
+        // long after the last means the computer slept.
+        cx.spawn(async move |this, cx| {
+            let mut last = Instant::now();
+            loop {
+                cx.background_executor()
+                    .timer(Duration::from_millis(8))
+                    .await;
+                let woke = last.elapsed() > Duration::from_secs(10);
+                last = Instant::now();
+                let mut got = Vec::new();
+                while let Ok(e) = events.try_recv() {
+                    got.push(e);
+                }
+                let alive = this.update(cx, |loom, cx| {
+                    if woke {
+                        loom.send(serde_json::json!({"t": "app.wake"}));
                     }
+                    loom.tray_actions(cx);
+                    if got.is_empty() {
+                        return;
+                    }
+                    let mut changed = false;
+                    for e in got {
+                        if let Ok(v) = serde_json::from_str::<Value>(&e) {
+                            if v.get("t").and_then(Value::as_str) == Some("core.notify") {
+                                let s = |k: &str| {
+                                    v.get(k)
+                                        .and_then(Value::as_str)
+                                        .unwrap_or_default()
+                                        .to_string()
+                                };
+                                shell::notify(&s("title"), &s("body"));
+                            }
+                            changed |= loom.model.take(&v);
+                        }
+                    }
+                    loom.fetch();
+                    if changed {
+                        loom.refresh_rows(cx);
+                        cx.notify();
+                    }
+                });
+                if alive.is_err() {
+                    return;
                 }
-                loom.fetch();
-                if changed {
-                    loom.refresh_rows(cx);
-                    cx.notify();
-                }
-            });
-            if alive.is_err() {
-                return;
             }
         })
         .detach();
+
+        // Closing the window keeps loom in the tray, so routines and replies go on.
+        let hwnd = shell::hwnd(window);
+        window.on_window_should_close(cx, move |_, _| {
+            shell::show_window(hwnd, false);
+            false
+        });
+        // The core notifies only while no one is looking at the app.
+        cx.observe_window_activation(window, |this: &mut Loom, window, _| {
+            this.send(serde_json::json!({"t": "app.active", "active": window.is_window_active()}));
+        })
+        .detach();
+        let data = data_dir();
+        shell::first_start(&data);
+        let tray = shell::Tray::new(shell::starts_at_login());
+        if std::env::args().any(|a| a == "--background") {
+            // Started at login: straight to the tray.
+            cx.defer(move |_| shell::show_window(hwnd, false));
+        }
 
         let scroller = cx.new(|cx| MessageScrollerState::new(0, cx));
         let mut loom = Loom {
@@ -225,6 +267,8 @@ impl Loom {
             instructions_in,
             program: None,
             open_thoughts: HashSet::new(),
+            tray,
+            hwnd,
         };
         loom.fetch();
         loom
@@ -1042,6 +1086,20 @@ impl Loom {
         self.refresh_rows(cx);
         self.scroller.update(cx, |s, cx| s.remeasure(cx));
         cx.notify();
+    }
+
+    fn tray_actions(&mut self, cx: &mut Context<Self>) {
+        let Some(tray) = &self.tray else { return };
+        for a in tray.actions() {
+            match a {
+                shell::TrayAction::Open => shell::show_window(self.hwnd, true),
+                shell::TrayAction::StartAtLogin(on) => shell::set_start_at_login(on),
+                shell::TrayAction::Quit => {
+                    self.send(serde_json::json!({"t": "app.active", "active": false}));
+                    cx.quit();
+                }
+            }
+        }
     }
 
     pub fn answer(&mut self, call: String, allow: bool, always: bool) {

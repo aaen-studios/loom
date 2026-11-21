@@ -10,12 +10,23 @@ name = "loom"
 path = "src/main.rs"
 
 [dependencies]
+auto-launch = "0.6.0"
 chrono = { version = "0.4.45", default-features = false, features = ["clock"] }
 # GPUI Kit pins the GPUI it's built on and re-exports it, with gpui-base and
 # gpui-component, so this one pin keeps them all in step. Pinned exactly:
 # GPUI is pre-1.0, so take each new version on purpose, at the latest.
 gpui-kit = "=0.10.0"
+notify-rust = "4.19.0"
+png = "0.18.1"
+raw-window-handle = "0.6"
 serde_json = { version = "1.0.154", default-features = false, features = ["std"] }
+tray-icon = "0.26.1"
 
 [profile.release]
 lto = "thin"
+
+[target."cfg(windows)".dependencies]
+windows-sys = { version = "0.61.2", features = ["Win32_UI_WindowsAndMessaging", "Win32_Foundation"] }
+
+[build-dependencies]
+winresource = "0.1.34"

@@ -1,3 +1,6 @@
+// A window, not a console program: no console opens beside it.
+#![windows_subsystem = "windows"]
+
 //! loom for Windows and macOS: a GPUI window over the Calx core, which it links.
 //! The app draws screens and reaches the system; everything else is the core's
 //! (PLAN.md, "Architecture").
@@ -5,6 +8,7 @@
 mod app;
 mod core;
 mod model;
+mod shell;
 mod thread;
 #[path = "../../design/generated/tokens.rs"]
 #[allow(dead_code)]
