@@ -213,6 +213,8 @@ A panel is code that an agent wrote, or that came from someone else, running ins
 
 An embedded web view is a native window of its own, laid over the GPUI window, so GPUI can't draw menus or popovers on top of a panel. Panels are laid out so nothing needs to overlap them. Phase 7 starts with a panel that tries to break out on each platform, and checks that it can't reach the app or the network.
 
+On Windows that test is `loom --panel-test` (`desktop/src/panel_test.rs`), in CI. Its first runs showed two things. The policy and WebView2's request filter each stop every HTTP request on their own. WebRTC goes around both, and around the proxy too, and WebView2 has no switch for it, so a script that runs first in every frame, blank frames included, takes it away. The Mac and the iPhone get the same test with their WKWebViews.
+
 Later: Calx library plugins in the server (Calx's own `@export` plugins), once loom can build them with the Calx it was built with.
 
 ## Server

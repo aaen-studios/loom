@@ -1,0 +1,222 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Break-out</title>
+<!--
+  A panel that tries to get out of its sandbox (PLAN.md, "The panel sandbox"),
+  for `loom --panel-test`. It tries each way to reach the network, this machine,
+  or the app, and reports each through the door as {op: "report", args: {name,
+  blocked, detail}}. The app also listens where the panel aims (`c`, a TCP port,
+  and `u`, a UDP one) and counts what arrives: that's the real answer, since a
+  request can look refused here and still have gone out.
+-->
+<style>
+  body { font: 14px system-ui; margin: 16px; }
+  .bg { background: url("CANARY/css-background"); }
+</style>
+<p>Trying to break out…</p>
+<div class="bg"></div>
+<script>
+const q = new URLSearchParams(location.search);
+const canary = "http://127.0.0.1:" + q.get("c");
+const udp = q.get("u");
+const css = document.querySelector("style");
+css.textContent = css.textContent.replace("CANARY", canary);
+
+const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+const report = (name, blocked, detail) => loom.send("report", { name, blocked, detail: String(detail || "") });
+
+// Whether a promise fails (or takes longer than `ms`, which counts as not getting through).
+async function fails(p, ms = 3000) {
+  try {
+    const r = await Promise.race([p, wait(ms).then(() => "timeout")]);
+    return r === "timeout" ? [true, "no answer"] : [false, "it answered"];
+  } catch (e) {
+    return [true, e && e.message];
+  }
+}
+
+// An element that loads `url`: blocked when it errors or never loads.
+function loads(tag, attr, url, extra) {
+  return new Promise((resolve) => {
+    const el = document.createElement(tag);
+    if (extra) extra(el);
+    let done = false;
+    el.onload = () => { if (!done) { done = true; resolve([false, "loaded"]); } };
+    el.onerror = () => { if (!done) { done = true; resolve([true, "error"]); } };
+    setTimeout(() => { if (!done) { done = true; resolve([true, "never loaded"]); } }, 3000);
+    el[attr] = url;
+    document.body.appendChild(el);
+  });
+}
+
+async function attempt(name, f) {
+  try {
+    const [blocked, detail] = await f();
+    await report(name, blocked, detail);
+  } catch (e) {
+    await report(name, true, "threw: " + (e && e.message));
+  }
+}
+
+(async () => {
+  await attempt("fetch this machine", () => fails(fetch(canary + "/fetch")));
+  await attempt("fetch the internet", () => fails(fetch("https://example.com/")));
+  await attempt("fetch no-cors", () => fails(fetch(canary + "/no-cors", { mode: "no-cors" })));
+  await attempt("fetch a file", () => fails(fetch("file:///C:/Windows/win.ini")));
+  await attempt("XMLHttpRequest", () => new Promise((resolve) => {
+    const x = new XMLHttpRequest();
+    x.onload = () => resolve([false, "status " + x.status]);
+    x.onerror = () => resolve([true, "error"]);
+    try { x.open("GET", canary + "/xhr"); x.send(); } catch (e) { resolve([true, e.message]); }
+  }));
+  await attempt("WebSocket", () => new Promise((resolve) => {
+    try {
+      const ws = new WebSocket("ws://127.0.0.1:" + q.get("c") + "/ws");
+      ws.onopen = () => resolve([false, "open"]);
+      ws.onerror = () => resolve([true, "error"]);
+      setTimeout(() => resolve([true, "never opened"]), 3000);
+    } catch (e) { resolve([true, e.message]); }
+  }));
+  await attempt("EventSource", () => new Promise((resolve) => {
+    try {
+      const es = new EventSource(canary + "/events");
+      es.onopen = () => resolve([false, "open"]);
+      es.onerror = () => { es.close(); resolve([true, "error"]); };
+    } catch (e) { resolve([true, e.message]); }
+  }));
+  await attempt("sendBeacon", async () => {
+    const queued = navigator.sendBeacon(canary + "/beacon", "x");
+    await wait(500);
+    return [true, queued ? "queued, so the listener decides" : "refused"];
+  });
+  await attempt("an image", () => loads("img", "src", canary + "/img.png"));
+  await attempt("a script", () => loads("script", "src", canary + "/script.js"));
+  await attempt("a stylesheet", () => loads("link", "href", canary + "/style.css", (l) => { l.rel = "stylesheet"; }));
+  await attempt("a prefetch", async () => {
+    const l = document.createElement("link");
+    l.rel = "prefetch";
+    l.href = canary + "/prefetch";
+    document.head.appendChild(l);
+    await wait(500);
+    return [true, "the listener decides"];
+  });
+  await attempt("a frame", async () => {
+    const f = document.createElement("iframe");
+    f.src = canary + "/frame";
+    document.body.appendChild(f);
+    await wait(1000);
+    let inside = null;
+    try { inside = f.contentWindow.location.href; } catch (e) { inside = "cross-origin"; }
+    return [inside !== canary + "/frame", "frame at " + inside];
+  });
+  await attempt("a frame from srcdoc", async () => {
+    const f = document.createElement("iframe");
+    f.srcdoc = "<img src='" + canary + "/srcdoc.png'>";
+    document.body.appendChild(f);
+    await wait(1000);
+    return [true, "the listener decides"];
+  });
+  await attempt("a worker", async () => {
+    try { new Worker("data:text/javascript,fetch('" + canary + "/worker')"); } catch (e) { return [true, e.message]; }
+    await wait(500);
+    return [true, "made, so the listener decides"];
+  });
+  await attempt("window.open", async () => {
+    const w = window.open(canary + "/window");
+    return [w === null, w === null ? "no window" : "a window"];
+  });
+  await attempt("a link to a new window", async () => {
+    const a = document.createElement("a");
+    a.href = canary + "/link";
+    a.target = "_blank";
+    document.body.appendChild(a);
+    a.click();
+    await wait(500);
+    return [true, "the app decides"];
+  });
+  await attempt("a form", async () => {
+    const f = document.createElement("form");
+    f.method = "post";
+    f.action = canary + "/form";
+    f.target = "_blank";
+    document.body.appendChild(f);
+    try { f.submit(); } catch (e) { return [true, e.message]; }
+    await wait(500);
+    return [true, "the listener decides"];
+  });
+  await attempt("WebRTC", async () => {
+    const pc = new RTCPeerConnection({ iceServers: [{ urls: "stun:127.0.0.1:" + udp }, { urls: "turn:127.0.0.1:" + q.get("c") + "?transport=tcp", username: "u", credential: "p" }] });
+    pc.createDataChannel("x");
+    await pc.setLocalDescription(await pc.createOffer());
+    await wait(1500);
+    return [true, "made, so the listeners decide"];
+  });
+  // A frame with no address is about:blank, of the panel's own origin, with a
+  // window of its own: if the prelude didn't reach it, WebRTC and storage are
+  // there whole.
+  await attempt("WebRTC from a blank frame", async () => {
+    const f = document.createElement("iframe");
+    document.body.appendChild(f);
+    const w = f.contentWindow;
+    if (!w) return [true, "no window"];
+    const R = w.RTCPeerConnection;
+    const pc = new R({ iceServers: [{ urls: "stun:127.0.0.1:" + udp }] });
+    pc.createDataChannel("x");
+    await pc.setLocalDescription(await pc.createOffer());
+    await wait(1500);
+    return [true, "made, so the listeners decide"];
+  });
+  await attempt("storage from a blank frame", async () => {
+    const f = document.createElement("iframe");
+    document.body.appendChild(f);
+    const w = f.contentWindow;
+    if (!w) return [true, "no window"];
+    w.localStorage.setItem("k", "v");
+    return [false, "stored"];
+  });
+  await attempt("WebRTC from window[0]", async () => {
+    const R = window[0] && window[0].RTCPeerConnection;
+    const pc = new R({ iceServers: [{ urls: "stun:127.0.0.1:" + udp }] });
+    pc.createDataChannel("x");
+    await pc.setLocalDescription(await pc.createOffer());
+    await wait(1500);
+    return [true, "made, so the listeners decide"];
+  });
+  await attempt("localStorage", async () => {
+    localStorage.setItem("k", "v");
+    return [false, "stored"];
+  });
+  await attempt("indexedDB", async () => {
+    indexedDB.open("x");
+    return [false, "opened"];
+  });
+  await attempt("a service worker", async () => {
+    await navigator.serviceWorker.register("sw.js");
+    return [false, "registered"];
+  });
+  await attempt("the core, through the door", () => fails(loom.send("core.cmd", { name: "agent.create" })));
+  await attempt("a message past the door", async () => {
+    window.chrome.webview.postMessage("not a message");
+    await wait(200);
+    return [true, "the app decides"];
+  });
+  await attempt("host objects", async () => {
+    const h = window.chrome.webview.hostObjects;
+    if (!h) return [true, "none"];
+    const [blocked, detail] = await fails(h.loom, 1000);
+    return [blocked, detail];
+  });
+  // Last, as it would take the page away: going somewhere else.
+  await attempt("navigating away", async () => {
+    location.href = canary + "/navigate";
+    await wait(1500);
+    return [true, "still here"];
+  });
+  await attempt("navigating to data:", async () => {
+    location.href = "data:text/html,<h1>out</h1>";
+    await wait(1000);
+    return [true, "still here"];
+  });
+  await loom.send("done", {});
+})();
+</script>

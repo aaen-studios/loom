@@ -8,6 +8,8 @@
 mod app;
 mod core;
 mod model;
+mod panel;
+mod panel_test;
 mod shell;
 mod thread;
 #[path = "../../design/generated/tokens.rs"]
@@ -85,6 +87,14 @@ fn main() {
     // Started by an agent of the instance in this app, for loom's own tools.
     if std::env::args().nth(1).as_deref() == Some("mcp") {
         std::process::exit(core::mcp());
+    }
+    // The panel break-out test, which CI runs.
+    if std::env::args().nth(1).as_deref() == Some("--panel-test") {
+        let out = std::env::args()
+            .nth(2)
+            .unwrap_or_else(|| String::from("panel-test.json"));
+        panel_test::run(out.into());
+        return;
     }
     shell::after_update();
     gpui_kit::application().with_assets(AppAssets).run(|cx| {
