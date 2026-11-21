@@ -22,7 +22,7 @@ import std.http.{Header, get}
 import std.io
 import std.json.{Json}
 import std.process.{current_exe, exit}
-import shared.obj.{at, str_at}
+import shared.obj.{Obj, at, str_at}
 import shared.protocol
 import shared.release.{MANIFEST, RELEASE_KEY, check_manifest, newer}
 import server.instance.{Config, EventLife, Instance}
@@ -45,6 +45,9 @@ usage: loom <command>
   acp add NAME COMMAND ...  add an ACP agent program, such as: acp add claude npx -y @agentclientprotocol/claude-agent-acp
   acp list                  list the ACP agent programs
   files limit MB|off        cap the files each person can keep, in megabytes
+  push key FILE KEY_ID TEAM_ID BUNDLE_ID
+                            send push to the iPhone app through APNs, signed with Apple's AuthKey_<id>.p8
+  push off                  send no push
   status                    say what the instance holds
   update                    update this program to the newest signed release (--check: only say if there's one)
   version                   print loom's version and the protocol versions it speaks
@@ -214,6 +217,17 @@ fn main() ! Error {
         for p in try store.acp_agents() {
             println("{p.name}  {p.command} {p.args.join(" ")}")
         }
+    } else if cmd == "push" and sub == "key" and a.words.len() == 6 {
+        // The APNs key (Apple's AuthKey_<id>.p8) loom signs push with, kept sealed.
+        let store = try open_store(a.copy())
+        let pem = try fs.read_text(a.words[2].copy()) ?? String()
+        if not pem.contains("-----BEGIN PRIVATE KEY-----") { fail "{a.words[2]} isn't an APNs key: Apple gives it as AuthKey_<key id>.p8" }
+        try store.set_apns(Obj.new().s("key", pem).s("key_id", a.words[3].copy()).s("team", a.words[4].copy()).s("topic", a.words[5].copy()).done())
+        println("push goes to APNs for {a.words[5]}, signed with key {a.words[3]} of team {a.words[4]}")
+    } else if cmd == "push" and sub == "off" {
+        let store = try open_store(a.copy())
+        try store.delete_meta("apns")
+        println("no push; phones get notifications while the app is open")
     } else if cmd == "files" and sub == "limit" and a.words.len() == 3 {
         let store = try open_store(a.copy())
         if a.words[2] == "off" {
@@ -236,6 +250,8 @@ fn main() ! Error {
         let programs = try store.acp_agents()
         println("ACP agents: {programs.len()}")
         println("runs as: {runs_as()}")
+        let apns = try store.apns()
+        println("push: {if let c = apns { "APNs, for {str_at(c, "topic") ?? String()}" } else { String("off") }}")
     } else {
         eprint("unknown command: {a.words.join(" ")}\n\n{usage()}")
         exit(2)

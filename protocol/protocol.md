@@ -463,6 +463,8 @@ Version 1's commands:
 | `memory.put` | `text`, `agent`? (empty or left out: shared by all the person's agents) | `id` |
 | `memory.delete` | `id` | — |
 | `link.create` | — | `code` (one-time, for [`POST /api/link`](#post-apilink)), `expires` (Unix ms, five minutes on), `instance` and `key` (the instance's id and public key, as `/api/info` gives them). The core adds `qr`, the QR code's text. Only a device can ask, never an agent |
+| `push.register` | `token` (the device's APNs token, hex), `env` (`production`, or `development` for a debug build) | Nothing back. Only a device, for itself. A device signed out loses it |
+| `push.unregister` | — | Nothing back. This device stops taking push |
 | `profile.get` | — | `profile`: `text`, `revision`, `by` (the device or agent that wrote it) and `at`, or `null` when there's none yet |
 | `profile.put` | `text` (the whole profile, up to 4000 bytes; empty clears it) | `profile`, as `profile.get` gives it, with its new `revision` |
 | `routine.list` | — | `routines`, oldest first: each `id`, `name`, `agent`, `prompt`, `schedule` (null for a routine that only runs by webhook), `hook` and `secret` (with a webhook: [`POST /hooks/<id>`](#post-hooksid)), `when` (in words, such as `every 30 minutes, and by webhook`), `tz` (an IANA name), `on`, `notify`, `catch_up`, `next` (when it runs next, Unix ms, or 0 while it's off), `conversation` (where it last posted), `last` (null before its first run, then `at`, `status`: `running`, `done`, `failed`, `cancelled` or `skipped`, `run`, and `error`), `by` and `at` |
@@ -654,6 +656,6 @@ Fields and frames that come with later phases. Where they only add, they come wi
 
 - **Device tools** (Phase 3): the instance sends `{"t":"device.call", …}` with the request, and the signed approval when there is one, and the device answers `{"t":"device.result", …}`. Each device offers its tools in `hello`.
 - **Routines daily and on weekdays** (Phase 4): schedules at a time of day, as `{"daily": "08:00"}` and `{"weekdays": "09:30"}`, in the routine's `tz`.
-- **Push** (Phase 5): the `push.register` command.
+- **Push** (Phase 5): sending to APNs once ES256 lands in Calx (CLX-406). `push.register` and `push.unregister` come first.
 - **Noise** (Phase 6): a phone reaching a desktop instance runs a Noise handshake against the instance's key from the QR code before `hello`, and every frame after it is encrypted.
 - **Moving** (Phase 7): the `instance.moved` event, signed with the instance's key, with the new address.

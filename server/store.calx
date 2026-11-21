@@ -85,6 +85,9 @@ CREATE INDEX IF NOT EXISTS routines_by_next ON routines (next);
 CREATE TABLE IF NOT EXISTS link_codes (
     hash TEXT PRIMARY KEY, user TEXT NOT NULL REFERENCES users(id), by TEXT NOT NULL,
     expires INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS push_tokens (
+    device TEXT PRIMARY KEY REFERENCES devices(id), user TEXT NOT NULL REFERENCES users(id),
+    token TEXT NOT NULL, env TEXT NOT NULL, at INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS memories (
     id INTEGER PRIMARY KEY, user TEXT NOT NULL REFERENCES users(id), agent TEXT NOT NULL,
     text TEXT NOT NULL, by TEXT NOT NULL, at INTEGER NOT NULL);
@@ -386,7 +389,43 @@ impl Store {
     }
 
     pub fn revoke_device(self, id: String) ! Error {
-        _ = try self.db.execute(String("UPDATE devices SET revoked = 1 WHERE id = ?"), [t(id)])
+        _ = try self.db.execute(String("UPDATE devices SET revoked = 1 WHERE id = ?"), [t(id.copy())])
+        // A device signed out gets no more push.
+        _ = try self.db.execute(String("DELETE FROM push_tokens WHERE device = ?"), [t(id)])
+    }
+
+    // --- Push (PLAN.md, "Notifications and push") ---
+
+    // Keeps device `device`'s APNs token, `env` production or development,
+    // in place of any it had.
+    pub fn set_push_token(self, user: String, device: String, token: String, env: String, time: i64) ! Error {
+        _ = try self.db.execute(String("INSERT OR REPLACE INTO push_tokens (device, user, token, env, at) VALUES (?, ?, ?, ?, ?)"), [t(device), t(user), t(token), t(env), Value.Int(time)])
+    }
+
+    pub fn delete_push_token(self, device: String) ! Error {
+        _ = try self.db.execute(String("DELETE FROM push_tokens WHERE device = ?"), [t(device)])
+    }
+
+    // `user`'s devices that take push: each one's id, token and env.
+    pub fn push_tokens(self, user: String) -> List<(String, String, String)> ! Error {
+        var out = List<(String, String, String)>()
+        for r in try self.db.query(String("SELECT device, token, env FROM push_tokens WHERE user = ? ORDER BY at"), [t(user)]) {
+            out.push((text(r[0].copy()), text(r[1].copy()), text(r[2].copy())))
+        }
+        return out
+    }
+
+    // The APNs key loom signs push with, and what goes with it (the key's id,
+    // the team and the app's bundle id), or none until the owner sets it up.
+    // The key is kept sealed.
+    pub fn apns(self) -> Json? ! Error {
+        let kept = try self.meta(String("apns")) ?? String()
+        if kept.len() == 0 { return none }
+        return some(try parse(try self.unseal(kept, String("loom apns"))))
+    }
+
+    pub fn set_apns(self, config: Json) ! Error {
+        try self.set_meta(String("apns"), self.seal("{config}", String("loom apns")))
     }
 
     // --- ACP agent programs ---
