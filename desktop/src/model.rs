@@ -420,6 +420,10 @@ pub struct Conversation {
     pub task: Option<String>,
     /// Where side questions about the agent's chat are asked: not its chat either.
     pub side: bool,
+    /// For a branch: the chat it goes on from, and the message it branches at.
+    pub branch_of: Option<String>,
+    pub branch_at: Option<String>,
+    pub title: String,
 }
 
 /// A side question about an agent's chat, and its answer once it's come
@@ -746,6 +750,8 @@ pub struct Model {
     tasks_stale: bool,
     /// The task whose conversation the chat shows instead of the agent's chat.
     pub open_task: Option<String>,
+    /// The branch the chat shows, by conversation, instead of the agent's chat.
+    pub open_branch: Option<String>,
     /// The person's plugins, by id.
     pub plugins: Vec<Plugin>,
     plugins_stale: bool,
@@ -944,10 +950,14 @@ impl Model {
         if let Some(task) = self.task_open() {
             return Some(task.conversation.clone());
         }
+        // By its id, even before the list of conversations has it.
+        if let Some(branch) = &self.open_branch {
+            return Some(branch.clone());
+        }
         let agent = self.selected.as_ref()?;
         self.conversations
             .iter()
-            .find(|c| &c.agent == agent && c.task.is_none() && !c.side)
+            .find(|c| &c.agent == agent && c.task.is_none() && !c.side && c.branch_of.is_none())
             .map(|c| c.id.clone())
     }
 
@@ -970,12 +980,58 @@ impl Model {
         }
         if self.open_task != task {
             self.open_task = task;
+            self.open_branch = None;
             self.messages.clear();
             self.dirty.insert(List::Messages);
             self.queue_stale = true;
             self.pins.clear();
             self.pins_stale = true;
         }
+    }
+
+    /// The branch the chat shows, if it shows one.
+    pub fn branch_open(&self) -> Option<&Conversation> {
+        let id = self.open_branch.as_ref()?;
+        self.conversations
+            .iter()
+            .find(|c| &c.id == id && Some(&c.agent) == self.selected.as_ref())
+    }
+
+    /// Shows a branch in the chat, or the agent's chat again.
+    pub fn show_branch(&mut self, branch: Option<String>) {
+        if self.open_branch != branch {
+            self.open_task = None;
+            self.open_branch = branch;
+            self.messages.clear();
+            self.dirty.insert(List::Messages);
+            self.queue_stale = true;
+            self.pins.clear();
+            self.pins_stale = true;
+        }
+    }
+
+    /// Branches the chat at a message: once it's made, the chat shows it.
+    pub fn branch(&mut self, message: &str) -> Value {
+        json!({"t": "cmd", "id": self.id("app.branch"), "name": "conversation.branch", "args": {"message": message}})
+    }
+
+    /// The branches that go on from each message of the open chat, by message: their
+    /// ids and titles.
+    pub fn branches(&self) -> HashMap<String, Vec<(String, String)>> {
+        let mut out: HashMap<String, Vec<(String, String)>> = HashMap::new();
+        let Some(chat) = self.conversation() else {
+            return out;
+        };
+        for c in &self.conversations {
+            if c.branch_of.as_deref() == Some(chat.as_str()) {
+                if let Some(at) = &c.branch_at {
+                    out.entry(at.clone())
+                        .or_default()
+                        .push((c.id.clone(), c.title.clone()));
+                }
+            }
+        }
+        out
     }
 
     /// Asks for the person's tasks.
@@ -1000,6 +1056,7 @@ impl Model {
         if self.selected != agent {
             self.selected = agent;
             self.open_task = None;
+            self.open_branch = None;
             self.messages.clear();
             self.dirty.insert(List::Messages);
             self.queue_stale = true;
@@ -1490,6 +1547,19 @@ impl Model {
                 .map(|ms| ms.iter().map(|m| self.message_of(m)).collect())
                 .unwrap_or_default();
             self.pins = pins;
+            return;
+        }
+        if id.starts_with("app.branch_") {
+            match f.get("error") {
+                Some(e) => self.notices.push(s(e, "message")),
+                None => {
+                    let made = f
+                        .pointer("/value/conversation")
+                        .and_then(Value::as_str)
+                        .map(String::from);
+                    self.show_branch(made);
+                }
+            }
             return;
         }
         if id.starts_with("app.aside_") {
@@ -1994,6 +2064,9 @@ impl Model {
                         agent: s(c, "agent"),
                         task: c.get("task").and_then(Value::as_str).map(String::from),
                         side: c.get("side").and_then(Value::as_bool).unwrap_or(false),
+                        branch_of: c.get("branch_of").and_then(Value::as_str).map(String::from),
+                        branch_at: c.get("branch_at").and_then(Value::as_str).map(String::from),
+                        title: s(c, "title"),
                     })
                     .collect();
                 if self.conversation() != before {
@@ -2223,9 +2296,12 @@ impl Model {
         }
         self.attachments.clear();
         let mut frame = json!({"t": "send", "agent": agent, "text": text});
-        // Into the task's conversation when the chat shows one; the core finds the agent's chat otherwise.
+        // Into the task's or the branch's conversation when the chat shows one; the core finds
+        // the agent's chat otherwise.
         if let Some(task) = self.task_open() {
             frame["conversation"] = json!(task.conversation);
+        } else if let Some(branch) = &self.open_branch {
+            frame["conversation"] = json!(branch);
         }
         if !files.is_empty() {
             frame["files"] = json!(files);
@@ -2940,12 +3016,18 @@ mod tests {
                 agent: "a_1".into(),
                 task: None,
                 side: false,
+                branch_of: None,
+                branch_at: None,
+                title: String::new(),
             },
             Conversation {
                 id: "c_2".into(),
                 agent: "a_2".into(),
                 task: None,
                 side: false,
+                branch_of: None,
+                branch_at: None,
+                title: String::new(),
             },
         ];
         m.select(Some("a_1".into()));
@@ -2972,12 +3054,18 @@ mod tests {
                 agent: "a_1".into(),
                 task: None,
                 side: true,
+                branch_of: None,
+                branch_at: None,
+                title: String::new(),
             },
             Conversation {
                 id: "c_chat".into(),
                 agent: "a_1".into(),
                 task: None,
                 side: false,
+                branch_of: None,
+                branch_at: None,
+                title: String::new(),
             },
         ];
         m.select(Some("a_1".into()));
@@ -3000,6 +3088,54 @@ mod tests {
             !m.unread.contains("a_1"),
             "its answer doesn't mark the agent unread"
         );
+    }
+
+    #[test]
+    fn a_branch_opens_once_made_and_is_listed_under_its_message() {
+        let chat = Conversation {
+            id: "c_chat".into(),
+            agent: "a_1".into(),
+            task: None,
+            side: false,
+            branch_of: None,
+            branch_at: None,
+            title: String::new(),
+        };
+        let mut m = Model::new();
+        m.conversations = vec![chat.clone()];
+        m.select(Some("a_1".into()));
+        let f = m.branch("msg_3");
+        assert_eq!(f["name"], "conversation.branch");
+        let id = f["id"].as_str().unwrap().to_string();
+        m.take(
+            &json!({"t": "result", "id": id, "ok": true, "value": {"conversation": "c_branch"}}),
+        );
+        assert_eq!(
+            m.conversation().as_deref(),
+            Some("c_branch"),
+            "the branch shows before the list has it"
+        );
+        assert!(m.branch_open().is_none());
+        m.conversations.push(Conversation {
+            id: "c_branch".into(),
+            branch_of: Some("c_chat".into()),
+            branch_at: Some("msg_3".into()),
+            title: "Socks, again".into(),
+            ..chat
+        });
+        assert_eq!(m.branch_open().unwrap().title, "Socks, again");
+        assert_eq!(m.send("hi").unwrap()["conversation"], "c_branch");
+        m.show_branch(None);
+        assert_eq!(m.conversation().as_deref(), Some("c_chat"));
+        let under = m.branches();
+        assert_eq!(
+            under.get("msg_3"),
+            Some(&vec![("c_branch".to_string(), "Socks, again".to_string())])
+        );
+        // Another agent closes it.
+        m.show_branch(Some("c_branch".into()));
+        m.select(Some("a_2".into()));
+        assert!(m.open_branch.is_none());
     }
 
     #[test]
@@ -3026,12 +3162,18 @@ mod tests {
                 agent: "a_1".into(),
                 task: Some("task_1".into()),
                 side: false,
+                branch_of: None,
+                branch_at: None,
+                title: String::new(),
             },
             Conversation {
                 id: "c_chat".into(),
                 agent: "a_1".into(),
                 task: None,
                 side: false,
+                branch_of: None,
+                branch_at: None,
+                title: String::new(),
             },
         ];
         m.select(Some("a_1".into()));
@@ -3065,6 +3207,9 @@ mod tests {
             agent: "a_1".into(),
             task: None,
             side: false,
+            branch_of: None,
+            branch_at: None,
+            title: String::new(),
         }];
         m.select(Some("a_1".into()));
         // Opening the chat asks for its queue.

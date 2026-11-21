@@ -1990,6 +1990,67 @@ impl Instance {
         return some(answer_text(result))
     }
 
+    // A chat in words, for an agent to go on: its newest messages, up to and
+    // with `upto` when it's given, newest last. The oldest go first when it's long.
+    fn transcript(i: Instance, user: String, conversation: String, upto: String?) -> String ! Error {
+        let (all, _) = try i.store.messages(user, conversation, none, 500)
+        var messages = List<Json>()
+        for m in all {
+            let id = str_at(m.copy(), "id") ?? String()
+            messages.push(m.copy())
+            if some(id) == upto.copy() { break }
+        }
+        var lines = List<String>()
+        var skip = if messages.len() > SIDE_MESSAGES { messages.len() - SIDE_MESSAGES } else { 0 }
+        for m in messages {
+            if skip > 0 {
+                skip -= 1
+                continue
+            }
+            var said = String()
+            if let Json.Array(blocks) = at(m.copy(), "blocks") {
+                for b in blocks {
+                    if str_at(b.copy(), "kind") == some(String("text")) { said.push_str(str_at(b, "text") ?? String()) }
+                }
+            }
+            if said.trim().len() == 0 { continue }
+            let who = if str_at(m, "role") == some(String("person")) { String("Your person") } else { String("You") }
+            lines.push("{who}: {cut_short(said.trim().copy(), 1500)}")
+        }
+        var transcript = lines.join("\n\n")
+        while transcript.len() > SIDE_TRANSCRIPT_MOST and lines.len() > 1 {
+            _ = lines.remove(0)
+            transcript = lines.join("\n\n")
+        }
+        return transcript
+    }
+
+    // conversation.branch: a new conversation with the same agent that goes on
+    // from `message` (PLAN.md, "Branching a chat"). Its first turn hands the
+    // agent the chat up to there.
+    fn branch(i: Instance, user: String, device: String, args: Json) -> Answer ! Error {
+        let id = str_at(args.copy(), "message") ?? String()
+        let m = try i.store.message(user.copy(), id.copy()) else return Answer.Refused(String("not_found"), "There's no message {id}.")
+        let from = str_at(m.copy(), "conversation") ?? String()
+        let chat = try i.store.conversation(user.copy(), from.copy()) else return Answer.Refused(String("not_found"), String("That message's conversation was deleted."))
+        if bool_at(chat.copy(), "side") == some(true) { return Answer.Refused(String("bad_request"), String("Side questions don't branch.")) }
+        var said = String()
+        if let Json.Array(blocks) = at(m, "blocks") {
+            for b in blocks {
+                if str_at(b.copy(), "kind") == some(String("text")) { said.push_str(str_at(b, "text") ?? String()) }
+            }
+        }
+        let first_line = said.trim().split("\n")[0].copy()
+        let title = str_at(args, "title") ?? (if first_line.len() > 0 { "Branch: {cut_short(first_line, 40)}" } else { String("Branch") })
+        let made = try i.store.add_conversation(user.copy(), str_at(chat, "agent") ?? String(), title)
+        let made_id = str_at(made.copy(), "id") ?? String()
+        try i.store.add_branch(user.copy(), made_id.copy(), from, id)
+        let c = try i.store.conversation(user.copy(), made_id.copy()) ?? made
+        try i.event(user.copy(), "conversation.created", Obj.new().j("conversation", c).done())
+        if device.starts_with("a_") { i.log(user, device.copy(), "agent", String("Branched a chat"), device) }
+        return Answer.Value(Obj.new().s("conversation", made_id).done())
+    }
+
     // chat.ask: a side question about a chat (PLAN.md, "Side questions"). The
     // agent answers it in a conversation of its own for them, with the chat's
     // newest messages to go on and no tools that ask, and the command is
@@ -2031,26 +2092,7 @@ impl Instance {
             i.answer_cmd(w, Answer.Refused(String("busy"), "{agent_name} is still answering the last side question."))
             return
         }
-        // What the agent goes on: the chat's newest messages, in words, newest last.
-        let (messages, _) = try i.store.messages(user.copy(), chat_id, none, SIDE_MESSAGES)
-        var lines = List<String>()
-        for m in messages {
-            var said = String()
-            if let Json.Array(blocks) = at(m.copy(), "blocks") {
-                for b in blocks {
-                    if str_at(b.copy(), "kind") == some(String("text")) { said.push_str(str_at(b, "text") ?? String()) }
-                }
-            }
-            if said.trim().len() == 0 { continue }
-            let who = if str_at(m, "role") == some(String("person")) { String("Your person") } else { String("You") }
-            lines.push("{who}: {cut_short(said.trim().copy(), 1500)}")
-        }
-        // The oldest go first when it's long.
-        var transcript = lines.join("\n\n")
-        while transcript.len() > SIDE_TRANSCRIPT_MOST and lines.len() > 1 {
-            _ = lines.remove(0)
-            transcript = lines.join("\n\n")
-        }
+        let transcript = try i.transcript(user.copy(), chat_id, none)
         let note = "[loom: This is a side question from your person about your chat with them, asked beside it: the question and your answer stay out of that chat. Answer from the chat and what you know, briefly. Don't use tools here: any that ask are refused. Your chat, newest last:\n\n{if transcript.len() > 0 { transcript } else { String("(Nothing said yet.)") }}]"
         let message_id = try i.store.new_id("msg")
         let blocks = Json.Array([Obj.new().s("kind", String("text")).s("text", question.copy()).done()])
@@ -3215,11 +3257,19 @@ impl Instance {
 
     // --- Runs ---
 
-    fn start_run(i: mut Instance, user: String, conversation: Json, run_id: String, answering: String, text: String, sent_files: List<Json>, from: String, note: String) ! Error {
+    fn start_run(i: mut Instance, user: String, conversation: Json, run_id: String, answering: String, text: String, sent_files: List<Json>, from: String, given_note: String) ! Error {
         let conversation_id = str_at(conversation.copy(), "id") ?? String()
         let agent_id = str_at(conversation, "agent") ?? String()
         let reply = try i.store.new_id("msg")
         try i.store.add_run(user.copy(), run_id.copy(), conversation_id.copy())
+        // A branch's first turn: the agent is handed the chat it goes on from.
+        var note = given_note.copy()
+        if let (chat, at_message) = try i.store.branch_to_hand(user.copy(), conversation_id.copy()) {
+            let before = try i.transcript(user.copy(), chat, some(at_message))
+            let handoff = "[loom: This conversation is a branch of your chat with your person: it goes on from the last message below, apart from that chat, which goes on as it was. Your chat up to there, newest last:\n\n{if before.len() > 0 { before } else { String("(Nothing said yet.)") }}]"
+            note = if note.len() > 0 { "{handoff}\n\n{note}" } else { handoff }
+            try i.store.branch_handed(conversation_id.copy())
+        }
         // A run in a task's conversation is the task's, running again.
         if let task = try i.store.task_in(user.copy(), conversation_id.copy()) {
             try i.task_changed(user.copy(), merge(without(task, "error"), Obj.new().s("status", String("running")).s("run", run_id.copy()).i("updated", now()).done()))
@@ -4469,6 +4519,7 @@ impl Instance {
             try i.event(user, "server.offered", Obj.new().s("address", address).s("by", device).done())
             return Answer.Value(empty)
         }
+        if name == "conversation.branch" { return try i.branch(user, device, args) }
         // Pins: a message is pinned in its conversation, for every device to see.
         if name == "message.pin" {
             let id = str_at(args.copy(), "message") ?? String()

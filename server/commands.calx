@@ -25,9 +25,10 @@ struct Command {
     does: str
 }
 
-const COMMANDS: [Command; 65] = [
+const COMMANDS: [Command; 66] = [
     Command { name: "conversation.create", args: "agent, title?", does: "Makes a conversation with an agent." },
     Command { name: "conversation.rename", args: "conversation, title", does: "Renames a conversation." },
+    Command { name: "conversation.branch", args: "message, title?", does: "Branches a chat at a message: a new conversation that goes on from there, apart from the chat." },
     Command { name: "conversation.delete", args: "conversation", does: "Deletes a conversation and its messages." },
     Command { name: "messages.list", args: "conversation, before? (a message id), limit? (up to 100)", does: "A conversation's messages, newest last." },
     Command { name: "messages.search", args: "query, agent?, after?, before? (Unix ms), limit?", does: "Finds words in every chat, and in file names." },
@@ -102,7 +103,7 @@ pub fn access(name: String) -> Access {
     if name.starts_with("push.") or name.starts_with("plugin.data.") or name == "plugin.cmd" { return Access.Never(String("That's for an app or a plugin's panel, not an agent.")) }
     if name.starts_with("browser.") { return Access.Never(String("Use your browser_ tools.")) }
     if name == "queue.steer" { return Access.Never(String("Steering is your person's: it stops the turn that's running.")) }
-    let runs = ["conversation.create", "conversation.rename", "messages.list", "messages.search", "messages.pinned", "message.pin", "agent.create", "agent.update", "agent.revisions", "agent.rollback", "activity.list", "memory.list", "memory.put", "profile.get", "profile.put", "routine.list", "routine.put", "routine.run", "task.list", "task.start", "task.pause", "task.resume", "task.cancel", "task.retry", "queue.list", "queue.edit", "queue.order", "queue.drop", "skill.list", "skill.get", "skill.put", "plugin.list", "plugin.get", "plugin.put", "plugin.revisions", "mcp.list", "secret.list", "acp.list", "acp.registry"]
+    let runs = ["conversation.create", "conversation.rename", "conversation.branch", "messages.list", "messages.search", "messages.pinned", "message.pin", "agent.create", "agent.update", "agent.revisions", "agent.rollback", "activity.list", "memory.list", "memory.put", "profile.get", "profile.put", "routine.list", "routine.put", "routine.run", "task.list", "task.start", "task.pause", "task.resume", "task.cancel", "task.retry", "queue.list", "queue.edit", "queue.order", "queue.drop", "skill.list", "skill.get", "skill.put", "plugin.list", "plugin.get", "plugin.put", "plugin.revisions", "mcp.list", "secret.list", "acp.list", "acp.registry"]
     for r in runs {
         if name == r { return Access.Runs }
     }
@@ -147,7 +148,7 @@ fn reading_runs_and_harm_asks() {
     for c in COMMANDS {
         if let Access.Never(_) = access(String(c.name)) { panic("{c.name} is listed but never runs") }
     }
-    assert(catalog().len() == 65)
+    assert(catalog().len() == 66)
     assert(does(String("mcp.delete")) == "Removes an MCP server")
     assert(does(String("agent.update")) == "Changes an agent")
 }
