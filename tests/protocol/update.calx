@@ -1,0 +1,97 @@
+module tests.protocol.update
+
+// The desktop app's updates (core/update.calx): a release is served from a
+// folder, as GitHub serves one, and the updater finds it, downloads the file
+// for its platform, and checks the manifest's signature and the file's
+// SHA-256 before it says the update is ready. A release signed with another
+// key, or a file that isn't the one the manifest names, is refused, and an
+// app that has the newest release hears so.
+//
+//     calx tests/protocol/update.calx
+import std.bytes
+import std.crypto.{Ed25519Key}
+import std.fs
+import std.hash.{sha256}
+import std.http.server.{Server}
+import std.json.{Json}
+import std.process.{exit}
+import std.thread.{Task, sleep}
+import shared.obj.{Obj, bool_at, str_at}
+import core.update.{Updater}
+import tests.kit.{check}
+
+struct Serving {
+    server: Server
+    dir: String
+}
+
+impl Task for Serving {
+    fn run(own self) {
+        var s = self
+        s.server.serve(s.dir.copy())
+    }
+}
+
+// Writes a release of `data` as version `version` into `dir`, signed with `key`.
+fn release(dir: String, version: str, data: List<u8>, key: Ed25519Key, base: String) ! Error {
+    try fs.make_dir_all(dir.copy())
+    try fs.write("{dir}/loom.exe", data.copy())
+    let entry = Obj.new().s("name", String("loom.exe")).s("url", "{base}/loom.exe").s("sha256", bytes.hex(sha256(data.copy()))).i("size", i64.wrap(u64(data.len()))).done()
+    let manifest = "{Obj.new().s("version", String(version)).s("notes", String("Faster.")).j("files", Obj.new().j("windows-desktop", entry).done()).done()}"
+    try fs.write_text("{dir}/manifest.json", manifest.copy())
+    try fs.write_text("{dir}/manifest.json.sig", bytes.base64(key.sign(manifest.to_bytes())))
+}
+
+// Asks the updater to look, and gives its answer.
+fn ask(u: mut Updater, id: str) -> Json ! Error {
+    u.check(some(String(id)))
+    for _ in 0..600 {
+        if let said = u.poll() { return said }
+        unsafe { sleep(10000000) }
+    }
+    fail "the updater didn't answer in 6 s"
+}
+
+fn run() ! Error {
+    let root = try fs.temp_dir()
+    var server = try Server.listen(0)
+    server.log = false
+    let base = server.url()[..server.url().len() - 1].copy()
+    _ = unsafe { Thread.spawn(Serving { server: server, dir: root.copy() }) }
+    let key = Ed25519Key.generate()
+    let public = bytes.hex(key.public_key().bytes())
+    let keep = "{root}/kept"
+
+    try release("{root}/good", "0.3.0", "new loom".to_bytes(), key, "{base}/good")
+    var u = Updater.new(String("0.2.0"), String("windows-desktop"), "{base}/good/manifest.json", keep.copy()).with_key(public.copy())
+    let ready = try ask(mut u, "u_1")
+    let path = str_at(ready.copy(), "path") ?? String()
+    try check(str_at(ready.copy(), "version") == some(String("0.3.0")) and str_at(ready.copy(), "notes") == some(String("Faster.")) and str_at(ready.copy(), "id") == some(String("u_1")), "a newer release is found, with its notes")
+    try check(try fs.read_text(path) == some(String("new loom")), "and its file is downloaded and checked")
+
+    var same = Updater.new(String("0.3.0"), String("windows-desktop"), "{base}/good/manifest.json", keep.copy()).with_key(public.copy())
+    try check(bool_at(try ask(mut same, "u_2"), "latest") == some(true), "an app with the newest release hears it's up to date")
+
+    let other = Ed25519Key.generate()
+    try release("{root}/forged", "9.0.0", "evil".to_bytes(), other, "{base}/forged")
+    var forged = Updater.new(String("0.2.0"), String("windows-desktop"), "{base}/forged/manifest.json", keep.copy()).with_key(public.copy())
+    let refused = try ask(mut forged, "u_3")
+    try check(str_at(refused.copy(), "path") == none and "{refused}".contains("isn't signed"), "a release signed with another key is refused")
+
+    try release("{root}/swapped", "0.4.0", "honest".to_bytes(), key, "{base}/swapped")
+    try fs.write("{root}/swapped/loom.exe", "evil".to_bytes())
+    var swapped = Updater.new(String("0.2.0"), String("windows-desktop"), "{base}/swapped/manifest.json", keep.copy()).with_key(public)
+    let bad = try ask(mut swapped, "u_4")
+    try check(str_at(bad.copy(), "path") == none and "{bad}".contains("isn't the file"), "a file that isn't the one the manifest names is refused")
+}
+
+fn main() ! Error {
+    match run() {
+        ok => println("\nupdates: all good"),
+        err(e) => {
+            eprintln("\n{e}")
+            exit(1)
+        },
+    }
+    exit(0)
+}

@@ -1,0 +1,197 @@
+module core.update
+
+// The desktop app's updates (PLAN.md, "Updates and versions"). The core looks
+// at the newest release's manifest a little after it starts and then every six
+// hours, or when the app asks. A newer release's file for this platform is
+// downloaded into the data folder, and the app hears `core.update` only once
+// the manifest's Ed25519 signature is the release key's and the file's SHA-256
+// is the manifest's. The app does the swap.
+import std.bytes
+import std.fs
+import std.hash.{sha256}
+import std.http.{Header, Request, get}
+import std.json.{Json}
+import std.time.{Instant}
+import shared.files.{safe_name}
+import shared.obj.{Obj, at, str_at}
+import shared.release.{RELEASE_KEY, check_manifest, newer}
+
+const FIRST_CHECK_NS: u64 = 10000000000          // 10 s after the start
+const EVERY_NS: u64 = 21600000000000             // then every 6 hours
+const TIMEOUT_MS: u32 = 600000
+const MAX_DOWNLOAD: usize = 400000000
+
+enum Step {
+    Waiting
+    Manifest(Request, Request)    // the manifest, and its signature
+    Download(Request)
+}
+
+pub struct Updater {
+    version: String       // the app's
+    kind: String          // the manifest's name for this platform's file: "windows-desktop"
+    url: String           // the manifest's address
+    dir: String           // where updates are kept: the data folder's update/
+    step: Step
+    next: Instant?        // the next look; none for one at once
+    wait: u64             // how long after `next` was set to look
+    asked: bool           // the app asked for this look
+    asked_id: String?     // and its id for the answer
+    found: Json           // the newer release's manifest, while its file comes
+    key: String           // the public key releases are signed with, in hex
+}
+
+fn answer() -> Obj {
+    return Obj.new().s("t", String("core.update"))
+}
+
+impl Updater {
+    pub fn new(version: own String, kind: own String, url: own String, dir: own String) -> Updater {
+        return Updater { version: version, kind: kind, url: url, dir: dir, step: Step.Waiting, next: some(unsafe { Instant.now() }), wait: FIRST_CHECK_NS, asked: false, asked_id: none, found: Json.Null, key: String(RELEASE_KEY) }
+    }
+
+    /// The updater with another release key, for tests.
+    pub fn with_key(own self, key_hex: String) -> Updater {
+        var u = self
+        u.key = key_hex.copy()
+        return u
+    }
+
+    /// Looks now, for the app's `update.check`. The answer says what was found.
+    pub fn check(mut self, id: own String?) {
+        self.asked = true
+        self.asked_id = id
+        match self.step {
+            Step.Waiting => self.next = none,
+            _ => {},
+        }
+    }
+
+    fn look(mut self) {
+        let sig_url = "{self.url}.sig"
+        self.step = Step.Manifest(get(self.url.copy(), List<Header>(), 60000, 1048576), get(sig_url, List<Header>(), 60000, 4096))
+    }
+
+    fn later(mut self) {
+        self.step = Step.Waiting
+        self.next = some(unsafe { Instant.now() })
+        self.wait = EVERY_NS
+    }
+
+    /// What the app hears about an explicit check that found nothing, or failed.
+    fn told(mut self, frame: own Obj) -> Json? {
+        if not self.asked { return none }
+        self.asked = false
+        return some(frame.maybe("id", self.asked_id.take()).done())
+    }
+
+    fn fail_check(mut self, why: String) -> Json? {
+        eprintln("loom: the update check: {why}")
+        return self.told(answer().j("error", Obj.new().s("code", String("update")).s("message", why).done()))
+    }
+
+    /// Moves along. Gives what to tell the app, if anything.
+    pub fn poll(mut self) -> Json? {
+        match self.step {
+            Step.Waiting => {
+                if let since = self.next {
+                    if unsafe { Instant.now() }.nanos_since(since) < self.wait { return none }
+                }
+                self.look()
+                return none
+            },
+            Step.Manifest(m, s) => {
+                if not m.done() or not s.done() { return none }
+                var mr = m
+                var sr = s
+                self.later()
+                let mres = match mr.wait() {
+                    ok(r) => r,
+                    err(e) => return self.fail_check("{e}"),
+                }
+                let sres = match sr.wait() {
+                    ok(r) => r,
+                    err(e) => return self.fail_check("{e}"),
+                }
+                if mres.status != 200 or sres.status != 200 {
+                    let why = "there's no release manifest at {self.url} ({mres.status})"
+                    return self.fail_check(why)
+                }
+                let manifest = check_manifest(mres.body.copy(), String.from_utf8(sres.body.copy()) ?? String(), self.key.copy()) else {
+                    return self.fail_check(String("the release manifest isn't signed with loom's release key"))
+                }
+                let version = str_at(manifest.copy(), "version") ?? String()
+                if not newer(version.copy(), self.version.copy()) {
+                    let latest = answer().b("latest", true).s("version", self.version.copy())
+                    return self.told(latest)
+                }
+                let file = self.entry(manifest.copy())
+                let url = str_at(file.copy(), "url") else {
+                    let why = "release {version} has nothing for {self.kind}"
+                    return self.fail_check(why)
+                }
+                let path = self.path_for(manifest.copy())
+                self.found = manifest.copy()
+                if fs.exists(path.copy()) and matches(path.copy(), file) {
+                    return some(self.ready(path))
+                }
+                self.step = Step.Download(get(url, List<Header>(), TIMEOUT_MS, MAX_DOWNLOAD))
+                return none
+            },
+            Step.Download(d) => {
+                if not d.done() { return none }
+                var dr = d
+                self.later()
+                let res = match dr.wait() {
+                    ok(r) => r,
+                    err(e) => return self.fail_check("{e}"),
+                }
+                let file = self.entry(self.found.copy())
+                if res.status != 200 {
+                    return self.fail_check("the release's file answered {res.status}")
+                }
+                if bytes.hex(sha256(res.body.copy())) != (str_at(file.copy(), "sha256") ?? String()) {
+                    return self.fail_check(String("the downloaded release isn't the file its manifest names"))
+                }
+                let path = self.path_for(self.found.copy())
+                match keep(path.copy(), res.body.copy()) {
+                    ok => return some(self.ready(path)),
+                    err(e) => return self.fail_check("can't keep the update: {e}"),
+                }
+            },
+        }
+    }
+
+    fn path_for(self, manifest: Json) -> String {
+        let version = safe_name(str_at(manifest.copy(), "version") ?? String("new"))
+        let name = safe_name(str_at(self.entry(manifest), "name") ?? String("loom.exe"))
+        return "{self.dir}/{version}/{name}"
+    }
+
+    /// This platform's file in a manifest.
+    fn entry(self, manifest: Json) -> Json {
+        return at(manifest, "files").get(self.kind.copy()) ?? Json.Null
+    }
+
+    fn ready(mut self, path: String) -> Json {
+        let id = if self.asked { self.asked_id.take() } else { none }
+        self.asked = false
+        return answer().maybe("id", id).s("version", str_at(self.found.copy(), "version") ?? String()).s("path", path).s("notes", str_at(self.found.copy(), "notes") ?? String()).done()
+    }
+}
+
+/// Whether the file at `path` is the one a manifest's entry names.
+fn matches(path: String, file: Json) -> bool {
+    return match fs.read(path) {
+        ok(data) => bytes.hex(sha256(data)) == (str_at(file, "sha256") ?? String()),
+        err(_) => false,
+    }
+}
+
+/// Writes an update beside where it goes, then moves it there.
+fn keep(path: String, data: List<u8>) ! Error {
+    try fs.make_dir_all(path[..path.find_last("/") ?? 0].copy())
+    let part = "{path}.part"
+    try fs.write(part.copy(), data)
+    try fs.rename(part, path)
+}

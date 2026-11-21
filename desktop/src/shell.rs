@@ -10,6 +10,7 @@ pub enum TrayAction {
     Open,
     Quit,
     StartAtLogin(bool),
+    CheckUpdates,
 }
 
 pub struct Tray {
@@ -17,6 +18,7 @@ pub struct Tray {
     open: MenuItem,
     quit: MenuItem,
     login: CheckMenuItem,
+    updates: MenuItem,
 }
 
 fn icon() -> Option<tray_icon::Icon> {
@@ -37,12 +39,14 @@ impl Tray {
     pub fn new(start_at_login: bool) -> Option<Tray> {
         let open = MenuItem::new("Open loom", true, None);
         let login = CheckMenuItem::new("Start at login", true, start_at_login, None);
+        let updates = MenuItem::new("Check for updates", true, None);
         let quit = MenuItem::new("Quit loom", true, None);
         let menu = Menu::new();
         menu.append_items(&[
             &open,
             &PredefinedMenuItem::separator(),
             &login,
+            &updates,
             &PredefinedMenuItem::separator(),
             &quit,
         ])
@@ -60,6 +64,7 @@ impl Tray {
             open,
             quit,
             login,
+            updates,
         })
     }
 
@@ -73,6 +78,8 @@ impl Tray {
                 out.push(TrayAction::Quit);
             } else if e.id == *self.login.id() {
                 out.push(TrayAction::StartAtLogin(self.login.is_checked()));
+            } else if e.id == *self.updates.id() {
+                out.push(TrayAction::CheckUpdates);
             }
         }
         while let Ok(e) = TrayIconEvent::receiver().try_recv() {
@@ -94,17 +101,89 @@ pub fn notify(title: &str, body: &str) {
     let mut n = notify_rust::Notification::new();
     n.summary(title).body(body);
     #[cfg(windows)]
-    n.app_id(APP_ID);
+    n.app_id(app_id());
     if let Err(e) = n.show() {
         eprintln!("loom: the notification didn't show: {e}");
     }
 }
 
-/// The id Windows shows notifications under. Without an installer that registers one,
-/// Windows falls back to PowerShell's, which still shows them.
+/// The id the installer gives loom's Start menu shortcut (installer.iss), which Windows
+/// shows notifications under.
 #[cfg(windows)]
-const APP_ID: &str =
-    "{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\\WindowsPowerShell\\v1.0\\powershell.exe";
+const APP_ID: &str = "AaenStudios.Loom";
+
+/// loom's own id once the installer has registered it, and otherwise PowerShell's, which
+/// Windows still shows notifications for.
+#[cfg(windows)]
+fn app_id() -> &'static str {
+    let installed = std::env::var("APPDATA").is_ok_and(|d| {
+        std::path::Path::new(&d)
+            .join(r"Microsoft\Windows\Start Menu\Programs\loom.lnk")
+            .exists()
+    });
+    if installed {
+        APP_ID
+    } else {
+        "{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\\WindowsPowerShell\\v1.0\\powershell.exe"
+    }
+}
+
+/// The program as it was before an update, kept beside it until the next start.
+fn old_exe() -> Option<std::path::PathBuf> {
+    Some(std::env::current_exe().ok()?.with_extension("old.exe"))
+}
+
+/// Puts the update at `new` in this program's place and starts it, for the app to quit
+/// after. The old program is kept as loom.old.exe, and put back if the swap fails.
+pub fn apply_update(new: &std::path::Path) -> std::io::Result<()> {
+    let exe = std::env::current_exe()?;
+    let old = old_exe().unwrap_or_else(|| exe.with_extension("old.exe"));
+    let _ = std::fs::remove_file(&old);
+    // Windows lets a running program be renamed, not replaced.
+    std::fs::rename(&exe, &old)?;
+    if let Err(e) = std::fs::copy(new, &exe) {
+        let _ = std::fs::rename(&old, &exe);
+        return Err(e);
+    }
+    std::process::Command::new(&exe)
+        .arg("--updated")
+        .arg(std::process::id().to_string())
+        .spawn()?;
+    Ok(())
+}
+
+/// After an update: waits for the old program to end, so two never run at once, and
+/// removes it.
+pub fn after_update() {
+    let mut args = std::env::args().skip_while(|a| a != "--updated").skip(1);
+    if let Some(pid) = args.next().and_then(|p| p.parse::<u32>().ok()) {
+        wait_for_exit(pid);
+    }
+    if let Some(old) = old_exe() {
+        let _ = std::fs::remove_file(old);
+    }
+}
+
+#[cfg(windows)]
+fn wait_for_exit(pid: u32) {
+    use windows_sys::Win32::Foundation::CloseHandle;
+    use windows_sys::Win32::System::Threading::{
+        OpenProcess, WaitForSingleObject, PROCESS_SYNCHRONIZE,
+    };
+    // SAFETY: the handle is checked, waited on for at most 15 s, and closed.
+    unsafe {
+        let h = OpenProcess(PROCESS_SYNCHRONIZE, 0, pid);
+        if !h.is_null() {
+            WaitForSingleObject(h, 15000);
+            CloseHandle(h);
+        }
+    }
+}
+
+#[cfg(not(windows))]
+fn wait_for_exit(_pid: u32) {
+    std::thread::sleep(std::time::Duration::from_secs(2));
+}
 
 fn launcher() -> Option<auto_launch::AutoLaunch> {
     let exe = std::env::current_exe().ok()?;

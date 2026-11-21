@@ -23,6 +23,8 @@ void      loom_core_stop(uint8_t *core);
 
 With `"mode": "local"` the core first starts an instance of its own ([PLAN.md, "An instance in the desktop app"](../PLAN.md#an-instance-in-the-desktop-app)): the server code, on a thread, listening on 127.0.0.1 on a free port, with its data in `{data}/instance`. It finds the ACP agents installed on the computer, makes a device for "This computer" owned by `username` (default `me`) of kind `kind` (default `windows`), and connects with that device's token, which is new every launch. Its cache is `{data}/local.db`, apart from `core.db`, so an instance elsewhere keeps its own. `loom_core_stop` stops the instance too.
 
+With `"version": "0.3.0"`, the core keeps the app up to date (PLAN.md, "Updates and versions"). A little after it starts, then every six hours, it reads the newest release's `manifest.json` and `manifest.json.sig` from `update` (GitHub's latest release, unless the config names another manifest; an empty `update` turns it off). If the signature is the release key's (`shared/release.calx`) and the release is newer, it downloads the file for `platform` (default `windows-desktop`) into `{data}/update/<version>/`, checks its SHA-256 against the manifest, and tells the app `core.update`. The app swaps it in. Builds from source leave `version` out.
+
 ## Between the app and the core
 
 The app sends the core protocol frames (`send`, `cmd`, `approve`, `cancel`, …), which go on to the instance as they are, and these of the core's own:
@@ -39,6 +41,7 @@ The app sends the core protocol frames (`send`, `cmd`, `approve`, `cancel`, …)
 | `{"t":"app.network"}` | The network changed. The same |
 | `{"t":"file.upload","id":"u_1","path":"C:\\Users\\…\\shot.png"}` | Sends a file to the instance (`POST /files`), up to 64 MB. `core.file` answers with its `file`, which goes in a `send`'s `files` |
 | `{"t":"file.get","id":"f_1","file":"9f86d0…","thumb":true}` | Fetches a file, or with `thumb` its thumbnail, into `{data}/files/`, and `core.file` says where. A file goes in a folder of its own, under its `name` if one is given, so the program that opens it knows its kind. One it has already is answered at once |
+| `{"t":"update.check","id":"u_2"}` | Looks for an update now. `core.update` answers, with the id |
 | `{"t":"core.stop"}` | Sent by `loom_core_stop`. The core closes the connection and ends |
 
 The core tells the app every frame the instance sends (`welcome`, `event`, `delta`, `synced`, `ack`, `result`, `error`, …), after the cache has taken it. Events it has applied already aren't sent again. Deltas go on only when they add text: a repeat is dropped, and a gap means one was lost, so the core reconnects and gets the reply again from position 0. And these of its own:
@@ -57,6 +60,7 @@ The core tells the app every frame the instance sends (`welcome`, `event`, `delt
 | `{"t":"core.data","id":"g_1","what":"messages","items":[…],"more":true}` | The answer to `core.get`, oldest first for messages. `more` says the cache has older ones |
 | `{"t":"core.notify","title":"Builder","body":"…","agent":"a_2","conversation":"c_9","kind":"run.finished"}` | Worth a system notification: a reply that finished or failed, or a question waiting (`approval.needed`). Only for live events while no one is looking, not for catch-up |
 | `{"t":"core.file","id":"u_1","file":{"file":"9f86d0…","name":"shot.png","mime":"image/png","size":48213}}` | A `file.upload` went up. For a `file.get`, `"path":"…"` instead: where the file is. Either can have `error`, with `code` and `message`, instead |
+| `{"t":"core.update","version":"0.3.0","path":"C:\\Users\\…\\update\\0.3.0\\loom.exe","notes":"…"}` | A newer release is downloaded and checked, at `path`. To an `update.check` that found nothing new, `"latest":true` and this version instead, or `error` |
 | `{"t":"error","code":"offline","for":"q_2"}` | A frame other than `send` came while the core wasn't connected, so it didn't go |
 | `{"t":"error","code":"not_sent","ref":"m_…","message":"…"}` | A send to an agent the instance couldn't make a conversation with, such as one deleted meanwhile. It leaves the outbox |
 | `{"t":"error","code":"cache","message":"…"}` | The cache couldn't be read or written. An event that wasn't applied isn't in the cursor either, so the next connection gets it again |

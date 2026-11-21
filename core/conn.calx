@@ -22,6 +22,7 @@ import core.cache.{Cache, now}
 import core.files.{Transfer, at_path, kept_at, refused}
 import shared.files.{is_sha}
 import core.login.{Kind, Outcome, Pending, address, request_body}
+import core.update.{Updater}
 import std.fs
 
 const FIRST_WAIT_MS: u64 = 500
@@ -104,6 +105,7 @@ pub struct Conn {
     random: Random
     pub files: String?    // where files that come down are kept; the system's temporary folder without one
     transfers: List<Transfer>
+    pub updater: Updater?    // looks for new releases of the app; none in tests and dev builds
 }
 
 impl Conn {
@@ -142,6 +144,7 @@ impl Conn {
             random: Random.system(),
             files: none,
             transfers: List<Transfer>(),
+            updater: none,
         }
     }
 
@@ -552,6 +555,14 @@ impl Conn {
             self.send(m)
             return true
         }
+        if t == "update.check" {
+            if let u = mut self.updater {
+                u.check(str_at(m, "id"))
+            } else {
+                self.tell(Obj.new().s("t", String("core.update")).maybe("id", str_at(m, "id")).j("error", Obj.new().s("code", String("update")).s("message", String("This build doesn't update itself.")).done()).done())
+            }
+            return true
+        }
         if t == "file.upload" or t == "file.get" {
             self.transfer(t == "file.upload", m)
             return true
@@ -771,6 +782,17 @@ impl Conn {
         self.transfers.push(Transfer.download(server, token, id, sha, thumb, dest))
     }
 
+    /// Moves the update check along, and tells the app what it found.
+    fn poll_update(mut self) {
+        var said: Json? = none
+        if let u = mut self.updater {
+            said = u.poll()
+        }
+        if let s = said {
+            self.tell(s)
+        }
+    }
+
     /// Answers the transfers that have ended.
     fn poll_transfers(mut self) {
         var i: usize = 0
@@ -803,6 +825,7 @@ impl Task for Conn {
             c.read()
             c.poll()
             c.poll_transfers()
+            c.poll_update()
             c.tick()
             if let m = unsafe { c.inbox.wait_for(TICK_NS) } {
                 if not c.from_app(m) { return }

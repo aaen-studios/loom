@@ -1,0 +1,146 @@
+name: release
+
+# A tag like v0.3.0 makes a release (PLAN.md, "Updates and versions"): the
+# desktop app and its installer, the `loom` server for Linux and Windows, and
+# manifest.json naming each with its SHA-256, signed with the release key
+# (scripts/release.calx). The desktop app and `loom update` take only what
+# that signature covers.
+
+on:
+  push:
+    tags: ["v*"]
+  # A dry run from the Actions tab builds everything, the installer too, and publishes nothing.
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  CALX_NO_UPDATE_CHECK: "1"
+  NO_COLOR: "1"
+
+jobs:
+  desktop:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Version
+        shell: bash
+        run: |
+          if [ "$GITHUB_REF_TYPE" = tag ]; then v="${GITHUB_REF_NAME#v}"; else v="0.0.0-dry"; fi
+          echo "LOOM_VERSION=$v" >> "$GITHUB_ENV"
+
+      - name: Install Calx
+        shell: pwsh
+        run: |
+          irm https://calxlang.com/install.ps1 | iex
+          "$HOME\.calx\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+
+      - name: Rust
+        run: rustup update stable && rustup default stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: desktop
+
+      - name: Build
+        working-directory: desktop
+        run: cargo build --release
+
+      - name: Installer
+        shell: pwsh
+        working-directory: desktop
+        run: |
+          choco install innosetup --no-progress -y
+          & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" "/DVersion=$env:LOOM_VERSION" "/DExe=target\release\loom.exe" installer.iss
+          New-Item -ItemType Directory -Force ..\dist | Out-Null
+          Copy-Item target\release\loom.exe ..\dist\loom.exe
+          Copy-Item loom-setup.exe ..\dist\loom-setup.exe
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: desktop
+          path: dist/
+
+  server:
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            out: loom-linux
+          - os: windows-latest
+            out: loom-windows.exe
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Calx (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          curl -fsSL https://calxlang.com/install.sh | sh
+          echo "$HOME/.calx/bin" >> "$GITHUB_PATH"
+
+      - name: Install Calx (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          irm https://calxlang.com/install.ps1 | iex
+          "$HOME\.calx\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+
+      - name: Build
+        shell: bash
+        run: |
+          if [ "$GITHUB_REF_TYPE" = tag ]; then version="${GITHUB_REF_NAME#v}"; else version="0.0.0-dry"; fi
+          sed -i "s/^const VERSION: str = \".*\"/const VERSION: str = \"$version\"/" server/main.calx
+          grep -q "const VERSION: str = \"$version\"" server/main.calx
+          mkdir -p dist
+          calx build --release server/main.calx -o "dist/${{ matrix.out }}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: server-${{ matrix.os }}
+          path: dist/
+
+  publish:
+    needs: [desktop, server]
+    if: github.ref_type == 'tag'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Calx
+        run: |
+          curl -fsSL https://calxlang.com/install.sh | sh
+          echo "$HOME/.calx/bin" >> "$GITHUB_PATH"
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Notes
+        run: |
+          git fetch --force origin "refs/tags/$GITHUB_REF_NAME:refs/tags/$GITHUB_REF_NAME"
+          notes="$(git tag -l --format='%(contents)' "$GITHUB_REF_NAME")"
+          if [ -z "$notes" ]; then notes="loom ${GITHUB_REF_NAME#v}"; fi
+          printf '%s\n' "$notes" > notes.md
+
+      - name: Sign
+        env:
+          LOOM_RELEASE_KEY: ${{ secrets.LOOM_RELEASE_KEY }}
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          base="https://github.com/${GITHUB_REPOSITORY}/releases/download/${GITHUB_REF_NAME}"
+          calx scripts/release.calx sign dist "$version" "$base" notes.md \
+            windows-desktop=loom.exe windows-installer=loom-setup.exe \
+            linux-server=loom-linux windows-server=loom-windows.exe
+          calx scripts/release.calx verify dist
+
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          prerelease=""
+          case "$GITHUB_REF_NAME" in *-*) prerelease="--prerelease" ;; esac
+          gh release create "$GITHUB_REF_NAME" dist/* --title "loom ${GITHUB_REF_NAME#v}" --notes-file notes.md $prerelease

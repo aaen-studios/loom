@@ -1,0 +1,83 @@
+module shared.release
+
+// What the desktop app's updater and `loom update` both check of a release
+// (PLAN.md, "Updates and versions"): the manifest's signature, and whether its
+// version is newer. scripts/release.calx makes and signs them.
+import std.bytes
+import std.crypto.{Ed25519PublicKey}
+import std.json.{Json, parse}
+import shared.obj.{Obj}
+
+/// The public key every release is signed with (scripts/release.calx). Its seed is the
+/// CI secret LOOM_RELEASE_KEY.
+pub const RELEASE_KEY: str = "56b1b9f75529f09eb47ef067b775a4e9391d3b794e6f65b4595892066ca0ae56"
+
+/// Where the newest release's manifest is.
+pub const MANIFEST: str = "https://github.com/aaen-studios/loom/releases/latest/download/manifest.json"
+
+/// The manifest, if `sig` (base64) is the signature of `text`'s exact bytes by `key`, a public
+/// key in hex: RELEASE_KEY, but for tests.
+pub fn check_manifest(text: List<u8>, sig: String, key_hex: String) -> Json? {
+    let key = Ed25519PublicKey.from_bytes(bytes.from_hex(key_hex) ?? List<u8>()) else return none
+    let signature = bytes.from_base64(sig.trim().copy()) else return none
+    if not key.verify(text.copy(), signature) { return none }
+    return match parse(String.from_utf8(text.copy()) ?? String()) {
+        ok(j) => some(j),
+        err(_) => none,
+    }
+}
+
+/// A version's numbers, and what follows a `-`: "0.3.0-dev" is ([0, 3, 0], "dev").
+fn parts(version: String) -> (List<i64>, String) {
+    let v = if version.starts_with("v") { version[1..].copy() } else { version.copy() }
+    var pre = String()
+    var main = v.copy()
+    if let i = v.find("-") {
+        main = v[..i].copy()
+        pre = v[i + 1..].copy()
+    }
+    var nums = List<i64>()
+    for n in main.split(".") {
+        nums.push(i64.parse(n.copy()) ?? 0)
+    }
+    while nums.len() < 3 {
+        nums.push(0)
+    }
+    return (nums, pre)
+}
+
+/// Whether `a` is a newer version than `b`. One with a `-` part comes before the same
+/// version without, as semver has it.
+pub fn newer(a: String, b: String) -> bool {
+    let (an, ap) = parts(a)
+    let (bn, bp) = parts(b)
+    for i in 0usize..3 {
+        if an[i] != bn[i] { return an[i] > bn[i] }
+    }
+    if ap == bp { return false }
+    if ap.len() == 0 { return true }
+    if bp.len() == 0 { return false }
+    return ap > bp
+}
+
+@test
+fn versions_are_compared() {
+    assert(newer(String("0.3.0"), String("0.2.0")))
+    assert(newer(String("v0.2.1"), String("0.2.0-dev")))
+    assert(newer(String("0.2.0"), String("0.2.0-dev")))
+    assert(not newer(String("0.2.0-dev"), String("0.2.0")))
+    assert(not newer(String("0.2.0"), String("0.2.0")))
+    assert(newer(String("1.0.0"), String("0.99.9")))
+    assert(newer(String("0.10.0"), String("0.9.0")))
+}
+
+@test
+fn unsigned_manifests_are_refused() {
+    let text = "{Obj.new().s("version", String("9.9.9")).done()}".to_bytes()
+    assert(check_manifest(text.copy(), String(""), String(RELEASE_KEY)) == none)
+    var zeros = List<u8>()
+    for _ in 0..64 {
+        zeros.push(0)
+    }
+    assert(check_manifest(text, bytes.base64(zeros), String(RELEASE_KEY)) == none)
+}
