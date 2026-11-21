@@ -9,7 +9,8 @@ module server.instance
 // next frame is read, and a session's catch-up can't interleave with live
 // events.
 import std.bytes
-import std.crypto.{Ed25519Key, PasswordHasher, compare_digest, random_bytes}
+import std.crypto.{Ed25519Key, PasswordHasher, XChaCha20Poly1305, compare_digest, random_bytes}
+import std.env.{os}
 import std.fs
 import std.hash.{hmac_sha256, sha256}
 import std.http.server.{Request, Response, Server, ServerSocket, content_type}
@@ -137,6 +138,7 @@ struct Proc {
     program: String    // the ACP agent it runs, by loom's name for it
     resume: bool    // whether it offers session/resume
     load: bool    // whether it offers session/load
+    mcp_http: bool    // whether it connects to MCP servers over HTTP itself
     next_id: i64
     pending: Map<i64, Pending>
     sessions: Map<String, String>    // conversation -> ACP session
@@ -175,6 +177,7 @@ pub struct Instance {
     installs: Map<i64, Install>    // installs on the installer's thread
     leftovers: List<String>    // folders of removed ACP agents, removed once their programs have let go
     device_calls: Map<String, DeviceCall>    // tc_ id -> a call sent to a device
+    sealer: XChaCha20Poly1305    // seals and opens secrets, with secret.key, which only the instance reads
     next_sweep: i64
     minute_ms: i64
     next_due: i64    // when to look for routines that are due
@@ -288,6 +291,70 @@ fn program_json(a: AcpAgent) -> Json {
     return Obj.new().s("name", a.name).s("command", a.command).s("source", a.source).s("version", a.version).j("settings", Json.Array(settings)).done()
 }
 
+// The cipher that seals the instance's secrets (PLAN.md, "Accounts and
+// invites"), with the key in secret.key in the data folder: made on the first
+// start, and readable only by the instance's own user. It's kept out of the
+// database, so a copy of loom.db alone opens nothing.
+fn secret_key(data: String) -> XChaCha20Poly1305 ! Error {
+    let path = "{data}/secret.key"
+    if fs.exists(path.copy()) {
+        let key = try fs.read(path.copy())
+        if key.len() != 32 { fail "{path} isn't a 32-byte key" }
+        return XChaCha20Poly1305.new(key)
+    }
+    let key = XChaCha20Poly1305.generate_key()
+    let part = "{path}.part"
+    try fs.write(part.copy(), key.copy())
+    if os() != "windows" { try fs.set_mode(part.copy(), 0o600) }
+    try fs.rename(part, path)
+    return XChaCha20Poly1305.new(key)
+}
+
+// What a secret's seal is bound to, so a sealed value moved to another
+// person or name doesn't open.
+fn secret_aad(user: String, name: String) -> List<u8> {
+    return "loom secret {user}/{name}".to_bytes()
+}
+
+// A secret's name: letters, digits, _, - and ., up to 64.
+fn valid_secret(name: String) -> bool {
+    if name.len() == 0 or name.len() > 64 { return false }
+    for r in name.runes() {
+        let fine = (r >= 'a' and r <= 'z') or (r >= 'A' and r <= 'Z') or (r >= '0' and r <= '9') or r == '_' or r == '-' or r == '.'
+        if not fine { return false }
+    }
+    return true
+}
+
+// An MCP server's env or headers, if each value is text or {"secret": NAME}.
+fn settings_of(j: Json) -> Json? {
+    var o = Obj.new()
+    if j == Json.Null { return some(o.done()) }
+    let Json.Object(m) = j else return none
+    for (k, v) in m {
+        if k.len() == 0 { return none }
+        if let s = v.as_str() {
+            o.m.insert(k.copy(), Json.Str(s))
+        } else if let secret = str_at(v.copy(), "secret") {
+            o.m.insert(k.copy(), Obj.new().s("secret", secret).done())
+        } else {
+            return none
+        }
+    }
+    return some(o.done())
+}
+
+// A list of names, keeping only the text ones.
+fn names_of(j: Json) -> Json {
+    var out = List<Json>()
+    if let Json.Array(items) = j {
+        for n in items {
+            if let s = n.as_str() { out.push(Json.Str(s)) }
+        }
+    }
+    return Json.Array(out)
+}
+
 // A JSON object with only its string values.
 fn strings_only(j: Json) -> Json {
     var o = Obj.new()
@@ -362,7 +429,7 @@ impl Instance {
         let (hash_to, hash_done) = hashing.start(config.hasher)
         let dummy = config.hasher.hash(bytes.hex(random_bytes(16)))
         let (install_to, install_done) = installer.start()
-        return Instance { store: store, server: server, data: config.data.copy(), sessions: Map<u32, Session>(), runs: LinkedMap<String, Run>(), procs: LinkedMap<String, Proc>(), approvals: LinkedMap<String, Approval>(), lines: lines, lines_to: to, hash_to: hash_to, hash_done: hash_done, next_job: 0, auths: Map<i64, Auth>(), dummy_hash: dummy, failures: LinkedMap<String, List<i64>>(), thumbs: files.start(), events: config.events, next_prune: 0, grants: Map<String, Grant>(), calls: Map<String, Request>(), registry_at: config.registry.copy(), registry: Json.Null, registry_time: 0, install_to: install_to, install_done: install_done, fetching: List<Waiter>(), installs: Map<i64, Install>(), leftovers: List<String>(), next_sweep: 0, device_calls: Map<String, DeviceCall>(), minute_ms: config.minute_ms, next_due: 0, routine_runs: Map<String, RoutineRun>() }
+        return Instance { store: store, server: server, data: config.data.copy(), sessions: Map<u32, Session>(), runs: LinkedMap<String, Run>(), procs: LinkedMap<String, Proc>(), approvals: LinkedMap<String, Approval>(), lines: lines, lines_to: to, hash_to: hash_to, hash_done: hash_done, next_job: 0, auths: Map<i64, Auth>(), dummy_hash: dummy, failures: LinkedMap<String, List<i64>>(), thumbs: files.start(), events: config.events, next_prune: 0, grants: Map<String, Grant>(), calls: Map<String, Request>(), registry_at: config.registry.copy(), registry: Json.Null, registry_time: 0, install_to: install_to, install_done: install_done, fetching: List<Waiter>(), installs: Map<i64, Install>(), leftovers: List<String>(), next_sweep: 0, device_calls: Map<String, DeviceCall>(), minute_ms: config.minute_ms, next_due: 0, routine_runs: Map<String, RoutineRun>(), sealer: try secret_key(config.data.copy()) }
     }
 
     pub fn url(self) -> String {
@@ -594,7 +661,7 @@ impl Instance {
     // --- Loom's own tools (PLAN.md, "Loom's own tools") ---
 
     // `loom mcp` for an agent's ACP session, with a token for that agent.
-    fn mcp_servers(i: mut Instance, user: String, agent: String) -> Json {
+    fn mcp_servers(i: mut Instance, user: String, agent: String, http: bool) -> Json {
         var token = String()
         for (t, g) in i.grants {
             if g.user == user and g.agent == agent { token = t.copy() }
@@ -607,7 +674,80 @@ impl Instance {
         let base = if address.ends_with("/") { address[..address.len() - 1].copy() } else { address }
         let env = Json.Array([Obj.new().s("name", String("LOOM_URL")).s("value", base).done(), Obj.new().s("name", String("LOOM_MCP_TOKEN")).s("value", token).done()])
         let loom = Obj.new().s("name", String("loom")).s("command", current_exe()).j("args", Json.Array([Json.Str(String("mcp"))])).j("env", env).done()
-        return Json.Array([loom])
+        var out: List<Json> = [loom]
+        // And the person's MCP servers the agent has.
+        let wanted = match i.store.agent(user.copy(), agent.copy()) {
+            ok(some(a)) => a,
+            _ => Json.Null,
+        }
+        if let Json.Array(names) = at(wanted, "mcp") {
+            for n in names {
+                let name = n.as_str() ?? String()
+                let server = match i.store.mcp_server(user.copy(), name.copy()) {
+                    ok(some(s)) => s,
+                    _ => continue,
+                }
+                if let s = i.session_server(user.copy(), server, http) { out.push(s) }
+            }
+        }
+        return Json.Array(out)
+    }
+
+    // One of the person's MCP servers as ACP's session/new takes it, with its
+    // secrets filled in. none for one over HTTP the agent can't use, or one
+    // whose secret is missing.
+    fn session_server(i: Instance, user: String, server: Json, http: bool) -> Json? {
+        let name = str_at(server.copy(), "name") ?? String()
+        if let address = str_at(server.copy(), "url") {
+            if not http {
+                eprintln("loom: the MCP server {name} is over HTTP, which this agent program can't use")
+                return none
+            }
+            let headers = i.pairs(user, at(server, "headers")) else return none
+            return some(Obj.new().s("type", String("http")).s("name", name).s("url", address).j("headers", headers).done())
+        }
+        let env = i.pairs(user, at(server.copy(), "env")) else return none
+        let args = if at(server.copy(), "args") == Json.Null { Json.Array(List<Json>()) } else { at(server.copy(), "args") }
+        return some(Obj.new().s("name", name).s("command", str_at(server, "command") ?? String()).j("args", args).j("env", env).done())
+    }
+
+    // {NAME: value} as ACP's [{name, value}], with each secret filled in.
+    fn pairs(i: Instance, user: String, values: Json) -> Json? {
+        var out = List<Json>()
+        if let Json.Object(m) = values {
+            for (k, v) in m {
+                let value = i.value_of(user.copy(), v.copy()) else {
+                    eprintln("loom: the MCP server setting {k} names a secret that isn't there")
+                    return none
+                }
+                out.push(Obj.new().s("name", k.copy()).s("value", value).done())
+            }
+        }
+        return some(Json.Array(out))
+    }
+
+    // A setting's value: text as it is, or {"secret": NAME} as that secret.
+    fn value_of(i: Instance, user: String, v: Json) -> String? {
+        if let s = v.as_str() { return some(s) }
+        let name = str_at(v, "secret") else return none
+        return match i.secret(user, name) {
+            ok(found) => found,
+            err(e) => {
+                eprintln("loom: a secret didn't open: {e}")
+                none
+            },
+        }
+    }
+
+    // `user`'s secret `name`, opened, or none if there's no such secret.
+    fn secret(i: Instance, user: String, name: String) -> String? ! Error {
+        let (nonce, sealed) = try i.store.sealed_secret(user.copy(), name.copy()) else return none
+        let n = bytes.from_hex(nonce) else return none
+        let s = bytes.from_hex(sealed) else return none
+        let opened = i.sealer.decrypt(n, s, secret_aad(user, name.copy())) else {
+            fail "the secret {name} doesn't open with this instance's key"
+        }
+        return String.from_utf8(opened)
     }
 
     // GET /api/mcp/tools and POST /api/mcp/call, from `loom mcp`. A call
@@ -1492,7 +1632,7 @@ impl Instance {
         }
         i.write_skills(user.copy(), folder.copy())
         let to = try acp.start(id.copy(), acp_agent.command, acp_agent.args, acp_agent.env, folder, i.lines_to.copy())
-        var p = Proc { agent: id.copy(), user: user.copy(), to: to, ready: false, images: false, program: program, resume: false, load: false, next_id: 1, pending: Map<i64, Pending>(), sessions: Map<String, String>(), told: Map<String, String>(), profiled: Map<String, i64>(), waiting: List<String>() }
+        var p = Proc { agent: id.copy(), user: user.copy(), to: to, ready: false, images: false, program: program, resume: false, load: false, mcp_http: false, next_id: 1, pending: Map<i64, Pending>(), sessions: Map<String, String>(), told: Map<String, String>(), profiled: Map<String, i64>(), waiting: List<String>() }
         p.pending.insert(1, Pending.Init)
         p.to.send(Out.Send(acp.request(1, "initialize", acp.initialize_params())))
         i.procs.insert(id, p)
@@ -1541,7 +1681,7 @@ impl Instance {
                 }
                 let method = if p.resume { "session/resume" } else { "session/load" }
                 p.pending.insert(id, Pending.Resume(run_id.copy(), session.copy()))
-                p.to.send(Out.Send(acp.request(id, method, Obj.new().s("sessionId", session).s("cwd", folder).j("mcpServers", i.mcp_servers(user.copy(), agent.copy())).done())))
+                p.to.send(Out.Send(acp.request(id, method, Obj.new().s("sessionId", session).s("cwd", folder).j("mcpServers", i.mcp_servers(user.copy(), agent.copy(), p.mcp_http)).done())))
                 return
             }
         }
@@ -1564,7 +1704,7 @@ impl Instance {
         }
         p.next_id += 1
         p.pending.insert(p.next_id, Pending.NewSession(run_id.copy()))
-        p.to.send(Out.Send(acp.request(p.next_id, "session/new", Obj.new().s("cwd", folder).j("mcpServers", i.mcp_servers(user, agent)).done())))
+        p.to.send(Out.Send(acp.request(p.next_id, "session/new", Obj.new().s("cwd", folder).j("mcpServers", i.mcp_servers(user, agent, p.mcp_http)).done())))
     }
 
     // Puts an agent's instructions in its folder, as AGENTS.md and CLAUDE.md,
@@ -1782,6 +1922,7 @@ impl Instance {
                 let caps = at(result, "agentCapabilities")
                 p.images = bool_at(at(caps.copy(), "promptCapabilities"), "image") ?? false
                 p.load = bool_at(caps.copy(), "loadSession") ?? false
+                p.mcp_http = bool_at(at(caps.copy(), "mcpCapabilities"), "http") ?? false
                 p.resume = match at(at(caps, "sessionCapabilities"), "resume") {
                     Json.Object(_) => true,
                     _ => false,
@@ -2505,7 +2646,7 @@ impl Instance {
             // Each new agent takes the next of the eight thread colours, unless it names one.
             let count = (try i.store.agents(user.copy())).len()
             let color = str_at(args.copy(), "color") ?? String(COLORS[count % COLORS.len()])
-            let agent = Obj.new().s("id", id).s("name", str_at(args.copy(), "name") ?? String("Agent")).s("color", color).s("acp_agent", program).s("instructions", str_at(args.copy(), "instructions") ?? String()).maybe("folder", str_at(args.copy(), "folder")).s("permission", str_at(args, "permission") ?? String("ask")).i("revision", 1).i("at", now()).done()
+            let agent = Obj.new().s("id", id).s("name", str_at(args.copy(), "name") ?? String("Agent")).s("color", color).s("acp_agent", program).s("instructions", str_at(args.copy(), "instructions") ?? String()).maybe("folder", str_at(args.copy(), "folder")).j("mcp", names_of(at(args.copy(), "mcp"))).s("permission", str_at(args, "permission") ?? String("ask")).i("revision", 1).i("at", now()).done()
             try i.store.put_agent(user.copy(), agent.copy(), device.copy())
             i.log(user.copy(), str_at(agent.copy(), "id") ?? String(), "agent", "Made {str_at(agent.copy(), "name") ?? String()}", device.copy())
             try i.event(user, "agent.created", Obj.new().j("agent", agent.copy()).done())
@@ -2524,6 +2665,7 @@ impl Instance {
             for key in keys {
                 if let v = str_at(args.copy(), key) { o.m.insert(String(key), Json.Str(v)) }
             }
+            if let Json.Array(_) = at(args.copy(), "mcp") { o.m.insert(String("mcp"), names_of(at(args.copy(), "mcp"))) }
             let agent = o.i("revision", (int_at(old, "revision") ?? 0) + 1).done()
             try i.store.put_agent(user.copy(), agent.copy(), device.copy())
             // New sessions start with the new instructions.
@@ -2571,6 +2713,57 @@ impl Instance {
         if name == "memory.delete" {
             let id = int_at(args, "id") ?? 0
             if not try i.store.forget(user, id, none) { return Answer.Refused(String("not_found"), "There's no note {id}.") }
+            return Answer.Value(empty)
+        }
+        if name == "secret.list" {
+            return Answer.Value(Obj.new().j("secrets", Json.Array(try i.store.secret_names(user))).done())
+        }
+        if name == "secret.put" {
+            let secret_name = str_at(args.copy(), "name") ?? String()
+            let value = str_at(args, "value") ?? String()
+            if not valid_secret(secret_name.copy()) { return Answer.Refused(String("bad_request"), String("A secret's name is letters, digits, _, - and ., such as ACTA_KEY.")) }
+            if value.len() == 0 { return Answer.Refused(String("bad_request"), String("The secret is empty.")) }
+            let nonce = random_bytes(24)
+            let sealed = i.sealer.encrypt(nonce.copy(), value.to_bytes(), secret_aad(user.copy(), secret_name.copy()))
+            try i.store.put_secret(user, secret_name.copy(), bytes.hex(nonce), bytes.hex(sealed))
+            return Answer.Value(Obj.new().s("name", secret_name).done())
+        }
+        if name == "secret.delete" {
+            let secret_name = str_at(args, "name") ?? String()
+            if not try i.store.delete_secret(user, secret_name.copy()) { return Answer.Refused(String("not_found"), "There's no secret {secret_name}.") }
+            return Answer.Value(empty)
+        }
+        if name == "mcp.list" {
+            return Answer.Value(Obj.new().j("servers", Json.Array(try i.store.mcp_servers(user))).done())
+        }
+        if name == "mcp.put" {
+            let server_name = str_at(args.copy(), "name") ?? String()
+            if not valid_skill(server_name.copy()) or server_name == "loom" { return Answer.Refused(String("bad_request"), String("An MCP server's name is lowercase letters, digits and hyphens, and isn't loom.")) }
+            let command = str_at(args.copy(), "command") ?? String()
+            let address = str_at(args.copy(), "url") ?? String()
+            if (command.len() == 0) == (address.len() == 0) { return Answer.Refused(String("bad_request"), String("An MCP server has a command, or a url, and not both.")) }
+            if address.len() > 0 and not address.starts_with("https://") and not address.starts_with("http://") { return Answer.Refused(String("bad_request"), "{address} isn't an http:// or https:// address.") }
+            var server = Obj.new().s("name", server_name.copy())
+            if command.len() > 0 {
+                var list = List<Json>()
+                if let Json.Array(given) = at(args.copy(), "args") {
+                    for a in given {
+                        if let s = a.as_str() { list.push(Json.Str(s)) }
+                    }
+                }
+                let env = settings_of(at(args.copy(), "env")) else return Answer.Refused(String("bad_request"), String(#"Each value in env is text, or {"secret": NAME}."#))
+                server = server.s("command", command).j("args", Json.Array(list)).j("env", env)
+            } else {
+                let headers = settings_of(at(args.copy(), "headers")) else return Answer.Refused(String("bad_request"), String(#"Each value in headers is text, or {"secret": NAME}."#))
+                server = server.s("url", address).j("headers", headers)
+            }
+            let done = server.done()
+            try i.store.put_mcp_server(user, done.copy())
+            return Answer.Value(Obj.new().j("server", done).done())
+        }
+        if name == "mcp.delete" {
+            let server_name = str_at(args, "name") ?? String()
+            if not try i.store.delete_mcp_server(user, server_name.copy()) { return Answer.Refused(String("not_found"), "There's no MCP server {server_name}.") }
             return Answer.Value(empty)
         }
         if name == "skill.list" {

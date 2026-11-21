@@ -55,6 +55,100 @@ pub struct Agent {
     pub program: String,
     pub permission: String,
     pub instructions: String,
+    /// The names of the person's MCP servers it has.
+    pub mcp: Vec<String>,
+}
+
+/// One of the person's MCP servers.
+#[derive(Clone, Debug)]
+pub struct McpServer {
+    pub name: String,
+    /// The command line, for one the agent starts; empty for one over HTTP.
+    pub command: String,
+    pub url: String,
+    /// Its env or headers: each name, and its text or the secret it names.
+    pub settings: Vec<(String, Setting)>,
+}
+
+#[derive(Clone, Debug)]
+pub enum Setting {
+    Text(String),
+    Secret(String),
+}
+
+impl McpServer {
+    fn of(v: &Value) -> McpServer {
+        let mut command = s(v, "command");
+        if let Some(args) = v.get("args").and_then(Value::as_array) {
+            for a in args.iter().filter_map(Value::as_str) {
+                command.push(' ');
+                command.push_str(a);
+            }
+        }
+        let pairs = v
+            .get("env")
+            .or_else(|| v.get("headers"))
+            .and_then(Value::as_object);
+        let settings = pairs
+            .map(|m| {
+                m.iter()
+                    .map(|(k, v)| {
+                        let value = match v.get("secret").and_then(Value::as_str) {
+                            Some(name) => Setting::Secret(name.to_string()),
+                            None => Setting::Text(v.as_str().unwrap_or_default().to_string()),
+                        };
+                        (k.clone(), value)
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        McpServer {
+            name: s(v, "name"),
+            command,
+            url: s(v, "url"),
+            settings,
+        }
+    }
+
+    /// Its settings as the form shows them, one `NAME=value` or `NAME=secret:KEY` a line.
+    pub fn settings_text(&self) -> String {
+        self.settings
+            .iter()
+            .map(|(k, v)| match v {
+                Setting::Text(t) => format!("{k}={t}"),
+                Setting::Secret(n) => format!("{k}=secret:{n}"),
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+}
+
+/// The `mcp.put` arguments for a server as the form has it: a command line, or an http(s)
+/// address, and its settings, one `NAME=value` or `NAME=secret:KEY` a line.
+pub fn server_args(name: &str, line: &str, settings: &str) -> Value {
+    let mut pairs = serde_json::Map::new();
+    for l in settings.lines() {
+        let Some((k, v)) = l.split_once('=') else {
+            continue;
+        };
+        let (k, v) = (k.trim(), v.trim());
+        if k.is_empty() {
+            continue;
+        }
+        let value = match v.strip_prefix("secret:") {
+            Some(n) => json!({"secret": n.trim()}),
+            None => json!(v),
+        };
+        pairs.insert(k.to_string(), value);
+    }
+    let line = line.trim();
+    if line.starts_with("http://") || line.starts_with("https://") {
+        return json!({"name": name.trim(), "url": line, "headers": pairs});
+    }
+    let mut words = line.split_whitespace();
+    let command = words.next().unwrap_or_default();
+    let args: Vec<&str> = words.collect();
+    json!({"name": name.trim(), "command": command, "args": args, "env": pairs})
 }
 
 /// The tools a device offers agents, as the core names them.
@@ -428,6 +522,10 @@ pub struct Model {
     programs_stale: bool,
     /// What this device offers agents, each tool with `off`, `ask` or `allow`.
     pub device_tools: Vec<(String, String)>,
+    /// The person's MCP servers, and the names of their secrets.
+    pub mcp_servers: Vec<McpServer>,
+    pub secrets: Vec<String>,
+    mcp_stale: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -503,6 +601,9 @@ impl Model {
         let mut out = Vec::new();
         if std::mem::take(&mut self.revisions_stale) && self.editing.is_some() {
             out.push(self.revisions_cmd());
+        }
+        if std::mem::take(&mut self.mcp_stale) {
+            out.extend(self.load_mcp());
         }
         if std::mem::take(&mut self.programs_stale) {
             out.push(self.programs());
@@ -870,6 +971,23 @@ impl Model {
                         .collect()
                 })
                 .unwrap_or_default();
+        } else if id.starts_with("app.mcp_list") {
+            self.mcp_servers = f
+                .pointer("/value/servers")
+                .and_then(Value::as_array)
+                .map(|ss| ss.iter().map(McpServer::of).collect())
+                .unwrap_or_default();
+        } else if id.starts_with("app.secrets") {
+            self.secrets = f
+                .pointer("/value/secrets")
+                .and_then(Value::as_array)
+                .map(|ss| ss.iter().map(|k| s(k, "name")).collect())
+                .unwrap_or_default();
+        } else if id.starts_with("app.mcp_") || id.starts_with("app.secret_") {
+            if let Some(e) = f.get("error") {
+                self.notices.push(s(e, "message"));
+            }
+            self.mcp_stale = true;
         } else if id.starts_with("app.registry") {
             self.registry_loading = false;
             if let Some(e) = f.get("error") {
@@ -971,6 +1089,16 @@ impl Model {
                         program: s(a, "acp_agent"),
                         permission: s(a, "permission"),
                         instructions: s(a, "instructions"),
+                        mcp: a
+                            .get("mcp")
+                            .and_then(Value::as_array)
+                            .map(|ns| {
+                                ns.iter()
+                                    .filter_map(Value::as_str)
+                                    .map(str::to_string)
+                                    .collect()
+                            })
+                            .unwrap_or_default(),
                     })
                     .collect();
                 if let Some(made) = self.made_agent.take() {
@@ -1425,6 +1553,50 @@ impl Model {
         let id = self.id("app.rollback");
         Some(
             json!({"t": "cmd", "id": id, "name": "agent.rollback", "args": {"agent": agent, "revision": revision}}),
+        )
+    }
+
+    /// Asks for the person's MCP servers and their secrets' names.
+    pub fn load_mcp(&mut self) -> Vec<Value> {
+        let (a, b) = (self.id("app.mcp_list"), self.id("app.secrets"));
+        vec![
+            json!({"t": "cmd", "id": a, "name": "mcp.list"}),
+            json!({"t": "cmd", "id": b, "name": "secret.list"}),
+        ]
+    }
+
+    pub fn put_mcp(&mut self, args: Value) -> Value {
+        let id = self.id("app.mcp_put");
+        json!({"t": "cmd", "id": id, "name": "mcp.put", "args": args})
+    }
+
+    pub fn delete_mcp(&mut self, name: &str) -> Value {
+        let id = self.id("app.mcp_delete");
+        json!({"t": "cmd", "id": id, "name": "mcp.delete", "args": {"name": name}})
+    }
+
+    pub fn put_secret(&mut self, name: &str, value: &str) -> Value {
+        let id = self.id("app.secret_put");
+        json!({"t": "cmd", "id": id, "name": "secret.put", "args": {"name": name.trim(), "value": value}})
+    }
+
+    pub fn delete_secret(&mut self, name: &str) -> Value {
+        let id = self.id("app.secret_delete");
+        json!({"t": "cmd", "id": id, "name": "secret.delete", "args": {"name": name}})
+    }
+
+    /// Gives the agent being edited the MCP server `name`, or takes it away.
+    pub fn toggle_mcp(&mut self, name: &str) -> Option<Value> {
+        let agent = self.editing.clone()?;
+        let mut names = self.agent(&agent)?.mcp.clone();
+        if let Some(i) = names.iter().position(|n| n == name) {
+            names.remove(i);
+        } else {
+            names.push(name.to_string());
+        }
+        let id = self.id("app.save");
+        Some(
+            json!({"t": "cmd", "id": id, "name": "agent.update", "args": {"agent": agent, "mcp": names}}),
         )
     }
 
