@@ -365,7 +365,8 @@ pub struct Routine {
     pub secret: String,
     /// When it runs next (Unix ms), or 0 while it's paused.
     pub next: i64,
-    /// How its last run went: running, done, failed, skipped, or "" before the first.
+    /// How its last run went: running, done, quiet (nothing new), failed, skipped, or "" before
+    /// the first.
     pub last_status: String,
     pub last_at: i64,
     pub last_error: String,
@@ -1596,8 +1597,8 @@ impl Model {
                 let conversation = s(f, "conversation");
                 if Some(conversation.clone()) == self.conversation() {
                     self.dirty.insert(List::Messages);
-                    // A pin put on or taken off here.
-                    if kind == "message.updated" {
+                    // A pin put on or taken off here, or a pinned message gone.
+                    if kind == "message.updated" || kind == "message.deleted" {
                         self.pins_stale = true;
                     }
                 } else if kind == "message.created" && self.synced && s(&message, "role") == "agent"
