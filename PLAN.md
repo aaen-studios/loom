@@ -91,7 +91,7 @@ bool      loom_push_open(const uint8_t *keyring, size_t klen, const uint8_t *sea
 
 People who don't want a server run their instance in the desktop app. On first start the app offers to begin, which runs one here, or to sign in to an instance on a server. Then it makes the first agent with the person: a brain (the agent program it runs on), a name (or one from the die) and a colour.
 
-- **The same server code, in the same library.** The server is compiled into the app's static library beside the core, since a process can hold only one Calx runtime. With `{"mode":"local"}` in its config, `loom_core_start` also starts the server on its own thread, listening on 127.0.0.1 on a free port with a token made for that launch. The core then connects to it as it would to any instance. One protocol and one code path, so whatever works on a server works here.
+- **The same server code, in the same library.** The server is compiled into the app's static library beside the core, since a process can hold only one Calx runtime. With `{"mode":"local"}` in its config, `loom_core_start` also starts the server on its own thread, listening on 127.0.0.1 on the port it had last time (kept in its data, as `port`, so the person's scripts find it in the same place), or a free one if that's taken, with a token made for that launch. The core then connects to it as it would to any instance. One protocol and one code path, so whatever works on a server works here.
 - **Data** goes in the app's data folder (`%APPDATA%\Loom`, `~/Library/Application Support/Loom`), and the agents' folders go there or wherever you choose.
 - **Just you, no password.** Your account on the computer is the lock. A desktop instance is for its owner and their own devices. To share it with other people, move it to a server.
 - **Agents work on your computer.** They're the ACP agents installed there, with your own logins, and their commands run in PowerShell on Windows and zsh on macOS.
@@ -354,6 +354,13 @@ Ideas taken from OpenBot ([CopilotKit's](https://github.com/CopilotKit/OpenBot),
 - **Long jobs are tasks**: each one an agent working in a conversation of its own, beside its chat, so the chat stays free. The person starts one from the Tasks page, or an agent starts one itself (`start_task`) when it's asked for something long. A task survives a restart of the instance, carrying on in the same ACP session, and the person can watch it, talk to it, pause, resume, cancel or retry it.
 - **Routines say when there's nothing to say.** A run can end with `routine_quiet` (no message, no notification), report a failure with `routine_failed`, or pause its own routine. A routine that fails five times in a row turns itself off and tells its person. A routine can post into its agent's chat or a thread of its own.
 - **A backup brain.** An agent can have a second program, which takes over when the first one's usage runs out, and the person can move a chat to another program with a handoff: the new one starts with a summary of what came before.
+
+### Scripts
+
+- **The person's own scripts reach their agents**: a script asks an agent and waits for its answer, runs a routine, or answers what waits for the person's yes, through `/api/scripts/` on the instance or loom's command line (`loom ask`, `loom routine run`, `loom approvals`, `loom approve`). A cron job asks for a summary, a build script answers an approval.
+- **Off until the person turns them on**, in the app's server settings, which gives a script token, shown once. Only its SHA-256 is kept. Turning scripts off, or on again, ends the last one.
+- **Only from the instance's own computer**, straight: a loopback address, and nothing forwarded through a proxy in front of it or the phones' bridge, which say so in their headers. A token copied elsewhere is no use.
+- **A script speaks for the person.** What it asks goes in the agent's chat as from a script, and its yes is the person's yes, in the activity log as the script's. A call to one of the person's devices is still answered on a device, which signs it. Agents can't turn scripts on.
 
 ### Rules, records and limits
 

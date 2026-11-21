@@ -22,12 +22,12 @@ import std.crypto.{PasswordHasher}
 import std.env
 import std.fs
 import std.hash.{sha256}
-import std.http.{Header, get}
+import std.http.{Header, get, post}
 import std.http.server.{Server}
 import std.io
-import std.json.{Json}
+import std.json.{Json, parse}
 import std.process.{current_exe, exit}
-import shared.obj.{Obj, at, str_at}
+import shared.obj.{Obj, at, bool_at, str_at}
 import shared.protocol
 import shared.release.{MANIFEST, RELEASE_KEY, check_manifest, newer}
 import server.instance.{Config, EventLife, Instance}
@@ -69,6 +69,14 @@ usage: loom <command>
   receive                   take a move into --data: prints a one-time move code, listens on --port and
                             --host, and returns once the instance has come. --data must hold no instance,
                             or one no one has set up yet
+  ask AGENT TEXT ...        your script asks AGENT, by name, in its chat (or --conversation ID), and
+                            prints its answer once it's done
+  routine run NAME          your script runs one of your routines now
+  approvals                 list what waits for your yes
+  approve CALL yes|no       answer one of them
+                            These four reach the running instance on this computer, at --url (or LOOM_URL,
+                            or 127.0.0.1 at --port), with the script token you made in the app's server
+                            settings: --token, or LOOM_SCRIPTS_TOKEN
   status                    say what the instance holds
   install                   set loom up on a Linux server, as root: the loom user, a systemd service,
                             and Caddy for TLS with --domain DOMAIN, or Tailscale without one, and Podman
@@ -107,10 +115,13 @@ struct Args {
     sandboxes: String    // what runs everyone else's agents: podman, or "" for nothing
     sandbox_image: String
     no_sandboxes: bool    // loom install sets no sandboxes up
+    url: String    // for scripts: the instance's address
+    token: String    // and the person's script token
+    conversation: String
 }
 
 fn read_args(given: List<String>) -> Args ! Error {
-    var a = Args { words: List<String>(), data: String("loom-data"), port: 8790, host: String("127.0.0.1"), fast_hashes: false, keep_events: none, registry: String(installer.REGISTRY), minute_ms: 60000, allow_root: false, json: false, domain: String(), apns: String(), backups: String(), backups_keep: 7, backup_every_ms: 86400000, lan: false, sandboxes: String(), sandbox_image: String(), no_sandboxes: false }
+    var a = Args { words: List<String>(), data: String("loom-data"), port: 8790, host: String("127.0.0.1"), fast_hashes: false, keep_events: none, registry: String(installer.REGISTRY), minute_ms: 60000, allow_root: false, json: false, domain: String(), apns: String(), backups: String(), backups_keep: 7, backup_every_ms: 86400000, lan: false, sandboxes: String(), sandbox_image: String(), no_sandboxes: false, url: String(), token: String(), conversation: String() }
     var i: usize = 0
     while i < given.len() {
         let w = given[i].copy()
@@ -169,6 +180,14 @@ fn read_args(given: List<String>) -> Args ! Error {
         if w == "--domain" {
             if i + 1 >= given.len() { fail "{w} needs a domain" }
             a.domain = given[i + 1].copy()
+            i += 2
+            continue
+        }
+        // For scripts: where the instance is, the script token, and the conversation to ask in.
+        if w == "--url" or w == "--token" or w == "--conversation" {
+            if i + 1 >= given.len() { fail "{w} needs a value" }
+            let v = given[i + 1].copy()
+            if w == "--url" { a.url = v } else if w == "--token" { a.token = v } else { a.conversation = v }
             i += 2
             continue
         }
@@ -313,6 +332,32 @@ fn main() ! Error {
     }
 }
 
+// A call to the running instance's scripts API, on this computer: POST with
+// `body`, or GET without. The address is --url, or LOOM_URL, or the instance at
+// --port here; the token is --token, or LOOM_SCRIPTS_TOKEN.
+fn script(a: Args, op: str, body: Json?) -> Json ! Error {
+    let token = if a.token.len() > 0 { a.token.copy() } else { env.variable(String("LOOM_SCRIPTS_TOKEN")) ?? String() }
+    if token.len() == 0 { fail "give your script token with --token or LOOM_SCRIPTS_TOKEN: turn scripts on in the app, under the server, to get one" }
+    let base = if a.url.len() > 0 { a.url.copy() } else { env.variable(String("LOOM_URL")) ?? "http://127.0.0.1:{a.port}" }
+    let url = "{base.trim_suffix("/")}/api/scripts/{op}"
+    let auth = Header { name: String("Authorization"), value: "Bearer {token}" }
+    var req = match body {
+        some(b) => post(url, [auth, Header { name: String("Content-Type"), value: String("application/json") }], "{b}".to_bytes(), SCRIPT_WAIT, SCRIPT_ANSWER_MOST),
+        none => get(url, [auth], SCRIPT_WAIT, SCRIPT_ANSWER_MOST),
+    }
+    let got = try req.wait()
+    let reply = match parse(String.from_utf8(got.body) ?? String()) {
+        ok(j) => j,
+        err(_) => Json.Null,
+    }
+    if got.status != 200 { fail str_at(at(reply, "error"), "message") ?? "the instance answered {got.status}" }
+    return reply
+}
+
+// How long a script waits for an agent's answer, and how big it may be.
+const SCRIPT_WAIT: u32 = 3600000
+const SCRIPT_ANSWER_MOST: usize = 16777216
+
 // An error, as --json gives it.
 fn failure(code: str, message: String) -> Json {
     return Obj.new().j("error", Obj.new().s("code", String(code)).s("message", message).done()).done()
@@ -324,6 +369,36 @@ fn run(a: Args) -> Said ! Error {
     let sub = if a.words.len() > 1 { a.words[1].copy() } else { String() }
     if cmd == "version" {
         return said(version_line(), Obj.new().s("version", String(VERSION)).i("protocol_oldest", i64(protocol.OLDEST)).i("protocol_newest", i64(protocol.NEWEST)).done())
+    }
+    // Scripts (PLAN.md, "Scripts"): the person's own, through the running instance.
+    if cmd == "ask" and a.words.len() >= 3 {
+        var words = List<String>()
+        for k in 2usize..a.words.len() { words.push(a.words[k].copy()) }
+        var body = Obj.new().s("agent", a.words[1].copy()).s("text", words.join(" "))
+        if a.conversation.len() > 0 { body = body.s("conversation", a.conversation.copy()) }
+        let v = try script(a.copy(), "ask", some(body.done()))
+        return said(str_at(v.copy(), "reply") ?? String(), v)
+    }
+    if cmd == "routine" and sub == "run" and a.words.len() == 3 {
+        let v = try script(a.copy(), "routine", some(Obj.new().s("routine", a.words[2].copy()).done()))
+        return said(String("Started."), v)
+    }
+    if cmd == "approvals" and a.words.len() == 1 {
+        let v = try script(a.copy(), "approvals", none)
+        var lines = List<String>()
+        if let Json.Array(list) = at(v.copy(), "approvals") {
+            for x in list {
+                let where = if bool_at(x.copy(), "on_a_device") == some(true) { " (answer it on a device)" } else { "" }
+                lines.push("{str_at(x.copy(), "call") ?? String()}  {str_at(x.copy(), "agent_name") ?? String()}: {str_at(x, "title") ?? String()}{where}")
+            }
+        }
+        return said(if lines.len() == 0 { String("Nothing is waiting for you.") } else { lines.join("\n") }, v)
+    }
+    if cmd == "approve" and a.words.len() == 3 {
+        let answer = a.words[2].copy()
+        if answer != "yes" and answer != "no" { fail "approve takes CALL and yes or no, not {answer}" }
+        let v = try script(a.copy(), "approve", some(Obj.new().s("call", a.words[1].copy()).b("allow", answer == "yes").done()))
+        return said(if answer == "yes" { String("Allowed.") } else { String("Denied.") }, v)
     }
     if cmd == "user" and sub == "add" and a.words.len() == 3 {
         let store = try open_store(a.copy())

@@ -772,6 +772,10 @@ pub struct Model {
     pub to_open: Vec<String>,
     /// The page shown beside the chat, from an agent's html_render.
     pub page: Option<FileRef>,
+    /// Whether the person's scripts are on (PLAN.md, "Scripts"), and the port the
+    /// instance listens on, once asked; and a new script token, shown once.
+    pub scripts: Option<(bool, u64)>,
+    pub script_token: Option<String>,
     /// What's typed in search, and what the newest search found.
     pub query: String,
     pub hits: Vec<Hit>,
@@ -1766,6 +1770,25 @@ impl Model {
                 self.notices.push(s(e, "message"));
             }
             self.plugins_stale = true;
+        } else if id.starts_with("app.scripts_") {
+            if let Some(e) = f.get("error") {
+                self.notices.push(s(e, "message"));
+                return;
+            }
+            let port = f
+                .pointer("/value/port")
+                .and_then(Value::as_u64)
+                .unwrap_or(0);
+            let on = if id.starts_with("app.scripts_get") {
+                f.pointer("/value/on").and_then(Value::as_bool) == Some(true)
+            } else {
+                id.starts_with("app.scripts_on")
+            };
+            self.script_token = f
+                .pointer("/value/token")
+                .and_then(Value::as_str)
+                .map(String::from);
+            self.scripts = Some((on, port));
         } else if id.starts_with("app.tables") {
             self.tables = f
                 .pointer("/value/tables")
@@ -2806,6 +2829,24 @@ impl Model {
         Ok(json!({"t": "cmd", "id": id, "name": name, "args": cmd_args}))
     }
 
+    /// Asks whether the person's scripts are on.
+    pub fn load_scripts(&mut self) -> Value {
+        self.script_token = None;
+        let id = self.id("app.scripts_get");
+        json!({"t": "cmd", "id": id, "name": "scripts.get", "args": {}})
+    }
+
+    /// Turns scripts on, or off, or with `on` again, makes a new token.
+    pub fn set_scripts(&mut self, on: bool) -> Value {
+        self.script_token = None;
+        let (id, name) = if on {
+            (self.id("app.scripts_on"), "scripts.on")
+        } else {
+            (self.id("app.scripts_off"), "scripts.off")
+        };
+        json!({"t": "cmd", "id": id, "name": name, "args": {}})
+    }
+
     /// Asks for the person's shared tables, and the open one's newest rows.
     pub fn load_tables(&mut self) -> Vec<Value> {
         let mut out = vec![
@@ -3247,6 +3288,29 @@ mod tests {
             !m.unread.contains("a_1"),
             "its answer doesn't mark the agent unread"
         );
+    }
+
+    #[test]
+    fn scripts_are_turned_on_with_a_token_shown_once() {
+        let mut m = Model::new();
+        let f = m.load_scripts();
+        assert_eq!(f["name"], "scripts.get");
+        m.take(&json!({"t": "result", "id": f["id"], "ok": true, "value": {"on": false, "since": null, "port": 8790}}));
+        assert_eq!(m.scripts, Some((false, 8790)));
+        let f = m.set_scripts(true);
+        assert_eq!(f["name"], "scripts.on");
+        m.take(&json!({"t": "result", "id": f["id"], "ok": true, "value": {"token": "loom-script-ab", "port": 8790}}));
+        assert_eq!(m.scripts, Some((true, 8790)));
+        assert_eq!(m.script_token.as_deref(), Some("loom-script-ab"));
+        // Coming back to the page, it's on, and the token isn't shown again.
+        let f = m.load_scripts();
+        assert!(m.script_token.is_none());
+        m.take(&json!({"t": "result", "id": f["id"], "ok": true, "value": {"on": true, "since": 1, "port": 8790}}));
+        assert_eq!(m.scripts, Some((true, 8790)));
+        let f = m.set_scripts(false);
+        assert_eq!(f["name"], "scripts.off");
+        m.take(&json!({"t": "result", "id": f["id"], "ok": true, "value": {}}));
+        assert_eq!(m.scripts, Some((false, 0)));
     }
 
     #[test]

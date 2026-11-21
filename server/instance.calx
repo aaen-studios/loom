@@ -203,6 +203,7 @@ pub struct Instance {
     next_due: i64    // when to look for routines that are due
     routine_runs: Map<String, RoutineRun>    // run -> the routine it's for
     panel_calls: Map<String, Waiter>    // run -> a panel's plugin.message waiting on it
+    script_calls: Map<String, Request>    // a script's ask, by its run, answered when the run ends
     slow_calls: Map<String, String>    // call -> user, for an agent's slow command its person allowed
     push_to: Sender<push.Job>    // the thread that sends to APNs
     push_gone: Receiver<push.Gone>    // tokens APNs says are gone
@@ -378,6 +379,21 @@ fn scheduled(r: Json) -> String {
     return text
 }
 
+// Whether a request came from the instance's own computer, straight: from a
+// loopback address, and not forwarded by a proxy in front of the instance
+// (Caddy says who it forwarded for) or the phones' bridge (X-Loom-Bridge).
+fn from_here(req: Request) -> bool {
+    let c = req.client.copy()
+    if not (c.starts_with("127.") or c.starts_with("[::1]") or c.starts_with("::1")) { return false }
+    for name in ["X-Forwarded-For", "Forwarded", "X-Real-IP", "Via", "X-Loom-Bridge"] {
+        if req.header(String(name)) != none { return false }
+    }
+    return true
+}
+
+// How much a script says to an agent at once.
+const SCRIPT_TEXT_MOST: usize = 20000
+
 fn http_error(status: u16, code: str, message: String) -> Response {
     let e = Obj.new().s("code", String(code)).s("message", message).done()
     return json_response(status, Obj.new().j("error", e).done())
@@ -527,7 +543,7 @@ impl Instance {
         }
         let browser_done = Receiver<browser.Back>()
         let browser_to = browser_done.sender()
-        var i = Instance { browsers: LinkedMap<String, Browser>(), watchers: Map<u32, String>(), browser_done: browser_done, browser_to: browser_to, stopped_browsers: List<Thread>(), fills: Map<String, Fill>(), turns_ended: List<(String, String, String)>(), next_browser_sweep: 0, task_stops: Map<String, String>(), resumes: List<(String, String)>(), push_to: push_to, push_gone: push_gone, move_to: move_to, move_done: move_done, lan: config.lan, bridge: none, stop_bridge: none, lan_port: 0, announcer: none, stop_announcer: none, to_close: List<ServerSocket>(), boxes: none, gate: none, stop_gate: none, moving: String(), move_waiters: List<Waiter>(), moved: moved, version: config.version.copy(), store: store, server: server, data: config.data.copy(), sessions: Map<u32, Session>(), runs: LinkedMap<String, Run>(), procs: LinkedMap<String, Proc>(), approvals: LinkedMap<String, Approval>(), lines: lines, lines_to: to, hash_to: hash_to, hash_done: hash_done, next_job: 0, auths: Map<i64, Auth>(), dummy_hash: dummy, failures: LinkedMap<String, List<i64>>(), thumbs: files.start(), events: config.events, next_prune: 0, grants: Map<String, Grant>(), calls: Map<String, Request>(), registry_at: config.registry.copy(), registry: Json.Null, registry_time: 0, install_to: install_to, install_done: install_done, fetching: List<Waiter>(), installs: Map<i64, Install>(), leftovers: List<String>(), next_sweep: 0, device_calls: Map<String, DeviceCall>(), minute_ms: config.minute_ms, next_due: 0, routine_runs: Map<String, RoutineRun>(), panel_calls: Map<String, Waiter>(), slow_calls: Map<String, String>(), sealer: try secret_key(config.data.copy()) }
+        var i = Instance { browsers: LinkedMap<String, Browser>(), watchers: Map<u32, String>(), browser_done: browser_done, browser_to: browser_to, stopped_browsers: List<Thread>(), fills: Map<String, Fill>(), turns_ended: List<(String, String, String)>(), next_browser_sweep: 0, task_stops: Map<String, String>(), resumes: List<(String, String)>(), push_to: push_to, push_gone: push_gone, move_to: move_to, move_done: move_done, lan: config.lan, bridge: none, stop_bridge: none, lan_port: 0, announcer: none, stop_announcer: none, to_close: List<ServerSocket>(), boxes: none, gate: none, stop_gate: none, moving: String(), move_waiters: List<Waiter>(), moved: moved, version: config.version.copy(), store: store, server: server, data: config.data.copy(), sessions: Map<u32, Session>(), runs: LinkedMap<String, Run>(), procs: LinkedMap<String, Proc>(), approvals: LinkedMap<String, Approval>(), lines: lines, lines_to: to, hash_to: hash_to, hash_done: hash_done, next_job: 0, auths: Map<i64, Auth>(), dummy_hash: dummy, failures: LinkedMap<String, List<i64>>(), thumbs: files.start(), events: config.events, next_prune: 0, grants: Map<String, Grant>(), calls: Map<String, Request>(), registry_at: config.registry.copy(), registry: Json.Null, registry_time: 0, install_to: install_to, install_done: install_done, fetching: List<Waiter>(), installs: Map<i64, Install>(), leftovers: List<String>(), next_sweep: 0, device_calls: Map<String, DeviceCall>(), minute_ms: config.minute_ms, next_due: 0, routine_runs: Map<String, RoutineRun>(), panel_calls: Map<String, Waiter>(), script_calls: Map<String, Request>(), slow_calls: Map<String, String>(), sealer: try secret_key(config.data.copy()) }
         if config.sandboxes.len() > 0 and not i.lan { try i.sandboxes_on(config.sandboxes.copy(), config.sandbox_image.copy()) }
         // What waited behind a turn the restart cut short goes once the loop
         // runs; a queue the person left waiting by stopping a turn still waits.
@@ -1388,6 +1404,9 @@ impl Instance {
         if req.path.starts_with("/api/mcp/") {
             return try i.mcp_route(req)
         }
+        if req.path.starts_with("/api/scripts/") {
+            return try i.scripts_route(req)
+        }
         if req.method != "POST" {
             return some(http_error(404, "not_found", String("There's nothing here.")))
         }
@@ -1509,6 +1528,100 @@ impl Instance {
 
     // GET /api/mcp/tools and POST /api/mcp/call, from `loom mcp`. A call
     // that waits on another agent is answered when that agent's run ends.
+    // /api/scripts/*: the person's own scripts on the instance's computer (PLAN.md,
+    // "Scripts"), with the script token they made in the app. Only from this
+    // computer, straight: not through a proxy in front of the instance, nor the
+    // phones' bridge, which say so in their headers.
+    fn scripts_route(i: mut Instance, req: Request) -> Response? ! Error {
+        if not from_here(req.copy()) { return some(http_error(403, "not_here", String("Scripts reach the instance only from its own computer."))) }
+        let h = req.header(String("Authorization")) ?? String()
+        let token = if h.starts_with("Bearer ") { h[7..].copy() } else { String() }
+        let user = (if token.len() > 0 { try i.store.script_token_user(bytes.hex(sha256(token.to_bytes()))) } else { none }) else {
+            return some(http_error(401, "unauthorized", String("That isn't a script token. Your person turns scripts on in the app, which gives one.")))
+        }
+        let op = req.path.trim_prefix("/api/scripts/").copy()
+        if op == "approvals" and req.method == "GET" {
+            var out = List<Json>()
+            for (call, a) in i.approvals {
+                if i.run_user(a.run.copy()) == user {
+                    out.push(Obj.new().s("call", call.copy()).s("agent", a.agent.copy()).s("agent_name", i.agent_name(user.copy(), a.agent.copy())).s("title", a.title.copy()).b("on_a_device", str_at(a.action.copy(), "name") == some(String("device.call"))).done())
+                }
+            }
+            return some(json_response(200, Obj.new().j("approvals", Json.Array(out)).done()))
+        }
+        if req.method != "POST" { return some(http_error(404, "not_found", String("There's nothing here."))) }
+        let body = match parse(req.text() ?? String()) {
+            ok(j) => j,
+            err(_) => return some(http_error(400, "bad_request", String("The body isn't JSON."))),
+        }
+        if op == "ask" { return try i.script_ask(req.copy(), user, body) }
+        if op == "routine" {
+            let key = (str_at(body, "routine") ?? String()).trim().copy()
+            var id = String()
+            for r in try i.store.routines(user.copy()) {
+                if str_at(r.copy(), "id") == some(key.copy()) or (str_at(r.copy(), "name") ?? String()).to_lower_root() == key.to_lower_root() { id = str_at(r, "id") ?? String() }
+            }
+            if id.len() == 0 { return some(http_error(404, "not_found", "There's no routine {key}.")) }
+            return some(match try i.command(user, String("script"), String("routine.run"), Obj.new().s("id", id).done()) {
+                Answer.Value(v) => json_response(200, v),
+                Answer.Refused(code, message) => json_response(400, Obj.new().j("error", Obj.new().s("code", code).s("message", message).done()).done()),
+            })
+        }
+        if op == "approve" {
+            let call = str_at(body.copy(), "call") ?? String()
+            let allow = bool_at(body, "allow") ?? false
+            var run = String()
+            var on_a_device = false
+            if let a = i.approvals.find(call.copy()) {
+                run = a.run.copy()
+                on_a_device = str_at(a.action.copy(), "name") == some(String("device.call"))
+            }
+            if run.len() == 0 or i.run_user(run) != user { return some(http_error(404, "not_found", String("There's no such approval, or it was answered already."))) }
+            // A call to one of the person's devices is answered on one of their devices, which signs it.
+            if on_a_device { return some(http_error(403, "on_a_device", String("That one is answered on one of your devices, which signs the yes."))) }
+            try i.answer_approval(call, allow, false, String("script"))
+            return some(json_response(200, Obj.new().done()))
+        }
+        return some(http_error(404, "not_found", String("There's nothing here.")))
+    }
+
+    // POST /api/scripts/ask: a message to an agent, from the person's script,
+    // in its chat or the conversation named, answered with the agent's reply
+    // once its run ends.
+    fn script_ask(i: mut Instance, req: own Request, user: String, body: Json) -> Response? ! Error {
+        let text = (str_at(body.copy(), "text") ?? String()).trim().copy()
+        if text.len() == 0 or text.len() > SCRIPT_TEXT_MOST { return some(http_error(400, "bad_request", "text is what to say, of 1 to {SCRIPT_TEXT_MOST} bytes.")) }
+        let key = str_at(body.copy(), "agent") ?? String()
+        let agent = try i.find_agent(user.copy(), key.copy()) else return some(http_error(404, "not_found", "There's no agent {key}."))
+        let agent_id = str_at(agent, "id") ?? String()
+        var conversation = Json.Null
+        if let c = str_at(body, "conversation") {
+            conversation = try i.store.conversation(user.copy(), c.copy()) ?? Json.Null
+            if conversation == Json.Null or str_at(conversation.copy(), "agent") != some(agent_id.copy()) { return some(http_error(404, "not_found", "There's no conversation {c} with {key}.")) }
+        } else {
+            conversation = try i.store.newest_conversation(user.copy(), agent_id.copy()) ?? Json.Null
+            if conversation == Json.Null {
+                conversation = try i.store.add_conversation(user.copy(), agent_id.copy(), String())
+                try i.event(user.copy(), "conversation.created", Obj.new().j("conversation", conversation.copy()).done())
+            }
+        }
+        let conversation_id = str_at(conversation.copy(), "id") ?? String()
+        for (_, r) in i.runs {
+            if r.user == user and r.conversation == conversation_id { return some(http_error(409, "busy", "{key} is answering in that conversation. Ask again once it's done.")) }
+        }
+        let message_id = try i.store.new_id("msg")
+        let blocks = Json.Array([Obj.new().s("kind", String("text")).s("text", text.copy()).done()])
+        let message = Obj.new().s("id", message_id.copy()).s("conversation", conversation_id.copy()).s("role", String("person")).s("from", String("script")).i("at", now()).j("blocks", blocks).done()
+        try i.store.put_message(user.copy(), message.copy())
+        try i.event(user.copy(), "message.created", Obj.new().s("conversation", conversation_id).j("message", message).done())
+        let run_id = try i.store.new_id("run")
+        i.script_calls.insert(run_id.copy(), req)
+        i.log(user.copy(), agent_id, "message", "Your script asked: {cut_short(text.copy(), 120)}", String("script"))
+        let context = "the person's own script, on the instance's computer, with the script token they made: it speaks for them"
+        try i.start_run(user, conversation, run_id, message_id, text, List<Json>(), context, String())
+        return none
+    }
+
     fn mcp_route(i: mut Instance, req: Request) -> Response? ! Error {
         let h = req.header(String("Authorization")) ?? String()
         let token = if h.starts_with("Bearer ") { h[7..].copy() } else { String() }
@@ -4400,6 +4513,12 @@ impl Instance {
             let result = if status == "done" { tool_text(if said.len() > 0 { said.copy() } else { String("(It answered with nothing to read.)") }) } else { tool_error("It couldn't answer ({status}): {error.copy() ?? String("it stopped")}") }
             i.server.respond(req, json_response(200, result))
         }
+        // So does a script's ask.
+        if let req = i.script_calls.remove(r.id.copy()) {
+            asked = true
+            let answer = if status == "done" { json_response(200, Obj.new().s("reply", said.copy()).s("conversation", r.conversation.copy()).s("message", r.message.copy()).done()) } else { http_error(502, "agent_failed", "It couldn't answer ({status}): {error.copy() ?? String("it stopped")}") }
+            i.server.respond(req, answer)
+        }
         // So does a panel's plugin.message, and a side question.
         if let w = i.panel_calls.remove(r.id.copy()) {
             asked = true
@@ -4660,6 +4779,25 @@ impl Instance {
         }
         if name == "conversation.branch" { return try i.branch(user, device, args) }
         if name.starts_with("table.") { return try i.table_command(user, device, name, args) }
+        // Scripts (PLAN.md, "Scripts"): the person's own, on the instance's computer,
+        // with a token only they make, in the app.
+        if name.starts_with("scripts.") {
+            if not device.starts_with("d_") { return Answer.Refused(String("forbidden"), String("Only the person turns scripts on or off, on one of their devices.")) }
+            if name == "scripts.get" {
+                let since = try i.store.scripts_since(user)
+                return Answer.Value(Obj.new().b("on", since != none).j("since", if let turned_on = since { Json.Int(turned_on) } else { Json.Null }).i("port", i64(i.server.port)).done())
+            }
+            if name == "scripts.on" {
+                // A new token every time, shown this once: only its SHA-256 is kept.
+                let token = "loom-script-{bytes.hex(random_bytes(24))}"
+                try i.store.set_script_token(user, bytes.hex(sha256(token.to_bytes())))
+                return Answer.Value(Obj.new().s("token", token).i("port", i64(i.server.port)).done())
+            }
+            if name == "scripts.off" {
+                try i.store.drop_script_token(user)
+                return Answer.Value(empty)
+            }
+        }
         // Pins: a message is pinned in its conversation, for every device to see.
         if name == "message.pin" {
             let id = str_at(args.copy(), "message") ?? String()

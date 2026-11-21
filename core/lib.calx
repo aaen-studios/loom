@@ -9,6 +9,7 @@ module core.lib
 // slow app never holds up the socket. loom_core_stop ends both and waits
 // for them, so no on_event comes after it returns.
 import std.crypto.{PasswordHasher}
+import std.fs
 import std.json.{Json, parse}
 import std.thread.{Task}
 import shared.obj.{Obj, str_at}
@@ -67,14 +68,23 @@ struct Local {
 impl Task for Local {
     fn run(own self) {
         var l = self
-        let config = Config { data: l.data.copy(), port: 0, host: String("127.0.0.1"), hasher: PasswordHasher(), events: EventLife.standard(), registry: String(installer.REGISTRY), minute_ms: 60000, apns: String(), version: String("desktop"), lan: true, sandboxes: String(), sandbox_image: String() }
-        var i = match Instance.open(config) {
+        // The port it had last time, so the person's scripts find it in the same
+        // place (PLAN.md, "Scripts"), unless something else has taken it since.
+        let port_file = "{l.data}/port"
+        let last = match fs.read_text(port_file.copy()) {
+            ok(some(t)) => u16.parse(t.trim().copy()) ?? 0,
+            _ => 0,
+        }
+        var i = match open_local(l.data.copy(), last) {
             ok(i) => i,
             err(e) => {
                 l.ready.send("error:{e}")
                 return
             },
         }
+        let url = i.url().trim_suffix("/").copy()
+        let port = url[(url.find_last(":") ?? 0) + 1..].copy()
+        if let err(e) = fs.write_text(port_file, port.copy()) { eprintln("loom: the instance's port wasn't kept: {e}") }
         let token = match i.local_token(l.username.copy(), l.kind.copy()) {
             ok(t) => t,
             err(e) => {
@@ -92,6 +102,22 @@ impl Task for Local {
             err(e) => eprintln("loom: the instance stopped: {e}"),
         }
     }
+}
+
+// The instance in the app, on the port it had last time if it's free, or on
+// a new one.
+fn open_local(data: String, last: u16) -> Instance ! Error {
+    if last != 0 {
+        match Instance.open(local_config(data.copy(), last)) {
+            ok(i) => return i,
+            err(_) => {},
+        }
+    }
+    return try Instance.open(local_config(data, 0))
+}
+
+fn local_config(data: String, port: u16) -> Config {
+    return Config { data: data.copy(), port: port, host: String("127.0.0.1"), hasher: PasswordHasher(), events: EventLife.standard(), registry: String(installer.REGISTRY), minute_ms: 60000, apns: String(), version: String("desktop"), lan: true, sandboxes: String(), sandbox_image: String() }
 }
 
 /// What the app holds between calls.
