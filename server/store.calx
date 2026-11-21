@@ -85,6 +85,9 @@ CREATE INDEX IF NOT EXISTS routines_by_next ON routines (next);
 CREATE TABLE IF NOT EXISTS link_codes (
     hash TEXT PRIMARY KEY, user TEXT NOT NULL REFERENCES users(id), by TEXT NOT NULL,
     expires INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS invites (
+    id TEXT PRIMARY KEY, hash TEXT NOT NULL UNIQUE, role TEXT NOT NULL, uses INTEGER NOT NULL,
+    expires INTEGER NOT NULL, by TEXT NOT NULL, at INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS push_tokens (
     device TEXT PRIMARY KEY REFERENCES devices(id), user TEXT NOT NULL REFERENCES users(id),
     token TEXT NOT NULL, env TEXT NOT NULL, at INTEGER NOT NULL);
@@ -949,6 +952,85 @@ impl Store {
         let r = try self.db.query_one(String("SELECT user, expires FROM link_codes WHERE hash = ?"), [t(hash.copy())]) else return none
         _ = try self.db.execute(String("DELETE FROM link_codes WHERE hash = ?"), [t(hash)])
         return some((text(r[0].copy()), int(r[1].copy())))
+    }
+
+    // --- Invites (PLAN.md, "Accounts and invites") ---
+
+    // An invite whose code's SHA-256 is `hash`, giving `role`, for `uses`
+    // accounts until `expires` (Unix ms), made by `by`. Gives its id.
+    pub fn add_invite(self, hash: String, role: String, uses: i64, expires: i64, by: String) -> String ! Error {
+        _ = try self.db.execute(String("DELETE FROM invites WHERE expires <= ? OR uses <= 0"), [Value.Int(now())])
+        let id = try self.new_id("inv")
+        _ = try self.db.execute(String("INSERT INTO invites (id, hash, role, uses, expires, by, at) VALUES (?, ?, ?, ?, ?, ?, ?)"), [t(id.copy()), t(hash), t(role), Value.Int(uses), Value.Int(expires), t(by), Value.Int(now())])
+        return id
+    }
+
+    // The invites still open, newest first, as invite.list gives them.
+    pub fn invites(self) -> List<Json> ! Error {
+        var out = List<Json>()
+        for r in try self.db.query(String("SELECT id, role, uses, expires, by, at FROM invites WHERE expires > ? AND uses > 0 ORDER BY at DESC"), [Value.Int(now())]) {
+            out.push(Obj.new().s("invite", text(r[0].copy())).s("role", text(r[1].copy())).i("uses", int(r[2].copy())).i("expires", int(r[3].copy())).s("by", text(r[4].copy())).i("at", int(r[5].copy())).done())
+        }
+        return out
+    }
+
+    // The invite whose code's SHA-256 is `hash`: its id, role, uses left and
+    // when it expires, or none for no such invite.
+    pub fn invite(self, hash: String) -> (String, String, i64, i64)? ! Error {
+        let r = try self.db.query_one(String("SELECT id, role, uses, expires FROM invites WHERE hash = ?"), [t(hash)]) else return none
+        return some((text(r[0].copy()), text(r[1].copy()), int(r[2].copy()), int(r[3].copy())))
+    }
+
+    // Takes one use of the invite `id`. False if it had none left.
+    pub fn use_invite(self, id: String) -> bool ! Error {
+        return try self.db.execute(String("UPDATE invites SET uses = uses - 1 WHERE id = ? AND uses > 0"), [t(id)]) > 0
+    }
+
+    pub fn delete_invite(self, id: String) -> bool ! Error {
+        return try self.db.execute(String("DELETE FROM invites WHERE id = ?"), [t(id)]) > 0
+    }
+
+    // --- People ---
+
+    // Everyone's account, oldest first, as user.list gives it.
+    pub fn people(self) -> List<Json> ! Error {
+        var out = List<Json>()
+        for r in try self.db.query(String("SELECT id, username, role, at FROM users ORDER BY at")) {
+            out.push(Obj.new().s("user", text(r[0].copy())).s("username", text(r[1].copy())).s("role", text(r[2].copy())).i("at", int(r[3].copy())).done())
+        }
+        return out
+    }
+
+    pub fn set_role(self, user: String, role: String) ! Error {
+        _ = try self.db.execute(String("UPDATE users SET role = ? WHERE id = ?"), [t(role), t(user)])
+    }
+
+    // Everything of `user`'s in the database, and the account: what's left
+    // are the files on disk other people may share, and folders the instance
+    // removes itself. Gives the ids of their agents, for their folders.
+    pub fn remove_user(self, user: String) -> List<String> ! Error {
+        var agents = List<String>()
+        for r in try self.db.query(String("SELECT id FROM agents WHERE user = ?"), [t(user.copy())]) {
+            agents.push(text(r[0].copy()))
+        }
+        try self.begin()
+        match self.remove_rows(user) {
+            ok => try self.commit(),
+            err(e) => {
+                self.rollback()
+                fail "{e}"
+            },
+        }
+        return agents
+    }
+
+    fn remove_rows(self, user: String) ! Error {
+        _ = try self.db.execute(String("DELETE FROM sent WHERE device IN (SELECT id FROM devices WHERE user = ?)"), [t(user.copy())])
+        for table in ["push_tokens", "link_codes", "agent_revisions", "agents", "activity", "secrets", "mcp_servers", "skills", "messages", "conversations", "runs", "events", "acp_sessions", "files", "profiles", "routines", "plugin_data", "plugin_revisions", "plugins", "memories", "memories_fts", "messages_fts", "devices"] {
+            _ = try self.db.execute("DELETE FROM {table} WHERE user = ?", [t(user.copy())])
+        }
+        _ = try self.db.execute(String("DELETE FROM invites WHERE by = ?"), [t(user.copy())])
+        _ = try self.db.execute(String("DELETE FROM users WHERE id = ?"), [t(user)])
     }
 
     // --- The activity log (PLAN.md, "Machines and devices") ---

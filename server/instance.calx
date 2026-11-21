@@ -197,6 +197,7 @@ pub struct Instance {
     bridge: Thread?    // the Noise bridge on the network (server/noise.calx), while phones are on
     stop_bridge: Sender<bool>?
     lan_port: u16    // its port, while it runs
+    to_close: List<ServerSocket>    // sessions of someone removed, closed once the command that did it is answered
     moving: String    // where the instance is moving to, while it is
     move_waiters: List<Waiter>    // instance.move commands waiting on the move
     moved: Json    // once the instance has moved: the signed moved frame, which every device gets
@@ -246,6 +247,8 @@ struct Auth {
     setup: bool
     username: String
     address: String
+    invite: String    // the invite an account comes with, for a join
+    role: String      // and the role it gives
 }
 
 const RATE_TRIES: usize = 10
@@ -441,7 +444,7 @@ impl Instance {
         if let text = try store.meta("moved") {
             if let ok(m) = parse(text) { moved = m }
         }
-        var i = Instance { push_to: push_to, push_gone: push_gone, move_to: move_to, move_done: move_done, lan: config.lan, bridge: none, stop_bridge: none, lan_port: 0, moving: String(), move_waiters: List<Waiter>(), moved: moved, version: config.version.copy(), store: store, server: server, data: config.data.copy(), sessions: Map<u32, Session>(), runs: LinkedMap<String, Run>(), procs: LinkedMap<String, Proc>(), approvals: LinkedMap<String, Approval>(), lines: lines, lines_to: to, hash_to: hash_to, hash_done: hash_done, next_job: 0, auths: Map<i64, Auth>(), dummy_hash: dummy, failures: LinkedMap<String, List<i64>>(), thumbs: files.start(), events: config.events, next_prune: 0, grants: Map<String, Grant>(), calls: Map<String, Request>(), registry_at: config.registry.copy(), registry: Json.Null, registry_time: 0, install_to: install_to, install_done: install_done, fetching: List<Waiter>(), installs: Map<i64, Install>(), leftovers: List<String>(), next_sweep: 0, device_calls: Map<String, DeviceCall>(), minute_ms: config.minute_ms, next_due: 0, routine_runs: Map<String, RoutineRun>(), panel_calls: Map<String, Waiter>(), sealer: try secret_key(config.data.copy()) }
+        var i = Instance { push_to: push_to, push_gone: push_gone, move_to: move_to, move_done: move_done, lan: config.lan, bridge: none, stop_bridge: none, lan_port: 0, to_close: List<ServerSocket>(), moving: String(), move_waiters: List<Waiter>(), moved: moved, version: config.version.copy(), store: store, server: server, data: config.data.copy(), sessions: Map<u32, Session>(), runs: LinkedMap<String, Run>(), procs: LinkedMap<String, Proc>(), approvals: LinkedMap<String, Approval>(), lines: lines, lines_to: to, hash_to: hash_to, hash_done: hash_done, next_job: 0, auths: Map<i64, Auth>(), dummy_hash: dummy, failures: LinkedMap<String, List<i64>>(), thumbs: files.start(), events: config.events, next_prune: 0, grants: Map<String, Grant>(), calls: Map<String, Request>(), registry_at: config.registry.copy(), registry: Json.Null, registry_time: 0, install_to: install_to, install_done: install_done, fetching: List<Waiter>(), installs: Map<i64, Install>(), leftovers: List<String>(), next_sweep: 0, device_calls: Map<String, DeviceCall>(), minute_ms: config.minute_ms, next_due: 0, routine_runs: Map<String, RoutineRun>(), panel_calls: Map<String, Waiter>(), sealer: try secret_key(config.data.copy()) }
         // Phones that were on stay on.
         if i.lan and try i.store.meta("phones") == some(String("on")) {
             match i.phones_on() {
@@ -806,6 +809,7 @@ impl Instance {
             err(_) => return some(http_error(400, "bad_request", String("The body isn't JSON."))),
         }
         if req.path == "/api/setup" { return try i.setup(req, body) }
+        if req.path.starts_with("/api/join/") { return try i.join(req, body) }
         if req.path == "/api/login" { return try i.login(req, body) }
         if req.path == "/api/link" { return some(try i.link(req, body)) }
         if req.path == "/api/logout" { return try i.logout(req) }
@@ -1708,6 +1712,136 @@ impl Instance {
         return Obj.new().s("user", user).s("device", device.id).s("token", token).done()
     }
 
+    // --- People (PLAN.md, "Accounts and invites") ---
+
+    // invite.create, invite.list and invite.delete; user.list, user.role and
+    // user.remove; and account.delete. Owners and admins invite and manage
+    // people, from a device: an admin invites and removes members, and only
+    // the owner makes admins. An instance in the desktop app is its owner's alone.
+    fn people_cmd(i: mut Instance, user: String, device: String, name: String, args: Json) -> Answer ! Error {
+        let empty = Obj.new().done()
+        if not device.starts_with("d_") { return Answer.Refused(String("forbidden"), String("Only a person, on one of their devices, invites and manages people.")) }
+        let role = try i.store.role(user.copy()) ?? String()
+        if name == "account.delete" {
+            if role == "owner" { return Answer.Refused(String("not_allowed"), String("The owner's account goes with the instance. Move or stop the instance instead.")) }
+            return try i.remove_person(user)
+        }
+        if i.lan { return Answer.Refused(String("not_here"), String("An instance in the desktop app is yours alone. Invite people to an instance on a server.")) }
+        if role != "owner" and role != "admin" { return Answer.Refused(String("not_allowed"), String("Only the owner and admins invite and manage people.")) }
+        if name == "invite.create" {
+            let gives = str_at(args.copy(), "role") ?? String("member")
+            if gives != "member" and gives != "admin" { return Answer.Refused(String("bad_request"), String("role is member or admin.")) }
+            if gives == "admin" and role != "owner" { return Answer.Refused(String("not_allowed"), String("Only the owner makes admins.")) }
+            let uses = int_at(args.copy(), "uses") ?? 1
+            let days = int_at(args, "days") ?? 7
+            if uses < 1 or uses > 100 { return Answer.Refused(String("bad_request"), String("uses is from 1 to 100.")) }
+            if days < 1 or days > 30 { return Answer.Refused(String("bad_request"), String("days is from 1 to 30.")) }
+            let code = bytes.hex(random_bytes(16))
+            let expires = now() + days * 86400000
+            let id = try i.store.add_invite(bytes.hex(sha256(code.to_bytes())), gives.copy(), uses, expires, user)
+            return Answer.Value(Obj.new().s("invite", id).s("code", code).s("role", gives).i("uses", uses).i("expires", expires).done())
+        }
+        if name == "invite.list" {
+            return Answer.Value(Obj.new().j("invites", Json.Array(try i.store.invites())).done())
+        }
+        if name == "invite.delete" {
+            let id = str_at(args, "invite") ?? String()
+            if not try i.store.delete_invite(id.copy()) { return Answer.Refused(String("not_found"), "There's no invite {id}.") }
+            return Answer.Value(empty)
+        }
+        if name == "user.list" {
+            return Answer.Value(Obj.new().j("users", Json.Array(try i.store.people())).done())
+        }
+        let target = str_at(args.copy(), "user") ?? String()
+        let theirs = try i.store.role(target.copy()) else return Answer.Refused(String("not_found"), "There's no one {target} here.")
+        if target == user { return Answer.Refused(String("not_allowed"), String("Not your own account: account.delete removes it.")) }
+        if theirs == "owner" { return Answer.Refused(String("not_allowed"), String("The owner stays the owner.")) }
+        if name == "user.role" {
+            if role != "owner" { return Answer.Refused(String("not_allowed"), String("Only the owner changes roles.")) }
+            let to = str_at(args, "role") ?? String()
+            if to != "member" and to != "admin" { return Answer.Refused(String("bad_request"), String("role is member or admin.")) }
+            try i.store.set_role(target, to)
+            return Answer.Value(empty)
+        }
+        if name == "user.remove" {
+            if theirs == "admin" and role != "owner" { return Answer.Refused(String("not_allowed"), String("Only the owner removes admins.")) }
+            return try i.remove_person(target)
+        }
+        return Answer.Refused(String("unknown_command"), "Version 1 has no command {name}.")
+    }
+
+    // Removes a person and everything of theirs: their sessions end as signed
+    // out, and their agents' and plugins' folders go once nothing holds them.
+    fn remove_person(i: mut Instance, user: String) -> Answer ! Error {
+        for (_, r) in i.runs {
+            if r.user == user { return Answer.Refused(String("busy"), String("One of their agents is still answering. Remove them once it's done, or stop it.")) }
+        }
+        var name = user.copy()
+        for u in try i.store.users() {
+            if u.id == user { name = u.username.copy() }
+        }
+        for (_, s) in i.sessions {
+            if s.user == user { i.to_close.push(s.socket) }
+        }
+        for agent in try i.store.remove_user(user.copy()) {
+            if agent.len() > 0 { i.leftovers.push("{i.data}/agents/{agent}") }
+        }
+        if user.len() > 0 { i.leftovers.push("{i.data}/plugins/{user}") }
+        i.next_sweep = 0
+        println("loom: removed {name}")
+        return Answer.Value(Obj.new().done())
+    }
+
+    // POST /api/join/<code>: an account from an invite (PLAN.md, "Accounts and
+    // invites"), with the username and password the person picked.
+    fn join(i: mut Instance, req: Request, body: Json) -> Response? ! Error {
+        let address = client_address(req.client.copy())
+        if let wait = i.limited(address.copy(), String()) { return some(rate_limited(wait)) }
+        let code = req.path["/api/join/".len()..].copy()
+        let (id, role, uses, expires) = try i.store.invite(bytes.hex(sha256(code.to_bytes()))) else {
+            // A code that isn't one counts as a wrong password does.
+            i.failed(address, String())
+            return some(http_error(403, "bad_code", String("That invite isn't this instance's.")))
+        }
+        if expires <= now() { return some(http_error(410, "expired", String("That invite has expired. Ask for a new one."))) }
+        if uses <= 0 { return some(http_error(410, "used_up", String("That invite has been used as many times as it could be. Ask for a new one."))) }
+        let username = str_at(body.copy(), "username") ?? String()
+        let password = str_at(body.copy(), "password") ?? String()
+        if not valid_username(username.copy()) {
+            return some(http_error(400, "bad_username", String("A username is 1 to 32 of a-z, 0-9, _ and -.")))
+        }
+        if password.len() < 8 {
+            return some(http_error(400, "weak_password", String("A password needs at least 8 characters.")))
+        }
+        if try i.store.find_username(username.copy()) != none {
+            return some(http_error(409, "username_taken", "Someone here has the username {username} already. Pick another."))
+        }
+        i.hash_later(Auth { req: req.copy(), body: body.copy(), user: none, setup: false, username: username, address: address, invite: id, role: role }, password, String())
+        return none
+    }
+
+    // The account a join makes, once its password is hashed.
+    fn joined(i: mut Instance, auth: Auth, hash: String) ! Error {
+        if try i.store.find_username(auth.username.copy()) != none {
+            i.server.respond(auth.req, http_error(409, "username_taken", "Someone here has the username {auth.username} already. Pick another."))
+            return
+        }
+        if not try i.store.use_invite(auth.invite.copy()) {
+            i.server.respond(auth.req, http_error(410, "used_up", String("That invite has been used as many times as it could be. Ask for a new one.")))
+            return
+        }
+        let user = try i.store.add_user_hashed(auth.username.copy(), hash, if auth.role == "admin" { "admin" } else { "member" })
+        println("loom: {user.username} joined, as {user.role}")
+        // Those who invite people hear who came.
+        let joined = Obj.new().s("user", user.id.copy()).s("username", user.username.copy()).s("role", user.role.copy()).done()
+        for p in try i.store.users() {
+            if p.role == "owner" or p.role == "admin" {
+                try i.event(p.id.copy(), "user.joined", joined.copy())
+            }
+        }
+        i.server.respond(auth.req, json_response(200, try i.new_device(user.id, auth.body.copy())))
+    }
+
     fn setup(i: mut Instance, req: Request, body: Json) -> Response? ! Error {
         if try i.store.user_count() > 0 {
             return some(http_error(409, "already_set_up", String("This instance has its owner already.")))
@@ -1728,7 +1862,7 @@ impl Instance {
         if password.len() < 8 {
             return some(http_error(400, "weak_password", String("A password needs at least 8 characters.")))
         }
-        i.hash_later(Auth { req: req.copy(), body: body.copy(), user: none, setup: true, username: username, address: address }, password, String())
+        i.hash_later(Auth { req: req.copy(), body: body.copy(), user: none, setup: true, username: username, address: address, invite: String(), role: String() }, password, String())
         return none
     }
 
@@ -1745,7 +1879,7 @@ impl Instance {
             user = some(u)
             stored = h
         }
-        i.hash_later(Auth { req: req.copy(), body: body.copy(), user: user, setup: false, username: username, address: address }, password, stored)
+        i.hash_later(Auth { req: req.copy(), body: body.copy(), user: user, setup: false, username: username, address: address, invite: String(), role: String() }, password, stored)
         return none
     }
 
@@ -1786,6 +1920,10 @@ impl Instance {
     // that waited on it is answered.
     fn hashed(i: mut Instance, done: Done) ! Error {
         let auth = i.auths.remove(done.id) else return
+        if auth.invite.len() > 0 {
+            try i.joined(auth, done.hash.copy())
+            return
+        }
         if auth.setup {
             if try i.store.user_count() > 0 {
                 i.server.respond(auth.req, http_error(409, "already_set_up", String("This instance has its owner already.")))
@@ -2997,6 +3135,10 @@ impl Instance {
         }
         let result = try i.command(user, device, name.copy(), args)
         i.answer_cmd(Waiter { socket: s, id: id }, result)
+        for gone in i.to_close {
+            i.server.close_socket(gone, protocol.CLOSE_TOKEN, String("this account was removed"))
+        }
+        i.to_close = List<ServerSocket>()
     }
 
     fn answer_cmd(i: Instance, w: Waiter, result: Answer) {
@@ -3238,6 +3380,9 @@ impl Instance {
             // A phone reaches an instance in the desktop app over Noise.
             if i.bridge != none { value = value.j("noise", try i.phones()) }
             return Answer.Value(value.done())
+        }
+        if name.starts_with("invite.") or name.starts_with("user.") or name == "account.delete" {
+            return try i.people_cmd(user, device, name, args)
         }
         if name == "instance.phones" {
             if try i.store.role(user.copy()) != some(String("owner")) { return Answer.Refused(String("not_allowed"), String("Only the instance's owner lets phones reach it.")) }

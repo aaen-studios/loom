@@ -1,0 +1,122 @@
+module tests.protocol.people
+
+// Inviting and managing people (PLAN.md, "Accounts and invites"). The owner
+// makes an invite, and someone joins with it at POST /api/join/<code>,
+// picking a username and password, once for a one-use invite. A wrong code,
+// a taken username and a weak password are refused. A member can't invite or
+// manage anyone. The owner makes the member an admin, who then invites
+// members but not admins. Removing someone ends their sessions and their
+// token, and a person can delete their own account, but the owner can't.
+//
+//     calx tests/protocol/people.calx
+import std.http.{Header, post}
+import std.json.{Json}
+import std.process.{exit}
+import shared.obj.{Obj, at, bool_at, int_at, str_at}
+import tests.kit.{App, Instance, check, device, json_of}
+
+fn code_of(answer: Json) -> String {
+    return str_at(at(answer, "error"), "code") ?? String()
+}
+
+fn join(base: String, code: String, username: str, password: str) -> (u32, Json) ! Error {
+    let headers: List<Header> = [Header { name: String("Content-Type"), value: String("application/json") }]
+    var req = post("http://{base}/api/join/{code}", headers, "{Obj.new().s("username", String(username)).s("password", String(password)).j("device", device("Laptop")).done()}".to_bytes(), 30000, 1048576)
+    let r = try req.wait()
+    return (r.status, json_of(r.body))
+}
+
+fn refused(r: Json) -> String {
+    if bool_at(r.copy(), "ok") == some(true) { return String() }
+    return code_of(r)
+}
+
+// Whether the instance closes `app`'s socket as signed out.
+fn signed_out(app: mut App) -> bool {
+    loop {
+        match app.until("never", "") {
+            ok(_) => {},
+            err(e) => return "{e}".contains("4001"),
+        }
+    }
+}
+
+fn run() ! Error {
+    let inst = try Instance.start()
+    var owner = try App.connect(inst.base.copy(), inst.token.copy(), 0)
+
+    try check(refused(try owner.cmd("q_1", "invite.create", Obj.new().s("role", String("owner")).done())) == "bad_request", "an invite can't make an owner")
+    let made = try owner.cmd("q_2", "invite.create", Obj.new().done())
+    let v = at(made, "value")
+    let code = str_at(v.copy(), "code") ?? String()
+    try check(code.len() == 32 and str_at(v.copy(), "role") == some(String("member")) and int_at(v.copy(), "uses") == some(1), "the owner makes a one-use member invite")
+
+    let (bad, bad_body) = try join(inst.base.copy(), String("0123456789abcdef0123456789abcdef"), "ann", "a good password")
+    try check(bad == 403 and code_of(bad_body) == "bad_code", "a wrong invite code is refused")
+    let (taken, taken_body) = try join(inst.base.copy(), code.copy(), "elliot", "a good password")
+    try check(taken == 409 and code_of(taken_body) == "username_taken", "a username someone has is refused")
+    let (weak, weak_body) = try join(inst.base.copy(), code.copy(), "ann", "short")
+    try check(weak == 400 and code_of(weak_body) == "weak_password", "a weak password is refused")
+    let (ok_status, joined) = try join(inst.base.copy(), code.copy(), "ann", "a good password")
+    let ann_token = str_at(joined, "token") ?? String()
+    try check(ok_status == 200 and ann_token.len() > 0, "ann joins with the invite")
+    let heard = try owner.until("event", "user.joined")
+    try check(str_at(at(heard, "data"), "username") == some(String("ann")) or "{heard}".contains("\"ann\""), "the owner hears who joined")
+    let (again, again_body) = try join(inst.base.copy(), code.copy(), "bob", "a good password")
+    try check(again == 410 and code_of(again_body) == "used_up", "a one-use invite works once")
+
+    var ann = try App.connect(inst.base.copy(), ann_token.copy(), 0)
+    try check(refused(try ann.cmd("q_1", "invite.create", Obj.new().done())) == "not_allowed", "a member can't invite")
+    try check(refused(try ann.cmd("q_2", "user.list", Obj.new().done())) == "not_allowed", "or list people")
+
+    let people = at(at(try owner.cmd("q_3", "user.list", Obj.new().done()), "value"), "users")
+    let ann_id = match people {
+        Json.Array(list) => {
+            var found = String()
+            for p in list {
+                if str_at(p.copy(), "username") == some(String("ann")) { found = str_at(p, "user") ?? String() }
+            }
+            found
+        },
+        _ => String(),
+    }
+    try check(ann_id.len() > 0, "the owner lists people")
+    try check(refused(try owner.cmd("q_4", "user.role", Obj.new().s("user", ann_id.copy()).s("role", String("admin")).done())) == "", "the owner makes ann an admin")
+    try check(refused(try ann.cmd("q_3", "invite.create", Obj.new().s("role", String("admin")).done())) == "not_allowed", "an admin can't make admins")
+    let ann_invite = try ann.cmd("q_4", "invite.create", Obj.new().i("uses", 2).done())
+    try check(refused(ann_invite.copy()) == "", "an admin invites members")
+    let bob_code = str_at(at(ann_invite, "value"), "code") ?? String()
+    let listed = "{try owner.cmd("q_5", "invite.list", Obj.new().done())}"
+    try check(listed.contains("\"uses\":2"), "invite.list shows the invite")
+
+    let (_, bob_joined) = try join(inst.base.copy(), bob_code, "bob", "bob's password")
+    var bob = try App.connect(inst.base.copy(), str_at(bob_joined, "token") ?? String(), 0)
+    try check(refused(try bob.cmd("q_1", "account.delete", Obj.new().done())) == "", "bob deletes his own account")
+    try check(signed_out(mut bob), "and his session ends")
+    try check(refused(try owner.cmd("q_6", "account.delete", Obj.new().done())) == "not_allowed", "the owner can't delete the owner's account")
+
+    try check(refused(try owner.cmd("q_7", "user.remove", Obj.new().s("user", ann_id.copy()).done())) == "", "the owner removes ann")
+    try check(signed_out(mut ann), "her session ends")
+    let gone = match App.connect(inst.base.copy(), ann_token, 0) {
+        ok(a) => {
+            a.close()
+            false
+        },
+        err(_) => true,
+    }
+    try check(gone, "and her token is gone")
+    let after = "{try owner.cmd("q_8", "user.list", Obj.new().done())}"
+    try check(not after.contains("\"ann\"") and not after.contains("\"bob\""), "neither is listed")
+    owner.close()
+    inst.stop()
+}
+
+fn main() {
+    match run() {
+        ok => println("\npeople: all good"),
+        err(e) => {
+            eprintln("\npeople: {e}")
+            exit(1)
+        },
+    }
+}
