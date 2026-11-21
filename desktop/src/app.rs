@@ -91,6 +91,7 @@ enum Screen {
 enum Menu {
     Agent,
     Permission,
+    Settings,
 }
 
 /// One row of the chat's list.
@@ -168,10 +169,16 @@ pub struct Loom {
     share_month: bool,
     instructions_in: Entity<TextareaState>,
     search_in: Entity<InputState>,
-    program: Option<String>,
     open_thoughts: HashSet<String>,
     tray: Option<shell::Tray>,
     hwnd: isize,
+    /// On the welcome screen: the server sign-in instead of Start, and with it the setup
+    /// code, for a server that has no owner yet.
+    server_form: bool,
+    show_code: bool,
+    /// Whether the agent programs were asked for, for the first agent's picker.
+    asked_programs: bool,
+    make: Making,
     /// The newest thing that went wrong, shown for a while above the composer.
     notice: Option<(String, Instant)>,
 }
@@ -230,11 +237,11 @@ impl Loom {
                     .masked(masked)
             })
         };
-        let server_in = input(window, cx, "https://loom.example.com", false);
+        let server_in = input(window, cx, "Server address", false);
         let user_in = input(window, cx, "Username", false);
         let pass_in = input(window, cx, "Password", true);
-        let code_in = input(window, cx, "Setup code, for a new instance", false);
-        let name_in = input(window, cx, "Scribe", false);
+        let code_in = input(window, cx, "Setup code", false);
+        let name_in = input(window, cx, "Name", false);
         let skill_name_in = input(window, cx, "release-notes", false);
         let note_in = input(window, cx, "Something to remember", false);
         let profile_in = cx.new(|cx| {
@@ -409,6 +416,10 @@ ACTA_KEY=secret:ACTA_KEY",
             relay_in,
             move_code_in,
             invite_admin: false,
+            server_form: false,
+            show_code: false,
+            asked_programs: false,
+            make: Making::default(),
             confirm_delete: false,
             routine_at_in,
             routine_prompt_in,
@@ -430,7 +441,6 @@ ACTA_KEY=secret:ACTA_KEY",
             share_month: false,
             instructions_in,
             search_in,
-            program: None,
             open_thoughts: HashSet::new(),
             tray,
             hwnd,
@@ -495,6 +505,87 @@ ACTA_KEY=secret:ACTA_KEY",
 
     /// Runs the instance on this computer, or stops and goes back to signing in to one
     /// elsewhere: keeps the choice, and starts the core again with it.
+    /// Opens a page, asking the instance for what it shows.
+    fn open(&mut self, screen: Screen, cx: &mut Context<Self>) {
+        match screen {
+            Screen::Profile => {
+                let f = self.model.load_profile();
+                self.send(f);
+                self.model.profile = None;
+            }
+            Screen::Routines => {
+                let f = self.model.load_routines();
+                self.send(f);
+                self.routine_open = None;
+            }
+            Screen::Skills => {
+                let f = self.model.load_skills();
+                self.send(f);
+                self.skill_open = None;
+            }
+            Screen::Plugins => {
+                let f = self.model.load_plugins();
+                self.send(f);
+                self.model.close_panel();
+            }
+            Screen::Programs => {
+                for f in self.model.load_programs() {
+                    self.send(f);
+                }
+                self.program_open = None;
+            }
+            Screen::Mcp => {
+                for f in self.model.load_mcp() {
+                    self.send(f);
+                }
+                self.mcp_open = None;
+            }
+            Screen::ThisDevice => {
+                let f = self.model.device_get();
+                self.send(f);
+            }
+            Screen::People => {
+                self.model.people_open = true;
+                for f in self.model.load_people() {
+                    self.send(f);
+                }
+            }
+            Screen::AddPhone => {
+                // An instance in this app reaches phones only once they're on.
+                if local_mode() {
+                    let f = self.model.set_phones(None);
+                    self.send(f);
+                }
+                let f = self.model.create_link();
+                self.send(f);
+                let d = self.model.load_devices();
+                self.send(d);
+                let r = self.model.set_relay(None);
+                self.send(r);
+            }
+            Screen::NewAgent => {
+                self.make = Making::default();
+                let f = self.model.programs();
+                self.send(f);
+            }
+            _ => {}
+        }
+        self.menu = None;
+        self.screen = screen;
+        cx.notify();
+    }
+
+    fn sign_out(&mut self, cx: &mut Context<Self>) {
+        self.menu = None;
+        if local_mode() {
+            // Stops the instance here; its agents and chats stay for next time.
+            self.set_local(false, cx);
+            return;
+        }
+        self.send(serde_json::json!({"t": "logout"}));
+        cx.notify();
+    }
+
     fn set_local(&mut self, local: bool, cx: &mut Context<Self>) {
         let file = std::path::Path::new(&data_dir()).join("mode");
         let kept = if local {
@@ -739,96 +830,209 @@ ACTA_KEY=secret:ACTA_KEY",
             .child(input)
     }
 
+    /// The first screen: Start runs loom on this computer, and a server is one step aside.
     fn sign_in(&mut self, cx: &mut Context<Self>) -> Div {
         let p = self.p;
-        let busy = self.model.logging_in;
+        let column = div().w(px(340.0)).flex().flex_col().items_center();
+        let body = if self.server_form {
+            self.server_sign_in(column, cx)
+        } else {
+            // Every thread colour, woven through the name.
+            let threads = COLORS.iter().map(|c| thread::color(c, p.dark)).collect();
+            let woven = div()
+                .relative()
+                .w_full()
+                .h(px(190.0))
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(
+                    div()
+                        .absolute()
+                        .top_0()
+                        .left_0()
+                        .w_full()
+                        .h(px(190.0))
+                        .child(thread::weave(threads, 0.0, 190.0)),
+                )
+                .child(
+                    div()
+                        .px(px(space::XL))
+                        .rounded_full()
+                        .bg(p.bg)
+                        .text_size(px(72.0))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(p.ink)
+                        .child("loom"),
+                );
+            let start = column
+                .gap(px(space::XL))
+                .child(
+                    div()
+                        .text_size(px(size::HEADING))
+                        .text_color(p.ink_2)
+                        .child("Little agents that live with you"),
+                )
+                .child(
+                    div()
+                        .w_full()
+                        .pt(px(space::L))
+                        .flex()
+                        .flex_col()
+                        .items_center()
+                        .gap(px(space::L))
+                        .child(
+                            div()
+                                .id("local")
+                                .w_full()
+                                .h(px(50.0))
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .gap(px(space::S))
+                                .rounded_full()
+                                .bg(p.button)
+                                .text_color(p.button_ink)
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .cursor_pointer()
+                                .hover(|s| s.opacity(0.9))
+                                .child("Let's begin")
+                                .child(Icon::new(IconName::ArrowRight).small())
+                                .on_click(cx.listener(|this, _, _, cx| this.set_local(true, cx))),
+                        )
+                        .child(
+                            div()
+                                .id("use-server")
+                                .text_size(px(size::SMALL))
+                                .text_color(p.ink_3)
+                                .cursor_pointer()
+                                .hover(move |s| s.text_color(p.ink))
+                                .child("I have a server")
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.server_form = true;
+                                    cx.notify();
+                                })),
+                        ),
+                )
+                .when_some(self.model.login_error.clone(), |d, e| {
+                    d.child(div().text_size(px(size::SMALL)).text_color(p.bad).child(e))
+                });
+            div()
+                .w_full()
+                .flex()
+                .flex_col()
+                .items_center()
+                .gap(px(space::L))
+                .child(woven)
+                .child(start)
+        };
         div()
             .size_full()
             .flex()
+            .flex_col()
             .items_center()
             .justify_center()
+            .pb(px(40.0))
             .bg(p.bg)
+            .child(body)
+    }
+
+    /// Signing in to an instance on a server: its address, the account, and for a new
+    /// server, the setup code it printed.
+    fn server_sign_in(&mut self, column: Div, cx: &mut Context<Self>) -> Div {
+        let p = self.p;
+        let busy = self.model.logging_in;
+        let input = |s: &Entity<InputState>| div().w_full().child(Input::new(s).large());
+        column
+            .gap(px(space::M))
             .child(
                 div()
-                    .w(px(360.0))
+                    .w_full()
                     .flex()
-                    .flex_col()
-                    .gap(px(space::L))
+                    .items_center()
+                    .gap(px(space::S))
+                    .pb(px(space::M))
                     .child(
                         div()
+                            .id("back")
+                            .size(px(30.0))
                             .flex()
-                            .flex_col()
-                            .gap(px(space::S))
-                            .child(thread(
-                                Mood::Writing,
-                                thread::color("periwinkle", p.dark),
-                                120.0,
-                                14.0,
-                                None,
-                            ))
-                            .child(
-                                div()
-                                    .text_size(px(size::HERO))
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .text_color(p.ink)
-                                    .child("loom"),
-                            )
-                            .child(
-                                div()
-                                    .text_size(px(size::BODY))
-                                    .text_color(p.ink_3)
-                                    .child("Sign in to your instance."),
-                            ),
-                    )
-                    .child(self.field("Instance", Input::new(&self.server_in)))
-                    .child(self.field("Username", Input::new(&self.user_in)))
-                    .child(self.field("Password", Input::new(&self.pass_in)))
-                    .child(self.field(
-                        "Setup code (only the first time)",
-                        Input::new(&self.code_in),
-                    ))
-                    .when_some(self.model.login_error.clone(), |d, e| {
-                        d.child(div().text_size(px(size::SMALL)).text_color(p.bad).child(e))
-                    })
-                    .child(
-                        self.button(
-                            "sign-in",
-                            if busy { "Signing in…" } else { "Sign in" },
-                            true,
-                        )
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            if this.model.logging_in {
-                                return;
-                            }
-                            let server = this.server_in.read(cx).value().to_string();
-                            let user = this.user_in.read(cx).value().to_string();
-                            let pass = this.pass_in.read(cx).value().to_string();
-                            let code = this.code_in.read(cx).value().to_string();
-                            let frame = this.model.login(&server, &user, &pass, &code);
-                            this.send(frame);
-                            cx.notify();
-                        })),
+                            .items_center()
+                            .justify_center()
+                            .rounded_full()
+                            .text_color(p.ink_2)
+                            .cursor_pointer()
+                            .hover(move |s| s.bg(p.hover).text_color(p.ink))
+                            .child(Icon::new(gpui_kit::assets::IconName::ArrowLeft).small())
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.server_form = false;
+                                this.model.login_error = None;
+                                cx.notify();
+                            })),
                     )
                     .child(
                         div()
-                            .flex()
-                            .flex_col()
-                            .gap(px(space::S))
-                            .pt(px(space::M))
-                            .border_t_1()
-                            .border_color(p.line)
-                            .child(
-                                div()
-                                    .text_size(px(size::SMALL))
-                                    .text_color(p.ink_3)
-                                    .child("No instance yet? Run one here. Your agents work while this computer is on."),
-                            )
-                            .child(
-                                self.button("local", "Run one on this computer", false)
-                                    .on_click(cx.listener(|this, _, _, cx| this.set_local(true, cx))),
-                            ),
+                            .text_size(px(size::HEADING))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(p.ink)
+                            .child("Your server"),
                     ),
             )
+            .child(input(&self.server_in))
+            .child(input(&self.user_in))
+            .child(input(&self.pass_in))
+            .when(self.show_code, |d| d.child(input(&self.code_in)))
+            .when_some(self.model.login_error.clone(), |d, e| {
+                d.child(
+                    div()
+                        .w_full()
+                        .text_size(px(size::SMALL))
+                        .text_color(p.bad)
+                        .child(e),
+                )
+            })
+            .child(
+                div().w_full().pt(px(space::S)).child(
+                    self.button(
+                        "sign-in",
+                        if busy { "Signing in…" } else { "Sign in" },
+                        true,
+                    )
+                    .w_full()
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        if this.model.logging_in {
+                            return;
+                        }
+                        let server = this.server_in.read(cx).value().to_string();
+                        let user = this.user_in.read(cx).value().to_string();
+                        let pass = this.pass_in.read(cx).value().to_string();
+                        let code = if this.show_code {
+                            this.code_in.read(cx).value().to_string()
+                        } else {
+                            String::new()
+                        };
+                        let frame = this.model.login(&server, &user, &pass, &code);
+                        this.send(frame);
+                        cx.notify();
+                    })),
+                ),
+            )
+            .when(!self.show_code, |d| {
+                d.child(
+                    div()
+                        .id("new-server")
+                        .pt(px(space::S))
+                        .text_size(px(size::SMALL))
+                        .text_color(p.ink_3)
+                        .cursor_pointer()
+                        .hover(move |s| s.text_color(p.ink))
+                        .child("New server? Add its setup code")
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.show_code = true;
+                            cx.notify();
+                        })),
+                )
+            })
     }
 
     /// What search found, in place of the agents.
@@ -982,7 +1186,7 @@ ACTA_KEY=secret:ACTA_KEY",
                                         p.ink_3
                                     })
                                     .truncate()
-                                    .child(preview),
+                                    .when(!preview.is_empty(), |d| d.child(preview)),
                             ),
                     ),
             );
@@ -1041,6 +1245,7 @@ ACTA_KEY=secret:ACTA_KEY",
         div()
             .w(px(layout::SIDEBAR))
             .h_full()
+            .relative()
             .flex_none()
             .flex()
             .flex_col()
@@ -1076,13 +1281,9 @@ ACTA_KEY=secret:ACTA_KEY",
                             .cursor_pointer()
                             .hover(move |s| s.bg(p.hover))
                             .child(Icon::new(IconName::Plus).small())
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.screen = Screen::NewAgent;
-                                this.menu = None;
-                                let f = this.model.programs();
-                                this.send(f);
-                                cx.notify();
-                            })),
+                            .on_click(
+                                cx.listener(|this, _, _, cx| this.open(Screen::NewAgent, cx)),
+                            ),
                     ),
             )
             .child(
@@ -1103,7 +1304,7 @@ ACTA_KEY=secret:ACTA_KEY",
                     .pb(px(space::XS))
                     .text_size(px(size::CAPTION))
                     .text_color(p.ink_3)
-                    .child(if searching { "Found" } else { "Agents" }),
+                    .when(searching, |d| d.child("Found")),
             )
             .child(
                 div()
@@ -1117,239 +1318,124 @@ ACTA_KEY=secret:ACTA_KEY",
             .child(
                 div()
                     .flex()
-                    .flex_wrap()
-                    .gap_x(px(space::L))
-                    .gap_y(px(space::XS))
-                    .px(px(space::L))
-                    .py(px(space::S))
-                    .border_t_1()
-                    .border_color(p.line)
-                    .child(
-                        div()
-                            .id("about-you")
-                            .text_size(px(size::CAPTION))
-                            .text_color(p.ink_3)
-                            .cursor_pointer()
-                            .hover(move |s| s.text_color(p.ink))
-                            .child("About you")
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                let f = this.model.load_profile();
-                                this.send(f);
-                                this.model.profile = None;
-                                this.menu = None;
-                                this.screen = Screen::Profile;
-                                cx.notify();
-                            })),
-                    )
-                    .child(
-                        div()
-                            .id("routines")
-                            .text_size(px(size::CAPTION))
-                            .text_color(p.ink_3)
-                            .cursor_pointer()
-                            .hover(move |s| s.text_color(p.ink))
-                            .child("Routines")
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                let f = this.model.load_routines();
-                                this.send(f);
-                                this.routine_open = None;
-                                this.menu = None;
-                                this.screen = Screen::Routines;
-                                cx.notify();
-                            })),
-                    )
-                    .child(
-                        div()
-                            .id("skills")
-                            .text_size(px(size::CAPTION))
-                            .text_color(p.ink_3)
-                            .cursor_pointer()
-                            .hover(move |s| s.text_color(p.ink))
-                            .child("Skills")
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                let f = this.model.load_skills();
-                                this.send(f);
-                                this.skill_open = None;
-                                this.menu = None;
-                                this.screen = Screen::Skills;
-                                cx.notify();
-                            })),
-                    )
-                    .child(
-                        div()
-                            .id("plugins")
-                            .text_size(px(size::CAPTION))
-                            .text_color(p.ink_3)
-                            .cursor_pointer()
-                            .hover(move |s| s.text_color(p.ink))
-                            .child("Plugins")
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                let f = this.model.load_plugins();
-                                this.send(f);
-                                this.model.close_panel();
-                                this.menu = None;
-                                this.screen = Screen::Plugins;
-                                cx.notify();
-                            })),
-                    )
-                    .child(
-                        div()
-                            .id("programs")
-                            .text_size(px(size::CAPTION))
-                            .text_color(p.ink_3)
-                            .cursor_pointer()
-                            .hover(move |s| s.text_color(p.ink))
-                            .child("Agent programs")
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                for f in this.model.load_programs() {
-                                    this.send(f);
-                                }
-                                this.program_open = None;
-                                this.menu = None;
-                                this.screen = Screen::Programs;
-                                cx.notify();
-                            })),
-                    )
-                    .child(
-                        div()
-                            .id("mcp")
-                            .text_size(px(size::CAPTION))
-                            .text_color(p.ink_3)
-                            .cursor_pointer()
-                            .hover(move |s| s.text_color(p.ink))
-                            .child("MCP servers")
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                for f in this.model.load_mcp() {
-                                    this.send(f);
-                                }
-                                this.mcp_open = None;
-                                this.menu = None;
-                                this.screen = Screen::Mcp;
-                                cx.notify();
-                            })),
-                    )
-                    .child(
-                        div()
-                            .id("move")
-                            .text_size(px(size::CAPTION))
-                            .text_color(p.ink_3)
-                            .cursor_pointer()
-                            .hover(move |s| s.text_color(p.ink))
-                            .child("Move")
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.menu = None;
-                                this.screen = Screen::Move;
-                                cx.notify();
-                            })),
-                    )
-                    // In a desktop instance, agents run on this PC already: its tools are
-                    // for an instance somewhere else.
-                    .when(!local_mode(), |d| {
-                        d.child(
-                            div()
-                                .id("this-device")
-                                .text_size(px(size::CAPTION))
-                                .text_color(p.ink_3)
-                                .cursor_pointer()
-                                .hover(move |s| s.text_color(p.ink))
-                                .child("This PC")
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    let f = this.model.device_get();
-                                    this.send(f);
-                                    this.menu = None;
-                                    this.screen = Screen::ThisDevice;
-                                    cx.notify();
-                                })),
-                        )
-                        // Only an instance on a server has other people.
-                        .child(
-                            div()
-                                .id("people")
-                                .text_size(px(size::CAPTION))
-                                .text_color(p.ink_3)
-                                .cursor_pointer()
-                                .hover(move |s| s.text_color(p.ink))
-                                .child("People")
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.model.people_open = true;
-                                    for f in this.model.load_people() {
-                                        this.send(f);
-                                    }
-                                    this.menu = None;
-                                    this.screen = Screen::People;
-                                    cx.notify();
-                                })),
-                        )
-                    })
-                    .child(
-                        div()
-                            .id("add-phone")
-                            .text_size(px(size::CAPTION))
-                            .text_color(p.ink_3)
-                            .cursor_pointer()
-                            .hover(move |s| s.text_color(p.ink))
-                            .child("Add a phone")
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                // An instance in this app reaches phones only once they're on.
-                                if local_mode() {
-                                    let f = this.model.set_phones(None);
-                                    this.send(f);
-                                }
-                                let f = this.model.create_link();
-                                this.send(f);
-                                let d = this.model.load_devices();
-                                this.send(d);
-                                let r = this.model.set_relay(None);
-                                this.send(r);
-                                this.menu = None;
-                                this.screen = Screen::AddPhone;
-                                cx.notify();
-                            })),
-                    ),
-            )
-            .child(
-                div()
-                    .flex()
                     .items_center()
                     .justify_between()
-                    .px(px(space::L))
-                    .py(px(space::M))
-                    .border_t_1()
-                    .border_color(p.line)
+                    .px(px(space::S))
+                    .py(px(space::S))
+                    .child(
+                        div()
+                            .id("settings")
+                            .flex()
+                            .items_center()
+                            .gap(px(space::S))
+                            .px(px(space::M))
+                            .py(px(space::S))
+                            .rounded(px(radius::ROW))
+                            .text_size(px(size::SMALL))
+                            .text_color(p.ink_2)
+                            .cursor_pointer()
+                            .when(self.menu == Some(Menu::Settings), |d| d.bg(p.active))
+                            .hover(move |s| s.bg(p.hover).text_color(p.ink))
+                            .child(Icon::new(gpui_kit::assets::IconName::Settings).small())
+                            .child("Settings")
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.menu = if this.menu == Some(Menu::Settings) {
+                                    None
+                                } else {
+                                    Some(Menu::Settings)
+                                };
+                                cx.notify();
+                            })),
+                    )
+                    // How the connection is, as a dot; the words only while it isn't well.
                     .child(
                         div()
                             .flex()
                             .items_center()
                             .gap(px(space::S))
-                            .child(div().size(px(6.0)).rounded_full().bg(status.1))
-                            .child(
-                                div()
-                                    .text_size(px(size::CAPTION))
-                                    .text_color(p.ink_3)
-                                    .child(status.0),
-                            ),
-                    )
-                    .child(
-                        div().flex().gap(px(space::M)).child(
-                            div()
-                                .id("sign-out")
-                                .text_size(px(size::CAPTION))
-                                .text_color(p.ink_3)
-                                .cursor_pointer()
-                                .hover(move |s| s.text_color(p.ink))
-                                .child("Sign out")
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    if local_mode() {
-                                        // Stops the instance here; its agents and chats stay for next time.
-                                        this.set_local(false, cx);
-                                        return;
-                                    }
-                                    this.send(serde_json::json!({"t": "logout"}));
-                                    cx.notify();
-                                })),
-                        ),
+                            .px(px(space::M))
+                            .when(status.1 != p.ok, |d| {
+                                d.child(
+                                    div()
+                                        .text_size(px(size::CAPTION))
+                                        .text_color(p.ink_3)
+                                        .child(status.0.clone()),
+                                )
+                            })
+                            .child(div().size(px(7.0)).rounded_full().bg(status.1)),
                     ),
             )
+            .when_some(self.settings_menu(cx), |d, m| d.child(m))
+    }
+
+    /// The settings menu, over the bottom of the sidebar: every page that isn't a chat.
+    fn settings_menu(&mut self, cx: &mut Context<Self>) -> Option<Div> {
+        if self.menu != Some(Menu::Settings) {
+            return None;
+        }
+        let p = self.p;
+        let local = local_mode();
+        let mut items: Vec<(&'static str, &'static str, Screen)> = vec![
+            ("set-profile", "About you", Screen::Profile),
+            ("set-routines", "Routines", Screen::Routines),
+            ("set-skills", "Skills", Screen::Skills),
+            ("set-programs", "Agent programs", Screen::Programs),
+            ("set-mcp", "MCP servers", Screen::Mcp),
+            ("set-plugins", "Plugins", Screen::Plugins),
+            ("set-phone", "Add a phone", Screen::AddPhone),
+        ];
+        // An instance somewhere else has other people, and reaches this PC as a device.
+        if !local {
+            items.push(("set-people", "People", Screen::People));
+            items.push(("set-device", "This PC", Screen::ThisDevice));
+        }
+        items.push(("set-move", "Move", Screen::Move));
+        let mut panel = div()
+            .absolute()
+            .left(px(space::S))
+            .bottom(px(52.0))
+            .w(px(layout::SIDEBAR - space::S * 2.0))
+            .p(px(space::XS))
+            .flex()
+            .flex_col()
+            .bg(p.raised)
+            .border_1()
+            .border_color(p.line_strong)
+            .rounded(px(radius::CARD))
+            .shadow_lg()
+            .on_mouse_down_out(cx.listener(|this, _, _, cx| {
+                this.menu = None;
+                cx.notify();
+            }));
+        for (id, title, screen) in items {
+            panel = panel.child(
+                self.menu_item(id, title, "", false)
+                    .on_click(cx.listener(move |this, _, _, cx| this.open(screen, cx))),
+            );
+        }
+        Some(
+            panel
+                .child(
+                    div()
+                        .h(px(1.0))
+                        .mx(px(space::S))
+                        .my(px(space::XS))
+                        .bg(p.line),
+                )
+                .child(
+                    self.menu_item(
+                        "set-sign-out",
+                        if local {
+                            "Close this instance"
+                        } else {
+                            "Sign out"
+                        },
+                        "",
+                        false,
+                    )
+                    .on_click(cx.listener(|this, _, _, cx| this.sign_out(cx))),
+                ),
+        )
     }
 
     fn header(&mut self, cx: &mut Context<Self>) -> Div {
@@ -1429,12 +1515,7 @@ ACTA_KEY=secret:ACTA_KEY",
             return bar;
         };
         if self.screen == Screen::NewAgent {
-            return bar.child(
-                div()
-                    .text_size(px(size::BODY))
-                    .text_color(p.ink_3)
-                    .child("New agent"),
-            );
+            return bar;
         }
         if matches!(
             self.screen,
@@ -1498,45 +1579,35 @@ ACTA_KEY=secret:ACTA_KEY",
                 ),
         )
         .child(
-            div()
-                .flex()
-                .items_center()
-                .gap(px(space::L))
-                .child(
-                    div()
-                        .text_size(px(size::CAPTION))
-                        .text_color(p.ink_3)
-                        .child(agent.program.clone()),
-                )
-                .child(
-                    div()
-                        .id("permission-menu")
-                        .occlude()
-                        .px(px(space::S))
-                        .py(px(space::XS))
-                        .rounded(px(radius::ROW))
-                        .text_size(px(size::CAPTION))
-                        .text_color(p.ink_2)
-                        .cursor_pointer()
-                        .hover(move |s| s.bg(p.hover))
-                        .flex()
-                        .items_center()
-                        .gap(px(space::XS))
-                        .child(permission)
-                        .child(
-                            Icon::new(IconName::ChevronDown)
-                                .xsmall()
-                                .text_color(p.ink_3),
-                        )
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.menu = if this.menu == Some(Menu::Permission) {
-                                None
-                            } else {
-                                Some(Menu::Permission)
-                            };
-                            cx.notify();
-                        })),
-                ),
+            div().flex().items_center().gap(px(space::L)).child(
+                div()
+                    .id("permission-menu")
+                    .occlude()
+                    .px(px(space::S))
+                    .py(px(space::XS))
+                    .rounded(px(radius::ROW))
+                    .text_size(px(size::CAPTION))
+                    .text_color(p.ink_2)
+                    .cursor_pointer()
+                    .hover(move |s| s.bg(p.hover))
+                    .flex()
+                    .items_center()
+                    .gap(px(space::XS))
+                    .child(permission)
+                    .child(
+                        Icon::new(IconName::ChevronDown)
+                            .xsmall()
+                            .text_color(p.ink_3),
+                    )
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.menu = if this.menu == Some(Menu::Permission) {
+                            None
+                        } else {
+                            Some(Menu::Permission)
+                        };
+                        cx.notify();
+                    })),
+            ),
         )
     }
 
@@ -1578,6 +1649,9 @@ ACTA_KEY=secret:ACTA_KEY",
     fn menu_panel(&mut self, cx: &mut Context<Self>) -> Option<Div> {
         let p = self.p;
         let menu = self.menu?;
+        if menu == Menu::Settings {
+            return None;
+        }
         let panel = div()
             .absolute()
             .top(px(layout::TITLEBAR - 4.0))
@@ -1595,6 +1669,7 @@ ACTA_KEY=secret:ACTA_KEY",
                 cx.notify();
             }));
         Some(match menu {
+            Menu::Settings => return None,
             Menu::Agent => panel
                 .left(px(space::S))
                 .child(
@@ -1732,6 +1807,13 @@ ACTA_KEY=secret:ACTA_KEY",
 
     fn chat(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Div {
         let p = self.p;
+        // A new account starts by picking who to talk to, once the instance has said it has no agents.
+        if self.model.agents.is_empty() || self.make.step == Step::Weaving {
+            if self.model.synced {
+                return self.first_agent(cx);
+            }
+            return div().flex_1();
+        }
         let rows = self.rows.clone();
         let agent = self
             .model
@@ -1789,13 +1871,15 @@ ACTA_KEY=secret:ACTA_KEY",
 
         let empty = self.rows.is_empty();
         let busy = self.model.busy();
-        let placeholder = format!(
-            "Reply to {}",
-            agent
-                .as_ref()
-                .map(|a| a.name.as_str())
-                .unwrap_or("the agent")
-        );
+        let who = agent
+            .as_ref()
+            .map(|a| a.name.as_str())
+            .unwrap_or("the agent");
+        let placeholder = if empty {
+            format!("Ask {who} anything")
+        } else {
+            format!("Reply to {who}")
+        };
         self.composer
             .update(cx, |s, cx| s.set_placeholder(placeholder, window, cx));
         let mut attached = div().flex().flex_wrap().gap(px(space::S));
@@ -1847,6 +1931,91 @@ ACTA_KEY=secret:ACTA_KEY",
             );
         }
         let has_attachments = !self.model.attachments.is_empty();
+        let mut composer = Some(
+            div()
+                .w_full()
+                .max_w(px(space::COLUMN))
+                .flex()
+                .flex_col()
+                .gap(px(space::S))
+                .px(px(space::M))
+                .py(px(space::S))
+                .bg(p.raised)
+                .border_1()
+                .border_color(p.line)
+                .rounded(px(radius::COMPOSER))
+                .when(has_attachments, |d| d.child(attached))
+                .child(
+                    div()
+                        .w_full()
+                        .flex()
+                        .items_end()
+                        .gap(px(space::S))
+                        .child(
+                            div()
+                                .id("attach")
+                                .size(px(32.0))
+                                .flex_none()
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .rounded_full()
+                                .text_color(p.ink_2)
+                                .cursor_pointer()
+                                .hover(move |s| s.bg(p.hover))
+                                .child(Icon::new(gpui_kit::assets::IconName::Paperclip).small())
+                                .on_click(cx.listener(|this, _, _, cx| this.pick_files(cx))),
+                        )
+                        .child(
+                            div()
+                                .flex_1()
+                                .text_size(px(size::COMPOSER))
+                                // Before the textarea's own Paste, which would
+                                // paste a copied file as its path.
+                                .capture_action(cx.listener(|this, _: &Paste, _, cx| {
+                                    if this.paste_files(cx) {
+                                        cx.stop_propagation();
+                                    }
+                                }))
+                                .child(Textarea::new(&self.composer).appearance(false)),
+                        )
+                        .child(
+                            div()
+                                .id("send")
+                                .size(px(32.0))
+                                .flex_none()
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .rounded_full()
+                                .bg(p.button)
+                                .text_color(p.button_ink)
+                                .cursor_pointer()
+                                .child(
+                                    Icon::new(if busy {
+                                        IconName::Square
+                                    } else {
+                                        IconName::ArrowUp
+                                    })
+                                    .small(),
+                                )
+                                .on_click(cx.listener(move |this, _, window, cx| {
+                                    if busy {
+                                        if let Some(f) = this.model.cancel() {
+                                            this.send(f);
+                                        }
+                                        return;
+                                    }
+                                    let text = this.composer.read(cx).value().to_string();
+                                    if let Some(frame) = this.model.send(&text) {
+                                        this.send(frame);
+                                        this.composer
+                                            .update(cx, |s, cx| s.set_value("", window, cx));
+                                    }
+                                })),
+                        ),
+                ),
+        );
         div()
             .flex_1()
             .min_h_0()
@@ -1857,18 +2026,7 @@ ACTA_KEY=secret:ACTA_KEY",
             }))
             .drag_over::<ExternalPaths>(move |s, _, _, _| s.bg(p.hover))
             .child(if empty {
-                div()
-                    .flex_1()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .text_size(px(size::BODY))
-                    .text_color(p.ink_3)
-                    .child(if agent.is_some() {
-                        "Nothing here yet. Say hello."
-                    } else {
-                        "Make an agent with + to start."
-                    })
+                self.hero(agent.as_ref(), composer.take(), cx)
                     .into_any_element()
             } else {
                 div().flex_1().min_h_0().child(list).into_any_element()
@@ -1897,148 +2055,424 @@ ACTA_KEY=secret:ACTA_KEY",
                         ),
                 )
             })
+            .when_some(composer, |d, c| {
+                d.child(
+                    div()
+                        .w_full()
+                        .flex()
+                        .justify_center()
+                        .px(px(space::XL))
+                        .pb(px(space::L))
+                        .pt(px(space::XS))
+                        .child(c),
+                )
+            })
+    }
+
+    /// The first screen of a new account: making its first agent.
+    fn first_agent(&mut self, cx: &mut Context<Self>) -> Div {
+        if !self.asked_programs {
+            self.asked_programs = true;
+            let f = self.model.programs();
+            self.send(f);
+        }
+        self.making(true, cx)
+    }
+
+    /// Making an agent, in three steps: a brain (the agent program it runs on), then a
+    /// name and a colour, then a moment while the threads weave it together.
+    fn making(&mut self, first: bool, cx: &mut Context<Self>) -> Div {
+        let p = self.p;
+        let step = self.make.step;
+        let back = step == Step::Name || (step == Step::Brain && !first);
+        let body = match step {
+            Step::Brain => self.brain_step(cx),
+            Step::Name => self.name_step(cx),
+            Step::Weaving => self.weaving_step(),
+        };
+        div()
+            .relative()
+            .flex_1()
+            .min_h_0()
+            .flex()
+            .flex_col()
+            .items_center()
+            .justify_center()
+            .gap(px(space::XXL))
+            .pb(px(60.0))
+            .when(back, |d| {
+                d.child(
+                    div()
+                        .id("make-back")
+                        .absolute()
+                        .top(px(space::L))
+                        .left(px(space::L))
+                        .size(px(34.0))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .rounded_full()
+                        .text_color(p.ink_2)
+                        .cursor_pointer()
+                        .hover(move |s| s.bg(p.hover).text_color(p.ink))
+                        .child(Icon::new(IconName::ArrowLeft).small())
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            if this.make.step == Step::Name {
+                                this.make.step = Step::Brain;
+                            } else {
+                                this.screen = Screen::Chat;
+                            }
+                            cx.notify();
+                        })),
+                )
+            })
+            .child(body)
+            .when(step != Step::Weaving, |d| d.child(self.step_marks(step)))
+    }
+
+    /// Where making an agent is up to: a short thread per step, moving on the current one.
+    fn step_marks(&self, step: Step) -> Div {
+        let p = self.p;
+        let tint = thread::color(self.make.color(), p.dark);
+        let grey = thread::color("grey", p.dark);
+        let marks = [Step::Brain, Step::Name];
+        let mut row = div().flex().items_center().gap(px(space::M));
+        for (i, s) in marks.iter().enumerate() {
+            let now = *s == step;
+            let done = i < marks.iter().position(|m| *m == step).unwrap_or(0);
+            let (mood, color) = if now {
+                (Mood::Writing, tint)
+            } else if done {
+                (Mood::Idle, tint)
+            } else {
+                (Mood::Idle, grey)
+            };
+            row = row.child(thread(mood, color, 34.0, 10.0, None));
+        }
+        row
+    }
+
+    /// The first step: which agent program it runs on, as a tile for each, whose thread
+    /// comes alive under the pointer.
+    fn brain_step(&mut self, cx: &mut Context<Self>) -> Div {
+        let p = self.p;
+        let column = div().flex().flex_col().items_center().gap(px(space::XXL));
+        let heading = |text: &str| {
+            div()
+                .text_size(px(size::HERO))
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(p.ink)
+                .child(text.to_string())
+        };
+        if !self.model.programs_known {
+            return column.child(thread(
+                Mood::Thinking,
+                thread::color("periwinkle", p.dark),
+                160.0,
+                16.0,
+                None,
+            ));
+        }
+        if self.model.programs.is_empty() {
+            let greys = (0..4).map(|_| thread::color("grey", p.dark)).collect();
+            return column
+                .child(div().w(px(360.0)).child(thread::weave(greys, 0.0, 70.0)))
+                .child(heading("It needs a brain first"))
+                .child(
+                    div()
+                        .flex()
+                        .gap(px(space::M))
+                        .child(self.button("get-node", "Get Node.js", true).on_click(
+                            cx.listener(|_, _, _, cx| cx.open_url("https://nodejs.org/")),
+                        ))
+                        .child(
+                            self.button("install-program", "Install one", false)
+                                .on_click(
+                                    cx.listener(|this, _, _, cx| this.open(Screen::Programs, cx)),
+                                ),
+                        ),
+                );
+        }
+        let mut tiles = div().flex().flex_wrap().justify_center().gap(px(space::L));
+        for (i, name) in self.model.programs.clone().into_iter().enumerate() {
+            let color = COLORS[i % COLORS.len()];
+            let tint = thread::color(color, p.dark);
+            let lit = self.make.hover.as_deref() == Some(name.as_str());
+            let hovered = name.clone();
+            let picked = name.clone();
+            tiles = tiles.child(
+                div()
+                    .id(SharedString::from(format!("brain-{name}")))
+                    .w(px(200.0))
+                    .h(px(176.0))
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .justify_center()
+                    .gap(px(space::M))
+                    .rounded(px(radius::CARD))
+                    .border_1()
+                    .cursor_pointer()
+                    .when(lit, |d| d.bg(p.raised_2).border_color(tint.opacity(0.7)))
+                    .when(!lit, |d| d.bg(p.raised).border_color(p.line))
+                    .child(thread(
+                        if lit { Mood::Writing } else { Mood::Idle },
+                        tint,
+                        120.0,
+                        20.0,
+                        None,
+                    ))
+                    .child(
+                        div()
+                            .pt(px(space::S))
+                            .text_size(px(size::HEADING))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(p.ink)
+                            .child(program_title(&name)),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(size::CAPTION))
+                            .text_color(p.ink_3)
+                            .child(program_maker(&name)),
+                    )
+                    .on_hover(cx.listener(move |this, over: &bool, _, cx| {
+                        if *over {
+                            this.make.hover = Some(hovered.clone());
+                        } else if this.make.hover.as_deref() == Some(hovered.as_str()) {
+                            this.make.hover = None;
+                        }
+                        cx.notify();
+                    }))
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.make.program = Some(picked.clone());
+                        this.make.color = color;
+                        this.make.step = Step::Name;
+                        this.make.snapped = Some(Instant::now());
+                        let current = this.name_in.read(cx).value().to_string();
+                        this.name_in.update(cx, |s, cx| {
+                            s.set_value(whimsical_name(&current), window, cx);
+                            s.focus(window, cx);
+                        });
+                        cx.notify();
+                    })),
+            );
+        }
+        column.child(heading("Pick a brain")).child(tiles)
+    }
+
+    /// The second step: its name, with a die for one, and its colour, shown on its own
+    /// thread, which twangs at every change.
+    fn name_step(&mut self, cx: &mut Context<Self>) -> Div {
+        let p = self.p;
+        let tint = thread::color(self.make.color(), p.dark);
+        let twang = self
+            .make
+            .snapped
+            .is_some_and(|at| at.elapsed().as_secs_f32() < 1.2);
+        let mut swatches = div().flex().items_center().gap(px(space::S));
+        for (i, color) in COLORS.iter().enumerate() {
+            let picked = self.make.color() == *color;
+            let dot = thread::color(color, p.dark);
+            swatches = swatches.child(
+                div()
+                    .id(("swatch", i))
+                    .size(px(34.0))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded_full()
+                    .border_2()
+                    .border_color(if picked { dot } else { transparent_black() })
+                    .cursor_pointer()
+                    .child(
+                        div()
+                            .size(px(if picked { 20.0 } else { 18.0 }))
+                            .rounded_full()
+                            .bg(dot),
+                    )
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.make.color = color;
+                        this.make.snapped = Some(Instant::now());
+                        cx.notify();
+                    })),
+            );
+        }
+        div()
+            .w(px(380.0))
+            .flex()
+            .flex_col()
+            .items_center()
+            .gap(px(space::XL))
+            .child(thread(
+                if twang { Mood::Idle } else { Mood::Thinking },
+                tint,
+                280.0,
+                36.0,
+                self.make.snapped,
+            ))
+            .child(
+                div()
+                    .text_size(px(size::HERO))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(p.ink)
+                    .child("Name it"),
+            )
             .child(
                 div()
                     .w_full()
                     .flex()
-                    .justify_center()
-                    .px(px(space::XL))
-                    .pb(px(space::L))
-                    .pt(px(space::XS))
+                    .items_center()
+                    .gap(px(space::S))
+                    .child(div().flex_1().child(Input::new(&self.name_in).large()))
                     .child(
                         div()
-                            .w_full()
-                            .max_w(px(space::COLUMN))
+                            .id("dice")
+                            .size(px(40.0))
                             .flex()
-                            .flex_col()
-                            .gap(px(space::S))
-                            .px(px(space::M))
-                            .py(px(space::S))
-                            .bg(p.raised)
-                            .border_1()
-                            .border_color(p.line)
-                            .rounded(px(radius::COMPOSER))
-                            .when(has_attachments, |d| d.child(attached))
-                            .child(
-                                div()
-                                    .w_full()
-                                    .flex()
-                                    .items_end()
-                                    .gap(px(space::S))
-                                    .child(
-                                        div()
-                                            .id("attach")
-                                            .size(px(32.0))
-                                            .flex_none()
-                                            .flex()
-                                            .items_center()
-                                            .justify_center()
-                                            .rounded_full()
-                                            .text_color(p.ink_2)
-                                            .cursor_pointer()
-                                            .hover(move |s| s.bg(p.hover))
-                                            .child(
-                                                Icon::new(gpui_kit::assets::IconName::Paperclip)
-                                                    .small(),
-                                            )
-                                            .on_click(
-                                                cx.listener(|this, _, _, cx| this.pick_files(cx)),
-                                            ),
-                                    )
-                                    .child(
-                                        div()
-                                            .flex_1()
-                                            .text_size(px(size::COMPOSER))
-                                            // Before the textarea's own Paste, which would
-                                            // paste a copied file as its path.
-                                            .capture_action(cx.listener(
-                                                |this, _: &Paste, _, cx| {
-                                                    if this.paste_files(cx) {
-                                                        cx.stop_propagation();
-                                                    }
-                                                },
-                                            ))
-                                            .child(Textarea::new(&self.composer).appearance(false)),
-                                    )
-                                    .child(
-                                        div()
-                                            .id("send")
-                                            .size(px(32.0))
-                                            .flex_none()
-                                            .flex()
-                                            .items_center()
-                                            .justify_center()
-                                            .rounded_full()
-                                            .bg(p.button)
-                                            .text_color(p.button_ink)
-                                            .cursor_pointer()
-                                            .child(
-                                                Icon::new(if busy {
-                                                    IconName::Square
-                                                } else {
-                                                    IconName::ArrowUp
-                                                })
-                                                .small(),
-                                            )
-                                            .on_click(cx.listener(move |this, _, window, cx| {
-                                                if busy {
-                                                    if let Some(f) = this.model.cancel() {
-                                                        this.send(f);
-                                                    }
-                                                    return;
-                                                }
-                                                let text =
-                                                    this.composer.read(cx).value().to_string();
-                                                if let Some(frame) = this.model.send(&text) {
-                                                    this.send(frame);
-                                                    this.composer.update(cx, |s, cx| {
-                                                        s.set_value("", window, cx)
-                                                    });
-                                                }
-                                            })),
-                                    ),
-                            ),
+                            .items_center()
+                            .justify_center()
+                            .rounded_full()
+                            .text_color(p.ink_2)
+                            .cursor_pointer()
+                            .hover(move |s| s.bg(p.hover).text_color(p.ink))
+                            .child(Icon::new(gpui_kit::assets::IconName::Dices))
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                let current = this.name_in.read(cx).value().to_string();
+                                this.name_in.update(cx, |s, cx| {
+                                    s.set_value(whimsical_name(&current), window, cx)
+                                });
+                                this.make.snapped = Some(Instant::now());
+                                cx.notify();
+                            })),
                     ),
+            )
+            .child(swatches)
+            .child(
+                div()
+                    .id("weave-it")
+                    .mt(px(space::S))
+                    .h(px(46.0))
+                    .px(px(space::XXL))
+                    .flex()
+                    .items_center()
+                    .gap(px(space::S))
+                    .rounded_full()
+                    .bg(tint)
+                    .text_color(p.bg)
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .cursor_pointer()
+                    .hover(|s| s.opacity(0.88))
+                    .child(Icon::new(gpui_kit::assets::IconName::Sparkles).small())
+                    .child("Weave it")
+                    .on_click(cx.listener(|this, _, _, cx| this.weave_agent(cx))),
             )
     }
 
-    fn new_agent(&mut self, cx: &mut Context<Self>) -> Div {
+    /// Makes the agent and lets the threads weave it while the instance does.
+    fn weave_agent(&mut self, cx: &mut Context<Self>) {
+        let Some(program) = self.make.program.clone() else {
+            return;
+        };
+        let typed = self.name_in.read(cx).value().trim().to_string();
+        let name = if typed.is_empty() {
+            program_title(&program)
+        } else {
+            typed
+        };
+        let f = self.model.new_agent(&name, &program, "", self.make.color());
+        self.send(f);
+        self.make.step = Step::Weaving;
+        self.make.started = Some(Instant::now());
+        self.make.agents_before = self.model.agents.len();
+        self.make.name = name;
+        cx.notify();
+    }
+
+    /// The last step: every colour's thread pulled in to the new agent's one.
+    fn weaving_step(&self) -> Div {
         let p = self.p;
-        let mut programs = div().flex().flex_wrap().gap(px(space::S));
-        if self.model.programs.is_empty() {
-            programs = programs.child(
+        let chosen = self.make.color();
+        let mut colors = vec![thread::color(chosen, p.dark)];
+        colors.extend(
+            COLORS
+                .iter()
+                .filter(|c| **c != chosen)
+                .map(|c| thread::color(c, p.dark)),
+        );
+        let t = self
+            .make
+            .started
+            .map_or(0.0, |s| s.elapsed().as_secs_f32() / WEAVE_SECONDS);
+        let gather = 1.0 - (1.0 - t.min(1.0)).powi(3);
+        div()
+            .w_full()
+            .flex()
+            .flex_col()
+            .items_center()
+            .gap(px(space::XL))
+            .child(thread::weave(colors, gather, 150.0))
+            .child(
                 div()
-                    .text_size(px(size::SMALL))
-                    .text_color(p.ink_3)
-                    .child("No agent programs are installed on the instance yet. Install one from Agent programs, at the bottom of the sidebar."),
-            );
+                    .text_size(px(size::HEADING))
+                    .text_color(p.ink_2)
+                    .child(format!("Weaving {}…", self.make.name)),
+            )
+    }
+
+    /// Once the woven agent is there and the threads have met, its chat opens.
+    fn finish_weaving(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.make.step != Step::Weaving {
+            return;
         }
-        for name in self.model.programs.clone() {
-            let picked = self.program.as_deref() == Some(name.as_str());
-            let n = name.clone();
-            programs = programs.child(
+        let t = self.make.started.map_or(0.0, |s| s.elapsed().as_secs_f32());
+        let made =
+            self.model.agents.len() > self.make.agents_before && self.model.made_agent.is_none();
+        if made && t > WEAVE_SECONDS + 0.3 {
+            self.name_in.update(cx, |s, cx| s.set_value("", window, cx));
+            self.make = Making::default();
+            self.screen = Screen::Chat;
+            self.refresh_rows(cx);
+        } else if !made && t > 20.0 {
+            // The instance said no, or never answered: back to the name, to try again.
+            self.make.step = Step::Name;
+        }
+    }
+
+    /// A chat with nothing in it yet: the agent's thread and name, the composer in the
+    /// middle, and a few things to ask it.
+    fn hero(
+        &mut self,
+        agent: Option<&model::Agent>,
+        composer: Option<Div>,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let p = self.p;
+        let Some(a) = agent else {
+            return div().flex_1();
+        };
+        let tint = thread::color(&a.color, p.dark);
+        let mood = self.model.mood(&a.id);
+        let mut chips = div().flex().flex_wrap().justify_center().gap(px(space::S));
+        for (i, ask) in SUGGESTIONS.iter().enumerate() {
+            chips = chips.child(
                 div()
-                    .id(SharedString::from(format!("program-{name}")))
-                    .px(px(space::M))
-                    .py(px(space::XS + 2.0))
-                    .rounded(px(radius::CHIP))
+                    .id(("ask", i))
+                    .px(px(space::L))
+                    .py(px(space::S))
+                    .rounded_full()
                     .border_1()
+                    .border_color(p.line_strong)
                     .text_size(px(size::SMALL))
+                    .text_color(p.ink_2)
                     .cursor_pointer()
-                    .when(picked, |d| {
-                        d.bg(p.button)
-                            .text_color(p.button_ink)
-                            .border_color(p.button)
-                    })
-                    .when(!picked, |d| {
-                        d.border_color(p.line_strong)
-                            .text_color(p.ink)
-                            .hover(move |s| s.bg(p.hover))
-                    })
-                    .child(name)
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.program = Some(n.clone());
-                        cx.notify();
+                    .hover(move |s| s.bg(p.hover).text_color(p.ink))
+                    .child(*ask)
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.composer.update(cx, |s, cx| {
+                            s.set_value(*ask, window, cx);
+                            s.focus(window, cx);
+                        });
                     })),
             );
         }
@@ -2046,59 +2480,35 @@ ACTA_KEY=secret:ACTA_KEY",
             .flex_1()
             .min_h_0()
             .flex()
+            .flex_col()
+            .items_center()
             .justify_center()
-            .pt(px(space::XXL))
+            .gap(px(space::XL))
+            .px(px(space::XL))
+            .pb(px(60.0))
+            .child(thread(
+                mood,
+                tint,
+                140.0,
+                16.0,
+                self.model.finished_at(&a.id),
+            ))
             .child(
                 div()
-                    .w(px(520.0))
-                    .flex()
-                    .flex_col()
-                    .gap(px(space::XL))
-                    .child(
-                        div()
-                            .text_size(px(size::HEADING))
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(p.ink)
-                            .child("New agent"),
-                    )
-                    .child(self.field("Name", Input::new(&self.name_in)))
-                    .child(self.field("Runs on", programs))
-                    .child(self.field("Instructions", Textarea::new(&self.instructions_in)))
-                    .child(
-                        div()
-                            .flex()
-                            .gap(px(space::S))
-                            .child(
-                                self.button("create", "Make agent", true)
-                                    .on_click(cx.listener(|this, _, window, cx| {
-                                        let name = this.name_in.read(cx).value().to_string();
-                                        let instructions =
-                                            this.instructions_in.read(cx).value().to_string();
-                                        let Some(program) = this.program.clone() else {
-                                            return;
-                                        };
-                                        if name.trim().is_empty() {
-                                            return;
-                                        }
-                                        let f =
-                                            this.model.new_agent(&name, &program, &instructions);
-                                        this.send(f);
-                                        this.name_in
-                                            .update(cx, |s, cx| s.set_value("", window, cx));
-                                        this.instructions_in
-                                            .update(cx, |s, cx| s.set_value("", window, cx));
-                                        this.screen = Screen::Chat;
-                                        cx.notify();
-                                    })),
-                            )
-                            .child(self.button("cancel-new", "Cancel", false).on_click(
-                                cx.listener(|this, _, _, cx| {
-                                    this.screen = Screen::Chat;
-                                    cx.notify();
-                                }),
-                            )),
-                    ),
+                    .text_size(px(size::HERO))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(p.ink)
+                    .child(a.name.clone()),
             )
+            .when_some(composer, |d, c| {
+                d.child(div().w_full().max_w(px(space::COLUMN)).child(c))
+            })
+            .child(chips)
+    }
+
+    /// A new agent: the same steps as the first one, with a way back.
+    fn new_agent(&mut self, cx: &mut Context<Self>) -> Div {
+        self.making(false, cx)
     }
 
     /// The edit page: an agent's name and instructions, and its earlier versions to go
@@ -4951,6 +5361,7 @@ fn time_of(ms: i64) -> String {
 impl Render for Loom {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let p = self.p;
+        self.finish_weaving(window, cx);
         if std::mem::take(&mut self.model.profile_came) {
             let text = self
                 .model
@@ -4967,6 +5378,9 @@ impl Render for Loom {
             .iter()
             .any(|a| thread::moves(self.model.mood(&a.id), self.model.finished_at(&a.id)))
             || self.model.conn == Some(Conn::SignedOut)
+            || (self.screen == Screen::Chat && self.model.agents.is_empty())
+            || self.screen == Screen::NewAgent
+            || self.make.step == Step::Weaving
         {
             window.request_animation_frame();
         }
@@ -5049,6 +5463,131 @@ fn thousands(n: i64) -> String {
         format!("-{out}")
     } else {
         out
+    }
+}
+
+/// The thread colours a new agent can have (design/tokens.toml), in the order the brain
+/// tiles take them. Grey is left for agents that are off.
+const COLORS: [&str; 7] = [
+    "periwinkle",
+    "apricot",
+    "mint",
+    "pink",
+    "sky",
+    "gold",
+    "lavender",
+];
+
+/// How long the threads take to weave a new agent together, in seconds.
+const WEAVE_SECONDS: f32 = 2.2;
+
+/// What the die names a new agent.
+const NAMES: [&str; 32] = [
+    "Pip",
+    "Juniper",
+    "Biscuit",
+    "Moss",
+    "Clementine",
+    "Otto",
+    "Wren",
+    "Maple",
+    "Pickle",
+    "Nova",
+    "Sprout",
+    "Bramble",
+    "Fig",
+    "Comet",
+    "Pebble",
+    "Tansy",
+    "Waffles",
+    "Marmalade",
+    "Basil",
+    "Noodle",
+    "Hazel",
+    "Quill",
+    "Bean",
+    "Ziggy",
+    "Clover",
+    "Puddle",
+    "Sorrel",
+    "Button",
+    "Thistle",
+    "Mochi",
+    "Ember",
+    "Tuppence",
+];
+
+/// A name from the die, never the one it has now.
+fn whimsical_name(now: &str) -> String {
+    let seed = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.subsec_nanos() as usize / 1000);
+    let mut i = seed % NAMES.len();
+    if NAMES[i] == now {
+        i = (i + 1) % NAMES.len();
+    }
+    NAMES[i].to_string()
+}
+
+/// Who makes an agent program, under its name on its tile.
+fn program_maker(name: &str) -> &'static str {
+    match name {
+        "claude" => "Anthropic",
+        "codex" => "OpenAI",
+        "gemini" => "Google",
+        "goose" => "Block",
+        _ => "",
+    }
+}
+
+/// How far making an agent has got.
+#[derive(Clone, Copy, PartialEq, Eq, Default)]
+enum Step {
+    #[default]
+    Brain,
+    Name,
+    Weaving,
+}
+
+/// An agent being made: its brain, its colour, and the weaving at the end.
+#[derive(Default)]
+struct Making {
+    step: Step,
+    program: Option<String>,
+    color: &'static str,
+    /// The brain tile under the pointer, whose thread moves.
+    hover: Option<String>,
+    /// When the name or colour last changed, so its thread twangs.
+    snapped: Option<Instant>,
+    /// When the weaving started, and how many agents there were then.
+    started: Option<Instant>,
+    agents_before: usize,
+    name: String,
+}
+
+impl Making {
+    fn color(&self) -> &'static str {
+        if self.color.is_empty() {
+            "periwinkle"
+        } else {
+            self.color
+        }
+    }
+}
+
+/// What a new chat offers to ask, under the composer.
+const SUGGESTIONS: [&str; 3] = [
+    "What can you do?",
+    "Plan my week with me",
+    "Check something for me every morning",
+];
+
+/// An agent program's name as a person reads it: claude as Claude.
+fn program_title(name: &str) -> String {
+    let mut c = name.chars();
+    match c.next() {
+        Some(f) => f.to_uppercase().chain(c).collect(),
+        None => String::new(),
     }
 }
 

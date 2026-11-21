@@ -55,7 +55,6 @@ pub struct Agent {
     pub id: String,
     pub name: String,
     pub color: String,
-    pub program: String,
     pub permission: String,
     pub instructions: String,
     /// The names of the person's MCP servers it has.
@@ -590,6 +589,8 @@ pub struct Model {
     pub tools: Vec<Tool>,
     pub approvals: Vec<Approval>,
     pub programs: Vec<String>,
+    /// Whether the instance has said which programs it has, since the last ask.
+    pub programs_known: bool,
     /// The selected agent's messages, oldest first, with the queued ones last.
     pub messages: Vec<Message>,
     pub more_messages: bool,
@@ -1396,6 +1397,7 @@ impl Model {
             }
             self.programs_stale = true;
         } else if id.starts_with("app.acp") {
+            self.programs_known = true;
             self.programs = f
                 .pointer("/value/programs")
                 .and_then(Value::as_array)
@@ -1470,7 +1472,6 @@ impl Model {
                         id: s(a, "id"),
                         name: s(a, "name"),
                         color: s(a, "color"),
-                        program: s(a, "acp_agent"),
                         permission: s(a, "permission"),
                         instructions: s(a, "instructions"),
                         mcp: a
@@ -1728,7 +1729,7 @@ impl Model {
         let Some(r) = self.runs.iter().find(|r| r.agent == agent.id) else {
             return match self.mood(&agent.id) {
                 Mood::Failed => "Couldn't finish".into(),
-                _ => agent.program.clone(),
+                _ => String::new(),
             };
         };
         if let Some(a) = self.approvals.iter().find(|a| a.run == r.id) {
@@ -1892,9 +1893,20 @@ impl Model {
         json!({"t": "cmd", "id": id, "name": "acp.list"})
     }
 
-    pub fn new_agent(&mut self, name: &str, program: &str, instructions: &str) -> Value {
+    pub fn new_agent(
+        &mut self,
+        name: &str,
+        program: &str,
+        instructions: &str,
+        color: &str,
+    ) -> Value {
         let id = self.id("app.new_agent");
-        json!({"t": "cmd", "id": id, "name": "agent.create", "args": {"name": name.trim(), "acp_agent": program, "instructions": instructions.trim()}})
+        let mut args =
+            json!({"name": name.trim(), "acp_agent": program, "instructions": instructions.trim()});
+        if !color.is_empty() {
+            args["color"] = json!(color);
+        }
+        json!({"t": "cmd", "id": id, "name": "agent.create", "args": args})
     }
 
     pub fn start_fresh(&mut self) -> Option<Value> {
