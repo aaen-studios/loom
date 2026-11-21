@@ -111,9 +111,14 @@ pub fn install(plan: Plan) -> Done ! Error {
 
     // The program, where the unit runs it.
     let exe = current_exe()
+    // An update finds the service running the old one, which Linux won't let
+    // be written over (ETXTBSY), so the new one goes beside it and is renamed
+    // over it; the service runs it once it restarts, below.
     if exe != BIN {
-        try fs.copy(exe, String(BIN))
-        try fs.set_mode(String(BIN), 0o755)
+        let next = "{BIN}.new"
+        try fs.copy(exe, next.copy())
+        try fs.set_mode(next.copy(), 0o755)
+        try fs.rename_synced(next, String(BIN))
         steps.push("put loom in {BIN}")
     }
 
