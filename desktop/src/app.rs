@@ -1824,11 +1824,37 @@ ACTA_KEY=secret:ACTA_KEY",
                 .top_0()
                 .left_0()
                 .size_full()
+                // It takes the pointer: nothing behind it hovers or takes a click, so
+                // the button that opened it doesn't open it again.
+                .occlude()
                 .flex()
                 .items_center()
                 .justify_center()
                 .bg(scrim)
                 .child(card),
+        )
+    }
+
+    /// While a menu is open, a clear sheet over the window that takes the pointer: nothing
+    /// behind it hovers, and a click anywhere, the button that opened it too, closes it.
+    /// The menus themselves are drawn over it.
+    fn menu_scrim(&self, cx: &mut Context<Self>) -> Option<Stateful<Div>> {
+        if self.menu.is_none() && self.plus.is_none() {
+            return None;
+        }
+        Some(
+            div()
+                .id("menu-scrim")
+                .absolute()
+                .top_0()
+                .left_0()
+                .size_full()
+                .occlude()
+                .on_any_mouse_down(cx.listener(|this, _, _, cx| {
+                    this.menu = None;
+                    this.plus = None;
+                    cx.notify();
+                })),
         )
     }
 
@@ -9610,7 +9636,9 @@ impl Render for Loom {
         };
         self.sync_panel(window, cx);
         let header = self.header(cx);
-        let menu = self.menu_panel(cx);
+        // Drawn last, over the sheet that takes the pointer while it's open.
+        let menu = self.menu_panel(cx).map(deferred);
+        let menu_scrim = self.menu_scrim(cx);
         let popup = self.popup_view(window, cx);
         root.flex()
             .child(self.sidebar(cx))
@@ -9636,6 +9664,7 @@ impl Render for Loom {
                     .when_some(unroll, |d, u| d.child(u)),
             )
             .when_some(popup, |d, p| d.child(p))
+            .when_some(menu_scrim, |d, s| d.child(s))
             .when_some(whole, |d, c| d.child(c))
             .when_some(splash, |d, s| d.child(s))
     }
