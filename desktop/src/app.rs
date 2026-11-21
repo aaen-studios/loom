@@ -126,6 +126,8 @@ pub struct Loom {
     /// The open plugin panel: its plugin, the web view, and where it is (x, y, w, h).
     panel: Option<(String, crate::panel::Panel, [f32; 4])>,
     panel_context: Option<wry::WebContext>,
+    /// The plugin whose panel is being made, while it is.
+    panel_opening: Option<String>,
     /// What came through the open panel's door, waiting for the window's task.
     door_in: Rc<std::cell::RefCell<Vec<crate::panel::Message>>>,
     note_in: Entity<InputState>,
@@ -382,6 +384,7 @@ ACTA_KEY=secret:ACTA_KEY",
             skill_open: None,
             panel: None,
             panel_context: None,
+            panel_opening: None,
             door_in: Rc::new(std::cell::RefCell::new(Vec::new())),
             note_in,
             profile_in,
@@ -2643,7 +2646,7 @@ ACTA_KEY=secret:ACTA_KEY",
 
     /// Shows the open plugin's panel over the content area, or takes it away when there's
     /// none to show, and keeps it where the content area is as the window changes size.
-    fn sync_panel(&mut self, window: &mut Window) {
+    fn sync_panel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let want = if self.screen == Screen::Plugins {
             self.model.panel.clone()
         } else {
@@ -2674,9 +2677,21 @@ ACTA_KEY=secret:ACTA_KEY",
             }
         }
         self.panel = None;
-        let context = self
+        if self.panel_opening.is_some() {
+            return;
+        }
+        // Making a web view runs a message loop of its own until WebView2 is ready, and
+        // the window's tasks run in it. So it's made from a task, with nothing borrowed,
+        // not here, where the window is.
+        let Ok(parent) =
+            raw_window_handle::HasWindowHandle::window_handle(&*window).map(|h| Parent(h.as_raw()))
+        else {
+            return;
+        };
+        let mut context = self
             .panel_context
-            .get_or_insert_with(|| crate::panel::context(std::path::Path::new(&data_dir())));
+            .take()
+            .unwrap_or_else(|| crate::panel::context(std::path::Path::new(&data_dir())));
         let source = crate::panel::Source {
             id: open.plugin.id.clone(),
             files: std::sync::Arc::new(
@@ -2688,22 +2703,40 @@ ACTA_KEY=secret:ACTA_KEY",
             entry,
         };
         let door = self.door_in.clone();
-        match crate::panel::Panel::open(
-            &*window,
-            context,
-            &source,
-            panel_bounds(rect),
-            move |m| door.borrow_mut().push(m),
-            |what| eprintln!("loom: a panel was refused: {what}"),
-        ) {
-            Ok(view) => self.panel = Some((open.plugin.id.clone(), view, rect)),
-            Err(e) => {
-                self.model
-                    .notices
-                    .push(format!("The panel didn't open: {e}"));
-                self.model.close_panel();
-            }
-        }
+        let id = open.plugin.id.clone();
+        self.panel_opening = Some(id.clone());
+        cx.spawn(async move |this, cx| {
+            let made = crate::panel::Panel::open(
+                &parent,
+                &mut context,
+                &source,
+                panel_bounds(rect),
+                move |m| door.borrow_mut().push(m),
+                |what| eprintln!("loom: a panel was refused: {what}"),
+            );
+            let _ = this.update(cx, |this, cx| {
+                this.panel_opening = None;
+                this.panel_context = Some(context);
+                match made {
+                    // Unless the person went elsewhere while it was being made.
+                    Ok(view) => {
+                        let wanted = this.screen == Screen::Plugins
+                            && this.model.panel.as_ref().is_some_and(|p| p.plugin.id == id);
+                        if wanted {
+                            this.panel = Some((id, view, rect));
+                        }
+                    }
+                    Err(e) => {
+                        this.model
+                            .notices
+                            .push(format!("The panel didn't open: {e}"));
+                        this.model.close_panel();
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     /// The open panel's door: what came in goes to the instance as commands, or is
@@ -4361,7 +4394,7 @@ impl Render for Loom {
             Screen::Mcp => self.mcp_page(cx),
             Screen::Plugins => self.plugins_page(cx),
         };
-        self.sync_panel(window);
+        self.sync_panel(window, cx);
         let header = self.header(cx);
         let menu = self.menu_panel(cx);
         root.flex().child(self.sidebar(cx)).child(
@@ -4425,6 +4458,19 @@ fn core_config() -> String {
         config["server"] = Value::String(server);
     }
     config.to_string()
+}
+
+/// The window a panel is made in, by its handle, for the task that makes it.
+struct Parent(raw_window_handle::RawWindowHandle);
+
+impl raw_window_handle::HasWindowHandle for Parent {
+    fn window_handle(
+        &self,
+    ) -> Result<raw_window_handle::WindowHandle<'_>, raw_window_handle::HandleError> {
+        // SAFETY: the handle is the app's one window, which lives as long as the app, and
+        // the panel is made on its thread.
+        Ok(unsafe { raw_window_handle::WindowHandle::borrow_raw(self.0) })
+    }
 }
 
 /// Where a panel goes, from [x, y, width, height] in the window's logical pixels.
