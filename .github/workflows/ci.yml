@@ -96,7 +96,7 @@ jobs:
           grep -q '^loom:' /etc/subuid
           uid="$(id -u loom)"
           cd /tmp
-          sudo -u loom -H env XDG_RUNTIME_DIR="/run/user/$uid" podman run --rm --network pasta docker.io/library/alpine:3.20 true
+          sudo -u loom env -i HOME=/var/lib/loom PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin XDG_RUNTIME_DIR="/run/user/$uid" podman run --rm --network pasta docker.io/library/alpine:3.20 true
 
       - name: Install again
         run: |
