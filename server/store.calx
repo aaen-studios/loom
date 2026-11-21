@@ -75,6 +75,8 @@ CREATE TABLE IF NOT EXISTS runs (
 CREATE TABLE IF NOT EXISTS branches (
     conversation TEXT PRIMARY KEY, user TEXT NOT NULL REFERENCES users(id), from_conversation TEXT NOT NULL,
     from_message TEXT NOT NULL, handed INTEGER NOT NULL DEFAULT 0);
+CREATE TABLE IF NOT EXISTS routine_threads (
+    conversation TEXT PRIMARY KEY, user TEXT NOT NULL REFERENCES users(id), routine TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS sides (
     user TEXT NOT NULL REFERENCES users(id), agent TEXT NOT NULL, conversation TEXT NOT NULL,
     PRIMARY KEY (user, agent));
@@ -230,6 +232,9 @@ fn conversation_of(r: List<Value>) -> Json {
     // A branch of a chat: the chat, and the message it branches at.
     let from = text(r[6].copy())
     if from.len() > 0 { o = o.s("branch_of", from).s("branch_at", text(r[7].copy())) }
+    // A routine's thread of its own: the routine.
+    let routine = text(r[8].copy())
+    if routine.len() > 0 { o = o.s("routine", routine) }
     return o.done()
 }
 
@@ -660,7 +665,7 @@ impl Store {
     }
 
     pub fn conversation(self, user: String, id: String) -> Json? ! Error {
-        let row = try self.db.query_one(String("SELECT c.id, c.agent, c.title, c.at, k.id, s.agent, b.from_conversation, b.from_message FROM conversations c LEFT JOIN tasks k ON k.conversation = c.id LEFT JOIN sides s ON s.conversation = c.id LEFT JOIN branches b ON b.conversation = c.id WHERE c.id = ? AND c.user = ? AND c.deleted = 0"), [t(id), t(user)])
+        let row = try self.db.query_one(String("SELECT c.id, c.agent, c.title, c.at, k.id, s.agent, b.from_conversation, b.from_message, rt.routine FROM conversations c LEFT JOIN tasks k ON k.conversation = c.id LEFT JOIN sides s ON s.conversation = c.id LEFT JOIN branches b ON b.conversation = c.id LEFT JOIN routine_threads rt ON rt.conversation = c.id WHERE c.id = ? AND c.user = ? AND c.deleted = 0"), [t(id), t(user)])
         let r = row else return none
         return some(conversation_of(r))
     }
@@ -668,13 +673,13 @@ impl Store {
     // `agent`'s conversation with the newest message, as the apps show its
     // chat. A task's conversation is the task's, not the chat.
     pub fn newest_conversation(self, user: String, agent: String) -> Json? ! Error {
-        let r = try self.db.query_one(String("SELECT c.id, c.agent, c.title, c.at, NULL, NULL, NULL, NULL FROM conversations c LEFT JOIN messages m ON m.conversation = c.id AND m.user = c.user WHERE c.user = ? AND c.agent = ? AND c.deleted = 0 AND c.id NOT IN (SELECT conversation FROM tasks) AND c.id NOT IN (SELECT conversation FROM sides) AND c.id NOT IN (SELECT conversation FROM branches) GROUP BY c.id ORDER BY max(coalesce(m.at, c.at)) DESC, c.rowid DESC LIMIT 1"), [t(user), t(agent)]) else return none
+        let r = try self.db.query_one(String("SELECT c.id, c.agent, c.title, c.at, NULL, NULL, NULL, NULL, NULL FROM conversations c LEFT JOIN messages m ON m.conversation = c.id AND m.user = c.user WHERE c.user = ? AND c.agent = ? AND c.deleted = 0 AND c.id NOT IN (SELECT conversation FROM tasks) AND c.id NOT IN (SELECT conversation FROM sides) AND c.id NOT IN (SELECT conversation FROM branches) AND c.id NOT IN (SELECT conversation FROM routine_threads) GROUP BY c.id ORDER BY max(coalesce(m.at, c.at)) DESC, c.rowid DESC LIMIT 1"), [t(user), t(agent)]) else return none
         return some(conversation_of(r))
     }
 
     pub fn conversations(self, user: String) -> List<Json> ! Error {
         var out = List<Json>()
-        for r in try self.db.query(String("SELECT c.id, c.agent, c.title, c.at, k.id, s.agent, b.from_conversation, b.from_message FROM conversations c LEFT JOIN tasks k ON k.conversation = c.id LEFT JOIN sides s ON s.conversation = c.id LEFT JOIN branches b ON b.conversation = c.id WHERE c.user = ? AND c.deleted = 0 ORDER BY c.at"), [t(user)]) {
+        for r in try self.db.query(String("SELECT c.id, c.agent, c.title, c.at, k.id, s.agent, b.from_conversation, b.from_message, rt.routine FROM conversations c LEFT JOIN tasks k ON k.conversation = c.id LEFT JOIN sides s ON s.conversation = c.id LEFT JOIN branches b ON b.conversation = c.id LEFT JOIN routine_threads rt ON rt.conversation = c.id WHERE c.user = ? AND c.deleted = 0 ORDER BY c.at"), [t(user)]) {
             out.push(conversation_of(r))
         }
         return out
@@ -689,7 +694,22 @@ impl Store {
         _ = try self.db.execute(String("DELETE FROM tasks WHERE conversation = ? AND user = ?"), [t(id.copy()), t(user.copy())])
         _ = try self.db.execute(String("DELETE FROM sides WHERE conversation = ? AND user = ?"), [t(id.copy()), t(user.copy())])
         _ = try self.db.execute(String("DELETE FROM branches WHERE conversation = ? AND user = ?"), [t(id.copy()), t(user.copy())])
+        _ = try self.db.execute(String("DELETE FROM routine_threads WHERE conversation = ? AND user = ?"), [t(id.copy()), t(user.copy())])
         _ = try self.db.execute(String("UPDATE conversations SET deleted = 1 WHERE id = ? AND user = ?"), [t(id), t(user)])
+    }
+
+    // --- Routine threads (PLAN.md, "Routines say when there's nothing to say") ---
+
+    // Marks `conversation` as routine `routine`'s thread of its own, which is
+    // never its agent's chat.
+    pub fn mark_routine_thread(self, user: String, conversation: String, routine: String) ! Error {
+        _ = try self.db.execute(String("INSERT INTO routine_threads (conversation, user, routine) VALUES (?, ?, ?)"), [t(conversation), t(user), t(routine)])
+    }
+
+    // Routine `routine`'s thread, the newest if it has had more than one.
+    pub fn routine_thread(self, user: String, routine: String) -> String? ! Error {
+        let r = try self.db.query_one(String("SELECT rt.conversation FROM routine_threads rt JOIN conversations c ON c.id = rt.conversation WHERE rt.user = ? AND rt.routine = ? AND c.deleted = 0 ORDER BY c.rowid DESC LIMIT 1"), [t(user), t(routine)]) else return none
+        return some(text(r[0].copy()))
     }
 
     // --- Branches (PLAN.md, "Branching a chat") ---
@@ -1478,7 +1498,7 @@ impl Store {
 
     fn remove_rows(self, user: String) ! Error {
         _ = try self.db.execute(String("DELETE FROM sent WHERE device IN (SELECT id FROM devices WHERE user = ?)"), [t(user.copy())])
-        for table in ["push_tokens", "link_codes", "resets", "agent_revisions", "agents", "activity", "secrets", "mcp_servers", "skills", "messages", "conversations", "runs", "queue", "tasks", "sides", "branches", "events", "acp_sessions", "files", "profiles", "routines", "flows", "plugin_data", "plugin_revisions", "plugins", "usage", "memories", "memories_fts", "messages_fts", "shared_rows", "shared_tables", "script_tokens", "devices"] {
+        for table in ["push_tokens", "link_codes", "resets", "agent_revisions", "agents", "activity", "secrets", "mcp_servers", "skills", "messages", "conversations", "runs", "queue", "tasks", "sides", "branches", "routine_threads", "events", "acp_sessions", "files", "profiles", "routines", "flows", "plugin_data", "plugin_revisions", "plugins", "usage", "memories", "memories_fts", "messages_fts", "shared_rows", "shared_tables", "script_tokens", "devices"] {
             _ = try self.db.execute("DELETE FROM {table} WHERE user = ?", [t(user.copy())])
         }
         _ = try self.db.execute(String("DELETE FROM invites WHERE by = ?"), [t(user.copy())])

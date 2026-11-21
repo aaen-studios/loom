@@ -2872,11 +2872,27 @@ impl Instance {
             try i.routine_ran(user, merge(r, Obj.new().j("last", Obj.new().i("at", t).s("status", String("failed")).s("error", String("Its agent was deleted.")).done()).done()))
             return Answer.Refused(String("not_found"), String("The routine's agent was deleted."))
         }
-        // It posts into the agent's chat, as the apps show it: its newest conversation.
-        var conversation = try i.store.newest_conversation(user.copy(), agent_id.copy()) ?? Json.Null
-        if conversation == Json.Null {
-            conversation = try i.store.add_conversation(user.copy(), agent_id.copy(), name.copy())
-            try i.event(user.copy(), "conversation.created", Obj.new().j("conversation", conversation.copy()).done())
+        // It posts into the agent's chat, as the apps show it: its newest
+        // conversation. Or into a thread of its own, which is never the chat.
+        var conversation = Json.Null
+        if str_at(r.copy(), "post") == some(String("thread")) {
+            if let kept = try i.store.routine_thread(user.copy(), id.copy()) {
+                let c = try i.store.conversation(user.copy(), kept) ?? Json.Null
+                if str_at(c.copy(), "agent") == some(agent_id.copy()) { conversation = c }
+            }
+            if conversation == Json.Null {
+                let made = try i.store.add_conversation(user.copy(), agent_id.copy(), name.copy())
+                let made_id = str_at(made.copy(), "id") ?? String()
+                try i.store.mark_routine_thread(user.copy(), made_id.copy(), id.copy())
+                conversation = try i.store.conversation(user.copy(), made_id) ?? made
+                try i.event(user.copy(), "conversation.created", Obj.new().j("conversation", conversation.copy()).done())
+            }
+        } else {
+            conversation = try i.store.newest_conversation(user.copy(), agent_id.copy()) ?? Json.Null
+            if conversation == Json.Null {
+                conversation = try i.store.add_conversation(user.copy(), agent_id.copy(), name.copy())
+                try i.event(user.copy(), "conversation.created", Obj.new().j("conversation", conversation.copy()).done())
+            }
         }
         let conversation_id = str_at(conversation.copy(), "id") ?? String()
         var busy = false
@@ -3143,6 +3159,9 @@ impl Instance {
         if not routines.known_zone(tz.copy()) { tz = String("UTC") }
         let on = bool_at(m.copy(), "on") ?? true
         let notify = bool_at(m.copy(), "notify") ?? false
+        // Where it posts: its agent's chat, or a thread of its own.
+        let post = str_at(m.copy(), "post") ?? String("chat")
+        if post != "chat" and post != "thread" { return Answer.Refused(String("bad_request"), String("post is chat, its agent's chat, or thread, a thread of its own.")) }
         let catch_up = bool_at(m, "catch_up") ?? true
         // When it runs next stays, unless what decides that changed.
         let same = old != Json.Null and "{at(old.copy(), "schedule")}" == "{schedule}" and str_at(old.copy(), "tz") == some(tz.copy()) and (int_at(old.copy(), "next") ?? 0) > 0
@@ -3151,10 +3170,11 @@ impl Instance {
         if let sc = s {
             if on { next = if same { int_at(old.copy(), "next") ?? 0 } else { routines.next(sc, tz.copy(), t, i.minute_ms) } }
         }
-        // Where it last posted, kept while its agent stays the same.
-        let conversation = if str_at(old.copy(), "agent") == some(agent_id.copy()) { str_at(old.copy(), "conversation") ?? String() } else { String() }
+        // Where it last posted, kept while its agent, and where it posts, stay the same.
+        let posted_before = str_at(old.copy(), "post") ?? String("chat")
+        let conversation = if str_at(old.copy(), "agent") == some(agent_id.copy()) and posted_before == post { str_at(old.copy(), "conversation") ?? String() } else { String() }
         let id = if id_given.len() > 0 { id_given } else { try i.store.new_id("rt") }
-        let r = Obj.new().s("id", id).s("name", name.copy()).s("agent", agent_id.copy()).s("prompt", prompt).j("schedule", schedule).maybe("hook", if webhook { some(hook) } else { none }).maybe("secret", if webhook { some(secret) } else { none }).s("when", when).s("tz", tz).b("on", on).b("notify", notify).b("catch_up", catch_up).s("conversation", conversation).i("next", next).j("last", at(old.copy(), "last")).j("flow", flow).s("by", by.copy()).i("at", t).done()
+        let r = Obj.new().s("id", id).s("name", name.copy()).s("agent", agent_id.copy()).s("prompt", prompt).j("schedule", schedule).maybe("hook", if webhook { some(hook) } else { none }).maybe("secret", if webhook { some(secret) } else { none }).s("when", when).s("tz", tz).b("on", on).b("notify", notify).b("catch_up", catch_up).s("post", post).s("conversation", conversation).i("next", next).j("last", at(old.copy(), "last")).j("flow", flow).s("by", by.copy()).i("at", t).done()
         i.log(user.copy(), agent_id, "routine", if old == Json.Null { "Made the routine {name}" } else { "Changed the routine {name}" }, by)
         try i.routine_ran(user, r.copy())
         return Answer.Value(Obj.new().j("routine", r).done())

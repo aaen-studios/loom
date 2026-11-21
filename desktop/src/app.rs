@@ -186,6 +186,8 @@ pub struct Loom {
     routine_notify: bool,
     routine_on: bool,
     routine_catch_up: bool,
+    /// Whether the routine in the form posts into a thread of its own, not its agent's chat.
+    routine_thread: bool,
     routine_webhook: bool,
     /// The flow the form edits, one step after another: each step's agent and prompt.
     routine_flow: Vec<(Option<String>, Entity<TextareaState>)>,
@@ -699,6 +701,7 @@ ACTA_KEY=secret:ACTA_KEY",
             routine_notify: true,
             routine_on: true,
             routine_catch_up: true,
+            routine_thread: false,
             routine_webhook: false,
             routine_kind: "every".into(),
             routine_flow: Vec::new(),
@@ -2079,8 +2082,15 @@ ACTA_KEY=secret:ACTA_KEY",
             )
     }
 
-    /// Over a branch in the chat: its title, and the way back to the chat it goes on from.
-    fn branch_strip(&self, title: String, tint: Hsla, cx: &mut Context<Self>) -> Div {
+    /// Over a branch, or a routine's thread, in the chat: its title, and the way back to the
+    /// agent's chat.
+    fn branch_strip(
+        &self,
+        title: String,
+        routine: bool,
+        tint: Hsla,
+        cx: &mut Context<Self>,
+    ) -> Div {
         let p = self.p;
         div()
             .w_full()
@@ -2115,7 +2125,11 @@ ACTA_KEY=secret:ACTA_KEY",
                             .child(Icon::new(Ico::ArrowLeft).small())
                             .on_click(cx.listener(|this, _, _, cx| this.open_branch(None, cx))),
                     )
-                    .child(Icon::new(Ico::GitBranch).small().text_color(tint))
+                    .child(
+                        Icon::new(if routine { Ico::Clock } else { Ico::GitBranch })
+                            .small()
+                            .text_color(tint),
+                    )
                     .child(
                         div()
                             .flex_1()
@@ -2135,10 +2149,23 @@ ACTA_KEY=secret:ACTA_KEY",
                                     .truncate()
                                     .text_size(px(size::CAPTION))
                                     .text_color(p.ink_3)
-                                    .child("A branch: the chat goes on as it was"),
+                                    .child(if routine {
+                                        "A routine's thread: each run posts here, not in the chat"
+                                    } else {
+                                        "A branch: the chat goes on as it was"
+                                    }),
                             ),
                     ),
             )
+    }
+
+    /// Shows a routine's thread of its own in place of its agent's chat, closing the page
+    /// that asked for it.
+    fn open_thread(&mut self, agent: &str, conversation: &str, cx: &mut Context<Self>) {
+        self.popup = None;
+        self.screen = Screen::Chat;
+        self.model.select(Some(agent.to_string()));
+        self.open_branch(Some(conversation.to_string()), cx);
     }
 
     /// Shows a branch in the chat, or the chat again.
@@ -3850,7 +3877,11 @@ ACTA_KEY=secret:ACTA_KEY",
         ) {
             (Some(t), Some(a), _) => Some(self.task_strip(&t, thread::color(&a.color, p.dark), cx)),
             (None, Some(a), Some(title)) => {
-                Some(self.branch_strip(title, thread::color(&a.color, p.dark), cx))
+                let routine = self
+                    .model
+                    .branch_open()
+                    .is_some_and(|c| c.routine.is_some());
+                Some(self.branch_strip(title, routine, thread::color(&a.color, p.dark), cx))
             }
             _ => None,
         };
@@ -6026,6 +6057,21 @@ ACTA_KEY=secret:ACTA_KEY",
                 )
                 .child(
                     self.button(
+                        "routine-post",
+                        if self.routine_thread {
+                            "Posts in a thread of its own"
+                        } else {
+                            "Posts in the chat"
+                        },
+                        false,
+                    )
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.routine_thread = !this.routine_thread;
+                        cx.notify();
+                    })),
+                )
+                .child(
+                    self.button(
                         "routine-webhook",
                         if self.routine_webhook {
                             "Webhook: on"
@@ -6137,6 +6183,12 @@ ACTA_KEY=secret:ACTA_KEY",
                                 notify: this.routine_notify,
                                 on: this.routine_on,
                                 catch_up: this.routine_catch_up,
+                                post: if this.routine_thread {
+                                    "thread"
+                                } else {
+                                    "chat"
+                                }
+                                .into(),
                                 webhook: this.routine_webhook,
                                 flow,
                             };
@@ -6268,6 +6320,18 @@ ACTA_KEY=secret:ACTA_KEY",
                             )
                         })
                 });
+                // A routine with a thread of its own: the way there.
+                let thread_row = (r.post == "thread" && !r.conversation.is_empty()).then(|| {
+                    let conversation = r.conversation.clone();
+                    let agent = r.agent.clone();
+                    div().flex().pt(px(space::XS)).child(
+                        self.button_owned(format!("thread-{}", r.id), "Open its thread", false)
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                cx.stop_propagation();
+                                this.open_thread(&agent, &conversation, cx);
+                            })),
+                    )
+                });
                 let id = SharedString::from(format!("routine-{}", r.id));
                 list = list.child(
                     div()
@@ -6296,6 +6360,7 @@ ACTA_KEY=secret:ACTA_KEY",
                             }
                         )))
                         .children(flow_row)
+                        .children(thread_row)
                         .on_click(cx.listener(move |this, _, window, cx| {
                             this.routine_name_in
                                 .update(cx, |s, cx| s.set_value(r.name.clone(), window, cx));
@@ -6312,6 +6377,7 @@ ACTA_KEY=secret:ACTA_KEY",
                             this.routine_notify = r.notify;
                             this.routine_on = r.on;
                             this.routine_catch_up = r.catch_up;
+                            this.routine_thread = r.post == "thread";
                             this.routine_webhook = !r.hook.is_empty();
                             this.set_routine_flow(&r.flow, window, cx);
                             this.routine_open = Some(Some(r.id.clone()));
@@ -6336,6 +6402,7 @@ ACTA_KEY=secret:ACTA_KEY",
                                 this.routine_notify = true;
                                 this.routine_on = true;
                                 this.routine_catch_up = true;
+                                this.routine_thread = false;
                                 this.routine_webhook = false;
                                 this.set_routine_flow(&[], window, cx);
                                 this.routine_open = Some(None);
