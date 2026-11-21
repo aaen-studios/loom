@@ -1,0 +1,163 @@
+module server.sandbox
+
+// Where the agents of everyone but the owner run (PLAN.md, "Sandboxes"): a
+// rootless Podman container for each person, which sees their own folder,
+// `sandboxes/<user>` in the data folder, and the instance's downloaded agent
+// programs, `acp/`, read-only, and nothing else of the instance's. Both are
+// mounted at the same paths as outside, so an agent's folder, the files loom
+// copies into it and the links the agent sends back mean the same inside and out.
+//
+// The container has the internet, through pasta, but not the server's
+// loopback, except one port: the gate (server/gate.calx), which passes only
+// `loom mcp`'s calls on to the instance. The person's agent programs run in it
+// with `podman exec`, and loom's own tools reach them through the image's `loom
+// mcp`. It keeps running between agents, so what the person installs in it
+// stays until the instance moves or the person is removed.
+import std.fs
+import std.process.{Command}
+
+// The image a sandbox runs, unless `loom serve --sandbox-image` names another:
+// loom's own, which has Node for the agents that start with npx, git, and `loom`
+// for `loom mcp`.
+pub const IMAGE: str = "ghcr.io/aaen-studios/loom"
+
+// What each sandbox may use, at most.
+const MEMORY: str = "2g"
+const CPUS: str = "2"
+const PIDS: str = "512"
+
+pub struct Sandboxes {
+    pub runtime: String    // podman
+    pub image: String
+    pub root: String       // the data folder's sandboxes/, absolute
+    pub acp: String        // the data folder's acp/, absolute
+    pub gate: u16          // the gate's port on 127.0.0.1
+}
+
+// The container's name for `user`.
+pub fn name(user: String) -> String {
+    return "loom-{user}"
+}
+
+// Whether `runtime` is there to run sandboxes with.
+pub fn found(runtime: String) -> bool {
+    return match Command.new(runtime).arg(String("--version")).output() {
+        ok(out) => out.status.success(),
+        err(_) => false,
+    }
+}
+
+impl Sandboxes {
+    // `user`'s own folder, which their sandbox sees.
+    pub fn home(self, user: String) -> String {
+        return "{self.root}/{user}"
+    }
+
+    // Makes sure `user`'s sandbox is running, made for this gate's port.
+    pub fn ready(self, user: String) ! Error {
+        let home = self.home(user.copy())
+        try fs.make_dir_all(home.copy())
+        try fs.make_dir_all(self.acp.copy())
+        let box = name(user.copy())
+        let looked = try Command.new(self.runtime.copy()).args([String("inspect"), String("--format"), String(#"{{.State.Running}} {{index .Config.Labels "loom.gate"}}"#), box.copy()]).output()
+        if looked.status.success() {
+            let said = looked.text().trim().copy()
+            if said == "true {self.gate}" { return }
+            if said == "false {self.gate}" {
+                try self.run([String("start"), box])
+                return
+            }
+            // Made for a gate on another port: made again, keeping the person's folder.
+            try self.run([String("rm"), String("-f"), box.copy()])
+        }
+        var args: List<String> = [String("run"), String("-d"), String("--name"), box.copy(), String("--label"), "loom.gate={self.gate}", String("--init")]
+        let limits: List<String> = [String("--memory"), String(MEMORY), String("--cpus"), String(CPUS), String("--pids-limit"), String(PIDS)]
+        let rest: List<String> = [String("--network"), "pasta:-T,{self.gate}", String("-v"), "{home}:{home}:Z", String("-v"), "{self.acp}:{self.acp}:ro,z", String("-e"), "HOME={home}", String("-w"), home.copy(), String("--entrypoint"), String("sleep"), self.image.copy(), String("infinity")]
+        var limited = args.copy()
+        limited.extend(limits)
+        limited.extend(rest.copy())
+        let made = try Command.new(self.runtime.copy()).args(limited).output()
+        if made.status.success() { return }
+        let why = made.error_text().trim().copy()
+        // Where the system doesn't let the instance's user set limits (no cgroup
+        // controllers delegated to it), the sandbox still keeps the person apart.
+        if not why.contains("cgroup") { fail "{self.runtime} didn't start the sandbox: {why}" }
+        eprintln("loom: {user}'s sandbox runs without limits on memory and CPU, which this system doesn't let loom set: {why}")
+        match Command.new(self.runtime.copy()).args([String("rm"), String("-f"), box]).output() {
+            ok(_) => {},
+            err(_) => {},
+        }
+        args.extend(rest)
+        try self.run(args)
+    }
+
+    // What runs `command` with `args` in `user`'s sandbox, in `folder`, with the
+    // environment variables `names` from the program's own environment.
+    pub fn wrap(self, user: String, folder: String, names: List<String>, command: String, args: List<String>) -> (String, List<String>) {
+        var out: List<String> = [String("exec"), String("-i"), String("-w"), folder.copy()]
+        for n in names {
+            out.push(String("-e"))
+            out.push(n.copy())
+        }
+        out.push(name(user.copy()))
+        out.push(command.copy())
+        out.extend(args.copy())
+        return (self.runtime.copy(), out)
+    }
+
+    // Stops `user`'s sandbox and removes it, with their folder. What their agents
+    // made there may belong to other ids of the sandbox's, so the folder goes in
+    // the sandboxes' user namespace (`podman unshare`).
+    pub fn remove(self, user: String) {
+        if user.len() == 0 or user.contains("/") or user.contains(".") { return }
+        match Command.new(self.runtime.copy()).args([String("rm"), String("-f"), String("-t"), String("0"), name(user.copy())]).output() {
+            ok(_) => {},
+            err(e) => eprintln("loom: removing a sandbox: {e}"),
+        }
+        let home = self.home(user)
+        if self.root.len() < 2 or not home.starts_with("{self.root}/") or not fs.exists(home.copy()) { return }
+        match Command.new(self.runtime.copy()).args([String("unshare"), String("rm"), String("-rf"), String("--"), home.copy()]).output() {
+            ok(out) => if not out.status.success() { eprintln("loom: removing {home}: {out.error_text().trim()}") },
+            err(e) => eprintln("loom: removing {home}: {e}"),
+        }
+    }
+
+    // Writes `data` at `path` in `user`'s sandbox, making its folders. The
+    // instance never writes in a person's folder itself: a link the person's
+    // agent put there could lead it to the instance's own files.
+    pub fn write(self, user: String, path: String, data: List<u8>) ! Error {
+        let script = String(#"mkdir -p -- "$(dirname -- "$1")" && cat > "$1""#)
+        let out = try Command.new(self.runtime.copy()).args([String("exec"), String("-i"), name(user), String("sh"), String("-c"), script, String("loom"), path.copy()]).input(data).output()
+        if not out.status.success() { fail "writing {path} in the sandbox didn't work: {out.error_text().trim()}" }
+    }
+
+    // Makes the folder `path` in `user`'s sandbox.
+    pub fn make_dir(self, user: String, path: String) ! Error {
+        try self.run([String("exec"), name(user), String("mkdir"), String("-p"), String("--"), path.copy()])
+    }
+
+    // Removes the file `path` in `user`'s sandbox, or the folder, if it's empty.
+    pub fn remove_file(self, user: String, path: String) ! Error {
+        try self.run([String("exec"), name(user), String("rm"), String("-f"), String("--"), path.copy()])
+    }
+
+    pub fn remove_dir(self, user: String, path: String) ! Error {
+        try self.run([String("exec"), name(user), String("rmdir"), String("--"), path.copy()])
+    }
+
+    // The file at `path` as `user`'s sandbox sees it, for a file their agent
+    // sends: read in the sandbox, so a link can't lead to the instance's own files.
+    pub fn read(self, user: String, path: String) -> List<u8>? {
+        let out = match Command.new(self.runtime.copy()).args([String("exec"), name(user), String("cat"), String("--"), path.copy()]).output() {
+            ok(o) => o,
+            err(_) => return none,
+        }
+        if not out.status.success() { return none }
+        return some(out.stdout)
+    }
+
+    fn run(self, args: List<String>) ! Error {
+        let out = try Command.new(self.runtime.copy()).args(args.copy()).output()
+        if not out.status.success() { fail "{self.runtime} {args.join(" ")} didn't work: {out.error_text().trim()}" }
+    }
+}

@@ -1,0 +1,119 @@
+module tests.protocol.sandbox
+
+// Sandboxes (PLAN.md, "Sandboxes: where members' agents run"), with Podman. A
+// member's agent runs in their own container, made from a small image with
+// `loom` and the fake agent in it. It gets the member's own secrets, never the
+// owner's program settings, has its home in the member's folder, and reaches
+// loom's tools through the gate. A file it links to is read in its sandbox,
+// so one of the instance's own isn't, and removing the member removes the
+// sandbox and the folder.
+//
+// It needs Linux, Podman and pasta (the passt package), and says it was
+// skipped without them.
+//
+//     calx tests/protocol/sandbox.calx
+import std.env
+import std.fs
+import std.json.{Json}
+import std.process.{Command, exit}
+import shared.obj.{Obj, at, str_at}
+import tests.kit.{App, Instance, calx, check, loom, reply_text}
+
+const IMAGE: str = "localhost/loom-sandbox-test"
+
+fn has(program: str) -> bool {
+    return match Command.new(String(program)).arg(String("--version")).output() {
+        ok(out) => out.status.success(),
+        err(_) => false,
+    }
+}
+
+fn sh(program: String, args: List<String>) ! Error {
+    let out = try Command.new(program.copy()).args(args.copy()).output()
+    if not out.status.success() { fail "{program} {args.join(" ")} didn't work: {out.error_text()}" }
+}
+
+fn file_blocks(message: Json) -> usize {
+    var n: usize = 0
+    if let Json.Array(blocks) = at(message, "blocks") {
+        for b in blocks {
+            if str_at(b.copy(), "kind") == some(String("file")) { n += 1 }
+        }
+    }
+    return n
+}
+
+// The image: loom and the fake agent, built here, on the system's own Ubuntu.
+fn build_image() ! Error {
+    let ctx = "{try fs.temp_dir()}/image"
+    try fs.make_dir_all(ctx.copy())
+    try sh(calx(), [String("build"), String("server/main.calx"), String("-o"), "{ctx}/loom"])
+    try sh(calx(), [String("build"), String("tests/fake_agent/main.calx"), String("-o"), "{ctx}/fake-agent"])
+    let lines: List<String> = [
+        String("FROM docker.io/library/ubuntu:24.04"),
+        String("RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates libcurl4t64 && rm -rf /var/lib/apt/lists/*"),
+        String("COPY loom fake-agent /usr/local/bin/"),
+        String("RUN ldd /usr/local/bin/loom && loom version"),
+    ]
+    try fs.write_text("{ctx}/Containerfile", "{lines.join("\n")}\n")
+    try sh(String("podman"), [String("build"), String("-q"), String("-t"), String(IMAGE), ctx])
+}
+
+fn run() ! Error {
+    if env.os() != "linux" or not has("podman") or not has("pasta") {
+        println("sandbox: skipped: it needs Linux, Podman and pasta")
+        return
+    }
+    try build_image()
+    try check(true, "the sandbox image builds")
+    let inst = try Instance.start_with([String("--sandboxes"), String("podman"), String("--sandbox-image"), String(IMAGE)])
+    let data = try fs.absolute(inst.data.copy())
+    // A program that's only in the image, for the member.
+    let added = try loom(inst.data.copy(), [String("acp"), String("add"), String("boxed"), String("/usr/local/bin/fake-agent")]).output()
+    if not added.status.success() { fail "loom acp add failed: {added.error_text()}" }
+    var owner = try App.connect(inst.base.copy(), inst.token.copy(), 0)
+    _ = try owner.cmd("q_1", "acp.settings", Obj.new().s("name", String("boxed")).j("env", Obj.new().s("OWNER_KEY", String("the owner's own")).done()).done())
+
+    let ann_token = try inst.second_account("ann")
+    var ann = try App.connect(inst.base.copy(), ann_token, 0)
+    _ = try ann.cmd("q_1", "secret.put", Obj.new().s("name", String("MY_KEY")).s("value", String("hers")).done())
+    let made = try ann.cmd("q_2", "agent.create", Obj.new().s("name", String("Hers")).s("acp_agent", String("boxed")).s("instructions", String("Ann's agent.")).s("folder", data.copy()).done())
+    let agent = str_at(at(at(made, "value"), "agent"), "id") ?? String()
+    let chat = str_at(at(try ann.cmd("q_3", "conversation.create", Obj.new().s("agent", agent.copy()).done()), "value"), "conversation") ?? String()
+
+    var ann_id = String()
+    if let Json.Array(people) = at(at(try owner.cmd("q_2", "user.list", Obj.new().done()), "value"), "users") {
+        for p in people {
+            if str_at(p.copy(), "username") == some(String("ann")) { ann_id = str_at(p, "user") ?? String() }
+        }
+    }
+    let home = "{data}/sandboxes/{ann_id}"
+    let steps = "/env MY_KEY\n/env OWNER_KEY\n/env HOME\n/mcp list\n/link {data}/loom.db\n/link {home}/agents/{agent}/AGENTS.md"
+    try ann.send(Obj.new().s("t", String("send")).s("cid", String("m_1")).s("conversation", chat).s("text", steps).done())
+    let reply = try ann.reply()
+    let said = reply_text(reply.copy())
+    println("      the agent said: {said}")
+    try check(said.contains("MY_KEY=hers"), "a member's agent gets her own secrets")
+    try check(not said.contains("the owner's own"), "but not the owner's settings for the program")
+    try check(said.contains("HOME={home}"), "its home is her folder, whatever folder the agent names")
+    try check(said.contains("remember"), "loom's tools reach it through the gate")
+    try check(file_blocks(reply) == 1, "a file it links to is read in its sandbox: its AGENTS.md, but not the instance's database")
+    try check(fs.exists("{home}/agents/{agent}/AGENTS.md") and not fs.exists("{data}/AGENTS.md"), "its instructions are in her folder, not the one it named")
+
+    _ = try owner.cmd("q_3", "user.remove", Obj.new().s("user", ann_id.copy()).done())
+    let there = try Command.new(String("podman")).args([String("container"), String("exists"), "loom-{ann_id}"]).output()
+    try check(not there.status.success(), "removing her removes her sandbox")
+    try check(not fs.exists(home), "and her folder")
+    owner.close()
+    inst.stop()
+}
+
+fn main() {
+    match run() {
+        ok => println("\nsandbox: all good"),
+        err(e) => {
+            eprintln("\nsandbox: {e}")
+            exit(1)
+        },
+    }
+}
