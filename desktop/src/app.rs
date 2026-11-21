@@ -90,6 +90,7 @@ enum Row {
 pub struct Loom {
     model: Model,
     core: Core,
+    events: std::sync::mpsc::Receiver<String>,
     p: Palette,
     screen: Screen,
     menu: Option<Menu>,
@@ -128,11 +129,7 @@ impl Loom {
                 WindowAppearance::Light | WindowAppearance::VibrantLight
             ),
         };
-        let mut config = serde_json::json!({"data": data_dir()});
-        if let Ok(server) = std::env::var("LOOM_SERVER") {
-            config["server"] = Value::String(server);
-        }
-        let (core, events) = Core::start(&config.to_string());
+        let (core, events) = Core::start(&core_config());
 
         let composer = cx.new(|cx| {
             TextareaState::new(window, cx)
@@ -190,11 +187,9 @@ impl Loom {
                     .await;
                 let woke = last.elapsed() > Duration::from_secs(10);
                 last = Instant::now();
-                let mut got = Vec::new();
-                while let Ok(e) = events.try_recv() {
-                    got.push(e);
-                }
                 let alive = this.update(cx, |loom, cx| {
+                    let got: Vec<String> =
+                        std::iter::from_fn(|| loom.events.try_recv().ok()).collect();
                     if woke {
                         loom.send(serde_json::json!({"t": "app.wake"}));
                     }
@@ -253,6 +248,7 @@ impl Loom {
         let mut loom = Loom {
             model: Model::new(),
             core,
+            events,
             p: Palette::new(dark),
             screen: Screen::Chat,
             menu: None,
@@ -276,6 +272,38 @@ impl Loom {
 
     fn send(&self, frame: Value) {
         self.core.send(&frame.to_string());
+    }
+
+    /// Runs the instance on this computer, or stops and goes back to signing in to one
+    /// elsewhere: keeps the choice, and starts the core again with it.
+    fn set_local(&mut self, local: bool, cx: &mut Context<Self>) {
+        let file = std::path::Path::new(&data_dir()).join("mode");
+        let kept = if local {
+            std::fs::write(&file, "local")
+        } else {
+            std::fs::remove_file(&file).or_else(|e| {
+                if e.kind() == std::io::ErrorKind::NotFound {
+                    Ok(())
+                } else {
+                    Err(e)
+                }
+            })
+        };
+        if let Err(e) = kept {
+            self.model.login_error = Some(format!("loom couldn't keep the choice: {e}"));
+            cx.notify();
+            return;
+        }
+        self.model = Model::new();
+        self.screen = Screen::Chat;
+        self.menu = None;
+        // The old core stops, and its instance with it, as it's dropped.
+        let (core, events) = Core::start(&core_config());
+        self.core = core;
+        self.events = events;
+        self.fetch();
+        self.refresh_rows(cx);
+        cx.notify();
     }
 
     fn fetch(&mut self) {
@@ -431,6 +459,25 @@ impl Loom {
                             this.send(frame);
                             cx.notify();
                         })),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap(px(space::S))
+                            .pt(px(space::M))
+                            .border_t_1()
+                            .border_color(p.line)
+                            .child(
+                                div()
+                                    .text_size(px(size::SMALL))
+                                    .text_color(p.ink_3)
+                                    .child("No instance yet? Run one here. Your agents work while this computer is on."),
+                            )
+                            .child(
+                                self.button("local", "Run one on this computer", false)
+                                    .on_click(cx.listener(|this, _, _, cx| this.set_local(true, cx))),
+                            ),
                     ),
             )
     }
@@ -587,6 +634,11 @@ impl Loom {
                             .hover(move |s| s.text_color(p.ink))
                             .child("Sign out")
                             .on_click(cx.listener(|this, _, _, cx| {
+                                if local_mode() {
+                                    // Stops the instance here; its agents and chats stay for next time.
+                                    this.set_local(false, cx);
+                                    return;
+                                }
                                 this.send(serde_json::json!({"t": "logout"}));
                                 cx.notify();
                             })),
@@ -1466,4 +1518,30 @@ impl Render for Loom {
                 .when_some(menu, |d, m| d.child(m)),
         )
     }
+}
+
+/// Whether this computer runs its own instance, as the person chose on the first start.
+fn local_mode() -> bool {
+    std::fs::read_to_string(std::path::Path::new(&data_dir()).join("mode"))
+        .is_ok_and(|m| m.trim() == "local")
+}
+
+/// The core's config (core/README.md, "Config").
+fn core_config() -> String {
+    let mut config = serde_json::json!({"data": data_dir()});
+    if local_mode() {
+        config["mode"] = "local".into();
+        config["username"] = std::env::var("USERNAME")
+            .unwrap_or_else(|_| "me".into())
+            .into();
+        config["kind"] = if cfg!(target_os = "macos") {
+            "macos"
+        } else {
+            "windows"
+        }
+        .into();
+    } else if let Ok(server) = std::env::var("LOOM_SERVER") {
+        config["server"] = Value::String(server);
+    }
+    config.to_string()
 }

@@ -308,7 +308,10 @@ impl Model {
             "result" => self.result(f),
             "error" => {
                 let code = s(f, "code");
-                if code != "offline" {
+                if code == "local" {
+                    // The instance on this computer didn't start: the sign-in page says why.
+                    self.login_error = Some(s(f, "message"));
+                } else if code != "offline" {
                     self.notices.push(s(f, "message"));
                 }
             }
