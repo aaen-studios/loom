@@ -605,6 +605,28 @@ fn http_error(status: u16, code: str, message: String) -> Response {
 // digits and hyphens, up to 64.
 // An ACP agent program as acp.list gives it. Its settings' values stay on the
 // instance, since keys are among them: only their names go out.
+// The ACP Registry agent a program on the instance is: the one with its name for an id,
+// or else the one named for it, as `claude-acp` and `codex-acp` are for `claude` and `codex`.
+fn registry_match(registry: Json, program: String) -> String? {
+    var named: String? = none
+    if let Json.Array(agents) = at(registry, "agents") {
+        for a in agents {
+            let id = str_at(a.copy(), "id") ?? String()
+            if id == program { return some(id) }
+            if named == none and (id == "{program}-acp" or id.starts_with("{program}-")) { named = some(id) }
+        }
+    }
+    return named
+}
+
+@test
+fn matches_a_program_to_its_registry_agent() {
+    let registry = parse(#"{"agents":[{"id":"claude-acp"},{"id":"codex-acp"},{"id":"gemini"}]}"#)!
+    assert(registry_match(registry.copy(), String("claude")) == some(String("claude-acp")))
+    assert(registry_match(registry.copy(), String("gemini")) == some(String("gemini")))
+    assert(registry_match(registry, String("cursor")) == none)
+}
+
 fn program_json(a: AcpAgent) -> Json {
     var settings = List<Json>()
     if let Json.Object(m) = a.env {
@@ -5561,7 +5583,7 @@ impl Instance {
         if let Json.Array(agents) = at(i.registry.copy(), "agents") {
             for a in agents {
                 let id = str_at(a.copy(), "id") ?? String()
-                var o = Obj.new().s("id", id.copy()).s("name", str_at(a.copy(), "name") ?? id.copy()).s("version", str_at(a.copy(), "version") ?? String()).s("description", str_at(a.copy(), "description") ?? String()).maybe("website", str_at(a.copy(), "website")).maybe("icon", str_at(a.copy(), "icon"))
+                var o = Obj.new().s("id", id.copy()).s("name", str_at(a.copy(), "name") ?? id.copy()).s("version", str_at(a.copy(), "version") ?? String()).s("description", str_at(a.copy(), "description") ?? String()).maybe("website", str_at(a.copy(), "website")).maybe("icon", str_at(a.copy(), "icon")).maybe("icon_svg", str_at(a.copy(), "icon_svg"))
                 o = match installer.pick(a.copy(), system.copy(), npx, uvx) {
                     some(how) => o.s("how", str_at(how, "kind") ?? String()),
                     none => o.j("how", Json.Null),
@@ -5570,7 +5592,14 @@ impl Instance {
                 out.push(o.done())
             }
         }
-        return Obj.new().j("agents", Json.Array(out)).s("platform", system).done()
+        // Each program on the instance, by the registry agent it is: one installed from
+        // the registry has its id, and one added by hand (`claude`) is matched to the entry
+        // named for it (`claude-acp`), so the apps show its icon too.
+        var programs = Obj.new()
+        for p in try i.store.acp_agents() {
+            if let id = registry_match(i.registry.copy(), p.name.copy()) { programs.m.insert(p.name.copy(), Json.Str(id)) }
+        }
+        return Obj.new().j("agents", Json.Array(out)).j("programs", programs.done()).s("platform", system).done()
     }
 
     // Stops the agents that run `program` and aren't answering anyone, so

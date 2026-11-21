@@ -4,7 +4,7 @@ Loom doesn't run models itself. Each agent runs on an agent program that speaks 
 
 ## Adding an agent program
 
-In the app, open **Agent programs**. It lists what's installed and the [ACP Registry](https://agentclientprotocol.com/get-started/registry)'s agents. **Install** downloads a build for the instance's machine and checks it against the registry, or runs the agent with `npx` or `uvx` when it has no build. Installing one again updates it. Only the owner installs programs.
+In the app, open **Brains** in Settings. It lists what's installed and the [ACP Registry](https://agentclientprotocol.com/get-started/registry)'s agents. **Install** downloads a build for the instance's machine and checks it against the registry, or runs the agent with `npx` or `uvx` when it has no build. Installing one again updates it. Only the owner installs programs.
 
 On a server you can also add a program by hand:
 
@@ -21,7 +21,7 @@ sudo -u loom loom acp add claude npx -y @agentclientprotocol/claude-agent-acp --
 
 ## Keys
 
-A program's settings are the environment variables it starts with: an API key, a model, a provider. Set them on the **Agent programs** page:
+A program's settings are the environment variables it starts with: an API key, a model, a provider. Set them on the **Brains** page:
 
 - Claude: `ANTHROPIC_API_KEY`
 - Codex: `OPENAI_API_KEY`
@@ -38,4 +38,4 @@ Set up MCP servers once, on the **MCP servers** page, and pick which each agent 
 
 ## Sharing keys with the people you invite
 
-The people you invite run their agents in sandboxes of their own ([People](people.md)), with their own secrets as their agent programs' settings. To let them use yours, open the program on **Agent programs** and **Share** its settings, with a number of tokens each person may use a day or a month. Loom counts what each turn uses, as the program reports it. Someone past their budget waits for the next day or month, or adds their own key as a secret with the setting's name, which then wins.
+The people you invite run their agents in sandboxes of their own ([People](people.md)), with their own secrets as their agent programs' settings. To let them use yours, open the program on **Brains** and **Share** its settings, with a number of tokens each person may use a day or a month. Loom counts what each turn uses, as the program reports it. Someone past their budget waits for the next day or month, or adds their own key as a secret with the setting's name, which then wins.

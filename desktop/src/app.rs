@@ -514,7 +514,7 @@ ACTA_KEY=secret:ACTA_KEY",
             )
         });
         let set_value_in = input(window, cx, "Its value", true);
-        let share_in = input(window, cx, "Tokens for each person", false);
+        let share_in = input(window, cx, "Tokens", false);
         let skill_desc_in = input(window, cx, "When it's for, in one sentence", false);
         let skill_body_in = cx.new(|cx| {
             TextareaState::new(window, cx)
@@ -1696,7 +1696,7 @@ ACTA_KEY=secret:ACTA_KEY",
             ("pop-routines", Ico::Clock, "Routines", Screen::Routines),
             ("pop-tasks", Ico::ListTodo, "Tasks", Screen::Tasks),
             ("pop-skills", Ico::BookOpen, "Skills", Screen::Skills),
-            ("pop-programs", Ico::Bot, "Agent programs", Screen::Programs),
+            ("pop-programs", Ico::Brain, "Brains", Screen::Programs),
             ("pop-mcp", Ico::Plug, "MCP servers", Screen::Mcp),
             ("pop-plugins", Ico::Puzzle, "Plugins", Screen::Plugins),
         ]
@@ -8303,256 +8303,286 @@ ACTA_KEY=secret:ACTA_KEY",
         self.group(None, vec![row.into_any_element()])
     }
 
-    /// The programs page: the agent programs on the instance, with their settings, and the
-    /// ACP Registry's agents to install.
+    /// A brain's icon: its ACP Registry icon, drawn in the app's ink, or the brain for one
+    /// the registry doesn't have.
+    fn brain_icon(&self, listed: Option<&model::Listed>, size: f32) -> AnyElement {
+        let p = self.p;
+        match listed.and_then(|l| l.icon.as_ref().map(|svg| (l.id.clone(), svg))) {
+            Some((id, svg)) => {
+                let path = crate::runtime_svg(&format!("brains/{id}.svg"), svg);
+                svg_icon(path, size, p.ink)
+            }
+            None => Icon::new(Ico::Brain)
+                .size(px(size))
+                .text_color(p.ink_2)
+                .into_any_element(),
+        }
+    }
+
+    /// A brain's icon in a square of its own, as a row's.
+    fn brain_tile(&self, listed: Option<&model::Listed>, size: f32) -> AnyElement {
+        let p = self.p;
+        div()
+            .size(px(size))
+            .flex_none()
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded(px(radius::ROW + 2.0))
+            .border_1()
+            .border_color(p.line)
+            .bg(p.bg)
+            .child(self.brain_icon(listed, size * 0.5))
+            .into_any_element()
+    }
+
+    /// The Brains page: the agent programs on the instance, each an agent's brain, with
+    /// their settings and sharing, and the ACP Registry's to install.
     fn programs_page(&mut self, cx: &mut Context<Self>) -> Div {
         let p = self.p;
-        let heading = |text: &'static str| {
-            div()
-                .text_size(px(size::HEADING))
-                .font_weight(FontWeight::SEMIBOLD)
-                .text_color(p.ink)
-                .child(text)
-        };
-        let caption = |text: String| {
-            div()
-                .text_size(px(size::CAPTION))
-                .text_color(p.ink_3)
-                .child(text)
-        };
-        let mut mine = div().flex().flex_col().gap(px(space::XS));
-        if self.model.installed.is_empty() {
-            mine = mine.child(caption("None yet".into()));
-        }
+        let mut groups = Vec::new();
+        let mut mine = Vec::new();
         for prog in self.model.installed.clone() {
             let open = self.program_open.as_deref() == Some(prog.name.as_str());
-            let newer = self
-                .model
-                .registry
-                .iter()
-                .find(|l| l.id == prog.source && !prog.source.is_empty())
+            let listed = self.model.program_listed(&prog.name).cloned();
+            let from_registry = (!prog.source.is_empty())
+                .then(|| self.model.registry.iter().find(|l| l.id == prog.source))
+                .flatten()
+                .cloned();
+            let newer = from_registry
+                .as_ref()
                 .filter(|l| l.version != prog.version)
                 .map(|l| l.version.clone());
-            let shown = self
-                .model
-                .registry
-                .iter()
-                .find(|l| l.id == prog.source && !prog.source.is_empty())
+            let shown = from_registry
+                .as_ref()
+                .or(listed.as_ref())
                 .map_or(prog.name.clone(), |l| l.name.clone());
+            let settings_words = match (&prog.share, prog.settings.len()) {
+                (Some(sh), _) => share_words(sh),
+                (None, 0) => "No settings".to_string(),
+                (None, 1) => "1 setting".to_string(),
+                (None, n) => format!("{n} settings"),
+            };
             let what = if prog.source.is_empty() {
-                "Added on the instance".to_string()
+                format!("Added on the instance · {settings_words}")
             } else {
-                format!("From the ACP Registry, version {}", prog.version)
+                format!("Version {} · {settings_words}", prog.version)
             };
             let name = prog.name.clone();
-            let mut row = div()
-                .flex()
-                .flex_col()
-                .gap(px(space::S))
-                .py(px(space::S))
-                .px(px(space::S))
-                .rounded(px(radius::BUTTON))
+            let chevron = div()
+                .text_color(p.ink_3)
                 .child(
-                    div()
-                        .id(SharedString::from(format!("program-{}", prog.name)))
-                        .flex()
-                        .items_center()
-                        .justify_between()
-                        .cursor_pointer()
-                        .child(
-                            div()
-                                .flex()
-                                .flex_col()
-                                .child(
-                                    div()
-                                        .text_size(px(size::SMALL))
-                                        .font_weight(FontWeight::MEDIUM)
-                                        .text_color(p.ink)
-                                        .child(shown),
-                                )
-                                .child(caption(what)),
-                        )
-                        .child(caption(match (&prog.share, prog.settings.len()) {
-                            (Some(sh), _) => share_words(sh),
-                            (None, 0) => "No settings".to_string(),
-                            (None, 1) => "1 setting".to_string(),
-                            (None, n) => format!("{n} settings"),
-                        }))
-                        .on_click(cx.listener(move |this, _, window, cx| {
-                            this.program_open =
-                                if this.program_open.as_deref() == Some(name.as_str()) {
-                                    None
-                                } else {
-                                    Some(name.clone())
-                                };
-                            for s in [&this.set_key_in, &this.set_value_in] {
-                                s.update(cx, |s, cx| s.set_value("", window, cx));
-                            }
-                            cx.notify();
-                        })),
-                );
-            if open {
-                let mut settings = div().flex().flex_col().gap(px(space::XS));
-                for key in prog.settings.clone() {
-                    let (program, k) = (prog.name.clone(), key.clone());
-                    settings = settings.child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .justify_between()
-                            .child(
-                                div()
-                                    .text_size(px(size::SMALL))
-                                    .text_color(p.ink_2)
-                                    .child(format!("{key} = ••••")),
+                    Icon::new(if open {
+                        IconName::ChevronDown
+                    } else {
+                        IconName::ChevronRight
+                    })
+                    .small(),
+                )
+                .into_any_element();
+            let row = self.row(
+                Some(self.brain_tile(from_registry.as_ref().or(listed.as_ref()), 34.0)),
+                shown,
+                Some(what),
+                Some(chevron),
+            );
+            mine.push(
+                self.link_row(SharedString::from(format!("program-{}", prog.name)), row)
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.program_open = if this.program_open.as_deref() == Some(name.as_str()) {
+                            None
+                        } else {
+                            Some(name.clone())
+                        };
+                        for s in [&this.set_key_in, &this.set_value_in] {
+                            s.update(cx, |s, cx| s.set_value("", window, cx));
+                        }
+                        cx.notify();
+                    }))
+                    .into_any_element(),
+            );
+            if !open {
+                continue;
+            }
+            // Its settings, which stay on the instance: only their names come here.
+            for key in prog.settings.clone() {
+                let (program, k) = (prog.name.clone(), key.clone());
+                mine.push(
+                    self.row(
+                        Some(div().w(px(34.0)).flex_none().into_any_element()),
+                        key.clone(),
+                        Some("••••••••".into()),
+                        Some(
+                            self.small_button(
+                                format!("unset-{}-{key}", prog.name),
+                                "Remove",
+                                false,
                             )
-                            .child(
-                                self.button_owned(
-                                    format!("unset-{}-{key}", prog.name),
-                                    "Remove",
-                                    false,
-                                )
-                                .on_click(cx.listener(
-                                    move |this, _, _, cx| {
-                                        let f = this.model.set_setting(&program, &k, None);
-                                        this.send(f);
-                                        cx.notify();
-                                    },
-                                )),
-                            ),
-                    );
-                }
-                let program = prog.name.clone();
-                let mut buttons = div().flex().gap(px(space::S)).child(
-                    self.button_owned(format!("set-{}", prog.name), "Save setting", true)
-                        .on_click(cx.listener(move |this, _, window, cx| {
-                            let key = this.set_key_in.read(cx).value().to_string();
-                            let value = this.set_value_in.read(cx).value().to_string();
-                            if key.trim().is_empty() {
-                                this.model.notices.push(
-                                    "A setting needs a name, such as ANTHROPIC_API_KEY.".into(),
-                                );
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                let f = this.model.set_setting(&program, &k, None);
+                                this.send(f);
                                 cx.notify();
-                                return;
-                            }
-                            let f = this.model.set_setting(&program, &key, Some(&value));
-                            this.send(f);
-                            for s in [&this.set_key_in, &this.set_value_in] {
-                                s.update(cx, |s, cx| s.set_value("", window, cx));
-                            }
-                            cx.notify();
-                        })),
+                            }))
+                            .into_any_element(),
+                        ),
+                    )
+                    .into_any_element(),
                 );
-                if let Some(version) = newer {
-                    let source = prog.source.clone();
-                    buttons = buttons.child(
-                        self.button_owned(
-                            format!("update-{}", prog.name),
-                            &format!("Update to {version}"),
-                            false,
-                        )
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            let f = this.model.install(&source);
-                            this.send(f);
-                            cx.notify();
-                        })),
-                    );
-                }
-                let program = prog.name.clone();
-                buttons = buttons.child(
-                    self.button_owned(format!("remove-{}", prog.name), "Remove", false)
-                        .text_color(p.bad)
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            let f = this.model.remove_program(&program);
-                            this.send(f);
-                            this.program_open = None;
-                            cx.notify();
-                        })),
-                );
-                // Sharing the settings with everyone else, a number of tokens each.
-                let month = self.share_month;
-                let program = prog.name.clone();
-                let mut sharing = div()
+            }
+            let program = prog.name.clone();
+            mine.push(
+                div()
                     .flex()
                     .items_center()
                     .gap(px(space::S))
-                    .child(div().w(px(180.0)).child(Input::new(&self.share_in)))
+                    .pl(px(space::L + 34.0 + space::M))
+                    .pr(px(space::L))
+                    .py(px(space::M))
+                    .child(div().flex_1().child(Input::new(&self.set_key_in)))
+                    .child(div().flex_1().child(Input::new(&self.set_value_in)))
                     .child(
-                        self.button_owned(format!("share-day-{}", prog.name), "a day", !month)
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.share_month = false;
-                                cx.notify();
-                            })),
-                    )
-                    .child(
-                        self.button_owned(format!("share-month-{}", prog.name), "a month", month)
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.share_month = true;
-                                cx.notify();
-                            })),
-                    )
-                    .child(
-                        self.button_owned(format!("share-{}", prog.name), "Share", false)
+                        self.small_button(format!("set-{}", prog.name), "Add setting", false)
                             .on_click(cx.listener(move |this, _, window, cx| {
-                                let given = this.share_in.read(cx).value().replace([',', ' '], "");
-                                let Ok(tokens) = given.parse::<i64>() else {
+                                let key = this.set_key_in.read(cx).value().to_string();
+                                let value = this.set_value_in.read(cx).value().to_string();
+                                if key.trim().is_empty() {
                                     this.model.notices.push(
-                                        "Give the tokens each person may use, as a number.".into(),
+                                        "A setting needs a name, such as ANTHROPIC_API_KEY.".into(),
                                     );
                                     cx.notify();
                                     return;
-                                };
-                                let per = if this.share_month { "month" } else { "day" };
-                                let f = this.model.share_program(&program, tokens, per);
+                                }
+                                let f = this.model.set_setting(&program, &key, Some(&value));
                                 this.send(f);
-                                this.share_in
-                                    .update(cx, |s, cx| s.set_value("", window, cx));
+                                for s in [&this.set_key_in, &this.set_value_in] {
+                                    s.update(cx, |s, cx| s.set_value("", window, cx));
+                                }
                                 cx.notify();
                             })),
-                    );
-                if prog.share.is_some() {
-                    let program = prog.name.clone();
-                    sharing = sharing.child(
-                        self.button_owned(format!("unshare-{}", prog.name), "Stop sharing", false)
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                let f = this.model.share_program(&program, 0, "day");
-                                this.send(f);
-                                cx.notify();
-                            })),
-                    );
-                }
-                row = row
-                    .bg(p.hover)
-                    .child(settings)
-                    .child(
-                        div()
-                            .flex()
-                            .gap(px(space::S))
-                            .child(div().flex_1().child(Input::new(&self.set_key_in)))
-                            .child(div().flex_1().child(Input::new(&self.set_value_in))),
                     )
-                    .child(buttons)
-                    .child(caption("Share with the people you've invited".into()))
-                    .child(sharing);
+                    .into_any_element(),
+            );
+            // Sharing its settings with the people invited, a number of tokens each.
+            let month = self.share_month;
+            let program = prog.name.clone();
+            let mut share = div()
+                .flex()
+                .items_center()
+                .gap(px(space::S))
+                .child(div().w(px(96.0)).child(Input::new(&self.share_in).small()))
+                .child(self.segments(vec![
+                    self.segment(format!("share-day-{}", prog.name), "a day", !month)
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.share_month = false;
+                            cx.notify();
+                        })),
+                    self.segment(format!("share-month-{}", prog.name), "a month", month)
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.share_month = true;
+                            cx.notify();
+                        })),
+                ]))
+                .child(
+                    self.small_button(format!("share-{}", prog.name), "Share", false)
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            let given = this.share_in.read(cx).value().replace([',', ' '], "");
+                            let Ok(tokens) = given.parse::<i64>() else {
+                                this.model.notices.push(
+                                    "Give the tokens each person may use, as a number.".into(),
+                                );
+                                cx.notify();
+                                return;
+                            };
+                            let per = if this.share_month { "month" } else { "day" };
+                            let f = this.model.share_program(&program, tokens, per);
+                            this.send(f);
+                            this.share_in
+                                .update(cx, |s, cx| s.set_value("", window, cx));
+                            cx.notify();
+                        })),
+                );
+            if prog.share.is_some() {
+                let program = prog.name.clone();
+                share = share.child(
+                    self.small_button(format!("unshare-{}", prog.name), "Stop", false)
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            let f = this.model.share_program(&program, 0, "day");
+                            this.send(f);
+                            cx.notify();
+                        })),
+                );
             }
-            mine = mine.child(row);
+            mine.push(
+                self.row(
+                    Some(div().w(px(34.0)).flex_none().into_any_element()),
+                    "Share it",
+                    Some("With the people you invited".into()),
+                    Some(share.into_any_element()),
+                )
+                .into_any_element(),
+            );
+            let mut actions = div().flex().gap(px(space::S));
+            if let Some(version) = newer {
+                let source = prog.source.clone();
+                actions = actions.child(
+                    self.small_button(
+                        format!("update-{}", prog.name),
+                        &format!("Update to {version}"),
+                        true,
+                    )
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        let f = this.model.install(&source);
+                        this.send(f);
+                        cx.notify();
+                    })),
+                );
+            }
+            let program = prog.name.clone();
+            actions = actions.child(
+                self.small_button(format!("remove-{}", prog.name), "Remove", false)
+                    .text_color(p.bad)
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        let f = this.model.remove_program(&program);
+                        this.send(f);
+                        this.program_open = None;
+                        cx.notify();
+                    })),
+            );
+            mine.push(
+                div()
+                    .flex()
+                    .justify_end()
+                    .px(px(space::L))
+                    .py(px(space::M))
+                    .child(actions)
+                    .into_any_element(),
+            );
         }
-
-        let mut registry = div().flex().flex_col().gap(px(space::XS));
-        if self.model.registry_loading {
-            registry = registry.child(caption("Reading the registry…".into()));
-        } else if let Some(e) = self.model.registry_error.clone() {
-            registry = registry.child(caption(e));
+        if mine.is_empty() {
+            groups.push(self.empty(
+                Ico::Brain,
+                "No brains yet",
+                "The program an agent thinks with, such as Claude or Codex. Install one below",
+                None,
+            ));
+        } else {
+            groups.push(self.group(Some("Your brains"), mine));
         }
+        // The registry's, not yet installed, as cards with their icons.
+        let mut cards = Vec::new();
         for l in self.model.registry.clone() {
-            if l.installed.is_some() {
+            if l.installed.is_some() || self.model.program_ids.values().any(|id| *id == l.id) {
                 continue;
             }
             let action: AnyElement = if self.model.installing.as_deref() == Some(l.id.as_str()) {
-                caption("Installing…".into()).into_any_element()
+                div()
+                    .text_size(px(size::CAPTION))
+                    .text_color(p.ink_3)
+                    .child("Installing…")
+                    .into_any_element()
             } else if l.how.is_some() {
                 let id = l.id.clone();
-                self.button_owned(format!("install-{}", l.id), "Install", false)
+                self.small_button(format!("install-{}", l.id), "Install", false)
                     .on_click(cx.listener(move |this, _, _, cx| {
                         let f = this.model.install(&id);
                         this.send(f);
@@ -8560,56 +8590,90 @@ ACTA_KEY=secret:ACTA_KEY",
                     }))
                     .into_any_element()
             } else {
-                caption("Not for this computer".into()).into_any_element()
-            };
-            registry = registry.child(
                 div()
+                    .text_size(px(size::CAPTION))
+                    .text_color(p.ink_3)
+                    .child("Not for this computer")
+                    .into_any_element()
+            };
+            cards.push(
+                div()
+                    .min_w_0()
                     .flex()
-                    .items_center()
-                    .justify_between()
+                    .flex_col()
                     .gap(px(space::M))
-                    .py(px(space::S))
-                    .px(px(space::S))
+                    .p(px(space::L))
+                    .rounded(px(radius::CARD))
+                    .border_1()
+                    .border_color(p.line)
+                    .bg(self.card_fill())
                     .child(
                         div()
-                            .flex_1()
-                            .min_w_0()
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .gap(px(space::S))
+                            .child(self.brain_tile(Some(&l), 40.0))
+                            .child(action),
+                    )
+                    .child(
+                        div()
                             .flex()
                             .flex_col()
+                            .gap(px(2.0))
                             .child(
                                 div()
-                                    .text_size(px(size::SMALL))
+                                    .text_size(px(size::BODY))
                                     .font_weight(FontWeight::MEDIUM)
                                     .text_color(p.ink)
+                                    .truncate()
                                     .child(l.name.clone()),
                             )
-                            .child(caption(l.description.clone())),
+                            .child(
+                                div()
+                                    .h(px(32.0))
+                                    .overflow_hidden()
+                                    .text_size(px(size::CAPTION))
+                                    .line_height(px(16.0))
+                                    .text_color(p.ink_3)
+                                    .child(l.description.clone()),
+                            ),
                     )
-                    .child(div().flex_none().child(action)),
+                    .into_any_element(),
             );
         }
-        let body = div()
-            .w_full()
-            .max_w(px(560.0))
-            .flex()
-            .flex_col()
-            .gap(px(space::XL))
-            .child(heading("On this instance"))
-            .child(mine)
-            .child(heading("From the ACP Registry"))
-            .child(registry);
-        let page = div()
-            .id("programs-page")
-            .size_full()
-            .overflow_y_scroll()
-            .flex()
-            .justify_center()
-            .items_start()
-            .pt(px(space::XL))
-            .px(px(space::XL))
-            .pb(px(space::XXL))
-            .child(body);
-        div().flex_1().min_h_0().child(page)
+        let get_more: AnyElement = if self.model.registry_loading {
+            self.group(
+                None,
+                vec![self.note_row("Reading the ACP Registry…", p.ink_3)],
+            )
+        } else if let Some(e) = self.model.registry_error.clone() {
+            self.group(None, vec![self.note_row(e, p.bad)])
+        } else {
+            div()
+                .grid()
+                .grid_cols(2)
+                .gap(px(space::S))
+                .children(cards)
+                .into_any_element()
+        };
+        groups.push(
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(space::S))
+                .child(
+                    div()
+                        .px(px(space::XS))
+                        .text_size(px(size::CAPTION))
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(p.ink_3)
+                        .child("More brains, from the ACP Registry"),
+                )
+                .child(get_more)
+                .into_any_element(),
+        );
+        self.settings_page("programs-page", "Brains", None, groups)
     }
 
     /// The About you page: the person's profile, which every agent's session starts with.
@@ -10313,4 +10377,14 @@ fn panel_bounds(r: [f32; 4]) -> wry::Rect {
         position: wry::dpi::LogicalPosition::new(r[0] as f64, r[1] as f64).into(),
         size: wry::dpi::LogicalSize::new(r[2].max(0.0) as f64, r[3].max(0.0) as f64).into(),
     }
+}
+
+/// An SVG icon by its asset path, `size` square, drawn in `ink`.
+fn svg_icon(path: SharedString, size: f32, ink: Hsla) -> AnyElement {
+    svg()
+        .path(path)
+        .size(px(size))
+        .flex_none()
+        .text_color(ink)
+        .into_any_element()
 }
