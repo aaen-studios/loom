@@ -74,6 +74,29 @@ impl Instance {
         return str_at(body, "token") ?? String()
     }
 
+    /// Adds the fake agent again as `name`, started with `arg`, such as --load.
+    pub fn add_fake(self, name: String, arg: String) ! Error {
+        let agent = try fs.absolute(String("tests/fake_agent/main.calx"))
+        let added = try loom(self.data.copy(), [String("acp"), String("add"), name.copy(), calx(), agent, arg.copy()]).output()
+        if not added.status.success() { fail "loom acp add failed: {added.error_text()}" }
+    }
+
+    /// Stops the instance and starts it again on the same data, as after a
+    /// restart. The token still works; the address is a new one.
+    pub fn restart(own self) -> Instance ! Error {
+        var old = self.server
+        old.kill()
+        _ = old.wait()
+        let server = try loom(self.data.copy(), [String("serve"), String("--port"), String("0")]).stdout(Stdio.Pipe).spawn()
+        let serving = server.wait_for_line(String("loom: serving"), WAIT) else {
+            server.kill()
+            fail "the server didn't start again"
+        }
+        let address = serving[serving.find("http://") ?? 0..].trim().copy()
+        let base = if address.ends_with("/") { address[7..address.len() - 1].copy() } else { address[7..].copy() }
+        return Instance { server: server, data: self.data, base: base, token: self.token }
+    }
+
     pub fn stop(own self) {
         var s = self.server
         s.kill()

@@ -103,6 +103,7 @@ enum Answer {
 enum Pending {
     Init
     NewSession(String)
+    Resume(String, String)    // the run, and the session picked up again
     Prompt(String)
 }
 
@@ -112,6 +113,9 @@ struct Proc {
     to: Sender<Out>
     ready: bool
     images: bool    // whether the program takes images in a prompt
+    program: String    // the ACP agent it runs, by loom's name for it
+    resume: bool    // whether it offers session/resume
+    load: bool    // whether it offers session/load
     next_id: i64
     pending: Map<i64, Pending>
     sessions: Map<String, String>    // conversation -> ACP session
@@ -855,7 +859,7 @@ impl Instance {
             try fs.write_text("{folder}/CLAUDE.md", instructions)
         }
         let to = try acp.start(id.copy(), acp_agent.command, acp_agent.args, folder, i.lines_to.copy())
-        var p = Proc { agent: id.copy(), user: user.copy(), to: to, ready: false, images: false, next_id: 1, pending: Map<i64, Pending>(), sessions: Map<String, String>(), waiting: List<String>() }
+        var p = Proc { agent: id.copy(), user: user.copy(), to: to, ready: false, images: false, program: program, resume: false, load: false, next_id: 1, pending: Map<i64, Pending>(), sessions: Map<String, String>(), waiting: List<String>() }
         p.pending.insert(1, Pending.Init)
         p.to.send(Out.Send(acp.request(1, "initialize", acp.initialize_params())))
         i.procs.insert(id, p)
@@ -887,12 +891,47 @@ impl Instance {
             i.prompt(mut p, run_id, known)
             return
         }
+        // After a restart: the session the conversation had, picked up again
+        // where the program can (PLAN.md, "Agents run on ACP").
+        if p.resume or p.load {
+            let kept = match i.store.acp_session(user.copy(), conversation, p.program.copy()) {
+                ok(s) => s,
+                err(e) => {
+                    eprintln("loom: looking up an ACP session: {e}")
+                    none
+                },
+            }
+            if let session = kept {
+                let folder = match fs.absolute(i.folder_of(user, agent)) {
+                    ok(path) => path,
+                    err(_) => String("."),
+                }
+                let method = if p.resume { "session/resume" } else { "session/load" }
+                p.pending.insert(id, Pending.Resume(run_id.copy(), session.copy()))
+                p.to.send(Out.Send(acp.request(id, method, Obj.new().s("sessionId", session).s("cwd", folder).j("mcpServers", Json.Array(List<Json>())).done())))
+                return
+            }
+        }
+        i.new_session(mut p, run_id)
+    }
+
+    // Starts a new ACP session for a run, when there's none to pick up.
+    fn new_session(i: Instance, p: mut Proc, run_id: String) {
+        var user = String()
+        var agent = String()
+        if let r = i.runs.find(run_id.copy()) {
+            user = r.user.copy()
+            agent = r.agent.copy()
+        } else {
+            return
+        }
         let folder = match fs.absolute(i.folder_of(user, agent)) {
             ok(path) => path,
             err(_) => String("."),
         }
-        p.pending.insert(id, Pending.NewSession(run_id.copy()))
-        p.to.send(Out.Send(acp.request(id, "session/new", Obj.new().s("cwd", folder).j("mcpServers", Json.Array(List<Json>())).done())))
+        p.next_id += 1
+        p.pending.insert(p.next_id, Pending.NewSession(run_id.copy()))
+        p.to.send(Out.Send(acp.request(p.next_id, "session/new", Obj.new().s("cwd", folder).j("mcpServers", Json.Array(List<Json>())).done())))
     }
 
     fn folder_of(i: Instance, user: String, agent: String) -> String {
@@ -1011,7 +1050,13 @@ impl Instance {
                     return
                 }
                 p.ready = true
-                p.images = bool_at(at(at(result, "agentCapabilities"), "promptCapabilities"), "image") ?? false
+                let caps = at(result, "agentCapabilities")
+                p.images = bool_at(at(caps.copy(), "promptCapabilities"), "image") ?? false
+                p.load = bool_at(caps.copy(), "loadSession") ?? false
+                p.resume = match at(at(caps, "sessionCapabilities"), "resume") {
+                    Json.Object(_) => true,
+                    _ => false,
+                }
                 let waiting = p.waiting.copy()
                 p.waiting = List<String>()
                 for run in waiting {
@@ -1024,15 +1069,16 @@ impl Instance {
                     return
                 }
                 let sid = str_at(result, "sessionId") ?? String()
-                var conversation = String()
-                if let rr = mut i.runs.find(run.copy()) {
-                    rr.session = sid.copy()
-                    conversation = rr.conversation.copy()
-                } else {
+                try i.session_ready(mut p, run, sid, true)
+            },
+            Pending.Resume(run, sid) => {
+                if let e = error {
+                    // Gone, or too old: a new session instead.
+                    eprintln("loom: agent {p.agent} couldn't pick session {sid} up again: {str_at(e, "message") ?? String()}")
+                    i.new_session(mut p, run)
                     return
                 }
-                p.sessions.insert(conversation, sid.copy())
-                i.prompt(mut p, run, sid)
+                try i.session_ready(mut p, run, sid, false)
             },
             Pending.Prompt(run) => {
                 if let e = error {
@@ -1042,6 +1088,23 @@ impl Instance {
                 try i.finish(run, acp.status_of(str_at(result, "stopReason") ?? String()), none)
             },
         }
+    }
+
+    // A run's session is there, new (and kept for after a restart) or picked
+    // up again: the prompt goes in.
+    fn session_ready(i: mut Instance, p: mut Proc, run: String, sid: String, new: bool) ! Error {
+        var conversation = String()
+        var user = String()
+        if let rr = mut i.runs.find(run.copy()) {
+            rr.session = sid.copy()
+            conversation = rr.conversation.copy()
+            user = rr.user.copy()
+        } else {
+            return
+        }
+        if new { try i.store.put_acp_session(user, conversation.copy(), p.program.copy(), sid.copy()) }
+        p.sessions.insert(conversation, sid.copy())
+        i.prompt(mut p, run, sid)
     }
 
     // Whose run it is, or "" for one that isn't running.

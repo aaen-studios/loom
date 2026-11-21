@@ -17,7 +17,8 @@ fn start() -> Child ! Error {
     try c.write_text(String("\{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":\{\"protocolVersion\":1\}\}\n"))
     _ = try expect(c, "\"id\":1,\"result\"")
     try c.write_text(String("\{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"session/new\",\"params\":\{\"cwd\":\".\",\"mcpServers\":[]\}\}\n"))
-    _ = try expect(c, "\"sessionId\":\"fake_1\"")
+    // Its session ids differ between runs; it takes any in a prompt.
+    _ = try expect(c, "\"sessionId\":\"fake_")
     return c
 }
 

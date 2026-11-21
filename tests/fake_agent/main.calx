@@ -12,8 +12,7 @@ module tests.fake_agent.main
 //     /plan A; B; C       a plan with those entries
 //     /tool TITLE         a tool call that runs and completes
 //     /ask TITLE          a command (kind execute) that asks permission first,
-//                         and runs
-//                         or fails by the answer
+//                         and runs or fails by the answer
 //     /read TITLE         the same for a tool that only reads (kind read)
 //     /slow MS            waits MS between chunks from here on
 //     /sleep MS           waits MS, or until the turn is cancelled
@@ -24,12 +23,19 @@ module tests.fake_agent.main
 //                         for an image, "link NAME" for a link to a file that
 //                         exists, "missing NAME" for one that doesn't
 //     /image              sends back a small PNG
+//     /session            says its session id: "session ID"
 //
 // A turn ends with end_turn after its last step, or with cancelled as soon as
 // session/cancel arrives. Diagnostics go to standard error.
 //
-//     calx tests/fake_agent/main.calx
+// With --load it offers session/load, and plays a line back when a session is
+// loaded; with --resume it offers session/resume; with --forget it offers
+// session/load and refuses every one. Without, it offers neither.
+//
+//     calx tests/fake_agent/main.calx [--load | --resume | --forget]
 import std.bytes
+import std.crypto.{random_bytes}
+import std.env
 import std.fs
 import std.image.{Color, Image, Kind}
 import std.io
@@ -69,6 +75,7 @@ pub enum Step {
     Crash
     Files
     Image
+    Session
 }
 
 // The steps a prompt spells out. Blank lines are skipped.
@@ -111,6 +118,8 @@ pub fn script(text: String) -> List<Step> {
             steps.push(Step.Crash)
         } else if word == "/files" {
             steps.push(Step.Files)
+        } else if word == "/session" {
+            steps.push(Step.Session)
         } else if word == "/image" {
             steps.push(Step.Image)
         } else {
@@ -156,6 +165,10 @@ struct Agent {
     sessions: i64
     next_id: i64
     tools: i64
+    // "load", "resume" or "forget" (offers session/load and refuses every one), from
+    // its argument, or "" for neither.
+    picks_up: String
+    stamp: String
     // Requests that came in during a turn, answered after it.
     backlog: List<Json>
 }
@@ -381,6 +394,7 @@ impl Agent {
                     exit(3)
                 },
                 Step.Files => chunk(session.copy(), "agent_message_chunk", if got.len() == 0 { String("no files") } else { got.join(", ") }),
+                Step.Session => chunk(session.copy(), "agent_message_chunk", "session {session}"),
                 Step.Image => {
                     var content = LinkedMap<String, Json>()
                     content.insert("type", js(String("image")))
@@ -409,7 +423,12 @@ impl Agent {
             prompt.insert("audio", Json.Bool(false))
             prompt.insert("embeddedContext", Json.Bool(false))
             var caps = LinkedMap<String, Json>()
-            caps.insert("loadSession", Json.Bool(false))
+            caps.insert("loadSession", Json.Bool(a.picks_up == "load" or a.picks_up == "forget"))
+            if a.picks_up == "resume" {
+                var resume = LinkedMap<String, Json>()
+                resume.insert("resume", Json.Object(LinkedMap<String, Json>()))
+                caps.insert("sessionCapabilities", Json.Object(resume))
+            }
             caps.insert("promptCapabilities", Json.Object(prompt))
             var info = LinkedMap<String, Json>()
             info.insert("name", js(String("fake-agent")))
@@ -423,8 +442,17 @@ impl Agent {
         } else if name == "session/new" {
             a.sessions += 1
             var r = LinkedMap<String, Json>()
-            r.insert("sessionId", js("fake_{a.sessions}"))
+            r.insert("sessionId", js("fake_{a.stamp}_{a.sessions}"))
             respond(id ?? Json.Null, Json.Object(r))
+        } else if name == "session/load" or name == "session/resume" {
+            let session = (params.get(String("sessionId")) ?? Json.Null).as_str() ?? String()
+            if a.picks_up == "forget" or not session.starts_with("fake_") {
+                respond_error(id ?? Json.Null, -32002, "no session {session}")
+                return
+            }
+            // session/load plays the conversation back first; session/resume doesn't.
+            if name == "session/load" { chunk(session.copy(), "agent_message_chunk", String("(the conversation so far)")) }
+            respond(id ?? Json.Null, Json.Object(LinkedMap<String, Json>()))
         } else if name == "session/prompt" {
             a.turn(id ?? Json.Null, params)
         } else if let i = id {
@@ -443,7 +471,9 @@ fn main() {
     let inbox = Receiver<String>()
     let reader = Reader { out: inbox.sender() }
     _ = unsafe { Thread.spawn(reader) }
-    var a = Agent { inbox: inbox, sessions: 0, next_id: 0, tools: 0, backlog: List<Json>() }
+    let given = env.args()
+    let picks_up = if given.len() > 0 { given[0].replace("--", "") } else { String() }
+    var a = Agent { inbox: inbox, sessions: 0, next_id: 0, tools: 0, picks_up: picks_up, stamp: bytes.hex(random_bytes(3)), backlog: List<Json>() }
     loop {
         if a.backlog.len() > 0 {
             let m = a.backlog.remove(0)

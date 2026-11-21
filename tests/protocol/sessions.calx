@@ -1,0 +1,99 @@
+module tests.protocol.sessions
+
+// After a restart, each conversation picks its ACP session up again (PLAN.md,
+// "Agents run on ACP"): with session/resume where the agent offers it, with
+// session/load where it offers that (and what the agent plays back isn't taken
+// as a reply), and with a new session where it offers neither, or can't find
+// the old one.
+//
+//     calx tests/protocol/sessions.calx
+import std.json.{Json}
+import std.process.{exit}
+import shared.obj.{Obj, at, str_at}
+import tests.kit.{App, Instance, check, reply_text}
+
+// Makes an agent on `program` and a conversation with it. Gives the conversation.
+fn chat_with(app: mut App, program: String) -> String ! Error {
+    let made = try app.cmd("q_agent", "agent.create", Obj.new().s("name", program.copy()).s("acp_agent", program).s("instructions", String("")).done())
+    let agent = str_at(at(at(made, "value"), "agent"), "id") ?? String()
+    let c = try app.cmd("q_conv", "conversation.create", Obj.new().s("agent", agent).done())
+    return str_at(at(c, "value"), "conversation") ?? String()
+}
+
+// Asks the agent in `conversation` for its session id.
+fn session_of(app: mut App, conversation: String, cid: String) -> String ! Error {
+    try app.send(Obj.new().s("t", String("send")).s("cid", cid).s("conversation", conversation).s("text", String("/session")).done())
+    let text = reply_text(try app.reply())
+    if not text.starts_with("session ") { fail "the agent said {text}, not its session" }
+    return text[8..].copy()
+}
+
+// What a conversation with each kind of agent had before the restart.
+struct Before {
+    programs: List<String>
+    conversations: List<String>
+    sessions: List<String>
+}
+
+fn before_restart(i: Instance) -> Before ! Error {
+    var b = Before { programs: List<String>(), conversations: List<String>(), sessions: List<String>() }
+    // Each kind of agent, as the fake agent is started.
+    let kinds: List<str> = ["load", "resume", "forget", "plain"]
+    for kind in kinds {
+        let name = "fake-{kind}"
+        try i.add_fake(name.copy(), "--{kind}")
+        b.programs.push(name)
+    }
+    var app = try App.connect(i.base.copy(), i.token.copy(), 0)
+    for p in b.programs.copy() {
+        let c = try chat_with(mut app, p.copy())
+        b.sessions.push(try session_of(mut app, c.copy(), "{p}_1"))
+        b.conversations.push(c)
+    }
+    app.close()
+    return b
+}
+
+fn after_restart(i: Instance, b: Before) ! Error {
+    var app = try App.connect(i.base.copy(), i.token.copy(), 0)
+    var after = List<String>()
+    for n in 0usize..4 {
+        after.push(try session_of(mut app, b.conversations[n].copy(), "{b.programs[n]}_2"))
+    }
+    try check(after[0] == b.sessions[0], "an agent with session/load is in the same session after a restart")
+    try check(after[1] == b.sessions[1], "and one with session/resume")
+    try check(after[2] != b.sessions[2], "an agent that can't find the old session gets a new one")
+    try check(after[3] != b.sessions[3], "and so does one that offers neither")
+    let listed = try app.cmd("q_list", "messages.list", Obj.new().s("conversation", b.conversations[0].copy()).done())
+    var count: usize = 0
+    if let Json.Array(ms) = at(at(listed, "value"), "messages") { count = ms.len() }
+    try check(count == 4, "what session/load plays back isn't kept as a reply")
+    app.close()
+}
+
+fn main() ! Error {
+    let first = try Instance.start()
+    var failure: String? = none
+    var b = Before { programs: List<String>(), conversations: List<String>(), sessions: List<String>() }
+    match before_restart(first.copy()) {
+        ok(got) => b = got,
+        err(e) => failure = some("{e}"),
+    }
+    if let f = failure {
+        first.stop()
+        eprintln("\n{f}")
+        exit(1)
+    } else {
+        let i = try first.restart()
+        match after_restart(i.copy(), b) {
+            ok => {},
+            err(e) => failure = some("{e}"),
+        }
+        i.stop()
+    }
+    if let f = failure {
+        eprintln("\n{f}")
+        exit(1)
+    }
+    println("\nsessions: all good")
+}
