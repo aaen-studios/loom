@@ -21,7 +21,7 @@ import std.signal
 import std.text.utf8.{decode_lossy_unicode}
 import std.time.{DateTime, Timestamp}
 import std.url
-import shared.obj.{Obj, at, bool_at, int_at, merge, str_at}
+import shared.obj.{Obj, at, bool_at, int_at, merge, without, str_at}
 import shared.protocol
 import shared.pushrelay
 import server.acp
@@ -227,6 +227,8 @@ pub struct Instance {
     fills: Map<String, Fill>    // browser_fill_secret calls on their browser
     turns_ended: List<(String, String, String)>    // a person, a conversation and how its turn ended, for the queue
     next_browser_sweep: i64
+    task_stops: Map<String, String>    // a task's run -> "pause" or "cancel", as the person asked
+    resumes: List<(String, String)>    // a person and a task the restart cut short, to carry on from the loop
 }
 
 // An agent's browser (server/browser.calx), on its thread.
@@ -276,6 +278,14 @@ struct Install {
 const REGISTRY_FRESH_MS: i64 = 600000
 // How long the person's profile may be: it goes into every session.
 const PROFILE_MOST: usize = 4000
+
+// Tasks (PLAN.md, "Work that waits its turn"): how many an agent may have
+// running that it started itself, and what it's told when one carries on.
+const TASKS_RUNNING_MOST: i64 = 3
+const TASK_RESULT_MOST: usize = 2000
+const TASK_RESTARTED: str = "[loom: The instance restarted while you worked on this task. Carry on from where you were.]"
+const TASK_RESUMED: str = "[loom: Your person paused this task, and has resumed it now. Carry on from where you stopped.]"
+const TASK_RETRIED: str = "[loom: Your person asked you to try this task again. What happened the last time is above.]"
 // How much of what a webhook was sent goes to the agent.
 const HOOK_MOST: usize = 20000
 // How long a code to add a device by QR code works: five minutes.
@@ -501,11 +511,15 @@ impl Instance {
         }
         let browser_done = Receiver<browser.Back>()
         let browser_to = browser_done.sender()
-        var i = Instance { browsers: LinkedMap<String, Browser>(), watchers: Map<u32, String>(), browser_done: browser_done, browser_to: browser_to, stopped_browsers: List<Thread>(), fills: Map<String, Fill>(), turns_ended: List<(String, String, String)>(), next_browser_sweep: 0, push_to: push_to, push_gone: push_gone, move_to: move_to, move_done: move_done, lan: config.lan, bridge: none, stop_bridge: none, lan_port: 0, announcer: none, stop_announcer: none, to_close: List<ServerSocket>(), boxes: none, gate: none, stop_gate: none, moving: String(), move_waiters: List<Waiter>(), moved: moved, version: config.version.copy(), store: store, server: server, data: config.data.copy(), sessions: Map<u32, Session>(), runs: LinkedMap<String, Run>(), procs: LinkedMap<String, Proc>(), approvals: LinkedMap<String, Approval>(), lines: lines, lines_to: to, hash_to: hash_to, hash_done: hash_done, next_job: 0, auths: Map<i64, Auth>(), dummy_hash: dummy, failures: LinkedMap<String, List<i64>>(), thumbs: files.start(), events: config.events, next_prune: 0, grants: Map<String, Grant>(), calls: Map<String, Request>(), registry_at: config.registry.copy(), registry: Json.Null, registry_time: 0, install_to: install_to, install_done: install_done, fetching: List<Waiter>(), installs: Map<i64, Install>(), leftovers: List<String>(), next_sweep: 0, device_calls: Map<String, DeviceCall>(), minute_ms: config.minute_ms, next_due: 0, routine_runs: Map<String, RoutineRun>(), panel_calls: Map<String, Waiter>(), sealer: try secret_key(config.data.copy()) }
+        var i = Instance { browsers: LinkedMap<String, Browser>(), watchers: Map<u32, String>(), browser_done: browser_done, browser_to: browser_to, stopped_browsers: List<Thread>(), fills: Map<String, Fill>(), turns_ended: List<(String, String, String)>(), next_browser_sweep: 0, task_stops: Map<String, String>(), resumes: List<(String, String)>(), push_to: push_to, push_gone: push_gone, move_to: move_to, move_done: move_done, lan: config.lan, bridge: none, stop_bridge: none, lan_port: 0, announcer: none, stop_announcer: none, to_close: List<ServerSocket>(), boxes: none, gate: none, stop_gate: none, moving: String(), move_waiters: List<Waiter>(), moved: moved, version: config.version.copy(), store: store, server: server, data: config.data.copy(), sessions: Map<u32, Session>(), runs: LinkedMap<String, Run>(), procs: LinkedMap<String, Proc>(), approvals: LinkedMap<String, Approval>(), lines: lines, lines_to: to, hash_to: hash_to, hash_done: hash_done, next_job: 0, auths: Map<i64, Auth>(), dummy_hash: dummy, failures: LinkedMap<String, List<i64>>(), thumbs: files.start(), events: config.events, next_prune: 0, grants: Map<String, Grant>(), calls: Map<String, Request>(), registry_at: config.registry.copy(), registry: Json.Null, registry_time: 0, install_to: install_to, install_done: install_done, fetching: List<Waiter>(), installs: Map<i64, Install>(), leftovers: List<String>(), next_sweep: 0, device_calls: Map<String, DeviceCall>(), minute_ms: config.minute_ms, next_due: 0, routine_runs: Map<String, RoutineRun>(), panel_calls: Map<String, Waiter>(), sealer: try secret_key(config.data.copy()) }
         if config.sandboxes.len() > 0 and not i.lan { try i.sandboxes_on(config.sandboxes.copy(), config.sandbox_image.copy()) }
         // What waited behind a turn the restart cut short goes once the loop
         // runs; a queue the person left waiting by stopping a turn still waits.
         i.turns_ended = restarted
+        // And a task that was running carries on.
+        for (user, task) in try i.store.running_tasks() {
+            i.resumes.push((user.copy(), str_at(task.copy(), "id") ?? String()))
+        }
         // Phones that were on stay on.
         if i.lan and try i.store.meta("phones") == some(String("on")) {
             match i.phones_on() {
@@ -873,6 +887,14 @@ impl Instance {
                 }
             }
             if now() >= i.next_browser_sweep { i.close_idle_browsers() }
+            // Tasks first: what waits in a task's conversation goes after it.
+            while i.resumes.len() > 0 {
+                let (user, task) = i.resumes.remove(0)
+                match i.task_go(user, task, String(TASK_RESTARTED), false) {
+                    ok(_) => {},
+                    err(e) => eprintln("loom: carrying on a task: {e}"),
+                }
+            }
             while i.turns_ended.len() > 0 {
                 let (user, conversation, status) = i.turns_ended.remove(0)
                 match i.next_queued(user, conversation, status) {
@@ -1572,6 +1594,20 @@ impl Instance {
         }
         if name == "message_agent" {
             return try i.message_agent(req, g, args)
+        }
+        if name == "start_task" {
+            let prompt = (str_at(args.copy(), "prompt") ?? String()).trim().copy()
+            if prompt.len() == 0 { return some(tool_error(String("prompt is empty: give the task everything it needs."))) }
+            var running: i64 = 0
+            for task in try i.store.tasks(g.user.copy()) {
+                if str_at(task.copy(), "agent") == some(g.agent.copy()) and str_at(task, "status") == some(String("running")) { running += 1 }
+            }
+            if running >= TASKS_RUNNING_MOST { return some(tool_error("You have {TASKS_RUNNING_MOST} tasks running already. Wait for one to finish, or ask your person to cancel one.")) }
+            let agent = try i.store.agent(g.user.copy(), g.agent.copy()) else return some(tool_error(String("You were deleted.")))
+            let title = str_at(args, "title") ?? String()
+            let task = try i.start_task(g.user.copy(), agent, title, prompt, String("you yourself: you started this task, to work on beside your chat with your person"), g.agent.copy())
+            i.log(g.user, g.agent.copy(), "task", "Started the task {str_at(task.copy(), "title") ?? String()}", g.agent)
+            return some(tool_text("Started, as task {str_at(task, "id") ?? String()}. You'll work on it in a conversation of its own; your person can watch it there."))
         }
         if name == "list_devices" {
             let devices = try i.live_devices(g.user.copy())
@@ -2833,6 +2869,96 @@ impl Instance {
         try i.start_run(user, conversation, run_id, message_id, text, sent_files, from, note)
     }
 
+    // --- Tasks (PLAN.md, "Work that waits its turn") ---
+
+    // Keeps a task as it is now, and tells the person's devices.
+    fn task_changed(i: Instance, user: String, task: Json) ! Error {
+        try i.store.put_task(user.copy(), task.copy())
+        try i.event(user, "task.updated", Obj.new().j("task", task).done())
+    }
+
+    // Starts a task: a conversation of its own with `agent`, which `prompt`
+    // starts as the person's message. `from` is who the agent is told wrote
+    // it, and `by` the device or agent that started it.
+    fn start_task(i: mut Instance, user: String, agent: Json, title: String, prompt: String, from: String, by: String) -> Json ! Error {
+        let agent_id = str_at(agent, "id") ?? String()
+        let first_line = prompt.split("\n")[0].copy()
+        let name = cut_short(if title.trim().len() > 0 { title.trim().copy() } else { first_line.trim().copy() }, 80)
+        let conversation = try i.store.add_conversation(user.copy(), agent_id.copy(), name.copy())
+        let conversation_id = str_at(conversation.copy(), "id") ?? String()
+        let id = try i.store.new_id("task")
+        let t = now()
+        let task = Obj.new().s("id", id.copy()).s("agent", agent_id).s("conversation", conversation_id.copy()).s("title", name).s("status", String("running")).s("by", by.copy()).i("attempts", 1).i("at", t).i("updated", t).done()
+        try i.store.put_task(user.copy(), task.copy())
+        let marked = merge(conversation, Obj.new().s("task", id.copy()).done())
+        try i.event(user.copy(), "conversation.created", Obj.new().j("conversation", marked.copy()).done())
+        let message_id = try i.store.new_id("msg")
+        let blocks = Json.Array([Obj.new().s("kind", String("text")).s("text", prompt.copy()).done()])
+        let message = Obj.new().s("id", message_id.copy()).s("conversation", conversation_id.copy()).s("role", String("person")).s("from", by).i("at", t).j("blocks", blocks).done()
+        try i.store.put_message(user.copy(), message.copy())
+        try i.event(user.copy(), "message.created", Obj.new().s("conversation", conversation_id).j("message", message).done())
+        let run_id = try i.store.new_id("run")
+        try i.start_run(user.copy(), marked, run_id, message_id, prompt, List<Json>(), from, String())
+        return try i.store.task(user, id) ?? task
+    }
+
+    // A task goes again, in its conversation, with `note` first: after a
+    // pause, a restart, or with `again`, as another try.
+    fn task_go(i: mut Instance, user: String, id: String, note: String, again: bool) -> Answer ! Error {
+        let task = try i.store.task(user.copy(), id.copy()) else return Answer.Refused(String("not_found"), String("There's no such task."))
+        let conversation_id = str_at(task.copy(), "conversation") ?? String()
+        if i.answering(user.copy(), conversation_id.copy()) != none { return Answer.Refused(String("busy"), String("The task's agent is working on it already.")) }
+        let conversation = try i.store.conversation(user.copy(), conversation_id) else return Answer.Refused(String("not_found"), String("The task's conversation was deleted."))
+        if try i.store.agent(user.copy(), str_at(task.copy(), "agent") ?? String()) == none { return Answer.Refused(String("not_found"), String("The task's agent was deleted.")) }
+        if again {
+            try i.store.put_task(user.copy(), merge(task.copy(), Obj.new().i("attempts", (int_at(task.copy(), "attempts") ?? 1) + 1).done()))
+        }
+        let run_id = try i.store.new_id("run")
+        let from = "your person's task \"{str_at(task, "title") ?? String()}\""
+        try i.start_run(user, conversation, run_id.copy(), String(), String(), List<Json>(), from, note)
+        return Answer.Value(Obj.new().s("run", run_id).done())
+    }
+
+    // task.list, task.start, task.pause, task.resume, task.cancel and task.retry.
+    fn task_cmd(i: mut Instance, user: String, device: String, name: String, args: Json) -> Answer ! Error {
+        if name == "task.list" {
+            return Answer.Value(Obj.new().j("tasks", Json.Array(try i.store.tasks(user))).done())
+        }
+        if name == "task.start" {
+            let prompt = (str_at(args.copy(), "prompt") ?? String()).trim().copy()
+            if prompt.len() == 0 { return Answer.Refused(String("bad_request"), String("Say what the task is: prompt is empty.")) }
+            let agent = try i.store.agent(user.copy(), str_at(args.copy(), "agent") ?? String()) else return Answer.Refused(String("not_found"), String("There's no such agent."))
+            let from = try i.writing_from(user.copy(), device.copy())
+            let task = try i.start_task(user, agent, str_at(args, "title") ?? String(), prompt, from, device)
+            return Answer.Value(Obj.new().j("task", task).done())
+        }
+        let id = str_at(args, "id") ?? String()
+        let task = try i.store.task(user.copy(), id.copy()) else return Answer.Refused(String("not_found"), String("There's no such task."))
+        let status = str_at(task.copy(), "status") ?? String()
+        let run = str_at(task.copy(), "run") ?? String()
+        let running = i.runs.contains(run.copy())
+        if name == "task.pause" or name == "task.cancel" {
+            let cancel = name == "task.cancel"
+            if status != "running" and not (cancel and status == "paused") { return Answer.Refused(String("not_now"), "The task is {status}.") }
+            if running {
+                i.task_stops.insert(run.copy(), String(if cancel { "cancel" } else { "pause" }))
+                try i.stop_run(run)
+            } else {
+                try i.task_changed(user, merge(task, Obj.new().s("status", String(if cancel { "cancelled" } else { "paused" })).i("updated", now()).done()))
+            }
+            return Answer.Value(Obj.new().done())
+        }
+        if name == "task.resume" {
+            if status != "paused" { return Answer.Refused(String("not_now"), "The task is {status}.") }
+            return try i.task_go(user, id, String(TASK_RESUMED), false)
+        }
+        if name == "task.retry" {
+            if status != "failed" and status != "cancelled" { return Answer.Refused(String("not_now"), "The task is {status}: only one that failed or was cancelled is tried again.") }
+            return try i.task_go(user, id, String(TASK_RETRIED), true)
+        }
+        return Answer.Refused(String("unknown_command"), "There's no command {name}.")
+    }
+
     // --- The queue (PLAN.md, "Work that waits its turn") ---
 
     // queue.changed, with the conversation's whole queue, to every device.
@@ -2922,6 +3048,10 @@ impl Instance {
         let agent_id = str_at(conversation, "agent") ?? String()
         let reply = try i.store.new_id("msg")
         try i.store.add_run(user.copy(), run_id.copy(), conversation_id.copy())
+        // A run in a task's conversation is the task's, running again.
+        if let task = try i.store.task_in(user.copy(), conversation_id.copy()) {
+            try i.task_changed(user.copy(), merge(without(task, "error"), Obj.new().s("status", String("running")).s("run", run_id.copy()).i("updated", now()).done()))
+        }
         let agent = try i.store.agent(user.copy(), agent_id.copy())
         let revision = int_at(agent.copy() ?? Json.Null, "revision") ?? 0
         try i.event(user.copy(), "run.started", Obj.new().s("run", run_id.copy()).s("conversation", conversation_id.copy()).s("agent", agent_id.copy()).i("revision", revision).s("message", reply.copy()).s("answering", answering.copy()).done())
@@ -3868,6 +3998,20 @@ impl Instance {
         try i.store.put_message(r.user.copy(), message.copy())
         try i.event(r.user.copy(), "message.created", Obj.new().s("conversation", r.conversation.copy()).j("message", message).done())
         try i.store.finish_run(r.id.copy(), status.copy())
+        // A task's run ends it, fails it, or stops it: cancelled when the
+        // person cancelled the task, and otherwise paused, to resume.
+        let stop = i.task_stops.remove(r.id.copy()) ?? String()
+        if let task = try i.store.task_in(r.user.copy(), r.conversation.copy()) {
+            if str_at(task.copy(), "run") == some(r.id.copy()) {
+                let next = if status == "done" { "done" } else if status == "failed" { "failed" } else if stop == "cancel" { "cancelled" } else { "paused" }
+                var o = Obj.new().s("status", String(next)).i("updated", now())
+                if status == "done" { o = o.s("result", cut_short(said.copy(), TASK_RESULT_MOST)) }
+                if next != "done" {
+                    if let e = error.copy() { o = o.s("error", e) }
+                }
+                try i.task_changed(r.user.copy(), merge(task, o.done()))
+            }
+        }
         // A message_agent call waiting on this run gets the reply.
         var asked = false
         if let req = i.calls.remove(r.id.copy()) {
@@ -3916,6 +4060,11 @@ impl Instance {
         }
         if name.starts_with("queue.") {
             let answer = try i.queue_cmd(user, name, args)
+            i.answer_cmd(Waiter { socket: s, id: id }, answer)
+            return
+        }
+        if name.starts_with("task.") {
+            let answer = try i.task_cmd(user, device, name, args)
             i.answer_cmd(Waiter { socket: s, id: id }, answer)
             return
         }

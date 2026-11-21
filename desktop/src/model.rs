@@ -416,6 +416,39 @@ pub struct Revision {
 pub struct Conversation {
     pub id: String,
     pub agent: String,
+    /// The task it's the conversation of, if it's one: not the agent's chat.
+    pub task: Option<String>,
+}
+
+/// A long job an agent works on in a conversation of its own (protocol.md, "Tasks").
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Task {
+    pub id: String,
+    pub agent: String,
+    pub conversation: String,
+    pub title: String,
+    /// running, paused, done, failed or cancelled.
+    pub status: String,
+    pub result: String,
+    pub error: String,
+    pub attempts: i64,
+    pub updated: i64,
+}
+
+impl Task {
+    fn of(t: &Value) -> Task {
+        Task {
+            id: s(t, "id"),
+            agent: s(t, "agent"),
+            conversation: s(t, "conversation"),
+            title: s(t, "title"),
+            status: s(t, "status"),
+            result: s(t, "result"),
+            error: s(t, "error"),
+            attempts: t.get("attempts").and_then(Value::as_i64).unwrap_or(1),
+            updated: t.get("updated").and_then(Value::as_i64).unwrap_or(0),
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -681,6 +714,11 @@ pub struct Model {
     /// The person's routines, oldest first.
     pub routines: Vec<Routine>,
     routines_stale: bool,
+    /// The person's tasks, newest first.
+    pub tasks: Vec<Task>,
+    tasks_stale: bool,
+    /// The task whose conversation the chat shows instead of the agent's chat.
+    pub open_task: Option<String>,
     /// The person's plugins, by id.
     pub plugins: Vec<Plugin>,
     plugins_stale: bool,
@@ -838,6 +876,9 @@ impl Model {
         if std::mem::take(&mut self.people_stale) {
             out.extend(self.load_people());
         }
+        if std::mem::take(&mut self.tasks_stale) {
+            out.push(self.load_tasks());
+        }
         if std::mem::take(&mut self.queue_stale) {
             if let Some(conversation) = self.conversation() {
                 out.push(json!({"t": "cmd", "id": format!("app.queue:{conversation}"), "name": "queue.list", "args": {"conversation": conversation}}));
@@ -867,13 +908,53 @@ impl Model {
         out
     }
 
-    /// The conversation the selected agent's chat shows: its newest.
+    /// The conversation the chat shows: the open task's, or else the selected
+    /// agent's chat, its newest that isn't a task's.
     pub fn conversation(&self) -> Option<String> {
+        if let Some(task) = self.task_open() {
+            return Some(task.conversation.clone());
+        }
         let agent = self.selected.as_ref()?;
         self.conversations
             .iter()
-            .find(|c| &c.agent == agent)
+            .find(|c| &c.agent == agent && c.task.is_none())
             .map(|c| c.id.clone())
+    }
+
+    /// The task the chat shows, if it shows one.
+    pub fn task_open(&self) -> Option<&Task> {
+        let id = self.open_task.as_ref()?;
+        self.tasks
+            .iter()
+            .find(|t| &t.id == id && Some(&t.agent) == self.selected.as_ref())
+    }
+
+    /// Shows a task's conversation in the chat, or the agent's chat again.
+    pub fn show_task(&mut self, task: Option<String>) {
+        if let Some(agent) = task
+            .as_ref()
+            .and_then(|id| self.tasks.iter().find(|t| &t.id == id))
+            .map(|t| t.agent.clone())
+        {
+            self.select(Some(agent));
+        }
+        if self.open_task != task {
+            self.open_task = task;
+            self.messages.clear();
+            self.dirty.insert(List::Messages);
+            self.queue_stale = true;
+        }
+    }
+
+    /// Asks for the person's tasks.
+    pub fn load_tasks(&mut self) -> Value {
+        json!({"t": "cmd", "id": "app.tasks", "name": "task.list"})
+    }
+
+    /// task.start, task.pause, task.resume, task.cancel or task.retry.
+    pub fn task_cmd(&mut self, name: &str, args: Value) -> Value {
+        let id = self.id("app.task_cmd");
+        json!({"t": "cmd", "id": id, "name": name, "args": args})
     }
 
     pub fn agent(&self, id: &str) -> Option<&Agent> {
@@ -886,6 +967,7 @@ impl Model {
         }
         if self.selected != agent {
             self.selected = agent;
+            self.open_task = None;
             self.messages.clear();
             self.dirty.insert(List::Messages);
             self.queue_stale = true;
@@ -978,6 +1060,7 @@ impl Model {
                 self.routines_stale = true;
                 self.rewatch = true;
                 self.queue_stale = true;
+                self.tasks_stale = true;
                 for l in [
                     List::Agents,
                     List::Conversations,
@@ -1149,6 +1232,13 @@ impl Model {
             "queue" => {
                 self.queues.insert(s(f, "conversation"), Model::queue_of(f));
             }
+            "task" => {
+                let task = Task::of(f.get("task").unwrap_or(&Value::Null));
+                match self.tasks.iter_mut().find(|t| t.id == task.id) {
+                    Some(t) => *t = task,
+                    None => self.tasks.insert(0, task),
+                }
+            }
             "plugin" if kind != "plugin.data" => {
                 self.plugins_stale = true;
             }
@@ -1271,6 +1361,20 @@ impl Model {
             if let Some(v) = f.get("value") {
                 self.queues
                     .insert(conversation.to_string(), Model::queue_of(v));
+            }
+            return;
+        }
+        if id == "app.tasks" {
+            self.tasks = f
+                .pointer("/value/tasks")
+                .and_then(Value::as_array)
+                .map(|ts| ts.iter().map(Task::of).collect())
+                .unwrap_or_default();
+            return;
+        }
+        if id.starts_with("app.task_cmd") {
+            if let Some(e) = f.get("error") {
+                self.notices.push(s(e, "message"));
             }
             return;
         }
@@ -1738,6 +1842,7 @@ impl Model {
                     .map(|c| Conversation {
                         id: s(c, "id"),
                         agent: s(c, "agent"),
+                        task: c.get("task").and_then(Value::as_str).map(String::from),
                     })
                     .collect();
                 if self.conversation() != before {
@@ -1995,6 +2100,10 @@ impl Model {
         }
         self.attachments.clear();
         let mut frame = json!({"t": "send", "agent": agent, "text": text});
+        // Into the task's conversation when the chat shows one; the core finds the agent's chat otherwise.
+        if let Some(task) = self.task_open() {
+            frame["conversation"] = json!(task.conversation);
+        }
         if !files.is_empty() {
             frame["files"] = json!(files);
         }
@@ -2706,10 +2815,12 @@ mod tests {
             Conversation {
                 id: "c_1".into(),
                 agent: "a_1".into(),
+                task: None,
             },
             Conversation {
                 id: "c_2".into(),
                 agent: "a_2".into(),
+                task: None,
             },
         ];
         m.select(Some("a_1".into()));
@@ -2728,11 +2839,50 @@ mod tests {
     }
 
     #[test]
+    fn a_task_has_its_own_conversation_beside_the_chat() {
+        let mut m = Model::new();
+        m.conversations = vec![
+            Conversation {
+                id: "c_task".into(),
+                agent: "a_1".into(),
+                task: Some("task_1".into()),
+            },
+            Conversation {
+                id: "c_chat".into(),
+                agent: "a_1".into(),
+                task: None,
+            },
+        ];
+        m.select(Some("a_1".into()));
+        // The newest conversation is the task's, but the chat is the chat.
+        assert_eq!(m.conversation().as_deref(), Some("c_chat"));
+        m.take(&json!({"t": "event", "kind": "task.updated", "task": {"id": "task_1", "agent": "a_1", "conversation": "c_task", "title": "Count", "status": "running"}}));
+        assert_eq!(m.tasks.len(), 1);
+        m.show_task(Some("task_1".into()));
+        assert_eq!(m.conversation().as_deref(), Some("c_task"));
+        let sent = m.send("more socks").unwrap();
+        assert_eq!(
+            sent["conversation"], "c_task",
+            "a message goes into the task"
+        );
+        m.take(&json!({"t": "event", "kind": "task.updated", "task": {"id": "task_1", "agent": "a_1", "conversation": "c_task", "title": "Count", "status": "failed", "error": "no socks"}}));
+        assert_eq!(m.tasks.len(), 1, "an update replaces the task");
+        assert_eq!(m.tasks[0].error, "no socks");
+        // Another agent closes it, and the chat's send names no conversation.
+        m.select(Some("a_2".into()));
+        assert!(m.task_open().is_none());
+        m.select(Some("a_1".into()));
+        assert_eq!(m.conversation().as_deref(), Some("c_chat"));
+        assert!(m.send("hi").unwrap().get("conversation").is_none());
+    }
+
+    #[test]
     fn the_queue_is_heard_asked_and_reordered() {
         let mut m = Model::new();
         m.conversations = vec![Conversation {
             id: "c_1".into(),
             agent: "a_1".into(),
+            task: None,
         }];
         m.select(Some("a_1".into()));
         // Opening the chat asks for its queue.

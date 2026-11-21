@@ -80,6 +80,7 @@ enum Screen {
     Memory,
     Profile,
     Routines,
+    Tasks,
     Programs,
     ThisDevice,
     AddPhone,
@@ -155,6 +156,9 @@ pub struct Loom {
     /// `Some(Some(id))` for one being changed. The form's agent and switches go with it.
     routine_open: Option<Option<String>>,
     routine_agent: Option<String>,
+    /// The new task form: what it is, and the agent it goes to.
+    task_prompt_in: Entity<TextareaState>,
+    task_agent: Option<String>,
     routine_notify: bool,
     routine_on: bool,
     routine_catch_up: bool,
@@ -339,6 +343,11 @@ impl Loom {
         let relay_in = input(window, cx, "https://push.loom.example", false);
         let move_code_in = input(window, cx, "loom-move-…", false);
         let routine_at_in = input(window, cx, "30", false);
+        let task_prompt_in = cx.new(|cx| {
+            TextareaState::new(window, cx)
+                .auto_grow(3, 14)
+                .placeholder("Everything it needs: what to do, and what done looks like.")
+        });
         let routine_prompt_in = cx.new(|cx| {
             TextareaState::new(window, cx)
                 .auto_grow(4, 14)
@@ -522,6 +531,8 @@ ACTA_KEY=secret:ACTA_KEY",
             routine_prompt_in,
             routine_open: None,
             routine_agent: None,
+            task_prompt_in,
+            task_agent: None,
             routine_notify: true,
             routine_on: true,
             routine_catch_up: true,
@@ -637,6 +648,10 @@ ACTA_KEY=secret:ACTA_KEY",
                 let f = self.model.load_routines();
                 self.send(f);
                 self.routine_open = None;
+            }
+            Screen::Tasks => {
+                let f = self.model.load_tasks();
+                self.send(f);
             }
             Screen::Skills => {
                 let f = self.model.load_skills();
@@ -894,9 +909,279 @@ ACTA_KEY=secret:ACTA_KEY",
         self.model.editing = None;
         self.menu = None;
         self.model.select(Some(agent));
+        self.model.show_task(None);
         self.fetch();
         self.refresh_rows(cx);
         cx.notify();
+    }
+
+    /// Shows a task's conversation in the chat, or with None, the agent's chat again.
+    fn open_task(&mut self, task: Option<String>, cx: &mut Context<Self>) {
+        self.screen = Screen::Chat;
+        self.model.editing = None;
+        self.menu = None;
+        self.model.show_task(task);
+        self.fetch();
+        self.refresh_rows(cx);
+        cx.notify();
+    }
+
+    // --- Tasks ---
+
+    /// What a task is doing, in a few words.
+    fn task_status(task: &model::Task) -> String {
+        match task.status.as_str() {
+            "running" => "Working on it".into(),
+            "paused" => "Paused".into(),
+            "done" => "Done".into(),
+            "cancelled" => "Cancelled".into(),
+            _ if task.error.is_empty() => "Couldn't finish".into(),
+            _ => format!("Couldn't finish: {}", task.error),
+        }
+    }
+
+    /// The buttons for what a task can do next: pause or resume it, cancel it, or try it again.
+    fn task_actions(&self, task: &model::Task, cx: &mut Context<Self>) -> Div {
+        let mut row = div().flex().gap(px(space::XS));
+        let add = |row: Div, name: &'static str, label: &str, primary: bool| {
+            let id = task.id.clone();
+            row.child(
+                self.button_owned(format!("task-{name}-{}", task.id), label, primary)
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        let f = this
+                            .model
+                            .task_cmd(&format!("task.{name}"), serde_json::json!({"id": id}));
+                        this.send(f);
+                        cx.notify();
+                    })),
+            )
+        };
+        match task.status.as_str() {
+            "running" => {
+                row = add(row, "pause", "Pause", false);
+                row = add(row, "cancel", "Cancel", false);
+            }
+            "paused" => {
+                row = add(row, "resume", "Resume", true);
+                row = add(row, "cancel", "Cancel", false);
+            }
+            "failed" | "cancelled" => {
+                row = add(row, "retry", "Try again", true);
+            }
+            _ => {}
+        }
+        row
+    }
+
+    /// Over the chat while it shows a task: back to the agent's chat, the task, and what it can do.
+    fn task_strip(&self, task: &model::Task, tint: Hsla, cx: &mut Context<Self>) -> Div {
+        let p = self.p;
+        div()
+            .w_full()
+            .flex()
+            .justify_center()
+            .px(px(space::XL))
+            .pt(px(space::S))
+            .child(
+                div()
+                    .w_full()
+                    .max_w(px(space::COLUMN))
+                    .flex()
+                    .items_center()
+                    .gap(px(space::M))
+                    .px(px(space::M))
+                    .py(px(space::S))
+                    .rounded(px(radius::BUTTON))
+                    .border_1()
+                    .border_color(p.line)
+                    .child(
+                        div()
+                            .id("task-back")
+                            .size(px(28.0))
+                            .flex_none()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .rounded(px(radius::ROW))
+                            .text_color(p.ink_2)
+                            .cursor_pointer()
+                            .hover(move |s| s.bg(p.hover).text_color(p.ink))
+                            .child(Icon::new(Ico::ArrowLeft).small())
+                            .on_click(cx.listener(|this, _, _, cx| this.open_task(None, cx))),
+                    )
+                    .child(Icon::new(Ico::ListTodo).small().text_color(tint))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .flex()
+                            .flex_col()
+                            .child(
+                                div()
+                                    .truncate()
+                                    .text_size(px(size::SMALL))
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .text_color(p.ink)
+                                    .child(task.title.clone()),
+                            )
+                            .child(
+                                div()
+                                    .truncate()
+                                    .text_size(px(size::CAPTION))
+                                    .text_color(if task.status == "failed" {
+                                        p.bad
+                                    } else {
+                                        p.ink_3
+                                    })
+                                    .child(Loom::task_status(task)),
+                            ),
+                    )
+                    .child(self.task_actions(task, cx)),
+            )
+    }
+
+    /// The Tasks page: a new task for an agent, and every task, newest first.
+    fn tasks_page(&mut self, cx: &mut Context<Self>) -> Div {
+        let p = self.p;
+        if self
+            .task_agent
+            .as_ref()
+            .is_none_or(|a| self.model.agent(a).is_none())
+        {
+            self.task_agent = self
+                .model
+                .selected
+                .clone()
+                .or_else(|| self.model.agents.first().map(|a| a.id.clone()));
+        }
+        let mut agents = div().flex().flex_wrap().gap(px(space::XS));
+        for a in self.model.agents.clone() {
+            let id = a.id.clone();
+            let picked = self.task_agent.as_deref() == Some(a.id.as_str());
+            agents = agents.child(
+                self.button_owned(format!("task-agent-{}", a.id), &a.name, picked)
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.task_agent = Some(id.clone());
+                        cx.notify();
+                    })),
+            );
+        }
+        let start = self
+            .button("start-task", "Start", true)
+            .on_click(cx.listener(|this, _, window, cx| {
+                let prompt = this.task_prompt_in.read(cx).value().trim().to_string();
+                let Some(agent) = this.task_agent.clone() else {
+                    return;
+                };
+                if prompt.is_empty() {
+                    return;
+                }
+                let f = this.model.task_cmd(
+                    "task.start",
+                    serde_json::json!({"agent": agent, "prompt": prompt}),
+                );
+                this.send(f);
+                this.task_prompt_in
+                    .update(cx, |s, cx| s.set_value("", window, cx));
+                cx.notify();
+            }));
+        let mut list = div().flex().flex_col().gap(px(space::XS));
+        if self.model.tasks.is_empty() {
+            list = list.child(
+                div()
+                    .text_size(px(size::CAPTION))
+                    .text_color(p.ink_3)
+                    .child("No tasks yet"),
+            );
+        }
+        for t in self.model.tasks.clone() {
+            let Some(agent) = self.model.agent(&t.agent).cloned() else {
+                continue;
+            };
+            let tint = thread::color(&agent.color, p.dark);
+            let id = t.id.clone();
+            let mut words = format!("{} · {}", agent.name, Loom::task_status(&t));
+            if t.status == "done" && !t.result.is_empty() {
+                words = format!("{words} · {}", t.result.lines().next().unwrap_or_default());
+            }
+            list = list.child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(space::M))
+                    .child(
+                        div()
+                            .id(SharedString::from(format!("task-{}", t.id)))
+                            .flex_1()
+                            .min_w_0()
+                            .flex()
+                            .items_center()
+                            .gap(px(space::M))
+                            .py(px(space::S))
+                            .px(px(space::S))
+                            .rounded(px(radius::BUTTON))
+                            .cursor_pointer()
+                            .hover(move |s| s.bg(p.hover))
+                            .child(Icon::new(Ico::ListTodo).small().text_color(tint))
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .flex()
+                                    .flex_col()
+                                    .child(
+                                        div()
+                                            .truncate()
+                                            .text_size(px(size::SMALL))
+                                            .font_weight(FontWeight::MEDIUM)
+                                            .text_color(p.ink)
+                                            .child(t.title.clone()),
+                                    )
+                                    .child(
+                                        div()
+                                            .truncate()
+                                            .text_size(px(size::CAPTION))
+                                            .text_color(if t.status == "failed" {
+                                                p.bad
+                                            } else {
+                                                p.ink_3
+                                            })
+                                            .child(words),
+                                    ),
+                            )
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.open_task(Some(id.clone()), cx)
+                            })),
+                    )
+                    .child(self.task_actions(&t, cx)),
+            );
+        }
+        let body = div()
+            .w(px(560.0))
+            .flex()
+            .flex_col()
+            .gap(px(space::XL))
+            .child(
+                div()
+                    .text_size(px(size::HEADING))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(p.ink)
+                    .child("New task"),
+            )
+            .child(self.field("Agent", agents))
+            .child(self.field("What to do", Textarea::new(&self.task_prompt_in)))
+            .child(div().flex().child(start))
+            .child(list);
+        let page = div()
+            .id("tasks-page")
+            .size_full()
+            .overflow_y_scroll()
+            .flex()
+            .justify_center()
+            .pt(px(space::XXL))
+            .pb(px(space::XXL))
+            .child(body);
+        div().flex_1().min_h_0().child(page)
     }
 
     // --- The parts ---
@@ -2072,6 +2357,7 @@ ACTA_KEY=secret:ACTA_KEY",
                 Screen::Profile,
             ),
             ("set-routines", Ico::Clock, "Routines", Screen::Routines),
+            ("set-tasks", Ico::ListTodo, "Tasks", Screen::Tasks),
             ("set-skills", Ico::BookOpen, "Skills", Screen::Skills),
             ("set-programs", Ico::Bot, "Agent programs", Screen::Programs),
             ("set-mcp", Ico::Plug, "MCP servers", Screen::Mcp),
@@ -2186,6 +2472,7 @@ ACTA_KEY=secret:ACTA_KEY",
                 | Screen::AddPhone
                 | Screen::Profile
                 | Screen::Routines
+                | Screen::Tasks
                 | Screen::Mcp
                 | Screen::Move
                 | Screen::People
@@ -2194,6 +2481,7 @@ ACTA_KEY=secret:ACTA_KEY",
                 match self.screen {
                     Screen::Skills => "Skills",
                     Screen::Routines => "Routines",
+                    Screen::Tasks => "Tasks",
                     Screen::Programs => "Agent programs",
                     Screen::Profile => "About you",
                     Screen::Mcp => "MCP servers",
@@ -2539,6 +2827,10 @@ ACTA_KEY=secret:ACTA_KEY",
         let ask = agent.as_ref().and_then(|a| self.browser_ask(a, cx));
         let secret = agent.as_ref().and_then(|a| self.secret_ask(a, cx));
         let queue = agent.as_ref().and_then(|a| self.queue_view(a, cx));
+        let strip = match (self.model.task_open().cloned(), agent.as_ref()) {
+            (Some(t), Some(a)) => Some(self.task_strip(&t, thread::color(&a.color, p.dark), cx)),
+            _ => None,
+        };
         let name = agent.as_ref().map(|a| a.name.clone()).unwrap_or_default();
         let tint = agent
             .as_ref()
@@ -2588,6 +2880,7 @@ ACTA_KEY=secret:ACTA_KEY",
         .with_bottom_fade(p.bg);
 
         let empty = self.rows.is_empty();
+        let in_task = self.model.task_open().is_some();
         // While the agent answers, the button stops it, unless there's something to send: that waits in the queue.
         let busy = self.model.busy()
             && self.composer.read(cx).value().trim().is_empty()
@@ -2743,7 +3036,8 @@ ACTA_KEY=secret:ACTA_KEY",
                 this.attach(paths.paths(), cx);
             }))
             .drag_over::<ExternalPaths>(move |s, _, _, _| s.bg(p.hover))
-            .child(if empty {
+            .when_some(strip, |d, s| d.child(s))
+            .child(if empty && !in_task {
                 self.hero(agent.as_ref(), composer.take(), cx)
                     .into_any_element()
             } else {
@@ -6469,6 +6763,7 @@ impl Render for Loom {
             Screen::Profile => self.profile_page(cx),
             Screen::Skills => self.skills_page(cx),
             Screen::Routines => self.routines_page(cx),
+            Screen::Tasks => self.tasks_page(cx),
             Screen::Programs => self.programs_page(cx),
             Screen::ThisDevice => self.device_page(cx),
             Screen::Move => self.move_page(cx),

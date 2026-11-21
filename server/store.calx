@@ -70,6 +70,9 @@ CREATE INDEX IF NOT EXISTS messages_by_conversation ON messages (user, conversat
 CREATE TABLE IF NOT EXISTS runs (
     id TEXT PRIMARY KEY, user TEXT NOT NULL REFERENCES users(id), conversation TEXT NOT NULL,
     status TEXT NOT NULL, at INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS tasks (
+    id TEXT PRIMARY KEY, user TEXT NOT NULL REFERENCES users(id), agent TEXT NOT NULL,
+    conversation TEXT NOT NULL, status TEXT NOT NULL, json TEXT NOT NULL, at INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS queue (
     id TEXT PRIMARY KEY, user TEXT NOT NULL REFERENCES users(id), conversation TEXT NOT NULL,
     pos INTEGER NOT NULL, json TEXT NOT NULL);
@@ -188,6 +191,19 @@ fn text(v: Value) -> String {
         Value.Int(n) => return "{n}",
         _ => return String(),
     }
+}
+
+// A JSON object's string field, or "".
+fn field(j: Json, key: str) -> String {
+    return (j.get(String(key)) ?? Json.Null).as_str() ?? String()
+}
+
+// A conversation from its row: id, agent, title, at, and the task it is, if any.
+fn conversation_of(r: List<Value>) -> Json {
+    var o = Obj.new().s("id", text(r[0].copy())).s("agent", text(r[1].copy())).s("title", text(r[2].copy())).i("at", int(r[3].copy()))
+    let task = text(r[4].copy())
+    if task.len() > 0 { o = o.s("task", task) }
+    return o.done()
 }
 
 fn int(v: Value) -> i64 {
@@ -595,21 +611,22 @@ impl Store {
     }
 
     pub fn conversation(self, user: String, id: String) -> Json? ! Error {
-        let row = try self.db.query_one(String("SELECT id, agent, title, at FROM conversations WHERE id = ? AND user = ? AND deleted = 0"), [t(id), t(user)])
+        let row = try self.db.query_one(String("SELECT c.id, c.agent, c.title, c.at, k.id FROM conversations c LEFT JOIN tasks k ON k.conversation = c.id WHERE c.id = ? AND c.user = ? AND c.deleted = 0"), [t(id), t(user)])
         let r = row else return none
-        return some(Obj.new().s("id", text(r[0].copy())).s("agent", text(r[1].copy())).s("title", text(r[2].copy())).i("at", int(r[3].copy())).done())
+        return some(conversation_of(r))
     }
 
-    // `agent`'s conversation with the newest message, as the apps show its chat.
+    // `agent`'s conversation with the newest message, as the apps show its
+    // chat. A task's conversation is the task's, not the chat.
     pub fn newest_conversation(self, user: String, agent: String) -> Json? ! Error {
-        let r = try self.db.query_one(String("SELECT c.id, c.agent, c.title, c.at FROM conversations c LEFT JOIN messages m ON m.conversation = c.id AND m.user = c.user WHERE c.user = ? AND c.agent = ? AND c.deleted = 0 GROUP BY c.id ORDER BY max(coalesce(m.at, c.at)) DESC, c.rowid DESC LIMIT 1"), [t(user), t(agent)]) else return none
-        return some(Obj.new().s("id", text(r[0].copy())).s("agent", text(r[1].copy())).s("title", text(r[2].copy())).i("at", int(r[3].copy())).done())
+        let r = try self.db.query_one(String("SELECT c.id, c.agent, c.title, c.at, NULL FROM conversations c LEFT JOIN messages m ON m.conversation = c.id AND m.user = c.user WHERE c.user = ? AND c.agent = ? AND c.deleted = 0 AND c.id NOT IN (SELECT conversation FROM tasks) GROUP BY c.id ORDER BY max(coalesce(m.at, c.at)) DESC, c.rowid DESC LIMIT 1"), [t(user), t(agent)]) else return none
+        return some(conversation_of(r))
     }
 
     pub fn conversations(self, user: String) -> List<Json> ! Error {
         var out = List<Json>()
-        for r in try self.db.query(String("SELECT id, agent, title, at FROM conversations WHERE user = ? AND deleted = 0 ORDER BY at"), [t(user)]) {
-            out.push(Obj.new().s("id", text(r[0].copy())).s("agent", text(r[1].copy())).s("title", text(r[2].copy())).i("at", int(r[3].copy())).done())
+        for r in try self.db.query(String("SELECT c.id, c.agent, c.title, c.at, k.id FROM conversations c LEFT JOIN tasks k ON k.conversation = c.id WHERE c.user = ? AND c.deleted = 0 ORDER BY c.at"), [t(user)]) {
+            out.push(conversation_of(r))
         }
         return out
     }
@@ -620,7 +637,46 @@ impl Store {
 
     pub fn delete_conversation(self, user: String, id: String) ! Error {
         _ = try self.db.execute(String("DELETE FROM queue WHERE conversation = ? AND user = ?"), [t(id.copy()), t(user.copy())])
+        _ = try self.db.execute(String("DELETE FROM tasks WHERE conversation = ? AND user = ?"), [t(id.copy()), t(user.copy())])
         _ = try self.db.execute(String("UPDATE conversations SET deleted = 1 WHERE id = ? AND user = ?"), [t(id), t(user)])
+    }
+
+    // --- Tasks (PLAN.md, "Work that waits its turn") ---
+
+    // Keeps a task as it is now: its `id`, `agent`, `conversation` and `status`, and the rest.
+    pub fn put_task(self, user: String, task: Json) ! Error {
+        _ = try self.db.execute(String("INSERT INTO tasks (id, user, agent, conversation, status, json, at) VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT (id) DO UPDATE SET status = excluded.status, json = excluded.json"), [t(field(task.copy(), "id")), t(user), t(field(task.copy(), "agent")), t(field(task.copy(), "conversation")), t(field(task.copy(), "status")), t("{task}"), Value.Int(now())])
+    }
+
+    pub fn task(self, user: String, id: String) -> Json? ! Error {
+        let r = try self.db.query_one(String("SELECT json FROM tasks WHERE id = ? AND user = ?"), [t(id), t(user)]) else return none
+        let ok(j) = parse(text(r[0].copy())) else return none
+        return some(j)
+    }
+
+    // The task a conversation is, if it's one.
+    pub fn task_in(self, user: String, conversation: String) -> Json? ! Error {
+        let r = try self.db.query_one(String("SELECT json FROM tasks WHERE conversation = ? AND user = ?"), [t(conversation), t(user)]) else return none
+        let ok(j) = parse(text(r[0].copy())) else return none
+        return some(j)
+    }
+
+    // A person's tasks, newest first, but not those of agents that were deleted.
+    pub fn tasks(self, user: String) -> List<Json> ! Error {
+        var out = List<Json>()
+        for r in try self.db.query(String("SELECT k.json FROM tasks k JOIN agents a ON a.id = k.agent AND a.deleted = 0 WHERE k.user = ? ORDER BY k.at DESC, k.rowid DESC"), [t(user)]) {
+            if let ok(j) = parse(text(r[0].copy())) { out.push(j) }
+        }
+        return out
+    }
+
+    // Every task that was running, as (user, task), for after a restart.
+    pub fn running_tasks(self) -> List<(String, Json)> ! Error {
+        var out = List<(String, Json)>()
+        for r in try self.db.query(String("SELECT k.user, k.json FROM tasks k JOIN agents a ON a.id = k.agent AND a.deleted = 0 WHERE k.status = 'running' ORDER BY k.at")) {
+            if let ok(j) = parse(text(r[1].copy())) { out.push((text(r[0].copy()), j)) }
+        }
+        return out
     }
 
     // --- The queue (PLAN.md, "Work that waits its turn") ---
@@ -1157,7 +1213,7 @@ impl Store {
 
     fn remove_rows(self, user: String) ! Error {
         _ = try self.db.execute(String("DELETE FROM sent WHERE device IN (SELECT id FROM devices WHERE user = ?)"), [t(user.copy())])
-        for table in ["push_tokens", "link_codes", "resets", "agent_revisions", "agents", "activity", "secrets", "mcp_servers", "skills", "messages", "conversations", "runs", "queue", "events", "acp_sessions", "files", "profiles", "routines", "plugin_data", "plugin_revisions", "plugins", "usage", "memories", "memories_fts", "messages_fts", "devices"] {
+        for table in ["push_tokens", "link_codes", "resets", "agent_revisions", "agents", "activity", "secrets", "mcp_servers", "skills", "messages", "conversations", "runs", "queue", "tasks", "events", "acp_sessions", "files", "profiles", "routines", "plugin_data", "plugin_revisions", "plugins", "usage", "memories", "memories_fts", "messages_fts", "devices"] {
             _ = try self.db.execute("DELETE FROM {table} WHERE user = ?", [t(user.copy())])
         }
         _ = try self.db.execute(String("DELETE FROM invites WHERE by = ?"), [t(user.copy())])
