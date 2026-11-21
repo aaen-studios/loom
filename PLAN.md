@@ -291,6 +291,7 @@ Each agent program runs as its own process. The instance reads each one on a thr
 | `notify` | Sends you a notification |
 | `edit_instructions` | Changes the agent's own instructions |
 | `list_agents`, `create_agent`, `update_agent`, `list_acp_agents`, `search_messages` | Loom's commands. None of them changes a permission mode or deletes |
+| `list_skills`, `read_skill`, `save_skill` | Skills: read when a task fits one, and saved by an agent for every agent. They're also written into each agent's folder as Claude Code skills |
 | Device tools | Your PC and phone, where you allow it ([Machines and devices](#machines-and-devices)) |
 | Every loom command | Agents, routines, plugins, settings, export, moving ([Agents can do anything the app can](#agents-can-do-anything-the-app-can)) |
 

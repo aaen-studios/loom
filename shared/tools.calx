@@ -33,6 +33,9 @@ pub fn all() -> List<Json> {
         tool("edit_instructions", "Replaces your own instructions, which you start every session with. Give them whole, not just the change. Your person sees it as a revision by you, and can roll it back.", object(Obj.new().j("instructions", text_arg("Your new instructions, in Markdown.")), ["instructions"])),
         tool("list_acp_agents", "Lists the ACP agent programs installed on the instance, which agents run on.", object(Obj.new(), List<str>())),
         tool("search_messages", "Searches every conversation your person has, for words in messages and in file names. Gives the newest matches first.", object(Obj.new().j("query", text_arg("The words to find.")).j("agent", text_arg("Only this agent's conversations, by name or id.")), ["query"])),
+        tool("list_skills", "Lists your person's skills: named instructions for a kind of task, each with when it's for. Look here before a task you haven't done before, and read the one that fits with read_skill.", object(Obj.new(), List<str>())),
+        tool("read_skill", "Reads a skill: how your person wants that kind of task done. Follow it.", object(Obj.new().j("name", text_arg("The skill's name, as list_skills gives it.")), ["name"])),
+        tool("save_skill", "Saves a skill, new or changed, for every one of your person's agents: how to do a kind of task, learned while doing it. Give it whole.", object(Obj.new().j("name", text_arg("Lowercase letters, digits and hyphens, such as release-notes.")).j("description", text_arg("When it's for, in one sentence, so an agent knows to read it.")).j("body", text_arg("The skill, in Markdown.")), ["name", "description", "body"])),
         tool("notify", "Sends your person a notification on their devices. Keep it for what they'd want to know now.", object(Obj.new().j("title", text_arg("A few words.")).j("body", text_arg("One or two sentences.")), ["title", "body"])),
     ]
 }
@@ -40,7 +43,7 @@ pub fn all() -> List<Json> {
 @test
 fn every_tool_has_a_schema() {
     let tools = all()
-    assert(tools.len() == 8)
+    assert(tools.len() == 11)
     for t in tools {
         assert("{t}".contains("\"inputSchema\":\{\"type\":\"object\""))
     }

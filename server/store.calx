@@ -35,6 +35,9 @@ CREATE TABLE IF NOT EXISTS agent_revisions (
 CREATE TABLE IF NOT EXISTS activity (
     id INTEGER PRIMARY KEY, user TEXT NOT NULL REFERENCES users(id), agent TEXT NOT NULL,
     kind TEXT NOT NULL, text TEXT NOT NULL, by TEXT NOT NULL, at INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS skills (
+    user TEXT NOT NULL REFERENCES users(id), name TEXT NOT NULL, description TEXT NOT NULL,
+    body TEXT NOT NULL, at INTEGER NOT NULL, PRIMARY KEY (user, name));
 CREATE TABLE IF NOT EXISTS conversations (
     id TEXT PRIMARY KEY, user TEXT NOT NULL REFERENCES users(id), agent TEXT NOT NULL,
     title TEXT NOT NULL, at INTEGER NOT NULL, deleted INTEGER NOT NULL DEFAULT 0);
@@ -448,6 +451,34 @@ impl Store {
             out.push((try parse(text(r[0].copy())), text(r[1].copy())))
         }
         return out
+    }
+
+    // --- Skills (PLAN.md, "Agents") ---
+
+    // Adds or replaces `user`'s skill `name`.
+    pub fn put_skill(self, user: String, name: String, description: String, body: String) ! Error {
+        _ = try self.db.execute(String("INSERT INTO skills (user, name, description, body, at) VALUES (?, ?, ?, ?, ?) ON CONFLICT (user, name) DO UPDATE SET description = excluded.description, body = excluded.body, at = excluded.at"), [t(user), t(name), t(description), t(body), Value.Int(now())])
+    }
+
+    // `user`'s skills, by name: `name`, `description`, `at`, and `body` when
+    // `bodies` is true.
+    pub fn skills(self, user: String, bodies: bool) -> List<Json> ! Error {
+        var out = List<Json>()
+        for r in try self.db.query(String("SELECT name, description, at, body FROM skills WHERE user = ? ORDER BY name"), [t(user)]) {
+            var o = Obj.new().s("name", text(r[0].copy())).s("description", text(r[1].copy())).i("at", int(r[2].copy()))
+            if bodies { o = o.s("body", text(r[3].copy())) }
+            out.push(o.done())
+        }
+        return out
+    }
+
+    pub fn skill(self, user: String, name: String) -> Json? ! Error {
+        let r = try self.db.query_one(String("SELECT name, description, body, at FROM skills WHERE user = ? AND name = ?"), [t(user), t(name)]) else return none
+        return some(Obj.new().s("name", text(r[0].copy())).s("description", text(r[1].copy())).s("body", text(r[2].copy())).i("at", int(r[3].copy())).done())
+    }
+
+    pub fn delete_skill(self, user: String, name: String) -> bool ! Error {
+        return try self.db.execute(String("DELETE FROM skills WHERE user = ? AND name = ?"), [t(user), t(name)]) > 0
     }
 
     // --- The activity log (PLAN.md, "Machines and devices") ---
