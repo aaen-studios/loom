@@ -1189,6 +1189,8 @@ ACTA_KEY=secret:ACTA_KEY",
                                 .on_click(cx.listener(|this, _, _, cx| {
                                     let f = this.model.create_link();
                                     this.send(f);
+                                    let d = this.model.load_devices();
+                                    this.send(d);
                                     this.menu = None;
                                     this.screen = Screen::AddPhone;
                                     cx.notify();
@@ -2832,7 +2834,9 @@ ACTA_KEY=secret:ACTA_KEY",
                 div()
                     .text_size(px(size::BODY))
                     .text_color(p.ink)
-                    .child(format!("{name} joined. It has a sign-in of its own, which you can take away from its settings.")),
+                    .child(format!(
+                    "{name} joined. It has a sign-in of its own, which you can take away below."
+                )),
             );
         } else if let Some((text, expires)) = self.model.link.clone() {
             body = body
@@ -2858,6 +2862,57 @@ ACTA_KEY=secret:ACTA_KEY",
                     })),
             ),
         );
+        // Every device signed in to this account, so one that shouldn't be can be signed out.
+        let mut devices = div().flex().flex_col().gap(px(space::XS)).child(
+            div()
+                .text_size(px(size::BODY))
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(p.ink)
+                .child("Signed in"),
+        );
+        for (id, name, kind) in self.model.devices.clone() {
+            let what = match kind.as_str() {
+                "ios" => "iPhone",
+                "macos" => "Mac",
+                "windows" => "Windows PC",
+                _ => "Command line",
+            };
+            let this_one = id == self.model.me;
+            let mut row = div()
+                .flex()
+                .items_center()
+                .justify_between()
+                .py(px(space::S))
+                .px(px(space::S))
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .child(
+                            div()
+                                .text_size(px(size::SMALL))
+                                .text_color(p.ink)
+                                .child(name.clone()),
+                        )
+                        .child(caption(if this_one {
+                            format!("{what}, this one")
+                        } else {
+                            what.to_string()
+                        })),
+                );
+            if !this_one {
+                row = row.child(
+                    self.button_owned(format!("revoke-{id}"), "Sign out", false)
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            let f = this.model.revoke_device(&id);
+                            this.send(f);
+                            cx.notify();
+                        })),
+                );
+            }
+            devices = devices.child(row);
+        }
+        body = body.child(devices);
         let page = div()
             .id("add-phone-page")
             .size_full()
