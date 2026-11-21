@@ -436,7 +436,7 @@ pub fn over_word(k: usize, u: f32) -> bool {
     if !(0.0..1.0).contains(&u) {
         return false;
     }
-    ((u * 4.0).floor() as usize + k) % 2 == 0
+    ((u * 4.0).floor() as usize + k).is_multiple_of(2)
 }
 
 fn weave_layer(
