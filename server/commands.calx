@@ -25,7 +25,7 @@ struct Command {
     does: str
 }
 
-const COMMANDS: [Command; 72] = [
+const COMMANDS: [Command; 74] = [
     Command { name: "conversation.create", args: "agent, title?", does: "Makes a conversation with an agent." },
     Command { name: "conversation.rename", args: "conversation, title", does: "Renames a conversation." },
     Command { name: "conversation.branch", args: "message, title?", does: "Branches a chat at a message: a new conversation that goes on from there, apart from the chat." },
@@ -52,8 +52,10 @@ const COMMANDS: [Command; 72] = [
     Command { name: "profile.get", args: "", does: "The person's profile, which every agent starts with." },
     Command { name: "profile.put", args: "text", does: "Writes the person's whole profile anew." },
     Command { name: "routine.list", args: "", does: "Routines, with when each runs next and how it last went." },
-    Command { name: "routine.put", args: #"name, agent, prompt, schedule ({every: minutes}, {daily: HH:MM} or {weekdays: HH:MM}), tz?, notify?, on?, catch_up?, webhook?; or id and what changes"#, does: "Makes or changes a routine." },
+    Command { name: "routine.put", args: #"name, agent, prompt, schedule ({every: minutes}, {daily: HH:MM} or {weekdays: HH:MM}), tz?, notify?, on?, catch_up?, webhook?, flow? (steps of name, agent, prompt and after: the steps each waits for); or id and what changes"#, does: "Makes or changes a routine." },
     Command { name: "routine.run", args: "id", does: "Runs a routine now." },
+    Command { name: "routine.stop", args: "id", does: "Stops the flow a routine has running: its steps that have not started never do." },
+    Command { name: "flow.list", args: "", does: "The routine flows running, with how far each has got." },
     Command { name: "routine.delete", args: "id", does: "Deletes a routine." },
     Command { name: "task.list", args: "", does: "Tasks, newest first." },
     Command { name: "task.start", args: "agent, prompt, title?", does: "Starts a long job for an agent, in a conversation of its own." },
@@ -110,7 +112,7 @@ pub fn access(name: String) -> Access {
     if name.starts_with("browser.") { return Access.Never(String("Use your browser_ tools.")) }
     if name == "queue.steer" { return Access.Never(String("Steering is your person's: it stops the turn that's running.")) }
     if name.starts_with("scripts.") { return Access.Never(String("Scripts are your person's own: they turn them on in the app.")) }
-    let runs = ["conversation.create", "conversation.rename", "conversation.branch", "messages.list", "messages.search", "messages.pinned", "message.pin", "agent.create", "agent.update", "agent.revisions", "agent.rollback", "activity.list", "memory.list", "memory.put", "table.list", "table.create", "table.write", "table.rows", "table.delete_rows", "profile.get", "profile.put", "routine.list", "routine.put", "routine.run", "task.list", "task.start", "task.pause", "task.resume", "task.cancel", "task.retry", "queue.list", "queue.edit", "queue.order", "queue.drop", "skill.list", "skill.get", "skill.put", "plugin.list", "plugin.get", "plugin.put", "plugin.revisions", "mcp.list", "secret.list", "acp.list", "acp.registry"]
+    let runs = ["conversation.create", "conversation.rename", "conversation.branch", "messages.list", "messages.search", "messages.pinned", "message.pin", "agent.create", "agent.update", "agent.revisions", "agent.rollback", "activity.list", "memory.list", "memory.put", "table.list", "table.create", "table.write", "table.rows", "table.delete_rows", "profile.get", "profile.put", "routine.list", "routine.put", "routine.run", "routine.stop", "flow.list", "task.list", "task.start", "task.pause", "task.resume", "task.cancel", "task.retry", "queue.list", "queue.edit", "queue.order", "queue.drop", "skill.list", "skill.get", "skill.put", "plugin.list", "plugin.get", "plugin.put", "plugin.revisions", "mcp.list", "secret.list", "acp.list", "acp.registry"]
     for r in runs {
         if name == r { return Access.Runs }
     }
@@ -155,7 +157,7 @@ fn reading_runs_and_harm_asks() {
     for c in COMMANDS {
         if let Access.Never(_) = access(String(c.name)) { panic("{c.name} is listed but never runs") }
     }
-    assert(catalog().len() == 72)
+    assert(catalog().len() == 74)
     assert(access(String("table.write")) == Access.Runs and access(String("table.delete_rows")) == Access.Runs)
     assert(access(String("table.drop")) == Access.Asks(String("delete")))
     assert(does(String("mcp.delete")) == "Removes an MCP server")

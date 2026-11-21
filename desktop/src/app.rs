@@ -187,6 +187,11 @@ pub struct Loom {
     routine_on: bool,
     routine_catch_up: bool,
     routine_webhook: bool,
+    /// The flow the form edits, one step after another: each step's agent and prompt.
+    routine_flow: Vec<(Option<String>, Entity<TextareaState>)>,
+    /// A flow an agent made with steps side by side, which the form shows but doesn't
+    /// edit: kept as it is unless the person takes it off.
+    routine_flow_kept: Vec<model::FlowStep>,
     /// The schedule the form shows: "every", "daily" or "weekdays".
     routine_kind: String,
     /// The MCP server form: none, a new server, or the one with this name.
@@ -693,6 +698,8 @@ ACTA_KEY=secret:ACTA_KEY",
             routine_catch_up: true,
             routine_webhook: false,
             routine_kind: "every".into(),
+            routine_flow: Vec::new(),
+            routine_flow_kept: Vec::new(),
             program_open: None,
             mcp_open: None,
             mcp_name_in,
@@ -1850,6 +1857,7 @@ ACTA_KEY=secret:ACTA_KEY",
                 .overflow_y_scroll()
                 .flex()
                 .justify_center()
+                .items_start()
                 .px(px(space::XL))
                 .pb(px(space::XXL))
                 .child(body),
@@ -2277,6 +2285,7 @@ ACTA_KEY=secret:ACTA_KEY",
             .overflow_y_scroll()
             .flex()
             .justify_center()
+            .items_start()
             .pt(px(space::XL))
             .px(px(space::XL))
             .pb(px(space::XXL))
@@ -5007,6 +5016,7 @@ ACTA_KEY=secret:ACTA_KEY",
             .overflow_y_scroll()
             .flex()
             .justify_center()
+            .items_start()
             .pt(px(space::XL))
             .px(px(space::XL))
             .pb(px(space::XXL))
@@ -5279,6 +5289,7 @@ ACTA_KEY=secret:ACTA_KEY",
             .overflow_y_scroll()
             .flex()
             .justify_center()
+            .items_start()
             .pt(px(space::XL))
             .px(px(space::XL))
             .pb(px(space::XXL))
@@ -5426,6 +5437,7 @@ ACTA_KEY=secret:ACTA_KEY",
             .overflow_y_scroll()
             .flex()
             .justify_center()
+            .items_start()
             .pt(px(space::XL))
             .px(px(space::XL))
             .pb(px(space::XXL))
@@ -5611,6 +5623,7 @@ ACTA_KEY=secret:ACTA_KEY",
             .overflow_y_scroll()
             .flex()
             .justify_center()
+            .items_start()
             .pt(px(space::XL))
             .px(px(space::XL))
             .pb(px(space::XXL))
@@ -5720,6 +5733,7 @@ ACTA_KEY=secret:ACTA_KEY",
             .overflow_y_scroll()
             .flex()
             .justify_center()
+            .items_start()
             .pt(px(space::XL))
             .px(px(space::XL))
             .pb(px(space::XXL))
@@ -6060,6 +6074,7 @@ ACTA_KEY=secret:ACTA_KEY",
                             ),
                     )
             });
+            let flow = self.routine_flow_section(cx);
             let editing = open.clone().unwrap_or_default();
             let mut buttons = div()
                 .flex()
@@ -6082,6 +6097,33 @@ ACTA_KEY=secret:ACTA_KEY",
                                 cx.notify();
                                 return;
                             }
+                            // The flow, one step after another; one an agent made
+                            // with steps side by side stays as it is.
+                            let flow = if this.routine_flow_kept.is_empty() {
+                                let mut steps = Vec::new();
+                                let mut before = "routine".to_string();
+                                for (k, (agent, prompt_in)) in this.routine_flow.iter().enumerate()
+                                {
+                                    let Some(agent) = agent.clone() else {
+                                        this.model
+                                            .notices
+                                            .push(format!("Pick step {}'s agent.", k + 1));
+                                        cx.notify();
+                                        return;
+                                    };
+                                    let name = (k + 1).to_string();
+                                    steps.push(model::FlowStep {
+                                        name: name.clone(),
+                                        agent,
+                                        prompt: prompt_in.read(cx).value().to_string(),
+                                        after: vec![before],
+                                    });
+                                    before = name;
+                                }
+                                Some(steps)
+                            } else {
+                                None
+                            };
                             let form = model::RoutineForm {
                                 id: editing.clone(),
                                 name,
@@ -6093,6 +6135,7 @@ ACTA_KEY=secret:ACTA_KEY",
                                 on: this.routine_on,
                                 catch_up: this.routine_catch_up,
                                 webhook: this.routine_webhook,
+                                flow,
                             };
                             let f = this.model.save_routine(&form);
                             this.send(f);
@@ -6152,6 +6195,7 @@ ACTA_KEY=secret:ACTA_KEY",
                 .child(self.field(at_label, Input::new(&self.routine_at_in)))
                 .child(switches)
                 .children(webhook)
+                .child(flow)
                 .child(buttons);
         } else {
             let mut list = div().flex().flex_col();
@@ -6178,6 +6222,48 @@ ACTA_KEY=secret:ACTA_KEY",
                     "skipped" => format!(" · skipped at {}", time_of(r.last_at)),
                     _ => format!(" · failed at {}: {}", time_of(r.last_at), r.last_error),
                 };
+                // Its flow, while it runs: how far each step has got, and a Stop.
+                let running = self
+                    .model
+                    .flows
+                    .iter()
+                    .find(|f| f.routine == r.id)
+                    .map(|f| {
+                        let steps: Vec<String> = f
+                            .steps
+                            .iter()
+                            .skip(1)
+                            .map(|(name, agent, status)| {
+                                let who = self
+                                    .model
+                                    .agent(agent)
+                                    .map(|a| a.name.clone())
+                                    .unwrap_or_else(|| "a deleted agent".into());
+                                format!("step {name} ({who}) {status}")
+                            })
+                            .collect();
+                        (format!("Flow: {}", steps.join(" · ")), f.stopped)
+                    });
+                let flow_row = running.map(|(text, stopped)| {
+                    let routine = r.id.clone();
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(space::S))
+                        .pt(px(space::XS))
+                        .child(div().flex_1().min_w_0().child(caption(text)))
+                        .when(!stopped, |d| {
+                            d.child(
+                                self.button_owned(format!("stop-flow-{}", r.id), "Stop", false)
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        cx.stop_propagation();
+                                        let f = this.model.stop_flow(&routine);
+                                        this.send(f);
+                                        cx.notify();
+                                    })),
+                            )
+                        })
+                });
                 let id = SharedString::from(format!("routine-{}", r.id));
                 list = list.child(
                     div()
@@ -6196,7 +6282,16 @@ ACTA_KEY=secret:ACTA_KEY",
                                 .text_color(p.ink)
                                 .child(r.name.clone()),
                         )
-                        .child(caption(format!("{agent}, {}, {next}{last}", r.when)))
+                        .child(caption(format!(
+                            "{agent}, {}, {next}{last}{}",
+                            r.when,
+                            match r.flow.len() {
+                                0 => String::new(),
+                                1 => " · then 1 more step".into(),
+                                n => format!(" · then {n} more steps"),
+                            }
+                        )))
+                        .children(flow_row)
                         .on_click(cx.listener(move |this, _, window, cx| {
                             this.routine_name_in
                                 .update(cx, |s, cx| s.set_value(r.name.clone(), window, cx));
@@ -6214,6 +6309,7 @@ ACTA_KEY=secret:ACTA_KEY",
                             this.routine_on = r.on;
                             this.routine_catch_up = r.catch_up;
                             this.routine_webhook = !r.hook.is_empty();
+                            this.set_routine_flow(&r.flow, window, cx);
                             this.routine_open = Some(Some(r.id.clone()));
                             cx.notify();
                         })),
@@ -6237,6 +6333,7 @@ ACTA_KEY=secret:ACTA_KEY",
                                 this.routine_on = true;
                                 this.routine_catch_up = true;
                                 this.routine_webhook = false;
+                                this.set_routine_flow(&[], window, cx);
                                 this.routine_open = Some(None);
                                 cx.notify();
                             })),
@@ -6249,11 +6346,174 @@ ACTA_KEY=secret:ACTA_KEY",
             .overflow_y_scroll()
             .flex()
             .justify_center()
+            .items_start()
             .pt(px(space::XL))
             .px(px(space::XL))
             .pb(px(space::XXL))
             .child(body);
         div().flex_1().min_h_0().child(page)
+    }
+
+    /// Fills the routine form's flow from `flow`: steps it edits when they go one after
+    /// another, or kept as they are when an agent put some side by side.
+    fn set_routine_flow(
+        &mut self,
+        flow: &[model::FlowStep],
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.routine_flow.clear();
+        self.routine_flow_kept.clear();
+        if !model::flow_is_chain(flow) {
+            self.routine_flow_kept = flow.to_vec();
+            return;
+        }
+        for step in flow {
+            let prompt = step.prompt.clone();
+            let input = cx.new(|cx| {
+                let mut t = TextareaState::new(window, cx)
+                    .auto_grow(2, 10)
+                    .placeholder("What this agent is asked, with the answer before it.");
+                t.set_value(prompt, window, cx);
+                t
+            });
+            self.routine_flow.push((Some(step.agent.clone()), input));
+        }
+    }
+
+    /// The routine form's flow (PLAN.md, "Routine flows"): who its answer goes to next,
+    /// step by step.
+    fn routine_flow_section(&mut self, cx: &mut Context<Self>) -> Div {
+        let p = self.p;
+        let caption = |text: String| {
+            div()
+                .text_size(px(size::CAPTION))
+                .text_color(p.ink_3)
+                .child(text)
+        };
+        let name_of = |id: &str| {
+            self.model
+                .agent(id)
+                .map(|a| a.name.clone())
+                .unwrap_or_else(|| "a deleted agent".into())
+        };
+        let mut section = div().flex().flex_col().gap(px(space::S)).child(
+            div()
+                .text_size(px(size::SMALL))
+                .text_color(p.ink_2)
+                .font_weight(FontWeight::MEDIUM)
+                .child("Then"),
+        );
+        if !self.routine_flow_kept.is_empty() {
+            let lines: Vec<String> = self
+                .routine_flow_kept
+                .iter()
+                .map(|s| {
+                    format!(
+                        "{} ({}), after {}: {}",
+                        s.name,
+                        name_of(&s.agent),
+                        s.after.join(" and "),
+                        s.prompt
+                    )
+                })
+                .collect();
+            return section
+                .child(caption(format!(
+                    "An agent set up this flow, with steps side by side. It stays as it is.\n{}",
+                    lines.join("\n")
+                )))
+                .child(
+                    div().flex().child(
+                        self.button("flow-off", "Take the flow off", false)
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.routine_flow_kept.clear();
+                                cx.notify();
+                            })),
+                    ),
+                );
+        }
+        if self.routine_flow.is_empty() {
+            section = section.child(caption(
+                "Its answer can go on to another agent, and that one's to the next.".into(),
+            ));
+        }
+        let agents = self.model.agents.clone();
+        for (k, (picked, prompt_in)) in self.routine_flow.iter().enumerate() {
+            let mut pick = div().flex().flex_wrap().gap(px(space::XS));
+            for a in &agents {
+                let id = a.id.clone();
+                pick = pick.child(
+                    self.button_owned(
+                        format!("flow-{k}-agent-{}", a.id),
+                        &a.name,
+                        picked.as_deref() == Some(a.id.as_str()),
+                    )
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        if let Some(step) = this.routine_flow.get_mut(k) {
+                            step.0 = Some(id.clone());
+                        }
+                        cx.notify();
+                    })),
+                );
+            }
+            let from = if k == 0 {
+                "the routine's answer".to_string()
+            } else {
+                format!("step {k}'s answer")
+            };
+            section = section.child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(space::XS))
+                    .p(px(space::S))
+                    .rounded(px(radius::BUTTON))
+                    .border_1()
+                    .border_color(p.line)
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(space::S))
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .text_size(px(size::SMALL))
+                                    .text_color(p.ink)
+                                    .child(format!("Step {}, with {from}", k + 1)),
+                            )
+                            .child(
+                                self.button_owned(format!("flow-{k}-remove"), "Remove", false)
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        if k < this.routine_flow.len() {
+                                            this.routine_flow.remove(k);
+                                        }
+                                        cx.notify();
+                                    })),
+                            ),
+                    )
+                    .child(pick)
+                    .child(Textarea::new(prompt_in)),
+            );
+        }
+        if self.routine_flow.len() < 20 {
+            section = section.child(
+                div().flex().child(
+                    self.button("flow-add", "Hand the answer on", false)
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            let input = cx.new(|cx| {
+                                TextareaState::new(window, cx).auto_grow(2, 10).placeholder(
+                                    "What this agent is asked, with the answer before it.",
+                                )
+                            });
+                            this.routine_flow.push((None, input));
+                            cx.notify();
+                        })),
+                ),
+            );
+        }
+        section
     }
 
     /// iPhone notifications through the push relay (PLAN.md, "The push relay"): whether the
@@ -6516,6 +6776,7 @@ ACTA_KEY=secret:ACTA_KEY",
             .overflow_y_scroll()
             .flex()
             .justify_center()
+            .items_start()
             .pt(px(space::XL))
             .px(px(space::XL))
             .pb(px(space::XXL))
@@ -6616,6 +6877,7 @@ ACTA_KEY=secret:ACTA_KEY",
             .overflow_y_scroll()
             .flex()
             .justify_center()
+            .items_start()
             .pt(px(space::XL))
             .px(px(space::XL))
             .pb(px(space::XXL))
@@ -6705,6 +6967,7 @@ ACTA_KEY=secret:ACTA_KEY",
             .overflow_y_scroll()
             .flex()
             .justify_center()
+            .items_start()
             .pt(px(space::XL))
             .px(px(space::XL))
             .pb(px(space::XXL))
@@ -6720,6 +6983,7 @@ ACTA_KEY=secret:ACTA_KEY",
             .overflow_y_scroll()
             .flex()
             .justify_center()
+            .items_start()
             .pt(px(space::XL))
             .px(px(space::XL))
             .pb(px(space::XXL))
@@ -6968,6 +7232,7 @@ ACTA_KEY=secret:ACTA_KEY",
             .overflow_y_scroll()
             .flex()
             .justify_center()
+            .items_start()
             .pt(px(space::XL))
             .px(px(space::XL))
             .pb(px(space::XXL))
@@ -7322,6 +7587,7 @@ ACTA_KEY=secret:ACTA_KEY",
             .overflow_y_scroll()
             .flex()
             .justify_center()
+            .items_start()
             .pt(px(space::XL))
             .px(px(space::XL))
             .pb(px(space::XXL))
@@ -7380,6 +7646,7 @@ ACTA_KEY=secret:ACTA_KEY",
             .overflow_y_scroll()
             .flex()
             .justify_center()
+            .items_start()
             .pt(px(space::XL))
             .px(px(space::XL))
             .pb(px(space::XXL))
@@ -7486,6 +7753,7 @@ ACTA_KEY=secret:ACTA_KEY",
             .overflow_y_scroll()
             .flex()
             .justify_center()
+            .items_start()
             .pt(px(space::XL))
             .px(px(space::XL))
             .pb(px(space::XXL))
@@ -7585,6 +7853,7 @@ ACTA_KEY=secret:ACTA_KEY",
             .overflow_y_scroll()
             .flex()
             .justify_center()
+            .items_start()
             .pt(px(space::XL))
             .px(px(space::XL))
             .pb(px(space::XXL))
