@@ -1,0 +1,101 @@
+module tests.protocol.threads
+
+// A routine that posts into a thread of its own (PLAN.md, "Routines say when
+// there's nothing to say"): with post "thread", a routine's runs go into a
+// conversation of their own, marked with the routine, which is never its
+// agent's chat. The next run goes into the same thread, while a routine that
+// posts into the chat still finds the chat. An agent makes one with
+// schedule, and a post that's neither is refused.
+//
+//     calx tests/protocol/threads.calx
+import std.json.{Json}
+import std.process.{exit}
+import shared.obj.{Obj, at, bool_at, str_at}
+import tests.kit.{App, Instance, check, reply_text}
+
+fn reply_in(app: mut App, conversation: String) -> String ! Error {
+    loop {
+        let created = try app.until("event", "message.created")
+        let m = at(created, "message")
+        if str_at(m.copy(), "role") == some(String("agent")) and str_at(m.copy(), "conversation") == some(conversation.copy()) { return reply_text(m) }
+    }
+}
+
+fn put(app: mut App, id: str, name: str, post: str) -> Json ! Error {
+    return try app.cmd(id, "routine.put", Obj.new().s("name", String(name)).s("agent", String("Main")).s("prompt", String(name)).j("schedule", Obj.new().i("every", 600).done()).s("post", String(post)).done())
+}
+
+// Runs routine `id` by hand, and gives the routine once its run has ended.
+fn run_once(app: mut App, q: str, id: String) -> Json ! Error {
+    let ran = try app.cmd(q, "routine.run", Obj.new().s("id", id.copy()).done())
+    if bool_at(ran.copy(), "ok") != some(true) { fail "routine.run refused: {ran}" }
+    loop {
+        let e = try app.until("event", "routine.updated")
+        let r = at(e, "routine")
+        if str_at(r.copy(), "id") == some(id.copy()) and str_at(at(r.copy(), "last"), "status") != some(String("running")) {
+            loop {
+                let f = try app.until("event", "run.finished")
+                if str_at(f, "run") == some(str_at(at(r.copy(), "last"), "run") ?? String()) { break }
+            }
+            return r
+        }
+    }
+}
+
+// The conversations made since frame `from`.
+fn made_since(app: App, from: usize) -> List<Json> {
+    var out = List<Json>()
+    for f in app.frames[from..] {
+        if str_at(f.copy(), "kind") == some(String("conversation.created")) { out.push(at(f.copy(), "conversation")) }
+    }
+    return out
+}
+
+fn run(i: Instance) ! Error {
+    var app = try App.connect(i.base.copy(), i.token.copy(), 0)
+    let made = try app.cmd("q_1", "agent.create", Obj.new().s("name", String("Main")).s("acp_agent", String("fake")).s("instructions", String("Test.")).done())
+    let main_id = str_at(at(at(made, "value"), "agent"), "id") ?? String()
+    let c = try app.cmd("q_2", "conversation.create", Obj.new().s("agent", main_id.copy()).done())
+    let chat = str_at(at(c, "value"), "conversation") ?? String()
+    try app.send(Obj.new().s("t", String("send")).s("cid", String("m_1")).s("conversation", chat.copy()).s("text", String("hello")).done())
+    _ = try reply_in(mut app, chat.copy())
+
+    // --- A thread of its own ---
+    let bad = try put(mut app, "q_3", "Nope", "inbox")
+    try check(bool_at(bad, "ok") == some(false), "a post that's neither chat nor thread is refused")
+    let news = str_at(at(at(try put(mut app, "q_4", "News", "thread"), "value"), "routine"), "id") ?? String()
+    let from = app.frames.len()
+    let first = try run_once(mut app, "q_5", news.copy())
+    let threads = made_since(app, from)
+    let thread = str_at(first.copy(), "conversation") ?? String()
+    try check(threads.len() == 1 and str_at(threads[0].copy(), "id") == some(thread.copy()) and thread != chat and str_at(threads[0].copy(), "routine") == some(news.copy()) and str_at(threads[0].copy(), "title") == some(String("News")), "a routine with post thread runs in a thread of its own, marked with the routine")
+    let again_from = app.frames.len()
+    let second = try run_once(mut app, "q_6", news.copy())
+    try check(str_at(second, "conversation") == some(thread.copy()) and made_since(app, again_from).len() == 0, "and its next run goes into the same thread")
+
+    // --- The chat stays the chat ---
+    let daily = str_at(at(at(try put(mut app, "q_7", "Daily", "chat"), "value"), "routine"), "id") ?? String()
+    let in_chat = try run_once(mut app, "q_8", daily)
+    try check(str_at(in_chat, "conversation") == some(chat.copy()), "a routine that posts into the chat still finds the chat, not the thread")
+
+    // --- From an agent ---
+    try app.send(Obj.new().s("t", String("send")).s("cid", String("m_2")).s("conversation", chat.copy()).s("text", String(#"/mcp schedule {"name":"Digest","prompt":"digest","schedule":{"every":600},"post":"thread"}"#)).done())
+    let said = try reply_in(mut app, chat.copy())
+    let listed = "{try app.cmd("q_9", "routine.list", Obj.new().done())}"
+    try check(said.starts_with("schedule:") and listed.contains(#""name":"Digest""#) and listed.contains(#""post":"thread""#), "an agent makes one with schedule")
+    app.close()
+}
+
+fn main() ! Error {
+    let inst = try Instance.start()
+    let failure: String? = match run(inst.copy()) {
+        ok => none,
+        err(e) => some("{e}"),
+    }
+    inst.stop()
+    if let f = failure {
+        eprintln("\n{f}")
+        exit(1)
+    }
+    println("\nthreads: all good")
+}

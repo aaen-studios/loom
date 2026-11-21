@@ -370,6 +370,10 @@ pub struct Routine {
     pub last_status: String,
     pub last_at: i64,
     pub last_error: String,
+    /// Where it posts: "chat", its agent's chat, or "thread", a thread of its own.
+    pub post: String,
+    /// The conversation it last posted in: its thread, for one that posts into one.
+    pub conversation: String,
     /// What happens to its answer (PLAN.md, "Routine flows"): the steps after it.
     pub flow: Vec<FlowStep>,
 }
@@ -488,6 +492,12 @@ impl Routine {
             last_status: s(&last, "status"),
             last_at: last.get("at").and_then(Value::as_i64).unwrap_or(0),
             last_error: s(&last, "error"),
+            post: r
+                .get("post")
+                .and_then(Value::as_str)
+                .unwrap_or("chat")
+                .to_string(),
+            conversation: s(r, "conversation"),
             flow: r
                 .get("flow")
                 .and_then(Value::as_array)
@@ -514,6 +524,8 @@ pub struct RoutineForm {
     pub on: bool,
     pub catch_up: bool,
     pub webhook: bool,
+    /// "chat" or "thread". Empty leaves it as it is.
+    pub post: String,
     /// The flow after it, or none to leave it as it is. An empty one takes it off.
     pub flow: Option<Vec<FlowStep>>,
 }
@@ -555,6 +567,8 @@ pub struct Conversation {
     /// For a branch: the chat it goes on from, and the message it branches at.
     pub branch_of: Option<String>,
     pub branch_at: Option<String>,
+    /// For a routine's thread of its own: the routine. Not the agent's chat either.
+    pub routine: Option<String>,
     pub title: String,
 }
 
@@ -1201,7 +1215,13 @@ impl Model {
         let agent = self.selected.as_ref()?;
         self.conversations
             .iter()
-            .find(|c| &c.agent == agent && c.task.is_none() && !c.side && c.branch_of.is_none())
+            .find(|c| {
+                &c.agent == agent
+                    && c.task.is_none()
+                    && !c.side
+                    && c.branch_of.is_none()
+                    && c.routine.is_none()
+            })
             .map(|c| c.id.clone())
     }
 
@@ -2417,6 +2437,7 @@ impl Model {
                         side: c.get("side").and_then(Value::as_bool).unwrap_or(false),
                         branch_of: c.get("branch_of").and_then(Value::as_str).map(String::from),
                         branch_at: c.get("branch_at").and_then(Value::as_str).map(String::from),
+                        routine: c.get("routine").and_then(Value::as_str).map(String::from),
                         title: s(c, "title"),
                     })
                     .collect();
@@ -3219,6 +3240,9 @@ impl Model {
             json!({ f.kind.as_str(): at })
         };
         let mut args = json!({"name": f.name.trim(), "agent": f.agent, "prompt": f.prompt, "schedule": schedule, "notify": f.notify, "on": f.on, "catch_up": f.catch_up, "webhook": f.webhook});
+        if !f.post.is_empty() {
+            args["post"] = json!(f.post);
+        }
         if !f.id.is_empty() {
             args["id"] = json!(f.id);
         }
@@ -3460,6 +3484,7 @@ mod tests {
                 side: false,
                 branch_of: None,
                 branch_at: None,
+                routine: None,
                 title: String::new(),
             },
             Conversation {
@@ -3469,6 +3494,7 @@ mod tests {
                 side: false,
                 branch_of: None,
                 branch_at: None,
+                routine: None,
                 title: String::new(),
             },
         ];
@@ -3488,6 +3514,37 @@ mod tests {
     }
 
     #[test]
+    fn a_routines_thread_is_shown_only_when_opened() {
+        let mut m = Model::new();
+        let conversation = |id: &str, routine: Option<&str>| Conversation {
+            id: id.into(),
+            agent: "a_1".into(),
+            task: None,
+            side: false,
+            branch_of: None,
+            branch_at: None,
+            routine: routine.map(String::from),
+            title: String::new(),
+        };
+        // The thread first, as if it were newer than the chat.
+        m.conversations = vec![
+            conversation("c_thread", Some("rt_1")),
+            conversation("c_chat", None),
+        ];
+        m.select(Some("a_1".into()));
+        assert_eq!(
+            m.conversation().as_deref(),
+            Some("c_chat"),
+            "a routine's thread isn't the chat"
+        );
+        m.show_branch(Some("c_thread".into()));
+        assert_eq!(m.conversation().as_deref(), Some("c_thread"));
+        assert!(m
+            .branch_open()
+            .is_some_and(|c| c.routine.as_deref() == Some("rt_1")));
+    }
+
+    #[test]
     fn a_side_question_is_answered_beside_the_chat_and_not_in_it() {
         let mut m = Model::new();
         m.conversations = vec![
@@ -3498,6 +3555,7 @@ mod tests {
                 side: true,
                 branch_of: None,
                 branch_at: None,
+                routine: None,
                 title: String::new(),
             },
             Conversation {
@@ -3507,6 +3565,7 @@ mod tests {
                 side: false,
                 branch_of: None,
                 branch_at: None,
+                routine: None,
                 title: String::new(),
             },
         ];
@@ -3720,6 +3779,7 @@ mod tests {
             side: false,
             branch_of: None,
             branch_at: None,
+            routine: None,
             title: String::new(),
         };
         let mut m = Model::new();
@@ -3741,6 +3801,7 @@ mod tests {
             id: "c_branch".into(),
             branch_of: Some("c_chat".into()),
             branch_at: Some("msg_3".into()),
+            routine: None,
             title: "Socks, again".into(),
             ..chat
         });
@@ -3785,6 +3846,7 @@ mod tests {
                 side: false,
                 branch_of: None,
                 branch_at: None,
+                routine: None,
                 title: String::new(),
             },
             Conversation {
@@ -3794,6 +3856,7 @@ mod tests {
                 side: false,
                 branch_of: None,
                 branch_at: None,
+                routine: None,
                 title: String::new(),
             },
         ];
@@ -3830,6 +3893,7 @@ mod tests {
             side: false,
             branch_of: None,
             branch_at: None,
+            routine: None,
             title: String::new(),
         }];
         m.select(Some("a_1".into()));
