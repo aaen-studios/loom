@@ -4,7 +4,8 @@ module tests.protocol.tools
 // `loom mcp`, and the fake agent calls it as a real agent would. An agent
 // lists the tools and the agents, hands work to another agent and gets its
 // reply, edits its own instructions, makes and changes agents but never their
-// permission mode, and sends a notification. Each session is told where the
+// permission mode, and sends a notification. Each change to an agent is a
+// revision, and one can be rolled back to. Each session is told where the
 // person is writing from, or that a message came from another agent. The tool
 // endpoints refuse a request without the agent's token.
 //
@@ -12,7 +13,7 @@ module tests.protocol.tools
 import std.http.{Header, get}
 import std.json.{Json}
 import std.process.{exit}
-import shared.obj.{Obj, at, str_at}
+import shared.obj.{Obj, at, int_at, str_at}
 import tests.kit.{App, Instance, check, reply_text}
 
 // The agent's next reply in `conversation`, as text.
@@ -91,6 +92,15 @@ fn run(i: Instance) ! Error {
 
     let unknown = try say(mut app, conversation, "m_10", String("/mcp delete_everything"))
     try check(unknown.starts_with("delete_everything failed"), "there's no tool that isn't on the list")
+
+    // --- Revisions ---
+    let revisions = try app.cmd("q_rev", "agent.revisions", Obj.new().s("agent", main_id.copy()).done())
+    var listed_revisions = List<Json>()
+    if let Json.Array(rs) = at(at(revisions, "value"), "revisions") { listed_revisions = rs.copy() }
+    try check(listed_revisions.len() == 2 and int_at(listed_revisions[0].copy(), "revision") == some(2) and str_at(listed_revisions[0].copy(), "by") == some(main_id.copy()), "each change is a revision, and says who made it")
+    let back = try app.cmd("q_back", "agent.rollback", Obj.new().s("agent", main_id.copy()).i("revision", 1).done())
+    let rolled = at(at(back, "value"), "agent")
+    try check(str_at(rolled.copy(), "instructions") == some(String("You are a test.")) and int_at(rolled, "revision") == some(3), "rolling back makes a new revision with the old instructions")
 
     // --- Where the person is writing from ---
     let c2 = try app.cmd("q_4", "conversation.create", Obj.new().s("agent", main_id).done())

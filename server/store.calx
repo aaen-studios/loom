@@ -29,6 +29,9 @@ CREATE TABLE IF NOT EXISTS acp_agents (name TEXT PRIMARY KEY, command TEXT NOT N
 CREATE TABLE IF NOT EXISTS agents (
     id TEXT PRIMARY KEY, user TEXT NOT NULL REFERENCES users(id), json TEXT NOT NULL,
     deleted INTEGER NOT NULL DEFAULT 0);
+CREATE TABLE IF NOT EXISTS agent_revisions (
+    agent TEXT NOT NULL, user TEXT NOT NULL REFERENCES users(id), revision INTEGER NOT NULL,
+    json TEXT NOT NULL, by TEXT NOT NULL, at INTEGER NOT NULL, PRIMARY KEY (agent, revision));
 CREATE TABLE IF NOT EXISTS conversations (
     id TEXT PRIMARY KEY, user TEXT NOT NULL REFERENCES users(id), agent TEXT NOT NULL,
     title TEXT NOT NULL, at INTEGER NOT NULL, deleted INTEGER NOT NULL DEFAULT 0);
@@ -312,9 +315,23 @@ impl Store {
 
     // --- Agents, conversations and messages, each as the JSON the protocol sends ---
 
-    pub fn put_agent(self, user: String, agent: Json) ! Error {
+    // Stores an agent, and keeps this revision of it, made `by` a device or
+    // an agent, for rolling back to.
+    pub fn put_agent(self, user: String, agent: Json, by: String) ! Error {
         let id = (agent.get(String("id")) ?? Json.Null).as_str() ?? String()
-        _ = try self.db.execute(String("INSERT INTO agents (id, user, json) VALUES (?, ?, ?) ON CONFLICT (id) DO UPDATE SET json = excluded.json"), [t(id), t(user), t("{agent}")])
+        let revision = (agent.get(String("revision")) ?? Json.Null).as_i64() ?? 0
+        _ = try self.db.execute(String("INSERT INTO agents (id, user, json) VALUES (?, ?, ?) ON CONFLICT (id) DO UPDATE SET json = excluded.json"), [t(id.copy()), t(user.copy()), t("{agent}")])
+        _ = try self.db.execute(String("INSERT INTO agent_revisions (agent, user, revision, json, by, at) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT (agent, revision) DO UPDATE SET json = excluded.json, by = excluded.by, at = excluded.at"), [t(id), t(user), Value.Int(revision), t("{agent}"), t(by), Value.Int(now())])
+    }
+
+    // An agent's revisions, newest first: `revision`, `by`, `at`, and the
+    // agent as it was.
+    pub fn agent_revisions(self, user: String, id: String) -> List<Json> ! Error {
+        var out = List<Json>()
+        for r in try self.db.query(String("SELECT revision, by, at, json FROM agent_revisions WHERE agent = ? AND user = ? ORDER BY revision DESC"), [t(id), t(user)]) {
+            out.push(Obj.new().i("revision", int(r[0].copy())).s("by", text(r[1].copy())).i("at", int(r[2].copy())).j("agent", try parse(text(r[3].copy()))).done())
+        }
+        return out
     }
 
     pub fn agent(self, user: String, id: String) -> Json? ! Error {

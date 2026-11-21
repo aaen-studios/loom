@@ -72,6 +72,7 @@ impl Palette {
 enum Screen {
     Chat,
     NewAgent,
+    EditAgent,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -493,9 +494,19 @@ impl Loom {
     // --- The parts ---
 
     fn button(&self, id: &'static str, label: &str, primary: bool) -> Stateful<Div> {
+        self.button_owned(id, label, primary)
+    }
+
+    /// A button whose id is made at run time, such as one per row.
+    fn button_owned(
+        &self,
+        id: impl Into<SharedString>,
+        label: &str,
+        primary: bool,
+    ) -> Stateful<Div> {
         let p = self.p;
         div()
-            .id(id)
+            .id(id.into())
             .px(px(space::L))
             .h(px(34.0))
             .flex()
@@ -963,6 +974,14 @@ impl Loom {
                     .child("New agent"),
             );
         }
+        if self.screen == Screen::EditAgent {
+            return bar.child(
+                div()
+                    .text_size(px(size::BODY))
+                    .text_color(p.ink_3)
+                    .child(format!("Edit {}", agent.name)),
+            );
+        }
         let permission = match agent.permission.as_str() {
             "allow" => "Doesn't ask",
             "auto" => "Asks when it's risky",
@@ -1108,6 +1127,28 @@ impl Loom {
         Some(match menu {
             Menu::Agent => panel
                 .left(px(space::S))
+                .child(
+                    self.menu_item(
+                        "edit",
+                        "Edit agent",
+                        "Its name and instructions, and every earlier version.",
+                        false,
+                    )
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        if let Some(f) = this.model.edit_agent() {
+                            this.send(f);
+                        }
+                        if let Some(a) = this.model.editing.as_ref().and_then(|id| this.model.agent(id)) {
+                            let (name, instructions) = (a.name.clone(), a.instructions.clone());
+                            this.name_in.update(cx, |s, cx| s.set_value(name, window, cx));
+                            this.instructions_in
+                                .update(cx, |s, cx| s.set_value(instructions, window, cx));
+                        }
+                        this.screen = Screen::EditAgent;
+                        this.menu = None;
+                        cx.notify();
+                    })),
+                )
                 .child(
                     self.menu_item(
                         "fresh",
@@ -1552,6 +1593,121 @@ impl Loom {
                             )),
                     ),
             )
+    }
+
+    /// The edit page: an agent's name and instructions, and its earlier versions to go
+    /// back to. Each save is a new revision, so nothing is lost.
+    fn edit_agent(&mut self, cx: &mut Context<Self>) -> Div {
+        let p = self.p;
+        let mut list = div().flex().flex_col();
+        let newest = self.model.revisions.first().map_or(0, |r| r.revision);
+        for r in self.model.revisions.clone() {
+            let who = self.model.made_by(&r.by);
+            let first_line = r
+                .instructions
+                .lines()
+                .find(|l| !l.trim().is_empty())
+                .unwrap_or("No instructions")
+                .to_string();
+            let mut row =
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(space::M))
+                    .py(px(space::S))
+                    .border_b_1()
+                    .border_color(p.line)
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .flex()
+                            .flex_col()
+                            .child(div().text_size(px(size::SMALL)).text_color(p.ink).child(
+                                format!("Revision {} · {who} · {}", r.revision, time_of(r.at)),
+                            ))
+                            .child(
+                                div()
+                                    .text_size(px(size::CAPTION))
+                                    .text_color(p.ink_3)
+                                    .truncate()
+                                    .child(first_line),
+                            ),
+                    );
+            if r.revision == newest {
+                row = row.child(
+                    div()
+                        .text_size(px(size::CAPTION))
+                        .text_color(p.ink_3)
+                        .child("Now"),
+                );
+            } else {
+                let revision = r.revision;
+                row = row.child(
+                    self.button_owned(format!("restore-{revision}"), "Go back to this", false)
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            if let Some(f) = this.model.roll_back(revision) {
+                                this.send(f);
+                            }
+                            this.screen = Screen::Chat;
+                            this.model.editing = None;
+                            cx.notify();
+                        })),
+                );
+            }
+            list = list.child(row);
+        }
+        let page = div()
+            .id("edit-agent")
+            .size_full()
+            .overflow_y_scroll()
+            .flex()
+            .justify_center()
+            .pt(px(space::XXL))
+            .pb(px(space::XXL))
+            .child(
+                div()
+                    .w(px(520.0))
+                    .flex()
+                    .flex_col()
+                    .gap(px(space::XL))
+                    .child(self.field("Name", Input::new(&self.name_in)))
+                    .child(self.field("Instructions", Textarea::new(&self.instructions_in)))
+                    .child(
+                        div()
+                            .flex()
+                            .gap(px(space::S))
+                            .child(
+                                self.button("save-agent", "Save", true)
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        let name = this.name_in.read(cx).value().to_string();
+                                        let instructions =
+                                            this.instructions_in.read(cx).value().to_string();
+                                        if name.trim().is_empty() {
+                                            return;
+                                        }
+                                        if let Some(f) = this.model.save_agent(&name, &instructions)
+                                        {
+                                            this.send(f);
+                                        }
+                                        this.screen = Screen::Chat;
+                                        this.model.editing = None;
+                                        cx.notify();
+                                    })),
+                            )
+                            .child(self.button("cancel-edit", "Cancel", false).on_click(
+                                cx.listener(|this, _, _, cx| {
+                                    this.screen = Screen::Chat;
+                                    this.model.editing = None;
+                                    cx.notify();
+                                }),
+                            )),
+                    )
+                    .when(!self.model.revisions.is_empty(), |d| {
+                        d.child(self.field("Versions", list))
+                    }),
+            );
+        div().flex_1().min_h_0().child(page)
     }
 
     pub fn toggle_thought(&mut self, key: String, cx: &mut Context<Self>) {
@@ -2026,6 +2182,7 @@ impl Render for Loom {
         let main = match self.screen {
             Screen::Chat => self.chat(window, cx),
             Screen::NewAgent => self.new_agent(cx),
+            Screen::EditAgent => self.edit_agent(cx),
         };
         let header = self.header(cx);
         let menu = self.menu_panel(cx);
