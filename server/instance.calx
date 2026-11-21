@@ -355,6 +355,14 @@ fn answer_text(a: Answer) -> Json {
     }
 }
 
+// How to put loom on a new server, for install_server: the command, what it
+// does, and how the person's app gets there.
+fn install_text(domain: String) -> String {
+    let flags = if domain.len() > 0 { " -s -- --domain {domain}" } else { String() }
+    let front = if domain.len() > 0 { "Caddy serves it at https://{domain}, with a certificate from Let's Encrypt, so point {domain}'s DNS at the server first." } else { String("With no domain, it's served through Tailscale when Tailscale is on the server, and on the server alone otherwise. Give a domain for Caddy and HTTPS.") }
+    return "On a Linux server (x86-64 or arm64), as root:\n\ncurl -fsSL https://github.com/aaen-studios/loom/releases/latest/download/install.sh | sudo sh{flags}\n\nIt fetches loom, checks it, and makes the loom user and the service. {front} At the end it prints the server's address and a setup code. Then add the server to your person's app with add_server and that address; they make the first account there with the code. To move this whole instance there instead, run loom receive on it, and use move_instance with the code it prints."
+}
+
 // What the schedule tool says it did, with the webhook when there is one.
 fn scheduled(r: Json) -> String {
     let zone = if routines.by_clock(at(r.copy(), "schedule")) { " ({str_at(r.copy(), "tz") ?? String("UTC")} time)" } else { String() }
@@ -1597,6 +1605,19 @@ impl Instance {
         }
         if name == "message_agent" {
             return try i.message_agent(req, g, args)
+        }
+        if name == "add_server" {
+            let address = (str_at(args, "address") ?? String()).trim().trim_suffix("/").copy()
+            if not address.starts_with("https://") and not address.starts_with("http://") { return some(tool_error(String("address is the server's http:// or https:// address, such as https://loom.example.com."))) }
+            let action = Obj.new().s("name", String("server.offer")).j("args", Obj.new().s("address", address.copy()).done()).done()
+            return try i.ask_person(req, g, "Add the server {address} to your app", "other", action)
+        }
+        if name == "install_server" {
+            let domain = (str_at(args, "domain") ?? String()).trim().copy()
+            for ch in domain.to_lower_root().runes() {
+                if not ((ch >= 'a' and ch <= 'z') or (ch >= '0' and ch <= '9') or ch == '.' or ch == '-') { return some(tool_error(String("domain is a name such as loom.example.com, of letters, digits, dots and hyphens."))) }
+            }
+            return some(tool_text(install_text(domain)))
         }
         if name == "list_commands" {
             return some(tool_text("{Json.Array(commands.catalog())}"))
@@ -4347,6 +4368,15 @@ impl Instance {
     // A command's value, or its error's code and message.
     fn command(i: mut Instance, user: String, device: String, name: String, args: Json) -> Answer ! Error {
         let empty = Obj.new().done()
+        // Another server, for the person's apps to add and sign in to: from an
+        // agent, once the person said yes on a device, which adds it.
+        if name == "server.offer" {
+            if not device.starts_with("d_") { return Answer.Refused(String("forbidden"), String("Only the person, on one of their devices, adds a server to their app.")) }
+            let address = (str_at(args, "address") ?? String()).trim().copy()
+            if not address.starts_with("https://") and not address.starts_with("http://") { return Answer.Refused(String("bad_request"), String("address is the server's http:// or https:// address.")) }
+            try i.event(user, "server.offered", Obj.new().s("address", address).s("by", device).done())
+            return Answer.Value(empty)
+        }
         if name.starts_with("queue.") { return try i.queue_cmd(user, name, args) }
         if name.starts_with("task.") { return try i.task_cmd(user, device, name, args) }
         // From an agent, once the person said yes: the move is under way.

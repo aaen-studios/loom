@@ -100,6 +100,16 @@ People who don't want a server run their instance in the desktop app. On first s
 - **Your phone** connects to it by scanning a QR code in the desktop app ([below](#connecting-devices)). An iPhone can't run an instance itself, since iOS stops apps in the background.
 - **Moving.** A desktop instance moves to a server, or back, whenever you like ([Moving an instance](#moving-an-instance)).
 
+### Several servers in one app
+
+One app signs in to as many instances as you like: the one on this computer, a server at home, one at work.
+
+- **A core for each.** Each server has a core of its own in the same Calx runtime, with its own data folder (the first in the app's, each other one under `servers/`), cache, cursor and token. The app keeps which are signed in, in `server-list`, and only the first runs the instance on this computer or updates the app.
+- **Each is its spool.** The sidebar's bottom row has a spool for each server, as each agent has its thread. The one on screen is bigger and opens the server popup. Another comes on screen when clicked, and has a dot when one of its agents said something there. With several, the sidebar names the server on screen above its agents.
+- **The others keep going.** A server away keeps its connection, so its replies notify and its unread marks gather. This PC's tools (screenshots, the clipboard, commands) answer only the server on screen.
+- **Adding and removing** are in the server popup: **Add a server** signs in beside the one on screen, with a setup code for a new server, and the server comes on screen once it's in. **Sign out and remove** takes one away, with its folder. The first server stays.
+- **Agents help.** An agent's `add_server` asks its person, and the device that said yes opens Add a server with the address in. `install_server` gives the command that puts loom on a new Linux server.
+
 ## Sync: an event log with a cursor
 
 Every change the server makes for a person is an event with a sequence number, counted per person and stored in `events`. The app remembers the last number it has. When it connects it sends that number, gets everything after it, and then gets live events as they happen.
@@ -305,6 +315,7 @@ Each agent program runs as its own process. The instance reads each one on a thr
 | `list_skills`, `read_skill`, `save_skill` | Skills: read when a task fits one, and saved by an agent for every agent. They're also written into each agent's folder as Claude Code skills |
 | Device tools | Your PC and phone, where you allow it ([Machines and devices](#machines-and-devices)) |
 | `list_commands`, `run_command` | Every loom command: agents, routines, tasks, plugins, MCP servers, agent programs, people, devices, moving ([Agents can do anything the app can](#agents-can-do-anything-the-app-can)) |
+| `add_server`, `install_server` | Another server in your app (asking first), and the command that puts loom on a new one ([Several servers in one app](#several-servers-in-one-app)) |
 
 - **Shell, files and web fetch** come from the agent itself.
 - **MCP servers** (Acta, Cloudflare, Composio for mail and the rest) are passed to the agent, which connects to them itself.

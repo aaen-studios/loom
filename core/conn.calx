@@ -240,7 +240,7 @@ impl Conn {
     }
 
     fn tell_state(mut self, retry_ms: u64, why: String) {
-        var o = Obj.new().s("t", String("core.conn")).s("state", String(self.state.name()))
+        var o = Obj.new().s("t", String("core.conn")).s("state", String(self.state.name())).maybe("server", self.server.copy())
         if retry_ms > 0 { o = o.i("retry_ms", i64.wrap(retry_ms)) }
         if why.len() > 0 { o = o.s("why", why) }
         self.tell(o.done())

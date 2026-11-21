@@ -89,6 +89,7 @@ enum Screen {
     Plugins,
     Move,
     People,
+    AddServer,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -105,9 +106,18 @@ enum Row {
 }
 
 pub struct Loom {
+    /// The server on screen: what it shows, its core, and the core's events.
     model: Model,
     core: Core,
     events: std::sync::mpsc::Receiver<String>,
+    /// Its folder ("" for the first server).
+    here: String,
+    /// The other servers the app is signed in to, each with its own core.
+    away: Vec<Away>,
+    /// An address for the server form, put in once there's a window to do it with.
+    fill_server: Option<String>,
+    /// The server being added in the popup, by folder, until it signs in.
+    adding: Option<String>,
     /// Answers to the core's device asks that finish on another thread, such as a
     /// screenshot, sent on from the window's task.
     device_tx: std::sync::mpsc::Sender<Value>,
@@ -228,6 +238,87 @@ fn data_dir() -> String {
     dir.to_string_lossy().into_owned()
 }
 
+/// A server the app is signed in to besides the one on screen: its own core, with a
+/// data folder of its own, and what it shows, kept up to date while it's away.
+struct Away {
+    /// Its folder under the app's: "" for the first server, `servers/2` for another.
+    dir: String,
+    core: Core,
+    events: std::sync::mpsc::Receiver<String>,
+    model: Model,
+}
+
+impl Away {
+    fn start(dir: String, server: Option<&str>) -> Away {
+        let (core, events) = Core::start(&core_config(&dir, server));
+        Away {
+            dir,
+            core,
+            events,
+            model: Model::new(),
+        }
+    }
+}
+
+/// The servers besides the first, by folder, as the app keeps them in `server-list`.
+fn server_dirs() -> Vec<String> {
+    let file = std::path::Path::new(&data_dir()).join("server-list");
+    std::fs::read_to_string(file)
+        .unwrap_or_default()
+        .lines()
+        .map(str::trim)
+        .filter(|l| is_server_dir(l))
+        .map(String::from)
+        .collect()
+}
+
+/// Whether `dir` is a folder the app made for a server: `servers/` and a number.
+fn is_server_dir(dir: &str) -> bool {
+    dir.strip_prefix("servers/")
+        .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
+}
+
+fn keep_server_dirs(dirs: &[String]) -> std::io::Result<()> {
+    let file = std::path::Path::new(&data_dir()).join("server-list");
+    std::fs::write(file, dirs.join("\n"))
+}
+
+/// A server's data folder: the app's own for the first, and one under it for another.
+fn server_folder(dir: &str) -> std::path::PathBuf {
+    let base = std::path::PathBuf::from(data_dir());
+    if dir.is_empty() {
+        base
+    } else {
+        base.join(dir)
+    }
+}
+
+/// How a server's spool is: wound while it's live, turning while it connects, loose
+/// while it can't, and empty signed out.
+fn spool_of(model: &Model) -> Spool {
+    match &model.conn {
+        Some(Conn::Live) if model.synced => Spool::Wound,
+        Some(Conn::Offline(_)) | Some(Conn::UpdateNeeded) => Spool::Loose,
+        Some(Conn::SignedOut) => Spool::Empty,
+        _ => Spool::Turning,
+    }
+}
+
+/// A server's name as the sidebar shows it: its host, or where it is.
+fn server_name(model: &Model, dir: &str) -> String {
+    if dir.is_empty() && local_mode() {
+        return "This computer".into();
+    }
+    match &model.server {
+        Some(address) => address
+            .trim_start_matches("https://")
+            .trim_start_matches("http://")
+            .trim_end_matches('/')
+            .to_string(),
+        None => "New server".into(),
+    }
+}
+
 impl Loom {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let dark = match std::env::var("LOOM_THEME").as_deref() {
@@ -238,7 +329,7 @@ impl Loom {
                 WindowAppearance::Light | WindowAppearance::VibrantLight
             ),
         };
-        let (core, events) = Core::start(&core_config());
+        let (core, events) = Core::start(&core_config("", None));
         let (device_tx, device_rx) = std::sync::mpsc::channel();
 
         let composer = cx.new(|cx| {
@@ -421,6 +512,9 @@ ACTA_KEY=secret:ACTA_KEY",
                         std::iter::from_fn(|| loom.events.try_recv().ok()).collect();
                     if woke {
                         loom.send(serde_json::json!({"t": "app.wake"}));
+                        for a in &loom.away {
+                            a.core.send(r#"{"t":"app.wake"}"#);
+                        }
                     }
                     loom.tray_actions(cx);
                     loom.take_notice(cx);
@@ -428,6 +522,18 @@ ACTA_KEY=secret:ACTA_KEY",
                         loom.send(answer);
                     }
                     loom.pump_door();
+                    if loom.pump_away() {
+                        cx.notify();
+                    }
+                    loom.watch_adding(cx);
+                    // A server an agent offered, and the person said yes to here.
+                    let mut offered = std::mem::take(&mut loom.model.offered);
+                    for a in &mut loom.away {
+                        offered.append(&mut a.model.offered);
+                    }
+                    for address in offered {
+                        loom.add_server(Some(address), cx);
+                    }
                     if got.is_empty() {
                         return;
                     }
@@ -471,6 +577,7 @@ ACTA_KEY=secret:ACTA_KEY",
             false
         });
         // The core notifies only while no one is looking at the app.
+        // The servers away aren't on screen, so they always may.
         cx.observe_window_activation(window, |this: &mut Loom, window, _| {
             this.send(serde_json::json!({"t": "app.active", "active": window.is_window_active()}));
         })
@@ -488,6 +595,13 @@ ACTA_KEY=secret:ACTA_KEY",
             model: Model::new(),
             core,
             events,
+            here: String::new(),
+            away: server_dirs()
+                .into_iter()
+                .map(|dir| Away::start(dir, None))
+                .collect(),
+            fill_server: None,
+            adding: None,
             device_tx,
             device_rx,
             p: Palette::new(dark),
@@ -699,7 +813,7 @@ ACTA_KEY=secret:ACTA_KEY",
             }
             Screen::AddPhone => {
                 // An instance in this app reaches phones only once they're on.
-                if local_mode() {
+                if self.local() {
                     let f = self.model.set_phones(None);
                     self.send(f);
                 }
@@ -714,6 +828,12 @@ ACTA_KEY=secret:ACTA_KEY",
                 self.make = Making::default();
                 let f = self.model.programs();
                 self.send(f);
+            }
+            Screen::AddServer => {
+                self.show_code = false;
+                if self.fill_server.is_none() {
+                    self.fill_server = Some(String::new());
+                }
             }
             _ => {}
         }
@@ -759,6 +879,11 @@ ACTA_KEY=secret:ACTA_KEY",
 
     fn sign_out(&mut self, cx: &mut Context<Self>) {
         self.menu = None;
+        // Another server signs out and goes from the app.
+        if !self.here.is_empty() {
+            self.remove_server(cx);
+            return;
+        }
         if local_mode() {
             // Stops the instance here; its agents and chats stay for next time.
             self.set_local(false, cx);
@@ -786,16 +911,229 @@ ACTA_KEY=secret:ACTA_KEY",
             cx.notify();
             return;
         }
+        // The choice is the first server's.
+        self.show_server("", cx);
         self.model = Model::new();
         self.screen = Screen::Chat;
         self.menu = None;
         // The old core stops, and its instance with it, as it's dropped.
-        let (core, events) = Core::start(&core_config());
+        let (core, events) = Core::start(&core_config("", None));
         self.core = core;
         self.events = events;
         self.fetch();
         self.refresh_rows(cx);
         cx.notify();
+    }
+
+    // --- Servers (PLAN.md, "Several servers in one app") ---
+
+    /// Brings in what the servers away said. Gives whether the window should redraw.
+    fn pump_away(&mut self) -> bool {
+        let mut changed = false;
+        for a in &mut self.away {
+            let got: Vec<String> = std::iter::from_fn(|| a.events.try_recv().ok()).collect();
+            for e in got {
+                let Ok(v) = serde_json::from_str::<Value>(&e) else {
+                    continue;
+                };
+                match v.get("t").and_then(Value::as_str) {
+                    // This PC's tools answer the server on screen alone.
+                    Some("core.device_ask") => {
+                        let call = v.get("call").and_then(Value::as_str).unwrap_or_default();
+                        a.core.send(&serde_json::json!({"t": "device.answer", "call": call, "ok": false, "output": "This server isn't the one open in loom on this PC. Ask your person to open it there."}).to_string());
+                        continue;
+                    }
+                    Some("core.notify") => {
+                        let s = |k: &str| {
+                            v.get(k)
+                                .and_then(Value::as_str)
+                                .unwrap_or_default()
+                                .to_string()
+                        };
+                        shell::notify(&s("title"), &s("body"));
+                    }
+                    _ => {}
+                }
+                changed |= a.model.take(&v);
+            }
+            for f in a.model.fetches() {
+                a.core.send(&f.to_string());
+            }
+        }
+        changed
+    }
+
+    /// Puts the server whose folder is `dir` on screen, and the one there away.
+    fn show_server(&mut self, dir: &str, cx: &mut Context<Self>) {
+        if self.here == dir {
+            return;
+        }
+        let Some(i) = self.away.iter().position(|a| a.dir == dir) else {
+            return;
+        };
+        let a = &mut self.away[i];
+        std::mem::swap(&mut self.core, &mut a.core);
+        std::mem::swap(&mut self.events, &mut a.events);
+        std::mem::swap(&mut self.model, &mut a.model);
+        std::mem::swap(&mut self.here, &mut a.dir);
+        // The one away notifies whatever the window does; the one here, only while it's
+        // not looked at, and it's looked at now.
+        a.core.send(r#"{"t":"app.active","active":false}"#);
+        self.send(serde_json::json!({"t": "app.active", "active": true}));
+        self.popup = None;
+        self.side = None;
+        self.menu = None;
+        self.panel = None;
+        self.screen = Screen::Chat;
+        self.server_form = self.model.conn == Some(Conn::SignedOut) && !self.here.is_empty();
+        self.fetch();
+        self.refresh_rows(cx);
+        cx.notify();
+    }
+
+    /// Opens the popup to add a server, at `address` when an agent offered one. One the
+    /// app has already is put on screen instead.
+    fn add_server(&mut self, address: Option<String>, cx: &mut Context<Self>) {
+        if let Some(a) = &address {
+            let same = |m: &Model| {
+                m.server.as_deref().map(|s| s.trim_end_matches('/'))
+                    == Some(a.trim_end_matches('/'))
+            };
+            if same(&self.model) {
+                return;
+            }
+            if let Some(dir) = self
+                .away
+                .iter()
+                .find(|x| same(&x.model))
+                .map(|x| x.dir.clone())
+            {
+                self.show_server(&dir, cx);
+                return;
+            }
+        }
+        self.fill_server = Some(address.unwrap_or_default());
+        self.open(Screen::AddServer, cx);
+    }
+
+    /// Signs in to the server in the add-a-server form: with a core of its own beside
+    /// the one on screen, started the first time.
+    fn sign_in_added(&mut self, cx: &mut Context<Self>) {
+        let server = self.server_in.read(cx).value().trim().to_string();
+        let user = self.user_in.read(cx).value().to_string();
+        let pass = self.pass_in.read(cx).value().to_string();
+        let code = if self.show_code {
+            self.code_in.read(cx).value().to_string()
+        } else {
+            String::new()
+        };
+        let dir = match self.adding.clone() {
+            Some(dir) => dir,
+            None => {
+                // The app keeps it once it's signed in. A folder left from one that never
+                // was is started afresh.
+                let dirs = server_dirs();
+                let n = (2..)
+                    .find(|n| !dirs.contains(&format!("servers/{n}")))
+                    .unwrap_or(2);
+                let dir = format!("servers/{n}");
+                let _ = std::fs::remove_dir_all(server_folder(&dir));
+                self.away.push(Away::start(dir.clone(), Some(&server)));
+                self.adding = Some(dir.clone());
+                dir
+            }
+        };
+        if let Some(a) = self.away.iter_mut().find(|a| a.dir == dir) {
+            if a.model.logging_in {
+                return;
+            }
+            let frame = a.model.login(&server, &user, &pass, &code);
+            a.core.send(&frame.to_string());
+        }
+        cx.notify();
+    }
+
+    /// The server being added: on screen once it's signed in, and gone again if the
+    /// popup closed before it was.
+    fn watch_adding(&mut self, cx: &mut Context<Self>) {
+        let Some(dir) = self.adding.clone() else {
+            return;
+        };
+        let live = self
+            .away
+            .iter()
+            .find(|a| a.dir == dir)
+            .is_some_and(|a| matches!(a.model.conn, Some(Conn::Live)));
+        if live {
+            self.adding = None;
+            self.popup = None;
+            let mut dirs = server_dirs();
+            dirs.push(dir.clone());
+            if let Err(e) = keep_server_dirs(&dirs) {
+                self.model
+                    .notices
+                    .push(format!("loom couldn't keep the new server: {e}"));
+            }
+            self.show_server(&dir, cx);
+        } else if self.popup != Some(Screen::AddServer) {
+            self.adding = None;
+            self.forget_server(&dir);
+            cx.notify();
+        }
+    }
+
+    /// Signs out of the server on screen, takes it from the app, and puts the first
+    /// server on screen. The first server isn't taken.
+    fn remove_server(&mut self, cx: &mut Context<Self>) {
+        let dir = self.here.clone();
+        if !is_server_dir(&dir) {
+            return;
+        }
+        self.send(serde_json::json!({"t": "logout"}));
+        self.show_server("", cx);
+        self.forget_server(&dir);
+        cx.notify();
+    }
+
+    /// Stops a server away, and takes it from the app's list, with its folder.
+    fn forget_server(&mut self, dir: &str) {
+        if !is_server_dir(dir) {
+            return;
+        }
+        if let Some(i) = self.away.iter().position(|a| a.dir == dir) {
+            // Its core stops as it's dropped, and lets go of its folder.
+            drop(self.away.remove(i));
+        }
+        let dirs: Vec<String> = server_dirs().into_iter().filter(|d| d != dir).collect();
+        if let Err(e) = keep_server_dirs(&dirs) {
+            self.model
+                .notices
+                .push(format!("loom couldn't forget the server: {e}"));
+            return;
+        }
+        let folder = server_folder(dir);
+        if folder.starts_with(data_dir()) && folder != data_dir() {
+            let _ = std::fs::remove_dir_all(folder);
+        }
+    }
+
+    /// Whether the server on screen is the instance on this computer.
+    fn local(&self) -> bool {
+        self.here.is_empty() && local_mode()
+    }
+
+    /// Every server, in the order the sidebar shows them: the first, then the rest as
+    /// they were added. Each is its folder and what it shows.
+    fn servers(&self) -> Vec<(String, &Model)> {
+        let mut all: Vec<(String, &Model)> = vec![(self.here.clone(), &self.model)];
+        all.extend(self.away.iter().map(|a| (a.dir.clone(), &a.model)));
+        let key = |d: &str| {
+            d.strip_prefix("servers/")
+                .and_then(|n| n.parse::<u64>().ok())
+                .unwrap_or(0)
+        };
+        all.sort_by_key(|(d, _)| key(d));
+        all
     }
 
     fn fetch(&mut self) {
@@ -1084,21 +1422,81 @@ ACTA_KEY=secret:ACTA_KEY",
 
     /// How the server's spool is now.
     fn spool_state(&self) -> Spool {
-        match &self.model.conn {
-            Some(Conn::Live) if self.model.synced => Spool::Wound,
-            Some(Conn::Offline(_)) | Some(Conn::UpdateNeeded) => Spool::Loose,
-            Some(Conn::SignedOut) => Spool::Empty,
-            _ => Spool::Turning,
-        }
+        spool_of(&self.model)
     }
 
     /// The spool's colour: the app's ink, or the colour for trouble.
     fn spool_ink(&self) -> Hsla {
-        match self.spool_state() {
+        self.ink_of(self.spool_state())
+    }
+
+    fn ink_of(&self, state: Spool) -> Hsla {
+        match state {
             Spool::Loose => self.p.bad,
             Spool::Empty => self.p.ink_3,
             _ => self.p.ink_2,
         }
+    }
+
+    /// Each server the app is signed in to, as its spool, in a row: the one on screen
+    /// opens the server popup, and another comes on screen, with a dot when one of its
+    /// agents said something there. With one server, only its spool.
+    fn spools(&self, server_open: bool, cx: &mut Context<Self>) -> Div {
+        let p = self.p;
+        let mut row = div().flex().items_center().gap(px(space::XS)).min_w_0();
+        let several = !self.away.is_empty();
+        for (dir, model) in self.servers() {
+            let here = dir == self.here;
+            let state = spool_of(model);
+            let ink = self.ink_of(state);
+            let id = SharedString::from(format!("server-{dir}"));
+            let mut button = div()
+                .id(id)
+                .relative()
+                .flex()
+                .items_center()
+                .gap(px(space::S))
+                .px(px(if several { space::S } else { space::M }))
+                .py(px(space::S))
+                .rounded(px(radius::ROW))
+                .cursor_pointer()
+                .hover(move |s| s.bg(p.hover));
+            if here {
+                button = button
+                    .when(server_open, |d| d.bg(p.active))
+                    .when(several, |d| d.bg(p.hover))
+                    .child(spool(state, ink, 38.0, 18.0))
+                    // The words only while it isn't well.
+                    .when(state != Spool::Wound, |d| {
+                        d.child(
+                            div()
+                                .text_size(px(size::CAPTION))
+                                .text_color(p.ink_3)
+                                .truncate()
+                                .child(self.conn_words()),
+                        )
+                    })
+                    .on_click(cx.listener(|this, _, _, cx| this.open(Screen::Server, cx)));
+            } else {
+                let heard = !model.unread.is_empty();
+                button = button
+                    .child(spool(state, ink, 26.0, 13.0))
+                    .when(heard, |d| {
+                        d.child(
+                            div()
+                                .absolute()
+                                .top(px(3.0))
+                                .right(px(3.0))
+                                .size(px(6.0))
+                                .rounded_full()
+                                .bg(p.ink),
+                        )
+                    })
+                    .on_click(cx.listener(move |this, _, _, cx| this.show_server(&dir, cx)));
+            }
+            row = row.child(button);
+        }
+        row
     }
 
     /// The connection in words.
@@ -1125,11 +1523,17 @@ ACTA_KEY=secret:ACTA_KEY",
                 ),
             ];
             // An instance somewhere else has other people, and reaches this PC as a device.
-            if !local_mode() {
+            if !self.local() {
                 pages.push(("pop-people", Ico::Users, "People", Screen::People));
                 pages.push(("pop-device", Ico::Monitor, "This PC", Screen::ThisDevice));
             }
             pages.push(("pop-move", Ico::Truck, "Move", Screen::Move));
+            pages.push((
+                "pop-add-server",
+                Ico::Plus,
+                "Add a server",
+                Screen::AddServer,
+            ));
             return pages;
         }
         vec![
@@ -1197,8 +1601,21 @@ ACTA_KEY=secret:ACTA_KEY",
                     .on_click(cx.listener(move |this, _, _, cx| this.open(screen, cx))),
             );
         }
-        if server {
-            let local = local_mode();
+        if server && !self.here.is_empty() {
+            nav = nav.child(div().flex_1()).child(
+                self.menu_item(
+                    "pop-remove-server",
+                    Ico::LogOut,
+                    "Sign out and remove",
+                    false,
+                )
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.popup = None;
+                    this.remove_server(cx)
+                })),
+            );
+        } else if server {
+            let local = self.local();
             nav = nav.child(div().flex_1()).child(
                 self.menu_item(
                     "pop-sign-out",
@@ -1229,6 +1646,7 @@ ACTA_KEY=secret:ACTA_KEY",
             Screen::AddPhone => self.add_phone_page(cx),
             Screen::Mcp => self.mcp_page(cx),
             Screen::Plugins => self.plugins_page(cx),
+            Screen::AddServer => self.add_server_page(cx),
             _ => div(),
         };
         let card = div()
@@ -1294,15 +1712,12 @@ ACTA_KEY=secret:ACTA_KEY",
     /// The popup's first server page: where the instance is, and how it is.
     fn server_page(&self) -> Div {
         let p = self.p;
-        let local = local_mode();
-        let where_ = if local {
+        let where_ = if self.local() {
             "On this computer".to_string()
         } else {
-            let address = std::env::var("LOOM_SERVER").unwrap_or_default();
-            if address.is_empty() {
-                "On a server".into()
-            } else {
-                format!("At {address}")
+            match &self.model.server {
+                Some(_) => format!("At {}", server_name(&self.model, &self.here)),
+                None => "On a server".into(),
             }
         };
         let body = div()
@@ -2377,6 +2792,11 @@ ACTA_KEY=secret:ACTA_KEY",
                             .hover(move |s| s.bg(p.hover).text_color(p.ink))
                             .child(Icon::new(Ico::ArrowLeft).small())
                             .on_click(cx.listener(|this, _, _, cx| {
+                                // A server being added goes again, back to the one before.
+                                if !this.here.is_empty() {
+                                    this.remove_server(cx);
+                                    return;
+                                }
                                 this.server_form = false;
                                 this.form_at = Instant::now();
                                 this.model.login_error = None;
@@ -2529,6 +2949,23 @@ ACTA_KEY=secret:ACTA_KEY",
         let p = self.p;
         let searching = !self.model.query.trim().is_empty();
         let mut list = div().flex().flex_col().gap(px(2.0)).px(px(space::S));
+        // With several servers, the agents are under their server's name.
+        if !self.away.is_empty() {
+            list = list.child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(space::S))
+                    .px(px(space::M))
+                    .pt(px(space::XS))
+                    .pb(px(space::S))
+                    .text_size(px(size::CAPTION))
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(p.ink_3)
+                    .child(spool(self.spool_state(), self.spool_ink(), 22.0, 11.0))
+                    .child(div().truncate().child(server_name(&self.model, &self.here))),
+            );
+        }
         for a in self.model.agents.clone() {
             let selected = self.model.selected.as_deref() == Some(a.id.as_str())
                 && self.screen == Screen::Chat;
@@ -2730,31 +3167,7 @@ ACTA_KEY=secret:ACTA_KEY",
                     .gap(px(space::XS))
                     .px(px(space::S))
                     .py(px(space::S))
-                    .child(
-                        div()
-                            .id("server")
-                            .flex()
-                            .items_center()
-                            .gap(px(space::S))
-                            .px(px(space::M))
-                            .py(px(space::S))
-                            .rounded(px(radius::ROW))
-                            .cursor_pointer()
-                            .when(server_open, |d| d.bg(p.active))
-                            .hover(move |s| s.bg(p.hover))
-                            .child(spool(self.spool_state(), self.spool_ink(), 38.0, 18.0))
-                            // The words only while it isn't well.
-                            .when(self.spool_state() != Spool::Wound, |d| {
-                                d.child(
-                                    div()
-                                        .text_size(px(size::CAPTION))
-                                        .text_color(p.ink_3)
-                                        .truncate()
-                                        .child(self.conn_words()),
-                                )
-                            })
-                            .on_click(cx.listener(|this, _, _, cx| this.open(Screen::Server, cx))),
-                    )
+                    .child(self.spools(server_open, cx))
                     .child(
                         div()
                             .id("settings")
@@ -5277,7 +5690,7 @@ ACTA_KEY=secret:ACTA_KEY",
                     .child("Add a phone"),
             );
         // The instance in this app listens only on this computer until phones are on.
-        let phones_off = local_mode() && self.model.phones != Some(true);
+        let phones_off = self.local() && self.model.phones != Some(true);
         if phones_off {
             body = body
                 .child(caption(
@@ -5324,7 +5737,7 @@ ACTA_KEY=secret:ACTA_KEY",
                         cx.notify();
                     })),
             );
-            if local_mode() {
+            if self.local() {
                 row = row.child(
                     div()
                         .id("phones-off")
@@ -5396,7 +5809,7 @@ ACTA_KEY=secret:ACTA_KEY",
         body = body.child(devices);
         // Leaving an instance on a server: the account and everything of it. The instance
         // refuses the owner's, whose account goes with the instance.
-        if !local_mode() {
+        if !self.local() {
             let mut leave = div().flex().flex_col().gap(px(space::S)).child(
                 div()
                     .text_size(px(size::BODY))
@@ -5559,6 +5972,93 @@ ACTA_KEY=secret:ACTA_KEY",
 
     /// Moving the instance (PLAN.md, "Moving an instance"): the new place's address and the
     /// code its `loom receive` printed. The apps follow by themselves once it's there.
+    /// Adding a server to the app: its address, the account, and for a new server, its
+    /// setup code. It signs in beside the server on screen, and comes on screen once it's in.
+    fn add_server_page(&mut self, cx: &mut Context<Self>) -> Div {
+        let p = self.p;
+        let pending = self
+            .adding
+            .as_ref()
+            .and_then(|dir| self.away.iter().find(|a| &a.dir == dir));
+        let busy = pending.is_some_and(|a| a.model.logging_in);
+        let error = pending.and_then(|a| a.model.login_error.clone());
+        let input = |s: &Entity<InputState>| div().w_full().child(Input::new(s).large());
+        let body = div()
+            .w_full()
+            .max_w(px(380.0))
+            .flex()
+            .flex_col()
+            .items_center()
+            .gap(px(space::M))
+            .child(spool(
+                if busy { Spool::Turning } else { Spool::Empty },
+                p.ink_2,
+                96.0,
+                36.0,
+            ))
+            .child(
+                div()
+                    .pt(px(space::S))
+                    .pb(px(space::S))
+                    .text_size(px(size::HEADING))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(p.ink)
+                    .child("Add a server"),
+            )
+            .child(input(&self.server_in))
+            .child(input(&self.user_in))
+            .child(input(&self.pass_in))
+            .when(self.show_code, |d| d.child(input(&self.code_in)))
+            .when_some(error, |d, e| {
+                d.child(
+                    div()
+                        .w_full()
+                        .text_size(px(size::SMALL))
+                        .text_color(p.bad)
+                        .child(e),
+                )
+            })
+            .child(
+                div().w_full().pt(px(space::S)).child(
+                    self.button(
+                        "add-server",
+                        if busy { "Signing in…" } else { "Sign in" },
+                        true,
+                    )
+                    .w_full()
+                    .h(px(46.0))
+                    .on_click(cx.listener(|this, _, _, cx| this.sign_in_added(cx))),
+                ),
+            )
+            .when(!self.show_code, |d| {
+                d.child(
+                    div()
+                        .id("add-server-code")
+                        .pt(px(space::S))
+                        .text_size(px(size::SMALL))
+                        .text_color(p.ink_3)
+                        .cursor_pointer()
+                        .hover(move |s| s.text_color(p.ink))
+                        .child("New server? Add its setup code")
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.show_code = true;
+                            cx.notify();
+                        })),
+                )
+            });
+        let page = div()
+            .id("add-server-page")
+            .size_full()
+            .overflow_y_scroll()
+            .flex()
+            .justify_center()
+            .pt(px(space::XL))
+            .px(px(space::XL))
+            .pb(px(space::XXL))
+            .child(body);
+        div().flex_1().min_h_0().child(page)
+    }
+
     fn move_page(&mut self, cx: &mut Context<Self>) -> Div {
         let body = self.move_section(cx).w_full().max_w(px(560.0));
         let page = div()
@@ -6951,6 +7451,10 @@ impl Render for Loom {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let p = self.p;
         self.finish_weaving(window, cx);
+        if let Some(address) = self.fill_server.take() {
+            self.server_in
+                .update(cx, |s, cx| s.set_value(address, window, cx));
+        }
         let signed_out = self.model.conn == Some(Conn::SignedOut);
         // The opening weave plays once the app knows it's signed in. Signed out, the
         // welcome comes in on its own instead.
@@ -6961,8 +7465,10 @@ impl Render for Loom {
                 self.launched = Some(Instant::now());
             }
         }
-        let first = self.screen == Screen::Chat && self.model.agents.is_empty()
-            || self.make.step == Step::Weaving && self.make.first;
+        // With other servers to go back to, it's made beside the sidebar instead.
+        let first = (self.screen == Screen::Chat && self.model.agents.is_empty()
+            || self.make.step == Step::Weaving && self.make.first)
+            && self.away.is_empty();
         let scene = if self.model.conn.is_none() {
             "blank"
         } else if signed_out {
@@ -7094,6 +7600,9 @@ impl Render for Loom {
         // The main area is the chat, unless an agent is being made.
         let main = match self.screen {
             Screen::NewAgent => self.new_agent(cx),
+            Screen::Chat if self.model.agents.is_empty() && self.model.synced => {
+                self.first_agent(cx)
+            }
             _ => self.chat(window, cx),
         };
         self.sync_panel(window, cx);
@@ -7316,13 +7825,24 @@ fn local_mode() -> bool {
         .is_ok_and(|m| m.trim() == "local")
 }
 
-/// The core's config (core/README.md, "Config").
-fn core_config() -> String {
-    let mut config = serde_json::json!({"data": data_dir()});
+/// The core's config (core/README.md, "Config"), for the server whose folder is `dir`
+/// ("" for the first), and for a new one, its address. Only the first updates the
+/// app, and only it can be the instance on this computer.
+fn core_config(dir: &str, server: Option<&str>) -> String {
+    let folder = server_folder(dir);
+    let _ = std::fs::create_dir_all(&folder);
+    let mut config = serde_json::json!({"data": folder.to_string_lossy()});
     // The system's time zone, which the core tells the instance, so routines at a time of
     // day keep this clock.
     if let Ok(tz) = iana_time_zone::get_timezone() {
         config["tz"] = tz.into();
+    }
+    if !dir.is_empty() {
+        config["update"] = "".into();
+        if let Some(server) = server {
+            config["server"] = server.into();
+        }
+        return config.to_string();
     }
     // Releases update themselves. A build from source doesn't, unless LOOM_UPDATE names a
     // manifest to try.
@@ -7398,7 +7918,12 @@ fn fidget(agent: &str, mood: Mood) -> (Mood, Option<Instant>) {
 fn is_server(s: Screen) -> bool {
     matches!(
         s,
-        Screen::Server | Screen::AddPhone | Screen::People | Screen::ThisDevice | Screen::Move
+        Screen::Server
+            | Screen::AddPhone
+            | Screen::People
+            | Screen::ThisDevice
+            | Screen::Move
+            | Screen::AddServer
     )
 }
 

@@ -106,6 +106,19 @@ fn run(i: Instance) ! Error {
     let servers = "{try app.cmd("q_7", "mcp.list", Obj.new().done())}"
     try check(not servers.contains("files-mcp"), "and a yes does it")
 
+    // --- Other servers ---
+    let install = try say(mut app, chat.copy(), "m_13", String(#"/mcp install_server {"domain":"loom.example.com"}"#))
+    try check(install.contains("install.sh | sudo sh -s -- --domain loom.example.com") and install.contains("add_server"), "an agent gives the command that installs loom on a new server")
+    let bad_domain = try say(mut app, chat.copy(), "m_14", String(#"/mcp install_server {"domain":"x; rm -rf /"}"#))
+    try check(bad_domain.starts_with("install_server failed"), "with a domain that's only a domain")
+    try app.send(Obj.new().s("t", String("send")).s("cid", String("m_15")).s("conversation", chat.copy()).s("text", String(#"/mcp add_server {"address":"https://loom.example.com/"}"#)).done())
+    let adding = try app.until("event", "approval.needed")
+    try check(str_at(adding.copy(), "title") == some(String("Add the server https://loom.example.com to your app")), "adding a server to the person's app asks them")
+    try app.send(Obj.new().s("t", String("approve")).s("call", str_at(adding, "call") ?? String()).b("allow", true).done())
+    let offered = try app.until("event", "server.offered")
+    _ = try reply_in(mut app, chat.copy())
+    try check(str_at(offered.copy(), "address") == some(String("https://loom.example.com")) and (str_at(offered, "by") ?? String()).starts_with("d_"), "and a yes offers it to the device that said yes")
+
     // --- Later ---
     let registry = try say(mut app, chat.copy(), "m_12", run_command("acp.registry", Obj.new().done()))
     try check(registry.starts_with("run_command failed") and registry.contains("ACP Registry couldn't be read"), "a command answered later answers the agent's call")
