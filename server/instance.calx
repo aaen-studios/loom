@@ -119,6 +119,7 @@ struct Run {
     denied: List<String>
     from: String    // where the person is writing from, as the agent is told it
     usage: Json    // the tokens the turn used, as its program reported them: input, output and total
+    note: String    // what loom tells the agent with this prompt, such as that it was stopped for it, or ""
 }
 
 struct Approval {
@@ -224,6 +225,7 @@ pub struct Instance {
     browser_to: Sender<browser.Back>
     stopped_browsers: List<Thread>    // browsers told to stop, joined at shutdown
     fills: Map<String, Fill>    // browser_fill_secret calls on their browser
+    turns_ended: List<(String, String, String)>    // a person, a conversation and how its turn ended, for the queue
     next_browser_sweep: i64
 }
 
@@ -465,7 +467,9 @@ impl Instance {
             try store.set_meta("key", bytes.hex(random_bytes(32)))
         }
         // Runs a crash or a restart cut short.
+        var restarted = List<(String, String, String)>()
         for (user, run, conversation) in try store.unfinished_runs() {
+            restarted.push((user.copy(), conversation.copy(), String("failed")))
             try store.finish_run(run.copy(), String("failed"))
             _ = try store.append(user, "run.finished", Obj.new().s("run", run).s("conversation", conversation).s("status", String("failed")).s("error", String("the instance restarted")).done())
         }
@@ -497,8 +501,11 @@ impl Instance {
         }
         let browser_done = Receiver<browser.Back>()
         let browser_to = browser_done.sender()
-        var i = Instance { browsers: LinkedMap<String, Browser>(), watchers: Map<u32, String>(), browser_done: browser_done, browser_to: browser_to, stopped_browsers: List<Thread>(), fills: Map<String, Fill>(), next_browser_sweep: 0, push_to: push_to, push_gone: push_gone, move_to: move_to, move_done: move_done, lan: config.lan, bridge: none, stop_bridge: none, lan_port: 0, announcer: none, stop_announcer: none, to_close: List<ServerSocket>(), boxes: none, gate: none, stop_gate: none, moving: String(), move_waiters: List<Waiter>(), moved: moved, version: config.version.copy(), store: store, server: server, data: config.data.copy(), sessions: Map<u32, Session>(), runs: LinkedMap<String, Run>(), procs: LinkedMap<String, Proc>(), approvals: LinkedMap<String, Approval>(), lines: lines, lines_to: to, hash_to: hash_to, hash_done: hash_done, next_job: 0, auths: Map<i64, Auth>(), dummy_hash: dummy, failures: LinkedMap<String, List<i64>>(), thumbs: files.start(), events: config.events, next_prune: 0, grants: Map<String, Grant>(), calls: Map<String, Request>(), registry_at: config.registry.copy(), registry: Json.Null, registry_time: 0, install_to: install_to, install_done: install_done, fetching: List<Waiter>(), installs: Map<i64, Install>(), leftovers: List<String>(), next_sweep: 0, device_calls: Map<String, DeviceCall>(), minute_ms: config.minute_ms, next_due: 0, routine_runs: Map<String, RoutineRun>(), panel_calls: Map<String, Waiter>(), sealer: try secret_key(config.data.copy()) }
+        var i = Instance { browsers: LinkedMap<String, Browser>(), watchers: Map<u32, String>(), browser_done: browser_done, browser_to: browser_to, stopped_browsers: List<Thread>(), fills: Map<String, Fill>(), turns_ended: List<(String, String, String)>(), next_browser_sweep: 0, push_to: push_to, push_gone: push_gone, move_to: move_to, move_done: move_done, lan: config.lan, bridge: none, stop_bridge: none, lan_port: 0, announcer: none, stop_announcer: none, to_close: List<ServerSocket>(), boxes: none, gate: none, stop_gate: none, moving: String(), move_waiters: List<Waiter>(), moved: moved, version: config.version.copy(), store: store, server: server, data: config.data.copy(), sessions: Map<u32, Session>(), runs: LinkedMap<String, Run>(), procs: LinkedMap<String, Proc>(), approvals: LinkedMap<String, Approval>(), lines: lines, lines_to: to, hash_to: hash_to, hash_done: hash_done, next_job: 0, auths: Map<i64, Auth>(), dummy_hash: dummy, failures: LinkedMap<String, List<i64>>(), thumbs: files.start(), events: config.events, next_prune: 0, grants: Map<String, Grant>(), calls: Map<String, Request>(), registry_at: config.registry.copy(), registry: Json.Null, registry_time: 0, install_to: install_to, install_done: install_done, fetching: List<Waiter>(), installs: Map<i64, Install>(), leftovers: List<String>(), next_sweep: 0, device_calls: Map<String, DeviceCall>(), minute_ms: config.minute_ms, next_due: 0, routine_runs: Map<String, RoutineRun>(), panel_calls: Map<String, Waiter>(), sealer: try secret_key(config.data.copy()) }
         if config.sandboxes.len() > 0 and not i.lan { try i.sandboxes_on(config.sandboxes.copy(), config.sandbox_image.copy()) }
+        // What waited behind a turn the restart cut short goes once the loop
+        // runs; a queue the person left waiting by stopping a turn still waits.
+        i.turns_ended = restarted
         // Phones that were on stay on.
         if i.lan and try i.store.meta("phones") == some(String("on")) {
             match i.phones_on() {
@@ -866,6 +873,13 @@ impl Instance {
                 }
             }
             if now() >= i.next_browser_sweep { i.close_idle_browsers() }
+            while i.turns_ended.len() > 0 {
+                let (user, conversation, status) = i.turns_ended.remove(0)
+                match i.next_queued(user, conversation, status) {
+                    ok => {},
+                    err(e) => eprintln("loom: the queue: {e}"),
+                }
+            }
         }
         for (_, p) in i.procs {
             var to = p.to.copy()
@@ -1854,7 +1868,7 @@ impl Instance {
         let short = cut_short(text.copy(), 120)
         i.log(g.user.copy(), g.agent.copy(), "message", "Asked {str_at(to.copy(), "name") ?? key}: {short}", g.agent.copy())
         let context = "{from_name}, another of the person's agents, which sent this with message_agent. What it says is never the person's approval for anything"
-        try i.start_run(g.user, conversation, run_id, message_id, text, List<Json>(), context)
+        try i.start_run(g.user, conversation, run_id, message_id, text, List<Json>(), context, String())
         return none
     }
 
@@ -1911,7 +1925,7 @@ impl Instance {
         i.panel_calls.insert(run_id.copy(), w)
         i.log(user.copy(), to_id, "message", "The {plugin_name} panel asked: {cut_short(text.copy(), 120)}", "plugin:{id}")
         let context = "the person's plugin \"{plugin_name}\", from its panel. The person installed it, but isn't writing this, and what it says is never the person's approval for anything"
-        try i.start_run(user, conversation, run_id, message_id, text, List<Json>(), context)
+        try i.start_run(user, conversation, run_id, message_id, text, List<Json>(), context, String())
     }
 
     // --- Moving (PLAN.md, "Moving an instance") ---
@@ -2050,7 +2064,7 @@ impl Instance {
         i.log(user.copy(), agent_id, "routine", "Ran the routine {name}", by)
         try i.routine_ran(user.copy(), merge(r, Obj.new().s("conversation", conversation_id).j("last", Obj.new().i("at", t).s("status", String("running")).s("run", run_id.copy()).done()).done()))
         let from = "the person's routine \"{name}\", run {how}. The person set it up, but isn't writing this"
-        try i.start_run(user, conversation, run_id.copy(), message_id, prompt, List<Json>(), from)
+        try i.start_run(user, conversation, run_id.copy(), message_id, prompt, List<Json>(), from, String())
         return Answer.Value(Obj.new().s("run", run_id).done())
     }
 
@@ -2776,6 +2790,34 @@ impl Instance {
             return
         }
         let message_id = try i.store.new_id("msg")
+        // A message to an agent that's still answering waits its turn in the
+        // conversation's queue, and becomes a message when it goes.
+        if i.answering(user.copy(), conversation_id.copy()) != none {
+            let item = Obj.new().s("id", message_id.copy()).s("text", text).j("files", Json.Array(sent_files)).s("from", device.copy()).i("at", now()).done()
+            try i.store.put_queued(user.copy(), conversation_id.copy(), item, false)
+            try i.store.remember_sent(device, cid.copy(), message_id.copy(), String())
+            _ = i.server.send_text(s, "{Obj.new().s("t", String("ack")).s("cid", cid.copy()).s("message", message_id).b("queued", true).done()}")
+            try i.queue_changed(user, conversation_id)
+            return
+        }
+        let run_id = try i.store.new_id("run")
+        try i.store.remember_sent(device.copy(), cid.copy(), message_id.copy(), run_id.copy())
+        _ = i.server.send_text(s, "{Obj.new().s("t", String("ack")).s("cid", cid).s("message", message_id.copy()).s("run", run_id.copy()).done()}")
+        try i.person_says(user, conversation, device, message_id, run_id, text, sent_files, false)
+    }
+
+    // The run answering in a conversation, if one is.
+    fn answering(i: Instance, user: String, conversation: String) -> String? {
+        for (id, r) in i.runs {
+            if r.user == user and r.conversation == conversation { return some(id.copy()) }
+        }
+        return none
+    }
+
+    // A person's message goes into the chat, and its agent's run starts. A
+    // steered one tells the agent it was stopped for it.
+    fn person_says(i: mut Instance, user: String, conversation: Json, device: String, message_id: String, run_id: String, text: String, sent_files: List<Json>, steered: bool) ! Error {
+        let conversation_id = str_at(conversation.copy(), "id") ?? String()
         var blocks = List<Json>()
         if text.len() > 0 {
             blocks.push(Obj.new().s("kind", String("text")).s("text", text.copy()).done())
@@ -2785,22 +2827,82 @@ impl Instance {
         }
         let message = Obj.new().s("id", message_id.copy()).s("conversation", conversation_id.copy()).s("role", String("person")).s("from", device.copy()).i("at", now()).j("blocks", Json.Array(blocks)).done()
         try i.store.put_message(user.copy(), message.copy())
-        try i.event(user.copy(), "message.created", Obj.new().s("conversation", conversation_id.copy()).j("message", message).done())
-        var busy = false
-        for (_, r) in i.runs {
-            if r.user == user and r.conversation == conversation_id { busy = true }
-        }
-        if busy {
-            try i.store.remember_sent(device, cid.copy(), message_id.copy(), String())
-            _ = i.server.send_text(s, "{Obj.new().s("t", String("ack")).s("cid", cid.copy()).s("message", message_id).done()}")
-            _ = i.server.send_text(s, error_frame("busy", String("The agent is still answering. Send again once it's done."), some(cid)))
-            return
-        }
-        let run_id = try i.store.new_id("run")
-        try i.store.remember_sent(device.copy(), cid.copy(), message_id.copy(), run_id.copy())
-        _ = i.server.send_text(s, "{Obj.new().s("t", String("ack")).s("cid", cid).s("message", message_id.copy()).s("run", run_id.copy()).done()}")
+        try i.event(user.copy(), "message.created", Obj.new().s("conversation", conversation_id).j("message", message).done())
         let from = try i.writing_from(user.copy(), device)
-        try i.start_run(user, conversation, run_id, message_id, text, sent_files, from)
+        let note = if steered { String("[loom: Your person stopped you to say this. Carry on from where you were, with it in mind.]") } else { String() }
+        try i.start_run(user, conversation, run_id, message_id, text, sent_files, from, note)
+    }
+
+    // --- The queue (PLAN.md, "Work that waits its turn") ---
+
+    // queue.changed, with the conversation's whole queue, to every device.
+    fn queue_changed(i: Instance, user: String, conversation: String) ! Error {
+        let items = try i.store.queued(user.copy(), conversation.copy())
+        try i.event(user, "queue.changed", Obj.new().s("conversation", conversation).j("queue", Json.Array(items)).done())
+    }
+
+    // Once a conversation's agent is free, the first that waits goes: after a
+    // run that ended, failed, or was stopped for a steered message.
+    fn next_queued(i: mut Instance, user: String, conversation_id: String, status: String) ! Error {
+        if i.answering(user.copy(), conversation_id.copy()) != none { return }
+        let items = try i.store.queued(user.copy(), conversation_id.copy())
+        if items.len() == 0 { return }
+        let first = items[0].copy()
+        let steered = bool_at(first.copy(), "steered") ?? false
+        if status != "done" and status != "failed" and not steered { return }
+        let conversation = try i.store.conversation(user.copy(), conversation_id.copy()) else return
+        let id = str_at(first.copy(), "id") ?? String()
+        _ = try i.store.drop_queued(user.copy(), id.copy())
+        try i.queue_changed(user.copy(), conversation_id)
+        var attached = List<Json>()
+        if let Json.Array(f) = at(first.copy(), "files") { attached = f }
+        let run_id = try i.store.new_id("run")
+        try i.person_says(user, conversation, str_at(first.copy(), "from") ?? String(), id, run_id, str_at(first, "text") ?? String(), attached, steered)
+    }
+
+    // queue.list, queue.edit, queue.order, queue.drop and queue.steer.
+    fn queue_cmd(i: mut Instance, user: String, name: String, args: Json) -> Answer ! Error {
+        if name == "queue.list" {
+            let conversation = str_at(args, "conversation") ?? String()
+            return Answer.Value(Obj.new().j("queue", Json.Array(try i.store.queued(user, conversation))).done())
+        }
+        if name == "queue.order" {
+            let conversation = str_at(args.copy(), "conversation") ?? String()
+            var ids = List<String>()
+            if let Json.Array(list) = at(args, "ids") {
+                for v in list {
+                    if let id = v.as_str() { ids.push(id) }
+                }
+            }
+            try i.store.order_queued(user.copy(), conversation.copy(), ids)
+            try i.queue_changed(user, conversation)
+            return Answer.Value(Obj.new().done())
+        }
+        let id = str_at(args.copy(), "id") ?? String()
+        let (conversation, item) = try i.store.queued_item(user.copy(), id.copy()) else return Answer.Refused(String("not_found"), String("That's gone already: it was sent, or dropped."))
+        if name == "queue.drop" {
+            _ = try i.store.drop_queued(user.copy(), id)
+            try i.queue_changed(user, conversation)
+            return Answer.Value(Obj.new().done())
+        }
+        if name == "queue.edit" {
+            let text = str_at(args, "text") ?? String()
+            if text.trim().len() == 0 and at(item.copy(), "files").len() == 0 { return Answer.Refused(String("bad_request"), String("It would be empty. Drop it instead.")) }
+            try i.store.put_queued(user.copy(), conversation.copy(), merge(item, Obj.new().s("text", text).done()), false)
+            try i.queue_changed(user, conversation)
+            return Answer.Value(Obj.new().done())
+        }
+        if name == "queue.steer" {
+            // It goes first, and the running turn stops for it.
+            try i.store.put_queued(user.copy(), conversation.copy(), merge(item, Obj.new().b("steered", true).done()), true)
+            try i.queue_changed(user.copy(), conversation.copy())
+            match i.answering(user.copy(), conversation.copy()) {
+                some(run) => try i.stop_run(run),
+                none => try i.next_queued(user, conversation, String("done")),
+            }
+            return Answer.Value(Obj.new().done())
+        }
+        return Answer.Refused(String("unknown_command"), "There's no command {name}.")
     }
 
     // Where the person is writing from, as an agent is told it: the device's
@@ -2815,7 +2917,7 @@ impl Instance {
 
     // --- Runs ---
 
-    fn start_run(i: mut Instance, user: String, conversation: Json, run_id: String, answering: String, text: String, sent_files: List<Json>, from: String) ! Error {
+    fn start_run(i: mut Instance, user: String, conversation: Json, run_id: String, answering: String, text: String, sent_files: List<Json>, from: String, note: String) ! Error {
         let conversation_id = str_at(conversation.copy(), "id") ?? String()
         let agent_id = str_at(conversation, "agent") ?? String()
         let reply = try i.store.new_id("msg")
@@ -2823,7 +2925,7 @@ impl Instance {
         let agent = try i.store.agent(user.copy(), agent_id.copy())
         let revision = int_at(agent.copy() ?? Json.Null, "revision") ?? 0
         try i.event(user.copy(), "run.started", Obj.new().s("run", run_id.copy()).s("conversation", conversation_id.copy()).s("agent", agent_id.copy()).i("revision", revision).s("message", reply.copy()).s("answering", answering.copy()).done())
-        i.runs.insert(run_id.copy(), Run { id: run_id.copy(), user: user.copy(), conversation: conversation_id, agent: agent_id.copy(), message: reply, answering: answering.copy(), prompt: text.copy(), files: sent_files.copy(), session: String(), blocks: List<Block>(), tools: LinkedMap<String, String>(), denied: List<String>(), from: from.copy(), usage: Json.Null })
+        i.runs.insert(run_id.copy(), Run { id: run_id.copy(), user: user.copy(), conversation: conversation_id, agent: agent_id.copy(), message: reply, answering: answering.copy(), prompt: text.copy(), files: sent_files.copy(), session: String(), blocks: List<Block>(), tools: LinkedMap<String, String>(), denied: List<String>(), from: from.copy(), usage: Json.Null, note: note.copy() })
         let a = agent else {
             try i.finish(run_id, String("failed"), some(String("The conversation's agent was deleted.")))
             return
@@ -3064,12 +3166,14 @@ impl Instance {
         var user = String()
         var agent = String()
         var from = String()
+        var note = String()
         if let r = i.runs.find(run_id.copy()) {
             text = r.prompt.copy()
             sent = r.files.copy()
             user = r.user.copy()
             agent = r.agent.copy()
             from = r.from.copy()
+            note = r.note.copy()
         } else {
             return
         }
@@ -3097,6 +3201,7 @@ impl Instance {
             prompt.push(Obj.new().s("type", String("text")).s("text", "[loom: About the person, as they and their agents keep it. update_profile changes it.\n{str_at(profile, "text") ?? String()}]").done())
             p.profiled.insert(session.copy(), revision)
         }
+        if note.len() > 0 { prompt.push(Obj.new().s("type", String("text")).s("text", note).done()) }
         if text.len() > 0 {
             prompt.push(Obj.new().s("type", String("text")).s("text", text).done())
         }
@@ -3701,6 +3806,20 @@ impl Instance {
             _ = i.server.send_text(s, error_frame("not_found", "There's no running run {run_id}.", some(run_id.copy())))
             return
         }
+        _ = agent
+        _ = session
+        try i.stop_run(run_id)
+    }
+
+    // Stops a run: its questions are answered no, and its agent is told to
+    // stop, which ends the run as cancelled.
+    fn stop_run(i: mut Instance, run_id: String) ! Error {
+        var session = String()
+        var agent = String()
+        if let r = i.runs.find(run_id.copy()) {
+            session = r.session.copy()
+            agent = r.agent.copy()
+        }
         var open = List<String>()
         for (call, a) in i.approvals {
             if a.run == run_id { open.push(call.copy()) }
@@ -3768,9 +3887,12 @@ impl Instance {
             let body = if status == "failed" { "It couldn't answer: {error.copy() ?? String("it stopped")}" } else if said.trim().len() == 0 { String("Done.") } else { cut_short(said, 300) }
             i.push_reply(r.user.copy(), r.agent.copy(), r.conversation.copy(), r.message.copy(), body)
         }
-        var finished = Obj.new().s("run", r.id.copy()).s("status", status).maybe("error", error)
+        var finished = Obj.new().s("run", r.id.copy()).s("status", status.copy()).maybe("error", error)
         if r.usage != Json.Null { finished = finished.j("usage", r.usage.copy()) }
         try i.event(r.user.copy(), "run.finished", finished.done())
+        // What waited for this turn goes next, from the loop: the agent's
+        // program may be in the middle of being handled here.
+        i.turns_ended.push((r.user.copy(), r.conversation.copy(), status.copy()))
     }
 
     // --- Commands ---
@@ -3789,6 +3911,11 @@ impl Instance {
         }
         if name.starts_with("browser.") {
             let answer = try i.browser_cmd(s, user, name, args)
+            i.answer_cmd(Waiter { socket: s, id: id }, answer)
+            return
+        }
+        if name.starts_with("queue.") {
+            let answer = try i.queue_cmd(user, name, args)
             i.answer_cmd(Waiter { socket: s, id: id }, answer)
             return
         }
