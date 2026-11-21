@@ -170,6 +170,8 @@ pub struct Message {
     pub live: bool,
     /// Written here and waiting in the outbox.
     pub queued: bool,
+    /// For a message another agent sent with message_agent, that agent's name.
+    pub from_agent: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -688,7 +690,7 @@ impl Model {
             }
             List::Messages => {
                 self.more_messages = f.get("more").and_then(Value::as_bool).unwrap_or(false);
-                self.messages = items
+                let messages: Vec<Message> = items
                     .iter()
                     .map(|m| Message {
                         id: s(m, "id"),
@@ -697,8 +699,19 @@ impl Model {
                         blocks: blocks_of(m),
                         live: false,
                         queued: false,
+                        // `from` is a device, or the agent that sent it.
+                        from_agent: m
+                            .get("from")
+                            .and_then(Value::as_str)
+                            .filter(|f| f.starts_with("a_"))
+                            .map(|f| {
+                                self.agent(f)
+                                    .map(|a| a.name.clone())
+                                    .unwrap_or_else(|| "Another agent".into())
+                            }),
                     })
                     .collect();
+                self.messages = messages;
                 self.place_queued();
             }
         }
@@ -735,6 +748,7 @@ impl Model {
                     blocks: vec![Block::text("text", text)],
                     live: false,
                     queued: true,
+                    from_agent: None,
                 });
             }
         }
@@ -766,6 +780,7 @@ impl Model {
                 blocks,
                 live: true,
                 queued: false,
+                from_agent: None,
             });
         }
         out

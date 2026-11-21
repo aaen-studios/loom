@@ -1,0 +1,103 @@
+module server.mcp
+
+// `loom mcp`: loom's own tools as an MCP server over standard input and output
+// (PLAN.md, "Loom's own tools"). The instance passes it to every ACP session,
+// with LOOM_URL and a token for that agent, LOOM_MCP_TOKEN, in its
+// environment. It asks the instance for the tools and hands each call to it,
+// so what an agent may do is decided there, with its person's rights.
+//
+// MCP is JSON-RPC 2.0, one message a line. Requests are answered in turn: a
+// message_agent call waits for the other agent's reply.
+import std.env
+import std.http.{Header, get, post}
+import std.io
+import std.json.{Json, parse}
+import shared.obj.{Obj, at, str_at}
+
+const PROTOCOL: str = "2025-06-18"
+const CALL_WAIT: u32 = 3600000    // message_agent waits on a whole reply
+const MAX_ANSWER: usize = 16777216
+
+fn reply(id: Json, result: Json) {
+    println("{Obj.new().s("jsonrpc", String("2.0")).j("id", id).j("result", result).done()}")
+}
+
+fn reply_error(id: Json, code: i64, message: String) {
+    println("{Obj.new().s("jsonrpc", String("2.0")).j("id", id).j("error", Obj.new().i("code", code).s("message", message).done()).done()}")
+}
+
+// A tool result that says what went wrong, for the agent to read.
+fn failed(text: String) -> Json {
+    return Obj.new().j("content", Json.Array([Obj.new().s("type", String("text")).s("text", text).done()])).b("isError", true).done()
+}
+
+struct Link {
+    base: String
+    token: String
+}
+
+impl Link {
+    fn headers(self) -> List<Header> {
+        return [Header { name: String("Authorization"), value: "Bearer {self.token}" }, Header { name: String("Content-Type"), value: String("application/json") }]
+    }
+
+    fn tools(self) -> Json ! Error {
+        var req = get("{self.base}/api/mcp/tools", self.headers(), 30000, MAX_ANSWER)
+        let r = try req.wait()
+        if r.status != 200 { fail "the instance answered {r.status}" }
+        return try parse(String.from_utf8(r.body) ?? String())
+    }
+
+    fn call(self, name: String, arguments: Json) -> Json {
+        let body = Obj.new().s("name", name).j("arguments", arguments).done()
+        var req = post("{self.base}/api/mcp/call", self.headers(), "{body}".to_bytes(), CALL_WAIT, MAX_ANSWER)
+        match req.wait() {
+            ok(r) => {
+                let text = String.from_utf8(r.body) ?? String()
+                if r.status != 200 { return failed("loom couldn't do that ({r.status}): {text}") }
+                return match parse(text) {
+                    ok(j) => j,
+                    err(_) => failed(String("loom's answer wasn't JSON")),
+                }
+            },
+            err(e) => return failed("loom didn't answer: {e}"),
+        }
+    }
+}
+
+fn handle(link: Link, m: Json) {
+    let id = m.get(String("id")) else return    // a notification, such as notifications/initialized
+    let method = str_at(m.copy(), "method") ?? String()
+    let params = at(m, "params")
+    if method == "initialize" {
+        let version = str_at(params, "protocolVersion") ?? String(PROTOCOL)
+        let info = Obj.new().s("name", String("loom")).s("version", String("1")).done()
+        reply(id, Obj.new().s("protocolVersion", version).j("capabilities", Obj.new().j("tools", Obj.new().done()).done()).j("serverInfo", info).done())
+    } else if method == "ping" {
+        reply(id, Obj.new().done())
+    } else if method == "tools/list" {
+        match link.tools() {
+            ok(t) => reply(id, t),
+            err(e) => reply_error(id, -32603, "loom's instance didn't answer: {e}"),
+        }
+    } else if method == "tools/call" {
+        reply(id, link.call(str_at(params.copy(), "name") ?? String(), at(params, "arguments")))
+    } else {
+        reply_error(id, -32601, "loom doesn't offer {method}")
+    }
+}
+
+// Serves MCP on standard input and output until input ends.
+pub fn serve() ! Error {
+    let base = env.variable(String("LOOM_URL")) else { fail "LOOM_URL isn't set: loom mcp is started by loom's instance" }
+    let token = env.variable(String("LOOM_MCP_TOKEN")) else { fail "LOOM_MCP_TOKEN isn't set: loom mcp is started by loom's instance" }
+    let link = Link { base: base, token: token }
+    var input = io.Lines()
+    while let line = input.next() {
+        if line.trim().len() == 0 { continue }
+        match parse(line.copy()) {
+            ok(m) => handle(link, m),
+            err(_) => reply_error(Json.Null, -32700, String("that line isn't JSON")),
+        }
+    }
+}

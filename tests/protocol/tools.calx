@@ -1,0 +1,108 @@
+module tests.protocol.tools
+
+// Loom's own tools (PLAN.md, "Loom's own tools"): every ACP session is given
+// `loom mcp`, and the fake agent calls it as a real agent would. An agent
+// lists the tools and the agents, hands work to another agent and gets its
+// reply, edits its own instructions, makes and changes agents but never their
+// permission mode, and sends a notification. The tool endpoints refuse a
+// request without the agent's token.
+//
+//     calx tests/protocol/tools.calx
+import std.http.{Header, get}
+import std.json.{Json}
+import std.process.{exit}
+import shared.obj.{Obj, at, str_at}
+import tests.kit.{App, Instance, check, reply_text}
+
+// The agent's next reply in `conversation`, as text.
+fn reply_in(app: mut App, conversation: String) -> String ! Error {
+    loop {
+        let created = try app.until("event", "message.created")
+        let m = at(created, "message")
+        if str_at(m.copy(), "role") == some(String("agent")) and str_at(m.copy(), "conversation") == some(conversation.copy()) { return reply_text(m) }
+    }
+}
+
+// Says `text` in `conversation`, and gives the reply.
+fn say(app: mut App, conversation: String, cid: str, text: String) -> String ! Error {
+    try app.send(Obj.new().s("t", String("send")).s("cid", String(cid)).s("conversation", conversation.copy()).s("text", text).done())
+    return try reply_in(mut app, conversation)
+}
+
+fn agent(app: mut App, id: str, name: str) -> String ! Error {
+    let made = try app.cmd(id, "agent.create", Obj.new().s("name", String(name)).s("acp_agent", String("fake")).s("instructions", String("You are a test.")).done())
+    return str_at(at(at(made, "value"), "agent"), "id") ?? String()
+}
+
+// The newest event of `kind` among what the app has read.
+fn last(app: App, kind: str) -> Json {
+    var found = Json.Null
+    for f in app.frames {
+        if str_at(f.copy(), "kind") == some(String(kind)) { found = f.copy() }
+    }
+    return found
+}
+
+fn run(i: Instance) ! Error {
+    var req = get("http://{i.base}/api/mcp/tools", List<Header>(), 10000, 65536)
+    try check((try req.wait()).status == 401, "loom's tools need an agent's token")
+
+    var app = try App.connect(i.base.copy(), i.token.copy(), 0)
+    let main_id = try agent(mut app, "q_1", "Main")
+    _ = try agent(mut app, "q_2", "Helper")
+    let c = try app.cmd("q_3", "conversation.create", Obj.new().s("agent", main_id.copy()).done())
+    let conversation = str_at(at(c, "value"), "conversation") ?? String()
+
+    let listed = try say(mut app, conversation.copy(), "m_1", String("/mcp list"))
+    try check(listed.contains("message_agent") and listed.contains("edit_instructions") and listed.contains("notify"), "an agent's session has loom's tools")
+    let agents = try say(mut app, conversation.copy(), "m_2", String("/mcp list_agents"))
+    try check(agents.contains("Helper") and agents.contains("Main"), "list_agents gives the person's agents")
+
+    let handed = try say(mut app, conversation.copy(), "m_3", String(#"/mcp message_agent {"agent":"helper","text":"hello from main"}"#))
+    try check(handed == "message_agent: hello from main", "message_agent gives the other agent's reply")
+    let made = last(app, "conversation.created")
+    try check(str_at(at(made, "conversation"), "title") == some(String("From Main")), "in a conversation of its own")
+    let again = try say(mut app, conversation.copy(), "m_4", String(#"/mcp message_agent {"agent":"Helper","text":"again"}"#))
+    try check(again == "message_agent: again" and str_at(at(last(app, "conversation.created"), "conversation"), "title") == some(String("From Main")), "and the next message goes to the same one")
+    var conversations: usize = 0
+    for f in app.frames {
+        if str_at(f.copy(), "kind") == some(String("conversation.created")) { conversations += 1 }
+    }
+    try check(conversations == 2, "the two keep one conversation")
+    let self_talk = try say(mut app, conversation.copy(), "m_5", String(#"/mcp message_agent {"agent":"Main","text":"hi"}"#))
+    try check(self_talk.starts_with("message_agent failed"), "an agent can't message itself")
+
+    let edited = try say(mut app, conversation.copy(), "m_6", String(#"/mcp edit_instructions {"instructions":"Be brief."}"#))
+    let updated = at(last(app, "agent.updated"), "agent")
+    try check(edited.starts_with("edit_instructions:") and str_at(updated.copy(), "id") == some(main_id.copy()) and str_at(updated, "instructions") == some(String("Be brief.")), "edit_instructions changes the agent's own instructions")
+
+    _ = try say(mut app, conversation.copy(), "m_7", String(#"/mcp update_agent {"agent":"Helper","name":"Helper 2","permission":"allow"}"#))
+    let changed = at(last(app, "agent.updated"), "agent")
+    try check(str_at(changed.copy(), "name") == some(String("Helper 2")) and str_at(changed, "permission") == some(String("ask")), "update_agent renames an agent, but leaves its permission mode")
+
+    _ = try say(mut app, conversation.copy(), "m_8", String(#"/mcp create_agent {"name":"Third","acp_agent":"fake","instructions":"Hi.","permission":"allow"}"#))
+    let third = at(last(app, "agent.created"), "agent")
+    try check(str_at(third.copy(), "name") == some(String("Third")) and str_at(third, "permission") == some(String("ask")), "create_agent makes an agent that asks first")
+
+    let sent = try say(mut app, conversation.copy(), "m_9", String(#"/mcp notify {"title":"Build","body":"It failed."}"#))
+    let note = last(app, "notify")
+    try check(sent == "notify: Sent." and str_at(note.copy(), "title") == some(String("Build")) and str_at(note, "agent") == some(main_id), "notify sends the person a notification")
+
+    let unknown = try say(mut app, conversation, "m_10", String("/mcp delete_everything"))
+    try check(unknown.starts_with("delete_everything failed"), "there's no tool that isn't on the list")
+    app.close()
+}
+
+fn main() ! Error {
+    let inst = try Instance.start()
+    let failure: String? = match run(inst.copy()) {
+        ok => none,
+        err(e) => some("{e}"),
+    }
+    inst.stop()
+    if let f = failure {
+        eprintln("\n{f}")
+        exit(1)
+    }
+    println("\ntools: all good")
+}

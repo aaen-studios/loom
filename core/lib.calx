@@ -17,6 +17,7 @@ import core.conn.{Conn}
 import core.update.{Updater}
 import shared.release.{MANIFEST}
 import server.instance.{Config, EventLife, Instance}
+import server.mcp
 
 /// The credential store's service the device token is kept under, by the instance's address.
 const KEYRING: str = "loom"
@@ -226,5 +227,19 @@ fn core_stop(core: *u8) {
     }
     if let t = c.value.local.take() {
         t.join()
+    }
+}
+
+/// `loom mcp`, for the desktop app started as `loom.exe mcp` by an agent of the
+/// instance it runs (PLAN.md, "Loom's own tools"). Serves MCP on standard
+/// input and output until input ends. Gives the exit status.
+@export_c("loom_mcp")
+fn loom_mcp() -> i32 {
+    match mcp.serve() {
+        ok => return 0,
+        err(e) => {
+            eprintln("loom mcp: {e}")
+            return 1
+        },
     }
 }

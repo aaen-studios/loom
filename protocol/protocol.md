@@ -117,6 +117,10 @@ A file goes in a message by its `file`, in [`send`](#send)'s `files`.
 
 Login needed, as above. The file, with its type, for whoever uploaded it or got it from an agent, and `404` for anyone else. With `?thumb`, a thumbnail of a PNG or JPEG image instead, at most 512 pixels a side, as a JPEG, or a PNG when it has transparency. It's made just after the upload; until it's there, and for files that have none, `?thumb` gives the file itself. Both are cached for good (`Cache-Control: private, immutable`), since a file's name is its content.
 
+### `GET /api/mcp/tools` and `POST /api/mcp/call`
+
+For `loom mcp` alone, which the instance starts for each agent (below, [How ACP maps onto loom](#how-acp-maps-onto-loom)). They take that agent's tool token, `Authorization: Bearer <token>`, not a device's, and an app never calls them. `tools` gives `{"tools": [...]}`, MCP's tool definitions from `shared/tools.calx`. `call` takes `{"name", "arguments"}` and gives an MCP tool result, `{"content": [{"type": "text", "text"}], "isError"?}`. A `message_agent` call is answered when the other agent's reply is done.
+
 ### Later routes
 
 `POST /hooks/<id>` for webhooks (Phase 4).
@@ -317,7 +321,7 @@ A message is a list of **content blocks**:
 }
 ```
 
-- `role` is `person` or `agent`. A person's message has `from` (a device id) instead of `agent` and `run`.
+- `role` is `person` or `agent`. A person's message has `from` (a device id) instead of `agent` and `run`. A message one agent sent another with `message_agent` is a `person` message too, in the other agent's conversation, with the sending agent's id as `from`.
 - Block kinds in version 1: `text` (Markdown), `thought` (the agent's reasoning, shown folded), `tool` (a tool call, whose details are in its `tool.*` events), `plan` (the agent's plan, as `entries` with `content` and `status`) and `file` (`file`, `name`, `mime`, `size`).
 
 **While a reply is being written**, its message exists but isn't finished. `run.started` gives its id, and deltas fill its blocks:
@@ -377,7 +381,8 @@ An approval nobody answers stays open while the run does. Cancelling the run ans
 
 | Kind | Fields | When |
 |---|---|---|
-| `agent.created`, `agent.updated` | `agent` (the whole agent, with its `revision`) | Made or changed, by a person or by itself |
+| `agent.created`, `agent.updated` | `agent` (the whole agent, with its `revision`), and for `agent.updated`, `by` (the device that changed it, or the agent's id when an agent did, with a tool) | Made or changed, by a person or by an agent |
+| `notify` | `agent`, `title`, `body` | An agent sent its person a notification with its `notify` tool. The apps show it, even while someone's looking |
 | `agent.deleted` | `agent` (the id) | Deleted |
 | `device.added` | `device` (`id`, `name`, `kind`, `at`) | A login, on any of the person's devices |
 | `device.updated` | `device` (`id` and what changed) | Renamed |
@@ -448,6 +453,7 @@ Inside the instance, each agent runs as an ACP agent program ([PLAN.md](../PLAN.
 | From the agent (ACP) | In loom |
 |---|---|
 | The instance sends the person's message to the session with `session/prompt` | `run.started` |
+| Every session gets `mcpServers` with one server, `loom`: the `loom` program (or the desktop app's own `loom.exe`) with the argument `mcp`, and `LOOM_URL` and that agent's `LOOM_MCP_TOKEN` in its environment. It gives the agent loom's own tools: `message_agent`, `list_agents`, `create_agent`, `update_agent`, `edit_instructions`, `list_acp_agents`, `search_messages` and `notify`. They act with the person's rights, never change a permission mode, and never delete | what the tools do: `message.created`, `agent.updated`, `notify` and the rest, as if the person had done it |
 | A conversation's first message to an agent program: `session/new`, or after a restart, `session/resume` (where the agent offers `sessionCapabilities.resume`) or `session/load` (where it offers `loadSession`) with the session the conversation had. What `session/load` plays back is dropped, and if the agent can't pick the session up, a new one starts | nothing: the apps see the same conversation |
 | The person's files, in that prompt | an `image` block for an image of up to 5 MB, when the program says it takes images (`promptCapabilities.image`); otherwise a `resource_link` to a copy in the agent's folder, under `files/`, with its name |
 | `session/update`, `agent_message_chunk` | `delta` with `kind: "text"` |

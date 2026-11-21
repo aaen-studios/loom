@@ -281,7 +281,7 @@ Each agent program runs as its own process. The instance reads each one on a thr
 
 ### Loom's own tools
 
-`loom mcp` serves them, as an MCP server over stdio. It's the `loom` program in MCP mode: servers run it, and the desktop app installs it beside itself. It connects back to the instance with a token for that one session, passed in its environment, and it acts with that person's rights and no more.
+`loom mcp` serves them, as an MCP server over stdio. It's the `loom` program in MCP mode, and in the desktop app it's `loom.exe mcp`, the app itself. The instance gives it to every ACP session. It connects back to the instance with a token for that one agent, passed in its environment, and it acts with that person's rights and no more. The tools are defined once, in `shared/tools.calx`.
 
 | Tool | What it does |
 |---|---|
@@ -290,6 +290,7 @@ Each agent program runs as its own process. The instance reads each one on a thr
 | `schedule` | Makes a routine |
 | `notify` | Sends you a notification |
 | `edit_instructions` | Changes the agent's own instructions |
+| `list_agents`, `create_agent`, `update_agent`, `list_acp_agents`, `search_messages` | Loom's commands. None of them changes a permission mode or deletes |
 | Device tools | Your PC and phone, where you allow it ([Machines and devices](#machines-and-devices)) |
 | Every loom command | Agents, routines, plugins, settings, export, moving ([Agents can do anything the app can](#agents-can-do-anything-the-app-can)) |
 

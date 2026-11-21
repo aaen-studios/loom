@@ -82,6 +82,10 @@ pub const VERSION: &str = match option_env!("LOOM_VERSION") {
 };
 
 fn main() {
+    // Started by an agent of the instance in this app, for loom's own tools.
+    if std::env::args().nth(1).as_deref() == Some("mcp") {
+        std::process::exit(core::mcp());
+    }
     shell::after_update();
     gpui_kit::application().with_assets(AppAssets).run(|cx| {
         gpui_kit::init(cx);

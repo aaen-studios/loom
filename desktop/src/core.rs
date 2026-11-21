@@ -14,6 +14,7 @@ extern "C" {
     ) -> *mut u8;
     fn loom_core_send(core: *mut u8, json: *const u8, len: usize);
     fn loom_core_stop(core: *mut u8);
+    fn loom_mcp() -> i32;
 }
 
 extern "C" fn on_event(json: *const u8, len: usize, ctx: *mut u8) {
@@ -53,5 +54,16 @@ impl Core {
 impl Drop for Core {
     fn drop(&mut self) {
         unsafe { loom_core_stop(self.handle) }
+    }
+}
+
+/// Runs `loom mcp`, loom's own tools for an agent, on standard input and output,
+/// as the instance in this app starts it. Gives the exit status.
+pub fn mcp() -> i32 {
+    // SAFETY: the Calx runtime is started once, before the core is called, and
+    // nothing else in this process uses it.
+    unsafe {
+        calx_init();
+        loom_mcp()
     }
 }

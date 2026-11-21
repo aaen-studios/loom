@@ -1601,6 +1601,15 @@ fn person(p: Palette, m: &Message, files: &HashMap<String, String>, this: WeakEn
         .flex_col()
         .items_end()
         .gap(px(space::XS));
+    // Another agent wrote this one, handing work over.
+    if let Some(from) = &m.from_agent {
+        out = out.child(
+            div()
+                .text_size(px(size::CAPTION))
+                .text_color(p.ink_3)
+                .child(format!("From {from}")),
+        );
+    }
     for (i, b) in m.blocks.iter().enumerate() {
         if let Some(f) = &b.file {
             out = out.child(file_view(
