@@ -1,0 +1,162 @@
+module server.tables
+
+// Shared tables (PLAN.md, "Shared tables"): what a table's name and a row's
+// fields may be, a row as it's written, and a query as table.rows takes it.
+// The instance does the rest, with the store.
+import std.json.{Json}
+import shared.obj.{Obj, at, bool_at, int_at, str_at}
+
+// How many tables a person has, and rows in all of them; how big a row is,
+// how many one write takes, and how many one read gives.
+pub const TABLES_MOST: usize = 100
+pub const ROWS_MOST: i64 = 100000
+pub const ROW_MOST: usize = 16384
+pub const WRITE_MOST: usize = 500
+pub const READ_MOST: i64 = 200
+const NAME_MOST: usize = 64
+
+// Why `name` can't name a table (with hyphens) or a field (without), or none
+// when it can: 1 to 64 letters, digits and underscores.
+pub fn bad_name(name: String, what: str, hyphens: bool) -> String? {
+    let also = if hyphens { ", hyphens" } else { "" }
+    let why = "{what} is 1 to {NAME_MOST} letters, digits{also} and underscores, not {name}."
+    if name.len() == 0 or name.len() > NAME_MOST { return some(why) }
+    for ch in name.runes() {
+        let fits = (ch >= 'a' and ch <= 'z') or (ch >= 'A' and ch <= 'Z') or (ch >= '0' and ch <= '9') or ch == '_' or (hyphens and ch == '-')
+        if not fits { return some(why) }
+    }
+    return none
+}
+
+// A row as table.write takes it: the id of the row it changes, if it names
+// one, and its fields, as the text kept.
+pub fn row_to_write(row: Json) -> (i64?, String) ! Error {
+    let Json.Object(members) = row else fail "Each row is an object of its fields, such as \{\"name\": \"socks\", \"pairs\": 3\}."
+    var id: i64? = none
+    var fields = LinkedMap<String, Json>()
+    for (k, v) in members {
+        if k == "id" {
+            match v {
+                Json.Int(n) => id = some(n),
+                _ => fail "A row's id is its number, as table.rows gives it.",
+            }
+            continue
+        }
+        if let why = bad_name(k.copy(), "A field's name", false) { fail why }
+        fields.insert(k.copy(), v.copy())
+    }
+    let text = "{Json.Object(fields)}"
+    if text.len() > ROW_MOST { fail "A row is {ROW_MOST} bytes at most, and this one is {text.len()}." }
+    return (id, text)
+}
+
+pub struct Query {
+    pub filters: List<(String, Json)>
+    pub order: String
+    pub desc: bool
+    pub limit: i64
+    pub offset: i64
+}
+
+// table.rows's args as a query: `where`, fields and the values they equal;
+// `order_by`, a field, or id (the default) for the order they were written
+// in; `desc`; `limit`, 50 unless it says, up to 200; and `offset`.
+pub fn query_of(args: Json) -> Query ! Error {
+    var filters = List<(String, Json)>()
+    match at(args.copy(), "where") {
+        Json.Null => {},
+        Json.Object(members) => {
+            for (k, v) in members {
+                if let why = bad_name(k.copy(), "A field's name", false) { fail why }
+                match v {
+                    Json.Array(_) => fail "where matches a field to a string, a number, true, false or null.",
+                    Json.Object(_) => fail "where matches a field to a string, a number, true, false or null.",
+                    _ => {},
+                }
+                filters.push((k.copy(), v.copy()))
+            }
+        },
+        _ => fail "where is an object of fields and the values they equal.",
+    }
+    let order = str_at(args.copy(), "order_by") ?? String("id")
+    if order != "id" {
+        if let why = bad_name(order.copy(), "order_by", false) { fail why }
+    }
+    let limit = int_at(args.copy(), "limit") ?? 50
+    if limit < 1 or limit > READ_MOST { fail "limit is 1 to {READ_MOST}." }
+    let offset = int_at(args.copy(), "offset") ?? 0
+    if offset < 0 { fail "offset is 0 or more." }
+    return Query { filters: filters, order: order, desc: bool_at(args, "desc") ?? false, limit: limit, offset: offset }
+}
+
+// Whether `writer` may change or delete a row `by` wrote in a table `owner`
+// owns. Each is an agent's id, or empty for the person, who may do anything.
+pub fn may_change(writer: String, by: String, owner: String) -> bool {
+    return writer.len() == 0 or writer == owner or writer == by
+}
+
+// Whether a row `by` wrote in a table `owner` owns is to be read as
+// untrusted: another agent wrote it, not the owner or the person.
+pub fn untrusted(by: String, owner: String) -> bool {
+    return by.len() > 0 and by != owner
+}
+
+@test
+fn names() {
+    assert(bad_name(String("socks_2026"), "A table's name", true) == none)
+    assert(bad_name(String("to-do"), "A table's name", true) == none)
+    assert(bad_name(String("to-do"), "A field's name", false) != none)
+    assert(bad_name(String(""), "A table's name", true) != none)
+    assert(bad_name("x".repeat(65), "A table's name", true) != none)
+    assert(bad_name(String("a.b"), "A field's name", false) != none)
+    assert(bad_name(String("ä"), "A field's name", false) != none)
+}
+
+@test
+fn rows_to_write() {
+    let (id, text) = row_to_write(Obj.new().i("id", 7).s("name", String("socks")).i("pairs", 3).done())!
+    assert(id == some(7i64) and text == #"{"name":"socks","pairs":3}"#)
+    let (none_id, _) = row_to_write(Obj.new().s("name", String("socks")).done())!
+    assert(none_id == none)
+    assert(row_fails(Json.Array(List<Json>())))
+    assert(row_fails(Obj.new().s("a.b", String("x")).done()))
+    assert(row_fails(Obj.new().s("id", String("7")).done()))
+    assert(row_fails(Obj.new().s("note", "x".repeat(16400)).done()))
+}
+
+@test
+fn queries() {
+    let q = query_of(Obj.new().j("where", Obj.new().s("status", String("open")).b("done", false).j("due", Json.Null).done()).s("order_by", String("due")).b("desc", true).i("limit", 10).done())!
+    assert(q.filters.len() == 3 and q.order == "due" and q.desc and q.limit == 10 and q.offset == 0)
+    let plain = query_of(Obj.new().done())!
+    assert(plain.filters.len() == 0 and plain.order == "id" and not plain.desc and plain.limit == 50)
+    assert(query_fails(Obj.new().j("where", Obj.new().j("tags", Json.Array(List<Json>())).done()).done()))
+    assert(query_fails(Obj.new().s("order_by", String("x; DROP")).done()))
+    assert(query_fails(Obj.new().i("limit", 201).done()))
+    assert(query_fails(Obj.new().s("where", String("status = 'open'")).done()))
+}
+
+@test
+fn who_may_change_a_row() {
+    assert(may_change(String(), String("a_2"), String("a_1")))
+    assert(may_change(String("a_1"), String("a_2"), String("a_1")))
+    assert(may_change(String("a_2"), String("a_2"), String("a_1")))
+    assert(not may_change(String("a_3"), String("a_2"), String("a_1")))
+    assert(untrusted(String("a_2"), String("a_1")))
+    assert(not untrusted(String("a_1"), String("a_1")))
+    assert(not untrusted(String(), String("a_1")))
+}
+
+fn row_fails(row: Json) -> bool {
+    return match row_to_write(row) {
+        ok(_) => false,
+        err(_) => true,
+    }
+}
+
+fn query_fails(args: Json) -> bool {
+    return match query_of(args) {
+        ok(_) => false,
+        err(_) => true,
+    }
+}

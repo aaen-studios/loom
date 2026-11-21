@@ -234,6 +234,42 @@ pub struct Skill {
     pub body: String,
 }
 
+/// One of the person's shared tables (PLAN.md, "Shared tables").
+#[derive(Clone, Debug, PartialEq)]
+pub struct SharedTable {
+    pub name: String,
+    pub description: String,
+    /// The agent that made it, or empty for the person.
+    pub owner: String,
+    pub rows: u64,
+}
+
+/// A row of the open shared table: its fields as JSON, who last wrote it, and whether
+/// that was another agent than the table's owner.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TableRow {
+    pub id: i64,
+    pub by: String,
+    pub untrusted: bool,
+    pub data: String,
+}
+
+/// A row's fields as a person reads them: `title: Emma · read: false`, a string as it
+/// is and anything else as JSON.
+fn fields_of(data: &Value) -> String {
+    let Some(fields) = data.as_object() else {
+        return data.to_string();
+    };
+    fields
+        .iter()
+        .map(|(k, v)| match v.as_str() {
+            Some(text) => format!("{k}: {text}"),
+            None => format!("{k}: {v}"),
+        })
+        .collect::<Vec<_>>()
+        .join(" · ")
+}
+
 /// One of the person's plugins (protocol.md, "Plugins").
 #[derive(Clone, Debug, Default)]
 pub struct Plugin {
@@ -753,6 +789,15 @@ pub struct Model {
     /// The person's skills, by name, for the skills page.
     pub skills: Vec<Skill>,
     skills_stale: bool,
+    /// The person's shared tables, for the tables page, and the one open on it, with
+    /// its newest rows and whether there are more.
+    pub tables: Vec<SharedTable>,
+    pub table_open: Option<String>,
+    pub table_rows: Vec<TableRow>,
+    pub table_more: bool,
+    /// Whether the tables page is showing, so a change to a table reloads it.
+    pub tables_open: bool,
+    tables_stale: bool,
     /// The person's routines, oldest first.
     pub routines: Vec<Routine>,
     routines_stale: bool,
@@ -917,6 +962,9 @@ impl Model {
         }
         if std::mem::take(&mut self.skills_stale) {
             out.push(self.load_skills());
+        }
+        if std::mem::take(&mut self.tables_stale) && self.tables_open {
+            out.extend(self.load_tables());
         }
         if std::mem::take(&mut self.routines_stale) {
             out.push(self.load_routines());
@@ -1341,6 +1389,15 @@ impl Model {
         let kind = s(f, "kind");
         let (family, _) = kind.split_once('.').unwrap_or((kind.as_str(), ""));
         match family {
+            "table" => {
+                if s(f, "table") == self.table_open.clone().unwrap_or_default()
+                    && f.get("dropped").and_then(Value::as_bool) == Some(true)
+                {
+                    self.table_open = None;
+                    self.table_rows.clear();
+                }
+                self.tables_stale = true;
+            }
             // A device that joined with the QR code being shown: the code is used up.
             "device" => {
                 self.dirty.insert(List::Devices);
@@ -1709,6 +1766,46 @@ impl Model {
                 self.notices.push(s(e, "message"));
             }
             self.plugins_stale = true;
+        } else if id.starts_with("app.tables") {
+            self.tables = f
+                .pointer("/value/tables")
+                .and_then(Value::as_array)
+                .map(|ts| {
+                    ts.iter()
+                        .map(|t| SharedTable {
+                            name: s(t, "name"),
+                            description: s(t, "description"),
+                            owner: s(t, "owner"),
+                            rows: t.get("rows").and_then(Value::as_u64).unwrap_or(0),
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+        } else if id.starts_with("app.table_rows") {
+            if let Some(e) = f.get("error") {
+                self.notices.push(s(e, "message"));
+                self.table_open = None;
+                return;
+            }
+            self.table_more = f.pointer("/value/more").and_then(Value::as_bool) == Some(true);
+            self.table_rows = f
+                .pointer("/value/rows")
+                .and_then(Value::as_array)
+                .map(|rs| {
+                    rs.iter()
+                        .map(|r| TableRow {
+                            id: r.get("id").and_then(Value::as_i64).unwrap_or(0),
+                            by: s(r, "by"),
+                            untrusted: r.get("untrusted").and_then(Value::as_bool) == Some(true),
+                            data: fields_of(r.get("data").unwrap_or(&Value::Null)),
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+        } else if id.starts_with("app.table_drop") {
+            if let Some(e) = f.get("error") {
+                self.notices.push(s(e, "message"));
+            }
         } else if id.starts_with("app.skills") {
             self.skills = f
                 .pointer("/value/skills")
@@ -2709,6 +2806,30 @@ impl Model {
         Ok(json!({"t": "cmd", "id": id, "name": name, "args": cmd_args}))
     }
 
+    /// Asks for the person's shared tables, and the open one's newest rows.
+    pub fn load_tables(&mut self) -> Vec<Value> {
+        let mut out = vec![
+            json!({"t": "cmd", "id": self.id("app.tables"), "name": "table.list", "args": {}}),
+        ];
+        if let Some(table) = self.table_open.clone() {
+            out.push(json!({"t": "cmd", "id": self.id("app.table_rows"), "name": "table.rows", "args": {"table": table, "desc": true, "limit": 200}}));
+        }
+        out
+    }
+
+    /// Opens a table on the tables page, or with None, the list again.
+    pub fn open_table(&mut self, table: Option<String>) -> Vec<Value> {
+        self.table_open = table;
+        self.table_rows.clear();
+        self.table_more = false;
+        self.load_tables()
+    }
+
+    pub fn drop_table(&mut self, table: &str) -> Value {
+        let id = self.id("app.table_drop");
+        json!({"t": "cmd", "id": id, "name": "table.drop", "args": {"table": table}})
+    }
+
     /// Asks for the person's skills, with what each says, for the skills page.
     pub fn load_skills(&mut self) -> Value {
         let id = self.id("app.skills");
@@ -3126,6 +3247,35 @@ mod tests {
             !m.unread.contains("a_1"),
             "its answer doesn't mark the agent unread"
         );
+    }
+
+    #[test]
+    fn tables_are_listed_opened_and_reloaded_when_they_change() {
+        let mut m = Model::new();
+        m.tables_open = true;
+        let asked = m.open_table(None);
+        assert_eq!(asked.len(), 1, "just the list, with no table open");
+        m.take(&json!({"t": "result", "id": asked[0]["id"], "ok": true, "value": {"tables": [{"name": "reading-list", "description": "Books", "owner": "a_1", "rows": 2}]}}));
+        assert_eq!(m.tables[0].name, "reading-list");
+        let asked = m.open_table(Some("reading-list".into()));
+        assert_eq!(asked[1]["name"], "table.rows");
+        assert_eq!(asked[1]["args"]["desc"], true);
+        m.take(&json!({"t": "result", "id": asked[1]["id"], "ok": true, "value": {"owner": "a_1", "more": false, "rows": [
+            {"id": 2, "by": "a_2", "untrusted": true, "data": {"title": "Emma"}},
+            {"id": 1, "by": "a_1", "data": {"title": "Dune"}}
+        ]}}));
+        assert_eq!(m.table_rows.len(), 2);
+        assert!(m.table_rows[0].untrusted && !m.table_rows[1].untrusted);
+        assert_eq!(m.table_rows[1].data, "title: Dune");
+        // A change reloads it, and dropping it closes it.
+        m.take(
+            &json!({"t": "event", "kind": "table.changed", "table": "reading-list", "by": "a_2"}),
+        );
+        let again = m.fetches();
+        assert!(again.iter().any(|f| f["name"] == "table.rows"));
+        m.take(&json!({"t": "event", "kind": "table.changed", "table": "reading-list", "by": "d_1", "dropped": true}));
+        assert!(m.table_open.is_none() && m.table_rows.is_empty());
+        assert_eq!(m.drop_table("x")["name"], "table.drop");
     }
 
     #[test]

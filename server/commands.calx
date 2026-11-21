@@ -25,7 +25,7 @@ struct Command {
     does: str
 }
 
-const COMMANDS: [Command; 66] = [
+const COMMANDS: [Command; 72] = [
     Command { name: "conversation.create", args: "agent, title?", does: "Makes a conversation with an agent." },
     Command { name: "conversation.rename", args: "conversation, title", does: "Renames a conversation." },
     Command { name: "conversation.branch", args: "message, title?", does: "Branches a chat at a message: a new conversation that goes on from there, apart from the chat." },
@@ -43,6 +43,12 @@ const COMMANDS: [Command; 66] = [
     Command { name: "memory.list", args: "agent?, query?, limit?", does: "Notes, an agent's and the shared ones." },
     Command { name: "memory.put", args: "text, agent? (left out: shared)", does: "Keeps a note." },
     Command { name: "memory.delete", args: "id", does: "Deletes a note." },
+    Command { name: "table.list", args: "", does: "The person's shared tables: name, description, owner and how many rows." },
+    Command { name: "table.create", args: "table, description?", does: "Makes a shared table, owned by whoever made it." },
+    Command { name: "table.write", args: "table, rows (objects of fields, with id to change a row)", does: "Writes rows into a shared table, and gives their ids." },
+    Command { name: "table.rows", args: "table, where? (fields and the values they equal), order_by?, desc?, limit?, offset?", does: "Reads rows of a shared table, those other agents wrote than its owner marked untrusted." },
+    Command { name: "table.delete_rows", args: "table, ids", does: "Deletes rows of a shared table: the caller's own, or any of a table it owns." },
+    Command { name: "table.drop", args: "table", does: "Drops a shared table and every row in it." },
     Command { name: "profile.get", args: "", does: "The person's profile, which every agent starts with." },
     Command { name: "profile.put", args: "text", does: "Writes the person's whole profile anew." },
     Command { name: "routine.list", args: "", does: "Routines, with when each runs next and how it last went." },
@@ -103,11 +109,11 @@ pub fn access(name: String) -> Access {
     if name.starts_with("push.") or name.starts_with("plugin.data.") or name == "plugin.cmd" { return Access.Never(String("That's for an app or a plugin's panel, not an agent.")) }
     if name.starts_with("browser.") { return Access.Never(String("Use your browser_ tools.")) }
     if name == "queue.steer" { return Access.Never(String("Steering is your person's: it stops the turn that's running.")) }
-    let runs = ["conversation.create", "conversation.rename", "conversation.branch", "messages.list", "messages.search", "messages.pinned", "message.pin", "agent.create", "agent.update", "agent.revisions", "agent.rollback", "activity.list", "memory.list", "memory.put", "profile.get", "profile.put", "routine.list", "routine.put", "routine.run", "task.list", "task.start", "task.pause", "task.resume", "task.cancel", "task.retry", "queue.list", "queue.edit", "queue.order", "queue.drop", "skill.list", "skill.get", "skill.put", "plugin.list", "plugin.get", "plugin.put", "plugin.revisions", "mcp.list", "secret.list", "acp.list", "acp.registry"]
+    let runs = ["conversation.create", "conversation.rename", "conversation.branch", "messages.list", "messages.search", "messages.pinned", "message.pin", "agent.create", "agent.update", "agent.revisions", "agent.rollback", "activity.list", "memory.list", "memory.put", "table.list", "table.create", "table.write", "table.rows", "table.delete_rows", "profile.get", "profile.put", "routine.list", "routine.put", "routine.run", "task.list", "task.start", "task.pause", "task.resume", "task.cancel", "task.retry", "queue.list", "queue.edit", "queue.order", "queue.drop", "skill.list", "skill.get", "skill.put", "plugin.list", "plugin.get", "plugin.put", "plugin.revisions", "mcp.list", "secret.list", "acp.list", "acp.registry"]
     for r in runs {
         if name == r { return Access.Runs }
     }
-    if name.ends_with(".delete") or name.ends_with(".remove") or name == "device.revoke" { return Access.Asks(String("delete")) }
+    if name.ends_with(".delete") or name.ends_with(".remove") or name == "device.revoke" or name == "table.drop" { return Access.Asks(String("delete")) }
     if name == "instance.move" { return Access.Asks(String("move")) }
     // Anything else, and anything new, asks first.
     return Access.Asks(String("other"))
@@ -148,7 +154,9 @@ fn reading_runs_and_harm_asks() {
     for c in COMMANDS {
         if let Access.Never(_) = access(String(c.name)) { panic("{c.name} is listed but never runs") }
     }
-    assert(catalog().len() == 66)
+    assert(catalog().len() == 72)
+    assert(access(String("table.write")) == Access.Runs and access(String("table.delete_rows")) == Access.Runs)
+    assert(access(String("table.drop")) == Access.Asks(String("delete")))
     assert(does(String("mcp.delete")) == "Removes an MCP server")
     assert(does(String("agent.update")) == "Changes an agent")
 }

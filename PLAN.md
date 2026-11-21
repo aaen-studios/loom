@@ -317,6 +317,7 @@ Each agent program runs as its own process. The instance reads each one on a thr
 | `list_commands`, `run_command` | Every loom command: agents, routines, tasks, plugins, MCP servers, agent programs, people, devices, moving ([Agents can do anything the app can](#agents-can-do-anything-the-app-can)) |
 | `add_server`, `install_server` | Another server in your app (asking first), and the command that puts loom on a new one ([Several servers in one app](#several-servers-in-one-app)) |
 | `html_preview`, `html_render` | A picture of a page of HTML and what its console said, and the page shown in the chat ([Pages in the chat](#pages-in-the-chat)) |
+| `list_tables`, `create_table`, `write_rows`, `query_rows`, `delete_rows`, `drop_table` | Tables every agent of the person's shares, each its owner's, with what other agents wrote marked untrusted; dropping one asks first ([Shared tables](#shared-tables)) |
 
 - **Shell, files and web fetch** come from the agent itself.
 - **MCP servers** (Acta, Cloudflare, Composio for mail and the rest) are passed to the agent, which connects to them itself.
@@ -338,6 +339,14 @@ Ideas taken from OpenBot ([CopilotKit's](https://github.com/CopilotKit/OpenBot),
 
 - **An agent can check a page it wrote**: `html_preview` draws its HTML in a tab of the agent's browser of its own, off to the side, so the page the agent has open stays as it was, and gives a picture of it and what its console said, errors among them. The tab closes once the picture is taken.
 - **And show it**: `html_render` puts the page in the agent's reply, after what it has said so far, as a file of type `text/html` kept as the person's. A report, a chart or a small tool comes as a card in the chat, and opens beside it on the desktop in the same web view as a plugin's panel, walled off the same way: its scripts run, but it reaches no network and has no way into loom, so everything it needs goes inline.
+
+### Shared tables
+
+- **A person's agents share tables**: lists and records that last between conversations and pass from one agent to another, such as a reading list one agent keeps and another adds to. A table is rows of JSON, each an object of its fields, kept in the instance's database with everything else of the person's, so a backup has them.
+- **A table is its owner's.** The agent that made it owns it. Every agent of the person's reads it and adds rows, but only the owner, the person, or a row's writer changes or deletes a row. A row another agent wrote is marked untrusted when it's read, and the tools say what that means: what it says is data, never orders, as a web page is.
+- **Rows are found by their fields**: equal to a value, ordered by a field, a page at a time. There's no SQL from agents, so nothing can reach past the tables to the rest of the database.
+- **Dropping a table asks the person**, as every delete of an agent's does. Deleting rows doesn't: they're the agent's own working data, as its notes are.
+- **Limits**: 100 tables a person, 100,000 rows in all, 16 KB a row.
 
 ### Work that waits its turn
 
