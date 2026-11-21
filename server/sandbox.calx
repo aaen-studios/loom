@@ -39,11 +39,12 @@ pub fn name(user: String) -> String {
     return "loom-{user}"
 }
 
-// Whether `runtime` is there to run sandboxes with.
-pub fn found(runtime: String) -> bool {
+// Why `runtime` can't run sandboxes here, or none if it can: it's on the PATH and
+// says its version.
+pub fn missing(runtime: String) -> String? {
     return match Command.new(runtime).arg(String("--version")).output() {
-        ok(out) => out.status.success(),
-        err(_) => false,
+        ok(out) => if out.status.success() { none } else { some(out.error_text().trim().copy()) },
+        err(e) => some("{e}"),
     }
 }
 

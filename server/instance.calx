@@ -498,7 +498,7 @@ impl Instance {
     // Starts the gate and sets up sandboxes run by `runtime`, from `image`.
     fn sandboxes_on(i: mut Instance, runtime: String, image: String) ! Error {
         if runtime != "podman" { fail "--sandboxes takes podman, not {runtime}" }
-        if not sandbox.found(runtime.copy()) { fail "--sandboxes podman, but Podman isn't installed: it runs the sandboxes of everyone but the owner" }
+        if let why = sandbox.missing(runtime.copy()) { fail "--sandboxes podman, but Podman doesn't run here ({why}): it runs the sandboxes of everyone but the owner" }
         let kept = u16.parse(try i.store.meta("gate_port") ?? String()) ?? 0
         let (t, stop, port) = try gate.start(kept, i.server.port)
         i.gate = some(t)
