@@ -76,6 +76,7 @@ enum Screen {
     Activity,
     Skills,
     Memory,
+    Profile,
     Programs,
     ThisDevice,
 }
@@ -115,6 +116,7 @@ pub struct Loom {
     /// for one being changed.
     skill_open: Option<Option<String>>,
     note_in: Entity<InputState>,
+    profile_in: Entity<TextareaState>,
     /// The program whose settings form is open, on the programs page.
     program_open: Option<String>,
     set_key_in: Entity<InputState>,
@@ -189,6 +191,11 @@ impl Loom {
         let name_in = input(window, cx, "Scribe", false);
         let skill_name_in = input(window, cx, "release-notes", false);
         let note_in = input(window, cx, "Something to remember", false);
+        let profile_in = cx.new(|cx| {
+            TextareaState::new(window, cx)
+                .auto_grow(6, 20)
+                .placeholder("Elliot, in Oslo. Builds loom. Likes short answers.")
+        });
         let set_key_in = input(window, cx, "ANTHROPIC_API_KEY", false);
         let set_value_in = input(window, cx, "Its value", true);
         let skill_desc_in = input(window, cx, "When it's for, in one sentence", false);
@@ -312,6 +319,7 @@ impl Loom {
             skill_body_in,
             skill_open: None,
             note_in,
+            profile_in,
             program_open: None,
             set_key_in,
             set_value_in,
@@ -942,11 +950,30 @@ impl Loom {
             .child(
                 div()
                     .flex()
-                    .gap(px(space::L))
+                    .flex_wrap()
+                    .gap_x(px(space::L))
+                    .gap_y(px(space::XS))
                     .px(px(space::L))
                     .py(px(space::S))
                     .border_t_1()
                     .border_color(p.line)
+                    .child(
+                        div()
+                            .id("about-you")
+                            .text_size(px(size::CAPTION))
+                            .text_color(p.ink_3)
+                            .cursor_pointer()
+                            .hover(move |s| s.text_color(p.ink))
+                            .child("About you")
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                let f = this.model.load_profile();
+                                this.send(f);
+                                this.model.profile = None;
+                                this.menu = None;
+                                this.screen = Screen::Profile;
+                                cx.notify();
+                            })),
+                    )
                     .child(
                         div()
                             .id("skills")
@@ -1060,12 +1087,13 @@ impl Loom {
             .px(px(space::L));
         if matches!(
             self.screen,
-            Screen::Skills | Screen::Programs | Screen::ThisDevice
+            Screen::Skills | Screen::Programs | Screen::ThisDevice | Screen::Profile
         ) {
             return bar.child(div().text_size(px(size::BODY)).text_color(p.ink_3).child(
                 match self.screen {
                     Screen::Skills => "Skills",
                     Screen::Programs => "Agent programs",
+                    Screen::Profile => "About you",
                     _ => "This PC",
                 },
             ));
@@ -2359,6 +2387,67 @@ impl Loom {
         div().flex_1().min_h_0().child(page)
     }
 
+    /// The About you page: the person's profile, which every agent's session starts with.
+    fn profile_page(&mut self, cx: &mut Context<Self>) -> Div {
+        let p = self.p;
+        let said = match &self.model.profile {
+            Some((_, revision, by)) if *revision > 0 => {
+                format!("Revision {revision}, by {}.", self.model.made_by(by))
+            }
+            Some(_) => "Nothing yet.".to_string(),
+            None => "Loading…".to_string(),
+        };
+        let body = div()
+            .w(px(560.0))
+            .flex()
+            .flex_col()
+            .gap(px(space::L))
+            .child(
+                div()
+                    .text_size(px(size::HEADING))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(p.ink)
+                    .child("About you"),
+            )
+            .child(
+                div()
+                    .text_size(px(size::CAPTION))
+                    .text_color(p.ink_3)
+                    .child("A few lines every agent starts with: who you are, what you do, how you like answers. Your agents update it as they learn, and you can change it here."),
+            )
+            .child(Textarea::new(&self.profile_in))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(space::M))
+                    .child(self.button("save-profile", "Save", true).on_click(cx.listener(
+                        |this, _, _, cx| {
+                            let text = this.profile_in.read(cx).value().to_string();
+                            let f = this.model.save_profile(&text);
+                            this.send(f);
+                            cx.notify();
+                        },
+                    )))
+                    .child(
+                        div()
+                            .text_size(px(size::CAPTION))
+                            .text_color(p.ink_3)
+                            .child(said),
+                    ),
+            );
+        let page = div()
+            .id("profile-page")
+            .size_full()
+            .overflow_y_scroll()
+            .flex()
+            .justify_center()
+            .pt(px(space::XXL))
+            .pb(px(space::XXL))
+            .child(body);
+        div().flex_1().min_h_0().child(page)
+    }
+
     /// The memory page: the selected agent's notes and the shared ones, newest first, to
     /// add to or delete from.
     fn memory_page(&mut self, cx: &mut Context<Self>) -> Div {
@@ -3025,6 +3114,16 @@ fn time_of(ms: i64) -> String {
 impl Render for Loom {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let p = self.p;
+        if std::mem::take(&mut self.model.profile_came) {
+            let text = self
+                .model
+                .profile
+                .as_ref()
+                .map(|p| p.0.clone())
+                .unwrap_or_default();
+            self.profile_in
+                .update(cx, |s, cx| s.set_value(text, window, cx));
+        }
         if self
             .model
             .agents
@@ -3049,6 +3148,7 @@ impl Render for Loom {
             Screen::EditAgent => self.edit_agent(cx),
             Screen::Activity => self.activity_page(),
             Screen::Memory => self.memory_page(cx),
+            Screen::Profile => self.profile_page(cx),
             Screen::Skills => self.skills_page(cx),
             Screen::Programs => self.programs_page(cx),
             Screen::ThisDevice => self.device_page(cx),

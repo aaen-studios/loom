@@ -286,7 +286,7 @@ Each agent program runs as its own process. The instance reads each one on a thr
 | Tool | What it does |
 |---|---|
 | `message_agent` | Talks to another of your agents |
-| `remember`, `recall` | Memory (below) |
+| `remember`, `recall`, `forget`, `update_profile` | Memory (below) |
 | `schedule` | Makes a routine |
 | `notify` | Sends you a notification |
 | `edit_instructions` | Changes the agent's own instructions |
@@ -333,7 +333,7 @@ In a desktop instance, the instance's machine and your PC are the same machine, 
 ## Memory
 
 - `remember`, `recall` and `forget` keep and search notes in SQLite with full-text search (FTS5), per person and per agent. A note can be shared by all the person's agents. `recall` finds any of its words, best match first. The person reads, adds and deletes them on the agent's **Memory** page.
-- A short profile of each person goes into every system prompt, and agents update it as they learn.
+- A short profile of each person (a few lines, up to 4000 bytes) starts every session, and comes again when it changes. Agents rewrite it with `update_profile` as they learn, and the person edits it on the **About you** page. Each change is a new revision, with who made it.
 - No embeddings to start. They come in if full-text search isn't enough.
 
 ## Routines

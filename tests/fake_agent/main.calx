@@ -435,7 +435,8 @@ impl Agent {
                 } else if let t = (b.get(String("text")) ?? Json.Null).as_str() {
                     // What loom says about where the person is, not a step.
                     if t.starts_with("[loom:") {
-                        context = t.copy()
+                        if context.len() > 0 { context.push_str("\n") }
+                        context.push_str(t)
                         continue
                     }
                     if text.len() > 0 { text.push_str("\n") }
