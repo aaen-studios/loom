@@ -53,6 +53,8 @@ usage: loom <command>
                             phones reach it on the network over Noise, once the owner turns them on
   user add NAME             add an account; the password comes on standard input
   user list                 list the accounts
+  user password NAME        give NAME a new password, from standard input, and sign them out everywhere:
+                            the owner's own reset
   acp add NAME COMMAND ...  add an ACP agent program, such as: acp add claude npx -y @agentclientprotocol/claude-agent-acp
   acp list                  list the ACP agent programs
   files limit MB|off        cap the files each person can keep, in megabytes
@@ -313,6 +315,18 @@ fn run(a: Args) -> Said ! Error {
         let role = if try store.user_count() == 0 { "owner" } else { "member" }
         let u = try store.add_user(a.words[2].copy(), password, role)
         return said("added {u.username} ({u.id}, {role})", Obj.new().s("id", u.id.copy()).s("username", u.username.copy()).s("role", String(role)).done())
+    }
+    // The owner's own reset (PLAN.md, "Accounts and invites"), or anyone's: a new
+    // password from standard input, and every device of theirs signed out.
+    if cmd == "user" and sub == "password" and a.words.len() == 3 {
+        let store = try open_store(a.copy())
+        let u = try store.find_username(a.words[2].copy()) else { fail "there's no one called {a.words[2]} here" }
+        var lines = io.Lines()
+        let password = lines.next() ?? String()
+        if password.len() < 8 { fail "a password needs at least 8 characters" }
+        try store.set_password(u.id.copy(), password)
+        let gone = try store.revoke_all(u.id.copy())
+        return said("{u.username} has a new password, and is signed out on {gone.len()} devices", Obj.new().s("id", u.id.copy()).s("username", u.username.copy()).i("signed_out", i64.wrap(gone.len())).done())
     }
     if cmd == "user" and sub == "list" {
         let store = try open_store(a)

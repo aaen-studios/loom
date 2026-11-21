@@ -230,6 +230,8 @@ const PROFILE_MOST: usize = 4000
 const HOOK_MOST: usize = 20000
 // How long a code to add a device by QR code works: five minutes.
 const LINK_MS: i64 = 300000
+// How long a password reset link works: a day.
+const RESET_MS: i64 = 86400000
 // How much a plugin's panel keeps, in bytes, at most.
 const PLUGIN_DATA_MOST: i64 = 1000000
 
@@ -249,6 +251,7 @@ struct Auth {
     address: String
     invite: String    // the invite an account comes with, for a join
     role: String      // and the role it gives
+    reset: String     // the reset code's hash, for a password reset
 }
 
 const RATE_TRIES: usize = 10
@@ -810,6 +813,7 @@ impl Instance {
         }
         if req.path == "/api/setup" { return try i.setup(req, body) }
         if req.path.starts_with("/api/join/") { return try i.join(req, body) }
+        if req.path.starts_with("/api/reset/") { return try i.reset(req, body) }
         if req.path == "/api/login" { return try i.login(req, body) }
         if req.path == "/api/link" { return some(try i.link(req, body)) }
         if req.path == "/api/logout" { return try i.logout(req) }
@@ -1767,6 +1771,13 @@ impl Instance {
             if theirs == "admin" and role != "owner" { return Answer.Refused(String("not_allowed"), String("Only the owner removes admins.")) }
             return try i.remove_person(target)
         }
+        if name == "password.reset" {
+            if theirs == "admin" and role != "owner" { return Answer.Refused(String("not_allowed"), String("Only the owner resets an admin's password.")) }
+            let code = bytes.hex(random_bytes(16))
+            let expires = now() + RESET_MS
+            try i.store.add_reset(bytes.hex(sha256(code.to_bytes())), target, user, expires)
+            return Answer.Value(Obj.new().s("code", code).i("expires", expires).done())
+        }
         return Answer.Refused(String("unknown_command"), "Version 1 has no command {name}.")
     }
 
@@ -1790,6 +1801,44 @@ impl Instance {
         i.next_sweep = 0
         println("loom: removed {name}")
         return Answer.Value(Obj.new().done())
+    }
+
+    // POST /api/reset/<code>: a new password, from the reset link an owner or
+    // admin made. It signs the person out everywhere, and in here.
+    fn reset(i: mut Instance, req: Request, body: Json) -> Response? ! Error {
+        let address = client_address(req.client.copy())
+        if let wait = i.limited(address.copy(), String()) { return some(rate_limited(wait)) }
+        let hash = bytes.hex(sha256(req.path["/api/reset/".len()..].to_bytes()))
+        let (user, expires) = try i.store.reset(hash.copy()) else {
+            i.failed(address, String())
+            return some(http_error(403, "bad_code", String("That reset link isn't this instance's, or it was used.")))
+        }
+        if expires <= now() { return some(http_error(410, "expired", String("That reset link has expired. Ask for a new one."))) }
+        let password = str_at(body.copy(), "password") ?? String()
+        if password.len() < 8 {
+            return some(http_error(400, "weak_password", String("A password needs at least 8 characters.")))
+        }
+        let who = User { id: user, username: String(), role: String() }
+        i.hash_later(Auth { req: req.copy(), body: body.copy(), user: some(who), setup: false, username: String(), address: address, invite: String(), role: String(), reset: hash }, password, String())
+        return none
+    }
+
+    // The new password, once it's hashed: every device of theirs is signed
+    // out, and this one signed in.
+    fn was_reset(i: mut Instance, auth: Auth, hash: String) ! Error {
+        let who = auth.user else return
+        if not try i.store.take_reset(auth.reset.copy()) {
+            i.server.respond(auth.req, http_error(403, "bad_code", String("That reset link isn't this instance's, or it was used.")))
+            return
+        }
+        try i.store.set_password_hash(who.id.copy(), hash)
+        for device in try i.store.revoke_all(who.id.copy()) {
+            try i.event(who.id.copy(), "device.revoked", Obj.new().s("device", device.copy()).done())
+            for (_, s) in i.sessions {
+                if s.device == device { i.server.close_socket(s.socket, protocol.CLOSE_TOKEN, String("the password was reset")) }
+            }
+        }
+        i.server.respond(auth.req, json_response(200, try i.new_device(who.id, auth.body.copy())))
     }
 
     // POST /api/join/<code>: an account from an invite (PLAN.md, "Accounts and
@@ -1816,7 +1865,7 @@ impl Instance {
         if try i.store.find_username(username.copy()) != none {
             return some(http_error(409, "username_taken", "Someone here has the username {username} already. Pick another."))
         }
-        i.hash_later(Auth { req: req.copy(), body: body.copy(), user: none, setup: false, username: username, address: address, invite: id, role: role }, password, String())
+        i.hash_later(Auth { req: req.copy(), body: body.copy(), user: none, setup: false, username: username, address: address, invite: id, role: role, reset: String() }, password, String())
         return none
     }
 
@@ -1862,7 +1911,7 @@ impl Instance {
         if password.len() < 8 {
             return some(http_error(400, "weak_password", String("A password needs at least 8 characters.")))
         }
-        i.hash_later(Auth { req: req.copy(), body: body.copy(), user: none, setup: true, username: username, address: address, invite: String(), role: String() }, password, String())
+        i.hash_later(Auth { req: req.copy(), body: body.copy(), user: none, setup: true, username: username, address: address, invite: String(), role: String(), reset: String() }, password, String())
         return none
     }
 
@@ -1879,7 +1928,7 @@ impl Instance {
             user = some(u)
             stored = h
         }
-        i.hash_later(Auth { req: req.copy(), body: body.copy(), user: user, setup: false, username: username, address: address, invite: String(), role: String() }, password, stored)
+        i.hash_later(Auth { req: req.copy(), body: body.copy(), user: user, setup: false, username: username, address: address, invite: String(), role: String(), reset: String() }, password, stored)
         return none
     }
 
@@ -1922,6 +1971,10 @@ impl Instance {
         let auth = i.auths.remove(done.id) else return
         if auth.invite.len() > 0 {
             try i.joined(auth, done.hash.copy())
+            return
+        }
+        if auth.reset.len() > 0 {
+            try i.was_reset(auth, done.hash.copy())
             return
         }
         if auth.setup {
@@ -3381,7 +3434,7 @@ impl Instance {
             if i.bridge != none { value = value.j("noise", try i.phones()) }
             return Answer.Value(value.done())
         }
-        if name.starts_with("invite.") or name.starts_with("user.") or name == "account.delete" {
+        if name.starts_with("invite.") or name.starts_with("user.") or name == "account.delete" or name == "password.reset" {
             return try i.people_cmd(user, device, name, args)
         }
         if name == "instance.phones" {

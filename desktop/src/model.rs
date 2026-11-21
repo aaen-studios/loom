@@ -647,6 +647,8 @@ pub struct Model {
     pub people: Vec<Person>,
     pub invites: Vec<Invite>,
     pub invite_made: Option<(String, String, i64)>,
+    /// The newest password reset link made here: whose, the link, and when it expires.
+    pub reset_made: Option<(String, String, i64)>,
     /// Why the People page shows nothing, when the instance said no.
     pub people_refused: Option<String>,
     pub people_open: bool,
@@ -1180,6 +1182,22 @@ impl Model {
                 ));
             }
             self.people_stale = true;
+        } else if let Some(who) = id.strip_prefix("app.reset:") {
+            if let Some(e) = f.get("error") {
+                self.notices.push(s(e, "message"));
+            } else if let Some(v) = f.get("value") {
+                let who = who.rsplit_once('_').map_or(who, |(w, _)| w);
+                let link = v
+                    .get("link")
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+                    .unwrap_or_else(|| s(v, "code"));
+                self.reset_made = Some((
+                    who.to_string(),
+                    link,
+                    v.get("expires").and_then(Value::as_i64).unwrap_or(0),
+                ));
+            }
         } else if id.starts_with("app.person") {
             if let Some(e) = f.get("error") {
                 self.notices.push(s(e, "message"));
@@ -2116,6 +2134,13 @@ impl Model {
         json!({"t": "cmd", "id": id, "name": "user.role", "args": {"user": user, "role": role}})
     }
 
+    /// Makes a link that sets a new password for `user`, whose name is `username`.
+    pub fn reset_password(&mut self, user: &str, username: &str) -> Value {
+        let id = self.id(&format!("app.reset:{username}"));
+        self.reset_made = None;
+        json!({"t": "cmd", "id": id, "name": "password.reset", "args": {"user": user}})
+    }
+
     /// Removes someone, and everything of theirs.
     pub fn remove_person(&mut self, user: &str) -> Value {
         let id = self.id("app.person");
@@ -2369,6 +2394,17 @@ mod tests {
         assert_eq!(
             m.invite_made,
             Some(("https://loom.example.com/join/ab".into(), "admin".into(), 5))
+        );
+        let reset = m.reset_password("u_2", "ann_b");
+        assert_eq!(reset["name"], "password.reset");
+        m.result(&json!({"t": "result", "id": reset["id"], "ok": true, "value": {"code": "cd", "link": "https://loom.example.com/reset/cd", "expires": 7}}));
+        assert_eq!(
+            m.reset_made,
+            Some((
+                "ann_b".into(),
+                "https://loom.example.com/reset/cd".into(),
+                7
+            ))
         );
         // A member is told why there's nothing to see.
         let [people, _] = m.load_people().try_into().unwrap();

@@ -19,7 +19,7 @@ import std.process.{exit}
 import shared.obj.{Obj, at, bool_at, int_at, str_at}
 import core.cache.{Cache}
 import core.conn.{Conn}
-import tests.kit.{App, Instance, check, device, json_of}
+import tests.kit.{App, Instance, check, device, json_of, loom, post_json}
 
 fn code_of(answer: Json) -> String {
     return str_at(at(answer, "error"), "code") ?? String()
@@ -132,6 +132,21 @@ fn run() ! Error {
         ok(_) => {},
         err(_) => {},
     }
+    if failure == none {
+        // The owner's own reset, from the command line, signs them out everywhere.
+        let done = try loom(inst.data.copy(), [String("user"), String("password"), String("elliot")]).input_text(String("the owner's new one\n")).output()
+        try check(done.status.success(), "loom user password gives the owner a new password")
+        let (status, _) = try post_json(inst.base.copy(), "/api/login", Obj.new().s("username", String("elliot")).s("password", String("the owner's new one")).j("device", device("Laptop")).done())
+        try check(status == 200, "which logs in")
+        let old_gone = match App.connect(inst.base.copy(), inst.token.copy(), 0) {
+            ok(a) => {
+                a.close()
+                false
+            },
+            err(_) => true,
+        }
+        try check(old_gone, "and the owner's old devices are signed out")
+    }
     inst.stop()
     if let f = failure { fail "{f}" }
 }
@@ -150,6 +165,21 @@ fn cores(owners: mut Core, newcomer: mut Core, base: String) ! Error {
     newcomer.send(Obj.new().s("t", String("invite.join")).s("id", String("l_2")).s("link", String("https://example.com/nothing")).done())
     let bad = try newcomer.until("core.login")
     try check(code_of(bad) == "bad_link", "a link that isn't an invite is refused")
+
+    // A forgotten password: the owner makes a reset link, and cora sets a new one with it.
+    let cora = str_at(joined, "user") ?? String()
+    owners.send(Obj.new().s("t", String("cmd")).s("id", String("q_2")).s("name", String("password.reset")).j("args", Obj.new().s("user", cora).done()).done())
+    let reset = str_at(at(try owners.until("result"), "value"), "link") ?? String()
+    try check(reset.starts_with("http://{base}/reset/"), "the owner's core gives a reset link")
+    newcomer.send(Obj.new().s("t", String("reset.use")).s("id", String("l_3")).s("link", reset.copy()).s("password", String("cora's new password")).j("device", device("Phone")).done())
+    let again = try newcomer.until("core.login")
+    try check(bool_at(again, "ok") == some(true), "cora sets a new password with it, and is signed in")
+    let (old, _) = try post_json(base.copy(), "/api/login", Obj.new().s("username", String("cora")).s("password", String("cora's password")).j("device", device("Laptop")).done())
+    let (new_one, _) = try post_json(base.copy(), "/api/login", Obj.new().s("username", String("cora")).s("password", String("cora's new password")).j("device", device("Laptop")).done())
+    try check(old == 401 and new_one == 200, "the old password no longer works, and the new one does")
+    newcomer.send(Obj.new().s("t", String("reset.use")).s("id", String("l_4")).s("link", reset).s("password", String("another password")).done())
+    let used = try newcomer.until("core.login")
+    try check(code_of(used) == "bad_code", "a reset link works once")
 }
 
 // The app's side of a real core.

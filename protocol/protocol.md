@@ -108,6 +108,17 @@ A code works once, for five minutes. The device that showed it hears `device.add
 
 No login. Makes an account from an invite ([`invite.create`](#commands)), with the username and password the person picked, and its first device. The same body and answer as `/api/setup`, without `code`. The account gets the invite's role. Errors: `bad_code` (it counts toward `rate_limited` as a wrong password does), `expired`, `used_up`, `username_taken`, `bad_username`, `weak_password`.
 
+### `POST /api/reset/<code>`
+
+No login. A new password, from the link an owner or admin made ([`password.reset`](#commands)), and a new device signed in with it, as a login gives:
+
+```json
+→ { "password": "…", "device": { "name": "iPhone", "kind": "ios", "tz": "Europe/Oslo" } }
+← { "user": "u_2", "device": "d_9", "token": "<device token>" }
+```
+
+A link works once, for a day. Every other device of the person's is signed out (`device.revoked`, and 4001 on its socket). Errors: `bad_code` (also for a link that was used, and it counts toward `rate_limited` as a wrong password does), `expired`, `weak_password`. The owner's own reset is `loom user password` on the server.
+
 ### `POST /api/logout`
 
 Login needed. Revokes this device's token. No body, and `204` back.
@@ -518,6 +529,7 @@ Version 1's commands:
 | `user.role` | `user`, `role` (`member` or `admin`) | —. The owner only, and never for the owner |
 | `user.remove` | `user` | —. Removes the person and everything of theirs, and their sessions close with 4001 once this is answered. The owner removes anyone but the owner, an admin only members, and not while one of their agents is answering (`busy`) |
 | `account.delete` | — | —. The person removes their own account, as `user.remove` does. Not the owner |
+| `password.reset` | `user` | `code` (for [`POST /api/reset/<code>`](#post-apiresetcode), shown once), `expires` (a day on). The owner resets anyone but the owner, an admin only members. Each new link replaces the person's last |
 | `agent.revisions` | `agent` | `revisions`, newest first: each `revision`, `by` (the device or agent that made it), `at`, and `agent` as it was then |
 | `agent.rollback` | `agent`, `revision` | `agent`: a new revision with that one's name, ACP agent, instructions, folder and colour. The permission mode stays as it is |
 | `agent.delete` | `agent` | — |
@@ -559,7 +571,7 @@ commands = ["routine.list"]   # commands the panel may send
 agents = true                 # the panel may message the person's agents
 ```
 
-What it asks for is its `asks`: `tools` when it has a tool server, `agents`, and `cmd:<name>` for each command. A panel never gets the commands that would let it allow itself more, borrow another plugin's permissions, run programs on the instance, or reach the person's devices, secrets and sign-in: `plugin.put`, `plugin.allow`, `plugin.delete`, `plugin.cmd`, `plugin.message`, `instance.move`, `instance.phones`, `invite.create`, `invite.delete`, `user.role`, `user.remove`, `account.delete`, `link.create`, `push.register`, `push.unregister`, `device.revoke`, `device.rename`, `secret.list`, `secret.put`, `secret.delete`, `mcp.put`, `acp.install`, `acp.remove` and `acp.settings`. Until its person allows something, it waits, and the plugin goes without it.
+What it asks for is its `asks`: `tools` when it has a tool server, `agents`, and `cmd:<name>` for each command. A panel never gets the commands that would let it allow itself more, borrow another plugin's permissions, run programs on the instance, or reach the person's devices, secrets and sign-in: `plugin.put`, `plugin.allow`, `plugin.delete`, `plugin.cmd`, `plugin.message`, `instance.move`, `instance.phones`, `invite.create`, `invite.delete`, `user.role`, `user.remove`, `account.delete`, `password.reset`, `link.create`, `push.register`, `push.unregister`, `device.revoke`, `device.rename`, `secret.list`, `secret.put`, `secret.delete`, `mcp.put`, `acp.install`, `acp.remove` and `acp.settings`. Until its person allows something, it waits, and the plugin goes without it.
 
 - **A tool server** the person allowed is in every one of their agents' new sessions, as the MCP server `plugin-<id>`. It runs from a folder holding the revision's files, with `LOOM_PLUGIN_DIR` set to that folder.
 - **A panel** talks to the app through one door, `await loom.send(op, args)` (desktop/src/panel.rs). The app sends these on, and refuses everything else, and the instance checks what's allowed:
