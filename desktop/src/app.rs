@@ -75,6 +75,7 @@ enum Screen {
     EditAgent,
     Activity,
     Skills,
+    Memory,
     Programs,
     ThisDevice,
 }
@@ -113,6 +114,7 @@ pub struct Loom {
     /// On the skills page: none for the list, `Some(None)` for a new skill, `Some(Some(name))`
     /// for one being changed.
     skill_open: Option<Option<String>>,
+    note_in: Entity<InputState>,
     /// The program whose settings form is open, on the programs page.
     program_open: Option<String>,
     set_key_in: Entity<InputState>,
@@ -186,6 +188,7 @@ impl Loom {
         let code_in = input(window, cx, "Setup code, for a new instance", false);
         let name_in = input(window, cx, "Scribe", false);
         let skill_name_in = input(window, cx, "release-notes", false);
+        let note_in = input(window, cx, "Something to remember", false);
         let set_key_in = input(window, cx, "ANTHROPIC_API_KEY", false);
         let set_value_in = input(window, cx, "Its value", true);
         let skill_desc_in = input(window, cx, "When it's for, in one sentence", false);
@@ -308,6 +311,7 @@ impl Loom {
             skill_desc_in,
             skill_body_in,
             skill_open: None,
+            note_in,
             program_open: None,
             set_key_in,
             set_value_in,
@@ -1083,11 +1087,14 @@ impl Loom {
                     .child("New agent"),
             );
         }
-        if self.screen == Screen::EditAgent || self.screen == Screen::Activity {
-            let title = if self.screen == Screen::EditAgent {
-                format!("Edit {}", agent.name)
-            } else {
-                format!("What {} did", agent.name)
+        if matches!(
+            self.screen,
+            Screen::EditAgent | Screen::Activity | Screen::Memory
+        ) {
+            let title = match self.screen {
+                Screen::EditAgent => format!("Edit {}", agent.name),
+                Screen::Memory => format!("What {} remembers", agent.name),
+                _ => format!("What {} did", agent.name),
             };
             return bar.child(
                 div()
@@ -1275,6 +1282,23 @@ impl Loom {
                             this.send(f);
                         }
                         this.screen = Screen::Activity;
+                        this.menu = None;
+                        cx.notify();
+                    })),
+                )
+                .child(
+                    self.menu_item(
+                        "memory",
+                        "Memory",
+                        "What it remembers, and what all your agents share.",
+                        false,
+                    )
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.model.notes.clear();
+                        if let Some(f) = this.model.load_notes() {
+                            this.send(f);
+                        }
+                        this.screen = Screen::Memory;
                         this.menu = None;
                         cx.notify();
                     })),
@@ -2335,6 +2359,107 @@ impl Loom {
         div().flex_1().min_h_0().child(page)
     }
 
+    /// The memory page: the selected agent's notes and the shared ones, newest first, to
+    /// add to or delete from.
+    fn memory_page(&mut self, cx: &mut Context<Self>) -> Div {
+        let p = self.p;
+        let mut list = div().flex().flex_col();
+        if self.model.notes.is_empty() {
+            list = list.child(div().text_size(px(size::SMALL)).text_color(p.ink_3).child(
+                "Nothing yet. Agents keep notes with remember, and look them up with recall.",
+            ));
+        }
+        for n in self.model.notes.clone() {
+            let who = if n.shared {
+                "Shared".to_string()
+            } else {
+                self.model.made_by(&n.by)
+            };
+            let note = n.id;
+            list = list.child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(space::M))
+                    .py(px(space::S))
+                    .border_b_1()
+                    .border_color(p.line)
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .flex()
+                            .flex_col()
+                            .child(
+                                div()
+                                    .text_size(px(size::SMALL))
+                                    .text_color(p.ink)
+                                    .child(n.text.clone()),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(size::CAPTION))
+                                    .text_color(p.ink_3)
+                                    .child(format!("{who} · {} {}", day_of(n.at), time_of(n.at))),
+                            ),
+                    )
+                    .child(
+                        self.button_owned(format!("forget-{note}"), "Delete", false)
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                let f = this.model.delete_note(note);
+                                this.send(f);
+                                cx.notify();
+                            })),
+                    ),
+            );
+        }
+        let add = |shared: bool| {
+            cx.listener(
+                move |this: &mut Self,
+                      _: &ClickEvent,
+                      window: &mut Window,
+                      cx: &mut Context<Self>| {
+                    let text = this.note_in.read(cx).value().to_string();
+                    if text.trim().is_empty() {
+                        return;
+                    }
+                    if let Some(f) = this.model.add_note(&text, shared) {
+                        this.send(f);
+                    }
+                    this.note_in.update(cx, |s, cx| s.set_value("", window, cx));
+                    cx.notify();
+                },
+            )
+        };
+        let body = div()
+            .w(px(560.0))
+            .flex()
+            .flex_col()
+            .gap(px(space::L))
+            .child(
+                div()
+                    .flex()
+                    .gap(px(space::S))
+                    .child(div().flex_1().child(Input::new(&self.note_in)))
+                    .child(self.button("note-own", "Add", true).on_click(add(false)))
+                    .child(
+                        self.button("note-shared", "Add for all", false)
+                            .on_click(add(true)),
+                    ),
+            )
+            .child(list);
+        let page = div()
+            .id("memory-page")
+            .size_full()
+            .overflow_y_scroll()
+            .flex()
+            .justify_center()
+            .pt(px(space::XXL))
+            .pb(px(space::XXL))
+            .child(body);
+        div().flex_1().min_h_0().child(page)
+    }
+
     /// The activity page: what the selected agent did, and what was done to it, newest
     /// first.
     fn activity_page(&mut self) -> Div {
@@ -2373,6 +2498,7 @@ impl Loom {
                 "approval" => "Asked",
                 "message" => "Handed over",
                 "notify" => "Notified",
+                "memory" => "Remembered",
                 "device" => "On a device",
                 _ => "Changed",
             };
@@ -2922,6 +3048,7 @@ impl Render for Loom {
             Screen::NewAgent => self.new_agent(cx),
             Screen::EditAgent => self.edit_agent(cx),
             Screen::Activity => self.activity_page(),
+            Screen::Memory => self.memory_page(cx),
             Screen::Skills => self.skills_page(cx),
             Screen::Programs => self.programs_page(cx),
             Screen::ThisDevice => self.device_page(cx),

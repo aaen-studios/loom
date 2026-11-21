@@ -83,6 +83,16 @@ pub struct Listed {
     pub installed: Option<String>,
 }
 
+/// A note an agent keeps, or one shared by all of the person's agents.
+#[derive(Clone, Debug)]
+pub struct Note {
+    pub id: i64,
+    pub text: String,
+    pub shared: bool,
+    pub by: String,
+    pub at: i64,
+}
+
 /// One of the person's skills.
 #[derive(Clone, Debug)]
 pub struct Skill {
@@ -329,6 +339,9 @@ pub struct Model {
     /// The person's skills, by name, for the skills page.
     pub skills: Vec<Skill>,
     skills_stale: bool,
+    /// What the selected agent remembers, for the memory page, newest first.
+    pub notes: Vec<Note>,
+    notes_stale: bool,
     /// The agent programs on the instance, for the programs page.
     pub installed: Vec<Program>,
     /// The ACP Registry's agents, once it's been read.
@@ -419,6 +432,11 @@ impl Model {
         if std::mem::take(&mut self.programs_stale) {
             out.push(self.programs());
             out.push(self.registry_cmd());
+        }
+        if std::mem::take(&mut self.notes_stale) {
+            if let Some(f) = self.load_notes() {
+                out.push(f);
+            }
         }
         if std::mem::take(&mut self.skills_stale) {
             out.push(self.load_skills());
@@ -691,6 +709,27 @@ impl Model {
                 self.notices.push(s(e, "message"));
             }
             self.skills_stale = true;
+        } else if id.starts_with("app.memory_list") {
+            self.notes = f
+                .pointer("/value/memories")
+                .and_then(Value::as_array)
+                .map(|ns| {
+                    ns.iter()
+                        .map(|n| Note {
+                            id: n.get("id").and_then(Value::as_i64).unwrap_or(0),
+                            text: s(n, "text"),
+                            shared: n.get("shared").and_then(Value::as_bool).unwrap_or(false),
+                            by: s(n, "by"),
+                            at: n.get("at").and_then(Value::as_i64).unwrap_or(0),
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+        } else if id.starts_with("app.memory_") {
+            if let Some(e) = f.get("error") {
+                self.notices.push(s(e, "message"));
+            }
+            self.notes_stale = true;
         } else if id.starts_with("app.activity") {
             self.activity = f
                 .pointer("/value/activity")
@@ -1333,6 +1372,33 @@ impl Model {
     pub fn delete_skill(&mut self, name: &str) -> Value {
         let id = self.id("app.skill_delete");
         json!({"t": "cmd", "id": id, "name": "skill.delete", "args": {"name": name}})
+    }
+
+    /// Asks for what the selected agent remembers, for the memory page.
+    pub fn load_notes(&mut self) -> Option<Value> {
+        let agent = self.selected.clone()?;
+        let id = self.id("app.memory_list");
+        Some(
+            json!({"t": "cmd", "id": id, "name": "memory.list", "args": {"agent": agent, "limit": 500}}),
+        )
+    }
+
+    /// Adds a note for the selected agent, or for all of them.
+    pub fn add_note(&mut self, text: &str, shared: bool) -> Option<Value> {
+        let agent = if shared {
+            String::new()
+        } else {
+            self.selected.clone()?
+        };
+        let id = self.id("app.memory_put");
+        Some(
+            json!({"t": "cmd", "id": id, "name": "memory.put", "args": {"text": text.trim(), "agent": agent}}),
+        )
+    }
+
+    pub fn delete_note(&mut self, note: i64) -> Value {
+        let id = self.id("app.memory_delete");
+        json!({"t": "cmd", "id": id, "name": "memory.delete", "args": {"id": note}})
     }
 
     /// Asks for the selected agent's activity, for the activity page.
