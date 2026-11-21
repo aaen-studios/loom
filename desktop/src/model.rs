@@ -341,6 +341,21 @@ pub struct Skill {
     pub body: String,
 }
 
+/// The composer's text with a skill picked from the + menu: the message
+/// starts by asking for it, before what was written already.
+pub fn with_skill(name: &str, text: &str) -> String {
+    let ask = format!("Use the {name} skill.");
+    let rest = text.trim_start();
+    if rest.starts_with(&ask) {
+        return text.to_string();
+    }
+    if rest.is_empty() {
+        format!("{ask} ")
+    } else {
+        format!("{ask} {rest}")
+    }
+}
+
 /// One of the person's shared tables (PLAN.md, "Shared tables").
 #[derive(Clone, Debug, PartialEq)]
 pub struct SharedTable {
@@ -3701,6 +3716,19 @@ mod tests {
             &json!({"t": "core.data", "what": "agents", "items": [{"id": "a_1", "name": "Main"}]}),
         );
         assert_eq!(m.agent("a_1").unwrap().picked(), None);
+    }
+
+    #[test]
+    fn a_skill_from_the_plus_menu_starts_the_message() {
+        assert_eq!(with_skill("review", ""), "Use the review skill. ");
+        assert_eq!(
+            with_skill("review", "  the login page"),
+            "Use the review skill. the login page"
+        );
+        assert_eq!(
+            with_skill("review", "Use the review skill. again"),
+            "Use the review skill. again"
+        );
     }
 
     #[test]

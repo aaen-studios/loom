@@ -103,6 +103,14 @@ enum Menu {
     Permission,
 }
 
+/// The composer's + menu, open at its first list or at one it leads to.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Plus {
+    Main,
+    Skills,
+    Routines,
+}
+
 /// One row of the chat's list.
 #[derive(Clone)]
 enum Row {
@@ -130,6 +138,7 @@ pub struct Loom {
     p: Palette,
     screen: Screen,
     menu: Option<Menu>,
+    plus: Option<Plus>,
     /// The settings or server popup over the window, open at this page.
     popup: Option<Screen>,
     /// The panel beside the chat on the right: an agent's page, or a plugin's panel.
@@ -648,6 +657,7 @@ ACTA_KEY=secret:ACTA_KEY",
             p: Palette::new(dark),
             screen: Screen::Chat,
             menu: None,
+            plus: None,
             popup: None,
             side: None,
             settings_last: Screen::Profile,
@@ -3685,10 +3695,16 @@ ACTA_KEY=secret:ACTA_KEY",
     }
 
     /// A menu entry: its icon and its title.
-    fn menu_item(&self, id: &'static str, icon: Ico, title: &str, danger: bool) -> Stateful<Div> {
+    fn menu_item(
+        &self,
+        id: impl Into<SharedString>,
+        icon: Ico,
+        title: &str,
+        danger: bool,
+    ) -> Stateful<Div> {
         let p = self.p;
         div()
-            .id(id)
+            .id(id.into())
             .flex()
             .items_center()
             .gap(px(space::M))
@@ -3705,6 +3721,144 @@ ACTA_KEY=secret:ACTA_KEY",
                     .child(Icon::new(icon).small()),
             )
             .child(div().flex_1().child(title.to_string()))
+    }
+
+    /// The composer's + menu: attach files, start the message with one of the
+    /// person's skills, or run one of this agent's routines now.
+    fn plus_menu(&self, which: Plus, cx: &mut Context<Self>) -> Div {
+        let p = self.p;
+        let panel = div()
+            .occlude()
+            .mb(px(space::S))
+            .w(px(240.0))
+            .max_h(px(320.0))
+            .p(px(space::XS))
+            .flex()
+            .flex_col()
+            .bg(p.raised)
+            .border_1()
+            .border_color(p.line_strong)
+            .rounded(px(radius::CARD))
+            .shadow_lg()
+            .on_mouse_down_out(cx.listener(|this, _, _, cx| {
+                this.plus = None;
+                cx.notify();
+            }));
+        let back = |this: &Self, cx: &mut Context<Self>| {
+            this.menu_item("plus-back", Ico::ArrowLeft, "Back", false)
+                .text_color(this.p.ink_2)
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.plus = Some(Plus::Main);
+                    cx.notify();
+                }))
+        };
+        let none = |text: &'static str| {
+            div()
+                .px(px(space::M))
+                .py(px(space::S))
+                .text_size(px(size::SMALL))
+                .text_color(p.ink_3)
+                .child(text)
+        };
+        match which {
+            Plus::Main => panel
+                .child(
+                    self.menu_item("plus-attach", Ico::Paperclip, "Attach files", false)
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.plus = None;
+                            this.pick_files(cx);
+                            cx.notify();
+                        })),
+                )
+                .child(
+                    self.menu_item("plus-skill", Ico::BookOpen, "Use a skill", false)
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            let f = this.model.load_skills();
+                            this.send(f);
+                            this.plus = Some(Plus::Skills);
+                            cx.notify();
+                        })),
+                )
+                .child(
+                    self.menu_item("plus-routine", Ico::Clock, "Run a routine", false)
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            let f = this.model.load_routines();
+                            this.send(f);
+                            this.plus = Some(Plus::Routines);
+                            cx.notify();
+                        })),
+                ),
+            Plus::Skills => {
+                let mut list = div()
+                    .id("plus-skills")
+                    .flex()
+                    .flex_col()
+                    .overflow_y_scroll();
+                if self.model.skills.is_empty() {
+                    list = list.child(none("No skills yet"));
+                }
+                for s in self.model.skills.clone() {
+                    let name = s.name.clone();
+                    list = list.child(
+                        self.menu_item(
+                            format!("plus-skill-{}", s.name),
+                            Ico::BookOpen,
+                            &s.name,
+                            false,
+                        )
+                        .on_click(cx.listener(
+                            move |this, _, window, cx| {
+                                let text = this.composer.read(cx).value().to_string();
+                                let next = model::with_skill(&name, &text);
+                                this.composer.update(cx, |c, cx| {
+                                    c.set_value(next, window, cx);
+                                    c.focus(window, cx);
+                                });
+                                this.plus = None;
+                                cx.notify();
+                            },
+                        )),
+                    );
+                }
+                panel.child(back(self, cx)).child(list)
+            }
+            Plus::Routines => {
+                let agent = self.model.selected.clone().unwrap_or_default();
+                let mine: Vec<model::Routine> = self
+                    .model
+                    .routines
+                    .iter()
+                    .filter(|r| r.agent == agent)
+                    .cloned()
+                    .collect();
+                let mut list = div()
+                    .id("plus-routines")
+                    .flex()
+                    .flex_col()
+                    .overflow_y_scroll();
+                if mine.is_empty() {
+                    list = list.child(none("No routines for this agent"));
+                }
+                for r in mine {
+                    let id = r.id.clone();
+                    list = list.child(
+                        self.menu_item(
+                            format!("plus-routine-{}", r.id),
+                            Ico::Clock,
+                            &r.name,
+                            false,
+                        )
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            let f = this.model.run_routine(&id);
+                            this.send(f);
+                            this.plus = None;
+                            cx.notify();
+                        })),
+                    );
+                }
+                panel.child(back(self, cx)).child(list)
+            }
+        }
     }
 
     /// A menu entry for one of the permission modes, ticked when it's the agent's.
@@ -4208,6 +4362,8 @@ ACTA_KEY=secret:ACTA_KEY",
             );
         }
         let has_attachments = !self.model.attachments.is_empty();
+        let plus_open = self.plus.is_some();
+        let plus_menu = self.plus.map(|which| self.plus_menu(which, cx));
         let mut composer = Some(
             div()
                 .w_full()
@@ -4230,18 +4386,34 @@ ACTA_KEY=secret:ACTA_KEY",
                         .gap(px(space::S))
                         .child(
                             div()
-                                .id("attach")
-                                .size(px(32.0))
                                 .flex_none()
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .rounded_full()
-                                .text_color(p.ink_2)
-                                .cursor_pointer()
-                                .hover(move |s| s.bg(p.hover))
-                                .child(Icon::new(Ico::Paperclip).small())
-                                .on_click(cx.listener(|this, _, _, cx| this.pick_files(cx))),
+                                .child(
+                                    div()
+                                        .id("plus")
+                                        .size(px(32.0))
+                                        .flex()
+                                        .items_center()
+                                        .justify_center()
+                                        .rounded_full()
+                                        .text_color(p.ink_2)
+                                        .cursor_pointer()
+                                        .hover(move |s| s.bg(p.hover))
+                                        .when(plus_open, |d| d.bg(p.hover))
+                                        .child(Icon::new(Ico::Plus).small())
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.plus = if this.plus.is_some() {
+                                                None
+                                            } else {
+                                                Some(Plus::Main)
+                                            };
+                                            cx.notify();
+                                        })),
+                                )
+                                .when_some(plus_menu, |d, menu| {
+                                    d.child(deferred(
+                                        anchored().anchor(Anchor::BottomLeft).child(menu),
+                                    ))
+                                }),
                         )
                         .child(
                             div()
