@@ -2,8 +2,9 @@ module shared.tools
 
 // Loom's own tools, as `loom mcp` offers them to every agent (PLAN.md, "Loom's
 // own tools"). The instance does what each one says, with its person's rights
-// and no more: an agent can't change a permission mode, and nothing here
-// deletes. Each is an MCP tool definition, with its arguments as JSON Schema.
+// and no more. Deleting, and changing a permission mode, waits for the
+// person's yes, every time. Each is an MCP tool definition, with its
+// arguments as JSON Schema.
 import std.json.{Json}
 import shared.obj.{Obj}
 
@@ -36,6 +37,9 @@ pub fn all() -> List<Json> {
         tool("list_skills", "Lists your person's skills: named instructions for a kind of task, each with when it's for. Look here before a task you haven't done before, and read the one that fits with read_skill.", object(Obj.new(), List<str>())),
         tool("read_skill", "Reads a skill: how your person wants that kind of task done. Follow it.", object(Obj.new().j("name", text_arg("The skill's name, as list_skills gives it.")), ["name"])),
         tool("save_skill", "Saves a skill, new or changed, for every one of your person's agents: how to do a kind of task, learned while doing it. Give it whole.", object(Obj.new().j("name", text_arg("Lowercase letters, digits and hyphens, such as release-notes.")).j("description", text_arg("When it's for, in one sentence, so an agent knows to read it.")).j("body", text_arg("The skill, in Markdown.")), ["name", "description", "body"])),
+        tool("delete_agent", "Deletes one of your person's agents, with its conversations. Your person is asked first, and the result says what they answered.", object(Obj.new().j("agent", text_arg("The agent's name or id.")), ["agent"])),
+        tool("set_permission", "Sets how an agent asks before it acts: ask (before every command and edit), auto (only when it's risky) or allow (never). Your person is asked first. You can tighten your own to ask, but not loosen it.", object(Obj.new().j("agent", text_arg("The agent's name or id.")).j("permission", text_arg("ask, auto or allow.")), ["agent", "permission"])),
+        tool("delete_skill", "Deletes one of your person's skills, for every agent. Your person is asked first.", object(Obj.new().j("name", text_arg("The skill's name.")), ["name"])),
         tool("notify", "Sends your person a notification on their devices. Keep it for what they'd want to know now.", object(Obj.new().j("title", text_arg("A few words.")).j("body", text_arg("One or two sentences.")), ["title", "body"])),
     ]
 }
@@ -43,7 +47,7 @@ pub fn all() -> List<Json> {
 @test
 fn every_tool_has_a_schema() {
     let tools = all()
-    assert(tools.len() == 11)
+    assert(tools.len() == 14)
     for t in tools {
         assert("{t}".contains("\"inputSchema\":\{\"type\":\"object\""))
     }

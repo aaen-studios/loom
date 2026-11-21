@@ -97,6 +97,7 @@ struct Approval {
     rpc: Json
     options: Json
     title: String    // what it asks, for the activity log
+    action: Json    // for one of loom's own tools: the command to run if allowed, {name, args}; null for an ACP request
 }
 
 // A command's answer: its value, or its error's code and message.
@@ -584,6 +585,29 @@ impl Instance {
         }
         if name == "message_agent" {
             return try i.message_agent(req, g, args)
+        }
+        // These three ask the person first, every time.
+        if name == "delete_agent" or name == "set_permission" {
+            let key = str_at(args.copy(), "agent") ?? String()
+            let found = try i.find_agent(g.user.copy(), key.copy()) else return some(tool_error("There's no agent {key}. list_agents gives their names."))
+            let id = str_at(found.copy(), "id") ?? String()
+            let agent_name = str_at(found, "name") ?? key
+            if name == "delete_agent" {
+                if id == g.agent { return some(tool_error(String("An agent can't delete itself. Your person can, in the app."))) }
+                let action = Obj.new().s("name", String("agent.delete")).j("args", Obj.new().s("agent", id).done()).done()
+                return try i.ask_person(req, g, "Delete the agent {agent_name}", "delete", action)
+            }
+            let mode = str_at(args, "permission") ?? String()
+            if mode != "ask" and mode != "auto" and mode != "allow" { return some(tool_error(String("permission is ask, auto or allow."))) }
+            if id == g.agent and mode != "ask" { return some(tool_error(String("An agent can't loosen its own permission mode. Your person can, in the app."))) }
+            let action = Obj.new().s("name", String("agent.update")).j("args", Obj.new().s("agent", id).s("permission", mode.copy()).done()).done()
+            return try i.ask_person(req, g, "Set {agent_name}'s permission mode to {mode}", "other", action)
+        }
+        if name == "delete_skill" {
+            let skill_name = str_at(args, "name") ?? String()
+            if try i.store.skill(g.user.copy(), skill_name.copy()) == none { return some(tool_error("There's no skill {skill_name}. list_skills gives their names.")) }
+            let action = Obj.new().s("name", String("skill.delete")).j("args", Obj.new().s("name", skill_name.copy()).done()).done()
+            return try i.ask_person(req, g, "Delete the skill {skill_name}", "delete", action)
         }
         return some(tool_error("loom has no tool {name}."))
     }
@@ -1600,7 +1624,7 @@ impl Instance {
             return
         }
         let can_always = acp.pick_option(options.copy(), true, true) != acp.pick_option(options.copy(), true, false)
-        i.approvals.insert(call.copy(), Approval { call: call.copy(), run: run.copy(), agent: p.agent.copy(), rpc: rpc.copy(), options: options, title: str_at(tool_call.copy(), "title") ?? String() })
+        i.approvals.insert(call.copy(), Approval { call: call.copy(), run: run.copy(), agent: p.agent.copy(), rpc: rpc.copy(), options: options, title: str_at(tool_call.copy(), "title") ?? String(), action: Json.Null })
         try i.event(user, "approval.needed", Obj.new().s("run", run).s("call", call).s("tool", kind).s("title", str_at(tool_call.copy(), "title") ?? String()).j("detail", at(tool_call, "rawInput")).b("can_always", can_always).done())
     }
 
@@ -1624,6 +1648,10 @@ impl Instance {
 
     fn answer_approval(i: mut Instance, call: String, allow: bool, always: bool, by: String) ! Error {
         let a = i.approvals.remove(call.copy()) else return
+        if a.action != Json.Null {
+            try i.answer_action(a, allow, by)
+            return
+        }
         let option = acp.pick_option(a.options.copy(), allow, always)
         let outcome = match option {
             some(o) => Obj.new().s("outcome", String("selected")).s("optionId", o).done(),
@@ -1642,6 +1670,50 @@ impl Instance {
             i.log(user.copy(), a.agent.copy(), "approval", if allow { "Allowed: {a.title}" } else { "Denied: {a.title}" }, by.copy())
             try i.event(user, "approval.answered", Obj.new().s("call", call).b("allow", allow).b("always", always and allow).s("by", by).done())
         }
+    }
+
+    // The person's answer to one of loom's own tools that asks first: runs the
+    // command as the device that allowed it, and answers the agent's call.
+    fn answer_action(i: mut Instance, a: Approval, allow: bool, by: String) ! Error {
+        let user = i.run_user(a.run.copy())
+        if user.len() == 0 { return }
+        var result = tool_error(String("Your person said no."))
+        var status = String("denied")
+        if allow {
+            let name = str_at(a.action.copy(), "name") ?? String()
+            result = match try i.command(user.copy(), by.copy(), name, at(a.action.copy(), "args")) {
+                Answer.Value(_) => tool_text(String("Done: your person said yes.")),
+                Answer.Refused(_, message) => tool_error(message),
+            }
+            status = if bool_at(result.copy(), "isError") == some(true) { String("failed") } else { String("done") }
+        }
+        if let req = i.calls.remove(a.call.copy()) { i.server.respond(req, json_response(200, result.copy())) }
+        i.log(user.copy(), a.agent.copy(), "approval", if allow { "Allowed: {a.title}" } else { "Denied: {a.title}" }, by.copy())
+        try i.event(user.copy(), "approval.answered", Obj.new().s("call", a.call.copy()).b("allow", allow).b("always", false).s("by", by).done())
+        try i.event(user, "tool.finished", Obj.new().s("call", a.call).s("status", status).j("output", Json.Array([Obj.new().s("kind", String("text")).s("text", str_at(at(at(result, "content"), "0"), "text") ?? String()).done()])).done())
+    }
+
+    // One of loom's own tools that deletes or changes a permission mode: it
+    // shows in the agent's chat as a tool waiting on the person, and the
+    // agent's call is answered once they do. An agent never answers this
+    // itself: only a device's `approve` does.
+    fn ask_person(i: mut Instance, req: Request, g: Grant, title: String, kind: str, action: Json) -> Json? ! Error {
+        var run_id = String()
+        for (id, r) in i.runs {
+            if r.user == g.user and r.agent == g.agent { run_id = id.copy() }
+        }
+        if run_id.len() == 0 { return some(tool_error(String("That needs your person's yes, and they can only give it during a chat with you."))) }
+        let call = try i.store.new_id("tc")
+        if let r = mut i.runs.find(run_id.copy()) {
+            var b = new_block("tool")
+            b.call = call.copy()
+            r.blocks.push(b)
+        }
+        try i.event(g.user.copy(), "tool.started", Obj.new().s("run", run_id.copy()).s("call", call.copy()).s("tool", String(kind)).s("title", title.copy()).j("input", at(action.copy(), "args")).j("locations", Json.Null).done())
+        i.approvals.insert(call.copy(), Approval { call: call.copy(), run: run_id.copy(), agent: g.agent.copy(), rpc: Json.Null, options: Json.Null, title: title.copy(), action: action.copy() })
+        i.calls.insert(call.copy(), req.copy())
+        try i.event(g.user, "approval.needed", Obj.new().s("run", run_id).s("call", call).s("tool", String(kind)).s("title", title).j("detail", at(action, "args")).b("can_always", false).done())
+        return none
     }
 
     fn cancel(i: mut Instance, s: ServerSocket, user: String, run_id: String) ! Error {
@@ -1684,6 +1756,7 @@ impl Instance {
         }
         for call in open {
             _ = i.approvals.remove(call.copy())
+            if let req = i.calls.remove(call.copy()) { i.server.respond(req, json_response(200, tool_error(String("The run ended before your person answered.")))) }
             try i.event(r.user.copy(), "approval.answered", Obj.new().s("call", call).b("allow", false).b("always", false).s("by", String("cancel")).done())
         }
         var blocks = List<Json>()
