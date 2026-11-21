@@ -122,9 +122,15 @@ Login needed, as above. The file, with its type, for whoever uploaded it or got 
 
 For `loom mcp` alone, which the instance starts for each agent (below, [How ACP maps onto loom](#how-acp-maps-onto-loom)). They take that agent's tool token, `Authorization: Bearer <token>`, not a device's, and an app never calls them. `tools` gives `{"tools": [...]}`, MCP's tool definitions from `shared/tools.calx`. `call` takes `{"name", "arguments"}` and gives an MCP tool result, `{"content": [{"type": "text", "text"}], "isError"?}`. A `message_agent` call is answered when the other agent's reply is done.
 
-### Later routes
+### `POST /hooks/<id>`
 
-`POST /hooks/<id>` for webhooks (Phase 4).
+A routine's webhook, for something outside to run it, such as GitHub Actions when a build fails. `<id>` is the routine's `hook`, and its `secret` comes one of two ways: as `Authorization: Bearer <secret>`, or as GitHub's webhooks sign, with `X-Hub-Signature-256: sha256=<hex>`, the HMAC-SHA256 of the body under the secret. The body can be anything. As UTF-8, up to 20,000 bytes of it, it goes to the agent after the routine's prompt, in a code block, with `X-GitHub-Event` named when it comes.
+
+- `202` with `{"run"}`: it's running.
+- `401` with `unauthorized`: the secret or the signature is wrong.
+- `404`: no routine has that hook.
+- `405`: a method other than POST.
+- `409` with `paused`, or `busy` while its last run is still going.
 
 ## The WebSocket session
 
@@ -446,8 +452,8 @@ Version 1's commands:
 | `memory.delete` | `id` | — |
 | `profile.get` | — | `profile`: `text`, `revision`, `by` (the device or agent that wrote it) and `at`, or `null` when there's none yet |
 | `profile.put` | `text` (the whole profile, up to 4000 bytes; empty clears it) | `profile`, as `profile.get` gives it, with its new `revision` |
-| `routine.list` | — | `routines`, oldest first: each `id`, `name`, `agent`, `prompt`, `schedule`, `when` (the schedule in words, such as `every 30 minutes`), `tz` (an IANA name), `on`, `notify`, `catch_up`, `next` (when it runs next, Unix ms, or 0 while it's off), `conversation` (where it last posted), `last` (null before its first run, then `at`, `status`: `running`, `done`, `failed`, `cancelled` or `skipped`, `run`, and `error`), `by` and `at` |
-| `routine.put` | To make one: `name` (up to 100 bytes), `agent` (by id or name), `prompt` (up to 20,000 bytes), `schedule` (`{"every": minutes}`, 5 to 10,080), and optionally `tz` (the device's time zone if left out), `notify` (false), `on` (true) and `catch_up` (true: a run missed while the instance was off happens once when it starts; false: it waits for its next time). To change one: its `id` and what changes | `routine`. Its next run stays unless its schedule or time zone changed |
+| `routine.list` | — | `routines`, oldest first: each `id`, `name`, `agent`, `prompt`, `schedule` (null for a routine that only runs by webhook), `hook` and `secret` (with a webhook: [`POST /hooks/<id>`](#post-hooksid)), `when` (in words, such as `every 30 minutes, and by webhook`), `tz` (an IANA name), `on`, `notify`, `catch_up`, `next` (when it runs next, Unix ms, or 0 while it's off), `conversation` (where it last posted), `last` (null before its first run, then `at`, `status`: `running`, `done`, `failed`, `cancelled` or `skipped`, `run`, and `error`), `by` and `at` |
+| `routine.put` | To make one: `name` (up to 100 bytes), `agent` (by id or name), `prompt` (up to 20,000 bytes), `schedule` (`{"every": minutes}`, 5 to 10,080), `webhook` (true for a webhook, which gets a new `hook` and `secret`; false takes it away), at least one of the two, and optionally `tz` (the device's time zone if left out), `notify` (false), `on` (true) and `catch_up` (true: a run missed while the instance was off happens once when it starts; false: it waits for its next time). To change one: its `id` and what changes | `routine`. Its next run stays unless its schedule or time zone changed |
 | `routine.run` | `id` | `run`. It runs now, whether it's on or not, unless its last run is still going (`busy`) |
 | `routine.delete` | `id` | — |
 | `skill.list` | `bodies`? (`true` for each skill's text too) | `skills`, by name: each `name`, `description` (when it's for) and `at`, and `body` with `bodies` |
@@ -628,7 +634,7 @@ The core replaces what the deltas built with the finished message, stores `seq` 
 Fields and frames that come with later phases. Where they only add, they come within version 1.
 
 - **Device tools** (Phase 3): the instance sends `{"t":"device.call", …}` with the request, and the signed approval when there is one, and the device answers `{"t":"device.result", …}`. Each device offers its tools in `hello`.
-- **Routines on a webhook** (Phase 4): `/hooks/<id>`, and the routine's secret, in `routine.put`. Schedules daily and on weekdays at a time, as `{"daily": "08:00"}` and `{"weekdays": "09:30"}`.
+- **Routines daily and on weekdays** (Phase 4): schedules at a time of day, as `{"daily": "08:00"}` and `{"weekdays": "09:30"}`, in the routine's `tz`.
 - **Push** (Phase 5): the `push.register` command.
 - **Noise** (Phase 6): a phone reaching a desktop instance runs a Noise handshake against the instance's key from the QR code before `hello`, and every frame after it is encrypted.
 - **Moving** (Phase 7): the `instance.moved` event, signed with the instance's key, with the new address.

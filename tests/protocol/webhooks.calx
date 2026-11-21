@@ -1,0 +1,102 @@
+module tests.protocol.webhooks
+
+// Routines on a webhook (PLAN.md, "Routines"): a routine with a webhook runs
+// when something posts to /hooks/<id> with its secret, as a bearer token or
+// signing the body as GitHub's webhooks do, and its agent gets what was sent
+// after the prompt. A wrong secret, a wrong signature, a paused routine and
+// an unknown hook are turned away. An agent makes one with the schedule tool
+// and is given its address and secret.
+//
+//     calx tests/protocol/webhooks.calx
+import std.bytes
+import std.hash.{hmac_sha256}
+import std.http.{Header, get, post}
+import std.json.{Json}
+import std.process.{exit}
+import shared.obj.{Obj, at, bool_at, int_at, str_at}
+import tests.kit.{App, Instance, check, json_of, reply_text}
+
+const FAILED: str = #"{"action":"completed","workflow_run":{"name":"ci","conclusion":"failure"}}"#
+
+fn reply_in(app: mut App, conversation: String) -> String ! Error {
+    loop {
+        let created = try app.until("event", "message.created")
+        let m = at(created, "message")
+        if str_at(m.copy(), "role") == some(String("agent")) and str_at(m.copy(), "conversation") == some(conversation.copy()) { return reply_text(m) }
+    }
+}
+
+// Posts `body` to `path` with `headers`, and gives the status and what came back.
+fn hook(base: String, path: String, headers: List<Header>, body: str) -> (u32, Json) ! Error {
+    var all: List<Header> = [Header { name: String("Content-Type"), value: String("application/json") }]
+    all.extend(headers)
+    var req = post("http://{base}{path}", all, String(body).to_bytes(), 30000, 1048576)
+    let r = try req.wait()
+    return (r.status, json_of(r.body))
+}
+
+fn header(name: str, value: String) -> List<Header> {
+    return [Header { name: String(name), value: value.copy() }]
+}
+
+fn run(i: Instance) ! Error {
+    var app = try App.connect(i.base.copy(), i.token.copy(), 0)
+    _ = try app.cmd("q_1", "agent.create", Obj.new().s("name", String("Main")).s("acp_agent", String("fake")).s("instructions", String("Test.")).done())
+
+    let neither = try app.cmd("q_2", "routine.put", Obj.new().s("name", String("Build")).s("agent", String("Main")).s("prompt", String("hi")).done())
+    try check(bool_at(neither, "ok") == some(false), "a routine with no schedule and no webhook is refused")
+    let put = try app.cmd("q_3", "routine.put", Obj.new().s("name", String("Build")).s("agent", String("Main")).s("prompt", String("/context\nSay what broke.")).b("webhook", true).b("notify", true).done())
+    let r = at(at(put, "value"), "routine")
+    let id = str_at(r.copy(), "id") ?? String()
+    let path = "/hooks/{str_at(r.copy(), "hook") ?? String()}"
+    let secret = str_at(r.copy(), "secret") ?? String()
+    try check(path.len() > 10 and secret.len() == 64 and int_at(r.copy(), "next") == some(0) and str_at(r, "when") == some(String("by webhook")), "a routine with a webhook has its own address and secret, and no time to run")
+
+    let (none_given, _) = try hook(i.base.copy(), path.copy(), List<Header>(), FAILED)
+    let (wrong, _) = try hook(i.base.copy(), path.copy(), header("Authorization", String("Bearer nope")), FAILED)
+    let (forged, _) = try hook(i.base.copy(), path.copy(), header("X-Hub-Signature-256", "sha256={bytes.hex(hmac_sha256(String("nope").to_bytes(), String(FAILED).to_bytes()))}"), FAILED)
+    let (unknown, _) = try hook(i.base.copy(), String("/hooks/h_nothing"), header("Authorization", "Bearer {secret}"), FAILED)
+    var looked = get("http://{i.base}{path}", List<Header>(), 10000, 65536)
+    let got = try looked.wait()
+    try check(none_given == 401 and wrong == 401 and forged == 401 and unknown == 404 and got.status == 405, "a post without the secret, with a wrong one or a forged signature, or to no hook, is turned away")
+
+    // As GitHub Actions posts it.
+    var signed = header("X-Hub-Signature-256", "sha256={bytes.hex(hmac_sha256(secret.to_bytes(), String(FAILED).to_bytes()))}")
+    signed.extend(header("X-GitHub-Event", String("workflow_run")))
+    let (status, ran) = try hook(i.base.copy(), path.copy(), signed, FAILED)
+    try check(status == 202 and str_at(ran, "run") != none, "a post signed as GitHub signs runs the routine")
+    let started = try app.until("event", "conversation.created")
+    let conversation = str_at(at(started, "conversation"), "id") ?? String()
+    let said = try reply_in(mut app, conversation.copy())
+    try check(said.contains("run by its webhook") and said.contains("a GitHub workflow_run event") and said.contains(#""conclusion":"failure""#), "its agent gets what was sent, and knows the webhook sent it")
+    let notified = try app.until("event", "notify")
+    try check(str_at(notified, "title") == some(String("Build")), "and the person is notified")
+
+    let (bearer, _) = try hook(i.base.copy(), path.copy(), header("Authorization", "Bearer {secret}"), #"{"hello":"there"}"#)
+    try check(bearer == 202 and (try reply_in(mut app, conversation.copy())).contains(#""hello":"there""#), "the secret as a bearer token runs it too")
+
+    _ = try app.cmd("q_4", "routine.put", Obj.new().s("id", id.copy()).b("on", false).done())
+    let (paused, _) = try hook(i.base.copy(), path.copy(), header("Authorization", "Bearer {secret}"), FAILED)
+    try check(paused == 409, "a paused routine's webhook doesn't run it")
+    let off = try app.cmd("q_5", "routine.put", Obj.new().s("id", id.copy()).b("webhook", false).done())
+    try check(bool_at(off, "ok") == some(false), "and a routine can't lose its webhook with no schedule left")
+
+    try app.send(Obj.new().s("t", String("send")).s("cid", String("m_1")).s("conversation", conversation.copy()).s("text", String(#"/mcp schedule {"name":"Deploys","prompt":"hi","webhook":true}"#)).done())
+    let told = try reply_in(mut app, conversation.copy())
+    try check(told.contains("Scheduled: Deploys, by webhook") and told.contains("POST /hooks/h_") and told.contains("Authorization: Bearer "), "an agent makes a routine with a webhook, and is given its address and secret")
+    app.close()
+}
+
+fn main() ! Error {
+    let inst = try Instance.start()
+    let failure: String? = match run(inst.copy()) {
+        ok => none,
+        err(e) => some("{e}"),
+    }
+    inst.stop()
+    if let f = failure {
+        eprintln("\n{f}")
+        exit(1)
+    }
+    println("\nwebhooks: all good")
+}

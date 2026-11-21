@@ -128,6 +128,7 @@ pub struct Loom {
     routine_notify: bool,
     routine_on: bool,
     routine_catch_up: bool,
+    routine_webhook: bool,
     /// The program whose settings form is open, on the programs page.
     program_open: Option<String>,
     set_key_in: Entity<InputState>,
@@ -346,6 +347,7 @@ impl Loom {
             routine_notify: true,
             routine_on: true,
             routine_catch_up: true,
+            routine_webhook: false,
             program_open: None,
             set_key_in,
             set_value_in,
@@ -2148,7 +2150,60 @@ impl Loom {
                         this.routine_catch_up = !this.routine_catch_up;
                         cx.notify();
                     })),
+                )
+                .child(
+                    self.button(
+                        "routine-webhook",
+                        if self.routine_webhook {
+                            "Webhook: on"
+                        } else {
+                            "Webhook: off"
+                        },
+                        self.routine_webhook,
+                    )
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.routine_webhook = !this.routine_webhook;
+                        cx.notify();
+                    })),
                 );
+            // Where to post, once it has a webhook: to give GitHub or anything else.
+            let hook = open
+                .as_ref()
+                .and_then(|id| self.model.routines.iter().find(|r| &r.id == id))
+                .filter(|r| !r.hook.is_empty() && self.routine_webhook)
+                .map(|r| (format!("/hooks/{}", r.hook), r.secret.clone()));
+            let webhook = hook.map(|(path, secret)| {
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(space::XS))
+                    .child(caption(format!(
+                        "POST to {path} on your instance's address, with Authorization: Bearer and the secret, or signed with the secret as GitHub signs (X-Hub-Signature-256). What's posted comes after the prompt."
+                    )))
+                    .child(
+                        div()
+                            .flex()
+                            .gap(px(space::XS))
+                            .child(
+                                self.button("copy-hook", "Copy address", false).on_click(
+                                    cx.listener(move |_, _, _, cx| {
+                                        cx.write_to_clipboard(ClipboardItem::new_string(
+                                            path.clone(),
+                                        ));
+                                    }),
+                                ),
+                            )
+                            .child(
+                                self.button("copy-secret", "Copy secret", false).on_click(
+                                    cx.listener(move |_, _, _, cx| {
+                                        cx.write_to_clipboard(ClipboardItem::new_string(
+                                            secret.clone(),
+                                        ));
+                                    }),
+                                ),
+                            ),
+                    )
+            });
             let editing = open.clone().unwrap_or_default();
             let mut buttons = div()
                 .flex()
@@ -2158,26 +2213,33 @@ impl Loom {
                         .on_click(cx.listener(move |this, _, _, cx| {
                             let name = this.routine_name_in.read(cx).value().to_string();
                             let prompt = this.routine_prompt_in.read(cx).value().to_string();
-                            let every = this.routine_every_in.read(cx).value().trim().parse();
-                            let (Some(agent), Ok(every)) = (this.routine_agent.clone(), every)
-                            else {
+                            let every_text = this.routine_every_in.read(cx).value().to_string();
+                            let every = every_text.trim().parse::<i64>().ok();
+                            let Some(agent) = this.routine_agent.clone() else {
+                                this.model.notices.push("Pick the agent it runs.".into());
+                                cx.notify();
+                                return;
+                            };
+                            if every.is_none() && !this.routine_webhook {
                                 this.model.notices.push(
-                                    "A routine needs an agent, and how many minutes apart it runs."
+                                    "A routine needs how many minutes apart it runs, a webhook, or both."
                                         .into(),
                                 );
                                 cx.notify();
                                 return;
-                            };
-                            let f = this.model.save_routine(
-                                &editing,
-                                &name,
-                                &agent,
-                                &prompt,
+                            }
+                            let form = model::RoutineForm {
+                                id: editing.clone(),
+                                name,
+                                agent,
+                                prompt,
                                 every,
-                                this.routine_notify,
-                                this.routine_on,
-                                this.routine_catch_up,
-                            );
+                                notify: this.routine_notify,
+                                on: this.routine_on,
+                                catch_up: this.routine_catch_up,
+                                webhook: this.routine_webhook,
+                            };
+                            let f = this.model.save_routine(&form);
                             this.send(f);
                             this.routine_open = None;
                             cx.notify();
@@ -2232,10 +2294,11 @@ impl Loom {
                     Textarea::new(&self.routine_prompt_in),
                 ))
                 .child(self.field(
-                    "Every how many minutes (5 at least)",
+                    "Every how many minutes (5 at least; empty for webhook only)",
                     Input::new(&self.routine_every_in),
                 ))
                 .child(switches)
+                .children(webhook)
                 .child(caption(
                     "Each run goes to the agent's chat, marked as from this routine. With notify on, you get its reply as a notification."
                         .into(),
@@ -2291,14 +2354,24 @@ impl Loom {
                         .on_click(cx.listener(move |this, _, window, cx| {
                             this.routine_name_in
                                 .update(cx, |s, cx| s.set_value(r.name.clone(), window, cx));
-                            this.routine_every_in
-                                .update(cx, |s, cx| s.set_value(r.every.to_string(), window, cx));
+                            this.routine_every_in.update(cx, |s, cx| {
+                                s.set_value(
+                                    if r.every > 0 {
+                                        r.every.to_string()
+                                    } else {
+                                        String::new()
+                                    },
+                                    window,
+                                    cx,
+                                )
+                            });
                             this.routine_prompt_in
                                 .update(cx, |s, cx| s.set_value(r.prompt.clone(), window, cx));
                             this.routine_agent = Some(r.agent.clone());
                             this.routine_notify = r.notify;
                             this.routine_on = r.on;
                             this.routine_catch_up = r.catch_up;
+                            this.routine_webhook = !r.hook.is_empty();
                             this.routine_open = Some(Some(r.id.clone()));
                             cx.notify();
                         })),
@@ -2320,6 +2393,7 @@ impl Loom {
                                 this.routine_notify = true;
                                 this.routine_on = true;
                                 this.routine_catch_up = true;
+                                this.routine_webhook = false;
                                 this.routine_open = Some(None);
                                 cx.notify();
                             })),

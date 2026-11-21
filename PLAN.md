@@ -339,7 +339,7 @@ In a desktop instance, the instance's machine and your PC are the same machine, 
 ## Routines
 
 - **On a schedule:** every N minutes (5 at least), daily at a time, or on weekdays at a time, in the person's own time zone, summer time included. A routine takes the time zone of the device that made it.
-- **On a webhook:** `/hooks/<id>`, with a secret. "The build failed" comes from GitHub Actions posting there, not from a timer.
+- **On a webhook:** `POST /hooks/<id>`, with the routine's secret as a bearer token or signing the body as GitHub's webhooks do (`X-Hub-Signature-256`). "The build failed" comes from GitHub Actions posting there, not from a timer. What was posted goes to the agent after the prompt. A routine can have a schedule, a webhook, or both. The instance has to be reachable from where the post comes from: a server is, and a desktop instance is through Tailscale Funnel or the like.
 - A routine sends its agent a prompt in the agent's chat, which is its newest conversation, so it shows where the person reads that agent. The message says it's from the routine, and the agent is told so. With notify on, the reply comes as a notification. If the last run hasn't finished, that time is skipped.
 - Missed while the instance was off, a routine runs once when it starts again, or waits for its next time, as the routine says (`catch_up`). Either way, missed runs never pile up.
 - The person makes, changes, pauses, runs and deletes them on the **Routines** page, and agents do the same with `schedule`, `list_routines` and `delete_routine`, which asks first.
