@@ -1,0 +1,4 @@
+# The image needs only server/ and shared/.
+*
+!server/
+!shared/

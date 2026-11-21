@@ -146,3 +146,28 @@ jobs:
           # The script a server runs to install loom: `curl -fsSL …/latest/download/install.sh | sudo sh`.
           cp server/install.sh dist/install.sh
           gh release create "$GITHUB_REF_NAME" dist/* --title "loom ${GITHUB_REF_NAME#v}" --notes-file notes.md $prerelease
+
+  # The Docker image, on GitHub's registry: ghcr.io/<owner>/loom, tagged with the
+  # version, and latest for a release that isn't a pre-release.
+  image:
+    if: github.ref_type == 'tag'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build and push
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          image="ghcr.io/$(echo "$GITHUB_REPOSITORY" | tr '[:upper:]' '[:lower:]')"
+          echo "$GH_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+          docker build --build-arg "VERSION=$version" -t "$image:$version" .
+          docker push "$image:$version"
+          case "$GITHUB_REF_NAME" in
+            *-*) ;;
+            *) docker tag "$image:$version" "$image:latest" && docker push "$image:latest" ;;
+          esac
