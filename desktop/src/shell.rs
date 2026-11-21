@@ -139,12 +139,48 @@ pub fn dictate() -> bool {
     false
 }
 
+/// What a notification is about: the server's folder ("" for the one on screen first),
+/// the agent and the conversation, which a click on it opens.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct About {
+    pub server: String,
+    pub agent: String,
+    pub conversation: String,
+}
+
+/// The notifications clicked since the app last looked, in the order they were.
+static CLICKED: std::sync::Mutex<Vec<About>> = std::sync::Mutex::new(Vec::new());
+
+/// The notifications clicked since the last call.
+pub fn clicked() -> Vec<About> {
+    CLICKED
+        .lock()
+        .map(|mut c| std::mem::take(&mut *c))
+        .unwrap_or_default()
+}
+
+/// A system notification. A click on it, while the app runs, opens what it's about.
+#[cfg(windows)]
+pub fn notify(title: &str, body: &str, about: Option<About>) {
+    let toast = tauri_winrt_notification::Toast::new(app_id())
+        .title(title)
+        .text1(body)
+        .on_activated(move |_| {
+            if let (Some(a), Ok(mut c)) = (about.clone(), CLICKED.lock()) {
+                c.push(a);
+            }
+            Ok(())
+        });
+    if let Err(e) = toast.show() {
+        eprintln!("loom: the notification didn't show: {e}");
+    }
+}
+
 /// A system notification.
-pub fn notify(title: &str, body: &str) {
+#[cfg(not(windows))]
+pub fn notify(title: &str, body: &str, _about: Option<About>) {
     let mut n = notify_rust::Notification::new();
     n.summary(title).body(body);
-    #[cfg(windows)]
-    n.app_id(app_id());
     if let Err(e) = n.show() {
         eprintln!("loom: the notification didn't show: {e}");
     }
