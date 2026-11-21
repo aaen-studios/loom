@@ -697,6 +697,12 @@ impl Instance {
         for (user, task) in try i.store.running_tasks() {
             i.resumes.push((user.copy(), str_at(task.copy(), "id") ?? String()))
         }
+        // So does a routine's flow: a step the restart cut short goes again.
+        for kept in try i.store.kept_flows() {
+            let f = flows.picked_up(kept)
+            i.flows_due.push(f.id.copy())
+            i.running_flows.insert(f.id.copy(), f)
+        }
         // Phones that were on stay on.
         if i.lan and try i.store.meta("phones") == some(String("on")) {
             match i.phones_on() {
@@ -2954,6 +2960,7 @@ impl Instance {
         let status = flows.status(f.copy())
         f.told = "{status}"
         try i.event(user, "flow.updated", Obj.new().j("flow", status).done())
+        i.keep_flow(f.copy())
         i.running_flows.insert(id.copy(), f)
         // From the loop, since the routine's run is ending now.
         i.flows_due.push(id)
@@ -3028,9 +3035,18 @@ impl Instance {
         }
         if flows.finished(f.copy()) {
             i.log(f.user.copy(), String(), "routine", if f.stopped { "Stopped the flow of {f.name}" } else { "Finished the flow of {f.name}" }, String("schedule"))
+            if let err(e) = i.store.drop_flow(id.copy()) { eprintln("loom: a finished flow: {e}") }
             return
         }
+        i.keep_flow(f.copy())
         i.running_flows.insert(id.copy(), f)
+    }
+
+    // Keeps a running flow in the store, so a restart picks it up again
+    // (PLAN.md, "Routine flows"). A failure is said, not passed up: the flow
+    // goes on while the instance runs.
+    fn keep_flow(i: Instance, f: flows.Flow) {
+        if let err(e) = i.store.keep_flow(f.id.copy(), f.user.copy(), flows.kept(f.copy())) { eprintln("loom: keeping a flow: {e}") }
     }
 
     // A step's run ended: its answer goes on, from the loop.
@@ -3039,10 +3055,13 @@ impl Instance {
             i.flow_results.push((id.copy(), k, worked, said.copy()))
             return
         }
+        var changed: flows.Flow? = none
         if let f = mut i.running_flows.find(id.copy()) {
             f.steps[k].state = if worked { flows.State.Done } else { flows.State.Failed }
             f.steps[k].answer = said.copy()
+            changed = some(f.copy())
         }
+        if let f = changed { i.keep_flow(f) }
         if not i.flows_due.contains(id.copy()) { i.flows_due.push(id.copy()) }
     }
 

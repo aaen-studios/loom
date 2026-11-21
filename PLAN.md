@@ -428,7 +428,7 @@ A routine's answer can go on to other agents, step by step, as a flow: the morni
 - A flow is a list of steps after the routine, 20 at most. Each has a `name`, an `agent`, a `prompt` and `after`, the steps it waits for: `routine` (the routine itself) or steps before it in the list, so a flow never loops back. Left out, `after` is the step before it.
 - A step goes once every step it comes after has finished. It posts its prompt in its agent's chat, as from the routine, and the agent is told, beside the prompt, what each of those steps answered, and which of them failed. A step whose inputs all failed, or were skipped, is skipped. A step whose agent is busy in its chat waits for the turn to end, so two steps for one agent go one after the other.
 - The apps hear how a flow stands as each step starts and ends (`flow.updated`), and the person or an agent stops one with `routine.stop`: the step that's running is stopped, and the rest skipped. The person sets a flow up on the **Routines** page, and an agent with `schedule`.
-- A flow lives while it runs. A restart ends the ones that were running; the routine runs again on its schedule.
+- A flow that's running is kept, so a restart doesn't end it: when the instance starts again, a step the restart cut short goes again, and the flow carries on.
 
 ## Notifications and push
 
