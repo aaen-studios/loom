@@ -17,7 +17,7 @@ import std.random.{Random}
 import std.thread.{Task}
 import std.time.{Instant}
 import shared.obj.{Obj, at, bool_at, int_at, merge, str_at}
-import shared.protocol.{CLOSE_TOKEN, CLOSE_VERSION, NEWEST}
+import shared.protocol.{APP_QUIET_MS, APP_WAIT_MS, CLOSE_TOKEN, CLOSE_VERSION, NEWEST}
 import core.cache.{Cache, now}
 import core.files.{Transfer, at_path, kept_at, refused}
 import shared.files.{is_sha}
@@ -219,7 +219,9 @@ impl Conn {
                 0
             },
         }
-        let ws = open(url)
+        // A connection that died without a close, as a sleeping laptop's does, ends
+        // after 45 s with nothing from the instance, and the core reconnects.
+        let ws = open(url, ping_interval_ms: APP_QUIET_MS, ping_timeout_ms: APP_WAIT_MS)
         let hello = Obj.new().s("t", String("hello")).s("token", token).j("versions", Json.Array([Json.Int(i64(NEWEST))])).i("after", after).j("device", Obj.new().b("active", self.active).done()).done()
         match ws.send_text("{hello}") {
             ok => {},

@@ -18,7 +18,4 @@ calx server/main.calx serve                       # prints a setup code on the f
 
 Then `POST /api/setup` with the code makes the owner. `echo "a password" | calx server/main.calx user add bob` adds a second account. Everything is kept in `loom-data/` unless `--data` names another folder. [`tests/protocol/phase1.calx`](../tests/protocol/phase1.calx) shows a whole session.
 
-Not in yet:
-- pings to the apps every 20 seconds ([CLX-394](https://acta.aaenz.no/aaen-studios/clx#CLX-394)).
-
 The same code is compiled into the desktop app's library for an instance with no server ([PLAN.md](../PLAN.md#an-instance-in-the-desktop-app)).

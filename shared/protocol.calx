@@ -11,6 +11,15 @@ pub const OLDEST: i32 = 1
 // A frame bigger than this closes the socket with 1009.
 pub const MAX_FRAME: usize = 1048576
 
+// Keeping a connection alive (protocol.md, "The WebSocket session"): the
+// instance pings every 20 s and closes a socket that hasn't answered for 60 s.
+// The app pings after 25 s of quiet and gives up 20 s later, so 45 s with
+// nothing from the instance is a dead connection.
+pub const PING_EVERY_MS: u64 = 20000
+pub const PING_ANSWER_MS: u64 = 40000
+pub const APP_QUIET_MS: u32 = 25000
+pub const APP_WAIT_MS: u32 = 20000
+
 // WebSocket close codes.
 pub const CLOSE_TOO_BIG: u16 = 1009
 pub const CLOSE_PROTOCOL: u16 = 4000    // the first frame wasn't hello, or the session broke the protocol

@@ -238,6 +238,8 @@ impl Instance {
         var server = try Server.listen(config.port, config.host.copy())
         server.log = false
         server.max_message = protocol.MAX_FRAME
+        server.ping_interval_ms = protocol.PING_EVERY_MS
+        server.ping_timeout_ms = protocol.PING_ANSWER_MS
         let lines = Receiver<Line>()
         let to = lines.sender()
         let (hash_to, hash_done) = hashing.start(config.hasher)
