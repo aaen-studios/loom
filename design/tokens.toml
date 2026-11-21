@@ -39,14 +39,14 @@ xxl = 32
 column = 740        # the chat column's widest
 
 [radius]
-window = 12
-input = 10
-row = 10
-chip = 14
-button = 16
-card = 16
-bubble = 20
-composer = 26
+window = 10
+input = 8
+row = 6
+chip = 6
+button = 8
+card = 10
+bubble = 14
+composer = 16
 
 [layout]
 sidebar = 260

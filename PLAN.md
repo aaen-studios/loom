@@ -30,6 +30,9 @@ Not decided here, and nothing from v0.1 or elsewhere is assumed. The only techni
 - The look lives as design tokens in one file. A Calx script generates them for each place that uses them: Rust for the desktop app, Swift for the iPhone app, and CSS for the site, the docs and panels.
 - Panels get the tokens as CSS variables, so plugins look like part of the app.
 - The main parts to design: the chat, a streaming reply, a tool call, an approval, the agent list, settings, a panel.
+- **Settings look like settings**, as the system settings of macOS, iOS and Windows do: a page's title with its one action beside it, then groups, each a box of rows with what a row is on the left and its control on the right (a switch, a choice of a few, a button), and one short line under it at most. A page with nothing on it yet says what would be there in a line, with the way to make the first. Corners are boxy but soft, from the tokens.
+- **The window is loom's own** to its edges: its minimise, maximise and close are loom's, drawn in its style, and act as the system's do (on Windows they're the system's hit areas, so Snap layouts work). macOS keeps its traffic lights.
+- **The logo is the knot with the wordmark beside it.** On the first screen and the opening, the agents' threads weave through it, over and under.
 
 ## Architecture
 
@@ -105,7 +108,7 @@ People who don't want a server run their instance in the desktop app. On first s
 One app signs in to as many instances as you like: the one on this computer, a server at home, one at work.
 
 - **A core for each.** Each server has a core of its own in the same Calx runtime, with its own data folder (the first in the app's, each other one under `servers/`), cache, cursor and token. The app keeps which are signed in, in `server-list`, and only the first runs the instance on this computer or updates the app.
-- **Each is its spool.** The sidebar's bottom row has a spool for each server, as each agent has its thread. The one on screen is bigger and opens the server popup. Another comes on screen when clicked, and has a dot when one of its agents said something there. With several, the sidebar names the server on screen above its agents.
+- **Each is its spool.** The sidebar's bottom row has a spool for each server, as each agent has its thread. The one on screen is a box with its spool, its name and whether it's connected, so it reads as the server you're on, and opens the server popup. The settings gear sits beside it. Another comes on screen when clicked, and has a dot when one of its agents said something there. With several, the sidebar names the server on screen above its agents.
 - **The others keep going.** A server away keeps its connection, so its replies notify and its unread marks gather. This PC's tools (screenshots, the clipboard, commands) answer only the server on screen.
 - **Adding and removing** are in the server popup: **Add a server** signs in beside the one on screen, with a setup code for a new server, and the server comes on screen once it's in. **Sign out and remove** takes one away, with its folder. The first server stays.
 - **Agents help.** An agent's `add_server` asks its person, and the device that said yes opens Add a server with the address in. `install_server` gives the command that puts loom on a new Linux server. Add a server and Move sit at the bottom of the server popup, under its settings, since they're things to do rather than settings, and each has **Copy prompt**: a prompt to give one of the person's agents, which does the technical part with these tools. Technical jobs in the app offer one the same way.
@@ -351,6 +354,7 @@ Ideas taken from OpenBot ([CopilotKit's](https://github.com/CopilotKit/OpenBot),
 - **Rows are found by their fields**: equal to a value, ordered by a field, a page at a time. There's no SQL from agents, so nothing can reach past the tables to the rest of the database.
 - **Dropping a table asks the person**, as every delete of an agent's does. Deleting rows doesn't: they're the agent's own working data, as its notes are.
 - **Limits**: 100 tables a person, 100,000 rows in all, 16 KB a row.
+- **Seen beside the chat**, from the Tables count in an agent's Knows: the tables it made and the ones it shares, each to open, newest rows first, and to drop. There's no Tables page in the settings.
 
 ### Work that waits its turn
 
