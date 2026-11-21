@@ -57,6 +57,14 @@ pub struct Agent {
     pub instructions: String,
 }
 
+/// One of the person's skills.
+#[derive(Clone, Debug)]
+pub struct Skill {
+    pub name: String,
+    pub description: String,
+    pub body: String,
+}
+
 /// One entry of the activity log.
 #[derive(Clone, Debug)]
 pub struct Activity {
@@ -292,6 +300,9 @@ pub struct Model {
     revisions_stale: bool,
     /// The activity page's entries, newest first.
     pub activity: Vec<Activity>,
+    /// The person's skills, by name, for the skills page.
+    pub skills: Vec<Skill>,
+    skills_stale: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -367,6 +378,9 @@ impl Model {
         let mut out = Vec::new();
         if std::mem::take(&mut self.revisions_stale) && self.editing.is_some() {
             out.push(self.revisions_cmd());
+        }
+        if std::mem::take(&mut self.skills_stale) {
+            out.push(self.load_skills());
         }
         let dirty: Vec<List> = self.dirty.drain().collect();
         for l in dirty {
@@ -606,6 +620,25 @@ impl Model {
                     })
                 })
                 .collect();
+        } else if id.starts_with("app.skills") {
+            self.skills = f
+                .pointer("/value/skills")
+                .and_then(Value::as_array)
+                .map(|ss| {
+                    ss.iter()
+                        .map(|k| Skill {
+                            name: s(k, "name"),
+                            description: s(k, "description"),
+                            body: s(k, "body"),
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+        } else if id.starts_with("app.skill_put") || id.starts_with("app.skill_delete") {
+            if let Some(e) = f.get("error") {
+                self.notices.push(s(e, "message"));
+            }
+            self.skills_stale = true;
         } else if id.starts_with("app.activity") {
             self.activity = f
                 .pointer("/value/activity")
@@ -1129,6 +1162,23 @@ impl Model {
         Some(
             json!({"t": "cmd", "id": id, "name": "agent.rollback", "args": {"agent": agent, "revision": revision}}),
         )
+    }
+
+    /// Asks for the person's skills, with what each says, for the skills page.
+    pub fn load_skills(&mut self) -> Value {
+        let id = self.id("app.skills");
+        json!({"t": "cmd", "id": id, "name": "skill.list", "args": {"bodies": true}})
+    }
+
+    /// Saves a skill, new or changed.
+    pub fn save_skill(&mut self, name: &str, description: &str, body: &str) -> Value {
+        let id = self.id("app.skill_put");
+        json!({"t": "cmd", "id": id, "name": "skill.put", "args": {"name": name.trim(), "description": description.trim(), "body": body}})
+    }
+
+    pub fn delete_skill(&mut self, name: &str) -> Value {
+        let id = self.id("app.skill_delete");
+        json!({"t": "cmd", "id": id, "name": "skill.delete", "args": {"name": name}})
     }
 
     /// Asks for the selected agent's activity, for the activity page.

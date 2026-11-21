@@ -74,6 +74,7 @@ enum Screen {
     NewAgent,
     EditAgent,
     Activity,
+    Skills,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -104,6 +105,12 @@ pub struct Loom {
     pass_in: Entity<InputState>,
     code_in: Entity<InputState>,
     name_in: Entity<InputState>,
+    skill_name_in: Entity<InputState>,
+    skill_desc_in: Entity<InputState>,
+    skill_body_in: Entity<TextareaState>,
+    /// On the skills page: none for the list, `Some(None)` for a new skill, `Some(Some(name))`
+    /// for one being changed.
+    skill_open: Option<Option<String>>,
     instructions_in: Entity<TextareaState>,
     search_in: Entity<InputState>,
     program: Option<String>,
@@ -172,6 +179,13 @@ impl Loom {
         let pass_in = input(window, cx, "Password", true);
         let code_in = input(window, cx, "Setup code, for a new instance", false);
         let name_in = input(window, cx, "Scribe", false);
+        let skill_name_in = input(window, cx, "release-notes", false);
+        let skill_desc_in = input(window, cx, "When it's for, in one sentence", false);
+        let skill_body_in = cx.new(|cx| {
+            TextareaState::new(window, cx)
+                .auto_grow(8, 24)
+                .placeholder("How to do it, in Markdown.")
+        });
         let instructions_in = cx.new(|cx| {
             TextareaState::new(window, cx)
                 .auto_grow(4, 14)
@@ -282,6 +296,10 @@ impl Loom {
             pass_in,
             code_in,
             name_in,
+            skill_name_in,
+            skill_desc_in,
+            skill_body_in,
+            skill_open: None,
             instructions_in,
             search_in,
             program: None,
@@ -930,21 +948,43 @@ impl Loom {
                     )
                     .child(
                         div()
-                            .id("sign-out")
-                            .text_size(px(size::CAPTION))
-                            .text_color(p.ink_3)
-                            .cursor_pointer()
-                            .hover(move |s| s.text_color(p.ink))
-                            .child("Sign out")
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                if local_mode() {
-                                    // Stops the instance here; its agents and chats stay for next time.
-                                    this.set_local(false, cx);
-                                    return;
-                                }
-                                this.send(serde_json::json!({"t": "logout"}));
-                                cx.notify();
-                            })),
+                            .flex()
+                            .gap(px(space::M))
+                            .child(
+                                div()
+                                    .id("skills")
+                                    .text_size(px(size::CAPTION))
+                                    .text_color(p.ink_3)
+                                    .cursor_pointer()
+                                    .hover(move |s| s.text_color(p.ink))
+                                    .child("Skills")
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        let f = this.model.load_skills();
+                                        this.send(f);
+                                        this.skill_open = None;
+                                        this.menu = None;
+                                        this.screen = Screen::Skills;
+                                        cx.notify();
+                                    })),
+                            )
+                            .child(
+                                div()
+                                    .id("sign-out")
+                                    .text_size(px(size::CAPTION))
+                                    .text_color(p.ink_3)
+                                    .cursor_pointer()
+                                    .hover(move |s| s.text_color(p.ink))
+                                    .child("Sign out")
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        if local_mode() {
+                                            // Stops the instance here; its agents and chats stay for next time.
+                                            this.set_local(false, cx);
+                                            return;
+                                        }
+                                        this.send(serde_json::json!({"t": "logout"}));
+                                        cx.notify();
+                                    })),
+                            ),
                     ),
             )
     }
@@ -959,6 +999,14 @@ impl Loom {
             .items_center()
             .justify_between()
             .px(px(space::L));
+        if self.screen == Screen::Skills {
+            return bar.child(
+                div()
+                    .text_size(px(size::BODY))
+                    .text_color(p.ink_3)
+                    .child("Skills"),
+            );
+        }
         let Some(agent) = self
             .model
             .selected
@@ -1733,6 +1781,147 @@ impl Loom {
         div().flex_1().min_h_0().child(page)
     }
 
+    /// The skills page: the person's skills, which every agent reads when a task fits one,
+    /// and the form for a new or changed one.
+    fn skills_page(&mut self, cx: &mut Context<Self>) -> Div {
+        let p = self.p;
+        let mut body = div().w(px(560.0)).flex().flex_col().gap(px(space::XL));
+        if let Some(open) = self.skill_open.clone() {
+            let mut buttons = div()
+                .flex()
+                .gap(px(space::S))
+                .child(
+                    self.button("save-skill", "Save", true)
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            let name = this.skill_name_in.read(cx).value().to_string();
+                            let description = this.skill_desc_in.read(cx).value().to_string();
+                            let text = this.skill_body_in.read(cx).value().to_string();
+                            if name.trim().is_empty() || description.trim().is_empty() {
+                                this.model
+                                    .notices
+                                    .push("A skill needs a name and when it's for.".into());
+                                cx.notify();
+                                return;
+                            }
+                            let f = this.model.save_skill(&name, &description, &text);
+                            this.send(f);
+                            this.skill_open = None;
+                            cx.notify();
+                        })),
+                )
+                .child(
+                    self.button("cancel-skill", "Cancel", false)
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.skill_open = None;
+                            cx.notify();
+                        })),
+                );
+            if let Some(name) = open.clone() {
+                buttons = buttons.child(
+                    self.button("delete-skill", "Delete", false)
+                        .text_color(p.bad)
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            let f = this.model.delete_skill(&name);
+                            this.send(f);
+                            this.skill_open = None;
+                            cx.notify();
+                        })),
+                );
+            }
+            body = body
+                .child(
+                    div()
+                        .text_size(px(size::HEADING))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(p.ink)
+                        .child(if open.is_some() {
+                            "Change skill"
+                        } else {
+                            "New skill"
+                        }),
+                )
+                .child(self.field("Name", Input::new(&self.skill_name_in)))
+                .child(self.field("When it's for", Input::new(&self.skill_desc_in)))
+                .child(self.field("How to do it", Textarea::new(&self.skill_body_in)))
+                .child(buttons);
+        } else {
+            let mut list = div().flex().flex_col();
+            if self.model.skills.is_empty() {
+                list = list.child(
+                    div()
+                        .text_size(px(size::SMALL))
+                        .text_color(p.ink_3)
+                        .child("No skills yet. A skill is how you want a kind of task done. Every agent reads it when a task fits, and agents can save their own."),
+                );
+            }
+            for k in self.model.skills.clone() {
+                let id = SharedString::from(format!("skill-{}", k.name));
+                list = list.child(
+                    div()
+                        .id(id)
+                        .flex()
+                        .flex_col()
+                        .py(px(space::S))
+                        .px(px(space::S))
+                        .rounded(px(radius::BUTTON))
+                        .cursor_pointer()
+                        .hover(move |s| s.bg(p.hover))
+                        .child(
+                            div()
+                                .text_size(px(size::SMALL))
+                                .font_weight(FontWeight::MEDIUM)
+                                .text_color(p.ink)
+                                .child(k.name.clone()),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(size::CAPTION))
+                                .text_color(p.ink_3)
+                                .child(k.description.clone()),
+                        )
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            let (name, description, text) =
+                                (k.name.clone(), k.description.clone(), k.body.clone());
+                            this.skill_name_in
+                                .update(cx, |s, cx| s.set_value(name.clone(), window, cx));
+                            this.skill_desc_in
+                                .update(cx, |s, cx| s.set_value(description, window, cx));
+                            this.skill_body_in
+                                .update(cx, |s, cx| s.set_value(text, window, cx));
+                            this.skill_open = Some(Some(name));
+                            cx.notify();
+                        })),
+                );
+            }
+            body = body.child(list).child(
+                div()
+                    .flex()
+                    .child(
+                        self.button("new-skill", "New skill", true)
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                for s in [&this.skill_name_in, &this.skill_desc_in] {
+                                    s.update(cx, |s, cx| s.set_value("", window, cx));
+                                }
+                                this.skill_body_in
+                                    .update(cx, |s, cx| s.set_value("", window, cx));
+                                this.skill_open = Some(None);
+                                cx.notify();
+                            })),
+                    ),
+            );
+        }
+        let page = div()
+            .id("skills-page")
+            .size_full()
+            .overflow_y_scroll()
+            .flex()
+            .justify_center()
+            .pt(px(space::XXL))
+            .pb(px(space::XXL))
+            .child(body);
+        div().flex_1().min_h_0().child(page)
+    }
+
     /// The activity page: what the selected agent did, and what was done to it, newest
     /// first.
     fn activity_page(&mut self) -> Div {
@@ -2319,6 +2508,7 @@ impl Render for Loom {
             Screen::NewAgent => self.new_agent(cx),
             Screen::EditAgent => self.edit_agent(cx),
             Screen::Activity => self.activity_page(),
+            Screen::Skills => self.skills_page(cx),
         };
         let header = self.header(cx);
         let menu = self.menu_panel(cx);

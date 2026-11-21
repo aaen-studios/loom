@@ -210,6 +210,24 @@ fn http_error(status: u16, code: str, message: String) -> Response {
     return json_response(status, Obj.new().j("error", e).done())
 }
 
+// A skill's name, as Claude Code's skills have them: lowercase letters,
+// digits and hyphens, up to 64.
+fn valid_skill(name: String) -> bool {
+    if name.len() == 0 or name.len() > 64 or name.starts_with("-") { return false }
+    for r in name.runes() {
+        let fine = (r >= 'a' and r <= 'z') or (r >= '0' and r <= '9') or r == '-'
+        if not fine { return false }
+    }
+    return true
+}
+
+// A skill as Claude Code reads one, SKILL.md with its name and description up
+// front, so a Claude agent loads it by itself when it fits.
+fn skill_file(skill: Json) -> String {
+    let description = (str_at(skill.copy(), "description") ?? String()).replace("\n", " ")
+    return "---\nname: {str_at(skill.copy(), "name") ?? String()}\ndescription: {description}\n---\n\n{str_at(skill, "body") ?? String()}\n"
+}
+
 fn valid_username(name: String) -> bool {
     if name.len() == 0 or name.len() > 32 { return false }
     for r in name.runes() {
@@ -541,6 +559,21 @@ impl Instance {
             }
             if let text = str_at(args, "instructions") { a = a.s("instructions", text) }
             return some(answer_text(try i.command(g.user, g.agent, String("agent.update"), a.done())))
+        }
+        if name == "list_skills" {
+            return some(answer_text(try i.command(g.user, g.agent, String("skill.list"), Obj.new().done())))
+        }
+        if name == "read_skill" {
+            let skill_name = str_at(args, "name") ?? String()
+            let skill = try i.store.skill(g.user, skill_name.copy()) else return some(tool_error("There's no skill {skill_name}. list_skills gives their names."))
+            return some(tool_text(str_at(skill, "body") ?? String()))
+        }
+        if name == "save_skill" {
+            let a = Obj.new().s("name", str_at(args.copy(), "name") ?? String()).s("description", str_at(args.copy(), "description") ?? String()).s("body", str_at(args, "body") ?? String()).done()
+            return some(match try i.command(g.user, g.agent, String("skill.put"), a) {
+                Answer.Value(_) => tool_text(String("Saved. Every agent of your person's can read it now.")),
+                Answer.Refused(_, message) => tool_error(message),
+            })
         }
         if name == "notify" {
             let title = str_at(args.copy(), "title") ?? String()
@@ -1063,6 +1096,7 @@ impl Instance {
             try fs.write_text("{folder}/AGENTS.md", instructions.copy())
             try fs.write_text("{folder}/CLAUDE.md", instructions)
         }
+        i.write_skills(user.copy(), folder.copy())
         let to = try acp.start(id.copy(), acp_agent.command, acp_agent.args, folder, i.lines_to.copy())
         var p = Proc { agent: id.copy(), user: user.copy(), to: to, ready: false, images: false, program: program, resume: false, load: false, next_id: 1, pending: Map<i64, Pending>(), sessions: Map<String, String>(), told: Map<String, String>(), waiting: List<String>() }
         p.pending.insert(1, Pending.Init)
@@ -1152,6 +1186,63 @@ impl Instance {
         let names: List<str> = ["AGENTS.md", "CLAUDE.md"]
         for n in names {
             if let err(e) = fs.write_text("{folder}/{n}", instructions.copy()) { eprintln("loom: agent {id}'s {n}: {e}") }
+        }
+    }
+
+    // Puts `user`'s skills in an agent's folder, as `.claude/skills/<name>/SKILL.md`,
+    // and takes out the ones loom put there that are gone. A folder loom made
+    // has a `.loom` file in it; others are the person's own and stay.
+    fn write_skills(i: Instance, user: String, folder: String) {
+        let skills = match i.store.skills(user, true) {
+            ok(s) => s,
+            err(e) => {
+                eprintln("loom: skills: {e}")
+                return
+            },
+        }
+        let root = "{folder}/.claude/skills"
+        var names = List<String>()
+        for s in skills {
+            let name = str_at(s.copy(), "name") ?? String()
+            if not valid_skill(name.copy()) { continue }
+            names.push(name.copy())
+            let dir = "{root}/{name}"
+            if let err(e) = fs.make_dir_all(dir.copy()) {
+                eprintln("loom: skill {name}: {e}")
+                continue
+            }
+            if let err(e) = fs.write_text("{dir}/.loom", String("Written by loom from its skills. Changes here are overwritten.\n")) { eprintln("loom: skill {name}: {e}") }
+            if let err(e) = fs.write_text("{dir}/SKILL.md", skill_file(s)) { eprintln("loom: skill {name}: {e}") }
+        }
+        let present = match fs.list(root.copy()) {
+            ok(entries) => entries,
+            err(_) => return,
+        }
+        for entry in present {
+            let name = entry.copy()
+            if names.contains(name.copy()) or not valid_skill(name.copy()) { continue }
+            let dir = "{root}/{name}"
+            if not fs.exists("{dir}/.loom") { continue }
+            // Only the two files loom wrote, then the folder if that left it empty.
+            let written: List<str> = ["SKILL.md", ".loom"]
+            for f in written {
+                if fs.exists("{dir}/{f}") {
+                    if let err(e) = fs.remove_file("{dir}/{f}") { eprintln("loom: skill {name}: {e}") }
+                }
+            }
+            if let err(e) = fs.remove_dir(dir) { eprintln("loom: skill {name}'s folder stays: {e}") }
+        }
+    }
+
+    // After a skill changes: every one of `user`'s agents' folders.
+    fn sync_skills(i: Instance, user: String) {
+        let agents = match i.store.agents(user.copy()) {
+            ok(a) => a,
+            err(_) => return,
+        }
+        for a in agents {
+            let id = str_at(a.copy(), "id") ?? String()
+            i.write_skills(user.copy(), str_at(a, "folder") ?? "{i.data}/agents/{id}")
         }
     }
 
@@ -1699,6 +1790,30 @@ impl Instance {
             i.log(user.copy(), id.copy(), "agent", "Changed: revision {int_at(agent.copy(), "revision") ?? 0}", device.copy())
             try i.event(user, "agent.updated", Obj.new().j("agent", agent.copy()).s("by", device.copy()).done())
             return Answer.Value(Obj.new().j("agent", agent).done())
+        }
+        if name == "skill.list" {
+            return Answer.Value(Obj.new().j("skills", Json.Array(try i.store.skills(user, bool_at(args, "bodies") ?? false))).done())
+        }
+        if name == "skill.get" {
+            let skill_name = str_at(args, "name") ?? String()
+            let skill = try i.store.skill(user, skill_name.copy()) else return Answer.Refused(String("not_found"), "There's no skill {skill_name}.")
+            return Answer.Value(Obj.new().j("skill", skill).done())
+        }
+        if name == "skill.put" {
+            let skill_name = str_at(args.copy(), "name") ?? String()
+            if not valid_skill(skill_name.copy()) { return Answer.Refused(String("bad_name"), String("A skill's name is lowercase letters, digits and hyphens, up to 64, like \"release-notes\".")) }
+            let description = str_at(args.copy(), "description") ?? String()
+            if description.trim().len() == 0 { return Answer.Refused(String("bad_frame"), String("A skill needs a description: when it's for, which is how an agent knows to read it.")) }
+            try i.store.put_skill(user.copy(), skill_name.copy(), description, str_at(args, "body") ?? String())
+            if device.starts_with("a_") { i.log(user.copy(), device.copy(), "agent", "Saved the skill {skill_name}", device.copy()) }
+            i.sync_skills(user.copy())
+            return Answer.Value(Obj.new().j("skill", try i.store.skill(user, skill_name) ?? Json.Null).done())
+        }
+        if name == "skill.delete" {
+            let skill_name = str_at(args, "name") ?? String()
+            if not try i.store.delete_skill(user.copy(), skill_name.copy()) { return Answer.Refused(String("not_found"), "There's no skill {skill_name}.") }
+            i.sync_skills(user)
+            return Answer.Value(empty)
         }
         if name == "activity.list" {
             let limit = int_at(args.copy(), "limit") ?? 50
