@@ -8,6 +8,7 @@
 mod app;
 mod core;
 mod model;
+mod motion;
 mod panel;
 mod panel_test;
 mod shell;

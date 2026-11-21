@@ -312,11 +312,18 @@ fn next(state: &mut u64) -> f32 {
     (*state >> 40) as f32 / (1u64 << 24) as f32
 }
 
-/// A server's mark, `size` square: a ball of yarn in `tint`, wound its own way by
-/// `seed`, with its end trailing out to the right. Connected, it rests; connecting, it
-/// rolls; when it can't be reached, it's `grey` with its end hanging loose; signed out,
-/// it's only its outline.
-pub fn yarn(state: Spool, tint: Hsla, grey: Hsla, seed: u64, size: f32) -> impl IntoElement {
+/// A server's mark, `size` square: a soft ball of yarn, pale `tint` on `base` with a few
+/// strands of `tint` wound round it, each tilted its own way by `seed`. Connected, it
+/// rests; connecting, its strands turn; when it can't be reached, it's `grey`; signed out,
+/// it's only a dashed outline.
+pub fn yarn(
+    state: Spool,
+    tint: Hsla,
+    grey: Hsla,
+    base: Hsla,
+    seed: u64,
+    size: f32,
+) -> impl IntoElement {
     canvas(
         |_, _, _| {},
         move |bounds, _, window, _| {
@@ -326,91 +333,71 @@ pub fn yarn(state: Spool, tint: Hsla, grey: Hsla, seed: u64, size: f32) -> impl 
             }
             let s = bounds.size.height.as_f32();
             let (x0, y0) = (bounds.origin.x.as_f32(), bounds.origin.y.as_f32());
-            let r = s * 0.34;
-            let (cx, cy) = (x0 + s * 0.4, y0 + s * 0.42);
+            let (cx, cy) = (x0 + s / 2.0, y0 + s / 2.0);
+            let r = s * 0.39;
             let at = |x: f32, y: f32| point(px(x), px(y));
             let color = match state {
                 Spool::Loose | Spool::Empty => grey,
                 _ => tint,
             };
-            let dark = mix(color, hsla(0.0, 0.0, 0.0, 1.0), 0.5);
-            let line = (s * 0.045).max(1.0);
+            let line = (s * 0.06).max(1.2);
             let paint = |pb: PathBuilder, c: Hsla, window: &mut Window| {
                 if let Ok(path) = pb.build() {
                     window.paint_path(path, c);
                 }
             };
-            let circle = |mut pb: PathBuilder, radius: f32| {
-                for i in 0..=48 {
-                    let a = TAU * i as f32 / 48.0;
-                    let p = at(cx + radius * a.cos(), cy + radius * a.sin());
-                    if i == 0 {
-                        pb.move_to(p)
-                    } else {
-                        pb.line_to(p)
+            if state == Spool::Empty {
+                // A dashed ring where the ball would be.
+                let mut dashes = PathBuilder::stroke(px(line * 0.8));
+                for k in 0..12 {
+                    let a0 = TAU * k as f32 / 12.0;
+                    let a1 = a0 + TAU / 24.0;
+                    dashes.move_to(at(cx + r * a0.cos(), cy + r * a0.sin()));
+                    for i in 1..=4 {
+                        let a = a0 + (a1 - a0) * i as f32 / 4.0;
+                        dashes.line_to(at(cx + r * a.cos(), cy + r * a.sin()));
                     }
                 }
-                pb.close();
-                pb
-            };
-            // Its end, behind the ball: off its lower right, out to the edge.
+                paint(dashes, mix(color, base, 0.3), window);
+                return;
+            }
+            let mut ball = PathBuilder::fill();
+            for i in 0..=48 {
+                let a = TAU * i as f32 / 48.0;
+                let p = at(cx + r * 1.04 * a.cos(), cy + r * 1.04 * a.sin());
+                if i == 0 {
+                    ball.move_to(p)
+                } else {
+                    ball.line_to(p)
+                }
+            }
+            ball.close();
+            paint(ball, mix(color, base, 0.78), window);
+            // Its strands: each the front half of a turn round the ball, tilted and
+            // squashed its own way, turning while it connects.
             let roll = if state == Spool::Turning {
-                t * 1.3
+                t * 1.6
             } else {
                 0.0
             };
-            let from = 0.75_f32;
-            let (fx, fy) = (cx + r * from.cos(), cy + r * from.sin());
-            let (ex, ey) = (x0 + s * 0.98, y0 + s * 0.84);
-            let mut end = PathBuilder::stroke(px(line * 1.2));
-            for i in 0..=20 {
-                let u = i as f32 / 20.0;
-                let (x, y) = match state {
-                    // Hanging loose, straight down off the ball.
-                    Spool::Loose => (fx + s * 0.18 * u, fy + (y0 + s * 0.98 - fy) * u.powf(0.8)),
-                    _ => {
-                        let wave = s * 0.06 * (PI * 2.0 * u + roll * 2.0).sin() * u;
-                        (fx + (ex - fx) * u, fy + (ey - fy) * u + wave)
+            let mut rng = seed | 1;
+            let mut strands = PathBuilder::stroke(px(line));
+            for _ in 0..4 {
+                let tilt = next(&mut rng) * TAU + roll;
+                let squash = 0.2 + next(&mut rng) * 0.6;
+                let (c, sn) = (tilt.cos(), tilt.sin());
+                for i in 0..=24 {
+                    let u = PI * i as f32 / 24.0;
+                    let (lx, ly) = (r * 0.92 * u.cos(), r * 0.92 * squash * u.sin());
+                    let p = at(cx + lx * c - ly * sn, cy + lx * sn + ly * c);
+                    if i == 0 {
+                        strands.move_to(p)
+                    } else {
+                        strands.line_to(p)
                     }
-                };
-                if i == 0 {
-                    end.move_to(at(x, y))
-                } else {
-                    end.line_to(at(x, y))
                 }
             }
-            if state != Spool::Empty {
-                paint(end, color, window);
-                paint(circle(PathBuilder::fill(), r), color, window);
-                // The strands it's wound with: each the front half of a turn round the
-                // ball, tilted and squashed its own way. Darker ones under, lighter ones
-                // crossing over them, so it looks woven.
-                let mut rng = seed | 1;
-                let mut wind = |count: usize, width: f32| {
-                    let mut strands = PathBuilder::stroke(px(width));
-                    for _ in 0..count {
-                        let tilt = next(&mut rng) * TAU + roll;
-                        let squash = 0.2 + next(&mut rng) * 0.7;
-                        let (c, sn) = (tilt.cos(), tilt.sin());
-                        for i in 0..=18 {
-                            let u = PI * i as f32 / 18.0;
-                            let (lx, ly) = (r * 0.92 * u.cos(), r * 0.92 * squash * u.sin());
-                            let p = at(cx + lx * c - ly * sn, cy + lx * sn + ly * c);
-                            if i == 0 {
-                                strands.move_to(p)
-                            } else {
-                                strands.line_to(p)
-                            }
-                        }
-                    }
-                    strands
-                };
-                let under = wind(5, line * 1.15);
-                let over = wind(3, line);
-                paint(under, dark, window);
-                paint(over, mix(color, hsla(0.0, 0.0, 1.0, 1.0), 0.45), window);
-            }
-            paint(circle(PathBuilder::stroke(px(line)), r), dark, window);
+            paint(strands, color, window);
         },
     )
     .size(px(size))

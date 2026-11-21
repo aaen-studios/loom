@@ -17,6 +17,7 @@ use serde_json::Value;
 
 use crate::core::Core;
 use crate::model::{self, Approval, Conn, ImportSource, Message, Model, Mood};
+use crate::motion::{self, SoftHover};
 use crate::shell;
 use crate::thread::{self, thread, Spool};
 use crate::tokens::*;
@@ -1570,7 +1571,7 @@ ACTA_KEY=secret:ACTA_KEY",
             .rounded(px(radius::ROW))
             .text_color(p.ink_3)
             .cursor_pointer()
-            .hover(move |s| s.bg(p.hover).text_color(p.ink))
+            .soft_hover(transparent_black(), p.hover, Some((p.ink_3, p.ink)))
             .child(Icon::new(Ico::X).small())
     }
 
@@ -1584,7 +1585,7 @@ ACTA_KEY=secret:ACTA_KEY",
     fn server_yarn(&self, state: Spool, name: &str, size: f32) -> AnyElement {
         let seed = thread::seed_of(name);
         let tint = thread::color(COLORS[(seed % COLORS.len() as u64) as usize], self.p.dark);
-        thread::yarn(state, tint, self.p.ink_3, seed, size).into_any_element()
+        thread::yarn(state, tint, self.p.ink_3, self.p.side, seed, size).into_any_element()
     }
 
     /// Each server the app is signed in to, in a row. The one on screen is a box with its
@@ -1611,7 +1612,7 @@ ACTA_KEY=secret:ACTA_KEY",
                 .gap(px(space::M))
                 .rounded(px(radius::ROW))
                 .cursor_pointer()
-                .hover(move |s| s.bg(p.hover));
+                .soft_hover(transparent_black(), p.hover, None);
             if here {
                 button = button
                     .flex_1()
@@ -2112,7 +2113,7 @@ ACTA_KEY=secret:ACTA_KEY",
                             .rounded(px(radius::ROW))
                             .text_color(p.ink_2)
                             .cursor_pointer()
-                            .hover(move |s| s.bg(p.hover).text_color(p.ink))
+                            .soft_hover(transparent_black(), p.hover, Some((p.ink_2, p.ink)))
                             .child(Icon::new(Ico::ArrowLeft).small())
                             .on_click(cx.listener(|this, _, _, cx| this.open_task(None, cx))),
                     )
@@ -2186,7 +2187,7 @@ ACTA_KEY=secret:ACTA_KEY",
                             .rounded(px(radius::ROW))
                             .text_color(p.ink_2)
                             .cursor_pointer()
-                            .hover(move |s| s.bg(p.hover).text_color(p.ink))
+                            .soft_hover(transparent_black(), p.hover, Some((p.ink_2, p.ink)))
                             .child(Icon::new(Ico::ArrowLeft).small())
                             .on_click(cx.listener(|this, _, _, cx| this.open_branch(None, cx))),
                     )
@@ -2276,7 +2277,7 @@ ACTA_KEY=secret:ACTA_KEY",
                     .when(!on, |d| {
                         d.border_color(transparent_black())
                             .text_color(p.ink_3)
-                            .hover(move |s| s.text_color(p.ink))
+                            .soft_ink(p.ink_3, p.ink)
                     })
                     .child(div().w(px(12.0)).h(px(2.0)).rounded(px(1.0)).bg(tint))
                     .child(a.name.clone())
@@ -2320,7 +2321,7 @@ ACTA_KEY=secret:ACTA_KEY",
                 .when(!picked, |d| {
                     d.border_color(p.line)
                         .text_color(p.ink_3)
-                        .hover(move |s| s.text_color(p.ink))
+                        .soft_ink(p.ink_3, p.ink)
                 })
                 .child(label)
         };
@@ -2466,7 +2467,7 @@ ACTA_KEY=secret:ACTA_KEY",
                 )
                 .id(SharedString::from(format!("task-{}", t.id)))
                 .cursor_pointer()
-                .hover(move |s| s.bg(p.hover))
+                .soft_hover(transparent_black(), p.hover, None)
                 .on_click(cx.listener(move |this, _, _, cx| this.open_task(Some(id.clone()), cx)))
                 .into_any_element(),
             );
@@ -2734,7 +2735,7 @@ ACTA_KEY=secret:ACTA_KEY",
                             .rounded(px(radius::ROW))
                             .cursor_pointer()
                             .text_color(p.ink_3)
-                            .hover(move |s| s.bg(p.hover).text_color(p.ink))
+                            .soft_hover(transparent_black(), p.hover, Some((p.ink_3, p.ink)))
                             .child(Icon::new(Ico::X).small())
                             .on_click(cx.listener(|this, _, _, cx| this.watch(None, cx))),
                     ),
@@ -2837,7 +2838,7 @@ ACTA_KEY=secret:ACTA_KEY",
                     .rounded(px(radius::ROW))
                     .text_color(p.ink_3)
                     .cursor_pointer()
-                    .hover(move |s| s.bg(p.hover).text_color(p.ink))
+                    .soft_hover(transparent_black(), p.hover, Some((p.ink_3, p.ink)))
                     .child(icon.xsmall())
             };
             let (steer_id, up_id, edit_item, drop_id) = (
@@ -3073,12 +3074,18 @@ ACTA_KEY=secret:ACTA_KEY",
             .text_size(px(size::SMALL))
             .font_weight(FontWeight::MEDIUM)
             .cursor_pointer()
-            .when(primary, |d| d.bg(p.button).text_color(p.button_ink))
+            .when(primary, |d| {
+                d.text_color(p.button_ink).soft_hover(
+                    p.button,
+                    motion::mix(p.button, p.bg, 0.18),
+                    None,
+                )
+            })
             .when(!primary, |d| {
                 d.border_1()
                     .border_color(p.line_strong)
                     .text_color(p.ink)
-                    .hover(move |s| s.bg(p.hover))
+                    .soft_hover(transparent_black(), p.hover, None)
             })
             .child(label.to_string())
     }
@@ -3166,7 +3173,7 @@ ACTA_KEY=secret:ACTA_KEY",
                                     .text_size(px(size::SMALL))
                                     .text_color(p.ink_3)
                                     .cursor_pointer()
-                                    .hover(move |s| s.text_color(p.ink))
+                                    .soft_ink(p.ink_3, p.ink)
                                     .child("I have a server")
                                     .on_click(cx.listener(|this, _, _, cx| {
                                         this.server_form = true;
@@ -3265,7 +3272,7 @@ ACTA_KEY=secret:ACTA_KEY",
                             .rounded(px(radius::BUTTON))
                             .text_color(p.ink_2)
                             .cursor_pointer()
-                            .hover(move |s| s.bg(p.hover).text_color(p.ink))
+                            .soft_hover(transparent_black(), p.hover, Some((p.ink_2, p.ink)))
                             .child(Icon::new(Ico::ArrowLeft).small())
                             .on_click(cx.listener(|this, _, _, cx| {
                                 // A server being added goes again, back to the one before.
@@ -3320,7 +3327,7 @@ ACTA_KEY=secret:ACTA_KEY",
                         .text_size(px(size::SMALL))
                         .text_color(p.ink_3)
                         .cursor_pointer()
-                        .hover(move |s| s.text_color(p.ink))
+                        .soft_ink(p.ink_3, p.ink)
                         .child("New server? Add its setup code")
                         .on_click(cx.listener(|this, _, _, cx| {
                             this.show_code = true;
@@ -3371,7 +3378,7 @@ ACTA_KEY=secret:ACTA_KEY",
                     .py(px(space::S))
                     .rounded(px(radius::ROW))
                     .cursor_pointer()
-                    .hover(move |s| s.bg(p.hover))
+                    .soft_hover(transparent_black(), p.hover, None)
                     .on_click(cx.listener(move |this, _, window, cx| {
                         this.search_in
                             .update(cx, |s, cx| s.set_value("", window, cx));
@@ -3460,7 +3467,9 @@ ACTA_KEY=secret:ACTA_KEY",
                     .rounded(px(radius::ROW))
                     .cursor_pointer()
                     .when(selected, |d| d.bg(p.active))
-                    .when(!selected, move |d| d.hover(move |s| s.bg(p.hover)))
+                    .when(!selected, move |d| {
+                        d.soft_hover(transparent_black(), p.hover, None)
+                    })
                     .on_click(cx.listener(move |this, _, _, cx| this.select(id.clone(), cx)))
                     .child(thread(
                         format!("side-{}", a.id),
@@ -3526,7 +3535,7 @@ ACTA_KEY=secret:ACTA_KEY",
                 .rounded(px(radius::ROW))
                 .bg(p.hover)
                 .cursor_pointer()
-                .hover(move |s| s.bg(p.active))
+                .soft_hover(p.hover, p.active, None)
                 .flex()
                 .flex_col()
                 .child(
@@ -3605,7 +3614,7 @@ ACTA_KEY=secret:ACTA_KEY",
                             .rounded(px(radius::ROW))
                             .text_color(p.ink_2)
                             .cursor_pointer()
-                            .hover(move |s| s.bg(p.hover))
+                            .soft_hover(transparent_black(), p.hover, None)
                             .child(Icon::new(IconName::Plus).small())
                             .on_click(
                                 cx.listener(|this, _, _, cx| this.open(Screen::NewAgent, cx)),
@@ -3664,7 +3673,15 @@ ACTA_KEY=secret:ACTA_KEY",
                             .text_color(if settings_open { p.ink } else { p.ink_3 })
                             .cursor_pointer()
                             .when(settings_open, |d| d.bg(p.active))
-                            .hover(move |s| s.bg(p.hover).text_color(p.ink))
+                            .soft_hover(
+                                if settings_open {
+                                    p.active
+                                } else {
+                                    transparent_black()
+                                },
+                                p.hover,
+                                Some((if settings_open { p.ink } else { p.ink_3 }, p.ink)),
+                            )
                             .child(Icon::new(Ico::Settings).small())
                             .on_click(cx.listener(|this, _, _, cx| {
                                 let last = this.settings_last;
@@ -3718,7 +3735,15 @@ ACTA_KEY=secret:ACTA_KEY",
             .text_color(if watching { tint } else { p.ink_2 })
             .when(watching, |d| d.bg(p.hover))
             .cursor_pointer()
-            .hover(move |s| s.bg(p.hover))
+            .soft_hover(
+                if watching {
+                    p.hover
+                } else {
+                    transparent_black()
+                },
+                p.hover,
+                None,
+            )
             .child(Icon::new(Ico::Globe).small())
             .child("Browser")
             .on_click(cx.listener(move |this, _, _, cx| {
@@ -3742,7 +3767,15 @@ ACTA_KEY=secret:ACTA_KEY",
             .text_color(if pins_open { p.ink } else { p.ink_2 })
             .when(pins_open, |d| d.bg(p.hover))
             .cursor_pointer()
-            .hover(move |s| s.bg(p.hover))
+            .soft_hover(
+                if pins_open {
+                    p.hover
+                } else {
+                    transparent_black()
+                },
+                p.hover,
+                None,
+            )
             .child(Icon::new(Ico::Pin).small())
             .when(pinned > 0, |d| d.child(pinned.to_string()))
             .on_click(cx.listener(move |this, _, _, cx| {
@@ -3763,7 +3796,7 @@ ACTA_KEY=secret:ACTA_KEY",
                 .py(px(space::XS))
                 .rounded(px(radius::ROW))
                 .cursor_pointer()
-                .hover(move |s| s.bg(p.hover))
+                .soft_hover(transparent_black(), p.hover, None)
                 .on_click(cx.listener(|this, _, _, cx| {
                     this.menu = if this.menu == Some(Menu::Agent) {
                         None
@@ -3811,7 +3844,7 @@ ACTA_KEY=secret:ACTA_KEY",
                             .text_size(px(size::CAPTION))
                             .text_color(p.ink_2)
                             .cursor_pointer()
-                            .hover(move |s| s.bg(p.hover))
+                            .soft_hover(transparent_black(), p.hover, None)
                             .when(self.menu == Some(Menu::Model), |d| d.bg(p.hover))
                             .flex()
                             .items_center()
@@ -3842,7 +3875,7 @@ ACTA_KEY=secret:ACTA_KEY",
                         .text_size(px(size::CAPTION))
                         .text_color(p.ink_2)
                         .cursor_pointer()
-                        .hover(move |s| s.bg(p.hover))
+                        .soft_hover(transparent_black(), p.hover, None)
                         .flex()
                         .items_center()
                         .gap(px(space::XS))
@@ -3884,7 +3917,7 @@ ACTA_KEY=secret:ACTA_KEY",
             .cursor_pointer()
             .text_size(px(size::SMALL))
             .text_color(if danger { p.bad } else { p.ink })
-            .hover(move |s| s.bg(p.hover))
+            .soft_hover(transparent_black(), p.hover, None)
             .child(
                 div()
                     .text_color(if danger { p.bad } else { p.ink_2 })
@@ -4080,7 +4113,7 @@ ACTA_KEY=secret:ACTA_KEY",
                         .cursor_pointer()
                         .text_size(px(size::SMALL))
                         .text_color(p.ink)
-                        .hover(move |s| s.bg(p.hover))
+                        .soft_hover(transparent_black(), p.hover, None)
                         .child(div().flex_1().child(name))
                         .when(picked, |d| {
                             d.child(
@@ -4415,7 +4448,7 @@ ACTA_KEY=secret:ACTA_KEY",
                         .text_size(px(size::CAPTION))
                         .text_color(p.ink_3)
                         .cursor_pointer()
-                        .hover(move |s| s.text_color(p.ink))
+                        .soft_ink(p.ink_3, p.ink)
                         .child(Icon::new(Ico::GitBranch).xsmall())
                         .child(title)
                         .on_click(move |_, _, cx| {
@@ -4476,7 +4509,11 @@ ACTA_KEY=secret:ACTA_KEY",
                                     .text_color(p.ink_3)
                                     .opacity(0.0)
                                     .group_hover("row", |s| s.opacity(1.0))
-                                    .hover(move |s| s.bg(p.hover).text_color(p.ink))
+                                    .soft_hover(
+                                        transparent_black(),
+                                        p.hover,
+                                        Some((p.ink_3, p.ink)),
+                                    )
                                     .child(Icon::new(Ico::GitBranch).xsmall())
                                     .on_click(move |_, _, cx| {
                                         let _ = to_branch.update(cx, |loom, _| {
@@ -4503,7 +4540,11 @@ ACTA_KEY=secret:ACTA_KEY",
                                     .when(!pinned, |d| {
                                         d.opacity(0.0).group_hover("row", |s| s.opacity(1.0))
                                     })
-                                    .hover(move |s| s.bg(p.hover).text_color(p.ink))
+                                    .soft_hover(
+                                        transparent_black(),
+                                        p.hover,
+                                        Some((if pinned { p.ink_2 } else { p.ink_3 }, p.ink)),
+                                    )
                                     .child(Icon::new(Ico::Pin).xsmall())
                                     .on_click(move |_, _, cx| {
                                         let _ = this.update(cx, |loom, _| {
@@ -4574,7 +4615,7 @@ ACTA_KEY=secret:ACTA_KEY",
                             .rounded(px(radius::ROW))
                             .text_color(p.ink_3)
                             .cursor_pointer()
-                            .hover(move |s| s.bg(p.hover).text_color(p.ink))
+                            .soft_hover(transparent_black(), p.hover, Some((p.ink_3, p.ink)))
                             .child(Icon::new(IconName::Close).xsmall())
                             .on_click(cx.listener(move |this, _, _, cx| this.unattach(&id, cx))),
                     ),
@@ -4616,7 +4657,7 @@ ACTA_KEY=secret:ACTA_KEY",
                                         .rounded(px(radius::BUTTON))
                                         .text_color(p.ink_2)
                                         .cursor_pointer()
-                                        .hover(move |s| s.bg(p.hover))
+                                        .soft_hover(transparent_black(), p.hover, None)
                                         .when(plus_open, |d| d.bg(p.hover))
                                         .child(Icon::new(Ico::Plus).small())
                                         .on_click(cx.listener(|this, _, _, cx| {
@@ -4660,7 +4701,7 @@ ACTA_KEY=secret:ACTA_KEY",
                                     .rounded(px(radius::BUTTON))
                                     .text_color(p.ink_2)
                                     .cursor_pointer()
-                                    .hover(move |s| s.bg(p.hover))
+                                    .soft_hover(transparent_black(), p.hover, None)
                                     .child(Icon::new(Ico::Mic).small())
                                     .on_click(cx.listener(|this, _, window, cx| {
                                         this.composer.update(cx, |c, cx| c.focus(window, cx));
@@ -4683,7 +4724,7 @@ ACTA_KEY=secret:ACTA_KEY",
                                 .items_center()
                                 .justify_center()
                                 .rounded(px(radius::BUTTON))
-                                .bg(p.button)
+                                .soft_hover(p.button, motion::mix(p.button, p.bg, 0.18), None)
                                 .text_color(p.button_ink)
                                 .cursor_pointer()
                                 .child(
@@ -4821,7 +4862,7 @@ ACTA_KEY=secret:ACTA_KEY",
                         .rounded(px(radius::BUTTON))
                         .text_color(p.ink_2)
                         .cursor_pointer()
-                        .hover(move |s| s.bg(p.hover).text_color(p.ink))
+                        .soft_hover(transparent_black(), p.hover, Some((p.ink_2, p.ink)))
                         .child(Icon::new(IconName::ArrowLeft).small())
                         .on_click(cx.listener(|this, _, _, cx| {
                             if this.make.step == Step::Name {
@@ -5100,7 +5141,7 @@ ACTA_KEY=secret:ACTA_KEY",
                                 .rounded(px(radius::BUTTON))
                                 .text_color(p.ink_2)
                                 .cursor_pointer()
-                                .hover(move |s| s.bg(p.hover).text_color(p.ink))
+                                .soft_hover(transparent_black(), p.hover, Some((p.ink_2, p.ink)))
                                 .child(Icon::new(Ico::Dices))
                                 .on_click(cx.listener(|this, _, window, cx| {
                                     let current = this.name_in.read(cx).value().to_string();
@@ -5472,7 +5513,7 @@ ACTA_KEY=secret:ACTA_KEY",
                     .text_size(px(size::SMALL))
                     .text_color(p.ink_2)
                     .cursor_pointer()
-                    .hover(move |s| s.bg(p.hover).text_color(p.ink))
+                    .soft_hover(transparent_black(), p.hover, Some((p.ink_2, p.ink)))
                     .child(*ask)
                     .on_click(cx.listener(move |this, _, window, cx| {
                         this.composer.update(cx, |s, cx| {
@@ -5536,7 +5577,7 @@ ACTA_KEY=secret:ACTA_KEY",
             .text_size(px(size::SMALL))
             .when(opens, |d| {
                 d.cursor_pointer()
-                    .hover(move |s| s.bg(p.hover))
+                    .soft_hover(transparent_black(), p.hover, None)
                     .on_click(on_click)
             })
             .child(div().flex_1().text_color(p.ink).child(label.to_string()))
@@ -5899,7 +5940,9 @@ ACTA_KEY=secret:ACTA_KEY",
     /// A row that opens what it names.
     fn link_row(&self, id: SharedString, row: Div) -> Stateful<Div> {
         let p = self.p;
-        row.id(id).cursor_pointer().hover(move |s| s.bg(p.hover))
+        row.id(id)
+            .cursor_pointer()
+            .soft_hover(transparent_black(), p.hover, None)
     }
 
     /// The MCP servers page: the person's servers, which each agent gets if it has them,
@@ -6253,7 +6296,7 @@ ACTA_KEY=secret:ACTA_KEY",
                 .rounded(px(radius::ROW))
                 .text_color(p.ink_2)
                 .cursor_pointer()
-                .hover(move |s| s.bg(p.hover).text_color(p.ink))
+                .soft_hover(transparent_black(), p.hover, Some((p.ink_2, p.ink)))
                 .child(Icon::new(Ico::ArrowLeft).small())
                 .on_click(cx.listener(|this, _, _, cx| {
                     this.table_dropping = None;
@@ -6894,7 +6937,7 @@ ACTA_KEY=secret:ACTA_KEY",
                 )
                 .id(SharedString::from(format!("routine-{}", r.id)))
                 .cursor_pointer()
-                .hover(move |s| s.bg(p.hover))
+                .soft_hover(transparent_black(), p.hover, None)
                 .on_click(cx.listener(move |this, _, window, cx| {
                     this.routine_name_in
                         .update(cx, |s, cx| s.set_value(r.name.clone(), window, cx));
@@ -7695,7 +7738,7 @@ ACTA_KEY=secret:ACTA_KEY",
                     .text_size(px(size::SMALL))
                     .text_color(p.ink_3)
                     .cursor_pointer()
-                    .hover(move |s| s.text_color(p.ink))
+                    .soft_ink(p.ink_3, p.ink)
                     .child("New server? Add its setup code")
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.show_code = true;
@@ -7999,14 +8042,15 @@ ACTA_KEY=secret:ACTA_KEY",
                 .items_center()
                 .justify_center()
                 .rounded(px(radius::ROW))
-                .text_color(p.ink_3)
-                .hover(move |s| {
+                .soft_hover(
                     if close {
-                        s.bg(p.bad).text_color(gpui::white())
+                        p.bad.opacity(0.0)
                     } else {
-                        s.bg(p.hover).text_color(p.ink)
-                    }
-                })
+                        transparent_black()
+                    },
+                    if close { p.bad } else { p.hover },
+                    Some((p.ink_3, if close { gpui::white() } else { p.ink })),
+                )
                 .when(cfg!(target_os = "windows"), |d| d.window_control_area(area))
                 .when(!cfg!(target_os = "windows"), |d| {
                     d.on_click(move |_, window, _| match area {
@@ -8320,26 +8364,34 @@ ACTA_KEY=secret:ACTA_KEY",
             .px(px(space::M))
     }
 
-    /// An on and off switch.
+    /// An on and off switch, whose knob slides across and whose colour fades as it
+    /// changes.
     fn switch(&self, id: impl Into<SharedString>, on: bool) -> Stateful<Div> {
         let p = self.p;
+        let id: SharedString = id.into();
+        let k = motion::level(&id, on, motion::SLIDE);
+        let off_hover = motion::mix(p.line_strong, p.ink_3, 0.35);
         div()
-            .id(id.into())
+            .id(id.clone())
+            .relative()
             .w(px(38.0))
             .h(px(22.0))
             .flex_none()
-            .flex()
-            .items_center()
-            .when(on, |d| d.justify_end())
-            .p(px(3.0))
             .rounded(px(radius::ROW))
-            .bg(if on { p.button } else { p.line_strong })
             .cursor_pointer()
+            .soft_hover(
+                motion::mix(p.line_strong, p.button, k),
+                motion::mix(off_hover, p.button, k),
+                None,
+            )
             .child(
                 div()
+                    .absolute()
+                    .top(px(3.0))
+                    .left(px(3.0 + 16.0 * k))
                     .size(px(16.0))
                     .rounded(px(4.0))
-                    .bg(if on { p.button_ink } else { p.bg })
+                    .bg(motion::mix(p.bg, p.button_ink, k))
                     .shadow_sm(),
             )
     }
@@ -8374,9 +8426,7 @@ ACTA_KEY=secret:ACTA_KEY",
                     .font_weight(FontWeight::MEDIUM)
                     .shadow_sm()
             })
-            .when(!on, |d| {
-                d.text_color(p.ink_3).hover(move |s| s.text_color(p.ink))
-            })
+            .when(!on, |d| d.soft_ink(p.ink_3, p.ink))
             .child(label.to_string())
     }
 
@@ -9241,7 +9291,7 @@ ACTA_KEY=secret:ACTA_KEY",
                     .border_1()
                     .border_color(p.line)
                     .cursor_pointer()
-                    .hover(move |s| s.bg(p.hover))
+                    .soft_hover(transparent_black(), p.hover, None)
                     .on_click(cx.listener(move |this, _, _, cx| this.jump_to(&id, cx)))
                     .child(
                         div()
@@ -9266,7 +9316,11 @@ ACTA_KEY=secret:ACTA_KEY",
                                     .items_center()
                                     .justify_center()
                                     .rounded(px(radius::ROW))
-                                    .hover(move |s| s.bg(p.active).text_color(p.ink))
+                                    .soft_hover(
+                                        transparent_black(),
+                                        p.active,
+                                        Some((p.ink_3, p.ink)),
+                                    )
                                     .child(Icon::new(Ico::PinOff).xsmall())
                                     .on_click(cx.listener(move |this, _, _, cx| {
                                         cx.stop_propagation();
@@ -9537,7 +9591,7 @@ fn file_view(
             .border_color(p.line)
             .bg(p.bubble)
             .cursor_pointer()
-            .hover(move |s| s.bg(p.hover))
+            .soft_hover(p.bubble, p.hover, None)
             .on_click(move |_, _, cx| {
                 let _ = this.update(cx, |loom, cx| loom.open_page(&file, cx));
             })
@@ -9600,7 +9654,7 @@ fn file_view(
         .border_1()
         .border_color(p.line)
         .cursor_pointer()
-        .hover(move |s| s.bg(p.hover))
+        .soft_hover(transparent_black(), p.hover, None)
         .on_click(open)
         .child(Icon::new(Ico::FileText).small().text_color(p.ink_3))
         .child(
@@ -9693,7 +9747,7 @@ fn reply(
                             div()
                                 .id(SharedString::from(format!("t-{key}")))
                                 .text_size(px(size::CAPTION))
-                                .text_color(p.ink_3)
+                                .soft_ink(p.ink_3, p.ink)
                                 .cursor_pointer()
                                 .child(if shown { "⌄ Thought" } else { "› Thought" })
                                 .on_click(move |_, _, cx| {
@@ -9792,7 +9846,8 @@ fn reply(
                     .bg(p.raised)
                     .text_size(px(size::SMALL))
                     .cursor_pointer()
-                    .hover(move |s| s.bg(p.hover).border_color(p.line_strong))
+                    .soft_hover(p.raised, p.hover, None)
+                    .hover(move |s| s.border_color(p.line_strong))
                     .child(
                         div()
                             .text_color(p.ink_3)
@@ -9848,12 +9903,18 @@ fn approval(p: Palette, a: &Approval, this: WeakEntity<Loom>) -> Div {
             .text_size(px(size::SMALL))
             .font_weight(FontWeight::MEDIUM)
             .cursor_pointer()
-            .when(primary, |d| d.bg(p.button).text_color(p.button_ink))
+            .when(primary, |d| {
+                d.text_color(p.button_ink).soft_hover(
+                    p.button,
+                    motion::mix(p.button, p.bg, 0.18),
+                    None,
+                )
+            })
             .when(!primary, |d| {
                 d.border_1()
                     .border_color(p.line_strong)
                     .text_color(p.ink)
-                    .hover(move |s| s.bg(p.hover))
+                    .soft_hover(transparent_black(), p.hover, None)
             })
             .child(label)
     };
@@ -10209,7 +10270,8 @@ impl Render for Loom {
                 .flex_col()
                 .child(self.title_bar(window, div(), transparent_black()))
                 .child(div().flex_1().min_h_0().flex().flex_col().child(page))
-                .when_some(splash, |d, s| d.child(s));
+                .when_some(splash, |d, s| d.child(s))
+                .child(motion_ticker());
         }
         // The main area is the chat, unless an agent is being made.
         let main = match self.screen {
@@ -10246,7 +10308,23 @@ impl Render for Loom {
             .when_some(menu_scrim, |d, s| d.child(s))
             .when_some(whole, |d, c| d.child(c))
             .when_some(splash, |d, s| d.child(s))
+            .child(motion_ticker())
     }
+}
+
+/// Drawn last of all, after every list has drawn its rows: while a switch is sliding
+/// or a hover fading, it asks for the next frame.
+fn motion_ticker() -> impl IntoElement {
+    canvas(
+        |_, _, _| {},
+        |_, _, window, _| {
+            if crate::motion::moving() {
+                window.request_animation_frame();
+            }
+        },
+    )
+    .absolute()
+    .size_0()
 }
 
 /// loom's mark, the knot, with the wordmark beside it (design/logo/README.md), "loom" at
