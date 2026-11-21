@@ -57,6 +57,38 @@ fn signed_out(app: mut App) -> bool {
     }
 }
 
+// The agent programs a person has (PLAN.md, "Agents and keys"): the owner
+// gives each to everyone, or only to some people, and shares its settings
+// with everyone or some of them.
+fn programs(owner: mut App, ann: mut App, ann_id: String, ann_chat: String) ! Error {
+    var owner_id = String()
+    if let Json.Array(list) = at(at(try owner.cmd("p_0", "user.list", Obj.new().done()), "value"), "users") {
+        for p in list {
+            if str_at(p.copy(), "role") == some(String("owner")) { owner_id = str_at(p, "user") ?? String() }
+        }
+    }
+    let to_none = try owner.cmd("p_1", "acp.members", Obj.new().s("name", String("fake")).j("members", Json.Array(List<Json>())).done())
+    try check("{at(at(to_none, "value"), "program")}".contains("\"members\":[]"), "the owner gives a program to no one but themselves")
+    try check(not "{try ann.cmd("p_1", "acp.list", Obj.new().done())}".contains("\"fake\""), "then a member's acp.list leaves it out")
+    try check(refused(try ann.cmd("p_2", "agent.create", Obj.new().s("name", String("Another")).s("acp_agent", String("fake")).done())) == "not_allowed", "and she can't make an agent on it")
+    try ann.send(Obj.new().s("t", String("send")).s("cid", String("p_3")).s("conversation", ann_chat).s("text", String("hello")).done())
+    let finished = "{try ann.until("event", "run.finished")}"
+    try check(finished.contains("\"failed\"") and finished.contains("hasn't given you the agent program fake"), "her agent already on it doesn't run, and says why")
+    try check(refused(try ann.cmd("p_4", "acp.members", Obj.new().s("name", String("fake")).j("members", Json.Null).done())) == "not_allowed", "a member can't give herself a program")
+    let me = Json.Array([Json.Str(owner_id)])
+    try check(refused(try owner.cmd("p_2", "acp.members", Obj.new().s("name", String("fake")).j("members", me).done())) == "bad_request", "the owner has every program already")
+
+    let her = Json.Array([Json.Str(ann_id.copy())])
+    _ = try owner.cmd("p_3", "acp.members", Obj.new().s("name", String("fake")).j("members", her.copy()).done())
+    try check("{try ann.cmd("p_5", "acp.list", Obj.new().done())}".contains("\"fake\""), "given it, she has it")
+    let shared = try owner.cmd("p_4", "acp.share", Obj.new().s("name", String("fake")).i("tokens", 1000).j("members", her).done())
+    try check("{at(at(at(shared, "value"), "program"), "share")}".contains(ann_id.copy()), "the owner shares its settings with her only")
+    let again = try owner.cmd("p_5", "acp.share", Obj.new().s("name", String("fake")).i("tokens", 2000).done())
+    try check("{at(at(at(again, "value"), "program"), "share")}".contains(ann_id), "a new budget keeps who it's for")
+    let everyone = try owner.cmd("p_6", "acp.members", Obj.new().s("name", String("fake")).j("members", Json.Null).done())
+    try check(at(at(at(everyone, "value"), "program"), "members") == Json.Null, "and gives the program back to everyone")
+}
+
 fn run() ! Error {
     let inst = try Instance.start()
     var owner = try App.connect(inst.base.copy(), inst.token.copy(), 0)
@@ -88,7 +120,7 @@ fn run() ! Error {
     let made_agent = try ann.cmd("q_a1", "agent.create", Obj.new().s("name", String("Hers")).s("acp_agent", String("fake")).done())
     let ann_agent = str_at(at(at(made_agent, "value"), "agent"), "id") ?? String()
     let ann_chat = str_at(at(try ann.cmd("q_a2", "conversation.create", Obj.new().s("agent", ann_agent).done()), "value"), "conversation") ?? String()
-    try ann.send(Obj.new().s("t", String("send")).s("cid", String("m_1")).s("conversation", ann_chat).s("text", String("hello")).done())
+    try ann.send(Obj.new().s("t", String("send")).s("cid", String("m_1")).s("conversation", ann_chat.copy()).s("text", String("hello")).done())
     let finished = "{try ann.until("event", "run.finished")}"
     try check(finished.contains("\"failed\"") and finished.contains("sandbox"), "a member's agent doesn't run outside a sandbox")
 
@@ -104,6 +136,7 @@ fn run() ! Error {
         _ => String(),
     }
     try check(ann_id.len() > 0, "the owner lists people")
+    try programs(mut owner, mut ann, ann_id.copy(), ann_chat.copy())
     try check(refused(try owner.cmd("q_4", "user.role", Obj.new().s("user", ann_id.copy()).s("role", String("admin")).done())) == "", "the owner makes ann an admin")
     try check(refused(try ann.cmd("q_3", "invite.create", Obj.new().s("role", String("admin")).done())) == "not_allowed", "an admin can't make admins")
     let ann_invite = try ann.cmd("q_4", "invite.create", Obj.new().i("uses", 2).done())
@@ -138,6 +171,11 @@ fn run() ! Error {
         "elliot: elliot set up the instance, as its owner",
         "elliot: Made an invite for a member, for 7 days",
         "ann: ann joined as a member, with an invite from elliot",
+        "elliot: Gave fake to no one",
+        "elliot: Gave fake to ann",
+        "elliot: Shared fake's settings with ann, 1000 tokens a day each",
+        "elliot: Shared fake's settings with ann, 2000 tokens a day each",
+        "elliot: Gave fake to everyone",
         "elliot: Made ann an admin",
         "ann: Made an invite for 2 members, for 7 days",
         "bob: bob joined as a member, with an invite from ann",
@@ -158,7 +196,7 @@ fn run() ! Error {
     let Json.Array(page) = at(first_page, "entries") else fail "people.log gave no entries"
     let oldest = int_at(page[1].copy(), "id") ?? 0
     let rest = entries(at(try owner.cmd("q_11", "people.log", Obj.new().i("before", oldest).done()), "value"))
-    try check(page.len() == 2 and rest.len() == 6 and rest[5] == "bob: bob joined as a member, with an invite from ann", "it comes a page at a time")
+    try check(page.len() == 2 and rest.len() == 11 and rest[10] == "bob: bob joined as a member, with an invite from ann", "it comes a page at a time")
     owner.close()
 
     // Through real cores: the owner's gets the link to pass on, and a new one joins from it.

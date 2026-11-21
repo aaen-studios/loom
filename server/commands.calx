@@ -25,7 +25,7 @@ struct Command {
     does: str
 }
 
-const COMMANDS: [Command; 78] = [
+const COMMANDS: [Command; 79] = [
     Command { name: "conversation.create", args: "agent, title?", does: "Makes a conversation with an agent." },
     Command { name: "conversation.rename", args: "conversation, title", does: "Renames a conversation." },
     Command { name: "conversation.branch", args: "message, title?", does: "Branches a chat at a message: a new conversation that goes on from there, apart from the chat." },
@@ -86,7 +86,8 @@ const COMMANDS: [Command; 78] = [
     Command { name: "acp.registry", args: "again?", does: "What the ACP Registry has to install." },
     Command { name: "acp.install", args: #"id, env? ({NAME: value})"#, does: "Installs an agent program from the ACP Registry." },
     Command { name: "acp.settings", args: #"name, env ({NAME: value}, or null to remove one)"#, does: "Changes an agent program's settings." },
-    Command { name: "acp.share", args: "name, tokens, per? (day or month)", does: "Shares an agent program's settings with everyone, with a budget each." },
+    Command { name: "acp.share", args: "name, tokens, per? (day or month), members? (ids, or null for everyone)", does: "Shares an agent program's settings with everyone or some people, with a budget each." },
+    Command { name: "acp.members", args: "name, members (ids, or null for everyone)", does: "Gives an agent program to everyone or only some people." },
     Command { name: "acp.remove", args: "name", does: "Removes an agent program." },
     Command { name: "user.list", args: "", does: "Everyone with an account here." },
     Command { name: "user.role", args: "user, role (member or admin)", does: "Makes someone an admin or a member." },
@@ -162,7 +163,7 @@ fn reading_runs_and_harm_asks() {
     for c in COMMANDS {
         if let Access.Never(_) = access(String(c.name)) { panic("{c.name} is listed but never runs") }
     }
-    assert(catalog().len() == 78)
+    assert(catalog().len() == 79)
     assert(access(String("import.run")) == Access.Asks(String("other")))
     assert(access(String("table.write")) == Access.Runs and access(String("table.delete_rows")) == Access.Runs)
     assert(access(String("table.drop")) == Access.Asks(String("delete")))
