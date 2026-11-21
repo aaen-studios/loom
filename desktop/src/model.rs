@@ -577,8 +577,34 @@ pub enum Conn {
     UpdateNeeded,
 }
 
+/// An agent's browser, as `browser.state` says it.
+#[derive(Clone, Default, Debug, PartialEq)]
+pub struct Browser {
+    pub open: bool,
+    /// Whether the person has taken it over.
+    pub person: bool,
+    /// What the agent asked the person for, while it waits.
+    pub asked: String,
+}
+
+/// The newest picture of the watched browser's page.
+#[derive(Clone, Debug)]
+pub struct PageFrame {
+    pub jpeg: Vec<u8>,
+    pub width: f32,
+    pub height: f32,
+    /// Counts up with each frame, so the window decodes only a new one.
+    pub seq: u64,
+}
+
 #[derive(Default)]
 pub struct Model {
+    /// Each agent's browser, by agent id.
+    pub browsers: HashMap<String, Browser>,
+    /// The agent whose browser this device watches.
+    pub watching: Option<String>,
+    pub frame: Option<PageFrame>,
+    rewatch: bool,
     pub conn: Option<Conn>,
     pub synced: bool,
     pub login_error: Option<String>,
@@ -798,6 +824,13 @@ impl Model {
         if std::mem::take(&mut self.people_stale) {
             out.extend(self.load_people());
         }
+        // After a reconnect the instance has forgotten what this device watched.
+        if std::mem::take(&mut self.rewatch) {
+            if let Some(agent) = self.watching.clone() {
+                let id = self.id("browser.watch");
+                out.push(json!({"t": "cmd", "id": id, "name": "browser.watch", "args": {"agent": agent, "on": true}}));
+            }
+        }
         let dirty: Vec<List> = self.dirty.drain().collect();
         for l in dirty {
             if l == List::Messages {
@@ -873,6 +906,7 @@ impl Model {
             "synced" => {
                 self.synced = true;
                 self.routines_stale = true;
+                self.rewatch = true;
                 for l in [
                     List::Agents,
                     List::Conversations,
@@ -935,6 +969,26 @@ impl Model {
             "delta" => self.delta(f),
             "event" => self.event(f),
             "result" => self.result(f),
+            "browser.state" => self.browser_state(f),
+            "browser.frame" => {
+                let agent = s(f, "agent");
+                if self.watching.as_deref() != Some(agent.as_str()) {
+                    return true;
+                }
+                use base64::Engine as _;
+                let Ok(jpeg) = base64::engine::general_purpose::STANDARD.decode(s(f, "data"))
+                else {
+                    return true;
+                };
+                let seq = self.frame.as_ref().map_or(0, |p| p.seq) + 1;
+                let size = |k: &str| f.get(k).and_then(Value::as_f64).unwrap_or(0.0) as f32;
+                self.frame = Some(PageFrame {
+                    jpeg,
+                    width: size("width"),
+                    height: size("height"),
+                    seq,
+                });
+            }
             "error" => {
                 let code = s(f, "code");
                 if code == "local" {
@@ -1052,8 +1106,79 @@ impl Model {
         }
     }
 
+    fn browser_state(&mut self, f: &Value) {
+        let agent = s(f, "agent");
+        let b = Browser {
+            open: f.get("open").and_then(Value::as_bool).unwrap_or(false),
+            person: f.get("person").and_then(Value::as_bool).unwrap_or(false),
+            asked: s(f, "asked"),
+        };
+        if !b.open && self.watching.as_deref() == Some(agent.as_str()) {
+            self.frame = None;
+        }
+        self.browsers.insert(agent, b);
+    }
+
+    /// The agent's browser, as last heard.
+    pub fn browser(&self, agent: &str) -> Browser {
+        self.browsers.get(agent).cloned().unwrap_or_default()
+    }
+
+    /// Watches `agent`'s browser, or stops watching with None.
+    pub fn watch(&mut self, agent: Option<String>) -> Option<Value> {
+        if self.watching == agent {
+            return None;
+        }
+        let id = self.id("browser.watch");
+        let frame = match (&agent, &self.watching) {
+            (Some(a), _) => {
+                json!({"t": "cmd", "id": id, "name": "browser.watch", "args": {"agent": a, "on": true}})
+            }
+            (None, Some(old)) => {
+                json!({"t": "cmd", "id": id, "name": "browser.watch", "args": {"agent": old, "on": false}})
+            }
+            (None, None) => return None,
+        };
+        self.watching = agent;
+        self.frame = None;
+        Some(frame)
+    }
+
+    /// Takes over the watched browser, or hands it back.
+    pub fn take_browser(&mut self, take: bool) -> Option<Value> {
+        let agent = self.watching.clone()?;
+        let id = self.id("browser.hand");
+        let name = if take { "browser.take" } else { "browser.give" };
+        Some(json!({"t": "cmd", "id": id, "name": name, "args": {"agent": agent}}))
+    }
+
+    /// The person's click, wheel, key or text, on the browser they've taken over.
+    pub fn browser_input(&mut self, mut input: Value) -> Option<Value> {
+        let agent = self.watching.clone()?;
+        if !self.browser(&agent).person {
+            return None;
+        }
+        input["agent"] = json!(agent);
+        let id = self.id("browser.input");
+        Some(json!({"t": "cmd", "id": id, "name": "browser.input", "args": input}))
+    }
+
     fn result(&mut self, f: &Value) {
         let id = s(f, "id");
+        if id.starts_with("browser.watch") || id.starts_with("browser.hand") {
+            if let Some(v) = f.get("value") {
+                if v.get("agent").is_some() {
+                    self.browser_state(v);
+                }
+            }
+            if let Some(e) = f.get("error") {
+                self.notices.push(s(e, "message"));
+            }
+            return;
+        }
+        if id.starts_with("browser.input") {
+            return;
+        }
         if id.starts_with("app.search") {
             if id != self.search_id {
                 return;

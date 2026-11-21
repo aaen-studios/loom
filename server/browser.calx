@@ -39,14 +39,16 @@ pub struct Op {
 
 pub enum In {
     Do(Op)
+    Watch(bool)    // whether someone's watching: frames come only while they are
+    Input(Json)    // the person's click, wheel, key or text, while they've taken over
     Stop
 }
 
-// A call's MCP result, for the agent `key` names.
-pub struct Done {
-    pub key: String
-    pub call: String
-    pub result: Json
+// What a browser's thread tells the loop. Each names the agent by its key.
+pub enum Back {
+    Done(String, String, Json)    // a call, and its MCP result
+    Frame(String, String, i64, i64)    // the page as a JPEG, in base64, and its width and height
+    Open(String, bool)    // whether its browser is open now
 }
 
 struct Worker {
@@ -54,18 +56,22 @@ struct Worker {
     profile: String
     guarded: bool
     inbox: Receiver<In>
-    done: Sender<Done>
+    back: Sender<Back>
     child: Child?
     page: WebSocket?
     next_id: i64
     refs: Map<String, i64>    // e1, e2, ... -> the node each is, from the last outline
+    watched: bool
+    casting: bool    // whether the page sends frames
 }
 
 impl Task for Worker {
     fn run(own self) {
         var w = self
         loop {
-            match unsafe { w.inbox.wait_for(1000000000) } {
+            // While frames come, they're taken often, so the person sees the page as it changes.
+            let wait: u64 = if w.casting { 30000000 } else { 1000000000 }
+            match unsafe { w.inbox.wait_for(wait) } {
                 some(In.Do(op)) => {
                     let result = match w.op(op.name.copy(), op.args.copy()) {
                         ok(r) => r,
@@ -75,7 +81,14 @@ impl Task for Worker {
                             error("{e}")
                         },
                     }
-                    w.done.send(Done { key: w.key.copy(), call: op.call.copy(), result: result })
+                    w.back.send(Back.Done(w.key.copy(), op.call.copy(), result))
+                },
+                some(In.Watch(on)) => {
+                    w.watched = on
+                    w.cast()
+                },
+                some(In.Input(e)) => {
+                    if let err(why) = w.input(e) { eprintln("loom: the browser: {why}") }
                 },
                 some(In.Stop) => {
                     w.close()
@@ -88,12 +101,12 @@ impl Task for Worker {
 }
 
 // Starts the thread for the agent `key` names, whose browser keeps its profile
-// in `profile`. Each call's result comes to `done`. The thread ends once it's
+// in `profile`. What it has to say comes to `back`. The thread ends once it's
 // sent Stop, with its browser stopped.
-pub fn start(key: String, profile: String, guarded: bool, done: Sender<Done>) -> (Sender<In>, Thread) {
+pub fn start(key: String, profile: String, guarded: bool, back: Sender<Back>) -> (Sender<In>, Thread) {
     let inbox = Receiver<In>()
     let to = inbox.sender()
-    let t = unsafe { Thread.spawn(Worker { key: key.copy(), profile: profile.copy(), guarded: guarded, inbox: inbox, done: done.copy(), child: none, page: none, next_id: 0, refs: Map<String, i64>() }) }
+    let t = unsafe { Thread.spawn(Worker { key: key.copy(), profile: profile.copy(), guarded: guarded, inbox: inbox, back: back.copy(), child: none, page: none, next_id: 0, refs: Map<String, i64>(), watched: false, casting: false }) }
     return (to, t)
 }
 
@@ -139,6 +152,7 @@ impl Worker {
 
     // Stops the browser and what it started.
     fn close(w: mut Worker) {
+        let was = w.child != none
         if let p = w.page.take() { p.close() }
         if let c = w.child {
             c.kill_tree()
@@ -146,22 +160,72 @@ impl Worker {
         }
         w.child = none
         w.refs.clear()
+        w.casting = false
+        if was { w.back.send(Back.Open(w.key.copy(), false)) }
     }
 
-    // Takes the events the page sent meanwhile, which nothing here reads, and
+    // Takes what the page sent meanwhile: frames, while someone watches. And
     // what the browser wrote, so it never waits on a full pipe.
-    fn drain(w: Worker) {
+    fn drain(w: mut Worker) {
         if let c = w.child {
             while let _ = c.read_line(0) {}
         }
-        if let p = w.page {
-            loop {
-                match p.receive(0) {
-                    ok(some(_)) => {},
-                    _ => break,
-                }
+        loop {
+            let m = match w.receive(0) {
+                ok(some(m)) => m,
+                _ => return,
+            }
+            if let Message.Text(t) = m {
+                if let ok(e) = parse(t) { w.event(e) }
             }
         }
+    }
+
+    // An event from the page. A frame goes to the loop, and the page is told
+    // it came, so it sends the next.
+    fn event(w: mut Worker, e: Json) {
+        if str_at(e.copy(), "method") != some(String("Page.screencastFrame")) { return }
+        let params = at(e, "params")
+        let session = int_at(params.copy(), "sessionId") ?? 0
+        if let err(_) = w.send("Page.screencastFrameAck", Obj.new().i("sessionId", session).done()) { return }
+        let meta = at(params.copy(), "metadata")
+        let width = i64.round(at(meta.copy(), "deviceWidth").as_f64() ?? 0.0)
+        let height = i64.round(at(meta, "deviceHeight").as_f64() ?? 0.0)
+        w.back.send(Back.Frame(w.key.copy(), str_at(params, "data") ?? String(), width, height))
+    }
+
+    // Starts or stops the page's frames, as whether someone watches says.
+    fn cast(w: mut Worker) {
+        if w.page == none { return }
+        if w.watched and not w.casting {
+            let params = Obj.new().s("format", String("jpeg")).i("quality", 60).i("maxWidth", 1280).i("maxHeight", 800).done()
+            if let ok(_) = w.call("Page.startScreencast", params) { w.casting = true }
+        } else if not w.watched and w.casting {
+            if let err(e) = w.call("Page.stopScreencast", Obj.new().done()) { eprintln("loom: the browser: {e}") }
+            w.casting = false
+        }
+    }
+
+    // The person's click, wheel, key or text, while they've taken over.
+    fn input(w: mut Worker, e: Json) ! Error {
+        if w.page == none { return }
+        let kind = str_at(e.copy(), "kind") ?? String()
+        let x = at(e.copy(), "x").as_f64() ?? 0.0
+        let y = at(e.copy(), "y").as_f64() ?? 0.0
+        if kind == "click" {
+            try w.mouse("mouseMoved", x, y, Obj.new())
+            try w.mouse("mousePressed", x, y, Obj.new().s("button", String("left")).i("clickCount", 1))
+            try w.mouse("mouseReleased", x, y, Obj.new().s("button", String("left")).i("clickCount", 1))
+        } else if kind == "move" {
+            try w.mouse("mouseMoved", x, y, Obj.new())
+        } else if kind == "wheel" {
+            try w.mouse("mouseWheel", x, y, Obj.new().j("deltaX", Json.Float(0.0)).j("deltaY", Json.Float(at(e.copy(), "dy").as_f64() ?? 0.0)))
+        } else if kind == "key" {
+            try w.press_key(str_at(e, "key") ?? String())
+        } else if kind == "text" {
+            _ = try w.call("Input.insertText", Obj.new().s("text", str_at(e, "text") ?? String()).done())
+        }
+        w.refs.clear()
     }
 
     // Starts the browser, and opens the DevTools connection to its page.
@@ -205,6 +269,21 @@ impl Worker {
             _ = try w.call("Network.enable", Obj.new().done())
             _ = try w.call("Network.setBlockedURLs", Obj.new().j("urls", Json.Array(blocked)).done())
         }
+        w.back.send(Back.Open(w.key.copy(), true))
+        w.cast()
+    }
+
+    // Sends a DevTools call without waiting for its answer, and gives its id.
+    fn send(w: mut Worker, method: str, params: Json) -> i64 ! Error {
+        w.next_id += 1
+        let p = w.page else fail "The browser isn't open."
+        try p.send_text("{Obj.new().i("id", w.next_id).s("method", String(method)).j("params", params).done()}")
+        return w.next_id
+    }
+
+    fn receive(w: Worker, ms: u32) -> Message? ! Error {
+        let p = w.page else fail "The browser isn't open."
+        return try p.receive(ms)
     }
 
     // Starts the browser and gives the port it listens on, or fails with why it
@@ -243,19 +322,20 @@ impl Worker {
     }
 
     // One DevTools call, and its result. The page's events that come
-    // meanwhile are passed over.
+    // meanwhile are taken as they come.
     fn call(w: mut Worker, method: str, params: Json) -> Json ! Error {
-        w.next_id += 1
-        let id = w.next_id
-        let p = w.page else fail "The browser isn't open."
-        try p.send_text("{Obj.new().i("id", id).s("method", String(method)).j("params", params).done()}")
+        let id = try w.send(method, params)
         let until = now() + CALL_MS
         loop {
             let left = until - now()
             if left <= 0 { fail "The browser didn't answer {method} in time." }
-            let m = try p.receive(u32.wrap(left)) else continue
+            let m = try w.receive(u32.wrap(left)) else continue
             let Message.Text(t) = m else continue
             let reply = try parse(t)
+            if reply.get(String("method")) != none {
+                w.event(reply)
+                continue
+            }
             if int_at(reply.copy(), "id") != some(id) { continue }
             if let e = reply.get(String("error")) { fail "{str_at(e, "message") ?? String("The browser refused it.")}" }
             return at(reply, "result")
@@ -400,6 +480,12 @@ impl Worker {
             _ = try w.call("Page.navigateToHistoryEntry", Obj.new().i("entryId", int_at(entry, "id") ?? 0).done())
             w.settle()
             return text(try w.outline())
+        }
+        // browser_ask_person's answer, once the person hands the browser back.
+        if name == "handed_back" {
+            let actions = int_at(args, "actions") ?? 0
+            let did = if actions == 0 { String("without doing anything in it") } else if actions == 1 { String("after one click or key") } else { "after {actions} clicks and keys" }
+            return text("Your person handed the browser back {did}. Take it from here.\n\n{try w.outline()}")
         }
         if name == "screenshot" {
             let shot = try w.call("Page.captureScreenshot", Obj.new().s("format", String("jpeg")).i("quality", 70).done())

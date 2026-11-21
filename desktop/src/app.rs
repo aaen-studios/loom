@@ -3,6 +3,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use gpui_kit::assets::IconName as Ico;
@@ -184,6 +185,12 @@ pub struct Loom {
     launched: Option<Instant>,
     /// The window's own focus, so keys like Esc reach it when no field has focus.
     keys: FocusHandle,
+    /// The watched browser's page, decoded, and the frame it's from.
+    page_image: Option<(u64, Arc<RenderImage>)>,
+    /// Where the page is drawn, for turning a click on it into the page's own pixels.
+    page_bounds: Rc<std::cell::Cell<Option<Bounds<Pixels>>>>,
+    /// The browser panel's focus, so keys go to the page while the person has it.
+    browser_keys: FocusHandle,
     /// The page beside the sidebar (its screen and agent), and when it last changed.
     page: ((Screen, Option<String>), Instant),
     /// What the window shows, and since when, so each new view eases in.
@@ -472,6 +479,9 @@ ACTA_KEY=secret:ACTA_KEY",
             make: Making::default(),
             launched: None,
             keys: cx.focus_handle(),
+            page_image: None,
+            page_bounds: Rc::new(std::cell::Cell::new(None)),
+            browser_keys: cx.focus_handle(),
             page: ((Screen::Chat, None), Instant::now()),
             scene: ("", Instant::now()),
             closing: None,
@@ -859,6 +869,310 @@ ACTA_KEY=secret:ACTA_KEY",
     }
 
     // --- The parts ---
+
+    /// Watches an agent's browser beside the chat, or stops with None.
+    fn watch(&mut self, agent: Option<String>, cx: &mut Context<Self>) {
+        if let Some(f) = self.model.watch(agent) {
+            self.send(f);
+        }
+        cx.notify();
+    }
+
+    /// A click or a scroll on the page as drawn, in the page's own pixels.
+    fn page_point(&self, at: Point<Pixels>) -> Option<(f32, f32)> {
+        let b = self.page_bounds.get()?;
+        let f = self.model.frame.as_ref()?;
+        let w = b.size.width.as_f32();
+        let h = b.size.height.as_f32();
+        if w <= 0.0 || h <= 0.0 {
+            return None;
+        }
+        let x = (at.x - b.origin.x).as_f32() / w * f.width;
+        let y = (at.y - b.origin.y).as_f32() / h * f.height;
+        (x >= 0.0 && y >= 0.0 && x <= f.width && y <= f.height).then_some((x, y))
+    }
+
+    /// The person's key, on the page they've taken over: a named key, or the text it types.
+    fn page_key(&mut self, e: &KeyDownEvent) -> bool {
+        let k = &e.keystroke;
+        let named = match k.key.as_str() {
+            "enter" => Some("Enter"),
+            "tab" => Some("Tab"),
+            "escape" => Some("Escape"),
+            "backspace" => Some("Backspace"),
+            "delete" => Some("Delete"),
+            "up" => Some("ArrowUp"),
+            "down" => Some("ArrowDown"),
+            "left" => Some("ArrowLeft"),
+            "right" => Some("ArrowRight"),
+            "home" => Some("Home"),
+            "end" => Some("End"),
+            "pageup" => Some("PageUp"),
+            "pagedown" => Some("PageDown"),
+            _ => None,
+        };
+        let input = if let Some(key) = named {
+            serde_json::json!({"kind": "key", "key": key})
+        } else if k.modifiers.control || k.modifiers.alt || k.modifiers.platform {
+            return false;
+        } else if let Some(text) = k.key_char.clone().filter(|t| !t.is_empty()) {
+            serde_json::json!({"kind": "text", "text": text})
+        } else {
+            return false;
+        };
+        if let Some(f) = self.model.browser_input(input) {
+            self.send(f);
+        }
+        true
+    }
+
+    /// The agent's browser beside its chat: its page as it changes, and the
+    /// person's way in for what only they should do.
+    fn browser_panel(
+        &mut self,
+        agent: &model::Agent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let p = self.p;
+        let tint = thread::color(&agent.color, p.dark);
+        let state = self.model.browser(&agent.id);
+        // A new frame is decoded once; the one it replaces leaves the GPU.
+        if let Some(f) = &self.model.frame {
+            if self.page_image.as_ref().map(|(seq, _)| *seq) != Some(f.seq) {
+                if let Ok(decoded) =
+                    image::load_from_memory_with_format(&f.jpeg, image::ImageFormat::Jpeg)
+                {
+                    let mut rgba = decoded.to_rgba8();
+                    for px in rgba.pixels_mut() {
+                        px.0.swap(0, 2);
+                    }
+                    let render = Arc::new(RenderImage::new(vec![image::Frame::new(rgba)]));
+                    if let Some((_, old)) = self.page_image.replace((f.seq, render)) {
+                        let _ = window.drop_image(old);
+                    }
+                }
+            }
+        } else if let Some((_, old)) = self.page_image.take() {
+            let _ = window.drop_image(old);
+        }
+        let width = (window.viewport_size().width.as_f32() * 0.45).clamp(360.0, 820.0);
+        let inner = width - 2.0 * space::L;
+        let (fw, fh) = self
+            .model
+            .frame
+            .as_ref()
+            .map_or((1280.0, 800.0), |f| (f.width.max(1.0), f.height.max(1.0)));
+        let height = inner * fh / fw;
+        let bounds = self.page_bounds.clone();
+        let page = match self.page_image.clone() {
+            Some((_, image)) => img(ImageSource::Render(image))
+                .size_full()
+                .rounded(px(radius::BUTTON - 2.0))
+                .into_any_element(),
+            None => div()
+                .w(px(inner))
+                .h(px(height))
+                .flex()
+                .items_center()
+                .justify_center()
+                .text_size(px(size::SMALL))
+                .text_color(p.ink_3)
+                .child(if state.open {
+                    "Loading the page…"
+                } else {
+                    "The browser is closed."
+                })
+                .into_any_element(),
+        };
+        let person = state.person;
+        let screen = div()
+            .id("browser-page")
+            .track_focus(&self.browser_keys)
+            .relative()
+            .w(px(inner))
+            .h(px(height))
+            .rounded(px(radius::BUTTON))
+            .overflow_hidden()
+            .border_2()
+            .border_color(if person { tint } else { p.line })
+            .when(person, |d| d.cursor_pointer())
+            .child(page)
+            .child(
+                canvas(move |b, _, _| bounds.set(Some(b)), |_, _, _, _| {})
+                    .absolute()
+                    .top_0()
+                    .left_0()
+                    .size_full(),
+            )
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, e: &MouseDownEvent, window, cx| {
+                    window.focus(&this.browser_keys, cx);
+                    let Some((x, y)) = this.page_point(e.position) else {
+                        return;
+                    };
+                    if let Some(f) = this
+                        .model
+                        .browser_input(serde_json::json!({"kind": "click", "x": x, "y": y}))
+                    {
+                        this.send(f);
+                    }
+                }),
+            )
+            .on_scroll(cx.listener(|this, e: &ScrollEvent, _, cx| {
+                let Some((x, y)) = this.page_point(e.position) else {
+                    return;
+                };
+                let dy = match e.delta {
+                    ScrollDelta::Pixels(d) => -d.y.as_f32(),
+                    ScrollDelta::Lines(d) => -d.y * 40.0,
+                };
+                if dy.abs() < 1.0 {
+                    return;
+                }
+                if let Some(f) = this
+                    .model
+                    .browser_input(serde_json::json!({"kind": "wheel", "x": x, "y": y, "dy": dy}))
+                {
+                    this.send(f);
+                    cx.stop_propagation();
+                }
+            }))
+            .on_key_down(cx.listener(|this, e: &KeyDownEvent, _, cx| {
+                if this
+                    .model
+                    .browser(this.model.watching.as_deref().unwrap_or_default())
+                    .person
+                    && this.page_key(e)
+                {
+                    cx.stop_propagation();
+                }
+            }));
+        let words = if person {
+            "You have it. Click and type on the page.".to_string()
+        } else if !state.asked.is_empty() {
+            state.asked.clone()
+        } else {
+            format!("{} is browsing.", agent.name)
+        };
+        let hand = if person {
+            self.button("browser-give", "Hand back", true)
+        } else {
+            self.button("browser-take", "Take over", !state.asked.is_empty())
+        }
+        .when(!state.open, |d| d.opacity(0.4))
+        .on_click(cx.listener(move |this, _, window, cx| {
+            if let Some(f) = this.model.take_browser(!person) {
+                this.send(f);
+            }
+            if !person {
+                window.focus(&this.browser_keys, cx);
+            }
+            cx.notify();
+        }));
+        div()
+            .w(px(width))
+            .h_full()
+            .flex_none()
+            .flex()
+            .flex_col()
+            .gap(px(space::M))
+            .p(px(space::L))
+            .border_l_1()
+            .border_color(p.line)
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(space::S))
+                            .text_size(px(size::SMALL))
+                            .text_color(p.ink_2)
+                            .child(Icon::new(Ico::Globe).small().text_color(tint))
+                            .child(format!("{}'s browser", agent.name)),
+                    )
+                    .child(
+                        div()
+                            .id("browser-close")
+                            .p(px(space::XS))
+                            .rounded(px(radius::ROW))
+                            .cursor_pointer()
+                            .text_color(p.ink_3)
+                            .hover(move |s| s.bg(p.hover).text_color(p.ink))
+                            .child(Icon::new(Ico::X).small())
+                            .on_click(cx.listener(|this, _, _, cx| this.watch(None, cx))),
+                    ),
+            )
+            .child(screen)
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap(px(space::M))
+                    .child(
+                        div()
+                            .flex_1()
+                            .text_size(px(size::SMALL))
+                            .text_color(if person || !state.asked.is_empty() {
+                                p.ink
+                            } else {
+                                p.ink_3
+                            })
+                            .child(words),
+                    )
+                    .child(hand),
+            )
+    }
+
+    /// The agent asking for the person in its browser, above the composer while
+    /// its browser isn't showing.
+    fn browser_ask(&self, agent: &model::Agent, cx: &mut Context<Self>) -> Option<Div> {
+        let state = self.model.browser(&agent.id);
+        if state.asked.is_empty() || self.model.watching.as_deref() == Some(agent.id.as_str()) {
+            return None;
+        }
+        let p = self.p;
+        let tint = thread::color(&agent.color, p.dark);
+        let id = agent.id.clone();
+        Some(
+            div()
+                .w_full()
+                .flex()
+                .justify_center()
+                .px(px(space::XL))
+                .pb(px(space::S))
+                .child(
+                    div()
+                        .w_full()
+                        .max_w(px(space::COLUMN))
+                        .flex()
+                        .items_center()
+                        .gap(px(space::M))
+                        .px(px(space::L))
+                        .py(px(space::M))
+                        .rounded(px(radius::BUTTON))
+                        .border_1()
+                        .border_color(tint)
+                        .child(Icon::new(Ico::Globe).small().text_color(tint))
+                        .child(
+                            div()
+                                .flex_1()
+                                .text_size(px(size::SMALL))
+                                .text_color(p.ink)
+                                .child(state.asked.clone()),
+                        )
+                        .child(self.button("browser-open", "Open browser", true).on_click(
+                            cx.listener(move |this, _, _, cx| this.watch(Some(id.clone()), cx)),
+                        )),
+                ),
+        )
+    }
 
     fn button(&self, id: &'static str, label: &str, primary: bool) -> Stateful<Div> {
         self.button_owned(id, label, primary)
@@ -1647,6 +1961,31 @@ ACTA_KEY=secret:ACTA_KEY",
             "auto" => "Asks when it's risky",
             _ => "Asks first",
         };
+        // The agent's browser, while it's open: a globe that shows it beside the chat.
+        let browsing = self.model.browser(&agent.id).open;
+        let watching = self.model.watching.as_deref() == Some(agent.id.as_str());
+        let tint = thread::color(&agent.color, p.dark);
+        let globe = div()
+            .id("browser-toggle")
+            .occlude()
+            .flex()
+            .items_center()
+            .gap(px(space::XS))
+            .px(px(space::S))
+            .py(px(space::XS))
+            .rounded(px(radius::ROW))
+            .text_size(px(size::CAPTION))
+            .text_color(if watching { tint } else { p.ink_2 })
+            .when(watching, |d| d.bg(p.hover))
+            .cursor_pointer()
+            .hover(move |s| s.bg(p.hover))
+            .child(Icon::new(Ico::Globe).small())
+            .child("Browser")
+            .on_click(cx.listener(move |this, _, _, cx| {
+                let id = this.model.selected.clone();
+                let next = if this.model.watching == id { None } else { id };
+                this.watch(next, cx);
+            }));
         bar.child(
             div()
                 .id("agent-menu")
@@ -1689,35 +2028,40 @@ ACTA_KEY=secret:ACTA_KEY",
                 ),
         )
         .child(
-            div().flex().items_center().gap(px(space::L)).child(
-                div()
-                    .id("permission-menu")
-                    .occlude()
-                    .px(px(space::S))
-                    .py(px(space::XS))
-                    .rounded(px(radius::ROW))
-                    .text_size(px(size::CAPTION))
-                    .text_color(p.ink_2)
-                    .cursor_pointer()
-                    .hover(move |s| s.bg(p.hover))
-                    .flex()
-                    .items_center()
-                    .gap(px(space::XS))
-                    .child(permission)
-                    .child(
-                        Icon::new(IconName::ChevronDown)
-                            .xsmall()
-                            .text_color(p.ink_3),
-                    )
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.menu = if this.menu == Some(Menu::Permission) {
-                            None
-                        } else {
-                            Some(Menu::Permission)
-                        };
-                        cx.notify();
-                    })),
-            ),
+            div()
+                .flex()
+                .items_center()
+                .gap(px(space::L))
+                .when(browsing || watching, |d| d.child(globe))
+                .child(
+                    div()
+                        .id("permission-menu")
+                        .occlude()
+                        .px(px(space::S))
+                        .py(px(space::XS))
+                        .rounded(px(radius::ROW))
+                        .text_size(px(size::CAPTION))
+                        .text_color(p.ink_2)
+                        .cursor_pointer()
+                        .hover(move |s| s.bg(p.hover))
+                        .flex()
+                        .items_center()
+                        .gap(px(space::XS))
+                        .child(permission)
+                        .child(
+                            Icon::new(IconName::ChevronDown)
+                                .xsmall()
+                                .text_color(p.ink_3),
+                        )
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.menu = if this.menu == Some(Menu::Permission) {
+                                None
+                            } else {
+                                Some(Menu::Permission)
+                            };
+                            cx.notify();
+                        })),
+                ),
         )
     }
 
@@ -1908,6 +2252,15 @@ ACTA_KEY=secret:ACTA_KEY",
             .as_ref()
             .and_then(|id| self.model.agent(id))
             .cloned();
+        // A browser shows beside its own agent's chat only.
+        if self.model.watching.is_some() && self.model.watching != self.model.selected {
+            self.watch(None, cx);
+        }
+        let panel = agent
+            .clone()
+            .filter(|a| self.model.watching.as_deref() == Some(a.id.as_str()))
+            .map(|a| self.browser_panel(&a, window, cx));
+        let ask = agent.as_ref().and_then(|a| self.browser_ask(a, cx));
         let name = agent.as_ref().map(|a| a.name.clone()).unwrap_or_default();
         let tint = agent
             .as_ref()
@@ -2099,8 +2452,9 @@ ACTA_KEY=secret:ACTA_KEY",
                         ),
                 ),
         );
-        div()
+        let column = div()
             .flex_1()
+            .min_w_0()
             .min_h_0()
             .flex()
             .flex_col()
@@ -2138,6 +2492,7 @@ ACTA_KEY=secret:ACTA_KEY",
                         ),
                 )
             })
+            .when_some(ask, |d, a| d.child(a))
             .when_some(composer, |d, c| {
                 d.child(
                     div()
@@ -2149,7 +2504,11 @@ ACTA_KEY=secret:ACTA_KEY",
                         .pt(px(space::XS))
                         .child(c),
                 )
-            })
+            });
+        match panel {
+            Some(panel) => div().flex_1().min_h_0().flex().child(column).child(panel),
+            None => column,
+        }
     }
 
     /// The first screen of a new account: making its first agent.

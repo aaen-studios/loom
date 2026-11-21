@@ -219,8 +219,9 @@ pub struct Instance {
     moved: Json    // once the instance has moved: the signed moved frame, which every device gets
     version: String
     browsers: LinkedMap<String, Browser>    // "user/agent" -> that agent's browser, while it's open
-    browser_done: Receiver<browser.Done>
-    browser_to: Sender<browser.Done>
+    browser_done: Receiver<browser.Back>
+    watchers: Map<u32, String>    // a session -> the browser it watches, by its key
+    browser_to: Sender<browser.Back>
     stopped_browsers: List<Thread>    // browsers told to stop, joined at shutdown
     next_browser_sweep: i64
 }
@@ -231,6 +232,12 @@ struct Browser {
     thread: Thread
     busy: i64    // calls sent that haven't come back
     used: i64    // when the last one did
+    open: bool    // whether the browser itself is running
+    person: bool    // whether the person has taken it over
+    asked: String    // what browser_ask_person said, while it waits
+    asks: List<String>    // browser_ask_person calls, answered when the person hands it back
+    held: List<browser.Op>    // the agent's calls while the person has it
+    actions: i64    // the person's clicks and keys since they took over
 }
 
 // A command answered once the installer's thread is done.
@@ -476,9 +483,9 @@ impl Instance {
         if let text = try store.meta("moved") {
             if let ok(m) = parse(text) { moved = m }
         }
-        let browser_done = Receiver<browser.Done>()
+        let browser_done = Receiver<browser.Back>()
         let browser_to = browser_done.sender()
-        var i = Instance { browsers: LinkedMap<String, Browser>(), browser_done: browser_done, browser_to: browser_to, stopped_browsers: List<Thread>(), next_browser_sweep: 0, push_to: push_to, push_gone: push_gone, move_to: move_to, move_done: move_done, lan: config.lan, bridge: none, stop_bridge: none, lan_port: 0, announcer: none, stop_announcer: none, to_close: List<ServerSocket>(), boxes: none, gate: none, stop_gate: none, moving: String(), move_waiters: List<Waiter>(), moved: moved, version: config.version.copy(), store: store, server: server, data: config.data.copy(), sessions: Map<u32, Session>(), runs: LinkedMap<String, Run>(), procs: LinkedMap<String, Proc>(), approvals: LinkedMap<String, Approval>(), lines: lines, lines_to: to, hash_to: hash_to, hash_done: hash_done, next_job: 0, auths: Map<i64, Auth>(), dummy_hash: dummy, failures: LinkedMap<String, List<i64>>(), thumbs: files.start(), events: config.events, next_prune: 0, grants: Map<String, Grant>(), calls: Map<String, Request>(), registry_at: config.registry.copy(), registry: Json.Null, registry_time: 0, install_to: install_to, install_done: install_done, fetching: List<Waiter>(), installs: Map<i64, Install>(), leftovers: List<String>(), next_sweep: 0, device_calls: Map<String, DeviceCall>(), minute_ms: config.minute_ms, next_due: 0, routine_runs: Map<String, RoutineRun>(), panel_calls: Map<String, Waiter>(), sealer: try secret_key(config.data.copy()) }
+        var i = Instance { browsers: LinkedMap<String, Browser>(), watchers: Map<u32, String>(), browser_done: browser_done, browser_to: browser_to, stopped_browsers: List<Thread>(), next_browser_sweep: 0, push_to: push_to, push_gone: push_gone, move_to: move_to, move_done: move_done, lan: config.lan, bridge: none, stop_bridge: none, lan_port: 0, announcer: none, stop_announcer: none, to_close: List<ServerSocket>(), boxes: none, gate: none, stop_gate: none, moving: String(), move_waiters: List<Waiter>(), moved: moved, version: config.version.copy(), store: store, server: server, data: config.data.copy(), sessions: Map<u32, Session>(), runs: LinkedMap<String, Run>(), procs: LinkedMap<String, Proc>(), approvals: LinkedMap<String, Approval>(), lines: lines, lines_to: to, hash_to: hash_to, hash_done: hash_done, next_job: 0, auths: Map<i64, Auth>(), dummy_hash: dummy, failures: LinkedMap<String, List<i64>>(), thumbs: files.start(), events: config.events, next_prune: 0, grants: Map<String, Grant>(), calls: Map<String, Request>(), registry_at: config.registry.copy(), registry: Json.Null, registry_time: 0, install_to: install_to, install_done: install_done, fetching: List<Waiter>(), installs: Map<i64, Install>(), leftovers: List<String>(), next_sweep: 0, device_calls: Map<String, DeviceCall>(), minute_ms: config.minute_ms, next_due: 0, routine_runs: Map<String, RoutineRun>(), panel_calls: Map<String, Waiter>(), sealer: try secret_key(config.data.copy()) }
         if config.sandboxes.len() > 0 and not i.lan { try i.sandboxes_on(config.sandboxes.copy(), config.sandbox_image.copy()) }
         // Phones that were on stay on.
         if i.lan and try i.store.meta("phones") == some(String("on")) {
@@ -771,6 +778,7 @@ impl Instance {
                 },
                 some(Message(s, Binary(_))) => i.server.close_socket(s, protocol.CLOSE_PROTOCOL, String("binary frames aren't used")),
                 some(Closed(s, _, _)) => {
+                    i.unwatch(s.id())
                     if let gone = i.sessions.remove(s.id()) {
                         match i.device_gone(gone.user, gone.device) {
                             ok => {},
@@ -817,12 +825,24 @@ impl Instance {
                     err(e) => eprintln("loom: push: {e}"),
                 }
             }
-            while let d = i.browser_done.next() {
-                if let b = mut i.browsers.find(d.key.copy()) {
-                    b.busy -= 1
-                    b.used = now()
+            while let back = i.browser_done.next() {
+                match back {
+                    browser.Back.Done(key, call, result) => {
+                        if let b = mut i.browsers.find(key) {
+                            b.busy -= 1
+                            b.used = now()
+                        }
+                        if let req = i.calls.remove(call) { i.server.respond(req, json_response(200, result)) }
+                    },
+                    browser.Back.Frame(key, data, width, height) => i.browser_frame(key, data, width, height),
+                    browser.Back.Open(key, open) => {
+                        if let b = mut i.browsers.find(key.copy()) {
+                            b.open = open
+                            if not open { b.person = false }
+                        }
+                        i.browser_state(key)
+                    },
                 }
-                if let req = i.calls.remove(d.call.copy()) { i.server.respond(req, json_response(200, d.result)) }
             }
             if now() >= i.next_browser_sweep { i.close_idle_browsers() }
         }
@@ -848,37 +868,175 @@ impl Instance {
     fn browse(i: mut Instance, req: Request, g: Grant, name: String, args: Json) -> Json? ! Error {
         let op = name.trim_prefix("browser_").copy()
         let key = "{g.user}/{g.agent}"
+        if op == "ask_person" {
+            let b = i.browsers.find(key.copy()) else return some(tool_error(String("Your browser isn't open. Open the page first, then ask.")))
+            if not b.open { return some(tool_error(String("Your browser isn't open. Open the page first, then ask."))) }
+        }
         if not i.browsers.contains(key.copy()) {
             let profile = try fs.absolute("{i.data}/browsers/{g.user}/{g.agent}")
             let (to, thread) = browser.start(key.copy(), profile, i.sandboxed(g.user.copy()), i.browser_to.copy())
-            i.browsers.insert(key.copy(), Browser { to: to, thread: thread, busy: 0, used: now() })
+            i.browsers.insert(key.copy(), Browser { to: to, thread: thread, busy: 0, used: now(), open: false, person: false, asked: String(), asks: List<String>(), held: List<browser.Op>(), actions: 0 })
+            i.watch_changed(key.copy())
         }
         let call = try i.store.new_id("bc")
         if op == "open" { i.log(g.user.copy(), g.agent.copy(), "browser", "Opened {cut_short(str_at(args.copy(), "url") ?? String(), 200)}", g.agent.copy()) }
-        let b = mut i.browsers.find(key) else return some(tool_error(String("The browser didn't start.")))
-        b.busy += 1
-        b.used = now()
-        b.to.send(browser.In.Do(browser.Op { call: call.copy(), name: op, args: args.copy() }))
-        i.calls.insert(call, req.copy())
+        let why = (str_at(args.copy(), "why") ?? String()).trim().copy()
+        i.calls.insert(call.copy(), req.copy())
+        if op == "ask_person" {
+            // Answered once the person hands the browser back.
+            if let b = mut i.browsers.find(key.copy()) {
+                b.busy += 1
+                b.used = now()
+                b.asks.push(call)
+                b.asked = if why.len() > 0 { why.copy() } else { String("It needs you for a moment.") }
+            }
+            let title = "{i.agent_name(g.user.copy(), g.agent.copy())} needs you in its browser"
+            i.log(g.user.copy(), g.agent.copy(), "browser", "Asked you to take over: {cut_short(why.copy(), 200)}", g.agent.copy())
+            try i.event(g.user.copy(), "notify", Obj.new().s("agent", g.agent.copy()).s("title", title).s("body", if why.len() > 0 { why } else { String("Take over its browser, then hand it back.") }).done())
+            i.browser_state(key)
+            return none
+        }
+        if let b = mut i.browsers.find(key) {
+            b.busy += 1
+            b.used = now()
+            let o = browser.Op { call: call, name: op, args: args.copy() }
+            // While the person has the browser, the agent's calls wait for it back.
+            if b.person { b.held.push(o) } else { b.to.send(browser.In.Do(o)) }
+        }
         return none
     }
 
     // Stops a browser. Its thread ends once it has, and is joined at shutdown.
+    // Calls waiting on it are told it closed.
     fn close_browser(i: mut Instance, key: String) {
-        let b = i.browsers.remove(key) else return
+        let b = i.browsers.remove(key.copy()) else return
         var to = b.to.copy()
         to.send(browser.In.Stop)
+        var waiting = b.asks.copy()
+        for o in b.held { waiting.push(o.call.copy()) }
+        for call in waiting {
+            if let req = i.calls.remove(call) { i.server.respond(req, json_response(200, tool_error(String("The browser closed.")))) }
+        }
         i.stopped_browsers.push(b.thread)
+        i.browser_state(key)
     }
 
-    // Stops each browser that's had nothing to do for browser.IDLE_MS.
+    // Stops each browser that's had nothing to do for browser.IDLE_MS, unless
+    // the person has it.
     fn close_idle_browsers(i: mut Instance) {
         i.next_browser_sweep = now() + 30000
         var idle = List<String>()
         for (k, b) in i.browsers {
-            if b.busy <= 0 and now() - b.used >= browser.IDLE_MS { idle.push(k.copy()) }
+            if b.busy <= 0 and not b.person and now() - b.used >= browser.IDLE_MS { idle.push(k.copy()) }
         }
         for k in idle { i.close_browser(k) }
+    }
+
+    // The sessions of `key`'s person, or only those watching its browser.
+    fn browser_send(i: Instance, key: String, frame: String, watching: bool) {
+        let (user, _) = key.split_once("/") ?? (String(), String())
+        for (id, s) in i.sessions {
+            if not s.live or s.user != user { continue }
+            if watching and i.watched_by(id) != key { continue }
+            _ = i.server.send_text(s.socket, frame.copy())
+        }
+    }
+
+    // Where an agent's browser is: open, the person's, asking for them.
+    fn browser_status(i: Instance, key: String) -> Obj {
+        let (_, agent) = key.split_once("/") ?? (String(), String())
+        var o = Obj.new().s("agent", agent)
+        if let b = i.browsers.find(key) {
+            return o.b("open", b.open).b("person", b.person).s("asked", if b.asks.len() > 0 { b.asked.copy() } else { String() })
+        }
+        o = o.b("open", false).b("person", false).s("asked", String())
+        return o
+    }
+
+    // browser.state, to each of the person's devices, as it changes.
+    fn browser_state(i: Instance, key: String) {
+        i.browser_send(key.copy(), "{i.browser_status(key.copy()).s("t", String("browser.state")).done()}", false)
+    }
+
+    // A frame of the page, to the devices watching it.
+    fn browser_frame(i: Instance, key: String, data: String, width: i64, height: i64) {
+        let (_, agent) = key.split_once("/") ?? (String(), String())
+        let frame = Obj.new().s("t", String("browser.frame")).s("agent", agent).s("data", data).i("width", width).i("height", height).done()
+        i.browser_send(key, "{frame}", true)
+    }
+
+    // Tells a browser whether anyone watches it now.
+    fn watch_changed(i: mut Instance, key: String) {
+        var watched = false
+        for (_, k) in i.watchers {
+            if k == key { watched = true }
+        }
+        if let b = mut i.browsers.find(key) { b.to.send(browser.In.Watch(watched)) }
+    }
+
+    // A session that's gone watches nothing.
+    fn unwatch(i: mut Instance, session: u32) {
+        let key = i.watchers.remove(session) else return
+        i.watch_changed(key)
+    }
+
+    // The browser a session watches, by its key, or "".
+    fn watched_by(i: Instance, session: u32) -> String {
+        if let k = i.watchers.find(session) { return k.copy() }
+        return String()
+    }
+
+    // browser.watch, browser.take, browser.give and browser.input
+    // (protocol.md, "The agent's browser").
+    fn browser_cmd(i: mut Instance, s: ServerSocket, user: String, name: String, args: Json) -> Answer ! Error {
+        let agent = str_at(args.copy(), "agent") ?? String()
+        if try i.store.agent(user.copy(), agent.copy()) == none { return Answer.Refused(String("not_found"), "There's no agent {agent}.") }
+        let key = "{user}/{agent}"
+        if name == "browser.watch" {
+            if bool_at(args, "on") ?? true {
+                if let old = i.watchers.remove(s.id()) { i.watch_changed(old) }
+                i.watchers.insert(s.id(), key.copy())
+                i.watch_changed(key.copy())
+            } else if i.watched_by(s.id()) == key {
+                i.unwatch(s.id())
+            }
+            return Answer.Value(i.browser_status(key).done())
+        }
+        if name != "browser.take" and name != "browser.give" and name != "browser.input" { return Answer.Refused(String("unknown_command"), "There's no command {name}.") }
+        var refused = String()
+        if let b = mut i.browsers.find(key.copy()) {
+            if name == "browser.take" {
+                if b.open {
+                    b.person = true
+                    b.actions = 0
+                } else {
+                    refused = String("The browser isn't open.")
+                }
+            } else if name == "browser.give" {
+                b.person = false
+                b.used = now()
+                for call in b.asks {
+                    b.to.send(browser.In.Do(browser.Op { call: call.copy(), name: String("handed_back"), args: Obj.new().i("actions", b.actions).done() }))
+                }
+                for o in b.held { b.to.send(browser.In.Do(o.copy())) }
+                b.asks = List<String>()
+                b.held = List<browser.Op>()
+                b.asked = String()
+            } else if b.person {
+                if str_at(args.copy(), "kind") != some(String("move")) { b.actions += 1 }
+                b.used = now()
+                b.to.send(browser.In.Input(args.copy()))
+                return Answer.Value(Obj.new().done())
+            } else {
+                return Answer.Refused(String("not_yours"), String("Take over the browser first."))
+            }
+        } else {
+            refused = String("The browser isn't open.")
+        }
+        if refused.len() > 0 { return Answer.Refused(String("not_open"), refused) }
+        if name == "browser.give" { i.log(user, agent, "browser", String("You handed the browser back"), String()) }
+        i.browser_state(key.copy())
+        return Answer.Value(i.browser_status(key).done())
     }
 
     // Stops `user`'s browsers, or only `agent`'s, and removes their profiles.
@@ -3506,6 +3664,11 @@ impl Instance {
         }
         if name == "plugin.message" {
             try i.panel_message(Waiter { socket: s, id: id }, user, args)
+            return
+        }
+        if name.starts_with("browser.") {
+            let answer = try i.browser_cmd(s, user, name, args)
+            i.answer_cmd(Waiter { socket: s, id: id }, answer)
             return
         }
         // Answered once the move is done, or has failed.
