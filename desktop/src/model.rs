@@ -101,6 +101,53 @@ pub struct Skill {
     pub body: String,
 }
 
+/// One of the person's routines: a prompt an agent is sent on a schedule.
+#[derive(Clone, Debug, Default)]
+pub struct Routine {
+    pub id: String,
+    pub name: String,
+    pub agent: String,
+    pub prompt: String,
+    /// Its gap in minutes.
+    pub every: i64,
+    /// When it runs, in words: "every 30 minutes".
+    pub when: String,
+    pub notify: bool,
+    pub on: bool,
+    /// Whether a run missed while the instance was off happens once it starts again.
+    pub catch_up: bool,
+    /// When it runs next (Unix ms), or 0 while it's paused.
+    pub next: i64,
+    /// How its last run went: running, done, failed, skipped, or "" before the first.
+    pub last_status: String,
+    pub last_at: i64,
+    pub last_error: String,
+}
+
+impl Routine {
+    fn of(r: &Value) -> Routine {
+        let last = r.get("last").cloned().unwrap_or(Value::Null);
+        Routine {
+            id: s(r, "id"),
+            name: s(r, "name"),
+            agent: s(r, "agent"),
+            prompt: s(r, "prompt"),
+            every: r
+                .pointer("/schedule/every")
+                .and_then(Value::as_i64)
+                .unwrap_or(0),
+            when: s(r, "when"),
+            notify: r.get("notify").and_then(Value::as_bool).unwrap_or(false),
+            on: r.get("on").and_then(Value::as_bool).unwrap_or(true),
+            catch_up: r.get("catch_up").and_then(Value::as_bool).unwrap_or(true),
+            next: r.get("next").and_then(Value::as_i64).unwrap_or(0),
+            last_status: s(&last, "status"),
+            last_at: last.get("at").and_then(Value::as_i64).unwrap_or(0),
+            last_error: s(&last, "error"),
+        }
+    }
+}
+
 /// One entry of the activity log.
 #[derive(Clone, Debug)]
 pub struct Activity {
@@ -339,6 +386,9 @@ pub struct Model {
     /// The person's skills, by name, for the skills page.
     pub skills: Vec<Skill>,
     skills_stale: bool,
+    /// The person's routines, oldest first.
+    pub routines: Vec<Routine>,
+    routines_stale: bool,
     /// What the selected agent remembers, for the memory page, newest first.
     pub notes: Vec<Note>,
     notes_stale: bool,
@@ -445,6 +495,9 @@ impl Model {
         if std::mem::take(&mut self.skills_stale) {
             out.push(self.load_skills());
         }
+        if std::mem::take(&mut self.routines_stale) {
+            out.push(self.load_routines());
+        }
         let dirty: Vec<List> = self.dirty.drain().collect();
         for l in dirty {
             if l == List::Messages {
@@ -516,6 +569,7 @@ impl Model {
             }
             "synced" => {
                 self.synced = true;
+                self.routines_stale = true;
                 for l in [
                     List::Agents,
                     List::Conversations,
@@ -632,6 +686,9 @@ impl Model {
             "approval" => {
                 self.dirty.insert(List::Approvals);
             }
+            "routine" => {
+                self.routines_stale = true;
+            }
             _ => {}
         }
     }
@@ -708,6 +765,18 @@ impl Model {
                         .collect()
                 })
                 .unwrap_or_default();
+        } else if id.starts_with("app.routines") {
+            self.routines = f
+                .pointer("/value/routines")
+                .and_then(Value::as_array)
+                .map(|rs| rs.iter().map(Routine::of).collect())
+                .unwrap_or_default();
+            self.dirty.insert(List::Messages);
+        } else if id.starts_with("app.routine_") {
+            if let Some(e) = f.get("error") {
+                self.notices.push(s(e, "message"));
+            }
+            self.routines_stale = true;
         } else if id.starts_with("app.skill_put") || id.starts_with("app.skill_delete") {
             if let Some(e) = f.get("error") {
                 self.notices.push(s(e, "message"));
@@ -968,16 +1037,26 @@ impl Model {
                         blocks: blocks_of(m),
                         live: false,
                         queued: false,
-                        // `from` is a device, or the agent that sent it.
-                        from_agent: m
-                            .get("from")
-                            .and_then(Value::as_str)
-                            .filter(|f| f.starts_with("a_"))
-                            .map(|f| {
-                                self.agent(f)
-                                    .map(|a| a.name.clone())
-                                    .unwrap_or_else(|| "Another agent".into())
-                            }),
+                        // `from` is a device, the agent that sent it, or a routine.
+                        from_agent: m.get("from").and_then(Value::as_str).and_then(|f| {
+                            if f.starts_with("a_") {
+                                Some(
+                                    self.agent(f)
+                                        .map(|a| a.name.clone())
+                                        .unwrap_or_else(|| "Another agent".into()),
+                                )
+                            } else if f.starts_with("rt_") {
+                                Some(
+                                    self.routines
+                                        .iter()
+                                        .find(|r| r.id == f)
+                                        .map(|r| format!("the routine {}", r.name))
+                                        .unwrap_or_else(|| "a routine".into()),
+                                )
+                            } else {
+                                None
+                            }
+                        }),
                     })
                     .collect();
                 self.messages = messages;
@@ -1388,6 +1467,43 @@ impl Model {
     pub fn delete_skill(&mut self, name: &str) -> Value {
         let id = self.id("app.skill_delete");
         json!({"t": "cmd", "id": id, "name": "skill.delete", "args": {"name": name}})
+    }
+
+    /// Asks for the person's routines.
+    pub fn load_routines(&mut self) -> Value {
+        let id = self.id("app.routines");
+        json!({"t": "cmd", "id": id, "name": "routine.list"})
+    }
+
+    /// Saves a routine, new (`id` empty) or changed.
+    #[allow(clippy::too_many_arguments)]
+    pub fn save_routine(
+        &mut self,
+        id: &str,
+        name: &str,
+        agent: &str,
+        prompt: &str,
+        every: i64,
+        notify: bool,
+        on: bool,
+        catch_up: bool,
+    ) -> Value {
+        let cmd = self.id("app.routine_put");
+        let mut args = json!({"name": name.trim(), "agent": agent, "prompt": prompt, "schedule": {"every": every}, "notify": notify, "on": on, "catch_up": catch_up});
+        if !id.is_empty() {
+            args["id"] = json!(id);
+        }
+        json!({"t": "cmd", "id": cmd, "name": "routine.put", "args": args})
+    }
+
+    pub fn run_routine(&mut self, id: &str) -> Value {
+        let cmd = self.id("app.routine_run");
+        json!({"t": "cmd", "id": cmd, "name": "routine.run", "args": {"id": id}})
+    }
+
+    pub fn delete_routine(&mut self, id: &str) -> Value {
+        let cmd = self.id("app.routine_delete");
+        json!({"t": "cmd", "id": cmd, "name": "routine.delete", "args": {"id": id}})
     }
 
     /// Asks for the person's profile, for the About you page.

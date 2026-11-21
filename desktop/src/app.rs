@@ -77,6 +77,7 @@ enum Screen {
     Skills,
     Memory,
     Profile,
+    Routines,
     Programs,
     ThisDevice,
 }
@@ -117,6 +118,16 @@ pub struct Loom {
     skill_open: Option<Option<String>>,
     note_in: Entity<InputState>,
     profile_in: Entity<TextareaState>,
+    routine_name_in: Entity<InputState>,
+    routine_every_in: Entity<InputState>,
+    routine_prompt_in: Entity<TextareaState>,
+    /// On the routines page: none for the list, `Some(None)` for a new routine,
+    /// `Some(Some(id))` for one being changed. The form's agent and switches go with it.
+    routine_open: Option<Option<String>>,
+    routine_agent: Option<String>,
+    routine_notify: bool,
+    routine_on: bool,
+    routine_catch_up: bool,
     /// The program whose settings form is open, on the programs page.
     program_open: Option<String>,
     set_key_in: Entity<InputState>,
@@ -195,6 +206,13 @@ impl Loom {
             TextareaState::new(window, cx)
                 .auto_grow(6, 20)
                 .placeholder("Elliot, in Oslo. Builds loom. Likes short answers.")
+        });
+        let routine_name_in = input(window, cx, "Morning brief", false);
+        let routine_every_in = input(window, cx, "30", false);
+        let routine_prompt_in = cx.new(|cx| {
+            TextareaState::new(window, cx)
+                .auto_grow(4, 14)
+                .placeholder("What the agent is asked each time.")
         });
         let set_key_in = input(window, cx, "ANTHROPIC_API_KEY", false);
         let set_value_in = input(window, cx, "Its value", true);
@@ -320,6 +338,14 @@ impl Loom {
             skill_open: None,
             note_in,
             profile_in,
+            routine_name_in,
+            routine_every_in,
+            routine_prompt_in,
+            routine_open: None,
+            routine_agent: None,
+            routine_notify: true,
+            routine_on: true,
+            routine_catch_up: true,
             program_open: None,
             set_key_in,
             set_value_in,
@@ -976,6 +1002,23 @@ impl Loom {
                     )
                     .child(
                         div()
+                            .id("routines")
+                            .text_size(px(size::CAPTION))
+                            .text_color(p.ink_3)
+                            .cursor_pointer()
+                            .hover(move |s| s.text_color(p.ink))
+                            .child("Routines")
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                let f = this.model.load_routines();
+                                this.send(f);
+                                this.routine_open = None;
+                                this.menu = None;
+                                this.screen = Screen::Routines;
+                                cx.notify();
+                            })),
+                    )
+                    .child(
+                        div()
                             .id("skills")
                             .text_size(px(size::CAPTION))
                             .text_color(p.ink_3)
@@ -1087,11 +1130,16 @@ impl Loom {
             .px(px(space::L));
         if matches!(
             self.screen,
-            Screen::Skills | Screen::Programs | Screen::ThisDevice | Screen::Profile
+            Screen::Skills
+                | Screen::Programs
+                | Screen::ThisDevice
+                | Screen::Profile
+                | Screen::Routines
         ) {
             return bar.child(div().text_size(px(size::BODY)).text_color(p.ink_3).child(
                 match self.screen {
                     Screen::Skills => "Skills",
+                    Screen::Routines => "Routines",
                     Screen::Programs => "Agent programs",
                     Screen::Profile => "About you",
                     _ => "This PC",
@@ -2033,6 +2081,263 @@ impl Loom {
         div().flex_1().min_h_0().child(page)
     }
 
+    /// The routines page: prompts the person's agents are sent on a schedule, each in a
+    /// conversation of its own, and the form for a new or changed one.
+    fn routines_page(&mut self, cx: &mut Context<Self>) -> Div {
+        let p = self.p;
+        let caption = |text: String| {
+            div()
+                .text_size(px(size::CAPTION))
+                .text_color(p.ink_3)
+                .child(text)
+        };
+        let mut body = div().w(px(560.0)).flex().flex_col().gap(px(space::XL));
+        if let Some(open) = self.routine_open.clone() {
+            let mut agents = div().flex().flex_wrap().gap(px(space::XS));
+            for a in self.model.agents.clone() {
+                let id = a.id.clone();
+                let picked = self.routine_agent.as_deref() == Some(a.id.as_str());
+                agents = agents.child(
+                    self.button_owned(format!("routine-agent-{}", a.id), &a.name, picked)
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.routine_agent = Some(id.clone());
+                            cx.notify();
+                        })),
+                );
+            }
+            let switches = div()
+                .flex()
+                .gap(px(space::XS))
+                .child(
+                    self.button(
+                        "routine-notify",
+                        if self.routine_notify {
+                            "Notify me: on"
+                        } else {
+                            "Notify me: off"
+                        },
+                        self.routine_notify,
+                    )
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.routine_notify = !this.routine_notify;
+                        cx.notify();
+                    })),
+                )
+                .child(
+                    self.button(
+                        "routine-on",
+                        if self.routine_on { "On" } else { "Paused" },
+                        self.routine_on,
+                    )
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.routine_on = !this.routine_on;
+                        cx.notify();
+                    })),
+                )
+                .child(
+                    self.button(
+                        "routine-catch-up",
+                        if self.routine_catch_up {
+                            "Missed while off: run once"
+                        } else {
+                            "Missed while off: skip"
+                        },
+                        false,
+                    )
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.routine_catch_up = !this.routine_catch_up;
+                        cx.notify();
+                    })),
+                );
+            let editing = open.clone().unwrap_or_default();
+            let mut buttons = div()
+                .flex()
+                .gap(px(space::S))
+                .child(
+                    self.button("save-routine", "Save", true)
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            let name = this.routine_name_in.read(cx).value().to_string();
+                            let prompt = this.routine_prompt_in.read(cx).value().to_string();
+                            let every = this.routine_every_in.read(cx).value().trim().parse();
+                            let (Some(agent), Ok(every)) = (this.routine_agent.clone(), every)
+                            else {
+                                this.model.notices.push(
+                                    "A routine needs an agent, and how many minutes apart it runs."
+                                        .into(),
+                                );
+                                cx.notify();
+                                return;
+                            };
+                            let f = this.model.save_routine(
+                                &editing,
+                                &name,
+                                &agent,
+                                &prompt,
+                                every,
+                                this.routine_notify,
+                                this.routine_on,
+                                this.routine_catch_up,
+                            );
+                            this.send(f);
+                            this.routine_open = None;
+                            cx.notify();
+                        })),
+                )
+                .child(
+                    self.button("cancel-routine", "Cancel", false)
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.routine_open = None;
+                            cx.notify();
+                        })),
+                );
+            if let Some(id) = open.clone() {
+                let run = id.clone();
+                buttons = buttons
+                    .child(
+                        self.button("run-routine", "Run now", false)
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                let f = this.model.run_routine(&run);
+                                this.send(f);
+                                this.routine_open = None;
+                                cx.notify();
+                            })),
+                    )
+                    .child(
+                        self.button("delete-routine", "Delete", false)
+                            .text_color(p.bad)
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                let f = this.model.delete_routine(&id);
+                                this.send(f);
+                                this.routine_open = None;
+                                cx.notify();
+                            })),
+                    );
+            }
+            body = body
+                .child(
+                    div()
+                        .text_size(px(size::HEADING))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(p.ink)
+                        .child(if open.is_some() {
+                            "Change routine"
+                        } else {
+                            "New routine"
+                        }),
+                )
+                .child(self.field("Name", Input::new(&self.routine_name_in)))
+                .child(self.field("Agent", agents))
+                .child(self.field(
+                    "What it's asked each time",
+                    Textarea::new(&self.routine_prompt_in),
+                ))
+                .child(self.field(
+                    "Every how many minutes (5 at least)",
+                    Input::new(&self.routine_every_in),
+                ))
+                .child(switches)
+                .child(caption(
+                    "Each run goes to the agent's chat, marked as from this routine. With notify on, you get its reply as a notification."
+                        .into(),
+                ))
+                .child(buttons);
+        } else {
+            let mut list = div().flex().flex_col();
+            if self.model.routines.is_empty() {
+                list = list.child(caption(
+                    "No routines yet. A routine sends an agent the same prompt on a schedule, such as a morning brief every day. Agents can set them up too."
+                        .into(),
+                ));
+            }
+            for r in self.model.routines.clone() {
+                let agent = self
+                    .model
+                    .agent(&r.agent)
+                    .map(|a| a.name.clone())
+                    .unwrap_or_else(|| "a deleted agent".into());
+                let next = if !r.on || r.next == 0 {
+                    "paused".to_string()
+                } else if day_of(r.next) == "Today" {
+                    format!("next at {}", time_of(r.next))
+                } else {
+                    format!("next {} at {}", day_of(r.next), time_of(r.next))
+                };
+                let last = match r.last_status.as_str() {
+                    "" => String::new(),
+                    "running" => " · running now".into(),
+                    "done" => format!(" · last ran {}", time_of(r.last_at)),
+                    "skipped" => format!(" · skipped at {}", time_of(r.last_at)),
+                    _ => format!(" · failed at {}: {}", time_of(r.last_at), r.last_error),
+                };
+                let id = SharedString::from(format!("routine-{}", r.id));
+                list = list.child(
+                    div()
+                        .id(id)
+                        .flex()
+                        .flex_col()
+                        .py(px(space::S))
+                        .px(px(space::S))
+                        .rounded(px(radius::BUTTON))
+                        .cursor_pointer()
+                        .hover(move |s| s.bg(p.hover))
+                        .child(
+                            div()
+                                .text_size(px(size::SMALL))
+                                .font_weight(FontWeight::MEDIUM)
+                                .text_color(p.ink)
+                                .child(r.name.clone()),
+                        )
+                        .child(caption(format!("{agent}, {}, {next}{last}", r.when)))
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            this.routine_name_in
+                                .update(cx, |s, cx| s.set_value(r.name.clone(), window, cx));
+                            this.routine_every_in
+                                .update(cx, |s, cx| s.set_value(r.every.to_string(), window, cx));
+                            this.routine_prompt_in
+                                .update(cx, |s, cx| s.set_value(r.prompt.clone(), window, cx));
+                            this.routine_agent = Some(r.agent.clone());
+                            this.routine_notify = r.notify;
+                            this.routine_on = r.on;
+                            this.routine_catch_up = r.catch_up;
+                            this.routine_open = Some(Some(r.id.clone()));
+                            cx.notify();
+                        })),
+                );
+            }
+            body = body.child(list).child(
+                div()
+                    .flex()
+                    .child(
+                        self.button("new-routine", "New routine", true)
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.routine_name_in
+                                    .update(cx, |s, cx| s.set_value("", window, cx));
+                                this.routine_every_in
+                                    .update(cx, |s, cx| s.set_value("30", window, cx));
+                                this.routine_prompt_in
+                                    .update(cx, |s, cx| s.set_value("", window, cx));
+                                this.routine_agent = this.model.selected.clone();
+                                this.routine_notify = true;
+                                this.routine_on = true;
+                                this.routine_catch_up = true;
+                                this.routine_open = Some(None);
+                                cx.notify();
+                            })),
+                    ),
+            );
+        }
+        let page = div()
+            .id("routines-page")
+            .size_full()
+            .overflow_y_scroll()
+            .flex()
+            .justify_center()
+            .pt(px(space::XXL))
+            .pb(px(space::XXL))
+            .child(body);
+        div().flex_1().min_h_0().child(page)
+    }
+
     /// The This PC page: what agents may do on this computer, tool by tool. The core keeps
     /// the choice, and checks it before it acts.
     fn device_page(&mut self, cx: &mut Context<Self>) -> Div {
@@ -2588,6 +2893,7 @@ impl Loom {
                 "message" => "Handed over",
                 "notify" => "Notified",
                 "memory" => "Remembered",
+                "routine" => "Routine",
                 "device" => "On a device",
                 _ => "Changed",
             };
@@ -3150,6 +3456,7 @@ impl Render for Loom {
             Screen::Memory => self.memory_page(cx),
             Screen::Profile => self.profile_page(cx),
             Screen::Skills => self.skills_page(cx),
+            Screen::Routines => self.routines_page(cx),
             Screen::Programs => self.programs_page(cx),
             Screen::ThisDevice => self.device_page(cx),
         };

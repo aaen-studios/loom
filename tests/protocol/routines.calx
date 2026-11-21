@@ -1,0 +1,172 @@
+module tests.protocol.routines
+
+// Routines on a schedule (PLAN.md, "Routines"). A minute lasts 100 ms here,
+// so a routine every 5 minutes runs every half second. It sends its agent the
+// prompt in the agent's chat (its newest conversation, or a new one when it
+// has none), tells it the routine sent it, and
+// notifies the person with the reply. Paused, it waits; run by hand, it runs
+// once. An agent makes routines with the schedule tool, lists them, and
+// deletes one only once the person says yes.
+//
+//     calx tests/protocol/routines.calx
+import std.json.{Json}
+import std.process.{exit}
+import shared.obj.{Obj, at, bool_at, int_at, str_at}
+import tests.kit.{App, Instance, check, reply_text}
+
+// The next reply in `conversation`, as text.
+fn reply_in(app: mut App, conversation: String) -> String ! Error {
+    loop {
+        let created = try app.until("event", "message.created")
+        let m = at(created, "message")
+        if str_at(m.copy(), "role") == some(String("agent")) and str_at(m.copy(), "conversation") == some(conversation.copy()) { return reply_text(m) }
+    }
+}
+
+fn say(app: mut App, conversation: String, cid: str, text: String) -> String ! Error {
+    try app.send(Obj.new().s("t", String("send")).s("cid", String(cid)).s("conversation", conversation.copy()).s("text", text).done())
+    return try reply_in(mut app, conversation)
+}
+
+// The next routine.updated event for routine `id` that says its last run
+// is `status`.
+fn last_is(app: mut App, id: String, status: str) -> Json ! Error {
+    loop {
+        let e = try app.until("event", "routine.updated")
+        let r = at(e, "routine")
+        if str_at(r.copy(), "id") == some(id.copy()) and str_at(at(r.copy(), "last"), "status") == some(String(status)) { return r }
+    }
+}
+
+// Waits for run `run` to finish, if it hasn't already.
+fn finished(app: mut App, run_id: String) ! Error {
+    for f in app.frames {
+        if str_at(f.copy(), "kind") == some(String("run.finished")) and str_at(f.copy(), "run") == some(run_id.copy()) { return }
+    }
+    loop {
+        let e = try app.until("event", "run.finished")
+        if str_at(e, "run") == some(run_id.copy()) { return }
+    }
+}
+
+fn run(i: Instance) -> i64 ! Error {
+    var app = try App.connect(i.base.copy(), i.token.copy(), 0)
+    let made = try app.cmd("q_1", "agent.create", Obj.new().s("name", String("Main")).s("acp_agent", String("fake")).s("instructions", String("Test.")).done())
+    let agent = str_at(at(at(made, "value"), "agent"), "id") ?? String()
+
+    let bad = try app.cmd("q_2", "routine.put", Obj.new().s("name", String("Pulse")).s("agent", String("Main")).s("prompt", String("hi")).j("schedule", Obj.new().i("every", 1).done()).done())
+    try check(bool_at(bad.copy(), "ok") == some(false) and str_at(at(bad, "error"), "code") == some(String("bad_request")), "a routine more often than every 5 minutes is refused")
+
+    let put = try app.cmd("q_3", "routine.put", Obj.new().s("name", String("Pulse")).s("agent", String("Main")).s("prompt", String("/context\npulse")).j("schedule", Obj.new().i("every", 5).done()).b("notify", true).done())
+    let r = at(at(put, "value"), "routine")
+    let id = str_at(r.copy(), "id") ?? String()
+    try check(str_at(r.copy(), "agent") == some(agent.copy()) and str_at(r.copy(), "when") == some(String("every 5 minutes")) and str_at(r.copy(), "tz") == some(String("Europe/Oslo")) and (int_at(r, "next") ?? 0) > 0, "a routine is made, for the agent named, in the device's time zone")
+
+    // It runs on its own. The agent has no conversation yet, so it starts one.
+    let running = try last_is(mut app, id.copy(), "running")
+    let conversation = str_at(running, "conversation") ?? String()
+    let first = try reply_in(mut app, conversation.copy())
+    try check(first.contains("pulse") and first.contains("routine \"Pulse\", run every 5 minutes"), "it runs on schedule, and its agent knows a routine sent it")
+    let notified = try app.until("event", "notify")
+    try check(str_at(notified.copy(), "title") == some(String("Pulse")) and str_at(notified.copy(), "conversation") == some(conversation.copy()) and (str_at(notified, "body") ?? String()).contains("pulse"), "the person is notified with the reply")
+    _ = try last_is(mut app, id.copy(), "done")
+    let again = try last_is(mut app, id.copy(), "running")
+    try check(str_at(again.copy(), "conversation") == some(conversation.copy()), "and it runs again, in the same conversation")
+
+    let paused = try app.cmd("q_4", "routine.put", Obj.new().s("id", id.copy()).b("on", false).done())
+    try check(int_at(at(at(paused, "value"), "routine"), "next") == some(0), "paused, it isn't due")
+    try finished(mut app, str_at(at(again, "last"), "run") ?? String())
+    let by_hand = try app.cmd("q_5", "routine.run", Obj.new().s("id", id.copy()).done())
+    try check(str_at(at(by_hand, "value"), "run") != none, "run by hand, it runs")
+    try check((try reply_in(mut app, conversation.copy())).contains("run now, as the person asked"), "and its agent knows that")
+
+    // An agent makes one, lists them, and asks to delete one.
+    let c = try app.cmd("q_6", "conversation.create", Obj.new().s("agent", agent.copy()).done())
+    let chat = str_at(at(c, "value"), "conversation") ?? String()
+    let scheduled = try say(mut app, chat.copy(), "m_1", String(#"/mcp schedule {"name":"Hourly","prompt":"hi","schedule":{"every":60}}"#))
+    try check(scheduled.starts_with("schedule: Scheduled: Hourly, every hour, as routine "), "an agent makes a routine with schedule")
+    let listed = try say(mut app, chat.copy(), "m_2", String("/mcp list_routines"))
+    try check(listed.contains("Hourly") and listed.contains("Pulse"), "and lists them")
+    let routines = at(at(try app.cmd("q_7", "routine.list", Obj.new().done()), "value"), "routines")
+    var hourly_id = String()
+    if let Json.Array(all) = routines {
+        for x in all {
+            if str_at(x.copy(), "name") == some(String("Hourly")) { hourly_id = str_at(x, "id") ?? String() }
+        }
+    }
+    try app.send(Obj.new().s("t", String("send")).s("cid", String("m_3")).s("conversation", chat.copy()).s("text", "/mcp delete_routine \{\"id\":\"{hourly_id}\"\}").done())
+    let asked = try app.until("event", "approval.needed")
+    try check(str_at(asked.copy(), "title") == some(String("Delete the routine Hourly")), "deleting one asks the person")
+    try app.send(Obj.new().s("t", String("approve")).s("call", str_at(asked, "call") ?? String()).b("allow", true).done())
+    let deleted = try app.until("event", "routine.deleted")
+    try check(str_at(deleted, "routine") == some(hourly_id), "and a yes deletes it")
+    _ = try reply_in(mut app, chat.copy())
+    // The person's chat is the agent's newest now, so the routine posts there.
+    _ = try app.cmd("q_11", "routine.run", Obj.new().s("id", id.copy()).done())
+    try check((try reply_in(mut app, chat.copy())).contains("pulse"), "a routine posts into its agent's chat, the conversation the person last used")
+
+    _ = try app.cmd("q_8", "routine.delete", Obj.new().s("id", id).done())
+    let left = "{at(at(try app.cmd("q_9", "routine.list", Obj.new().done()), "value"), "routines")}"
+    try check(left == "[]", "the person deletes one")
+    let logged = "{at(try app.cmd("q_10", "activity.list", Obj.new().s("agent", agent).done()), "value")}"
+    try check(logged.contains("Made the routine Pulse") and logged.contains("Ran the routine Pulse") and logged.contains("Deleted the routine Hourly"), "the activity log has the routines")
+
+    // Two more, for while the instance is off: one catches up, one doesn't.
+    _ = try app.cmd("q_12", "routine.put", Obj.new().s("name", String("Quiet")).s("agent", String("Main")).s("prompt", String("quiet")).j("schedule", Obj.new().i("every", 5).done()).b("catch_up", false).done())
+    _ = try app.cmd("q_13", "routine.put", Obj.new().s("name", String("Loud")).s("agent", String("Main")).s("prompt", String("loud")).j("schedule", Obj.new().i("every", 5).done()).done())
+    let seq = app.seq
+    app.close()
+    return seq
+}
+
+// The next routine.updated event for the routine named `name`.
+fn updated(app: mut App, name: str) -> Json ! Error {
+    loop {
+        let e = try app.until("event", "routine.updated")
+        let r = at(e, "routine")
+        if str_at(r.copy(), "name") == some(String(name)) { return r }
+    }
+}
+
+// Off for a few of their gaps: Quiet waits for its next time, and Loud runs once.
+fn after_restart(i: Instance, seq: i64) ! Error {
+    var app = try App.connect(i.base.copy(), i.token.copy(), seq)
+    var quiet = String()
+    var loud = String()
+    while quiet.len() == 0 or loud.len() == 0 {
+        let e = try app.until("event", "routine.updated")
+        let r = at(e, "routine")
+        let status = str_at(at(r.copy(), "last"), "status") ?? String()
+        if str_at(r.copy(), "name") == some(String("Quiet")) and quiet.len() == 0 { quiet = status } else if str_at(r, "name") == some(String("Loud")) and loud.len() == 0 { loud = status }
+    }
+    try check(quiet == "skipped" and loud == "running", "missed while the instance was off, one routine runs once and one waits, as each says")
+    _ = try updated(mut app, "Loud")
+    app.close()
+}
+
+fn main() ! Error {
+    let inst = try Instance.start_with([String("--test-minute-ms"), String("100")])
+    var failure: String? = none
+    var seq: i64 = 0
+    match run(inst.copy()) {
+        ok(s) => seq = s,
+        err(e) => failure = some("{e}"),
+    }
+    if let f = failure {
+        inst.stop()
+        eprintln("\n{f}")
+        exit(1)
+    } else {
+        let back = try inst.restart_with([String("--test-minute-ms"), String("100")], 1500)
+        match after_restart(back.copy(), seq) {
+            ok => {},
+            err(e) => failure = some("{e}"),
+        }
+        back.stop()
+    }
+    if let f = failure {
+        eprintln("\n{f}")
+        exit(1)
+    }
+    println("\nroutines: all good")
+}

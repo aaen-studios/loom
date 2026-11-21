@@ -383,7 +383,7 @@ impl Conn {
                 _ => String("An agent"),
             }
             let title = str_at(e.copy(), "title") ?? String()
-            self.tell(Obj.new().s("t", String("core.notify")).s("title", if title.len() > 0 { "{name}: {title}" } else { name }).s("body", str_at(e, "body") ?? String()).s("agent", agent_id).s("conversation", String()).s("kind", String("notify")).done())
+            self.tell(Obj.new().s("t", String("core.notify")).s("title", if title.len() > 0 { "{name}: {title}" } else { name }).s("body", str_at(e, "body") ?? String()).s("agent", agent_id).s("conversation", str_at(e, "conversation") ?? String()).s("kind", String("notify")).done())
             return
         }
         if kind != "run.finished" and kind != "approval.needed" { return }
