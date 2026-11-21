@@ -139,6 +139,8 @@ pub struct Loom {
     move_code_in: Entity<InputState>,
     /// Whether the People page's next invite makes an admin rather than a member.
     invite_admin: bool,
+    /// Whether the Add a phone page is asking "delete my account?" before it does.
+    confirm_delete: bool,
     routine_at_in: Entity<InputState>,
     routine_prompt_in: Entity<TextareaState>,
     /// On the routines page: none for the list, `Some(None)` for a new routine,
@@ -400,6 +402,7 @@ ACTA_KEY=secret:ACTA_KEY",
             move_to_in,
             move_code_in,
             invite_admin: false,
+            confirm_delete: false,
             routine_at_in,
             routine_prompt_in,
             routine_open: None,
@@ -3308,6 +3311,56 @@ ACTA_KEY=secret:ACTA_KEY",
             devices = devices.child(row);
         }
         body = body.child(devices);
+        // Leaving an instance on a server: the account and everything of it. The instance
+        // refuses the owner's, whose account goes with the instance.
+        if !local_mode() {
+            let mut leave = div().flex().flex_col().gap(px(space::S)).child(
+                div()
+                    .text_size(px(size::BODY))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(p.ink)
+                    .child("Your account"),
+            );
+            if self.confirm_delete {
+                leave = leave
+                    .child(
+                        div()
+                            .text_size(px(size::SMALL))
+                            .text_color(p.bad)
+                            .child("Delete your account, with every agent, chat, routine and secret of yours? This can't be undone."),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .gap(px(space::S))
+                            .child(self.button("delete-account", "Delete it", true).on_click(
+                                cx.listener(|this, _, _, cx| {
+                                    this.confirm_delete = false;
+                                    let f = this.model.delete_account();
+                                    this.send(f);
+                                    cx.notify();
+                                }),
+                            ))
+                            .child(self.button("keep-account", "Keep it", false).on_click(
+                                cx.listener(|this, _, _, cx| {
+                                    this.confirm_delete = false;
+                                    cx.notify();
+                                }),
+                            )),
+                    );
+            } else {
+                leave = leave.child(
+                    div().child(
+                        self.button("ask-delete-account", "Delete my account", false)
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.confirm_delete = true;
+                                cx.notify();
+                            })),
+                    ),
+                );
+            }
+            body = body.child(leave);
+        }
         let page = div()
             .id("add-phone-page")
             .size_full()
