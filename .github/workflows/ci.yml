@@ -70,7 +70,7 @@ jobs:
       - name: Install
         run: |
           sudo env LOOM_RELEASES="file://$PWD/release" sh server/install.sh --json | tee install.json
-          grep -q '"setup_code":"' install.json
+          grep -q '"setup_code":"' install.json || { sudo systemctl status loom --no-pager || true; sudo journalctl -u loom --no-pager | tail -60; exit 1; }
 
       - name: Check
         run: |
