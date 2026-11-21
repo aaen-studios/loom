@@ -5,9 +5,9 @@ Calx: the apps' core, built with the server as one static library that the deskt
 Only JSON crosses its C boundary:
 
 ```c
-int  loom_core_start(const char *config_json, size_t len, loom_event_fn on_event, void *ctx);
-void loom_core_send(const char *json, size_t len);
-void loom_core_stop(void);
+uint8_t *loom_core_start(const uint8_t *config_json, size_t len, loom_event_fn on_event, uint8_t *ctx);
+void      loom_core_send(uint8_t *core, const uint8_t *json, size_t len);
+void      loom_core_stop(uint8_t *core);
 ```
 
-Starts in Phase 2, once Calx can build it (CLX-333, CLX-334).
+[`spike.calx`](spike.calx) is the LOO-4 spike's stand-in: it streams a made-up reply to the desktop app through `on_event`, from a thread of its own, to show the boundary works. The real core replaces it in Phase 2.

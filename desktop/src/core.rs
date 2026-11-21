@@ -1,0 +1,57 @@
+//! The Calx core, through its C boundary: JSON in with `send`, JSON out
+//! through a callback on the core's own thread, handed to the UI thread over
+//! a channel.
+
+use std::sync::mpsc::{channel, Receiver, Sender};
+
+extern "C" {
+    fn calx_init();
+    fn loom_core_start(
+        config: *const u8,
+        len: usize,
+        on_event: extern "C" fn(*const u8, usize, *mut u8),
+        ctx: *mut u8,
+    ) -> *mut u8;
+    fn loom_core_send(core: *mut u8, json: *const u8, len: usize);
+    fn loom_core_stop(core: *mut u8);
+}
+
+extern "C" fn on_event(json: *const u8, len: usize, ctx: *mut u8) {
+    // SAFETY: the core passes `len` bytes at `json`, and the ctx we gave it,
+    // which points at a Sender that lives as long as the Core.
+    let bytes = unsafe { std::slice::from_raw_parts(json, len) };
+    let tx = unsafe { &*(ctx as *const Sender<String>) };
+    let _ = tx.send(String::from_utf8_lossy(bytes).into_owned());
+}
+
+pub struct Core {
+    handle: *mut u8,
+    _tx: Box<Sender<String>>,
+}
+
+// The handle is only used through the core's functions, which take any thread.
+unsafe impl Send for Core {}
+
+impl Core {
+    /// Starts the core. Its events come out of the receiver.
+    pub fn start(config: &str) -> (Core, Receiver<String>) {
+        let (tx, rx) = channel();
+        let tx = Box::new(tx);
+        let ctx = &*tx as *const Sender<String> as *mut u8;
+        let handle = unsafe {
+            calx_init();
+            loom_core_start(config.as_ptr(), config.len(), on_event, ctx)
+        };
+        (Core { handle, _tx: tx }, rx)
+    }
+
+    pub fn send(&self, json: &str) {
+        unsafe { loom_core_send(self.handle, json.as_ptr(), json.len()) }
+    }
+}
+
+impl Drop for Core {
+    fn drop(&mut self) {
+        unsafe { loom_core_stop(self.handle) }
+    }
+}

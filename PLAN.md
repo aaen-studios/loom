@@ -65,14 +65,14 @@ Native features (push, Face ID, haptics, the share sheet, notifications, the cam
 The core is the same Calx code on every platform, and only JSON crosses into Rust or Swift:
 
 ```c
-typedef void (*loom_event_fn)(const char *json, size_t len, void *ctx);
+typedef void (*loom_event_fn)(const uint8_t *json, size_t len, uint8_t *ctx);
 
-int  loom_core_start(const char *config_json, size_t len, loom_event_fn on_event, void *ctx);
-void loom_core_send(const char *json, size_t len);
-void loom_core_stop(void);
+uint8_t *loom_core_start(const uint8_t *config_json, size_t len, loom_event_fn on_event, uint8_t *ctx);
+void      loom_core_send(uint8_t *core, const uint8_t *json, size_t len);
+void      loom_core_stop(uint8_t *core);
 ```
 
-- `loom_core_start` starts the Calx runtime and the core's own thread, which runs std.net's event loop. The config holds the data folder and the server's address.
+- The app calls `calx_init` once, which starts the Calx runtime (`calx build --staticlib` makes it and the header). `loom_core_start` then starts the core's own thread, which runs std.net's event loop. The config holds the data folder and the server's address. It gives back the core: Calx has no global variables, so what the core keeps lives in a box the app holds and passes to the other two calls.
 - The app passes JSON to `loom_core_send`, and the core answers through `on_event` on its own thread. The app hands each event to its UI thread: a GPUI entity update on desktop, the main actor on iPhone.
 - What happens to the app (sleep, going to the background on iPhone, a new network) comes in as messages too, such as `{"t":"app.background"}`.
 - The UI never talks to the server itself. Everything goes through the core, so the cache and the outbox always know what happened.
@@ -533,11 +533,24 @@ Agents start moving over in Phase 4, once routines and MCP work. OpenBot is swit
 
 GPUI is Zed's UI framework. It makes nothing in this plan impossible, but it's young, and some things are loom's own work:
 
-- **It's pre-1.0.** The API changes between versions, and the docs are thin. Pin one version, and upgrade on purpose. Check the state of its Windows support before Phase 2 starts.
-- **Loom builds its own widgets:** Markdown with code blocks, selectable streaming text, the chat list. Longbridge's `gpui-component` covers some of them.
-- **What a web app shell gave for free is now small crates:** the tray, notifications, starting at login, screenshots, the clipboard, the updater.
-- **No screen reader support** in GPUI today. Desktop accessibility waits on GPUI; the iPhone app has it from SwiftUI.
-- **Licences.** GPUI is Apache-2.0, which fits loom's MIT. Zed's editor and terminal crates are GPL, so they can't be used. A terminal panel would use `alacritty_terminal` (Apache-2.0).
+- **Which GPUI.** The `gpui` crate on crates.io stopped at 0.2.2. Zed's main branch is published as `gpui-pre`, and **GPUI Kit** (`gpui-kit`) pins a `gpui-pre` and re-exports it with `gpui-base` and `gpui-component`. Loom depends on `gpui-kit` alone, pinned exactly, and takes each new version on purpose. It needs a recent stable Rust (1.100 when the spike ran).
+- **The widgets mostly exist.** `gpui-component` has Markdown with code blocks (`TextView::markdown`, selectable), a virtual chat list that follows the tail (`MessageScroller`), and a composer (`Textarea`, growing, Enter to send and Shift+Enter for a new line). Loom styles them and builds what's missing.
+- **What a web app shell gave for free is now small crates:** the tray (`tray-icon`), notifications (`notify-rust`), starting at login, screenshots, the clipboard, the updater. `tray-icon` pulls in GTK on Linux, which loom doesn't target.
+- **Screen readers.** GPUI now has AccessKit on Windows, and `gpui-component`'s widgets set roles and labels. Check each screen with Narrator and VoiceOver as it's built.
+- **Licences.** GPUI, `gpui-component` and GPUI Kit are Apache-2.0, which fits loom's MIT. Zed's editor and terminal crates are GPL, so they can't be used. A terminal panel would use `alacritty_terminal` (Apache-2.0).
+
+### What the Windows spike showed (LOO-4)
+
+The throwaway test that opens Phase 2: `core/spike.calx` built with `calx build --staticlib` by `desktop/build.rs`, linked into a GPUI Kit window, streaming a Markdown reply through `on_event` from the core's own thread, below 3000 older Markdown messages.
+
+- **It works.** The core's 71 deltas arrive over 1.1 s, and GPUI draws each one as it comes, with code blocks, lists and inline code.
+- **Release build:** the window is up in about 0.55 s, the process holds about 85 MB, and the exe is 26 MB.
+- **The composer** takes typing and Enter, sends to the core, and the list follows the new message. Dropping files gives their paths (`ExternalPaths`). The tray icon and a notification come from the crates above, on GPUI's own message loop.
+- **Not yet checked by hand:** an IME (Japanese, say), and Narrator. Both are on the Phase 2 desktop chat task.
+- **Geist isn't bundled yet,** so text falls back to a system font.
+- **For the real core:** `loom_core_stop` must join the core's threads before it returns, so no `on_event` call comes after the app frees its side.
+
+GPUI is ready for this on Windows, so the Tauri fallback isn't needed.
 
 ## What happens to v0.1
 
