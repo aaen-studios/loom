@@ -9,6 +9,7 @@ module server.instance
 // next frame is read, and a session's catch-up can't interleave with live
 // events.
 import std.bytes
+import std.csv
 import std.crypto.{Ed25519Key, PasswordHasher, X25519Key, XChaCha20Poly1305, compare_digest, random_bytes}
 import std.fs
 import std.hash.{hmac_sha256, sha256}
@@ -213,6 +214,9 @@ pub struct Instance {
     flow_results: List<(String, usize, bool, String)>    // steps that ended meanwhile: flow, step, whether it worked, its answer
     flows_due: List<String>    // flows to move along from the loop, by id
     slow_calls: Map<String, String>    // call -> user, for an agent's slow command its person allowed
+    acting: i64    // the action a tool call being done is recorded as, while it is
+    call_actions: Map<String, i64>    // a call held in calls -> the action it is
+    tool_actions: Map<String, i64>    // an ACP tool call (tc_ id) -> the action it is
     push_to: Sender<push.Job>    // the thread that sends to APNs
     push_gone: Receiver<push.Gone>    // tokens APNs says are gone
     move_to: Sender<move.Job>    // the thread that sends a move
@@ -362,6 +366,89 @@ fn tool_error(text: String) -> Json {
     return Obj.new().j("content", Json.Array([Obj.new().s("type", String("text")).s("text", text).done()])).b("isError", true).done()
 }
 
+// A tool's result when a rule refused it. `rule` names the rule for the
+// activity log (PLAN.md, "Every action is recorded before it happens"), and
+// is taken off before the agent gets the result.
+fn rule_refusal(rule: str, text: String) -> Json {
+    return merge(tool_error(text), Obj.new().s("loom_rule", String(rule)).done())
+}
+
+// How a tool's result went, for the activity log: done, failed or refused,
+// and why. A refusal's why starts with its rule.
+fn how_it_went(result: Json) -> (String, String) {
+    var said = String()
+    if let Json.Array(parts) = at(result.copy(), "content") {
+        for p in parts {
+            if let t = str_at(p, "text") {
+                said = t.copy()
+                break
+            }
+        }
+    }
+    if let rule = str_at(result.copy(), "loom_rule") { return (String("refused"), "{rule}: {said}") }
+    if bool_at(result, "isError") == some(true) { return (String("failed"), said) }
+    return (String("done"), String())
+}
+
+// Whether a call to loom's tool `name` only reads, so isn't an action the
+// activity log records: lists, searches, reading and looking.
+fn tool_reads(name: String, args: Json) -> bool {
+    if name == "run_command" {
+        let command = str_at(args, "name") ?? String()
+        return command.ends_with(".list") or command.ends_with(".get") or command.ends_with(".search") or command.ends_with(".revisions")
+    }
+    let reads = ["list_agents", "list_acp_agents", "search_messages", "list_skills", "read_skill", "list_devices", "recall", "list_routines", "list_plugins", "read_plugin", "browser_snapshot", "browser_screenshot", "html_preview", "list_tables", "query_rows", "install_server", "list_commands"]
+    for r in reads {
+        if name == r { return true }
+    }
+    return false
+}
+
+// How many characters `s` has.
+fn rune_len(s: String) -> usize {
+    var n: usize = 0
+    for _ in s.runes() { n += 1 }
+    return n
+}
+
+// `text` with each of `secrets` (name, value) in it shown only as its length.
+fn hidden_text(text: String, secrets: List<(String, String)>) -> String {
+    var shown = text.copy()
+    for (name, value) in secrets {
+        if shown.contains(value.copy()) { shown = shown.replace(value.copy(), "[secret {name}: {rune_len(value.copy())} characters]") }
+    }
+    return shown
+}
+
+// `j` as the activity log keeps it: each of `secrets` (name, value) in it,
+// and a member named like a password or a token, shown only as its length.
+fn hide_secrets(j: Json, secrets: List<(String, String)>) -> Json {
+    match j.copy() {
+        Json.Str(s) => return Json.Str(hidden_text(s, secrets)),
+        Json.Array(xs) => {
+            var out = List<Json>()
+            for x in xs { out.push(hide_secrets(x.copy(), secrets.copy())) }
+            return Json.Array(out)
+        },
+        Json.Object(o) => {
+            var m = LinkedMap<String, Json>()
+            for (k, v) in o {
+                let low = k.to_lower_root()
+                let hidden = low.contains("password") or low.contains("passphrase") or low.contains("token") or low.contains("api_key") or low.contains("apikey")
+                if hidden {
+                    if let Json.Str(s) = v.copy() {
+                        m.insert(k.copy(), Json.Str("[{rune_len(s)} characters]"))
+                        continue
+                    }
+                }
+                m.insert(k.copy(), hide_secrets(v.copy(), secrets.copy()))
+            }
+            return Json.Object(m)
+        },
+        _ => return j.copy(),
+    }
+}
+
 // A command's answer, as a tool's result.
 fn answer_text(a: Answer) -> Json {
     return match a {
@@ -407,6 +494,9 @@ const FAILURES_OFF: i64 = 5
 // How many agents may ask on the way to a run, with message_agent (PLAN.md,
 // "Agents talking to agents have limits").
 const CHAIN_MOST: usize = 4
+
+// The most entries activity.export gives: the newest, when there are more.
+const ACTIVITY_EXPORT_MOST: usize = 100000
 
 // How much a script says to an agent at once.
 const SCRIPT_TEXT_MOST: usize = 20000
@@ -560,8 +650,10 @@ impl Instance {
         }
         let browser_done = Receiver<browser.Back>()
         let browser_to = browser_done.sender()
-        var i = Instance { browsers: LinkedMap<String, Browser>(), watchers: Map<u32, String>(), browser_done: browser_done, browser_to: browser_to, stopped_browsers: List<Thread>(), fills: Map<String, Fill>(), turns_ended: List<(String, String, String)>(), next_browser_sweep: 0, task_stops: Map<String, String>(), resumes: List<(String, String)>(), push_to: push_to, push_gone: push_gone, move_to: move_to, move_done: move_done, lan: config.lan, bridge: none, stop_bridge: none, lan_port: 0, announcer: none, stop_announcer: none, to_close: List<ServerSocket>(), boxes: none, gate: none, stop_gate: none, moving: String(), move_waiters: List<Waiter>(), moved: moved, version: config.version.copy(), store: store, server: server, data: config.data.copy(), sessions: Map<u32, Session>(), runs: LinkedMap<String, Run>(), procs: LinkedMap<String, Proc>(), approvals: LinkedMap<String, Approval>(), lines: lines, lines_to: to, hash_to: hash_to, hash_done: hash_done, next_job: 0, auths: Map<i64, Auth>(), dummy_hash: dummy, failures: LinkedMap<String, List<i64>>(), thumbs: files.start(), events: config.events, next_prune: 0, grants: Map<String, Grant>(), calls: Map<String, Request>(), registry_at: config.registry.copy(), registry: Json.Null, registry_time: 0, install_to: install_to, install_done: install_done, fetching: List<Waiter>(), installs: Map<i64, Install>(), leftovers: List<String>(), next_sweep: 0, device_calls: Map<String, DeviceCall>(), minute_ms: config.minute_ms, next_due: 0, routine_runs: Map<String, RoutineRun>(), routine_marks: Map<String, (String, String)>(), run_chains: Map<String, List<String>>(), panel_calls: Map<String, Waiter>(), script_calls: Map<String, Request>(), running_flows: LinkedMap<String, flows.Flow>(), flow_steps: Map<String, (String, usize)>(), advancing: List<String>(), flow_results: List<(String, usize, bool, String)>(), flows_due: List<String>(), slow_calls: Map<String, String>(), sealer: try secret_key(config.data.copy()) }
+        var i = Instance { browsers: LinkedMap<String, Browser>(), watchers: Map<u32, String>(), browser_done: browser_done, browser_to: browser_to, stopped_browsers: List<Thread>(), fills: Map<String, Fill>(), turns_ended: List<(String, String, String)>(), next_browser_sweep: 0, task_stops: Map<String, String>(), resumes: List<(String, String)>(), push_to: push_to, push_gone: push_gone, move_to: move_to, move_done: move_done, lan: config.lan, bridge: none, stop_bridge: none, lan_port: 0, announcer: none, stop_announcer: none, to_close: List<ServerSocket>(), boxes: none, gate: none, stop_gate: none, moving: String(), move_waiters: List<Waiter>(), moved: moved, version: config.version.copy(), store: store, server: server, data: config.data.copy(), sessions: Map<u32, Session>(), runs: LinkedMap<String, Run>(), procs: LinkedMap<String, Proc>(), approvals: LinkedMap<String, Approval>(), lines: lines, lines_to: to, hash_to: hash_to, hash_done: hash_done, next_job: 0, auths: Map<i64, Auth>(), dummy_hash: dummy, failures: LinkedMap<String, List<i64>>(), thumbs: files.start(), events: config.events, next_prune: 0, grants: Map<String, Grant>(), calls: Map<String, Request>(), registry_at: config.registry.copy(), registry: Json.Null, registry_time: 0, install_to: install_to, install_done: install_done, fetching: List<Waiter>(), installs: Map<i64, Install>(), leftovers: List<String>(), next_sweep: 0, device_calls: Map<String, DeviceCall>(), minute_ms: config.minute_ms, next_due: 0, routine_runs: Map<String, RoutineRun>(), routine_marks: Map<String, (String, String)>(), run_chains: Map<String, List<String>>(), panel_calls: Map<String, Waiter>(), script_calls: Map<String, Request>(), running_flows: LinkedMap<String, flows.Flow>(), flow_steps: Map<String, (String, usize)>(), advancing: List<String>(), flow_results: List<(String, usize, bool, String)>(), flows_due: List<String>(), slow_calls: Map<String, String>(), acting: 0, call_actions: Map<String, i64>(), tool_actions: Map<String, i64>(), sealer: try secret_key(config.data.copy()) }
         if config.sandboxes.len() > 0 and not i.lan { try i.sandboxes_on(config.sandboxes.copy(), config.sandbox_image.copy()) }
+        // An action the last run of the instance left started, it never finished.
+        try i.store.settle_cut_short()
         // What waited behind a turn the restart cut short goes once the loop
         // runs; a queue the person left waiting by stopping a turn still waits.
         i.turns_ended = restarted
@@ -923,7 +1015,7 @@ impl Instance {
                                 continue
                             }
                         }
-                        if let req = i.calls.remove(call) { i.server.respond(req, json_response(200, result)) }
+                        i.answer_call(call, result)
                     },
                     browser.Back.Frame(key, data, width, height) => i.browser_frame(key, data, width, height),
                     browser.Back.Open(key, open) => {
@@ -1007,7 +1099,7 @@ impl Instance {
         let call = try i.store.new_id("bc")
         if op == "open" { i.log(g.user.copy(), g.agent.copy(), "browser", "Opened {cut_short(str_at(args.copy(), "url") ?? String(), 200)}", g.agent.copy()) }
         let why = (str_at(args.copy(), "why") ?? String()).trim().copy()
-        i.calls.insert(call.copy(), req.copy())
+        i.hold_call(call.copy(), req.copy())
         if op == "ask_person" {
             // Answered once the person hands the browser back.
             if let b = mut i.browsers.find(key.copy()) {
@@ -1058,7 +1150,9 @@ impl Instance {
     // browser_fill_secret on a site its secret hasn't gone to: the person is
     // asked, in the agent's chat, and the call waits for their answer.
     fn fill_needs_yes(i: mut Instance, call: String, f: Fill, host: String) {
-        let req = i.calls.remove(call) else return
+        let req = i.calls.remove(call.copy()) else return
+        // The call's action goes on with the question it now waits on.
+        i.acting = i.call_actions.remove(call) ?? 0
         let site = if host.len() > 0 { host.copy() } else { String("a file on this computer") }
         let action = Obj.new().s("name", String("browser.fill")).j("args", Obj.new().s("secret", f.name.copy()).s("site", host).s("ref", f.ref_id.copy()).b("submit", f.submit).s("agent", f.agent.copy()).done()).done()
         let g = Grant { user: f.user.copy(), agent: f.agent.copy(), conversation: String() }
@@ -1066,7 +1160,12 @@ impl Instance {
             ok(a) => a,
             err(e) => some(tool_error("{e}")),
         }
-        if let a = answer { i.server.respond(req, json_response(200, a)) }
+        if let a = answer {
+            let (status, why) = how_it_went(a.copy())
+            i.settle(i.acting, status, why)
+            i.server.respond(req, json_response(200, without(a, "loom_rule")))
+        }
+        i.acting = 0
     }
 
     // The person said yes to a secret on a site: the site is kept for it, and
@@ -1092,7 +1191,7 @@ impl Instance {
             if b.person { b.held.push(o) } else { b.to.send(browser.In.Do(o)) }
             return
         }
-        if let req = i.calls.remove(a.call.copy()) { i.server.respond(req, json_response(200, tool_error(String("The browser closed.")))) }
+        i.answer_call(a.call.copy(), tool_error(String("The browser closed.")))
     }
 
     // Stops a browser. Its thread ends once it has, and is joined at shutdown.
@@ -1104,7 +1203,7 @@ impl Instance {
         var waiting = b.asks.copy()
         for o in b.held { waiting.push(o.call.copy()) }
         for call in waiting {
-            if let req = i.calls.remove(call) { i.server.respond(req, json_response(200, tool_error(String("The browser closed.")))) }
+            i.answer_call(call, tool_error(String("The browser closed.")))
         }
         i.stopped_browsers.push(b.thread)
         i.browser_state(key)
@@ -1207,7 +1306,7 @@ impl Instance {
             if ask == Json.Null { return Answer.Refused(String("not_asked"), String("The agent isn't asking for anything.")) }
             if value.len() == 0 {
                 if let b = mut i.browsers.find(key.copy()) { b.busy -= 1 }
-                if let req = i.calls.remove(str_at(ask, "call") ?? String()) { i.server.respond(req, json_response(200, tool_error(String("Your person didn't give it.")))) }
+                i.answer_call(str_at(ask, "call") ?? String(), tool_error(String("Your person didn't give it.")))
             }
             i.log(user, agent, "browser", String(if value.len() > 0 { "You typed in what it asked for" } else { "You didn't give what it asked for" }), String())
             i.browser_state(key.copy())
@@ -1401,8 +1500,79 @@ impl Instance {
 
     // An entry in the activity log. A failure to write one is said, not
     // passed up: the action itself has happened.
+    // An entry in the activity log, with the person's secrets in it shown only
+    // as their length. A failure to write one is said, not passed up: the
+    // action itself has happened.
     fn log(i: Instance, user: String, agent: String, kind: str, what: String, by: String) {
-        if let err(e) = i.store.log(user, agent, kind, what, by) { eprintln("loom: the activity log: {e}") }
+        let shown = hidden_text(what, i.secret_values(user.copy()))
+        if let err(e) = i.store.log(user, agent, kind, shown, by) { eprintln("loom: the activity log: {e}") }
+    }
+
+    // `user`'s secrets, (name, value), for the activity log to hide. One
+    // shorter than four characters is too likely to turn up by chance.
+    fn secret_values(i: Instance, user: String) -> List<(String, String)> {
+        var secrets = List<(String, String)>()
+        let names = match i.store.secret_names(user.copy()) {
+            ok(n) => n,
+            err(_) => List<Json>(),
+        }
+        for n in names {
+            let name = str_at(n, "name") ?? String()
+            let value = match i.secret(user.copy(), name.copy()) {
+                ok(v) => v ?? String(),
+                err(_) => String(),
+            }
+            if rune_len(value.copy()) >= 4 { secrets.push((name, value)) }
+        }
+        return secrets
+    }
+
+    // Records an action before it happens (PLAN.md, "Every action is recorded
+    // before it happens"), with what it was given, the person's secrets shown
+    // only as their length. Gives the entry's id, or 0 if the log couldn't
+    // take it.
+    fn record(i: Instance, user: String, agent: String, kind: str, what: String, input: Json, by: String) -> i64 {
+        let secrets = i.secret_values(user.copy())
+        let shown = if input == Json.Null { String() } else { cut_short("{hide_secrets(input, secrets.copy())}", 4000) }
+        let said = hidden_text(what, secrets)
+        return match i.store.record(user, agent, kind, said, shown, by) {
+            ok(id) => id,
+            err(e) => {
+                eprintln("loom: the activity log: {e}")
+                0
+            },
+        }
+    }
+
+    // Marks the action `act` done, failed or refused.
+    fn settle(i: Instance, act: i64, status: String, why: String) {
+        if act <= 0 { return }
+        let kind = if status == "done" { "done" } else if status == "refused" { "refused" } else { "failed" }
+        if let err(e) = i.store.settle(act, kind, cut_short(why, 1000)) { eprintln("loom: the activity log: {e}") }
+    }
+
+    // Holds a tool call's request under `key` until it's answered, with the
+    // action it's recorded as.
+    fn hold_call(i: mut Instance, key: String, req: Request) {
+        if i.acting > 0 { i.call_actions.insert(key.copy(), i.acting) }
+        i.calls.insert(key.copy(), req.copy())
+    }
+
+    // Settles the action a held call is recorded as, by its result, and gives
+    // the result as the agent gets it.
+    fn settle_call(i: mut Instance, key: String, result: Json) -> Json {
+        if let act = i.call_actions.remove(key) {
+            let (status, why) = how_it_went(result.copy())
+            i.settle(act, status, why)
+        }
+        return without(result, "loom_rule")
+    }
+
+    // Answers the tool call held under `key`, if one is.
+    fn answer_call(i: mut Instance, key: String, result: Json) {
+        let req = i.calls.remove(key.copy()) else return
+        let answer = i.settle_call(key, result)
+        i.server.respond(req, json_response(200, answer))
     }
 
     // --- HTTP ---
@@ -1670,8 +1840,30 @@ impl Instance {
         }
         let name = str_at(body.copy(), "name") ?? String()
         let args = at(body, "arguments")
-        match try i.tool(req.copy(), grant, name, args) {
-            some(result) => return some(json_response(200, result)),
+        // What acts is recorded before it happens, and settled once it's done:
+        // now, or when a held call is answered.
+        var act: i64 = 0
+        if not tool_reads(name.copy(), args.copy()) {
+            let command = str_at(args.copy(), "name") ?? String()
+            let what = if name == "run_command" { "run_command {command}" } else { name.copy() }
+            act = i.record(grant.user.copy(), grant.agent.copy(), "tool", what, args.copy(), grant.agent.copy())
+        }
+        i.acting = act
+        let answered = match i.tool(req.copy(), grant, name, args) {
+            ok(a) => a,
+            err(e) => {
+                i.acting = 0
+                i.settle(act, String("failed"), "{e}")
+                fail "{e}"
+            },
+        }
+        i.acting = 0
+        match answered {
+            some(result) => {
+                let (status, why) = how_it_went(result.copy())
+                i.settle(act, status, why)
+                return some(json_response(200, without(result, "loom_rule")))
+            },
             none => return none,
         }
     }
@@ -1899,14 +2091,14 @@ impl Instance {
             let id = str_at(found.copy(), "id") ?? String()
             let agent_name = str_at(found, "name") ?? key
             if name == "delete_agent" {
-                if id == g.agent { return some(tool_error(String("An agent can't delete itself. Your person can, in the app."))) }
+                if id == g.agent { return some(rule_refusal("not-itself", String("An agent can't delete itself. Your person can, in the app."))) }
                 let action = Obj.new().s("name", String("agent.delete")).j("args", Obj.new().s("agent", id).done()).done()
                 return try i.ask_person(req, g, "Delete the agent {agent_name}", "delete", action)
             }
             let mode = str_at(args, "permission") ?? String()
             if mode != "ask" and mode != "auto" and mode != "allow" { return some(tool_error(String("permission is ask, auto or allow."))) }
-            if id == g.agent and mode != "ask" { return some(tool_error(String("An agent can't loosen its own permission mode. Your person can, in the app."))) }
-            if let why = try i.more_than_it_has(g.copy(), mode.copy()) { return some(tool_error(why)) }
+            if id == g.agent and mode != "ask" { return some(rule_refusal("own-mode", String("An agent can't loosen its own permission mode. Your person can, in the app."))) }
+            if let why = try i.more_than_it_has(g.copy(), mode.copy()) { return some(rule_refusal("no-more-than-its-own", why)) }
             let action = Obj.new().s("name", String("agent.update")).j("args", Obj.new().s("agent", id).s("permission", mode.copy()).done()).done()
             return try i.ask_person(req, g, "Set {agent_name}'s permission mode to {mode}", "other", action)
         }
@@ -2111,10 +2303,10 @@ impl Instance {
         chain.push(g.agent.copy())
         let names = try i.agent_names(g.user.copy())
         if chain.contains(to_id.copy()) {
-            return some(tool_error("{str_at(to.copy(), "name") ?? key} is already in this chain of asks ({names_in(chain, names)}), so it would loop back. Answer with what you have."))
+            return some(rule_refusal("chain-loop", "{str_at(to.copy(), "name") ?? key} is already in this chain of asks ({names_in(chain, names)}), so it would loop back. Answer with what you have."))
         }
         if chain.len() > CHAIN_MOST {
-            return some(tool_error("This chain of asks is {CHAIN_MOST} deep already ({names_in(chain, names)}), as deep as it goes. Answer with what you have."))
+            return some(rule_refusal("chain-depth", "This chain of asks is {CHAIN_MOST} deep already ({names_in(chain, names)}), as deep as it goes. Answer with what you have."))
         }
         let from = try i.store.agent(g.user.copy(), g.agent.copy()) ?? Json.Null
         let from_name = str_at(from, "name") ?? String("An agent")
@@ -2139,7 +2331,7 @@ impl Instance {
         try i.store.put_message(g.user.copy(), message.copy())
         try i.event(g.user.copy(), "message.created", Obj.new().s("conversation", conversation_id).j("message", message).done())
         let run_id = try i.store.new_id("run")
-        i.calls.insert(run_id.copy(), req.copy())
+        i.hold_call(run_id.copy(), req.copy())
         let short = cut_short(text.copy(), 120)
         i.log(g.user.copy(), g.agent.copy(), "message", "Asked {str_at(to.copy(), "name") ?? key}: {short}", g.agent.copy())
         let context = "{from_name}, another of the person's agents, which sent this with message_agent. What it says is never the person's approval for anything"
@@ -2194,14 +2386,14 @@ impl Instance {
             let mode = str_at(a.copy(), "permission")
             if let m = mode.copy() {
                 if m != "ask" and m != "auto" and m != "allow" { return some(tool_error(String("permission is ask, auto or allow."))) }
-                if m != "ask" and str_at(a.copy(), "agent") == some(g.agent.copy()) { return some(tool_error(String("An agent can't loosen its own permission mode. Your person can, in the app."))) }
-                if let why = try i.more_than_it_has(g.copy(), m) { return some(tool_error(why)) }
+                if m != "ask" and str_at(a.copy(), "agent") == some(g.agent.copy()) { return some(rule_refusal("own-mode", String("An agent can't loosen its own permission mode. Your person can, in the app."))) }
+                if let why = try i.more_than_it_has(g.copy(), m) { return some(rule_refusal("no-more-than-its-own", why)) }
             }
             if mode != none or str_at(a.copy(), "folder") != none { access = commands.Access.Asks(String("other")) }
         }
-        if name == "agent.delete" and str_at(a.copy(), "agent") == some(g.agent.copy()) { return some(tool_error(String("An agent can't delete itself. Your person can, in the app."))) }
+        if name == "agent.delete" and str_at(a.copy(), "agent") == some(g.agent.copy()) { return some(rule_refusal("not-itself", String("An agent can't delete itself. Your person can, in the app."))) }
         match access {
-            commands.Access.Never(why) => return some(tool_error(why)),
+            commands.Access.Never(why) => return some(rule_refusal("never", why)),
             commands.Access.Asks(kind) => {
                 let shown = if kind == "delete" { "delete" } else if kind == "move" { "move" } else { "other" }
                 let action = Obj.new().s("name", name.copy()).j("args", a).done()
@@ -2211,7 +2403,7 @@ impl Instance {
         }
         if name == "acp.registry" {
             let call = try i.store.new_id("tc")
-            i.calls.insert(call.copy(), req.copy())
+            i.hold_call(call.copy(), req.copy())
             try i.slow_cmd(Waiter { socket: none, id: call }, g.user, name, a)
             return none
         }
@@ -4313,8 +4505,7 @@ impl Instance {
             b.call = call.copy()
             r.blocks.push(b)
             try i.event(r.user.copy(), "tool.started", Obj.new().s("run", r.id.copy()).s("call", call.copy()).s("tool", acp.tool_kind(str_at(u.copy(), "kind") ?? String())).s("title", str_at(u.copy(), "title") ?? String()).j("input", cut_input(at(u.copy(), "rawInput"))).j("locations", at(u.copy(), "locations")).done())
-            let title = str_at(u.copy(), "title") ?? String()
-            i.log(r.user.copy(), r.agent.copy(), "tool", if title.len() > 0 { title } else { acp.tool_kind(str_at(u.copy(), "kind") ?? String()) }, String())
+            i.record_tool(r.user.copy(), r.agent.copy(), call.copy(), u.copy())
             let status = str_at(u.copy(), "status") ?? String()
             if status == "completed" or status == "failed" {
                 try i.tool_finished(r, call, status, at(u, "content"))
@@ -4401,9 +4592,31 @@ impl Instance {
         return some(try i.agent_file(user, name, mime, got))
     }
 
+    // An agent's own tool call, recorded before it runs, once: when the agent
+    // says it's starting it, or asks permission for it, whichever is first.
+    fn record_tool(i: mut Instance, user: String, agent: String, call: String, tool_call: Json) {
+        if let _ = i.tool_actions.find(call.copy()) { return }
+        let title = str_at(tool_call.copy(), "title") ?? String()
+        let what = if title.len() > 0 { title } else { acp.tool_kind(str_at(tool_call.copy(), "kind") ?? String()) }
+        let act = i.record(user, agent, "tool", what, at(tool_call, "rawInput"), String())
+        if act > 0 { i.tool_actions.insert(call.copy(), act) }
+    }
+
     fn tool_finished(i: Instance, r: Run, call: String, status: String, content: Json) ! Error {
         var s = if status == "completed" { String("done") } else { String("failed") }
         if r.denied.contains(call.copy()) { s = String("denied") }
+        if let act = i.tool_actions.find(call.copy()) {
+            var said = String()
+            if let Json.Array(parts) = content.copy() {
+                for p in parts {
+                    if let t = str_at(at(p, "content"), "text") {
+                        said = t.copy()
+                        break
+                    }
+                }
+            }
+            if s == "denied" { i.settle(act, String("refused"), String("person-said-no: Your person said no.")) } else { i.settle(act, s.copy(), if s == "done" { String() } else { said }) }
+        }
         try i.event(r.user.copy(), "tool.finished", Obj.new().s("call", call).s("status", s).j("output", output_blocks(content)).done())
     }
 
@@ -4426,6 +4639,7 @@ impl Instance {
             b.call = call.copy()
             r.blocks.push(b)
         }
+        i.record_tool(r.user.copy(), r.agent.copy(), call.copy(), tool_call.copy())
         let options = at(params, "options")
         // A side question's answer uses no tools that ask.
         let conversation = try i.store.conversation(r.user.copy(), r.conversation.copy()) ?? Json.Null
@@ -4527,10 +4741,10 @@ impl Instance {
         let device = str_at(target.copy(), "id") ?? String()
         let device_name = str_at(target.copy(), "name") ?? String()
         let mode = (at(target, "tools").get(tool_name.copy()) ?? Json.Null).as_str() ?? String("off")
-        if mode != "ask" and mode != "allow" { return some(tool_error("{tool_name} is off on {device_name}. Your person can turn it on in that device's app.")) }
+        if mode != "ask" and mode != "allow" { return some(rule_refusal("device-tool-off", "{tool_name} is off on {device_name}. Your person can turn it on in that device's app.")) }
         let tool_args = at(args, "args")
         let run_id = i.calling_run(g.copy())
-        if mode == "ask" and run_id.len() == 0 { return some(tool_error(String("That needs your person's yes, and they can only give it during a chat with you."))) }
+        if mode == "ask" and run_id.len() == 0 { return some(rule_refusal("needs-a-chat", String("That needs your person's yes, and they can only give it during a chat with you."))) }
         let call = try i.store.new_id("tc")
         let request = "{Obj.new().s("call", call.copy()).s("device", device.copy()).s("tool", tool_name.copy()).j("args", tool_args.copy()).s("agent", g.agent.copy()).i("at", now()).done()}"
         let what = str_at(tool_args.copy(), "command") ?? str_at(tool_args.copy(), "path") ?? str_at(tool_args.copy(), "target") ?? cut_short(str_at(tool_args, "text") ?? String(), 80)
@@ -4555,7 +4769,7 @@ impl Instance {
             }
             try i.event(g.user.copy(), "tool.started", Obj.new().s("run", run_id.copy()).s("call", call.copy()).s("tool", kind.copy()).s("title", title.copy()).j("input", Obj.new().s("device", device_name.copy()).s("tool", tool_name.copy()).j("args", cut_input(at(args, "args"))).done()).j("locations", Json.Null).done())
         }
-        i.calls.insert(call.copy(), req.copy())
+        i.hold_call(call.copy(), req.copy())
         i.device_calls.insert(call.copy(), DeviceCall { user: g.user.copy(), device: device.copy(), agent: g.agent.copy(), title: title.copy() })
         if mode == "ask" {
             let action = Obj.new().s("name", String("device.call")).s("device", device.copy()).s("request", request.copy()).done()
@@ -4605,14 +4819,14 @@ impl Instance {
     // screenshot: its `data` in base64, its `mime`, and the `file` it's kept as.
     fn device_done(i: mut Instance, call: String, status: String, output: String, picture: Json) ! Error {
         let dc = i.device_calls.remove(call.copy()) else return
-        var result = if status == "done" { tool_text(output.copy()) } else { tool_error(output.copy()) }
+        var result = if status == "done" { tool_text(output.copy()) } else if status == "denied" { rule_refusal("person-said-no", output.copy()) } else { tool_error(output.copy()) }
         var shown = List<Json>()
         if picture != Json.Null {
             let image = Obj.new().s("type", String("image")).s("data", str_at(picture.copy(), "data") ?? String()).s("mimeType", str_at(picture.copy(), "mime") ?? String()).done()
             result = Obj.new().j("content", Json.Array([image, Obj.new().s("type", String("text")).s("text", output.copy()).done()])).done()
             shown.push(at(picture, "file"))
         }
-        if let req = i.calls.remove(call.copy()) { i.server.respond(req, json_response(200, result)) }
+        i.answer_call(call.copy(), result)
         if status != "denied" { i.log(dc.user.copy(), dc.agent.copy(), "device", if status == "done" { dc.title.copy() } else { "Failed: {dc.title}" }, dc.device.copy()) }
         shown.push(Obj.new().s("kind", String("text")).s("text", cut_short(output, 4000)).done())
         try i.event(dc.user, "tool.finished", Obj.new().s("call", call).s("status", status).j("output", Json.Array(shown)).done())
@@ -4678,7 +4892,7 @@ impl Instance {
             try i.slow_cmd(Waiter { socket: none, id: a.call.copy() }, user, name, at(a.action.copy(), "args"))
             return
         }
-        var result = tool_error(String("Your person said no."))
+        var result = rule_refusal("person-said-no", String("Your person said no."))
         if allow {
             result = match try i.command(user.copy(), by.copy(), name, at(a.action.copy(), "args")) {
                 Answer.Value(v) => if v == Obj.new().done() { tool_text(String("Done: your person said yes.")) } else { tool_text("Done: your person said yes. {v}") },
@@ -4686,7 +4900,7 @@ impl Instance {
             }
             i.close_gone()
         }
-        if let req = i.calls.remove(a.call.copy()) { i.server.respond(req, json_response(200, result.copy())) }
+        i.answer_call(a.call.copy(), result.copy())
         try i.tool_done(user, a.call, if allow { none } else { some(String("denied")) }, result)
     }
 
@@ -4702,7 +4916,7 @@ impl Instance {
     // itself: only a device's `approve` does.
     fn ask_person(i: mut Instance, req: Request, g: Grant, title: String, kind: str, action: Json) -> Json? ! Error {
         let run_id = i.calling_run(g.copy())
-        if run_id.len() == 0 { return some(tool_error(String("That needs your person's yes, and they can only give it during a chat with you."))) }
+        if run_id.len() == 0 { return some(rule_refusal("needs-a-chat", String("That needs your person's yes, and they can only give it during a chat with you."))) }
         let call = try i.store.new_id("tc")
         if let r = mut i.runs.find(run_id.copy()) {
             var b = new_block("tool")
@@ -4711,7 +4925,7 @@ impl Instance {
         }
         try i.event(g.user.copy(), "tool.started", Obj.new().s("run", run_id.copy()).s("call", call.copy()).s("tool", String(kind)).s("title", title.copy()).j("input", cut_input(at(action.copy(), "args"))).j("locations", Json.Null).done())
         i.approvals.insert(call.copy(), Approval { call: call.copy(), run: run_id.copy(), agent: g.agent.copy(), rpc: Json.Null, options: Json.Null, title: title.copy(), action: action.copy() })
-        i.calls.insert(call.copy(), req.copy())
+        i.hold_call(call.copy(), req.copy())
         try i.event(g.user, "approval.needed", Obj.new().s("run", run_id).s("call", call).s("tool", String(kind)).s("title", title).j("detail", cut_input(at(action, "args"))).b("can_always", false).done())
         return none
     }
@@ -4765,13 +4979,17 @@ impl Instance {
     fn finish(i: mut Instance, run_id: String, status: String, error: String?) ! Error {
         let r = i.runs.remove(run_id.copy()) else return
         _ = i.run_chains.remove(run_id.copy())
+        // An agent tool call the turn ended without settling: the record says so.
+        for (_, call) in r.tools {
+            if let act = i.tool_actions.remove(call.copy()) { i.settle(act, String("failed"), String("The turn ended before the agent said it finished.")) }
+        }
         var open = List<String>()
         for (call, a) in i.approvals {
             if a.run == run_id { open.push(call.copy()) }
         }
         for call in open {
             _ = i.approvals.remove(call.copy())
-            if let req = i.calls.remove(call.copy()) { i.server.respond(req, json_response(200, tool_error(String("The run ended before your person answered.")))) }
+            i.answer_call(call.copy(), tool_error(String("The run ended before your person answered.")))
             try i.event(r.user.copy(), "approval.answered", Obj.new().s("call", call).b("allow", false).b("always", false).s("by", String("cancel")).done())
         }
         var blocks = List<Json>()
@@ -4821,7 +5039,8 @@ impl Instance {
         if let req = i.calls.remove(r.id.copy()) {
             asked = true
             let result = if status == "done" { tool_text(if said.len() > 0 { said.copy() } else { String("(It answered with nothing to read.)") }) } else { tool_error("It couldn't answer ({status}): {error.copy() ?? String("it stopped")}") }
-            i.server.respond(req, json_response(200, result))
+            let answer = i.settle_call(r.id.copy(), result)
+            i.server.respond(req, json_response(200, answer))
         }
         // So does a script's ask.
         if let req = i.script_calls.remove(r.id.copy()) {
@@ -4916,7 +5135,7 @@ impl Instance {
             // An agent's run_command: its tool call gets the answer, and
             // when its person allowed it, the tool in its chat finishes.
             let out = answer_text(result)
-            if let req = i.calls.remove(w.id.copy()) { i.server.respond(req, json_response(200, out.copy())) }
+            i.answer_call(w.id.copy(), out.copy())
             if let user = i.slow_calls.remove(w.id.copy()) {
                 match i.tool_done(user, w.id, none, out) {
                     ok => {},
@@ -5432,6 +5651,35 @@ impl Instance {
             let n: i64 = if limit < 1 { 1 } else if limit > 200 { 200 } else { limit }
             let entries = try i.store.activity(user, str_at(args.copy(), "agent"), int_at(args, "before"), usize.try_from(n) ?? 50)
             return Answer.Value(Obj.new().j("activity", Json.Array(entries)).done())
+        }
+        if name == "activity.export" {
+            // The record as CSV, oldest first: every entry, or one agent's,
+            // with agents by name and times in UTC.
+            var names = Map<String, String>()
+            for a in try i.store.agents(user.copy()) { names.insert(str_at(a.copy(), "id") ?? String(), str_at(a, "name") ?? String()) }
+            let entries = try i.store.activity(user, str_at(args, "agent"), none, ACTIVITY_EXPORT_MOST)
+            var rows: List<List<String>> = [[String("id"), String("at"), String("agent"), String("kind"), String("what"), String("by"), String("status"), String("why"), String("input"), String("ended")]]
+            var k = entries.len()
+            while k > 0 {
+                k -= 1
+                let e = entries[k].copy()
+                let agent_id = str_at(e.copy(), "agent") ?? String()
+                let agent_name = if let n = names.find(agent_id.copy()) { n.copy() } else { agent_id }
+                let ended = int_at(e.copy(), "ended") ?? 0
+                rows.push([
+                    "{int_at(e.copy(), "id") ?? 0}",
+                    Timestamp { unix_ms: int_at(e.copy(), "at") ?? 0 }.iso(0),
+                    agent_name,
+                    str_at(e.copy(), "kind") ?? String(),
+                    str_at(e.copy(), "text") ?? String(),
+                    str_at(e.copy(), "by") ?? String(),
+                    str_at(e.copy(), "status") ?? String(),
+                    str_at(e.copy(), "why") ?? String(),
+                    str_at(e.copy(), "input") ?? String(),
+                    if ended > 0 { Timestamp { unix_ms: ended }.iso(0) } else { String() },
+                ])
+            }
+            return Answer.Value(Obj.new().s("csv", csv.format(rows)).i("entries", i64.wrap(u64(entries.len()))).done())
         }
         if name == "agent.revisions" {
             let id = str_at(args, "agent") ?? String()

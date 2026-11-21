@@ -527,6 +527,11 @@ pub struct Activity {
     /// agent itself.
     pub by: String,
     pub at: i64,
+    /// For an action recorded before it happened: started, done, failed or refused. Empty for
+    /// an entry that only says what happened.
+    pub status: String,
+    /// Why it failed or was refused; a refusal's starts with its rule.
+    pub why: String,
 }
 
 /// One revision of an agent, for the edit page.
@@ -946,6 +951,8 @@ pub struct Model {
     pub update: Option<(String, String)>,
     /// What a check the person asked for found, for the app to say.
     pub checked: Option<String>,
+    /// The activity log as CSV, once `activity.export` gives it, for the app to save.
+    pub exported: Option<String>,
     /// The agent the edit page shows, and its revisions, newest first.
     pub editing: Option<String>,
     pub revisions: Vec<Revision>,
@@ -2212,10 +2219,16 @@ impl Model {
                             text: s(e, "text"),
                             by: s(e, "by"),
                             at: e.get("at").and_then(Value::as_i64).unwrap_or(0),
+                            status: s(e, "status"),
+                            why: s(e, "why"),
                         })
                         .collect()
                 })
                 .unwrap_or_default();
+        } else if id.starts_with("app.actexport") {
+            if let Some(csv) = f.pointer("/value/csv").and_then(Value::as_str) {
+                self.exported = Some(csv.to_string());
+            }
         } else if id.starts_with("app.revisions") {
             self.revisions = f
                 .pointer("/value/revisions")
@@ -3286,6 +3299,13 @@ impl Model {
         Some(
             json!({"t": "cmd", "id": id, "name": "activity.list", "args": {"agent": agent, "limit": 200}}),
         )
+    }
+
+    /// Asks for the selected agent's activity log as CSV, to save.
+    pub fn export_activity(&mut self) -> Option<Value> {
+        let agent = self.selected.clone()?;
+        let id = self.id("app.actexport");
+        Some(json!({"t": "cmd", "id": id, "name": "activity.export", "args": {"agent": agent}}))
     }
 
     /// Who made a revision, as the edit page says it.

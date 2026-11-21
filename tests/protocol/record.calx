@@ -1,0 +1,113 @@
+module tests.protocol.record
+
+// Every action is recorded before it happens (PLAN.md): a call to one of
+// loom's tools that acts, an agent's own tool call and a call to a device go
+// in the activity log as started, then are marked done, failed or refused. A
+// refusal names its rule. What a call was given is kept with the person's
+// secrets, and members named like a password or a token, shown only as their
+// length. Reading isn't an action. activity.export gives the log as CSV.
+//
+//     calx tests/protocol/record.calx
+import std.json.{Json}
+import std.process.{exit}
+import shared.obj.{Obj, at, str_at}
+import tests.kit.{App, Instance, check, reply_text}
+
+// The agent's next reply in `conversation`, as text.
+fn reply_in(app: mut App, conversation: String) -> String ! Error {
+    loop {
+        let created = try app.until("event", "message.created")
+        let m = at(created, "message")
+        if str_at(m.copy(), "role") == some(String("agent")) and str_at(m.copy(), "conversation") == some(conversation.copy()) { return reply_text(m) }
+    }
+}
+
+fn say(app: mut App, conversation: String, cid: str, text: String) -> String ! Error {
+    try app.send(Obj.new().s("t", String("send")).s("cid", String(cid)).s("conversation", conversation.copy()).s("text", text).done())
+    return try reply_in(mut app, conversation)
+}
+
+// The agent's activity, newest first.
+fn activity(app: mut App, id: str, agent: String) -> List<Json> ! Error {
+    let got = try app.cmd(id, "activity.list", Obj.new().s("agent", agent).done())
+    if let Json.Array(es) = at(at(got, "value"), "activity") { return es.copy() }
+    return List<Json>()
+}
+
+// The newest entry whose text is `text`, or null.
+fn entry(entries: List<Json>, text: str) -> Json {
+    for e in entries {
+        if str_at(e.copy(), "text") == some(String(text)) { return e.copy() }
+    }
+    return Json.Null
+}
+
+fn run(i: Instance) ! Error {
+    var app = try App.connect(i.base.copy(), i.token.copy(), 0)
+    let made = try app.cmd("q_1", "agent.create", Obj.new().s("name", String("Main")).s("acp_agent", String("fake")).s("instructions", String("You are a test.")).done())
+    let main_id = str_at(at(at(made, "value"), "agent"), "id") ?? String()
+    _ = try app.cmd("q_2", "agent.create", Obj.new().s("name", String("Helper")).s("acp_agent", String("fake")).s("instructions", String("You are a test.")).done())
+    let c = try app.cmd("q_3", "conversation.create", Obj.new().s("agent", main_id.copy()).done())
+    let chat = str_at(at(c, "value"), "conversation") ?? String()
+    _ = try app.cmd("q_4", "secret.put", Obj.new().s("name", String("deploy")).s("value", String("hunter2-hunter2")).done())
+
+    // --- Done, with secrets hidden ---
+    let kept = try say(mut app, chat.copy(), "m_1", String(#"/mcp remember {"text":"The deploy key is hunter2-hunter2.","password":"abcd1234"}"#))
+    let remembered = entry(try activity(mut app, "q_5", main_id.copy()), "remember")
+    let input = str_at(remembered.copy(), "input") ?? String()
+    try check(kept.starts_with("remember:") and str_at(remembered.copy(), "status") == some(String("done")) and str_at(remembered.copy(), "by") == some(main_id.copy()), "a tool call that acts is recorded, and marked done")
+    try check(input.contains("[secret deploy: 15 characters]") and input.contains("[8 characters]") and not input.contains("hunter2") and not input.contains("abcd1234"), "what it was given shows secrets, and a password, only as their length")
+
+    // --- Reading isn't an action ---
+    _ = try say(mut app, chat.copy(), "m_2", String("/mcp list_agents"))
+    try check(entry(try activity(mut app, "q_6", main_id.copy()), "list_agents") == Json.Null, "a tool call that only reads isn't recorded")
+
+    // --- Failed and refused ---
+    _ = try say(mut app, chat.copy(), "m_3", String(#"/mcp message_agent {"agent":"Nobody","text":"hi"}"#))
+    let failed = entry(try activity(mut app, "q_7", main_id.copy()), "message_agent")
+    try check(str_at(failed.copy(), "status") == some(String("failed")) and (str_at(failed, "why") ?? String()).contains("There's no agent Nobody"), "a call that fails is marked failed, with why")
+    let secret = Obj.new().s("name", String("secret.put")).j("args", Obj.new().s("name", String("x")).s("value", String("y")).done()).done()
+    _ = try say(mut app, chat.copy(), "m_4", "/mcp run_command {secret}")
+    let never = entry(try activity(mut app, "q_8", main_id.copy()), "run_command secret.put")
+    try check(str_at(never.copy(), "status") == some(String("refused")) and (str_at(never, "why") ?? String()).starts_with("never: "), "a refusal is marked refused, and names its rule")
+    try app.send(Obj.new().s("t", String("send")).s("cid", String("m_5")).s("conversation", chat.copy()).s("text", String(#"/mcp delete_agent {"agent":"Helper"}"#)).done())
+    let asked = try app.until("event", "approval.needed")
+    let started = entry(try activity(mut app, "q_9", main_id.copy()), "delete_agent")
+    try check(str_at(started, "status") == some(String("started")), "a call waiting on the person is recorded as started, before it happens")
+    try app.send(Obj.new().s("t", String("approve")).s("call", str_at(asked, "call") ?? String()).b("allow", false).done())
+    _ = try reply_in(mut app, chat.copy())
+    let no = entry(try activity(mut app, "q_10", main_id.copy()), "delete_agent")
+    try check(str_at(no.copy(), "status") == some(String("refused")) and (str_at(no, "why") ?? String()).starts_with("person-said-no: "), "and the person's no refuses it")
+
+    // --- The agent's own tools ---
+    _ = try say(mut app, chat.copy(), "m_6", String("/tool Read the notes"))
+    let ran = entry(try activity(mut app, "q_11", main_id.copy()), "Read the notes")
+    try check(str_at(ran, "status") == some(String("done")), "an agent's own tool call is recorded, and marked done")
+    try app.send(Obj.new().s("t", String("send")).s("cid", String("m_7")).s("conversation", chat.copy()).s("text", String("/ask Delete the build folder")).done())
+    let permission = try app.until("event", "approval.needed")
+    try app.send(Obj.new().s("t", String("approve")).s("call", str_at(permission, "call") ?? String()).b("allow", false).done())
+    _ = try reply_in(mut app, chat.copy())
+    let denied = entry(try activity(mut app, "q_12", main_id.copy()), "Delete the build folder")
+    try check(str_at(denied.copy(), "status") == some(String("refused")) and (str_at(denied, "why") ?? String()).starts_with("person-said-no"), "and one the person says no to is refused")
+
+    // --- Export ---
+    let exported = at(try app.cmd("q_13", "activity.export", Obj.new().s("agent", main_id.copy()).done()), "value")
+    let text = str_at(exported, "csv") ?? String()
+    let lines = text.split("\r\n")
+    try check(lines[0] == "id,at,agent,kind,what,by,status,why,input,ended" and lines[1].contains(",Main,agent,Made Main,") and text.contains(",Main,tool,remember,") and text.contains("refused,\"never: ") and text.contains("Remembered: The deploy key is [secret deploy: 15 characters].") and not text.contains("hunter2"), "activity.export gives the log as CSV, oldest first, with agents by name, and secrets hidden in every entry")
+    app.close()
+}
+
+fn main() ! Error {
+    let inst = try Instance.start()
+    let failure: String? = match run(inst.copy()) {
+        ok => none,
+        err(e) => some("{e}"),
+    }
+    inst.stop()
+    if let f = failure {
+        eprintln("\n{f}")
+        exit(1)
+    }
+    println("\nrecord: all good")
+}
