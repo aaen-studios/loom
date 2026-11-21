@@ -24,6 +24,7 @@ module tests.fake_agent.main
 //                         exists, "missing NAME" for one that doesn't
 //     /image              sends back a small PNG
 //     /session            says its session id: "session ID"
+//     /env NAME           says NAME=VALUE, its environment variable NAME
 //     /context            says what loom told it this turn about where the person
 //                         is writing from (a "[loom: ...]" text block, which is
 //                         never a step), or "no context"
@@ -85,6 +86,7 @@ pub enum Step {
     Session
     Context
     Mcp(String, String)
+    Env(String)
 }
 
 // The steps a prompt spells out. Blank lines are skipped.
@@ -137,6 +139,8 @@ pub fn script(text: String) -> List<Step> {
             steps.push(Step.Context)
         } else if word == "/session" {
             steps.push(Step.Session)
+        } else if word == "/env" {
+            steps.push(Step.Env(rest))
         } else if word == "/image" {
             steps.push(Step.Image)
         } else {
@@ -498,6 +502,7 @@ impl Agent {
                 },
                 Step.Files => chunk(session.copy(), "agent_message_chunk", if got.len() == 0 { String("no files") } else { got.join(", ") }),
                 Step.Session => chunk(session.copy(), "agent_message_chunk", "session {session}"),
+                Step.Env(name) => chunk(session.copy(), "agent_message_chunk", "{name}={env.variable(name.copy()) ?? String()}"),
                 Step.Context => chunk(session.copy(), "agent_message_chunk", if context.len() > 0 { context.copy() } else { String("no context") }),
                 Step.Mcp(tool, args) => chunk(session.copy(), "agent_message_chunk", a.call_loom(session.copy(), tool, args)),
                 Step.Image => {

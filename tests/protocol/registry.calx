@@ -1,0 +1,150 @@
+module tests.protocol.registry
+
+// ACP agents from the ACP Registry (PLAN.md, "Agents run on ACP"): a registry
+// is served from a folder, as the CDN serves the real one, with the fake agent
+// built as a program and zipped, as a binary release is. The owner lists the
+// registry, installs an agent with a setting, and its agents run it with that
+// setting, and with a changed one. A download that isn't the file the registry
+// names, an agent with no build for this computer, and a member who isn't the
+// owner are refused. Removing an agent removes what was installed.
+//
+//     calx tests/protocol/registry.calx
+import std.bytes
+import std.env
+import std.fs
+import std.hash.{sha256}
+import std.http.server.{Server}
+import std.json.{Json}
+import std.process.{Command, exit}
+import std.thread.{Task, sleep}
+import std.zip.{Writer}
+import shared.obj.{Obj, at, str_at}
+import server.installer
+import tests.kit.{App, Instance, calx, check, reply_text}
+
+struct Serving {
+    server: Server
+    dir: String
+}
+
+impl Task for Serving {
+    fn run(own self) {
+        var s = self
+        s.server.serve(s.dir.copy())
+    }
+}
+
+fn binary(platform: String, archive: String, cmd: String, sha: String) -> Json {
+    let target = Obj.new().s("archive", archive).s("cmd", cmd).s("sha256", sha).done()
+    var targets = Obj.new()
+    targets.m.insert(platform.copy(), target)
+    return Obj.new().j("binary", targets.done()).done()
+}
+
+fn entry(id: str, name: str, distribution: Json) -> Json {
+    return Obj.new().s("id", String(id)).s("name", String(name)).s("version", String("1.0.0")).s("description", String("A test agent.")).s("license_url", String("https://example.com")).j("distribution", distribution).done()
+}
+
+// The registry's entry for `id`, from acp.registry's answer.
+fn listed(answer: Json, id: str) -> Json {
+    if let Json.Array(agents) = at(at(answer, "value"), "agents") {
+        for a in agents {
+            if str_at(a.copy(), "id") == some(String(id)) { return a.copy() }
+        }
+    }
+    return Json.Null
+}
+
+fn say(app: mut App, conversation: String, cid: str, text: str) -> String ! Error {
+    try app.send(Obj.new().s("t", String("send")).s("cid", String(cid)).s("conversation", conversation).s("text", String(text)).done())
+    return reply_text(try app.reply())
+}
+
+fn error_code(answer: Json) -> String {
+    return str_at(at(answer, "error"), "code") ?? String()
+}
+
+fn run(i: Instance) ! Error {
+    var app = try App.connect(i.base.copy(), i.token.copy(), 0)
+    let list = try app.cmd("q_1", "acp.registry", Obj.new().done())
+    let bin = listed(list.copy(), "fake-bin")
+    try check(str_at(bin.copy(), "how") == some(String("binary")) and str_at(bin, "installed") == none and at(listed(list.copy(), "fake-elsewhere"), "how") == Json.Null, "the registry lists its agents, and how each would run here")
+
+    let installed = try app.cmd("q_2", "acp.install", Obj.new().s("id", String("fake-bin")).j("env", Obj.new().s("FAKE_SETTING", String("hello")).done()).done())
+    let program = at(at(installed, "value"), "program")
+    try check((str_at(program.copy(), "command") ?? String()).ends_with("/acp/fake-bin/{exe_name()}") and "{at(program.copy(), "settings")}" == #"["FAKE_SETTING"]"# and str_at(program, "version") == some(String("1.0.0")), "an agent is installed, with its setting, whose value stays on the instance")
+    try check(str_at(listed(try app.cmd("q_3", "acp.registry", Obj.new().done()), "fake-bin"), "installed") == some(String("1.0.0")), "and the registry says it's installed")
+
+    let made = try app.cmd("q_4", "agent.create", Obj.new().s("name", String("Bin")).s("acp_agent", String("fake-bin")).s("instructions", String("Test.")).done())
+    let agent = str_at(at(at(made, "value"), "agent"), "id") ?? String()
+    let c = try app.cmd("q_5", "conversation.create", Obj.new().s("agent", agent).done())
+    let conversation = str_at(at(c, "value"), "conversation") ?? String()
+    try check(try say(mut app, conversation.copy(), "m_1", "/env FAKE_SETTING") == "FAKE_SETTING=hello", "an agent runs on it, with its settings")
+    _ = try app.cmd("q_6", "acp.settings", Obj.new().s("name", String("fake-bin")).j("env", Obj.new().s("FAKE_SETTING", String("changed")).done()).done())
+    try check(try say(mut app, conversation, "m_2", "/env FAKE_SETTING") == "FAKE_SETTING=changed", "and with a changed setting from the next message")
+
+    let swapped = try app.cmd("q_7", "acp.install", Obj.new().s("id", String("fake-swapped")).done())
+    try check(error_code(swapped.copy()) == "install_failed" and "{swapped}".contains("SHA-256"), "a download that isn't the file the registry names is refused")
+    try check(error_code(try app.cmd("q_8", "acp.install", Obj.new().s("id", String("fake-elsewhere")).done())) == "unsupported", "and so is an agent with no build for this computer")
+    try check(error_code(try app.cmd("q_9", "acp.install", Obj.new().s("id", String("nothing")).done())) == "not_found", "and one that isn't in the registry")
+
+    let member = try i.second_account("ann")
+    var theirs = try App.connect(i.base.copy(), member, 0)
+    _ = try theirs.cmd("q_1", "acp.registry", Obj.new().done())
+    try check(error_code(try theirs.cmd("q_2", "acp.install", Obj.new().s("id", String("fake-bin")).done())) == "not_allowed", "only the owner installs")
+    theirs.close()
+
+    _ = try app.cmd("q_10", "acp.remove", Obj.new().s("name", String("fake-bin")).done())
+    var gone = false
+    for _ in 0..100 {
+        if not fs.exists("{i.data}/acp/fake-bin") {
+            gone = true
+            break
+        }
+        unsafe { sleep(50000000) }
+    }
+    try check(gone and not "{try app.cmd("q_11", "acp.list", Obj.new().done())}".contains("fake-bin"), "removing an agent removes what was installed")
+    app.close()
+}
+
+fn exe_name() -> String {
+    return if env.os() == "windows" { String("fake-agent.exe") } else { String("fake-agent") }
+}
+
+fn main() ! Error {
+    let root = try fs.temp_dir()
+    let built = "{root}/{exe_name()}"
+    let made = try Command.new(calx()).arg(String("build")).arg(String("tests/fake_agent/main.calx")).arg(String("-o")).arg(built.copy()).output()
+    if not made.status.success() {
+        eprintln("building the fake agent failed: {made.error_text()}")
+        exit(1)
+    }
+    var w = Writer.new()
+    w.add(exe_name(), try fs.read(built), mode: 0o755)
+    let zip = w.finish()
+    try fs.write("{root}/fake.zip", zip.copy())
+    var server = try Server.listen(0)
+    server.log = false
+    let base = server.url()[..server.url().len() - 1].copy()
+    _ = unsafe { Thread.spawn(Serving { server: server, dir: root.copy() }) }
+    let here = installer.platform()
+    let good = bytes.hex(sha256(zip))
+    let agents = Json.Array([
+        entry("fake-bin", "Fake", binary(here.copy(), "{base}/fake.zip", "./{exe_name()}", good)),
+        entry("fake-swapped", "Swapped", binary(here.copy(), "{base}/fake.zip", "./{exe_name()}", bytes.hex(sha256("other".to_bytes())))),
+        entry("fake-elsewhere", "Elsewhere", binary(String("plan9-mips"), "{base}/fake.zip", String("./x"), good)),
+    ])
+    try fs.write_text("{root}/registry.json", "{Obj.new().s("version", String("1.0.0")).j("agents", agents).done()}")
+
+    let inst = try Instance.start_with([String("--registry"), "{base}/registry.json"])
+    let failure: String? = match run(inst.copy()) {
+        ok => none,
+        err(e) => some("{e}"),
+    }
+    inst.stop()
+    if let f = failure {
+        eprintln("\n{f}")
+        exit(1)
+    }
+    println("\nregistry: all good")
+}

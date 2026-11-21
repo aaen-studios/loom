@@ -238,7 +238,7 @@ Loom doesn't run models itself. Every agent runs on an ACP agent program, and lo
 | Custom providers: OpenRouter, Ollama, LM Studio, DeepSeek, Groq, Mistral and more | OpenCode or Goose |
 | Gemini | Gemini CLI |
 
-- **Adding an agent.** Loom installs agents from the ACP Registry: on the instance's machine for the owner, or in a member's sandbox. An agent's settings (its model, its provider, an API key) live in loom, which passes them to the agent when it starts it, as environment variables or the agent's config file. Keys are kept with the other secrets.
+- **Adding an agent.** Loom installs agents from the [ACP Registry](https://agentclientprotocol.com/get-started/registry): on the instance's machine for the owner, or in a member's sandbox. A binary release for that machine is downloaded into the instance's `acp/` folder, checked against the registry's SHA-256 and unpacked; otherwise the agent runs through `npx` or `uvx`. Installing one again updates it. An agent's settings (its model, its provider, an API key) live in loom, which passes them to the agent as environment variables when it starts it, and never sends their values to the apps. Keys are kept with the other secrets. The app's **Agent programs** page lists what's installed, with its settings, and the registry to install from.
 - **Loom never logs in for an agent.** Each ACP agent uses the login it already has on that machine, set up by the person it belongs to (for Claude, their own Claude Code login). Loom has no "log in with Claude.ai" or anything like it.
 - **Each person's login is their own.** The owner's agents run as `loom` on a server, or as you in the desktop app. A member's run in their [sandbox](#sandboxes-where-members-agents-run), with the member's own logins. One person's subscription is never used for anyone else.
 - **Claude through ACP.** Claude's adapter is one ACP agent like the rest, and loom runs it as OpenBot does, on the person's own Claude Code login. Elliot's own instance uses it from the start. Anthropic's Agent SDK docs say: "Unless previously approved, Anthropic does not allow third party developers to offer claude.ai login or rate limits for their products, including agents built on the Claude Agent SDK." The rule is about what a product *offers*, so the public loom:
@@ -414,7 +414,7 @@ Full-text search over every conversation, with FTS5 as memory uses, filtered by 
 
 ## Storage
 
-One SQLite database on the server, with these tables: `users`, `invites`, `link_codes`, `devices` (with each device's public key), `device_grants`, `sandboxes`, `plugins`, `plugin_revisions`, `acp_agents`, `agents`, `agent_revisions`, `skills`, `conversations`, `acp_sessions`, `messages` (content blocks as JSON, with FTS5), `files`, `runs`, `tool_calls`, `approvals`, `activity`, `reports`, `events`, `memories` (with FTS5), `routines`, `push_tokens`, `secrets`, `usage`, `schema_version`. Files themselves sit in the data folder, named by their SHA-256.
+One SQLite database on the server, with these tables: `users`, `invites`, `link_codes`, `devices` (with each device's public key), `device_grants`, `sandboxes`, `plugins`, `plugin_revisions`, `acp_agents`, `acp_settings`, `agents`, `agent_revisions`, `skills`, `conversations`, `acp_sessions`, `messages` (content blocks as JSON, with FTS5), `files`, `runs`, `tool_calls`, `approvals`, `activity`, `reports`, `events`, `memories` (with FTS5), `routines`, `push_tokens`, `secrets`, `usage`, `schema_version`. Files themselves sit in the data folder, named by their SHA-256.
 
 ## Protocol
 
