@@ -1,0 +1,58 @@
+module server.announce
+
+// An instance in the desktop app, while phones reach it, says where it is on the
+// local network with mDNS and DNS-SD (PLAN.md, "Reaching an instance in a
+// desktop app"): the service `_loom._tcp` on its Noise port, with its Noise key,
+// hex, as the TXT property `key`. A phone whose QR code's addresses no longer
+// answer, as when the PC's Wi-Fi gave it another, finds the PC again by its key
+// (core/relay.calx). Calx's responder announces the PC's addresses as they change.
+import std.net.mdns.{Mdns, ServiceInfo}
+import std.thread.{Task}
+
+pub const KIND: str = "_loom._tcp"
+
+struct Announcer {
+    port: u16
+    key: String
+    stop: Receiver<bool>
+}
+
+// Starts announcing the instance's Noise `port` and `key` (hex), on a thread of its own.
+pub fn start(port: u16, key: String) -> (Thread, Sender<bool>) {
+    let stop = Receiver<bool>()
+    let stop_to = stop.sender()
+    let t = unsafe { Thread.spawn(Announcer { port: port, key: key.copy(), stop: stop }) }
+    return (t, stop_to)
+}
+
+impl Task for Announcer {
+    fn run(own self) {
+        var a = self
+        var m = match Mdns.new() {
+            ok(m) => m,
+            err(e) => {
+                eprintln("loom: phones won't find this computer by mDNS: {e}")
+                return
+            },
+        }
+        match m.register(ServiceInfo.new(String(KIND), String("loom"), a.port).with_property("key", a.key.copy())) {
+            ok(name) => println("loom: announced on the local network as {name}"),
+            err(e) => {
+                eprintln("loom: phones won't find this computer by mDNS: {e}")
+                m.close()
+                return
+            },
+        }
+        // It answers the network's questions while it waits.
+        while a.stop.next() == none {
+            match m.next_event(500) {
+                ok(_) => {},
+                err(e) => {
+                    eprintln("loom: mDNS: {e}")
+                    break
+                },
+            }
+        }
+        m.close()
+    }
+}

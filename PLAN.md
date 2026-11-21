@@ -489,7 +489,7 @@ Checked against the Calx board on 2026-11-20: every card below is done, so Phase
 | A library's panic reports to the host instead of ending the app | **Done** | [CLX-407](https://acta.aaenz.no/aaen-studios/clx#CLX-407) | A bug in the core shouldn't close the app | 5 |
 | A static library for macOS that links with Rust | Not checked yet | — | The Mac app | 6 |
 | X25519 in std.crypto, and a Noise handshake built on it, Ed25519 and AEAD | **Done**: `X25519Key`, `NoiseHandshake` and `NoiseTransport` | [CLX-411](https://acta.aaenz.no/aaen-studios/clx#CLX-411) | End-to-end encryption to a desktop instance, and the push relay's sealed tokens | 6 |
-| UDP sockets with multicast in std.net, and mDNS | No UDP in std.net | [CLX-412](https://acta.aaenz.no/aaen-studios/clx#CLX-412) | Finding a desktop instance on the Wi-Fi when its address changes | 6 |
+| UDP sockets with multicast in std.net, and mDNS | **Done**: UDP in std.net, `std.net.mdns`, and `interfaces()` | [CLX-412](https://acta.aaenz.no/aaen-studios/clx#CLX-412) | Finding a desktop instance on the Wi-Fi when its address changes | 6 |
 | Choosing the CPU a release build targets, such as x86-64-v2 | **Done**: the `--cpu` level | [CLX-381](https://acta.aaenz.no/aaen-studios/clx#CLX-381) | Installing loom on any VPS | 7 |
 | Writing and reading tar as a stream, to and from a file or a connection | **Done**: `StreamWriter` and `StreamReader` over std.zstd | [CLX-413](https://acta.aaenz.no/aaen-studios/clx#CLX-413) | Exports and moves of many gigabytes | 7 |
 

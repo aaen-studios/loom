@@ -639,6 +639,8 @@ So a phone joins with `POST /api/link`, uploads and fetches files, and runs its 
 
 The instance's Noise key is X25519, made from the same seed as its Ed25519 key, so it moves with the instance. `link.create` gives its public half, with the port, while phones are on.
 
+**Found by mDNS.** While phones are on, the instance also says where it is on the local network with mDNS and DNS-SD: the service `_loom._tcp`, named `loom` (or `loom (2)` and so on), on its Noise port, with its Noise public key, hex, as the TXT property `key`. A phone whose addresses from the QR code no longer answer looks for the service whose `key` is the one it has, at most every 30 seconds, and tries its addresses: 192.168/16 and 10/8 first, then 172.16/12, then Tailscale's 100.64/10. Anyone on the network can see the key, which is public, and the handshake still needs the instance to hold its private half.
+
 ## Push
 
 A phone that registered with `push.register` gets push through APNs while it isn't connected, once the owner has set up the APNs key with `loom push key`. Without a key, nothing is sent. The instance sends each one as an HTTP/2 `POST /3/device/<token>` to `api.push.apple.com`, or `api.sandbox.push.apple.com` for a token whose `env` is `development`, with `apns-push-type: alert` and the bundle id as `apns-topic`. Its provider token is a JWT signed ES256 with the key, naming the key's id (`kid`) and the team (`iss`), made again every 50 minutes. A token APNs answers 410, `BadDeviceToken` or `DeviceTokenNotForTopic` for is forgotten.

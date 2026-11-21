@@ -21,7 +21,7 @@ import core.cache.{Cache}
 import core.conn.{Conn}
 import core.link
 import core.relay
-import tests.kit.{App, Instance, check}
+import tests.kit.{App, Instance, check, fetch}
 
 // The app's side of a core with no instance yet.
 struct Core {
@@ -85,7 +85,7 @@ fn run(inst: Instance, core: mut Core, service: String) ! Error {
     let v = at(try app.cmd("q_2", "link.create", Obj.new().done()), "value")
     app.close()
     // Port 1 answers nothing, so the relay goes on to the next address.
-    let place = relay.write(relay.Place { key: noise_key, addresses: [String("127.0.0.1:1"), "127.0.0.1:{port}"] })
+    let place = relay.write(relay.Place { key: noise_key.copy(), addresses: [String("127.0.0.1:1"), "127.0.0.1:{port}"] })
     let qr = link.qr(link.Link { server: place.copy(), code: str_at(v.copy(), "code") ?? String(), instance: str_at(v.copy(), "instance") ?? String(), key: str_at(v, "key") ?? String() })
 
     // A place with another key goes nowhere.
@@ -118,6 +118,17 @@ fn run(inst: Instance, core: mut Core, service: String) ! Error {
     let down = try core.until("core.file", 30000)
     let got = try fs.read(str_at(down, "path") ?? String())
     try check(got == big, "and comes back the same")
+
+    // A PC at new addresses: it says them with mDNS, and the relay finds it by its key.
+    let found = relay.look_up(noise_key.copy())
+    println("      found by mDNS at {found.len()} addresses")
+    try check(found.len() > 0 and found[0].ends_with(":{port}"), "with phones on, the instance says where it is with mDNS, under its Noise key")
+    let (rt, rstop, url) = try relay.start(relay.Place { key: noise_key.copy(), addresses: [String("127.0.0.1:1")] })
+    var stop_relay = rstop
+    let (status, _, body) = try fetch(url[7..].copy(), String(), String("/api/info"))
+    stop_relay.send(true)
+    rt.join()
+    try check(status == 200 and (String.from_utf8(body) ?? String()).contains("\"instance\""), "a relay whose addresses answer nothing finds the PC by mDNS and gets through")
     match keyring.delete(service, relay.keyring_name(place)) {
         ok(_) => {},
         err(_) => {},

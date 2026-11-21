@@ -24,6 +24,7 @@ import shared.obj.{Obj, at, bool_at, int_at, merge, str_at}
 import shared.protocol
 import server.acp
 import server.acp.{Line, Out}
+import server.announce
 import server.files
 import server.files.{Thumb}
 import shared.files.{is_sha, safe_name}
@@ -202,6 +203,8 @@ pub struct Instance {
     bridge: Thread?    // the Noise bridge on the network (server/noise.calx), while phones are on
     stop_bridge: Sender<bool>?
     lan_port: u16    // its port, while it runs
+    announcer: Thread?    // says where it is on the local network, with mDNS, while phones are on (server/announce.calx)
+    stop_announcer: Sender<bool>?
     to_close: List<ServerSocket>    // sessions of someone removed, closed once the command that did it is answered
     boxes: sandbox.Sandboxes?    // where the agents of everyone but the owner run (server/sandbox.calx)
     gate: Thread?    // the sandboxes' way to loom's tools (server/gate.calx)
@@ -455,7 +458,7 @@ impl Instance {
         if let text = try store.meta("moved") {
             if let ok(m) = parse(text) { moved = m }
         }
-        var i = Instance { push_to: push_to, push_gone: push_gone, move_to: move_to, move_done: move_done, lan: config.lan, bridge: none, stop_bridge: none, lan_port: 0, to_close: List<ServerSocket>(), boxes: none, gate: none, stop_gate: none, moving: String(), move_waiters: List<Waiter>(), moved: moved, version: config.version.copy(), store: store, server: server, data: config.data.copy(), sessions: Map<u32, Session>(), runs: LinkedMap<String, Run>(), procs: LinkedMap<String, Proc>(), approvals: LinkedMap<String, Approval>(), lines: lines, lines_to: to, hash_to: hash_to, hash_done: hash_done, next_job: 0, auths: Map<i64, Auth>(), dummy_hash: dummy, failures: LinkedMap<String, List<i64>>(), thumbs: files.start(), events: config.events, next_prune: 0, grants: Map<String, Grant>(), calls: Map<String, Request>(), registry_at: config.registry.copy(), registry: Json.Null, registry_time: 0, install_to: install_to, install_done: install_done, fetching: List<Waiter>(), installs: Map<i64, Install>(), leftovers: List<String>(), next_sweep: 0, device_calls: Map<String, DeviceCall>(), minute_ms: config.minute_ms, next_due: 0, routine_runs: Map<String, RoutineRun>(), panel_calls: Map<String, Waiter>(), sealer: try secret_key(config.data.copy()) }
+        var i = Instance { push_to: push_to, push_gone: push_gone, move_to: move_to, move_done: move_done, lan: config.lan, bridge: none, stop_bridge: none, lan_port: 0, announcer: none, stop_announcer: none, to_close: List<ServerSocket>(), boxes: none, gate: none, stop_gate: none, moving: String(), move_waiters: List<Waiter>(), moved: moved, version: config.version.copy(), store: store, server: server, data: config.data.copy(), sessions: Map<u32, Session>(), runs: LinkedMap<String, Run>(), procs: LinkedMap<String, Proc>(), approvals: LinkedMap<String, Approval>(), lines: lines, lines_to: to, hash_to: hash_to, hash_done: hash_done, next_job: 0, auths: Map<i64, Auth>(), dummy_hash: dummy, failures: LinkedMap<String, List<i64>>(), thumbs: files.start(), events: config.events, next_prune: 0, grants: Map<String, Grant>(), calls: Map<String, Request>(), registry_at: config.registry.copy(), registry: Json.Null, registry_time: 0, install_to: install_to, install_done: install_done, fetching: List<Waiter>(), installs: Map<i64, Install>(), leftovers: List<String>(), next_sweep: 0, device_calls: Map<String, DeviceCall>(), minute_ms: config.minute_ms, next_due: 0, routine_runs: Map<String, RoutineRun>(), panel_calls: Map<String, Waiter>(), sealer: try secret_key(config.data.copy()) }
         if config.sandboxes.len() > 0 and not i.lan { try i.sandboxes_on(config.sandboxes.copy(), config.sandbox_image.copy()) }
         // Phones that were on stay on.
         if i.lan and try i.store.meta("phones") == some(String("on")) {
@@ -484,9 +487,16 @@ impl Instance {
         i.lan_port = port
         try i.store.set_meta("lan_port", "{port}")
         println("loom: phones reach this instance on port {port}")
+        let noise_key = try i.noise_key()
+        let (announcing, stop_announcing) = announce.start(port, bytes.hex(noise_key.public_key().bytes()))
+        i.announcer = some(announcing)
+        i.stop_announcer = some(stop_announcing)
     }
 
     fn phones_off(i: mut Instance) {
+        if let s = mut i.stop_announcer { s.send(true) }
+        i.stop_announcer = none
+        if let t = i.announcer.take() { t.join() }
         if let s = mut i.stop_bridge { s.send(true) }
         i.stop_bridge = none
         if let t = i.bridge.take() { t.join() }

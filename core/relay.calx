@@ -16,6 +16,8 @@ import std.http.server.{Request, Response, Server, ServerSocket}
 import std.http.websocket
 import std.http.websocket.{WebSocket}
 import std.net.{Ip, interfaces}
+import std.net.mdns.{find}
+import std.time.{Instant}
 import std.thread.{Task}
 import shared.noise
 import shared.noise.{Joiner, Opened}
@@ -84,6 +86,64 @@ pub fn own_addresses(port: u16) -> List<String> {
     return local
 }
 
+// How often the relay may look for the PC with mDNS, when none of its addresses answer.
+const LOOK_EVERY_MS: u64 = 30000
+
+// When the relay last looked for the PC with mDNS.
+struct Looked {
+    at: Instant?
+}
+
+impl Looked {
+    // Whether it may look again, and if so, that it is.
+    fn may(mut self) -> bool {
+        let now = unsafe { Instant.now() }
+        if let last = self.at {
+            if now.nanos_since(last) / 1000000 < LOOK_EVERY_MS { return false }
+        }
+        self.at = some(now)
+        return true
+    }
+}
+
+/// The addresses the instance with the Noise key `key` says it's at on the local
+/// network, with mDNS (server/announce.calx), in the order to try them. Looking
+/// takes 3 seconds.
+pub fn look_up(key: List<u8>) -> List<String> {
+    let found = match find(String("_loom._tcp")) {
+        ok(f) => f,
+        err(_) => return List<String>(),
+    }
+    let wanted = bytes.hex(key)
+    var out = List<String>()
+    for s in found {
+        if s.property("key") != some(wanted.copy()) { continue }
+        for a in ranked(s.addresses.copy(), s.port) {
+            if not out.contains(a.copy()) { out.push(a.copy()) }
+        }
+    }
+    return out
+}
+
+/// IPv4 addresses on `port` in the order a phone tries them: the home network's
+/// usual 192.168/16 and 10/8 first, then 172.16/12, where virtual machines' and
+/// containers' networks often are, then Tailscale's 100.64/10. Others are left out.
+fn ranked(ips: List<Ip>, port: u16) -> List<String> {
+    var tiers: List<List<String>> = [List<String>(), List<String>(), List<String>(), List<String>()]
+    for ip in ips {
+        if let Ip.V4(b) = ip {
+            let text = "{b[0]}.{b[1]}.{b[2]}.{b[3]}:{port}"
+            let tier: usize = if b[0] == 192u8 and b[1] == 168u8 { 0 } else if b[0] == 10u8 { 1 } else if b[0] == 172u8 and b[1] >= 16u8 and b[1] <= 31u8 { 2 } else if b[0] == 100u8 and b[1] >= 64u8 and b[1] <= 127u8 { 3 } else { 9 }
+            if tier < 4 { tiers[tier].push(text) }
+        }
+    }
+    var out = List<String>()
+    for t in tiers {
+        out.extend(t.copy())
+    }
+    return out
+}
+
 /// Whether an interface named `name` is a network inside this machine, for
 /// virtual machines and containers, which no phone reaches: Hyper-V's and
 /// WSL's switches on Windows, Docker's, Podman's and libvirt's bridges.
@@ -150,6 +210,8 @@ impl Task for Relay {
         server.max_message = protocol.MAX_FRAME
         server.ping_interval_ms = 0
         r.ready.send("http://127.0.0.1:{server.port}")
+        var reaching = r.place.copy()
+        var looked = Looked { at: none }
         var sessions = Map<u32, Tunnel>()
         var http: Tunnel? = none
         var next_id: i64 = 1
@@ -160,14 +222,14 @@ impl Task for Relay {
                     if req.path == "/ws" and req.method == "GET" {
                         match server.upgrade(req.copy()) {
                             ok(s) => {
-                                var t = open(r.place, key, 0)
+                                var t = open(reaching, key, 0)
                                 t.local = some(s)
                                 sessions.insert(s.id(), t)
                             },
                             err(_) => {},
                         }
                     } else {
-                        if http == none { http = some(open(r.place, key, 0)) }
+                        if http == none { http = some(open(reaching, key, 0)) }
                         if let t = mut http {
                             let id = next_id
                             next_id += 1
@@ -192,11 +254,11 @@ impl Task for Relay {
                 _ => {},
             }
             for t in mut sessions.values() {
-                pump(mut server, mut t, r.place, key)
+                pump(mut server, mut t, mut reaching, key, mut looked)
             }
             var http_ended = false
             if let t = mut http {
-                pump(mut server, mut t, r.place, key)
+                pump(mut server, mut t, mut reaching, key, mut looked)
                 http_ended = t.ws == none
             }
             // One that ended answered what it carried, and the next request opens another.
@@ -250,7 +312,7 @@ fn put(t: mut Tunnel, message: List<u8>) {
 }
 
 // What came from the PC since the last turn.
-fn pump(server: mut Server, t: mut Tunnel, p: Place, key: X25519PublicKey) {
+fn pump(server: mut Server, t: mut Tunnel, p: mut Place, key: X25519PublicKey, looked: mut Looked) {
     var came = List<List<u8>>()
     var ended: websocket.Error? = none
     if let ws = t.ws {
@@ -296,16 +358,23 @@ fn pump(server: mut Server, t: mut Tunnel, p: Place, key: X25519PublicKey) {
         }
     }
     let e = ended else { return }
-    // An address that didn't answer: the next one, if there is one.
-    if t.hs != none and t.tried + 1 < p.addresses.len() {
-        match e {
-            websocket.Error.Closed(_, _) => {},
-            _ => {
-                if let ws = t.ws.take() { ws.close() }
-                t.tried += 1
-                dial(mut t, p, key)
-                return
-            },
+    // An address that didn't answer: the next one, if there is one. Past the
+    // last, the PC may have new addresses: it says them with mDNS on the local network.
+    let unreached = match e {
+        websocket.Error.Closed(_, _) => false,
+        _ => true,
+    }
+    if t.hs != none and unreached {
+        if t.tried + 1 >= p.addresses.len() and looked.may() {
+            for a in look_up(p.key.copy()) {
+                if not p.addresses.contains(a.copy()) { p.addresses.push(a.copy()) }
+            }
+        }
+        if t.tried + 1 < p.addresses.len() {
+            if let ws = t.ws.take() { ws.close() }
+            t.tried += 1
+            dial(mut t, p, key)
+            return
         }
     }
     match e {
@@ -367,4 +436,11 @@ fn networks_inside_the_machine_are_left_out() {
     assert(virtual(String("vEthernet (WSL (Hyper-V firewall))")))
     assert(virtual(String("docker0")) and virtual(String("br-3f2a")) and virtual(String("virbr0")))
     assert(not virtual(String("Wi-Fi")) and not virtual(String("wlan0")) and not virtual(String("Tailscale")) and not virtual(String("tailscale0")) and not virtual(String("Ethernet")))
+}
+
+@test
+fn addresses_are_tried_home_network_first() {
+    let ips: List<Ip> = [Ip.V4([100u8, 101u8, 1u8, 2u8]), Ip.V4([172u8, 29u8, 64u8, 1u8]), Ip.V4([8u8, 8u8, 8u8, 8u8]), Ip.V4([192u8, 168u8, 1u8, 20u8]), Ip.V4([10u8, 0u8, 0u8, 5u8])]
+    let got = ranked(ips, 47420)
+    assert(got.join(",") == "192.168.1.20:47420,10.0.0.5:47420,172.29.64.1:47420,100.101.1.2:47420")
 }
