@@ -169,7 +169,8 @@ gpui_kit::assets::icon_assets!(
         Pause,
         Play,
         Pin,
-        PinOff
+        PinOff,
+        MessageCircleQuestionMark
     ]
 );
 

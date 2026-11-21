@@ -418,6 +418,19 @@ pub struct Conversation {
     pub agent: String,
     /// The task it's the conversation of, if it's one: not the agent's chat.
     pub task: Option<String>,
+    /// Where side questions about the agent's chat are asked: not its chat either.
+    pub side: bool,
+}
+
+/// A side question about an agent's chat, and its answer once it's come
+/// (protocol.md, "Side questions"). Kept while the app runs.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Aside {
+    pub id: String,
+    pub agent: String,
+    pub question: String,
+    pub answer: Option<String>,
+    pub error: Option<String>,
 }
 
 /// A long job an agent works on in a conversation of its own (protocol.md, "Tasks").
@@ -727,6 +740,8 @@ pub struct Model {
     /// are open beside the chat, and whether they changed since.
     pub pins: Vec<Message>,
     pub pins_open: bool,
+    /// Side questions asked while the app runs, oldest first.
+    pub asides: Vec<Aside>,
     pins_stale: bool,
     tasks_stale: bool,
     /// The task whose conversation the chat shows instead of the agent's chat.
@@ -932,7 +947,7 @@ impl Model {
         let agent = self.selected.as_ref()?;
         self.conversations
             .iter()
-            .find(|c| &c.agent == agent && c.task.is_none())
+            .find(|c| &c.agent == agent && c.task.is_none() && !c.side)
             .map(|c| c.id.clone())
     }
 
@@ -1082,6 +1097,27 @@ impl Model {
         self.pins_stale = false;
         Some(
             json!({"t": "cmd", "id": "app.pins", "name": "messages.pinned", "args": {"conversation": conversation}}),
+        )
+    }
+
+    /// Asks the selected agent a side question about its chat.
+    pub fn ask_aside(&mut self, question: &str) -> Option<Value> {
+        let question = question.trim();
+        if question.is_empty() {
+            return None;
+        }
+        let conversation = self.conversation()?;
+        let agent = self.selected.clone()?;
+        let id = self.id("app.aside");
+        self.asides.push(Aside {
+            id: id.clone(),
+            agent,
+            question: question.to_string(),
+            answer: None,
+            error: None,
+        });
+        Some(
+            json!({"t": "cmd", "id": id, "name": "chat.ask", "args": {"conversation": conversation, "question": question}}),
         )
     }
 
@@ -1263,6 +1299,8 @@ impl Model {
                         self.pins_stale = true;
                     }
                 } else if kind == "message.created" && self.synced && s(&message, "role") == "agent"
+                    // A side question's answer is shown where it was asked.
+                    && !self.conversations.iter().any(|c| c.id == conversation && c.side)
                 {
                     // A reply in another chat, as it comes; catch-up is what was seen before.
                     let agent = self
@@ -1452,6 +1490,22 @@ impl Model {
                 .map(|ms| ms.iter().map(|m| self.message_of(m)).collect())
                 .unwrap_or_default();
             self.pins = pins;
+            return;
+        }
+        if id.starts_with("app.aside_") {
+            if let Some(a) = self.asides.iter_mut().find(|a| a.id == id) {
+                match f.get("error") {
+                    Some(e) => a.error = Some(s(e, "message")),
+                    None => {
+                        a.answer = Some(
+                            f.pointer("/value/reply")
+                                .and_then(Value::as_str)
+                                .unwrap_or_default()
+                                .to_string(),
+                        )
+                    }
+                }
+            }
             return;
         }
         if id.starts_with("app.pin_") {
@@ -1939,6 +1993,7 @@ impl Model {
                         id: s(c, "id"),
                         agent: s(c, "agent"),
                         task: c.get("task").and_then(Value::as_str).map(String::from),
+                        side: c.get("side").and_then(Value::as_bool).unwrap_or(false),
                     })
                     .collect();
                 if self.conversation() != before {
@@ -2884,11 +2939,13 @@ mod tests {
                 id: "c_1".into(),
                 agent: "a_1".into(),
                 task: None,
+                side: false,
             },
             Conversation {
                 id: "c_2".into(),
                 agent: "a_2".into(),
                 task: None,
+                side: false,
             },
         ];
         m.select(Some("a_1".into()));
@@ -2904,6 +2961,45 @@ mod tests {
         assert!(m.unread.contains("a_2"));
         m.select(Some("a_2".into()));
         assert!(m.unread.is_empty());
+    }
+
+    #[test]
+    fn a_side_question_is_answered_beside_the_chat_and_not_in_it() {
+        let mut m = Model::new();
+        m.conversations = vec![
+            Conversation {
+                id: "c_side".into(),
+                agent: "a_1".into(),
+                task: None,
+                side: true,
+            },
+            Conversation {
+                id: "c_chat".into(),
+                agent: "a_1".into(),
+                task: None,
+                side: false,
+            },
+        ];
+        m.select(Some("a_1".into()));
+        assert_eq!(
+            m.conversation().as_deref(),
+            Some("c_chat"),
+            "the side questions' conversation isn't the chat"
+        );
+        let f = m
+            .ask_aside("what was the word?")
+            .expect("a question for the chat");
+        assert_eq!(f["name"], "chat.ask");
+        assert_eq!(f["args"]["conversation"], "c_chat");
+        let id = f["id"].as_str().unwrap().to_string();
+        m.take(&json!({"t": "result", "id": id, "ok": true, "value": {"reply": "teapot"}}));
+        assert_eq!(m.asides[0].answer.as_deref(), Some("teapot"));
+        m.synced = true;
+        m.take(&json!({"t": "event", "kind": "message.created", "conversation": "c_side", "message": {"id": "msg_9", "conversation": "c_side", "role": "agent", "agent": "a_1"}}));
+        assert!(
+            !m.unread.contains("a_1"),
+            "its answer doesn't mark the agent unread"
+        );
     }
 
     #[test]
@@ -2929,11 +3025,13 @@ mod tests {
                 id: "c_task".into(),
                 agent: "a_1".into(),
                 task: Some("task_1".into()),
+                side: false,
             },
             Conversation {
                 id: "c_chat".into(),
                 agent: "a_1".into(),
                 task: None,
+                side: false,
             },
         ];
         m.select(Some("a_1".into()));
@@ -2966,6 +3064,7 @@ mod tests {
             id: "c_1".into(),
             agent: "a_1".into(),
             task: None,
+            side: false,
         }];
         m.select(Some("a_1".into()));
         // Opening the chat asks for its queue.

@@ -91,6 +91,7 @@ enum Screen {
     People,
     AddServer,
     Pins,
+    Aside,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -140,6 +141,8 @@ pub struct Loom {
     pass_in: Entity<InputState>,
     secret_in: Entity<InputState>,
     queue_in: Entity<InputState>,
+    /// A side question being written.
+    aside_in: Entity<InputState>,
     /// The queued message being edited, by id.
     queue_editing: Option<String>,
     code_in: Entity<InputState>,
@@ -417,6 +420,23 @@ impl Loom {
             },
         )
         .detach();
+        // A side question: Enter asks it.
+        let aside_in = input(window, cx, "Ask about this chat", false);
+        cx.subscribe_in(
+            &aside_in,
+            window,
+            |this: &mut Loom, state, event: &InputEvent, window, cx| {
+                if let InputEvent::PressEnter { .. } = event {
+                    let question = state.read(cx).value().to_string();
+                    if let Some(f) = this.model.ask_aside(&question) {
+                        this.send(f);
+                        state.update(cx, |s, cx| s.set_value("", window, cx));
+                    }
+                    cx.notify();
+                }
+            },
+        )
+        .detach();
         for field in [&pass_in, &code_in] {
             cx.subscribe_in(
                 field,
@@ -624,6 +644,7 @@ ACTA_KEY=secret:ACTA_KEY",
             pass_in,
             secret_in,
             queue_in,
+            aside_in,
             queue_editing: None,
             code_in,
             name_in,
@@ -1351,6 +1372,10 @@ ACTA_KEY=secret:ACTA_KEY",
             Screen::Activity => (Ico::Activity, format!("What {name} did")),
             Screen::Memory => (Ico::Brain, format!("What {name} remembers")),
             Screen::Pins => (Ico::Pin, "Pinned".to_string()),
+            Screen::Aside => (
+                Ico::MessageCircleQuestionMark,
+                format!("Ask {name} on the side"),
+            ),
             _ => (
                 Ico::Puzzle,
                 self.model
@@ -1365,6 +1390,7 @@ ACTA_KEY=secret:ACTA_KEY",
             Screen::Activity => self.activity_page(),
             Screen::Memory => self.memory_page(cx),
             Screen::Pins => self.pins_page(&name, cx),
+            Screen::Aside => self.aside_page(&name),
             _ => div().flex_1(),
         };
         // An agent's page opens under its thread, across the panel.
@@ -3478,6 +3504,19 @@ ACTA_KEY=secret:ACTA_KEY",
                             this.menu = None;
                             cx.notify();
                         })),
+                )
+                .child(
+                    self.menu_item(
+                        "aside",
+                        Ico::MessageCircleQuestionMark,
+                        "Ask on the side",
+                        false,
+                    )
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.show_side(Screen::Aside, cx);
+                        this.menu = None;
+                        cx.notify();
+                    })),
                 )
                 .child(
                     self.menu_item("fresh", Ico::RotateCcw, "Start fresh", false)
@@ -7129,6 +7168,89 @@ ACTA_KEY=secret:ACTA_KEY",
         div().flex_1().min_h_0().child(page)
     }
 
+    /// Side questions about the open chat, beside it: what was asked and the answers,
+    /// and a box to ask another. None of it goes in the chat.
+    fn aside_page(&mut self, agent: &str) -> Div {
+        let p = self.p;
+        let selected = self.model.selected.clone().unwrap_or_default();
+        let asides: Vec<model::Aside> = self
+            .model
+            .asides
+            .iter()
+            .filter(|a| a.agent == selected)
+            .cloned()
+            .collect();
+        let mut list = div().flex().flex_col().gap(px(space::L));
+        if asides.is_empty() {
+            list = list.child(
+                div()
+                    .pt(px(space::L))
+                    .text_size(px(size::SMALL))
+                    .text_color(p.ink_3)
+                    .child(format!(
+                        "Ask {agent} about this chat. The question and the answer stay out of it."
+                    )),
+            );
+        }
+        for a in asides {
+            list = list
+                .child(
+                    div().flex().justify_end().child(
+                        div()
+                            .max_w(px(300.0))
+                            .px(px(space::M))
+                            .py(px(space::S))
+                            .rounded(px(radius::CARD))
+                            .bg(p.raised)
+                            .text_size(px(size::SMALL))
+                            .text_color(p.ink)
+                            .child(a.question.clone()),
+                    ),
+                )
+                .child(match (&a.answer, &a.error) {
+                    (Some(answer), _) => div().text_size(px(size::SMALL)).text_color(p.ink).child(
+                        if answer.trim().is_empty() {
+                            "(Nothing to say.)".to_string()
+                        } else {
+                            answer.clone()
+                        },
+                    ),
+                    (None, Some(e)) => div()
+                        .text_size(px(size::SMALL))
+                        .text_color(p.bad)
+                        .child(e.clone()),
+                    (None, None) => div()
+                        .text_size(px(size::SMALL))
+                        .text_color(p.ink_3)
+                        .child("Thinking…"),
+                });
+        }
+        div()
+            .flex_1()
+            .min_h_0()
+            .flex()
+            .flex_col()
+            .child(
+                div().flex_1().min_h_0().child(
+                    div()
+                        .id("asides")
+                        .size_full()
+                        .overflow_y_scroll()
+                        .px(px(space::L))
+                        .pt(px(space::M))
+                        .pb(px(space::L))
+                        .child(list),
+                ),
+            )
+            .child(
+                div()
+                    .flex_none()
+                    .px(px(space::L))
+                    .pb(px(space::L))
+                    .child(Input::new(&self.aside_in).large()),
+            )
+    }
+
     /// Scrolls the chat to a message, when it's among those loaded.
     fn jump_to(&mut self, message: &str, cx: &mut Context<Self>) {
         let at = self
@@ -7725,7 +7847,13 @@ impl Render for Loom {
             // An agent's page beside the chat, whose thread fidgets at its top.
             || matches!(
                 self.side,
-                Some(Screen::EditAgent | Screen::Activity | Screen::Memory)
+                Some(
+                    Screen::EditAgent
+                        | Screen::Activity
+                        | Screen::Memory
+                        | Screen::Pins
+                        | Screen::Aside
+                )
             ) && self.screen == Screen::Chat
             // Someone typing to an agent, whose thread thinks along.
             || self.screen == Screen::Chat && !self.composer.read(cx).value().trim().is_empty()

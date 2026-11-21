@@ -281,6 +281,10 @@ struct Install {
 const REGISTRY_FRESH_MS: i64 = 600000
 // How long the person's profile may be: it goes into every session.
 const PROFILE_MOST: usize = 4000
+// Side questions: how long one may be, and how much of the chat the agent is given.
+const SIDE_QUESTION_MOST: usize = 4000
+const SIDE_MESSAGES: usize = 40
+const SIDE_TRANSCRIPT_MOST: usize = 24000
 
 // Tasks (PLAN.md, "Work that waits its turn"): how many an agent may have
 // running that it started itself, and what it's told when one carries on.
@@ -1984,6 +1988,80 @@ impl Instance {
             if let Answer.Value(_) = result.copy() { i.log(g.user, g.agent.copy(), "agent", "Ran {name}", g.agent) }
         }
         return some(answer_text(result))
+    }
+
+    // chat.ask: a side question about a chat (PLAN.md, "Side questions"). The
+    // agent answers it in a conversation of its own for them, with the chat's
+    // newest messages to go on and no tools that ask, and the command is
+    // answered with the reply, so neither goes in the chat.
+    fn side_question(i: mut Instance, w: own Waiter, user: String, device: String, args: Json) ! Error {
+        let chat_id = str_at(args.copy(), "conversation") ?? String()
+        let question = (str_at(args, "question") ?? String()).trim().copy()
+        let chat = try i.store.conversation(user.copy(), chat_id.copy()) else {
+            i.answer_cmd(w, Answer.Refused(String("not_found"), "There's no conversation {chat_id}."))
+            return
+        }
+        if bool_at(chat.copy(), "side") == some(true) {
+            i.answer_cmd(w, Answer.Refused(String("bad_request"), String("Ask about a chat, not about the side questions.")))
+            return
+        }
+        if question.len() == 0 or question.len() > SIDE_QUESTION_MOST {
+            i.answer_cmd(w, Answer.Refused(String("bad_request"), "question is what to ask, of 1 to {SIDE_QUESTION_MOST} bytes."))
+            return
+        }
+        let agent_id = str_at(chat, "agent") ?? String()
+        let agent = try i.store.agent(user.copy(), agent_id.copy()) else {
+            i.answer_cmd(w, Answer.Refused(String("not_found"), String("That chat's agent was deleted.")))
+            return
+        }
+        let agent_name = str_at(agent, "name") ?? String("The agent")
+        var side_id = try i.store.side_conversation(user.copy(), agent_id.copy()) ?? String()
+        if side_id.len() == 0 {
+            let made = try i.store.add_conversation(user.copy(), agent_id.copy(), String("Side questions"))
+            side_id = str_at(made, "id") ?? String()
+            try i.store.put_side(user.copy(), agent_id.copy(), side_id.copy())
+            let side = try i.store.conversation(user.copy(), side_id.copy()) ?? made
+            try i.event(user.copy(), "conversation.created", Obj.new().j("conversation", side).done())
+        }
+        var answering = false
+        for (_, r) in i.runs {
+            if r.user == user and r.conversation == side_id { answering = true }
+        }
+        if answering {
+            i.answer_cmd(w, Answer.Refused(String("busy"), "{agent_name} is still answering the last side question."))
+            return
+        }
+        // What the agent goes on: the chat's newest messages, in words, newest last.
+        let (messages, _) = try i.store.messages(user.copy(), chat_id, none, SIDE_MESSAGES)
+        var lines = List<String>()
+        for m in messages {
+            var said = String()
+            if let Json.Array(blocks) = at(m.copy(), "blocks") {
+                for b in blocks {
+                    if str_at(b.copy(), "kind") == some(String("text")) { said.push_str(str_at(b, "text") ?? String()) }
+                }
+            }
+            if said.trim().len() == 0 { continue }
+            let who = if str_at(m, "role") == some(String("person")) { String("Your person") } else { String("You") }
+            lines.push("{who}: {cut_short(said.trim().copy(), 1500)}")
+        }
+        // The oldest go first when it's long.
+        var transcript = lines.join("\n\n")
+        while transcript.len() > SIDE_TRANSCRIPT_MOST and lines.len() > 1 {
+            _ = lines.remove(0)
+            transcript = lines.join("\n\n")
+        }
+        let note = "[loom: This is a side question from your person about your chat with them, asked beside it: the question and your answer stay out of that chat. Answer from the chat and what you know, briefly. Don't use tools here: any that ask are refused. Your chat, newest last:\n\n{if transcript.len() > 0 { transcript } else { String("(Nothing said yet.)") }}]"
+        let message_id = try i.store.new_id("msg")
+        let blocks = Json.Array([Obj.new().s("kind", String("text")).s("text", question.copy()).done()])
+        let message = Obj.new().s("id", message_id.copy()).s("conversation", side_id.copy()).s("role", String("person")).s("from", device.copy()).i("at", now()).j("blocks", blocks).done()
+        try i.store.put_message(user.copy(), message.copy())
+        try i.event(user.copy(), "message.created", Obj.new().s("conversation", side_id.copy()).j("message", message).done())
+        let run_id = try i.store.new_id("run")
+        i.panel_calls.insert(run_id.copy(), w)
+        let from = try i.writing_from(user.copy(), device)
+        let side = try i.store.conversation(user.copy(), side_id) ?? Json.Null
+        try i.start_run(user, side, run_id, message_id, question, List<Json>(), from, note)
     }
 
     // plugin.message: a plugin's panel says `text` to one of its person's
@@ -3742,6 +3820,15 @@ impl Instance {
             r.blocks.push(b)
         }
         let options = at(params, "options")
+        // A side question's answer uses no tools that ask.
+        let conversation = try i.store.conversation(r.user.copy(), r.conversation.copy()) ?? Json.Null
+        if bool_at(conversation, "side") == some(true) {
+            let option = acp.pick_option(options, false, false) ?? String("reject_once")
+            p.to.send(Out.Send(acp.respond(rpc, Obj.new().j("outcome", Obj.new().s("outcome", String("selected")).s("optionId", option).done()).done())))
+            r.denied.push(call)
+            i.runs.insert(run_id, r)
+            return
+        }
         let agent = try i.store.agent(r.user.copy(), r.agent.copy()) ?? Json.Null
         let mode = str_at(agent, "permission") ?? String("ask")
         let kind = acp.tool_kind(str_at(tool_call.copy(), "kind") ?? String())
@@ -4124,8 +4211,9 @@ impl Instance {
             let result = if status == "done" { tool_text(if said.len() > 0 { said.copy() } else { String("(It answered with nothing to read.)") }) } else { tool_error("It couldn't answer ({status}): {error.copy() ?? String("it stopped")}") }
             i.server.respond(req, json_response(200, result))
         }
-        // So does a panel's plugin.message.
+        // So does a panel's plugin.message, and a side question.
         if let w = i.panel_calls.remove(r.id.copy()) {
+            asked = true
             let answer = if status == "done" { Answer.Value(Obj.new().s("reply", said.copy()).done()) } else { Answer.Refused(String("agent_failed"), "It couldn't answer ({status}): {error.copy() ?? String("it stopped")}") }
             i.answer_cmd(w, answer)
         }
@@ -4156,6 +4244,10 @@ impl Instance {
         }
         if name == "plugin.message" {
             try i.panel_message(Waiter { socket: some(s), id: id }, user, args)
+            return
+        }
+        if name == "chat.ask" {
+            try i.side_question(Waiter { socket: some(s), id: id }, user, device, args)
             return
         }
         if name.starts_with("browser.") {

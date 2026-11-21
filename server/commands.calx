@@ -98,7 +98,7 @@ pub fn access(name: String) -> Access {
     if name == "account.delete" or name == "password.reset" { return Access.Never(String("That's your person's own to do, in the app.")) }
     if name == "secret.put" { return Access.Never(String("A secret's value is never an agent's: ask your person to keep it in the app, or use browser_ask_secret.")) }
     if name == "plugin.allow" { return Access.Never(String("Only your person allows what a plugin asks for, in the app.")) }
-    if name == "plugin.message" { return Access.Never(String("Use message_agent.")) }
+    if name == "plugin.message" or name == "chat.ask" { return Access.Never(String("Use message_agent.")) }
     if name.starts_with("push.") or name.starts_with("plugin.data.") or name == "plugin.cmd" { return Access.Never(String("That's for an app or a plugin's panel, not an agent.")) }
     if name.starts_with("browser.") { return Access.Never(String("Use your browser_ tools.")) }
     if name == "queue.steer" { return Access.Never(String("Steering is your person's: it stops the turn that's running.")) }

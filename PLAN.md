@@ -449,6 +449,10 @@ An instance moves whole, in any direction: desktop to server, server to desktop,
 
 Full-text search over every conversation, with FTS5 as memory uses, filtered by agent and date.
 
+## Side questions
+
+Ask an agent about its chat without adding to it: "what did we decide about the deadline?", "what was that link?". The agent's menu has **Ask on the side**, which opens beside the chat. The agent answers in a conversation of its own for side questions, which no chat shows, with the chat's newest messages to go on, and with no tools that ask: any it tries are refused, without asking the person. The question and the answer are shown beside the chat, and neither goes in it.
+
 ## Pinned messages
 
 A message worth keeping at hand is pinned in its chat, as in Discord: by the person, from the pin in its corner, or by an agent, with `run_command`. The pin is kept on the message, with when and who, so every device sees it. The chat's header shows how many there are, and opens them beside the chat, the newest pin first, each to jump to or take off.
