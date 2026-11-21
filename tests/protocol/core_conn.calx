@@ -1,0 +1,177 @@
+module tests.protocol.core_conn
+
+// The core's connection (core/conn.calx) against a real instance: it
+// connects and catches up, takes the app's frames to the instance, starts
+// again when the instance goes away and comes back, reconnects at once on
+// wake, stops on a refused token, and stops when it's told to.
+//
+// Run it from the repository's root:
+//
+//     calx tests/protocol/core_conn.calx
+import std.env
+import std.fs
+import std.http.{Header, post}
+import std.json.{Json, parse}
+import std.process.{Child, Command, Stdio, exit}
+import std.time.{Instant}
+import shared.obj.{Obj, at, int_at, str_at}
+import core.conn.{Conn}
+
+const WAIT: u64 = 120000    // the first start builds the server
+
+fn calx() -> String {
+    return env.variable(String("CALX")) ?? String("calx")
+}
+
+fn serve(data: String, port: String) -> Child ! Error {
+    let cmd = Command.new(calx()).arg(String("server/main.calx")).arg(String("serve")).arg(String("--port")).arg(port).arg(String("--data")).arg(data).arg(String("--test-fast-hashes"))
+    return try cmd.stdout(Stdio.Pipe).own_group().spawn()
+}
+
+fn check(passed: bool, what: str) ! Error {
+    if not passed { fail "failed: {what}" }
+    println("ok    {what}")
+}
+
+fn post_json(base: String, path: str, body: Json) -> (u32, Json) ! Error {
+    let headers: List<Header> = [Header { name: String("Content-Type"), value: String("application/json") }]
+    var req = post("http://{base}{path}", headers, "{body}".to_bytes(), 30000, 1048576)
+    let r = try req.wait()
+    let j = match parse(String.from_utf8(r.body) ?? String()) {
+        ok(v) => v,
+        err(_) => Json.Null,
+    }
+    return (r.status, j)
+}
+
+// The app's side of a running connection: what it sends the core, and what
+// the core tells it.
+struct App {
+    to_core: Sender<String>
+    from_core: Receiver<String>
+    thread: Thread?
+}
+
+impl App {
+    fn start(base: String, token: own String, after: i64) -> App ! Error {
+        let inbox = Receiver<String>()
+        let to_core = inbox.sender()
+        let from_core = Receiver<String>()
+        let conn = Conn.new("http://{base}", token, after, inbox, from_core.sender()) else {
+            fail "Conn.new refused http://{base}"
+        }
+        let t = unsafe { Thread.spawn(conn) }
+        return App { to_core: to_core, from_core: from_core, thread: some(t) }
+    }
+
+    fn send(mut self, frame: Json) {
+        self.to_core.send("{frame}")
+    }
+
+    // Reads what the core says until a frame whose `t` is `t` and, if `field` isn't
+    // empty, whose `field` is `value`. Fails after `ms`.
+    fn until(mut self, t: str, field: str, value: str, ms: u64) -> Json ! Error {
+        let start = unsafe { Instant.now() }
+        loop {
+            let waited = unsafe { Instant.now() }.nanos_since(start) / 1000000
+            if waited >= ms { fail "no {t} {field}={value} came in {ms} ms" }
+            let m = unsafe { self.from_core.wait_for((ms - waited) * 1000000) } else { continue }
+            let f = try parse(m)
+            if (str_at(f.copy(), "t") ?? String()) != t { continue }
+            if field.len() == 0 or (str_at(f.copy(), field) ?? String()) == value { return f }
+        }
+    }
+
+    fn stop(mut self) {
+        self.to_core.send(String(#"{"t":"core.stop"}"#))
+        if let t = self.thread.take() {
+            t.join()
+        }
+    }
+}
+
+fn run(server: mut Child, data: String) ! Error {
+    let serving = server.wait_for_line(String("loom: serving"), WAIT) else {
+        fail "the server didn't start"
+    }
+    let address = serving[serving.find("http://") ?? 0..].trim().copy()
+    let base = if address.ends_with("/") { address[7..address.len() - 1].copy() } else { address[7..].copy() }
+    let port = base[(base.find_last(":") ?? 0) + 1..].copy()
+    let code_line = server.wait_for_line(String("setup code:"), 10000) else {
+        fail "the server didn't print a setup code"
+    }
+    let code = code_line[12..].trim().copy()
+    let (s1, owner) = try post_json(base.copy(), "/api/setup", Obj.new().s("code", code).s("username", String("elliot")).s("password", String("correct horse")).j("device", Obj.new().s("name", String("Desk PC")).s("kind", String("desktop")).done()).done())
+    try check(s1 == 200, "the instance is set up")
+    let token = str_at(owner, "token") ?? String()
+
+    // --- Connects and catches up ---
+    var app = try App.start(base.copy(), token.copy(), 0)
+    _ = try app.until("core.conn", "state", "connecting", 5000)
+    let live = try app.until("core.conn", "state", "live", 10000)
+    try check(str_at(live, "state") == some(String("live")), "it connects, says hello and is welcomed")
+    let added = try app.until("event", "kind", "device.added", 5000)
+    try check(int_at(added, "seq") == some(1), "it catches up from its cursor")
+    _ = try app.until("synced", "", "", 5000)
+    println("ok    and says synced")
+
+    // --- The app's frames go to the instance ---
+    app.send(Obj.new().s("t", String("cmd")).s("id", String("q_1")).s("name", String("nothing.here")).j("args", Obj.new().done()).done())
+    let listed = try app.until("result", "id", "q_1", 5000)
+    try check(str_at(at(listed, "error"), "code") == some(String("unknown_command")), "a cmd from the app reaches the instance and its result comes back")
+
+    // --- The instance goes away and comes back ---
+    server.kill_tree()
+    _ = server.wait()
+    let gone = try app.until("core.conn", "state", "offline", 10000)
+    let first_wait = int_at(gone, "retry_ms") ?? 0
+    try check(first_wait >= 500 and first_wait <= 600, "it notices the instance went, and waits 0.5 s and up to 20% more")
+    println("      first wait {first_wait} ms")
+    let again = try app.until("core.conn", "state", "offline", 10000)
+    let second_wait = int_at(again, "retry_ms") ?? 0
+    try check(second_wait >= 1000 and second_wait <= 1200, "then twice as long")
+    println("      second wait {second_wait} ms")
+    app.send(Obj.new().s("t", String("cmd")).s("id", String("q_2")).s("name", String("nothing.here")).done())
+    let offline = try app.until("error", "code", "offline", 5000)
+    try check(str_at(offline, "for") == some(String("q_2")), "a frame sent while offline is answered with offline")
+
+    server = try serve(data.copy(), port)
+    if server.wait_for_line(String("loom: serving"), WAIT) == none {
+        fail "the server didn't start again"
+    }
+    _ = try app.until("core.conn", "state", "live", 40000)
+    _ = try app.until("synced", "", "", 5000)
+    try check(true, "it connects again once the instance is back")
+
+    // --- Wake ---
+    app.send(Obj.new().s("t", String("app.wake")).done())
+    _ = try app.until("core.conn", "state", "connecting", 2000)
+    _ = try app.until("core.conn", "state", "live", 5000)
+    try check(true, "on wake it opens a new connection at once")
+
+    // --- Stop ---
+    app.stop()
+    try check(true, "core.stop closes it and its thread ends")
+
+    // --- A refused token ---
+    var wrong = try App.start(base.copy(), String("not a token"), 0)
+    let out = try wrong.until("core.conn", "state", "signed_out", 10000)
+    try check(str_at(out, "state") == some(String("signed_out")), "a refused token signs out and doesn't try again")
+    wrong.stop()
+}
+
+fn main() ! Error {
+    let data = try fs.temp_dir()
+    var server = try serve(data.copy(), String("0"))
+    let failure: String? = match run(mut server, data) {
+        ok => none,
+        err(e) => some("{e}"),
+    }
+    server.kill_tree()
+    _ = server.wait()
+    if let f = failure {
+        eprintln("\n{f}")
+        exit(1)
+    }
+    println("\ncore connection: all good")
+}

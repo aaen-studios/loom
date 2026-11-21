@@ -1,0 +1,295 @@
+module core.conn
+
+// The core's connection to its instance (protocol/protocol.md, "Connecting").
+// One WebSocket to /ws, opened on the core's own thread: hello with the cursor,
+// catch-up, then live frames. When it ends it opens again after 0.5 s,
+// doubling to 30 s with up to 20% more at random, and at once when the system
+// wakes or the network changes.
+//
+// The app's messages come in on `inbox`, and everything for the app goes out
+// on `to_app`, both as JSON text. The C boundary (core/lib.calx) joins them
+// to loom_core_send and on_event; tests use them as they are.
+import std.http.websocket.{Error, Message, WebSocket, open}
+import std.json.{Json, parse}
+import std.random.{Random}
+import std.thread.{Task}
+import std.time.{Instant}
+import shared.obj.{Obj, bool_at, int_at, str_at}
+import shared.protocol.{CLOSE_TOKEN, CLOSE_VERSION, NEWEST}
+
+const FIRST_WAIT_MS: u64 = 500
+const LONGEST_WAIT_MS: u64 = 30000
+const TICK_NS: u64 = 10000000    // the loop wakes this often to read the socket
+
+/// How long to wait after `failed` tries in a row: 0.5 s, doubling up to 30 s.
+pub fn wait_ms(failed: u32) -> u64 {
+    var ms = FIRST_WAIT_MS
+    var n: u32 = 0
+    while n < failed and ms < LONGEST_WAIT_MS {
+        ms *= 2
+        n += 1
+    }
+    return if ms > LONGEST_WAIT_MS { LONGEST_WAIT_MS } else { ms }
+}
+
+/// The WebSocket address of an instance at `server`, an http:// or https:// address.
+pub fn ws_url(server: String) -> String? {
+    var base = server.trim().copy()
+    while base.ends_with("/") {
+        base = base[0..base.len() - 1].copy()
+    }
+    if base.starts_with("https://") { return some("wss://{base[8..]}/ws") }
+    if base.starts_with("http://") { return some("ws://{base[7..]}/ws") }
+    return none
+}
+
+/// What one read of the socket gave.
+enum Got {
+    Text(String)
+    Skip
+    Nothing
+    Ended(Error)
+}
+
+/// Where the connection is.
+pub enum State {
+    Offline       // waiting to try again
+    Connecting    // the socket is opening, or hello is sent and welcome hasn't come
+    Live          // welcomed: frames go both ways
+    SignedOut     // the instance refused the token (4001); a login starts it again
+    UpdateNeeded  // no protocol version in common (4002)
+}
+
+impl State {
+    fn name(self) -> str {
+        return match self {
+            State.Offline => "offline",
+            State.Connecting => "connecting",
+            State.Live => "live",
+            State.SignedOut => "signed_out",
+            State.UpdateNeeded => "update_needed",
+        }
+    }
+}
+
+/// The connection, run by the core's thread.
+pub struct Conn {
+    url: String
+    token: String
+    after: i64            // the newest event seq the app has; LOO-24 keeps it in the cache
+    ws: WebSocket?
+    state: State
+    failed: u32           // tries in a row that didn't reach welcome
+    retry_at: Instant?
+    wait: u64             // how long after retry_at to try again
+    inbox: Receiver<String>
+    to_app: Sender<String>
+    random: Random
+}
+
+impl Conn {
+    /// A connection to the instance at `server` with the device `token`, from the cursor
+    /// `after`. It starts when it's run.
+    pub fn new(server: String, token: own String, after: i64, inbox: own Receiver<String>, to_app: own Sender<String>) -> Conn? {
+        let url = ws_url(server) else { return none }
+        return some(Conn {
+            url: url,
+            token: token,
+            after: after,
+            ws: none,
+            state: State.Offline,
+            failed: 0,
+            retry_at: none,
+            wait: 0,
+            inbox: inbox,
+            to_app: to_app,
+            random: Random.system(),
+        })
+    }
+
+    fn tell(mut self, frame: Json) {
+        self.to_app.send("{frame}")
+    }
+
+    fn tell_state(mut self, retry_ms: u64, why: String) {
+        var o = Obj.new().s("t", String("core.conn")).s("state", String(self.state.name()))
+        if retry_ms > 0 { o = o.i("retry_ms", i64.wrap(retry_ms)) }
+        if why.len() > 0 { o = o.s("why", why) }
+        self.tell(o.done())
+    }
+
+    /// Opens the socket and says hello. What's sent while it opens goes once it's open.
+    fn connect(mut self) {
+        self.retry_at = none
+        let ws = open(self.url.copy())
+        let hello = Obj.new().s("t", String("hello")).s("token", self.token.copy()).j("versions", Json.Array([Json.Int(i64(NEWEST))])).i("after", self.after).j("device", Obj.new().b("active", true).done()).done()
+        match ws.send_text("{hello}") {
+            ok => {},
+            err(_) => {},    // receive says how it ended
+        }
+        self.ws = some(ws)
+        self.state = State.Connecting
+        self.tell_state(0, String())
+    }
+
+    /// The socket ended with `e`: try again later, or stop for good on 4001 and 4002.
+    fn ended(mut self, e: Error) {
+        if let ws = self.ws.take() {
+            ws.close()
+        }
+        match e {
+            Error.Closed(code, reason) => {
+                if code == CLOSE_TOKEN {
+                    self.state = State.SignedOut
+                    self.tell_state(0, reason.copy())
+                    return
+                }
+                if code == CLOSE_VERSION {
+                    self.state = State.UpdateNeeded
+                    self.tell_state(0, reason.copy())
+                    return
+                }
+            },
+            _ => {},
+        }
+        self.retry_later("{e}")
+    }
+
+    fn retry_later(mut self, why: String) {
+        let base = wait_ms(self.failed)
+        let ms = base + self.random.below(base / 5 + 1)
+        self.failed += 1
+        self.retry_at = some(unsafe { Instant.now() })
+        self.state = State.Offline
+        self.wait = ms
+        self.tell_state(ms, why)
+    }
+
+    /// A frame from the instance. Every frame goes on to the app; the connection keeps
+    /// the cursor and its own state.
+    fn frame(mut self, text: own String) {
+        let f = match parse(text.copy()) {
+            ok(j) => j,
+            err(_) => return,
+        }
+        let t = str_at(f.copy(), "t") ?? String()
+        if t == "welcome" {
+            self.state = State.Live
+            self.failed = 0
+            if bool_at(f.copy(), "reset") == some(true) {
+                self.after = int_at(f.copy(), "seq") ?? self.after
+            }
+            self.tell_state(0, String())
+        } else if t == "event" {
+            if let seq = int_at(f.copy(), "seq") {
+                if seq > self.after { self.after = seq }
+            }
+        }
+        self.to_app.send(text)
+    }
+
+    /// Reads what has come on the socket, without waiting.
+    fn read(mut self) {
+        loop {
+            let got = match self.ws {
+                some(ws) => match ws.receive(0) {
+                    ok(some(Message.Text(text))) => Got.Text(text),
+                    ok(some(Message.Binary(_))) => Got.Skip,
+                    ok(none) => Got.Nothing,
+                    err(e) => Got.Ended(e),
+                },
+                none => Got.Nothing,
+            }
+            match got {
+                Got.Text(text) => self.frame(text),
+                Got.Skip => {},
+                Got.Nothing => return,
+                Got.Ended(e) => {
+                    self.ended(e)
+                    return
+                },
+            }
+        }
+    }
+
+    /// A message from the app. Gives false when the core is stopping.
+    fn from_app(mut self, text: own String) -> bool {
+        let m = match parse(text.copy()) {
+            ok(j) => j,
+            err(_) => return true,
+        }
+        let t = str_at(m.copy(), "t") ?? String()
+        if t == "core.stop" {
+            if let ws = self.ws.take() {
+                ws.close()
+            }
+            return false
+        }
+        if t == "app.wake" or t == "app.network" {
+            // The socket may have died while the system slept or the network changed, with
+            // nothing to say so: open a new one now. The cursor makes it lossless.
+            if self.state == State.Live or self.state == State.Connecting or self.state == State.Offline {
+                if let ws = self.ws.take() {
+                    ws.close()
+                }
+                self.failed = 0
+                self.connect()
+            }
+            return true
+        }
+        if self.state == State.Live {
+            if let ws = self.ws {
+                match ws.send_text(text) {
+                    ok => return true,
+                    err(_) => {},
+                }
+            }
+        }
+        // Not connected: the outbox (LOO-24) keeps sends for later. Until then, say so.
+        self.tell(Obj.new().s("t", String("error")).s("code", String("offline")).maybe("for", str_at(m.copy(), "id")).done())
+        return true
+    }
+
+    /// Starts again if it's time.
+    fn tick(mut self) {
+        if self.state != State.Offline { return }
+        if let since = self.retry_at {
+            let waited = unsafe { Instant.now() }.nanos_since(since) / 1000000
+            if waited < self.wait { return }
+        }
+        self.connect()
+    }
+}
+
+impl Task for Conn {
+    fn run(own self) {
+        var c = self
+        c.connect()
+        loop {
+            c.read()
+            c.tick()
+            if let m = unsafe { c.inbox.wait_for(TICK_NS) } {
+                if not c.from_app(m) { return }
+                while let more = c.inbox.next() {
+                    if not c.from_app(more) { return }
+                }
+            }
+        }
+    }
+}
+
+@test
+fn waits_double_up_to_thirty_seconds() {
+    assert(wait_ms(0) == 500)
+    assert(wait_ms(1) == 1000)
+    assert(wait_ms(2) == 2000)
+    assert(wait_ms(6) == 30000)
+    assert(wait_ms(40) == 30000)
+}
+
+@test
+fn makes_the_websocket_address() {
+    assert(ws_url(String("http://127.0.0.1:8080")) == some(String("ws://127.0.0.1:8080/ws")))
+    assert(ws_url(String("https://loom.example.com/")) == some(String("wss://loom.example.com/ws")))
+    assert(ws_url(String("ftp://x")) == none)
+}
