@@ -18,7 +18,7 @@ use serde_json::Value;
 use crate::core::Core;
 use crate::model::{self, Approval, Conn, ImportSource, Message, Model, Mood};
 use crate::shell;
-use crate::thread::{self, spool, thread, Spool};
+use crate::thread::{self, thread, Spool};
 use crate::tokens::*;
 
 /// The colours of one theme.
@@ -1579,17 +1579,45 @@ ACTA_KEY=secret:ACTA_KEY",
         spool_of(&self.model)
     }
 
-    /// The spool's colour: the app's ink, or the colour for trouble.
-    fn spool_ink(&self) -> Hsla {
-        self.ink_of(self.spool_state())
-    }
-
-    fn ink_of(&self, state: Spool) -> Hsla {
-        match state {
-            Spool::Loose => self.p.bad,
-            Spool::Empty => self.p.ink_3,
-            _ => self.p.ink_2,
-        }
+    /// A server as a tile, `size` square: a laptop for the instance on this computer, a
+    /// server for one elsewhere, with a dot on its corner for how it is: green connected,
+    /// grey connecting or signed out, red when it can't be reached.
+    fn server_tile(&self, state: Spool, local: bool, size: f32) -> AnyElement {
+        let p = self.p;
+        let dot = match state {
+            Spool::Wound => p.ok,
+            Spool::Loose => p.bad,
+            _ => p.ink_3,
+        };
+        let ring = (size * 0.3).round().max(8.0);
+        div()
+            .relative()
+            .size(px(size))
+            .flex_none()
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded(px(radius::ROW + 2.0))
+            .bg(p.bg)
+            .border_1()
+            .border_color(p.line)
+            .text_color(p.ink_2)
+            .child(
+                Icon::new(if local { Ico::Laptop } else { Ico::Server })
+                    .size(px((size * 0.5).round())),
+            )
+            .child(
+                div()
+                    .absolute()
+                    .right(px(-3.0))
+                    .bottom(px(-3.0))
+                    .size(px(ring))
+                    .rounded_full()
+                    .bg(dot)
+                    .border_2()
+                    .border_color(p.side),
+            )
+            .into_any_element()
     }
 
     /// Each server the app is signed in to, in a row. The one on screen is a box with its
@@ -1606,32 +1634,25 @@ ACTA_KEY=secret:ACTA_KEY",
         for (dir, model) in self.servers() {
             let here = dir == self.here;
             let state = spool_of(model);
-            let ink = self.ink_of(state);
+            let local = dir.is_empty() && local_mode();
             let id = SharedString::from(format!("server-{dir}"));
             let mut button = div()
                 .id(id)
                 .relative()
                 .flex()
                 .items_center()
-                .gap(px(space::S))
+                .gap(px(space::M))
                 .rounded(px(radius::ROW))
                 .cursor_pointer()
                 .hover(move |s| s.bg(p.hover));
             if here {
-                let dot = match state {
-                    Spool::Wound => p.ok,
-                    Spool::Loose => p.bad,
-                    _ => p.ink_3,
-                };
                 button = button
                     .flex_1()
                     .min_w_0()
+                    .h(px(46.0))
                     .px(px(space::S))
-                    .py(px(6.0))
-                    .border_1()
-                    .border_color(if server_open { p.line_strong } else { p.line })
                     .when(server_open, |d| d.bg(p.active))
-                    .child(div().flex_none().child(spool(state, ink, 30.0, 14.0)))
+                    .child(self.server_tile(state, local, 30.0))
                     .child(
                         div()
                             .flex_1()
@@ -1648,21 +1669,22 @@ ACTA_KEY=secret:ACTA_KEY",
                             )
                             .child(
                                 div()
-                                    .flex()
-                                    .items_center()
-                                    .gap(px(5.0))
                                     .text_size(px(size::CAPTION))
-                                    .text_color(p.ink_3)
-                                    .child(div().size(px(6.0)).flex_none().rounded(px(2.0)).bg(dot))
-                                    .child(div().truncate().child(self.conn_words())),
+                                    .text_color(if state == Spool::Loose {
+                                        p.bad
+                                    } else {
+                                        p.ink_3
+                                    })
+                                    .truncate()
+                                    .child(self.conn_words()),
                             ),
                     )
                     .on_click(cx.listener(|this, _, _, cx| this.open(Screen::Server, cx)));
             } else {
-                button = button.flex_none().px(px(space::XS)).py(px(space::S));
+                button = button.flex_none().p(px(space::S));
                 let heard = !model.unread.is_empty();
                 button = button
-                    .child(spool(state, ink, 26.0, 13.0))
+                    .child(self.server_tile(state, local, 30.0))
                     .when(heard, |d| {
                         d.child(
                             div()
@@ -1749,7 +1771,12 @@ ACTA_KEY=secret:ACTA_KEY",
             .bg(p.side)
             .border_r_1()
             .border_color(p.line);
-        // Its head: the gear, or the server's spool, as the sidebar shows them.
+        // Its head: the gear, or the server's icon, as the sidebar shows them.
+        let server_icon = if self.local() {
+            Ico::Laptop
+        } else {
+            Ico::Server
+        };
         nav = nav.child(
             div()
                 .flex()
@@ -1762,7 +1789,7 @@ ACTA_KEY=secret:ACTA_KEY",
                 .font_weight(FontWeight::SEMIBOLD)
                 .text_color(p.ink)
                 .when(server, |d| {
-                    d.child(spool(self.spool_state(), self.spool_ink(), 30.0, 14.0))
+                    d.child(Icon::new(server_icon).small().text_color(p.ink_2))
                         .child("Server")
                 })
                 .when(!server, |d| {
@@ -1955,23 +1982,10 @@ ACTA_KEY=secret:ACTA_KEY",
             } else {
                 p.ink_2
             })
-            .child(div().size(px(7.0)).rounded(px(2.0)).bg(match state {
-                Spool::Wound => p.ok,
-                Spool::Loose => p.bad,
-                _ => p.ink_3,
-            }))
             .child(words);
         let here = self
             .row(
-                Some(
-                    div()
-                        .w(px(52.0))
-                        .flex_none()
-                        .flex()
-                        .justify_center()
-                        .child(spool(state, self.spool_ink(), 46.0, 20.0))
-                        .into_any_element(),
-                ),
+                Some(self.server_tile(state, self.local(), 40.0)),
                 where_,
                 Some(format!("loom {}", crate::VERSION)),
                 Some(status.into_any_element()),
@@ -3460,7 +3474,6 @@ ACTA_KEY=secret:ACTA_KEY",
                     .text_size(px(size::CAPTION))
                     .font_weight(FontWeight::MEDIUM)
                     .text_color(p.ink_3)
-                    .child(spool(self.spool_state(), self.spool_ink(), 22.0, 11.0))
                     .child(div().truncate().child(server_name(&self.model, &self.here))),
             );
         }
@@ -3669,7 +3682,7 @@ ACTA_KEY=secret:ACTA_KEY",
             .child(
                 div()
                     .flex()
-                    .items_stretch()
+                    .items_center()
                     .justify_between()
                     .gap(px(space::XS))
                     .px(px(space::S))
@@ -3678,15 +3691,13 @@ ACTA_KEY=secret:ACTA_KEY",
                     .child(
                         div()
                             .id("settings")
-                            .w(px(40.0))
+                            .size(px(34.0))
                             .flex_none()
                             .flex()
                             .items_center()
                             .justify_center()
                             .rounded(px(radius::ROW))
-                            .border_1()
-                            .border_color(if settings_open { p.line_strong } else { p.line })
-                            .text_color(p.ink_2)
+                            .text_color(if settings_open { p.ink } else { p.ink_3 })
                             .cursor_pointer()
                             .when(settings_open, |d| d.bg(p.active))
                             .hover(move |s| s.bg(p.hover).text_color(p.ink))
@@ -4459,7 +4470,11 @@ ACTA_KEY=secret:ACTA_KEY",
                 .child(
                     div()
                         .w_full()
-                        .max_w(px(space::COLUMN))
+                        // The hover reaches the strip either side where its time and
+                        // buttons are, so moving on to them keeps them there.
+                        .max_w(px(space::COLUMN + 2.0 * HOVER_REACH))
+                        .mx(px(-HOVER_REACH))
+                        .px(px(HOVER_REACH))
                         .py(px(space::S))
                         .relative()
                         .group("row")
@@ -4469,6 +4484,7 @@ ACTA_KEY=secret:ACTA_KEY",
                                     .absolute()
                                     .top(px(space::S + 4.0))
                                     .right(relative(1.0))
+                                    .mr(px(-HOVER_REACH))
                                     .pr(px(space::M))
                                     .whitespace_nowrap()
                                     .text_size(px(size::CAPTION))
@@ -4486,7 +4502,7 @@ ACTA_KEY=secret:ACTA_KEY",
                                     .id(SharedString::from(format!("branch-row-{id}")))
                                     .absolute()
                                     .top(px(space::S + 28.0))
-                                    .right(px(-30.0))
+                                    .right(px(HOVER_REACH - 30.0))
                                     .size(px(24.0))
                                     .flex()
                                     .items_center()
@@ -4512,7 +4528,7 @@ ACTA_KEY=secret:ACTA_KEY",
                                     .id(SharedString::from(format!("pin-row-{id}")))
                                     .absolute()
                                     .top(px(space::S))
-                                    .right(px(-30.0))
+                                    .right(px(HOVER_REACH - 30.0))
                                     .size(px(24.0))
                                     .flex()
                                     .items_center()
@@ -5260,9 +5276,9 @@ ACTA_KEY=secret:ACTA_KEY",
             )
     }
 
-    /// The opening weave, over everything for a moment on every launch: the threads come
-    /// in from the left, the name rises among them and sinks away, they draw together
-    /// into one, and the window closes on that line to open the app.
+    /// The opening, over everything for a moment on every launch: one thread draws
+    /// itself across the middle, the mark settles on it, and the window opens along
+    /// that line to show the app.
     fn splash(&self, h: f32) -> Option<Div> {
         let t = self.launched?.elapsed().as_secs_f32();
         if t >= SPLASH_SECONDS {
@@ -5270,17 +5286,16 @@ ACTA_KEY=secret:ACTA_KEY",
         }
         let p = self.p;
         let span = |a: f32, b: f32| ((t - a) / (b - a)).clamp(0.0, 1.0);
+        let ease = |x: f32| 1.0 - (1.0 - x).powi(3);
         let smooth = |x: f32| x * x * (3.0 - 2.0 * x);
-        let reveal = smooth(span(0.05, 1.2));
-        let word_in = smooth(span(0.55, 1.1));
-        let word_out = smooth(span(1.35, 1.75));
-        let gather = smooth(span(1.45, 2.15));
-        let close = smooth(span(2.1, SPLASH_SECONDS));
-        let threads: Vec<Hsla> = COLORS.iter().map(|c| thread::color(c, p.dark)).collect();
-        let over = threads.clone();
-        let (mark, half) = wordmark(p, 80.0);
-        const BAND: f32 = 220.0;
-        const WORD: f32 = 130.0;
+        let reveal = ease(span(0.0, 0.6));
+        let word_in = ease(span(0.3, 0.75));
+        let word_out = smooth(span(1.0, 1.25));
+        let calm = 0.55 + 0.45 * smooth(span(0.8, 1.25));
+        let close = smooth(span(1.1, SPLASH_SECONDS));
+        let (mark, _) = wordmark(p, 34.0);
+        const BAND: f32 = 64.0;
+        let shown = word_in * (1.0 - word_out);
         let band = div()
             .relative()
             .w_full()
@@ -5295,26 +5310,49 @@ ACTA_KEY=secret:ACTA_KEY",
                     .left_0()
                     .w_full()
                     .h(px(BAND))
-                    .child(thread::weave(threads, gather, reveal, BAND)),
+                    .child(thread::weave(vec![p.ink_3], calm, reveal, BAND)),
             )
-            // The mark, in a slot it rises out of and sinks back into, with the threads
-            // weaving over and under it.
+            // The mark sits on the thread, which passes behind it, and settles into
+            // place as it comes.
             .child(
                 div()
-                    .overflow_hidden()
-                    .child(mark.relative().top(px(WORD * ((1.0 - word_in) + word_out)))),
-            )
-            .child(
-                div()
-                    .absolute()
-                    .top_0()
-                    .left_0()
-                    .w_full()
-                    .h(px(BAND))
-                    .opacity(word_in * (1.0 - word_out))
-                    .child(thread::weave_over(over, gather, reveal, BAND, half)),
+                    .relative()
+                    .top(px(6.0 * (1.0 - word_in)))
+                    .px(px(space::L))
+                    .bg(p.bg)
+                    .opacity(shown)
+                    .child(mark),
             );
-        Some(self.curtain(h, h / 2.0, close, band, BAND))
+        // It opens from the line outwards, each half drawing back to its edge, and
+        // the thread goes as they part.
+        let center = h / 2.0;
+        let half = |top: bool| {
+            let d = div().absolute().left_0().right_0().occlude().bg(p.bg);
+            if top {
+                d.top_0().h(px(center * (1.0 - close)))
+            } else {
+                d.bottom_0().h(px((h - center) * (1.0 - close)))
+            }
+        };
+        Some(
+            div()
+                .absolute()
+                .top_0()
+                .left_0()
+                .size_full()
+                .child(half(true))
+                .child(half(false))
+                .child(
+                    div()
+                        .absolute()
+                        .left_0()
+                        .right_0()
+                        .top(px(center - BAND / 2.0))
+                        .h(px(BAND))
+                        .opacity(1.0 - smooth(span(1.1, 1.35)))
+                        .child(band),
+                ),
+        )
     }
 
     /// When the page beside the sidebar was last seen arriving: as it unrolled, or as the
@@ -10357,7 +10395,10 @@ fn appear<E: Styled>(d: E, k: f32) -> E {
 }
 
 /// How long the opening weave lasts on every launch, in seconds.
-const SPLASH_SECONDS: f32 = 2.8;
+const SPLASH_SECONDS: f32 = 1.6;
+/// How far past a message its hover reaches, for its time on the left and its buttons on
+/// the right.
+const HOVER_REACH: f32 = 34.0;
 
 /// How long picking a brain takes to move on to naming it, in seconds.
 const PICK_SECONDS: f32 = 0.45;

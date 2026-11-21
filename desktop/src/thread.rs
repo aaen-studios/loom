@@ -282,131 +282,18 @@ pub fn thread(
     .flex_none()
 }
 
-/// How the server's spool is: what the connection to the instance is doing.
+/// How the server is: what the connection to the instance is doing, as the dot on its
+/// tile shows it.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Spool {
-    /// Connected: its thread wound on and still.
+    /// Connected.
     Wound,
-    /// Connecting: it turns, and its thread waves as it's drawn off.
+    /// Connecting.
     Turning,
-    /// Can't be reached: half unwound, its end hanging loose and frayed.
+    /// Can't be reached.
     Loose,
-    /// Signed out: an empty spool.
+    /// Signed out.
     Empty,
-}
-
-/// The server's mark, `w` by `h` pixels: a spool, with its thread coming off to the
-/// right, the way an agent is its thread. The spool takes `h` of the width; the thread
-/// the rest.
-pub fn spool(state: Spool, ink: Hsla, w: f32, h: f32) -> impl IntoElement {
-    canvas(
-        |_, _, _| {},
-        move |bounds, _, window, _| {
-            let t = now();
-            if state == Spool::Turning {
-                window.request_animation_frame();
-            }
-            let x0 = bounds.origin.x.as_f32();
-            let y0 = bounds.origin.y.as_f32();
-            let bw = bounds.size.width.as_f32();
-            let bh = bounds.size.height.as_f32();
-            let s = if bh > 24.0 {
-                thread_stroke::LARGE
-            } else {
-                thread_stroke::SMALL
-            };
-            let paint = |pb: PathBuilder, window: &mut Window| {
-                if let Ok(path) = pb.build() {
-                    window.paint_path(path, ink);
-                }
-            };
-            // The flanges, either end of the spool.
-            let left = x0 + s;
-            let right = x0 + bh * 1.1 - s;
-            let top = y0 + s;
-            let bottom = y0 + bh - s;
-            let mid = y0 + bh / 2.0;
-            let mut flanges = PathBuilder::stroke(px(s));
-            for x in [left, right] {
-                flanges.move_to(point(px(x), px(top)));
-                flanges.line_to(point(px(x), px(bottom)));
-            }
-            paint(flanges, window);
-            // The thread wound on the barrel between them: close slanted turns, filling
-            // most of the flanges' height, that slide along while the spool turns.
-            let (bt, bb) = (mid - bh * 0.3, mid + bh * 0.3);
-            let (inner_l, inner_r) = (left + s * 1.3, right - s * 1.3);
-            let gap = (bh * 0.15).max(2.2);
-            let slant = gap * 1.3;
-            let wound_to = match state {
-                Spool::Empty => inner_l,
-                Spool::Loose => inner_l + (inner_r - inner_l) * 0.5,
-                _ => inner_r,
-            };
-            let shift = if state == Spool::Turning {
-                (t * 1.4 * gap) % gap
-            } else {
-                0.0
-            };
-            let mut turns = PathBuilder::stroke(px(s * 0.7));
-            let mut x = inner_l - slant - gap + shift;
-            while x < wound_to {
-                let u0 = ((inner_l - x) / slant).max(0.0);
-                let u1 = ((wound_to - x) / slant).min(1.0);
-                if u1 > u0 {
-                    let at = |u: f32| point(px(x + slant * u), px(bb + (bt - bb) * u));
-                    turns.move_to(at(u0));
-                    turns.line_to(at(u1));
-                }
-                x += gap;
-            }
-            paint(turns, window);
-            if state == Spool::Empty {
-                return;
-            }
-            // Its end, off the spool to the right at the middle, as an agent's thread
-            // is: still while it's connected, waving as it's drawn off while it
-            // connects, and hanging down, frayed, while it can't be reached.
-            let from_x = right + s;
-            let end_x = x0 + bw - s;
-            let span = (end_x - from_x).max(1.0);
-            let steps = (span / 1.5).max(8.0) as usize;
-            let point_at = |u: f32| match state {
-                Spool::Loose => {
-                    let x = from_x + span * 0.45 * u;
-                    point(px(x), px(mid + (bottom - mid) * u.powf(1.6)))
-                }
-                Spool::Turning => {
-                    let wave = (bh * 0.2) * u * (TAU * (u * 1.2 - t * 0.9)).sin();
-                    point(px(from_x + span * u), px(mid + wave))
-                }
-                _ => point(px(from_x + span * u), px(mid)),
-            };
-            let mut end = PathBuilder::stroke(px(s));
-            for i in 0..=steps {
-                let p = point_at(i as f32 / steps as f32);
-                if i == 0 {
-                    end.move_to(p)
-                } else {
-                    end.line_to(p)
-                }
-            }
-            paint(end, window);
-            if state == Spool::Loose {
-                // Frayed where it ends.
-                let tip = point_at(1.0);
-                let mut fray = PathBuilder::stroke(px(s * 0.8));
-                for (dx, dy) in [(-0.14, 0.14), (0.0, 0.2), (0.14, 0.14)] {
-                    fray.move_to(tip);
-                    fray.line_to(point(tip.x + px(dx * bh), tip.y + px(dy * bh)));
-                }
-                paint(fray, window);
-            }
-        },
-    )
-    .w(px(w))
-    .h(px(h))
-    .flex_none()
 }
 
 /// Several threads woven across the full width, `h` high: each its own wave, so they
