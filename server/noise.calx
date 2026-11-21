@@ -1,0 +1,261 @@
+module server.noise
+
+// The network side of an instance in the desktop app (PLAN.md, "Reaching an
+// instance in a desktop app"), once the person turns phones on. The instance
+// itself listens only on 127.0.0.1. This bridge listens on every address, on
+// a thread of its own, and takes only /ws/noise there: the Noise handshake
+// against the instance's Noise key, then each phone's frames to its own /ws
+// on loopback, and its HTTP requests to the instance's routes, both ways
+// sealed (shared/noise.calx says how).
+import std.crypto.{NoiseHandshake, NoiseTransport, X25519Key}
+import std.hash.{hmac_sha256}
+import std.http.{Header, Request, get, post}
+import std.http.server.{Response, Server, ServerSocket}
+import std.http.websocket
+import std.http.websocket.{WebSocket}
+import std.json.{Json}
+import std.thread.{Task}
+import shared.noise
+import shared.noise.{Joiner, Opened}
+import shared.obj.{Obj, at, int_at, str_at}
+import shared.protocol
+
+// A Noise message that didn't open, or a handshake that failed.
+pub const CLOSE_NOISE: u16 = 4005
+
+// The port a desktop instance tries first, and keeps once it has one.
+pub const PORT: u16 = 47420
+
+// How long a request through the bridge may take, and the longest answer.
+const CALL_MS: u32 = 120000
+const CALL_LIMIT: usize = 67108864
+
+// The instance's Noise key, from its Ed25519 seed, so it moves with it.
+pub fn key(seed: List<u8>) -> X25519Key ! Error {
+    let k = X25519Key.from_bytes(hmac_sha256(seed, "loom noise key".to_bytes())) else { fail "the instance's key is damaged" }
+    return k
+}
+
+// A request a phone sent, until the instance answers it.
+struct Call {
+    id: i64
+    req: Request
+}
+
+// A phone's connection.
+struct Peer {
+    socket: ServerSocket
+    hs: NoiseHandshake?        // until the handshake is done
+    t: NoiseTransport?         // after it
+    joiner: Joiner
+    inner: WebSocket?          // its /ws on loopback, from its first frame
+    calls: List<Call>
+}
+
+struct Bridge {
+    key: X25519Key
+    port: u16                  // the port to try
+    instance: u16              // the instance's port on 127.0.0.1
+    ready: Sender<String>
+    stop: Receiver<bool>
+}
+
+// Starts the bridge, for the instance on `instance`, on `port` or, if that's
+// taken, one the system picks. Gives its thread, what stops it, and its port.
+pub fn start(noise_key: X25519Key, port: u16, instance: u16) -> (Thread, Sender<bool>, u16) ! Error {
+    var ready = Receiver<String>()
+    let stop = Receiver<bool>()
+    let stop_to = stop.sender()
+    let t = unsafe { Thread.spawn(Bridge { key: noise_key.copy(), port: port, instance: instance, ready: ready.sender(), stop: stop }) }
+    let said = unsafe { ready.wait_for(10000000000) } else { fail "the network listener didn't start" }
+    if said.starts_with("error:") { fail "can't listen on the network: {said[6..]}" }
+    let p = u16.parse(said) else { fail "the network listener said {said}" }
+    return (t, stop_to, p)
+}
+
+impl Task for Bridge {
+    fn run(own self) {
+        var b = self
+        var server = match Server.listen(b.port, String()) {
+            ok(s) => s,
+            err(_) => match Server.listen(0, String()) {
+                ok(s) => s,
+                err(e) => {
+                    b.ready.send("error:{e}")
+                    return
+                },
+            },
+        }
+        server.log = false
+        server.max_message = 65535
+        server.ping_interval_ms = protocol.PING_EVERY_MS
+        server.ping_timeout_ms = protocol.PING_ANSWER_MS
+        b.ready.send("{server.port}")
+        var peers = Map<u32, Peer>()
+        loop {
+            if b.stop.next() != none { break }
+            match server.next_event(10) {
+                some(Request(req)) => {
+                    if req.path == noise.PATH and req.method == "GET" {
+                        match server.upgrade(req.copy()) {
+                            ok(s) => peers.insert(s.id(), Peer { socket: s, hs: some(noise.responder(b.key.copy())), t: none, joiner: Joiner.new(), inner: none, calls: List<Call>() }),
+                            err(e) => eprintln("loom: {noise.PATH} from {req.client}: {e}"),
+                        }
+                    } else {
+                        let body = Obj.new().j("error", Obj.new().s("code", String("noise_only")).s("message", "Only {noise.PATH} is reached from the network, and the rest through it.").done()).done()
+                        server.respond(req, Response.json("{body}", 404))
+                    }
+                },
+                some(Message(s, Binary(m))) => {
+                    if let p = mut peers.find(s.id()) {
+                        if let why = took(server, mut p, m, b.instance) {
+                            shut(mut server, mut p, CLOSE_NOISE, why)
+                        }
+                    }
+                },
+                some(Message(s, Text(_))) => server.close_socket(s, protocol.CLOSE_PROTOCOL, String("only binary Noise messages")),
+                some(Closed(s, _, _)) => {
+                    if let p = peers.remove(s.id()) {
+                        var gone = p
+                        let_go(mut gone)
+                    }
+                },
+                _ => {},
+            }
+            for p in mut peers.values() {
+                relay(mut server, mut p)
+            }
+        }
+        for p in mut peers.values() { let_go(mut p) }
+        server.shutdown()
+    }
+}
+
+// Closes a phone's connection, and its /ws.
+fn shut(server: mut Server, p: mut Peer, code: u16, why: String) {
+    if let ws = p.inner.take() { ws.close() }
+    server.close_socket(p.socket, code, why)
+}
+
+fn let_go(p: mut Peer) {
+    if let ws = p.inner.take() { ws.close() }
+}
+
+// Sends a message to the phone, sealed.
+fn say(server: Server, p: mut Peer, message: List<u8>) {
+    if let t = mut p.t {
+        for piece in noise.seal(mut t, message) {
+            _ = server.send_binary(p.socket, piece)
+        }
+    }
+}
+
+// A binary message from the phone: the handshake's first message, or a piece.
+// Gives why the connection ends, if it does.
+fn took(server: Server, p: mut Peer, m: List<u8>, instance: u16) -> String? {
+    if let h = p.hs.take() {
+        var hs = h
+        if let err(_) = hs.read_message(m) { return some(String("the Noise handshake failed")) }
+        match hs.write_message([]) {
+            ok(reply) => _ = server.send_binary(p.socket, reply),
+            err(_) => return some(String("the Noise handshake failed")),
+        }
+        p.t = some(hs.transport())
+        return none
+    }
+    var t = p.t.take() else return some(String("the Noise handshake failed"))
+    let opened = p.joiner.take(mut t, m)
+    p.t = some(t)
+    match opened {
+        Opened.Bad => return some(String("a Noise message didn't open")),
+        Opened.More => return none,
+        Opened.Whole(message) => return handle(server, mut p, message, instance),
+    }
+}
+
+// A whole message from the phone.
+fn handle(server: Server, p: mut Peer, message: List<u8>, instance: u16) -> String? {
+    if message.len() == 0 { return some(String("an empty message")) }
+    if message[0] == noise.FRAME {
+        let text = String.from_utf8(message[1..].copy()) else return some(String("a frame that isn't UTF-8"))
+        if p.inner == none {
+            p.inner = some(websocket.open("ws://127.0.0.1:{instance}/ws", [], 30000, protocol.MAX_FRAME))
+        }
+        if let ws = p.inner {
+            if let err(_) = ws.send_text(text) { return some(String("the instance closed the session")) }
+        }
+        return none
+    }
+    if message[0] == noise.REQUEST {
+        let (head, body) = noise.head_of(message) else return some(String("a request without a head"))
+        let id = int_at(head.copy(), "id") ?? 0
+        let method = str_at(head.copy(), "method") ?? String("GET")
+        let path = str_at(head.copy(), "path") ?? String()
+        // Only the instance's routes, never a socket of its own.
+        if not path.starts_with("/") or path.starts_with("/ws") or (method != "GET" and method != "POST") {
+            say(server, mut p, noise.with_head(noise.RESPONSE, noise.response_head(id, 400, some(String("application/json")), none), "{Obj.new().j("error", Obj.new().s("code", String("bad_request")).s("message", String("Through Noise, GET and POST to the instance's HTTP routes.")).done()).done()}".to_bytes()))
+            return none
+        }
+        var headers = List<Header>()
+        if let Json.Object(fields) = at(head, "headers") {
+            for (name, value) in fields {
+                if let Json.Str(v) = value {
+                    headers.push(Header { name: name.copy(), value: v.copy() })
+                }
+            }
+        }
+        let url = "http://127.0.0.1:{instance}{path}"
+        let req = if method == "POST" { post(url, headers, body, CALL_MS, CALL_LIMIT) } else { get(url, headers, CALL_MS, CALL_LIMIT) }
+        p.calls.push(Call { id: id, req: req })
+        return none
+    }
+    return some(String("a message of a kind loom doesn't send"))
+}
+
+// What the instance said to the phone since the last turn: frames on its /ws,
+// and the answers to its requests.
+fn relay(server: mut Server, p: mut Peer) {
+    var ended: (u16, String)? = none
+    var frames = List<String>()
+    if let ws = p.inner {
+        loop {
+            match ws.receive(0) {
+                ok(some(websocket.Message.Text(text))) => frames.push(text),
+                ok(some(_)) => {},
+                ok(none) => break,
+                err(e) => {
+                    ended = match e {
+                        websocket.Error.Closed(code, reason) => some((code, reason)),
+                        _ => some((1011u16, String("the instance went away"))),
+                    }
+                    break
+                },
+            }
+        }
+    }
+    for text in frames {
+        say(server, mut p, noise.frame(text.copy()))
+    }
+    if let (code, reason) = ended {
+        p.inner = none
+        server.close_socket(p.socket, code, reason)
+        return
+    }
+    var waiting = List<Call>()
+    var answers = List<List<u8>>()
+    for c in p.calls {
+        if not c.req.done() {
+            waiting.push(c)
+            continue
+        }
+        var req = c.req
+        answers.push(match req.wait() {
+            ok(res) => noise.with_head(noise.RESPONSE, noise.response_head(c.id, i64(res.status), res.header(String("Content-Type")), res.header(String("Content-Disposition"))), res.body),
+            err(e) => noise.with_head(noise.RESPONSE, noise.response_head(c.id, 502, some(String("application/json")), none), "{Obj.new().j("error", Obj.new().s("code", String("internal")).s("message", "The instance didn't answer: {e}").done()).done()}".to_bytes()),
+        })
+    }
+    p.calls = waiting
+    for a in answers {
+        say(server, mut p, a.copy())
+    }
+}

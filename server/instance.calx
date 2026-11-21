@@ -9,7 +9,7 @@ module server.instance
 // next frame is read, and a session's catch-up can't interleave with live
 // events.
 import std.bytes
-import std.crypto.{Ed25519Key, PasswordHasher, XChaCha20Poly1305, compare_digest, random_bytes}
+import std.crypto.{Ed25519Key, PasswordHasher, X25519Key, XChaCha20Poly1305, compare_digest, random_bytes}
 import std.fs
 import std.hash.{hmac_sha256, sha256}
 import std.http.server.{Request, Response, Server, ServerSocket, content_type}
@@ -31,6 +31,7 @@ import server.hashing
 import server.hashing.{Done, Job}
 import server.installer
 import server.move
+import server.noise
 import server.plugins
 import server.push
 import server.routines
@@ -47,6 +48,7 @@ pub struct Config {
     pub minute_ms: i64    // how long a minute is, for routines: 60,000, but less in tests
     pub apns: String    // where APNs is, or "" for Apple's: a test's fake one
     pub version: String    // loom's version, for what a move says it came from
+    pub lan: bool    // whether phones may reach it on the network, through the Noise bridge: an instance in the desktop app
 }
 
 // How long events are kept (PLAN.md, "Sync"): `age_ms`, but always each
@@ -191,6 +193,10 @@ pub struct Instance {
     push_gone: Receiver<push.Gone>    // tokens APNs says are gone
     move_to: Sender<move.Job>    // the thread that sends a move
     move_done: Receiver<move.Done>
+    lan: bool    // whether phones may reach it on the network: an instance in the desktop app
+    bridge: Thread?    // the Noise bridge on the network (server/noise.calx), while phones are on
+    stop_bridge: Sender<bool>?
+    lan_port: u16    // its port, while it runs
     moving: String    // where the instance is moving to, while it is
     move_waiters: List<Waiter>    // instance.move commands waiting on the move
     moved: Json    // once the instance has moved: the signed moved frame, which every device gets
@@ -435,7 +441,48 @@ impl Instance {
         if let text = try store.meta("moved") {
             if let ok(m) = parse(text) { moved = m }
         }
-        return Instance { push_to: push_to, push_gone: push_gone, move_to: move_to, move_done: move_done, moving: String(), move_waiters: List<Waiter>(), moved: moved, version: config.version.copy(), store: store, server: server, data: config.data.copy(), sessions: Map<u32, Session>(), runs: LinkedMap<String, Run>(), procs: LinkedMap<String, Proc>(), approvals: LinkedMap<String, Approval>(), lines: lines, lines_to: to, hash_to: hash_to, hash_done: hash_done, next_job: 0, auths: Map<i64, Auth>(), dummy_hash: dummy, failures: LinkedMap<String, List<i64>>(), thumbs: files.start(), events: config.events, next_prune: 0, grants: Map<String, Grant>(), calls: Map<String, Request>(), registry_at: config.registry.copy(), registry: Json.Null, registry_time: 0, install_to: install_to, install_done: install_done, fetching: List<Waiter>(), installs: Map<i64, Install>(), leftovers: List<String>(), next_sweep: 0, device_calls: Map<String, DeviceCall>(), minute_ms: config.minute_ms, next_due: 0, routine_runs: Map<String, RoutineRun>(), panel_calls: Map<String, Waiter>(), sealer: try secret_key(config.data.copy()) }
+        var i = Instance { push_to: push_to, push_gone: push_gone, move_to: move_to, move_done: move_done, lan: config.lan, bridge: none, stop_bridge: none, lan_port: 0, moving: String(), move_waiters: List<Waiter>(), moved: moved, version: config.version.copy(), store: store, server: server, data: config.data.copy(), sessions: Map<u32, Session>(), runs: LinkedMap<String, Run>(), procs: LinkedMap<String, Proc>(), approvals: LinkedMap<String, Approval>(), lines: lines, lines_to: to, hash_to: hash_to, hash_done: hash_done, next_job: 0, auths: Map<i64, Auth>(), dummy_hash: dummy, failures: LinkedMap<String, List<i64>>(), thumbs: files.start(), events: config.events, next_prune: 0, grants: Map<String, Grant>(), calls: Map<String, Request>(), registry_at: config.registry.copy(), registry: Json.Null, registry_time: 0, install_to: install_to, install_done: install_done, fetching: List<Waiter>(), installs: Map<i64, Install>(), leftovers: List<String>(), next_sweep: 0, device_calls: Map<String, DeviceCall>(), minute_ms: config.minute_ms, next_due: 0, routine_runs: Map<String, RoutineRun>(), panel_calls: Map<String, Waiter>(), sealer: try secret_key(config.data.copy()) }
+        // Phones that were on stay on.
+        if i.lan and try i.store.meta("phones") == some(String("on")) {
+            match i.phones_on() {
+                ok => {},
+                err(e) => eprintln("loom: phones: {e}"),
+            }
+        }
+        return i
+    }
+
+    // --- Phones on the network (PLAN.md, "Reaching an instance in a desktop app") ---
+
+    fn noise_key(i: Instance) -> X25519Key ! Error {
+        let seed = try i.store.meta("key") ?? String()
+        return try noise.key(bytes.from_hex(seed) ?? List<u8>())
+    }
+
+    // Starts the Noise bridge, on the port it had last time if it can.
+    fn phones_on(i: mut Instance) ! Error {
+        if i.bridge != none { return }
+        let kept = u16.parse(try i.store.meta("lan_port") ?? String()) ?? noise.PORT
+        let (t, stop, port) = try noise.start(try i.noise_key(), kept, i.server.port)
+        i.bridge = some(t)
+        i.stop_bridge = some(stop)
+        i.lan_port = port
+        try i.store.set_meta("lan_port", "{port}")
+        println("loom: phones reach this instance on port {port}")
+    }
+
+    fn phones_off(i: mut Instance) {
+        if let s = mut i.stop_bridge { s.send(true) }
+        i.stop_bridge = none
+        if let t = i.bridge.take() { t.join() }
+        i.lan_port = 0
+    }
+
+    // What a phone needs to reach the instance over Noise, while phones are on.
+    fn phones(i: Instance) -> Json ! Error {
+        if i.bridge == none { return Obj.new().b("on", false).done() }
+        let key = try i.noise_key()
+        return Obj.new().b("on", true).i("port", i64(i.lan_port)).s("key", bytes.base64(key.public_key().bytes())).done()
     }
 
     pub fn url(self) -> String {
@@ -593,6 +640,7 @@ impl Instance {
             var to = p.to.copy()
             to.send(Out.Stop)
         }
+        i.phones_off()
         i.server.shutdown()
     }
 
@@ -3186,7 +3234,25 @@ impl Instance {
             let code = bytes.hex(random_bytes(16))
             let expires = now() + LINK_MS
             try i.store.add_link_code(bytes.hex(sha256(code.to_bytes())), user, device, expires, now())
-            return Answer.Value(Obj.new().s("code", code).i("expires", expires).s("instance", try i.store.meta("instance") ?? String()).s("key", try i.public_key()).done())
+            var value = Obj.new().s("code", code).i("expires", expires).s("instance", try i.store.meta("instance") ?? String()).s("key", try i.public_key())
+            // A phone reaches an instance in the desktop app over Noise.
+            if i.bridge != none { value = value.j("noise", try i.phones()) }
+            return Answer.Value(value.done())
+        }
+        if name == "instance.phones" {
+            if try i.store.role(user.copy()) != some(String("owner")) { return Answer.Refused(String("not_allowed"), String("Only the instance's owner lets phones reach it.")) }
+            if not device.starts_with("d_") { return Answer.Refused(String("forbidden"), String("Only the person, on one of their devices, lets phones reach the instance.")) }
+            if not i.lan { return Answer.Refused(String("not_here"), String("Phones reach an instance on a server at its own address. This is for an instance in the desktop app.")) }
+            if let on = bool_at(args, "on") {
+                if on {
+                    try i.phones_on()
+                    try i.store.set_meta("phones", String("on"))
+                } else {
+                    i.phones_off()
+                    try i.store.set_meta("phones", String("off"))
+                }
+            }
+            return Answer.Value(try i.phones())
         }
         if name == "push.register" or name == "push.unregister" {
             // A phone hands over its own APNs token, never another device's, and never an agent.

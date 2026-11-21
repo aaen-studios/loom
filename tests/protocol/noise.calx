@@ -1,0 +1,202 @@
+module tests.protocol.noise
+
+// A phone reaching an instance in the desktop app (protocol/protocol.md, "Over
+// Noise"). The owner turns phones on, and the instance listens on the network
+// too, where it takes only /ws/noise: plain HTTP and a plain /ws there are
+// refused. A phone with the Noise key from link.create joins with the QR
+// code's one-time code, says hello, and sends and fetches a file bigger than
+// one Noise message, all through the one socket. A handshake against another
+// key goes nowhere. Phones stay on across a restart, on the same port with the
+// same key, and turning them off closes the phone's socket.
+//
+//     calx tests/protocol/noise.calx
+import std.bytes
+import std.crypto.{NoiseTransport, X25519Key, X25519PublicKey}
+import std.http.{get}
+import std.http.websocket
+import std.http.websocket.{Message, WebSocket, connect}
+import std.json.{Json, parse}
+import std.process.{exit}
+import shared.noise
+import shared.noise.{Joiner, Opened}
+import shared.obj.{Obj, at, bool_at, int_at, str_at}
+import tests.kit.{App, Instance, check, device, json_of}
+
+// A phone's side of /ws/noise.
+struct Phone {
+    ws: WebSocket
+    t: NoiseTransport
+    j: Joiner
+    next_id: i64
+}
+
+impl Phone {
+    fn connect(port: i64, key: String) -> Phone ! Error {
+        let raw = bytes.from_base64(key) else { fail "the Noise key isn't base64" }
+        let public = X25519PublicKey.from_bytes(raw) else { fail "the Noise key isn't 32 bytes" }
+        var h = noise.initiator(public)
+        let ws = try connect("ws://127.0.0.1:{port}{noise.PATH}")
+        try ws.send_binary(try h.write_message([]))
+        let m = try ws.receive(30000) else { fail "the instance didn't answer the handshake" }
+        let Message.Binary(reply) = m else { fail "the handshake's answer wasn't binary" }
+        _ = try h.read_message(reply)
+        return Phone { ws: ws, t: h.transport(), j: Joiner.new(), next_id: 1 }
+    }
+
+    fn put(p: mut Phone, message: List<u8>) ! Error {
+        for piece in noise.seal(mut p.t, message) {
+            try p.ws.send_binary(piece)
+        }
+    }
+
+    // The next whole message from the instance.
+    fn next(p: mut Phone) -> List<u8> ! Error {
+        loop {
+            let m = try p.ws.receive(30000) else { fail "nothing came in 30 s" }
+            let Message.Binary(sealed) = m else { fail "a text message came over Noise" }
+            match p.j.take(mut p.t, sealed) {
+                Opened.Whole(w) => return w,
+                Opened.More => {},
+                Opened.Bad => fail "a message from the instance didn't open",
+            }
+        }
+    }
+
+    fn send(p: mut Phone, frame: Json) ! Error {
+        try p.put(noise.frame("{frame}"))
+    }
+
+    // The next frame whose `t` is `t`, passing over others.
+    fn until(p: mut Phone, t: str) -> Json ! Error {
+        loop {
+            let m = try p.next()
+            if m[0] != noise.FRAME { continue }
+            let f = try parse(String.from_utf8(m[1..].copy()) ?? String())
+            if str_at(f.copy(), "t") == some(String(t)) { return f }
+        }
+    }
+
+    // An HTTP request through the socket: the status, the head and the body.
+    fn request(p: mut Phone, method: str, path: String, headers: Json, body: List<u8>) -> (i64, Json, List<u8>) ! Error {
+        let id = p.next_id
+        p.next_id += 1
+        try p.put(noise.with_head(noise.REQUEST, Obj.new().i("id", id).s("method", String(method)).s("path", path).j("headers", headers).done(), body))
+        loop {
+            let m = try p.next()
+            if m[0] != noise.RESPONSE { continue }
+            let (head, got) = noise.head_of(m) else { fail "a response without a head" }
+            if int_at(head.copy(), "id") == some(id) { return (int_at(head.copy(), "status") ?? 0, head, got) }
+        }
+    }
+}
+
+fn json_headers() -> Json {
+    return Obj.new().s("Content-Type", String("application/json")).done()
+}
+
+fn phones(app: mut App, id: str, on: bool) -> Json ! Error {
+    let r = try app.cmd(id, "instance.phones", Obj.new().b("on", on).done())
+    if bool_at(r.copy(), "ok") != some(true) { fail "instance.phones: {r}" }
+    return at(r, "value")
+}
+
+fn run() ! Error {
+    var inst = try Instance.start_with([String("--lan")])
+    var app = try App.connect(inst.base.copy(), inst.token.copy(), 0)
+
+    // Off until the owner turns phones on.
+    let link0 = try app.cmd("q_1", "link.create", Obj.new().done())
+    try check(at(at(link0, "value"), "noise") == Json.Null, "link.create says nothing of Noise while phones are off")
+    let on = try phones(mut app, "q_2", true)
+    let port = int_at(on.copy(), "port") ?? 0
+    let key = str_at(on.copy(), "key") ?? String()
+    try check(bool_at(on.copy(), "on") == some(true) and port > 0 and key.len() == 44, "instance.phones turns them on, with a port and a key")
+    let link = at(try app.cmd("q_3", "link.create", Obj.new().done()), "value")
+    try check(str_at(at(link.copy(), "noise"), "key") == some(key.copy()) and int_at(at(link.copy(), "noise"), "port") == some(port), "link.create gives the Noise key and port")
+    let code = str_at(link, "code") ?? String()
+
+    // Plain HTTP and a plain /ws on the network port are refused.
+    var plain = get("http://127.0.0.1:{port}/api/info", [], 30000, 1048576)
+    let answer = try plain.wait()
+    try check(answer.status == 404 and str_at(at(json_of(answer.body), "error"), "code") == some(String("noise_only")), "plain HTTP on the network port gets noise_only")
+    match connect("ws://127.0.0.1:{port}/ws") {
+        ok(ws) => {
+            ws.close()
+            fail "a plain /ws on the network port opened"
+        },
+        err(websocket.Error.Refused(404)) => try check(true, "a plain /ws on the network port is refused"),
+        err(e) => fail "a plain /ws on the network port ended with {e}",
+    }
+
+    // A handshake against another key goes nowhere.
+    let stranger = X25519Key.generate()
+    match Phone.connect(port, bytes.base64(stranger.public_key().bytes())) {
+        ok(_) => fail "a handshake against another key finished",
+        err(_) => try check(true, "a handshake against another key fails"),
+    }
+
+    // The phone joins, says hello, and sends and fetches a file, all through the socket.
+    var phone = try Phone.connect(port, key.copy())
+    let (status, _, joined) = try phone.request("POST", String("/api/link"), json_headers(), "{Obj.new().s("code", code).j("device", device("iPhone")).done()}".to_bytes())
+    let token = str_at(json_of(joined.copy()), "token") ?? String()
+    try check(status == 200 and token.len() > 0, "the phone joins with the QR code's code, over Noise")
+    try phone.send(Obj.new().s("t", String("hello")).s("token", token.copy()).j("versions", Json.Array([Json.Int(1)])).i("after", 0).done())
+    let welcome = try phone.until("welcome")
+    try check(str_at(welcome, "device") != none, "the phone is welcomed over Noise")
+    _ = try phone.until("synced")
+    try check(true, "and synced")
+    var big = List<u8>()
+    for n in 0..300000 { big.push(u8.wrap(n * 7)) }
+    let auth = Obj.new().s("Authorization", "Bearer {token}").s("Content-Type", String("application/octet-stream")).done()
+    let (up, _, up_body) = try phone.request("POST", String("/files?name=big.bin"), auth.copy(), big.copy())
+    let sha = str_at(json_of(up_body), "file") ?? String()
+    try check(up == 200 and sha.len() == 64, "a file bigger than one Noise message goes up")
+    let (down, head, got) = try phone.request("GET", "/files/{sha}", Obj.new().s("Authorization", "Bearer {token}").done(), List<u8>())
+    try check(down == 200 and got == big, "and comes back the same")
+    try check(str_at(at(head, "headers"), "Content-Type") != none, "with its type")
+    let (ws_status, _, _) = try phone.request("GET", String("/ws"), Obj.new().done(), List<u8>())
+    try check(ws_status == 400, "a request through Noise can't reach /ws")
+    // A frame the session answers, through the bridge both ways.
+    try phone.send(Obj.new().s("t", String("cmd")).s("id", String("q_9")).s("name", String("conversation.create")).j("args", Obj.new().s("agent", String("a_none")).done()).done())
+    let result = try phone.until("result")
+    try check(str_at(result, "id") == some(String("q_9")), "a command's result comes back over Noise")
+
+    // Phones stay on across a restart, on the same port with the same key.
+    app.close()
+    phone.ws.close()
+    inst = try inst.restart_with([String("--lan")], 0)
+    var again = try App.connect(inst.base.copy(), inst.token.copy(), 0)
+    let still = at(try again.cmd("q_4", "instance.phones", Obj.new().done()), "value")
+    try check(bool_at(still.copy(), "on") == some(true) and int_at(still.copy(), "port") == some(port) and str_at(still, "key") == some(key.copy()), "phones stay on across a restart, on the same port with the same key")
+    var back = try Phone.connect(port, key.copy())
+    try back.send(Obj.new().s("t", String("hello")).s("token", token).j("versions", Json.Array([Json.Int(1)])).i("after", 0).done())
+    _ = try back.until("synced")
+    try check(true, "the phone's token works after the restart")
+
+    // Turning phones off closes the phone's socket.
+    _ = try phones(mut again, "q_5", false)
+    var closed = false
+    loop {
+        match back.ws.receive(30000) {
+            ok(some(_)) => {},
+            ok(none) => break,
+            err(_) => {
+                closed = true
+                break
+            },
+        }
+    }
+    try check(closed, "turning phones off closes the phone's socket")
+    again.close()
+    inst.stop()
+}
+
+fn main() {
+    match run() {
+        ok => println("noise: all good"),
+        err(e) => {
+            eprintln("noise: {e}")
+            exit(1)
+        },
+    }
+}

@@ -166,6 +166,7 @@ The QR code holds the instance's id and public key, the addresses to reach it, a
 - **On the same Wi-Fi**, directly. If the PC's address changes, the phone finds it again with mDNS.
 - **Away from home**, through Tailscale, which people set up themselves. Loom passes no traffic through a server of its own (the only relay it has is the [opt-in one for push](#the-push-relay-opt-in)). A home PC sits behind the router, so a phone on mobile data can't reach it on its own. Tailscale puts the PC and the phone on one private network. Loom sees the PC's Tailscale address (a `100.x` address, or a `….ts.net` name) and puts it in the QR code beside the Wi-Fi one, so the phone tries Wi-Fi first and Tailscale next. Any other VPN works the same way.
 - **Encrypted end to end** either way, with a Noise handshake against the key from the QR code. Tailscale encrypts too, but loom doesn't count on it, and on Wi-Fi nothing else does.
+- **Only once phones are on.** The instance in the app listens on 127.0.0.1 alone until the person turns phones on. Then a bridge listens on the network too, on a port it keeps, and takes nothing but the encrypted socket, which carries the phone's HTTP requests as well as its session ([protocol.md: Over Noise](protocol/protocol.md#over-noise)).
 
 ## Agents
 
