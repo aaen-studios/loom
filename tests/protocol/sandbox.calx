@@ -16,7 +16,7 @@ import std.env
 import std.fs
 import std.json.{Json}
 import std.process.{Command, exit}
-import shared.obj.{Obj, at, str_at}
+import shared.obj.{Obj, at, int_at, str_at}
 import tests.kit.{App, Instance, calx, check, loom, reply_text}
 
 const IMAGE: str = "localhost/loom-sandbox-test"
@@ -99,6 +99,23 @@ fn run() ! Error {
     try check(said.contains("remember"), "loom's tools reach it through the gate")
     try check(file_blocks(reply) == 1, "a file it links to is read in its sandbox: its AGENTS.md, but not the instance's database")
     try check(fs.exists("{home}/agents/{agent}/AGENTS.md") and not fs.exists("{data}/AGENTS.md"), "its instructions are in her folder, not the one it named")
+
+    // Budgets: the owner shares the program's settings, 100 tokens a day each.
+    let shared = try owner.cmd("q_4", "acp.share", Obj.new().s("name", String("boxed")).i("tokens", 100).s("per", String("day")).done())
+    try check(int_at(at(at(at(shared, "value"), "program"), "share"), "tokens") == some(100), "the owner shares a program's settings, with a budget")
+    try ann.send(Obj.new().s("t", String("send")).s("cid", String("m_2")).s("conversation", chat.copy()).s("text", String("/env OWNER_KEY\n/tokens 150")).done())
+    let on_shared = reply_text(try ann.reply())
+    try check(on_shared.contains("OWNER_KEY=the owner's own"), "a member's agent then gets the shared settings")
+    _ = try ann.until("event", "run.finished")
+    let listed = "{try ann.cmd("q_4", "acp.list", Obj.new().done())}"
+    try check(listed.contains("\"left\":0"), "acp.list says what's left of her budget")
+    try ann.send(Obj.new().s("t", String("send")).s("cid", String("m_3")).s("conversation", chat.copy()).s("text", String("hello")).done())
+    let over = try ann.until("event", "run.finished")
+    try check(str_at(over, "status") == some(String("limit")), "past it, her runs stop at the limit")
+    _ = try ann.cmd("q_5", "secret.put", Obj.new().s("name", String("OWNER_KEY")).s("value", String("her own")).done())
+    try ann.send(Obj.new().s("t", String("send")).s("cid", String("m_4")).s("conversation", chat.copy()).s("text", String("/env OWNER_KEY")).done())
+    let own_key = reply_text(try ann.reply())
+    try check(own_key.contains("OWNER_KEY=her own"), "with a key of her own, she's past no budget, and her key wins")
 
     _ = try owner.cmd("q_3", "user.remove", Obj.new().s("user", ann_id.copy()).done())
     let there = try Command.new(String("podman")).args([String("container"), String("exists"), "loom-{ann_id}"]).output()

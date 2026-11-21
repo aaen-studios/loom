@@ -18,7 +18,7 @@ import std.process
 import std.process.{current_exe}
 import std.signal
 import std.text.utf8.{decode_lossy_unicode}
-import std.time.{Timestamp}
+import std.time.{DateTime, Timestamp}
 import std.url
 import shared.obj.{Obj, at, bool_at, int_at, merge, str_at}
 import shared.protocol
@@ -115,6 +115,7 @@ struct Run {
     tools: LinkedMap<String, String>    // ACP toolCallId -> tc_ id
     denied: List<String>
     from: String    // where the person is writing from, as the agent is told it
+    usage: Json    // the tokens the turn used, as its program reported them: input, output and total
 }
 
 struct Approval {
@@ -151,6 +152,7 @@ struct Proc {
     load: bool    // whether it offers session/load
     mcp_http: bool    // whether it connects to MCP servers over HTTP itself
     boxed: bool    // whether it runs in its person's sandbox
+    shared: bool    // whether it runs on the program's settings the owner shared, under a budget
     next_id: i64
     pending: Map<i64, Pending>
     sessions: Map<String, String>    // conversation -> ACP session
@@ -539,6 +541,62 @@ impl Instance {
             return "{i.data}/sandboxes/{user}/agents/{id}"
         }
         return str_at(agent, "folder") ?? "{i.data}/agents/{id}"
+    }
+
+    // --- Budgets (PLAN.md, "Agents and keys") ---
+
+    // The budget `user`'s agents on `program` run under: the owner shares its
+    // settings with everyone else, and the person hasn't their own secret for
+    // each of them. none for the owner, an unshared program, or a person who
+    // brings every key themselves.
+    fn share_for(i: Instance, user: String, program: String) -> (i64, String)? ! Error {
+        if not i.sandboxed(user.copy()) { return none }
+        let share = try i.store.share(program.copy()) else return none
+        let a = try i.store.acp_agent(program) else return none
+        var theirs = List<String>()
+        for s in try i.store.secret_names(user) {
+            theirs.push(str_at(s, "name") ?? String())
+        }
+        var needed = false
+        if let Json.Object(m) = a.env {
+            for (k, _) in m {
+                if not theirs.contains(k.copy()) { needed = true }
+            }
+        }
+        if not needed { return none }
+        return some(share)
+    }
+
+    // A program as acp.list gives it, with its share: to the owner, the budget;
+    // to anyone it applies to, what's left of theirs too.
+    fn program_shared(i: Instance, user: String, a: AcpAgent) -> Json ! Error {
+        let name = a.name.copy()
+        var out = program_json(a)
+        let (tokens, per) = try i.store.share(name.copy()) else return out
+        var share = Obj.new().i("tokens", tokens).s("per", per)
+        if let (left, _) = try i.budget_left(user, name) { share = share.i("left", if left < 0 { 0 } else { left }) }
+        if let Json.Object(m) = mut out { m.insert(String("share"), share.done()) }
+        return out
+    }
+
+    // The tokens `user` has used of `program`'s budget since it last began again.
+    fn budget_left(i: Instance, user: String, program: String) -> (i64, String)? ! Error {
+        let (tokens, per) = try i.share_for(user.copy(), program.copy()) else return none
+        let used = try i.store.shared_used(user, program, period_start(per.copy(), now()))
+        return some((tokens - used, per))
+    }
+
+    // A finished turn's tokens, as its program reported them (ACP's `usage`),
+    // kept for the person and on the run.
+    fn used(i: mut Instance, p: Proc, run: String, usage: Json) {
+        if usage == Json.Null { return }
+        let input = int_at(usage.copy(), "inputTokens") ?? 0
+        let output = int_at(usage.copy(), "outputTokens") ?? 0
+        let total = int_at(usage, "totalTokens") ?? (input + output)
+        if let r = mut i.runs.find(run.copy()) {
+            r.usage = Obj.new().i("input", input).i("output", output).i("total", total).done()
+        }
+        if let err(e) = i.store.add_usage(p.user.copy(), p.program.copy(), run, input, output, total, p.shared) { eprintln("loom: usage: {e}") }
     }
 
     // Writing in an agent's folder: through the person's sandbox when they have
@@ -2379,10 +2437,18 @@ impl Instance {
         let agent = try i.store.agent(user.copy(), agent_id.copy())
         let revision = int_at(agent.copy() ?? Json.Null, "revision") ?? 0
         try i.event(user.copy(), "run.started", Obj.new().s("run", run_id.copy()).s("conversation", conversation_id.copy()).s("agent", agent_id.copy()).i("revision", revision).s("message", reply.copy()).s("answering", answering.copy()).done())
-        i.runs.insert(run_id.copy(), Run { id: run_id.copy(), user: user.copy(), conversation: conversation_id, agent: agent_id.copy(), message: reply, answering: answering.copy(), prompt: text.copy(), files: sent_files.copy(), session: String(), blocks: List<Block>(), tools: LinkedMap<String, String>(), denied: List<String>(), from: from.copy() })
+        i.runs.insert(run_id.copy(), Run { id: run_id.copy(), user: user.copy(), conversation: conversation_id, agent: agent_id.copy(), message: reply, answering: answering.copy(), prompt: text.copy(), files: sent_files.copy(), session: String(), blocks: List<Block>(), tools: LinkedMap<String, String>(), denied: List<String>(), from: from.copy(), usage: Json.Null })
         let a = agent else {
             try i.finish(run_id, String("failed"), some(String("The conversation's agent was deleted.")))
             return
+        }
+        // A person past their budget on the owner's shared settings waits for it to begin again.
+        if let (left, per) = try i.budget_left(user.copy(), str_at(a.copy(), "acp_agent") ?? String()) {
+            if left <= 0 {
+                let when = if per == "month" { "this month" } else { "today" }
+                try i.finish(run_id, String("limit"), some("The tokens the owner shares for this agent program are used up {when}. Add your own key as a secret, or wait."))
+                return
+            }
         }
         if not i.procs.contains(agent_id.copy()) {
             match i.start_proc(user, a) {
@@ -2413,6 +2479,7 @@ impl Instance {
         // "Sandboxes"). Anyone else's would reach everyone's data and the owner's
         // keys, so theirs run in their sandbox, with their own secrets for settings.
         let boxed = i.sandboxed(user.copy())
+        let shared = try i.share_for(user.copy(), program.copy()) != none
         var command = acp_agent.command.copy()
         var args = acp_agent.args.copy()
         var settings = acp_agent.env.copy()
@@ -2421,14 +2488,25 @@ impl Instance {
                 fail "Agents of people other than the owner run in their own sandbox, and this instance has none: the owner starts it with --sandboxes podman"
             }
             try b.ready(user.copy())
+            // The program's settings when the owner shares them, under the person's
+            // own secrets of the same names, which always win.
             var theirs = Obj.new()
             var names = List<String>()
+            if shared {
+                if let Json.Object(m) = acp_agent.env.copy() {
+                    for (k, v) in m {
+                        if not env_name(k.copy()) { continue }
+                        theirs.m.insert(k.copy(), v.copy())
+                        names.push(k.copy())
+                    }
+                }
+            }
             for s in try i.store.secret_names(user.copy()) {
                 let n = str_at(s, "name") ?? String()
                 if not env_name(n.copy()) { continue }
                 if let v = try i.secret(user.copy(), n.copy()) {
                     theirs.m.insert(n.copy(), Json.Str(v))
-                    names.push(n)
+                    if not names.contains(n.copy()) { names.push(n) }
                 }
             }
             settings = theirs.done()
@@ -2444,7 +2522,7 @@ impl Instance {
         }
         i.write_skills(user.copy(), folder.copy())
         let to = try acp.start(id.copy(), command, args, settings, folder, i.lines_to.copy())
-        var p = Proc { agent: id.copy(), user: user.copy(), to: to, ready: false, images: false, program: program, resume: false, load: false, mcp_http: false, boxed: boxed, next_id: 1, pending: Map<i64, Pending>(), sessions: Map<String, String>(), told: Map<String, String>(), profiled: Map<String, i64>(), waiting: List<String>() }
+        var p = Proc { agent: id.copy(), user: user.copy(), to: to, ready: false, images: false, program: program, resume: false, load: false, mcp_http: false, boxed: boxed, shared: shared, next_id: 1, pending: Map<i64, Pending>(), sessions: Map<String, String>(), told: Map<String, String>(), profiled: Map<String, i64>(), waiting: List<String>() }
         p.pending.insert(1, Pending.Init)
         p.to.send(Out.Send(acp.request(1, "initialize", acp.initialize_params())))
         i.procs.insert(id, p)
@@ -2756,6 +2834,7 @@ impl Instance {
                     try i.finish(run, String("failed"), some(str_at(e, "message") ?? String("The agent failed.")))
                     return
                 }
+                i.used(p, run.copy(), at(result.copy(), "usage"))
                 try i.finish(run, acp.status_of(str_at(result, "stopReason") ?? String()), none)
             },
         }
@@ -3293,7 +3372,9 @@ impl Instance {
             let body = if status == "failed" { "It couldn't answer: {error.copy() ?? String("it stopped")}" } else if said.trim().len() == 0 { String("Done.") } else { cut_short(said, 300) }
             i.push_reply(r.user.copy(), r.agent.copy(), r.conversation.copy(), r.message.copy(), body)
         }
-        try i.event(r.user.copy(), "run.finished", Obj.new().s("run", r.id.copy()).s("status", status).maybe("error", error).done())
+        var finished = Obj.new().s("run", r.id.copy()).s("status", status).maybe("error", error)
+        if r.usage != Json.Null { finished = finished.j("usage", r.usage.copy()) }
+        try i.event(r.user.copy(), "run.finished", finished.done())
     }
 
     // --- Commands ---
@@ -3451,6 +3532,27 @@ impl Instance {
     // Stops the agents that run `program` and aren't answering anyone, so
     // the next message starts it again, new or with new settings. One that's
     // answering keeps the old until it next starts.
+    // A sandboxed person's secrets are their agent programs' settings: once one
+    // changes, their agents that aren't answering start again with it at their next message.
+    fn stop_idle_of(i: mut Instance, user: String) {
+        if not i.sandboxed(user.copy()) { return }
+        var idle = List<String>()
+        for (agent, p) in i.procs {
+            if p.user != user { continue }
+            var busy = false
+            for (_, r) in i.runs {
+                if r.agent == agent { busy = true }
+            }
+            if not busy { idle.push(agent.copy()) }
+        }
+        for agent in idle {
+            if let p = i.procs.remove(agent) {
+                var to = p.to.copy()
+                to.send(Out.Stop)
+            }
+        }
+    }
+
     fn stop_program(i: mut Instance, program: String) {
         var idle = List<String>()
         for (agent, p) in i.procs {
@@ -3634,12 +3736,14 @@ impl Instance {
             if value.len() == 0 { return Answer.Refused(String("bad_request"), String("The secret is empty.")) }
             let nonce = random_bytes(24)
             let sealed = i.sealer.encrypt(nonce.copy(), value.to_bytes(), secret_aad(user.copy(), secret_name.copy()))
-            try i.store.put_secret(user, secret_name.copy(), bytes.hex(nonce), bytes.hex(sealed))
+            try i.store.put_secret(user.copy(), secret_name.copy(), bytes.hex(nonce), bytes.hex(sealed))
+            i.stop_idle_of(user)
             return Answer.Value(Obj.new().s("name", secret_name).done())
         }
         if name == "secret.delete" {
             let secret_name = str_at(args, "name") ?? String()
-            if not try i.store.delete_secret(user, secret_name.copy()) { return Answer.Refused(String("not_found"), "There's no secret {secret_name}.") }
+            if not try i.store.delete_secret(user.copy(), secret_name.copy()) { return Answer.Refused(String("not_found"), "There's no secret {secret_name}.") }
+            i.stop_idle_of(user)
             return Answer.Value(empty)
         }
         if name == "mcp.list" {
@@ -3758,9 +3862,23 @@ impl Instance {
             // The agent programs installed on the instance, for picking one when an agent is made.
             var programs = List<Json>()
             for a in try i.store.acp_agents() {
-                programs.push(program_json(a))
+                programs.push(try i.program_shared(user.copy(), a))
             }
             return Answer.Value(Obj.new().j("programs", Json.Array(programs)).done())
+        }
+        if name == "acp.share" {
+            if try i.store.role(user.copy()) != some(String("owner")) { return Answer.Refused(String("not_allowed"), String("Only the instance's owner shares an agent program's settings.")) }
+            let program_name = str_at(args.copy(), "name") ?? String()
+            if try i.store.acp_agent(program_name.copy()) == none { return Answer.Refused(String("not_found"), "There's no ACP agent {program_name}.") }
+            let tokens = int_at(args.copy(), "tokens") ?? 0
+            let per = str_at(args, "per") ?? String("day")
+            if per != "day" and per != "month" { return Answer.Refused(String("bad_request"), String("per is day or month.")) }
+            if tokens < 0 { return Answer.Refused(String("bad_request"), String("tokens is a number of tokens, or 0 to stop sharing.")) }
+            try i.store.set_share(program_name.copy(), tokens, per)
+            // Agents already running keep the settings they started with until they start again.
+            i.stop_program(program_name.copy())
+            let a = try i.store.acp_agent(program_name) else return Answer.Value(empty)
+            return Answer.Value(Obj.new().j("program", try i.program_shared(user, a)).done())
         }
         if name == "acp.settings" or name == "acp.remove" {
             if try i.store.role(user.copy()) != some(String("owner")) { return Answer.Refused(String("not_allowed"), String("Only the instance's owner changes ACP agents.")) }
@@ -3811,6 +3929,14 @@ impl Instance {
         }
         return Answer.Refused(String("unknown_command"), "Version 1 has no command {name}.")
     }
+}
+
+// When the budget period `per` (day or month) holding `moment` began, in UTC.
+fn period_start(per: String, moment: i64) -> i64 {
+    let d = Timestamp { unix_ms: moment }.date_time(0)
+    let day = if per == "month" { 1 } else { d.day }
+    let start = DateTime.new(d.year, d.month, day) else return moment
+    return start.timestamp(0).unix_ms
 }
 
 // Whether `name` can be an environment variable's name: letters, digits and _,
@@ -3884,4 +4010,13 @@ fn cut_short(text: String, most: usize) -> String {
         cut.push(if r == '\n' { ' ' } else { r })
     }
     return cut
+}
+
+@test
+fn a_budget_begins_again_each_day_or_month() {
+    let at_noon = (DateTime.new(2026, 11, 21, 13, 5) ?? panic("no date")).timestamp(0).unix_ms
+    let day = (DateTime.new(2026, 11, 21) ?? panic("no date")).timestamp(0).unix_ms
+    let month = (DateTime.new(2026, 11, 1) ?? panic("no date")).timestamp(0).unix_ms
+    assert(period_start(String("day"), at_noon) == day)
+    assert(period_start(String("month"), at_noon) == month)
 }

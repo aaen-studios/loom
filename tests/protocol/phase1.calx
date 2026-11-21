@@ -222,6 +222,10 @@ fn run(server: Child, data: String) ! Error {
     try check(count == 2 and back.seq == before, "and makes no message and no event")
 
     // --- An approval ---
+    // What a turn used, as its program reports it.
+    try back.send(Obj.new().s("t", String("send")).s("cid", String("m_tokens")).s("conversation", conversation.copy()).s("text", String("/tokens 41\ncounted")).done())
+    let counted = try back.until("event", "run.finished")
+    try check(int_at(at(counted, "usage"), "total") == some(41) and int_at(at(counted, "usage"), "input") == some(20), "run.finished says the tokens the turn used")
     try back.send(Obj.new().s("t", String("send")).s("cid", String("m_2")).s("conversation", conversation.copy()).s("text", String("/ask rm -rf build\ndone")).done())
     let needed = try back.until("event", "approval.needed")
     let call = str_at(needed.copy(), "call") ?? String()

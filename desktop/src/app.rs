@@ -162,6 +162,9 @@ pub struct Loom {
     program_open: Option<String>,
     set_key_in: Entity<InputState>,
     set_value_in: Entity<InputState>,
+    /// The open program's share: tokens each person may use, and whether each month.
+    share_in: Entity<InputState>,
+    share_month: bool,
     instructions_in: Entity<TextareaState>,
     search_in: Entity<InputState>,
     program: Option<String>,
@@ -262,6 +265,7 @@ ACTA_KEY=secret:ACTA_KEY",
             )
         });
         let set_value_in = input(window, cx, "Its value", true);
+        let share_in = input(window, cx, "Tokens for each person", false);
         let skill_desc_in = input(window, cx, "When it's for, in one sentence", false);
         let skill_body_in = cx.new(|cx| {
             TextareaState::new(window, cx)
@@ -419,6 +423,8 @@ ACTA_KEY=secret:ACTA_KEY",
             mcp_settings_in,
             set_key_in,
             set_value_in,
+            share_in,
+            share_month: false,
             instructions_in,
             search_in,
             program: None,
@@ -3854,10 +3860,11 @@ ACTA_KEY=secret:ACTA_KEY",
                                 )
                                 .child(caption(what)),
                         )
-                        .child(caption(match prog.settings.len() {
-                            0 => "No settings".to_string(),
-                            1 => "1 setting".to_string(),
-                            n => format!("{n} settings"),
+                        .child(caption(match (&prog.share, prog.settings.len()) {
+                            (Some(sh), _) => share_words(sh),
+                            (None, 0) => "No settings".to_string(),
+                            (None, 1) => "1 setting".to_string(),
+                            (None, n) => format!("{n} settings"),
                         }))
                         .on_click(cx.listener(move |this, _, window, cx| {
                             this.program_open =
@@ -3950,6 +3957,58 @@ ACTA_KEY=secret:ACTA_KEY",
                             cx.notify();
                         })),
                 );
+                // Sharing the settings with everyone else, a number of tokens each.
+                let month = self.share_month;
+                let program = prog.name.clone();
+                let mut sharing = div()
+                    .flex()
+                    .items_center()
+                    .gap(px(space::S))
+                    .child(div().w(px(180.0)).child(Input::new(&self.share_in)))
+                    .child(
+                        self.button_owned(format!("share-day-{}", prog.name), "a day", !month)
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.share_month = false;
+                                cx.notify();
+                            })),
+                    )
+                    .child(
+                        self.button_owned(format!("share-month-{}", prog.name), "a month", month)
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.share_month = true;
+                                cx.notify();
+                            })),
+                    )
+                    .child(
+                        self.button_owned(format!("share-{}", prog.name), "Share", false)
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                let given = this.share_in.read(cx).value().replace([',', ' '], "");
+                                let Ok(tokens) = given.parse::<i64>() else {
+                                    this.model.notices.push(
+                                        "Give the tokens each person may use, as a number.".into(),
+                                    );
+                                    cx.notify();
+                                    return;
+                                };
+                                let per = if this.share_month { "month" } else { "day" };
+                                let f = this.model.share_program(&program, tokens, per);
+                                this.send(f);
+                                this.share_in
+                                    .update(cx, |s, cx| s.set_value("", window, cx));
+                                cx.notify();
+                            })),
+                    );
+                if prog.share.is_some() {
+                    let program = prog.name.clone();
+                    sharing = sharing.child(
+                        self.button_owned(format!("unshare-{}", prog.name), "Stop sharing", false)
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                let f = this.model.share_program(&program, 0, "day");
+                                this.send(f);
+                                cx.notify();
+                            })),
+                    );
+                }
                 row = row
                     .bg(p.hover)
                     .child(caption(
@@ -3963,7 +4022,11 @@ ACTA_KEY=secret:ACTA_KEY",
                             .child(div().flex_1().child(Input::new(&self.set_key_in)))
                             .child(div().flex_1().child(Input::new(&self.set_value_in))),
                     )
-                    .child(buttons);
+                    .child(buttons)
+                    .child(caption(
+                        "Share these settings with the people you've invited, a number of tokens each. Anyone who adds their own key as a secret uses theirs instead.".into(),
+                    ))
+                    .child(sharing);
             }
             mine = mine.child(row);
         }
@@ -4874,6 +4937,37 @@ impl Render for Loom {
                 .child(main)
                 .when_some(menu, |d, m| d.child(m)),
         )
+    }
+}
+
+/// A program's share, in words: what each person gets, and what's left of the
+/// reader's own, when it applies to them.
+fn share_words(sh: &model::Share) -> String {
+    let per = if sh.per == "month" { "month" } else { "day" };
+    match sh.left {
+        Some(left) => format!(
+            "Shared: {} of {} tokens left this {per}",
+            thousands(left),
+            thousands(sh.tokens)
+        ),
+        None => format!("Shared: {} tokens a {per} each", thousands(sh.tokens)),
+    }
+}
+
+/// 12345 as 12,345.
+fn thousands(n: i64) -> String {
+    let digits = n.unsigned_abs().to_string();
+    let mut out = String::new();
+    for (i, c) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(c);
+    }
+    if n < 0 {
+        format!("-{out}")
+    } else {
+        out
     }
 }
 

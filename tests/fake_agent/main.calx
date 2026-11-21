@@ -17,6 +17,7 @@ module tests.fake_agent.main
 //     /slow MS            waits MS between chunks from here on
 //     /sleep MS           waits MS, or until the turn is cancelled
 //     /stop REASON        ends the turn with that stopReason (max_tokens, ...)
+//     /tokens N           reports the turn used N tokens (ACP's usage: half input, half output)
 //     /fail MESSAGE       answers session/prompt with an error
 //     /crash              exits with status 3 in the middle of the turn
 //     /files              says what files came with the prompt: "image MIME"
@@ -82,6 +83,7 @@ pub enum Step {
     Slow(u64)
     Sleep(u64)
     Stop(String)
+    Tokens(i64)
     Fail(String)
     Crash
     Files
@@ -126,6 +128,8 @@ pub fn script(text: String) -> List<Step> {
             steps.push(Step.Slow(u64.parse(rest) ?? 0))
         } else if word == "/sleep" {
             steps.push(Step.Sleep(u64.parse(rest) ?? 0))
+        } else if word == "/tokens" {
+            steps.push(Step.Tokens(i64.parse(rest) ?? 0))
         } else if word == "/stop" {
             steps.push(Step.Stop(if rest.len() == 0 { String("end_turn") } else { rest }))
         } else if word == "/fail" {
@@ -490,6 +494,7 @@ impl Agent {
         }
         var slow: u64 = 0
         var reason = String("end_turn")
+        var tokens: i64 = 0
         for step in script(text) {
             match step {
                 Step.Say(s) => {
@@ -537,6 +542,7 @@ impl Agent {
                     if a.idle(ms) { reason = String("cancelled") }
                 },
                 Step.Stop(r) => reason = r.copy(),
+                Step.Tokens(n) => tokens = n,
                 Step.Fail(message) => {
                     respond_error(id, -32603, message)
                     return
@@ -577,6 +583,13 @@ impl Agent {
         }
         var r = LinkedMap<String, Json>()
         r.insert("stopReason", js(reason))
+        if tokens > 0 {
+            var usage = LinkedMap<String, Json>()
+            usage.insert("inputTokens", int(tokens / 2))
+            usage.insert("outputTokens", int(tokens - tokens / 2))
+            usage.insert("totalTokens", int(tokens))
+            r.insert("usage", Json.Object(usage))
+        }
         respond(id, Json.Object(r))
     }
 
