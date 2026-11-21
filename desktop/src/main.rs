@@ -11,6 +11,7 @@ mod model;
 mod panel;
 mod panel_test;
 mod shell;
+mod smooth;
 mod thread;
 #[path = "../../design/generated/tokens.rs"]
 #[allow(dead_code)]

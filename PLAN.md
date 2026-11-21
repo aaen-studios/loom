@@ -33,6 +33,7 @@ Not decided here, and nothing from v0.1 or elsewhere is assumed. The only techni
 - **Settings look like settings**, as the system settings of macOS, iOS and Windows do: a page's title with its one action beside it, then groups, each a box of rows with what a row is on the left and its control on the right (a switch, a choice of a few, a button), and one short line under it at most. A page with nothing on it yet says what would be there in a line, with the way to make the first. Corners are boxy but soft, from the tokens.
 - **The window is loom's own** to its edges: its minimise, maximise and close are loom's, drawn in its style, and act as the system's do (on Windows they're the system's hit areas, so Snap layouts work). macOS keeps its traffic lights.
 - **The logo is the knot with the wordmark beside it.** On the first screen and the opening, the agents' threads weave through it, over and under.
+- **Scrolling is smooth.** A mouse wheel's notch, which the system gives in lines, is caught before anything scrolls and played out in pixels over the next frames, easing out, as a browser does, everywhere in the window. Trackpads and touch, already in pixels, pass as they are.
 
 ## Architecture
 

@@ -195,6 +195,8 @@ pub struct Loom {
     task_agent: Option<String>,
     // Whether the Tasks page shows a new task being written.
     task_new: bool,
+    // The mouse wheel's scrolling, played out smoothly.
+    smooth: crate::smooth::Smooth,
     routine_notify: bool,
     routine_on: bool,
     routine_catch_up: bool,
@@ -712,6 +714,7 @@ ACTA_KEY=secret:ACTA_KEY",
             task_prompt_in,
             task_agent: None,
             task_new: false,
+            smooth: Default::default(),
             routine_notify: true,
             routine_on: true,
             routine_catch_up: true,
@@ -7961,6 +7964,55 @@ ACTA_KEY=secret:ACTA_KEY",
             .into_any_element()
     }
 
+    /// Catches the mouse wheel's notches before anything scrolls, and plays each out in
+    /// pixels over the next frames, so every list and page scrolls smoothly
+    /// (crate::smooth). It draws nothing.
+    fn wheel_catcher(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let this = cx.entity().downgrade();
+        canvas(
+            |_, _, _| {},
+            move |_, _, window, _| {
+                let this = this.clone();
+                window.on_mouse_event(move |e: &ScrollEvent, phase, window, cx| {
+                    if phase != DispatchPhase::Capture {
+                        return;
+                    }
+                    let line = window.line_height().as_f32();
+                    let _ = this.update(cx, |this, cx| {
+                        if !this.smooth.catch(e, line) {
+                            return;
+                        }
+                        cx.stop_propagation();
+                        if this.smooth.running {
+                            return;
+                        }
+                        this.smooth.running = true;
+                        cx.spawn_in(window, async move |this, cx| loop {
+                            cx.background_executor().timer(crate::smooth::FRAME).await;
+                            let step = this
+                                .update(cx, |this, _| {
+                                    let step = this.smooth.step();
+                                    this.smooth.running = step.is_some();
+                                    step
+                                })
+                                .ok()
+                                .flatten();
+                            let Some(step) = step else {
+                                break;
+                            };
+                            let _ = cx.update(|window, cx| {
+                                window.dispatch_event(PlatformInput::Scroll(step), cx);
+                            });
+                        })
+                        .detach();
+                    });
+                });
+            },
+        )
+        .absolute()
+        .size_0()
+    }
+
     // --- The settings kit ---
     //
     // Every page of the settings and server popups is built from these, the way the
@@ -10005,6 +10057,7 @@ impl Render for Loom {
         let menu_scrim = self.menu_scrim(cx);
         let popup = self.popup_view(window, cx);
         root.flex()
+            .child(self.wheel_catcher(cx))
             .child(self.sidebar(cx))
             .child(
                 div()
