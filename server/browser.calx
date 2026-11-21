@@ -148,8 +148,12 @@ impl Worker {
         w.refs.clear()
     }
 
-    // Takes the events the page sent meanwhile, which nothing here reads.
+    // Takes the events the page sent meanwhile, which nothing here reads, and
+    // what the browser wrote, so it never waits on a full pipe.
     fn drain(w: Worker) {
+        if let c = w.child {
+            while let _ = c.read_line(0) {}
+        }
         if let p = w.page {
             loop {
                 match p.receive(0) {
@@ -164,24 +168,16 @@ impl Worker {
     fn open_browser(w: mut Worker) ! Error {
         let exe = find() else fail "There's no Chrome, Edge or Chromium on the computer the instance runs on. Your person can install one, or set LOOM_BROWSER to the one to use."
         try fs.make_dir_all(w.profile.copy())
-        let port_file = "{w.profile}/DevToolsActivePort"
-        if fs.exists(port_file.copy()) { try fs.remove_file(port_file.copy()) }
-        let args: List<String> = ["--headless=new", "--remote-debugging-port=0", "--user-data-dir={w.profile}", "--no-first-run", "--no-default-browser-check", "--disable-background-networking", "--window-size=1280,800", "about:blank"]
-        w.child = some(try Command.new(exe).args(args).stdin(Stdio.Null).stdout(Stdio.Null).stderr(Stdio.Null).own_group().spawn())
-        // The browser writes the port it took, and its own address, once it listens.
-        let until = now() + 20000
-        var port = String()
-        while port.len() == 0 {
-            if let ok(some(t)) = fs.read_text(port_file.copy()) {
-                let lines = t.lines()
-                if lines.len() >= 2 { port = lines[0].trim().copy() }
-            }
-            if port.len() > 0 { break }
-            if now() > until {
-                w.close()
-                fail "The browser didn't start."
-            }
-            unsafe { sleep(100000000) }
+        let port = match w.launch(exe.copy(), true) {
+            ok(p) => p,
+            err(e) => {
+                // Linux may not let the browser make its sandbox, as Ubuntu's AppArmor
+                // doesn't for a Chrome it has no profile for, and a container doesn't.
+                // Then it runs without one, and says so.
+                if env.os() != "linux" or not "{e}".contains("sandbox") { fail "{e}" }
+                eprintln("loom: the browser can't make its sandbox here, so it runs without one: {e}")
+                try w.launch(exe, false)
+            },
         }
         var asked = get("http://127.0.0.1:{port}/json/list", List<Header>(), 10000, 4000000)
         let got = try asked.wait()
@@ -208,6 +204,40 @@ impl Worker {
             for p in guarded_patterns() { blocked.push(Json.Str(p.copy())) }
             _ = try w.call("Network.enable", Obj.new().done())
             _ = try w.call("Network.setBlockedURLs", Obj.new().j("urls", Json.Array(blocked)).done())
+        }
+    }
+
+    // Starts the browser and gives the port it listens on, or fails with why it
+    // didn't start, in its own words.
+    fn launch(w: mut Worker, exe: String, sandbox: bool) -> String ! Error {
+        let port_file = "{w.profile}/DevToolsActivePort"
+        if fs.exists(port_file.copy()) { try fs.remove_file(port_file.copy()) }
+        var args: List<String> = ["--headless=new", "--remote-debugging-port=0", "--user-data-dir={w.profile}", "--no-first-run", "--no-default-browser-check", "--disable-background-networking", "--window-size=1280,800"]
+        if not sandbox { args.push(String("--no-sandbox")) }
+        args.push(String("about:blank"))
+        let child = try Command.new(exe).args(args).stdin(Stdio.Null).stdout(Stdio.Pipe).stderr(Stdio.Stdout).own_group().spawn()
+        // The browser writes the port it took, and its own address, once it listens.
+        var said = List<String>()
+        let until = now() + 20000
+        loop {
+            while let line = child.read_line(0) {
+                said.push(line)
+                if said.len() > 12 { _ = said.remove(0) }
+            }
+            if let ok(some(t)) = fs.read_text(port_file.copy()) {
+                let lines = t.lines()
+                if lines.len() >= 2 {
+                    w.child = some(child)
+                    return lines[0].trim().copy()
+                }
+            }
+            if child.try_wait() != none or now() > until {
+                child.kill_tree()
+                _ = child.wait_timeout(5000)
+                let why = said.join(" ").trim().copy()
+                fail if why.len() > 0 { "The browser didn't start: {short(why, 600)}" } else { String("The browser didn't start.") }
+            }
+            unsafe { sleep(100000000) }
         }
     }
 
