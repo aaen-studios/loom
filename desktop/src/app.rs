@@ -1012,6 +1012,24 @@ ACTA_KEY=secret:ACTA_KEY",
             Screen::Memory => self.memory_page(cx),
             _ => div().flex_1(),
         };
+        // An agent's page opens under its thread, across the panel.
+        let hero = self
+            .model
+            .selected
+            .as_ref()
+            .and_then(|id| self.model.agent(id))
+            .filter(|_| side != Screen::Plugins)
+            .map(|a| {
+                let (mood, snapped) = fidget(&a.id, self.model.mood(&a.id));
+                div().px(px(space::L)).pt(px(space::S)).child(thread(
+                    format!("side-thread-{}", a.id),
+                    mood,
+                    thread::color(&a.color, p.dark),
+                    width - 2.0 * space::L,
+                    40.0,
+                    snapped.or(self.model.finished_at(&a.id)),
+                ))
+            });
         div()
             .w(px(width))
             .h_full()
@@ -1043,6 +1061,7 @@ ACTA_KEY=secret:ACTA_KEY",
                             .on_click(cx.listener(|this, _, _, cx| this.close_side(cx))),
                     ),
             )
+            .when_some(hero, |d, h| d.child(h))
             .child(div().flex_1().min_h_0().flex().flex_col().child(body))
     }
 
@@ -2701,11 +2720,13 @@ ACTA_KEY=secret:ACTA_KEY",
                     .child(if searching { self.hits(cx) } else { list }),
             )
             .when_some(update, |d, row| d.child(row))
-            // The server, as its spool, and the settings: each opens the popup.
+            // The server, as its spool, on the left, and the settings on the right: each
+            // opens the popup.
             .child(
                 div()
                     .flex()
                     .items_center()
+                    .justify_between()
                     .gap(px(space::XS))
                     .px(px(space::S))
                     .py(px(space::S))
@@ -6992,6 +7013,11 @@ impl Render for Loom {
                 .checked_duration_since(Instant::now())
                 .is_some()
             || self.opened().elapsed().as_secs_f32() < 1.5
+            // An agent's page beside the chat, whose thread fidgets at its top.
+            || matches!(
+                self.side,
+                Some(Screen::EditAgent | Screen::Activity | Screen::Memory)
+            ) && self.screen == Screen::Chat
             // Someone typing to an agent, whose thread thinks along.
             || self.screen == Screen::Chat && !self.composer.read(cx).value().trim().is_empty()
         {
@@ -7339,6 +7365,35 @@ impl raw_window_handle::HasWindowHandle for Parent {
 }
 
 /// Where a panel goes, from [x, y, width, height] in the window's logical pixels.
+/// What an agent's thread does at the top of its page: what the agent is doing, or
+/// while it's idle, a flourish every few seconds, a thinking loop, a knot or a twang, picked
+/// at random for each agent and each few seconds. The thread eases between them.
+fn fidget(agent: &str, mood: Mood) -> (Mood, Option<Instant>) {
+    if mood != Mood::Idle {
+        return (mood, None);
+    }
+    const BEAT: f32 = 3.5;
+    let t = thread::now();
+    let slot = (t / BEAT) as u64;
+    let mut h = std::hash::DefaultHasher::new();
+    std::hash::Hash::hash(&(agent, slot), &mut h);
+    let roll = std::hash::Hasher::finish(&h) % 12;
+    let pick = match roll {
+        // Not writing or a tool: their waves are sized for a short thread.
+        0..=3 => Mood::Thinking,
+        4 | 5 => Mood::Waiting,
+        _ => Mood::Idle,
+    };
+    // Some idle beats start with a twang.
+    let snapped = (roll >= 7).then(|| {
+        let into = Duration::from_secs_f32(t - slot as f32 * BEAT);
+        Instant::now()
+            .checked_sub(into)
+            .unwrap_or_else(Instant::now)
+    });
+    (pick, snapped)
+}
+
 /// Whether a popup page is the server's, not the person's settings.
 fn is_server(s: Screen) -> bool {
     matches!(
