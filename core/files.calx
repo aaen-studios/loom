@@ -1,0 +1,131 @@
+module core.files
+
+// Files going up to the instance and coming down from it (protocol/protocol.md,
+// "POST /files" and "GET /files/<sha256>"). Each is a request the core's loop
+// starts and then looks at on each turn, as logins are, so the socket never
+// waits on a big file. Files that come down are kept in the data folder's
+// files/, by their SHA-256, so each is fetched once.
+import std.fs
+import std.http.{Header, Request, get, post}
+import std.http.server.{content_type}
+import std.json.{Json, parse}
+import std.url
+import shared.files.{safe_name}
+import shared.obj.{Obj, at, str_at}
+
+const TIMEOUT_MS: u32 = 300000
+const MAX_FILE: usize = 64000000
+
+/// A file on its way, up or down.
+pub struct Transfer {
+    pub id: String?       // the app's id for it, given back in the answer
+    up: bool
+    dest: String          // where a download goes
+    req: Request
+}
+
+/// The last part of a path, on any system.
+pub fn base_name(path: String) -> String {
+    var b = path.copy()
+    if let i = b.find_last("/") { b = b[i + 1..].copy() }
+    if let i = b.find_last("\\") { b = b[i + 1..].copy() }
+    return b
+}
+
+/// Where a file, or its thumbnail, is kept once it's down: a file with a name under it, in a
+/// folder of its own, so the program that opens it knows its kind.
+pub fn kept_at(dir: String, sha: String, thumb: bool, name: String?) -> String {
+    if thumb { return "{dir}/{sha}.thumb" }
+    return "{dir}/{sha}/{safe_name(name.copy() ?? String("file"))}"
+}
+
+fn answer(id: String?) -> Obj {
+    return Obj.new().s("t", String("core.file")).maybe("id", id)
+}
+
+/// The app's answer when a transfer can't start or didn't work.
+pub fn refused(id: String?, code: str, message: String) -> Json {
+    return answer(id).j("error", Obj.new().s("code", String(code)).s("message", message).done()).done()
+}
+
+/// The app's answer for a file that's down: where it is.
+pub fn at_path(id: String?, path: String) -> Json {
+    return answer(id).s("path", path).done()
+}
+
+impl Transfer {
+    /// Starts sending the file at `path`. Fails, with the words to show, if it can't be read
+    /// or is too big.
+    pub fn upload(server: String, token: String, id: own String?, path: String) -> Transfer ! String {
+        let size = match fs.metadata(path.copy()) {
+            ok(m) => m.size,
+            err(e) => fail "can't read {path}: {e}",
+        }
+        if size > u64(MAX_FILE) { fail "{base_name(path.copy())} is over 64 MB" }
+        let data = match fs.read(path.copy()) {
+            ok(d) => d,
+            err(e) => fail "can't read {path}: {e}",
+        }
+        let name = base_name(path)
+        let headers: List<Header> = [Header { name: String("Authorization"), value: "Bearer {token}" }, Header { name: String("Content-Type"), value: content_type(name.copy()) }]
+        let req = post("{server}/files?name={url.encode_plus(name)}", headers, data, TIMEOUT_MS, 1048576)
+        return Transfer { id: id, up: true, dest: String(), req: req }
+    }
+
+    /// Starts fetching the file `sha`, or its thumbnail, to `dest`.
+    pub fn download(server: String, token: String, id: own String?, sha: String, thumb: bool, dest: own String) -> Transfer {
+        let headers: List<Header> = [Header { name: String("Authorization"), value: "Bearer {token}" }]
+        let query = if thumb { "?thumb" } else { "" }
+        let req = get("{server}/files/{sha}{query}", headers, TIMEOUT_MS, MAX_FILE + 1048576)
+        return Transfer { id: id, up: false, dest: dest, req: req }
+    }
+
+    pub fn done(self) -> bool {
+        return self.req.done()
+    }
+
+    /// How it ended, as the app's `core.file`.
+    pub fn outcome(mut self) -> Json {
+        let id = self.id.copy()
+        let r = match self.req.wait() {
+            ok(r) => r,
+            err(e) => return refused(id, "unreachable", "{e}"),
+        }
+        if r.status != 200 {
+            let body = match parse(String.from_utf8(r.body.copy()) ?? String()) {
+                ok(j) => j,
+                err(_) => Json.Null,
+            }
+            let e = at(body, "error")
+            return answer(id).j("error", Obj.new().s("code", str_at(e.copy(), "code") ?? "http_{r.status}").s("message", str_at(e, "message") ?? "The instance answered {r.status}.").done()).done()
+        }
+        if self.up {
+            let file = match parse(String.from_utf8(r.body.copy()) ?? String()) {
+                ok(j) => j,
+                err(_) => return refused(id, "bad_answer", String("The instance's answer wasn't JSON.")),
+            }
+            return answer(id).j("file", file).done()
+        }
+        // Written beside, then moved, so a half-written file is never shown.
+        let part = "{self.dest}.part"
+        match fs.write(part.copy(), r.body.copy()) {
+            ok => {},
+            err(e) => return refused(id, "cache", "can't write {part}: {e}"),
+        }
+        match fs.rename(part, self.dest.copy()) {
+            ok => {},
+            err(e) => return refused(id, "cache", "can't write {self.dest}: {e}"),
+        }
+        return at_path(id, self.dest.copy())
+    }
+}
+
+@test
+fn names_paths() {
+    assert(base_name(String("C:\\Users\\me\\shot.png")) == "shot.png")
+    assert(base_name(String("/home/me/notes.txt")) == "notes.txt")
+    assert(base_name(String("plain")) == "plain")
+    assert(kept_at(String("d"), String("ab"), true, none) == "d/ab.thumb")
+    assert(kept_at(String("d"), String("ab"), false, none) == "d/ab/file")
+    assert(kept_at(String("d"), String("ab"), false, some(String("../x.txt"))) == "d/ab/x.txt")
+}

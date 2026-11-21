@@ -1,0 +1,145 @@
+module tests.protocol.files
+
+// Files, images and search (PLAN.md, "Files and images" and "Search"), on a
+// real instance with the fake agent:
+//
+// - a file goes up with POST /files, is kept once under its SHA-256, and
+//   comes back with GET /files/<sha256>, only for whoever sent it;
+// - an image gets a thumbnail;
+// - a send with files gives the agent an image and a link to a copy of the
+//   rest, and an image the agent sends back becomes a file block;
+// - messages.search finds words in text and in file names;
+// - the owner's storage limit holds.
+//
+//     calx tests/protocol/files.calx
+import std.image.{Color, Image, Kind}
+import std.json.{Json}
+import std.thread.{sleep}
+import std.process.{exit}
+import shared.obj.{Obj, at, int_at, str_at}
+import tests.kit.{App, Instance, check, fetch, loom, reply_text, upload}
+
+fn file_blocks(message: Json) -> List<Json> {
+    var out = List<Json>()
+    if let Json.Array(blocks) = at(message, "blocks") {
+        for b in blocks {
+            if str_at(b.copy(), "kind") == some(String("file")) { out.push(b.copy()) }
+        }
+    }
+    return out
+}
+
+fn results(found: Json) -> usize {
+    if let Json.Array(rs) = at(at(found, "value"), "results") { return rs.len() }
+    return 0
+}
+
+fn run(inst: Instance) ! Error {
+    let base = inst.base.copy()
+    let token = inst.token.copy()
+    println("ok    the instance started, and its owner is set up")
+
+    // --- Uploading ---
+    let png = Image.new(600, 400, Kind.Rgb, Color.rgb(24, 56, 208)).encode_png()
+    let (s1, shot) = try upload(base.copy(), token.copy(), "shot.png", "application/octet-stream", png.copy())
+    let sha = str_at(shot.copy(), "file") ?? String()
+    try check(s1 == 200 and sha.len() == 64 and str_at(shot.copy(), "mime") == some(String("image/png")) and int_at(shot, "size") == some(i64.wrap(u64(png.len()))), "POST /files keeps a file under its SHA-256, and tells its type from its bytes")
+    let (_, again) = try upload(base.copy(), token.copy(), "shot.png", "image/png", png.copy())
+    try check(str_at(again, "file") == some(sha.copy()), "the same file is kept once")
+    let (s2, notes) = try upload(base.copy(), token.copy(), "notes.txt", "text/plain", "the quarterly numbers".to_bytes())
+    let notes_sha = str_at(notes.copy(), "file") ?? String()
+    try check(s2 == 200 and str_at(notes, "mime") == some(String("text/plain")), "a text file keeps the type it was sent with")
+    let (s3, _) = try upload(base.copy(), String(), "x.txt", "text/plain", "x".to_bytes())
+    try check(s3 == 401, "uploading needs a token")
+
+    // --- Reading ---
+    let (g1, mime, body) = try fetch(base.copy(), token.copy(), "/files/{sha}")
+    try check(g1 == 200 and mime == "image/png" and body == png, "GET /files/<sha256> gives the file back")
+    let bob = try inst.second_account("bob")
+    let (g2, _, _) = try fetch(base.copy(), bob.copy(), "/files/{sha}")
+    try check(g2 == 404, "but not to someone who didn't send it")
+    let (g3, _, _) = try fetch(base.copy(), String(), "/files/{sha}")
+    try check(g3 == 401, "and not without a token")
+    let (g4, _, _) = try fetch(base.copy(), token.copy(), String("/files/..%2F..%2Floom.db"))
+    try check(g4 == 404, "a path that isn't a SHA-256 finds nothing")
+    var thumb_ok = false
+    for _ in 0..50 {
+        let (st, tmime, small) = try fetch(base.copy(), token.copy(), "/files/{sha}?thumb")
+        if st == 200 and tmime == "image/jpeg" {
+            let im = match Image.decode(small) {
+                ok(i) => i,
+                err(why) => fail "the thumbnail isn't an image: {why}",
+            }
+            thumb_ok = im.width() == 512 and im.height() == 341
+            break
+        }
+        unsafe { sleep(100000000) }
+    }
+    try check(thumb_ok, "an image gets a 512-pixel thumbnail")
+
+    // --- Sending files to an agent, and getting one back ---
+    var app = try App.connect(base.copy(), token.copy(), 0)
+    let made = try app.cmd("q_1", "agent.create", Obj.new().s("name", String("Fake")).s("acp_agent", String("fake")).done())
+    let agent = str_at(at(at(made, "value"), "agent"), "id") ?? String()
+    let conv = try app.cmd("q_2", "conversation.create", Obj.new().s("agent", agent.copy()).done())
+    let conversation = str_at(at(conv, "value"), "conversation") ?? String()
+    let ids = Json.Array([Json.Str(sha.copy()), Json.Str(notes_sha.copy())])
+    try app.send(Obj.new().s("t", String("send")).s("cid", String("m_1")).s("conversation", conversation.copy()).s("text", String("/files\n/image")).j("files", ids).done())
+    let mine = try app.until("event", "message.created")
+    let sent = file_blocks(at(mine, "message"))
+    try check(sent.len() == 2 and str_at(sent[1].copy(), "name") == some(String("notes.txt")), "a send with files makes file blocks")
+    let reply = try app.reply()
+    let said = reply_text(reply.copy())
+    println("      the agent said: {said}")
+    try check(said.contains("image image/png") and said.contains("link notes.txt"), "the agent gets the image, and a link to a copy of the other file")
+    let back = file_blocks(reply)
+    try check(back.len() == 1 and str_at(back[0].copy(), "mime") == some(String("image/png")), "an image the agent sends back is a file block")
+    let (g5, _, _) = try fetch(base.copy(), token.copy(), "/files/{str_at(back[0].copy(), "file") ?? String()}")
+    try check(g5 == 200, "and the person can fetch it")
+    _ = try app.until("event", "run.finished")
+    try app.send(Obj.new().s("t", String("send")).s("cid", String("m_2")).s("conversation", conversation.copy()).s("text", String("hi")).j("files", Json.Array([Json.Str("b".repeat(64))])).done())
+    let refused = try app.until("error", "")
+    try check(str_at(refused, "code") == some(String("unknown_file")), "a file that wasn't uploaded is refused")
+
+    // --- Search ---
+    try app.send(Obj.new().s("t", String("send")).s("cid", String("m_3")).s("conversation", conversation.copy()).s("text", String("Remember the deploy checklist")).done())
+    _ = try app.reply()
+    let found = try app.cmd("q_3", "messages.search", Obj.new().s("query", String("deploy check")).done())
+    try check(results(found.copy()) == 2, "messages.search finds the words, the last as a prefix, in the message and the agent's echo")
+    if let Json.Array(rs) = at(at(found, "value"), "results") {
+        try check((str_at(rs[0].copy(), "snippet") ?? String()).contains("\u{2}deploy\u{3}"), "with the matched words marked")
+    }
+    let by_name = try app.cmd("q_4", "messages.search", Obj.new().s("query", String("shot.png")).done())
+    try check(results(by_name) == 1, "file names are searched too")
+    let other = try app.cmd("q_5", "messages.search", Obj.new().s("query", String("deploy")).s("agent", String("a_999")).done())
+    try check(results(other) == 0, "and an agent's filter keeps to that agent")
+    var bob_app = try App.connect(base.copy(), bob, 0)
+    let theirs = try bob_app.cmd("q_1", "messages.search", Obj.new().s("query", String("deploy")).done())
+    try check(results(theirs) == 0, "no one finds someone else's messages")
+    bob_app.close()
+    app.close()
+
+    // --- The owner's storage limit ---
+    let limited = try loom(inst.data.copy(), [String("files"), String("limit"), String("1")]).output()
+    try check(limited.status.success(), "the owner limits each person's files to 1 MB")
+    var big = List<u8>()
+    for _ in 0..1200000 {
+        big.push(7)
+    }
+    let (s4, full) = try upload(base.copy(), token, "big.bin", "application/octet-stream", big)
+    try check(s4 == 413 and "{full}".contains("storage_full"), "a file over the limit is refused")
+}
+
+fn main() ! Error {
+    let inst = try Instance.start()
+    let failure: String? = match run(inst.copy()) {
+        ok => none,
+        err(e) => some("{e}"),
+    }
+    inst.stop()
+    if let f = failure {
+        eprintln("\n{f}")
+        exit(1)
+    }
+    println("\nfiles and search: all good")
+}

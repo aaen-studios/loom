@@ -1,11 +1,11 @@
 //! The window: the sidebar of agents, and the chat with the one picked. The look
 //! follows design/explorations/round-4.html, with every value from design/tokens.toml.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
-use gpui_kit::component::input::{Input, InputEvent, InputState, Textarea, TextareaState};
+use gpui_kit::component::input::{Input, InputEvent, InputState, Paste, Textarea, TextareaState};
 use gpui_kit::component::message_scroller::{MessageScroller, MessageScrollerState};
 use gpui_kit::component::text::TextView;
 use gpui_kit::component::{Icon, IconName, Sizable as _, TitleBar};
@@ -103,10 +103,13 @@ pub struct Loom {
     code_in: Entity<InputState>,
     name_in: Entity<InputState>,
     instructions_in: Entity<TextareaState>,
+    search_in: Entity<InputState>,
     program: Option<String>,
     open_thoughts: HashSet<String>,
     tray: Option<shell::Tray>,
     hwnd: isize,
+    /// The newest thing that went wrong, shown for a while above the composer.
+    notice: Option<(String, Instant)>,
 }
 
 fn data_dir() -> String {
@@ -175,6 +178,21 @@ impl Loom {
         if let Ok(server) = std::env::var("LOOM_SERVER") {
             server_in.update(cx, |s, cx| s.set_value(server, window, cx));
         }
+        let search_in = input(window, cx, "Search", false);
+        cx.subscribe_in(
+            &search_in,
+            window,
+            |this: &mut Loom, state, event: &InputEvent, _, cx| {
+                if let InputEvent::Change = event {
+                    let query = state.read(cx).value().to_string();
+                    if let Some(frame) = this.model.search(&query) {
+                        this.send(frame);
+                    }
+                    cx.notify();
+                }
+            },
+        )
+        .detach();
 
         // The core's events come on its thread; this task brings them to the window.
         // It also looks at the tray, and notices the system waking: a tick that comes
@@ -194,6 +212,7 @@ impl Loom {
                         loom.send(serde_json::json!({"t": "app.wake"}));
                     }
                     loom.tray_actions(cx);
+                    loom.take_notice(cx);
                     if got.is_empty() {
                         return;
                     }
@@ -213,6 +232,7 @@ impl Loom {
                         }
                     }
                     loom.fetch();
+                    loom.open_fetched(cx);
                     if changed {
                         loom.refresh_rows(cx);
                         cx.notify();
@@ -261,10 +281,12 @@ impl Loom {
             code_in,
             name_in,
             instructions_in,
+            search_in,
             program: None,
             open_thoughts: HashSet::new(),
             tray,
             hwnd,
+            notice: None,
         };
         loom.fetch();
         loom
@@ -310,6 +332,122 @@ impl Loom {
         for f in self.model.fetches() {
             self.core.send(&f.to_string());
         }
+        for f in self.model.file_fetches() {
+            self.core.send(&f.to_string());
+        }
+    }
+
+    /// Shows the newest notice from the model, and hides one that's been up 8 seconds.
+    fn take_notice(&mut self, cx: &mut Context<Self>) {
+        if let Some(words) = self.model.notices.pop() {
+            self.model.notices.clear();
+            self.notice = Some((words, Instant::now()));
+            cx.notify();
+        } else if self
+            .notice
+            .as_ref()
+            .is_some_and(|(_, at)| at.elapsed() > Duration::from_secs(8))
+        {
+            self.notice = None;
+            cx.notify();
+        }
+    }
+
+    /// Opens the files that came to be opened, each in its own program.
+    fn open_fetched(&mut self, cx: &mut Context<Self>) {
+        for path in std::mem::take(&mut self.model.to_open) {
+            cx.open_with_system(std::path::Path::new(&path));
+        }
+    }
+
+    /// Opens a file from the chat in its own program.
+    pub fn open_file(&mut self, f: &model::FileRef, cx: &mut Context<Self>) {
+        if let Some(frame) = self.model.open_file(f) {
+            self.send(frame);
+        }
+        self.open_fetched(cx);
+    }
+
+    /// Sends files for the next message.
+    fn attach(&mut self, paths: &[std::path::PathBuf], cx: &mut Context<Self>) {
+        for path in paths {
+            if path.is_file() {
+                let frame = self.model.attach(&path.to_string_lossy());
+                self.send(frame);
+            }
+        }
+        cx.notify();
+    }
+
+    pub fn unattach(&mut self, id: &str, cx: &mut Context<Self>) {
+        self.model.unattach(id);
+        cx.notify();
+    }
+
+    /// Asks the system for files to attach.
+    fn pick_files(&mut self, cx: &mut Context<Self>) {
+        let picked = cx.prompt_for_paths(PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: true,
+            prompt: None,
+        });
+        cx.spawn(async move |this, cx| {
+            if let Ok(Ok(Some(paths))) = picked.await {
+                let _ = this.update(cx, |loom, cx| loom.attach(&paths, cx));
+            }
+        })
+        .detach();
+    }
+
+    /// Ctrl+V in the composer: an image, or files copied in Explorer, become attachments.
+    /// Gives whether it took the paste, so text still pastes as text.
+    fn paste_files(&mut self, cx: &mut Context<Self>) -> bool {
+        let Some(item) = cx.read_from_clipboard() else {
+            return false;
+        };
+        for entry in item.entries() {
+            match entry {
+                ClipboardEntry::ExternalPaths(paths) => {
+                    self.attach(paths.paths(), cx);
+                    return true;
+                }
+                ClipboardEntry::Image(image) => {
+                    // Most Windows programs copy a bitmap, which agents don't take: it goes
+                    // as a PNG.
+                    let (ext, bytes) = match image.format {
+                        ImageFormat::Jpeg => ("jpg", image.bytes.clone()),
+                        ImageFormat::Webp => ("webp", image.bytes.clone()),
+                        ImageFormat::Gif => ("gif", image.bytes.clone()),
+                        ImageFormat::Png => ("png", image.bytes.clone()),
+                        _ => match shell::to_png(&image.bytes) {
+                            Some(png) => ("png", png),
+                            None => {
+                                self.model
+                                    .notices
+                                    .push("That image's kind can't be sent.".into());
+                                return true;
+                            }
+                        },
+                    };
+                    let dir = std::path::Path::new(&data_dir()).join("pasted");
+                    let at = chrono::Local::now().format("%Y-%m-%d %H.%M.%S");
+                    let path = dir.join(format!("Pasted {at}.{ext}"));
+                    let written =
+                        std::fs::create_dir_all(&dir).and_then(|_| std::fs::write(&path, &bytes));
+                    match written {
+                        Ok(()) => self.attach(&[path], cx),
+                        Err(e) => self
+                            .model
+                            .notices
+                            .push(format!("The image couldn't be kept: {e}")),
+                    }
+                    return true;
+                }
+                _ => {}
+            }
+        }
+        false
     }
 
     /// Rebuilds the chat's rows, and tells the list what changed.
@@ -482,8 +620,99 @@ impl Loom {
             )
     }
 
+    /// What search found, in place of the agents.
+    fn hits(&mut self, cx: &mut Context<Self>) -> Div {
+        let p = self.p;
+        let mut list = div().flex().flex_col().gap(px(2.0)).px(px(space::S));
+        if self.model.hits.is_empty() {
+            let words = if self.model.query.trim().chars().count() < 2 {
+                "Type a little more"
+            } else {
+                "Nothing found"
+            };
+            return list.child(
+                div()
+                    .px(px(space::M))
+                    .py(px(space::S))
+                    .text_size(px(size::SMALL))
+                    .text_color(p.ink_3)
+                    .child(words),
+            );
+        }
+        for (i, h) in self.model.hits.clone().into_iter().enumerate() {
+            let Some(a) = self.model.agent(&h.agent).cloned() else {
+                continue;
+            };
+            let id = h.agent.clone();
+            let marked = HighlightStyle {
+                color: Some(p.ink),
+                font_weight: Some(FontWeight::SEMIBOLD),
+                ..Default::default()
+            };
+            let snippet = StyledText::new(h.snippet.clone())
+                .with_highlights(h.marks.iter().map(|r| (r.clone(), marked)));
+            list = list.child(
+                div()
+                    .id(SharedString::from(format!("hit-{i}")))
+                    .flex()
+                    .flex_col()
+                    .gap(px(2.0))
+                    .px(px(space::M))
+                    .py(px(space::S))
+                    .rounded(px(radius::ROW))
+                    .cursor_pointer()
+                    .hover(move |s| s.bg(p.hover))
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.search_in
+                            .update(cx, |s, cx| s.set_value("", window, cx));
+                        this.model.search("");
+                        this.select(id.clone(), cx);
+                    }))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(space::S))
+                            .child(thread(
+                                Mood::Idle,
+                                thread::color(&a.color, p.dark),
+                                14.0,
+                                8.0,
+                                None,
+                            ))
+                            .child(
+                                div()
+                                    .text_size(px(size::CAPTION))
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .text_color(p.ink_2)
+                                    .child(if h.person {
+                                        format!("You, to {}", a.name)
+                                    } else {
+                                        a.name.clone()
+                                    }),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(size::CAPTION))
+                                    .text_color(p.ink_3)
+                                    .child(time_of(h.at)),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(size::SMALL))
+                            .text_color(p.ink_3)
+                            .line_clamp(2)
+                            .child(snippet),
+                    ),
+            );
+        }
+        list
+    }
+
     fn sidebar(&mut self, cx: &mut Context<Self>) -> Div {
         let p = self.p;
+        let searching = !self.model.query.trim().is_empty();
         let mut list = div().flex().flex_col().gap(px(2.0)).px(px(space::S));
         for a in self.model.agents.clone() {
             let selected = self.model.selected.as_deref() == Some(a.id.as_str())
@@ -595,14 +824,32 @@ impl Loom {
             )
             .child(
                 div()
+                    .px(px(space::M))
+                    .pb(px(space::S))
+                    .text_size(px(size::SMALL))
+                    .child(
+                        Input::new(&self.search_in)
+                            .prefix(Icon::new(IconName::Search).small().text_color(p.ink_3))
+                            .cleanable(true),
+                    ),
+            )
+            .child(
+                div()
                     .px(px(space::L + space::XS))
                     .pt(px(space::S))
                     .pb(px(space::XS))
                     .text_size(px(size::CAPTION))
                     .text_color(p.ink_3)
-                    .child("Agents"),
+                    .child(if searching { "Found" } else { "Agents" }),
             )
-            .child(div().flex_1().child(list))
+            .child(
+                div()
+                    .id("side-list")
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scroll()
+                    .child(if searching { self.hits(cx) } else { list }),
+            )
             .child(
                 div()
                     .flex()
@@ -898,13 +1145,14 @@ impl Loom {
             .unwrap_or(Mood::Idle);
         let open = self.open_thoughts.clone();
         let tools: Vec<model::Tool> = self.model.tools.clone();
+        let files = Rc::new(self.model.files.clone());
         let this = cx.entity().downgrade();
         let list = MessageScroller::new("chat", self.scroller.clone(), move |ix, _, _| {
             let Some(row) = rows.get(ix) else {
                 return div().into_any_element();
             };
             let inner = match row {
-                Row::Message(m) if m.role == "person" => person(p, m),
+                Row::Message(m) if m.role == "person" => person(p, m, &files, this.clone()),
                 Row::Message(m) => reply(
                     p,
                     m,
@@ -913,6 +1161,7 @@ impl Loom {
                     if m.live { mood } else { Mood::Idle },
                     &open,
                     &tools,
+                    &files,
                     this.clone(),
                 ),
                 Row::Approval(a) => approval(p, a, this.clone()),
@@ -944,11 +1193,64 @@ impl Loom {
         );
         self.composer
             .update(cx, |s, cx| s.set_placeholder(placeholder, window, cx));
+        let mut attached = div().flex().flex_wrap().gap(px(space::S));
+        for a in self.model.attachments.clone() {
+            let id = a.id.clone();
+            let (note, color) = match (&a.file, &a.error) {
+                (_, Some(e)) => (e.clone(), p.bad),
+                (Some(f), None) => (model::size_of(f.size), p.ink_3),
+                (None, None) => ("Sending…".to_string(), p.ink_3),
+            };
+            attached = attached.child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(space::S))
+                    .pl(px(space::M))
+                    .pr(px(space::XS))
+                    .py(px(space::XS))
+                    .rounded(px(radius::ROW))
+                    .bg(p.bubble)
+                    .text_size(px(size::SMALL))
+                    .child(
+                        Icon::new(gpui_kit::assets::IconName::FileText)
+                            .small()
+                            .text_color(p.ink_3),
+                    )
+                    .child(
+                        div()
+                            .max_w(px(220.0))
+                            .truncate()
+                            .text_color(p.ink)
+                            .child(a.name.clone()),
+                    )
+                    .child(div().text_color(color).truncate().child(note))
+                    .child(
+                        div()
+                            .id(SharedString::from(format!("unattach-{}", a.id)))
+                            .size(px(22.0))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .rounded(px(radius::ROW))
+                            .text_color(p.ink_3)
+                            .cursor_pointer()
+                            .hover(move |s| s.bg(p.hover).text_color(p.ink))
+                            .child(Icon::new(IconName::Close).xsmall())
+                            .on_click(cx.listener(move |this, _, _, cx| this.unattach(&id, cx))),
+                    ),
+            );
+        }
+        let has_attachments = !self.model.attachments.is_empty();
         div()
             .flex_1()
             .min_h_0()
             .flex()
             .flex_col()
+            .on_drop(cx.listener(|this, paths: &ExternalPaths, _, cx| {
+                this.attach(paths.paths(), cx);
+            }))
+            .drag_over::<ExternalPaths>(move |s, _, _, _| s.bg(p.hover))
             .child(if empty {
                 div()
                     .flex_1()
@@ -966,6 +1268,30 @@ impl Loom {
             } else {
                 div().flex_1().min_h_0().child(list).into_any_element()
             })
+            .when_some(self.notice.clone(), |d, (words, _)| {
+                d.child(
+                    div()
+                        .w_full()
+                        .flex()
+                        .justify_center()
+                        .px(px(space::XL))
+                        .child(
+                            div()
+                                .id("notice")
+                                .w_full()
+                                .max_w(px(space::COLUMN))
+                                .px(px(space::L))
+                                .text_size(px(size::SMALL))
+                                .text_color(p.bad)
+                                .cursor_pointer()
+                                .child(words)
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.notice = None;
+                                    cx.notify();
+                                })),
+                        ),
+                )
+            })
             .child(
                 div()
                     .w_full()
@@ -979,54 +1305,93 @@ impl Loom {
                             .w_full()
                             .max_w(px(space::COLUMN))
                             .flex()
-                            .items_end()
+                            .flex_col()
                             .gap(px(space::S))
-                            .px(px(space::L))
+                            .px(px(space::M))
                             .py(px(space::S))
                             .bg(p.raised)
                             .border_1()
                             .border_color(p.line)
                             .rounded(px(radius::COMPOSER))
+                            .when(has_attachments, |d| d.child(attached))
                             .child(
                                 div()
-                                    .flex_1()
-                                    .text_size(px(size::COMPOSER))
-                                    .child(Textarea::new(&self.composer).appearance(false)),
-                            )
-                            .child(
-                                div()
-                                    .id("send")
-                                    .size(px(32.0))
-                                    .flex_none()
+                                    .w_full()
                                     .flex()
-                                    .items_center()
-                                    .justify_center()
-                                    .rounded_full()
-                                    .bg(p.button)
-                                    .text_color(p.button_ink)
-                                    .cursor_pointer()
+                                    .items_end()
+                                    .gap(px(space::S))
                                     .child(
-                                        Icon::new(if busy {
-                                            IconName::Square
-                                        } else {
-                                            IconName::ArrowUp
-                                        })
-                                        .small(),
+                                        div()
+                                            .id("attach")
+                                            .size(px(32.0))
+                                            .flex_none()
+                                            .flex()
+                                            .items_center()
+                                            .justify_center()
+                                            .rounded_full()
+                                            .text_color(p.ink_2)
+                                            .cursor_pointer()
+                                            .hover(move |s| s.bg(p.hover))
+                                            .child(
+                                                Icon::new(gpui_kit::assets::IconName::Paperclip)
+                                                    .small(),
+                                            )
+                                            .on_click(
+                                                cx.listener(|this, _, _, cx| this.pick_files(cx)),
+                                            ),
                                     )
-                                    .on_click(cx.listener(move |this, _, window, cx| {
-                                        if busy {
-                                            if let Some(f) = this.model.cancel() {
-                                                this.send(f);
-                                            }
-                                            return;
-                                        }
-                                        let text = this.composer.read(cx).value().to_string();
-                                        if let Some(frame) = this.model.send(&text) {
-                                            this.send(frame);
-                                            this.composer
-                                                .update(cx, |s, cx| s.set_value("", window, cx));
-                                        }
-                                    })),
+                                    .child(
+                                        div()
+                                            .flex_1()
+                                            .text_size(px(size::COMPOSER))
+                                            // Before the textarea's own Paste, which would
+                                            // paste a copied file as its path.
+                                            .capture_action(cx.listener(
+                                                |this, _: &Paste, _, cx| {
+                                                    if this.paste_files(cx) {
+                                                        cx.stop_propagation();
+                                                    }
+                                                },
+                                            ))
+                                            .child(Textarea::new(&self.composer).appearance(false)),
+                                    )
+                                    .child(
+                                        div()
+                                            .id("send")
+                                            .size(px(32.0))
+                                            .flex_none()
+                                            .flex()
+                                            .items_center()
+                                            .justify_center()
+                                            .rounded_full()
+                                            .bg(p.button)
+                                            .text_color(p.button_ink)
+                                            .cursor_pointer()
+                                            .child(
+                                                Icon::new(if busy {
+                                                    IconName::Square
+                                                } else {
+                                                    IconName::ArrowUp
+                                                })
+                                                .small(),
+                                            )
+                                            .on_click(cx.listener(move |this, _, window, cx| {
+                                                if busy {
+                                                    if let Some(f) = this.model.cancel() {
+                                                        this.send(f);
+                                                    }
+                                                    return;
+                                                }
+                                                let text =
+                                                    this.composer.read(cx).value().to_string();
+                                                if let Some(frame) = this.model.send(&text) {
+                                                    this.send(frame);
+                                                    this.composer.update(cx, |s, cx| {
+                                                        s.set_value("", window, cx)
+                                                    });
+                                                }
+                                            })),
+                                    ),
                             ),
                     ),
             )
@@ -1159,7 +1524,7 @@ impl Loom {
     }
 }
 
-fn person(p: Palette, m: &Message) -> Div {
+fn person(p: Palette, m: &Message, files: &HashMap<String, String>, this: WeakEntity<Loom>) -> Div {
     let text: String = m
         .blocks
         .iter()
@@ -1169,13 +1534,25 @@ fn person(p: Palette, m: &Message) -> Div {
         .join("\n");
     // What a person typed keeps its line breaks, which Markdown would join.
     let text = text.replace('\n', "  \n");
-    div()
+    let mut out = div()
         .w_full()
         .flex()
         .flex_col()
         .items_end()
-        .gap(px(space::XS))
-        .child(
+        .gap(px(space::XS));
+    for (i, b) in m.blocks.iter().enumerate() {
+        if let Some(f) = &b.file {
+            out = out.child(file_view(
+                p,
+                f,
+                files,
+                format!("{}/{i}", m.id),
+                this.clone(),
+            ));
+        }
+    }
+    out.when(!text.trim().is_empty(), |d| {
+        d.child(
             div()
                 .max_w(px(520.0))
                 .px(px(space::L))
@@ -1190,14 +1567,92 @@ fn person(p: Palette, m: &Message) -> Div {
                         .selectable(true),
                 ),
         )
-        .when(m.queued, |d| {
-            d.child(
-                div()
-                    .text_size(px(size::CAPTION))
-                    .text_color(p.ink_3)
-                    .child("Waiting to send"),
-            )
-        })
+    })
+    .when(m.queued, |d| {
+        d.child(
+            div()
+                .text_size(px(size::CAPTION))
+                .text_color(p.ink_3)
+                .child("Waiting to send"),
+        )
+    })
+}
+
+/// A file in a message: a picture for an image, its name and size for anything else.
+/// Clicking it opens it in its own program.
+fn file_view(
+    p: Palette,
+    f: &model::FileRef,
+    files: &HashMap<String, String>,
+    key: String,
+    this: WeakEntity<Loom>,
+) -> AnyElement {
+    let file = f.clone();
+    let open = move |_: &ClickEvent, _: &mut Window, cx: &mut App| {
+        let _ = this.update(cx, |loom, cx| loom.open_file(&file, cx));
+    };
+    let id = SharedString::from(format!("file-{key}"));
+    if f.image() {
+        let picture = match files.get(&format!("{}.thumb", f.file)) {
+            Some(path) => img(std::path::PathBuf::from(path))
+                .max_w(px(320.0))
+                .max_h(px(240.0))
+                .rounded(px(radius::BUBBLE))
+                .into_any_element(),
+            // Until the thumbnail is here, a place of about its size.
+            None => div()
+                .w(px(240.0))
+                .h(px(160.0))
+                .rounded(px(radius::BUBBLE))
+                .bg(p.bubble)
+                .into_any_element(),
+        };
+        return div()
+            .id(id)
+            .cursor_pointer()
+            .on_click(open)
+            .child(picture)
+            .into_any_element();
+    }
+    div()
+        .id(id)
+        .max_w(px(320.0))
+        .flex()
+        .items_center()
+        .gap(px(space::M))
+        .px(px(space::M))
+        .py(px(space::S))
+        .rounded(px(radius::ROW))
+        .border_1()
+        .border_color(p.line)
+        .cursor_pointer()
+        .hover(move |s| s.bg(p.hover))
+        .on_click(open)
+        .child(
+            Icon::new(gpui_kit::assets::IconName::FileText)
+                .small()
+                .text_color(p.ink_3),
+        )
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .min_w_0()
+                .child(
+                    div()
+                        .text_size(px(size::SMALL))
+                        .text_color(p.ink)
+                        .truncate()
+                        .child(f.name.clone()),
+                )
+                .child(
+                    div()
+                        .text_size(px(size::CAPTION))
+                        .text_color(p.ink_3)
+                        .child(model::size_of(f.size)),
+                ),
+        )
+        .into_any_element()
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1209,6 +1664,7 @@ fn reply(
     mood: Mood,
     open: &HashSet<String>,
     tools: &[model::Tool],
+    files: &HashMap<String, String>,
     this: WeakEntity<Loom>,
 ) -> Div {
     let when = if m.live {
@@ -1329,6 +1785,11 @@ fn reply(
                         .text_color(p.ink_2)
                         .child(b.text.clone()),
                 );
+            }
+            "file" => {
+                if let Some(f) = &b.file {
+                    body = body.child(file_view(p, f, files, key, this.clone()));
+                }
             }
             _ => {}
         }

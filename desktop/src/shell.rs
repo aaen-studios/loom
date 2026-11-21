@@ -168,3 +168,13 @@ pub fn hwnd(window: &gpui_kit::Window) -> isize {
         _ => 0,
     }
 }
+
+/// An image the clipboard gave in another kind, such as a bitmap, as a PNG.
+pub fn to_png(bytes: &[u8]) -> Option<Vec<u8>> {
+    let image = image::load_from_memory(bytes).ok()?;
+    let mut out = Vec::new();
+    image
+        .write_to(&mut std::io::Cursor::new(&mut out), image::ImageFormat::Png)
+        .ok()?;
+    Some(out)
+}

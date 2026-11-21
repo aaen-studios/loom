@@ -67,6 +67,97 @@ pub struct Block {
     pub kind: String,
     pub text: String,
     pub call: Option<String>,
+    pub file: Option<FileRef>,
+}
+
+impl Block {
+    fn text(kind: &str, text: String) -> Block {
+        Block {
+            kind: kind.into(),
+            text,
+            call: None,
+            file: None,
+        }
+    }
+}
+
+/// A file in a message, or one sent: its SHA-256, name, type and size.
+#[derive(Clone, Debug, PartialEq)]
+pub struct FileRef {
+    pub file: String,
+    pub name: String,
+    pub mime: String,
+    pub size: u64,
+}
+
+impl FileRef {
+    fn of(v: &Value) -> FileRef {
+        FileRef {
+            file: s(v, "file"),
+            name: s(v, "name"),
+            mime: s(v, "mime"),
+            size: v.get("size").and_then(Value::as_u64).unwrap_or(0),
+        }
+    }
+
+    /// Whether the chat shows it as a picture.
+    pub fn image(&self) -> bool {
+        matches!(
+            self.mime.as_str(),
+            "image/png" | "image/jpeg" | "image/gif" | "image/webp"
+        )
+    }
+}
+
+/// A file picked to go with the next message.
+#[derive(Clone, Debug)]
+pub struct Attachment {
+    pub id: String,
+    pub name: String,
+    /// Once it's up.
+    pub file: Option<FileRef>,
+    pub error: Option<String>,
+}
+
+/// A message search found.
+#[derive(Clone, Debug)]
+pub struct Hit {
+    pub agent: String,
+    /// The words around the match, and where in them the matched words are.
+    pub snippet: String,
+    pub marks: Vec<std::ops::Range<usize>>,
+    pub person: bool,
+    pub at: i64,
+}
+
+/// A snippet without the instance's marks (U+0002 before a matched word, U+0003 after),
+/// and the byte ranges of the matched words in what's left.
+pub fn unmark(snippet: &str) -> (String, Vec<std::ops::Range<usize>>) {
+    let mut out = String::new();
+    let mut marks = Vec::new();
+    let mut start = None;
+    for c in snippet.chars() {
+        match c {
+            '\u{2}' => start = Some(out.len()),
+            '\u{3}' => {
+                if let Some(s) = start.take() {
+                    marks.push(s..out.len());
+                }
+            }
+            '\n' => out.push(' '),
+            c => out.push(c),
+        }
+    }
+    (out, marks)
+}
+
+/// A size as people read it.
+pub fn size_of(bytes: u64) -> String {
+    match bytes {
+        b if b < 1000 => format!("{b} B"),
+        b if b < 1_000_000 => format!("{:.0} KB", b as f64 / 1000.0),
+        b => format!("{:.1} MB", b as f64 / 1_000_000.0),
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -149,12 +240,48 @@ pub struct Model {
     last_delta: HashMap<String, Instant>,
     failed: HashMap<String, Instant>,
     finished: HashMap<String, Instant>,
-    queued: Vec<(String, Option<String>, Option<String>, String)>, // cid, agent, conversation, text
+    queued: Vec<Queued>,
     dirty: HashSet<List>,
     next_id: u64,
     /// The id of the agent the app just asked the instance to make.
     pub made_agent: Option<String>,
     pub notices: Vec<String>,
+    /// Files for the next message.
+    pub attachments: Vec<Attachment>,
+    /// Files the core has fetched, by SHA-256, or SHA-256 and ".thumb": where they are.
+    pub files: HashMap<String, String>,
+    /// file.get requests on their way: what they fetch, and whether to open it.
+    getting: HashMap<String, (String, bool)>,
+    /// Files fetched to be opened, for the app to open.
+    pub to_open: Vec<String>,
+    /// What's typed in search, and what the newest search found.
+    pub query: String,
+    pub hits: Vec<Hit>,
+    search_id: String,
+}
+
+#[derive(Clone, Debug)]
+struct Queued {
+    cid: String,
+    agent: Option<String>,
+    conversation: Option<String>,
+    text: String,
+    files: usize,
+}
+
+impl Queued {
+    fn of(q: &Value) -> Queued {
+        Queued {
+            cid: s(q, "cid"),
+            agent: q.get("agent").and_then(Value::as_str).map(str::to_string),
+            conversation: q
+                .get("conversation")
+                .and_then(Value::as_str)
+                .map(str::to_string),
+            text: s(q, "text"),
+            files: q.get("files").and_then(Value::as_array).map_or(0, Vec::len),
+        }
+    }
 }
 
 fn s(v: &Value, key: &str) -> String {
@@ -173,6 +300,7 @@ fn blocks_of(v: &Value) -> Vec<Block> {
                     kind: s(b, "kind"),
                     text: s(b, "text"),
                     call: b.get("call").and_then(Value::as_str).map(str::to_string),
+                    file: (s(b, "kind") == "file").then(|| FileRef::of(b)),
                 })
                 .collect()
         })
@@ -288,19 +416,13 @@ impl Model {
             }
             "core.data" => self.data(f),
             "core.queued" => {
-                self.queued.push((
-                    s(f, "cid"),
-                    f.get("agent").and_then(Value::as_str).map(str::to_string),
-                    f.get("conversation")
-                        .and_then(Value::as_str)
-                        .map(str::to_string),
-                    s(f, "text"),
-                ));
+                self.queued.push(Queued::of(f));
                 self.place_queued();
             }
+            "core.file" => self.file_came(f),
             "ack" => {
                 let cid = s(f, "cid");
-                self.queued.retain(|q| q.0 != cid);
+                self.queued.retain(|q| q.cid != cid);
                 self.dirty.insert(List::Messages);
             }
             "delta" => self.delta(f),
@@ -371,11 +493,7 @@ impl Model {
         let block = f.get("block").and_then(Value::as_u64).unwrap_or(0) as usize;
         let blocks = self.live.entry(message.clone()).or_default();
         while blocks.len() <= block {
-            blocks.push(Block {
-                kind: s(f, "kind"),
-                text: String::new(),
-                call: None,
-            });
+            blocks.push(Block::text(&s(f, "kind"), String::new()));
         }
         // The core sends only what adds to the text, so the piece goes on the end.
         let pos = f.get("pos").and_then(Value::as_u64).unwrap_or(0) as usize;
@@ -392,7 +510,43 @@ impl Model {
 
     fn result(&mut self, f: &Value) {
         let id = s(f, "id");
-        if id.starts_with("app.acp") {
+        if id.starts_with("app.search") {
+            if id != self.search_id {
+                return;
+            }
+            let results = f
+                .pointer("/value/results")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default();
+            self.hits = results
+                .iter()
+                .filter_map(|r| {
+                    let m = r.get("message")?;
+                    let conversation = s(m, "conversation");
+                    let person = s(m, "role") == "person";
+                    // A person's message is its conversation's agent's.
+                    let agent = if person {
+                        self.conversations
+                            .iter()
+                            .find(|c| c.id == conversation)?
+                            .agent
+                            .clone()
+                    } else {
+                        s(m, "agent")
+                    };
+                    self.agent(&agent)?;
+                    let (snippet, marks) = unmark(&s(r, "snippet"));
+                    Some(Hit {
+                        agent,
+                        snippet,
+                        marks,
+                        person,
+                        at: m.get("at").and_then(Value::as_i64).unwrap_or(0),
+                    })
+                })
+                .collect();
+        } else if id.starts_with("app.acp") {
             self.programs = f
                 .pointer("/value/programs")
                 .and_then(Value::as_array)
@@ -508,19 +662,7 @@ impl Model {
                     .collect();
             }
             List::Outbox => {
-                self.queued = items
-                    .iter()
-                    .map(|q| {
-                        (
-                            s(q, "cid"),
-                            q.get("agent").and_then(Value::as_str).map(str::to_string),
-                            q.get("conversation")
-                                .and_then(Value::as_str)
-                                .map(str::to_string),
-                            s(q, "text"),
-                        )
-                    })
-                    .collect();
+                self.queued = items.iter().map(Queued::of).collect();
                 self.place_queued();
             }
             List::Messages => {
@@ -546,21 +688,30 @@ impl Model {
         self.messages.retain(|m| !m.queued);
         let conversation = self.conversation();
         let agent = self.selected.clone();
-        for (cid, q_agent, q_conversation, text) in &self.queued {
-            let here = match q_conversation {
+        for q in &self.queued {
+            let here = match &q.conversation {
                 Some(c) => Some(c) == conversation.as_ref(),
-                None => q_agent.is_some() && q_agent == &agent,
+                None => q.agent.is_some() && q.agent == agent,
             };
             if here {
+                let mut text = q.text.clone();
+                if q.files > 0 {
+                    let files = if q.files == 1 {
+                        "1 file".to_string()
+                    } else {
+                        format!("{} files", q.files)
+                    };
+                    text = if text.is_empty() {
+                        files
+                    } else {
+                        format!("{text}\n\n{files}")
+                    };
+                }
                 self.messages.push(Message {
-                    id: cid.clone(),
+                    id: q.cid.clone(),
                     role: "person".into(),
                     at: i64::MAX,
-                    blocks: vec![Block {
-                        kind: "text".into(),
-                        text: text.clone(),
-                        call: None,
-                    }],
+                    blocks: vec![Block::text("text", text)],
                     live: false,
                     queued: true,
                 });
@@ -582,11 +733,9 @@ impl Model {
             let mut blocks = self.live.get(&r.message).cloned().unwrap_or_default();
             for t in self.tools.iter().filter(|t| t.run == r.id) {
                 if !blocks.iter().any(|b| b.call.as_ref() == Some(&t.call)) {
-                    blocks.push(Block {
-                        kind: "tool".into(),
-                        text: String::new(),
-                        call: Some(t.call.clone()),
-                    });
+                    let mut b = Block::text("tool", String::new());
+                    b.call = Some(t.call.clone());
+                    blocks.push(b);
                 }
             }
             out.push(Message {
@@ -681,13 +830,133 @@ impl Model {
 
     // --- What the app sends ---
 
+    /// The next message, with the attachments that are up. None while one is still going
+    /// up, or with nothing to send.
     pub fn send(&mut self, text: &str) -> Option<Value> {
         let agent = self.selected.clone()?;
         let text = text.trim();
-        if text.is_empty() {
+        if self.uploading() {
             return None;
         }
-        Some(json!({"t": "send", "agent": agent, "text": text}))
+        let files: Vec<String> = self
+            .attachments
+            .iter()
+            .filter_map(|a| a.file.as_ref().map(|f| f.file.clone()))
+            .collect();
+        if text.is_empty() && files.is_empty() {
+            return None;
+        }
+        self.attachments.clear();
+        let mut frame = json!({"t": "send", "agent": agent, "text": text});
+        if !files.is_empty() {
+            frame["files"] = json!(files);
+        }
+        Some(frame)
+    }
+
+    /// Starts sending a file for the next message.
+    pub fn attach(&mut self, path: &str) -> Value {
+        let id = self.id("app.up");
+        let name = std::path::Path::new(path)
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| path.to_string());
+        self.attachments.push(Attachment {
+            id: id.clone(),
+            name,
+            file: None,
+            error: None,
+        });
+        json!({"t": "file.upload", "id": id, "path": path})
+    }
+
+    pub fn unattach(&mut self, id: &str) {
+        self.attachments.retain(|a| a.id != id);
+    }
+
+    /// Whether an attachment is still going up.
+    pub fn uploading(&self) -> bool {
+        self.attachments
+            .iter()
+            .any(|a| a.file.is_none() && a.error.is_none())
+    }
+
+    /// The thumbnails the shown chat needs and doesn't have yet.
+    pub fn file_fetches(&mut self) -> Vec<Value> {
+        let mut out = Vec::new();
+        let wanted: Vec<String> = self
+            .shown()
+            .iter()
+            .flat_map(|m| m.blocks.iter())
+            .filter_map(|b| b.file.as_ref())
+            .filter(|f| f.image())
+            .map(|f| f.file.clone())
+            .collect();
+        for sha in wanted {
+            let key = format!("{sha}.thumb");
+            if self.files.contains_key(&key) || self.getting.values().any(|(k, _)| k == &key) {
+                continue;
+            }
+            let id = self.id("app.get");
+            self.getting.insert(id.clone(), (key, false));
+            out.push(json!({"t": "file.get", "id": id, "file": sha, "thumb": true}));
+        }
+        out
+    }
+
+    /// Opens a file in its own program: at once if it's here, or once it's fetched.
+    pub fn open_file(&mut self, f: &FileRef) -> Option<Value> {
+        if let Some(path) = self.files.get(&f.file) {
+            self.to_open.push(path.clone());
+            return None;
+        }
+        let id = self.id("app.get");
+        self.getting.insert(id.clone(), (f.file.clone(), true));
+        Some(json!({"t": "file.get", "id": id, "file": f.file, "name": f.name}))
+    }
+
+    fn file_came(&mut self, f: &Value) {
+        let id = s(f, "id");
+        let error = f.get("error").map(|e| s(e, "message"));
+        if let Some(a) = self.attachments.iter_mut().find(|a| a.id == id) {
+            match f.get("file") {
+                Some(file) if error.is_none() => a.file = Some(FileRef::of(file)),
+                _ => a.error = Some(error.unwrap_or_else(|| "It didn't go up.".into())),
+            }
+            return;
+        }
+        let Some((key, open)) = self.getting.remove(&id) else {
+            return;
+        };
+        match (error, f.get("path").and_then(Value::as_str)) {
+            (None, Some(path)) => {
+                if open {
+                    self.to_open.push(path.to_string());
+                }
+                self.files.insert(key, path.to_string());
+            }
+            (e, _) => {
+                if open {
+                    self.notices
+                        .push(e.unwrap_or_else(|| "The file couldn't be fetched.".into()));
+                }
+            }
+        }
+    }
+
+    /// Searches every chat for `query`. None when it's too short to search.
+    pub fn search(&mut self, query: &str) -> Option<Value> {
+        self.query = query.to_string();
+        if query.trim().chars().count() < 2 {
+            self.hits.clear();
+            self.search_id.clear();
+            return None;
+        }
+        let id = self.id("app.search");
+        self.search_id = id.clone();
+        Some(
+            json!({"t": "cmd", "id": id, "name": "messages.search", "args": {"query": query.trim(), "limit": 30}}),
+        )
     }
 
     pub fn login(&mut self, server: &str, username: &str, password: &str, code: &str) -> Value {

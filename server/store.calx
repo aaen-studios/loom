@@ -45,7 +45,17 @@ CREATE TABLE IF NOT EXISTS sent (
 CREATE TABLE IF NOT EXISTS events (
     user TEXT NOT NULL REFERENCES users(id), seq INTEGER NOT NULL, json TEXT NOT NULL,
     at INTEGER NOT NULL, PRIMARY KEY (user, seq));
+CREATE TABLE IF NOT EXISTS files (
+    sha TEXT NOT NULL, user TEXT NOT NULL REFERENCES users(id), name TEXT NOT NULL,
+    mime TEXT NOT NULL, size INTEGER NOT NULL, at INTEGER NOT NULL, PRIMARY KEY (sha, user));
+CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5 (
+    text, user UNINDEXED, agent UNINDEXED, at UNINDEXED,
+    tokenize = 'unicode61 remove_diacritics 2');
 "#
+
+/// What search marks a matched word with, before and after.
+pub const MARK_START: str = "\u{2}"
+pub const MARK_END: str = "\u{3}"
 
 pub fn now() -> i64 {
     return unsafe { Timestamp.now() }.unix_ms
@@ -110,7 +120,17 @@ impl Store {
         let db = try Database.open(path)
         try db.execute_script(String("PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON;"))
         try db.execute_script(String(SCHEMA))
-        return Store { db: db, hasher: hasher }
+        let s = Store { db: db, hasher: hasher }
+        // Messages stored before search came are indexed once.
+        if try s.meta("search") == none {
+            try s.begin()
+            for r in try s.db.query(String("SELECT user, json FROM messages")) {
+                try s.index_message(text(r[0].copy()), try parse(text(r[1].copy())))
+            }
+            try s.set_meta("search", String("1"))
+            try s.commit()
+        }
+        return s
     }
 
     // The next id of a kind: "u" gives u_1, u_2, ...
@@ -339,7 +359,85 @@ impl Store {
         let id = (message.get(String("id")) ?? Json.Null).as_str() ?? String()
         let conversation = (message.get(String("conversation")) ?? Json.Null).as_str() ?? String()
         let at = (message.get(String("at")) ?? Json.Null).as_i64() ?? now()
-        _ = try self.db.execute(String("INSERT INTO messages (id, user, conversation, json, at) VALUES (?, ?, ?, ?, ?) ON CONFLICT (id) DO UPDATE SET json = excluded.json"), [t(id), t(user), t(conversation), t("{message}"), Value.Int(at)])
+        _ = try self.db.execute(String("INSERT INTO messages (id, user, conversation, json, at) VALUES (?, ?, ?, ?, ?) ON CONFLICT (id) DO UPDATE SET json = excluded.json"), [t(id), t(user.copy()), t(conversation), t("{message}"), Value.Int(at)])
+        try self.index_message(user, message)
+    }
+
+    // Puts a message's words in the search index: its text, and its files' names.
+    // A message's row there has the message's rowid, so storing it again replaces it.
+    fn index_message(self, user: String, message: Json) ! Error {
+        let id = (message.get(String("id")) ?? Json.Null).as_str() ?? String()
+        let row = try self.db.query_one(String("SELECT rowid, conversation, at FROM messages WHERE id = ?"), [t(id)]) else return
+        var agent = (message.get(String("agent")) ?? Json.Null).as_str() ?? String()
+        if agent.len() == 0 {
+            if let c = try self.db.query_one(String("SELECT agent FROM conversations WHERE id = ?"), [row[1].copy()]) {
+                agent = text(c[0].copy())
+            }
+        }
+        var words = String()
+        if let Json.Array(blocks) = message.get(String("blocks")) ?? Json.Null {
+            for b in blocks {
+                let kind = (b.get(String("kind")) ?? Json.Null).as_str() ?? String()
+                let piece = if kind == "text" { (b.get(String("text")) ?? Json.Null).as_str() } else if kind == "file" { (b.get(String("name")) ?? Json.Null).as_str() } else { none }
+                if let p = piece {
+                    if words.len() > 0 { words.push_str("\n") }
+                    words.push_str(p)
+                }
+            }
+        }
+        _ = try self.db.execute(String("DELETE FROM messages_fts WHERE rowid = ?"), [row[0].copy()])
+        if words.len() > 0 {
+            _ = try self.db.execute(String("INSERT INTO messages_fts (rowid, text, user, agent, at) VALUES (?, ?, ?, ?, ?)"), [row[0].copy(), t(words), t(user), t(agent), row[2].copy()])
+        }
+    }
+
+    // `user`'s messages that have every word of `query`, the last one as a prefix, best
+    // first: each message, and the words around the match with each matched word
+    // between MARK_START and MARK_END. Only in conversations that aren't deleted; with
+    // `agent`, only that agent's; with `after` or `before`, only from that time on, or
+    // before it (Unix ms).
+    pub fn search(self, user: String, query: String, agent: String?, after: i64?, before: i64?, limit: usize) -> List<(Json, String)> ! Error {
+        var out = List<(Json, String)>()
+        let fts = fts_query(query) else return out
+        var sql = String("SELECT m.json, snippet(messages_fts, 0, char(2), char(3), '…', 16) FROM messages_fts f JOIN messages m ON m.rowid = f.rowid JOIN conversations c ON c.id = m.conversation AND c.deleted = 0 WHERE messages_fts MATCH ? AND f.user = ?")
+        var args: List<Value> = [t(fts), t(user)]
+        if let a = agent {
+            sql.push_str(" AND f.agent = ?")
+            args.push(t(a))
+        }
+        if let a = after {
+            sql.push_str(" AND m.at >= ?")
+            args.push(Value.Int(a))
+        }
+        if let b = before {
+            sql.push_str(" AND m.at < ?")
+            args.push(Value.Int(b))
+        }
+        sql.push_str(" ORDER BY rank LIMIT ?")
+        args.push(Value.Int(i64.wrap(u64(limit))))
+        for r in try self.db.query(sql, args) {
+            out.push((try parse(text(r[0].copy())), text(r[1].copy())))
+        }
+        return out
+    }
+
+    // --- Files ---
+
+    // Notes that `user` has the file `sha`. The first name and type they gave it stay.
+    pub fn add_file(self, user: String, sha: String, name: String, mime: String, size: i64) ! Error {
+        _ = try self.db.execute(String("INSERT INTO files (sha, user, name, mime, size, at) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT (sha, user) DO NOTHING"), [t(sha), t(user), t(name), t(mime), Value.Int(size), Value.Int(now())])
+    }
+
+    // The file `sha`, if `user` has it: `file`, `name`, `mime` and `size`, as a file block has them.
+    pub fn file(self, user: String, sha: String) -> Json? ! Error {
+        let r = try self.db.query_one(String("SELECT sha, name, mime, size FROM files WHERE sha = ? AND user = ?"), [t(sha), t(user)]) else return none
+        return some(Obj.new().s("file", text(r[0].copy())).s("name", text(r[1].copy())).s("mime", text(r[2].copy())).i("size", int(r[3].copy())).done())
+    }
+
+    // The bytes of the files `user` has, counting each once.
+    pub fn file_usage(self, user: String) -> i64 ! Error {
+        let row = try self.db.query_one(String("SELECT coalesce(sum(size), 0) FROM files WHERE user = ?"), [t(user)])
+        return int((row ?? List<Value>())[0].copy())
     }
 
     // Up to `limit` messages of a conversation, newest last, before the
@@ -426,6 +524,20 @@ impl Store {
     }
 }
 
+// A search as FTS5 reads it: each word in quotes, so nothing in it is taken as
+// FTS5's own syntax, and the last a prefix, for searching while typing. None when
+// it has no words.
+fn fts_query(query: String) -> String? {
+    var parts = List<String>()
+    for w in query.split_whitespace() {
+        parts.push("\"{w.replace("\"", "\"\"")}\"")
+    }
+    if parts.len() == 0 { return none }
+    let n = parts.len()
+    parts[n - 1].push_str("*")
+    return some(parts.join(" "))
+}
+
 fn test_store() -> Store {
     return Store.open(String(":memory:"), PasswordHasher { memory_kib: 64, iterations: 1, parallelism: 1 })!
 }
@@ -490,4 +602,59 @@ fn messages_page_newest_last() {
     assert("{page[1]}".contains("msg_5") and "{page[0]}".contains("msg_4"))
     let (older, more2) = s.messages(a.id.copy(), String("c_1"), some(String("msg_4")), 10)!
     assert(not more2 and older.len() == 3 and "{older[0]}".contains("msg_1"))
+}
+
+fn text_message(id: str, conversation: String, agent: str, words: str, at: i64) -> Json {
+    let block = Obj.new().s("kind", String("text")).s("text", String(words)).done()
+    var o = Obj.new().s("id", String(id)).s("conversation", conversation).i("at", at).j("blocks", Json.Array([block]))
+    if agent.len() > 0 { o = o.s("agent", String(agent)) }
+    return o.done()
+}
+
+@test
+fn search_finds_words_per_person() {
+    let s = test_store()
+    let a = s.add_user(String("a"), String("password1"), "owner")!
+    let b = s.add_user(String("b"), String("password2"), "member")!
+    let c1 = s.add_conversation(a.id.copy(), String("a_1"), String("Builds"))!
+    let c2 = s.add_conversation(a.id.copy(), String("a_2"), String("Mail"))!
+    let cb = s.add_conversation(b.id.copy(), String("a_3"), String("Theirs"))!
+    let id1 = (c1.get(String("id")) ?? Json.Null).as_str() ?? String()
+    let id2 = (c2.get(String("id")) ?? Json.Null).as_str() ?? String()
+    let idb = (cb.get(String("id")) ?? Json.Null).as_str() ?? String()
+    s.put_message(a.id.copy(), text_message("msg_1", id1.copy(), "", "Did the build on main pass?", 100))!
+    s.put_message(a.id.copy(), text_message("msg_2", id1.copy(), "a_1", "Yes, the last build passed.", 200))!
+    s.put_message(a.id.copy(), text_message("msg_3", id2.copy(), "a_2", "Café receipts are in the inbox.", 300))!
+    s.put_message(b.id.copy(), text_message("msg_4", idb, "a_3", "Their build too", 400))!
+    assert(s.search(a.id.copy(), String("build"), none, none, none, 10)!.len() == 2)
+    // Prefixes, accents, and quotes that aren't FTS5 syntax.
+    assert(s.search(a.id.copy(), String("pas"), none, none, none, 10)!.len() == 2)
+    assert(s.search(a.id.copy(), String("cafe"), none, none, none, 10)!.len() == 1)
+    assert(s.search(a.id.copy(), String("\"build OR"), none, none, none, 10)!.len() == 0)
+    // The person's message counts as the conversation's agent's.
+    assert(s.search(a.id.copy(), String("build"), some(String("a_1")), none, none, 10)!.len() == 2)
+    assert(s.search(a.id.copy(), String("build"), some(String("a_2")), none, none, 10)!.len() == 0)
+    assert(s.search(a.id.copy(), String("build"), none, some(150), none, 10)!.len() == 1)
+    assert(s.search(a.id.copy(), String("build"), none, none, some(150), 10)!.len() == 1)
+    let found = s.search(a.id.copy(), String("receipts"), none, none, none, 10)!
+    assert(found[0].1.contains("{MARK_START}receipts{MARK_END}"))
+    // Storing a message again replaces its words, and a deleted conversation's don't show.
+    s.put_message(a.id.copy(), text_message("msg_3", id2.copy(), "a_2", "Nothing here now", 300))!
+    assert(s.search(a.id.copy(), String("receipts"), none, none, none, 10)!.len() == 0)
+    s.delete_conversation(a.id.copy(), id1)!
+    assert(s.search(a.id.copy(), String("build"), none, none, none, 10)!.len() == 0)
+    assert(s.search(a.id.copy(), String("   "), none, none, none, 10)!.len() == 0)
+}
+
+@test
+fn files_are_per_person() {
+    let s = test_store()
+    let a = s.add_user(String("a"), String("password1"), "owner")!
+    let b = s.add_user(String("b"), String("password2"), "member")!
+    let sha = "a".repeat(64)
+    s.add_file(a.id.copy(), sha.copy(), String("x.png"), String("image/png"), 10)!
+    s.add_file(a.id.copy(), sha.copy(), String("again.png"), String("image/png"), 10)!
+    assert("{s.file(a.id.copy(), sha.copy())!}".contains("x.png"))
+    assert(s.file(b.id.copy(), sha)! == none)
+    assert(s.file_usage(a.id.copy())! == 10 and s.file_usage(b.id.copy())! == 0)
 }

@@ -31,6 +31,7 @@ usage: loom <command>
   user list                 list the accounts
   acp add NAME COMMAND ...  add an ACP agent program, such as: acp add claude npx @zed-industries/claude-agent-acp
   acp list                  list the ACP agent programs
+  files limit MB|off        cap the files each person can keep, in megabytes
   status                    say what the instance holds
   version                   print loom's version and the protocol versions it speaks
 
@@ -137,6 +138,18 @@ fn main() ! Error {
         let store = try open_store(a)
         for p in try store.acp_agents() {
             println("{p.name}  {p.command} {p.args.join(" ")}")
+        }
+    } else if cmd == "files" and sub == "limit" and a.words.len() == 3 {
+        let store = try open_store(a.copy())
+        if a.words[2] == "off" {
+            try store.delete_meta("file_limit")
+            println("each person can keep as many files as fit")
+        } else {
+            let mb = i64.parse(a.words[2].copy()) else {
+                fail "the limit is a number of megabytes, or off"
+            }
+            try store.set_meta("file_limit", "{mb * 1000000}")
+            println("each person can keep {mb} MB of files")
         }
     } else if cmd == "status" {
         let store = try open_store(a.copy())
