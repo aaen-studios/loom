@@ -3299,6 +3299,7 @@ ACTA_KEY=secret:ACTA_KEY",
                     ))
                     .child(
                         div()
+                            .flex_1()
                             .flex()
                             .flex_col()
                             .min_w_0()
@@ -3328,7 +3329,15 @@ ACTA_KEY=secret:ACTA_KEY",
                                     .truncate()
                                     .when(!preview.is_empty(), |d| d.child(preview)),
                             ),
-                    ),
+                    )
+                    .when(a.pinned.is_some(), |d| {
+                        d.child(
+                            div()
+                                .flex_none()
+                                .text_color(p.ink_3)
+                                .child(Icon::new(Ico::Pin).xsmall()),
+                        )
+                    }),
             );
         }
         let server_open = self.popup.is_some_and(is_server);
@@ -3796,9 +3805,30 @@ ACTA_KEY=secret:ACTA_KEY",
                 this.menu = None;
                 cx.notify();
             }));
+        let pinned = self
+            .model
+            .selected
+            .as_ref()
+            .and_then(|id| self.model.agent(id))
+            .is_some_and(|a| a.pinned.is_some());
         Some(match menu {
             Menu::Agent => panel
                 .left(px(space::S))
+                .child(
+                    self.menu_item(
+                        "pin-agent",
+                        if pinned { Ico::PinOff } else { Ico::Pin },
+                        if pinned { "Unpin" } else { "Pin to top" },
+                        false,
+                    )
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        if let Some(f) = this.model.pin_agent(!pinned) {
+                            this.send(f);
+                        }
+                        this.menu = None;
+                        cx.notify();
+                    })),
+                )
                 .child(
                     self.menu_item("edit", Ico::Pencil, "Edit agent", false)
                         .on_click(cx.listener(|this, _, window, cx| {

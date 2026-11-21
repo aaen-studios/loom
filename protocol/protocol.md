@@ -631,6 +631,7 @@ Version 1's commands:
 | `people.log` | `before`? (an entry's `id`), `limit`? (50; up to 200) | `entries`, newest first: each `id`, `kind` (`joined`, `invited`, `role`, `removed`, `left`, `reset` or `password`), `text` (what happened, in words, with usernames), `by` (the username of who did it, or empty when it came from the server's command line or the person is gone) and `at`. Owners and admins. It keeps who joined and how, invites made and taken back, role changes, removals, accounts deleted, reset links made and used, and accounts and passwords from the command line |
 | `agent.revisions` | `agent` | `revisions`, newest first: each `revision`, `by` (the device or agent that made it), `at`, and `agent` as it was then |
 | `agent.rollback` | `agent`, `revision` | `agent`: a new revision with that one's name, ACP agent, instructions, folder and colour. The permission mode stays as it is |
+| `agent.pin` | `agent`, `pinned`? (`false` takes the pin off) | `agent`, with `pinned`: when it was pinned. Pinned agents go at the top of the list, in that order. Not a revision; `agent.updated` tells every device |
 | `agent.delete` | `agent` | — |
 | `device.rename` | `device`, `name` | — |
 | `device.revoke` | `device` | — |

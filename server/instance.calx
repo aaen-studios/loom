@@ -5928,6 +5928,24 @@ impl Instance {
             }
             return try i.command(user, device, String("agent.update"), changes.done())
         }
+        if name == "agent.pin" {
+            // Pinned agents go at the top of the list, in the order they were
+            // pinned. Where an agent sits isn't a change to it: no revision.
+            let id = str_at(args.copy(), "agent") ?? String()
+            let old = try i.store.agent(user.copy(), id.copy()) else return Answer.Refused(String("not_found"), "There's no agent {id}.")
+            let pin = bool_at(args, "pinned") ?? true
+            var o = Obj.new()
+            if let Json.Object(m) = old.copy() {
+                for (k, v) in m {
+                    if k != "pinned" { o.m.insert(k.copy(), v.copy()) }
+                }
+            }
+            if pin { o = o.i("pinned", int_at(old, "pinned") ?? now()) }
+            let agent = o.done()
+            try i.store.put_agent_json(user.copy(), agent.copy())
+            try i.event(user, "agent.updated", Obj.new().j("agent", agent.copy()).s("by", device).done())
+            return Answer.Value(Obj.new().j("agent", agent).done())
+        }
         if name == "agent.delete" {
             let id = str_at(args, "agent") ?? String()
             if try i.store.agent(user.copy(), id.copy()) == none { return Answer.Refused(String("not_found"), "There's no agent {id}.") }

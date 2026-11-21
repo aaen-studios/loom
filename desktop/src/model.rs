@@ -63,6 +63,8 @@ pub struct Agent {
     pub options: Vec<ConfigOption>,
     /// What the person picked, by option id; the rest are what the program starts on.
     pub config: Vec<(String, String)>,
+    /// When it was pinned to the top of the list, if it is.
+    pub pinned: Option<i64>,
 }
 
 /// One of the things an agent's program lets the person pick, such as its model.
@@ -2522,8 +2524,12 @@ impl Model {
                             .unwrap_or_default(),
                         options: config_options(a),
                         config: config_values(a),
+                        pinned: a.get("pinned").and_then(Value::as_i64),
                     })
                     .collect();
+                // Pinned agents first, in the order they were pinned; the rest as they were.
+                self.agents
+                    .sort_by_key(|a| (a.pinned.is_none(), a.pinned.unwrap_or(0)));
                 if let Some(made) = self.made_agent.take() {
                     if self.agent(&made).is_some() {
                         self.select(Some(made));
@@ -3457,6 +3463,15 @@ impl Model {
         "You".into()
     }
 
+    /// Pins the open agent to the top of the list, or takes its pin off.
+    pub fn pin_agent(&mut self, pinned: bool) -> Option<Value> {
+        let agent = self.selected.clone()?;
+        let id = self.id("app.pin_agent");
+        Some(
+            json!({"t": "cmd", "id": id, "name": "agent.pin", "args": {"agent": agent, "pinned": pinned}}),
+        )
+    }
+
     pub fn set_permission(&mut self, permission: &str) -> Option<Value> {
         let agent = self.selected.clone()?;
         let id = self.id("app.permission");
@@ -4182,5 +4197,22 @@ mod tests {
     fn no_door_without_a_panel() {
         let mut m = Model::new();
         assert!(m.door(1, "data.get", &json!({"key": "k"})).is_err());
+    }
+
+    #[test]
+    fn pinned_agents_come_first_in_the_order_they_were_pinned() {
+        let mut m = Model::new();
+        m.take(&json!({"t": "core.data", "what": "agents", "items": [
+            {"id": "a_1", "name": "One"},
+            {"id": "a_2", "name": "Two", "pinned": 200},
+            {"id": "a_3", "name": "Three"},
+            {"id": "a_4", "name": "Four", "pinned": 100}
+        ]}));
+        let order: Vec<&str> = m.agents.iter().map(|a| a.id.as_str()).collect();
+        assert_eq!(order, ["a_4", "a_2", "a_1", "a_3"]);
+        m.select(Some("a_1".into()));
+        let f = m.pin_agent(true).unwrap();
+        assert_eq!(f["name"], "agent.pin");
+        assert_eq!(f["args"]["agent"], "a_1");
     }
 }
