@@ -1,0 +1,79 @@
+module tests.protocol.events
+
+// Old events are pruned (PLAN.md, "Sync"), and a device whose cursor is from
+// before what's left gets reset: true and a snapshot instead, as does a new
+// device starting from 0. A device still within what's left catches up on the
+// events as usual. The instance runs with --test-keep-events 3, which keeps
+// each person's newest 3 events of any age.
+//
+//     calx tests/protocol/events.calx
+import std.json.{Json}
+import std.process.{exit}
+import std.thread.{sleep}
+import shared.obj.{Obj, at, bool_at, int_at, str_at}
+import tests.kit.{App, Instance, check}
+
+// The welcome an app got, and whether a snapshot came after it.
+fn welcomed(app: App) -> (Json, bool) {
+    var welcome = Json.Null
+    var snapshot = false
+    for f in app.frames {
+        let t = str_at(f.copy(), "t") ?? String()
+        if t == "welcome" { welcome = f.copy() }
+        if t == "snapshot" { snapshot = true }
+    }
+    return (welcome, snapshot)
+}
+
+fn run(i: Instance) ! Error {
+    var app = try App.connect(i.base.copy(), i.token.copy(), 0)
+    let made = try app.cmd("q_1", "agent.create", Obj.new().s("name", String("Fake")).s("acp_agent", String("fake")).s("instructions", String("")).done())
+    let agent = str_at(at(at(made, "value"), "agent"), "id") ?? String()
+    let ids: List<str> = ["q_c0", "q_c1", "q_c2", "q_c3", "q_c4"]
+    for n in ids {
+        _ = try app.cmd(n, "conversation.create", Obj.new().s("agent", agent.copy()).s("title", String(n)).done())
+    }
+    let last = app.seq
+    app.close()
+    try check(last >= 6, "the person has more events than are kept")
+    // The instance looks every 200 ms.
+    unsafe { sleep(600000000) }
+
+    let fresh = try App.connect(i.base.copy(), i.token.copy(), 0)
+    let (w1, snap1) = welcomed(fresh)
+    var agents: usize = 0
+    var conversations: usize = 0
+    for f in fresh.frames {
+        if str_at(f.copy(), "t") == some(String("snapshot")) {
+            if let Json.Array(a) = at(f.copy(), "agents") { agents = a.len() }
+            if let Json.Array(c) = at(f, "conversations") { conversations = c.len() }
+        }
+    }
+    try check(bool_at(w1.copy(), "reset") == some(true) and snap1 and int_at(w1, "seq") == some(last), "a new device gets a snapshot once events are pruned")
+    try check(agents == 1 and conversations == 5, "and the snapshot has everything")
+    fresh.close()
+
+    let behind = try App.connect(i.base.copy(), i.token.copy(), 1)
+    let (w2, snap2) = welcomed(behind)
+    try check(bool_at(w2, "reset") == some(true) and snap2, "a device from before what's left gets a snapshot")
+    behind.close()
+
+    let near = try App.connect(i.base.copy(), i.token.copy(), last - 2)
+    let (w3, snap3) = welcomed(near)
+    try check(bool_at(w3, "reset") == some(false) and not snap3 and near.seq == last, "a device within what's left catches up on the events")
+    near.close()
+}
+
+fn main() ! Error {
+    let inst = try Instance.start_with([String("--test-keep-events"), String("3")])
+    let failure: String? = match run(inst.copy()) {
+        ok => none,
+        err(e) => some("{e}"),
+    }
+    inst.stop()
+    if let f = failure {
+        eprintln("\n{f}")
+        exit(1)
+    }
+    println("\nevents: all good")
+}

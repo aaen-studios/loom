@@ -25,7 +25,7 @@ import std.process.{current_exe, exit}
 import shared.obj.{at, str_at}
 import shared.protocol
 import shared.release.{MANIFEST, RELEASE_KEY, check_manifest, newer}
-import server.instance.{Config, Instance}
+import server.instance.{Config, EventLife, Instance}
 import server.store.{Store}
 
 const VERSION: str = "0.2.0-dev"
@@ -59,13 +59,21 @@ struct Args {
     port: u16
     host: String
     fast_hashes: bool
+    keep_events: i64?
 }
 
 fn read_args(given: List<String>) -> Args ! Error {
-    var a = Args { words: List<String>(), data: String("loom-data"), port: 8790, host: String("127.0.0.1"), fast_hashes: false }
+    var a = Args { words: List<String>(), data: String("loom-data"), port: 8790, host: String("127.0.0.1"), fast_hashes: false, keep_events: none }
     var i: usize = 0
     while i < given.len() {
         let w = given[i].copy()
+        // For tests only: keeps just the newest N events, of any age.
+        if w == "--test-keep-events" {
+            if i + 1 >= given.len() { fail "{w} needs a number" }
+            a.keep_events = some(i64.parse(given[i + 1].copy()) ?? 0)
+            i += 2
+            continue
+        }
         if w == "--data" or w == "--port" or w == "--host" {
             if i + 1 >= given.len() { fail "{w} needs a value" }
             let v = given[i + 1].copy()
@@ -88,6 +96,11 @@ fn read_args(given: List<String>) -> Args ! Error {
     return a
 }
 
+fn event_life(a: Args) -> EventLife {
+    if let keep = a.keep_events { return EventLife { age_ms: 0, keep: keep, every_ms: 200 } }
+    return EventLife.standard()
+}
+
 fn hasher(a: Args) -> PasswordHasher {
     if a.fast_hashes { return PasswordHasher { memory_kib: 64, iterations: 1, parallelism: 1 } }
     return PasswordHasher()
@@ -99,7 +112,7 @@ fn open_store(a: Args) -> Store ! Error {
 }
 
 fn serve(a: Args) ! Error {
-    var i = try Instance.open(Config { data: a.data.copy(), port: a.port, host: a.host.copy(), hasher: hasher(a.copy()) })
+    var i = try Instance.open(Config { data: a.data.copy(), port: a.port, host: a.host.copy(), hasher: hasher(a.copy()), events: event_life(a.copy()) })
     println("loom: serving {a.data} at {i.url()}")
     if let code = try i.setup_code() {
         println("loom: no owner yet. Set one up with POST /api/setup and this code:")

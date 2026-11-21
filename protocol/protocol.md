@@ -217,7 +217,7 @@ The device's state changed: the same optional fields as `hello`'s `device`. Sent
 
 - `version`: the one version this connection uses.
 - `seq`: the newest event `seq` the person has right now. Catch-up runs from `after` up to this.
-- `reset`: `true` when the app's cursor is too old (its events were pruned) or ahead of the instance's (the instance was restored from an older backup). The app clears its cache, and a [`snapshot`](#snapshot) follows instead of the missed events.
+- `reset`: `true` when the app's cursor is too old (its events were pruned, which includes a new device's `0` once any have been) or ahead of the instance's (the instance was restored from an older backup). The app clears its cache, and a [`snapshot`](#snapshot) follows instead of the missed events.
 
 ### `snapshot`
 
@@ -294,7 +294,7 @@ Something the app sent couldn't be done. The socket stays open.
 - **An event is stored before it's sent.** An app that has `seq` N has everything up to N.
 - **The app stores the `seq`** of the last event it applied, in the same transaction as the change it made to its cache. That's its cursor, and it sends it as `after` on the next `hello`.
 - **Every device of a person** sees the same events in the same order, including events about what that device did itself.
-- **Old events are pruned** after 30 days, keeping at least the newest 10,000. A device further behind than that gets `reset: true` and a snapshot.
+- **Old events are pruned** after 30 days, keeping at least each person's newest 10,000. The instance looks once an hour. A device further behind than that gets `reset: true` and a snapshot.
 - **What isn't an event:** deltas, `ack`, `result`, `error`, `welcome` and `synced`. None of them change state that a cache keeps.
 
 ## Messages and streaming

@@ -35,11 +35,18 @@ pub struct Instance {
 
 impl Instance {
     pub fn start() -> Instance ! Error {
+        return try Instance.start_with(List<String>())
+    }
+
+    /// The same, with `extra` options for `loom serve`.
+    pub fn start_with(extra: List<String>) -> Instance ! Error {
         let data = try fs.temp_dir()
         let agent = try fs.absolute(String("tests/fake_agent/main.calx"))
         let added = try loom(data.copy(), [String("acp"), String("add"), String("fake"), calx(), agent]).output()
         if not added.status.success() { fail "loom acp add failed: {added.error_text()}" }
-        let server = try loom(data.copy(), [String("serve"), String("--port"), String("0")]).stdout(Stdio.Pipe).spawn()
+        var args: List<String> = [String("serve"), String("--port"), String("0")]
+        args.extend(extra)
+        let server = try loom(data.copy(), args).stdout(Stdio.Pipe).spawn()
         let serving = server.wait_for_line(String("loom: serving"), WAIT) else {
             server.kill()
             fail "the server didn't start"
