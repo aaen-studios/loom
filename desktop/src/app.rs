@@ -3869,10 +3869,30 @@ ACTA_KEY=secret:ACTA_KEY",
         let tools: Vec<model::Tool> = self.model.tools.clone();
         let files = Rc::new(self.model.files.clone());
         let this = cx.entity().downgrade();
+        let new_line = self.model.new_line.clone();
         let list = MessageScroller::new("chat", self.scroller.clone(), move |ix, _, _| {
             let Some(row) = rows.get(ix) else {
                 return div().into_any_element();
             };
+            // Above the first reply that came while the chat was shut: a line, NEW
+            // in the agent's colour.
+            let is_new =
+                matches!(row, Row::Message(m) if new_line.as_deref() == Some(m.id.as_str()));
+            let divider = div()
+                .w_full()
+                .max_w(px(space::COLUMN))
+                .flex()
+                .items_center()
+                .gap(px(space::S))
+                .pt(px(space::S))
+                .child(div().flex_1().h(px(1.0)).bg(tint.opacity(0.5)))
+                .child(
+                    div()
+                        .text_size(px(size::CAPTION))
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(tint)
+                        .child("NEW"),
+                );
             let inner = match row {
                 Row::Message(m) if m.role == "person" => person(p, m, &files, this.clone()),
                 Row::Message(m) => reply(
@@ -3927,8 +3947,10 @@ ACTA_KEY=secret:ACTA_KEY",
             div()
                 .w_full()
                 .flex()
-                .justify_center()
+                .flex_col()
+                .items_center()
                 .px(px(space::XL))
+                .when(is_new, |d| d.child(divider))
                 .child(
                     div()
                         .w_full()
