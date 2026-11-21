@@ -182,6 +182,10 @@ pub struct Loom {
     make: Making,
     /// When the window opened, for the opening weave.
     launched: Option<Instant>,
+    /// The window's own focus, so keys like Esc reach it when no field has focus.
+    keys: FocusHandle,
+    /// The page beside the sidebar (its screen and agent), and when it last changed.
+    page: ((Screen, Option<String>), Instant),
     /// What the window shows, and since when, so each new view eases in.
     scene: (&'static str, Instant),
     /// The window closing on a new agent's thread: since when, its colour, and whether it
@@ -226,12 +230,17 @@ impl Loom {
             &composer,
             window,
             |this: &mut Loom, state, event: &InputEvent, window, cx| {
-                if let InputEvent::PressEnter { shift: false, .. } = event {
-                    let text = state.read(cx).value().to_string();
-                    if let Some(frame) = this.model.send(&text) {
-                        this.core.send(&frame.to_string());
-                        state.update(cx, |s, cx| s.set_value("", window, cx));
+                match event {
+                    InputEvent::PressEnter { shift: false, .. } => {
+                        let text = state.read(cx).value().to_string();
+                        if let Some(frame) = this.model.send(&text) {
+                            this.core.send(&frame.to_string());
+                            state.update(cx, |s, cx| s.set_value("", window, cx));
+                        }
                     }
+                    // The agent's thread thinks along while there's something typed.
+                    InputEvent::Change => cx.notify(),
+                    _ => {}
                 }
             },
         )
@@ -462,6 +471,8 @@ ACTA_KEY=secret:ACTA_KEY",
             asked_programs: false,
             make: Making::default(),
             launched: None,
+            keys: cx.focus_handle(),
+            page: ((Screen::Chat, None), Instant::now()),
             scene: ("", Instant::now()),
             closing: None,
             form_at: Instant::now(),
@@ -492,7 +503,30 @@ ACTA_KEY=secret:ACTA_KEY",
             notice: None,
         };
         loom.fetch();
+        window.focus(&loom.keys, cx);
         loom
+    }
+
+    /// Esc steps back: closes a menu, the server form, a page, or a step of making an
+    /// agent, whichever is on top.
+    fn escape(&mut self, cx: &mut Context<Self>) {
+        if self.menu.is_some() {
+            self.menu = None;
+        } else if self.model.conn == Some(Conn::SignedOut) {
+            if self.server_form {
+                self.server_form = false;
+                self.model.login_error = None;
+                self.form_at = Instant::now();
+            }
+        } else if self.make.step == Step::Name {
+            self.make.step = Step::Brain;
+        } else if self.make.step == Step::Weaving {
+            // It's being made; there's nothing to step back to.
+        } else if self.screen != Screen::Chat {
+            self.model.editing = None;
+            self.screen = Screen::Chat;
+        }
+        cx.notify();
     }
 
     fn send(&self, frame: Value) {
@@ -2638,6 +2672,69 @@ ACTA_KEY=secret:ACTA_KEY",
         Some(self.curtain(h, h / 2.0, close, band, BAND))
     }
 
+    /// When the page beside the sidebar was last seen arriving: as it unrolled, or as the
+    /// opening weave or a new agent's curtain uncovered it. It can be a moment ahead.
+    fn opened(&self) -> Instant {
+        let mut at = self.page.1;
+        if let Some((closed, _, _)) = self.closing {
+            at = at.max(closed + Duration::from_secs_f32(CLOSE_SECONDS * 0.6));
+        }
+        if let Some(launched) = self.launched {
+            at = at.max(launched + Duration::from_secs_f32(SPLASH_SECONDS * 0.85));
+        }
+        at
+    }
+
+    /// A page unrolling beside the sidebar: the background still over what's below a
+    /// thread passing down it, `h` being the window's height.
+    fn unroll(&self, h: f32) -> Option<Div> {
+        let t = self.page.1.elapsed().as_secs_f32() / UNROLL_SECONDS;
+        if t >= 1.0 {
+            return None;
+        }
+        let p = self.p;
+        let k = 1.0 - (1.0 - t).powi(3);
+        let area = h - layout::TITLEBAR;
+        let top = layout::TITLEBAR + area * k;
+        let tint = match self.screen {
+            Screen::Chat => self
+                .model
+                .selected
+                .as_ref()
+                .and_then(|id| self.model.agent(id))
+                .map(|a| thread::color(&a.color, p.dark)),
+            _ => None,
+        }
+        .unwrap_or_else(|| thread::color("grey", p.dark));
+        const BAND: f32 = 28.0;
+        Some(
+            div()
+                .absolute()
+                .left_0()
+                .right_0()
+                .top(px(top - BAND / 2.0))
+                .bottom_0()
+                .child(
+                    div()
+                        .absolute()
+                        .left_0()
+                        .right_0()
+                        .top(px(BAND / 2.0))
+                        .bottom_0()
+                        .bg(p.bg),
+                )
+                .child(
+                    div()
+                        .absolute()
+                        .left_0()
+                        .right_0()
+                        .top_0()
+                        .h(px(BAND))
+                        .child(thread::weave(vec![tint], 0.6, 1.0, BAND)),
+                ),
+        )
+    }
+
     /// The app opening under a new agent's weave: the window closes on its thread.
     fn closing(&self, h: f32) -> Option<Div> {
         let (at, tint, _) = self.closing?;
@@ -2698,10 +2795,26 @@ ACTA_KEY=secret:ACTA_KEY",
             return div().flex_1();
         };
         let tint = thread::color(&a.color, p.dark);
-        let mood = self.model.mood(&a.id);
+        // While the person types to an idle agent, its thread leans in and thinks along.
+        let typing = !self.composer.read(cx).value().trim().is_empty();
+        let mood = match self.model.mood(&a.id) {
+            Mood::Idle if typing => Mood::Thinking,
+            m => m,
+        };
+        // It twangs as its chat opens, like a hello, and after each run.
+        let opened = self.opened();
+        let snapped = match self.model.finished_at(&a.id) {
+            Some(done) if done > opened => Some(done),
+            _ => Some(opened),
+        };
+        let since = opened
+            .checked_duration_since(Instant::now())
+            .map_or(opened.elapsed().as_secs_f32(), |wait| -wait.as_secs_f32());
         let mut chips = div().flex().flex_wrap().justify_center().gap(px(space::S));
         for (i, ask) in SUGGESTIONS.iter().enumerate() {
-            chips = chips.child(
+            // The suggestions come in one after another.
+            let x = ((since - 0.35 - 0.1 * i as f32) / 0.35).clamp(0.0, 1.0);
+            chips = chips.child(appear(
                 div()
                     .id(("ask", i))
                     .px(px(space::L))
@@ -2720,7 +2833,8 @@ ACTA_KEY=secret:ACTA_KEY",
                             s.focus(window, cx);
                         });
                     })),
-            );
+                x * x * (3.0 - 2.0 * x),
+            ));
         }
         div()
             .flex_1()
@@ -2732,14 +2846,7 @@ ACTA_KEY=secret:ACTA_KEY",
             .gap(px(space::XL))
             .px(px(space::XL))
             .pb(px(60.0))
-            .child(thread(
-                "hero",
-                mood,
-                tint,
-                140.0,
-                16.0,
-                self.model.finished_at(&a.id),
-            ))
+            .child(thread("hero", mood, tint, 140.0, 16.0, snapped))
             .child(
                 div()
                     .text_size(px(size::HERO))
@@ -5632,6 +5739,14 @@ impl Render for Loom {
             || self
                 .closing
                 .is_some_and(|c| c.0.elapsed().as_secs_f32() < CLOSE_SECONDS)
+            // A page arriving: its thread unrolls it, then twangs hello.
+            || self
+                .opened()
+                .checked_duration_since(Instant::now())
+                .is_some()
+            || self.opened().elapsed().as_secs_f32() < 1.5
+            // Someone typing to an agent, whose thread thinks along.
+            || self.screen == Screen::Chat && !self.composer.read(cx).value().trim().is_empty()
         {
             window.request_animation_frame();
         }
@@ -5646,7 +5761,34 @@ impl Render for Loom {
         } else {
             (None, closing)
         };
+        // A new page in the app unrolls under a thread that passes down it, like a shuttle,
+        // in the agent's colour for a chat. Not when the app has only just opened: the
+        // opening weave or a new agent's curtain does that.
+        let page = (self.screen, self.model.selected.clone());
+        if self.page.0 != page {
+            let settled = self.scene.0 == "app" && self.scene.1.elapsed().as_secs_f32() > 0.2;
+            if settled {
+                window.request_animation_frame();
+            }
+            self.page = (
+                page,
+                if settled {
+                    Instant::now()
+                } else {
+                    Instant::now()
+                        .checked_sub(Duration::from_secs(10))
+                        .unwrap_or_else(Instant::now)
+                },
+            );
+        }
+        let unroll = self.unroll(h);
         let root = div()
+            .track_focus(&self.keys)
+            .on_key_down(cx.listener(|this, e: &KeyDownEvent, _, cx| {
+                if e.keystroke.key == "escape" {
+                    this.escape(cx);
+                }
+            }))
             .relative()
             .size_full()
             .bg(p.bg)
@@ -5716,7 +5858,8 @@ impl Render for Loom {
                     )
                     .child(main)
                     .when_some(menu, |d, m| d.child(m))
-                    .when_some(beside, |d, c| d.child(c)),
+                    .when_some(beside, |d, c| d.child(c))
+                    .when_some(unroll, |d, u| d.child(u)),
             )
             .when_some(whole, |d, c| d.child(c))
             .when_some(splash, |d, s| d.child(s))
@@ -5780,6 +5923,9 @@ const PICK_SECONDS: f32 = 0.45;
 
 /// How long the window takes to close on a new agent's thread, in seconds.
 const CLOSE_SECONDS: f32 = 0.7;
+
+/// How long a new page takes to unroll under its thread, in seconds.
+const UNROLL_SECONDS: f32 = 0.45;
 
 /// How high the band the weaving threads move in is.
 const WEAVE_BAND: f32 = 150.0;
