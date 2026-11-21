@@ -5,6 +5,7 @@ use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
+use gpui_kit::assets::IconName as Ico;
 use gpui_kit::component::input::{Input, InputEvent, InputState, Paste, Textarea, TextareaState};
 use gpui_kit::component::message_scroller::{MessageScroller, MessageScrollerState};
 use gpui_kit::component::text::TextView;
@@ -247,7 +248,7 @@ impl Loom {
         let profile_in = cx.new(|cx| {
             TextareaState::new(window, cx)
                 .auto_grow(6, 20)
-                .placeholder("Elliot, in Oslo. Builds loom. Likes short answers.")
+                .placeholder("Who you are, and how you like answers")
         });
         let routine_name_in = input(window, cx, "Morning brief", false);
         let move_to_in = input(window, cx, "https://loom.example.com", false);
@@ -284,7 +285,7 @@ ACTA_KEY=secret:ACTA_KEY",
         let instructions_in = cx.new(|cx| {
             TextareaState::new(window, cx)
                 .auto_grow(4, 14)
-                .placeholder("What it does, and how. It reads this before every chat.")
+                .placeholder("How should it work?")
         });
         if let Ok(server) = std::env::var("LOOM_SERVER") {
             server_in.update(cx, |s, cx| s.set_value(server, window, cx));
@@ -963,7 +964,7 @@ ACTA_KEY=secret:ACTA_KEY",
                             .text_color(p.ink_2)
                             .cursor_pointer()
                             .hover(move |s| s.bg(p.hover).text_color(p.ink))
-                            .child(Icon::new(gpui_kit::assets::IconName::ArrowLeft).small())
+                            .child(Icon::new(Ico::ArrowLeft).small())
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.server_form = false;
                                 this.model.login_error = None;
@@ -1336,7 +1337,7 @@ ACTA_KEY=secret:ACTA_KEY",
                             .cursor_pointer()
                             .when(self.menu == Some(Menu::Settings), |d| d.bg(p.active))
                             .hover(move |s| s.bg(p.hover).text_color(p.ink))
-                            .child(Icon::new(gpui_kit::assets::IconName::Settings).small())
+                            .child(Icon::new(Ico::Settings).small())
                             .child("Settings")
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.menu = if this.menu == Some(Menu::Settings) {
@@ -1375,21 +1376,31 @@ ACTA_KEY=secret:ACTA_KEY",
         }
         let p = self.p;
         let local = local_mode();
-        let mut items: Vec<(&'static str, &'static str, Screen)> = vec![
-            ("set-profile", "About you", Screen::Profile),
-            ("set-routines", "Routines", Screen::Routines),
-            ("set-skills", "Skills", Screen::Skills),
-            ("set-programs", "Agent programs", Screen::Programs),
-            ("set-mcp", "MCP servers", Screen::Mcp),
-            ("set-plugins", "Plugins", Screen::Plugins),
-            ("set-phone", "Add a phone", Screen::AddPhone),
+        let mut items: Vec<(&'static str, Ico, &'static str, Screen)> = vec![
+            (
+                "set-profile",
+                Ico::CircleUserRound,
+                "About you",
+                Screen::Profile,
+            ),
+            ("set-routines", Ico::Clock, "Routines", Screen::Routines),
+            ("set-skills", Ico::WandSparkles, "Skills", Screen::Skills),
+            ("set-programs", Ico::Bot, "Agent programs", Screen::Programs),
+            ("set-mcp", Ico::Plug, "MCP servers", Screen::Mcp),
+            ("set-plugins", Ico::Puzzle, "Plugins", Screen::Plugins),
+            (
+                "set-phone",
+                Ico::Smartphone,
+                "Add a phone",
+                Screen::AddPhone,
+            ),
         ];
         // An instance somewhere else has other people, and reaches this PC as a device.
         if !local {
-            items.push(("set-people", "People", Screen::People));
-            items.push(("set-device", "This PC", Screen::ThisDevice));
+            items.push(("set-people", Ico::Users, "People", Screen::People));
+            items.push(("set-device", Ico::Monitor, "This PC", Screen::ThisDevice));
         }
-        items.push(("set-move", "Move", Screen::Move));
+        items.push(("set-move", Ico::Truck, "Move", Screen::Move));
         let mut panel = div()
             .absolute()
             .left(px(space::S))
@@ -1407,9 +1418,9 @@ ACTA_KEY=secret:ACTA_KEY",
                 this.menu = None;
                 cx.notify();
             }));
-        for (id, title, screen) in items {
+        for (id, icon, title, screen) in items {
             panel = panel.child(
-                self.menu_item(id, title, "", false)
+                self.menu_item(id, icon, title, false)
                     .on_click(cx.listener(move |this, _, _, cx| this.open(screen, cx))),
             );
         }
@@ -1425,12 +1436,12 @@ ACTA_KEY=secret:ACTA_KEY",
                 .child(
                     self.menu_item(
                         "set-sign-out",
+                        if local { Ico::Power } else { Ico::LogOut },
                         if local {
                             "Close this instance"
                         } else {
                             "Sign out"
                         },
-                        "",
                         false,
                     )
                     .on_click(cx.listener(|this, _, _, cx| this.sign_out(cx))),
@@ -1611,39 +1622,45 @@ ACTA_KEY=secret:ACTA_KEY",
         )
     }
 
-    fn menu_item(
-        &self,
-        id: &'static str,
-        title: &str,
-        detail: &str,
-        danger: bool,
-    ) -> Stateful<Div> {
+    /// A menu entry: its icon and its title.
+    fn menu_item(&self, id: &'static str, icon: Ico, title: &str, danger: bool) -> Stateful<Div> {
         let p = self.p;
         div()
             .id(id)
             .flex()
-            .flex_col()
-            .gap(px(2.0))
+            .items_center()
+            .gap(px(space::M))
             .px(px(space::M))
             .py(px(space::S))
             .rounded(px(radius::ROW))
             .cursor_pointer()
+            .text_size(px(size::SMALL))
+            .text_color(if danger { p.bad } else { p.ink })
             .hover(move |s| s.bg(p.hover))
             .child(
                 div()
-                    .text_size(px(size::SMALL))
-                    .font_weight(FontWeight::MEDIUM)
-                    .text_color(if danger { p.bad } else { p.ink })
-                    .child(title.to_string()),
+                    .text_color(if danger { p.bad } else { p.ink_2 })
+                    .child(Icon::new(icon).small()),
             )
-            .when(!detail.is_empty(), |d| {
-                d.child(
-                    div()
-                        .text_size(px(size::CAPTION))
-                        .text_color(p.ink_3)
-                        .child(detail.to_string()),
-                )
-            })
+            .child(div().flex_1().child(title.to_string()))
+    }
+
+    /// A menu entry for one of the permission modes, ticked when it's the agent's.
+    fn mode_item(&self, id: &'static str, icon: Ico, title: &str, mode: &str) -> Stateful<Div> {
+        let p = self.p;
+        let on = self
+            .model
+            .selected
+            .as_ref()
+            .and_then(|a| self.model.agent(a))
+            .is_some_and(|a| a.permission == mode);
+        self.menu_item(id, icon, title, false).when(on, |d| {
+            d.child(
+                div()
+                    .text_color(p.ink_2)
+                    .child(Icon::new(Ico::Check).small()),
+            )
+        })
     }
 
     fn menu_panel(&mut self, cx: &mut Context<Self>) -> Option<Div> {
@@ -1655,7 +1672,7 @@ ACTA_KEY=secret:ACTA_KEY",
         let panel = div()
             .absolute()
             .top(px(layout::TITLEBAR - 4.0))
-            .w(px(300.0))
+            .w(px(230.0))
             .p(px(space::XS))
             .flex()
             .flex_col()
@@ -1673,80 +1690,66 @@ ACTA_KEY=secret:ACTA_KEY",
             Menu::Agent => panel
                 .left(px(space::S))
                 .child(
-                    self.menu_item(
-                        "edit",
-                        "Edit agent",
-                        "Its name and instructions, and every earlier version.",
-                        false,
-                    )
-                    .on_click(cx.listener(|this, _, window, cx| {
-                        for f in this.model.load_mcp() {
-                            this.send(f);
-                        }
-                        if let Some(f) = this.model.edit_agent() {
-                            this.send(f);
-                        }
-                        if let Some(a) = this.model.editing.as_ref().and_then(|id| this.model.agent(id)) {
-                            let (name, instructions) = (a.name.clone(), a.instructions.clone());
-                            this.name_in.update(cx, |s, cx| s.set_value(name, window, cx));
-                            this.instructions_in
-                                .update(cx, |s, cx| s.set_value(instructions, window, cx));
-                        }
-                        this.screen = Screen::EditAgent;
-                        this.menu = None;
-                        cx.notify();
-                    })),
+                    self.menu_item("edit", Ico::Pencil, "Edit agent", false)
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            for f in this.model.load_mcp() {
+                                this.send(f);
+                            }
+                            if let Some(f) = this.model.edit_agent() {
+                                this.send(f);
+                            }
+                            if let Some(a) = this
+                                .model
+                                .editing
+                                .as_ref()
+                                .and_then(|id| this.model.agent(id))
+                            {
+                                let (name, instructions) = (a.name.clone(), a.instructions.clone());
+                                this.name_in
+                                    .update(cx, |s, cx| s.set_value(name, window, cx));
+                                this.instructions_in
+                                    .update(cx, |s, cx| s.set_value(instructions, window, cx));
+                            }
+                            this.screen = Screen::EditAgent;
+                            this.menu = None;
+                            cx.notify();
+                        })),
                 )
                 .child(
-                    self.menu_item(
-                        "activity",
-                        "Activity",
-                        "What it ran, what it was allowed, and what changed.",
-                        false,
-                    )
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        if let Some(f) = this.model.load_activity() {
-                            this.send(f);
-                        }
-                        this.screen = Screen::Activity;
-                        this.menu = None;
-                        cx.notify();
-                    })),
+                    self.menu_item("activity", Ico::Activity, "Activity", false)
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            if let Some(f) = this.model.load_activity() {
+                                this.send(f);
+                            }
+                            this.screen = Screen::Activity;
+                            this.menu = None;
+                            cx.notify();
+                        })),
                 )
                 .child(
-                    self.menu_item(
-                        "memory",
-                        "Memory",
-                        "What it remembers, and what all your agents share.",
-                        false,
-                    )
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.model.notes.clear();
-                        if let Some(f) = this.model.load_notes() {
-                            this.send(f);
-                        }
-                        this.screen = Screen::Memory;
-                        this.menu = None;
-                        cx.notify();
-                    })),
+                    self.menu_item("memory", Ico::Brain, "Memory", false)
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.model.notes.clear();
+                            if let Some(f) = this.model.load_notes() {
+                                this.send(f);
+                            }
+                            this.screen = Screen::Memory;
+                            this.menu = None;
+                            cx.notify();
+                        })),
                 )
                 .child(
-                    self.menu_item(
-                        "fresh",
-                        "Start fresh",
-                        "A new conversation, so it forgets this one's context.",
-                        false,
-                    )
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        if let Some(f) = this.model.start_fresh() {
-                            this.send(f);
-                        }
-                        this.menu = None;
-                        cx.notify();
-                    })),
+                    self.menu_item("fresh", Ico::RotateCcw, "Start fresh", false)
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            if let Some(f) = this.model.start_fresh() {
+                                this.send(f);
+                            }
+                            this.menu = None;
+                            cx.notify();
+                        })),
                 )
                 .child(
-                    self.menu_item("delete", "Delete agent", "", true)
+                    self.menu_item("delete", Ico::Trash, "Delete agent", true)
                         .on_click(cx.listener(|this, _, _, cx| {
                             if let Some(f) = this.model.delete_agent() {
                                 this.send(f);
@@ -1758,49 +1761,34 @@ ACTA_KEY=secret:ACTA_KEY",
             Menu::Permission => panel
                 .right(px(space::S))
                 .child(
-                    self.menu_item(
-                        "ask",
-                        "Ask first",
-                        "Asks before every command and every edit.",
-                        false,
-                    )
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        if let Some(f) = this.model.set_permission("ask") {
-                            this.send(f);
-                        }
-                        this.menu = None;
-                        cx.notify();
-                    })),
+                    self.mode_item("ask", Ico::Hand, "Ask first", "ask")
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            if let Some(f) = this.model.set_permission("ask") {
+                                this.send(f);
+                            }
+                            this.menu = None;
+                            cx.notify();
+                        })),
                 )
                 .child(
-                    self.menu_item(
-                        "auto",
-                        "Ask when it's risky",
-                        "Reads, searches and looks things up on its own. Asks before commands and edits.",
-                        false,
-                    )
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        if let Some(f) = this.model.set_permission("auto") {
-                            this.send(f);
-                        }
-                        this.menu = None;
-                        cx.notify();
-                    })),
+                    self.mode_item("auto", Ico::ShieldCheck, "Ask when it's risky", "auto")
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            if let Some(f) = this.model.set_permission("auto") {
+                                this.send(f);
+                            }
+                            this.menu = None;
+                            cx.notify();
+                        })),
                 )
                 .child(
-                    self.menu_item(
-                        "allow",
-                        "Don't ask",
-                        "Everything runs on its own. Only for agents you trust.",
-                        false,
-                    )
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        if let Some(f) = this.model.set_permission("allow") {
-                            this.send(f);
-                        }
-                        this.menu = None;
-                        cx.notify();
-                    })),
+                    self.mode_item("allow", Ico::Zap, "Don't ask", "allow")
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            if let Some(f) = this.model.set_permission("allow") {
+                                this.send(f);
+                            }
+                            this.menu = None;
+                            cx.notify();
+                        })),
                 ),
         })
     }
@@ -1901,11 +1889,7 @@ ACTA_KEY=secret:ACTA_KEY",
                     .rounded(px(radius::ROW))
                     .bg(p.bubble)
                     .text_size(px(size::SMALL))
-                    .child(
-                        Icon::new(gpui_kit::assets::IconName::FileText)
-                            .small()
-                            .text_color(p.ink_3),
-                    )
+                    .child(Icon::new(Ico::FileText).small().text_color(p.ink_3))
                     .child(
                         div()
                             .max_w(px(220.0))
@@ -1963,7 +1947,7 @@ ACTA_KEY=secret:ACTA_KEY",
                                 .text_color(p.ink_2)
                                 .cursor_pointer()
                                 .hover(move |s| s.bg(p.hover))
-                                .child(Icon::new(gpui_kit::assets::IconName::Paperclip).small())
+                                .child(Icon::new(Ico::Paperclip).small())
                                 .on_click(cx.listener(|this, _, _, cx| this.pick_files(cx))),
                         )
                         .child(
@@ -2336,7 +2320,7 @@ ACTA_KEY=secret:ACTA_KEY",
                             .text_color(p.ink_2)
                             .cursor_pointer()
                             .hover(move |s| s.bg(p.hover).text_color(p.ink))
-                            .child(Icon::new(gpui_kit::assets::IconName::Dices))
+                            .child(Icon::new(Ico::Dices))
                             .on_click(cx.listener(|this, _, window, cx| {
                                 let current = this.name_in.read(cx).value().to_string();
                                 this.name_in.update(cx, |s, cx| {
@@ -2363,7 +2347,7 @@ ACTA_KEY=secret:ACTA_KEY",
                     .font_weight(FontWeight::SEMIBOLD)
                     .cursor_pointer()
                     .hover(|s| s.opacity(0.88))
-                    .child(Icon::new(gpui_kit::assets::IconName::Sparkles).small())
+                    .child(Icon::new(Ico::Sparkles).small())
                     .child("Weave it")
                     .on_click(cx.listener(|this, _, _, cx| this.weave_agent(cx))),
             )
@@ -2587,9 +2571,7 @@ ACTA_KEY=secret:ACTA_KEY",
                 div()
                     .text_size(px(size::CAPTION))
                     .text_color(p.ink_3)
-                    .child(
-                        "None set up yet. Add them on MCP servers, at the bottom of the sidebar.",
-                    ),
+                    .child("None yet"),
             );
         }
         for m in self.model.mcp_servers.clone() {
@@ -2690,7 +2672,7 @@ ACTA_KEY=secret:ACTA_KEY",
                         if name.trim().is_empty() || line.trim().is_empty() {
                             this.model
                                 .notices
-                                .push("A server needs a name, and a command or an address.".into());
+                                .push("Needs a name, and a command or an address".into());
                             cx.notify();
                             return;
                         }
@@ -2739,9 +2721,7 @@ ACTA_KEY=secret:ACTA_KEY",
         } else {
             let mut list = div().flex().flex_col();
             if self.model.mcp_servers.is_empty() {
-                list = list.child(caption(
-                    "None yet. An MCP server gives agents more tools: Acta, a browser, mail. Each agent gets the ones you pick on its edit page.".into(),
-                ));
+                list = list.child(caption("No MCP servers yet".into()));
             }
             for m in self.model.mcp_servers.clone() {
                 let what = if m.url.is_empty() {
@@ -2813,70 +2793,69 @@ ACTA_KEY=secret:ACTA_KEY",
                         ),
                 );
             }
-            body = body
-                .child(heading("Servers"))
-                .child(list)
-                .child(
-                    div()
-                        .flex()
-                        .gap(px(space::S))
-                        .child(self.button("new-mcp", "New server", true).on_click(
-                            cx.listener(|this, _, window, cx| {
-                                for s in [&this.mcp_name_in, &this.mcp_cmd_in] {
-                                    s.update(cx, |s, cx| s.set_value("", window, cx));
-                                }
-                                this.mcp_settings_in
-                                    .update(cx, |s, cx| s.set_value("", window, cx));
-                                this.mcp_open = Some(None);
-                                cx.notify();
-                            }),
-                        ))
-                        // A browser the agent drives, through Microsoft's Playwright MCP
-                        // server. It needs Node on the instance's computer.
-                        .when(
-                            !self.model.mcp_servers.iter().any(|m| m.name == "browser"),
-                            |d| {
-                                d.child(self.button("add-browser", "Add a browser", false).on_click(
-                                    cx.listener(|this, _, _, cx| {
-                                        let f = this.model.put_mcp(crate::model::server_args(
-                                            "browser",
-                                            "npx -y @playwright/mcp@latest",
-                                            "",
-                                        ));
-                                        this.send(f);
-                                        cx.notify();
-                                    }),
-                                ))
-                            },
-                        ),
-                )
-                .child(heading("Keys"))
-                .child(caption(
-                    "Keys are kept encrypted on the instance, and go only to the agents whose servers name them. They never come back to the app.".into(),
-                ))
-                .child(keys)
-                .child(
-                    div()
-                        .flex()
-                        .gap(px(space::S))
-                        .child(div().flex_1().child(Input::new(&self.set_key_in)))
-                        .child(div().flex_1().child(Input::new(&self.set_value_in)))
-                        .child(self.button("save-secret", "Save key", false).on_click(
-                            cx.listener(|this, _, window, cx| {
-                                let name = this.set_key_in.read(cx).value().to_string();
-                                let value = this.set_value_in.read(cx).value().to_string();
-                                if name.trim().is_empty() {
-                                    return;
-                                }
-                                let f = this.model.put_secret(&name, &value);
-                                this.send(f);
-                                for s in [&this.set_key_in, &this.set_value_in] {
-                                    s.update(cx, |s, cx| s.set_value("", window, cx));
-                                }
-                                cx.notify();
-                            }),
-                        )),
-                );
+            body =
+                body.child(heading("Servers"))
+                    .child(list)
+                    .child(
+                        div()
+                            .flex()
+                            .gap(px(space::S))
+                            .child(self.button("new-mcp", "New server", true).on_click(
+                                cx.listener(|this, _, window, cx| {
+                                    for s in [&this.mcp_name_in, &this.mcp_cmd_in] {
+                                        s.update(cx, |s, cx| s.set_value("", window, cx));
+                                    }
+                                    this.mcp_settings_in
+                                        .update(cx, |s, cx| s.set_value("", window, cx));
+                                    this.mcp_open = Some(None);
+                                    cx.notify();
+                                }),
+                            ))
+                            // A browser the agent drives, through Microsoft's Playwright MCP
+                            // server. It needs Node on the instance's computer.
+                            .when(
+                                !self.model.mcp_servers.iter().any(|m| m.name == "browser"),
+                                |d| {
+                                    d.child(
+                                        self.button("add-browser", "Add a browser", false)
+                                            .on_click(cx.listener(|this, _, _, cx| {
+                                                let f =
+                                                    this.model.put_mcp(crate::model::server_args(
+                                                        "browser",
+                                                        "npx -y @playwright/mcp@latest",
+                                                        "",
+                                                    ));
+                                                this.send(f);
+                                                cx.notify();
+                                            })),
+                                    )
+                                },
+                            ),
+                    )
+                    .child(heading("Keys"))
+                    .child(keys)
+                    .child(
+                        div()
+                            .flex()
+                            .gap(px(space::S))
+                            .child(div().flex_1().child(Input::new(&self.set_key_in)))
+                            .child(div().flex_1().child(Input::new(&self.set_value_in)))
+                            .child(self.button("save-secret", "Save key", false).on_click(
+                                cx.listener(|this, _, window, cx| {
+                                    let name = this.set_key_in.read(cx).value().to_string();
+                                    let value = this.set_value_in.read(cx).value().to_string();
+                                    if name.trim().is_empty() {
+                                        return;
+                                    }
+                                    let f = this.model.put_secret(&name, &value);
+                                    this.send(f);
+                                    for s in [&this.set_key_in, &this.set_value_in] {
+                                        s.update(cx, |s, cx| s.set_value("", window, cx));
+                                    }
+                                    cx.notify();
+                                }),
+                            )),
+                    );
         }
         let page = div()
             .id("mcp-page")
@@ -2908,7 +2887,7 @@ ACTA_KEY=secret:ACTA_KEY",
                             if name.trim().is_empty() || description.trim().is_empty() {
                                 this.model
                                     .notices
-                                    .push("A skill needs a name and when it's for.".into());
+                                    .push("Needs a name, and when it's for".into());
                                 cx.notify();
                                 return;
                             }
@@ -2960,7 +2939,7 @@ ACTA_KEY=secret:ACTA_KEY",
                     div()
                         .text_size(px(size::SMALL))
                         .text_color(p.ink_3)
-                        .child("No skills yet. A skill is how you want a kind of task done. Every agent reads it when a task fits, and agents can save their own."),
+                        .child("No skills yet"),
                 );
             }
             for k in self.model.skills.clone() {
@@ -3044,7 +3023,7 @@ ACTA_KEY=secret:ACTA_KEY",
                 div()
                     .text_size(px(size::SMALL))
                     .text_color(p.ink_3)
-                    .child("No plugins yet. A plugin is a small app of your own in loom: a panel, tools for your agents, or both. Ask an agent to make one."),
+                    .child("No plugins yet. Ask an agent to make one."),
             );
         }
         for pl in self.model.plugins.clone() {
@@ -3298,9 +3277,9 @@ ACTA_KEY=secret:ACTA_KEY",
                 );
             }
             let at_label = if self.routine_kind == "every" {
-                "Every how many minutes (5 at least; empty for webhook only)"
+                "Minutes between runs"
             } else {
-                "At what time, as HH:MM on a 24-hour clock, in your time zone (empty for webhook only)"
+                "Time, as HH:MM"
             };
             let switches = div()
                 .flex()
@@ -3417,7 +3396,7 @@ ACTA_KEY=secret:ACTA_KEY",
                             if at.trim().is_empty() && !this.routine_webhook {
                                 this.model
                                     .notices
-                                    .push("A routine needs a schedule, a webhook, or both.".into());
+                                    .push("Needs a schedule or a webhook".into());
                                 cx.notify();
                                 return;
                             }
@@ -3491,18 +3470,11 @@ ACTA_KEY=secret:ACTA_KEY",
                 .child(self.field(at_label, Input::new(&self.routine_at_in)))
                 .child(switches)
                 .children(webhook)
-                .child(caption(
-                    "Each run goes to the agent's chat, marked as from this routine. With notify on, you get its reply as a notification."
-                        .into(),
-                ))
                 .child(buttons);
         } else {
             let mut list = div().flex().flex_col();
             if self.model.routines.is_empty() {
-                list = list.child(caption(
-                    "No routines yet. A routine sends an agent the same prompt on a schedule, such as a morning brief every day. Agents can set them up too."
-                        .into(),
-                ));
+                list = list.child(caption("No routines yet".into()));
             }
             for r in self.model.routines.clone() {
                 let agent = self
@@ -3643,7 +3615,7 @@ ACTA_KEY=secret:ACTA_KEY",
                 ),
             Some(_) => section
                 .child(caption(
-                    "An instance needs an APNs key of its own, or a push relay, to reach an iPhone that isn't open. A relay gets each phone's token sealed for it and each notification sealed for the phone, so it never reads what they say. Phones that connect after you turn it on use it."
+                    "Notifications while loom is closed on your phone, sealed end to end"
                         .into(),
                 ))
                 .child(self.field("Push relay", Input::new(&self.relay_in)))
@@ -3691,8 +3663,7 @@ ACTA_KEY=secret:ACTA_KEY",
         if phones_off {
             body = body
                 .child(caption(
-                    "Your phone reaches loom on this computer over the Wi-Fi, and through Tailscale when you're away, encrypted end to end. Until you let it, loom listens only on this computer."
-                        .into(),
+                    "Over Wi-Fi or Tailscale, encrypted end to end".into(),
                 ))
                 .child(
                     div().flex().child(
@@ -3717,10 +3688,7 @@ ACTA_KEY=secret:ACTA_KEY",
             );
         } else if let Some((text, expires)) = self.model.link.clone() {
             body = body
-                .child(caption(
-                    "In loom on your phone, choose Scan a code and point the camera here. It joins this account, on this instance."
-                        .into(),
-                ))
+                .child(caption("Scan it with loom on your phone".into()))
                 .child(qr_view(&text))
                 .child(caption(format!(
                     "The code works once, until {}.",
@@ -3945,7 +3913,7 @@ ACTA_KEY=secret:ACTA_KEY",
                     .child("What agents may do on this PC"),
             )
             .child(caption(
-                "While loom runs here, your agents can use this PC as a tool. Each tool is off until you turn it on. Ask means you say yes on this PC each time, and only a yes given here counts, so the instance can't give it for you.",
+                "Off until you turn it on. Ask waits for your yes on this PC.",
             ))
             .child(list)
             .when(allowed, |d| {
@@ -3953,7 +3921,7 @@ ACTA_KEY=secret:ACTA_KEY",
                     div()
                         .text_size(px(size::CAPTION))
                         .text_color(p.bad)
-                        .child("Allow lets your agents run any command here without asking you."),
+                        .child("Agents can run any command here without asking"),
                 )
             });
         let page = div()
@@ -4023,10 +3991,7 @@ ACTA_KEY=secret:ACTA_KEY",
             .flex_col()
             .gap(px(space::M))
             .child(heading("Invite someone"))
-            .child(caption(
-                "They pick a username and password, and they're in. An invite works once, for a week."
-                    .into(),
-            ))
+            .child(caption("Works once, for a week".into()))
             .child(
                 div()
                     .flex()
@@ -4046,15 +4011,14 @@ ACTA_KEY=secret:ACTA_KEY",
                             })),
                     )
                     .child(div().flex_1())
-                    .child(
-                        self.button("make-invite", "Make an invite", true)
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                let role = if this.invite_admin { "admin" } else { "member" };
-                                let f = this.model.create_invite(role, 1);
-                                this.send(f);
-                                cx.notify();
-                            })),
-                    ),
+                    .child(self.button("make-invite", "Make an invite", true).on_click(
+                        cx.listener(|this, _, _, cx| {
+                            let role = if this.invite_admin { "admin" } else { "member" };
+                            let f = this.model.create_invite(role, 1);
+                            this.send(f);
+                            cx.notify();
+                        }),
+                    )),
             );
         if let Some((link, role, expires)) = self.model.invite_made.clone() {
             let copied = link.clone();
@@ -4254,7 +4218,7 @@ ACTA_KEY=secret:ACTA_KEY",
                     .child("Move this instance"),
             )
             .child(caption(
-                "Everything goes to the new place: agents, conversations, files and secrets. Run loom receive there, and give its address and the move code it prints. Your apps follow on their own.".into(),
+                "Run loom receive there, then give its address and move code".into(),
             ));
         if let Some(to) = self.model.moving.clone() {
             return section.child(caption(format!("Moving to {to}…")));
@@ -4299,9 +4263,7 @@ ACTA_KEY=secret:ACTA_KEY",
         };
         let mut mine = div().flex().flex_col().gap(px(space::XS));
         if self.model.installed.is_empty() {
-            mine = mine.child(caption(
-                "None yet. Install one from the registry below.".into(),
-            ));
+            mine = mine.child(caption("None yet".into()));
         }
         for prog in self.model.installed.clone() {
             let open = self.program_open.as_deref() == Some(prog.name.as_str());
@@ -4502,9 +4464,6 @@ ACTA_KEY=secret:ACTA_KEY",
                 }
                 row = row
                     .bg(p.hover)
-                    .child(caption(
-                        "Settings are the environment variables it starts with, such as an API key or a model. They stay on the instance.".into(),
-                    ))
                     .child(settings)
                     .child(
                         div()
@@ -4514,9 +4473,7 @@ ACTA_KEY=secret:ACTA_KEY",
                             .child(div().flex_1().child(Input::new(&self.set_value_in))),
                     )
                     .child(buttons)
-                    .child(caption(
-                        "Share these settings with the people you've invited, a number of tokens each. Anyone who adds their own key as a secret uses theirs instead.".into(),
-                    ))
+                    .child(caption("Share with the people you've invited".into()))
                     .child(sharing);
             }
             mine = mine.child(row);
@@ -4580,9 +4537,6 @@ ACTA_KEY=secret:ACTA_KEY",
             .child(heading("On this instance"))
             .child(mine)
             .child(heading("From the ACP Registry"))
-            .child(caption(
-                "Each uses the login it already has on the instance's computer, or the key you give it in its settings.".into(),
-            ))
             .child(registry);
         let page = div()
             .id("programs-page")
@@ -4618,26 +4572,21 @@ ACTA_KEY=secret:ACTA_KEY",
                     .text_color(p.ink)
                     .child("About you"),
             )
-            .child(
-                div()
-                    .text_size(px(size::CAPTION))
-                    .text_color(p.ink_3)
-                    .child("A few lines every agent starts with: who you are, what you do, how you like answers. Your agents update it as they learn, and you can change it here."),
-            )
             .child(Textarea::new(&self.profile_in))
             .child(
                 div()
                     .flex()
                     .items_center()
                     .gap(px(space::M))
-                    .child(self.button("save-profile", "Save", true).on_click(cx.listener(
-                        |this, _, _, cx| {
-                            let text = this.profile_in.read(cx).value().to_string();
-                            let f = this.model.save_profile(&text);
-                            this.send(f);
-                            cx.notify();
-                        },
-                    )))
+                    .child(
+                        self.button("save-profile", "Save", true)
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                let text = this.profile_in.read(cx).value().to_string();
+                                let f = this.model.save_profile(&text);
+                                this.send(f);
+                                cx.notify();
+                            })),
+                    )
                     .child(
                         div()
                             .text_size(px(size::CAPTION))
@@ -4663,9 +4612,12 @@ ACTA_KEY=secret:ACTA_KEY",
         let p = self.p;
         let mut list = div().flex().flex_col();
         if self.model.notes.is_empty() {
-            list = list.child(div().text_size(px(size::SMALL)).text_color(p.ink_3).child(
-                "Nothing yet. Agents keep notes with remember, and look them up with recall.",
-            ));
+            list = list.child(
+                div()
+                    .text_size(px(size::SMALL))
+                    .text_color(p.ink_3)
+                    .child("Nothing remembered yet"),
+            );
         }
         for n in self.model.notes.clone() {
             let who = if n.shared {
@@ -5000,11 +4952,7 @@ fn file_view(
         .cursor_pointer()
         .hover(move |s| s.bg(p.hover))
         .on_click(open)
-        .child(
-            Icon::new(gpui_kit::assets::IconName::FileText)
-                .small()
-                .text_color(p.ink_3),
-        )
+        .child(Icon::new(Ico::FileText).small().text_color(p.ink_3))
         .child(
             div()
                 .flex()
