@@ -402,6 +402,8 @@ Version 1's commands:
 | `messages.list` | `conversation`, `before`? (a message id), `limit`? (up to 100) | `messages`, newest last, and `more` |
 | `agent.create` | `name`, `acp_agent`, `instructions`, `folder`?, `permission`? (the permission mode: `ask`, the default, asks about everything; `auto` allows the tools that only look, of kind `read`, `search`, `think` and `fetch`, and asks about the rest; `allow` allows everything; or a list of kinds to allow, like `"read,search,edit"`), `color`? (one of the eight thread colours in `design/tokens.toml`; left out, they go round in turn) | `agent` |
 | `agent.update` | `agent`, and what changes | `agent`, with its new `revision` |
+| `agent.revisions` | `agent` | `revisions`, newest first: each `revision`, `by` (the device or agent that made it), `at`, and `agent` as it was then |
+| `agent.rollback` | `agent`, `revision` | `agent`: a new revision with that one's name, ACP agent, instructions, folder and colour. The permission mode stays as it is |
 | `agent.delete` | `agent` | — |
 | `device.rename` | `device`, `name` | — |
 | `device.revoke` | `device` | — |

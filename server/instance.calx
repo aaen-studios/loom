@@ -1127,6 +1127,22 @@ impl Instance {
         p.to.send(Out.Send(acp.request(p.next_id, "session/new", Obj.new().s("cwd", folder).j("mcpServers", i.mcp_servers(user, agent)).done())))
     }
 
+    // Puts an agent's instructions in its folder, as AGENTS.md and CLAUDE.md,
+    // which its program reads when a session starts.
+    fn write_instructions(i: Instance, agent: Json) {
+        let id = str_at(agent.copy(), "id") ?? String()
+        let folder = str_at(agent.copy(), "folder") ?? "{i.data}/agents/{id}"
+        let instructions = str_at(agent, "instructions") ?? String()
+        if let err(e) = fs.make_dir_all(folder.copy()) {
+            eprintln("loom: agent {id}'s folder: {e}")
+            return
+        }
+        let names: List<str> = ["AGENTS.md", "CLAUDE.md"]
+        for n in names {
+            if let err(e) = fs.write_text("{folder}/{n}", instructions.copy()) { eprintln("loom: agent {id}'s {n}: {e}") }
+        }
+    }
+
     fn folder_of(i: Instance, user: String, agent: String) -> String {
         match i.store.agent(user, agent.copy()) {
             ok(some(a)) => return str_at(a, "folder") ?? "{i.data}/agents/{agent}",
@@ -1642,7 +1658,7 @@ impl Instance {
             let count = (try i.store.agents(user.copy())).len()
             let color = str_at(args.copy(), "color") ?? String(COLORS[count % COLORS.len()])
             let agent = Obj.new().s("id", id).s("name", str_at(args.copy(), "name") ?? String("Agent")).s("color", color).s("acp_agent", program).s("instructions", str_at(args.copy(), "instructions") ?? String()).maybe("folder", str_at(args.copy(), "folder")).s("permission", str_at(args, "permission") ?? String("ask")).i("revision", 1).i("at", now()).done()
-            try i.store.put_agent(user.copy(), agent.copy())
+            try i.store.put_agent(user.copy(), agent.copy(), device.copy())
             try i.event(user, "agent.created", Obj.new().j("agent", agent.copy()).done())
             return Answer.Value(Obj.new().j("agent", agent).done())
         }
@@ -1660,9 +1676,36 @@ impl Instance {
                 if let v = str_at(args.copy(), key) { o.m.insert(String(key), Json.Str(v)) }
             }
             let agent = o.i("revision", (int_at(old, "revision") ?? 0) + 1).done()
-            try i.store.put_agent(user.copy(), agent.copy())
+            try i.store.put_agent(user.copy(), agent.copy(), device.copy())
+            // New sessions start with the new instructions.
+            if str_at(args.copy(), "instructions") != none { i.write_instructions(agent.copy()) }
             try i.event(user, "agent.updated", Obj.new().j("agent", agent.copy()).s("by", device.copy()).done())
             return Answer.Value(Obj.new().j("agent", agent).done())
+        }
+        if name == "agent.revisions" {
+            let id = str_at(args, "agent") ?? String()
+            let current = try i.store.agent(user.copy(), id.copy()) else return Answer.Refused(String("not_found"), "There's no agent {id}.")
+            var revisions = try i.store.agent_revisions(user, id)
+            // An agent from before revisions were kept has only the one it is.
+            if revisions.len() == 0 { revisions.push(Obj.new().i("revision", int_at(current.copy(), "revision") ?? 1).s("by", String()).i("at", int_at(current.copy(), "at") ?? 0).j("agent", current).done()) }
+            return Answer.Value(Obj.new().j("revisions", Json.Array(revisions)).done())
+        }
+        if name == "agent.rollback" {
+            // A new revision with what an old one had. The permission mode
+            // stays as it is: that's a setting of its own.
+            let id = str_at(args.copy(), "agent") ?? String()
+            let wanted = int_at(args, "revision") ?? 0
+            var old = Json.Null
+            for r in try i.store.agent_revisions(user.copy(), id.copy()) {
+                if int_at(r.copy(), "revision") == some(wanted) { old = at(r, "agent") }
+            }
+            if old == Json.Null { return Answer.Refused(String("not_found"), "Agent {id} has no revision {wanted}.") }
+            var changes = Obj.new().s("agent", id)
+            let keys: List<str> = ["name", "acp_agent", "instructions", "folder", "color"]
+            for key in keys {
+                if let v = str_at(old.copy(), key) { changes = changes.s(key, v) }
+            }
+            return try i.command(user, device, String("agent.update"), changes.done())
         }
         if name == "agent.delete" {
             let id = str_at(args, "agent") ?? String()

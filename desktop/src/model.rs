@@ -54,6 +54,17 @@ pub struct Agent {
     pub color: String,
     pub program: String,
     pub permission: String,
+    pub instructions: String,
+}
+
+/// One revision of an agent, for the edit page.
+#[derive(Clone, Debug)]
+pub struct Revision {
+    pub revision: i64,
+    /// Who made it: a device or an agent's id.
+    pub by: String,
+    pub at: i64,
+    pub instructions: String,
 }
 
 #[derive(Clone, Debug)]
@@ -264,6 +275,10 @@ pub struct Model {
     pub update: Option<(String, String)>,
     /// What a check the person asked for found, for the app to say.
     pub checked: Option<String>,
+    /// The agent the edit page shows, and its revisions, newest first.
+    pub editing: Option<String>,
+    pub revisions: Vec<Revision>,
+    revisions_stale: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -337,6 +352,9 @@ impl Model {
     /// The frames to send the core for the lists that changed.
     pub fn fetches(&mut self) -> Vec<Value> {
         let mut out = Vec::new();
+        if std::mem::take(&mut self.revisions_stale) && self.editing.is_some() {
+            out.push(self.revisions_cmd());
+        }
         let dirty: Vec<List> = self.dirty.drain().collect();
         for l in dirty {
             if l == List::Messages {
@@ -471,6 +489,12 @@ impl Model {
         match family {
             "agent" => {
                 self.dirty.insert(List::Agents);
+                // A change to the agent being edited is a new revision to list.
+                if self.editing.is_some()
+                    && f.pointer("/agent/id").and_then(Value::as_str) == self.editing.as_deref()
+                {
+                    self.revisions_stale = true;
+                }
             }
             "conversation" => {
                 self.dirty.insert(List::Conversations);
@@ -569,6 +593,25 @@ impl Model {
                     })
                 })
                 .collect();
+        } else if id.starts_with("app.revisions") {
+            self.revisions = f
+                .pointer("/value/revisions")
+                .and_then(Value::as_array)
+                .map(|rs| {
+                    rs.iter()
+                        .map(|r| Revision {
+                            revision: r.get("revision").and_then(Value::as_i64).unwrap_or(0),
+                            by: s(r, "by"),
+                            at: r.get("at").and_then(Value::as_i64).unwrap_or(0),
+                            instructions: r
+                                .pointer("/agent/instructions")
+                                .and_then(Value::as_str)
+                                .unwrap_or_default()
+                                .to_string(),
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
         } else if id.starts_with("app.acp") {
             self.programs = f
                 .pointer("/value/programs")
@@ -612,6 +655,7 @@ impl Model {
                         color: s(a, "color"),
                         program: s(a, "acp_agent"),
                         permission: s(a, "permission"),
+                        instructions: s(a, "instructions"),
                     })
                     .collect();
                 if let Some(made) = self.made_agent.take() {
@@ -1026,6 +1070,48 @@ impl Model {
         let agent = self.selected.clone()?;
         let id = self.id("app.delete");
         Some(json!({"t": "cmd", "id": id, "name": "agent.delete", "args": {"agent": agent}}))
+    }
+
+    /// Opens the edit page for the selected agent: asks for its revisions.
+    pub fn edit_agent(&mut self) -> Option<Value> {
+        let agent = self.selected.clone()?;
+        self.editing = Some(agent);
+        self.revisions.clear();
+        Some(self.revisions_cmd())
+    }
+
+    fn revisions_cmd(&mut self) -> Value {
+        let id = self.id("app.revisions");
+        json!({"t": "cmd", "id": id, "name": "agent.revisions", "args": {"agent": self.editing}})
+    }
+
+    /// Saves the edit page's name and instructions, as a new revision.
+    pub fn save_agent(&mut self, name: &str, instructions: &str) -> Option<Value> {
+        let agent = self.editing.clone()?;
+        let id = self.id("app.save");
+        Some(
+            json!({"t": "cmd", "id": id, "name": "agent.update", "args": {"agent": agent, "name": name.trim(), "instructions": instructions}}),
+        )
+    }
+
+    /// Goes back to `revision`, as a new revision.
+    pub fn roll_back(&mut self, revision: i64) -> Option<Value> {
+        let agent = self.editing.clone()?;
+        let id = self.id("app.rollback");
+        Some(
+            json!({"t": "cmd", "id": id, "name": "agent.rollback", "args": {"agent": agent, "revision": revision}}),
+        )
+    }
+
+    /// Who made a revision, as the edit page says it.
+    pub fn made_by(&self, by: &str) -> String {
+        if let Some(a) = self.agent(by) {
+            return a.name.clone();
+        }
+        if by.starts_with("a_") {
+            return "An agent".into();
+        }
+        "You".into()
     }
 
     pub fn set_permission(&mut self, permission: &str) -> Option<Value> {
