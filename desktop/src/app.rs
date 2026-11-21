@@ -422,7 +422,12 @@ impl Loom {
                 window,
                 |this: &mut Loom, _, event: &InputEvent, _, cx| {
                     if let InputEvent::PressEnter { .. } = event {
-                        this.sign_in_server(cx);
+                        // In the popup, the same fields add a server beside this one.
+                        if this.popup == Some(Screen::AddServer) {
+                            this.sign_in_added(cx);
+                        } else {
+                            this.sign_in_server(cx);
+                        }
                     }
                 },
             )
