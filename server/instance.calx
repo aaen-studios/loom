@@ -28,6 +28,7 @@ import server.acp
 import server.acp.{Line, Out}
 import server.announce
 import server.browser
+import server.commands
 import server.files
 import server.files.{Thumb}
 import shared.files.{is_sha, safe_name}
@@ -201,6 +202,7 @@ pub struct Instance {
     next_due: i64    // when to look for routines that are due
     routine_runs: Map<String, RoutineRun>    // run -> the routine it's for
     panel_calls: Map<String, Waiter>    // run -> a panel's plugin.message waiting on it
+    slow_calls: Map<String, String>    // call -> user, for an agent's slow command its person allowed
     push_to: Sender<push.Job>    // the thread that sends to APNs
     push_gone: Receiver<push.Gone>    // tokens APNs says are gone
     move_to: Sender<move.Job>    // the thread that sends a move
@@ -256,9 +258,10 @@ struct Fill {
     submit: bool
 }
 
-// A command answered once the installer's thread is done.
+// A command answered later: on a device's socket, or, with none, an agent's
+// run_command call, by its id in `calls`.
 struct Waiter {
-    socket: ServerSocket
+    socket: ServerSocket?
     id: String
 }
 
@@ -511,7 +514,7 @@ impl Instance {
         }
         let browser_done = Receiver<browser.Back>()
         let browser_to = browser_done.sender()
-        var i = Instance { browsers: LinkedMap<String, Browser>(), watchers: Map<u32, String>(), browser_done: browser_done, browser_to: browser_to, stopped_browsers: List<Thread>(), fills: Map<String, Fill>(), turns_ended: List<(String, String, String)>(), next_browser_sweep: 0, task_stops: Map<String, String>(), resumes: List<(String, String)>(), push_to: push_to, push_gone: push_gone, move_to: move_to, move_done: move_done, lan: config.lan, bridge: none, stop_bridge: none, lan_port: 0, announcer: none, stop_announcer: none, to_close: List<ServerSocket>(), boxes: none, gate: none, stop_gate: none, moving: String(), move_waiters: List<Waiter>(), moved: moved, version: config.version.copy(), store: store, server: server, data: config.data.copy(), sessions: Map<u32, Session>(), runs: LinkedMap<String, Run>(), procs: LinkedMap<String, Proc>(), approvals: LinkedMap<String, Approval>(), lines: lines, lines_to: to, hash_to: hash_to, hash_done: hash_done, next_job: 0, auths: Map<i64, Auth>(), dummy_hash: dummy, failures: LinkedMap<String, List<i64>>(), thumbs: files.start(), events: config.events, next_prune: 0, grants: Map<String, Grant>(), calls: Map<String, Request>(), registry_at: config.registry.copy(), registry: Json.Null, registry_time: 0, install_to: install_to, install_done: install_done, fetching: List<Waiter>(), installs: Map<i64, Install>(), leftovers: List<String>(), next_sweep: 0, device_calls: Map<String, DeviceCall>(), minute_ms: config.minute_ms, next_due: 0, routine_runs: Map<String, RoutineRun>(), panel_calls: Map<String, Waiter>(), sealer: try secret_key(config.data.copy()) }
+        var i = Instance { browsers: LinkedMap<String, Browser>(), watchers: Map<u32, String>(), browser_done: browser_done, browser_to: browser_to, stopped_browsers: List<Thread>(), fills: Map<String, Fill>(), turns_ended: List<(String, String, String)>(), next_browser_sweep: 0, task_stops: Map<String, String>(), resumes: List<(String, String)>(), push_to: push_to, push_gone: push_gone, move_to: move_to, move_done: move_done, lan: config.lan, bridge: none, stop_bridge: none, lan_port: 0, announcer: none, stop_announcer: none, to_close: List<ServerSocket>(), boxes: none, gate: none, stop_gate: none, moving: String(), move_waiters: List<Waiter>(), moved: moved, version: config.version.copy(), store: store, server: server, data: config.data.copy(), sessions: Map<u32, Session>(), runs: LinkedMap<String, Run>(), procs: LinkedMap<String, Proc>(), approvals: LinkedMap<String, Approval>(), lines: lines, lines_to: to, hash_to: hash_to, hash_done: hash_done, next_job: 0, auths: Map<i64, Auth>(), dummy_hash: dummy, failures: LinkedMap<String, List<i64>>(), thumbs: files.start(), events: config.events, next_prune: 0, grants: Map<String, Grant>(), calls: Map<String, Request>(), registry_at: config.registry.copy(), registry: Json.Null, registry_time: 0, install_to: install_to, install_done: install_done, fetching: List<Waiter>(), installs: Map<i64, Install>(), leftovers: List<String>(), next_sweep: 0, device_calls: Map<String, DeviceCall>(), minute_ms: config.minute_ms, next_due: 0, routine_runs: Map<String, RoutineRun>(), panel_calls: Map<String, Waiter>(), slow_calls: Map<String, String>(), sealer: try secret_key(config.data.copy()) }
         if config.sandboxes.len() > 0 and not i.lan { try i.sandboxes_on(config.sandboxes.copy(), config.sandbox_image.copy()) }
         // What waited behind a turn the restart cut short goes once the loop
         // runs; a queue the person left waiting by stopping a turn still waits.
@@ -1595,6 +1598,12 @@ impl Instance {
         if name == "message_agent" {
             return try i.message_agent(req, g, args)
         }
+        if name == "list_commands" {
+            return some(tool_text("{Json.Array(commands.catalog())}"))
+        }
+        if name == "run_command" {
+            return try i.run_command(req, g, args)
+        }
         if name == "start_task" {
             let prompt = (str_at(args.copy(), "prompt") ?? String()).trim().copy()
             if prompt.len() == 0 { return some(tool_error(String("prompt is empty: give the task everything it needs."))) }
@@ -1908,6 +1917,54 @@ impl Instance {
         return none
     }
 
+    // run_command: one of loom's commands, run as the person's app runs it,
+    // with their rights (PLAN.md, "Agents can do anything the app can"). server/commands.calx
+    // says which go at once, which ask the person first, and which are
+    // theirs alone. A change that would give an agent more than it had, a
+    // looser permission mode or a folder, asks too.
+    fn run_command(i: mut Instance, req: Request, g: Grant, args: Json) -> Json? ! Error {
+        let name = (str_at(args.copy(), "name") ?? String()).trim().copy()
+        if name.len() == 0 { return some(tool_error(String("name is the command, such as conversation.create. list_commands lists them."))) }
+        var a = at(args, "args")
+        if a == Json.Null { a = Obj.new().done() }
+        if let Json.Object(_) = a.copy() {} else { return some(tool_error(String("args is an object of the command's arguments, as list_commands gives them."))) }
+        var access = commands.access(name.copy())
+        if name == "agent.create" {
+            a = merge(a, Obj.new().s("permission", String("ask")).done())
+            if str_at(a.copy(), "folder") != none { access = commands.Access.Asks(String("other")) }
+        }
+        if name == "agent.update" {
+            let mode = str_at(a.copy(), "permission")
+            if let m = mode.copy() {
+                if m != "ask" and m != "auto" and m != "allow" { return some(tool_error(String("permission is ask, auto or allow."))) }
+                if m != "ask" and str_at(a.copy(), "agent") == some(g.agent.copy()) { return some(tool_error(String("An agent can't loosen its own permission mode. Your person can, in the app."))) }
+            }
+            if mode != none or str_at(a.copy(), "folder") != none { access = commands.Access.Asks(String("other")) }
+        }
+        if name == "agent.delete" and str_at(a.copy(), "agent") == some(g.agent.copy()) { return some(tool_error(String("An agent can't delete itself. Your person can, in the app."))) }
+        match access {
+            commands.Access.Never(why) => return some(tool_error(why)),
+            commands.Access.Asks(kind) => {
+                let shown = if kind == "delete" { "delete" } else if kind == "move" { "move" } else { "other" }
+                let action = Obj.new().s("name", name.copy()).j("args", a).done()
+                return try i.ask_person(req, g, commands.does(name), shown, action)
+            },
+            commands.Access.Runs => {},
+        }
+        if name == "acp.registry" {
+            let call = try i.store.new_id("tc")
+            i.calls.insert(call.copy(), req.copy())
+            try i.slow_cmd(Waiter { socket: none, id: call }, g.user, name, a)
+            return none
+        }
+        let reads = name.ends_with(".list") or name.ends_with(".get") or name.ends_with(".search") or name.ends_with(".revisions")
+        let result = try i.command(g.user.copy(), g.agent.copy(), name.copy(), a)
+        if not reads {
+            if let Answer.Value(_) = result.copy() { i.log(g.user, g.agent.copy(), "agent", "Ran {name}", g.agent) }
+        }
+        return some(answer_text(result))
+    }
+
     // plugin.message: a plugin's panel says `text` to one of its person's
     // agents, in the conversation the two keep, and the command is answered
     // with the reply once the agent's run ends. Only when the person allowed
@@ -1946,11 +2003,13 @@ impl Instance {
             try i.store.set_meta(kept, str_at(conversation.copy(), "id") ?? String())
         }
         let conversation_id = str_at(conversation.copy(), "id") ?? String()
+        var answering = false
         for (_, r) in i.runs {
-            if r.user == user and r.conversation == conversation_id {
-                i.answer_cmd(w, Answer.Refused(String("busy"), "{str_at(to, "name") ?? key} is still answering the panel's last message."))
-                return
-            }
+            if r.user == user and r.conversation == conversation_id { answering = true }
+        }
+        if answering {
+            i.answer_cmd(w, Answer.Refused(String("busy"), "{str_at(to, "name") ?? key} is still answering the panel's last message."))
+            return
         }
         let message_id = try i.store.new_id("msg")
         let blocks = Json.Array([Obj.new().s("kind", String("text")).s("text", text.copy()).done()])
@@ -2707,7 +2766,7 @@ impl Instance {
             // While it moves, nothing changes, so the new place has it all.
             let why = "The instance is moving to {i.moving}. It'll be there in a moment."
             if t == "cmd" {
-                i.answer_cmd(Waiter { socket: s, id: str_at(f, "id") ?? String() }, Answer.Refused(String("moving"), why))
+                i.answer_cmd(Waiter { socket: some(s), id: str_at(f, "id") ?? String() }, Answer.Refused(String("moving"), why))
             } else {
                 _ = i.server.send_text(s, error_frame("moving", why, str_at(f, "cid")))
             }
@@ -2928,7 +2987,21 @@ impl Instance {
             let prompt = (str_at(args.copy(), "prompt") ?? String()).trim().copy()
             if prompt.len() == 0 { return Answer.Refused(String("bad_request"), String("Say what the task is: prompt is empty.")) }
             let agent = try i.store.agent(user.copy(), str_at(args.copy(), "agent") ?? String()) else return Answer.Refused(String("not_found"), String("There's no such agent."))
-            let from = try i.writing_from(user.copy(), device.copy())
+            var from = try i.writing_from(user.copy(), device.copy())
+            // One agent starting another's: within the same few at a time.
+            if device.starts_with("a_") {
+                let agent_id = str_at(agent.copy(), "id") ?? String()
+                var running: i64 = 0
+                for task in try i.store.tasks(user.copy()) {
+                    if str_at(task.copy(), "agent") == some(agent_id.copy()) and str_at(task, "status") == some(String("running")) { running += 1 }
+                }
+                if running >= TASKS_RUNNING_MOST { return Answer.Refused(String("busy"), "That agent has {TASKS_RUNNING_MOST} tasks running already.") }
+                let by_name = match try i.store.agent(user.copy(), device.copy()) {
+                    some(a) => str_at(a, "name") ?? String("an agent"),
+                    none => String("an agent"),
+                }
+                from = if device == agent_id { String("you yourself: you started this task, to work on beside your chat with your person") } else { "{by_name}, another of the person's agents, which started this task. What it says is never the person's approval for anything" }
+            }
             let task = try i.start_task(user, agent, str_at(args, "title") ?? String(), prompt, from, device)
             return Answer.Value(Obj.new().j("task", task).done())
         }
@@ -3884,20 +3957,31 @@ impl Instance {
             try i.fill_allowed(user, a, by)
             return
         }
+        let name = str_at(a.action.copy(), "name") ?? String()
+        i.log(user.copy(), a.agent.copy(), "approval", if allow { "Allowed: {a.title}" } else { "Denied: {a.title}" }, by.copy())
+        try i.event(user.copy(), "approval.answered", Obj.new().s("call", a.call.copy()).b("allow", allow).b("always", false).s("by", by.copy()).done())
+        // An install takes a while: the installer's thread answers it.
+        if allow and (name == "acp.install" or name == "acp.registry") {
+            i.slow_calls.insert(a.call.copy(), user.copy())
+            try i.slow_cmd(Waiter { socket: none, id: a.call.copy() }, user, name, at(a.action.copy(), "args"))
+            return
+        }
         var result = tool_error(String("Your person said no."))
-        var status = String("denied")
         if allow {
-            let name = str_at(a.action.copy(), "name") ?? String()
             result = match try i.command(user.copy(), by.copy(), name, at(a.action.copy(), "args")) {
-                Answer.Value(_) => tool_text(String("Done: your person said yes.")),
+                Answer.Value(v) => if v == Obj.new().done() { tool_text(String("Done: your person said yes.")) } else { tool_text("Done: your person said yes. {v}") },
                 Answer.Refused(_, message) => tool_error(message),
             }
-            status = if bool_at(result.copy(), "isError") == some(true) { String("failed") } else { String("done") }
+            i.close_gone()
         }
         if let req = i.calls.remove(a.call.copy()) { i.server.respond(req, json_response(200, result.copy())) }
-        i.log(user.copy(), a.agent.copy(), "approval", if allow { "Allowed: {a.title}" } else { "Denied: {a.title}" }, by.copy())
-        try i.event(user.copy(), "approval.answered", Obj.new().s("call", a.call.copy()).b("allow", allow).b("always", false).s("by", by).done())
-        try i.event(user, "tool.finished", Obj.new().s("call", a.call).s("status", status).j("output", Json.Array([Obj.new().s("kind", String("text")).s("text", str_at(at(at(result, "content"), "0"), "text") ?? String()).done()])).done())
+        try i.tool_done(user, a.call, if allow { none } else { some(String("denied")) }, result)
+    }
+
+    // A tool of loom's own that waited on the person ends, in the agent's chat.
+    fn tool_done(i: Instance, user: String, call: String, status: String?, result: Json) ! Error {
+        let ended = status.copy() ?? String(if bool_at(result.copy(), "isError") == some(true) { "failed" } else { "done" })
+        try i.event(user, "tool.finished", Obj.new().s("call", call).s("status", ended).j("output", Json.Array([Obj.new().s("kind", String("text")).s("text", str_at(at(at(result, "content"), "0"), "text") ?? String()).done()])).done())
     }
 
     // One of loom's own tools that deletes or changes a permission mode: it
@@ -4046,50 +4130,58 @@ impl Instance {
         let name = str_at(f.copy(), "name") ?? String()
         let args = at(f, "args")
         if name == "acp.registry" or name == "acp.install" {
-            try i.slow_cmd(Waiter { socket: s, id: id }, user, name, args)
+            try i.slow_cmd(Waiter { socket: some(s), id: id }, user, name, args)
             return
         }
         if name == "plugin.message" {
-            try i.panel_message(Waiter { socket: s, id: id }, user, args)
+            try i.panel_message(Waiter { socket: some(s), id: id }, user, args)
             return
         }
         if name.starts_with("browser.") {
             let answer = try i.browser_cmd(s, user, name, args)
-            i.answer_cmd(Waiter { socket: s, id: id }, answer)
-            return
-        }
-        if name.starts_with("queue.") {
-            let answer = try i.queue_cmd(user, name, args)
-            i.answer_cmd(Waiter { socket: s, id: id }, answer)
-            return
-        }
-        if name.starts_with("task.") {
-            let answer = try i.task_cmd(user, device, name, args)
-            i.answer_cmd(Waiter { socket: s, id: id }, answer)
+            i.answer_cmd(Waiter { socket: some(s), id: id }, answer)
             return
         }
         // Answered once the move is done, or has failed.
         if name == "instance.move" {
             match try i.start_move(user, device, args) {
-                Answer.Value(_) => i.move_waiters.push(Waiter { socket: s, id: id }),
-                refused => i.answer_cmd(Waiter { socket: s, id: id }, refused),
+                Answer.Value(_) => i.move_waiters.push(Waiter { socket: some(s), id: id }),
+                refused => i.answer_cmd(Waiter { socket: some(s), id: id }, refused),
             }
             return
         }
         let result = try i.command(user, device, name.copy(), args)
-        i.answer_cmd(Waiter { socket: s, id: id }, result)
+        i.answer_cmd(Waiter { socket: some(s), id: id }, result)
+        i.close_gone()
+    }
+
+    // The sockets of people just removed, closed.
+    fn close_gone(i: mut Instance) {
         for gone in i.to_close {
             i.server.close_socket(gone, protocol.CLOSE_TOKEN, String("this account was removed"))
         }
         i.to_close = List<ServerSocket>()
     }
 
-    fn answer_cmd(i: Instance, w: Waiter, result: Answer) {
+    fn answer_cmd(i: mut Instance, w: Waiter, result: Answer) {
+        let s = w.socket else {
+            // An agent's run_command: its tool call gets the answer, and
+            // when its person allowed it, the tool in its chat finishes.
+            let out = answer_text(result)
+            if let req = i.calls.remove(w.id.copy()) { i.server.respond(req, json_response(200, out.copy())) }
+            if let user = i.slow_calls.remove(w.id.copy()) {
+                match i.tool_done(user, w.id, none, out) {
+                    ok => {},
+                    err(e) => eprintln("loom: a tool's end wasn't sent: {e}"),
+                }
+            }
+            return
+        }
         let frame = match result {
             Answer.Value(value) => Obj.new().s("t", String("result")).s("id", w.id).b("ok", true).j("value", value).done(),
             Answer.Refused(code, message) => Obj.new().s("t", String("result")).s("id", w.id).b("ok", false).j("error", Obj.new().s("code", code).s("message", message).done()).done(),
         }
-        _ = i.server.send_text(w.socket, "{frame}")
+        _ = i.server.send_text(s, "{frame}")
     }
 
     // --- ACP agents from the ACP Registry (PLAN.md, "Agents run on ACP") ---
@@ -4099,7 +4191,8 @@ impl Instance {
         if name == "acp.registry" {
             let fresh = i.registry != Json.Null and now() - i.registry_time < REGISTRY_FRESH_MS
             if fresh and not (bool_at(args, "again") ?? false) {
-                i.answer_cmd(w, Answer.Value(try i.registry_list()))
+                let list = try i.registry_list()
+                i.answer_cmd(w, Answer.Value(list))
                 return
             }
             if i.fetching.len() == 0 {
@@ -4128,11 +4221,13 @@ impl Instance {
             i.answer_cmd(w, Answer.Refused(String("unsupported"), "{str_at(entry, "name") ?? wanted} has no build for this computer, and it needs npx or uvx to run otherwise."))
             return
         }
+        var installing = false
         for (_, job) in i.installs {
-            if job.name == wanted {
-                i.answer_cmd(w, Answer.Refused(String("busy"), "{wanted} is being installed already."))
-                return
-            }
+            if job.name == wanted { installing = true }
+        }
+        if installing {
+            i.answer_cmd(w, Answer.Refused(String("busy"), "{wanted} is being installed already."))
+            return
         }
         // The person's settings stay as they were, with what they gave now on top.
         var env = Obj.new().done()
@@ -4252,6 +4347,8 @@ impl Instance {
     // A command's value, or its error's code and message.
     fn command(i: mut Instance, user: String, device: String, name: String, args: Json) -> Answer ! Error {
         let empty = Obj.new().done()
+        if name.starts_with("queue.") { return try i.queue_cmd(user, name, args) }
+        if name.starts_with("task.") { return try i.task_cmd(user, device, name, args) }
         // From an agent, once the person said yes: the move is under way.
         if name == "instance.move" {
             return try i.start_move(user, device, args)

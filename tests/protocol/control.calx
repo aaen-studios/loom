@@ -1,0 +1,128 @@
+module tests.protocol.control
+
+// Agents can do anything the app can (PLAN.md): with run_command, an
+// agent runs loom's commands as its person's app does, with their rights.
+// list_commands lists them. Reading and everyday changes run at once and are
+// in the activity log. What deletes, removes, installs, reaches outside, gives
+// an agent more, or moves the instance asks the person first, and runs as the
+// device that said yes. The person's account, password and secrets' values
+// stay theirs. A command answered later, such as acp.registry, answers the
+// agent's call when it's done.
+//
+//     calx tests/protocol/control.calx
+import std.json.{Json}
+import std.process.{exit}
+import shared.obj.{Obj, at, str_at}
+import tests.kit.{App, Instance, check, reply_text}
+
+// The agent's next reply in `conversation`, as text.
+fn reply_in(app: mut App, conversation: String) -> String ! Error {
+    loop {
+        let created = try app.until("event", "message.created")
+        let m = at(created, "message")
+        if str_at(m.copy(), "role") == some(String("agent")) and str_at(m.copy(), "conversation") == some(conversation.copy()) { return reply_text(m) }
+    }
+}
+
+fn say(app: mut App, conversation: String, cid: str, text: String) -> String ! Error {
+    try app.send(Obj.new().s("t", String("send")).s("cid", String(cid)).s("conversation", conversation.copy()).s("text", text).done())
+    return try reply_in(mut app, conversation)
+}
+
+// `/mcp run_command` with `name` and `args`, as the agent's message.
+fn run_command(name: str, args: Json) -> String {
+    return "/mcp run_command {Obj.new().s("name", String(name)).j("args", args).done()}"
+}
+
+// The newest event of `kind` among what the app has read.
+fn last(app: App, kind: str) -> Json {
+    var found = Json.Null
+    for f in app.frames {
+        if str_at(f.copy(), "kind") == some(String(kind)) { found = f.copy() }
+    }
+    return found
+}
+
+fn agent(app: mut App, id: str, name: str) -> String ! Error {
+    let made = try app.cmd(id, "agent.create", Obj.new().s("name", String(name)).s("acp_agent", String("fake")).s("instructions", String("You are a test.")).done())
+    return str_at(at(at(made, "value"), "agent"), "id") ?? String()
+}
+
+fn run(i: Instance) ! Error {
+    var app = try App.connect(i.base.copy(), i.token.copy(), 0)
+    let main_id = try agent(mut app, "q_1", "Main")
+    let helper = try agent(mut app, "q_2", "Helper")
+    let c = try app.cmd("q_3", "conversation.create", Obj.new().s("agent", main_id.copy()).done())
+    let chat = str_at(at(c, "value"), "conversation") ?? String()
+
+    let listed = try say(mut app, chat.copy(), "m_1", String("/mcp list_commands"))
+    try check(listed.contains("conversation.create") and listed.contains("instance.move") and listed.contains("asks your person first") and not listed.contains("secret.put") and not listed.contains("account.delete"), "list_commands lists what an agent can run, and what asks")
+
+    // --- At once ---
+    let made = try say(mut app, chat.copy(), "m_2", run_command("conversation.create", Obj.new().s("agent", helper.copy()).s("title", String("Planning")).done()))
+    let created = last(app, "conversation.created")
+    try check(made.starts_with("run_command:") and made.contains("\"conversation\"") and str_at(at(created, "conversation"), "title") == some(String("Planning")), "an agent makes a conversation, at once")
+    let kept = try say(mut app, chat.copy(), "m_3", run_command("memory.put", Obj.new().s("text", String("The office closes at five.")).done()))
+    let notes = "{try app.cmd("q_4", "memory.list", Obj.new().done())}"
+    try check(kept.starts_with("run_command:") and notes.contains("The office closes at five."), "and keeps a shared note")
+    let made_agent = try say(mut app, chat.copy(), "m_4", run_command("agent.create", Obj.new().s("name", String("Third")).s("acp_agent", String("fake")).s("instructions", String("Hi.")).s("permission", String("allow")).done()))
+    let third = at(last(app, "agent.created"), "agent")
+    try check(made_agent.starts_with("run_command:") and str_at(third, "permission") == some(String("ask")), "an agent it makes asks first, whatever it said")
+    let logged = "{at(at(try app.cmd("q_5", "activity.list", Obj.new().s("agent", main_id.copy()).done()), "value"), "activity")}"
+    try check(logged.contains("Ran memory.put") and not logged.contains("Ran memory.list"), "what it changed is in the activity log")
+
+    // --- Never ---
+    let secret = try say(mut app, chat.copy(), "m_5", run_command("secret.put", Obj.new().s("name", String("key")).s("value", String("hunter2")).done()))
+    try check(secret.starts_with("run_command failed") and secret.contains("never an agent's"), "a secret's value is the person's alone")
+    let account = try say(mut app, chat.copy(), "m_6", run_command("account.delete", Obj.new().done()))
+    try check(account.starts_with("run_command failed"), "and so is their account")
+    let itself = try say(mut app, chat.copy(), "m_7", run_command("agent.update", Obj.new().s("agent", main_id.copy()).s("permission", String("allow")).done()))
+    try check(itself.starts_with("run_command failed") and itself.contains("own permission mode"), "an agent can't loosen its own permission mode")
+    let gone = try say(mut app, chat.copy(), "m_8", run_command("agent.delete", Obj.new().s("agent", main_id.copy()).done()))
+    try check(gone.starts_with("run_command failed"), "or delete itself")
+
+    // --- Asks ---
+    try app.send(Obj.new().s("t", String("send")).s("cid", String("m_9")).s("conversation", chat.copy()).s("text", run_command("agent.update", Obj.new().s("agent", helper.copy()).s("permission", String("auto")).done())).done())
+    let loosen = try app.until("event", "approval.needed")
+    try check(str_at(loosen.copy(), "title") == some(String("Changes an agent")) and str_at(at(loosen.copy(), "detail"), "permission") == some(String("auto")), "a looser permission mode for another asks the person")
+    try app.send(Obj.new().s("t", String("approve")).s("call", str_at(loosen, "call") ?? String()).b("allow", false).done())
+    let no = try app.until("event", "tool.finished")
+    let told_no = try reply_in(mut app, chat.copy())
+    try check(str_at(no, "status") == some(String("denied")) and told_no.contains("said no"), "and a no is passed back")
+
+    try app.send(Obj.new().s("t", String("send")).s("cid", String("m_10")).s("conversation", chat.copy()).s("text", run_command("user.list", Obj.new().done())).done())
+    let people = try app.until("event", "approval.needed")
+    try app.send(Obj.new().s("t", String("approve")).s("call", str_at(people, "call") ?? String()).b("allow", true).done())
+    let yes = try app.until("event", "tool.finished")
+    let everyone = try reply_in(mut app, chat.copy())
+    try check(str_at(yes, "status") == some(String("done")) and everyone.contains("said yes") and everyone.contains("elliot"), "what only a device may do runs as the device that said yes")
+
+    _ = try app.cmd("q_6", "mcp.put", Obj.new().s("name", String("files")).s("command", String("files-mcp")).done())
+    try app.send(Obj.new().s("t", String("send")).s("cid", String("m_11")).s("conversation", chat.copy()).s("text", run_command("mcp.delete", Obj.new().s("name", String("files")).done())).done())
+    let removing = try app.until("event", "approval.needed")
+    try check(str_at(removing.copy(), "tool") == some(String("delete")) and str_at(removing.copy(), "title") == some(String("Removes an MCP server")), "removing something asks, as a delete")
+    try app.send(Obj.new().s("t", String("approve")).s("call", str_at(removing, "call") ?? String()).b("allow", true).done())
+    _ = try reply_in(mut app, chat.copy())
+    let servers = "{try app.cmd("q_7", "mcp.list", Obj.new().done())}"
+    try check(not servers.contains("files-mcp"), "and a yes does it")
+
+    // --- Later ---
+    let registry = try say(mut app, chat.copy(), "m_12", run_command("acp.registry", Obj.new().done()))
+    try check(registry.starts_with("run_command failed") and registry.contains("ACP Registry couldn't be read"), "a command answered later answers the agent's call")
+    app.close()
+}
+
+fn main() ! Error {
+    // A registry nothing answers at, so acp.registry fails, quickly.
+    let inst = try Instance.start_with([String("--registry"), String("http://127.0.0.1:9/registry.json")])
+    let failure: String? = match run(inst.copy()) {
+        ok => none,
+        err(e) => some("{e}"),
+    }
+    inst.stop()
+    if let f = failure {
+        eprintln("\n{f}")
+        exit(1)
+    }
+    println("\ncontrol: all good")
+}
