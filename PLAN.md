@@ -187,7 +187,7 @@ Agents live in the database, and are made and edited in the app.
 Say you ask: "Set up loom on this VPS and move me there." The agent:
 
 1. Connects with `ssh`, using the address and key you give it. That's an approval.
-2. Runs the install script. It downloads the server for that machine, makes the `loom` user and the service, and sets up Caddy for TLS if there's a domain, or Tailscale if there isn't.
+2. Runs the install script (`curl -fsSL …/releases/latest/download/install.sh | sudo sh`). It downloads the server for that machine and runs `loom install`, which makes the `loom` user and the service, and sets up Caddy for TLS if there's a domain, or Tailscale if there isn't.
 3. Starts `loom receive` there, and reads the move code it prints.
 4. Asks you once: "Move this instance to the new server?" Then it moves it, and your apps follow.
 

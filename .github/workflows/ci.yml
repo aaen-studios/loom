@@ -39,6 +39,51 @@ jobs:
       - name: Check and test
         run: calx scripts/check.calx
 
+  # loom install on a fresh server, through install.sh as a person runs it, with a
+  # release served from a folder: the user, the service, and the instance answering.
+  install:
+    name: install (ubuntu-latest)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Calx
+        run: |
+          curl -fsSL https://calxlang.com/install.sh | sh
+          echo "$HOME/.calx/bin" >> "$GITHUB_PATH"
+
+      - name: A release in a folder
+        run: |
+          mkdir -p release
+          calx build server/main.calx -o release/loom-linux
+          sum="$(sha256sum release/loom-linux | cut -d ' ' -f 1)"
+          printf '{"version":"0.0.0-ci","files":{"linux-server":{"name":"loom-linux","url":"file://%s/release/loom-linux","sha256":"%s"}}}' "$PWD" "$sum" > release/manifest.json
+
+      - name: Install
+        run: |
+          sudo env LOOM_RELEASES="file://$PWD/release" sh server/install.sh --json | tee install.json
+          grep -q '"setup_code":"' install.json
+
+      - name: Check
+        run: |
+          # Still running a moment later, or what it said before it stopped.
+          sleep 2
+          if ! systemctl is-active --quiet loom; then
+            systemctl status loom --no-pager || true
+            sudo journalctl -u loom --no-pager | tail -40
+            exit 1
+          fi
+          test "$(systemctl show -p User --value loom)" = loom
+          test "$(ps -o user= -p "$(systemctl show -p MainPID --value loom)")" = loom
+          test "$(stat -c %a /var/lib/loom)" = 700
+          curl -fsS http://127.0.0.1:8790/api/info | grep -q '"setup":true'
+          sudo -u loom /usr/local/bin/loom status --json --data /var/lib/loom | grep -q '"user":"loom"'
+
+      - name: Install again
+        run: |
+          sudo env LOOM_RELEASES="file://$PWD/release" sh server/install.sh
+          systemctl is-active loom
+
   desktop:
     name: desktop (windows-latest)
     runs-on: windows-latest
