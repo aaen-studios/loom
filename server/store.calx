@@ -32,6 +32,9 @@ CREATE TABLE IF NOT EXISTS agents (
 CREATE TABLE IF NOT EXISTS agent_revisions (
     agent TEXT NOT NULL, user TEXT NOT NULL REFERENCES users(id), revision INTEGER NOT NULL,
     json TEXT NOT NULL, by TEXT NOT NULL, at INTEGER NOT NULL, PRIMARY KEY (agent, revision));
+CREATE TABLE IF NOT EXISTS activity (
+    id INTEGER PRIMARY KEY, user TEXT NOT NULL REFERENCES users(id), agent TEXT NOT NULL,
+    kind TEXT NOT NULL, text TEXT NOT NULL, by TEXT NOT NULL, at INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS conversations (
     id TEXT PRIMARY KEY, user TEXT NOT NULL REFERENCES users(id), agent TEXT NOT NULL,
     title TEXT NOT NULL, at INTEGER NOT NULL, deleted INTEGER NOT NULL DEFAULT 0);
@@ -443,6 +446,30 @@ impl Store {
         args.push(Value.Int(i64.wrap(u64(limit))))
         for r in try self.db.query(sql, args) {
             out.push((try parse(text(r[0].copy())), text(r[1].copy())))
+        }
+        return out
+    }
+
+    // --- The activity log (PLAN.md, "Machines and devices") ---
+
+    // Notes what `agent` did, or what was done to it: `kind` is tool,
+    // approval, agent, message or notify, and `by` the device or agent that
+    // did it ("" for the agent itself, "auto" for its permission mode).
+    pub fn log(self, user: String, agent: String, kind: str, what: String, by: String) ! Error {
+        _ = try self.db.execute(String("INSERT INTO activity (user, agent, kind, text, by, at) VALUES (?, ?, ?, ?, ?, ?)"), [t(user), t(agent), t(String(kind)), t(what), t(by), Value.Int(now())])
+    }
+
+    // `user`'s activity, newest first: all of it, or one agent's, from
+    // before the entry `before`.
+    pub fn activity(self, user: String, agent: String?, before: i64?, limit: usize) -> List<Json> ! Error {
+        var out = List<Json>()
+        let below = before ?? i64.MAX
+        let rows = match agent {
+            some(a) => try self.db.query(String("SELECT id, agent, kind, text, by, at FROM activity WHERE user = ? AND agent = ? AND id < ? ORDER BY id DESC LIMIT ?"), [t(user), t(a), Value.Int(below), Value.Int(i64.wrap(u64(limit)))]),
+            none => try self.db.query(String("SELECT id, agent, kind, text, by, at FROM activity WHERE user = ? AND id < ? ORDER BY id DESC LIMIT ?"), [t(user), Value.Int(below), Value.Int(i64.wrap(u64(limit)))]),
+        }
+        for r in rows {
+            out.push(Obj.new().i("id", int(r[0].copy())).s("agent", text(r[1].copy())).s("kind", text(r[2].copy())).s("text", text(r[3].copy())).s("by", text(r[4].copy())).i("at", int(r[5].copy())).done())
         }
         return out
     }

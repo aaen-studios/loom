@@ -73,6 +73,7 @@ enum Screen {
     Chat,
     NewAgent,
     EditAgent,
+    Activity,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -484,6 +485,7 @@ impl Loom {
 
     fn select(&mut self, agent: String, cx: &mut Context<Self>) {
         self.screen = Screen::Chat;
+        self.model.editing = None;
         self.menu = None;
         self.model.select(Some(agent));
         self.fetch();
@@ -974,12 +976,17 @@ impl Loom {
                     .child("New agent"),
             );
         }
-        if self.screen == Screen::EditAgent {
+        if self.screen == Screen::EditAgent || self.screen == Screen::Activity {
+            let title = if self.screen == Screen::EditAgent {
+                format!("Edit {}", agent.name)
+            } else {
+                format!("What {} did", agent.name)
+            };
             return bar.child(
                 div()
                     .text_size(px(size::BODY))
                     .text_color(p.ink_3)
-                    .child(format!("Edit {}", agent.name)),
+                    .child(title),
             );
         }
         let permission = match agent.permission.as_str() {
@@ -1145,6 +1152,22 @@ impl Loom {
                                 .update(cx, |s, cx| s.set_value(instructions, window, cx));
                         }
                         this.screen = Screen::EditAgent;
+                        this.menu = None;
+                        cx.notify();
+                    })),
+                )
+                .child(
+                    self.menu_item(
+                        "activity",
+                        "Activity",
+                        "What it ran, what it was allowed, and what changed.",
+                        false,
+                    )
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        if let Some(f) = this.model.load_activity() {
+                            this.send(f);
+                        }
+                        this.screen = Screen::Activity;
                         this.menu = None;
                         cx.notify();
                     })),
@@ -1710,6 +1733,101 @@ impl Loom {
         div().flex_1().min_h_0().child(page)
     }
 
+    /// The activity page: what the selected agent did, and what was done to it, newest
+    /// first.
+    fn activity_page(&mut self) -> Div {
+        let p = self.p;
+        let mut list = div().flex().flex_col();
+        if self.model.activity.is_empty() {
+            list = list.child(
+                div()
+                    .text_size(px(size::SMALL))
+                    .text_color(p.ink_3)
+                    .child("Nothing yet."),
+            );
+        }
+        let mut day = String::new();
+        for e in self.model.activity.clone() {
+            let this_day = day_of(e.at);
+            if this_day != day {
+                list = list.child(
+                    div()
+                        .pt(px(space::L))
+                        .pb(px(space::XS))
+                        .text_size(px(size::CAPTION))
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(p.ink_3)
+                        .child(this_day.clone()),
+                );
+                day = this_day;
+            }
+            let who = match e.by.as_str() {
+                "" => String::new(),
+                "auto" => "its permission mode".into(),
+                by => self.model.made_by(by),
+            };
+            let what = match e.kind.as_str() {
+                "tool" => "Ran",
+                "approval" => "Asked",
+                "message" => "Handed over",
+                "notify" => "Notified",
+                _ => "Changed",
+            };
+            list = list.child(
+                div()
+                    .flex()
+                    .items_baseline()
+                    .gap(px(space::M))
+                    .py(px(space::XS + 2.0))
+                    .border_b_1()
+                    .border_color(p.line)
+                    .child(
+                        div()
+                            .w(px(44.0))
+                            .flex_none()
+                            .text_size(px(size::CAPTION))
+                            .text_color(p.ink_3)
+                            .child(time_of(e.at)),
+                    )
+                    .child(
+                        div()
+                            .w(px(88.0))
+                            .flex_none()
+                            .text_size(px(size::CAPTION))
+                            .text_color(p.ink_3)
+                            .child(what),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .text_size(px(size::SMALL))
+                            .text_color(p.ink)
+                            .child(e.text),
+                    )
+                    .when(!who.is_empty(), |d| {
+                        d.child(
+                            div()
+                                .flex_none()
+                                .text_size(px(size::CAPTION))
+                                .text_color(p.ink_3)
+                                .child(who),
+                        )
+                    }),
+            );
+        }
+        let page = div()
+            .id("activity")
+            .size_full()
+            .overflow_y_scroll()
+            .flex()
+            .justify_center()
+            .pt(px(space::XL))
+            .pb(px(space::XXL))
+            .child(div().w(px(640.0)).flex().flex_col().child(list));
+        div().flex_1().min_h_0().child(page)
+    }
+
     pub fn toggle_thought(&mut self, key: String, cx: &mut Context<Self>) {
         if !self.open_thoughts.remove(&key) {
             self.open_thoughts.insert(key);
@@ -2147,6 +2265,23 @@ fn command_of(detail: &str) -> String {
     }
 }
 
+/// The day of `ms`, as the activity page heads its entries: "Today", "Yesterday", or a date.
+fn day_of(ms: i64) -> String {
+    use chrono::TimeZone;
+    let chrono::LocalResult::Single(t) = chrono::Local.timestamp_millis_opt(ms) else {
+        return String::new();
+    };
+    let today = chrono::Local::now().date_naive();
+    let day = t.date_naive();
+    if day == today {
+        "Today".into()
+    } else if Some(day) == today.pred_opt() {
+        "Yesterday".into()
+    } else {
+        day.format("%-d %B %Y").to_string()
+    }
+}
+
 fn time_of(ms: i64) -> String {
     use chrono::TimeZone;
     if ms <= 0 || ms == i64::MAX {
@@ -2183,6 +2318,7 @@ impl Render for Loom {
             Screen::Chat => self.chat(window, cx),
             Screen::NewAgent => self.new_agent(cx),
             Screen::EditAgent => self.edit_agent(cx),
+            Screen::Activity => self.activity_page(),
         };
         let header = self.header(cx);
         let menu = self.menu_panel(cx);

@@ -57,6 +57,17 @@ pub struct Agent {
     pub instructions: String,
 }
 
+/// One entry of the activity log.
+#[derive(Clone, Debug)]
+pub struct Activity {
+    pub kind: String,
+    pub text: String,
+    /// Who did it: a device, an agent's id, "auto" for the permission mode, or "" for the
+    /// agent itself.
+    pub by: String,
+    pub at: i64,
+}
+
 /// One revision of an agent, for the edit page.
 #[derive(Clone, Debug)]
 pub struct Revision {
@@ -279,6 +290,8 @@ pub struct Model {
     pub editing: Option<String>,
     pub revisions: Vec<Revision>,
     revisions_stale: bool,
+    /// The activity page's entries, newest first.
+    pub activity: Vec<Activity>,
 }
 
 #[derive(Clone, Debug)]
@@ -593,6 +606,21 @@ impl Model {
                     })
                 })
                 .collect();
+        } else if id.starts_with("app.activity") {
+            self.activity = f
+                .pointer("/value/activity")
+                .and_then(Value::as_array)
+                .map(|es| {
+                    es.iter()
+                        .map(|e| Activity {
+                            kind: s(e, "kind"),
+                            text: s(e, "text"),
+                            by: s(e, "by"),
+                            at: e.get("at").and_then(Value::as_i64).unwrap_or(0),
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
         } else if id.starts_with("app.revisions") {
             self.revisions = f
                 .pointer("/value/revisions")
@@ -1100,6 +1128,16 @@ impl Model {
         let id = self.id("app.rollback");
         Some(
             json!({"t": "cmd", "id": id, "name": "agent.rollback", "args": {"agent": agent, "revision": revision}}),
+        )
+    }
+
+    /// Asks for the selected agent's activity, for the activity page.
+    pub fn load_activity(&mut self) -> Option<Value> {
+        let agent = self.selected.clone()?;
+        self.activity.clear();
+        let id = self.id("app.activity");
+        Some(
+            json!({"t": "cmd", "id": id, "name": "activity.list", "args": {"agent": agent, "limit": 200}}),
         )
     }
 
