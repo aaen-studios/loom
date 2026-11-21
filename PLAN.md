@@ -275,7 +275,7 @@ Each agent program runs as its own process. The instance reads each one on a thr
 ### Permissions
 
 - **Loom starts each agent in a mode that asks** before commands and edits, never in one that skips asking, unless the owner picks that for one agent.
-- **Loom answers the agent's requests** by the agent's permission mode: `ask` (every request comes to you), `auto` (loom allows the safe ones and asks about the rest), or a list of what to allow.
+- **Loom answers the agent's requests** by the agent's permission mode: `ask` (every request comes to you), `auto` (loom allows the tools that only look: reading, searching, thinking and fetching, and asks about the rest), `allow` (everything), or a list of the kinds to allow.
 - **Loom's own tools follow loom's rules.** Sending, paying, deleting, letting people in, changing permissions and moving always ask.
 - **Where the agent runs limits what it can do anyway:** as `loom` on a server, in a member's sandbox, or as you in a desktop instance.
 

@@ -1152,6 +1152,21 @@ impl Loom {
                 )
                 .child(
                     self.menu_item(
+                        "auto",
+                        "Ask when it's risky",
+                        "Reads, searches and looks things up on its own. Asks before commands and edits.",
+                        false,
+                    )
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        if let Some(f) = this.model.set_permission("auto") {
+                            this.send(f);
+                        }
+                        this.menu = None;
+                        cx.notify();
+                    })),
+                )
+                .child(
+                    self.menu_item(
                         "allow",
                         "Don't ask",
                         "Everything runs on its own. Only for agents you trust.",

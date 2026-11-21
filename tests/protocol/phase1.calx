@@ -10,7 +10,8 @@ module tests.protocol.phase1
 // - the connection drops in the middle of a reply, and a reconnect catches
 //   up: the events missed, then the reply so far from position 0, then the
 //   rest live;
-// - an approval is asked and answered;
+// - an approval is asked and answered, and the auto mode answers a safe one
+//   by itself;
 // - a send sent again does nothing new;
 // - the second account sees none of it.
 //
@@ -26,7 +27,7 @@ import std.http.{Header, post}
 import std.http.websocket.{Message, WebSocket, connect}
 import std.json.{Json, parse}
 import std.process.{Child, Command, Stdio, exit}
-import shared.obj.{Obj, at, int_at, str_at}
+import shared.obj.{Obj, at, bool_at, int_at, str_at}
 
 const WAIT: u64 = 120000    // the first start builds the server and the agent
 
@@ -219,6 +220,19 @@ fn run(server: Child, data: String) ! Error {
     try back.send(Obj.new().s("t", String("approve")).s("call", call).b("allow", true).done())
     let late = try back.until("error", "")
     try check(str_at(late, "code") == some(String("already_answered")), "an approval answered twice is refused")
+
+    // --- The auto permission mode ---
+    _ = try back.cmd("q_auto", "agent.update", Obj.new().s("agent", agent.copy()).s("permission", String("auto")).done())
+    try back.send(Obj.new().s("t", String("send")).s("cid", String("m_auto")).s("conversation", conversation.copy()).s("text", String("/read cat notes.md\n/ask rm notes.md")).done())
+    let by_itself = try back.until("event", "approval.answered")
+    try check(str_at(by_itself, "by") == some(String("auto")) and bool_at(by_itself, "allow") == some(true), "auto allows a tool that only reads")
+    let risky = try back.until("event", "approval.needed")
+    try check(str_at(risky.copy(), "title") == some(String("rm notes.md")) and str_at(risky.copy(), "tool") == some(String("execute")), "and asks about one that runs a command")
+    try back.send(Obj.new().s("t", String("approve")).s("call", str_at(risky, "call") ?? String()).b("allow", false).done())
+    let denied = try back.until("event", "tool.finished")
+    try check(str_at(denied, "status") == some(String("denied")), "a denied tool doesn't run")
+    _ = try back.until("event", "run.finished")
+    _ = try back.cmd("q_ask", "agent.update", Obj.new().s("agent", agent.copy()).s("permission", String("ask")).done())
 
     // --- A cancel ---
     try back.send(Obj.new().s("t", String("send")).s("cid", String("m_3")).s("conversation", conversation.copy()).s("text", String("/sleep 20000\nlate")).done())

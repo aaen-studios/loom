@@ -11,8 +11,10 @@ module tests.fake_agent.main
 //     /think TEXT         an agent_thought_chunk
 //     /plan A; B; C       a plan with those entries
 //     /tool TITLE         a tool call that runs and completes
-//     /ask TITLE          a tool call that asks permission first, and runs
+//     /ask TITLE          a command (kind execute) that asks permission first,
+//                         and runs
 //                         or fails by the answer
+//     /read TITLE         the same for a tool that only reads (kind read)
 //     /slow MS            waits MS between chunks from here on
 //     /sleep MS           waits MS, or until the turn is cancelled
 //     /stop REASON        ends the turn with that stopReason (max_tokens, ...)
@@ -59,7 +61,7 @@ pub enum Step {
     Think(String)
     Plan(List<String>)
     Tool(String)
-    Ask(String)
+    Ask(String, String)
     Slow(u64)
     Sleep(u64)
     Stop(String)
@@ -94,7 +96,9 @@ pub fn script(text: String) -> List<Step> {
         } else if word == "/tool" {
             steps.push(Step.Tool(rest))
         } else if word == "/ask" {
-            steps.push(Step.Ask(rest))
+            steps.push(Step.Ask(String("execute"), rest))
+        } else if word == "/read" {
+            steps.push(Step.Ask(String("read"), rest))
         } else if word == "/slow" {
             steps.push(Step.Slow(u64.parse(rest) ?? 0))
         } else if word == "/sleep" {
@@ -219,14 +223,14 @@ fn tool_update(session: String, id: String, status: str, output: String) {
 }
 
 impl Agent {
-    fn tool_call(a: mut Agent, session: String, title: String) -> String {
+    fn tool_call(a: mut Agent, session: String, kind: String, title: String) -> String {
         a.tools += 1
         let id = "tool_{a.tools}"
         var u = LinkedMap<String, Json>()
         u.insert("sessionUpdate", js(String("tool_call")))
         u.insert("toolCallId", js(id.copy()))
         u.insert("title", js(title))
-        u.insert("kind", js(String("execute")))
+        u.insert("kind", js(kind))
         u.insert("status", js(String("pending")))
         update(session, u)
         return id
@@ -259,12 +263,13 @@ impl Agent {
 
     // Asks the client's permission for a tool call. Gives whether it was
     // allowed, or none if the turn was cancelled first.
-    fn ask(a: mut Agent, session: String, tool: String, title: String) -> bool? {
+    fn ask(a: mut Agent, session: String, tool: String, tool_kind: String, title: String) -> bool? {
         a.next_id += 1
         let id = a.next_id
         var call = LinkedMap<String, Json>()
         call.insert("toolCallId", js(tool))
         call.insert("title", js(title))
+        call.insert("kind", js(tool_kind))
         var options = List<Json>()
         for kind in "allow_once allow_always reject_once reject_always".split(" ") {
             var o = LinkedMap<String, Json>()
@@ -344,13 +349,13 @@ impl Agent {
                     update(session.copy(), u)
                 },
                 Step.Tool(title) => {
-                    let tool = a.tool_call(session.copy(), title.copy())
+                    let tool = a.tool_call(session.copy(), String("execute"), title.copy())
                     tool_update(session.copy(), tool.copy(), "in_progress", String())
                     tool_update(session.copy(), tool, "completed", "ran: {title}")
                 },
-                Step.Ask(title) => {
-                    let tool = a.tool_call(session.copy(), title.copy())
-                    match a.ask(session.copy(), tool.copy(), title.copy()) {
+                Step.Ask(kind, title) => {
+                    let tool = a.tool_call(session.copy(), kind.copy(), title.copy())
+                    match a.ask(session.copy(), tool.copy(), kind.copy(), title.copy()) {
                         some(true) => {
                             tool_update(session.copy(), tool.copy(), "in_progress", String())
                             tool_update(session.copy(), tool, "completed", "ran: {title}")
@@ -467,7 +472,7 @@ fn reads_every_step() {
     assert(steps.len() == 9)
     let entries: List<String> = [String("a"), String("b")]
     assert(steps[1] == Step.Plan(entries))
-    assert(steps[3] == Step.Ask(String("rm x")))
+    assert(steps[3] == Step.Ask(String("execute"), String("rm x")))
     assert(steps[5] == Step.Sleep(10))
     assert(steps[6] == Step.Stop(String("max_tokens")))
     assert(steps[8] == Step.Crash)

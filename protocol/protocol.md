@@ -395,7 +395,7 @@ Version 1's commands:
 | `conversation.rename` | `conversation`, `title` | — |
 | `conversation.delete` | `conversation` | — |
 | `messages.list` | `conversation`, `before`? (a message id), `limit`? (up to 100) | `messages`, newest last, and `more` |
-| `agent.create` | `name`, `acp_agent`, `instructions`, `folder`?, `permission`?, `color`? (one of the eight thread colours in `design/tokens.toml`; left out, they go round in turn) | `agent` |
+| `agent.create` | `name`, `acp_agent`, `instructions`, `folder`?, `permission`? (the permission mode: `ask`, the default, asks about everything; `auto` allows the tools that only look, of kind `read`, `search`, `think` and `fetch`, and asks about the rest; `allow` allows everything; or a list of kinds to allow, like `"read,search,edit"`), `color`? (one of the eight thread colours in `design/tokens.toml`; left out, they go round in turn) | `agent` |
 | `agent.update` | `agent`, and what changes | `agent`, with its new `revision` |
 | `agent.delete` | `agent` | — |
 | `device.rename` | `device`, `name` | — |
