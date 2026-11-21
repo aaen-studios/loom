@@ -1166,10 +1166,11 @@ impl Instance {
         let options = at(params, "options")
         let agent = try i.store.agent(r.user.copy(), r.agent.copy()) ?? Json.Null
         let mode = str_at(agent, "permission") ?? String("ask")
+        let kind = acp.tool_kind(str_at(tool_call.copy(), "kind") ?? String())
         let user = r.user.copy()
         let run = r.id.copy()
         i.runs.insert(run_id, r)
-        if mode == "allow" {
+        if acp.allows(mode, kind.copy()) {
             let option = acp.pick_option(options, true, false) ?? String("allow_once")
             p.to.send(Out.Send(acp.respond(rpc, Obj.new().j("outcome", Obj.new().s("outcome", String("selected")).s("optionId", option).done()).done())))
             try i.event(user, "approval.answered", Obj.new().s("call", call).b("allow", true).b("always", false).s("by", String("auto")).done())
@@ -1177,7 +1178,7 @@ impl Instance {
         }
         let can_always = acp.pick_option(options.copy(), true, true) != acp.pick_option(options.copy(), true, false)
         i.approvals.insert(call.copy(), Approval { call: call.copy(), run: run.copy(), agent: p.agent.copy(), rpc: rpc.copy(), options: options })
-        try i.event(user, "approval.needed", Obj.new().s("run", run).s("call", call).s("tool", acp.tool_kind(str_at(tool_call.copy(), "kind") ?? String())).s("title", str_at(tool_call.copy(), "title") ?? String()).j("detail", at(tool_call, "rawInput")).b("can_always", can_always).done())
+        try i.event(user, "approval.needed", Obj.new().s("run", run).s("call", call).s("tool", kind).s("title", str_at(tool_call.copy(), "title") ?? String()).j("detail", at(tool_call, "rawInput")).b("can_always", can_always).done())
     }
 
     fn approve(i: mut Instance, s: ServerSocket, user: String, device: String, f: Json) ! Error {

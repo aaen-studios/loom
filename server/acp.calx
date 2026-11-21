@@ -115,6 +115,23 @@ pub fn tool_kind(kind: String) -> String {
     return String("other")
 }
 
+// What the `auto` permission mode allows without asking: tools that only look.
+pub const SAFE_KINDS: str = "read search think fetch"
+
+// Whether an agent's permission mode answers a request for a tool of `kind`
+// (one of tool_kind's) by itself. `ask` asks about everything, `allow` allows
+// everything, `auto` allows the SAFE_KINDS, and a list like "read,search,edit"
+// allows the kinds it names. Anything else asks.
+pub fn allows(mode: String, kind: String) -> bool {
+    if mode == "allow" { return true }
+    if mode == "ask" or kind == "other" { return false }
+    let kinds = if mode == "auto" { String(SAFE_KINDS).replace(" ", ",") } else { mode.copy() }
+    for k in kinds.split(",") {
+        if k.trim() == kind { return true }
+    }
+    return false
+}
+
 // The option of a permission request that matches the person's answer:
 // allow_once, allow_always, reject_once or reject_always, falling back to any
 // allow or reject. none if the agent offered nothing that fits.
@@ -138,6 +155,21 @@ fn stop_reasons_map_to_statuses() {
     assert(status_of(String("end_turn")) == "done")
     assert(status_of(String("max_tokens")) == "limit")
     assert(status_of(String("cancelled")) == "cancelled")
+}
+
+@test
+fn permission_modes_allow_what_they_say() {
+    assert(allows(String("allow"), String("execute")))
+    assert(allows(String("allow"), String("other")))
+    assert(not allows(String("ask"), String("read")))
+    assert(allows(String("auto"), String("read")))
+    assert(allows(String("auto"), String("fetch")))
+    assert(not allows(String("auto"), String("execute")))
+    assert(not allows(String("auto"), String("edit")))
+    assert(not allows(String("auto"), String("other")))
+    assert(allows(String("read, edit"), String("edit")))
+    assert(not allows(String("read,edit"), String("delete")))
+    assert(not allows(String("something new"), String("read")))
 }
 
 @test

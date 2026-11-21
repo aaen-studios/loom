@@ -20,7 +20,6 @@ Then `POST /api/setup` with the code makes the owner. `echo "a password" | calx 
 Not in yet:
 - pings to the apps every 20 seconds ([CLX-394](https://acta.aaenz.no/aaen-studios/clx#CLX-394));
 - pruning old events;
-- picking a session up again after a restart with `session/load`;
-- the `auto` permission mode (`ask` and `allow` work).
+- picking a session up again after a restart with `session/load`.
 
 The same code is compiled into the desktop app's library for an instance with no server ([PLAN.md](../PLAN.md#an-instance-in-the-desktop-app)).
