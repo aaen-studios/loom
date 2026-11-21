@@ -316,6 +316,7 @@ Each agent program runs as its own process. The instance reads each one on a thr
 | Device tools | Your PC and phone, where you allow it ([Machines and devices](#machines-and-devices)) |
 | `list_commands`, `run_command` | Every loom command: agents, routines, tasks, plugins, MCP servers, agent programs, people, devices, moving ([Agents can do anything the app can](#agents-can-do-anything-the-app-can)) |
 | `add_server`, `install_server` | Another server in your app (asking first), and the command that puts loom on a new one ([Several servers in one app](#several-servers-in-one-app)) |
+| `html_preview`, `html_render` | A picture of a page of HTML and what its console said, and the page shown in the chat ([Pages in the chat](#pages-in-the-chat)) |
 
 - **Shell, files and web fetch** come from the agent itself.
 - **MCP servers** (Acta, Cloudflare, Composio for mail and the rest) are passed to the agent, which connects to them itself.
@@ -332,6 +333,11 @@ Ideas taken from OpenBot ([CopilotKit's](https://github.com/CopilotKit/OpenBot),
 - **You can watch it.** An app showing an agent with its browser open asks for its screen (`browser.watch`), and the instance sends frames as they come (`browser.frame`, JPEG), only while someone watches. It's a panel beside the chat on the desktop, and a sheet on the phone.
 - **You can take over** for a login, a 2FA code or a CAPTCHA: the agent asks with `browser_ask_person`, or you press Take over. Your clicks and keys go to the page (`browser.input`), the agent's browser tools wait meanwhile, and Hand back lets it carry on, with the tool's result saying what you did.
 - **Secrets go in without the agent seeing them.** `browser_fill_secret` types one of the person's secrets into a field by name, and `browser_ask_secret` shows the person a card to type it into once. The agent is told it's filled, never what it was.
+
+### Pages in the chat
+
+- **An agent can check a page it wrote**: `html_preview` draws its HTML in a tab of the agent's browser of its own, off to the side, so the page the agent has open stays as it was, and gives a picture of it and what its console said, errors among them. The tab closes once the picture is taken.
+- **And show it**: `html_render` puts the page in the agent's reply, after what it has said so far, as a file of type `text/html` kept as the person's. A report, a chart or a small tool comes as a card in the chat, and opens beside it on the desktop in the same web view as a plugin's panel, walled off the same way: its scripts run, but it reaches no network and has no way into loom, so everything it needs goes inline.
 
 ### Work that waits its turn
 

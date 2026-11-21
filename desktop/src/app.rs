@@ -92,6 +92,7 @@ enum Screen {
     AddServer,
     Pins,
     Aside,
+    Page,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -910,6 +911,7 @@ ACTA_KEY=secret:ACTA_KEY",
         if self.side == Some(Screen::Plugins) {
             self.model.close_panel();
         }
+        self.model.page = None;
         self.model.pins_open = false;
         self.side = None;
         self.model.editing = None;
@@ -1210,6 +1212,15 @@ ACTA_KEY=secret:ACTA_KEY",
         }
     }
 
+    /// Opens a page from the chat beside it, walled off as a plugin's panel is.
+    pub fn open_page(&mut self, f: &model::FileRef, cx: &mut Context<Self>) {
+        if let Some(frame) = self.model.open_page(f) {
+            self.send(frame);
+        }
+        self.show_side(Screen::Page, cx);
+        cx.notify();
+    }
+
     /// Opens a file from the chat in its own program.
     pub fn open_file(&mut self, f: &model::FileRef, cx: &mut Context<Self>) {
         if let Some(frame) = self.model.open_file(f) {
@@ -1379,6 +1390,14 @@ ACTA_KEY=secret:ACTA_KEY",
                 Ico::MessageCircleQuestionMark,
                 format!("Ask {name} on the side"),
             ),
+            Screen::Page => (
+                Ico::AppWindow,
+                self.model
+                    .page
+                    .as_ref()
+                    .map(model::FileRef::title)
+                    .unwrap_or_else(|| "Page".into()),
+            ),
             _ => (
                 Ico::Puzzle,
                 self.model
@@ -1394,6 +1413,13 @@ ACTA_KEY=secret:ACTA_KEY",
             Screen::Memory => self.memory_page(cx),
             Screen::Pins => self.pins_page(&name, cx),
             Screen::Aside => self.aside_page(&name),
+            // The page's web view sits over this, once it's here.
+            Screen::Page if self.model.page_path().is_none() => div()
+                .flex_1()
+                .p(px(space::L))
+                .text_size(px(size::SMALL))
+                .text_color(p.ink_3)
+                .child("Opening the page…"),
             _ => div().flex_1(),
         };
         // An agent's page opens under its thread, across the panel.
@@ -1402,7 +1428,7 @@ ACTA_KEY=secret:ACTA_KEY",
             .selected
             .as_ref()
             .and_then(|id| self.model.agent(id))
-            .filter(|_| side != Screen::Plugins)
+            .filter(|_| side != Screen::Plugins && side != Screen::Page)
             .map(|a| {
                 let (mood, snapped) = fidget(&a.id, self.model.mood(&a.id));
                 div().px(px(space::L)).pt(px(space::S)).child(thread(
@@ -5396,26 +5422,77 @@ ACTA_KEY=secret:ACTA_KEY",
         div().flex_1().min_h_0().child(page)
     }
 
-    /// Shows the open plugin's panel beside the chat, or takes it away when there's
-    /// none to show, and keeps it in its place as the window changes size.
+    /// What the web view beside the chat shows, by key: the open plugin's panel (by
+    /// the plugin's id), or the open page once it's fetched ("page:" and its file).
+    /// None when it shows neither.
+    fn panel_key(&self) -> Option<String> {
+        if self.screen != Screen::Chat {
+            return None;
+        }
+        match self.side {
+            Some(Screen::Plugins) => self
+                .model
+                .panel
+                .as_ref()
+                .filter(|o| o.plugin.entry.is_some())
+                .map(|o| o.plugin.id.clone()),
+            Some(Screen::Page) => {
+                self.model.page_path()?;
+                self.model
+                    .page
+                    .as_ref()
+                    .map(|f| format!("page:{}", f.file.get(..16).unwrap_or(&f.file)))
+            }
+            _ => None,
+        }
+    }
+
+    /// What the web view loads for `key`: the plugin's files, or the page alone.
+    fn panel_source(&mut self, key: &str) -> Option<crate::panel::Source> {
+        if key.starts_with("page:") {
+            let path = self.model.page_path()?.clone();
+            let html = match std::fs::read(&path) {
+                Ok(b) => b,
+                Err(e) => {
+                    self.model
+                        .notices
+                        .push(format!("The page couldn't be read: {e}"));
+                    self.model.page = None;
+                    return None;
+                }
+            };
+            return Some(crate::panel::Source {
+                id: key.to_string(),
+                files: std::sync::Arc::new(HashMap::from([("index.html".to_string(), html)])),
+                entry: "index.html".into(),
+            });
+        }
+        let open = self.model.panel.clone()?;
+        let entry = open.plugin.entry.clone()?;
+        Some(crate::panel::Source {
+            id: open.plugin.id.clone(),
+            files: std::sync::Arc::new(
+                open.files
+                    .into_iter()
+                    .map(|(k, v)| (k, v.into_bytes()))
+                    .collect(),
+            ),
+            entry,
+        })
+    }
+
+    /// Shows the open plugin's panel or the open page beside the chat, or takes it
+    /// away when there's none to show, and keeps it in its place as the window
+    /// changes size.
     fn sync_panel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let want = if self.side == Some(Screen::Plugins) && self.screen == Screen::Chat {
-            self.model.panel.clone()
-        } else {
-            None
-        };
-        let Some(open) = want else {
-            self.panel = None;
-            return;
-        };
-        let Some(entry) = open.plugin.entry.clone() else {
+        let Some(key) = self.panel_key() else {
             self.panel = None;
             return;
         };
         // In the panel beside the chat, under its head. A web view draws over everything
         // in the window, so while the popup is open it shrinks to nothing.
         let size = window.viewport_size();
-        let w = side_width(Screen::Plugins, f32::from(size.width));
+        let w = side_width(self.side.unwrap_or(Screen::Plugins), f32::from(size.width));
         let rect = if self.popup.is_some() {
             [0.0, 0.0, 0.0, 0.0]
         } else {
@@ -5427,7 +5504,7 @@ ACTA_KEY=secret:ACTA_KEY",
             ]
         };
         if let Some((id, view, at)) = &mut self.panel {
-            if *id == open.plugin.id {
+            if *id == key {
                 if *at != rect {
                     view.set_bounds(panel_bounds(rect));
                     *at = rect;
@@ -5447,22 +5524,15 @@ ACTA_KEY=secret:ACTA_KEY",
         else {
             return;
         };
+        let Some(source) = self.panel_source(&key) else {
+            return;
+        };
         let mut context = self
             .panel_context
             .take()
             .unwrap_or_else(|| crate::panel::context(std::path::Path::new(&data_dir())));
-        let source = crate::panel::Source {
-            id: open.plugin.id.clone(),
-            files: std::sync::Arc::new(
-                open.files
-                    .into_iter()
-                    .map(|(k, v)| (k, v.into_bytes()))
-                    .collect(),
-            ),
-            entry,
-        };
         let door = self.door_in.clone();
-        let id = open.plugin.id.clone();
+        let id = key;
         self.panel_opening = Some(id.clone());
         cx.spawn(async move |this, cx| {
             let made = crate::panel::Panel::open(
@@ -5479,9 +5549,7 @@ ACTA_KEY=secret:ACTA_KEY",
                 match made {
                     // Unless the person went elsewhere while it was being made.
                     Ok(view) => {
-                        let wanted = this.side == Some(Screen::Plugins)
-                            && this.model.panel.as_ref().is_some_and(|p| p.plugin.id == id);
-                        if wanted {
+                        if this.panel_key().as_ref() == Some(&id) {
                             this.panel = Some((id, view, rect));
                         }
                     }
@@ -5489,7 +5557,11 @@ ACTA_KEY=secret:ACTA_KEY",
                         this.model
                             .notices
                             .push(format!("The panel didn't open: {e}"));
-                        this.model.close_panel();
+                        if id.starts_with("page:") {
+                            this.model.page = None;
+                        } else {
+                            this.model.close_panel();
+                        }
                     }
                 }
                 cx.notify();
@@ -5499,10 +5571,21 @@ ACTA_KEY=secret:ACTA_KEY",
     }
 
     /// The open panel's door: what came in goes to the instance as commands, or is
-    /// refused, and the answers that came back go to the panel.
+    /// refused, and the answers that came back go to the panel. A page has no door:
+    /// everything through it is refused.
     fn pump_door(&mut self) {
         let came: Vec<crate::panel::Message> = self.door_in.borrow_mut().drain(..).collect();
+        let page = self
+            .panel
+            .as_ref()
+            .is_some_and(|(id, _, _)| id.starts_with("page:"));
         for m in came {
+            if page {
+                self.model
+                    .door_answers
+                    .push((m.id, Err("A page has no way to loom.".into())));
+                continue;
+            }
             match self.model.door(m.id, &m.op, &m.args) {
                 Ok(frame) => self.send(frame),
                 Err(why) => self.model.door_answers.push((m.id, Err(why))),
@@ -7521,10 +7604,52 @@ fn file_view(
     this: WeakEntity<Loom>,
 ) -> AnyElement {
     let file = f.clone();
+    let id = SharedString::from(format!("file-{key}"));
+    // A page an agent made opens beside the chat, walled off, not in a browser.
+    if f.page() {
+        return div()
+            .id(id)
+            .w_full()
+            .max_w(px(320.0))
+            .flex()
+            .items_center()
+            .gap(px(space::M))
+            .px(px(space::M))
+            .py(px(space::M))
+            .rounded(px(radius::ROW))
+            .border_1()
+            .border_color(p.line)
+            .bg(p.bubble)
+            .cursor_pointer()
+            .hover(move |s| s.bg(p.hover))
+            .on_click(move |_, _, cx| {
+                let _ = this.update(cx, |loom, cx| loom.open_page(&file, cx));
+            })
+            .child(Icon::new(Ico::AppWindow).text_color(p.ink_2))
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .min_w_0()
+                    .child(
+                        div()
+                            .text_size(px(size::SMALL))
+                            .text_color(p.ink)
+                            .truncate()
+                            .child(f.title()),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(size::CAPTION))
+                            .text_color(p.ink_3)
+                            .child("Page · opens beside the chat"),
+                    ),
+            )
+            .into_any_element();
+    }
     let open = move |_: &ClickEvent, _: &mut Window, cx: &mut App| {
         let _ = this.update(cx, |loom, cx| loom.open_file(&file, cx));
     };
-    let id = SharedString::from(format!("file-{key}"));
     if f.image() {
         let picture = match files.get(&format!("{}.thumb", f.file)) {
             Some(path) => img(std::path::PathBuf::from(path))
@@ -8410,7 +8535,7 @@ const SIDE_HEAD: f32 = 48.0;
 /// How wide the panel beside the chat is, in a window `window` wide: a plugin's panel
 /// as wide as the browser's, an agent's page narrower.
 fn side_width(side: Screen, window: f32) -> f32 {
-    if side == Screen::Plugins {
+    if side == Screen::Plugins || side == Screen::Page {
         (window * 0.45).clamp(360.0, 820.0)
     } else {
         (window * 0.36).clamp(360.0, 560.0)

@@ -59,6 +59,7 @@ struct Worker {
     back: Sender<Back>
     child: Child?
     page: WebSocket?
+    port: String    // where its DevTools listen, for html_preview's tab
     next_id: i64
     refs: Map<String, i64>    // e1, e2, ... -> the node each is, from the last outline
     hidden: List<(String, String)>    // secrets filled into this browser, and their names, kept out of what the agent reads
@@ -107,7 +108,7 @@ impl Task for Worker {
 pub fn start(key: String, profile: String, guarded: bool, back: Sender<Back>) -> (Sender<In>, Thread) {
     let inbox = Receiver<In>()
     let to = inbox.sender()
-    let t = unsafe { Thread.spawn(Worker { key: key.copy(), profile: profile.copy(), guarded: guarded, inbox: inbox, back: back.copy(), child: none, page: none, next_id: 0, refs: Map<String, i64>(), hidden: List<(String, String)>(), watched: false, casting: false }) }
+    let t = unsafe { Thread.spawn(Worker { key: key.copy(), profile: profile.copy(), guarded: guarded, inbox: inbox, back: back.copy(), child: none, page: none, port: String(), next_id: 0, refs: Map<String, i64>(), hidden: List<(String, String)>(), watched: false, casting: false }) }
     return (to, t)
 }
 
@@ -244,6 +245,7 @@ impl Worker {
                 try w.launch(exe, false)
             },
         }
+        w.port = port.copy()
         var asked = get("http://127.0.0.1:{port}/json/list", List<Header>(), 10000, 4000000)
         let got = try asked.wait()
         let targets = try parse(String.from_utf8(got.body) ?? String())
@@ -534,8 +536,149 @@ impl Worker {
             let image = Obj.new().s("type", String("image")).s("data", str_at(shot, "data") ?? String()).s("mimeType", String("image/jpeg")).done()
             return Obj.new().j("content", Json.Array([image, Obj.new().s("type", String("text")).s("text", "Page: {try w.where()}").done()])).done()
         }
+        // html_preview: the page drawn in a tab of its own, so the one the agent
+        // has open stays as it was, and the tab closed once its picture is taken.
+        if name == "preview" {
+            let html = str_at(args.copy(), "html") ?? String()
+            if html.trim().len() == 0 { return error(String("html is empty: give the whole page.")) }
+            if html.len() > HTML_MOST { return error("The page is {html.len()} bytes, and html_preview takes {HTML_MOST} at most.") }
+            let width = (int_at(args.copy(), "width") ?? 1280).max(200).min(3840)
+            let height = (int_at(args.copy(), "height") ?? 800).max(200).min(2400)
+            let made = try w.call("Target.createTarget", Obj.new().s("url", String("about:blank")).b("background", true).done())
+            let target = str_at(made, "targetId") ?? String()
+            if target.len() == 0 { fail "The browser didn't open a tab for the page." }
+            let drawn = match w.preview(target.copy(), html, width, height, bool_at(args, "full_page") ?? false) {
+                ok(r) => r,
+                err(e) => error("{e}"),
+            }
+            if let err(e) = w.call("Target.closeTarget", Obj.new().s("targetId", target).done()) { eprintln("loom: the browser: {e}") }
+            return drawn
+        }
         return error("The browser has no {name}.")
     }
+
+    fn preview(w: Worker, target: String, html: String, width: i64, height: i64, full_page: bool) -> Json ! Error {
+        var t = Tab { sock: try connect("ws://127.0.0.1:{w.port}/devtools/page/{target}"), next_id: 0, said: List<String>() }
+        for domain in ["Page", "Runtime", "Log"] { _ = try t.call("{domain}.enable", Obj.new().done()) }
+        if w.guarded {
+            var blocked = List<Json>()
+            for p in guarded_patterns() { blocked.push(Json.Str(p.copy())) }
+            _ = try t.call(String("Network.enable"), Obj.new().done())
+            _ = try t.call(String("Network.setBlockedURLs"), Obj.new().j("urls", Json.Array(blocked)).done())
+        }
+        _ = try t.call(String("Emulation.setDeviceMetricsOverride"), Obj.new().i("width", width).i("height", height).i("deviceScaleFactor", 1).b("mobile", false).done())
+        let tree = try t.call(String("Page.getFrameTree"), Obj.new().done())
+        let frame = str_at(at(at(tree, "frameTree"), "frame"), "id") ?? String()
+        _ = try t.call(String("Page.setDocumentContent"), Obj.new().s("frameId", frame).s("html", html).done())
+        t.settle()
+        var shot_args = Obj.new().s("format", String("jpeg")).i("quality", 80)
+        var size = "{width} × {height}"
+        if full_page {
+            let metrics = try t.call(String("Page.getLayoutMetrics"), Obj.new().done())
+            let tall = (at(at(metrics, "cssContentSize"), "height").as_f64() ?? f64.nearest(height)).max(f64.nearest(height)).min(FULL_PAGE_MOST)
+            shot_args = shot_args.b("captureBeyondViewport", true).j("clip", Obj.new().i("x", 0).i("y", 0).i("width", width).j("height", Json.Float(tall)).i("scale", 1).done())
+            size = "{width} × {i64.saturate(tall)}, the whole page"
+        }
+        let shot = try t.call(String("Page.captureScreenshot"), shot_args.done())
+        t.sock.close()
+        let image = Obj.new().s("type", String("image")).s("data", str_at(shot, "data") ?? String()).s("mimeType", String("image/jpeg")).done()
+        var said = if t.said.len() == 0 { String("Its console said nothing.") } else { "Its console said:\n{t.said.join("\n")}" }
+        if t.said.len() >= SAID_MOST { said.push_str("\n(It said more after that.)") }
+        return Obj.new().j("content", Json.Array([image, Obj.new().s("type", String("text")).s("text", "The page, at {size}. {said}").done()])).done()
+    }
+}
+
+// How big a page html_preview takes, and how tall a picture of a whole page
+// gets.
+pub const HTML_MOST: usize = 2097152
+const FULL_PAGE_MOST: f64 = 16000.0
+// How many lines of a preview's console go to the agent.
+const SAID_MOST: usize = 50
+
+// html_preview's tab, while it draws the page: what its console says is kept
+// as it comes.
+struct Tab {
+    sock: WebSocket
+    next_id: i64
+    said: List<String>
+}
+
+impl Tab {
+    fn call(t: mut Tab, method: String, params: Json) -> Json ! Error {
+        t.next_id += 1
+        let id = t.next_id
+        try t.sock.send_text("{Obj.new().i("id", id).s("method", method.copy()).j("params", params).done()}")
+        let until = now() + CALL_MS
+        loop {
+            let left = until - now()
+            if left <= 0 { fail "The browser didn't answer {method} in time." }
+            let m = try t.sock.receive(u32.wrap(left)) else continue
+            let Message.Text(said) = m else continue
+            let reply = try parse(said)
+            if let event = str_at(reply.copy(), "method") {
+                t.heard(event, at(reply, "params"))
+                continue
+            }
+            if int_at(reply.copy(), "id") != some(id) { continue }
+            if let e = reply.get(String("error")) { fail "{str_at(e, "message") ?? String("The browser refused it.")}" }
+            return at(reply, "result")
+        }
+    }
+
+    // Waits for the page to load, and a moment more for what its scripts draw.
+    fn settle(t: mut Tab) {
+        let until = now() + LOAD_MS
+        while now() < until {
+            match t.call(String("Runtime.evaluate"), Obj.new().s("expression", String("document.readyState")).b("returnByValue", true).done()) {
+                ok(r) => if str_at(at(r, "result"), "value") == some(String("complete")) { break },
+                err(_) => {},
+            }
+            unsafe { sleep(100000000) }
+        }
+        unsafe { sleep(300000000) }
+        // What was said meanwhile comes with the answer to a last call.
+        match t.call(String("Runtime.evaluate"), Obj.new().s("expression", String("0")).done()) {
+            ok(_) => {},
+            err(_) => {},
+        }
+    }
+
+    fn heard(t: mut Tab, event: String, p: Json) {
+        if t.said.len() >= SAID_MOST { return }
+        if let line = console_line(event, p) { t.said.push(short(line, 400)) }
+    }
+}
+
+// A line of what a page's console said, from a DevTools event: a log, an
+// error thrown, or the browser's own word, as a request that failed.
+pub fn console_line(event: String, p: Json) -> String? {
+    if event == "Runtime.consoleAPICalled" {
+        var parts = List<String>()
+        if let Json.Array(args) = at(p.copy(), "args") {
+            for a in args {
+                if let s = str_at(a.copy(), "value") {
+                    parts.push(s)
+                } else if let v = a.get(String("value")) {
+                    parts.push("{v}")
+                } else {
+                    parts.push(str_at(a.copy(), "description") ?? str_at(a, "type") ?? String())
+                }
+            }
+        }
+        return some("{str_at(p, "type") ?? String("log")}: {parts.join(" ")}")
+    }
+    if event == "Runtime.exceptionThrown" {
+        let d = at(p, "exceptionDetails")
+        let what = str_at(at(d.copy(), "exception"), "description") ?? str_at(d.copy(), "text") ?? String("An error")
+        return some("error, line {(int_at(d, "lineNumber") ?? 0) + 1}: {what}")
+    }
+    if event == "Log.entryAdded" {
+        let e = at(p, "entry")
+        let place = str_at(e.copy(), "url") ?? String()
+        let said = "{str_at(e.copy(), "level") ?? String("info")}: {str_at(e, "text") ?? String()}"
+        return some(if place.len() > 0 { "{said} ({place})" } else { said })
+    }
+    return none
 }
 
 // Selects what an element holds, so typing replaces it.

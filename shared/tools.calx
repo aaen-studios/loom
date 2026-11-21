@@ -66,6 +66,8 @@ pub fn all() -> List<Json> {
         tool("browser_back", "Goes back to the page before, as a browser's back button does, and gives its outline.", object(Obj.new(), List<str>())),
         tool("browser_screenshot", "Gives a picture of what your browser shows, for when how the page looks matters.", object(Obj.new(), List<str>())),
         tool("browser_ask_person", "Asks your person to take over your browser for something only they should do, such as logging in, a code sent to their phone, or a CAPTCHA. They get a notification, take over, and hand it back; the result comes then, with the page as it is. Open the page first.", object(Obj.new().j("why", text_arg("What you need them to do, in one sentence.")), ["why"])),
+        tool("html_preview", "Shows you how a page of HTML you wrote looks, before your person sees it: your browser draws it in a tab of its own, off to the side of the page it has open, and gives a picture of it and what its console said, errors among them. Use it to check a page, then html_render to show it.", object(Obj.new().j("html", text_arg("The whole page: HTML, with its CSS and scripts inline, up to 2 MB.")).j("width", Obj.new().s("type", String("integer")).s("description", String("How wide the window is, in pixels. 1280 if left out.")).done()).j("height", Obj.new().s("type", String("integer")).s("description", String("How tall the window is, in pixels. 800 if left out.")).done()).j("full_page", Obj.new().s("type", String("boolean")).s("description", String("Whether the picture is the whole page, past the window's height.")).done()), ["html"])),
+        tool("html_render", "Shows your person a page of HTML you made, in the chat, after what you've said so far: a report, a chart, a small tool. It opens beside the chat, walled off: its scripts run, but it reaches no network, so put everything it needs inline. Check it with html_preview first.", object(Obj.new().j("html", text_arg("The whole page: HTML, with its CSS, scripts and pictures inline, up to 2 MB.")).j("title", text_arg("What the page is, in a few words, such as Sales this week.")), ["html", "title"])),
         tool("add_server", "Adds another loom server to your person's app, beside this one, for them to sign in to there. Your person is asked first.", object(Obj.new().j("address", text_arg("The server's address, such as https://loom.example.com.")), ["address"])),
         tool("install_server", "Gives the command that puts loom on a new Linux server, and what comes after: add it with add_server, or move this instance there with move_instance.", object(Obj.new().j("domain", text_arg("The server's domain, for HTTPS through Caddy, such as loom.example.com. Leave it out for Tailscale.")), List<str>())),
         tool("list_commands", "Lists loom's commands, which run_command runs: each one's name, its args, what it does, and whether it runs at once or asks your person first.", object(Obj.new(), List<str>())),
@@ -77,7 +79,7 @@ pub fn all() -> List<Json> {
 @test
 fn every_tool_has_a_schema() {
     let tools = all()
-    assert(tools.len() == 44)
+    assert(tools.len() == 46)
     for t in tools {
         assert("{t}".contains("\"inputSchema\":\{\"type\":\"object\""))
     }
