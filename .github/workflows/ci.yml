@@ -66,6 +66,13 @@ jobs:
 
       - name: Check
         run: |
+          # Still running a moment later, or what it said before it stopped.
+          sleep 2
+          if ! systemctl is-active --quiet loom; then
+            systemctl status loom --no-pager || true
+            sudo journalctl -u loom --no-pager | tail -40
+            exit 1
+          fi
           test "$(systemctl show -p User --value loom)" = loom
           test "$(ps -o user= -p "$(systemctl show -p MainPID --value loom)")" = loom
           test "$(stat -c %a /var/lib/loom)" = 700
