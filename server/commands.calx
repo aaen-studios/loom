@@ -25,7 +25,7 @@ struct Command {
     does: str
 }
 
-const COMMANDS: [Command; 75] = [
+const COMMANDS: [Command; 76] = [
     Command { name: "conversation.create", args: "agent, title?", does: "Makes a conversation with an agent." },
     Command { name: "conversation.rename", args: "conversation, title", does: "Renames a conversation." },
     Command { name: "conversation.branch", args: "message, title?", does: "Branches a chat at a message: a new conversation that goes on from there, apart from the chat." },
@@ -40,6 +40,7 @@ const COMMANDS: [Command; 75] = [
     Command { name: "agent.rollback", args: "agent, revision", does: "Puts an agent back as it was at a revision." },
     Command { name: "agent.delete", args: "agent", does: "Deletes an agent." },
     Command { name: "activity.list", args: "agent?, before?, limit?", does: "What agents ran, were allowed, and changed." },
+    Command { name: "activity.export", args: "agent?", does: "The activity log as CSV, oldest first." },
     Command { name: "memory.list", args: "agent?, query?, limit?", does: "Notes, an agent's and the shared ones." },
     Command { name: "memory.put", args: "text, agent? (left out: shared)", does: "Keeps a note." },
     Command { name: "memory.delete", args: "id", does: "Deletes a note." },
@@ -159,7 +160,7 @@ fn reading_runs_and_harm_asks() {
     for c in COMMANDS {
         if let Access.Never(_) = access(String(c.name)) { panic("{c.name} is listed but never runs") }
     }
-    assert(catalog().len() == 75)
+    assert(catalog().len() == 76)
     assert(access(String("table.write")) == Access.Runs and access(String("table.delete_rows")) == Access.Runs)
     assert(access(String("table.drop")) == Access.Asks(String("delete")))
     assert(does(String("mcp.delete")) == "Removes an MCP server")

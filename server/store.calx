@@ -50,7 +50,9 @@ CREATE TABLE IF NOT EXISTS agent_revisions (
     json TEXT NOT NULL, by TEXT NOT NULL, at INTEGER NOT NULL, PRIMARY KEY (agent, revision));
 CREATE TABLE IF NOT EXISTS activity (
     id INTEGER PRIMARY KEY, user TEXT NOT NULL REFERENCES users(id), agent TEXT NOT NULL,
-    kind TEXT NOT NULL, text TEXT NOT NULL, by TEXT NOT NULL, at INTEGER NOT NULL);
+    kind TEXT NOT NULL, text TEXT NOT NULL, by TEXT NOT NULL, at INTEGER NOT NULL,
+    status TEXT NOT NULL DEFAULT '', input TEXT NOT NULL DEFAULT '', why TEXT NOT NULL DEFAULT '',
+    ended INTEGER NOT NULL DEFAULT 0);
 CREATE TABLE IF NOT EXISTS secrets (
     user TEXT NOT NULL REFERENCES users(id), name TEXT NOT NULL, nonce TEXT NOT NULL,
     sealed TEXT NOT NULL, at INTEGER NOT NULL, PRIMARY KEY (user, name));
@@ -269,6 +271,11 @@ fn token_hash(token: String) -> String {
 }
 
 impl Store {
+    // Closes the database, so its files can be moved or removed.
+    pub fn close(own self) ! Error {
+        try self.db.close()
+    }
+
     // Opens (or makes) the database at `path`. `hasher` hashes passwords;
     // tests pass a cheap one.
     pub fn open(path: String, hasher: PasswordHasher) -> Store ! Error {
@@ -278,6 +285,14 @@ impl Store {
         try db.execute_script(String("PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON;"))
         try db.execute_script(String(SCHEMA))
         let s = Store { db: db, hasher: hasher, sealer: sealer }
+        // An activity log from before actions were recorded gets their columns.
+        var recorded = false
+        for r in try s.db.query(String("PRAGMA table_info(activity)")) {
+            if text(r[1].copy()) == "status" { recorded = true }
+        }
+        if not recorded {
+            try s.db.execute_script(String("ALTER TABLE activity ADD COLUMN status TEXT NOT NULL DEFAULT ''; ALTER TABLE activity ADD COLUMN input TEXT NOT NULL DEFAULT ''; ALTER TABLE activity ADD COLUMN why TEXT NOT NULL DEFAULT ''; ALTER TABLE activity ADD COLUMN ended INTEGER NOT NULL DEFAULT 0;"))
+        }
         // Settings kept before they were sealed are sealed once.
         for r in try s.db.query(String("SELECT name, env FROM acp_settings")) {
             let env = text(r[1].copy())
@@ -1458,17 +1473,44 @@ impl Store {
         _ = try self.db.execute(String("INSERT INTO activity (user, agent, kind, text, by, at) VALUES (?, ?, ?, ?, ?, ?)"), [t(user), t(agent), t(String(kind)), t(what), t(by), Value.Int(now())])
     }
 
+    // Notes an action before it happens (PLAN.md, "Every action is recorded
+    // before it happens"): `input` is what it was given, with secrets already
+    // shown only as their length. Its status is "started" until `settle`
+    // marks it done, failed or refused. Gives the entry's id.
+    pub fn record(self, user: String, agent: String, kind: str, what: String, input: String, by: String) -> i64 ! Error {
+        _ = try self.db.execute(String("INSERT INTO activity (user, agent, kind, text, by, at, status, input) VALUES (?, ?, ?, ?, ?, ?, 'started', ?)"), [t(user), t(agent), t(String(kind)), t(what), t(by), Value.Int(now()), t(input)])
+        return self.db.last_insert_id()
+    }
+
+    // Marks the action `id` done, failed or refused, with why for the last two:
+    // a refusal's why starts with the rule that refused it.
+    pub fn settle(self, id: i64, status: str, why: String) ! Error {
+        _ = try self.db.execute(String("UPDATE activity SET status = ?, why = ?, ended = ? WHERE id = ? AND status = 'started'"), [t(String(status)), t(why), Value.Int(now()), Value.Int(id)])
+    }
+
+    // Actions a restart cut short are marked failed, once.
+    pub fn settle_cut_short(self) ! Error {
+        _ = try self.db.execute(String("UPDATE activity SET status = 'failed', why = 'The instance stopped before it finished.', ended = ? WHERE status = 'started'"), [Value.Int(now())])
+    }
+
     // `user`'s activity, newest first: all of it, or one agent's, from
     // before the entry `before`.
     pub fn activity(self, user: String, agent: String?, before: i64?, limit: usize) -> List<Json> ! Error {
         var out = List<Json>()
         let below = before ?? i64.MAX
         let rows = match agent {
-            some(a) => try self.db.query(String("SELECT id, agent, kind, text, by, at FROM activity WHERE user = ? AND agent = ? AND id < ? ORDER BY id DESC LIMIT ?"), [t(user), t(a), Value.Int(below), Value.Int(i64.wrap(u64(limit)))]),
-            none => try self.db.query(String("SELECT id, agent, kind, text, by, at FROM activity WHERE user = ? AND id < ? ORDER BY id DESC LIMIT ?"), [t(user), Value.Int(below), Value.Int(i64.wrap(u64(limit)))]),
+            some(a) => try self.db.query(String("SELECT id, agent, kind, text, by, at, status, input, why, ended FROM activity WHERE user = ? AND agent = ? AND id < ? ORDER BY id DESC LIMIT ?"), [t(user), t(a), Value.Int(below), Value.Int(i64.wrap(u64(limit)))]),
+            none => try self.db.query(String("SELECT id, agent, kind, text, by, at, status, input, why, ended FROM activity WHERE user = ? AND id < ? ORDER BY id DESC LIMIT ?"), [t(user), Value.Int(below), Value.Int(i64.wrap(u64(limit)))]),
         }
         for r in rows {
-            out.push(Obj.new().i("id", int(r[0].copy())).s("agent", text(r[1].copy())).s("kind", text(r[2].copy())).s("text", text(r[3].copy())).s("by", text(r[4].copy())).i("at", int(r[5].copy())).done())
+            var e = Obj.new().i("id", int(r[0].copy())).s("agent", text(r[1].copy())).s("kind", text(r[2].copy())).s("text", text(r[3].copy())).s("by", text(r[4].copy())).i("at", int(r[5].copy()))
+            let status = text(r[6].copy())
+            if status.len() > 0 {
+                e = e.s("status", status).s("input", text(r[7].copy())).s("why", text(r[8].copy()))
+                let ended = int(r[9].copy())
+                if ended > 0 { e = e.i("ended", ended) }
+            }
+            out.push(e.done())
         }
         return out
     }
@@ -1641,6 +1683,29 @@ fn fts_query(query: String) -> String? {
 
 fn test_store() -> Store {
     return Store.open(String(":memory:"), PasswordHasher { memory_kib: 64, iterations: 1, parallelism: 1 })!
+}
+
+@test
+fn an_old_activity_log_gets_the_record_columns() {
+    let dir = fs.temp_dir()!
+    let path = "{dir}/loom.db"
+    let old = Database.open(path.copy())!
+    old.execute_script(String("CREATE TABLE activity (id INTEGER PRIMARY KEY, user TEXT NOT NULL, agent TEXT NOT NULL, kind TEXT NOT NULL, text TEXT NOT NULL, by TEXT NOT NULL, at INTEGER NOT NULL); INSERT INTO activity (user, agent, kind, text, by, at) VALUES ('u_1', 'a_1', 'notify', 'Notified you: Build', 'a_1', 1);"))!
+    old.close()!
+    let entries = record_in(path)
+    assert(entries.len() == 2 and "{entries[0]}".contains(#""status":"done""#) and not "{entries[1]}".contains("status"))
+    fs.remove_dir_all(dir)!
+}
+
+// Opens the store at `path`, records an action and settles it, and gives
+// the log. The store is closed once it's given.
+fn record_in(path: String) -> List<Json> {
+    let s = Store.open(path, PasswordHasher { memory_kib: 64, iterations: 1, parallelism: 1 })!
+    let id = s.record(String("u_1"), String("a_1"), "tool", String("remember"), String("args"), String("a_1"))!
+    s.settle(id, "done", String())!
+    let entries = s.activity(String("u_1"), none, none, 10)!
+    s.close()!
+    return entries
 }
 
 @test

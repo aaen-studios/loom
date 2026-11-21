@@ -553,6 +553,9 @@ ACTA_KEY=secret:ACTA_KEY",
                     }
                     loom.tray_actions(cx);
                     loom.take_notice(cx);
+                    if let Some(csv) = loom.model.exported.take() {
+                        loom.save_export(csv, cx);
+                    }
                     while let Ok(answer) = loom.device_rx.try_recv() {
                         loom.send(answer);
                     }
@@ -1431,7 +1434,7 @@ ACTA_KEY=secret:ACTA_KEY",
         };
         let body = match side {
             Screen::EditAgent => self.edit_agent(cx),
-            Screen::Activity => self.activity_page(),
+            Screen::Activity => self.activity_page(cx),
             Screen::Memory => self.memory_page(cx),
             Screen::Pins => self.pins_page(&name, cx),
             Screen::Aside => self.aside_page(&name),
@@ -7793,7 +7796,7 @@ ACTA_KEY=secret:ACTA_KEY",
 
     /// The activity page: what the selected agent did, and what was done to it, newest
     /// first.
-    fn activity_page(&mut self) -> Div {
+    fn activity_page(&mut self, cx: &mut Context<Self>) -> Div {
         let p = self.p;
         let mut list = div().flex().flex_col();
         if self.model.activity.is_empty() {
@@ -7862,9 +7865,30 @@ ACTA_KEY=secret:ACTA_KEY",
                         div()
                             .flex_1()
                             .min_w_0()
-                            .text_size(px(size::SMALL))
-                            .text_color(p.ink)
-                            .child(e.text),
+                            .flex()
+                            .flex_col()
+                            .child(
+                                div()
+                                    .text_size(px(size::SMALL))
+                                    .text_color(p.ink)
+                                    .child(e.text),
+                            )
+                            .when(
+                                matches!(e.status.as_str(), "started" | "failed" | "refused"),
+                                |d| {
+                                    let (said, colour) = match e.status.as_str() {
+                                        "started" => ("Not finished yet".to_string(), p.ink_3),
+                                        "refused" => (format!("Refused: {}", e.why), p.bad),
+                                        _ => (format!("Failed: {}", e.why), p.bad),
+                                    };
+                                    d.child(
+                                        div()
+                                            .text_size(px(size::CAPTION))
+                                            .text_color(colour)
+                                            .child(said),
+                                    )
+                                },
+                            ),
                     )
                     .when(!who.is_empty(), |d| {
                         d.child(
@@ -7893,9 +7917,46 @@ ACTA_KEY=secret:ACTA_KEY",
                     .max_w(px(640.0))
                     .flex()
                     .flex_col()
+                    .child(
+                        div().flex().justify_end().child(
+                            self.button("export-activity", "Export as CSV", false)
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    if let Some(f) = this.model.export_activity() {
+                                        this.send(f);
+                                    }
+                                    cx.notify();
+                                })),
+                        ),
+                    )
                     .child(list),
             );
         div().flex_1().min_h_0().child(page)
+    }
+
+    /// Asks where to save the activity log `activity.export` gave, and saves it there.
+    fn save_export(&mut self, csv: String, cx: &mut Context<Self>) {
+        let downloads = std::env::var("USERPROFILE")
+            .or_else(|_| std::env::var("HOME"))
+            .map(|h| std::path::Path::new(&h).join("Downloads"))
+            .unwrap_or_else(|_| std::path::PathBuf::from("."));
+        let name = format!(
+            "loom activity {}.csv",
+            chrono::Local::now().format("%Y-%m-%d")
+        );
+        let picked = cx.prompt_for_new_path(&downloads, Some(&name));
+        cx.spawn(async move |this, cx| {
+            if let Ok(Ok(Some(path))) = picked.await {
+                let said = match std::fs::write(&path, csv.as_bytes()) {
+                    Ok(()) => format!("Saved the activity log to {}", path.display()),
+                    Err(e) => format!("The activity log couldn't be saved: {e}"),
+                };
+                let _ = this.update(cx, |loom, cx| {
+                    loom.model.notices.push(said);
+                    cx.notify();
+                });
+            }
+        })
+        .detach();
     }
 
     /// The open chat's pinned messages, beside it: who, when and the start of each, to
