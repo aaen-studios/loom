@@ -1462,6 +1462,32 @@ impl Model {
         }
     }
 
+    /// Opens what a notification was about: the agent, and the conversation in the chat's
+    /// place when it's a task's, a branch or a routine's thread rather than the chat itself.
+    /// A side question opens the agent's chat, which it's about.
+    pub fn open_about(&mut self, agent: &str, conversation: &str) {
+        if self.agent(agent).is_none() {
+            return;
+        }
+        self.select(Some(agent.to_string()));
+        let about = self
+            .conversations
+            .iter()
+            .find(|c| c.id == conversation && c.agent == agent)
+            .cloned();
+        match about {
+            Some(c) if c.task.is_some() => {
+                self.show_branch(None);
+                self.open_task = c.task;
+                self.dirty.insert(List::Messages);
+            }
+            Some(c) if c.branch_of.is_some() || c.routine.is_some() => {
+                self.show_branch(Some(c.id));
+            }
+            _ => self.show_branch(None),
+        }
+    }
+
     /// Branches the chat at a message: once it's made, the chat shows it.
     pub fn branch(&mut self, message: &str) -> Value {
         json!({"t": "cmd", "id": self.id("app.branch"), "name": "conversation.branch", "args": {"message": message}})
@@ -4456,5 +4482,55 @@ mod tests {
         let f = m.pin_agent(true).unwrap();
         assert_eq!(f["name"], "agent.pin");
         assert_eq!(f["args"]["agent"], "a_1");
+    }
+
+    #[test]
+    fn a_clicked_notification_opens_what_it_was_about() {
+        let mut m = Model::new();
+        m.take(&json!({"t": "core.data", "what": "agents", "items": [
+            {"id": "a_1", "name": "One"},
+            {"id": "a_2", "name": "Two"}
+        ]}));
+        let chat = Conversation {
+            id: "c_chat".into(),
+            agent: "a_2".into(),
+            task: None,
+            side: false,
+            branch_of: None,
+            branch_at: None,
+            routine: None,
+            title: String::new(),
+        };
+        m.conversations = vec![
+            chat.clone(),
+            Conversation {
+                id: "c_thread".into(),
+                routine: Some("r_1".into()),
+                ..chat.clone()
+            },
+            Conversation {
+                id: "c_task".into(),
+                task: Some("t_1".into()),
+                ..chat.clone()
+            },
+        ];
+        m.select(Some("a_1".into()));
+        m.open_about("a_2", "c_chat");
+        assert_eq!(m.selected.as_deref(), Some("a_2"));
+        assert_eq!(m.conversation().as_deref(), Some("c_chat"));
+        m.open_about("a_2", "c_thread");
+        assert_eq!(
+            m.conversation().as_deref(),
+            Some("c_thread"),
+            "a routine's thread"
+        );
+        m.open_about("a_2", "c_task");
+        assert_eq!(m.open_task.as_deref(), Some("t_1"), "a task");
+        m.open_about("a_9", "c_chat");
+        assert_eq!(
+            m.selected.as_deref(),
+            Some("a_2"),
+            "an agent that's gone opens nothing"
+        );
     }
 }

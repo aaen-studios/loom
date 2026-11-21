@@ -19,7 +19,6 @@ chrono = { version = "0.4.45", default-features = false, features = ["clock"] }
 # gpui-component, so this one pin keeps them all in step. Pinned exactly:
 # GPUI is pre-1.0, so take each new version on purpose, at the latest.
 gpui-kit = "=0.10.0"
-notify-rust = "4.19.0"
 png = "0.18.1"
 image = { version = "0.25.10", default-features = false, features = ["bmp", "jpeg", "png"] }
 raw-window-handle = "0.6"
@@ -35,7 +34,11 @@ lto = "thin"
 webview2-com = "0.39.1"
 windows = { version = "0.62", features = ["Win32_Foundation", "Win32_System_Com"] }
 windows-core = "0.62"
+tauri-winrt-notification = "0.8.1"
 windows-sys = { version = "0.61.2", features = ["Win32_UI_WindowsAndMessaging", "Win32_UI_Input_KeyboardAndMouse", "Win32_Foundation", "Win32_System_Threading"] }
 
 [build-dependencies]
 winresource = "0.1.34"
+
+[target."cfg(not(windows))".dependencies]
+notify-rust = "4.19.0"

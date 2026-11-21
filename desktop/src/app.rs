@@ -568,6 +568,7 @@ ACTA_KEY=secret:ACTA_KEY",
                         }
                     }
                     loom.tray_actions(cx);
+                    loom.notification_clicks(cx);
                     loom.take_notice(cx);
                     if let Some(csv) = loom.model.exported.take() {
                         loom.save_export(csv, cx);
@@ -605,7 +606,12 @@ ACTA_KEY=secret:ACTA_KEY",
                                         .unwrap_or_default()
                                         .to_string()
                                 };
-                                shell::notify(&s("title"), &s("body"));
+                                let about = shell::About {
+                                    server: loom.here.clone(),
+                                    agent: s("agent"),
+                                    conversation: s("conversation"),
+                                };
+                                shell::notify(&s("title"), &s("body"), Some(about));
                             }
                             changed |= loom.model.take(&v);
                         }
@@ -1039,7 +1045,12 @@ ACTA_KEY=secret:ACTA_KEY",
                                 .unwrap_or_default()
                                 .to_string()
                         };
-                        shell::notify(&s("title"), &s("body"));
+                        let about = shell::About {
+                            server: a.dir.clone(),
+                            agent: s("agent"),
+                            conversation: s("conversation"),
+                        };
+                        shell::notify(&s("title"), &s("body"), Some(about));
                     }
                     _ => {}
                 }
@@ -1237,7 +1248,7 @@ ACTA_KEY=secret:ACTA_KEY",
     /// Shows the newest notice from the model, and hides one that's been up 8 seconds.
     fn take_notice(&mut self, cx: &mut Context<Self>) {
         if let Some(words) = self.model.checked.take() {
-            shell::notify("loom", &words);
+            shell::notify("loom", &words, None);
         }
         if let Some(words) = self.model.notices.pop() {
             self.model.notices.clear();
@@ -9179,6 +9190,22 @@ ACTA_KEY=secret:ACTA_KEY",
         self.refresh_rows(cx);
         self.scroller.update(cx, |s, cx| s.remeasure(cx));
         cx.notify();
+    }
+
+    /// Opens what each clicked notification was about, with the window up: its server,
+    /// its agent and its conversation. The person clicked it, so the window comes forward.
+    fn notification_clicks(&mut self, cx: &mut Context<Self>) {
+        for about in shell::clicked() {
+            shell::show_window(self.hwnd, true);
+            self.show_server(&about.server, cx);
+            self.popup = None;
+            self.menu = None;
+            self.screen = Screen::Chat;
+            self.model.open_about(&about.agent, &about.conversation);
+            self.fetch();
+            self.refresh_rows(cx);
+            cx.notify();
+        }
     }
 
     fn tray_actions(&mut self, cx: &mut Context<Self>) {

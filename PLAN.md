@@ -439,7 +439,7 @@ A routine's answer can go on to other agents, step by step, as a flow: the morni
 
 ## Notifications and push
 
-- **Desktop.** The app lives in the tray and keeps the WebSocket open, so the core shows system notifications itself. No push service needed.
+- **Desktop.** The app lives in the tray and keeps the WebSocket open, so the core shows system notifications itself. No push service needed. Clicking one brings the window up on what it's about: its server, its agent, and the task, branch or routine thread it came from, or else the chat.
 - **iPhone.** APNs, with an ES256-signed token, over HTTP/2. Approvals come with Allow and Deny buttons.
 - **Elliot's instance sends push to Apple itself**, with the key of the Apple developer account that signed the app.
 - **Other people's instances can't do that.** Apple only accepts a push signed with that key. Elliot signs the TestFlight and App Store builds, and his key can't be handed out, since it would let anyone push to every loom user. So other instances have three choices:
