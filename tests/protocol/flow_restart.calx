@@ -1,0 +1,97 @@
+module tests.protocol.flow_restart
+
+// A routine's flow across a restart (PLAN.md, "Routine flows"): the instance
+// keeps each running flow, and when it starts again the flow carries on. The
+// step the restart cut short goes again, and the steps after it follow.
+//
+//     calx tests/protocol/flow_restart.calx
+import std.json.{Json}
+import std.process.{exit}
+import shared.obj.{Obj, at, bool_at, str_at}
+import tests.kit.{App, Instance, check}
+
+fn step_after(name: str, agent: str, prompt: str, after: str) -> Json {
+    return Obj.new().s("name", String(name)).s("agent", String(agent)).s("prompt", String(prompt)).j("after", Json.Array([Json.Str(String(after))])).done()
+}
+
+// Each step's name and status, as "routine:done slow:running last:waiting".
+fn states(flow: Json) -> String {
+    var out = List<String>()
+    if let Json.Array(steps) = at(flow, "steps") {
+        for s in steps { out.push("{str_at(s.copy(), "name") ?? String()}:{str_at(s, "status") ?? String()}") }
+    }
+    return out.join(" ")
+}
+
+// The next flow.updated for routine `routine` that `wanted` says yes to.
+fn flow_where(app: mut App, routine: String, wanted: fn(Json) -> bool) -> Json ! Error {
+    loop {
+        let e = try app.until("event", "flow.updated")
+        let flow = at(e, "flow")
+        if str_at(flow.copy(), "routine") == some(routine.copy()) and wanted(flow.copy()) { return flow }
+    }
+}
+
+fn slow_running(flow: Json) -> bool {
+    return states(flow).contains("slow:running")
+}
+
+fn finished(flow: Json) -> bool {
+    return bool_at(flow, "finished") == some(true)
+}
+
+// Starts the flow, and gives the event number to pick up from and the
+// routine, once its slow step is running.
+fn before(i: Instance) -> (i64, String) ! Error {
+    var app = try App.connect(i.base.copy(), i.token.copy(), 0)
+    for (q, name) in [("q_1", "Main"), ("q_2", "Slow")] {
+        _ = try app.cmd(q, "agent.create", Obj.new().s("name", String(name)).s("acp_agent", String("fake")).s("instructions", String("Test.")).done())
+    }
+    let flow = Json.Array([step_after("slow", "Slow", "/sleep 3000\nslow done", "routine"), step_after("last", "Main", "last done", "slow")])
+    let put = try app.cmd("q_3", "routine.put", Obj.new().s("name", String("Chain")).s("agent", String("Main")).s("prompt", String("started")).j("schedule", Obj.new().i("every", 600).done()).j("flow", flow).done())
+    let routine = str_at(at(at(put, "value"), "routine"), "id") ?? String()
+    _ = try app.cmd("q_4", "routine.run", Obj.new().s("id", routine.copy()).done())
+    _ = try flow_where(mut app, routine.copy(), slow_running)
+    let seq = app.seq
+    app.close()
+    return (seq, routine)
+}
+
+fn after_restart(i: Instance, seq: i64, routine: String) ! Error {
+    var app = try App.connect(i.base.copy(), i.token.copy(), seq)
+    let done = try flow_where(mut app, routine, finished)
+    try check(states(done) == "routine:done slow:done last:done", "after a restart, the flow carries on: the step it cut short goes again, and the next follows")
+    var answered = false
+    for f in app.frames {
+        let m = at(f.copy(), "message")
+        if str_at(f.copy(), "kind") == some(String("message.created")) and str_at(m.copy(), "role") == some(String("agent")) and "{at(m, "blocks")}".contains("slow done") { answered = true }
+    }
+    try check(answered, "and its agent answers")
+    app.close()
+}
+
+fn main() ! Error {
+    let inst = try Instance.start()
+    var failure: String? = none
+    var left: (i64, String) = (0, String())
+    match before(inst.copy()) {
+        ok(l) => left = l,
+        err(e) => failure = some("{e}"),
+    }
+    if failure != none {
+        inst.stop()
+    } else {
+        let (seq, routine) = left
+        let back = try inst.restart()
+        match after_restart(back.copy(), seq, routine) {
+            ok => {},
+            err(e) => failure = some("{e}"),
+        }
+        back.stop()
+    }
+    if let f = failure {
+        eprintln("\n{f}")
+        exit(1)
+    }
+    println("\nflow_restart: all good")
+}

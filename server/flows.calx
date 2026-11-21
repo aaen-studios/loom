@@ -7,7 +7,7 @@ module server.flows
 // instance runs the steps and keeps the flows that are running; this is what
 // a flow is, and which steps go next.
 import std.json.{Json}
-import shared.obj.{Obj, at, str_at}
+import shared.obj.{Obj, at, bool_at, str_at}
 
 pub const STEPS_MOST: usize = 20
 const NAME_MOST: usize = 40
@@ -51,6 +51,48 @@ fn state_name(s: State) -> String {
         State.Failed => "failed",
         State.Skipped => "skipped",
     })
+}
+
+fn state_of(name: String) -> State {
+    if name == "running" { return State.Running }
+    if name == "done" { return State.Done }
+    if name == "failed" { return State.Failed }
+    if name == "skipped" { return State.Skipped }
+    return State.Waiting
+}
+
+// A running flow whole, as the store keeps it across a restart: each step's
+// state, answer and run too.
+pub fn kept(f: Flow) -> Json {
+    var steps = List<Json>()
+    for s in f.steps {
+        var after = List<Json>()
+        for a in s.after { after.push(Json.Str(a.copy())) }
+        steps.push(Obj.new().s("name", s.name.copy()).s("agent", s.agent.copy()).s("prompt", s.prompt.copy()).j("after", Json.Array(after)).s("state", state_name(s.state)).s("answer", s.answer.copy()).s("run", s.run.copy()).done())
+    }
+    return Obj.new().s("id", f.id.copy()).s("user", f.user.copy()).s("routine", f.routine.copy()).s("name", f.name.copy()).j("steps", Json.Array(steps)).b("stopped", f.stopped).s("told", f.told.copy()).done()
+}
+
+// A flow the store kept, picked up again after a restart: a step whose run
+// the restart cut short waits to go again.
+pub fn picked_up(j: Json) -> Flow {
+    var steps = List<Step>()
+    if let Json.Array(ss) = at(j.copy(), "steps") {
+        for s in ss {
+            var after = List<String>()
+            if let Json.Array(xs) = at(s.copy(), "after") {
+                for x in xs { after.push(x.as_str() ?? String()) }
+            }
+            var state = state_of(str_at(s.copy(), "state") ?? String())
+            var run = str_at(s.copy(), "run") ?? String()
+            if state == State.Running {
+                state = State.Waiting
+                run = String()
+            }
+            steps.push(Step { name: str_at(s.copy(), "name") ?? String(), agent: str_at(s.copy(), "agent") ?? String(), prompt: str_at(s.copy(), "prompt") ?? String(), after: after, state: state, answer: str_at(s.copy(), "answer") ?? String(), run: run })
+        }
+    }
+    return Flow { id: str_at(j.copy(), "id") ?? String(), user: str_at(j.copy(), "user") ?? String(), routine: str_at(j.copy(), "routine") ?? String(), name: str_at(j.copy(), "name") ?? String(), steps: steps, stopped: bool_at(j.copy(), "stopped") ?? false, told: str_at(j, "told") ?? String() }
 }
 
 // A routine's `flow` as routine.put takes it: a list of steps, each `name`,
@@ -222,6 +264,16 @@ fn steps_wait_for_every_input() {
     let asked = inputs_for(f.copy(), 3, Map<String, String>())
     assert(asked.starts_with("[loom: This is step s3") and asked.contains("From step s1 (a_1):\nanswer 1") and asked.contains("These failed, so their answers aren't here: step s2 (a_2)."))
     assert(not finished(f.copy()))
+}
+
+@test
+fn a_kept_flow_is_picked_up_with_a_cut_short_step_waiting() {
+    var f = flow_of([List<str>(), ["routine"], ["s1"]], [State.Done, State.Running, State.Waiting])
+    f.steps[1].run = String("run_9")
+    let back = picked_up(kept(f.copy()))
+    assert(back.id == f.id and back.routine == f.routine and back.steps.len() == 3 and back.steps[2].after == [String("s1")])
+    assert(back.steps[0].state == State.Done and back.steps[0].answer == f.steps[0].answer)
+    assert(back.steps[1].state == State.Waiting and back.steps[1].run.len() == 0)
 }
 
 @test

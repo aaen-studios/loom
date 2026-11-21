@@ -103,6 +103,8 @@ CREATE TABLE IF NOT EXISTS routines (
     id TEXT PRIMARY KEY, user TEXT NOT NULL REFERENCES users(id), json TEXT NOT NULL,
     next INTEGER NOT NULL);
 CREATE INDEX IF NOT EXISTS routines_by_next ON routines (next);
+CREATE TABLE IF NOT EXISTS flows (
+    id TEXT PRIMARY KEY, user TEXT NOT NULL REFERENCES users(id), json TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS link_codes (
     hash TEXT PRIMARY KEY, user TEXT NOT NULL REFERENCES users(id), by TEXT NOT NULL,
     expires INTEGER NOT NULL);
@@ -1307,6 +1309,25 @@ impl Store {
         return try self.db.execute(String("DELETE FROM routines WHERE id = ? AND user = ?"), [t(id), t(user)]) > 0
     }
 
+    // --- Routine flows that are running (PLAN.md, "Routine flows") ---
+
+    // Keeps a running flow, as flows.kept gives it, across a restart.
+    pub fn keep_flow(self, id: String, user: String, flow: Json) ! Error {
+        _ = try self.db.execute(String("INSERT INTO flows (id, user, json) VALUES (?, ?, ?) ON CONFLICT (id) DO UPDATE SET json = excluded.json"), [t(id), t(user), t("{flow}")])
+    }
+
+    // A flow that finished, and isn't kept any more.
+    pub fn drop_flow(self, id: String) ! Error {
+        _ = try self.db.execute(String("DELETE FROM flows WHERE id = ?"), [t(id)])
+    }
+
+    // Every flow kept, oldest first, to pick up after a restart.
+    pub fn kept_flows(self) -> List<Json> ! Error {
+        var out = List<Json>()
+        for r in try self.db.query(String("SELECT json FROM flows ORDER BY rowid")) { out.push(try parse(text(r[0].copy()))) }
+        return out
+    }
+
     // --- Codes that add a device by QR code (PLAN.md, "Connecting devices") ---
 
     // Keeps a one-time code, as its SHA-256 `hash`, for `user`, made on device
@@ -1457,7 +1478,7 @@ impl Store {
 
     fn remove_rows(self, user: String) ! Error {
         _ = try self.db.execute(String("DELETE FROM sent WHERE device IN (SELECT id FROM devices WHERE user = ?)"), [t(user.copy())])
-        for table in ["push_tokens", "link_codes", "resets", "agent_revisions", "agents", "activity", "secrets", "mcp_servers", "skills", "messages", "conversations", "runs", "queue", "tasks", "sides", "branches", "events", "acp_sessions", "files", "profiles", "routines", "plugin_data", "plugin_revisions", "plugins", "usage", "memories", "memories_fts", "messages_fts", "shared_rows", "shared_tables", "script_tokens", "devices"] {
+        for table in ["push_tokens", "link_codes", "resets", "agent_revisions", "agents", "activity", "secrets", "mcp_servers", "skills", "messages", "conversations", "runs", "queue", "tasks", "sides", "branches", "events", "acp_sessions", "files", "profiles", "routines", "flows", "plugin_data", "plugin_revisions", "plugins", "usage", "memories", "memories_fts", "messages_fts", "shared_rows", "shared_tables", "script_tokens", "devices"] {
             _ = try self.db.execute("DELETE FROM {table} WHERE user = ?", [t(user.copy())])
         }
         _ = try self.db.execute(String("DELETE FROM invites WHERE by = ?"), [t(user.copy())])
