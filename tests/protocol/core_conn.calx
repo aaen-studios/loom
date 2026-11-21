@@ -130,6 +130,27 @@ fn run(server: mut Child, data: String) ! Error {
     let listed = try app.until("result", "id", "q_1", 5000)
     try check(str_at(at(listed, "error"), "code") == some(String("unknown_command")), "a cmd from the app reaches the instance and its result comes back")
 
+    // --- A phone joins by the QR code this device shows ---
+    app.send(Obj.new().s("t", String("cmd")).s("id", String("q_link")).s("name", String("link.create")).done())
+    let link_made = at(try app.until("result", "id", "q_link", 5000), "value")
+    let qr = str_at(link_made.copy(), "qr") ?? String()
+    try check(qr.starts_with("loom://link?a=http%3A%2F%2F") and qr.contains("&c={str_at(link_made.copy(), "code") ?? String("-")}") and (int_at(link_made, "expires") ?? 0) > 0, "link.create gives a one-time code, and the core makes the QR code's text from it")
+    var phone = try App.start(base.copy(), none, "{service}-phone", String(":memory:"))
+    phone.send(Obj.new().s("t", String("link")).s("id", String("k_1")).s("qr", qr.copy()).j("device", Obj.new().s("name", String("iPhone")).s("kind", String("ios")).done()).done())
+    let joined = try phone.until("core.login", "id", "k_1", 10000)
+    try check(bool_at(joined.copy(), "ok") == some(true) and str_at(joined, "user") == str_at(logged.copy(), "user"), "a phone that scans it joins the same account, with a token of its own")
+    _ = try phone.until("core.conn", "state", "live", 10000)
+    let seen = try app.until("event", "kind", "device.added", 5000)
+    try check(str_at(at(seen, "device"), "kind") == some(String("ios")), "and the device that showed it hears it joined")
+    phone.send(Obj.new().s("t", String("link")).s("id", String("k_2")).s("qr", qr).done())
+    let used = try phone.until("core.login", "id", "k_2", 10000)
+    phone.send(Obj.new().s("t", String("link")).s("id", String("k_3")).s("qr", String("https://example.com")).done())
+    let not_loom = try phone.until("core.login", "id", "k_3", 5000)
+    try check(str_at(at(used, "error"), "code") == some(String("bad_code")) and str_at(at(not_loom, "error"), "code") == some(String("bad_qr")), "a code works once, and a QR code that isn't loom's is refused")
+    phone.send(Obj.new().s("t", String("logout")).done())
+    _ = try phone.until("core.conn", "why", String("logged out"), 5000)
+    phone.stop()
+
     // --- The cache ---
     app.send(Obj.new().s("t", String("cmd")).s("id", String("q_a")).s("name", String("agent.create")).j("args", Obj.new().s("name", String("Fake")).s("acp_agent", String("fake")).s("instructions", String("You are a test.")).done()).done())
     let made = try app.until("result", "id", "q_a", 5000)

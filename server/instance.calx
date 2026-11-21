@@ -207,6 +207,8 @@ const REGISTRY_FRESH_MS: i64 = 600000
 const PROFILE_MOST: usize = 4000
 // How much of what a webhook was sent goes to the agent.
 const HOOK_MOST: usize = 20000
+// How long a code to add a device by QR code works: five minutes.
+const LINK_MS: i64 = 300000
 
 // An agent's right to loom's own tools: `loom mcp` acts as `user`, for `agent`.
 struct Grant {
@@ -609,12 +611,8 @@ impl Instance {
     fn http(i: mut Instance, req: Request) -> Response? ! Error {
         if req.path == "/api/info" and req.method == "GET" {
             let users = try i.store.user_count()
-            let seed = try i.store.meta("key") ?? String()
-            let key = Ed25519Key.from_seed(bytes.from_hex(seed) ?? List<u8>()) else {
-                fail "the instance's key is damaged"
-            }
             let versions = Json.Array([Json.Int(i64(protocol.NEWEST))])
-            return some(json_response(200, Obj.new().s("instance", try i.store.meta("instance") ?? String()).s("key", bytes.base64(key.public_key().bytes())).j("protocol", versions).b("setup", users == 0).done()))
+            return some(json_response(200, Obj.new().s("instance", try i.store.meta("instance") ?? String()).s("key", try i.public_key()).j("protocol", versions).b("setup", users == 0).done()))
         }
         if req.path == "/files" or req.path.starts_with("/files/") {
             return some(try i.files_route(req))
@@ -634,6 +632,7 @@ impl Instance {
         }
         if req.path == "/api/setup" { return try i.setup(req, body) }
         if req.path == "/api/login" { return try i.login(req, body) }
+        if req.path == "/api/link" { return some(try i.link(req, body)) }
         if req.path == "/api/logout" { return try i.logout(req) }
         return some(http_error(404, "not_found", String("There's nothing here.")))
     }
@@ -1281,6 +1280,32 @@ impl Instance {
         }
         i.hash_later(Auth { req: req.copy(), body: body.copy(), user: user, setup: false, username: username, address: address }, password, stored)
         return none
+    }
+
+    // The instance's public key, base64: its identity (PLAN.md, "Connecting devices").
+    fn public_key(i: Instance) -> String ! Error {
+        let seed = try i.store.meta("key") ?? String()
+        let key = Ed25519Key.from_seed(bytes.from_hex(seed) ?? List<u8>()) else {
+            fail "the instance's key is damaged"
+        }
+        return bytes.base64(key.public_key().bytes())
+    }
+
+    // A device joins with the one-time code from another device's QR code
+    // (PLAN.md, "Connecting devices"), and gets a token of its own for the
+    // same account. A wrong code counts against the address, as a wrong
+    // password does.
+    fn link(i: mut Instance, req: Request, body: Json) -> Response ! Error {
+        let address = client_address(req.client.copy())
+        if let wait = i.limited(address.copy(), String()) { return rate_limited(wait) }
+        let code = str_at(body.copy(), "code") ?? String()
+        let taken = try i.store.take_link_code(bytes.hex(sha256(code.to_bytes()))) else {
+            i.failed(address, String())
+            return http_error(403, "bad_code", String("That code isn't one this instance made, or it's been used."))
+        }
+        let (user, expires) = taken
+        if expires <= now() { return http_error(403, "expired", String("That code has expired. Show a new one on the device that's connected.")) }
+        return json_response(200, try i.new_device(user, body))
     }
 
     fn hash_later(i: mut Instance, auth: own Auth, password: own String, stored: own String) {
@@ -2694,6 +2719,14 @@ impl Instance {
             i.log(user.copy(), str_at(r.copy(), "agent") ?? String(), "routine", "Deleted the routine {str_at(r, "name") ?? id.copy()}", device)
             try i.event(user, "routine.deleted", Obj.new().s("routine", id).done())
             return Answer.Value(empty)
+        }
+        if name == "link.create" {
+            // Only a device the person holds shows a code, never an agent.
+            if not device.starts_with("d_") { return Answer.Refused(String("forbidden"), String("Only a device can make a code to add another.")) }
+            let code = bytes.hex(random_bytes(16))
+            let expires = now() + LINK_MS
+            try i.store.add_link_code(bytes.hex(sha256(code.to_bytes())), user, device, expires, now())
+            return Answer.Value(Obj.new().s("code", code).i("expires", expires).s("instance", try i.store.meta("instance") ?? String()).s("key", try i.public_key()).done())
         }
         if name == "profile.get" {
             return Answer.Value(Obj.new().j("profile", try i.store.profile(user) ?? Json.Null).done())

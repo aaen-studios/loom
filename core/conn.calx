@@ -22,6 +22,7 @@ import core.cache.{Cache, now}
 import core.files.{Transfer, at_path, kept_at, refused}
 import shared.files.{is_sha}
 import core.login.{Kind, Outcome, Pending, address, request_body}
+import core.link
 import core.update.{Updater}
 import core.device.{Device}
 import std.fs
@@ -92,6 +93,7 @@ pub struct Conn {
     cache: Cache          // what came from the instance, the cursor and the outbox
     lists: List<String>   // the ids of messages.list commands, whose results the cache keeps
     making: List<String>  // the ids of conversation.create commands the core sent for a send
+    linking: List<String> // the ids of link.create commands, whose results get the QR code's text
     synced: bool          // catch-up is over on this connection
     active: bool          // someone is looking at the app
     have: Map<String, usize>    // bytes of each streaming block so far, by "message/block"
@@ -139,6 +141,7 @@ impl Conn {
             cache: cache,
             lists: List<String>(),
             making: List<String>(),
+            linking: List<String>(),
             synced: false,
             active: true,
             have: Map<String, usize>(),
@@ -490,6 +493,11 @@ impl Conn {
                 self.made_conversation(f)
                 return
             }
+            if let i = self.linking.position(|x| x == id) {
+                _ = self.linking.remove(i)
+                self.linked(f)
+                return
+            }
             if let i = self.lists.position(|x| x == id) {
                 _ = self.lists.remove(i)
                 match self.cache.put_messages(at(at(f.copy(), "value"), "messages")) {
@@ -608,9 +616,18 @@ impl Conn {
             self.transfer(t == "file.upload", m)
             return true
         }
+        if t == "link" {
+            self.join(m)
+            return true
+        }
         if t == "cmd" and (str_at(m.copy(), "name") ?? String()) == "messages.list" {
             if let id = str_at(m.copy(), "id") {
                 self.lists.push(id)
+            }
+        }
+        if t == "cmd" and (str_at(m.copy(), "name") ?? String()) == "link.create" {
+            if let id = str_at(m.copy(), "id") {
+                self.linking.push(id)
             }
         }
         if self.state == State.Live {
@@ -713,6 +730,36 @@ impl Conn {
             return
         }
         self.pending = some(Pending.start(kind, server, id, request_body(kind, m)))
+    }
+
+    /// The instance made a code to add a device: the app gets the result with `qr`, the
+    /// text its QR code draws, which holds the address this core reaches the instance at.
+    fn linked(mut self, f: Json) {
+        let v = at(f.copy(), "value")
+        if str_at(v.copy(), "code") == none {
+            self.to_app.send("{f}")
+            return
+        }
+        let l = link.Link { server: self.server.copy() ?? String(), code: str_at(v.copy(), "code") ?? String(), instance: str_at(v.copy(), "instance") ?? String(), key: str_at(v.copy(), "key") ?? String() }
+        self.tell(merge(f, Obj.new().j("value", merge(v, Obj.new().s("qr", link.qr(l)).done())).done()))
+    }
+
+    /// The app scanned a QR code (its text in `qr`) on a device that isn't signed in: the
+    /// device joins that instance with the code, as a login does with a password.
+    fn join(mut self, m: Json) {
+        let id = str_at(m.copy(), "id")
+        let l = link.read(str_at(m.copy(), "qr") ?? String()) else {
+            self.tell(Obj.new().s("t", String("core.login")).maybe("id", id).j("error", Obj.new().s("code", String("bad_qr")).s("message", String("That isn't a loom code. Show the QR code on a device that's signed in, under Add a device.")).done()).done())
+            return
+        }
+        if self.pending != none {
+            self.tell(Obj.new().s("t", String("core.login")).maybe("id", id).j("error", Obj.new().s("code", String("busy")).s("message", String("A login is already on its way.")).done()).done())
+            return
+        }
+        var body = Obj.new().s("code", l.code.copy())
+        let device = at(m, "device")
+        if device != Json.Null { body = body.j("device", device) }
+        self.pending = some(Pending.start(Kind.Link, address(l.server.copy()), id, body.done()))
     }
 
     /// Takes a login, setup or logout that has ended.

@@ -512,6 +512,11 @@ pub struct Model {
     /// The person's routines, oldest first.
     pub routines: Vec<Routine>,
     routines_stale: bool,
+    /// The QR code that adds a phone, while one is shown: its text, and when it expires
+    /// (Unix ms).
+    pub link: Option<(String, i64)>,
+    /// The name of the device that joined with it, once one has.
+    pub joined: Option<String>,
     /// What the selected agent remembers, for the memory page, newest first.
     pub notes: Vec<Note>,
     notes_stale: bool,
@@ -772,6 +777,11 @@ impl Model {
         let kind = s(f, "kind");
         let (family, _) = kind.split_once('.').unwrap_or((kind.as_str(), ""));
         match family {
+            // A device that joined with the QR code being shown: the code is used up.
+            "device" if kind == "device.added" && self.link.is_some() => {
+                self.link = None;
+                self.joined = Some(s(f.get("device").unwrap_or(&Value::Null), "name"));
+            }
             "agent" => {
                 self.dirty.insert(List::Agents);
                 // A change to the agent being edited is a new revision to list.
@@ -895,6 +905,16 @@ impl Model {
                         .collect()
                 })
                 .unwrap_or_default();
+        } else if id.starts_with("app.link") {
+            if let Some(e) = f.get("error") {
+                self.notices.push(s(e, "message"));
+            } else if let Some(v) = f.get("value") {
+                self.link = Some((
+                    s(v, "qr"),
+                    v.get("expires").and_then(Value::as_i64).unwrap_or(0),
+                ));
+                self.joined = None;
+            }
         } else if id.starts_with("app.routines") {
             self.routines = f
                 .pointer("/value/routines")
@@ -1668,6 +1688,15 @@ impl Model {
     pub fn delete_skill(&mut self, name: &str) -> Value {
         let id = self.id("app.skill_delete");
         json!({"t": "cmd", "id": id, "name": "skill.delete", "args": {"name": name}})
+    }
+
+    /// Asks the instance for a one-time code that adds a phone; the core gives it back with
+    /// the QR code's text.
+    pub fn create_link(&mut self) -> Value {
+        let id = self.id("app.link");
+        self.link = None;
+        self.joined = None;
+        json!({"t": "cmd", "id": id, "name": "link.create"})
     }
 
     /// Asks for the person's routines.

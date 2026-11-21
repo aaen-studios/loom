@@ -87,6 +87,17 @@ Each login makes a new device and a new token. The password isn't used again unt
 
 Errors: `bad_password` (also for a username that doesn't exist, so the two can't be told apart), `rate_limited`.
 
+### `POST /api/link`
+
+A device joins with the one-time code in the QR code another device of the same account shows ([`link.create`](#commands), [PLAN.md: Connecting devices](../PLAN.md#connecting-devices)). No login.
+
+```json
+→ { "code": "<code from the QR code>", "device": { "name": "iPhone", "kind": "ios", "tz": "Europe/Oslo" } }
+← { "user": "u_1", "device": "d_4", "token": "<device token>" }
+```
+
+A code works once, for five minutes. The device that showed it hears `device.added`. Errors: `bad_code` (also for one that's been used, and it counts toward `rate_limited` as a wrong password does), `expired`.
+
 ### `POST /api/join/<code>`
 
 An invite (Phase 10). The same body and answer as `/api/setup`, without `code`. Errors: `bad_code`, `expired`, `used_up`, `username_taken`.
@@ -451,6 +462,7 @@ Version 1's commands:
 | `memory.list` | `agent`? (that agent's notes and the shared ones; every note without it), `query`? (words, any of them, best match first; newest first without), `limit`? (up to 500, 100 if left out) | `memories`: each `id`, `agent` (empty for a shared note), `shared`, `text`, `by` (the agent or device that kept it) and `at` |
 | `memory.put` | `text`, `agent`? (empty or left out: shared by all the person's agents) | `id` |
 | `memory.delete` | `id` | — |
+| `link.create` | — | `code` (one-time, for [`POST /api/link`](#post-apilink)), `expires` (Unix ms, five minutes on), `instance` and `key` (the instance's id and public key, as `/api/info` gives them). The core adds `qr`, the QR code's text. Only a device can ask, never an agent |
 | `profile.get` | — | `profile`: `text`, `revision`, `by` (the device or agent that wrote it) and `at`, or `null` when there's none yet |
 | `profile.put` | `text` (the whole profile, up to 4000 bytes; empty clears it) | `profile`, as `profile.get` gives it, with its new `revision` |
 | `routine.list` | — | `routines`, oldest first: each `id`, `name`, `agent`, `prompt`, `schedule` (null for a routine that only runs by webhook), `hook` and `secret` (with a webhook: [`POST /hooks/<id>`](#post-hooksid)), `when` (in words, such as `every 30 minutes, and by webhook`), `tz` (an IANA name), `on`, `notify`, `catch_up`, `next` (when it runs next, Unix ms, or 0 while it's off), `conversation` (where it last posted), `last` (null before its first run, then `at`, `status`: `running`, `done`, `failed`, `cancelled` or `skipped`, `run`, and `error`), `by` and `at` |
