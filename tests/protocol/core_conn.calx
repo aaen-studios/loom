@@ -1,6 +1,7 @@
 module tests.protocol.core_conn
 
-// The core's connection (core/conn.calx) against a real instance: it
+// The core's connection (core/conn.calx) against a real instance: it sets
+// the instance up and keeps the token, logs out, and
 // connects and catches up, takes the app's frames to the instance, starts
 // again when the instance goes away and comes back, reconnects at once on
 // wake, stops on a refused token, and stops when it's told to.
@@ -10,11 +11,11 @@ module tests.protocol.core_conn
 //     calx tests/protocol/core_conn.calx
 import std.env
 import std.fs
-import std.http.{Header, post}
 import std.json.{Json, parse}
 import std.process.{Child, Command, Stdio, exit}
+import std.random.{Random}
 import std.time.{Instant}
-import shared.obj.{Obj, at, int_at, str_at}
+import shared.obj.{Obj, at, bool_at, int_at, str_at}
 import core.conn.{Conn}
 
 const WAIT: u64 = 120000    // the first start builds the server
@@ -33,17 +34,6 @@ fn check(passed: bool, what: str) ! Error {
     println("ok    {what}")
 }
 
-fn post_json(base: String, path: str, body: Json) -> (u32, Json) ! Error {
-    let headers: List<Header> = [Header { name: String("Content-Type"), value: String("application/json") }]
-    var req = post("http://{base}{path}", headers, "{body}".to_bytes(), 30000, 1048576)
-    let r = try req.wait()
-    let j = match parse(String.from_utf8(r.body) ?? String()) {
-        ok(v) => v,
-        err(_) => Json.Null,
-    }
-    return (r.status, j)
-}
-
 // The app's side of a running connection: what it sends the core, and what
 // the core tells it.
 struct App {
@@ -53,13 +43,13 @@ struct App {
 }
 
 impl App {
-    fn start(base: String, token: own String, after: i64) -> App ! Error {
+    // Starts a core for the instance at `base`, keeping its token under the
+    // credential store's service `service`.
+    fn start(base: String, token: own String?, service: String) -> App {
         let inbox = Receiver<String>()
         let to_core = inbox.sender()
         let from_core = Receiver<String>()
-        let conn = Conn.new("http://{base}", token, after, inbox, from_core.sender()) else {
-            fail "Conn.new refused http://{base}"
-        }
+        let conn = Conn.new(some("http://{base}"), token, 0, service.copy(), inbox, from_core.sender())
         let t = unsafe { Thread.spawn(conn) }
         return App { to_core: to_core, from_core: from_core, thread: some(t) }
     }
@@ -101,12 +91,28 @@ fn run(server: mut Child, data: String) ! Error {
         fail "the server didn't print a setup code"
     }
     let code = code_line[12..].trim().copy()
-    let (s1, owner) = try post_json(base.copy(), "/api/setup", Obj.new().s("code", code).s("username", String("elliot")).s("password", String("correct horse")).j("device", Obj.new().s("name", String("Desk PC")).s("kind", String("desktop")).done()).done())
-    try check(s1 == 200, "the instance is set up")
-    let token = str_at(owner, "token") ?? String()
+    var random = Random.system()
+    let service = "loom-test-{random.next_u32()}"
+    let device = Obj.new().s("name", String("Desk PC")).s("kind", String("windows")).done()
+
+    // --- Setup through the core ---
+    var app = App.start(base.copy(), none, service.copy())
+    let waiting = try app.until("core.conn", "state", "signed_out", 5000)
+    try check(str_at(waiting, "why") == some(String("not logged in")), "with no token kept, it waits for a login")
+    app.send(Obj.new().s("t", String("setup")).s("id", String("l_1")).s("code", String("wrong")).s("username", String("elliot")).s("password", String("correct horse")).done())
+    let refused = try app.until("core.login", "id", "l_1", 10000)
+    try check(str_at(at(refused, "error"), "code") == some(String("bad_code")), "a setup with a wrong code is refused")
+    app.send(Obj.new().s("t", String("setup")).s("id", String("l_2")).s("code", code).s("username", String("elliot")).s("password", String("correct horse")).j("device", device.copy()).done())
+    let logged = try app.until("core.login", "id", "l_2", 10000)
+    try check(bool_at(logged.copy(), "ok") == some(true) and str_at(logged.copy(), "user") != none, "the core sets the instance up and gets a token")
+    let kept = bool_at(logged.copy(), "kept") == some(true)
+    if kept {
+        println("ok    and keeps it in the credential store")
+    } else {
+        println("      the token wasn't kept: {str_at(logged, "why") ?? String()}")
+    }
 
     // --- Connects and catches up ---
-    var app = try App.start(base.copy(), token.copy(), 0)
     _ = try app.until("core.conn", "state", "connecting", 5000)
     let live = try app.until("core.conn", "state", "live", 10000)
     try check(str_at(live, "state") == some(String("live")), "it connects, says hello and is welcomed")
@@ -153,8 +159,28 @@ fn run(server: mut Child, data: String) ! Error {
     app.stop()
     try check(true, "core.stop closes it and its thread ends")
 
+    // --- Started again, from the credential store ---
+    if kept {
+        var next = App.start(base.copy(), none, service.copy())
+        _ = try next.until("core.conn", "state", "live", 10000)
+        try check(true, "a new start finds the token in the credential store and connects")
+
+        // --- A wrong password, and logging out ---
+        next.send(Obj.new().s("t", String("login")).s("id", String("l_3")).s("username", String("elliot")).s("password", String("not it")).done())
+        let wrong_pw = try next.until("core.login", "id", "l_3", 10000)
+        try check(str_at(at(wrong_pw, "error"), "code") == some(String("bad_password")), "a wrong password is refused")
+        next.send(Obj.new().s("t", String("logout")).done())
+        let out = try next.until("core.conn", "state", "signed_out", 5000)
+        try check(str_at(out, "why") == some(String("logged out")), "logout signs out")
+        next.stop()
+        var after_logout = App.start(base.copy(), none, service.copy())
+        let gone_token = try after_logout.until("core.conn", "state", "signed_out", 5000)
+        try check(str_at(gone_token, "why") == some(String("not logged in")), "and forgets the token")
+        after_logout.stop()
+    }
+
     // --- A refused token ---
-    var wrong = try App.start(base.copy(), String("not a token"), 0)
+    var wrong = App.start(base.copy(), some(String("not a token")), service.copy())
     let out = try wrong.until("core.conn", "state", "signed_out", 10000)
     try check(str_at(out, "state") == some(String("signed_out")), "a refused token signs out and doesn't try again")
     wrong.stop()
