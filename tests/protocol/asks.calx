@@ -1,0 +1,91 @@
+module tests.protocol.asks
+
+// Agents talking to agents have limits (PLAN.md): an ask can say what the
+// task is, its bounds and what a good answer looks like, each under its own
+// heading. An agent that was asked can ask others, at most four deep, and
+// never back to one already in the chain, so asks can't loop. Once a chain
+// ends, the next ask starts a new one.
+//
+//     calx tests/protocol/asks.calx
+import std.process.{exit}
+import shared.obj.{Obj, at, str_at}
+import tests.kit.{App, Instance, check, reply_text}
+
+// The agent's next reply in `conversation`, as text.
+fn reply_in(app: mut App, conversation: String) -> String ! Error {
+    loop {
+        let created = try app.until("event", "message.created")
+        let m = at(created, "message")
+        if str_at(m.copy(), "role") == some(String("agent")) and str_at(m.copy(), "conversation") == some(conversation.copy()) { return reply_text(m) }
+    }
+}
+
+fn say(app: mut App, conversation: String, cid: str, text: String) -> String ! Error {
+    try app.send(Obj.new().s("t", String("send")).s("cid", String(cid)).s("conversation", conversation.copy()).s("text", text).done())
+    return try reply_in(mut app, conversation)
+}
+
+// What an agent says to ask `to` with `text`, through message_agent.
+fn ask(to: str, text: String) -> String {
+    return "/mcp message_agent {Obj.new().s("agent", String(to)).s("text", text).done()}"
+}
+
+fn agent(app: mut App, id: str, name: str) -> String ! Error {
+    let made = try app.cmd(id, "agent.create", Obj.new().s("name", String(name)).s("acp_agent", String("fake")).s("instructions", String("You are a test.")).done())
+    return str_at(at(at(made, "value"), "agent"), "id") ?? String()
+}
+
+fn run(i: Instance) ! Error {
+    var app = try App.connect(i.base.copy(), i.token.copy(), 0)
+    let main_id = try agent(mut app, "q_1", "Main")
+    _ = try agent(mut app, "q_2", "A")
+    _ = try agent(mut app, "q_3", "B")
+    _ = try agent(mut app, "q_4", "C")
+    _ = try agent(mut app, "q_5", "D")
+    _ = try agent(mut app, "q_6", "E")
+    let c = try app.cmd("q_7", "conversation.create", Obj.new().s("agent", main_id).done())
+    let chat = str_at(at(c, "value"), "conversation") ?? String()
+
+    // --- What's asked ---
+    let typed = Obj.new().s("agent", String("A")).s("task", String("Sum up the notes.")).s("bounds", String("Read only; stop after one pass.")).s("good_answer", String("Three bullets.")).done()
+    let answered = try say(mut app, chat.copy(), "m_1", "/mcp message_agent {typed}")
+    var asked = String()
+    for f in app.frames {
+        let m = at(f.copy(), "message")
+        if str_at(f.copy(), "kind") == some(String("message.created")) and str_at(m.copy(), "from") == some(main_id.copy()) { asked = reply_text(m) }
+    }
+    try check(asked == "The task: Sum up the notes.\n\nIts bounds: Read only; stop after one pass.\n\nA good answer: Three bullets." and answered.starts_with("message_agent: The task: Sum up the notes."), "an ask says its task, bounds and a good answer, each under its heading")
+    let empty = try say(mut app, chat.copy(), "m_2", String(#"/mcp message_agent {"agent":"A"}"#))
+    try check(empty.starts_with("message_agent failed") and empty.contains("Say something"), "an ask with nothing in it is refused")
+
+    // --- Loops ---
+    let back = try say(mut app, chat.copy(), "m_3", ask("A", ask("B", ask("Main", String("hi")))))
+    try check(back.contains("message_agent failed") and back.contains("Main is already in this chain of asks (Main asked A asked B)"), "an ask back to an agent already in the chain is refused")
+    let to_asker = try say(mut app, chat.copy(), "m_4", ask("A", ask("Main", String("hi"))))
+    try check(to_asker.contains("message_agent failed") and to_asker.contains("so it would loop back"), "and so is one straight back to the asker")
+
+    // --- Depth ---
+    let four = try say(mut app, chat.copy(), "m_5", ask("A", ask("B", ask("C", ask("D", String("deep enough"))))))
+    try check(four == "message_agent: message_agent: message_agent: message_agent: deep enough", "a chain of four asks goes through")
+    let five = try say(mut app, chat.copy(), "m_6", ask("A", ask("B", ask("C", ask("D", ask("E", String("too deep")))))))
+    try check(five.contains("message_agent failed") and five.contains("4 deep already (Main asked A asked B asked C asked D)") and not five.contains("too deep"), "a fifth is refused, and E never hears it")
+
+    // --- A new chain ---
+    let fresh = try say(mut app, chat.copy(), "m_7", ask("B", ask("A", String("again"))))
+    try check(fresh == "message_agent: message_agent: again", "once a chain ends, the next ask starts a new one")
+    app.close()
+}
+
+fn main() ! Error {
+    let inst = try Instance.start()
+    let failure: String? = match run(inst.copy()) {
+        ok => none,
+        err(e) => some("{e}"),
+    }
+    inst.stop()
+    if let f = failure {
+        eprintln("\n{f}")
+        exit(1)
+    }
+    println("\nasks: all good")
+}

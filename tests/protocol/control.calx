@@ -82,6 +82,9 @@ fn run(i: Instance) ! Error {
     try check(gone.starts_with("run_command failed"), "or delete itself")
 
     // --- Asks ---
+    let beyond = try say(mut app, chat.copy(), "m_8b", run_command("agent.update", Obj.new().s("agent", helper.copy()).s("permission", String("auto")).done()))
+    try check(beyond.starts_with("run_command failed") and beyond.contains("no more than you have yourself"), "an agent can't give another a looser permission mode than its own")
+    _ = try app.cmd("q_5b", "agent.update", Obj.new().s("agent", main_id.copy()).s("permission", String("auto")).done())
     try app.send(Obj.new().s("t", String("send")).s("cid", String("m_9")).s("conversation", chat.copy()).s("text", run_command("agent.update", Obj.new().s("agent", helper.copy()).s("permission", String("auto")).done())).done())
     let loosen = try app.until("event", "approval.needed")
     try check(str_at(loosen.copy(), "title") == some(String("Changes an agent")) and str_at(at(loosen.copy(), "detail"), "permission") == some(String("auto")), "a looser permission mode for another asks the person")
@@ -89,6 +92,7 @@ fn run(i: Instance) ! Error {
     let no = try app.until("event", "tool.finished")
     let told_no = try reply_in(mut app, chat.copy())
     try check(str_at(no, "status") == some(String("denied")) and told_no.contains("said no"), "and a no is passed back")
+    _ = try app.cmd("q_5c", "agent.update", Obj.new().s("agent", main_id.copy()).s("permission", String("ask")).done())
 
     try app.send(Obj.new().s("t", String("send")).s("cid", String("m_10")).s("conversation", chat.copy()).s("text", run_command("user.list", Obj.new().done())).done())
     let people = try app.until("event", "approval.needed")
