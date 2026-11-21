@@ -118,7 +118,7 @@ pub fn install(plan: Plan) -> Done ! Error {
     }
 
     // The service.
-    let existing = try fs.read_text(String(UNIT)) ?? String()
+    let existing = if fs.exists(String(UNIT)) { try fs.read_text(String(UNIT)) ?? String() } else { String() }
     if existing.len() > 0 and not existing.contains(MARK) { fail "{UNIT} is there already, and loom didn't write it, so it's left as it is" }
     try fs.write_text(String(UNIT), unit(plan.port))
     _ = try sh("systemctl", words(["daemon-reload"]))
@@ -134,7 +134,7 @@ pub fn install(plan: Plan) -> Done ! Error {
             _ = try sh("apt-get", words(["install", "-y", "caddy"]))
             steps.push("installed Caddy")
         }
-        let there = try fs.read_text(String(CADDYFILE)) ?? String()
+        let there = if fs.exists(String(CADDYFILE)) { try fs.read_text(String(CADDYFILE)) ?? String() } else { String() }
         if there.len() > 0 and not caddyfile_ours(there) { fail "{CADDYFILE} has a site in it already, so loom leaves it: add `{plan.domain} \{ reverse_proxy 127.0.0.1:{plan.port} \}` to it yourself" }
         try fs.make_dir_all(String("/etc/caddy"))
         try fs.write_text(String(CADDYFILE), caddyfile(plan.domain.copy(), plan.port))
