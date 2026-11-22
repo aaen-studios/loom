@@ -1419,6 +1419,14 @@ impl Store {
         return id
     }
 
+    // Writes `new` for `old` in each of the person's memories that has it, as a
+    // folder that moved.
+    pub fn repath_memories(self, user: String, old: String, new: String) ! Error {
+        for table in ["memories", "memories_fts"] {
+            _ = try self.db.execute("UPDATE {table} SET text = replace(text, ?, ?) WHERE user = ? AND instr(text, ?) > 0", [t(old.copy()), t(new.copy()), t(user.copy()), t(old.copy())])
+        }
+    }
+
     // What `agent` remembers (its own notes and the shared ones), best match
     // first for `query`, or newest first without one. Each note is `id`,
     // `text`, `shared`, `by` and `at`. With `agent` none, every note of the

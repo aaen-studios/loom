@@ -112,7 +112,7 @@ fn len_at(j: Json, key: str) -> i64 {
 
 // Counts in words, the kinds there are any of: "3 agents, 120 messages, 4 memories".
 pub fn summary(counts: Json) -> String {
-    let kinds: List<(str, str, str)> = [("agents", "agent", "agents"), ("messages", "message", "messages"), ("memories", "memory", "memories"), ("routines", "routine", "routines"), ("skills", "skill", "skills"), ("mcp", "MCP server", "MCP servers"), ("tables", "table", "tables"), ("files", "file", "files")]
+    let kinds: List<(str, str, str)> = [("agents", "agent", "agents"), ("messages", "message", "messages"), ("memories", "memory", "memories"), ("routines", "routine", "routines"), ("skills", "skill", "skills"), ("mcp", "MCP server", "MCP servers"), ("tables", "table", "tables"), ("files", "file", "files"), ("folders", "folder", "folders")]
     var parts = List<String>()
     for (key, one, many) in kinds {
         let n = int_at(counts.copy(), key) ?? 0
@@ -510,6 +510,8 @@ fn hhmm(t: String) -> String {
 
 // The file in a staged copy that maps the files it copied in, from where they were.
 pub const STAGED_FILES: str = "loom-files.json"
+/// In a staged folder: the folders the agents worked in, `brought` by where they were to where each is staged, and those `too_big` to come.
+pub const STAGED_FOLDERS: str = "loom-folders.json"
 
 // The settings of Claude Code's that say which provider it uses, and so which
 // OpenBot's Claude used: its endpoint, and the token or key for it.

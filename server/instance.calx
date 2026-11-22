@@ -4118,9 +4118,52 @@ impl Instance {
             }
         }
 
+        // The folders the agents worked in, which an import staged as root brought
+        // from its user's home: each goes in the person's shared folder, and the
+        // instructions, skills and memories that named it name it there now.
+        let staged_at = str_at(b.copy(), "where") ?? String()
+        let folders_file = "{staged_at}/{importer.STAGED_FOLDERS}"
+        if staged_at.len() > 0 and fs.is_file(folders_file.copy()) {
+            let folders = match parse(try fs.read_text(folders_file) ?? String()) {
+                ok(j) => j,
+                err(_) => Json.Null,
+            }
+            if let Json.Object(m) = at(folders.copy(), "brought") {
+                for (old, staged) in m {
+                    let from_dir = staged.as_str() ?? String()
+                    var to = String()
+                    if let had = try i.store.imported(user.copy(), from.copy(), "folder", old.copy()) {
+                        to = had
+                        already += 1
+                    } else {
+                        if from_dir.len() == 0 or not fs.is_dir(from_dir.copy()) { continue }
+                        let shared = i.shared_folder(user.copy(), false)
+                        let name = stage.base_name(old.copy())
+                        to = "{shared}/{name}"
+                        var k = 2
+                        while fs.exists(to.copy()) {
+                            to = "{shared}/{name}-{k}"
+                            k += 1
+                        }
+                        try fs.copy_dir_all(from_dir, to.copy())
+                        try i.store.mark_imported(user.copy(), from.copy(), "folder", old.copy(), to.copy())
+                        tally(mut came, "folders")
+                        // Its remotes' keys or tokens were the old user's, which don't come.
+                        if let ok(some(config)) = fs.read_text("{to}/.git/config") {
+                            if config.contains("url = ") { left.push("Folder {old} is in {to} now. It's a git repo with a remote, and pushing to it needs a key or token for the loom user, which the old user's didn't give.") }
+                        }
+                    }
+                    try i.repath(user.copy(), old.copy(), to.copy())
+                }
+            }
+            if let Json.Array(big) = at(folders, "too_big") {
+                for f in big { left.push("Folder {f.as_str() ?? String()}: it's over 2 GB, so it stayed where it was, which the loom user can't read.") }
+            }
+        }
+
         // What came, in words.
         var counts = Obj.new()
-        let kinds: List<str> = ["agents", "conversations", "messages", "files", "pins", "memories", "routines", "skills", "mcp", "tables", "rows"]
+        let kinds: List<str> = ["agents", "conversations", "messages", "files", "pins", "memories", "routines", "skills", "mcp", "tables", "rows", "folders"]
         for k in kinds {
             counts = counts.i(k, came.get(String(k)) ?? 0)
         }
@@ -4129,6 +4172,28 @@ impl Instance {
         let text = if said == "Nothing to bring over" { if already > 0 { "Everything from {app} is here already." } else { "Nothing came from {app}." } } else { "Brought over from {app}: {said}." }
         i.log(user.copy(), String(), "import", text.copy(), device.copy())
         return Obj.new().s("from", from).s("where", str_at(b, "where") ?? String()).j("came", counted).i("already", already).j("not", Json.Array(left.map(|s| Json.Str(s.copy())))).s("text", text).done()
+    }
+
+    // Writes `new` for the path `old` wherever the person's agents' instructions,
+    // their skills and their memories name it.
+    fn repath(i: Instance, user: String, old: String, new: String) ! Error {
+        for a in try i.store.agents(user.copy()) {
+            let text = str_at(a.copy(), "instructions") ?? String()
+            if not text.contains(old.copy()) { continue }
+            let changed = merge(a, Obj.new().s("instructions", text.replace(old.copy(), new.copy())).done())
+            try i.store.put_agent_json(user.copy(), changed.copy())
+            i.write_instructions(user.copy(), changed.copy())
+            try i.event(user.copy(), "agent.updated", Obj.new().j("agent", changed).done())
+        }
+        var skills_changed = false
+        for s in try i.store.skills(user.copy(), true) {
+            let body = str_at(s.copy(), "body") ?? String()
+            if not body.contains(old.copy()) { continue }
+            try i.store.put_skill(user.copy(), str_at(s.copy(), "name") ?? String(), str_at(s, "description") ?? String(), body.replace(old.copy(), new.copy()))
+            skills_changed = true
+        }
+        if skills_changed { i.sync_skills(user.copy()) }
+        try i.store.repath_memories(user, old, new)
     }
 
     // The agent program an imported agent runs on: one named for its provider

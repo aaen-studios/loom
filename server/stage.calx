@@ -180,12 +180,129 @@ pub fn stage_openbot(home: String, data: String, workspace: String, to: String) 
     }
     try fs.write_text("{part}/{importer.STAGED_FILES}", "{map.done()}")
 
+    // The folders the agents worked in, in the user's home, as git repos, which
+    // the loom user can't read where they are.
+    var texts = List<String>()
+    for (kind, field) in [("agents", "instructions"), ("memories", "text"), ("skills", "body")] {
+        if let Json.Array(items) = at(bundle.copy(), kind) {
+            for x in items { texts.push(str_at(x, field) ?? String()) }
+        }
+    }
+    var folders = Obj.new()
+    var brought = List<Json>()
+    var too_big = List<Json>()
+    var n: i64 = 0
+    for folder in named_folders(home.copy(), texts, [data.copy(), workspace.copy()]) {
+        let size = tree_size(folder.copy())
+        if size > FOLDER_MOST {
+            too_big.push(Json.Str(folder.copy()))
+            continue
+        }
+        n += 1
+        try fs.copy_dir_all(folder.copy(), "{part}/folders/{n}")
+        folders.m.insert(folder.copy(), Json.Str("{dest}/folders/{n}"))
+        brought.push(Json.Str(folder.copy()))
+    }
+    try fs.write_text("{part}/{importer.STAGED_FOLDERS}", "{Obj.new().j("brought", folders.done()).j("too_big", Json.Array(too_big.copy())).done()}")
+
     if fs.exists(dest.copy()) {
         if not fs.is_file("{dest}/{MARK}") { fail "{dest} is there already, and loom didn't stage it" }
         try fs.remove_dir_all(dest.copy())
     }
     try fs.rename(part, dest.copy())
-    return Obj.new().s("path", dest).s("data", data).s("workspace", workspace).j("counts", importer.counted(bundle)).i("files", files).i("skills", skills).b("provider", any).done()
+    return Obj.new().s("path", dest).s("data", data).s("workspace", workspace).j("counts", importer.counted(bundle)).i("files", files).i("skills", skills).b("provider", any).j("folders", Json.Array(brought)).j("folders_too_big", Json.Array(too_big)).done()
+}
+
+/// How big a folder the agents worked in may be, all of it, to come.
+pub const FOLDER_MOST: u64 = 2000000000
+
+/// The folders in `home` that `texts` name by their path, each once: the git
+/// repo a path is in, or else the folder it names or is in. Not `home` itself,
+/// a hidden folder at its top (as .ssh), or one in `skip` (OpenBot's data and
+/// workspace, which come as they do).
+pub fn named_folders(home: String, texts: List<String>, skip: List<String>) -> List<String> {
+    var out = List<String>()
+    for t in texts {
+        for p in paths_in(t, home.copy()) {
+            let folder = folder_for(p, home.copy()) else continue
+            var skipped = false
+            for s in skip.copy() {
+                if s.len() > 0 and (folder == s or folder.starts_with("{s}/") or s.starts_with("{folder}/")) { skipped = true }
+            }
+            if not skipped and not out.contains(folder.copy()) { out.push(folder) }
+        }
+    }
+    return out
+}
+
+/// The paths in `text` that start in `home`, as written, without the
+/// punctuation that ends a sentence or a quote after them.
+pub fn paths_in(text: String, home: String) -> List<String> {
+    var out = List<String>()
+    let start = "{home}/"
+    var rest = text.copy()
+    while let at_ = rest.find(start.copy()) {
+        let tail = rest[at_..].copy()
+        // Where it ends: at a space, a quote, a bracket or a comma, which are all ASCII.
+        var end = tail.len()
+        var k: usize = 0
+        for b in tail.to_bytes() {
+            if b == 32 or b == 10 or b == 13 or b == 9 or b == 34 or b == 39 or b == 96 or b == 60 or b == 62 or b == 40 or b == 41 or b == 91 or b == 93 or b == 44 or b == 59 or b == 42 {
+                end = k
+                break
+            }
+            k += 1
+        }
+        var p = tail[..end].copy()
+        while p.ends_with(".") or p.ends_with(":") or p.ends_with("/") or p.ends_with("!") or p.ends_with("?") { p = p[..p.len() - 1].copy() }
+        if p.len() > start.len() and not out.contains(p.copy()) { out.push(p) }
+        rest = tail[end..].copy()
+    }
+    return out
+}
+
+// The folder to bring for `path`, a path in `home`: the git repo it's in, or
+// the folder it is or is in, or none for one that isn't there or isn't to come.
+fn folder_for(path: String, home: String) -> String? {
+    var dir = if fs.is_dir(path.copy()) { path.copy() } else { parent(path.copy()) }
+    if not fs.is_dir(dir.copy()) { return none }
+    let named = dir.copy()
+    loop {
+        if dir == home or not dir.starts_with("{home}/") { break }
+        if fs.exists("{dir}/.git") {
+            return if top_of(dir.copy(), home.copy()).starts_with(".") { none } else { some(dir) }
+        }
+        dir = parent(dir)
+    }
+    if named == home or not named.starts_with("{home}/") or top_of(named.copy(), home).starts_with(".") { return none }
+    return some(named)
+}
+
+// The name of the folder at the top of `home` that `dir` is in.
+fn top_of(dir: String, home: String) -> String {
+    let rest = dir[home.len() + 1..].copy()
+    let (top, _) = rest.split_once("/") ?? (rest.copy(), String())
+    return top
+}
+
+/// The last name in `path`, as a folder brought keeps it.
+pub fn base_name(path: String) -> String {
+    return file_name(path)
+}
+
+fn parent(path: String) -> String {
+    return if let cut = path.find_last("/") { path[..cut].copy() } else { String() }
+}
+
+// How many bytes the files in `dir` take.
+fn tree_size(dir: String) -> u64 {
+    var total: u64 = 0
+    if let ok(found) = fs.walk(dir) {
+        for e in found {
+            if let ok(m) = fs.metadata(e.path) { if m.kind == fs.Kind.File { total += m.size } }
+        }
+    }
+    return total
 }
 
 /// A consistent snapshot of the SQLite database at `from`, written to `to`, while
@@ -231,4 +348,32 @@ fn finds_a_user_s_home() {
     assert(home_of(String("openbot"), passwd.copy()) == some(String("/var/lib/openbot")))
     assert(home_of(String("nobody"), passwd) == none)
     assert(file_name(String("/a/b/report.txt")) == "report.txt" and file_name(String("C:\\x\\y.png")) == "y.png" and file_name(String("..")) == "file")
+}
+
+@test
+fn finds_the_paths_an_agent_names() {
+    let text = String("Log food in `/var/lib/openbot/repos/elliot/data/food.csv`, with log.calx. Notes are in /var/lib/openbot/notes.\nNot /var/lib/openbotter/x or /etc/passwd. Again: \"/var/lib/openbot/repos/elliot\".")
+    let found = paths_in(text, String("/var/lib/openbot"))
+    assert(found == [String("/var/lib/openbot/repos/elliot/data/food.csv"), String("/var/lib/openbot/notes"), String("/var/lib/openbot/repos/elliot")])
+}
+
+@test
+fn brings_the_repo_a_path_is_in() {
+    let root = fs.temp_dir()!
+    let home = root.replace("\\", "/")
+    fs.make_dir_all("{home}/repos/elliot/.git")!
+    fs.make_dir_all("{home}/repos/elliot/data")!
+    fs.write_text("{home}/repos/elliot/data/food.csv", String("day,what\n"))!
+    fs.make_dir_all("{home}/notes")!
+    fs.make_dir_all("{home}/.ssh")!
+    fs.make_dir_all("{home}/data/workspace")!
+    let texts: List<String> = [
+        "Log it in {home}/repos/elliot/data/food.csv and {home}/repos/elliot.",
+        "Notes in {home}/notes/today.md. Keys in {home}/.ssh/id_ed25519. Data in {home}/data/workspace/x. Gone: {home}/gone/x.",
+    ]
+    let skip: List<String> = ["{home}/data"]
+    let found = named_folders(home.copy(), texts, skip)
+    let wanted: List<String> = ["{home}/repos/elliot", "{home}/notes"]
+    assert(found == wanted)
+    fs.remove_dir_all(root)!
 }

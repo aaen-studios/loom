@@ -125,6 +125,20 @@ fn agent_named(app: Session, name: str) -> Json {
     return found
 }
 
+// An agent as the app last heard of it, made or changed.
+fn agent_by_id(app: Session, id: String) -> Json {
+    var found = Json.Null
+    for f in app.frames {
+        let kind = str_at(f.copy(), "kind") ?? String()
+        if (kind == "agent.created" or kind == "agent.updated") and str_at(at(f.copy(), "agent"), "id") == some(id.copy()) { found = at(f.copy(), "agent") }
+    }
+    return found
+}
+
+fn parent_of(path: String) -> String {
+    return if let cut = path.find_last("/") { path[..cut].copy() } else { String() }
+}
+
 // The conversations made for an agent, as conversation.created told the app.
 fn conversations_of(app: Session, agent: String) -> List<Json> {
     var out = List<Json>()
@@ -268,6 +282,13 @@ fn run(inst: Instance) ! Error {
     try fs.make_dir_all("{home}/.agents/skills/notes")
     try fs.write_text("{home}/.agents/skills/notes/SKILL.md", String("---\nname: notes\ndescription: Taking notes\n---\n\nWrite them down."))
     try fs.write_text("{data}/attachments/notes.txt", String("The notes."))
+    // A repo in the user's home that an agent works in, which the loom user can't read there.
+    try fs.make_dir_all("{home}/repos/elliot/.git")
+    try fs.make_dir_all("{home}/repos/elliot/data")
+    try fs.write_text("{home}/repos/elliot/data/food.csv", String("day,what\n"))
+    try fs.write_text("{data}/workspace/Agents/main/AGENTS.md", "# Main\n\nYou are Main. Log food in {home}/repos/elliot/data/food.csv.")
+    let coach_made = value(try app.cmd("q_25b", "agent.create", Obj.new().s("name", String("Coach")).s("acp_agent", String("fake")).s("instructions", "Log food in {home}/repos/elliot/data/food.csv.").done()))
+    let coach = str_at(at(coach_made, "agent"), "id") ?? String()
     // OpenBot is running: what it wrote last is still in its WAL, which a copy of the file would miss.
     let live = try Database.open("{data}/openbot.db")
     _ = try live.query(String("PRAGMA journal_mode=WAL"))
@@ -287,6 +308,9 @@ fn run(inst: Instance) ! Error {
     try check(not fs.exists("{stage_dir}/.claude/settings.json") and not fs.exists("{inst.data}/imports/pending.json") and not fs.exists("{inst.data}/imports/done.json"), "and keeps no token once it's imported, nor anything waiting")
     let main_chat = at(value(try app.cmd("q_26", "messages.list", Obj.new().s("conversation", chat.copy()).done())), "messages")
     try check("{main_chat}".contains("Written while it ran"), "the message written while OpenBot ran is in the chat")
+    let coach_now = str_at(agent_by_id(app, coach), "instructions") ?? String()
+    let moved = coach_now.replace("Log food in ", "").trim_suffix(".").replace("\\", "/")
+    try check(int_at(staged_came.copy(), "folders") == some(1) and moved.contains("/shared/") and moved.ends_with("/elliot/data/food.csv") and fs.is_file(moved.copy()) and fs.is_dir("{parent_of(parent_of(moved))}/.git"), "a repo in the user's home that an agent names comes into the shared folder, and the agent names it there")
     app.close()
 }
 
