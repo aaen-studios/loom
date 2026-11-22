@@ -6,10 +6,11 @@ module server.acp
 // and what the loop sends goes to the thread as Outs.
 //
 // ACP is JSON-RPC 2.0 with one message a line (https://agentclientprotocol.com).
-import std.json.{Json}
+import std.json.{Json, parse}
 import std.process.{Child, Command, Stdio}
 import std.thread.{Task}
-import shared.obj.{Obj}
+import shared.obj.{Obj, at, str_at}
+import shared.tools
 
 // A line an agent program wrote, or its end.
 pub struct Line {
@@ -107,6 +108,79 @@ pub fn initialize_params() -> Json {
     let caps = Obj.new().j("fs", fs).b("terminal", false).done()
     let info = Obj.new().s("name", String("loom")).s("version", String("0.2.0-dev")).done()
     return Obj.new().i("protocolVersion", 1).j("clientCapabilities", caps).j("clientInfo", info).done()
+}
+
+// --- Code Mode's tools, which the agent program doesn't ask about ---
+//
+// Loom asks for each call in a script, by the agent's permission mode, and
+// before a script in `ask` (PLAN.md, "Permissions"), so an agent program
+// asking before search_tools or run_code would ask twice. Codex reads their
+// MCP annotations (shared/tools.calx). Claude's adapter takes allowedTools
+// in session/new's _meta, as Claude Code names MCP tools: mcp__loom__run_code.
+// OpenCode takes a permission rule for each, named loom_run_code, in the
+// config in OPENCODE_CONFIG_CONTENT. Each program leaves the others' alone.
+
+// session/new's, session/load's and session/resume's _meta.
+pub fn session_meta() -> Json {
+    var allowed = List<Json>()
+    for t in tools.CODE_TOOLS.split(" ") {
+        allowed.push(Json.Str("mcp__loom__{t}"))
+    }
+    let options = Obj.new().j("allowedTools", Json.Array(allowed)).done()
+    return Obj.new().j("claudeCode", Obj.new().j("options", options).done()).done()
+}
+
+const OPENCODE_CONFIG: str = "OPENCODE_CONFIG_CONTENT"
+
+// An agent program's environment (a JSON object), with OpenCode's config
+// allowing Code Mode's tools: added to the config the settings give, where
+// they give one, which keeps any rule of its own for them.
+pub fn program_env(env: Json) -> Json {
+    var vars = LinkedMap<String, Json>()
+    if let Json.Object(m) = env { vars = m.copy() }
+    var config = LinkedMap<String, Json>()
+    if let given = str_at(Json.Object(vars.copy()), OPENCODE_CONFIG) {
+        match parse(given) {
+            ok(Json.Object(m)) => config = m.copy(),
+            _ => return Json.Object(vars),    // not one loom can add to: as it is
+        }
+    }
+    var rules = LinkedMap<String, Json>()
+    match at(Json.Object(config.copy()), "permission") {
+        Json.Object(m) => rules = m.copy(),
+        Json.Str(all) => rules.insert(String("*"), Json.Str(all.copy())),
+        _ => {},
+    }
+    for t in tools.CODE_TOOLS.split(" ") {
+        let name = "loom_{t}"
+        if not rules.contains(name.copy()) { rules.insert(name, Json.Str(String("allow"))) }
+    }
+    config.insert(String("permission"), Json.Object(rules))
+    vars.insert(String(OPENCODE_CONFIG), Json.Str("{Json.Object(config)}"))
+    return Json.Object(vars)
+}
+
+@test
+fn code_tools_are_allowed_in_each_program() {
+    let meta = "{session_meta()}"
+    assert(meta == #"{"claudeCode":{"options":{"allowedTools":["mcp__loom__search_tools","mcp__loom__run_code"]}}}"#)
+    let fresh = program_env(Obj.new().s("KEY", String("k")).done())
+    assert(str_at(fresh.copy(), "KEY") == some(String("k")))
+    assert(str_at(fresh, OPENCODE_CONFIG) == some(String(#"{"permission":{"loom_search_tools":"allow","loom_run_code":"allow"}}"#)))
+    // The person's own config keeps its rules, its own for run_code among them,
+    // and a rule for everything stays first, as OpenCode's last match wins.
+    let theirs = program_env(Obj.new().s(OPENCODE_CONFIG, String(#"{"model":"m","permission":{"loom_run_code":"ask"}}"#)).done())
+    assert(str_at(theirs, OPENCODE_CONFIG) == some(String(#"{"model":"m","permission":{"loom_run_code":"ask","loom_search_tools":"allow"}}"#)))
+    let all = program_env(Obj.new().s(OPENCODE_CONFIG, String(#"{"permission":"ask"}"#)).done())
+    assert(str_at(all, OPENCODE_CONFIG) == some(String(#"{"permission":{"*":"ask","loom_search_tools":"allow","loom_run_code":"allow"}}"#)))
+    let broken = program_env(Obj.new().s(OPENCODE_CONFIG, String("not json")).done())
+    assert(str_at(broken, OPENCODE_CONFIG) == some(String("not json")))
+}
+
+// Whether a permission mode asks before a script runs: only `ask`, which asks
+// about everything. In any other, each call in the script is put to the mode.
+pub fn asks_before_scripts(mode: String) -> bool {
+    return mode == "ask"
 }
 
 // A run's end, from session/prompt's stopReason, as loom's run.finished
