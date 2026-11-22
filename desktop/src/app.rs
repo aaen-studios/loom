@@ -5639,7 +5639,11 @@ ACTA_KEY=secret:ACTA_KEY",
             };
             let this = this.clone();
             let to_branch = this.clone();
-            let mut links = div().flex().flex_col().gap(px(2.0)).pt(px(space::XS));
+            let mut links = div().flex().flex_col().gap(px(2.0)).pt(px(if joined.below {
+                0.0
+            } else {
+                space::XS
+            }));
             for (i, (id, title)) in gone_on.into_iter().enumerate() {
                 let this = this.clone();
                 links = links.child(
@@ -5675,9 +5679,17 @@ ACTA_KEY=secret:ACTA_KEY",
                         .max_w(px(space::COLUMN + 2.0 * HOVER_REACH))
                         .mx(px(-HOVER_REACH))
                         .px(px(HOVER_REACH))
-                        // Bubbles that join sit close, as they do in a reply.
+                        // Messages stand apart, but bubbles that join sit close, as
+                        // they do in a reply. The list's own gap under each row is
+                        // taken off (`with_row_style`), so it's here instead.
                         .pt(px(if joined.above { 0.0 } else { space::S }))
-                        .pb(px(if joined.below { space::XS } else { space::S }))
+                        .pb(px(if joined.below {
+                            space::XS
+                        } else if ix + 1 == rows.len() {
+                            space::S
+                        } else {
+                            space::S + space::XXL
+                        }))
                         .relative()
                         .group("row")
                         .when_some(when, |d, when| {
@@ -5764,6 +5776,7 @@ ACTA_KEY=secret:ACTA_KEY",
                 )
                 .into_any_element()
         })
+        .with_row_style(StyleRefinement::default().pb(px(0.0)))
         .with_bottom_fade(p.bg)
         // The last message scrolls up clear of the small browser window.
         .when(mini.is_some(), |l| {
