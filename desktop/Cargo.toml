@@ -27,6 +27,10 @@ tray-icon = "0.26.1"
 xcap = "0.9.10"
 wry = "0.57.3"
 
+[features]
+# Frame timing in perf.log in the data folder (src/perf.rs), for measuring the app.
+perf = []
+
 [profile.release]
 lto = "thin"
 

@@ -417,7 +417,9 @@ impl Loom {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let prefs = Prefs::load(&data_dir());
         let dark = prefs.dark(system_dark(window));
+        crate::perf::once("core starting");
         let (core, events) = Core::start(&core_config("", None));
+        crate::perf::once("core started");
         let (device_tx, device_rx) = std::sync::mpsc::channel();
 
         let composer = cx.new(|cx| {
@@ -715,7 +717,7 @@ ACTA_KEY=secret:ACTA_KEY",
                                 };
                                 loom.notify(&s("title"), &s("body"), about);
                             }
-                            changed |= loom.model.take(&v);
+                            changed |= crate::perf::step("take", || loom.model.take(&v));
                         }
                     }
                     loom.fetch();
@@ -1572,6 +1574,13 @@ ACTA_KEY=secret:ACTA_KEY",
 
     /// Rebuilds the chat's rows, and tells the list what changed.
     fn refresh_rows(&mut self, cx: &mut Context<Self>) {
+        crate::perf::step("rows", || self.rebuild_rows(cx));
+        if self.rows.len() > 1 {
+            crate::perf::once("chat shown");
+        }
+    }
+
+    fn rebuild_rows(&mut self, cx: &mut Context<Self>) {
         let mut rows: Vec<Row> = self.model.shown().into_iter().map(Row::Message).collect();
         rows.extend(self.model.shown_approvals().into_iter().map(Row::Approval));
         let old = self.rows.clone();
@@ -12042,6 +12051,7 @@ mod when_tests {
 
 impl Render for Loom {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        crate::perf::frame_start();
         let p = self.p;
         self.finish_weaving(window, cx);
         if let Some(address) = self.fill_server.take() {
@@ -12131,6 +12141,7 @@ impl Render for Loom {
             // Someone typing to an agent, whose thread thinks along.
             || self.screen == Screen::Chat && !self.composer.read(cx).value().trim().is_empty()
         {
+            crate::perf::count("want:app");
             window.request_animation_frame();
         }
         let h = window.viewport_size().height.as_f32();
@@ -12207,7 +12218,7 @@ impl Render for Loom {
             Screen::Chat if self.model.agents.is_empty() && self.model.synced => {
                 self.first_agent(cx)
             }
-            _ => self.chat(window, cx),
+            _ => crate::perf::step("chat", || self.chat(window, cx)),
         };
         self.sync_panel(window, cx);
         let header = self.header(cx);
@@ -12216,7 +12227,8 @@ impl Render for Loom {
         let menu_scrim = self.menu_scrim(cx);
         let popup = self.popup_view(window, cx);
         let toast = self.toast(window, cx);
-        root.flex()
+        let out = root
+            .flex()
             .child(self.wheel_catcher(cx))
             .when(self.side_drag.is_some(), |d| {
                 d.child(self.side_dragger(cx)).cursor_col_resize()
@@ -12241,7 +12253,9 @@ impl Render for Loom {
             .when_some(menu_scrim, |d, s| d.child(s))
             .when_some(whole, |d, c| d.child(c))
             .when_some(splash, |d, s| d.child(s))
-            .child(motion_ticker())
+            .child(motion_ticker());
+        crate::perf::render_end();
+        out
     }
 }
 
@@ -12251,7 +12265,9 @@ fn motion_ticker() -> impl IntoElement {
     canvas(
         |_, _, _| {},
         |_, _, window, _| {
+            crate::perf::frame_end();
             if crate::motion::moving() {
+                crate::perf::count("want:motion");
                 window.request_animation_frame();
             }
         },

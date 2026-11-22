@@ -241,6 +241,7 @@ pub fn thread(
             let t = now();
             let (from, to, k, tint) = blend(&key, mood, tint, t);
             if k < 1.0 {
+                crate::perf::count("want:thread");
                 window.request_animation_frame();
             }
             let x0 = bounds.origin.x.as_f32();
@@ -329,6 +330,7 @@ pub fn yarn(
         move |bounds, _, window, _| {
             let t = now();
             if state == Spool::Turning {
+                crate::perf::count("want:yarn");
                 window.request_animation_frame();
             }
             let s = bounds.size.height.as_f32();

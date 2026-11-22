@@ -96,7 +96,7 @@ bool      loom_push_open(const uint8_t *keyring, size_t klen, const uint8_t *sea
 
 People who don't want a server run their instance in the desktop app. On first start the app offers to begin, which runs one here, or to sign in to an instance on a server. Then it makes the first agent with the person: a brain (the agent program it runs on), a name (or one from the die) and a colour.
 
-- **The same server code, in the same library.** The server is compiled into the app's static library beside the core, since a process can hold only one Calx runtime. With `{"mode":"local"}` in its config, `loom_core_start` also starts the server on its own thread, listening on 127.0.0.1 on the port it had last time (kept in its data, as `port`, so the person's scripts find it in the same place), or a free one if that's taken, with a token made for that launch. The core then connects to it as it would to any instance. One protocol and one code path, so whatever works on a server works here.
+- **The same server code, in the same library.** The server is compiled into the app's static library beside the core, since a process can hold only one Calx runtime. With `{"mode":"local"}` in its config, `loom_core_start` also starts the server on its own thread, without holding up the app's window, listening on 127.0.0.1 on the port it had last time (kept in its data, as `port`, so the person's scripts find it in the same place), or a free one if that's taken, with a token made for that launch. The core then connects to it as it would to any instance. One protocol and one code path, so whatever works on a server works here.
 - **Data** goes in the app's data folder (`%APPDATA%\Loom`, `~/Library/Application Support/Loom`), and the agents' folders go there or wherever you choose.
 - **Just you, no password.** Your account on the computer is the lock. A desktop instance is for its owner and their own devices. To share it with other people, move it to a server.
 - **Agents work on your computer.** They're the ACP agents installed there, with your own logins, and their commands run in PowerShell on Windows and zsh on macOS.
@@ -589,6 +589,7 @@ To try another way from some point without losing the chat, branch it there: by 
 - **A fake ACP agent** that plays scripted turns (replies, tool calls, permission requests, crashes), so sessions, approvals and reconnects are tested without a real model or spending money.
 - **Protocol tests** drive a real instance through the WebSocket, as Phase 1's test script does, and grow into the main suite.
 - **End-to-end tests** run the real app against an instance with the fake ACP agent.
+- **Benchmarks** (`tests/bench/`) time the server and the core with the fake agent: a long reply, short turns, catching up. The desktop app built with `--features perf` times its own frames, so a change that should make loom faster is measured before and after.
 - **CI** builds and tests the server, the library and the app on Linux, Windows and macOS on every push.
 
 ## Storage

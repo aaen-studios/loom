@@ -1,0 +1,127 @@
+module tests.bench.desktop
+
+// Gets a data folder ready for measuring the desktop app, and streams a reply into it
+// while the app runs. The app is built with `cargo build --release --features perf`,
+// which writes perf.log in the data folder (desktop/src/perf.rs), and started with
+// LOOM_DATA set to the folder.
+//
+//     calx tests/bench/desktop.calx prepare DATA [TURNS]
+//     calx tests/bench/desktop.calx stream DATA [WORDS] [MS]
+//     calx tests/bench/desktop.calx say DATA TEXT
+//
+// prepare makes DATA an instance on this computer, as the app's first start would,
+// with the fake agent, one agent and TURNS (300 by default) turns in its chat, each
+// reply about 2.4 KB of Markdown. It marks the first start done, so the app doesn't
+// set itself to start at login. stream sends one more message while the app runs on
+// DATA, whose reply streams WORDS words (2000), a word every MS ms (10). say sends
+// TEXT, with \n for a new line, such as "/sleep 15000" for an agent that works a while.
+import std.env
+import std.fs
+import std.json.{Json}
+import std.process.{Stdio, exit}
+import shared.obj.{Obj, at, str_at}
+import tests.kit.{App, calx, device, loom, post_json}
+
+const WAIT: u64 = 600000
+
+fn arg_or(args: List<String>, n: usize, default: usize) -> usize {
+    if n < args.len() { return usize.parse(args[n].copy()) ?? default }
+    return default
+}
+
+// A reply's worth of Markdown, about 2.4 KB as a real answer is, `n` to tell them apart.
+fn paragraph(n: usize) -> String {
+    var out = String()
+    for k in 0..8 {
+        out.push_str("Reply {n}.{k}: here is **what I found** in `notes/hours.md`, with a [link](https://example.com) and some plain words after it so the line wraps a few times in the chat, as a real answer does when it explains something at length and names a file or two like `src/app.rs` along the way. ")
+    }
+    return out
+}
+
+fn prepare(data: String, turns: usize) ! Error {
+    try fs.make_dir_all(data.copy())
+    let home = "{data}/instance"
+    try fs.make_dir_all(home.copy())
+
+    let agent_path = try fs.absolute(String("tests/fake_agent/main.calx"))
+    let added = try loom(home.copy(), [String("acp"), String("add"), String("fake"), calx(), agent_path]).output()
+    if not added.status.success() { fail "loom acp add failed: {added.error_text()}" }
+    var server = try loom(home.copy(), [String("serve"), String("--port"), String("0"), String("--allow-root")]).stdout(Stdio.Pipe).spawn()
+    let serving = server.wait_for_line(String("loom: serving"), WAIT) else {
+        server.kill()
+        fail "the server didn't start"
+    }
+    let address = serving[serving.find("http://") ?? 0..].trim().copy()
+    let base = if address.ends_with("/") { address[7..address.len() - 1].copy() } else { address[7..].copy() }
+    let code_line = server.wait_for_line(String("setup code:"), 10000) else {
+        server.kill()
+        fail "the server didn't print a setup code"
+    }
+    let code = code_line[12..].trim().copy()
+    let (status, owner) = try post_json(base.copy(), "/api/setup", Obj.new().s("code", code).s("username", String("bench")).s("password", String("correct horse")).j("device", device("Bench")).done())
+    if status != 200 {
+        server.kill()
+        fail "setup failed: {owner}"
+    }
+    let token = str_at(owner, "token") ?? String()
+    var app = try App.connect(base.copy(), token.copy(), 0)
+    let made = try app.cmd("q_1", "agent.create", Obj.new().s("name", String("Fake")).s("acp_agent", String("fake")).s("instructions", String("")).done())
+    let agent = str_at(at(at(made, "value"), "agent"), "id") ?? String()
+    let conv = try app.cmd("q_2", "conversation.create", Obj.new().s("agent", agent.copy()).s("title", String("chat")).done())
+    let conversation = str_at(at(conv, "value"), "conversation") ?? String()
+    for n in 0..turns {
+        try app.send(Obj.new().s("t", String("send")).s("cid", "p{n}").s("conversation", conversation.copy()).s("text", paragraph(n)).done())
+        _ = try app.until("event", "run.finished", 120000)
+        if n % 50 == 0 { app.frames = List<Json>() }
+    }
+    app.close()
+    server.kill()
+    _ = server.wait()
+    try fs.write_text("{data}/bench-token", token)
+    try fs.write_text("{data}/bench-conversation", conversation)
+    try fs.write_text("{data}/mode", String("local"))
+    // The app's first start would turn starting at login on.
+    try fs.write_text("{data}/started", String())
+    println("ready: {turns} turns in {data}")
+}
+
+// Sends `text` to the agent in the app's instance on `data`, and waits for its turn to end.
+fn say(data: String, text: String) ! Error {
+    let port = (try fs.read_text("{data}/instance/port") ?? String()).trim().copy()
+    let token = try fs.read_text("{data}/bench-token") ?? String()
+    let conversation = try fs.read_text("{data}/bench-conversation") ?? String()
+    var app = try App.connect("127.0.0.1:{port}", token, 0)
+    // The newest seq makes a client id this instance hasn't seen.
+    try app.send(Obj.new().s("t", String("send")).s("cid", "bench{app.seq}").s("conversation", conversation).s("text", text).done())
+    _ = try app.until("event", "run.finished", 600000)
+    app.close()
+}
+
+fn stream(data: String, words: usize, every: usize) ! Error {
+    var text = "/slow {every}\n"
+    for n in 0..words {
+        if n > 0 { text.push_str(" ") }
+        text.push_str(if n % 9 == 0 { "**w{n}**" } else { "w{n}" })
+    }
+    try say(data, text)
+    println("streamed {words} words")
+}
+
+fn main() ! Error {
+    let args = env.args()
+    if args.len() < 2 {
+        eprintln("usage: calx tests/bench/desktop.calx prepare DATA [TURNS] | stream DATA [WORDS] [MS] | say DATA TEXT")
+        exit(2)
+    }
+    let data = args[1].copy()
+    if args[0] == "prepare" {
+        try prepare(data, arg_or(args.copy(), 2, 300))
+    } else if args[0] == "stream" {
+        try stream(data, arg_or(args.copy(), 2, 2000), arg_or(args, 3, 10))
+    } else if args[0] == "say" and args.len() > 2 {
+        try say(data, args[2].replace("\\n", "\n"))
+    } else {
+        eprintln("unknown command {args[0]}")
+        exit(2)
+    }
+}

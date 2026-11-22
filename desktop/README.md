@@ -37,6 +37,10 @@ Run an instance (`calx server/main.calx serve`), then start the app and sign in 
 - `LOOM_THEME`: `dark` or `light`, instead of following the system.
 - `LOOM_UPDATE`: a release manifest's address, for trying updates in a build from source, which doesn't update itself otherwise.
 
+## Measuring
+
+`cargo build --release --features perf` builds an app that measures itself (`src/perf.rs`) and opens its window without taking the focus. Each second it draws anything, it adds a line to `perf.log` in its data folder: frames a second, the average and longest frame (from the start of `render` to the end of painting), and the time in each timed step: `render` (building the window's elements, the rest of a frame being GPUI's layout and painting), `chat`, `take` (a frame from the core), `rows` (rebuilding the chat's rows), and a count of each thing that asked for another frame (`want:app`, `want:motion`, `want:thread`, `want:yarn`). It also says when the core started, the first frame and the chat came. [`tests/bench/desktop.calx`](../tests/bench/desktop.calx) makes a data folder with a long chat to start it on, and streams a reply into it while it runs. Without the feature, none of this is built.
+
 ## Releases
 
 A tag like `v0.3.0` runs `.github/workflows/release.yml`. It builds `loom.exe` with the version in it (`LOOM_VERSION`), and `loom-setup.exe` from `installer.iss` with Inno Setup. It also builds the server for Linux and Windows, and publishes them all with a `manifest.json` that `scripts/release.calx` signs with the release key, from the CI secret `LOOM_RELEASE_KEY`. The tag's message is the release notes.
