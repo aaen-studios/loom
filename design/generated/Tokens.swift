@@ -60,6 +60,7 @@ enum Tokens {
 
     enum Layout {
         static let sidebar: CGFloat = 260
+        static let rail: CGFloat = 56
         static let titlebar: CGFloat = 48
         static let settings: CGFloat = 600
         static let page: CGFloat = 520
