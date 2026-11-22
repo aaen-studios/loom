@@ -244,6 +244,15 @@ pub struct Loom {
     page_image: Option<(u64, Arc<RenderImage>)>,
     /// Where the page is drawn, for turning a click on it into the page's own pixels.
     page_bounds: Rc<std::cell::Cell<Option<Bounds<Pixels>>>>,
+    /// Whether the watched browser fills the panel beside the chat. Otherwise it's
+    /// the small window at the chat's bottom right.
+    browser_docked: bool,
+    /// The agent whose small browser window the person closed, until its browser closes.
+    browser_shut: Option<String>,
+    /// The panel's width, as the person dragged it, kept in the data folder.
+    side_w: Option<f32>,
+    /// While the panel's edge is dragged: where the pointer and the width started.
+    side_drag: Option<(f32, f32)>,
     /// The browser panel's focus, so keys go to the page while the person has it.
     browser_keys: FocusHandle,
     /// The page beside the sidebar (its screen and agent), and when it last changed.
@@ -709,6 +718,12 @@ ACTA_KEY=secret:ACTA_KEY",
             keys: cx.focus_handle(),
             page_image: None,
             page_bounds: Rc::new(std::cell::Cell::new(None)),
+            browser_docked: false,
+            browser_shut: None,
+            side_w: std::fs::read_to_string(std::path::Path::new(&data_dir()).join("side-width"))
+                .ok()
+                .and_then(|w| w.trim().parse().ok()),
+            side_drag: None,
             browser_keys: cx.focus_handle(),
             page: ((Screen::Chat, None), Instant::now()),
             scene: ("", Instant::now()),
@@ -969,9 +984,8 @@ ACTA_KEY=secret:ACTA_KEY",
 
     /// Opens `screen` in the panel beside the chat, in place of the browser if it showed.
     fn show_side(&mut self, screen: Screen, cx: &mut Context<Self>) {
-        if self.model.watching.is_some() {
-            self.watch(None, cx);
-        }
+        // The browser goes back to its small window.
+        self.browser_docked = false;
         self.screen = Screen::Chat;
         self.popup = None;
         self.side = Some(screen);
@@ -982,6 +996,7 @@ ACTA_KEY=secret:ACTA_KEY",
                 self.send(f);
             }
         }
+        cx.notify();
     }
 
     /// Closes the panel beside the chat, and a plugin's panel with it.
@@ -1466,7 +1481,11 @@ ACTA_KEY=secret:ACTA_KEY",
     /// whose web view sits over the space left for it under the head.
     fn side_panel(&mut self, side: Screen, window: &mut Window, cx: &mut Context<Self>) -> Div {
         let p = self.p;
-        let width = side_width(side, window.viewport_size().width.as_f32());
+        let width = side_width(
+            side == Screen::Plugins || side == Screen::Page,
+            window.viewport_size().width.as_f32(),
+            self.side_w,
+        );
         let name = self
             .model
             .selected
@@ -1542,8 +1561,10 @@ ACTA_KEY=secret:ACTA_KEY",
             .flex_none()
             .flex()
             .flex_col()
+            .relative()
             .border_l_1()
             .border_color(p.line)
+            .child(self.side_edge(width, cx))
             .child(
                 div()
                     .h(px(SIDE_HEAD))
@@ -2513,8 +2534,237 @@ ACTA_KEY=secret:ACTA_KEY",
         if agent.is_some() && self.side.is_some() {
             self.close_side(cx);
         }
+        self.browser_docked = agent.is_some();
+        if agent.is_some() {
+            self.browser_shut = None;
+        }
         if let Some(f) = self.model.watch(agent) {
             self.send(f);
+        }
+        cx.notify();
+    }
+
+    /// Keeps the small browser window right for the agent on screen: watching its
+    /// browser while it's open and the person hasn't closed the window, and not
+    /// once it's closed.
+    fn follow_browser(&mut self, agent: Option<&model::Agent>) {
+        let Some(a) = agent else { return };
+        let open = self.model.browser(&a.id).open;
+        let mine = self.model.watching.as_deref() == Some(a.id.as_str());
+        if !open && self.browser_shut.as_deref() == Some(a.id.as_str()) {
+            self.browser_shut = None;
+        }
+        let want = open && self.browser_shut.as_deref() != Some(a.id.as_str());
+        if want && !mine {
+            self.browser_docked = false;
+            if let Some(f) = self.model.watch(Some(a.id.clone())) {
+                self.send(f);
+            }
+        } else if !open && mine && !self.browser_docked {
+            if let Some(f) = self.model.watch(None) {
+                self.send(f);
+            }
+        }
+    }
+
+    /// Decodes the watched browser's newest frame, once per frame.
+    fn decode_page(&mut self, window: &mut Window) {
+        if let Some(f) = &self.model.frame {
+            if self.page_image.as_ref().map(|(seq, _)| *seq) != Some(f.seq) {
+                if let Ok(decoded) =
+                    image::load_from_memory_with_format(&f.jpeg, image::ImageFormat::Jpeg)
+                {
+                    let mut rgba = decoded.to_rgba8();
+                    for px in rgba.pixels_mut() {
+                        px.0.swap(0, 2);
+                    }
+                    let render = Arc::new(RenderImage::new(vec![image::Frame::new(rgba)]));
+                    if let Some((_, old)) = self.page_image.replace((f.seq, render)) {
+                        let _ = window.drop_image(old);
+                    }
+                }
+            }
+        } else if let Some((_, old)) = self.page_image.take() {
+            let _ = window.drop_image(old);
+        }
+    }
+
+    /// The agent's browser as a small window at the chat's bottom right, while it
+    /// browses and the panel beside the chat shows something else. A click opens
+    /// it in the panel.
+    fn browser_mini(
+        &mut self,
+        agent: &model::Agent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Stateful<Div> {
+        self.decode_page(window);
+        let p = self.p;
+        let tint = thread::color(&agent.color, p.dark);
+        let state = self.model.browser(&agent.id);
+        let (fw, fh) = self
+            .model
+            .frame
+            .as_ref()
+            .map_or((1280.0, 800.0), |f| (f.width.max(1.0), f.height.max(1.0)));
+        let w = MINI_W;
+        let h = mini_page_height(fw, fh);
+        let page = match self.page_image.clone() {
+            Some((_, image)) => img(ImageSource::Render(image))
+                .size_full()
+                .into_any_element(),
+            None => div()
+                .size_full()
+                .flex()
+                .items_center()
+                .justify_center()
+                .text_size(px(size::CAPTION))
+                .text_color(p.ink_3)
+                .child("Loading the page…")
+                .into_any_element(),
+        };
+        let words = if state.person {
+            "You have it".to_string()
+        } else if !state.asked.is_empty() {
+            "Needs you".to_string()
+        } else {
+            format!("{} is browsing", agent.name)
+        };
+        let shown = motion::arrive(&SharedString::from("browser-mini"), 0.22);
+        let id = agent.id.clone();
+        div()
+            .id("browser-mini")
+            .absolute()
+            .right(px(space::L))
+            .bottom(px(space::S - 8.0 * (1.0 - shown)))
+            .opacity(shown)
+            .w(px(w))
+            .flex()
+            .flex_col()
+            .rounded(px(radius::CARD))
+            .overflow_hidden()
+            .border_1()
+            .border_color(p.line)
+            .bg(p.raised)
+            .shadow_lg()
+            .cursor_pointer()
+            .occlude()
+            .on_click(cx.listener(|this, _, _, cx| {
+                let id = this.model.selected.clone();
+                this.watch(id, cx);
+            }))
+            .child(
+                div()
+                    .h(px(28.0))
+                    .px(px(space::S))
+                    .flex()
+                    .items_center()
+                    .gap(px(space::XS))
+                    .text_size(px(size::CAPTION))
+                    .text_color(p.ink_2)
+                    .child(div().text_color(tint).child(Icon::new(Ico::Globe).xsmall()))
+                    .child(div().flex_1().truncate().child(words))
+                    .child(
+                        div()
+                            .id("browser-mini-shut")
+                            .size(px(20.0))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .rounded(px(radius::ROW))
+                            .text_color(p.ink_3)
+                            .soft_hover(transparent_black(), p.hover, Some((p.ink_3, p.ink)))
+                            .child(Icon::new(Ico::X).xsmall())
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                cx.stop_propagation();
+                                this.browser_shut = Some(id.clone());
+                                this.watch(None, cx);
+                            })),
+                    ),
+            )
+            .child(div().w(px(w)).h(px(h)).bg(p.hover).child(page))
+    }
+
+    /// A handle over the panel's left edge, which drags to make the panel wider or
+    /// narrower. It shows as a stronger line on hover and while dragged.
+    fn side_edge(&self, width: f32, cx: &mut Context<Self>) -> impl IntoElement {
+        let p = self.p;
+        let dragging = self.side_drag.is_some();
+        div()
+            .id("side-edge")
+            .absolute()
+            .top_0()
+            .bottom_0()
+            .left(px(-3.0))
+            .w(px(7.0))
+            .flex()
+            .justify_center()
+            .cursor_col_resize()
+            .occlude()
+            .group("side-edge")
+            .child(
+                div()
+                    .w(px(1.0))
+                    .h_full()
+                    .when(dragging, |d| d.bg(p.line_strong))
+                    .group_hover("side-edge", |s| s.bg(p.line_strong)),
+            )
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, e: &MouseDownEvent, _, cx| {
+                    this.side_drag = Some((e.position.x.as_f32(), width));
+                    cx.stop_propagation();
+                    cx.notify();
+                }),
+            )
+    }
+
+    /// While the panel's edge is dragged, follows the pointer anywhere in the
+    /// window, and keeps the width where it's let go. It draws nothing.
+    fn side_dragger(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let this = cx.entity().downgrade();
+        let up = this.clone();
+        canvas(
+            |_, _, _| {},
+            move |_, _, window, _| {
+                window.on_mouse_event(move |e: &MouseMoveEvent, phase, window, cx| {
+                    if phase != DispatchPhase::Capture {
+                        return;
+                    }
+                    let _ = this.update(cx, |this, cx| {
+                        let Some((from, start)) = this.side_drag else {
+                            return;
+                        };
+                        if !e.dragging() {
+                            this.side_drag_end(cx);
+                            return;
+                        }
+                        let w = window.viewport_size().width.as_f32();
+                        let to = start + from - e.position.x.as_f32();
+                        this.side_w = Some(side_width(true, w, Some(to)));
+                        cx.notify();
+                    });
+                });
+                window.on_mouse_event(move |_: &MouseUpEvent, phase, _, cx| {
+                    if phase == DispatchPhase::Capture {
+                        let _ = up.update(cx, |this, cx| this.side_drag_end(cx));
+                    }
+                });
+            },
+        )
+        .absolute()
+        .size_0()
+    }
+
+    fn side_drag_end(&mut self, cx: &mut Context<Self>) {
+        if self.side_drag.take().is_none() {
+            return;
+        }
+        if let Some(w) = self.side_w {
+            let _ = std::fs::write(
+                std::path::Path::new(&data_dir()).join("side-width"),
+                format!("{}", w.round()),
+            );
         }
         cx.notify();
     }
@@ -2578,26 +2828,8 @@ ACTA_KEY=secret:ACTA_KEY",
         let p = self.p;
         let tint = thread::color(&agent.color, p.dark);
         let state = self.model.browser(&agent.id);
-        // A new frame is decoded once; the one it replaces leaves the GPU.
-        if let Some(f) = &self.model.frame {
-            if self.page_image.as_ref().map(|(seq, _)| *seq) != Some(f.seq) {
-                if let Ok(decoded) =
-                    image::load_from_memory_with_format(&f.jpeg, image::ImageFormat::Jpeg)
-                {
-                    let mut rgba = decoded.to_rgba8();
-                    for px in rgba.pixels_mut() {
-                        px.0.swap(0, 2);
-                    }
-                    let render = Arc::new(RenderImage::new(vec![image::Frame::new(rgba)]));
-                    if let Some((_, old)) = self.page_image.replace((f.seq, render)) {
-                        let _ = window.drop_image(old);
-                    }
-                }
-            }
-        } else if let Some((_, old)) = self.page_image.take() {
-            let _ = window.drop_image(old);
-        }
-        let width = (window.viewport_size().width.as_f32() * 0.45).clamp(360.0, 820.0);
+        self.decode_page(window);
+        let width = side_width(true, window.viewport_size().width.as_f32(), self.side_w);
         let inner = width - 2.0 * space::L;
         let (fw, fh) = self
             .model
@@ -2720,8 +2952,10 @@ ACTA_KEY=secret:ACTA_KEY",
             .flex_col()
             .gap(px(space::M))
             .p(px(space::L))
+            .relative()
             .border_l_1()
             .border_color(p.line)
+            .child(self.side_edge(width, cx))
             .child(
                 div()
                     .flex()
@@ -2746,7 +2980,19 @@ ACTA_KEY=secret:ACTA_KEY",
                             .text_color(p.ink_3)
                             .soft_hover(transparent_black(), p.hover, Some((p.ink_3, p.ink)))
                             .child(Icon::new(Ico::X).small())
-                            .on_click(cx.listener(|this, _, _, cx| this.watch(None, cx))),
+                            // Back to the small window while it browses.
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                if this
+                                    .model
+                                    .browser(&this.model.watching.clone().unwrap_or_default())
+                                    .open
+                                {
+                                    this.browser_docked = false;
+                                    cx.notify();
+                                } else {
+                                    this.watch(None, cx);
+                                }
+                            })),
                     ),
             )
             .child(screen)
@@ -3020,7 +3266,9 @@ ACTA_KEY=secret:ACTA_KEY",
     /// its browser isn't showing.
     fn browser_ask(&self, agent: &model::Agent, cx: &mut Context<Self>) -> Option<Div> {
         let state = self.model.browser(&agent.id);
-        if state.asked.is_empty() || self.model.watching.as_deref() == Some(agent.id.as_str()) {
+        if state.asked.is_empty()
+            || (self.browser_docked && self.model.watching.as_deref() == Some(agent.id.as_str()))
+        {
             return None;
         }
         let p = self.p;
@@ -3729,7 +3977,8 @@ ACTA_KEY=secret:ACTA_KEY",
         };
         // The agent's browser, while it's open: a globe that shows it beside the chat.
         let browsing = self.model.browser(&agent.id).open;
-        let watching = self.model.watching.as_deref() == Some(agent.id.as_str());
+        let watching =
+            self.browser_docked && self.model.watching.as_deref() == Some(agent.id.as_str());
         let tint = thread::color(&agent.color, p.dark);
         let globe = div()
             .id("browser-toggle")
@@ -3757,8 +4006,12 @@ ACTA_KEY=secret:ACTA_KEY",
             .child("Browser")
             .on_click(cx.listener(move |this, _, _, cx| {
                 let id = this.model.selected.clone();
-                let next = if this.model.watching == id { None } else { id };
-                this.watch(next, cx);
+                if this.model.watching == id && this.browser_docked {
+                    this.browser_docked = false;
+                    cx.notify();
+                } else {
+                    this.watch(id, cx);
+                }
             }));
         // The chat's pins, while it has some, or they're open beside it.
         let pinned = self.model.messages.iter().filter(|m| m.pinned).count();
@@ -4334,11 +4587,17 @@ ACTA_KEY=secret:ACTA_KEY",
         if self.model.watching.is_some() && self.model.watching != self.model.selected {
             self.watch(None, cx);
         }
+        self.follow_browser(agent.as_ref());
         // Beside the chat: the agent's browser, or an agent's page or a plugin's panel.
         let watched = agent
             .clone()
             .filter(|a| self.model.watching.as_deref() == Some(a.id.as_str()));
-        let panel = match (watched, self.side) {
+        let docked = watched.clone().filter(|_| self.browser_docked);
+        // While it browses and the panel shows something else, or nothing: the small window.
+        let mini = watched
+            .filter(|a| !self.browser_docked && self.model.browser(&a.id).open)
+            .map(|a| self.browser_mini(&a, window, cx));
+        let panel = match (docked, self.side) {
             (Some(a), _) => Some(self.browser_panel(&a, window, cx)),
             (None, Some(side)) => Some(self.side_panel(side, window, cx)),
             (None, None) => None,
@@ -4566,7 +4825,18 @@ ACTA_KEY=secret:ACTA_KEY",
                 )
                 .into_any_element()
         })
-        .with_bottom_fade(p.bg);
+        .with_bottom_fade(p.bg)
+        // The last message scrolls up clear of the small browser window.
+        .when(mini.is_some(), |l| {
+            let (fw, fh) = self
+                .model
+                .frame
+                .as_ref()
+                .map_or((1280.0, 800.0), |f| (f.width.max(1.0), f.height.max(1.0)));
+            let mut s = StyleRefinement::default();
+            s.padding.bottom = Some(px(28.0 + mini_page_height(fw, fh) + space::L).into());
+            l.with_list_style(s)
+        });
 
         let empty = self.rows.is_empty();
         // A task or a branch shows its strip over the list, even before it has messages.
@@ -4772,12 +5042,21 @@ ACTA_KEY=secret:ACTA_KEY",
             }))
             .drag_over::<ExternalPaths>(move |s, _, _, _| s.bg(p.hover))
             .when_some(strip, |d, s| d.child(s))
-            .child(if empty && !in_task {
-                self.hero(agent.as_ref(), composer.take(), cx)
-                    .into_any_element()
-            } else {
-                div().flex_1().min_h_0().child(list).into_any_element()
-            })
+            .child(
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .flex()
+                    .flex_col()
+                    .relative()
+                    .child(if empty && !in_task {
+                        self.hero(agent.as_ref(), composer.take(), cx)
+                            .into_any_element()
+                    } else {
+                        div().flex_1().min_h_0().child(list).into_any_element()
+                    })
+                    .when_some(mini, |d, m| d.child(m)),
+            )
             .when_some(self.notice.clone(), |d, (words, _)| {
                 d.child(
                     div()
@@ -6703,7 +6982,12 @@ ACTA_KEY=secret:ACTA_KEY",
         // In the panel beside the chat, under its head. A web view draws over everything
         // in the window, so while the popup is open it shrinks to nothing.
         let size = window.viewport_size();
-        let w = side_width(self.side.unwrap_or(Screen::Plugins), f32::from(size.width));
+        let side = self.side.unwrap_or(Screen::Plugins);
+        let w = side_width(
+            side == Screen::Plugins || side == Screen::Page,
+            f32::from(size.width),
+            self.side_w,
+        );
         let rect = if self.popup.is_some() {
             [0.0, 0.0, 0.0, 0.0]
         } else {
@@ -10298,6 +10582,9 @@ impl Render for Loom {
         let popup = self.popup_view(window, cx);
         root.flex()
             .child(self.wheel_catcher(cx))
+            .when(self.side_drag.is_some(), |d| {
+                d.child(self.side_dragger(cx)).cursor_col_resize()
+            })
             .child(self.sidebar(cx))
             .child(
                 div()
@@ -10691,13 +10978,26 @@ fn is_server(s: Screen) -> bool {
 /// The height of the head of the panel beside the chat, and of the popup's page.
 const SIDE_HEAD: f32 = 48.0;
 
-/// How wide the panel beside the chat is, in a window `window` wide: a plugin's panel
-/// as wide as the browser's, an agent's page narrower.
-fn side_width(side: Screen, window: f32) -> f32 {
-    if side == Screen::Plugins || side == Screen::Page {
-        (window * 0.45).clamp(360.0, 820.0)
-    } else {
-        (window * 0.36).clamp(360.0, 560.0)
+/// The narrowest the panel beside the chat drags to, and the least it leaves the chat.
+const SIDE_LEAST: f32 = 320.0;
+const CHAT_LEAST: f32 = 420.0;
+/// The small browser window's width.
+const MINI_W: f32 = 280.0;
+
+/// The height of the page in the small browser window, for a page `fw` by `fh`.
+fn mini_page_height(fw: f32, fh: f32) -> f32 {
+    (MINI_W * fh / fw).clamp(90.0, 200.0)
+}
+
+/// How wide the panel beside the chat is, in a window `window` wide: as the person
+/// dragged it, or else a plugin's panel or the browser (`wide`) wider than an
+/// agent's page.
+fn side_width(wide: bool, window: f32, dragged: Option<f32>) -> f32 {
+    let most = (window - layout::SIDEBAR - CHAT_LEAST).max(SIDE_LEAST);
+    match dragged {
+        Some(w) => w.clamp(SIDE_LEAST, most),
+        None if wide => (window * 0.45).clamp(360.0, 820.0).min(most),
+        None => (window * 0.36).clamp(360.0, 560.0).min(most),
     }
 }
 
@@ -10716,4 +11016,21 @@ fn svg_icon(path: SharedString, size: f32, ink: Hsla) -> AnyElement {
         .flex_none()
         .text_color(ink)
         .into_any_element()
+}
+
+#[cfg(test)]
+mod side_tests {
+    use super::{layout, side_width, CHAT_LEAST, SIDE_LEAST};
+
+    #[test]
+    fn the_panel_keeps_its_dragged_width_and_leaves_the_chat_room() {
+        let window = 1400.0;
+        assert_eq!(side_width(true, window, Some(500.0)), 500.0);
+        assert_eq!(side_width(false, window, Some(100.0)), SIDE_LEAST);
+        let most = window - layout::SIDEBAR - CHAT_LEAST;
+        assert_eq!(side_width(true, window, Some(5000.0)), most);
+        // Undragged, it's a share of the window, never past what leaves the chat room.
+        assert!(side_width(true, 1120.0, None) <= 1120.0 - layout::SIDEBAR - CHAT_LEAST);
+        assert!(side_width(false, window, None) < side_width(true, window, None));
+    }
 }

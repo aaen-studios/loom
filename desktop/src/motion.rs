@@ -71,6 +71,20 @@ pub fn level(key: &SharedString, on: bool, secs: f32) -> f32 {
     })
 }
 
+/// How far the thing under `key` has come in, from 0 when it first shows to 1 `secs`
+/// later. Once a frame goes by without it, it comes in from 0 again.
+pub fn arrive(key: &SharedString, secs: f32) -> f32 {
+    LEVELS.with(|levels| {
+        levels.borrow_mut().entry(key.clone()).or_insert(Level {
+            on: true,
+            from: 0.0,
+            at: Instant::now(),
+            secs,
+        });
+    });
+    level(key, true, secs)
+}
+
 /// Whether the pointer is over the thing under `key`.
 pub fn hovered(key: &SharedString) -> bool {
     HOVERED.with(|h| h.borrow().get(key).copied().unwrap_or(false))
@@ -149,7 +163,7 @@ impl SoftHover for Stateful<Div> {
 
 #[cfg(test)]
 mod tests {
-    use super::{level, mix, moving, SLIDE};
+    use super::{arrive, level, mix, moving, SLIDE};
     use gpui_kit::{hsla, transparent_black, SharedString};
 
     #[test]
@@ -165,6 +179,13 @@ mod tests {
         assert_eq!(level(&key, false, SLIDE), 0.0);
         let moved = level(&key, true, SLIDE);
         assert!(moved < 0.5);
+        assert!(moving());
+    }
+
+    #[test]
+    fn a_new_thing_comes_in_from_nothing() {
+        let key: SharedString = "test-arrive".into();
+        assert!(arrive(&key, 0.2) < 0.2);
         assert!(moving());
     }
 }
