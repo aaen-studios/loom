@@ -180,6 +180,7 @@ fn run(inst: Instance) ! Error {
     let main_one = agent_named(app, "Main")
     let main_id = str_at(main_one.copy(), "id") ?? String()
     try check((str_at(main_one.copy(), "instructions") ?? String()).contains("You are Main") and str_at(main_one.copy(), "color") == some(String("periwinkle")) and str_at(at(main_one.copy(), "config"), "model") == some(String("sonnet")) and int_at(main_one.copy(), "pinned") != none and str_at(main_one.copy(), "acp_agent") == some(String("fake")), "an agent comes with its AGENTS.md, its colour, its model and its pin")
+    try check("{at(main_one.copy(), "mcp")}" == #"["acta","remote"]"#, "and with the MCP servers that came, as every agent in OpenBot has them")
     let helper = agent_named(app, "Helper")
     try check((str_at(helper.copy(), "instructions") ?? String()).contains("Finds things out") and str_at(helper.copy(), "color") == some(String("mint")) and int_at(helper, "pinned") == none, "one without its AGENTS.md takes its title and description, and the nearest colour")
 

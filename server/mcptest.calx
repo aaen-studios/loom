@@ -1,0 +1,63 @@
+module server.mcptest
+
+// Testing one of the person's MCP servers (PLAN.md, "MCP servers"): started as
+// an agent's session would start it, with its secrets filled in, asked for its
+// tools, and stopped. It runs on a thread of its own, since a server may take
+// up to a minute to start, and the instance's loop never waits.
+import std.json.{Json}
+import std.thread.{Task}
+import shared.obj.{str_at}
+import server.mcpclient
+
+pub struct Job {
+    pub id: i64
+    pub spec: Json    // as ACP's session/new takes it, with its secrets filled in
+}
+
+pub struct Done {
+    pub id: i64
+    pub tools: List<String>    // the tools' names, when it worked
+    pub error: String    // why it didn't, or ""
+}
+
+struct Worker {
+    jobs: Receiver<Job>
+    done: Sender<Done>
+}
+
+impl Task for Worker {
+    fn run(own self) {
+        var w = self
+        while let job = w.jobs.wait() {
+            let id = job.id
+            match test(job.spec) {
+                ok(tools) => w.done.send(Done { id: id, tools: tools, error: String() }),
+                err(e) => w.done.send(Done { id: id, tools: List<String>(), error: "{e}" }),
+            }
+        }
+    }
+}
+
+pub fn start() -> (Sender<Job>, Receiver<Done>) {
+    let jobs = Receiver<Job>()
+    let to = jobs.sender()
+    let done = Receiver<Done>()
+    _ = unsafe { Thread.spawn(Worker { jobs: jobs, done: done.sender() }) }
+    return (to, done)
+}
+
+// The names of the tools the server at `spec` offers.
+fn test(spec: Json) -> List<String> ! Error {
+    var server = try mcpclient.start(spec)
+    let (listed, failed) = match server.tools() {
+        ok(l) => (l, String()),
+        err(e) => (List<Json>(), "{e}"),
+    }
+    server.stop()
+    if failed.len() > 0 { fail "{failed}" }
+    var names = List<String>()
+    for t in listed {
+        if let n = str_at(t, "name") { names.push(n) }
+    }
+    return names
+}

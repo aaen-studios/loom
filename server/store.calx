@@ -942,6 +942,16 @@ impl Store {
         return some(text(r[0].copy()))
     }
 
+    // What came from imports of `kind`: each one's source, its id there, and
+    // what it is in loom.
+    pub fn imported_of(self, user: String, kind: str) -> List<(String, String, String)> ! Error {
+        var out = List<(String, String, String)>()
+        for r in try self.db.query(String("SELECT source, id, loom FROM imported WHERE user = ? AND kind = ? ORDER BY at"), [t(user), t(String(kind))]) {
+            out.push((text(r[0].copy()), text(r[1].copy()), text(r[2].copy())))
+        }
+        return out
+    }
+
     pub fn mark_imported(self, user: String, source: String, kind: str, id: String, loom: String) ! Error {
         _ = try self.db.execute(String("INSERT INTO imported (user, source, kind, id, loom, at) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT (user, source, kind, id) DO UPDATE SET loom = excluded.loom"), [t(user), t(source), t(String(kind)), t(id), t(loom), Value.Int(now())])
     }

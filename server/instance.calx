@@ -41,6 +41,7 @@ import server.hashing
 import server.importer
 import server.hashing.{Done, Job}
 import server.installer
+import server.mcptest
 import server.move
 import server.noise
 import server.plugins
@@ -256,6 +257,9 @@ pub struct Instance {
     registry_fetching: bool    // whether a read of it is under way
     install_to: Sender<installer.Job>
     install_done: Receiver<installer.Done>
+    mcp_test_to: Sender<mcptest.Job>    // the thread that tests an MCP server
+    mcp_test_done: Receiver<mcptest.Done>
+    mcp_tests: Map<i64, Waiter>    // the command waiting on each test
     fetching: List<Waiter>    // commands waiting on the registry
     installs: Map<i64, Install>    // installs on the installer's thread
     deno_job: i64    // the installer's job fetching Deno for Code Mode, or 0
@@ -1042,6 +1046,7 @@ impl Instance {
         let (hash_to, hash_done) = hashing.start(config.hasher)
         let dummy = config.hasher.hash(bytes.hex(random_bytes(16)))
         let (install_to, install_done) = installer.start()
+        let (mcp_test_to, mcp_test_done) = mcptest.start()
         let (push_to, push_gone) = push.start(config.apns.copy())
         let (move_to, move_done) = move.start()
         let (update_to, update_back) = update.start()
@@ -1052,12 +1057,13 @@ impl Instance {
         }
         let browser_done = Receiver<browser.Back>()
         let browser_to = browser_done.sender()
-        var i = Instance { release: config.release.copy(), host: update.host(config.in_app), exe: current_exe(), update_to: update_to, update_back: update_back, updating: no_update(), next_update_check: 0, last_busy: now(), restart_stops: List<String>(), restart: false, told_update: Json.Null, told_update_at: 0, browsers: LinkedMap<String, Browser>(), watchers: Map<u32, String>(), followers: List<u32>(), browser_pages: Map<String, String>(), browsers_to_check: List<String>(), browser_done: browser_done, browser_to: browser_to, stopped_browsers: List<Thread>(), fills: Map<String, Fill>(), turns_ended: List<(String, String, String)>(), next_browser_sweep: 0, task_stops: Map<String, String>(), resumes: List<(String, String)>(), push_to: push_to, push_gone: push_gone, move_to: move_to, move_done: move_done, lan: config.lan, bridge: none, stop_bridge: none, lan_port: 0, announcer: none, stop_announcer: none, to_close: List<ServerSocket>(), boxes: none, gate: none, stop_gate: none, doors: LinkedMap<String, egress.Door>(), moving: String(), move_waiters: List<Waiter>(), moved: moved, version: config.version.copy(), store: store, server: server, data: config.data.copy(), sessions: Map<u32, Session>(), runs: LinkedMap<String, Run>(), procs: LinkedMap<String, Proc>(), approvals: LinkedMap<String, Approval>(), lines: lines, lines_to: to, hash_to: hash_to, hash_done: hash_done, next_job: 0, auths: Map<i64, Auth>(), dummy_hash: dummy, failures: LinkedMap<String, List<i64>>(), thumbs: files.start(), events: config.events, next_prune: 0, grants: Map<String, Grant>(), calls: Map<String, Request>(), context: Map<String, (i64, i64)>(), registry_at: config.registry.copy(), registry: Json.Null, registry_time: 0, registry_fetching: false, install_to: install_to, install_done: install_done, fetching: List<Waiter>(), installs: Map<i64, Install>(), deno_job: 0, deno_waiters: List<Request>(), code_acts: Map<i64, String>(), leftovers: List<String>(), next_sweep: 0, device_calls: Map<String, DeviceCall>(), setups: Map<String, Setup>(), minute_ms: config.minute_ms, next_due: 0, routine_runs: Map<String, RoutineRun>(), routine_marks: Map<String, (String, String)>(), run_chains: Map<String, List<String>>(), panel_calls: Map<String, Waiter>(), script_calls: Map<String, Request>(), running_flows: LinkedMap<String, flows.Flow>(), flow_steps: Map<String, (String, usize)>(), advancing: List<String>(), flow_results: List<(String, usize, bool, String)>(), flows_due: List<String>(), slow_calls: Map<String, String>(), acting: 0, call_actions: Map<String, i64>(), tool_actions: Map<String, i64>(), sealer: try secret_key(config.data.copy()) }
+        var i = Instance { release: config.release.copy(), host: update.host(config.in_app), exe: current_exe(), update_to: update_to, update_back: update_back, updating: no_update(), next_update_check: 0, last_busy: now(), restart_stops: List<String>(), restart: false, told_update: Json.Null, told_update_at: 0, browsers: LinkedMap<String, Browser>(), watchers: Map<u32, String>(), followers: List<u32>(), browser_pages: Map<String, String>(), browsers_to_check: List<String>(), browser_done: browser_done, browser_to: browser_to, stopped_browsers: List<Thread>(), fills: Map<String, Fill>(), turns_ended: List<(String, String, String)>(), next_browser_sweep: 0, task_stops: Map<String, String>(), resumes: List<(String, String)>(), push_to: push_to, push_gone: push_gone, move_to: move_to, move_done: move_done, lan: config.lan, bridge: none, stop_bridge: none, lan_port: 0, announcer: none, stop_announcer: none, to_close: List<ServerSocket>(), boxes: none, gate: none, stop_gate: none, doors: LinkedMap<String, egress.Door>(), moving: String(), move_waiters: List<Waiter>(), moved: moved, version: config.version.copy(), store: store, server: server, data: config.data.copy(), sessions: Map<u32, Session>(), runs: LinkedMap<String, Run>(), procs: LinkedMap<String, Proc>(), approvals: LinkedMap<String, Approval>(), lines: lines, lines_to: to, hash_to: hash_to, hash_done: hash_done, next_job: 0, auths: Map<i64, Auth>(), dummy_hash: dummy, failures: LinkedMap<String, List<i64>>(), thumbs: files.start(), events: config.events, next_prune: 0, grants: Map<String, Grant>(), calls: Map<String, Request>(), context: Map<String, (i64, i64)>(), registry_at: config.registry.copy(), registry: Json.Null, registry_time: 0, registry_fetching: false, install_to: install_to, install_done: install_done, mcp_test_to: mcp_test_to, mcp_test_done: mcp_test_done, mcp_tests: Map<i64, Waiter>(), fetching: List<Waiter>(), installs: Map<i64, Install>(), deno_job: 0, deno_waiters: List<Request>(), code_acts: Map<i64, String>(), leftovers: List<String>(), next_sweep: 0, device_calls: Map<String, DeviceCall>(), setups: Map<String, Setup>(), minute_ms: config.minute_ms, next_due: 0, routine_runs: Map<String, RoutineRun>(), routine_marks: Map<String, (String, String)>(), run_chains: Map<String, List<String>>(), panel_calls: Map<String, Waiter>(), script_calls: Map<String, Request>(), running_flows: LinkedMap<String, flows.Flow>(), flow_steps: Map<String, (String, usize)>(), advancing: List<String>(), flow_results: List<(String, usize, bool, String)>(), flows_due: List<String>(), slow_calls: Map<String, String>(), acting: 0, call_actions: Map<String, i64>(), tool_actions: Map<String, i64>(), sealer: try secret_key(config.data.copy()) }
         if config.sandboxes.len() > 0 and not i.lan { try i.sandboxes_on(config.sandboxes.copy(), config.sandbox_image.copy()) }
         // An action the last run of the instance left started, it never finished.
         try i.store.settle_cut_short()
         // Nor did it stop the browsers it had open, if it crashed.
         browser.stop_leftovers("{i.data}/browsers")
+        try i.give_imported_servers()
         i.pick_up_registry()
         // What waited behind a turn the restart cut short goes once the loop
         // runs; a queue the person left waiting by stopping a turn still waits.
@@ -1582,6 +1588,15 @@ impl Instance {
                     ok => {},
                     err(e) => eprintln("loom: installing: {e}"),
                 }
+            }
+            while let d = i.mcp_test_done.next() {
+                let w = i.mcp_tests.remove(d.id) else continue
+                let answer = if d.error.len() > 0 { Answer.Refused(String("mcp_failed"), d.error) } else {
+                    var names = List<Json>()
+                    for n in d.tools { names.push(Json.Str(n.copy())) }
+                    Answer.Value(Obj.new().j("tools", Json.Array(names)).done())
+                }
+                i.answer_cmd(w, answer)
             }
             while let d = i.move_done.next() {
                 match i.move_finished(d) {
@@ -2521,6 +2536,70 @@ impl Instance {
         var out: List<Json> = [loom]
         out.extend(i.agent_servers(user, wanted, http, boxed))
         return Json.Array(out)
+    }
+
+    // mcp.test: starts one of the person's MCP servers as an agent's session
+    // would, with its secrets, and answers with its tools' names once it has
+    // listed them, or with why it didn't start. A sandboxed person's servers
+    // run only in their agents' sandboxes, so theirs aren't started here.
+    fn test_mcp(i: mut Instance, w: Waiter, user: String, args: Json) ! Error {
+        let server_name = str_at(args, "name") ?? String()
+        let server = try i.store.mcp_server(user.copy(), server_name.copy()) else {
+            i.answer_cmd(w, Answer.Refused(String("not_found"), "There's no MCP server {server_name}."))
+            return
+        }
+        if i.sandboxed(user.copy()) {
+            i.answer_cmd(w, Answer.Refused(String("not_allowed"), String("Your MCP servers run only in your agents' sandboxes, so they can't be tested here: ask an agent to use one.")))
+            return
+        }
+        // Each secret it names, by name, that the person doesn't have.
+        var missing = List<String>()
+        for key in ["env", "headers"] {
+            if let Json.Object(m) = at(server.copy(), key) {
+                for (_, v) in m {
+                    if let secret = str_at(v.copy(), "secret") {
+                        if i.value_of(user.copy(), v.copy()) == none and not missing.contains(secret.copy()) { missing.push(secret) }
+                    }
+                }
+            }
+        }
+        if missing.len() > 0 {
+            i.answer_cmd(w, Answer.Refused(String("mcp_failed"), "It uses {if missing.len() == 1 { "a secret" } else { "secrets" }} you don't have: {missing.join(", ")}. Add {if missing.len() == 1 { "it" } else { "them" }} under Keys on the MCP servers page."))
+            return
+        }
+        let spec = i.session_server(user, server, true) else {
+            i.answer_cmd(w, Answer.Refused(String("mcp_failed"), String("It can't be started as it's set.")))
+            return
+        }
+        i.next_job += 1
+        i.mcp_tests.insert(i.next_job, w.copy())
+        i.mcp_test_to.send(mcptest.Job { id: i.next_job, spec: spec })
+    }
+
+    // Agents an import made before it gave them the MCP servers it brought have
+    // none of them, as OpenBot's every agent had every server: each that has no
+    // servers gets those, once.
+    fn give_imported_servers(i: Instance) ! Error {
+        if try i.store.meta(String("imported_servers_given")) != none { return }
+        for u in try i.store.users() {
+            let servers = try i.store.imported_of(u.id.copy(), "mcp")
+            if servers.len() == 0 { continue }
+            for (source, _, agent_id) in try i.store.imported_of(u.id.copy(), "agent") {
+                let a = try i.store.agent(u.id.copy(), agent_id.copy()) else continue
+                if let Json.Array(had) = at(a.copy(), "mcp") {
+                    if had.len() > 0 { continue }
+                }
+                var names = List<Json>()
+                for (from, _, name) in servers.copy() {
+                    if from == source and try i.store.mcp_server(u.id.copy(), name.copy()) != none { names.push(Json.Str(name.copy())) }
+                }
+                if names.len() == 0 { continue }
+                let given = merge(a, Obj.new().j("mcp", Json.Array(names)).done())
+                try i.store.put_agent_json(u.id.copy(), given.copy())
+                try i.event(u.id.copy(), "agent.updated", Obj.new().j("agent", given).done())
+            }
+        }
+        try i.store.set_meta(String("imported_servers_given"), String("1"))
     }
 
     // The person's MCP servers the agent has, as ACP's session/new takes them,
@@ -3575,6 +3654,12 @@ impl Instance {
             try i.slow_cmd(Waiter { socket: none, id: call }, g.user, name, a)
             return none
         }
+        if name == "mcp.test" {
+            let call = try i.store.new_id("tc")
+            i.hold_call(call.copy(), req.copy())
+            try i.test_mcp(Waiter { socket: none, id: call }, g.user, a)
+            return none
+        }
         let reads = name.ends_with(".list") or name.ends_with(".get") or name.ends_with(".search") or name.ends_with(".revisions")
         let result = try i.command(g.user.copy(), g.agent.copy(), name.copy(), a)
         if not reads {
@@ -3737,17 +3822,25 @@ impl Instance {
         var came = Map<String, i64>()
         var already: i64 = 0
 
-        // MCP servers, without their environment and headers.
+        // MCP servers, without their environment and headers. Every agent in
+        // OpenBot has every server, so every agent that comes has these.
+        var servers_for_agents = List<Json>()
         if let Json.Array(list) = at(b.copy(), "mcp") {
             for s in list {
                 let source_name = str_at(s.copy(), "name") ?? String()
-                if try i.store.imported(user.copy(), from.copy(), "mcp", source_name.copy()) != none {
+                if let had = try i.store.imported(user.copy(), from.copy(), "mcp", source_name.copy()) {
+                    servers_for_agents.push(Json.Str(had))
                     already += 1
                     continue
                 }
                 let server_name = importer.skill_name(source_name.copy())
-                if server_name.len() == 0 or server_name == "loom" or try i.store.mcp_server(user.copy(), server_name.copy()) != none {
+                if server_name.len() == 0 or server_name == "loom" {
+                    left.push("MCP server {source_name}: its name can't be one in loom, so it didn't come.")
+                    continue
+                }
+                if try i.store.mcp_server(user.copy(), server_name.copy()) != none {
                     left.push("MCP server {source_name}: you have one named {server_name} already, so yours stays.")
+                    servers_for_agents.push(Json.Str(server_name))
                     continue
                 }
                 let command = str_at(s.copy(), "command") ?? String()
@@ -3763,6 +3856,7 @@ impl Instance {
                 }
                 try i.store.put_mcp_server(user.copy(), server.done())
                 try i.store.mark_imported(user.copy(), from.copy(), "mcp", source_name.copy(), server_name.copy())
+                servers_for_agents.push(Json.Str(server_name.copy()))
                 if bool_at(s, "had_secrets") == some(true) { left.push("MCP server {server_name} came without its environment and headers: add its keys with mcp.put, as secrets.") }
                 tally(mut came, "mcp")
             }
@@ -3815,7 +3909,7 @@ impl Instance {
                 if model.len() > 0 { config = config.s("model", model) }
                 let effort = str_at(a.copy(), "effort") ?? String()
                 if effort.len() > 0 { config = config.s("effort", effort) }
-                var agent = Obj.new().s("id", id.copy()).s("name", agent_name.copy()).s("color", if color.len() > 0 { color } else { String(COLORS[count_now % COLORS.len()]) }).s("acp_agent", program).s("instructions", str_at(a.copy(), "instructions") ?? String()).j("mcp", Json.Array(List<Json>())).s("permission", String("ask")).j("config", config.done()).i("revision", 1).i("at", now())
+                var agent = Obj.new().s("id", id.copy()).s("name", agent_name.copy()).s("color", if color.len() > 0 { color } else { String(COLORS[count_now % COLORS.len()]) }).s("acp_agent", program).s("instructions", str_at(a.copy(), "instructions") ?? String()).j("mcp", Json.Array(servers_for_agents.copy())).s("permission", String("ask")).j("config", config.done()).i("revision", 1).i("at", now())
                 if bool_at(a.copy(), "pinned") == some(true) { agent = agent.i("pinned", pin_base + (int_at(a, "pin_order") ?? 0)) }
                 let made = agent.done()
                 try i.store.put_agent(user.copy(), made.copy(), by.copy())
@@ -7874,6 +7968,10 @@ impl Instance {
         }
         if name == "plugin.message" {
             try i.panel_message(Waiter { socket: some(s), id: id }, user, args)
+            return
+        }
+        if name == "mcp.test" {
+            try i.test_mcp(Waiter { socket: some(s), id: id }, user, args)
             return
         }
         if name == "chat.ask" {
