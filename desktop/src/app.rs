@@ -174,6 +174,10 @@ pub struct Loom {
     side: Option<Screen>,
     /// The settings page the popup opened at last, to open at again.
     settings_last: Screen,
+    /// The update icon's popup: the pointer is on the icon, or on the popup, and when it
+    /// last left both, so the popup stays a moment for the pointer to cross the gap.
+    update_over: (bool, bool),
+    update_left: Option<Instant>,
     rows: Rc<Vec<Row>>,
     scroller: Entity<MessageScrollerState>,
     composer: Entity<TextareaState>,
@@ -685,6 +689,7 @@ ACTA_KEY=secret:ACTA_KEY",
                         cx.notify();
                     }
                     loom.spread_release();
+                    loom.route_updates(cx);
                     loom.watch_adding(cx);
                     // A server an agent offered, and the person said yes to here.
                     let mut offered = std::mem::take(&mut loom.model.offered);
@@ -722,6 +727,7 @@ ACTA_KEY=secret:ACTA_KEY",
                         }
                     }
                     loom.spread_release();
+                    loom.route_updates(cx);
                     loom.fetch();
                     loom.open_fetched(cx);
                     if changed {
@@ -795,6 +801,8 @@ ACTA_KEY=secret:ACTA_KEY",
             popup: None,
             side: None,
             settings_last: Screen::Profile,
+            update_over: (false, false),
+            update_left: None,
             rows: Rc::new(Vec::new()),
             scroller,
             composer,
@@ -1268,6 +1276,86 @@ ACTA_KEY=secret:ACTA_KEY",
         }
     }
 
+    /// Hands a frame to the core of the server whose folder is `dir`, here or away.
+    fn send_to(&self, dir: &str, frame: &Value) {
+        if self.here == dir {
+            self.core.send(&frame.to_string());
+        } else if let Some(a) = self.away.iter().find(|a| a.dir == dir) {
+            a.core.send(&frame.to_string());
+        }
+    }
+
+    /// The first core's model, which says what's behind across the app.
+    fn hub(&self) -> &Model {
+        if self.here.is_empty() {
+            return &self.model;
+        }
+        self.away
+            .iter()
+            .find(|a| a.dir.is_empty())
+            .map(|a| &a.model)
+            .unwrap_or(&self.model)
+    }
+
+    fn hub_mut(&mut self) -> &mut Model {
+        if self.here.is_empty() {
+            return &mut self.model;
+        }
+        match self.away.iter_mut().find(|a| a.dir.is_empty()) {
+            Some(a) => &mut a.model,
+            None => &mut self.model,
+        }
+    }
+
+    /// Carries what the update icon needs between the cores, as the first core asks:
+    /// each other server's `core.server` to it, what it relays to another server's
+    /// core, and the app's own update once it says the app goes (core/updates.calx).
+    fn route_updates(&mut self, cx: &mut Context<Self>) {
+        let mut said: Vec<(String, Value)> = Vec::new();
+        if let Some(f) = self.model.server_said.take() {
+            said.push((self.here.clone(), f));
+        }
+        for a in &mut self.away {
+            if let Some(f) = a.model.server_said.take() {
+                said.push((a.dir.clone(), f));
+            }
+        }
+        for (dir, mut f) in said {
+            // The first core hears its own server itself.
+            if dir.is_empty() {
+                continue;
+            }
+            f["t"] = "server.state".into();
+            f["dir"] = dir.into();
+            self.send_to("", &f);
+        }
+        let relays = std::mem::take(&mut self.hub_mut().relays);
+        for (dir, frame) in relays {
+            self.send_to(&dir, &frame);
+        }
+        if let Some(path) = self.hub_mut().restart.take() {
+            match shell::apply_update(std::path::Path::new(&path), false) {
+                Ok(()) => cx.quit(),
+                Err(e) => {
+                    self.model
+                        .notices
+                        .push(format!("loom couldn't update itself: {e}"));
+                    cx.notify();
+                }
+            }
+        }
+    }
+
+    /// Updates `device` ("app", or a server's folder), or with none, everything behind
+    /// that this person may update: the first core decides what that means.
+    fn run_updates(&mut self, device: Option<&str>) {
+        let mut f = serde_json::json!({"t": "updates.run"});
+        if let Some(d) = device {
+            f["device"] = d.into();
+        }
+        self.send_to("", &f);
+    }
+
     /// Puts the server whose folder is `dir` on screen, and the one there away.
     fn show_server(&mut self, dir: &str, cx: &mut Context<Self>) {
         if self.here == dir {
@@ -1406,7 +1494,12 @@ ACTA_KEY=secret:ACTA_KEY",
             return;
         }
         if let Some(i) = self.away.iter().position(|a| a.dir == dir) {
-            // Its core stops as it's dropped, and lets go of its folder.
+            // Its core stops as it's dropped, and lets go of its folder; the first core
+            // forgets whether it was behind.
+            self.send_to(
+                "",
+                &serde_json::json!({"t": "server.state", "dir": dir, "gone": true}),
+            );
             drop(self.away.remove(i));
         }
         let dirs: Vec<String> = server_dirs().into_iter().filter(|d| d != dir).collect();
@@ -4238,45 +4331,6 @@ ACTA_KEY=secret:ACTA_KEY",
         }
         let server_open = self.popup.is_some_and(is_server);
         let settings_open = self.popup.is_some() && !server_open;
-        // A newer loom, downloaded and checked, waits for a restart.
-        let update = self.model.update.clone().map(|(version, path)| {
-            div()
-                .id("update")
-                .mx(px(space::S))
-                .mb(px(space::S))
-                .px(px(space::M))
-                .py(px(space::S))
-                .rounded(px(radius::ROW))
-                .bg(p.hover)
-                .cursor_pointer()
-                .soft_hover(p.hover, p.active, None)
-                .flex()
-                .flex_col()
-                .child(
-                    div()
-                        .text_size(px(size::SMALL))
-                        .font_weight(FontWeight::MEDIUM)
-                        .text_color(p.ink)
-                        .child(format!("loom {version} is ready")),
-                )
-                .child(
-                    div()
-                        .text_size(px(size::CAPTION))
-                        .text_color(p.ink_3)
-                        .child("Restart to update"),
-                )
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    match shell::apply_update(std::path::Path::new(&path), false) {
-                        Ok(()) => cx.quit(),
-                        Err(e) => {
-                            this.model
-                                .notices
-                                .push(format!("loom couldn't update itself: {e}"));
-                            cx.notify();
-                        }
-                    }
-                }))
-        });
         div()
             .w(px(layout::SIDEBAR))
             .h_full()
@@ -4365,9 +4419,10 @@ ACTA_KEY=secret:ACTA_KEY",
                     .overflow_y_scroll()
                     .child(if searching { self.hits(cx) } else { list }),
             )
-            .when_some(update, |d, row| d.child(row))
+            .when_some(self.update_pop(cx), |d, pop| d.child(pop))
             // The server, as its spool, on the left, and the settings on the right: each
-            // opens the popup.
+            // opens the popup. While anything loom runs is behind, the update icon sits
+            // just left of the gear.
             .child(
                 div()
                     .flex()
@@ -4377,6 +4432,7 @@ ACTA_KEY=secret:ACTA_KEY",
                     .px(px(space::S))
                     .py(px(space::S))
                     .child(self.spools(server_open, cx))
+                    .when_some(self.update_icon(cx), |d, icon| d.child(icon))
                     .child(
                         div()
                             .id("settings")
@@ -4398,13 +4454,245 @@ ACTA_KEY=secret:ACTA_KEY",
                                 p.hover,
                                 Some((if settings_open { p.ink } else { p.ink_3 }, p.ink)),
                             )
-                            .child(Icon::new(Ico::Settings).small())
+                            .child(Icon::new(Ico::Settings))
                             .on_click(cx.listener(|this, _, _, cx| {
                                 let last = this.settings_last;
                                 this.open(last, cx)
                             })),
                     ),
             )
+    }
+
+    // --- The update icon (core/updates.calx decides; this draws it) ---
+
+    /// What's behind across the app, as the first core says it.
+    fn behind(&self) -> &[model::Behind] {
+        &self.hub().behind
+    }
+
+    /// A device behind, by name: this app, or a server as the sidebar names it.
+    fn behind_name(&self, b: &model::Behind) -> String {
+        if b.app {
+            return "This app".into();
+        }
+        self.servers()
+            .into_iter()
+            .find(|(dir, _)| *dir == b.device)
+            .map(|(dir, m)| server_name(m, &dir))
+            .unwrap_or_else(|| "A server".into())
+    }
+
+    /// Whether the update popup shows: the pointer is on the icon or the popup, or left
+    /// them a moment ago, so it can cross between them.
+    fn update_pop_open(&self) -> bool {
+        let (icon, pop) = self.update_over;
+        icon || pop
+            || self
+                .update_left
+                .is_some_and(|t| t.elapsed() < Duration::from_millis(300))
+    }
+
+    /// Notes the pointer coming onto or leaving the icon (`which` 0) or the popup (1).
+    fn update_hovered(&mut self, which: usize, over: bool, cx: &mut Context<Self>) {
+        if which == 0 {
+            self.update_over.0 = over;
+        } else {
+            self.update_over.1 = over;
+        }
+        if !over {
+            self.update_left = Some(Instant::now());
+            // Closes once the moment is up, unless the pointer came back.
+            cx.spawn(async move |this, cx| {
+                cx.background_executor()
+                    .timer(Duration::from_millis(320))
+                    .await;
+                let _ = this.update(cx, |_, cx| cx.notify());
+            })
+            .detach();
+        }
+        cx.notify();
+    }
+
+    /// The icon just left of the gear, while anything loom runs is behind: a click updates
+    /// everything this person may update, and hovering shows each device.
+    fn update_icon(&self, cx: &mut Context<Self>) -> Option<Stateful<Div>> {
+        let behind = self.behind();
+        if behind.is_empty() {
+            return None;
+        }
+        let p = self.p;
+        let busy = behind.iter().any(|b| {
+            matches!(
+                b.state.as_str(),
+                "asked" | "downloading" | "waiting" | "restarting"
+            )
+        });
+        let all = self.hub().behind_all;
+        let open = self.update_pop_open();
+        Some(
+            div()
+                .id("update")
+                .size(px(control::ICON_LARGE))
+                .flex_none()
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded(px(radius::ROW))
+                .cursor_pointer()
+                .when(open, |d| d.bg(p.hover))
+                .soft_hover(
+                    if open { p.hover } else { transparent_black() },
+                    p.hover,
+                    Some((if busy { p.ink_3 } else { p.ink_2 }, p.ink)),
+                )
+                .child(Icon::new(Ico::CircleFadingArrowUp))
+                .on_hover(cx.listener(|this, over: &bool, _, cx| this.update_hovered(0, *over, cx)))
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    if all {
+                        this.run_updates(None);
+                    }
+                    cx.notify();
+                })),
+        )
+    }
+
+    /// The popup over the sidebar's foot: each device that's behind, with its versions and
+    /// its own Update, or how its update stands, or plainly why it can't be updated here.
+    fn update_pop(&self, cx: &mut Context<Self>) -> Option<Stateful<Div>> {
+        let behind = self.behind().to_vec();
+        if behind.is_empty() || !self.update_pop_open() {
+            return None;
+        }
+        let p = self.p;
+        let mut list = div().flex().flex_col().gap(px(2.0));
+        for b in &behind {
+            let name = self.behind_name(b);
+            let versions = format!("{} → {}", b.version, b.latest);
+            let (note, failed): (Option<String>, bool) = match b.state.as_str() {
+                "asked" | "downloading" => (Some("Downloading…".into()), false),
+                "waiting" => (Some("Updates once nothing runs".into()), false),
+                "restarting" => (Some("Restarting…".into()), false),
+                "failed" => (
+                    Some(if b.error.is_empty() {
+                        "Didn't update".into()
+                    } else {
+                        format!("Didn't update: {}", b.error)
+                    }),
+                    true,
+                ),
+                _ if !b.can => (
+                    Some(if b.why.is_empty() {
+                        "It can't update itself where it runs.".into()
+                    } else {
+                        b.why.clone()
+                    }),
+                    false,
+                ),
+                _ if !b.may => (Some("An owner or admin updates it".into()), false),
+                _ => (None, false),
+            };
+            let offer = b.may && b.can && matches!(b.state.as_str(), "" | "failed");
+            let device = b.device.clone();
+            let id = SharedString::from(format!("update-{}", b.device));
+            list = list.child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(space::M))
+                    .px(px(space::S))
+                    .py(px(space::S))
+                    .rounded(px(radius::ROW))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .flex()
+                            .flex_col()
+                            .child(
+                                div()
+                                    .text_size(px(size::SMALL))
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .text_color(p.ink)
+                                    .truncate()
+                                    .child(name),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(size::CAPTION))
+                                    .text_color(p.ink_3)
+                                    .child(versions),
+                            )
+                            .when_some(note, |d, n| {
+                                d.child(
+                                    div()
+                                        .text_size(px(size::CAPTION))
+                                        .text_color(if failed { p.bad } else { p.ink_3 })
+                                        .child(n),
+                                )
+                            }),
+                    )
+                    .when(offer, |d| {
+                        d.child(self.small_button(id, "Update", false).flex_none().on_click(
+                            cx.listener(move |this, _, _, cx| {
+                                this.run_updates(Some(&device));
+                                cx.notify();
+                            }),
+                        ))
+                    }),
+            );
+        }
+        let offered = behind
+            .iter()
+            .filter(|b| b.may && b.can && matches!(b.state.as_str(), "" | "failed"))
+            .count();
+        let head = div()
+            .flex()
+            .items_center()
+            .justify_between()
+            .px(px(space::S))
+            .pt(px(space::XS))
+            .pb(px(space::XS))
+            .child(
+                div()
+                    .text_size(px(size::CAPTION))
+                    .text_color(p.ink_3)
+                    .child("Updates"),
+            )
+            .when(offered > 1, |d| {
+                d.child(
+                    div()
+                        .id("update-all")
+                        .text_size(px(size::CAPTION))
+                        .text_color(p.ink_2)
+                        .cursor_pointer()
+                        .soft_ink(p.ink_2, p.ink)
+                        .child("Update all")
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.run_updates(None);
+                            cx.notify();
+                        })),
+                )
+            });
+        Some(
+            div()
+                .id("update-pop")
+                .absolute()
+                .left(px(space::S))
+                .right(px(space::S))
+                .bottom(px(control::SERVER + space::S * 2.0 - space::XS))
+                .p(px(space::XS))
+                .flex()
+                .flex_col()
+                .rounded(px(radius::CARD))
+                .border_1()
+                .border_color(p.line)
+                .bg(p.raised)
+                .shadow_lg()
+                .occlude()
+                .on_hover(cx.listener(|this, over: &bool, _, cx| this.update_hovered(1, *over, cx)))
+                .child(head)
+                .child(list),
+        )
     }
 
     fn header(&mut self, cx: &mut Context<Self>) -> Div {
@@ -12729,6 +13017,8 @@ fn core_config(dir: &str, server: Option<&str>) -> String {
         }
         return config.to_string();
     }
+    // The first core gathers what's behind across the app, for the update icon.
+    config["hub"] = true.into();
     // Releases update themselves. A build from source doesn't, unless LOOM_UPDATE names a
     // manifest to try.
     match std::env::var("LOOM_UPDATE") {

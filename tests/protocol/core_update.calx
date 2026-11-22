@@ -1,0 +1,253 @@
+module tests.protocol.core_update
+
+// What's behind across the app, and updating it (core/updates.calx, and
+// core/conn.calx's side of instance.update), against a real instance run by
+// hand with a release of its own, as tests/protocol/server_update.calx serves
+// one. A core with the hub, as the app's first core has, hears the newest
+// release, asks its instance who may update it, and says core.updates. Update
+// everything has the instance update itself; the core sees it restart, tries
+// again every second, and is back on the new version by itself, with nothing
+// left behind. An instance that can't update itself where it runs (here, one
+// that says it's in Docker) is listed with why, and isn't offered Update.
+//
+//     calx tests/protocol/core_update.calx
+import std.bytes
+import std.crypto.{Ed25519Key}
+import std.env
+import std.fs
+import std.hash.{sha256}
+import std.http.server.{Server}
+import std.json.{Json, parse}
+import std.process.{Child, Command, exit}
+import std.random.{Random}
+import std.thread.{Task, sleep}
+import std.time.{Instant}
+import shared.obj.{Obj, at, bool_at, str_at}
+import core.cache.{Cache}
+import core.conn.{Conn}
+import core.updates.{Hub}
+import server.update
+import tests.kit.{Instance, calx, check, json_of}
+
+struct Serving {
+    server: Server
+    dir: String
+}
+
+impl Task for Serving {
+    fn run(own self) {
+        var s = self
+        s.server.serve(s.dir.copy())
+    }
+}
+
+fn sh(program: String, args: List<String>) -> String ! Error {
+    let out = try Command.new(program.copy()).args(args.copy()).output()
+    if not out.status.success() { fail "{program} {args.join(" ")}: {out.error_text()}" }
+    return out.text()
+}
+
+// `data` with every `from` in it written over with `to`, which is as long.
+fn patched(data: List<u8>, from: String, to: String) -> List<u8> ! Error {
+    let a = from.to_bytes()
+    let b = to.to_bytes()
+    if a.len() != b.len() or a.len() == 0 { fail "a version is patched with one as long" }
+    var out = data.copy()
+    var found: usize = 0
+    var k: usize = 0
+    while k + a.len() <= out.len() {
+        var same = true
+        for j in 0usize..a.len() {
+            if out[k + j] != a[j] {
+                same = false
+                break
+            }
+        }
+        if same {
+            for j in 0usize..b.len() {
+                out[k + j] = b[j]
+            }
+            found += 1
+            k += a.len()
+        } else {
+            k += 1
+        }
+    }
+    if found == 0 { fail "the program doesn't hold {from}" }
+    return out
+}
+
+// Writes a release of `exe` as `version` into `dir`, signed with `key`, served at `base`.
+fn release(dir: String, version: String, exe: String, key: Ed25519Key, base: String) ! Error {
+    let data = try fs.read(exe)
+    let name = "loom-{version}"
+    try fs.write("{dir}/{name}", data.copy())
+    let entry = Obj.new().s("name", String("loom")).s("url", "{base}/{name}").s("sha256", bytes.hex(sha256(data.copy()))).i("size", i64.wrap(u64(data.len()))).done()
+    var files = Obj.new().done()
+    if let Json.Object(m) = mut files { m.insert(update.kind(), entry) }
+    let manifest = "{Obj.new().s("version", version).s("notes", String("Faster.")).j("files", files).done()}"
+    try fs.write_text("{dir}/manifest.json", manifest.copy())
+    try fs.write_text("{dir}/manifest.json.sig", bytes.base64(key.sign(manifest.to_bytes())))
+}
+
+// The app's side of a core with the hub: what it sends, and what the core says.
+struct Core {
+    to_core: Sender<String>
+    from_core: Receiver<String>
+    thread: Thread?
+}
+
+impl Core {
+    fn start(base: String, token: String, cache: String) -> Core ! Error {
+        let inbox = Receiver<String>()
+        let to_core = inbox.sender()
+        let from_core = Receiver<String>()
+        var random = Random.system()
+        var conn = Conn.new(some("http://{base}"), some(token.copy()), "loom-test-{random.next_u32()}", try Cache.open(cache), inbox, from_core.sender())
+        conn.hub = some(Hub.new(String("0.0.1")))
+        let t = unsafe { Thread.spawn(conn) }
+        return Core { to_core: to_core, from_core: from_core, thread: some(t) }
+    }
+
+    fn send(mut self, frame: Json) {
+        self.to_core.send("{frame}")
+    }
+
+    // Reads what the core says until a frame whose `t` is `t` and that `wanted` takes.
+    fn until<F: Fn(Json) -> bool>(mut self, t: str, ms: u64, wanted: F) -> Json ! Error {
+        let start = unsafe { Instant.now() }
+        loop {
+            let waited = unsafe { Instant.now() }.nanos_since(start) / 1000000
+            if waited >= ms { fail "no {t} that was wanted came in {ms} ms" }
+            let m = unsafe { self.from_core.wait_for((ms - waited) * 1000000) } else { continue }
+            let f = try parse(m)
+            if str_at(f.copy(), "t") != some(String(t)) { continue }
+            if wanted(f.copy()) { return f }
+        }
+    }
+
+    fn stop(mut self) {
+        self.to_core.send(String(#"{"t":"core.stop"}"#))
+        if let t = self.thread.take() { t.join() }
+    }
+}
+
+fn devices(f: Json) -> List<Json> {
+    return match at(f, "devices") {
+        Json.Array(a) => a,
+        _ => List<Json>(),
+    }
+}
+
+fn listed_may(f: Json) -> bool {
+    let d = devices(f.copy())
+    return d.len() == 1 and str_at(d[0].copy(), "device") == some(String()) and bool_at(d[0].copy(), "may") == some(true) and bool_at(d[0].copy(), "can") == some(true) and bool_at(f, "all") == some(true)
+}
+
+fn none_listed(f: Json) -> bool {
+    return devices(f).len() == 0
+}
+
+fn restarting(f: Json) -> bool {
+    return str_at(at(f, "update"), "state") == some(String("restarting"))
+}
+
+fn live(f: Json) -> bool {
+    return str_at(f, "state") == some(String("live"))
+}
+
+fn cant(f: Json) -> bool {
+    let d = devices(f.copy())
+    return d.len() == 1 and bool_at(d[0].copy(), "can") == some(false) and (str_at(d[0].copy(), "why") ?? String()).contains("container") and bool_at(f, "all") == some(false)
+}
+
+fn run(root: String, started: mut List<Child>) ! Error {
+    let exe_name = if env.os() == "windows" { "loom.exe" } else { "loom" }
+    let bin = "{root}/bin"
+    let rel = "{root}/rel"
+    try fs.make_dir_all(bin.copy())
+    try fs.make_dir_all(rel.copy())
+    let exe = "{bin}/{exe_name}"
+    println("building loom…")
+    _ = try sh(calx(), [String("build"), String("server/main.calx"), String("-o"), exe.copy()])
+    let said = try sh(exe.copy(), [String("version"), String("--json")])
+    let v1 = str_at(json_of(said.to_bytes()), "version") ?? String()
+    let lead = v1[..1].copy()
+    if lead != "0" and lead != "1" and lead != "2" and lead != "3" and lead != "4" { fail "this test makes a newer version from one that starts with 0 to 4, not {v1}" }
+    let v2 = "5{v1[1..]}"
+    let p2 = "{root}/loom-5{if env.os() == "windows" { ".exe" } else { "" }}"
+    try fs.write(p2.copy(), try patched(try fs.read(exe.copy()), v1.copy(), v2.copy()))
+    if env.os() != "windows" { try fs.set_mode(p2.copy(), 0o755) }
+
+    var http = try Server.listen(0)
+    http.log = false
+    let base = http.url()[..http.url().len() - 1].copy()
+    _ = unsafe { Thread.spawn(Serving { server: http, dir: root.copy() }) }
+    let key = Ed25519Key.generate()
+    let public = bytes.hex(key.public_key().bytes())
+    try release(rel.copy(), v2.copy(), p2.copy(), key, "{base}/rel")
+
+    // --- An instance run by hand, which updates itself ---
+    let data = "{root}/data"
+    try fs.make_dir_all(data.copy())
+    let cmd = Command.new(exe.copy()).args([String("serve"), String("--data"), data.copy(), String("--port"), String("0"), String("--allow-root"), String("--test-fast-hashes"), String("--test-release"), "{base}/rel/manifest.json", public.copy()]).env_remove(String("INVOCATION_ID")).env_remove(String("LOOM_SERVICE")).own_group()
+    let i = try Instance.launch(data.copy(), cmd)
+    started.push(i.server)
+    var core = try Core.start(i.base.copy(), i.token.copy(), "{root}/core.db")
+    _ = try core.until("core.conn", 30000, live)
+    core.send(Obj.new().s("t", String("release")).s("version", v2.copy()).done())
+    let behind = try core.until("core.server", 10000, |f| bool_at(f.copy(), "behind") == some(true) and bool_at(f, "may") == some(true))
+    try check(bool_at(behind, "can") == some(true), "a core whose instance is behind asks who may update it, and says so in core.server")
+    _ = try core.until("core.updates", 10000, listed_may)
+    try check(true, "the hub lists it, with Update for its owner, and update everything has something to do")
+
+    core.send(Obj.new().s("t", String("updates.run")).done())
+    _ = try core.until("core.server", 60000, restarting)
+    try check(true, "update everything has the instance update itself, and it says it's restarting")
+    let back = try core.until("core.server", 60000, |f| str_at(f, "loom") == some(v2.copy()))
+    try check(bool_at(back, "behind") == some(false), "the core reconnects by itself, to the new version")
+    _ = try core.until("core.updates", 10000, none_listed)
+    try check(true, "and nothing is listed behind any more")
+    core.stop()
+
+    // --- One that can't update itself where it runs says why ---
+    let docker_data = "{root}/docker"
+    try fs.make_dir_all(docker_data.copy())
+    let dcmd = Command.new(p2.copy()).args([String("serve"), String("--data"), docker_data.copy(), String("--port"), String("0"), String("--allow-root"), String("--test-fast-hashes")]).env(String("LOOM_SERVICE"), String("docker")).own_group()
+    let d = try Instance.launch(docker_data, dcmd)
+    started.push(d.server)
+    var other = try Core.start(d.base.copy(), d.token.copy(), "{root}/core2.db")
+    _ = try other.until("core.conn", 30000, live)
+    other.send(Obj.new().s("t", String("release")).s("version", "9{v2[1..]}").done())
+    _ = try other.until("core.updates", 10000, cant)
+    try check(true, "an instance in a container is listed with why it can't update itself, and isn't offered Update")
+    other.send(Obj.new().s("t", String("updates.run")).done())
+    unsafe { sleep(500000000) }
+    other.send(Obj.new().s("t", String("release")).s("version", "9{v2[1..]}").done())
+    let still = try other.until("core.server", 5000, |f| bool_at(f, "behind") == some(true))
+    if at(still.copy(), "update") != Json.Null { println("said: {still}") }
+    try check(at(still, "update") == Json.Null, "and update everything leaves it alone")
+    other.stop()
+}
+
+fn main() ! Error {
+    let root = try fs.temp_dir()
+    var started = List<Child>()
+    let failed = match run(root.copy(), mut started) {
+        ok => String(),
+        err(e) => "{e}",
+    }
+    // Each restart's program is in the first one's group.
+    for c in started { c.kill_tree() }
+    unsafe { sleep(500000000) }
+    match fs.remove_dir_all(root) {
+        ok => {},
+        err(_) => {},
+    }
+    if failed.len() > 0 {
+        eprintln("\n{failed}")
+        exit(1)
+    }
+    println("\ncore updates: all good")
+    exit(0)
+}

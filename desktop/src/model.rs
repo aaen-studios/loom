@@ -1512,6 +1512,41 @@ pub struct PageFrame {
     pub seq: u64,
 }
 
+/// One device that's behind, or whose update is under way or failed, as the first
+/// core says it (`core.updates`): the app itself (`device` "app") or a server, by its
+/// folder. The core decides all of it; the update icon and its popup draw it.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Behind {
+    pub device: String,
+    pub app: bool,
+    pub version: String,
+    pub latest: String,
+    /// This person may update it.
+    pub may: bool,
+    /// It can update itself where it runs, and why not when it can't.
+    pub can: bool,
+    pub why: String,
+    /// Its update under way: asked, downloading, waiting, restarting or failed.
+    pub state: String,
+    pub error: String,
+}
+
+impl Behind {
+    fn of(v: &Value) -> Behind {
+        Behind {
+            device: s(v, "device"),
+            app: s(v, "kind") == "app",
+            version: s(v, "version"),
+            latest: s(v, "latest"),
+            may: v.get("may").and_then(Value::as_bool) == Some(true),
+            can: v.get("can").and_then(Value::as_bool) != Some(false),
+            why: s(v, "why"),
+            state: s(v, "state"),
+            error: s(v, "error"),
+        }
+    }
+}
+
 /// The instance's version against loom's newest release, as the core says it
 /// (`core.server`): the core decides whether it's behind.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -1564,6 +1599,16 @@ pub struct Model {
     /// The newest release's version, as this server's core found it, for the app to
     /// hand to its other servers' cores.
     pub release: Option<String>,
+    /// The last `core.server`, for the app to hand the first core (`server.state`).
+    pub server_said: Option<Value>,
+    /// What's behind across the app, from the first core alone (`core.updates`), and
+    /// whether "update everything" has something to do.
+    pub behind: Vec<Behind>,
+    pub behind_all: bool,
+    /// Frames the first core asks the app to hand another server's core, by its folder.
+    pub relays: Vec<(String, Value)>,
+    /// The app's update to run now, through its setup, once the servers have gone.
+    pub restart: Option<String>,
     /// Each agent's browser, by agent id.
     pub browsers: HashMap<String, Browser>,
     /// The agent whose browser this device watches.
@@ -2307,7 +2352,22 @@ impl Model {
                     latest: s(f, "latest"),
                     behind: f.get("behind").and_then(Value::as_bool) == Some(true),
                 });
+                self.server_said = Some(f.clone());
             }
+            "core.updates" => {
+                self.behind = f
+                    .get("devices")
+                    .and_then(Value::as_array)
+                    .map(|a| a.iter().map(Behind::of).collect())
+                    .unwrap_or_default();
+                self.behind_all = f.get("all").and_then(Value::as_bool) == Some(true);
+            }
+            "core.relay" => {
+                if let Some(frame) = f.get("frame") {
+                    self.relays.push((s(f, "to"), frame.clone()));
+                }
+            }
+            "core.restart" => self.restart = Some(s(f, "path")),
             "core.release" => self.release = Some(s(f, "version")),
             "instance.update" => self.server_update = Some(ServerUpdate::of(f)),
             "core.data" => self.data(f),
@@ -2340,7 +2400,7 @@ impl Model {
                     let version = s(f, "version");
                     if asked {
                         self.checked = Some(format!(
-                            "loom {version} is ready. Restart it from the sidebar."
+                            "loom {version} is ready. The update icon beside the gear puts it in."
                         ));
                     }
                     self.update = Some((version, path.to_string()));
@@ -4775,6 +4835,27 @@ mod tests {
             files: Vec::new(),
         });
         m
+    }
+
+    #[test]
+    fn what_is_behind_across_the_app_as_the_first_core_says() {
+        let mut m = Model::new();
+        m.take(&json!({"t": "core.updates", "all": true, "devices": [
+            {"device": "app", "kind": "app", "version": "0.2.0", "latest": "0.2.1", "may": true, "can": true, "state": ""},
+            {"device": "servers/2", "kind": "server", "version": "0.2.0", "latest": "0.2.1", "may": true, "can": false, "why": "In a container", "state": ""}
+        ]}));
+        assert!(m.behind_all && m.behind.len() == 2);
+        assert!(m.behind[0].app && m.behind[0].may && m.behind[0].can);
+        assert!(!m.behind[1].app && !m.behind[1].can && m.behind[1].why == "In a container");
+        // What it asks the app to carry, and the app's own update once it's time.
+        m.take(&json!({"t": "core.relay", "to": "servers/3", "frame": {"t": "server.update"}}));
+        assert_eq!(m.relays.len(), 1);
+        assert_eq!(m.relays[0].0, "servers/3");
+        m.take(&json!({"t": "core.restart", "version": "0.2.1", "path": "C:/u/loom-setup.exe"}));
+        assert_eq!(m.restart.as_deref(), Some("C:/u/loom-setup.exe"));
+        // A core.server is kept for the app to hand the first core.
+        m.take(&json!({"t": "core.server", "loom": "0.2.0", "latest": "0.2.1", "behind": true}));
+        assert!(m.server_said.take().is_some());
     }
 
     #[test]

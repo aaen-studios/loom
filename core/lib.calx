@@ -14,11 +14,12 @@ import std.crypto.{PasswordHasher}
 import std.fs
 import std.json.{Json, parse}
 import std.thread.{Task}
-import shared.obj.{Obj, str_at}
+import shared.obj.{Obj, bool_at, str_at}
 import core.cache.{Cache}
 import core.conn.{Conn}
 import core.pushbox
 import core.update.{Updater}
+import core.updates.{Hub}
 import shared.release.{MANIFEST}
 import server.instance.{Config, EventLife, Instance}
 import server.mcp
@@ -182,6 +183,10 @@ impl Task for Boot {
         var conn = Conn.new(server, token, service, cache, b.inbox, b.to_app)
         conn.tz = str_at(cfg.copy(), "tz")
         conn.local = str_at(cfg.copy(), "mode") == some(String("local"))
+        // The first core gathers what's behind across the app, for the update icon.
+        if bool_at(cfg.copy(), "hub") == some(true) {
+            conn.hub = some(Hub.new(str_at(cfg.copy(), "version") ?? String()))
+        }
         if let d = data {
             conn.files = some("{d}/files")
             // Updates, for an app that says its version. An empty `update` turns them off.
