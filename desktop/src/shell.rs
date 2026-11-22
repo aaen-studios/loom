@@ -196,7 +196,7 @@ pub fn notify(title: &str, body: &str, _about: Option<About>, sound: bool) {
     }
 }
 
-/// The id the installer gives loom's Start menu shortcut (installer.iss), which Windows
+/// The id loom-setup gives loom's Start menu shortcut (desktop/setup), which Windows
 /// shows notifications under.
 #[cfg(windows)]
 const APP_ID: &str = "AaenStudios.Loom";
@@ -217,26 +217,17 @@ fn app_id() -> &'static str {
     }
 }
 
-/// The program as it was before an update, kept beside it until the next start.
-fn old_exe() -> Option<std::path::PathBuf> {
-    Some(std::env::current_exe().ok()?.with_extension("old.exe"))
-}
-
-/// Puts the update at `new` in this program's place and starts it, for the app to quit
-/// after, in the tray when `background`. The old program is kept as loom.old.exe, and
-/// put back if the swap fails.
-pub fn apply_update(new: &std::path::Path, background: bool) -> std::io::Result<()> {
-    let exe = std::env::current_exe()?;
-    let old = old_exe().unwrap_or_else(|| exe.with_extension("old.exe"));
-    let _ = std::fs::remove_file(&old);
-    // Windows lets a running program be renamed, not replaced.
-    std::fs::rename(&exe, &old)?;
-    if let Err(e) = std::fs::copy(new, &exe) {
-        let _ = std::fs::rename(&old, &exe);
-        return Err(e);
-    }
-    let mut started = std::process::Command::new(&exe);
-    started.arg("--updated").arg(std::process::id().to_string());
+/// Hands the update at `setup`, the new release's loom-setup.exe that the core
+/// downloaded and checked against the signed manifest, to that setup, for the app to
+/// quit after. The setup waits for this program to end, checks its own signature,
+/// swaps loom.exe, starts the new one (in the tray when `background`) and puts the old
+/// one back if the new one doesn't start (desktop/setup).
+pub fn apply_update(setup: &std::path::Path, background: bool) -> std::io::Result<()> {
+    let mut started = std::process::Command::new(setup);
+    started
+        .arg("--update")
+        .arg("--pid")
+        .arg(std::process::id().to_string());
     if background {
         started.arg("--background");
     }
@@ -285,39 +276,6 @@ pub fn window_shown(hwnd: isize) -> bool {
 #[cfg(not(windows))]
 pub fn window_shown(_hwnd: isize) -> bool {
     true
-}
-
-/// After an update: waits for the old program to end, so two never run at once, and
-/// removes it.
-pub fn after_update() {
-    let mut args = std::env::args().skip_while(|a| a != "--updated").skip(1);
-    if let Some(pid) = args.next().and_then(|p| p.parse::<u32>().ok()) {
-        wait_for_exit(pid);
-    }
-    if let Some(old) = old_exe() {
-        let _ = std::fs::remove_file(old);
-    }
-}
-
-#[cfg(windows)]
-fn wait_for_exit(pid: u32) {
-    use windows_sys::Win32::Foundation::CloseHandle;
-    use windows_sys::Win32::System::Threading::{
-        OpenProcess, WaitForSingleObject, PROCESS_SYNCHRONIZE,
-    };
-    // SAFETY: the handle is checked, waited on for at most 15 s, and closed.
-    unsafe {
-        let h = OpenProcess(PROCESS_SYNCHRONIZE, 0, pid);
-        if !h.is_null() {
-            WaitForSingleObject(h, 15000);
-            CloseHandle(h);
-        }
-    }
-}
-
-#[cfg(not(windows))]
-fn wait_for_exit(_pid: u32) {
-    std::thread::sleep(std::time::Duration::from_secs(2));
 }
 
 fn launcher() -> Option<auto_launch::AutoLaunch> {

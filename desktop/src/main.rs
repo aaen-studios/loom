@@ -101,7 +101,6 @@ fn main() {
         panel_test::run(out.into());
         return;
     }
-    shell::after_update();
     gpui_kit::application().with_assets(AppAssets).run(|cx| {
         gpui_kit::init(cx);
         let fonts: Vec<Cow<'static, [u8]>> = FONTS.iter().map(|f| Cow::Borrowed(*f)).collect();

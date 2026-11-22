@@ -20,23 +20,188 @@ module scripts.release
 //         seed from LOOM_RELEASE_KEY.
 //     calx scripts/release.calx verify DIR
 //         checks DIR's manifest against the public key, and each file's hash.
+//     calx scripts/release.calx pack SETUP LOOM_EXE VERSION OUT
+//         makes the installer: loom-setup's program (desktop/setup) with
+//         LOOM_EXE compressed onto its end, and a header naming the version and
+//         LOOM_EXE's SHA-256, signed with the seed from LOOM_RELEASE_KEY
+//         (desktop/setup/src/pack.rs has the layout). The setup installs nothing
+//         that header's signature doesn't cover. With LOOM_PACK_TEST_SEED in
+//         place of LOOM_RELEASE_KEY it signs with that seed instead, for trying a
+//         setup built with LOOM_SETUP_TEST_KEY set to the public key it prints.
+//     calx scripts/release.calx bridge SETUP VERSION BASE_URL OUT_DIR
+//         the way over from v0.1 (PLAN.md, "What happens to v0.1"): writes
+//         OUT_DIR/update.json and the payload it names, a zip holding SETUP (the
+//         packed loom-setup.exe) as loom.exe, which v0.1's own updater swaps in and
+//         starts. v0.1 takes only a payload signed with its minisign key, so it's
+//         signed with that, from the secret key file LOOM_V01_KEY names (v0.1 kept
+//         it in ~/.loom/keys/loom.key), or the file's text in LOOM_V01_KEY_TEXT.
 import std.bytes
 import std.crypto.{Ed25519Key}
 import std.env
 import std.fs
-import std.hash.{sha256}
+import std.hash.{blake2b, sha256}
 import std.json.{Json}
 import std.keyring
 import std.process.{exit}
 import std.time.{Timestamp}
+import std.zip
+import std.zstd
 import shared.obj.{Obj, at, int_at, str_at}
 import shared.release.{RELEASE_KEY, check_manifest}
 
 const SERVICE: str = "loom-release"
 const ACCOUNT: str = "ed25519-seed"
+// What the setup looks for at its end, and what its header is signed as (desktop/setup/src/pack.rs).
+const PACK_MAGIC: str = "LOOMPAK1"
+const PACK_SIGNED_AS: str = "loom setup\n"
 
 fn usage() -> String {
-    return String("usage: calx scripts/release.calx key SEED_FILE | seed | sign DIR VERSION BASE_URL NOTES_FILE KIND=FILE ... | verify DIR\n")
+    return String("usage: calx scripts/release.calx key SEED_FILE | seed | sign DIR VERSION BASE_URL NOTES_FILE KIND=FILE ... | verify DIR | pack SETUP LOOM_EXE VERSION OUT | bridge SETUP VERSION BASE_URL OUT_DIR\n")
+}
+
+// The key a pack is signed with: the release key, or a test key with LOOM_PACK_TEST_SEED.
+fn pack_key() -> Ed25519Key ! Error {
+    if let test = env.variable(String("LOOM_PACK_TEST_SEED")) {
+        let key = Ed25519Key.from_seed(bytes.from_hex(test.trim().copy()) ?? List<u8>()) else {
+            fail "LOOM_PACK_TEST_SEED isn't a 32-byte seed in hex"
+        }
+        eprintln("signing with a test key: only a setup built with LOOM_SETUP_TEST_KEY={bytes.hex(key.public_key().bytes())} takes it")
+        return key
+    }
+    let seed_hex = env.variable(String("LOOM_RELEASE_KEY")) else {
+        fail "LOOM_RELEASE_KEY isn't set"
+    }
+    let key = Ed25519Key.from_seed(bytes.from_hex(seed_hex.trim().copy()) ?? List<u8>()) else {
+        fail "LOOM_RELEASE_KEY isn't a 32-byte seed in hex"
+    }
+    if bytes.hex(key.public_key().bytes()) != RELEASE_KEY {
+        fail "LOOM_RELEASE_KEY isn't the key shared/release.calx trusts"
+    }
+    return key
+}
+
+/// The setup `stub` carrying `program`, signed with `key`.
+fn packed(stub: own List<u8>, program: List<u8>, version: String, key: Ed25519Key) -> List<u8> {
+    let header = "{Obj.new().s("version", version).s("sha256", bytes.hex(sha256(program.copy()))).i("size", i64.wrap(u64(program.len()))).done()}".to_bytes()
+    let payload = zstd.compress(program, 19, true)
+    var signed = PACK_SIGNED_AS.to_bytes()
+    signed.extend(header.copy())
+    var out = stub
+    out.extend(payload.copy())
+    out.extend(header.copy())
+    out.extend(key.sign(signed))
+    bytes.put_u32_le(mut out, u32.wrap(u64(header.len())))
+    bytes.put_u64_le(mut out, u64(payload.len()))
+    out.extend(PACK_MAGIC.to_bytes())
+    return out
+}
+
+fn pack(args: List<String>) ! Error {
+    if args.len() != 5 { fail "{usage()}" }
+    let key = try pack_key()
+    let stub = try fs.read(args[1].copy())
+    let program = try fs.read(args[2].copy())
+    let out = packed(stub.copy(), program.copy(), args[3].copy(), key)
+    try fs.write(args[4].copy(), out.copy())
+    println("packed loom {args[3]} ({program.len()} bytes) into {args[4]}: {out.len()} bytes, the setup itself {stub.len()}")
+}
+
+// v0.1's minisign public key, as v0.1 has it built in (crates/loom-core/src/updater.rs at
+// the v0.1 tag): "Ed", its key id and the Ed25519 public key.
+const V01_PUBLIC: str = "RWTcRe6IBJDw4DRdVWHvaKGMe918aIDaAeTHO5YciQcCfucFFqENkYuv"
+
+/// The key a minisign secret key file holds, and its id, if it's v0.1's and not
+/// encrypted (v0.1's isn't). The file's second line is base64 of: "Ed", the KDF ("\0\0"
+/// for none), "B2", a salt (32), two limits (8 each), the key id (8), the secret key
+/// (the seed and the public key, 64) and a checksum (32).
+fn v01_key(text: String) -> (Ed25519Key, List<u8>)? {
+    let lines = text.split("\n")
+    if lines.len() < 2 { return none }
+    let b = bytes.from_base64(lines[1].trim().copy()) else return none
+    if b.len() != 158 or b[0] != 69 or b[1] != 100 or b[2] != 0 or b[3] != 0 { return none }
+    let id = b[54..62].copy()
+    let key = Ed25519Key.from_seed(b[62..94].copy()) else return none
+    let public = bytes.from_base64(String(V01_PUBLIC)) ?? List<u8>()
+    if public.len() != 42 or public[2..10] != id or public[10..42] != key.public_key().bytes() { return none }
+    return some((key, id))
+}
+
+/// A minisign signature of `data`, as minisign writes one with `-H`: the Ed25519
+/// signature of its BLAKE2b-512 ("ED"), and a global signature over that and the
+/// trusted comment.
+fn minisign(key: Ed25519Key, id: List<u8>, data: List<u8>, trusted: String) -> String {
+    let sig = key.sign(blake2b(data))
+    var line = "ED".to_bytes()
+    line.extend(id)
+    line.extend(sig.copy())
+    var global = sig
+    global.extend(trusted.to_bytes())
+    return "untrusted comment: signature from minisign secret key\n{bytes.base64(line)}\ntrusted comment: {trusted}\n{bytes.base64(key.sign(global))}\n"
+}
+
+fn bridge(args: List<String>) ! Error {
+    if args.len() != 5 { fail "{usage()}" }
+    let text = if let path = env.variable(String("LOOM_V01_KEY")) {
+        try fs.read_text(path) ?? String()
+    } else {
+        env.variable(String("LOOM_V01_KEY_TEXT")) ?? String()
+    }
+    let (key, id) = v01_key(text) else {
+        fail "LOOM_V01_KEY (or LOOM_V01_KEY_TEXT) isn't v0.1's minisign secret key, unencrypted"
+    }
+    let version = args[2].copy()
+    let out = args[4].copy()
+    var z = zip.Writer.new()
+    z.add(String("loom.exe"), try fs.read(args[1].copy()), 6)
+    let payload = z.finish()
+    let name = "loom-v{version}-payload.zip"
+    try fs.make_dir_all(out.copy())
+    try fs.write("{out}/{name}", payload.copy())
+    let trusted = "timestamp:{unsafe { Timestamp.now() }.unix_ms / 1000}\tfile:{name}\thashed"
+    let manifest = Obj.new().s("version", version.copy()).s("notes", "loom {version}: the new loom. This update installs it in place of v0.1.").s("payload", "{args[3]}/{name}").s("sha256", bytes.hex(sha256(payload.copy()))).s("signature", minisign(key, id, payload, trusted)).done()
+    try fs.write_text("{out}/update.json", "{manifest}")
+    println("wrote {out}/update.json and {out}/{name}, signed with v0.1's key, for v0.1's updater")
+}
+
+@test
+fn a_minisign_signature_checks_out() {
+    let key = Ed25519Key.from_seed(bytes.from_hex(String("9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60")) ?? List<u8>())!
+    let id: List<u8> = [1u8, 2, 3, 4, 5, 6, 7, 8]
+    let data = "payload".to_bytes()
+    let text = minisign(key.copy(), id.copy(), data.copy(), String("timestamp:1\tfile:p.zip"))
+    let lines = text.split("\n")
+    let line = bytes.from_base64(lines[1].copy())!
+    assert(line[..2] == "ED".to_bytes() and line[2..10] == id)
+    let sig = line[10..74].copy()
+    assert(key.public_key().verify(blake2b(data), sig.copy()))
+    var global = sig
+    global.extend("timestamp:1\tfile:p.zip".to_bytes())
+    assert(key.public_key().verify(global, bytes.from_base64(lines[3].copy())!))
+}
+
+@test
+fn only_v01s_key_signs_the_bridge() {
+    assert(v01_key(String("untrusted comment: x\nnot a key\n")) == none)
+}
+
+@test
+fn a_pack_ends_as_the_setup_reads_it() {
+    let key = Ed25519Key.from_seed(bytes.from_hex(String("9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60")) ?? List<u8>())!
+    let program = "MZ the program".to_bytes()
+    let out = packed("STUB".to_bytes(), program.copy(), String("0.2.0"), key.copy())
+    let n = out.len()
+    assert(String.from_utf8(out[n - 8..].copy()) == some(String(PACK_MAGIC)))
+    let payload_len = usize.wrap(bytes.u64_le(out, n - 16))
+    let header_len = usize(bytes.u32_le(out, n - 20))
+    let sig_at = n - 20 - 64
+    let header = out[sig_at - header_len..sig_at].copy()
+    var signed = PACK_SIGNED_AS.to_bytes()
+    signed.extend(header.copy())
+    assert(key.public_key().verify(signed, out[sig_at..sig_at + 64].copy()))
+    let payload = out[sig_at - header_len - payload_len..sig_at - header_len].copy()
+    assert(zstd.decompress(payload)! == program)
+    assert(String.from_utf8(out[..4].copy()) == some(String("STUB")))
+    assert((String.from_utf8(header) ?? String()).contains("\"version\":\"0.2.0\""))
 }
 
 fn make_key(out: String) ! Error {
@@ -122,6 +287,10 @@ fn main() ! Error {
         try sign(args)
     } else if cmd == "verify" {
         try verify(args[1].copy())
+    } else if cmd == "pack" {
+        try pack(args)
+    } else if cmd == "bridge" {
+        try bridge(args)
     } else {
         eprint(usage())
         exit(2)

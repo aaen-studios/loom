@@ -147,7 +147,9 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: desktop
+          workspaces: |
+            desktop
+            desktop/setup
 
       - name: Format
         working-directory: desktop
@@ -160,6 +162,18 @@ jobs:
       - name: Test
         working-directory: desktop
         run: cargo test --locked
+
+      # loom's installer and updater (desktop/setup): its own checks, then installing,
+      # updating, rolling back and uninstalling in a folder of its own.
+      - name: Setup
+        working-directory: desktop/setup
+        run: |
+          cargo fmt --check
+          cargo clippy --locked --release -- -D warnings
+          cargo test --locked --release
+
+      - name: Setup, end to end
+        run: calx tests/setup/e2e.calx
 
       # A panel that tries every way out of its sandbox (PLAN.md, "The panel sandbox").
       - name: Panel break-out test
