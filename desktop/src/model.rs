@@ -2109,6 +2109,9 @@ pub struct Model {
     pub moving: Option<String>,
     /// Files for the next message.
     pub attachments: Vec<Attachment>,
+    /// Files for chats the person left with them unsent (the app's drafts), which
+    /// may still be going up.
+    pub parked: Vec<Attachment>,
     /// Files the core has fetched, by SHA-256, or SHA-256 and ".thumb": where they are.
     pub files: Rc<HashMap<String, String>>,
     /// file.get requests on their way: what they fetch, and whether to open it.
@@ -4425,10 +4428,32 @@ impl Model {
         self.files.get(&self.page.as_ref()?.file)
     }
 
+    /// Puts the files for the next message aside, for a chat the person leaves, and
+    /// gives their ids.
+    pub fn park_attachments(&mut self) -> Vec<String> {
+        let ids = self.attachments.iter().map(|a| a.id.clone()).collect();
+        self.parked.append(&mut self.attachments);
+        ids
+    }
+
+    /// Takes back the files with `ids` that were put aside, for the next message.
+    pub fn unpark_attachments(&mut self, ids: &[String]) {
+        let (back, kept): (Vec<_>, Vec<_>) = std::mem::take(&mut self.parked)
+            .into_iter()
+            .partition(|a| ids.contains(&a.id));
+        self.parked = kept;
+        self.attachments = back;
+    }
+
     fn file_came(&mut self, f: &Value) {
         let id = s(f, "id");
         let error = f.get("error").map(|e| s(e, "message"));
-        if let Some(a) = self.attachments.iter_mut().find(|a| a.id == id) {
+        if let Some(a) = self
+            .attachments
+            .iter_mut()
+            .chain(self.parked.iter_mut())
+            .find(|a| a.id == id)
+        {
             match f.get("file") {
                 Some(file) if error.is_none() => a.file = Some(FileRef::of(file)),
                 _ => a.error = Some(error.unwrap_or_else(|| "It didn't go up.".into())),
@@ -5414,6 +5439,18 @@ pub fn approve(call: &str, allow: bool, always: bool) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_file_put_aside_still_goes_up_and_comes_back() {
+        let mut m = Model::new();
+        let _ = m.attach("C:/notes.txt");
+        let id = m.attachments[0].id.clone();
+        let parked = m.park_attachments();
+        assert!(m.attachments.is_empty() && parked == vec![id.clone()]);
+        m.file_came(&json!({"id": id, "file": {"id": "f1", "name": "notes.txt", "size": 3}}));
+        m.unpark_attachments(&parked);
+        assert!(m.parked.is_empty() && m.attachments.len() == 1 && m.attachments[0].file.is_some());
+    }
 
     fn with_panel() -> Model {
         let mut m = Model::new();
