@@ -125,9 +125,48 @@ pub fn mix(a: Hsla, b: Hsla, k: f32) -> Hsla {
     .into()
 }
 
+/// How light a colour looks (WCAG's relative luminance, 0 to 1).
+fn luminance(c: Hsla) -> f32 {
+    let c = c.to_rgb();
+    let lin = |v: f32| {
+        if v <= 0.04045 {
+            v / 12.92
+        } else {
+            ((v + 0.055) / 1.055).powf(2.4)
+        }
+    };
+    0.2126 * lin(c.r) + 0.7152 * lin(c.g) + 0.0722 * lin(c.b)
+}
+
+/// Of two inks, the one that reads best on `fill`: words on an agent's colour stay
+/// readable whichever colour it is, in either theme.
+pub fn ink_on(fill: Hsla, a: Hsla, b: Hsla) -> Hsla {
+    let contrast = |ink: Hsla| {
+        let (x, y) = (luminance(fill), luminance(ink));
+        (x.max(y) + 0.05) / (x.min(y) + 0.05)
+    };
+    if contrast(a) >= contrast(b) {
+        a
+    } else {
+        b
+    }
+}
+
+/// What a hovered background turns while it's pressed: a step darker on a light one,
+/// a step lighter on a dark one, so every button answers the click the same way.
+pub fn pressed(c: Hsla) -> Hsla {
+    let mut c = c;
+    if c.l > 0.5 {
+        c.l -= 0.05;
+    } else {
+        c.l += 0.06;
+    }
+    c
+}
+
 /// A hover that fades: the element's background goes from `bg` to `hover_bg`, and its
 /// text from the first of `ink` to the second, when given, over `HOVER` seconds each
-/// way. It's kept under the element's id.
+/// way, and a step further while it's pressed. It's kept under the element's id.
 pub trait SoftHover: Sized {
     /// The background from the first of `bg` to the second, and the text from the
     /// first of `ink` to the second, each when given.
@@ -150,6 +189,10 @@ impl SoftHover for Stateful<Div> {
         let mut d = self;
         if let Some((from, to)) = bg {
             d = d.bg(mix(from, to, k));
+            if to.a > 0.0 {
+                let down = pressed(to);
+                d = d.active(move |s| s.bg(down));
+            }
         }
         if let Some((from, to)) = ink {
             d = d.text_color(mix(from, to, k));
@@ -164,7 +207,7 @@ impl SoftHover for Stateful<Div> {
 #[cfg(test)]
 mod tests {
     use super::{arrive, level, mix, moving, SLIDE};
-    use gpui_kit::{hsla, transparent_black, SharedString};
+    use gpui_kit::{hsla, transparent_black, Hsla, SharedString};
 
     #[test]
     fn fading_in_from_nothing_never_greys() {
@@ -180,6 +223,25 @@ mod tests {
         let moved = level(&key, true, SLIDE);
         assert!(moved < 0.5);
         assert!(moving());
+    }
+
+    #[test]
+    fn words_on_a_colour_take_the_ink_that_reads() {
+        let white = hsla(0.0, 0.0, 1.0, 1.0);
+        let black = hsla(0.0, 0.0, 0.04, 1.0);
+        // The light theme's gold and mint want dark words; its periwinkle wants white.
+        let gold: Hsla = gpui_kit::rgb(0xb8961a).into();
+        let periwinkle: Hsla = gpui_kit::rgb(0x5763e0).into();
+        assert_eq!(super::ink_on(gold, white, black), black);
+        assert_eq!(super::ink_on(periwinkle, white, black), white);
+    }
+
+    #[test]
+    fn pressing_steps_away_from_the_page() {
+        let light = hsla(0.0, 0.0, 0.94, 1.0);
+        let dark = hsla(0.0, 0.0, 0.09, 1.0);
+        assert!(super::pressed(light).l < light.l);
+        assert!(super::pressed(dark).l > dark.l);
     }
 
     #[test]

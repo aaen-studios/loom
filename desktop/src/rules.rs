@@ -326,14 +326,23 @@ impl Loom {
             self.row(None, "On", None, Some(on)).into_any_element(),
         ];
         if let Some((_, label)) = ON.iter().find(|(k, _)| *k == self.rule_on) {
-            rows.push(self.field_row(label, Input::new(&self.rule_in)));
+            // The field and its example in one row, the example under the field itself,
+            // past the label's width.
             rows.push(
                 div()
-                    .px(px(space::L))
-                    .pb(px(space::S + 2.0))
-                    .text_size(px(size::CAPTION))
-                    .text_color(p.ink_3)
-                    .child(format!("Such as {}", example(self.rule_on)))
+                    .flex()
+                    .flex_col()
+                    .child(self.field_row(label, Input::new(&self.rule_in)))
+                    .child(
+                        div()
+                            .pl(px(space::L + FIELD_LABEL + space::M))
+                            .pr(px(space::L))
+                            .pb(px(space::S + 2.0))
+                            .mt(px(-space::XS))
+                            .text_size(px(size::CAPTION))
+                            .text_color(p.ink_3)
+                            .child(format!("Such as {}", example(self.rule_on))),
+                    )
                     .into_any_element(),
             );
         }

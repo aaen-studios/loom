@@ -64,7 +64,7 @@ pub mod color_dark {
     pub const LINE_STRONG: u32 = 0x2e2e33;
     pub const INK: u32 = 0xededee;
     pub const INK_2: u32 = 0xb4b4ba;
-    pub const INK_3: u32 = 0x7c7c85;
+    pub const INK_3: u32 = 0x86868f;
     pub const BUTTON: u32 = 0xededee;
     pub const BUTTON_INK: u32 = 0x0b0b0c;
     pub const BUBBLE: u32 = 0x1c1c1f;
@@ -83,7 +83,7 @@ pub mod color_light {
     pub const LINE_STRONG: u32 = 0xdcdce0;
     pub const INK: u32 = 0x111113;
     pub const INK_2: u32 = 0x4a4a52;
-    pub const INK_3: u32 = 0x8a8a93;
+    pub const INK_3: u32 = 0x707079;
     pub const BUTTON: u32 = 0x111113;
     pub const BUTTON_INK: u32 = 0xffffff;
     pub const BUBBLE: u32 = 0xf1f1f3;

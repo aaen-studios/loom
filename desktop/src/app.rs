@@ -313,8 +313,10 @@ pub struct Loom {
     closing: Option<(Instant, Hsla, bool)>,
     /// When the welcome last swapped between its buttons and the server form.
     form_at: Instant,
-    /// The newest thing that went wrong, shown for a while above the composer.
-    notice: Option<(String, Instant)>,
+    /// The newest thing to tell the person, shown for a while at the window's foot, over
+    /// any popup: its words, since when, and whether it's good news rather than
+    /// something that went wrong.
+    notice: Option<(String, Instant, bool)>,
 }
 
 pub fn data_dir() -> String {
@@ -1422,7 +1424,7 @@ ACTA_KEY=secret:ACTA_KEY",
         }
     }
 
-    /// Shows the newest notice from the model, and hides one that's been up 8 seconds.
+    /// Shows the newest notice from the model, and hides one that's been up its time.
     fn take_notice(&mut self, cx: &mut Context<Self>) {
         if let Some(words) = self.model.checked.take() {
             // Settings shows it; away from the window, a notification does.
@@ -1431,14 +1433,18 @@ ACTA_KEY=secret:ACTA_KEY",
             }
             self.update_said = Some(words);
         }
-        if let Some(words) = self.model.notices.pop() {
+        // Something that went wrong wins over good news that came with it.
+        let bad = self.model.notices.pop().map(|w| (w, false));
+        let came = bad.or_else(|| self.model.said.pop().map(|w| (w, true)));
+        if let Some((words, good)) = came {
             self.model.notices.clear();
-            self.notice = Some((words, Instant::now()));
+            self.model.said.clear();
+            self.notice = Some((words, Instant::now(), good));
             cx.notify();
         } else if self
             .notice
             .as_ref()
-            .is_some_and(|(_, at)| at.elapsed() > Duration::from_secs(8))
+            .is_some_and(|(_, at, _)| at.elapsed().as_secs_f32() > NOTICE_SECONDS)
         {
             self.notice = None;
             cx.notify();
@@ -2126,6 +2132,69 @@ ACTA_KEY=secret:ACTA_KEY",
                 .justify_center()
                 .bg(scrim)
                 .child(card),
+        )
+    }
+
+    /// The notice, floating at the window's foot over everything, a popup too, so what a
+    /// click in Settings did shows where it was clicked: good news with a tick, and what
+    /// went wrong in red. It fades in and out, and a click puts it away.
+    fn toast(&self, window: &mut Window, cx: &mut Context<Self>) -> Option<Div> {
+        let (words, at, good) = self.notice.clone()?;
+        let p = self.p;
+        let key = SharedString::from(format!("toast-{at:?}"));
+        let shown = at.elapsed().as_secs_f32();
+        let leaving = ((NOTICE_SECONDS - shown) / 0.3).clamp(0.0, 1.0);
+        if leaving < 1.0 || shown > NOTICE_SECONDS - 0.4 {
+            window.request_animation_frame();
+        }
+        let k = motion::arrive(&key, 0.2).min(leaving);
+        Some(
+            div()
+                .absolute()
+                .left_0()
+                .right_0()
+                .bottom(px(88.0 - space::S * (1.0 - k)))
+                .flex()
+                .justify_center()
+                .px(px(space::XL))
+                .child(
+                    div()
+                        .id("notice")
+                        .occlude()
+                        .max_w(px(space::COLUMN))
+                        .flex()
+                        .items_center()
+                        .gap(px(space::S))
+                        .px(px(space::L))
+                        .py(px(space::S + 2.0))
+                        .rounded(px(radius::CARD))
+                        .border_1()
+                        .border_color(p.line_strong)
+                        .bg(p.raised)
+                        .shadow_lg()
+                        .opacity(k)
+                        .text_size(px(size::SMALL))
+                        .text_color(if good { p.ink } else { p.bad })
+                        .cursor_pointer()
+                        .child(
+                            Icon::new(if good {
+                                Ico::CircleCheck
+                            } else {
+                                Ico::CircleAlert
+                            })
+                            .small()
+                            .text_color(if good {
+                                p.ok
+                            } else {
+                                p.bad
+                            }),
+                        )
+                        .child(words)
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.notice = None;
+                            cx.notify();
+                        })),
+                ),
         )
     }
 
@@ -3369,13 +3438,8 @@ ACTA_KEY=secret:ACTA_KEY",
                         .child(text)
                         .into_any_element()
                 })
-                .child(tool("steer", Icon::new(Ico::Zap)).on_click(cx.listener(
-                    move |this, _, _, cx| {
-                        let f = this.model.queue_cmd("queue.steer", &steer_id, None);
-                        this.send(f);
-                        cx.notify();
-                    },
-                )))
+                // Moving up comes first: the first can't go higher, so its empty place
+                // sits by the words, and its other buttons line up with the rest.
                 .when(k > 0, |d| {
                     d.child(
                         tool("up", Icon::new(IconName::ArrowUp)).on_click(cx.listener(
@@ -3388,8 +3452,14 @@ ACTA_KEY=secret:ACTA_KEY",
                         )),
                     )
                 })
-                // The first can't go higher; its buttons still line up.
                 .when(k == 0, |d| d.child(div().size(px(26.0)).flex_none()))
+                .child(tool("steer", Icon::new(Ico::Zap)).on_click(cx.listener(
+                    move |this, _, _, cx| {
+                        let f = this.model.queue_cmd("queue.steer", &steer_id, None);
+                        this.send(f);
+                        cx.notify();
+                    },
+                )))
                 .child(if editing {
                     tool("save", Icon::new(Ico::Check))
                         .on_click(cx.listener(|this, _, window, cx| this.save_queued(window, cx)))
@@ -3639,11 +3709,10 @@ ACTA_KEY=secret:ACTA_KEY",
                                     .justify_center()
                                     .gap(px(space::S))
                                     .rounded(px(radius::BUTTON))
-                                    .bg(p.button)
+                                    .soft_hover(p.button, motion::mix(p.button, p.bg, 0.18), None)
                                     .text_color(p.button_ink)
                                     .font_weight(FontWeight::SEMIBOLD)
                                     .cursor_pointer()
-                                    .hover(|s| s.opacity(0.9))
                                     .child("Let's begin")
                                     .child(Icon::new(IconName::ArrowRight).small())
                                     .on_click(
@@ -4122,7 +4191,9 @@ ACTA_KEY=secret:ACTA_KEY",
                     .pb(px(space::XS))
                     .text_size(px(size::CAPTION))
                     .text_color(p.ink_3)
-                    .when(searching, |d| d.child("Found")),
+                    .when(searching && !self.model.hits.is_empty(), |d| {
+                        d.child("Found")
+                    }),
             )
             .child(
                 div()
@@ -4281,6 +4352,9 @@ ACTA_KEY=secret:ACTA_KEY",
                 .rounded(px(radius::ROW))
                 .cursor_pointer()
                 .soft_hover(transparent_black(), p.hover, None)
+                .when(matches!(self.menu, Some(Menu::Agent | Menu::MoveTo)), |d| {
+                    d.bg(p.hover)
+                })
                 .on_click(cx.listener(|this, _, _, cx| {
                     this.menu = if this.menu == Some(Menu::Agent) {
                         None
@@ -4360,6 +4434,7 @@ ACTA_KEY=secret:ACTA_KEY",
                         .text_color(p.ink_2)
                         .cursor_pointer()
                         .soft_hover(transparent_black(), p.hover, None)
+                        .when(self.menu == Some(Menu::Permission), |d| d.bg(p.hover))
                         .flex()
                         .items_center()
                         .gap(px(space::XS))
@@ -4851,12 +4926,14 @@ ACTA_KEY=secret:ACTA_KEY",
                             this.pick_mode(None, cx);
                         })),
                 );
-                let modes: [(&'static str, Ico, &'static str, &'static str); 3] = [
-                    ("ask", Ico::Hand, "Ask first", "ask"),
-                    ("auto", Ico::ShieldCheck, "Ask when it's risky", "auto"),
-                    ("allow", Ico::Zap, "Don't ask", "allow"),
+                let modes: [(&'static str, Ico, &'static str); 3] = [
+                    ("ask", Ico::Hand, "ask"),
+                    ("auto", Ico::ShieldCheck, "auto"),
+                    ("allow", Ico::Zap, "allow"),
                 ];
-                for (id, icon, title, mode) in modes {
+                // In the words the header and the agent's page use.
+                for (id, icon, mode) in modes {
+                    let title = model::mode_name(mode);
                     list = list.child(self.mode_item(id, icon, title, mode).on_click(cx.listener(
                         move |this, _, _, cx| {
                             this.pick_mode(Some(mode), cx);
@@ -5026,9 +5103,9 @@ ACTA_KEY=secret:ACTA_KEY",
             };
             let branch_at = pin.as_ref().map(|(id, _)| id.clone());
             // Its time, just outside its left edge while the pointer is over it: the
-            // chat has no time separators.
+            // chat has no time separators. A reply says its time beside its name already.
             let when = match row {
-                Row::Message(m) if !m.live && !m.queued => {
+                Row::Message(m) if !m.live && !m.queued && m.role == "person" => {
                     Some(when_sent(m.at, chrono::Local::now())).filter(|w| !w.is_empty())
                 }
                 _ => None,
@@ -5388,30 +5465,6 @@ ACTA_KEY=secret:ACTA_KEY",
                     })
                     .when_some(mini, |d, m| d.child(m)),
             )
-            .when_some(self.notice.clone(), |d, (words, _)| {
-                d.child(
-                    div()
-                        .w_full()
-                        .flex()
-                        .justify_center()
-                        .px(px(space::XL))
-                        .child(
-                            div()
-                                .id("notice")
-                                .w_full()
-                                .max_w(px(space::COLUMN))
-                                .px(px(space::L))
-                                .text_size(px(size::SMALL))
-                                .text_color(p.bad)
-                                .cursor_pointer()
-                                .child(words)
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.notice = None;
-                                    cx.notify();
-                                })),
-                        ),
-                )
-            })
             .when_some(ask, |d, a| d.child(a))
             .when_some(secret, |d, a| d.child(a))
             .when_some(queue, |d, q| d.child(q))
@@ -5699,6 +5752,7 @@ ACTA_KEY=secret:ACTA_KEY",
                     .border_2()
                     .border_color(if picked { dot } else { transparent_black() })
                     .cursor_pointer()
+                    .soft_hover(transparent_black(), p.hover, None)
                     .child(
                         div()
                             .size(px(if picked { 20.0 } else { 18.0 }))
@@ -5749,6 +5803,9 @@ ACTA_KEY=secret:ACTA_KEY",
                         .flex()
                         .items_center()
                         .gap(px(space::S))
+                        // As wide as the die on the right, so the field sits in the
+                        // middle, under the heading and over the colours.
+                        .child(div().size(px(40.0)).flex_none())
                         .child(div().flex_1().child(Input::new(&self.name_in).large()))
                         .child(
                             div()
@@ -5786,11 +5843,10 @@ ACTA_KEY=secret:ACTA_KEY",
                     .items_center()
                     .gap(px(space::S))
                     .rounded(px(radius::BUTTON))
-                    .bg(tint)
-                    .text_color(p.bg)
+                    .soft_hover(tint, motion::mix(tint, p.bg, 0.15), None)
+                    .text_color(motion::ink_on(tint, p.button_ink, p.button))
                     .font_weight(FontWeight::SEMIBOLD)
                     .cursor_pointer()
-                    .hover(|s| s.opacity(0.88))
                     .child("Weave it")
                     .on_click(cx.listener(|this, _, _, cx| this.weave_agent(cx))),
                 self.enter(0.55, 0.4),
@@ -6281,9 +6337,19 @@ ACTA_KEY=secret:ACTA_KEY",
         if self.model.mcp_servers.is_empty() {
             servers = servers.child(
                 div()
-                    .text_size(px(size::CAPTION))
-                    .text_color(p.ink_3)
-                    .child("None yet"),
+                    .flex()
+                    .items_center()
+                    .gap(px(space::M))
+                    .child(
+                        div()
+                            .text_size(px(size::CAPTION))
+                            .text_color(p.ink_3)
+                            .child("None yet. Set them up once, then pick them here."),
+                    )
+                    .child(
+                        self.small_button("edit-mcp-setup", "Set up", false)
+                            .on_click(cx.listener(|this, _, _, cx| this.open(Screen::Mcp, cx))),
+                    ),
             );
         }
         for m in self.model.mcp_servers.clone() {
@@ -6608,6 +6674,7 @@ ACTA_KEY=secret:ACTA_KEY",
                     .border_2()
                     .border_color(if picked { dot } else { transparent_black() })
                     .cursor_pointer()
+                    .soft_hover(transparent_black(), p.hover, None)
                     .child(div().size(px(16.0)).rounded_full().bg(dot))
                     .on_click(cx.listener(move |this, _, _, cx| {
                         if let Some(f) = this.model.set_color(c) {
@@ -6739,9 +6806,13 @@ ACTA_KEY=secret:ACTA_KEY",
                     )
                     // Name and instructions are what Save keeps; what it knows comes
                     // after, under its own heading.
+                    // The counted rows and the switches reach out past the column by
+                    // their own padding, so their words line up with the labels above
+                    // and their hover has room around them.
                     .child(group("Knows"))
                     .child(
                         div()
+                            .mx(px(-space::S))
                             .flex()
                             .flex_col()
                             .child(memories)
@@ -6750,11 +6821,18 @@ ACTA_KEY=secret:ACTA_KEY",
                             .child(files),
                     )
                     .child(self.field("MCP servers", servers))
-                    .child(scripts)
+                    .child(div().mx(px(-space::L)).child(scripts))
                     .child(group("Does"))
-                    .child(div().flex().flex_col().child(routines).child(usage))
+                    .child(
+                        div()
+                            .mx(px(-space::S))
+                            .flex()
+                            .flex_col()
+                            .child(routines)
+                            .child(usage),
+                    )
                     .child(group("Runs"))
-                    .child(isolate)
+                    .child(div().mx(px(-space::L)).child(isolate))
                     .when(isolated, |d| {
                         d.child(self.field("Network", reach))
                             .when(listing, |d| d.child(hosts_list))
@@ -7244,7 +7322,7 @@ ACTA_KEY=secret:ACTA_KEY",
                 .on_click(cx.listener(move |this, _, _, cx| {
                     let f = this.model.ask_proposals(&agent);
                     this.send(f);
-                    this.model.notices.push(format!(
+                    this.model.said.push(format!(
                         "{name} is looking over your chats. What it proposes comes here."
                     ));
                     cx.notify();
@@ -7589,12 +7667,13 @@ ACTA_KEY=secret:ACTA_KEY",
     fn plugins_page(&mut self, cx: &mut Context<Self>) -> Div {
         let p = self.p;
         let ask = |this: &Self, cx: &mut Context<Self>, primary: bool| {
-            this.small_button("plugin-prompt", "Copy a prompt", primary)
+            this.small_button("plugin-prompt", "Copy prompt", primary)
                 .on_click(cx.listener(|this, _, _, cx| {
                     cx.write_to_clipboard(ClipboardItem::new_string(PLUGIN_PROMPT.to_string()));
                     this.notice = Some((
                         "Copied. Paste it to one of your agents.".into(),
                         Instant::now(),
+                        true,
                     ));
                     cx.notify();
                 }))
@@ -9374,12 +9453,14 @@ ACTA_KEY=secret:ACTA_KEY",
                             .truncate()
                             .child(title.into()),
                     )
+                    // Up to two lines, so a wide control beside it doesn't cut off
+                    // what the row is for.
                     .when_some(sub, |d, s| {
                         d.child(
                             div()
                                 .text_size(px(size::CAPTION))
                                 .text_color(p.ink_3)
-                                .truncate()
+                                .line_clamp(2)
                                 .child(s),
                         )
                     }),
@@ -9410,7 +9491,7 @@ ACTA_KEY=secret:ACTA_KEY",
             .py(px(space::S + 2.0))
             .child(
                 div()
-                    .w(px(120.0))
+                    .w(px(FIELD_LABEL))
                     .flex_none()
                     .text_size(px(size::BODY))
                     .text_color(p.ink)
@@ -9488,13 +9569,15 @@ ACTA_KEY=secret:ACTA_KEY",
             .rounded(px(radius::ROW))
             .text_size(px(size::SMALL))
             .cursor_pointer()
+            // The picked one stands up off the track: white on light, a lighter step on
+            // dark, where the page's own black would sink into it.
             .when(on, |d| {
-                d.bg(p.bg)
+                d.bg(if p.dark { p.line_strong } else { p.bg })
                     .text_color(p.ink)
                     .font_weight(FontWeight::MEDIUM)
                     .shadow_sm()
             })
-            .when(!on, |d| d.soft_ink(p.ink_3, p.ink))
+            .when(!on, |d| d.soft_ink(p.ink_2, p.ink))
             .child(label.to_string())
     }
 
@@ -9561,6 +9644,7 @@ ACTA_KEY=secret:ACTA_KEY",
                 this.notice = Some((
                     "Copied. Paste it to one of your agents.".into(),
                     Instant::now(),
+                    true,
                 ));
                 cx.notify();
             }));
@@ -9626,7 +9710,7 @@ ACTA_KEY=secret:ACTA_KEY",
             let shown = from_registry
                 .as_ref()
                 .or(listed.as_ref())
-                .map_or(prog.name.clone(), |l| l.name.clone());
+                .map_or_else(|| program_title(&prog.name), |l| l.name.clone());
             let settings_words = match (&prog.share, prog.settings.len()) {
                 (Some(sh), _) => share_words(sh),
                 (None, 0) => "No settings".to_string(),
@@ -10051,13 +10135,13 @@ ACTA_KEY=secret:ACTA_KEY",
             }
             self.segments(items).into_any_element()
         });
+        let brain_how = if d.brain.is_empty() {
+            "None picked yet: what an agent your agents make runs on"
+        } else {
+            "The program a new agent runs on"
+        };
         let mut rows = vec![self
-            .row(
-                None,
-                "Brain",
-                Some("The program a new agent runs on".into()),
-                Some(brain),
-            )
+            .row(None, "Brain", Some(brain_how.into()), Some(brain))
             .into_any_element()];
         if let Some(backup) = backup {
             rows.push(
@@ -10085,7 +10169,10 @@ ACTA_KEY=secret:ACTA_KEY",
                 .cloned()
             else {
                 picks.push(self.note_row(
-                    format!("{name}: its models show here once an agent on it has started."),
+                    format!(
+                        "{}: its models show here once an agent on it has started.",
+                        program_title(&name)
+                    ),
                     p.ink_3,
                 ));
                 continue;
@@ -10126,16 +10213,15 @@ ACTA_KEY=secret:ACTA_KEY",
             picks,
         );
         // How agents ask, and what a message while one answers does.
-        let modes = [
-            ("ask", "Asks first"),
-            ("auto", "When risky"),
-            ("allow", "Doesn't ask"),
-        ];
         let mut mode_items = Vec::new();
-        for (mode, label) in modes {
+        for mode in ["ask", "auto", "allow"] {
             mode_items.push(
-                self.segment(format!("default-mode-{mode}"), label, d.permission == mode)
-                    .on_click(put(serde_json::json!({"permission": mode}))),
+                self.segment(
+                    format!("default-mode-{mode}"),
+                    model::mode_name(mode),
+                    d.permission == mode,
+                )
+                .on_click(put(serde_json::json!({"permission": mode}))),
             );
         }
         let mut busy_items = Vec::new();
@@ -10206,7 +10292,7 @@ ACTA_KEY=secret:ACTA_KEY",
             Some((_, revision, by)) if *revision > 0 => {
                 format!("Revision {revision}, by {}", self.model.made_by(by))
             }
-            Some(_) => "Nothing yet".to_string(),
+            Some(_) => "Not written yet. Every agent starts with what you put here".to_string(),
             None => "Loading…".to_string(),
         };
         let save = self
@@ -10243,12 +10329,10 @@ ACTA_KEY=secret:ACTA_KEY",
         let p = self.p;
         let mut list = div().flex().flex_col();
         if self.model.notes.is_empty() {
-            list = list.child(
-                div()
-                    .text_size(px(size::SMALL))
-                    .text_color(p.ink_3)
-                    .child("Nothing remembered yet"),
-            );
+            list = list.child(div().text_size(px(size::SMALL)).text_color(p.ink_3).child(
+                "Nothing remembered yet. It keeps notes here as it learns, and you \
+                         can add one above: Add for all shares it with every agent.",
+            ));
         }
         for n in self.model.notes.clone() {
             let who = if n.shared {
@@ -10353,8 +10437,12 @@ ACTA_KEY=secret:ACTA_KEY",
             list = list.child(
                 div()
                     .text_size(px(size::SMALL))
+                    .pt(px(space::L))
                     .text_color(p.ink_3)
-                    .child("Nothing yet."),
+                    .child(
+                        "Nothing yet. What it runs, what it's allowed and what changes \
+                         show here as it works.",
+                    ),
             );
         }
         let mut day = String::new();
@@ -10388,9 +10476,10 @@ ACTA_KEY=secret:ACTA_KEY",
                 _ => "Changed",
             };
             list = list.child(
+                // Its time and kind sit on its first line, however many lines it takes.
                 div()
                     .flex()
-                    .items_baseline()
+                    .items_start()
                     .gap(px(space::M))
                     .py(px(space::XS + 2.0))
                     .border_b_1()
@@ -10421,7 +10510,7 @@ ACTA_KEY=secret:ACTA_KEY",
                                 div()
                                     .text_size(px(size::SMALL))
                                     .text_color(p.ink)
-                                    .child(e.text),
+                                    .child(readable_name(&e.text)),
                             )
                             .when(
                                 matches!(e.status.as_str(), "started" | "failed" | "refused"),
@@ -10496,12 +10585,18 @@ ACTA_KEY=secret:ACTA_KEY",
         let picked = cx.prompt_for_new_path(&downloads, Some(&name));
         cx.spawn(async move |this, cx| {
             if let Ok(Ok(Some(path))) = picked.await {
-                let said = match std::fs::write(&path, csv.as_bytes()) {
-                    Ok(()) => format!("Saved the activity log to {}", path.display()),
-                    Err(e) => format!("The activity log couldn't be saved: {e}"),
-                };
+                let written = std::fs::write(&path, csv.as_bytes());
                 let _ = this.update(cx, |loom, cx| {
-                    loom.model.notices.push(said);
+                    match written {
+                        Ok(()) => loom
+                            .model
+                            .said
+                            .push(format!("Saved the activity log to {}", path.display())),
+                        Err(e) => loom
+                            .model
+                            .notices
+                            .push(format!("The activity log couldn't be saved: {e}")),
+                    }
                     cx.notify();
                 });
             }
@@ -11049,7 +11144,7 @@ fn card_view(
                         .child(if *done {
                             mark.border_color(tint)
                                 .bg(tint)
-                                .text_color(p.bg)
+                                .text_color(motion::ink_on(tint, p.button_ink, p.button))
                                 .child(Icon::new(Ico::Check).xsmall())
                         } else {
                             mark.border_color(p.line_strong)
@@ -11428,13 +11523,49 @@ fn reply(
                 continue;
             }
             "plan" => {
-                shown_any = true;
-                body = body.child(
-                    div()
-                        .text_size(px(size::SMALL * show.text_scale))
-                        .text_color(p.ink_2)
-                        .child(b.text.clone()),
-                );
+                // Its steps, a line each, marked as the checklist card marks them: done
+                // in the agent's colour, the one it's on in ink, the rest waiting.
+                let mut steps = div().flex().flex_col().gap(px(space::XS));
+                for line in b.text.lines().filter(|l| !l.trim().is_empty()) {
+                    let (state, what) = line.split_once(' ').unwrap_or(("todo", line));
+                    let mark = div()
+                        .size(px(14.0))
+                        .flex_none()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .rounded_full()
+                        .border_1();
+                    let mark = match state {
+                        "done" => mark
+                            .border_color(tint)
+                            .bg(tint)
+                            .text_color(motion::ink_on(tint, p.button_ink, p.button))
+                            .child(Icon::new(Ico::Check).xsmall()),
+                        "doing" => mark
+                            .border_color(tint)
+                            .child(div().size(px(6.0)).rounded_full().bg(tint)),
+                        _ => mark.border_color(p.line_strong),
+                    };
+                    steps = steps.child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(space::S))
+                            .text_size(px(size::SMALL * show.text_scale))
+                            .text_color(match state {
+                                "done" => p.ink_3,
+                                "doing" => p.ink,
+                                _ => p.ink_2,
+                            })
+                            .child(mark)
+                            .child(div().flex_1().min_w_0().child(what.to_string())),
+                    );
+                }
+                if !b.text.trim().is_empty() {
+                    shown_any = true;
+                    body = body.child(steps);
+                }
             }
             "notice" => {
                 // One quiet line from loom, such as that another program took the chat
@@ -11482,6 +11613,24 @@ fn reply(
                 .truncate()
                 .child(doing),
         );
+    } else if !shown_any {
+        // A finished turn that only used tools the person's prefs hide: a quiet line
+        // saying so, rather than its name over nothing.
+        let used: Vec<&model::Block> = m.blocks.iter().filter(|b| b.kind == "tool").collect();
+        let words = match used.as_slice() {
+            [] => None,
+            [one] => Some(format!("Used {}", tool_title(one, tools))),
+            many => Some(format!("Used {} tools", many.len())),
+        };
+        if let Some(words) = words {
+            body = body.child(
+                div()
+                    .text_size(px(size::SMALL))
+                    .text_color(p.ink_3)
+                    .truncate()
+                    .child(words),
+            );
+        }
     }
     // The files it names, each a chip with its type, which opens it.
     if !m.mentions.is_empty() {
@@ -11783,6 +11932,19 @@ mod command_tests {
         assert_eq!(command_of(script), "const a = 1;\nreturn a;");
         assert_eq!(command_of("plain words"), "plain words");
     }
+
+    #[test]
+    fn a_tools_name_reads_as_words() {
+        use super::readable_name;
+        assert_eq!(readable_name("show_card"), "Show card");
+        assert_eq!(readable_name("browser_open"), "Browser open");
+        assert_eq!(
+            readable_name("Clean out the old build folder"),
+            "Clean out the old build folder"
+        );
+        assert_eq!(readable_name("notes.md"), "notes.md");
+        assert_eq!(readable_name("Made Button"), "Made Button");
+    }
 }
 
 #[cfg(test)]
@@ -11963,11 +12125,15 @@ impl Render for Loom {
             } else {
                 self.first_agent(cx)
             };
+            let toast = (scene != "blank" && !signed_out)
+                .then(|| self.toast(window, cx))
+                .flatten();
             return root
                 .flex()
                 .flex_col()
                 .child(self.title_bar(window, div(), transparent_black()))
                 .child(div().flex_1().min_h_0().flex().flex_col().child(page))
+                .when_some(toast, |d, t| d.child(t))
                 .when_some(splash, |d, s| d.child(s))
                 .child(motion_ticker());
         }
@@ -11985,6 +12151,7 @@ impl Render for Loom {
         let menu = self.menu_panel(cx).map(deferred);
         let menu_scrim = self.menu_scrim(cx);
         let popup = self.popup_view(window, cx);
+        let toast = self.toast(window, cx);
         root.flex()
             .child(self.wheel_catcher(cx))
             .when(self.side_drag.is_some(), |d| {
@@ -12006,6 +12173,7 @@ impl Render for Loom {
                     .when_some(unroll, |d, u| d.child(u)),
             )
             .when_some(popup, |d, p| d.child(p))
+            .when_some(toast, |d, t| d.child(t))
             .when_some(menu_scrim, |d, s| d.child(s))
             .when_some(whole, |d, c| d.child(c))
             .when_some(splash, |d, s| d.child(s))
@@ -12115,7 +12283,7 @@ const MOVE_PROMPT: &str = "Move my loom instance to another server for me. Ask m
 /// its tools (install_server, add_server).
 const ADD_SERVER_PROMPT: &str = "Set up a new loom server for me and add it to my app. Ask me where it should run (a server I can reach, or a VPS to rent) if I haven't said. Use install_server to get the command that installs loom there, and run it or walk me through it. Then use add_server so my app offers to add it, and tell me what to do next.";
 
-/// What "Copy a prompt" gives on the Plugins page, for an agent in loom to build one with
+/// What "Copy prompt" gives on the Plugins page, for an agent in loom to build one with
 /// its tools (save_plugin), asking the person what it should do.
 const PLUGIN_PROMPT: &str = "Make me a loom plugin. Ask me what it should do if I haven't said: a panel beside the chat, tools for my agents, or both. Build it with save_plugin, then tell me how to open it and what it asks me to allow.";
 
@@ -12139,6 +12307,13 @@ fn appear<E: Styled>(d: E, k: f32) -> E {
 
 /// How long the opening weave lasts on every launch, in seconds.
 const SPLASH_SECONDS: f32 = 1.6;
+
+/// How wide a field's label is, in a row a field fills, so what's under the field lines
+/// up with it.
+const FIELD_LABEL: f32 = 120.0;
+
+/// How long a notice stays, unless it's clicked away.
+const NOTICE_SECONDS: f32 = 8.0;
 /// How far past a message its hover reaches, for its time on the left and its buttons on
 /// the right.
 const HOVER_REACH: f32 = 34.0;
@@ -12264,6 +12439,25 @@ const SUGGESTIONS: [&str; 3] = [
 ];
 
 /// An agent program's name as a person reads it: claude as Claude.
+/// A tool's name as the person reads it: `show_card` is "Show card". Anything already in
+/// words, with a space in it or no underscore, is left as it is.
+fn readable_name(text: &str) -> String {
+    let id = !text.is_empty()
+        && text.contains('_')
+        && text
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '.');
+    if !id {
+        return text.to_string();
+    }
+    let words = text
+        .split(['_', '.'])
+        .filter(|w| !w.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ");
+    program_title(&words)
+}
+
 fn program_title(name: &str) -> String {
     let mut c = name.chars();
     match c.next() {

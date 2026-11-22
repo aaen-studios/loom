@@ -45,7 +45,7 @@ The **Defaults** page, under Agents in Settings, sets what every agent of yours 
 
 - **Brain**: the program a new agent runs on.
 - **Backup program**: what takes a turn over when an agent's own program runs out of usage or doesn't start ([In the chat](chat.md#a-backup-program)).
-- **Permission**: Asks first, When risky, or Doesn't ask, for agents without a mode of their own. It's Asks first until you change it.
+- **Permission**: Asks first, Asks when it's risky, or Doesn't ask, for agents without a mode of their own. It's Asks first until you change it.
 - **A message while it answers**: waits its turn, or steers at once.
 - **Model and effort** for each program, for agents that don't pick their own. A program's models show here once an agent on it has started.
 - **Instructions every agent follows**, told to each agent beside About you, under their own heading. Choose **Save** to keep them.
