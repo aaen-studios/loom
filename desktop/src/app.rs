@@ -6766,7 +6766,7 @@ ACTA_KEY=secret:ACTA_KEY",
                         )
                         .child(
                             div()
-                                .font_family(font::MONO)
+                                .font_family(crate::prefs::mono_font())
                                 .text_size(px(size::SMALL))
                                 .text_color(p.ink)
                                 .child(r.data.clone()),
@@ -10135,7 +10135,7 @@ fn tool_line(p: Palette, b: &model::Block, tools: &[model::Tool]) -> Div {
         .child(div().text_color(p.ink_3).child("›_"))
         .child(
             div()
-                .font_family(font::MONO)
+                .font_family(crate::prefs::mono_font())
                 .text_color(p.ink_2)
                 .truncate()
                 .child(title),
@@ -10502,7 +10502,7 @@ fn approval(p: Palette, a: &Approval, this: WeakEntity<Loom>) -> Div {
                     .border_1()
                     .border_color(p.line)
                     .rounded(px(radius::INPUT))
-                    .font_family(font::MONO)
+                    .font_family(crate::prefs::mono_font())
                     .text_size(px(size::SMALL))
                     .text_color(p.ink_2)
                     .child(detail),
@@ -10806,7 +10806,7 @@ impl Render for Loom {
             .size_full()
             .bg(p.bg)
             .text_color(p.ink)
-            .font_family(font::UI)
+            .font_family(crate::prefs::ui_font())
             .text_size(px(size::BODY));
         // Until the core says how things are, only the window's background: nothing to
         // pop in and out.

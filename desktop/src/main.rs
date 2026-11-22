@@ -47,8 +47,8 @@ pub fn theme(cx: &mut App, dark: bool) {
     );
     let p = Palette::new(dark);
     let t = Theme::global_mut(cx);
-    t.font_family = tokens::font::UI.into();
-    t.mono_font_family = tokens::font::MONO.into();
+    t.font_family = prefs::ui_font().into();
+    t.mono_font_family = prefs::mono_font().into();
     t.font_size = px(tokens::size::BODY);
     t.mono_font_size = px(tokens::size::SMALL);
     t.radius = px(tokens::radius::INPUT);
@@ -106,7 +106,9 @@ fn main() {
         if let Err(e) = cx.text_system().add_fonts(fonts) {
             eprintln!("loom: the fonts didn't load: {e}");
         }
-        let dark = prefs::Prefs::load(&app::data_dir()).dark(!matches!(
+        let kept = prefs::Prefs::load(&app::data_dir());
+        prefs::use_fonts(&kept);
+        let dark = kept.dark(!matches!(
             cx.window_appearance(),
             WindowAppearance::Light | WindowAppearance::VibrantLight
         ));

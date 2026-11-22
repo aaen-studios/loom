@@ -3,6 +3,8 @@
 //! `prefs.json` in the app's data folder, so each device has its own. What belongs to
 //! the account (agent defaults, the profile) lives on the instance instead.
 
+use std::sync::atomic::{AtomicBool, Ordering};
+
 use serde_json::{json, Map, Value};
 
 /// The colours: the system's, or always light or dark.
@@ -36,6 +38,10 @@ pub enum Text {
 pub struct Prefs {
     pub theme: Theme,
     pub text: Text,
+    /// Whether the words are in the system's font, rather than loom's own (Geist), and
+    /// code in the system's monospace one, rather than Geist Mono.
+    pub system_font: bool,
+    pub system_mono: bool,
     pub tools: Tools,
     /// Whether an agent's thoughts show open, rather than folded under "Thought".
     pub thoughts_open: bool,
@@ -62,6 +68,8 @@ impl Default for Prefs {
         Prefs {
             theme: Theme::System,
             text: Text::Normal,
+            system_font: false,
+            system_mono: false,
             tools: Tools::Hidden,
             thoughts_open: false,
             bubbles: true,
@@ -109,6 +117,8 @@ impl Prefs {
                 "large" => Text::Large,
                 _ => d.text,
             },
+            system_font: b("system_font", d.system_font),
+            system_mono: b("system_mono", d.system_mono),
             tools: match s("tools") {
                 "folded" => Tools::Folded,
                 "all" => Tools::All,
@@ -153,6 +163,8 @@ impl Prefs {
             }),
         );
         m.insert("thoughts_open".into(), json!(self.thoughts_open));
+        m.insert("system_font".into(), json!(self.system_font));
+        m.insert("system_mono".into(), json!(self.system_mono));
         m.insert("bubbles".into(), json!(self.bubbles));
         m.insert("ctrl_enter".into(), json!(self.ctrl_enter));
         m.insert("tray".into(), json!(self.tray));
@@ -185,6 +197,43 @@ impl Prefs {
             Text::Normal => 1.0,
             Text::Large => 1.15,
         }
+    }
+}
+
+/// The fonts in use, as the prefs last set them, for every place that draws words.
+static SYSTEM_FONT: AtomicBool = AtomicBool::new(false);
+static SYSTEM_MONO: AtomicBool = AtomicBool::new(false);
+
+#[cfg(windows)]
+const SYSTEM_UI: &str = "Segoe UI";
+#[cfg(windows)]
+const SYSTEM_CODE: &str = "Consolas";
+#[cfg(not(windows))]
+const SYSTEM_UI: &str = ".SystemUIFont";
+#[cfg(not(windows))]
+const SYSTEM_CODE: &str = "Menlo";
+
+/// Puts `p`'s fonts in use.
+pub fn use_fonts(p: &Prefs) {
+    SYSTEM_FONT.store(p.system_font, Ordering::Relaxed);
+    SYSTEM_MONO.store(p.system_mono, Ordering::Relaxed);
+}
+
+/// The font for words.
+pub fn ui_font() -> &'static str {
+    if SYSTEM_FONT.load(Ordering::Relaxed) {
+        SYSTEM_UI
+    } else {
+        crate::tokens::font::UI
+    }
+}
+
+/// The font for code.
+pub fn mono_font() -> &'static str {
+    if SYSTEM_MONO.load(Ordering::Relaxed) {
+        SYSTEM_CODE
+    } else {
+        crate::tokens::font::MONO
     }
 }
 
