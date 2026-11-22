@@ -147,6 +147,7 @@ pub struct Conn {
     relay_url: String     // and where it listens
     push_relay: String?   // the push relay's key, base64, from welcome, when the instance pushes through one
     loom: String          // the instance's own version, as welcome says it
+    me: String            // this device's id, as welcome says it
     latest: String        // the newest release's version, from this core's updater or the app ("release")
     pub local: bool       // the instance is the one in this app, which updates with the app
     may: bool             // this person may update the instance, as instance.updates said
@@ -216,6 +217,7 @@ impl Conn {
             relay_url: String(),
             push_relay: none,
             loom: String(),
+            me: String(),
             latest: String(),
             local: false,
             may: false,
@@ -566,7 +568,9 @@ impl Conn {
             self.failed = 0
             self.tell_server()
             self.tell_state(0, String())
-            self.offer(str_at(f.copy(), "device") ?? String())
+            let me = str_at(f.copy(), "device") ?? String()
+            self.me = me.copy()
+            self.offer(me)
             self.flush()
         } else if t == "synced" {
             self.synced = true
@@ -588,6 +592,11 @@ impl Conn {
                     self.tell_error("cache", "{e}")
                     return
                 },
+            }
+            // A server an agent offered, that the person said yes to on this device:
+            // the app adds it, signed in with its link code when it came with one.
+            if (str_at(f.copy(), "kind") ?? String()) == "server.offered" and self.me.len() > 0 and str_at(f.copy(), "by") == some(self.me.copy()) {
+                self.tell(Obj.new().s("t", String("core.offer")).s("address", address(str_at(f.copy(), "address") ?? String())).maybe("code", str_at(f.copy(), "link_code")).maybe("username", str_at(f.copy(), "username")).done())
             }
             if (str_at(f.copy(), "kind") ?? String()) == "message.created" {
                 let id = str_at(at(f.copy(), "message"), "id") ?? String()
@@ -1039,6 +1048,25 @@ impl Conn {
     /// device joins that instance with the code, as a login does with a password.
     fn join(mut self, m: Json) {
         let id = str_at(m.copy(), "id")
+        // Or a link code an agent's add_server gave (`core.offer`), for the server at
+        // `server`: on a new server it makes the owner, as `username`.
+        if let code = str_at(m.copy(), "code") {
+            let server = address(str_at(m.copy(), "server") ?? String())
+            if not valid_server(server.copy()) or code.len() == 0 {
+                self.tell(Obj.new().s("t", String("core.login")).maybe("id", id).j("error", Obj.new().s("code", String("bad_server")).s("message", String("That isn't a server's http:// or https:// address.")).done()).done())
+                return
+            }
+            if self.pending != none {
+                self.tell(Obj.new().s("t", String("core.login")).maybe("id", id).j("error", Obj.new().s("code", String("busy")).s("message", String("A login is already on its way.")).done()).done())
+                return
+            }
+            var body = Obj.new().s("code", code).maybe("username", str_at(m.copy(), "username"))
+            let device = at(m, "device")
+            if device != Json.Null { body = body.j("device", device) }
+            let base = self.reach(server.copy())
+            self.pending = some(Pending.start(Kind.Link, server, base, id, self.with_tz(body.done())))
+            return
+        }
         let l = link.read(str_at(m.copy(), "qr") ?? String()) else {
             self.tell(Obj.new().s("t", String("core.login")).maybe("id", id).j("error", Obj.new().s("code", String("bad_qr")).s("message", String("That isn't a loom code. Show the QR code on a device that's signed in, under Add a device.")).done()).done())
             return
