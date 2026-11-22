@@ -176,6 +176,7 @@ gpui_kit::assets::icon_assets!(
         AppWindow,
         Sheet,
         SquareTerminal,
+        SlidersHorizontal,
         Minus,
         Square,
         Copy,

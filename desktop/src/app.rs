@@ -86,6 +86,7 @@ enum Screen {
     Skills,
     Memory,
     Profile,
+    Defaults,
     Routines,
     Tasks,
     Programs,
@@ -194,6 +195,8 @@ pub struct Loom {
     door_in: Rc<std::cell::RefCell<Vec<crate::panel::Message>>>,
     note_in: Entity<InputState>,
     profile_in: Entity<TextareaState>,
+    /// The instructions every agent follows, on the Defaults page.
+    every_in: Entity<TextareaState>,
     routine_name_in: Entity<InputState>,
     move_to_in: Entity<InputState>,
     relay_in: Entity<InputState>,
@@ -509,6 +512,11 @@ impl Loom {
                 .auto_grow(6, 20)
                 .placeholder("Who you are, and how you like answers")
         });
+        let every_in = cx.new(|cx| {
+            TextareaState::new(window, cx)
+                .auto_grow(4, 16)
+                .placeholder("What every agent should know or do, such as how to answer")
+        });
         let routine_name_in = input(window, cx, "Morning brief", false);
         let move_to_in = input(window, cx, "https://loom.example.com", false);
         let relay_in = input(window, cx, "https://push.loom.example", false);
@@ -750,6 +758,7 @@ ACTA_KEY=secret:ACTA_KEY",
             door_in: Rc::new(std::cell::RefCell::new(Vec::new())),
             note_in,
             profile_in,
+            every_in,
             routine_name_in,
             move_to_in,
             relay_in,
@@ -922,6 +931,13 @@ ACTA_KEY=secret:ACTA_KEY",
                 for f in self.model.open_table(None) {
                     self.send(f);
                 }
+            }
+            Screen::Defaults => {
+                // Shown as they were when the page opened, the instructions too.
+                let f = self.model.load_defaults();
+                self.send(f);
+                let f = self.model.programs();
+                self.send(f);
             }
             Screen::Profile => {
                 let f = self.model.load_profile();
@@ -1956,6 +1972,7 @@ ACTA_KEY=secret:ACTA_KEY",
         let page = match open {
             Screen::Server => self.server_page(cx),
             Screen::Profile => self.profile_page(cx),
+            Screen::Defaults => self.defaults_page(cx),
             Screen::Skills => self.skills_page(cx),
             Screen::Routines => self.routines_page(cx),
             Screen::Tasks => self.tasks_page(cx),
@@ -4071,11 +4088,7 @@ ACTA_KEY=secret:ACTA_KEY",
         if self.screen == Screen::NewAgent {
             return bar;
         }
-        let permission = match agent.permission.as_str() {
-            "allow" => "Doesn't ask",
-            "auto" => "Asks when it's risky",
-            _ => "Asks first",
-        };
+        let permission = model::mode_name(agent.mode());
         // The agent's browser, while it's open: a globe that shows it beside the chat.
         let browsing = self.model.browser(&agent.id).open;
         let watching =
@@ -4446,11 +4459,13 @@ ACTA_KEY=secret:ACTA_KEY",
     }
 
     /// The model picker's list: each option the agent's program offers (its model,
-    /// then its reasoning effort) under its name, the value it's on ticked.
+    /// then its reasoning effort) under its name, first following the default, then
+    /// each value, the one it's on ticked.
     fn model_picks(&self, agent: &model::Agent, cx: &mut Context<Self>) -> Div {
         let p = self.p;
         let mut list = div().flex().flex_col();
         for (n, o) in agent.picks().into_iter().enumerate() {
+            let follows = agent.follows(&o.id);
             let on = agent.chosen(&o.id);
             list = list.child(
                 div()
@@ -4461,30 +4476,25 @@ ACTA_KEY=secret:ACTA_KEY",
                     .text_color(p.ink_3)
                     .child(o.name.clone()),
             );
+            let (agent_id, option) = (agent.id.clone(), o.id.clone());
+            list = list.child(
+                self.pick_row(
+                    format!("pick-{}-default", o.id),
+                    format!("Default: {}", value_name(&o, &agent.followed(&o.id))),
+                    follows,
+                )
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    if let Some(f) = this.model.follow_config(&agent_id, &option) {
+                        this.send(f);
+                    }
+                    cx.notify();
+                })),
+            );
             for (value, name) in o.values.clone() {
                 let (agent_id, option) = (agent.id.clone(), o.id.clone());
-                let picked = value == on;
+                let picked = !follows && value == on;
                 list = list.child(
-                    div()
-                        .id(SharedString::from(format!("pick-{}-{value}", o.id)))
-                        .flex()
-                        .items_center()
-                        .gap(px(space::M))
-                        .px(px(space::M))
-                        .py(px(space::S))
-                        .rounded(px(radius::ROW))
-                        .cursor_pointer()
-                        .text_size(px(size::SMALL))
-                        .text_color(p.ink)
-                        .soft_hover(transparent_black(), p.hover, None)
-                        .child(div().flex_1().child(name))
-                        .when(picked, |d| {
-                            d.child(
-                                div()
-                                    .text_color(p.ink_2)
-                                    .child(Icon::new(Ico::Check).small()),
-                            )
-                        })
+                    self.pick_row(format!("pick-{}-{value}", o.id), name, picked)
                         .on_click(cx.listener(move |this, _, _, cx| {
                             if let Some(f) = this.model.set_config(&agent_id, &option, &value) {
                                 this.send(f);
@@ -4495,6 +4505,31 @@ ACTA_KEY=secret:ACTA_KEY",
             }
         }
         list
+    }
+
+    /// One choice in the model picker, ticked when it's the one.
+    fn pick_row(&self, id: String, label: String, picked: bool) -> Stateful<Div> {
+        let p = self.p;
+        div()
+            .id(SharedString::from(id))
+            .flex()
+            .items_center()
+            .gap(px(space::M))
+            .px(px(space::M))
+            .py(px(space::S))
+            .rounded(px(radius::ROW))
+            .cursor_pointer()
+            .text_size(px(size::SMALL))
+            .text_color(p.ink)
+            .soft_hover(transparent_black(), p.hover, None)
+            .child(div().flex_1().child(label))
+            .when(picked, |d| {
+                d.child(
+                    div()
+                        .text_color(p.ink_2)
+                        .child(Icon::new(Ico::Check).small()),
+                )
+            })
     }
 
     fn menu_panel(&mut self, cx: &mut Context<Self>) -> Option<Div> {
@@ -4633,39 +4668,44 @@ ACTA_KEY=secret:ACTA_KEY",
                     .right(px(space::S))
                     .child(self.model_picks(&agent, cx))
             }
-            Menu::Permission => panel
-                .right(px(space::S))
-                .child(
-                    self.mode_item("ask", Ico::Hand, "Ask first", "ask")
+            Menu::Permission => {
+                let default_title = format!(
+                    "Default: {}",
+                    model::mode_name(&self.model.defaults.permission)
+                );
+                let mut list = panel.right(px(space::S)).child(
+                    self.mode_item("mode-default", Ico::SlidersHorizontal, &default_title, "")
                         .on_click(cx.listener(|this, _, _, cx| {
-                            if let Some(f) = this.model.set_permission("ask") {
-                                this.send(f);
-                            }
-                            this.menu = None;
-                            cx.notify();
+                            this.pick_mode(None, cx);
                         })),
-                )
-                .child(
-                    self.mode_item("auto", Ico::ShieldCheck, "Ask when it's risky", "auto")
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            if let Some(f) = this.model.set_permission("auto") {
-                                this.send(f);
-                            }
-                            this.menu = None;
-                            cx.notify();
-                        })),
-                )
-                .child(
-                    self.mode_item("allow", Ico::Zap, "Don't ask", "allow")
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            if let Some(f) = this.model.set_permission("allow") {
-                                this.send(f);
-                            }
-                            this.menu = None;
-                            cx.notify();
-                        })),
-                ),
+                );
+                let modes: [(&'static str, Ico, &'static str, &'static str); 3] = [
+                    ("ask", Ico::Hand, "Ask first", "ask"),
+                    ("auto", Ico::ShieldCheck, "Ask when it's risky", "auto"),
+                    ("allow", Ico::Zap, "Don't ask", "allow"),
+                ];
+                for (id, icon, title, mode) in modes {
+                    list = list.child(self.mode_item(id, icon, title, mode).on_click(cx.listener(
+                        move |this, _, _, cx| {
+                            this.pick_mode(Some(mode), cx);
+                        },
+                    )));
+                }
+                list
+            }
         })
+    }
+
+    /// Sets the open agent's permission mode from the chat's menu, or with None, has it
+    /// follow the default.
+    fn pick_mode(&mut self, mode: Option<&str>, cx: &mut Context<Self>) {
+        if let Some(agent) = self.model.selected.clone() {
+            if let Some(f) = self.model.set_permission(&agent, mode) {
+                self.send(f);
+            }
+        }
+        self.menu = None;
+        cx.notify();
     }
 
     fn chat(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Div {
@@ -6082,7 +6122,9 @@ ACTA_KEY=secret:ACTA_KEY",
             );
         }
         // Its model and reasoning effort, as the chat's picker has them, once
-        // its program has said what it offers.
+        // its program has said what it offers; then its permission mode and what a
+        // message while it's busy does. Each first offers the person's default, which
+        // it follows until it picks its own.
         let mut picks = Vec::new();
         if let Some(a) = self
             .model
@@ -6092,15 +6134,29 @@ ACTA_KEY=secret:ACTA_KEY",
             .cloned()
         {
             for o in a.picks() {
+                let follows = a.follows(&o.id);
                 let on = a.chosen(&o.id);
-                let mut row = div().flex().flex_wrap().gap(px(space::S));
+                let (agent_id, option) = (a.id.clone(), o.id.clone());
+                let mut row = div().flex().flex_wrap().gap(px(space::S)).child(
+                    self.button_owned(
+                        format!("edit-pick-{}-default", o.id),
+                        &format!("Default: {}", value_name(&o, &a.followed(&o.id))),
+                        follows,
+                    )
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        if let Some(f) = this.model.follow_config(&agent_id, &option) {
+                            this.send(f);
+                        }
+                        cx.notify();
+                    })),
+                );
                 for (value, name) in o.values.clone() {
                     let (agent_id, option) = (a.id.clone(), o.id.clone());
                     row = row.child(
                         self.button_owned(
                             format!("edit-pick-{}-{value}", o.id),
                             &name,
-                            value == on,
+                            !follows && value == on,
                         )
                         .on_click(cx.listener(move |this, _, _, cx| {
                             if let Some(f) = this.model.set_config(&agent_id, &option, &value) {
@@ -6112,6 +6168,58 @@ ACTA_KEY=secret:ACTA_KEY",
                 }
                 picks.push(self.field(&o.name, row));
             }
+            let mut modes = div().flex().flex_wrap().gap(px(space::S));
+            let default_mode = format!(
+                "Default: {}",
+                model::mode_name(&self.model.defaults.permission)
+            );
+            let choices: [(&'static str, String, Option<&'static str>); 4] = [
+                ("default", default_mode, None),
+                ("ask", "Asks first".into(), Some("ask")),
+                ("auto", "Asks when it's risky".into(), Some("auto")),
+                ("allow", "Doesn't ask".into(), Some("allow")),
+            ];
+            for (id, label, mode) in choices {
+                let agent_id = a.id.clone();
+                modes = modes.child(
+                    self.button_owned(
+                        format!("edit-mode-{id}"),
+                        &label,
+                        a.permission == mode.unwrap_or_default(),
+                    )
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        if let Some(f) = this.model.set_permission(&agent_id, mode) {
+                            this.send(f);
+                        }
+                        cx.notify();
+                    })),
+                );
+            }
+            picks.push(self.field("Permission", modes));
+            let mut busy = div().flex().flex_wrap().gap(px(space::S));
+            let default_busy = format!("Default: {}", busy_name(&self.model.defaults.busy));
+            let choices: [(&'static str, String, Option<&'static str>); 3] = [
+                ("default", default_busy, None),
+                ("queue", busy_name("queue").into(), Some("queue")),
+                ("steer", busy_name("steer").into(), Some("steer")),
+            ];
+            for (id, label, choice) in choices {
+                let agent_id = a.id.clone();
+                busy = busy.child(
+                    self.button_owned(
+                        format!("edit-busy-{id}"),
+                        &label,
+                        a.busy == choice.unwrap_or_default(),
+                    )
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        if let Some(f) = this.model.set_busy(&agent_id, choice) {
+                            this.send(f);
+                        }
+                        cx.notify();
+                    })),
+                );
+            }
+            picks.push(self.field("A message while it answers", busy));
         }
         // Its thread's colour.
         let color = self
@@ -9334,6 +9442,168 @@ ACTA_KEY=secret:ACTA_KEY",
         self.settings_page("programs-page", "Brains", None, groups)
     }
 
+    /// The Agent defaults page: what every agent follows where it has nothing of its
+    /// own, changed live for every agent that follows it.
+    fn defaults_page(&mut self, cx: &mut Context<Self>) -> Div {
+        let p = self.p;
+        let d = self.model.defaults.clone();
+        let put = |args: Value| {
+            cx.listener(move |this: &mut Loom, _: &ClickEvent, _: &mut Window, cx| {
+                let f = this.model.put_defaults(args.clone());
+                this.send(f);
+                cx.notify();
+            })
+        };
+        // What a new agent runs on.
+        let programs = self.model.programs.clone();
+        let brain: AnyElement = if programs.is_empty() {
+            div()
+                .text_size(px(size::SMALL))
+                .text_color(p.ink_3)
+                .child("None installed")
+                .into_any_element()
+        } else {
+            let mut items = Vec::new();
+            for name in programs.clone() {
+                items.push(
+                    self.segment(format!("default-brain-{name}"), &name, d.brain == name)
+                        .on_click(put(serde_json::json!({"brain": name}))),
+                );
+            }
+            self.segments(items).into_any_element()
+        };
+        let new_agents = self.group(
+            Some("New agents"),
+            vec![self
+                .row(
+                    None,
+                    "Brain",
+                    Some("The program a new agent runs on".into()),
+                    Some(brain),
+                )
+                .into_any_element()],
+        );
+        // Each program's model and effort, from what an agent on it has said it offers.
+        let mut picks = Vec::new();
+        for name in programs {
+            let Some(agent) = self
+                .model
+                .agents
+                .iter()
+                .find(|a| a.program == name && !a.picks().is_empty())
+                .cloned()
+            else {
+                picks.push(self.note_row(
+                    format!("{name}: its models show here once an agent on it has started."),
+                    p.ink_3,
+                ));
+                continue;
+            };
+            for o in agent.picks() {
+                let picked = d.pick(&name, &o.id);
+                let mut row = div().flex().flex_wrap().gap(px(space::S)).child(
+                    self.small_button(
+                        format!("default-pick-{name}-{}-own", o.id),
+                        "What it starts on",
+                        picked.is_none(),
+                    )
+                    .on_click(put(
+                        serde_json::json!({"config": {name.clone(): {o.id.clone(): null}}}),
+                    )),
+                );
+                for (value, label) in o.values.clone() {
+                    row = row.child(
+                        self.small_button(
+                            format!("default-pick-{name}-{}-{value}", o.id),
+                            &label,
+                            picked.as_deref() == Some(value.as_str()),
+                        )
+                        .on_click(put(
+                            serde_json::json!({"config": {name.clone(): {o.id.clone(): value}}}),
+                        )),
+                    );
+                }
+                picks.push(self.text_row(&format!("{name} · {}", o.name), None, row));
+            }
+        }
+        let models = self.group(
+            Some("Model and effort, for agents that don't pick their own"),
+            picks,
+        );
+        // How agents ask, and what a message while one answers does.
+        let modes = [
+            ("ask", "Asks first"),
+            ("auto", "When risky"),
+            ("allow", "Doesn't ask"),
+        ];
+        let mut mode_items = Vec::new();
+        for (mode, label) in modes {
+            mode_items.push(
+                self.segment(format!("default-mode-{mode}"), label, d.permission == mode)
+                    .on_click(put(serde_json::json!({"permission": mode}))),
+            );
+        }
+        let mut busy_items = Vec::new();
+        for (busy, label) in [("queue", "Waits its turn"), ("steer", "Steers at once")] {
+            busy_items.push(
+                self.segment(format!("default-busy-{busy}"), label, d.busy == busy)
+                    .on_click(put(serde_json::json!({"busy": busy}))),
+            );
+        }
+        let ways = self.group(
+            Some("How they work"),
+            vec![
+                self.row(
+                    None,
+                    "Permission",
+                    Some("For agents without a mode of their own".into()),
+                    Some(self.segments(mode_items).into_any_element()),
+                )
+                .into_any_element(),
+                self.row(
+                    None,
+                    "A message while it answers",
+                    Some("Waits in the queue, or stops the turn and goes now".into()),
+                    Some(self.segments(busy_items).into_any_element()),
+                )
+                .into_any_element(),
+            ],
+        );
+        let instructions = self.group(
+            Some("Instructions every agent follows"),
+            vec![
+                div()
+                    .p(px(space::L))
+                    .child(Textarea::new(&self.every_in))
+                    .into_any_element(),
+                div()
+                    .px(px(space::L))
+                    .py(px(space::S + 2.0))
+                    .text_size(px(size::CAPTION))
+                    .text_color(p.ink_3)
+                    .child("Told to every agent beside About you, under their own heading")
+                    .into_any_element(),
+            ],
+        );
+        let save = self
+            .small_button("save-defaults", "Save", true)
+            .on_click(cx.listener(|this, _, _, cx| {
+                let text = this.every_in.read(cx).value().to_string();
+                let f = this
+                    .model
+                    .put_defaults(serde_json::json!({"instructions": text.trim()}));
+                this.send(f);
+                cx.notify();
+            }))
+            .into_any_element();
+        self.settings_page(
+            "defaults-page",
+            "Agent defaults",
+            Some(save),
+            vec![new_agents, ways, models, instructions],
+        )
+    }
+
     /// The About you page: the person's profile, which every agent's session starts with.
     fn profile_page(&mut self, cx: &mut Context<Self>) -> Div {
         let p = self.p;
@@ -10613,6 +10883,23 @@ fn qr_view(text: &str) -> Div {
     div().flex().child(grid)
 }
 
+/// What a message to a busy agent does, in words.
+fn busy_name(busy: &str) -> &'static str {
+    if busy == "steer" {
+        "Steers at once"
+    } else {
+        "Waits its turn"
+    }
+}
+
+/// A value of an option by its name, or as it is when the option doesn't name it.
+fn value_name(o: &model::ConfigOption, value: &str) -> String {
+    o.values
+        .iter()
+        .find(|(v, _)| v == value)
+        .map_or_else(|| value.to_string(), |(_, name)| name.clone())
+}
+
 fn time_of(ms: i64) -> String {
     use chrono::TimeZone;
     if ms <= 0 || ms == i64::MAX {
@@ -10714,6 +11001,11 @@ impl Render for Loom {
         };
         if self.scene.0 != scene {
             self.scene = (scene, Instant::now());
+        }
+        if std::mem::take(&mut self.model.defaults_came) {
+            let text = self.model.defaults.instructions.clone();
+            self.every_in
+                .update(cx, |s, cx| s.set_value(text, window, cx));
         }
         if std::mem::take(&mut self.model.profile_came) {
             let text = self

@@ -196,12 +196,19 @@ The QR code holds the instance's id and public key, the addresses to reach it, a
 Agents live in the database, and are made and edited in the app.
 
 - **What an agent has:** a name and a look, the ACP agent it runs on with that agent's model and mode ([Agents run on ACP](#agents-run-on-acp)), instructions (Markdown, like an `AGENTS.md`), its permission mode, its MCP servers, its skills, and a workspace folder. MCP servers are set up once, on the app's **MCP servers** page, and each agent picks the ones it gets on its edit page. A setting can name one of the person's secrets (`ACTA_KEY=secret:ACTA_KEY`), which is filled in only for the agent's process.
-- **Its settings, grouped**, in the panel beside the chat, without a title for the agent: **Brain** (its name, model and effort, colour), **Knows** (instructions, and its memories, the skills, its tables and its files with their size, each counted and opening where it's kept, then its MCP servers) and **Does** (its routines, and the tokens it used today and this month). `agent.summary` gives the counts.
+- **Its settings, grouped**, in the panel beside the chat, without a title for the agent: **Brain** (its name, model and effort, its permission mode and what a message while it answers does, each with **Default** to follow the person's, colour), **Knows** (instructions, and its memories, the skills, its tables and its files with their size, each counted and opening where it's kept, then its MCP servers) and **Does** (its routines, and the tokens it used today and this month). `agent.summary` gives the counts.
 - **Revisions.** Each change to an agent is saved as a revision, and each run records the revision it used. You can see which instructions gave an answer, and roll back.
 - **Agents edit themselves.** An agent can change its own instructions with a tool, as OpenBot's agents (and v0.1's Atelier mode) do. The change shows up as a revision by that agent.
 - **Skills.** Named Markdown bundles with files, loaded only when an agent needs them. Personal or shared.
 - **Agents talk to each other.** `message_agent` starts or continues a conversation with another of your agents, so a main agent can hand work to the others. A message from an agent never counts as your approval for a risky action.
 - **As files.** An agent can be exported and imported as a folder (`agent.toml`, `instructions.md`, `skills/`), for backups, git, and moving between instances. OpenBot's and Grok Bot's agents come over with everything around them ([Importing from OpenBot and Grok Bot](#importing-from-openbot-and-grok-bot)).
+
+### Agent defaults
+
+- **Live, and an agent can override.** The person's **Defaults** page, under Agents in the settings, sets what every agent of theirs follows until its own settings change that field, so changing a default changes every agent that hasn't. They're kept on the instance per person, so the phone has them too.
+- **What they cover:** the brain (agent program) a new agent runs on; the model and reasoning effort for each brain's agents, used where the program offers that value; the permission mode, `ask` until the person changes it; instructions every agent follows, told beside the person's profile under their own heading; and whether a message to a busy agent queues or steers ([Work that waits its turn](#work-that-waits-its-turn)).
+- **Back to the default.** Each field on an agent's edit page that follows the default says so, and the person sets one back to it there. Agents made before the defaults keep the permission mode they were made with until the person sets it to follow, so nothing loosens on its own; one an agent makes, or an import brings, starts on `ask` of its own.
+- **Agents read them, the person changes them.** An agent reads the defaults at once, and changing them asks its person first, as a looser permission mode does, since the default mode is every following agent's.
 
 ### Agents can do anything the app can
 
@@ -303,7 +310,7 @@ Each agent program runs as its own process. The instance reads each one on a thr
 ### Permissions
 
 - **Loom starts each agent in a mode that asks** before commands and edits, never in one that skips asking, unless the owner picks that for one agent.
-- **Loom answers the agent's requests** by the agent's permission mode: `ask` (every request comes to you), `auto` (loom allows the tools that only look: reading, searching, thinking and fetching, and asks about the rest), `allow` (everything), or a list of the kinds to allow.
+- **Loom answers the agent's requests** by the agent's permission mode, its own or the person's default ([Agent defaults](#agent-defaults)): `ask` (every request comes to you), `auto` (loom allows the tools that only look: reading, searching, thinking and fetching, and asks about the rest), `allow` (everything), or a list of the kinds to allow.
 - **Loom's own tools follow loom's rules.** Sending, paying, deleting, letting people in, changing permissions and moving always ask.
 - **Where the agent runs limits what it can do anyway:** as `loom` on a server, in a member's sandbox, or as you in a desktop instance.
 
@@ -360,7 +367,7 @@ Ideas taken from OpenBot ([CopilotKit's](https://github.com/CopilotKit/OpenBot),
 
 ### Work that waits its turn
 
-- **A message to a busy agent queues**, instead of being refused. The person sees the queue above the composer and can edit, reorder or drop what waits, or **steer**: stop the running turn and send it now, in the same ACP session, so the agent carries on from where it was with it in mind. ACP has no way into a turn that's running, so stopping it is how a message gets in.
+- **A message to a busy agent queues**, instead of being refused, or steers at once where the agent, or the person's default, says so ([Agent defaults](#agent-defaults)). The person sees the queue above the composer and can edit, reorder or drop what waits, or **steer**: stop the running turn and send it now, in the same ACP session, so the agent carries on from where it was with it in mind. ACP has no way into a turn that's running, so stopping it is how a message gets in.
 - **Long jobs are tasks**: each one an agent working in a conversation of its own, beside its chat, so the chat stays free. The person starts one from the Tasks page, or an agent starts one itself (`start_task`) when it's asked for something long. A task survives a restart of the instance, carrying on in the same ACP session, and the person can watch it, talk to it, pause, resume, cancel or retry it.
 - **Routines say when there's nothing to say.** A run can end with `routine_quiet` (no message, no notification), report a failure with `routine_failed`, or pause its own routine. A routine that fails five times in a row turns itself off and tells its person ([Routines](#routines)). A routine can post into its agent's chat or into a thread of its own, beside the chat, for one that would crowd it.
 - **A backup brain.** An agent can have a second program, which takes over when the first one's usage runs out, and the person can move a chat to another program with a handoff: the new one starts with a summary of what came before.
