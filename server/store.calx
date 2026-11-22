@@ -125,7 +125,7 @@ CREATE TABLE IF NOT EXISTS events (
     at INTEGER NOT NULL, PRIMARY KEY (user, seq));
 CREATE TABLE IF NOT EXISTS acp_sessions (
     user TEXT NOT NULL REFERENCES users(id), conversation TEXT NOT NULL, program TEXT NOT NULL,
-    session TEXT NOT NULL, at INTEGER NOT NULL, PRIMARY KEY (user, conversation));
+    session TEXT NOT NULL, at INTEGER NOT NULL, tools TEXT NOT NULL DEFAULT '', PRIMARY KEY (user, conversation));
 CREATE TABLE IF NOT EXISTS files (
     sha TEXT NOT NULL, user TEXT NOT NULL REFERENCES users(id), name TEXT NOT NULL,
     mime TEXT NOT NULL, size INTEGER NOT NULL, at INTEGER NOT NULL, PRIMARY KEY (sha, user));
@@ -146,6 +146,11 @@ CREATE TABLE IF NOT EXISTS flows (
     id TEXT PRIMARY KEY, user TEXT NOT NULL REFERENCES users(id), json TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS link_codes (
     hash TEXT PRIMARY KEY, user TEXT NOT NULL REFERENCES users(id), by TEXT NOT NULL,
+    expires INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS owner_codes (
+    hash TEXT PRIMARY KEY, by TEXT NOT NULL, expires INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS script_grants (
+    hash TEXT PRIMARY KEY, user TEXT NOT NULL REFERENCES users(id), scope TEXT NOT NULL,
     expires INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS invites (
     id TEXT PRIMARY KEY, hash TEXT NOT NULL UNIQUE, role TEXT NOT NULL, uses INTEGER NOT NULL,
@@ -357,6 +362,13 @@ impl Store {
             if text(r[1].copy()) == "site" { sited = true }
         }
         if not sited { try s.db.execute_script(String("ALTER TABLE memories ADD COLUMN site TEXT NOT NULL DEFAULT '';")) }
+        // ACP sessions from before a session kept its tools get the column,
+        // empty for not known.
+        var tooled = false
+        for r in try s.db.query(String("PRAGMA table_info(acp_sessions)")) {
+            if text(r[1].copy()) == "tools" { tooled = true }
+        }
+        if not tooled { try s.db.execute_script(String("ALTER TABLE acp_sessions ADD COLUMN tools TEXT NOT NULL DEFAULT '';")) }
         // Settings kept before they were sealed are sealed once.
         for r in try s.db.query(String("SELECT name, env FROM acp_settings")) {
             let env = text(r[1].copy())
@@ -486,6 +498,8 @@ impl Store {
             return none
         }
         let stored = text(r[3].copy())
+        // An account with no password yet takes none.
+        if stored.len() == 0 { return none }
         if not verify_password(stored.copy(), password.copy()) { return none }
         if self.hasher.needs_rehash(stored) {
             _ = try self.db.execute(String("UPDATE users SET password = ? WHERE id = ?"), [t(self.hasher.hash(password)), r[0].copy()])
@@ -899,6 +913,24 @@ impl Store {
     pub fn script_token_user(self, hash: String) -> String? ! Error {
         let r = try self.db.query_one(String("SELECT user FROM script_tokens WHERE hash = ?"), [t(hash)]) else return none
         return some(text(r[0].copy()))
+    }
+
+    // A script token that one script makes for itself from the data folder, as
+    // `loom import` does: for `user`, taken only for `scope` (a script route's
+    // name), until `expires` (Unix ms). Those past their time go.
+    pub fn add_script_grant(self, hash: String, user: String, scope: str, expires: i64) ! Error {
+        _ = try self.db.execute(String("DELETE FROM script_grants WHERE expires <= ?"), [Value.Int(now())])
+        _ = try self.db.execute(String("INSERT INTO script_grants (hash, user, scope, expires) VALUES (?, ?, ?, ?)"), [t(hash), t(user), t(String(scope)), Value.Int(expires)])
+    }
+
+    // Whose grant has this SHA-256, what it's for, and when it ends.
+    pub fn script_grant(self, hash: String) -> (String, String, i64)? ! Error {
+        let r = try self.db.query_one(String("SELECT user, scope, expires FROM script_grants WHERE hash = ?"), [t(hash)]) else return none
+        return some((text(r[0].copy()), text(r[1].copy()), int(r[2].copy())))
+    }
+
+    pub fn drop_script_grant(self, hash: String) ! Error {
+        _ = try self.db.execute(String("DELETE FROM script_grants WHERE hash = ?"), [t(hash)])
     }
 
     // --- Imports (PLAN.md, "Importing from OpenBot and Grok Bot") ---
@@ -1676,6 +1708,32 @@ impl Store {
         return some((text(r[0].copy()), int(r[1].copy())))
     }
 
+    // A link code that makes the owner on an instance no one has set up yet
+    // (protocol.md, "Link codes"), as its SHA-256, made by `by` ("setup" or
+    // "cli"), until `expires`. There's one at a time: a new one replaces the last.
+    pub fn add_owner_code(self, hash: String, by: str, expires: i64) ! Error {
+        _ = try self.db.execute(String("DELETE FROM owner_codes"))
+        _ = try self.db.execute(String("INSERT INTO owner_codes (hash, by, expires) VALUES (?, ?, ?)"), [t(hash), t(String(by)), Value.Int(expires)])
+    }
+
+    // When the owner code whose SHA-256 is `hash` expires, or none for one there
+    // isn't. It stays until `drop_owner_codes`, once the owner is made.
+    pub fn owner_code(self, hash: String) -> i64? ! Error {
+        let r = try self.db.query_one(String("SELECT expires FROM owner_codes WHERE hash = ?"), [t(hash)]) else return none
+        return some(int(r[0].copy()))
+    }
+
+    pub fn drop_owner_codes(self) ! Error {
+        _ = try self.db.execute(String("DELETE FROM owner_codes"))
+    }
+
+    // Whether the account has a password: one made from a link code has none
+    // until the person sets one.
+    pub fn has_password(self, user: String) -> bool ! Error {
+        let r = try self.db.query_one(String("SELECT password FROM users WHERE id = ?"), [t(user)]) else return false
+        return text(r[0].copy()).len() > 0
+    }
+
     // --- Invites (PLAN.md, "Accounts and invites") ---
 
     // An invite whose code's SHA-256 is `hash`, giving `role`, for `uses`
@@ -1809,7 +1867,7 @@ impl Store {
 
     fn remove_rows(self, user: String) ! Error {
         _ = try self.db.execute(String("DELETE FROM sent WHERE device IN (SELECT id FROM devices WHERE user = ?)"), [t(user.copy())])
-        for table in ["push_tokens", "link_codes", "resets", "agent_revisions", "agents", "activity", "secrets", "mcp_servers", "skills", "messages", "conversations", "runs", "queue", "tasks", "sides", "branches", "routine_threads", "events", "acp_sessions", "files", "profiles", "defaults", "rules", "routines", "flows", "plugin_data", "plugin_revisions", "plugins", "usage", "memories", "memories_fts", "messages_fts", "shared_rows", "shared_tables", "script_tokens", "imported", "recordings", "proposals", "devices"] {
+        for table in ["push_tokens", "link_codes", "script_grants", "resets", "agent_revisions", "agents", "activity", "secrets", "mcp_servers", "skills", "messages", "conversations", "runs", "queue", "tasks", "sides", "branches", "routine_threads", "events", "acp_sessions", "files", "profiles", "defaults", "rules", "routines", "flows", "plugin_data", "plugin_revisions", "plugins", "usage", "memories", "memories_fts", "messages_fts", "shared_rows", "shared_tables", "script_tokens", "imported", "recordings", "proposals", "devices"] {
             _ = try self.db.execute("DELETE FROM {table} WHERE user = ?", [t(user.copy())])
         }
         _ = try self.db.execute(String("DELETE FROM invites WHERE by = ?"), [t(user.copy())])
@@ -1876,8 +1934,15 @@ impl Store {
         return some(text(r[0].copy()))
     }
 
-    pub fn put_acp_session(self, user: String, conversation: String, program: String, session: String) ! Error {
-        _ = try self.db.execute(String("INSERT INTO acp_sessions (user, conversation, program, session, at) VALUES (?, ?, ?, ?, ?) ON CONFLICT (user, conversation) DO UPDATE SET program = excluded.program, session = excluded.session, at = excluded.at"), [t(user), t(conversation), t(program), t(session), Value.Int(now())])
+    // The tools `session` was started with: "code" (Code Mode) or "plain", or
+    // empty for one kept before sessions kept them.
+    pub fn acp_session_tools(self, user: String, conversation: String, session: String) -> String ! Error {
+        let r = try self.db.query_one(String("SELECT tools FROM acp_sessions WHERE user = ? AND conversation = ? AND session = ?"), [t(user), t(conversation), t(session)]) else return String()
+        return text(r[0].copy())
+    }
+
+    pub fn put_acp_session(self, user: String, conversation: String, program: String, session: String, tools: str) ! Error {
+        _ = try self.db.execute(String("INSERT INTO acp_sessions (user, conversation, program, session, at, tools) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT (user, conversation) DO UPDATE SET program = excluded.program, session = excluded.session, at = excluded.at, tools = excluded.tools"), [t(user), t(conversation), t(program), t(session), Value.Int(now()), t(String(tools))])
     }
 
     // --- Files ---
@@ -2256,11 +2321,15 @@ fn acp_sessions_are_kept_per_conversation_and_program() {
     let s = test_store()
     let a = s.add_user(String("a"), String("password1"), "owner")!
     assert(s.acp_session(a.id.copy(), String("c_1"), String("claude"))! == none)
-    s.put_acp_session(a.id.copy(), String("c_1"), String("claude"), String("s_1"))!
+    s.put_acp_session(a.id.copy(), String("c_1"), String("claude"), String("s_1"), "code")!
     assert(s.acp_session(a.id.copy(), String("c_1"), String("claude"))! == some(String("s_1")))
+    // It keeps the tools it started with.
+    assert(s.acp_session_tools(a.id.copy(), String("c_1"), String("s_1"))! == "code")
+    assert(s.acp_session_tools(a.id.copy(), String("c_1"), String("s_9"))! == "")
     // Another program can't take up claude's session.
     assert(s.acp_session(a.id.copy(), String("c_1"), String("codex"))! == none)
-    s.put_acp_session(a.id.copy(), String("c_1"), String("codex"), String("s_2"))!
+    s.put_acp_session(a.id.copy(), String("c_1"), String("codex"), String("s_2"), "plain")!
+    assert(s.acp_session_tools(a.id.copy(), String("c_1"), String("s_2"))! == "plain")
     assert(s.acp_session(a.id.copy(), String("c_1"), String("claude"))! == none)
     assert(s.acp_session(a.id.copy(), String("c_1"), String("codex"))! == some(String("s_2")))
 }

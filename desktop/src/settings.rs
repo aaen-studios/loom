@@ -142,6 +142,16 @@ impl Loom {
         cx.notify();
     }
 
+    /// Keeps where the window is now, when that changed, so it opens there next time.
+    pub(super) fn keep_place(&mut self) {
+        if let Some(p) = shell::window_place(self.hwnd) {
+            if self.place != Some(p) {
+                p.save(&data_dir());
+                self.place = Some(p);
+            }
+        }
+    }
+
     /// The colours, as the prefs and the system have them.
     pub(super) fn apply_theme(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let dark = self.prefs.dark(system_dark(window));

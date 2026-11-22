@@ -16,10 +16,10 @@ import std.sqlite.{Database, Value}
 import std.time.{Timestamp}
 import std.zip.{Writer}
 import shared.obj.{Obj, at, int_at, str_at}
-import tests.kit.{App, Instance, check, loom, reply_text}
+import tests.kit.{App, Instance, check, json_of, loom, reply_text}
 
 // What the copies hold that must never come over.
-const SECRETS: [str; 7] = ["VAULT_SECRET_VALUE", "API_KEY_SECRET", "MCP_ENV_SECRET", "MCP_HEADER_SECRET", "GROK_SECRET", "GROK_ENV_SECRET", "GROK_HEADER_SECRET"]
+const SECRETS: [str; 8] = ["PROVIDER_TOKEN_SECRET", "VAULT_SECRET_VALUE", "API_KEY_SECRET", "MCP_ENV_SECRET", "MCP_HEADER_SECRET", "GROK_SECRET", "GROK_ENV_SECRET", "GROK_HEADER_SECRET"]
 
 const OPENBOT_SCHEMA: str = #"
 CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY);
@@ -70,6 +70,9 @@ fn openbot_fixture(root: String) ! Error {
     try fs.write_text("{root}/agent-api-keys/key.txt", String("API_KEY_SECRET"))
     try fs.write_text("{root}/openbot-vault-v1.json", String(#"{"keys":"VAULT_SECRET_VALUE"}"#))
     try fs.write_text("{root}/openbot-sidebar-pins-v1.json", String(#"{"version":1,"pinned":["ag_main"]}"#))
+    // The provider OpenBot's Claude uses, in Claude Code's settings, with other settings beside it.
+    try fs.make_dir_all("{root}/.claude")
+    try fs.write_text("{root}/.claude/settings.json", String(#"{"env":{"ANTHROPIC_BASE_URL":"https://proxy.example.com","ANTHROPIC_AUTH_TOKEN":"PROVIDER_TOKEN_SECRET","OTHER":"x"},"permissions":{"allow":[]}}"#))
     var z = Writer.new()
     z.add(String("weekly-report/SKILL.md"), String("---\nname: Weekly Report\ndescription: When asked for the week's report\n---\n\n# Steps\n\nGather the week.").to_bytes())
     z.add(String("weekly-report/template.md"), String("# Week").to_bytes())
@@ -159,6 +162,8 @@ fn run(inst: Instance) ! Error {
     let g = sources.at(1) ?? Json.Null
     try check(str_at(o.copy(), "from") == some(String("openbot")) and at(o.copy(), "found") == Json.Bool(true) and int_at(at(o.copy(), "counts"), "agents") == some(2) and int_at(at(o.copy(), "counts"), "messages") == some(3), "import.scan finds OpenBot's data, with how much of each kind")
     try check(at(g.copy(), "found") == Json.Bool(true) and int_at(at(g.copy(), "counts"), "agents") == some(1) and (str_at(g, "text") ?? String()).contains("1 agent"), "and Grok Bot's, in words")
+    let provider = at(o.copy(), "provider")
+    try check(str_at(provider.copy(), "endpoint") == some(String("https://proxy.example.com")) and at(provider.copy(), "token") == Json.Bool(true) and (str_at(provider.copy(), "text") ?? String()).contains("https://proxy.example.com with a token") and not "{scan}".contains("PROVIDER_TOKEN_SECRET"), "it says which endpoint OpenBot's Claude uses, with a token, and never the token")
     let nowhere = value(try app.cmd("q_2", "import.scan", Obj.new().s("openbot", "{root}/nothing").done()))
     try check(at(at(nowhere, "sources").at(0) ?? Json.Null, "found") == Json.Bool(false), "an app that isn't there is said not to be")
 
@@ -238,6 +243,48 @@ fn run(inst: Instance) ! Error {
     let token = str_at(value(try app.cmd("q_21", "scripts.on", Obj.new().done())), "token") ?? String()
     let out = try loom(inst.data.copy(), [String("import"), String("grokbot"), gb.copy(), String("--url"), "http://{inst.base}", String("--token"), token]).output()
     try check(out.status.success() and out.text().contains("here already"), "loom import grokbot does it from the command line")
+
+    // --- The provider, carried over once the person says yes ---
+    try inst.add_fake(String("claude"), String("--load"))
+    let carried = value(try app.cmd("q_22", "import.run", Obj.new().s("from", String("openbot")).s("path", ob.copy()).b("carry_provider", true).done()))
+    let p = at(carried.copy(), "provider")
+    try check(at(p.copy(), "carried") == Json.Bool(true) and str_at(p.copy(), "program") == some(String("claude")) and str_at(p, "endpoint") == some(String("https://proxy.example.com")) and not "{carried}".contains("PROVIDER_TOKEN_SECRET"), "import.run with carry_provider gives the provider to the Claude agent program, saying the endpoint, not the token")
+    let programs = "{value(try app.cmd("q_23", "acp.list", Obj.new().done()))}"
+    try check(programs.contains(#""ANTHROPIC_BASE_URL","ANTHROPIC_AUTH_TOKEN""#) and not programs.contains("PROVIDER_TOKEN_SECRET") and not programs.contains("OTHER"), "kept in its sealed settings, of which only the names come back, and nothing else of Claude's settings")
+    let made = value(try app.cmd("q_24", "agent.create", Obj.new().s("name", String("Carried")).s("acp_agent", String("claude")).s("instructions", String("Test.")).done()))
+    let carried_agent = str_at(at(made, "agent"), "id") ?? String()
+    let opened = value(try app.cmd("q_25", "conversation.create", Obj.new().s("agent", carried_agent).done()))
+    try app.send(Obj.new().s("t", String("send")).s("cid", String("c_1")).s("conversation", str_at(opened, "conversation") ?? String()).s("text", String("/env ANTHROPIC_BASE_URL")).done())
+    try check(reply_text(try app.reply()) == "ANTHROPIC_BASE_URL=https://proxy.example.com", "and an agent on it starts with that endpoint")
+
+    // --- From another user's folder, as root would, while OpenBot writes to it ---
+    let home = "{root}/home-openbot"
+    let data = "{home}/.config/OpenBot"
+    try openbot_fixture(data.copy())
+    try fs.make_dir_all("{home}/.claude")
+    try fs.write_text("{home}/.claude/settings.json", String(#"{"env":{"ANTHROPIC_BASE_URL":"https://proxy2.example.com","ANTHROPIC_AUTH_TOKEN":"PROVIDER_TOKEN_SECRET"}}"#))
+    try fs.make_dir_all("{home}/.agents/skills/notes")
+    try fs.write_text("{home}/.agents/skills/notes/SKILL.md", String("---\nname: notes\ndescription: Taking notes\n---\n\nWrite them down."))
+    try fs.write_text("{data}/attachments/notes.txt", String("The notes."))
+    // OpenBot is running: what it wrote last is still in its WAL, which a copy of the file would miss.
+    let live = try Database.open("{data}/openbot.db")
+    _ = try live.query(String("PRAGMA journal_mode=WAL"))
+    _ = try live.query(String("PRAGMA wal_autocheckpoint=0"))
+    _ = try live.execute(String(#"INSERT INTO projection_thread_messages VALUES ('th_main', 'm9', 't9', 'user', 'done', 'message', '2026-01-03T09:00:00.000Z', 4, '{"id":"m9","author":"user","text":"Written while it ran","source":"user"}', 1)"#))
+    _ = try live.execute(String("INSERT INTO projection_attachments VALUES ('at9', 'message', 'th_main:m9', 'notes.txt', ?, '[]', '2026-01-03T09:00:00.000Z', 1)"), [sql_text("{data}/attachments/notes.txt")])
+    let staged_run = try loom(inst.data.copy(), [String("import"), String("openbot"), String("--from-user"), String("openbot"), String("--test-from-home"), home.copy(), String("--carry-provider"), String("--url"), "http://{inst.base}", String("--json")]).output()
+    try live.close()
+    let said = json_of(staged_run.stdout.copy())
+    let staged_came = at(said.copy(), "came")
+    println("      {str_at(said.copy(), "text") ?? staged_run.error_text()}")
+    try check(staged_run.status.success() and int_at(staged_came.copy(), "messages") == some(1) and int_at(staged_came.copy(), "files") == some(1) and int_at(staged_came, "skills") == some(1) and (int_at(said.copy(), "already") ?? 0) > 0, "loom import openbot --from-user stages a snapshot that has what was still in the WAL, with its file and the user's skills, and imports what's new")
+    try check(str_at(at(said.copy(), "provider"), "endpoint") == some(String("https://proxy2.example.com")) and not "{said}".contains("PROVIDER_TOKEN_SECRET") and not staged_run.error_text().contains("PROVIDER_TOKEN_SECRET"), "with --carry-provider the user's Claude provider comes too, its token never said")
+    let stage_dir = (str_at(at(said.copy(), "staged"), "path") ?? String()).copy()
+    let files_map = try fs.read_text("{stage_dir}/loom-files.json") ?? String()
+    try check(stage_dir.ends_with("/imports/openbot") and fs.is_file("{stage_dir}/openbot.db") and files_map.contains("notes.txt") and files_map.contains("report.txt") and not files_map.contains("key.txt") and not fs.exists("{stage_dir}/openbot-vault-v1.json") and not fs.exists("{stage_dir}/agent-api-keys"), "the staged folder in the instance's imports/ has the snapshot and the chats' files, but no secret")
+    try check(not fs.exists("{stage_dir}/.claude/settings.json") and not fs.exists("{inst.data}/imports/pending.json") and not fs.exists("{inst.data}/imports/done.json"), "and keeps no token once it's imported, nor anything waiting")
+    let main_chat = at(value(try app.cmd("q_26", "messages.list", Obj.new().s("conversation", chat.copy()).done())), "messages")
+    try check("{main_chat}".contains("Written while it ran"), "the message written while OpenBot ran is in the chat")
     app.close()
 }
 

@@ -205,6 +205,16 @@ fn config_values(a: &Value) -> Vec<(String, String)> {
         .unwrap_or_default()
 }
 
+/// A server an agent offered, that the person said yes to on this device, as the
+/// core says it (`core.offer`). With a link code, the app signs in with it.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Offer {
+    pub address: String,
+    pub code: String,
+    /// The person's username where it was offered, for the owner a code makes.
+    pub username: String,
+}
+
 /// The person's agent defaults: what every agent of theirs follows where it has
 /// nothing of its own.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -1870,7 +1880,7 @@ pub struct Model {
     pub server: Option<String>,
     /// Servers an agent offered and the person said yes to on this device, for the
     /// app to add.
-    pub offered: Vec<String>,
+    pub offered: Vec<Offer>,
     pub synced: bool,
     pub login_error: Option<String>,
     pub logging_in: bool,
@@ -2560,6 +2570,15 @@ impl Model {
                     self.logging_in = false;
                 }
             }
+            // An agent offered another server, and the person said yes here: the core
+            // decided it's this device's to add.
+            "core.offer" => {
+                self.offered.push(Offer {
+                    address: s(f, "address"),
+                    code: s(f, "code"),
+                    username: s(f, "username"),
+                });
+            }
             "core.login" => {
                 self.logging_in = false;
                 if let Some(e) = f.get("error") {
@@ -2805,10 +2824,6 @@ impl Model {
                     self.flows.push(flow);
                 }
             }
-            // An agent offered another server, and the person said yes here.
-            "server" if kind == "server.offered" && s(f, "by") == self.me => {
-                self.offered.push(s(f, "address"));
-            }
             "defaults" => {
                 if let Some(d) = f.get("defaults") {
                     self.take_defaults(d, false);
@@ -2823,10 +2838,6 @@ impl Model {
             }
             "queue" => {
                 self.queues.insert(s(f, "conversation"), Model::queue_of(f));
-            }
-            // An agent offered another server, and the person said yes here.
-            "server" if kind == "server.offered" && s(f, "by") == self.me => {
-                self.offered.push(s(f, "address"));
             }
             "task" => {
                 let task = Task::of(f.get("task").unwrap_or(&Value::Null));
@@ -4195,6 +4206,19 @@ impl Model {
         } else {
             json!({"t": "setup", "server": server.trim(), "code": code.trim(), "username": username.trim(), "password": password, "device": device})
         }
+    }
+
+    /// Signs in to an offered server with its link code, for the core of that server:
+    /// on a new one the code makes the owner, as the person's username.
+    pub fn link_offered(&mut self, offer: &Offer) -> Value {
+        self.logging_in = true;
+        self.login_error = None;
+        let device = json!({"name": device_name(), "kind": "windows"});
+        let mut frame = json!({"t": "link", "server": offer.address.trim(), "code": offer.code, "device": device});
+        if !offer.username.is_empty() {
+            frame["username"] = json!(offer.username);
+        }
+        frame
     }
 
     pub fn programs(&mut self) -> Value {
@@ -6257,14 +6281,55 @@ mod tests {
         let mut m = Model::new();
         m.take(&json!({"t": "core.conn", "state": "live", "server": "https://loom.example.com"}));
         assert_eq!(m.server.as_deref(), Some("https://loom.example.com"));
-        m.take(&json!({"t": "welcome", "device": "d_1"}));
-        m.take(&json!({"t": "event", "kind": "server.offered", "address": "https://two.example.com", "by": "d_2"}));
-        assert!(
-            m.offered.is_empty(),
-            "one said yes to on another device is that one's"
-        );
+        // The core says which offers are this device's; the event alone adds nothing.
         m.take(&json!({"t": "event", "kind": "server.offered", "address": "https://two.example.com", "by": "d_1"}));
-        assert_eq!(m.offered, vec!["https://two.example.com".to_string()]);
+        assert!(m.offered.is_empty(), "the core decides, not the event");
+        m.take(&json!({"t": "core.offer", "address": "https://two.example.com"}));
+        assert_eq!(
+            m.offered,
+            vec![Offer {
+                address: "https://two.example.com".into(),
+                ..Offer::default()
+            }]
+        );
+    }
+
+    #[test]
+    fn one_yes_to_a_server_with_a_link_code_signs_in_there() {
+        // The yes card: the agent's add_server asks, as one of loom's own tools.
+        let mut here = Model::new();
+        here.take(&json!({"t": "event", "kind": "approval.needed", "call": "tc_1", "run": "run_1", "title": "Add the server https://two.example.com to your app, and sign in there", "can_always": false}));
+        // The person's yes there is the only one: the core of the device that gave it
+        // says core.offer with the code.
+        here.take(&json!({"t": "core.offer", "address": "https://two.example.com", "code": "loom-link-3f2a", "username": "elliot"}));
+        let offer = here.offered.pop().expect("an offer for this device");
+        assert_eq!(offer.code, "loom-link-3f2a");
+        // The new server's own model signs in with it, as the person, with nothing typed.
+        let mut there = Model::new();
+        let frame = there.link_offered(&offer);
+        assert_eq!(frame["t"], "link");
+        assert_eq!(frame["server"], "https://two.example.com");
+        assert_eq!(frame["code"], "loom-link-3f2a");
+        assert_eq!(frame["username"], "elliot");
+        assert!(frame.get("password").is_none());
+        assert!(
+            there.logging_in,
+            "the add-a-server popup says it's signing in"
+        );
+        // A code that didn't work leaves the form, with why, to sign in by hand.
+        there.take(&json!({"t": "core.login", "error": {"code": "expired", "message": "That code has expired. Ask for a new one."}}));
+        assert!(!there.logging_in);
+        assert_eq!(
+            there.login_error.as_deref(),
+            Some("That code has expired. Ask for a new one.")
+        );
+        // With no username, the server names the owner itself.
+        let bare = there.link_offered(&Offer {
+            address: "https://three.example.com".into(),
+            code: "loom-link-9b".into(),
+            username: String::new(),
+        });
+        assert!(bare.get("username").is_none());
     }
 
     #[test]

@@ -85,6 +85,8 @@ jobs:
           test "$(ps -o user= -p "$(systemctl show -p MainPID --value loom)")" = loom
           test "$(stat -c %a /var/lib/loom)" = 700
           curl -fsS http://127.0.0.1:8790/api/info | grep -q '"setup":true'
+          curl -fsS http://127.0.0.1:8790/api/version | grep -q '"set_up":false'
+          grep -q '"version":"' install.json
           sudo -u loom /usr/local/bin/loom status --json --data /var/lib/loom | grep -q '"user":"loom"'
 
       - name: Sandboxes
