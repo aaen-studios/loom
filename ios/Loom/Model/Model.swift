@@ -22,12 +22,26 @@ struct Agent: Identifiable, Equatable, Sendable {
     var shape = ""
     /// The one the person drew, as the instance smoothed it, in a box from -1 to 1.
     var drawing: [CGPoint] = []
+    /// When it was pinned to the top of the list, and its place where the person
+    /// dragged it, if either.
+    var pinned: Int?
+    var order: Int?
 
     /// The points its thread follows in the list, or nil for the plain thread.
     var outline: [CGPoint]? {
         if shape == "drawn" { return drawing.count > 1 ? drawing : nil }
         return Tokens.ThreadShape.all[shape]
     }
+}
+
+/// Agents as the desktop lists them (model.rs, sort_agents): pinned ones first; within
+/// each, where the person dragged them, then the ones not placed yet, as they were made.
+func listed(_ agents: [Agent]) -> [Agent] {
+    agents.enumerated().sorted { a, b in
+        let ka = (a.element.pinned == nil ? 1 : 0, a.element.order ?? Int.max, a.element.pinned ?? 0, a.offset)
+        let kb = (b.element.pinned == nil ? 1 : 0, b.element.order ?? Int.max, b.element.pinned ?? 0, b.offset)
+        return ka < kb
+    }.map(\.element)
 }
 
 /// A drawing as the instance keeps it: `[[x, y], ...]`.
@@ -460,9 +474,9 @@ final class Model {
         let items = f["items"].array
         switch what {
         case .agents:
-            agents = items.map {
-                Agent(id: $0["id"].text, name: $0["name"].text, color: $0["color"].text, program: $0["acp_agent"].text, shape: $0["shape"].text, drawing: points($0["drawing"]))
-            }
+            agents = listed(items.map {
+                Agent(id: $0["id"].text, name: $0["name"].text, color: $0["color"].text, program: $0["acp_agent"].text, shape: $0["shape"].text, drawing: points($0["drawing"]), pinned: $0["pinned"].int, order: $0["order"].int)
+            })
             if let s = selected, agent(s) == nil { select(nil) }
         case .conversations:
             let before = conversation

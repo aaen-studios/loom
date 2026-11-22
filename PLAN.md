@@ -585,7 +585,7 @@ Ask an agent about its chat without adding to it: "what did we decide about the 
 
 A message worth keeping at hand is pinned in its chat, as in Discord: by the person, from the pin in its corner, or by an agent, with `run_command`. The pin is kept on the message, with when and who, so every device sees it. The chat's header shows how many there are, and opens them beside the chat, the newest pin first, each to jump to or take off.
 
-An agent is pinned too, from its menu: pinned agents stay at the top of the agent list, in the order they were pinned, with a small pin. The pin is kept on the instance, so every device has it, and it isn't a revision of the agent. They aren't tiles, which wouldn't fit the threads.
+An agent is pinned too, from its menu: pinned agents stay at the top of the agent list, with a small pin. Otherwise agents stay where they are: nothing the person does with one moves it, and they drag them into the order they want, in the sidebar or the rail (`agent.order`). The pin and the order are kept on the instance, so every device has them, and neither is a revision of the agent. They aren't tiles, which wouldn't fit the threads.
 
 ## Branching a chat
 

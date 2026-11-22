@@ -30,6 +30,67 @@ use settings::{settings_found, settings_groups, system_dark};
 #[path = "rules.rs"]
 mod rules;
 
+/// What dropping a dragged agent on a row does.
+type DropAgent = Box<dyn Fn(&AgentDrag, &mut Window, &mut App) + 'static>;
+
+/// An agent being dragged in the sidebar to a new place, with what its floating copy
+/// under the pointer shows: its thread in its shape, and its name.
+#[derive(Clone)]
+pub struct AgentDrag {
+    id: String,
+    name: SharedString,
+    tint: Hsla,
+    outline: Option<Vec<(f32, f32)>>,
+    p: Palette,
+}
+
+impl AgentDrag {
+    fn of(a: &model::Agent, p: Palette) -> Self {
+        AgentDrag {
+            id: a.id.clone(),
+            name: a.name.clone().into(),
+            tint: thread::color(&a.color, p.dark),
+            outline: a.outline().map(<[_]>::to_vec),
+            p,
+        }
+    }
+
+    fn ghost(d: &AgentDrag, _: Point<Pixels>, _: &mut Window, cx: &mut App) -> Entity<AgentDrag> {
+        let d = d.clone();
+        cx.new(|_| d)
+    }
+}
+
+impl Render for AgentDrag {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        let p = self.p;
+        div()
+            .flex()
+            .items_center()
+            .gap(px(space::M))
+            .px(px(space::M))
+            .py(px(space::S))
+            .rounded(px(radius::ROW))
+            .bg(p.raised)
+            .border_1()
+            .border_color(p.line_strong)
+            .shadow_lg()
+            .text_size(px(size::BODY))
+            .font_weight(FontWeight::MEDIUM)
+            .text_color(p.ink)
+            .child(thread::strand(
+                format!("drag-{}", self.id),
+                Mood::Idle,
+                self.tint,
+                self.outline.as_deref(),
+                26.0,
+                10.0,
+                None,
+            ))
+            .child(self.name.clone())
+    }
+}
+
 /// The colours of one theme.
 #[derive(Clone, Copy)]
 pub struct Palette {
@@ -2139,6 +2200,18 @@ ACTA_KEY=secret:ACTA_KEY",
                 s.scroll_to_end(cx);
             }
         });
+    }
+
+    /// What dropping a dragged agent on the agent `onto` does: puts it in that one's
+    /// place, and tells the instance the new order.
+    fn drop_agent(&self, onto: &str, cx: &mut Context<Self>) -> DropAgent {
+        let onto = onto.to_string();
+        Box::new(cx.listener(move |this, d: &AgentDrag, _, cx| {
+            if let Some(f) = this.model.move_agent(&d.id, &onto) {
+                this.send(f);
+            }
+            cx.notify();
+        }))
     }
 
     /// A right-click on an agent in the sidebar: its chat, with its menu open at the
@@ -4769,6 +4842,9 @@ ACTA_KEY=secret:ACTA_KEY",
                         })
                     })
                     .on_click(cx.listener(move |this, _, _, cx| this.select(id.clone(), cx)))
+                    .on_drag(AgentDrag::of(&a, p), AgentDrag::ghost)
+                    .drag_over::<AgentDrag>(move |s, _, _, _| s.bg(p.hover))
+                    .on_drop(self.drop_agent(&a.id, cx))
                     .child(thread::strand(
                         format!("side-{}", a.id),
                         mood,
@@ -5074,6 +5150,9 @@ ACTA_KEY=secret:ACTA_KEY",
                         })
                     })
                     .on_click(cx.listener(move |this, _, _, cx| this.select(id.clone(), cx)))
+                    .on_drag(AgentDrag::of(&a, p), AgentDrag::ghost)
+                    .drag_over::<AgentDrag>(move |s, _, _, _| s.bg(p.hover))
+                    .on_drop(self.drop_agent(&a.id, cx))
                     .child(thread::strand(
                         format!("side-{}", a.id),
                         self.model.mood(&a.id),
