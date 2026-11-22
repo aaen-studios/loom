@@ -18,7 +18,7 @@ use serde_json::Value;
 use crate::core::Core;
 use crate::model::{self, Approval, Conn, ImportSource, Message, Model, Mood, Offer, ServerUpdate};
 use crate::motion::{self, SoftHover};
-use crate::prefs::{Prefs, Text, Theme, Thoughts, Tools};
+use crate::prefs::{Prefs, Text, Theme, Thoughts, Tools, Width};
 use crate::shell;
 use crate::thread::{self, thread, Spool};
 use crate::tokens::*;
@@ -118,8 +118,6 @@ enum Menu {
     Agent,
     Model,
     Permission,
-    /// Which program the open chat moves to.
-    MoveTo,
 }
 
 /// The composer's + menu, open at its first list or at one it leads to.
@@ -168,6 +166,18 @@ pub struct Loom {
     /// The menu item that can't be undone and waits for its second click, until the
     /// menu closes.
     armed: Option<&'static str>,
+    /// Start fresh on the agent's edit panel, waiting for its second click.
+    fresh_armed: bool,
+    /// Whether the colour wheel for an agent's own colour is open on its edit panel,
+    /// and when a click outside last closed it.
+    custom_color: bool,
+    color_closed_at: Option<Instant>,
+    /// Whether a press on the colour wheel is being dragged.
+    wheel_drag: bool,
+    /// Where the colour wheel is on screen, for a click on it.
+    wheel_bounds: Rc<std::cell::Cell<Option<Bounds<Pixels>>>>,
+    /// An agent's own colour as #rrggbb, on its edit panel.
+    color_in: Entity<InputState>,
     plus: Option<Plus>,
     /// The settings or server popup over the window, open at this page.
     popup: Option<Screen>,
@@ -478,6 +488,35 @@ impl Loom {
         let pass_in = input(window, cx, "Password", true);
         let code_in = input(window, cx, "Setup code", false);
         let name_in = input(window, cx, "Name", false);
+        // An agent's own colour: each change that makes a whole #rrggbb sets it.
+        let color_in = input(window, cx, "#5b8def", false);
+        cx.subscribe_in(
+            &color_in,
+            window,
+            |this: &mut Loom, state, event: &InputEvent, _, cx| {
+                if let InputEvent::Change = event {
+                    let typed = state.read(cx).value().trim().to_lowercase();
+                    let typed = if typed.starts_with('#') {
+                        typed
+                    } else {
+                        format!("#{typed}")
+                    };
+                    let same = this
+                        .model
+                        .editing
+                        .as_ref()
+                        .and_then(|id| this.model.agent(id))
+                        .is_some_and(|a| a.color == typed);
+                    if thread::hex(&typed).is_some() && !same {
+                        if let Some(f) = this.model.set_color(&typed) {
+                            this.send(f);
+                        }
+                        cx.notify();
+                    }
+                }
+            },
+        )
+        .detach();
         // A host for the agent's list: Enter adds it.
         let host_in = input(window, cx, "github.com", false);
         cx.subscribe_in(
@@ -838,6 +877,12 @@ ACTA_KEY=secret:ACTA_KEY",
             screen: Screen::Chat,
             menu: None,
             armed: None,
+            fresh_armed: false,
+            custom_color: false,
+            color_closed_at: None,
+            wheel_drag: false,
+            wheel_bounds: Rc::new(std::cell::Cell::new(None)),
+            color_in,
             plus: None,
             popup: None,
             side: None,
@@ -1979,6 +2024,16 @@ ACTA_KEY=secret:ACTA_KEY",
                     40.0,
                     snapped.or(self.model.finished_at(&a.id)),
                 ))
+            })
+            .map(|hero| {
+                hero.child(
+                    div()
+                        .pt(px(space::S))
+                        .pb(px(space::M))
+                        .border_b_1()
+                        .border_color(p.line)
+                        .child(self.color_picker(cx)),
+                )
             });
         div()
             .w(px(width))
@@ -2787,7 +2842,7 @@ ACTA_KEY=secret:ACTA_KEY",
             .child(
                 div()
                     .w_full()
-                    .max_w(px(space::COLUMN))
+                    .max_w(px(self.prefs.column()))
                     .flex()
                     .items_center()
                     .gap(px(space::M))
@@ -2861,7 +2916,7 @@ ACTA_KEY=secret:ACTA_KEY",
             .child(
                 div()
                     .w_full()
-                    .max_w(px(space::COLUMN))
+                    .max_w(px(self.prefs.column()))
                     .flex()
                     .items_center()
                     .gap(px(space::M))
@@ -3773,7 +3828,7 @@ ACTA_KEY=secret:ACTA_KEY",
         let tint = thread::color(&agent.color, p.dark);
         let mut list = div()
             .w_full()
-            .max_w(px(space::COLUMN))
+            .max_w(px(self.prefs.column()))
             .flex()
             .flex_col()
             .gap(px(space::XS));
@@ -3921,7 +3976,7 @@ ACTA_KEY=secret:ACTA_KEY",
                 .child(
                     div()
                         .w_full()
-                        .max_w(px(space::COLUMN))
+                        .max_w(px(self.prefs.column()))
                         .flex()
                         .flex_col()
                         .gap(px(space::S))
@@ -3992,7 +4047,7 @@ ACTA_KEY=secret:ACTA_KEY",
                 .child(
                     div()
                         .w_full()
-                        .max_w(px(space::COLUMN))
+                        .max_w(px(self.prefs.column()))
                         .flex()
                         .items_center()
                         .gap(px(space::M))
@@ -5187,9 +5242,7 @@ ACTA_KEY=secret:ACTA_KEY",
                 .rounded(px(radius::ROW))
                 .cursor_pointer()
                 .soft_hover(transparent_black(), p.hover, None)
-                .when(matches!(self.menu, Some(Menu::Agent | Menu::MoveTo)), |d| {
-                    d.bg(p.hover)
-                })
+                .when(self.menu == Some(Menu::Agent), |d| d.bg(p.hover))
                 .on_click(cx.listener(|this, _, _, cx| {
                     this.menu = if this.menu == Some(Menu::Agent) {
                         None
@@ -5324,9 +5377,12 @@ ACTA_KEY=secret:ACTA_KEY",
     /// person's skills, or run one of this agent's routines now.
     fn plus_menu(&self, which: Plus, cx: &mut Context<Self>) -> Div {
         let p = self.p;
+        let k = motion::arrive(&SharedString::from("plus-menu"), 0.16);
         let panel = div()
             .occlude()
-            .mb(px(space::S))
+            // It rises into place as it fades in.
+            .opacity(k)
+            .mb(px(space::S - 6.0 * (1.0 - k)))
             .w(px(layout::MENU_WIDE))
             .max_h(px(320.0))
             .p(px(space::XS))
@@ -5622,30 +5678,9 @@ ACTA_KEY=secret:ACTA_KEY",
                                 this.instructions_in
                                     .update(cx, |s, cx| s.set_value(instructions, window, cx));
                             }
+                            this.fresh_armed = false;
+                            this.custom_color = false;
                             this.show_side(Screen::EditAgent, cx);
-                            this.menu = None;
-                            cx.notify();
-                        })),
-                )
-                .child(
-                    self.menu_item("activity", Ico::Activity, "Activity", false)
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            if let Some(f) = this.model.load_activity() {
-                                this.send(f);
-                            }
-                            this.show_side(Screen::Activity, cx);
-                            this.menu = None;
-                            cx.notify();
-                        })),
-                )
-                .child(
-                    self.menu_item("memory", Ico::Brain, "Memory", false)
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.model.notes.clear();
-                            if let Some(f) = this.model.load_notes() {
-                                this.send(f);
-                            }
-                            this.show_side(Screen::Memory, cx);
                             this.menu = None;
                             cx.notify();
                         })),
@@ -5663,40 +5698,7 @@ ACTA_KEY=secret:ACTA_KEY",
                         cx.notify();
                     })),
                 )
-                .child(
-                    self.menu_item("move-to", Ico::ArrowRightLeft, "Move to…", false)
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            let f = this.model.programs();
-                            this.send(f);
-                            this.menu = Some(Menu::MoveTo);
-                            cx.notify();
-                        })),
-                )
-                // These can't be undone: the first click asks for a second.
-                .child(
-                    self.menu_item(
-                        "fresh",
-                        Ico::RotateCcw,
-                        if self.armed == Some("fresh") {
-                            "Click again to start fresh"
-                        } else {
-                            "Start fresh"
-                        },
-                        self.armed == Some("fresh"),
-                    )
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        if this.armed != Some("fresh") {
-                            this.armed = Some("fresh");
-                            cx.notify();
-                            return;
-                        }
-                        if let Some(f) = this.model.start_fresh() {
-                            this.send(f);
-                        }
-                        this.menu = None;
-                        cx.notify();
-                    })),
-                )
+                // Deleting can't be undone: the first click asks for a second.
                 .child(
                     self.menu_item(
                         "delete",
@@ -5724,56 +5726,6 @@ ACTA_KEY=secret:ACTA_KEY",
                         cx.notify();
                     })),
                 ),
-            Menu::MoveTo => {
-                // Each installed program, the one the chat runs on ticked. Moving hands the
-                // new one loom's summary of the chat.
-                let on = self.model.chat_program().unwrap_or_default();
-                let mut list = panel.left(px(space::S)).child(
-                    self.menu_item("move-back", Ico::ArrowLeft, "Move this chat to", false)
-                        .text_color(p.ink_2)
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.menu = Some(Menu::Agent);
-                            cx.notify();
-                        })),
-                );
-                if self.model.programs.is_empty() {
-                    list = list.child(
-                        div()
-                            .px(px(space::M))
-                            .py(px(space::S))
-                            .text_size(px(size::SMALL))
-                            .text_color(p.ink_3)
-                            .child("No brains installed"),
-                    );
-                }
-                for name in self.model.programs.clone() {
-                    let here = name == on;
-                    let program = name.clone();
-                    list = list.child(
-                        self.menu_item(
-                            format!("move-to-{name}"),
-                            Ico::Brain,
-                            &program_title(&name),
-                            false,
-                        )
-                        .when(here, |d| {
-                            d.child(
-                                div()
-                                    .text_color(p.ink_2)
-                                    .child(Icon::new(Ico::Check).small()),
-                            )
-                        })
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            if let Some(f) = this.model.move_chat(&program) {
-                                this.send(f);
-                            }
-                            this.menu = None;
-                            cx.notify();
-                        })),
-                    );
-                }
-                list
-            }
             Menu::Model => {
                 let agent = self
                     .model
@@ -5846,7 +5798,7 @@ ACTA_KEY=secret:ACTA_KEY",
             None => 0.0,
         };
         (w - self.bar_width(w) - side)
-            .clamp(0.0, space::COLUMN)
+            .clamp(0.0, self.prefs.column())
             .round() as i32
     }
 
@@ -5940,6 +5892,7 @@ ACTA_KEY=secret:ACTA_KEY",
         let files = self.model.files.clone();
         let this = cx.entity().downgrade();
         let new_line = self.model.new_line.clone();
+        let column = self.prefs.column();
         let list = MessageScroller::new("chat", self.scroller.clone(), move |ix, _, _| {
             let Some(row) = rows.get(ix) else {
                 return div().into_any_element();
@@ -5950,7 +5903,7 @@ ACTA_KEY=secret:ACTA_KEY",
                 matches!(row, Row::Message(m) if new_line.as_deref() == Some(m.id.as_str()));
             let divider = div()
                 .w_full()
-                .max_w(px(space::COLUMN))
+                .max_w(px(column))
                 .flex()
                 .items_center()
                 .gap(px(space::S))
@@ -6051,7 +6004,7 @@ ACTA_KEY=secret:ACTA_KEY",
                         .w_full()
                         // The hover reaches the strip either side where its time and
                         // buttons are, so moving on to them keeps them there.
-                        .max_w(px(space::COLUMN + 2.0 * HOVER_REACH))
+                        .max_w(px(column + 2.0 * HOVER_REACH))
                         .mx(px(-HOVER_REACH))
                         .px(px(HOVER_REACH))
                         // Messages stand apart, but bubbles that join sit close, as
@@ -6233,7 +6186,7 @@ ACTA_KEY=secret:ACTA_KEY",
         let mut composer = Some(
             div()
                 .w_full()
-                .max_w(px(space::COLUMN))
+                .max_w(px(self.prefs.column()))
                 .flex()
                 .flex_col()
                 .gap(px(space::S))
@@ -6243,6 +6196,13 @@ ACTA_KEY=secret:ACTA_KEY",
                 .border_1()
                 .border_color(p.line)
                 .rounded(px(radius::COMPOSER))
+                // The plus menu opens just above the composer, from its left edge.
+                .relative()
+                .when_some(plus_menu, |d, menu| {
+                    d.child(div().absolute().top_0().left_0().child(deferred(
+                        anchored().anchor(Anchor::BottomLeft).child(menu),
+                    )))
+                })
                 .when(has_attachments, |d| d.child(attached))
                 .child(
                     div()
@@ -6277,12 +6237,7 @@ ACTA_KEY=secret:ACTA_KEY",
                                             };
                                             cx.notify();
                                         })),
-                                )
-                                .when_some(plus_menu, |d, menu| {
-                                    d.child(deferred(
-                                        anchored().anchor(Anchor::BottomLeft).child(menu),
-                                    ))
-                                }),
+                                ),
                         )
                         .child(
                             div()
@@ -7141,6 +7096,8 @@ ACTA_KEY=secret:ACTA_KEY",
                     .child(a.name.clone()),
             )
             .when_some(composer, |d, c| {
+                // An empty chat keeps its composer at the normal width, whatever the
+                // chat width is.
                 d.child(div().w_full().max_w(px(space::COLUMN)).child(c))
             })
             .child(chips)
@@ -7189,6 +7146,255 @@ ACTA_KEY=secret:ACTA_KEY",
             })
     }
 
+    /// A choice in a row of them, filled when it's the one on, and saying so beside the
+    /// person's default.
+    fn chip(
+        &self,
+        id: impl Into<ElementId>,
+        label: &str,
+        on: bool,
+        default: bool,
+    ) -> Stateful<Div> {
+        let p = self.p;
+        div()
+            .id(id.into())
+            .h(px(control::CHIP))
+            .px(px(space::M))
+            .flex()
+            .items_center()
+            .gap(px(space::XS + 2.0))
+            .rounded(px(radius::CHIP))
+            .text_size(px(size::SMALL))
+            .cursor_pointer()
+            .when(on, |d| d.bg(p.button).text_color(p.button_ink))
+            .when(!on, |d| {
+                d.text_color(p.ink_2)
+                    .soft_hover(p.hover, p.active, Some((p.ink_2, p.ink)))
+            })
+            .child(label.to_string())
+            .when(default, |d| {
+                d.child(
+                    div()
+                        .text_size(px(size::CAPTION))
+                        .opacity(0.6)
+                        .child("default"),
+                )
+            })
+    }
+
+    /// One of an agent's settings as a row of chips. The person's default is one of
+    /// them, marked so: picking it has the agent follow the default, and picking another
+    /// gives it its own. `own` is None while it follows; `default` is the default's
+    /// value and name, put first when it isn't one of `values`.
+    fn choices(
+        &self,
+        id: &str,
+        mut values: Vec<(String, String)>,
+        own: Option<String>,
+        default: (String, String),
+        pick: Pick,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        if !values.iter().any(|(v, _)| *v == default.0) {
+            values.insert(0, default.clone());
+        }
+        let on = own.unwrap_or_else(|| default.0.clone());
+        let mut row = div().flex().flex_wrap().gap(px(space::XS + 2.0));
+        for (value, label) in values {
+            let is_default = value == default.0;
+            let chosen = (!is_default).then(|| value.clone());
+            let pick = pick.clone();
+            row = row.child(
+                self.chip(format!("{id}-{value}"), &label, value == on, is_default)
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        if let Some(f) = pick(this, chosen.as_deref()) {
+                            this.send(f);
+                        }
+                        cx.notify();
+                    })),
+            );
+        }
+        row
+    }
+
+    /// The agent's colours, under its thread at the top of its edit panel: loom's, and
+    /// its own, which opens a strip of every hue and a field for one as #rrggbb.
+    fn color_picker(&self, cx: &mut Context<Self>) -> Div {
+        let p = self.p;
+        let color = self
+            .model
+            .editing
+            .as_ref()
+            .and_then(|id| self.model.agent(id))
+            .map(|a| a.color.clone())
+            .unwrap_or_default();
+        let own = thread::hex(&color).is_some();
+        let swatch = |id: ElementId, picked: bool| {
+            div()
+                .id(id)
+                .size(px(control::ICON))
+                .flex_none()
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded(px(radius::BUTTON))
+                .border_2()
+                .border_color(if picked { p.ink_2 } else { transparent_black() })
+                .cursor_pointer()
+                .soft_hover(transparent_black(), p.hover, None)
+        };
+        let mut row = div().flex().flex_wrap().items_center().gap(px(space::XS));
+        for (i, (c, title)) in THREAD_COLORS.iter().enumerate() {
+            let c: &'static str = c;
+            row = row.child(
+                swatch(("edit-swatch", i).into(), color == *c)
+                    .child(
+                        div()
+                            .size(px(18.0))
+                            .rounded(px(radius::ROW))
+                            .bg(thread::color(c, p.dark)),
+                    )
+                    .tooltip(tip(title))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.custom_color = false;
+                        if let Some(f) = this.model.set_color(c) {
+                            this.send(f);
+                        }
+                        cx.notify();
+                    })),
+            );
+        }
+        // Its own colour: a small colour wheel, which opens a bigger one to pick from,
+        // with a field for one as #rrggbb.
+        let wheel_icon = swatch("edit-swatch-own".into(), own || self.custom_color)
+            .child(thread::wheel(18.0, 48, p.dark, None))
+            .when(!self.custom_color, |d| d.tooltip(tip("Its own colour")))
+            .on_click(cx.listener(|this, _, window, cx| {
+                // The click that closed it, outside it, doesn't open it again.
+                if this
+                    .color_closed_at
+                    .is_some_and(|at| at.elapsed().as_millis() < 300)
+                {
+                    return;
+                }
+                this.custom_color = !this.custom_color;
+                let color = this
+                    .model
+                    .editing
+                    .as_ref()
+                    .and_then(|id| this.model.agent(id))
+                    .map(|a| a.color.clone())
+                    .filter(|c| thread::hex(c).is_some())
+                    .unwrap_or_default();
+                this.color_in
+                    .update(cx, |s, cx| s.set_value(color, window, cx));
+                cx.notify();
+            }));
+        let mut own_slot = div().relative().child(wheel_icon);
+        if self.custom_color {
+            const WHEEL: f32 = 184.0;
+            let bounds = self.wheel_bounds.clone();
+            let pick = |this: &mut Loom,
+                        at: Point<Pixels>,
+                        window: &mut Window,
+                        cx: &mut Context<Loom>| {
+                let Some(b) = this.wheel_bounds.get() else {
+                    return;
+                };
+                let (x, y) = ((at.x - b.origin.x).as_f32(), (at.y - b.origin.y).as_f32());
+                let Some(hex) = thread::wheel_pick(x, y, WHEEL) else {
+                    return;
+                };
+                if let Some(f) = this.model.set_color(&hex) {
+                    this.send(f);
+                }
+                this.color_in
+                    .update(cx, |s, cx| s.set_value(hex, window, cx));
+                cx.notify();
+            };
+            let wheel = div()
+                .id("edit-wheel")
+                .relative()
+                .size(px(WHEEL))
+                .cursor_pointer()
+                .child(thread::wheel(
+                    WHEEL,
+                    180,
+                    p.dark,
+                    own.then(|| color.clone()),
+                ))
+                .child(
+                    canvas(move |b, _, _| bounds.set(Some(b)), |_, _, _, _| {})
+                        .absolute()
+                        .top_0()
+                        .left_0()
+                        .size_full(),
+                )
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, e: &MouseDownEvent, window, cx| {
+                        this.wheel_drag = true;
+                        pick(this, e.position, window, cx)
+                    }),
+                )
+                // A drag picks as it goes, only when it started on the wheel.
+                .on_mouse_move(cx.listener(move |this, e: &MouseMoveEvent, window, cx| {
+                    if this.wheel_drag && e.pressed_button == Some(MouseButton::Left) {
+                        pick(this, e.position, window, cx)
+                    }
+                }))
+                .on_mouse_up(
+                    MouseButton::Left,
+                    cx.listener(|this, _, _, _| this.wheel_drag = false),
+                )
+                .on_mouse_up_out(
+                    MouseButton::Left,
+                    cx.listener(|this, _, _, _| this.wheel_drag = false),
+                );
+            let popup = div()
+                .occlude()
+                .mt(px(space::XS))
+                .p(px(space::M))
+                .flex()
+                .flex_col()
+                .items_center()
+                .gap(px(space::M))
+                .bg(p.raised)
+                .border_1()
+                .border_color(p.line_strong)
+                .rounded(px(radius::CARD))
+                .shadow_lg()
+                .on_mouse_down_out(cx.listener(|this, _, _, cx| {
+                    this.custom_color = false;
+                    this.color_closed_at = Some(Instant::now());
+                    cx.notify();
+                }))
+                .child(wheel)
+                .child(
+                    div()
+                        .w(px(WHEEL))
+                        .flex()
+                        .items_center()
+                        .gap(px(space::S))
+                        .child(
+                            div()
+                                .size(px(control::ICON_SMALL))
+                                .flex_none()
+                                .rounded(px(radius::ROW))
+                                .bg(thread::color(&color, p.dark)),
+                        )
+                        .child(div().flex_1().child(Input::new(&self.color_in).small())),
+                );
+            own_slot = own_slot.child(
+                div()
+                    .absolute()
+                    .top(px(control::ICON))
+                    .right_0()
+                    .child(deferred(anchored().anchor(Anchor::TopRight).child(popup))),
+            );
+        }
+        row.child(own_slot)
+    }
     fn edit_agent(&mut self, cx: &mut Context<Self>) -> Div {
         let p = self.p;
         let mut list = div().flex().flex_col();
@@ -7316,10 +7522,9 @@ ACTA_KEY=secret:ACTA_KEY",
                 }
             },
         );
-        // Its model and reasoning effort, as the chat's picker has them, once
-        // its program has said what it offers; then its permission mode and what a
-        // message while it's busy does. Each first offers the person's default, which
-        // it follows until it picks its own.
+        // Its model and reasoning effort, as the chat's picker has them, once its
+        // program has said what it offers; then its permission mode, what a message
+        // while it's busy does, and its backup. Each row's default is one of its chips.
         let mut picks = Vec::new();
         if let Some(a) = self
             .model
@@ -7329,120 +7534,90 @@ ACTA_KEY=secret:ACTA_KEY",
             .cloned()
         {
             for o in a.picks() {
-                let follows = a.follows(&o.id);
-                let on = a.chosen(&o.id);
+                let default = a.followed(&o.id);
+                let own = (!a.follows(&o.id)).then(|| a.chosen(&o.id));
                 let (agent_id, option) = (a.id.clone(), o.id.clone());
-                let mut row = div().flex().flex_wrap().gap(px(space::S)).child(
-                    self.button_owned(
-                        format!("edit-pick-{}-default", o.id),
-                        &format!("Default: {}", value_name(&o, &a.followed(&o.id))),
-                        follows,
-                    )
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        if let Some(f) = this.model.follow_config(&agent_id, &option) {
-                            this.send(f);
-                        }
-                        cx.notify();
-                    })),
+                let row = self.choices(
+                    &format!("edit-pick-{}", o.id),
+                    o.values.clone(),
+                    own,
+                    (default.clone(), value_name(&o, &default)),
+                    Rc::new(move |this: &mut Loom, v: Option<&str>| match v {
+                        None => this.model.follow_config(&agent_id, &option),
+                        Some(v) => this.model.set_config(&agent_id, &option, v),
+                    }),
+                    cx,
                 );
-                for (value, name) in o.values.clone() {
-                    let (agent_id, option) = (a.id.clone(), o.id.clone());
-                    row = row.child(
-                        self.button_owned(
-                            format!("edit-pick-{}-{value}", o.id),
-                            &name,
-                            !follows && value == on,
-                        )
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            if let Some(f) = this.model.set_config(&agent_id, &option, &value) {
-                                this.send(f);
-                            }
-                            cx.notify();
-                        })),
-                    );
-                }
                 picks.push(self.field(&o.name, row));
             }
-            let mut modes = div().flex().flex_wrap().gap(px(space::S));
-            let default_mode = format!(
-                "Default: {}",
-                model::mode_name(&self.model.defaults.permission)
+            let default_mode = match self.model.defaults.permission.as_str() {
+                "" => "ask".to_string(),
+                m => m.to_string(),
+            };
+            let agent_id = a.id.clone();
+            let modes = self.choices(
+                "edit-mode",
+                ["ask", "auto", "allow"]
+                    .map(|m| (m.to_string(), model::mode_name(m).to_string()))
+                    .to_vec(),
+                (!a.permission.is_empty()).then(|| a.permission.clone()),
+                (
+                    default_mode.clone(),
+                    model::mode_name(&default_mode).to_string(),
+                ),
+                Rc::new(move |this: &mut Loom, v: Option<&str>| {
+                    this.model.set_permission(&agent_id, v)
+                }),
+                cx,
             );
-            let choices: [(&'static str, String, Option<&'static str>); 4] = [
-                ("default", default_mode, None),
-                ("ask", "Asks first".into(), Some("ask")),
-                ("auto", "Asks when it's risky".into(), Some("auto")),
-                ("allow", "Doesn't ask".into(), Some("allow")),
-            ];
-            for (id, label, mode) in choices {
-                let agent_id = a.id.clone();
-                modes = modes.child(
-                    self.button_owned(
-                        format!("edit-mode-{id}"),
-                        &label,
-                        a.permission == mode.unwrap_or_default(),
-                    )
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        if let Some(f) = this.model.set_permission(&agent_id, mode) {
-                            this.send(f);
-                        }
-                        cx.notify();
-                    })),
-                );
-            }
             picks.push(self.field("Permission", modes));
-            let mut busy = div().flex().flex_wrap().gap(px(space::S));
-            let default_busy = format!("Default: {}", busy_name(&self.model.defaults.busy));
-            let choices: [(&'static str, String, Option<&'static str>); 3] = [
-                ("default", default_busy, None),
-                ("queue", busy_name("queue").into(), Some("queue")),
-                ("steer", busy_name("steer").into(), Some("steer")),
-            ];
-            for (id, label, choice) in choices {
-                let agent_id = a.id.clone();
-                busy = busy.child(
-                    self.button_owned(
-                        format!("edit-busy-{id}"),
-                        &label,
-                        a.busy == choice.unwrap_or_default(),
-                    )
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        if let Some(f) = this.model.set_busy(&agent_id, choice) {
-                            this.send(f);
-                        }
-                        cx.notify();
-                    })),
-                );
-            }
+            let default_busy = if self.model.defaults.busy == "steer" {
+                "steer"
+            } else {
+                "queue"
+            };
+            let agent_id = a.id.clone();
+            let busy = self.choices(
+                "edit-busy",
+                ["queue", "steer"]
+                    .map(|b| (b.to_string(), busy_name(b).to_string()))
+                    .to_vec(),
+                (!a.busy.is_empty()).then(|| a.busy.clone()),
+                (
+                    default_busy.to_string(),
+                    busy_name(default_busy).to_string(),
+                ),
+                Rc::new(move |this: &mut Loom, v: Option<&str>| this.model.set_busy(&agent_id, v)),
+                cx,
+            );
             picks.push(self.field("A message while it answers", busy));
             // Its backup program, which takes a turn over when its own runs out of usage
-            // or doesn't start: the default's, none, or one of the other programs.
+            // or doesn't start: none, or one of the other programs.
             let default_backup = if self.model.defaults.backup.is_empty() {
-                "Default: None".to_string()
+                "none".to_string()
             } else {
-                format!("Default: {}", program_title(&self.model.defaults.backup))
+                self.model.defaults.backup.clone()
             };
-            let mut choices: Vec<(String, String, Option<String>)> = vec![
-                ("default".into(), default_backup, None),
-                ("none".into(), "None".into(), Some("none".into())),
-            ];
+            let mut programs = vec![("none".to_string(), "None".to_string())];
             for name in self.model.programs.iter().filter(|n| **n != a.program) {
-                choices.push((name.clone(), program_title(name), Some(name.clone())));
+                programs.push((name.clone(), program_title(name)));
             }
-            let mut backups = div().flex().flex_wrap().gap(px(space::S));
-            for (id, label, choice) in choices {
-                let agent_id = a.id.clone();
-                let on = a.backup == choice.clone().unwrap_or_default();
-                backups = backups.child(
-                    self.button_owned(format!("edit-backup-{id}"), &label, on)
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            if let Some(f) = this.model.set_backup(&agent_id, choice.as_deref()) {
-                                this.send(f);
-                            }
-                            cx.notify();
-                        })),
-                );
-            }
+            let backup_name = if default_backup == "none" {
+                "None".to_string()
+            } else {
+                program_title(&default_backup)
+            };
+            let agent_id = a.id.clone();
+            let backups = self.choices(
+                "edit-backup",
+                programs,
+                (!a.backup.is_empty()).then(|| a.backup.clone()),
+                (default_backup, backup_name),
+                Rc::new(move |this: &mut Loom, v: Option<&str>| {
+                    this.model.set_backup(&agent_id, v)
+                }),
+                cx,
+            );
             picks.push(self.field("Backup program", backups));
         }
         // Where it runs: in a sandbox or not, and what it reaches from there,
@@ -7574,39 +7749,6 @@ ACTA_KEY=secret:ACTA_KEY",
                         ),
                 );
         }
-        // Its thread's colour.
-        let color = self
-            .model
-            .editing
-            .as_ref()
-            .and_then(|id| self.model.agent(id))
-            .map(|a| a.color.clone())
-            .unwrap_or_default();
-        let mut swatches = div().flex().flex_wrap().items_center().gap(px(space::S));
-        for (i, c) in COLORS.iter().enumerate() {
-            let picked = color == *c;
-            let dot = thread::color(c, p.dark);
-            swatches = swatches.child(
-                div()
-                    .id(("edit-swatch", i))
-                    .size(px(control::ICON))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .rounded_full()
-                    .border_2()
-                    .border_color(if picked { dot } else { transparent_black() })
-                    .cursor_pointer()
-                    .soft_hover(transparent_black(), p.hover, None)
-                    .child(div().size(px(16.0)).rounded_full().bg(dot))
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        if let Some(f) = this.model.set_color(c) {
-                            this.send(f);
-                        }
-                        cx.notify();
-                    })),
-            );
-        }
         // What it knows and does, counted, each opening where it's kept.
         let summary = self.model.summary.clone();
         let count = |n: Option<i64>| n.map_or(String::from("…"), |n| n.to_string());
@@ -7647,6 +7789,19 @@ ACTA_KEY=secret:ACTA_KEY",
             false,
             |_, _, _| {},
         );
+        let activity = self.stat_row(
+            "edit-activity",
+            "Activity",
+            String::new(),
+            true,
+            cx.listener(|this, _, _, cx| {
+                if let Some(f) = this.model.load_activity() {
+                    this.send(f);
+                }
+                this.show_side(Screen::Activity, cx);
+                cx.notify();
+            }),
+        );
         let routines = self.stat_row(
             "edit-routines",
             "Routines",
@@ -7667,16 +7822,88 @@ ACTA_KEY=secret:ACTA_KEY",
             false,
             |_, _, _| {},
         );
+        // The open chat: the brain it runs on, to move it to another, which starts with
+        // loom's summary of it, and Start fresh, which asks for a second click.
+        let on = self.model.chat_program().unwrap_or_default();
+        let mut brains = div().flex().flex_wrap().gap(px(space::XS + 2.0));
+        for name in self.model.programs.clone() {
+            let program = name.clone();
+            brains = brains.child(
+                self.chip(
+                    format!("edit-move-{name}"),
+                    &program_title(&name),
+                    name == on,
+                    false,
+                )
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    if let Some(f) = this.model.move_chat(&program) {
+                        this.send(f);
+                    }
+                    cx.notify();
+                })),
+            );
+        }
+        let fresh = self
+            .button_owned(
+                "edit-fresh".to_string(),
+                if self.fresh_armed {
+                    "Click again to start fresh"
+                } else {
+                    "Start fresh"
+                },
+                false,
+            )
+            .when(self.fresh_armed, |d| {
+                d.border_color(p.bad).text_color(p.bad)
+            })
+            .on_click(cx.listener(|this, _, _, cx| {
+                if !this.fresh_armed {
+                    this.fresh_armed = true;
+                    cx.notify();
+                    return;
+                }
+                this.fresh_armed = false;
+                if let Some(f) = this.model.start_fresh() {
+                    this.send(f);
+                }
+                this.close_side(cx);
+                cx.notify();
+            }));
         let group = |title: &'static str| {
             div()
-                .pt(px(space::M))
+                .mt(px(space::M))
+                .pt(px(space::L))
                 .border_t_1()
                 .border_color(p.line)
-                .text_size(px(size::CAPTION))
-                .font_weight(FontWeight::MEDIUM)
-                .text_color(p.ink_3)
+                .text_size(px(size::SMALL))
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(p.ink)
                 .child(title)
         };
+        // The counted rows and the switches reach out past the column by their own
+        // padding, so their words line up with the labels and their hover has room.
+        let rows =
+            |items: Vec<Stateful<Div>>| div().mx(px(-space::S)).flex().flex_col().children(items);
+        let save = self
+            .button("save-agent", "Save", true)
+            .on_click(cx.listener(|this, _, _, cx| {
+                let name = this.name_in.read(cx).value().to_string();
+                let instructions = this.instructions_in.read(cx).value().to_string();
+                if name.trim().is_empty() {
+                    return;
+                }
+                if let Some(f) = this.model.save_agent(&name, &instructions) {
+                    this.send(f);
+                }
+                this.close_side(cx);
+                cx.notify();
+            }));
+        let cancel = self
+            .button("cancel-edit", "Cancel", false)
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.close_side(cx);
+                cx.notify();
+            }));
         let page = div()
             .id("edit-agent")
             .size_full()
@@ -7684,7 +7911,7 @@ ACTA_KEY=secret:ACTA_KEY",
             .flex()
             .justify_center()
             .items_start()
-            .pt(px(space::XL))
+            .pt(px(space::L))
             .px(px(space::XL))
             .pb(px(space::XXL))
             .child(
@@ -7694,66 +7921,20 @@ ACTA_KEY=secret:ACTA_KEY",
                     .flex()
                     .flex_col()
                     .gap(px(space::L))
-                    .child(group("Brain"))
+                    // Name and instructions are what Save keeps; everything under them
+                    // changes as it's picked.
                     .child(self.field("Name", Input::new(&self.name_in)))
-                    .children(picks)
-                    .child(self.field("Colour", swatches))
                     .child(self.field("Instructions", Textarea::new(&self.instructions_in)))
-                    .child(
-                        div()
-                            .flex()
-                            .gap(px(space::S))
-                            .child(
-                                self.button("save-agent", "Save", true)
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        let name = this.name_in.read(cx).value().to_string();
-                                        let instructions =
-                                            this.instructions_in.read(cx).value().to_string();
-                                        if name.trim().is_empty() {
-                                            return;
-                                        }
-                                        if let Some(f) = this.model.save_agent(&name, &instructions)
-                                        {
-                                            this.send(f);
-                                        }
-                                        this.close_side(cx);
-                                        cx.notify();
-                                    })),
-                            )
-                            .child(self.button("cancel-edit", "Cancel", false).on_click(
-                                cx.listener(|this, _, _, cx| {
-                                    this.close_side(cx);
-                                    cx.notify();
-                                }),
-                            )),
-                    )
-                    // Name and instructions are what Save keeps; what it knows comes
-                    // after, under its own heading.
-                    // The counted rows and the switches reach out past the column by
-                    // their own padding, so their words line up with the labels above
-                    // and their hover has room around them.
+                    .child(div().flex().gap(px(space::S)).child(save).child(cancel))
+                    .when(!picks.is_empty(), |d| {
+                        d.child(group("Brain")).children(picks)
+                    })
                     .child(group("Knows"))
-                    .child(
-                        div()
-                            .mx(px(-space::S))
-                            .flex()
-                            .flex_col()
-                            .child(memories)
-                            .child(skills)
-                            .child(tables)
-                            .child(files),
-                    )
+                    .child(rows(vec![memories, skills, tables, files]))
                     .child(self.field("MCP servers", servers))
                     .child(div().mx(px(-space::L)).child(scripts))
                     .child(group("Does"))
-                    .child(
-                        div()
-                            .mx(px(-space::S))
-                            .flex()
-                            .flex_col()
-                            .child(routines)
-                            .child(usage),
-                    )
+                    .child(rows(vec![activity, routines, usage]))
                     .child(group("Runs"))
                     .child(div().mx(px(-space::L)).child(isolate))
                     .when(isolated, |d| {
@@ -7762,7 +7943,12 @@ ACTA_KEY=secret:ACTA_KEY",
                     })
                     .when(!self.model.revisions.is_empty(), |d| {
                         d.child(self.field("Versions", list))
-                    }),
+                    })
+                    .child(group("This chat"))
+                    .when(!self.model.programs.is_empty(), |d| {
+                        d.child(self.field("Runs on", brains))
+                    })
+                    .child(div().flex().child(fresh)),
             );
         div().flex_1().min_h_0().child(page)
     }
@@ -13441,6 +13627,27 @@ const COLORS: [&str; 7] = [
     "sky",
     "gold",
     "lavender",
+];
+
+/// What picking one of an agent's choices does: the frame for it, given the value, or
+/// None to follow the person's default.
+type Pick = Rc<dyn Fn(&mut Loom, Option<&str>) -> Option<Value>>;
+
+/// Every colour an agent's thread can have (design/tokens.toml), with its name, for
+/// its edit panel. An agent can also have its own, as #rrggbb.
+const THREAD_COLORS: [(&str, &str); 12] = [
+    ("periwinkle", "Periwinkle"),
+    ("lavender", "Lavender"),
+    ("plum", "Plum"),
+    ("pink", "Pink"),
+    ("coral", "Coral"),
+    ("apricot", "Apricot"),
+    ("gold", "Gold"),
+    ("moss", "Moss"),
+    ("mint", "Mint"),
+    ("teal", "Teal"),
+    ("sky", "Sky"),
+    ("grey", "Grey"),
 ];
 
 /// A small thing coming in, `k` of the way (0 to 1): a button, a tile, a line of text.

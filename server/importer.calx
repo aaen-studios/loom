@@ -733,12 +733,12 @@ fn field_name(k: String) -> String {
     return if out.len() == 0 { String("field") } else if out.len() > 64 { out[..64].copy() } else { out }
 }
 
-// The nearest of loom's eight thread colours to a colour another app gave, as a
+// The nearest of loom's twelve thread colours to a colour another app gave, as a
 // name ("blue") or as hex ("#5b8def"), or none when it's neither.
 pub fn color_of(given: String) -> String? {
     let g = given.trim().to_lower_root()
     if g.len() == 0 { return none }
-    let names: List<(str, str)> = [("periwinkle", "periwinkle"), ("indigo", "periwinkle"), ("blue", "periwinkle"), ("mint", "mint"), ("green", "mint"), ("emerald", "mint"), ("teal", "mint"), ("lime", "mint"), ("apricot", "apricot"), ("orange", "apricot"), ("amber", "apricot"), ("peach", "apricot"), ("pink", "pink"), ("rose", "pink"), ("red", "pink"), ("fuchsia", "pink"), ("magenta", "pink"), ("sky", "sky"), ("cyan", "sky"), ("aqua", "sky"), ("gold", "gold"), ("yellow", "gold"), ("lavender", "lavender"), ("purple", "lavender"), ("violet", "lavender"), ("grey", "grey"), ("gray", "grey"), ("slate", "grey"), ("zinc", "grey"), ("neutral", "grey"), ("stone", "grey"), ("black", "grey"), ("white", "grey")]
+    let names: List<(str, str)> = [("periwinkle", "periwinkle"), ("indigo", "periwinkle"), ("blue", "periwinkle"), ("mint", "mint"), ("green", "mint"), ("emerald", "mint"), ("teal", "teal"), ("lime", "moss"), ("olive", "moss"), ("moss", "moss"), ("apricot", "apricot"), ("orange", "apricot"), ("amber", "apricot"), ("peach", "apricot"), ("coral", "coral"), ("red", "coral"), ("pink", "pink"), ("rose", "pink"), ("fuchsia", "pink"), ("magenta", "pink"), ("sky", "sky"), ("cyan", "sky"), ("aqua", "sky"), ("gold", "gold"), ("yellow", "gold"), ("lavender", "lavender"), ("violet", "lavender"), ("purple", "plum"), ("plum", "plum"), ("grey", "grey"), ("gray", "grey"), ("slate", "grey"), ("zinc", "grey"), ("neutral", "grey"), ("stone", "grey"), ("black", "grey"), ("white", "grey")]
     for (n, c) in names {
         if g.contains(n) { return some(String(c)) }
     }
@@ -747,8 +747,8 @@ pub fn color_of(given: String) -> String? {
     let r = i64.parse_radix(hex[0..2].copy(), 16) else return none
     let gr = i64.parse_radix(hex[2..4].copy(), 16) else return none
     let b = i64.parse_radix(hex[4..6].copy(), 16) else return none
-    // Loom's colours in both themes; the nearest of the sixteen wins.
-    let palette: List<(str, i64, i64, i64)> = [("periwinkle", 0x9e, 0xa8, 0xff), ("mint", 0x74, 0xd6, 0xa6), ("apricot", 0xf2, 0xa7, 0x7a), ("pink", 0xe8, 0x93, 0xc9), ("sky", 0x7c, 0xc8, 0xf0), ("gold", 0xe8, 0xd2, 0x7a), ("lavender", 0xb4, 0x9c, 0xff), ("grey", 0x9a, 0xa0, 0xa6), ("periwinkle", 0x57, 0x63, 0xe0), ("mint", 0x18, 0xa0, 0x6a), ("apricot", 0xe0, 0x7a, 0x3d), ("pink", 0xcf, 0x4f, 0x9d), ("sky", 0x1f, 0x8f, 0xc7), ("gold", 0xb8, 0x96, 0x1a), ("lavender", 0x7d, 0x5f, 0xd6), ("grey", 0x6b, 0x70, 0x78)]
+    // Loom's colours in both themes; the nearest of the twenty-four wins.
+    let palette: List<(str, i64, i64, i64)> = [("coral", 0xf2, 0x92, 0x86), ("moss", 0xb3, 0xd4, 0x7a), ("teal", 0x6f, 0xd4, 0xc8), ("plum", 0xd3, 0x9a, 0xe8), ("coral", 0xd9, 0x53, 0x4a), ("moss", 0x6b, 0x8f, 0x23), ("teal", 0x11, 0x99, 0x8e), ("plum", 0x9b, 0x4f, 0xb5), ("periwinkle", 0x9e, 0xa8, 0xff), ("mint", 0x74, 0xd6, 0xa6), ("apricot", 0xf2, 0xa7, 0x7a), ("pink", 0xe8, 0x93, 0xc9), ("sky", 0x7c, 0xc8, 0xf0), ("gold", 0xe8, 0xd2, 0x7a), ("lavender", 0xb4, 0x9c, 0xff), ("grey", 0x9a, 0xa0, 0xa6), ("periwinkle", 0x57, 0x63, 0xe0), ("mint", 0x18, 0xa0, 0x6a), ("apricot", 0xe0, 0x7a, 0x3d), ("pink", 0xcf, 0x4f, 0x9d), ("sky", 0x1f, 0x8f, 0xc7), ("gold", 0xb8, 0x96, 0x1a), ("lavender", 0x7d, 0x5f, 0xd6), ("grey", 0x6b, 0x70, 0x78)]
     var best = String()
     var least: i64 = -1
     for (n, pr, pg, pb) in palette {
@@ -914,6 +914,8 @@ fn colours_go_to_the_nearest_thread() {
     assert(color_of(String("blue")) == some(String("periwinkle")))
     assert(color_of(String("#18a06a")) == some(String("mint")))
     assert(color_of(String("#ff9a6a")) == some(String("apricot")))
+    assert(color_of(String("Teal")) == some(String("teal")) and color_of(String("red")) == some(String("coral")))
+    assert(color_of(String("#9b4fb5")) == some(String("plum")))
     assert(color_of(String("")) == none)
     assert(color_of(String("not a colour")) == none)
 }

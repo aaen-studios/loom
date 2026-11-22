@@ -44,6 +44,7 @@ enum Tokens {
         static let xl: CGFloat = 24
         static let xxl: CGFloat = 32
         static let column: CGFloat = 740
+        static let columnWide: CGFloat = 980
     }
 
     enum Radius {
@@ -148,6 +149,10 @@ enum Tokens {
         static let gold: UInt32 = 0xe8d27a
         static let lavender: UInt32 = 0xb49cff
         static let grey: UInt32 = 0x9aa0a6
+        static let coral: UInt32 = 0xf29286
+        static let moss: UInt32 = 0xb3d47a
+        static let teal: UInt32 = 0x6fd4c8
+        static let plum: UInt32 = 0xd39ae8
     }
 
     enum ThreadColorLight {
@@ -159,6 +164,10 @@ enum Tokens {
         static let gold: UInt32 = 0xb8961a
         static let lavender: UInt32 = 0x7d5fd6
         static let grey: UInt32 = 0x6b7078
+        static let coral: UInt32 = 0xd9534a
+        static let moss: UInt32 = 0x6b8f23
+        static let teal: UInt32 = 0x11998e
+        static let plum: UInt32 = 0x9b4fb5
     }
 
     enum ThreadStroke {

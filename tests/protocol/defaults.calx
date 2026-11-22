@@ -109,6 +109,11 @@ fn run(i: Instance) ! Error {
     let made = try app.cmd("q_6", "agent.create", Obj.new().s("name", String("Main")).s("instructions", String("You are a test.")).done())
     let main_agent = at(at(made, "value"), "agent")
     let main_id = str_at(main_agent.copy(), "id") ?? String()
+    // Its thread: one of loom's colours or one of its own, and nothing else.
+    let own_colour = try app.cmd("q_c1", "agent.update", Obj.new().s("agent", main_id.copy()).s("color", String("#3a7bd5")).done())
+    let named = try app.cmd("q_c2", "agent.update", Obj.new().s("agent", main_id.copy()).s("color", String("teal")).done())
+    let not_one = try app.cmd("q_c3", "agent.update", Obj.new().s("agent", main_id.copy()).s("color", String("blue")).done())
+    try check(str_at(at(at(own_colour, "value"), "agent"), "color") == some(String("#3a7bd5")) and str_at(at(at(named, "value"), "agent"), "color") == some(String("teal")) and str_at(at(not_one, "error"), "code") == some(String("bad_request")), "an agent's colour is one of loom's or its own as #rrggbb, and nothing else")
     try check(str_at(main_agent.copy(), "acp_agent") == some(String("fake")) and str_at(main_agent, "permission") == none, "a new agent runs on the default brain, with no permission mode of its own")
     let first = try chat(mut app, "q_7", main_id.copy())
     let told = try say(mut app, first.copy(), "m_1", String("/context"))

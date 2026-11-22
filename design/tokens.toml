@@ -37,6 +37,7 @@ l = 16
 xl = 24
 xxl = 32
 column = 740        # the chat column's widest
+column-wide = 980   # the chat column's widest when it's set to comfortable
 
 [radius]
 window = 10
@@ -128,7 +129,7 @@ bubble = "#f1f1f3"
 ok = "#1f8a55"
 bad = "#d4442f"
 
-# An agent's thread colour, picked when the agent is made. Eight, chosen so
+# An agent's thread colour, picked when the agent is made. Twelve, chosen so
 # any two tell apart, in both themes.
 [thread.color.dark]
 periwinkle = "#9ea8ff"
@@ -139,6 +140,10 @@ sky = "#7cc8f0"
 gold = "#e8d27a"
 lavender = "#b49cff"
 grey = "#9aa0a6"
+coral = "#f29286"
+moss = "#b3d47a"
+teal = "#6fd4c8"
+plum = "#d39ae8"
 
 [thread.color.light]
 periwinkle = "#5763e0"
@@ -149,6 +154,10 @@ sky = "#1f8fc7"
 gold = "#b8961a"
 lavender = "#7d5fd6"
 grey = "#6b7078"
+coral = "#d9534a"
+moss = "#6b8f23"
+teal = "#11998e"
+plum = "#9b4fb5"
 
 [thread.stroke]
 small = 1.6        # the sidebar, the header, beside a reply

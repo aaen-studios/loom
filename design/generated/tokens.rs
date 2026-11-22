@@ -35,6 +35,7 @@ pub mod space {
     pub const XL: f32 = 24.0;
     pub const XXL: f32 = 32.0;
     pub const COLUMN: f32 = 740.0;
+    pub const COLUMN_WIDE: f32 = 980.0;
 }
 
 pub mod radius {
@@ -139,6 +140,10 @@ pub mod thread_color_dark {
     pub const GOLD: u32 = 0xe8d27a;
     pub const LAVENDER: u32 = 0xb49cff;
     pub const GREY: u32 = 0x9aa0a6;
+    pub const CORAL: u32 = 0xf29286;
+    pub const MOSS: u32 = 0xb3d47a;
+    pub const TEAL: u32 = 0x6fd4c8;
+    pub const PLUM: u32 = 0xd39ae8;
 }
 
 pub mod thread_color_light {
@@ -150,6 +155,10 @@ pub mod thread_color_light {
     pub const GOLD: u32 = 0xb8961a;
     pub const LAVENDER: u32 = 0x7d5fd6;
     pub const GREY: u32 = 0x6b7078;
+    pub const CORAL: u32 = 0xd9534a;
+    pub const MOSS: u32 = 0x6b8f23;
+    pub const TEAL: u32 = 0x11998e;
+    pub const PLUM: u32 = 0x9b4fb5;
 }
 
 pub mod thread_stroke {
