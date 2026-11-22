@@ -37,6 +37,7 @@ l = 16
 xl = 24
 xxl = 32
 column = 740        # the chat column's widest
+column-wide = 980   # the chat column's widest when it's set to comfortable
 
 [radius]
 window = 10

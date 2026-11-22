@@ -44,6 +44,7 @@ enum Tokens {
         static let xl: CGFloat = 24
         static let xxl: CGFloat = 32
         static let column: CGFloat = 740
+        static let columnWide: CGFloat = 980
     }
 
     enum Radius {

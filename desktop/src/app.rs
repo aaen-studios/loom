@@ -18,7 +18,7 @@ use serde_json::Value;
 use crate::core::Core;
 use crate::model::{self, Approval, Conn, ImportSource, Message, Model, Mood, Offer, ServerUpdate};
 use crate::motion::{self, SoftHover};
-use crate::prefs::{Prefs, Text, Theme, Thoughts, Tools};
+use crate::prefs::{Prefs, Text, Theme, Thoughts, Tools, Width};
 use crate::shell;
 use crate::thread::{self, thread, Spool};
 use crate::tokens::*;
@@ -168,8 +168,14 @@ pub struct Loom {
     armed: Option<&'static str>,
     /// Start fresh on the agent's edit panel, waiting for its second click.
     fresh_armed: bool,
-    /// Whether the edit panel shows the strip of hues for an agent's own colour.
+    /// Whether the colour wheel for an agent's own colour is open on its edit panel,
+    /// and when a click outside last closed it.
     custom_color: bool,
+    color_closed_at: Option<Instant>,
+    /// Whether a press on the colour wheel is being dragged.
+    wheel_drag: bool,
+    /// Where the colour wheel is on screen, for a click on it.
+    wheel_bounds: Rc<std::cell::Cell<Option<Bounds<Pixels>>>>,
     /// An agent's own colour as #rrggbb, on its edit panel.
     color_in: Entity<InputState>,
     plus: Option<Plus>,
@@ -873,6 +879,9 @@ ACTA_KEY=secret:ACTA_KEY",
             armed: None,
             fresh_armed: false,
             custom_color: false,
+            color_closed_at: None,
+            wheel_drag: false,
+            wheel_bounds: Rc::new(std::cell::Cell::new(None)),
             color_in,
             plus: None,
             popup: None,
@@ -2833,7 +2842,7 @@ ACTA_KEY=secret:ACTA_KEY",
             .child(
                 div()
                     .w_full()
-                    .max_w(px(space::COLUMN))
+                    .max_w(px(self.prefs.column()))
                     .flex()
                     .items_center()
                     .gap(px(space::M))
@@ -2907,7 +2916,7 @@ ACTA_KEY=secret:ACTA_KEY",
             .child(
                 div()
                     .w_full()
-                    .max_w(px(space::COLUMN))
+                    .max_w(px(self.prefs.column()))
                     .flex()
                     .items_center()
                     .gap(px(space::M))
@@ -3819,7 +3828,7 @@ ACTA_KEY=secret:ACTA_KEY",
         let tint = thread::color(&agent.color, p.dark);
         let mut list = div()
             .w_full()
-            .max_w(px(space::COLUMN))
+            .max_w(px(self.prefs.column()))
             .flex()
             .flex_col()
             .gap(px(space::XS));
@@ -3967,7 +3976,7 @@ ACTA_KEY=secret:ACTA_KEY",
                 .child(
                     div()
                         .w_full()
-                        .max_w(px(space::COLUMN))
+                        .max_w(px(self.prefs.column()))
                         .flex()
                         .flex_col()
                         .gap(px(space::S))
@@ -4038,7 +4047,7 @@ ACTA_KEY=secret:ACTA_KEY",
                 .child(
                     div()
                         .w_full()
-                        .max_w(px(space::COLUMN))
+                        .max_w(px(self.prefs.column()))
                         .flex()
                         .items_center()
                         .gap(px(space::M))
@@ -5789,7 +5798,7 @@ ACTA_KEY=secret:ACTA_KEY",
             None => 0.0,
         };
         (w - self.bar_width(w) - side)
-            .clamp(0.0, space::COLUMN)
+            .clamp(0.0, self.prefs.column())
             .round() as i32
     }
 
@@ -5883,6 +5892,7 @@ ACTA_KEY=secret:ACTA_KEY",
         let files = self.model.files.clone();
         let this = cx.entity().downgrade();
         let new_line = self.model.new_line.clone();
+        let column = self.prefs.column();
         let list = MessageScroller::new("chat", self.scroller.clone(), move |ix, _, _| {
             let Some(row) = rows.get(ix) else {
                 return div().into_any_element();
@@ -5893,7 +5903,7 @@ ACTA_KEY=secret:ACTA_KEY",
                 matches!(row, Row::Message(m) if new_line.as_deref() == Some(m.id.as_str()));
             let divider = div()
                 .w_full()
-                .max_w(px(space::COLUMN))
+                .max_w(px(column))
                 .flex()
                 .items_center()
                 .gap(px(space::S))
@@ -5994,7 +6004,7 @@ ACTA_KEY=secret:ACTA_KEY",
                         .w_full()
                         // The hover reaches the strip either side where its time and
                         // buttons are, so moving on to them keeps them there.
-                        .max_w(px(space::COLUMN + 2.0 * HOVER_REACH))
+                        .max_w(px(column + 2.0 * HOVER_REACH))
                         .mx(px(-HOVER_REACH))
                         .px(px(HOVER_REACH))
                         // Messages stand apart, but bubbles that join sit close, as
@@ -6176,7 +6186,7 @@ ACTA_KEY=secret:ACTA_KEY",
         let mut composer = Some(
             div()
                 .w_full()
-                .max_w(px(space::COLUMN))
+                .max_w(px(self.prefs.column()))
                 .flex()
                 .flex_col()
                 .gap(px(space::S))
@@ -7086,7 +7096,7 @@ ACTA_KEY=secret:ACTA_KEY",
                     .child(a.name.clone()),
             )
             .when_some(composer, |d, c| {
-                d.child(div().w_full().max_w(px(space::COLUMN)).child(c))
+                d.child(div().w_full().max_w(px(self.prefs.column())).child(c))
             })
             .child(chips)
     }
@@ -7151,7 +7161,7 @@ ACTA_KEY=secret:ACTA_KEY",
             .flex()
             .items_center()
             .gap(px(space::XS + 2.0))
-            .rounded_full()
+            .rounded(px(radius::CHIP))
             .text_size(px(size::SMALL))
             .cursor_pointer()
             .when(on, |d| d.bg(p.button).text_color(p.button_ink))
@@ -7217,7 +7227,7 @@ ACTA_KEY=secret:ACTA_KEY",
             .map(|a| a.color.clone())
             .unwrap_or_default();
         let own = thread::hex(&color).is_some();
-        let swatch = |id: ElementId, picked: bool, dot: Div| {
+        let swatch = |id: ElementId, picked: bool| {
             div()
                 .id(id)
                 .size(px(control::ICON))
@@ -7225,22 +7235,23 @@ ACTA_KEY=secret:ACTA_KEY",
                 .flex()
                 .items_center()
                 .justify_center()
-                .rounded_full()
+                .rounded(px(radius::BUTTON))
                 .border_2()
                 .border_color(if picked { p.ink_2 } else { transparent_black() })
                 .cursor_pointer()
                 .soft_hover(transparent_black(), p.hover, None)
-                .child(dot)
         };
         let mut row = div().flex().flex_wrap().items_center().gap(px(space::XS));
         for (i, (c, title)) in THREAD_COLORS.iter().enumerate() {
             let c: &'static str = c;
-            let dot = div()
-                .size(px(18.0))
-                .rounded_full()
-                .bg(thread::color(c, p.dark));
             row = row.child(
-                swatch(("edit-swatch", i).into(), color == *c, dot)
+                swatch(("edit-swatch", i).into(), color == *c)
+                    .child(
+                        div()
+                            .size(px(18.0))
+                            .rounded(px(radius::ROW))
+                            .bg(thread::color(c, p.dark)),
+                    )
                     .tooltip(tip(title))
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.custom_color = false;
@@ -7251,90 +7262,137 @@ ACTA_KEY=secret:ACTA_KEY",
                     })),
             );
         }
-        // Its own: the colour when it has one, otherwise every hue round the dot.
-        let own_dot = if own {
-            div()
-                .size(px(18.0))
-                .rounded_full()
-                .bg(thread::color(&color, p.dark))
-        } else {
-            let mut ring = div().size(px(18.0)).rounded_full().overflow_hidden().flex();
-            for i in 0..6 {
-                ring = ring.child(
-                    div()
-                        .flex_1()
-                        .h_full()
-                        .bg(thread::color(&thread::hue_hex(i as f32 / 6.0), p.dark)),
-                );
-            }
-            ring
-        };
-        row = row.child(
-            swatch("edit-swatch-own".into(), own || self.custom_color, own_dot)
-                .tooltip(tip("Its own colour"))
-                .on_click(cx.listener(|this, _, window, cx| {
-                    this.custom_color = !this.custom_color;
-                    let color = this
-                        .model
-                        .editing
-                        .as_ref()
-                        .and_then(|id| this.model.agent(id))
-                        .map(|a| a.color.clone())
-                        .filter(|c| thread::hex(c).is_some())
-                        .unwrap_or_default();
-                    this.color_in
-                        .update(cx, |s, cx| s.set_value(color, window, cx));
-                    cx.notify();
-                })),
-        );
-        let mut picker = div().flex().flex_col().gap(px(space::S));
+        // Its own colour: a small colour wheel, which opens a bigger one to pick from,
+        // with a field for one as #rrggbb.
+        let wheel_icon = swatch("edit-swatch-own".into(), own || self.custom_color)
+            .child(thread::wheel(18.0, 48, p.dark, None))
+            .when(!self.custom_color, |d| d.tooltip(tip("Its own colour")))
+            .on_click(cx.listener(|this, _, window, cx| {
+                // The click that closed it, outside it, doesn't open it again.
+                if this
+                    .color_closed_at
+                    .is_some_and(|at| at.elapsed().as_millis() < 300)
+                {
+                    return;
+                }
+                this.custom_color = !this.custom_color;
+                let color = this
+                    .model
+                    .editing
+                    .as_ref()
+                    .and_then(|id| this.model.agent(id))
+                    .map(|a| a.color.clone())
+                    .filter(|c| thread::hex(c).is_some())
+                    .unwrap_or_default();
+                this.color_in
+                    .update(cx, |s, cx| s.set_value(color, window, cx));
+                cx.notify();
+            }));
+        let mut own_slot = div().relative().child(wheel_icon);
         if self.custom_color {
-            // Every hue, a click away, in a strip of small steps that reads as one band.
-            const STEPS: usize = 48;
-            let mut strip = div()
-                .h(px(control::SEGMENT - 6.0))
-                .w_full()
-                .flex()
-                .rounded(px(radius::CHIP))
-                .overflow_hidden();
-            for i in 0..STEPS {
-                let hex = thread::hue_hex(i as f32 / STEPS as f32);
-                let next = thread::hue_hex((i + 1) as f32 / STEPS as f32);
-                let (a, b) = (thread::color(&hex, p.dark), thread::color(&next, p.dark));
-                strip = strip.child(
-                    div()
-                        .id(("edit-hue", i))
-                        .flex_1()
-                        .h_full()
-                        .cursor_pointer()
-                        .bg(linear_gradient(
-                            90.0,
-                            linear_color_stop(a, 0.0),
-                            linear_color_stop(b, 1.0),
-                        ))
-                        .on_click(cx.listener(move |this, _, window, cx| {
-                            if let Some(f) = this.model.set_color(&hex) {
-                                this.send(f);
-                            }
-                            let hex = hex.clone();
-                            this.color_in
-                                .update(cx, |s, cx| s.set_value(hex, window, cx));
-                            cx.notify();
-                        })),
+            const WHEEL: f32 = 184.0;
+            let bounds = self.wheel_bounds.clone();
+            let pick = |this: &mut Loom,
+                        at: Point<Pixels>,
+                        window: &mut Window,
+                        cx: &mut Context<Loom>| {
+                let Some(b) = this.wheel_bounds.get() else {
+                    return;
+                };
+                let (x, y) = ((at.x - b.origin.x).as_f32(), (at.y - b.origin.y).as_f32());
+                let Some(hex) = thread::wheel_pick(x, y, WHEEL) else {
+                    return;
+                };
+                if let Some(f) = this.model.set_color(&hex) {
+                    this.send(f);
+                }
+                this.color_in
+                    .update(cx, |s, cx| s.set_value(hex, window, cx));
+                cx.notify();
+            };
+            let wheel = div()
+                .id("edit-wheel")
+                .relative()
+                .size(px(WHEEL))
+                .cursor_pointer()
+                .child(thread::wheel(
+                    WHEEL,
+                    180,
+                    p.dark,
+                    own.then(|| color.clone()),
+                ))
+                .child(
+                    canvas(move |b, _, _| bounds.set(Some(b)), |_, _, _, _| {})
+                        .absolute()
+                        .top_0()
+                        .left_0()
+                        .size_full(),
+                )
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, e: &MouseDownEvent, window, cx| {
+                        this.wheel_drag = true;
+                        pick(this, e.position, window, cx)
+                    }),
+                )
+                // A drag picks as it goes, only when it started on the wheel.
+                .on_mouse_move(cx.listener(move |this, e: &MouseMoveEvent, window, cx| {
+                    if this.wheel_drag && e.pressed_button == Some(MouseButton::Left) {
+                        pick(this, e.position, window, cx)
+                    }
+                }))
+                .on_mouse_up(
+                    MouseButton::Left,
+                    cx.listener(|this, _, _, _| this.wheel_drag = false),
+                )
+                .on_mouse_up_out(
+                    MouseButton::Left,
+                    cx.listener(|this, _, _, _| this.wheel_drag = false),
                 );
-            }
-            picker = picker
-                .child(strip)
-                .child(div().w(px(140.0)).child(Input::new(&self.color_in).small()));
+            let popup = div()
+                .occlude()
+                .mt(px(space::XS))
+                .p(px(space::M))
+                .flex()
+                .flex_col()
+                .items_center()
+                .gap(px(space::M))
+                .bg(p.raised)
+                .border_1()
+                .border_color(p.line_strong)
+                .rounded(px(radius::CARD))
+                .shadow_lg()
+                .on_mouse_down_out(cx.listener(|this, _, _, cx| {
+                    this.custom_color = false;
+                    this.color_closed_at = Some(Instant::now());
+                    cx.notify();
+                }))
+                .child(wheel)
+                .child(
+                    div()
+                        .w(px(WHEEL))
+                        .flex()
+                        .items_center()
+                        .gap(px(space::S))
+                        .child(
+                            div()
+                                .size(px(control::ICON_SMALL))
+                                .flex_none()
+                                .rounded(px(radius::ROW))
+                                .bg(thread::color(&color, p.dark)),
+                        )
+                        .child(div().flex_1().child(Input::new(&self.color_in).small())),
+                );
+            own_slot = own_slot.child(
+                div()
+                    .absolute()
+                    .top(px(control::ICON))
+                    .right_0()
+                    .child(deferred(anchored().anchor(Anchor::TopRight).child(popup))),
+            );
         }
-        div()
-            .flex()
-            .flex_col()
-            .gap(px(space::S))
-            .child(row)
-            .when(self.custom_color, |d| d.child(picker))
+        row.child(own_slot)
     }
-
     fn edit_agent(&mut self, cx: &mut Context<Self>) -> Div {
         let p = self.p;
         let mut list = div().flex().flex_col();

@@ -45,6 +45,15 @@ pub enum Text {
     Large,
 }
 
+/// How wide the chat's column is at most.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Width {
+    Normal,
+    Comfortable,
+    /// As wide as the window leaves it.
+    Full,
+}
+
 #[derive(Clone, PartialEq, Debug)]
 pub struct Prefs {
     pub theme: Theme,
@@ -73,6 +82,7 @@ pub struct Prefs {
     pub auto_update: bool,
     /// Whether the sidebar shows the search box over the agents.
     pub search: bool,
+    pub width: Width,
 }
 
 impl Default for Prefs {
@@ -93,6 +103,7 @@ impl Default for Prefs {
             awake: false,
             auto_update: false,
             search: false,
+            width: Width::Normal,
         }
     }
 }
@@ -157,6 +168,11 @@ impl Prefs {
             awake: b("awake", d.awake),
             auto_update: b("auto_update", d.auto_update),
             search: b("search", d.search),
+            width: match s("width") {
+                "comfortable" => Width::Comfortable,
+                "full" => Width::Full,
+                _ => d.width,
+            },
         }
     }
 
@@ -205,6 +221,14 @@ impl Prefs {
         m.insert("awake".into(), json!(self.awake));
         m.insert("auto_update".into(), json!(self.auto_update));
         m.insert("search".into(), json!(self.search));
+        m.insert(
+            "width".into(),
+            json!(match self.width {
+                Width::Normal => "normal",
+                Width::Comfortable => "comfortable",
+                Width::Full => "full",
+            }),
+        );
         Value::Object(m)
     }
 
@@ -219,6 +243,15 @@ impl Prefs {
             Theme::System => system_dark,
             Theme::Light => false,
             Theme::Dark => true,
+        }
+    }
+
+    /// The chat column's widest, in pixels.
+    pub fn column(&self) -> f32 {
+        match self.width {
+            Width::Normal => crate::tokens::space::COLUMN,
+            Width::Comfortable => crate::tokens::space::COLUMN_WIDE,
+            Width::Full => f32::MAX,
         }
     }
 
@@ -271,7 +304,7 @@ pub fn mono_font() -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use super::{Prefs, Theme, Thoughts, Tools};
+    use super::{Prefs, Theme, Thoughts, Tools, Width};
     use serde_json::json;
 
     #[test]
@@ -305,9 +338,11 @@ mod tests {
             ctrl_enter: true,
             sound: false,
             search: true,
+            width: Width::Comfortable,
             ..Prefs::default()
         };
         assert_eq!(Prefs::from_json(&p.to_json()), p);
+        assert_eq!(Prefs::default().width, Width::Normal);
     }
 
     #[test]
