@@ -578,8 +578,9 @@ To try another way from some point without losing the chat, branch it there: by 
 ## Updates and versions
 
 - **Desktop apps** update themselves from signed releases (an Ed25519 signature on each release, checked before the swap), with loom's own small updater. The iPhone app updates through TestFlight, and later the App Store.
+- **loom's own installer** on Windows, `loom-setup.exe` ([desktop/setup](desktop/setup/README.md)), installs, updates and uninstalls, and looks and moves like loom: a small program drawn by hand in loom's look, not GPUI, so it's about a megabyte and opens at once. A release's `loom-setup.exe` carries `loom.exe` compressed, under a header the release key signs, which it checks before it installs anything. For an update the core downloads the new release's setup, the app hands it over and quits, and the setup swaps `loom.exe`, starts the new one, and puts the old one back if it doesn't start.
 - **Servers** update with `loom update`, which checks the release's signature, swaps the program and restarts. The owner can let it update by itself. A release has the server for Linux on x64 and Arm, Windows, and macOS on Apple silicon, and a Docker image on GitHub's registry.
-- **How a release is signed.** A tag `v…` builds every program, and `scripts/release.calx` writes `manifest.json` with each file's SHA-256 and `manifest.json.sig`, the Ed25519 signature of the manifest's exact bytes, with the release key (the CI secret `LOOM_RELEASE_KEY`; its public half is in `shared/release.calx`). The desktop core and `loom update` read the latest release's manifest, check the signature and then each file's hash, and only then use it. The desktop app is installed per person (`%LOCALAPPDATA%\Programs\loom`), so it swaps its own `loom.exe` without asking for an administrator.
+- **How a release is signed.** A tag `v…` builds every program, and `scripts/release.calx` writes `manifest.json` with each file's SHA-256 and `manifest.json.sig`, the Ed25519 signature of the manifest's exact bytes, with the release key (the CI secret `LOOM_RELEASE_KEY`; its public half is in `shared/release.calx`). The desktop core and `loom update` read the latest release's manifest, check the signature and then each file's hash, and only then use it. The desktop app is installed per person (`%LOCALAPPDATA%\Programs\loom`), so its setup swaps `loom.exe` without asking for an administrator.
 - **Protocol versions.** `hello` says which protocol versions the app speaks, and the instance answers with the one it will use. An instance supports its newest version and the one before, so an app a release behind still works, and the app says when it has to update.
 - **The database** carries its schema version, and the instance upgrades it on start, after a backup. A move between instances on different versions goes through the same upgrade.
 
@@ -745,6 +746,8 @@ Nothing from v0.1's code carries over: the engine was Rust with its own model lo
 - Computer use on Windows, as a device tool (see [Your devices](#your-devices)).
 - Image generation, as an MCP tool rather than a provider feature.
 - Semantic search over a coding workspace, if full-text search isn't enough.
+
+**People on v0.1 are moved over by v0.1's own updater.** v0.1 looks at the latest release's `update.json` and takes a payload signed with its minisign key, which every release from v0.2.0 on carries (`scripts/release.calx bridge`, with the CI secret `LOOM_V01_KEY`): a zip whose `loom.exe` is that release's `loom-setup.exe`. v0.1 swaps it in and starts it, and the setup installs the new loom and takes v0.1 off, without running v0.1's own uninstaller, which would end the new loom and delete the folder they share. v0.1's chats and settings in `~/.loom` stay where they are; the new loom doesn't read them. Someone who downloads `loom-setup.exe` instead gets the same: v0.1 is taken off as the new loom goes in.
 
 ## Later ideas
 
