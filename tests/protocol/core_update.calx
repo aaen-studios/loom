@@ -27,7 +27,8 @@ import core.cache.{Cache}
 import core.conn.{Conn}
 import core.updates.{Hub}
 import server.update
-import tests.kit.{Instance, calx, check, json_of}
+import shared.client.{json_of}
+import tests.kit.{Instance, calx, check}
 
 struct Serving {
     server: Server

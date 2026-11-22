@@ -11,9 +11,10 @@ module tests.protocol.threads
 import std.json.{Json}
 import std.process.{exit}
 import shared.obj.{Obj, at, bool_at, str_at}
-import tests.kit.{App, Instance, check, reply_text}
+import shared.client.{Session, reply_text}
+import tests.kit.{Instance, check}
 
-fn reply_in(app: mut App, conversation: String) -> String ! Error {
+fn reply_in(app: mut Session, conversation: String) -> String ! Error {
     loop {
         let created = try app.until("event", "message.created")
         let m = at(created, "message")
@@ -21,12 +22,12 @@ fn reply_in(app: mut App, conversation: String) -> String ! Error {
     }
 }
 
-fn put(app: mut App, id: str, name: str, post: str) -> Json ! Error {
+fn put(app: mut Session, id: str, name: str, post: str) -> Json ! Error {
     return try app.cmd(id, "routine.put", Obj.new().s("name", String(name)).s("agent", String("Main")).s("prompt", String(name)).j("schedule", Obj.new().i("every", 600).done()).s("post", String(post)).done())
 }
 
 // Runs routine `id` by hand, and gives the routine once its run has ended.
-fn run_once(app: mut App, q: str, id: String) -> Json ! Error {
+fn run_once(app: mut Session, q: str, id: String) -> Json ! Error {
     let ran = try app.cmd(q, "routine.run", Obj.new().s("id", id.copy()).done())
     if bool_at(ran.copy(), "ok") != some(true) { fail "routine.run refused: {ran}" }
     loop {
@@ -43,7 +44,7 @@ fn run_once(app: mut App, q: str, id: String) -> Json ! Error {
 }
 
 // The conversations made since frame `from`.
-fn made_since(app: App, from: usize) -> List<Json> {
+fn made_since(app: Session, from: usize) -> List<Json> {
     var out = List<Json>()
     for f in app.frames[from..] {
         if str_at(f.copy(), "kind") == some(String("conversation.created")) { out.push(at(f.copy(), "conversation")) }
@@ -52,7 +53,7 @@ fn made_since(app: App, from: usize) -> List<Json> {
 }
 
 fn run(i: Instance) ! Error {
-    var app = try App.connect(i.base.copy(), i.token.copy(), 0)
+    var app = try Session.connect(i.base.copy(), i.token.copy(), 0)
     let made = try app.cmd("q_1", "agent.create", Obj.new().s("name", String("Main")).s("acp_agent", String("fake")).s("instructions", String("Test.")).done())
     let main_id = str_at(at(at(made, "value"), "agent"), "id") ?? String()
     let c = try app.cmd("q_2", "conversation.create", Obj.new().s("agent", main_id.copy()).done())

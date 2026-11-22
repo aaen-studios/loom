@@ -1447,11 +1447,17 @@ impl Conn {
         var results = List<Json>()
         var found = Json.Null
         if let d = mut self.device {
-            results = d.poll()
+            results = d.poll(now())
             if let f = d.scan_poll() { found = f }
         }
         for r in results {
-            _ = self.put("{r}")
+            // A server an install on a host made, for this app to add and sign in
+            // to with its link code, which goes nowhere else.
+            if str_at(r.copy(), "t") == some(String("core.offer")) {
+                self.tell(r)
+            } else {
+                _ = self.put("{r}")
+            }
         }
         if found != Json.Null { self.tell(found) }
     }

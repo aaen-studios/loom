@@ -11,10 +11,11 @@ import std.json.{Json}
 import std.process.{exit}
 import std.thread.{sleep}
 import shared.obj.{Obj, at, bool_at, int_at, str_at}
-import tests.kit.{App, Instance, check}
+import shared.client.{Session}
+import tests.kit.{Instance, check}
 
 // The welcome an app got, and whether a snapshot came after it.
-fn welcomed(app: App) -> (Json, bool) {
+fn welcomed(app: Session) -> (Json, bool) {
     var welcome = Json.Null
     var snapshot = false
     for f in app.frames {
@@ -26,7 +27,7 @@ fn welcomed(app: App) -> (Json, bool) {
 }
 
 fn run(i: Instance) ! Error {
-    var app = try App.connect(i.base.copy(), i.token.copy(), 0)
+    var app = try Session.connect(i.base.copy(), i.token.copy(), 0)
     let made = try app.cmd("q_1", "agent.create", Obj.new().s("name", String("Fake")).s("acp_agent", String("fake")).s("instructions", String("")).done())
     let agent = str_at(at(at(made, "value"), "agent"), "id") ?? String()
     let ids: List<str> = ["q_c0", "q_c1", "q_c2", "q_c3", "q_c4"]
@@ -39,7 +40,7 @@ fn run(i: Instance) ! Error {
     // The instance looks every 200 ms.
     unsafe { sleep(600000000) }
 
-    let fresh = try App.connect(i.base.copy(), i.token.copy(), 0)
+    let fresh = try Session.connect(i.base.copy(), i.token.copy(), 0)
     let (w1, snap1) = welcomed(fresh)
     var agents: usize = 0
     var conversations: usize = 0
@@ -53,12 +54,12 @@ fn run(i: Instance) ! Error {
     try check(agents == 1 and conversations == 5, "and the snapshot has everything")
     fresh.close()
 
-    let behind = try App.connect(i.base.copy(), i.token.copy(), 1)
+    let behind = try Session.connect(i.base.copy(), i.token.copy(), 1)
     let (w2, snap2) = welcomed(behind)
     try check(bool_at(w2, "reset") == some(true) and snap2, "a device from before what's left gets a snapshot")
     behind.close()
 
-    let near = try App.connect(i.base.copy(), i.token.copy(), last - 2)
+    let near = try Session.connect(i.base.copy(), i.token.copy(), last - 2)
     let (w3, snap3) = welcomed(near)
     try check(bool_at(w3, "reset") == some(false) and not snap3 and near.seq == last, "a device within what's left catches up on the events")
     near.close()

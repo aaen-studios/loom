@@ -13,12 +13,13 @@ module tests.protocol.plugins
 import std.json.{Json}
 import std.process.{exit}
 import shared.obj.{Obj, at, int_at, str_at}
-import tests.kit.{App, Instance, check, reply_text}
+import shared.client.{Session, reply_text}
+import tests.kit.{Instance, check}
 
 const MANIFEST: str = "name = \"Build board\"\nversion = \"0.1.0\"\n[panel]\nentry = \"index.html\"\n[permissions]\ncommands = [\"routine.list\"]\nagents = true\n"
 const TOOLED: str = "name = \"Weather\"\nversion = \"1.0.0\"\n[tools]\ncommand = \"calx\"\nargs = [\"tools.calx\", \"--verbose\"]\n"
 
-fn reply_in(app: mut App, conversation: String) -> String ! Error {
+fn reply_in(app: mut Session, conversation: String) -> String ! Error {
     loop {
         let created = try app.until("event", "message.created")
         let m = at(created, "message")
@@ -26,7 +27,7 @@ fn reply_in(app: mut App, conversation: String) -> String ! Error {
     }
 }
 
-fn say(app: mut App, conversation: String, cid: str, text: String) -> String ! Error {
+fn say(app: mut Session, conversation: String, cid: str, text: String) -> String ! Error {
     try app.send(Obj.new().s("t", String("send")).s("cid", String(cid)).s("conversation", conversation.copy()).s("text", text).done())
     return try reply_in(mut app, conversation)
 }
@@ -36,7 +37,7 @@ fn code(answer: Json) -> String {
 }
 
 fn run(i: Instance) ! Error {
-    var app = try App.connect(i.base.copy(), i.token.copy(), 0)
+    var app = try Session.connect(i.base.copy(), i.token.copy(), 0)
 
     // --- From the person ---
     let files = Obj.new().s("plugin.toml", String(MANIFEST)).s("index.html", String("<p>builds</p>")).done()
@@ -141,7 +142,7 @@ fn main() ! Error {
 }
 
 // The newest event of `kind` the app has read.
-fn last(app: App, kind: str) -> Json {
+fn last(app: Session, kind: str) -> Json {
     var found = Json.Null
     for f in app.frames {
         if str_at(f.copy(), "kind") == some(String(kind)) { found = f.copy() }

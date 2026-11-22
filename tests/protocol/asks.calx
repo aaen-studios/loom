@@ -9,10 +9,11 @@ module tests.protocol.asks
 //     calx tests/protocol/asks.calx
 import std.process.{exit}
 import shared.obj.{Obj, at, str_at}
-import tests.kit.{App, Instance, check, reply_text}
+import shared.client.{Session, reply_text}
+import tests.kit.{Instance, check}
 
 // The agent's next reply in `conversation`, as text.
-fn reply_in(app: mut App, conversation: String) -> String ! Error {
+fn reply_in(app: mut Session, conversation: String) -> String ! Error {
     loop {
         let created = try app.until("event", "message.created")
         let m = at(created, "message")
@@ -20,7 +21,7 @@ fn reply_in(app: mut App, conversation: String) -> String ! Error {
     }
 }
 
-fn say(app: mut App, conversation: String, cid: str, text: String) -> String ! Error {
+fn say(app: mut Session, conversation: String, cid: str, text: String) -> String ! Error {
     try app.send(Obj.new().s("t", String("send")).s("cid", String(cid)).s("conversation", conversation.copy()).s("text", text).done())
     return try reply_in(mut app, conversation)
 }
@@ -30,13 +31,13 @@ fn ask(to: str, text: String) -> String {
     return "/mcp message_agent {Obj.new().s("agent", String(to)).s("text", text).done()}"
 }
 
-fn agent(app: mut App, id: str, name: str) -> String ! Error {
+fn agent(app: mut Session, id: str, name: str) -> String ! Error {
     let made = try app.cmd(id, "agent.create", Obj.new().s("name", String(name)).s("acp_agent", String("fake")).s("instructions", String("You are a test.")).done())
     return str_at(at(at(made, "value"), "agent"), "id") ?? String()
 }
 
 fn run(i: Instance) ! Error {
-    var app = try App.connect(i.base.copy(), i.token.copy(), 0)
+    var app = try Session.connect(i.base.copy(), i.token.copy(), 0)
     let main_id = try agent(mut app, "q_1", "Main")
     _ = try agent(mut app, "q_2", "A")
     _ = try agent(mut app, "q_3", "B")

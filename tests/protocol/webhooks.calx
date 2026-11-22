@@ -14,11 +14,12 @@ import std.http.{Header, get, post}
 import std.json.{Json}
 import std.process.{exit}
 import shared.obj.{Obj, at, bool_at, int_at, str_at}
-import tests.kit.{App, Instance, check, json_of, reply_text}
+import shared.client.{Session, json_of, reply_text}
+import tests.kit.{Instance, check}
 
 const FAILED: str = #"{"action":"completed","workflow_run":{"name":"ci","conclusion":"failure"}}"#
 
-fn reply_in(app: mut App, conversation: String) -> String ! Error {
+fn reply_in(app: mut Session, conversation: String) -> String ! Error {
     loop {
         let created = try app.until("event", "message.created")
         let m = at(created, "message")
@@ -40,7 +41,7 @@ fn header(name: str, value: String) -> List<Header> {
 }
 
 fn run(i: Instance) ! Error {
-    var app = try App.connect(i.base.copy(), i.token.copy(), 0)
+    var app = try Session.connect(i.base.copy(), i.token.copy(), 0)
     _ = try app.cmd("q_1", "agent.create", Obj.new().s("name", String("Main")).s("acp_agent", String("fake")).s("instructions", String("Test.")).done())
 
     let neither = try app.cmd("q_2", "routine.put", Obj.new().s("name", String("Build")).s("agent", String("Main")).s("prompt", String("hi")).done())

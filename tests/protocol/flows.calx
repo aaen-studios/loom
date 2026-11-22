@@ -13,7 +13,8 @@ module tests.protocol.flows
 import std.json.{Json}
 import std.process.{exit}
 import shared.obj.{Obj, at, bool_at, str_at}
-import tests.kit.{App, Instance, check, reply_text}
+import shared.client.{Session, reply_text}
+import tests.kit.{Instance, check}
 
 fn step(name: str, agent: str, prompt: str) -> Json {
     return Obj.new().s("name", String(name)).s("agent", String(agent)).s("prompt", String(prompt)).done()
@@ -25,7 +26,7 @@ fn step_after(name: str, agent: str, prompt: str, after: List<str>) -> Json {
     return Obj.new().s("name", String(name)).s("agent", String(agent)).s("prompt", String(prompt)).j("after", Json.Array(a)).done()
 }
 
-fn put_flow(app: mut App, id: str, name: str, agent: str, prompt: str, flow: List<Json>) -> Json ! Error {
+fn put_flow(app: mut Session, id: str, name: str, agent: str, prompt: str, flow: List<Json>) -> Json ! Error {
     return try app.cmd(id, "routine.put", Obj.new().s("name", String(name)).s("agent", String(agent)).s("prompt", String(prompt)).j("schedule", Obj.new().i("every", 600).done()).j("flow", Json.Array(flow.copy())).done())
 }
 
@@ -41,7 +42,7 @@ fn is_flow_of(f: Json, routine: String, finished: bool) -> bool {
 
 // The flow.updated that says routine `routine`'s flow finished, or the next
 // one about it that comes.
-fn flow_of(app: mut App, routine: String, finished: bool) -> Json ! Error {
+fn flow_of(app: mut Session, routine: String, finished: bool) -> Json ! Error {
     for f in app.frames {
         if is_flow_of(f.copy(), routine.copy(), finished) { return at(f.copy(), "flow") }
     }
@@ -52,7 +53,7 @@ fn flow_of(app: mut App, routine: String, finished: bool) -> Json ! Error {
 }
 
 // Waits for routine `routine`'s flow to stand as `want`, as states gives it.
-fn flow_reaches(app: mut App, routine: String, want: str) ! Error {
+fn flow_reaches(app: mut Session, routine: String, want: str) ! Error {
     for f in app.frames {
         if is_flow_of(f.copy(), routine.copy(), false) and states(at(f.copy(), "flow")) == want { return }
     }
@@ -80,7 +81,7 @@ fn states(flow: Json) -> String {
 
 // What the agent answered to each message routine `routine`'s flow posted,
 // by the step's prompt, in the order the steps went.
-fn answers(app: App, routine: String) -> List<(String, String, String)> {
+fn answers(app: Session, routine: String) -> List<(String, String, String)> {
     var out = List<(String, String, String)>()
     for f in app.frames {
         if str_at(f.copy(), "kind") != some(String("message.created")) { continue }
@@ -112,7 +113,7 @@ fn refused(r: Json, code: str) -> bool {
 }
 
 fn run(i: Instance) ! Error {
-    var app = try App.connect(i.base.copy(), i.token.copy(), 0)
+    var app = try Session.connect(i.base.copy(), i.token.copy(), 0)
     _ = try app.cmd("q_a1", "agent.create", Obj.new().s("name", String("One")).s("acp_agent", String("fake")).s("instructions", String("Test.")).done())
     _ = try app.cmd("q_a2", "agent.create", Obj.new().s("name", String("Two")).s("acp_agent", String("fake")).s("instructions", String("Test.")).done())
     let three = try app.cmd("q_a3", "agent.create", Obj.new().s("name", String("Three")).s("acp_agent", String("fake")).s("instructions", String("Test.")).done())

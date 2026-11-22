@@ -13,9 +13,10 @@ import std.json.{Json}
 import std.process.{exit}
 import std.text.utf8.{decode_lossy_unicode}
 import shared.obj.{Obj, at, str_at}
-import tests.kit.{App, Instance, check, reply_text}
+import shared.client.{Session, reply_text}
+import tests.kit.{Instance, check}
 
-fn reply_in(app: mut App, conversation: String) -> String ! Error {
+fn reply_in(app: mut Session, conversation: String) -> String ! Error {
     loop {
         let created = try app.until("event", "message.created")
         let m = at(created, "message")
@@ -24,7 +25,7 @@ fn reply_in(app: mut App, conversation: String) -> String ! Error {
 }
 
 // What a new conversation with `agent` says its session got.
-fn servers_of(app: mut App, agent: String, id: str) -> String ! Error {
+fn servers_of(app: mut Session, agent: String, id: str) -> String ! Error {
     let c = try app.cmd(id, "conversation.create", Obj.new().s("agent", agent).done())
     let conversation = str_at(at(c, "value"), "conversation") ?? String()
     try app.send(Obj.new().s("t", String("send")).s("cid", "m_{id}").s("conversation", conversation.copy()).s("text", String("/servers")).done())
@@ -36,7 +37,7 @@ fn code(answer: Json) -> String {
 }
 
 fn run(i: Instance) ! Error {
-    var app = try App.connect(i.base.copy(), i.token.copy(), 0)
+    var app = try Session.connect(i.base.copy(), i.token.copy(), 0)
     _ = try app.cmd("q_s1", "secret.put", Obj.new().s("name", String("ACTA_KEY")).s("value", String("s3cret-acta-key")).done())
     let names = "{try app.cmd("q_s2", "secret.list", Obj.new().done())}"
     try check(names.contains("ACTA_KEY") and not names.contains("s3cret"), "a secret is kept, and only its name comes back")

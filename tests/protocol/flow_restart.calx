@@ -8,7 +8,8 @@ module tests.protocol.flow_restart
 import std.json.{Json}
 import std.process.{exit}
 import shared.obj.{Obj, at, bool_at, str_at}
-import tests.kit.{App, Instance, check}
+import shared.client.{Session}
+import tests.kit.{Instance, check}
 
 fn step_after(name: str, agent: str, prompt: str, after: str) -> Json {
     return Obj.new().s("name", String(name)).s("agent", String(agent)).s("prompt", String(prompt)).j("after", Json.Array([Json.Str(String(after))])).done()
@@ -24,7 +25,7 @@ fn states(flow: Json) -> String {
 }
 
 // The next flow.updated for routine `routine` that `wanted` says yes to.
-fn flow_where(app: mut App, routine: String, wanted: fn(Json) -> bool) -> Json ! Error {
+fn flow_where(app: mut Session, routine: String, wanted: fn(Json) -> bool) -> Json ! Error {
     loop {
         let e = try app.until("event", "flow.updated")
         let flow = at(e, "flow")
@@ -43,7 +44,7 @@ fn finished(flow: Json) -> bool {
 // Starts the flow, and gives the event number to pick up from and the
 // routine, once its slow step is running.
 fn before(i: Instance) -> (i64, String) ! Error {
-    var app = try App.connect(i.base.copy(), i.token.copy(), 0)
+    var app = try Session.connect(i.base.copy(), i.token.copy(), 0)
     for (q, name) in [("q_1", "Main"), ("q_2", "Slow")] {
         _ = try app.cmd(q, "agent.create", Obj.new().s("name", String(name)).s("acp_agent", String("fake")).s("instructions", String("Test.")).done())
     }
@@ -58,7 +59,7 @@ fn before(i: Instance) -> (i64, String) ! Error {
 }
 
 fn after_restart(i: Instance, seq: i64, routine: String) ! Error {
-    var app = try App.connect(i.base.copy(), i.token.copy(), seq)
+    var app = try Session.connect(i.base.copy(), i.token.copy(), seq)
     let done = try flow_where(mut app, routine, finished)
     try check(states(done) == "routine:done slow:done last:done", "after a restart, the flow carries on: the step it cut short goes again, and the next follows")
     var answered = false

@@ -1,0 +1,308 @@
+module core.install
+
+// Installing loom on one of the person's hosts, for an agent's install_server
+// (PLAN.md, "Several servers in one app"), once the person said yes to its plan
+// on this device. The plan is what they signed: the host, a domain or none,
+// and what to import. Every command comes from it here, never from the
+// instance. It runs on this device, through ssh as the host's commands do, one
+// step after another, and says how each went (`device.progress`):
+//
+// 1. install: the install script, then `loom install --json`, which gives the
+//    server's address, its version and a link code;
+// 2. import, when the plan has one: `loom import openbot --from-user`, which
+//    stages OpenBot's data, and its provider, for the owner the link makes;
+// 3. link: this app adds the server, signed in with the link code
+//    (`core.offer`), so the code never leaves this computer, and neither the
+//    person nor the agent types anything;
+// 4. check: `/api/version` on the new server, from here, until it says it's
+//    set up, which the app's sign-in does.
+//
+// The agent's result (`device.result`) says what was done, and when a step
+// fails, what failed and what to do next. It never has a code.
+import std.http.{Request}
+import std.json.{Json, parse}
+import std.process.{Child, Stdio}
+import std.text.utf8.{decode_lossy_unicode}
+import shared.client
+import shared.hosts.{LOOM_DATA, import_command, install_command}
+import shared.obj.{Obj, at, bool_at, str_at}
+import core.hosts
+import core.hosts.{Host}
+
+// How long each step may take.
+const INSTALL_MS: u64 = 1200000
+const IMPORT_MS: u64 = 600000
+// How long the check waits for the app to be signed in, and how often it asks.
+pub const CHECK_MS: i64 = 120000
+const CHECK_EVERY_MS: i64 = 1000
+
+pub struct Install {
+    pub call: String
+    host: Host
+    plan: Json
+    ssh: List<String>    // the ssh program, with its first arguments
+    step: String    // install, import, link, check, or done
+    child: Child?
+    out: List<u8>
+    address: String
+    code: String    // the link code, which stays here
+    version: String
+    via: String
+    lines: List<String>    // the result, a line or so for each step
+    ok: bool
+    asking: Request?
+    check_from: i64
+    next_check: i64
+    answered: Json    // what /api/version said last
+    why: String    // why it didn't answer, last
+}
+
+fn progress(call: String, step: str, status: str, said: String) -> Json {
+    return Obj.new().s("t", String("device.progress")).s("call", call).s("step", String(step)).s("status", String(status)).s("said", said).done()
+}
+
+fn text_of(b: List<u8>) -> String {
+    return decode_lossy_unicode(b.copy(), 0, b.len())
+}
+
+/// The last line of `text` that's a JSON object: what a `--json` command answered.
+pub fn last_json(text: String) -> Json {
+    var found = Json.Null
+    for line in text.lines() {
+        let l = line.trim().copy()
+        if not l.starts_with("\{") { continue }
+        if let ok(j) = parse(l) {
+            if let Json.Object(_) = j.copy() { found = j }
+        }
+    }
+    return found
+}
+
+// The last few lines of `text`, for a failure that didn't say why in JSON.
+fn tail(text: String) -> String {
+    var kept = List<String>()
+    for line in text.lines() {
+        if line.trim().len() > 0 { kept.push(line.trim().copy()) }
+    }
+    let from = if kept.len() > 4 { kept.len() - 4 } else { 0 }
+    return kept[from..].join(" / ")
+}
+
+/// What a staged import holds, in words, from its counts: "6 agents, 120 messages".
+pub fn counted(counts: Json) -> String {
+    var parts = List<String>()
+    if let Json.Object(m) = counts {
+        for (k, v) in m {
+            if let n = v.as_i64() {
+                if n > 0 { parts.push("{n} {k.replace("_", " ")}") }
+            }
+        }
+    }
+    if parts.len() == 0 { return String("nothing yet") }
+    return parts.join(", ")
+}
+
+impl Install {
+    /// Starts the install the person signed, with `ssh` (the program and its first
+    /// arguments). Its first progress, or its result when it couldn't start.
+    pub fn start(call: String, host: own Host, plan: own Json, ssh: own List<String>) -> (Install, Json) {
+        var i = Install { call: call.copy(), host: host, plan: plan, ssh: ssh, step: String("install"), child: none, out: List<u8>(), address: String(), code: String(), version: String(), via: String(), lines: List<String>(), ok: false, asking: none, check_from: 0, next_check: 0, answered: Json.Null, why: String() }
+        let command = install_command(i.plan.copy())
+        if let why = i.run(command, INSTALL_MS) {
+            i.lines.push("Installing loom on {i.host.name} failed: ssh didn't start on this computer: {why}. Nothing was done.")
+            i.step = String("done")
+            let r = i.result()
+            return (i, r)
+        }
+        let first = progress(call, "install", "running", "Installing loom on {i.host.name}")
+        return (i, first)
+    }
+
+    pub fn done(self) -> bool {
+        return self.step == "done"
+    }
+
+    fn result(self) -> Json {
+        return Obj.new().s("t", String("device.result")).s("call", self.call.copy()).b("ok", self.ok).s("output", self.lines.join("\n")).done()
+    }
+
+    // Runs `command` on the host, for the step: why it couldn't start, or none.
+    fn run(mut self, command: String, timeout_ms: u64) -> String? {
+        match hosts.ssh_command(self.ssh.copy(), self.host.target.copy(), command).stdin(Stdio.Null).stdout(Stdio.Pipe).stderr(Stdio.Stdout).timeout(timeout_ms).spawn() {
+            ok(child) => self.child = some(child),
+            err(e) => return some("{e}"),
+        }
+        return none
+    }
+
+    // The step's command, once it has ended: its output, whether it worked, and
+    // how it ended in words; none while it runs.
+    fn ended(mut self) -> (String, bool, String)? {
+        var c = self.child.take() else return none
+        self.out.extend(c.read(0))
+        if not c.ended() {
+            self.child = some(c)
+            return none
+        }
+        let end = c.wait()
+        self.out.extend(end.stdout.copy())
+        let text = text_of(self.out.copy())
+        self.out = List<u8>()
+        let how = if end.status.timed_out { String("it ran out of time") } else if end.status.code == some(255) { "ssh couldn't reach {self.host.name}" } else { "exit status {end.status.code ?? -1}" }
+        return some((text, end.status.success(), how))
+    }
+
+    /// Moves the install along: what it has to say now, in order. The last is the
+    /// result, once it's done.
+    pub fn poll(mut self, now_ms: i64) -> List<Json> {
+        var out = List<Json>()
+        if self.step == "install" {
+            let (text, worked, how) = self.ended() else return out
+            self.installed(mut out, text, worked, how)
+        } else if self.step == "import" {
+            let (text, worked, how) = self.ended() else return out
+            self.imported(mut out, text, worked, how)
+        }
+        if self.step == "link" { self.link(mut out, now_ms) }
+        if self.step == "check" { self.check(mut out, now_ms) }
+        return out
+    }
+
+    fn installed(mut self, out: mut List<Json>, text: String, worked: bool, how: String) {
+        let j = last_json(text.copy())
+        let error = at(j.copy(), "error")
+        if not worked or error != Json.Null or str_at(j.copy(), "address") == none {
+            let said = tail(text)
+            let why = str_at(error, "message") ?? (if said.len() > 0 { "{how}: {said}" } else { how.copy() })
+            out.push(progress(self.call.copy(), "install", "failed", why.copy()))
+            self.lines.push("Installing loom on {self.host.name} failed: {why}")
+            self.lines.push("Nothing after it ran. Fix that on {self.host.name} (use_device can look), then call install_server again: a second install keeps what the first did.")
+            self.step = String("done")
+            out.push(self.result())
+            return
+        }
+        self.address = (str_at(j.copy(), "address") ?? String()).trim_suffix("/").copy()
+        self.code = str_at(j.copy(), "link_code") ?? String()
+        self.version = str_at(j.copy(), "version") ?? String()
+        self.via = str_at(j.copy(), "via") ?? String()
+        let through = if self.via == "caddy" { " (through Caddy)" } else if self.via == "tailscale" { " (through Tailscale)" } else { " (on the server alone)" }
+        out.push(progress(self.call.copy(), "install", "done", "Installed loom {self.version} at {self.address}{through}"))
+        self.lines.push("Installed loom {self.version} on {self.host.name}, at {self.address}{through}.")
+        if let Json.Array(steps) = at(j, "steps") {
+            if steps.len() > 0 { self.lines.push(String("What the install did:")) }
+            for s in steps {
+                self.lines.push("- {s.as_str() ?? String()}")
+            }
+        }
+        let importing = import_command(self.plan.copy())
+        if importing.len() == 0 {
+            self.step = String("link")
+            return
+        }
+        self.step = String("import")
+        out.push(progress(self.call.copy(), "import", "running", String("Bringing OpenBot's data over")))
+        if let why = self.run(importing, IMPORT_MS) { self.imported(mut out, String(), false, "ssh didn't start on this computer: {why}") }
+    }
+
+    // The import has ended. A failure doesn't stop the rest: the server works
+    // without it, and it can be run again.
+    fn imported(mut self, out: mut List<Json>, text: String, worked: bool, how: String) {
+        self.step = String("link")
+        let user = str_at(self.plan.copy(), "from_user") ?? String("openbot")
+        let j = last_json(text.copy())
+        let error = at(j.copy(), "error")
+        if not worked or error != Json.Null {
+            let said = tail(text)
+            let why = str_at(error, "message") ?? (if said.len() > 0 { "{how}: {said}" } else { how.copy() })
+            out.push(progress(self.call.copy(), "import", "failed", why.copy()))
+            self.lines.push("Bringing OpenBot's data over from the user {user} failed: {why}")
+            self.lines.push("loom works without it. To try again, run `loom import openbot --from-user {user} --data {LOOM_DATA}` as root on {self.host.name}, with use_device.")
+            return
+        }
+        let what = counted(at(at(j.copy(), "staged"), "counts"))
+        let carried = if bool_at(self.plan.copy(), "carry_provider") == some(true) { ", with its provider for Claude" } else { "" }
+        out.push(progress(self.call.copy(), "import", "done", "Staged OpenBot's data: {what}"))
+        self.lines.push("Staged OpenBot's data from the user {user}{carried}: {what}. It comes into your person's account once they're its owner, which the link makes them.")
+    }
+
+    // This app adds the server, signed in with the link code.
+    fn link(mut self, out: mut List<Json>, now_ms: i64) {
+        if self.via == "local" {
+            let why = "loom answers only on {self.host.name} itself, with no domain and no Tailscale there, so this app can't reach it"
+            out.push(progress(self.call.copy(), "link", "failed", why.copy()))
+            self.lines.push("Linking it to your person's app failed: {why}.")
+            self.lines.push("Put Tailscale on {self.host.name}, or point a domain at it, and call install_server again (with domain for a domain).")
+            self.step = String("done")
+            out.push(self.result())
+            return
+        }
+        let username = str_at(self.plan.copy(), "username") ?? String()
+        var offer = Obj.new().s("t", String("core.offer")).s("address", self.address.copy())
+        if self.code.len() > 0 { offer = offer.s("code", self.code.copy()).s("username", username) }
+        out.push(offer.done())
+        let said = if self.code.len() > 0 { String("Signing this app in there") } else { String("Added to this app, to sign in to: it had an owner already") }
+        out.push(progress(self.call.copy(), "link", "done", said))
+        self.lines.push(if self.code.len() > 0 { String("Linked to your person's app: it signs them in there, as its owner, with nothing to type.") } else { String("It had an owner already, so it's added to your person's app for them to sign in to.") })
+        self.step = String("check")
+        self.check_from = now_ms
+        self.next_check = now_ms
+        out.push(progress(self.call.copy(), "check", "running", "Asking {self.address}/api/version"))
+    }
+
+    // /api/version on the new server, from here, until it's set up: which the
+    // app's sign-in with the code makes it.
+    fn check(mut self, out: mut List<Json>, now_ms: i64) {
+        if self.asking == none {
+            if now_ms < self.next_check { return }
+            self.asking = some(client.ask_version(self.address.copy(), 5000))
+            return
+        }
+        var r = self.asking.take() else return
+        if not r.done() {
+            self.asking = some(r)
+            return
+        }
+        let (j, why) = client.version_of(mut r)
+        if j != Json.Null {
+            self.answered = j.copy()
+            if bool_at(j.copy(), "set_up") == some(true) or self.code.len() == 0 {
+                let v = str_at(j, "version") ?? self.version.copy()
+                out.push(progress(self.call.copy(), "check", "done", "loom {v} answers at {self.address}"))
+                self.lines.push("Checked: loom {v} answers at {self.address}/api/version{if self.code.len() > 0 { ", set up" } else { "" }}.")
+                self.ok = true
+                self.step = String("done")
+                out.push(self.result())
+                return
+            }
+        } else {
+            self.why = why
+        }
+        if now_ms - self.check_from < CHECK_MS {
+            self.next_check = now_ms + CHECK_EVERY_MS
+            return
+        }
+        let failed = if self.answered != Json.Null {
+            "loom {str_at(self.answered.copy(), "version") ?? self.version.copy()} answers at {self.address}, but your person's app hasn't signed in there in {CHECK_MS / 60000} minutes. The link code works for 15 minutes from the install; after that, `sudo -u loom loom link --data {LOOM_DATA} --json` on {self.host.name} gives a new one for add_server"
+        } else {
+            "nothing answers at {self.address} from the computer that reaches {self.host.name} ({self.why}). Check Tailscale is on there and on {self.host.name}, or that the domain points at it, then add the server with add_server"
+        }
+        out.push(progress(self.call.copy(), "check", "failed", failed.copy()))
+        self.lines.push("Checking it failed: {failed}.")
+        self.step = String("done")
+        out.push(self.result())
+    }
+}
+
+@test
+fn reads_what_a_json_command_answered() {
+    let text = "fetching loom…\n{#"{"not": "this"}"#}\nchecking\n{#"{"address":"https://vps.tail1.ts.net:8443","link_code":"loom-link-1"}"#}\n"
+    assert(str_at(last_json(text), "address") == some(String("https://vps.tail1.ts.net:8443")))
+    assert(last_json(String("no json here")) == Json.Null)
+    assert(tail(String("a\n\nb\nc\nd\ne\n")) == "b / c / d / e")
+}
+
+@test
+fn counts_say_what_came() {
+    assert(counted(parse(String(#"{"agents":6,"skills":0,"chat_messages":120}"#))!) == "6 agents, 120 chat messages")
+    assert(counted(Json.Null) == "nothing yet")
+}
