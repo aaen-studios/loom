@@ -1757,6 +1757,7 @@ ACTA_KEY=secret:ACTA_KEY",
             .text_color(p.ink_3)
             .cursor_pointer()
             .soft_hover(transparent_black(), p.hover, Some((p.ink_3, p.ink)))
+            .tooltip(tip("Close"))
             .child(Icon::new(Ico::X).small())
     }
 
@@ -2934,6 +2935,7 @@ ACTA_KEY=secret:ACTA_KEY",
                     .child(
                         div()
                             .id("browser-mini-shut")
+                            .tooltip(tip("Hide until the browser opens again"))
                             .size(px(20.0))
                             .flex()
                             .items_center()
@@ -3272,6 +3274,7 @@ ACTA_KEY=secret:ACTA_KEY",
                     .child(
                         div()
                             .id("browser-close")
+                            .tooltip(tip("Close"))
                             .p(px(space::XS))
                             .rounded(px(radius::ROW))
                             .cursor_pointer()
@@ -3382,8 +3385,16 @@ ACTA_KEY=secret:ACTA_KEY",
         for (k, item) in items.iter().enumerate() {
             let editing = self.queue_editing.as_deref() == Some(item.id.as_str());
             let tool = |name: &str, icon: Icon| {
+                let words = match name {
+                    "up" => "Move up",
+                    "steer" => "Send now, stopping the answer",
+                    "save" => "Save",
+                    "edit" => "Edit",
+                    _ => "Remove",
+                };
                 div()
                     .id(SharedString::from(format!("queue-{name}-{}", item.id)))
+                    .tooltip(tip(words))
                     .size(px(26.0))
                     .flex_none()
                     .flex()
@@ -5229,6 +5240,7 @@ ACTA_KEY=secret:ACTA_KEY",
                                         p.hover,
                                         Some((p.ink_3, p.ink)),
                                     )
+                                    .tooltip(tip("Branch from here"))
                                     .child(Icon::new(Ico::GitBranch).xsmall())
                                     .on_click(move |_, _, cx| {
                                         let _ = to_branch.update(cx, |loom, _| {
@@ -5260,6 +5272,7 @@ ACTA_KEY=secret:ACTA_KEY",
                                         p.hover,
                                         Some((if pinned { p.ink_2 } else { p.ink_3 }, p.ink)),
                                     )
+                                    .tooltip(tip(if pinned { "Unpin" } else { "Pin" }))
                                     .child(Icon::new(Ico::Pin).xsmall())
                                     .on_click(move |_, _, cx| {
                                         let _ = this.update(cx, |loom, _| {
@@ -5385,6 +5398,9 @@ ACTA_KEY=secret:ACTA_KEY",
                                         .cursor_pointer()
                                         .soft_hover(transparent_black(), p.hover, None)
                                         .when(plus_open, |d| d.bg(p.hover))
+                                        .when(!plus_open, |d| {
+                                            d.tooltip(tip("Attach, skills and routines"))
+                                        })
                                         .child(Icon::new(Ico::Plus).small())
                                         .on_click(cx.listener(|this, _, _, cx| {
                                             this.plus = if this.plus.is_some() {
@@ -5428,6 +5444,7 @@ ACTA_KEY=secret:ACTA_KEY",
                                     .text_color(p.ink_2)
                                     .cursor_pointer()
                                     .soft_hover(transparent_black(), p.hover, None)
+                                    .tooltip(tip("Voice typing"))
                                     .child(Icon::new(Ico::Mic).small())
                                     .on_click(cx.listener(|this, _, window, cx| {
                                         this.composer.update(cx, |c, cx| c.focus(window, cx));
@@ -10713,6 +10730,7 @@ ACTA_KEY=secret:ACTA_KEY",
                             .child(
                                 div()
                                     .id(SharedString::from(format!("unpin-{}", m.id)))
+                                    .tooltip(tip("Unpin"))
                                     .size(px(22.0))
                                     .flex()
                                     .items_center()
@@ -11818,6 +11836,11 @@ fn approval(p: Palette, a: &Approval, this: WeakEntity<Loom>) -> Div {
                     btn(format!("deny-{}", a.call), "Deny", false).on_click(answer(false, false)),
                 ),
         )
+}
+
+/// A button's name, shown under the pointer after a moment, for buttons that are only an icon.
+fn tip(words: &'static str) -> impl Fn(&mut Window, &mut App) -> AnyView + 'static {
+    move |window, cx| gpui_kit::component::tooltip::Tooltip::new(words).build(window, cx)
 }
 
 /// What an approval would run, from the tool's input: its command if it has one.
