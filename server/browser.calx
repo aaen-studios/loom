@@ -5,7 +5,15 @@ module server.browser
 // over the DevTools protocol. Each runs on a thread of its own, which starts
 // the browser on its first call, does each call in turn, and answers the
 // instance's loop with the call's MCP result, so the loop never waits on a
-// page. The loop stops one that's been idle, and the next call starts it again.
+// page. The loop stops it once the agent's turn ends and no one is watching
+// it or has it, or once it's been idle, and the next call starts it again, on
+// the page it was on.
+//
+// It's Chrome's own headless mode everywhere, which since Chrome 112 is the
+// same browser as the one with a window, drawing pages the same, only without
+// the window: so a server with no display needs no virtual one. What a bare
+// Linux server lacks is the browser itself and fonts, which `missing` names
+// and `loom install` installs (server/setup.calx).
 //
 // The browser's profile, its cookies and logins among them, is in the
 // instance's data, not in the agent's folder, so the agent can't read it. A
@@ -21,8 +29,13 @@ import std.thread.{Task, sleep}
 import shared.obj.{Obj, at, bool_at, int_at, merge, str_at}
 import server.store.{now}
 
-// How long a browser stays open with nothing to do: ten minutes.
-pub const IDLE_MS: i64 = 600000
+// How long a browser with nothing to do stays open, in minutes, when no
+// turn's end has closed it: an agent that's stopped browsing to think or run
+// commands, in a long turn, or a page the person watches and leaves. An agent
+// that pauses browsing mostly comes back within a few minutes, and a browser
+// that's gone costs it its open page and a second or two to start again, so
+// not less; and an idle Chromium holds a few hundred megabytes, so not more.
+pub const IDLE_MINUTES: i64 = 5
 
 // How long one DevTools call may take, and how long a page may take to load.
 const CALL_MS: i64 = 30000
@@ -74,6 +87,9 @@ struct Worker {
     recording: bool    // whether what the person does is kept as steps
     steps: List<Json>    // what they've done since they started recording
     last_url: String    // the page the last step was on
+    was_on: String    // the page the last call left it on
+    reopen: String    // the page to open again when the browser starts, where it was before it closed
+    told_fonts: bool    // whether the agent's been told the computer has no fonts
 }
 
 impl Task for Worker {
@@ -92,13 +108,19 @@ impl Task for Worker {
                             error("{e}")
                         },
                     }
-                    // The page's host as the call left it, for the person's rules on
-                    // sites; the instance takes it off before the agent gets the result.
+                    // The page's host and address as the call left it, for the person's
+                    // rules on sites and to open it again after a close; the instance
+                    // takes them off before the agent gets the result.
                     var site = String()
+                    var url = String()
                     if op.name != "preview" and w.page != none {
-                        if let ok(h) = w.host() { site = h }
+                        if let ok(u) = w.url() {
+                            site = host_of(u.copy())
+                            if kept_page(u.copy()) { w.was_on = u.copy() }
+                            url = w.was_on.copy()
+                        }
                     }
-                    w.back.send(Back.Done(w.key.copy(), op.call.copy(), merge(result, Obj.new().s("loom_site", site).done())))
+                    w.back.send(Back.Done(w.key.copy(), op.call.copy(), merge(result, Obj.new().s("loom_site", site).s("loom_url", url).done())))
                 },
                 some(In.Record(on)) => w.record(on),
                 some(In.Watch(on)) => {
@@ -120,16 +142,18 @@ impl Task for Worker {
 
 // Starts the thread for the agent `key` names, whose browser keeps its profile
 // in `profile`. What it has to say comes to `back`. The thread ends once it's
-// sent Stop, with its browser stopped.
-pub fn start(key: String, profile: String, guarded: bool, proxy: u16, back: Sender<Back>) -> (Sender<In>, Thread) {
+// sent Stop, with its browser stopped. `reopen` is the page it was on when it
+// last closed, or "", which its first call that isn't browser_open opens again.
+pub fn start(key: String, profile: String, guarded: bool, proxy: u16, reopen: String, back: Sender<Back>) -> (Sender<In>, Thread) {
     let inbox = Receiver<In>()
     let to = inbox.sender()
-    let t = unsafe { Thread.spawn(Worker { key: key.copy(), profile: profile.copy(), guarded: guarded, proxy: proxy, inbox: inbox, back: back.copy(), child: none, page: none, port: String(), next_id: 0, refs: Map<String, i64>(), hidden: List<(String, String)>(), watched: false, casting: false, recording: false, steps: List<Json>(), last_url: String() }) }
+    let t = unsafe { Thread.spawn(Worker { key: key.copy(), profile: profile.copy(), guarded: guarded, proxy: proxy, inbox: inbox, back: back.copy(), child: none, page: none, port: String(), next_id: 0, refs: Map<String, i64>(), hidden: List<(String, String)>(), watched: false, casting: false, recording: false, steps: List<Json>(), last_url: String(), was_on: String(), reopen: reopen.copy(), told_fonts: false }) }
     return (to, t)
 }
 
 // The browser to run: LOOM_BROWSER, or the first Chrome, Edge or Chromium found
-// where they're installed, or on PATH.
+// where they're installed, or on PATH. On Linux, a snap's comes last: a snap
+// can't keep its profile in a service's folder, as /var/lib/loom.
 pub fn find() -> String? {
     if let set = env.variable(String("LOOM_BROWSER")) {
         if set.trim().len() > 0 { return some(set.trim().copy()) }
@@ -148,10 +172,166 @@ pub fn find() -> String? {
     for p in places {
         if fs.is_file(p.copy()) { return some(p.copy()) }
     }
+    var snaps = List<String>()
     for name in ["chromium", "chromium-browser", "google-chrome", "google-chrome-stable", "microsoft-edge", "chrome"] {
-        if let found = which(String(name)) { return some(found) }
+        if let found = which(String(name)) {
+            if not is_snap(found.copy()) { return some(found) }
+            snaps.push(found)
+        }
     }
+    if snaps.len() > 0 { return some(snaps[0].copy()) }
     return none
+}
+
+// Whether `path` is a snap's browser, or Ubuntu's chromium-browser, which only
+// starts the snap.
+pub fn is_snap(path: String) -> bool {
+    if path.starts_with("/snap/") { return true }
+    if let ok(real) = fs.real_path(path.copy()) {
+        if real.starts_with("/snap/") or real.ends_with("/snap") { return true }
+    }
+    // Ubuntu's is a short script; a real browser is a program of its own.
+    if path.ends_with("/chromium-browser") {
+        if let ok(m) = fs.metadata(path.copy()) {
+            if m.size < 16384 {
+                if let ok(some(t)) = fs.read_text(path) { return t.contains("snap") }
+            }
+        }
+    }
+    return false
+}
+
+// What the computer lacks for the browser to show pages as a desktop does,
+// in a few words each: a browser, or fonts. Only Linux lacks them: Windows and
+// macOS come with fonts, and the desktop app finds the Edge or Chrome that's
+// there. Empty when nothing's missing.
+pub fn missing() -> List<String> {
+    var gaps = List<String>()
+    if env.os() != "linux" { return gaps }
+    match find() {
+        some(exe) => {
+            if is_snap(exe.copy()) { gaps.push(String("a browser that isn't a snap")) }
+        },
+        none => gaps.push(String("a browser")),
+    }
+    gaps.extend(font_gaps(fonts()))
+    return gaps
+}
+
+// The fonts the browser can draw with, by family, a line each, and the lines
+// after "lang=zh" and "emoji" headers the ones for Chinese and emoji: as
+// fontconfig, which Chrome on Linux uses, lists them. Without fc-list, the
+// font files in the usual folders, by name.
+fn fonts() -> List<String> {
+    var lines = List<String>()
+    if which(String("fc-list")) != none {
+        for (header, pattern) in [("all", ":"), ("lang=zh", ":lang=zh"), ("emoji", ":charset=1f600")] {
+            lines.push("# {header}")
+            if let ok(out) = Command.new(String("fc-list")).arg(String(pattern)).arg(String("family")).timeout(20000).output() {
+                for line in out.text().lines() {
+                    if line.trim().len() > 0 { lines.push(line.trim().copy()) }
+                }
+            }
+        }
+        return lines
+    }
+    var dirs: List<String> = ["/usr/share/fonts", "/usr/local/share/fonts"]
+    if let home = env.variable(String("HOME")) {
+        dirs.push("{home}/.fonts")
+        dirs.push("{home}/.local/share/fonts")
+    }
+    for dir in dirs {
+        if not fs.is_dir(dir.copy()) { continue }
+        if let ok(found) = fs.walk(dir) {
+            for e in found {
+                let lower = e.path.to_lower_root()
+                if lower.ends_with(".ttf") or lower.ends_with(".otf") or lower.ends_with(".ttc") or lower.ends_with(".otc") or lower.ends_with(".pfb") or lower.ends_with(".woff2") { lines.push("file {e.path}") }
+            }
+        }
+    }
+    return lines
+}
+
+// What's missing from the fonts `fonts` gives: any at all, ones for Chinese,
+// Japanese and Korean, and emoji.
+pub fn font_gaps(lines: List<String>) -> List<String> {
+    var any = false
+    var cjk = false
+    var emoji = false
+    var part = String("all")
+    for line in lines {
+        if line.starts_with("# ") {
+            part = line[2..].copy()
+            continue
+        }
+        if part == "all" { any = true }
+        if part == "lang=zh" { cjk = true }
+        if part == "emoji" { emoji = true }
+        // Files, by name, without fontconfig to ask.
+        if line.starts_with("file ") {
+            let name = line.to_lower_root()
+            if name.contains("cjk") or name.contains("wqy") or name.contains("droidsansfallback") or name.contains("unifont") { cjk = true }
+            if name.contains("emoji") { emoji = true }
+        }
+    }
+    var gaps = List<String>()
+    if not any { return [String("fonts")] }
+    if not cjk { gaps.push(String("fonts for Chinese, Japanese and Korean")) }
+    if not emoji { gaps.push(String("an emoji font")) }
+    return gaps
+}
+
+// What to say a computer missing `gaps` should have, for the person who runs it.
+pub fn missing_text(gaps: List<String>) -> String {
+    return "This server lacks {join_and(gaps)} for its browser. Its owner can run sudo loom install again, which installs them, or install them: on Debian, apt install chromium fonts-liberation fonts-noto-core fonts-noto-cjk fonts-noto-color-emoji."
+}
+
+fn join_and(parts: List<String>) -> String {
+    if parts.len() == 0 { return String() }
+    if parts.len() == 1 { return parts[0].copy() }
+    var head = List<String>()
+    for k in 0usize..parts.len() - 1 { head.push(parts[k].copy()) }
+    return "{head.join(", ")} and {parts[parts.len() - 1]}"
+}
+
+// Whether a page is one to open again after the browser closes: a web page or
+// a file, not a blank one or the browser's own.
+fn kept_page(url: String) -> bool {
+    let lower = url.to_lower_root()
+    return lower.starts_with("http://") or lower.starts_with("https://") or lower.starts_with("file:")
+}
+
+// Stops the browsers a loom that ended without stopping them left running,
+// as one that crashed would: each profile in `root` (a person's folder each,
+// an agent's in that) whose browser still listens where it wrote it does is
+// told to close, by the address only that browser has.
+pub fn stop_leftovers(root: String) {
+    let found = match fs.glob("{root}/*/*/DevToolsActivePort") {
+        ok(f) => f,
+        err(_) => return,
+    }
+    for file in found {
+        if let ok(some(t)) = fs.read_text(file.copy()) {
+            let lines = t.lines()
+            if lines.len() >= 2 {
+                let port = lines[0].trim().copy()
+                let path = lines[1].trim().copy()
+                if path.starts_with("/devtools/browser/") {
+                    if let ok(ws) = connect("ws://127.0.0.1:{port}{path}", List<Header>(), 2000) {
+                        if let ok = ws.send_text("{Obj.new().i("id", 1).s("method", String("Browser.close")).j("params", Obj.new().done()).done()}") {
+                            match ws.receive(2000) {
+                                ok(_) => {},
+                                err(_) => {},
+                            }
+                        }
+                        ws.close()
+                        eprintln("loom: stopped a browser left running from before, in {file}")
+                    }
+                }
+            }
+        }
+        if let err(e) = fs.remove_file(file) { eprintln("loom: a browser's old port file: {e}") }
+    }
 }
 
 fn text(t: String) -> Json {
@@ -160,6 +340,14 @@ fn text(t: String) -> Json {
 
 fn error(t: String) -> Json {
     return Obj.new().j("content", Json.Array([Obj.new().s("type", String("text")).s("text", t).done()])).b("isError", true).done()
+}
+
+// A result with `note` as a text before the rest of it, when there's one.
+fn noted(result: own Json, note: String) -> Json {
+    if note.len() == 0 { return result }
+    var content: List<Json> = [Obj.new().s("type", String("text")).s("text", note).done()]
+    if let Json.Array(had) = at(result.copy(), "content") { content.extend(had) }
+    return merge(result, Obj.new().j("content", Json.Array(content)).done())
 }
 
 impl Worker {
@@ -179,6 +367,8 @@ impl Worker {
         w.child = none
         w.refs.clear()
         w.casting = false
+        // A browser that went by itself opens where it was on the next call.
+        if w.was_on.len() > 0 { w.reopen = w.was_on.copy() }
         // A recording ends with its browser, keeping what it had.
         if w.recording {
             w.recording = false
@@ -389,7 +579,10 @@ impl Worker {
 
     // Starts the browser, and opens the DevTools connection to its page.
     fn open_browser(w: mut Worker) ! Error {
-        let exe = find() else fail "There's no Chrome, Edge or Chromium on the computer the instance runs on. Your person can install one, or set LOOM_BROWSER to the one to use."
+        let exe = find() else {
+            if env.os() == "linux" { fail "There's no Chrome or Chromium on the server the instance runs on. {missing_text(missing())} Or set LOOM_BROWSER to the browser to use." }
+            fail "There's no Chrome, Edge or Chromium on the computer the instance runs on. Your person can install one, or set LOOM_BROWSER to the one to use."
+        }
         try fs.make_dir_all(w.profile.copy())
         let port = match w.launch(exe.copy(), true) {
             ok(p) => p,
@@ -453,6 +646,9 @@ impl Worker {
         if fs.exists(port_file.copy()) { try fs.remove_file(port_file.copy()) }
         var args: List<String> = ["--headless=new", "--remote-debugging-port=0", "--user-data-dir={w.profile}", "--no-first-run", "--no-default-browser-check", "--disable-background-networking", "--window-size=1280,800"]
         if not sandbox { args.push(String("--no-sandbox")) }
+        // A container's /dev/shm is 64 MB, which a page can fill and crash its tab;
+        // /tmp does as well everywhere.
+        if env.os() == "linux" { args.push(String("--disable-dev-shm-usage")) }
         // An agent closed to the network browses through its egress, which lets it
         // reach only the hosts on its list: every request, the computer's own too,
         // and nothing over UDP, which a proxy doesn't carry.
@@ -481,6 +677,8 @@ impl Worker {
                 child.kill_tree()
                 _ = child.wait_timeout(5000)
                 let why = said.join(" ").trim().copy()
+                // A browser copied onto a bare server, without the libraries it needs.
+                if why.contains("error while loading shared libraries") { fail "The browser didn't start: {short(why, 400)} {missing_text([String("the libraries a browser needs")])}" }
                 fail if why.len() > 0 { "The browser didn't start: {short(why, 600)}" } else { String("The browser didn't start.") }
             }
             unsafe { sleep(100000000) }
@@ -561,10 +759,15 @@ impl Worker {
     // The page's host, as a secret is allowed for it: example.com, or
     // localhost:8080. A file has none.
     fn host(w: mut Worker) -> String ! Error {
+        return host_of(try w.url())
+    }
+
+    // The address of the page it's on.
+    fn url(w: mut Worker) -> String ! Error {
         let h = try w.call("Page.getNavigationHistory", Obj.new().done())
         let k = int_at(h.copy(), "currentIndex") ?? 0
         let entry = at(h, "entries").at(usize.wrap(k)) ?? Json.Null
-        return host_of(str_at(entry, "url") ?? String())
+        return str_at(entry, "url") ?? String()
     }
 
     // The node a ref names, from the last outline.
@@ -605,8 +808,42 @@ impl Worker {
         _ = try w.call("Input.dispatchKeyEvent", Obj.new().s("type", String("keyUp")).s("key", name).i("windowsVirtualKeyCode", code).done())
     }
 
+    // A call, on a browser started for it if it isn't open. One started again
+    // after it closed opens the page it was on first, unless the call opens
+    // another, and the result says so.
     fn op(w: mut Worker, name: String, args: Json) -> Json ! Error {
-        if w.page == none { try w.open_browser() }
+        var note = String()
+        if w.page == none {
+            try w.open_browser()
+            if env.os() == "linux" and not w.told_fonts {
+                w.told_fonts = true
+                let gaps = font_gaps(fonts())
+                if gaps.len() > 0 { eprintln("loom: {missing_text(gaps)}") }
+                // Without any font, a picture of a page has no words in it, though its outline does.
+                if gaps.len() > 0 and gaps[0] == "fonts" { note = "[loom: {missing_text(gaps)} Until then, pictures of pages show no text: read pages with browser_snapshot.]" }
+            }
+            let back_to = w.reopen.copy()
+            w.reopen = String()
+            if name != "open" and name != "preview" and back_to.len() > 0 and refused(back_to.copy(), w.guarded) == none {
+                let r = try w.call("Page.navigate", Obj.new().s("url", back_to.copy()).done())
+                if str_at(r, "errorText") == none {
+                    w.settle()
+                    let again = "[loom: Your browser had closed since you last used it, so it opened {back_to} again, where you were. Refs from before are gone: take them from a new outline.]"
+                    note = if note.len() > 0 { "{note}\n{again}" } else { again }
+                }
+            }
+        }
+        let result = match w.act(name, args) {
+            ok(r) => r,
+            err(e) => {
+                if note.len() == 0 { fail "{e}" }
+                error("{note}\n\n{e}")
+            },
+        }
+        return noted(result, note)
+    }
+
+    fn act(w: mut Worker, name: String, args: Json) -> Json ! Error {
         if name == "open" {
             let url = (str_at(args, "url") ?? String()).trim().copy()
             if let why = refused(url.copy(), w.guarded) { return error(why) }
@@ -1084,6 +1321,31 @@ fn steps_read_as_lines() {
     let steps = parse(#"[{"kind":"page","title":"Shop","url":"https://shop.example"},{"kind":"click","on":"link \"Socks\""},{"kind":"type","into":"textbox \"Search\"","text":"wool"},{"kind":"type","into":"textbox \"Password\"","secret":true},{"kind":"key","key":"Enter"},{"kind":"scroll","direction":"down"}]"#)!
     let t = steps_text(steps)
     assert(t == "1. On the page Shop (https://shop.example)\n2. Clicked link \"Socks\"\n3. Typed \"wool\" into textbox \"Search\"\n4. Typed something secret into textbox \"Password\" (it isn't kept)\n5. Pressed Enter\n6. Scrolled down")
+}
+
+@test
+fn fonts_say_what_is_missing() {
+    let full: List<String> = ["# all", "DejaVu Sans", "Noto Sans CJK SC", "Noto Color Emoji", "# lang=zh", "Noto Sans CJK SC", "# emoji", "Noto Color Emoji"]
+    assert(font_gaps(full).len() == 0)
+    let plain: List<String> = ["# all", "DejaVu Sans", "Liberation Serif", "# lang=zh", "# emoji"]
+    let gaps = font_gaps(plain)
+    assert(gaps.len() == 2 and gaps[0] == "fonts for Chinese, Japanese and Korean" and gaps[1] == "an emoji font")
+    let none_at_all: List<String> = ["# all", "# lang=zh", "# emoji"]
+    assert(font_gaps(none_at_all) == [String("fonts")])
+    assert(font_gaps(List<String>()) == [String("fonts")])
+    // Without fontconfig, by the files' names.
+    let files: List<String> = ["file /usr/share/fonts/truetype/noto/NotoColorEmoji.ttf", "file /usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc"]
+    assert(font_gaps(files).len() == 0)
+    assert(missing_text([String("a browser"), String("fonts")]).starts_with("This server lacks a browser and fonts for its browser."))
+}
+
+@test
+fn only_pages_are_opened_again() {
+    assert(kept_page(String("https://example.com/a")) and kept_page(String("file:///tmp/x.html")))
+    assert(not kept_page(String("about:blank")) and not kept_page(String("chrome-error://chromewebdata/")))
+    let r = noted(text(String("Page: Shop")), String("[loom: again]"))
+    assert("{r}" == #"{"content":[{"type":"text","text":"[loom: again]"},{"type":"text","text":"Page: Shop"}]}"#)
+    assert(noted(text(String("x")), String()) == text(String("x")))
 }
 
 @test

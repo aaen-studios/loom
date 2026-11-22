@@ -293,11 +293,14 @@ pub struct Instance {
     browsers: LinkedMap<String, Browser>    // "user/agent" -> that agent's browser, while it's open
     browser_done: Receiver<browser.Back>
     watchers: Map<u32, String>    // a session -> the browser it watches, by its key
+    followers: List<u32>    // the sessions among them that only follow, which keep no browser open
     browser_to: Sender<browser.Back>
     stopped_browsers: List<Thread>    // browsers told to stop, joined at shutdown
     fills: Map<String, Fill>    // browser_fill_secret calls on their browser
     turns_ended: List<(String, String, String)>    // a person, a conversation and how its turn ended, for the queue
     next_browser_sweep: i64
+    browser_pages: Map<String, String>    // "user/agent" -> the page its browser was last on, to open again
+    browsers_to_check: List<String>    // browsers that may have nothing using them now, to close from the loop
     task_stops: Map<String, String>    // a task's run -> "pause" or "cancel", as the person asked
     resumes: List<(String, String)>    // a person and a task the restart cut short, to carry on from the loop
     release: update.Source    // where its own updates come from
@@ -1018,10 +1021,12 @@ impl Instance {
         }
         let browser_done = Receiver<browser.Back>()
         let browser_to = browser_done.sender()
-        var i = Instance { release: config.release.copy(), host: update.host(config.in_app), exe: current_exe(), update_to: update_to, update_back: update_back, updating: no_update(), next_update_check: 0, last_busy: now(), restart_stops: List<String>(), restart: false, told_update: Json.Null, told_update_at: 0, browsers: LinkedMap<String, Browser>(), watchers: Map<u32, String>(), browser_done: browser_done, browser_to: browser_to, stopped_browsers: List<Thread>(), fills: Map<String, Fill>(), turns_ended: List<(String, String, String)>(), next_browser_sweep: 0, task_stops: Map<String, String>(), resumes: List<(String, String)>(), push_to: push_to, push_gone: push_gone, move_to: move_to, move_done: move_done, lan: config.lan, bridge: none, stop_bridge: none, lan_port: 0, announcer: none, stop_announcer: none, to_close: List<ServerSocket>(), boxes: none, gate: none, stop_gate: none, doors: LinkedMap<String, egress.Door>(), moving: String(), move_waiters: List<Waiter>(), moved: moved, version: config.version.copy(), store: store, server: server, data: config.data.copy(), sessions: Map<u32, Session>(), runs: LinkedMap<String, Run>(), procs: LinkedMap<String, Proc>(), approvals: LinkedMap<String, Approval>(), lines: lines, lines_to: to, hash_to: hash_to, hash_done: hash_done, next_job: 0, auths: Map<i64, Auth>(), dummy_hash: dummy, failures: LinkedMap<String, List<i64>>(), thumbs: files.start(), events: config.events, next_prune: 0, grants: Map<String, Grant>(), calls: Map<String, Request>(), context: Map<String, (i64, i64)>(), registry_at: config.registry.copy(), registry: Json.Null, registry_time: 0, registry_fetching: false, install_to: install_to, install_done: install_done, fetching: List<Waiter>(), installs: Map<i64, Install>(), deno_job: 0, deno_waiters: List<Request>(), code_acts: Map<i64, String>(), leftovers: List<String>(), next_sweep: 0, device_calls: Map<String, DeviceCall>(), minute_ms: config.minute_ms, next_due: 0, routine_runs: Map<String, RoutineRun>(), routine_marks: Map<String, (String, String)>(), run_chains: Map<String, List<String>>(), panel_calls: Map<String, Waiter>(), script_calls: Map<String, Request>(), running_flows: LinkedMap<String, flows.Flow>(), flow_steps: Map<String, (String, usize)>(), advancing: List<String>(), flow_results: List<(String, usize, bool, String)>(), flows_due: List<String>(), slow_calls: Map<String, String>(), acting: 0, call_actions: Map<String, i64>(), tool_actions: Map<String, i64>(), sealer: try secret_key(config.data.copy()) }
+        var i = Instance { release: config.release.copy(), host: update.host(config.in_app), exe: current_exe(), update_to: update_to, update_back: update_back, updating: no_update(), next_update_check: 0, last_busy: now(), restart_stops: List<String>(), restart: false, told_update: Json.Null, told_update_at: 0, browsers: LinkedMap<String, Browser>(), watchers: Map<u32, String>(), followers: List<u32>(), browser_done: browser_done, browser_to: browser_to, stopped_browsers: List<Thread>(), fills: Map<String, Fill>(), turns_ended: List<(String, String, String)>(), next_browser_sweep: 0, browser_pages: Map<String, String>(), browsers_to_check: List<String>(), task_stops: Map<String, String>(), resumes: List<(String, String)>(), push_to: push_to, push_gone: push_gone, move_to: move_to, move_done: move_done, lan: config.lan, bridge: none, stop_bridge: none, lan_port: 0, announcer: none, stop_announcer: none, to_close: List<ServerSocket>(), boxes: none, gate: none, stop_gate: none, doors: LinkedMap<String, egress.Door>(), moving: String(), move_waiters: List<Waiter>(), moved: moved, version: config.version.copy(), store: store, server: server, data: config.data.copy(), sessions: Map<u32, Session>(), runs: LinkedMap<String, Run>(), procs: LinkedMap<String, Proc>(), approvals: LinkedMap<String, Approval>(), lines: lines, lines_to: to, hash_to: hash_to, hash_done: hash_done, next_job: 0, auths: Map<i64, Auth>(), dummy_hash: dummy, failures: LinkedMap<String, List<i64>>(), thumbs: files.start(), events: config.events, next_prune: 0, grants: Map<String, Grant>(), calls: Map<String, Request>(), context: Map<String, (i64, i64)>(), registry_at: config.registry.copy(), registry: Json.Null, registry_time: 0, registry_fetching: false, install_to: install_to, install_done: install_done, fetching: List<Waiter>(), installs: Map<i64, Install>(), deno_job: 0, deno_waiters: List<Request>(), code_acts: Map<i64, String>(), leftovers: List<String>(), next_sweep: 0, device_calls: Map<String, DeviceCall>(), minute_ms: config.minute_ms, next_due: 0, routine_runs: Map<String, RoutineRun>(), routine_marks: Map<String, (String, String)>(), run_chains: Map<String, List<String>>(), panel_calls: Map<String, Waiter>(), script_calls: Map<String, Request>(), running_flows: LinkedMap<String, flows.Flow>(), flow_steps: Map<String, (String, usize)>(), advancing: List<String>(), flow_results: List<(String, usize, bool, String)>(), flows_due: List<String>(), slow_calls: Map<String, String>(), acting: 0, call_actions: Map<String, i64>(), tool_actions: Map<String, i64>(), sealer: try secret_key(config.data.copy()) }
         if config.sandboxes.len() > 0 and not i.lan { try i.sandboxes_on(config.sandboxes.copy(), config.sandbox_image.copy()) }
         // An action the last run of the instance left started, it never finished.
         try i.store.settle_cut_short()
+        // Nor did it stop the browsers it had open, if it crashed.
+        browser.stop_leftovers("{i.data}/browsers")
         i.pick_up_registry()
         // What waited behind a turn the restart cut short goes once the loop
         // runs; a queue the person left waiting by stopping a turn still waits.
@@ -1568,11 +1573,13 @@ impl Instance {
                     browser.Back.Done(key, call, done) => {
                         // Where the page is now, for the rules on sites.
                         let site = str_at(done.copy(), "loom_site")
-                        let given = without(done, "loom_site")
+                        let page_url = str_at(done.copy(), "loom_url") ?? String()
+                        let given = without(without(done, "loom_site"), "loom_url")
                         if let b = mut i.browsers.find(key.copy()) {
                             b.busy -= 1
                             b.used = now()
                             if let s = site.copy() { b.site = s }
+                            if page_url.len() > 0 { i.browser_pages.insert(key.copy(), page_url) }
                         }
                         // A page on a site with notes tied to it: the agent is shown them, once a visit.
                         let result = i.with_site_notes(key, site ?? String(), given)
@@ -1642,6 +1649,13 @@ impl Instance {
                     err(e) => eprintln("loom: a routine's flow: {e}"),
                 }
             }
+            // Last, the browsers a turn's end, or the person, may have left with
+            // nothing using them: a turn that waited behind the one that ended
+            // has started by now, and keeps its agent's open.
+            while i.browsers_to_check.len() > 0 {
+                let key = i.browsers_to_check.remove(0)
+                if not i.browser_in_use(key.copy()) { i.close_browser(key) }
+            }
         }
         for (_, p) in i.procs {
             var to = p.to.copy()
@@ -1665,8 +1679,23 @@ impl Instance {
     // open, and its result comes back to the loop.
     fn browse(i: mut Instance, req: Request, g: Grant, name: String, args: Json) -> Json? ! Error {
         let op = name.trim_prefix("browser_").copy()
-        if not " open snapshot click type press scroll back screenshot ask_person fill_secret ask_secret preview ".contains(" {op} ") { return some(tool_error("loom has no tool {name}.")) }
+        if not " open snapshot click type press scroll back screenshot ask_person fill_secret ask_secret preview close ".contains(" {op} ") { return some(tool_error("loom has no tool {name}.")) }
         let key = "{g.user}/{g.agent}"
+        // The agent's done with it: it closes now, and the next call starts it on a blank page.
+        if op == "close" {
+            var had = false
+            var person = false
+            if let b = i.browsers.find(key.copy()) {
+                had = true
+                person = b.person
+            }
+            if person { return some(tool_error(String("Your person has your browser now. It closes once they hand it back and your turn is over."))) }
+            _ = i.browser_pages.remove(key.copy())
+            if not had { return some(tool_text(String("Your browser wasn't open."))) }
+            i.log(g.user.copy(), g.agent.copy(), "browser", String("Closed its browser"), g.agent.copy())
+            i.close_browser(key)
+            return some(tool_text(String("Closed your browser. browser_open starts it again.")))
+        }
         if op == "ask_person" or op == "ask_secret" {
             let b = i.browsers.find(key.copy()) else return some(tool_error(String("Your browser isn't open. Open the page first, then ask.")))
             if not b.open { return some(tool_error(String("Your browser isn't open. Open the page first, then ask."))) }
@@ -1705,7 +1734,8 @@ impl Instance {
                     err(e) => return some(tool_error("Your browser can't start, since your network's way out didn't: {e}")),
                 }
             }
-            let (to, thread) = browser.start(key.copy(), profile, i.isolated(g.user.copy(), agent), proxy, i.browser_to.copy())
+            let reopen = if let p = i.browser_pages.find(key.copy()) { p.copy() } else { String() }
+            let (to, thread) = browser.start(key.copy(), profile, i.isolated(g.user.copy(), agent), proxy, reopen, i.browser_to.copy())
             i.browsers.insert(key.copy(), Browser { to: to, thread: thread, busy: 0, used: now(), open: false, person: false, asked: String(), asks: List<String>(), held: List<browser.Op>(), actions: 0, secret_ask: Json.Null, site: String(), recording: false, steps: 0, record_by: String(), told: String() })
             i.watch_changed(key.copy())
         }
@@ -1815,6 +1845,7 @@ impl Instance {
         to.send(browser.In.Stop)
         var waiting = b.asks.copy()
         for o in b.held { waiting.push(o.call.copy()) }
+        if let call = str_at(b.secret_ask.copy(), "call") { waiting.push(call) }
         for call in waiting {
             i.answer_call(call, tool_error(String("The browser closed.")))
         }
@@ -1822,13 +1853,35 @@ impl Instance {
         i.browser_state(key)
     }
 
-    // Stops each browser that's had nothing to do for browser.IDLE_MS, unless
-    // the person has it.
+    // Whether anything uses `key`'s browser: a turn of its agent's, in any of
+    // its chats or tasks, the person, who has it or watches it, or a recording.
+    fn browser_in_use(i: Instance, key: String) -> bool {
+        let b = i.browsers.find(key.copy()) else return false
+        if b.person or b.recording { return true }
+        for (session, k) in i.watchers {
+            if k == key and not i.followers.contains(session) { return true }
+        }
+        let (user, agent) = key.split_once("/") ?? (String(), String())
+        for (_, r) in i.runs {
+            if r.user == user and r.agent == agent { return true }
+        }
+        return false
+    }
+
+    // Has the loop close `key`'s browser if nothing uses it now.
+    fn check_browser(i: mut Instance, key: String) {
+        if i.browsers.contains(key.copy()) and not i.browsers_to_check.contains(key.copy()) { i.browsers_to_check.push(key.copy()) }
+    }
+
+    // Stops each browser that's had nothing to do for browser.IDLE_MINUTES,
+    // whoever watches it: no call, and nothing from the person who has it.
+    // One whose agent waits on the person, or on a call, stays.
     fn close_idle_browsers(i: mut Instance) {
-        i.next_browser_sweep = now() + 30000
+        let idle_ms = browser.IDLE_MINUTES * i.minute_ms
+        i.next_browser_sweep = now() + (if i.minute_ms < 30000 { i.minute_ms } else { 30000 })
         var idle = List<String>()
         for (k, b) in i.browsers {
-            if b.busy <= 0 and not b.person and now() - b.used >= browser.IDLE_MS { idle.push(k.copy()) }
+            if b.busy <= 0 and now() - b.used >= idle_ms { idle.push(k.copy()) }
         }
         for k in idle { i.close_browser(k) }
     }
@@ -1875,10 +1928,13 @@ impl Instance {
         if let b = mut i.browsers.find(key) { b.to.send(browser.In.Watch(watched)) }
     }
 
-    // A session that's gone watches nothing.
+    // A session that's gone watches nothing. A browser no one watches now
+    // closes if nothing else uses it.
     fn unwatch(i: mut Instance, session: u32) {
+        if let k = i.followers.position(|x| x == session) { _ = i.followers.remove(k) }
         let key = i.watchers.remove(session) else return
-        i.watch_changed(key)
+        i.watch_changed(key.copy())
+        i.check_browser(key)
     }
 
     // The browser a session watches, by its key, or "".
@@ -1894,8 +1950,20 @@ impl Instance {
         if try i.store.agent(user.copy(), agent.copy()) == none { return Answer.Refused(String("not_found"), "There's no agent {agent}.") }
         let key = "{user}/{agent}"
         if name == "browser.watch" {
-            if bool_at(args, "on") ?? true {
-                if let old = i.watchers.remove(s.id()) { i.watch_changed(old) }
+            if bool_at(args.copy(), "on") ?? true {
+                if let old = i.watchers.remove(s.id()) {
+                    i.watch_changed(old.copy())
+                    // Another browser, or this one only followed now, may have nothing using it.
+                    i.check_browser(old)
+                }
+                // Following it, as an app's small window does while the agent browses,
+                // keeps it open no longer than the agent's turn.
+                let follow = bool_at(args, "follow") ?? false
+                let had = i.followers.position(|x| x == s.id())
+                if follow and had == none { i.followers.push(s.id()) }
+                if not follow {
+                    if let k = had { _ = i.followers.remove(k) }
+                }
                 i.watchers.insert(s.id(), key.copy())
                 i.watch_changed(key.copy())
             } else if i.watched_by(s.id()) == key {
@@ -1988,7 +2056,11 @@ impl Instance {
             refused = String("The browser isn't open.")
         }
         if refused.len() > 0 { return Answer.Refused(String("not_open"), refused) }
-        if name == "browser.give" { i.log(user, agent, "browser", String("You handed the browser back"), String()) }
+        if name == "browser.give" {
+            i.log(user, agent, "browser", String("You handed the browser back"), String())
+            // Handed back after the agent's turn: it closes, unless it's watched.
+            i.check_browser(key.copy())
+        }
         i.browser_state(key.copy())
         return Answer.Value(i.browser_status(key).done())
     }
@@ -2102,6 +2174,15 @@ impl Instance {
             if mine { gone.push(k.copy()) }
         }
         for k in gone { i.close_browser(k) }
+        var pages = List<String>()
+        for (k, _) in i.browser_pages {
+            let mine = match agent {
+                some(a) => k == "{user}/{a}",
+                none => k.starts_with("{user}/"),
+            }
+            if mine { pages.push(k.copy()) }
+        }
+        for k in pages { _ = i.browser_pages.remove(k) }
         if user.len() == 0 { return }
         match agent {
             some(a) => if a.len() > 0 { i.leftovers.push("{i.data}/browsers/{user}/{a}") },
@@ -7574,6 +7655,8 @@ impl Instance {
         // What waited for this turn goes next, from the loop: the agent's
         // program may be in the middle of being handled here.
         i.turns_ended.push((r.user.copy(), r.conversation.copy(), status.copy()))
+        // And the agent's browser closes, once nothing else uses it.
+        i.check_browser("{r.user}/{r.agent}")
     }
 
     // --- Commands ---

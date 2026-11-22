@@ -7,15 +7,17 @@ module server.setup
 // from a systemd unit, and puts Caddy in front for TLS when there's a domain,
 // or Tailscale when there isn't. Unless told not to, it sets up rootless Podman
 // for the `loom` user, for the sandboxes everyone but the owner runs their
-// agents in (server/sandbox.calx). Then it starts it, and gives the address
-// the setup code, and a link code for an agent to add it to the person's app.
+// agents in (server/sandbox.calx). It installs a browser and fonts for the
+// agents' browsers, when the server lacks them (server/browser.calx). Then it
+// starts it, and gives the address the setup code, and a link code for an agent to add it to the person's app.
 import std.env
 import std.fs
-import std.http.{Header, post}
+import std.http.{Header, get, post}
 import std.json.{Json, parse}
 import std.process.{Command, current_exe, which}
 import std.thread.{sleep}
 import shared.obj.{Obj, at, bool_at, str_at}
+import server.browser
 
 pub const USER: str = "loom"
 pub const HOME: str = "/var/lib/loom"
@@ -247,6 +249,118 @@ fn podman_for_loom(steps: mut List<String>) -> String? ! Error {
     return some(uid)
 }
 
+/// What to install for the agents' browser, with apt: packages, and whether
+/// Google's Chrome comes from its own .deb, with why when nothing can be.
+pub struct BrowserPlan {
+    pub packages: List<String>
+    pub chrome: bool
+    pub why: String
+}
+
+/// What a server lacking `gaps` (server/browser.calx's `missing`) installs,
+/// by what /etc/os-release (`os_release`) says it is, on `arch`. Debian has
+/// Chromium as a package; Ubuntu has it only as a snap, which can't keep its
+/// profile in /var/lib/loom, so Ubuntu gets Google's Chrome, which is there
+/// for x86_64 only. Fonts are Noto, for every script and emoji, and
+/// Liberation, which is as wide as Arial, Times and Courier, so pages lay out
+/// as on a desktop.
+pub fn browser_plan(os_release: String, arch: String, gaps: List<String>) -> BrowserPlan {
+    var id = String()
+    var like = String()
+    for line in os_release.lines() {
+        let (k, v) = line.split_once("=") ?? (String(), String())
+        let value = v.trim().trim_prefix("\"").trim_suffix("\"").to_lower_root()
+        if k.trim() == "ID" { id = value.copy() }
+        if k.trim() == "ID_LIKE" { like = value.copy() }
+    }
+    var plan = BrowserPlan { packages: List<String>(), chrome: false, why: String() }
+    let ubuntu = id == "ubuntu" or " {like} ".contains(" ubuntu ")
+    let debian = id == "debian" or " {like} ".contains(" debian ")
+    var fonts = List<String>()
+    for gap in gaps {
+        if gap.starts_with("a browser") {
+            if ubuntu {
+                if arch == "x86_64" { plan.chrome = true } else { plan.why = String("Ubuntu's Chromium is a snap, which can't keep its profile in /var/lib/loom, and Chrome isn't made for Linux on Arm: install a Chromium that isn't a snap, and set LOOM_BROWSER to it in the service") }
+            } else if debian {
+                plan.packages.push(String("chromium"))
+                fonts.push(String("fonts-liberation"))
+            } else {
+                plan.why = String("install Chromium and fonts with this system's own package manager")
+            }
+        } else if gap == "fonts" {
+            fonts.extend(["fonts-liberation", "fonts-noto-core", "fonts-noto-cjk", "fonts-noto-color-emoji"])
+        } else if gap.contains("Chinese") {
+            fonts.push(String("fonts-noto-cjk"))
+        } else if gap.contains("emoji") {
+            fonts.push(String("fonts-noto-color-emoji"))
+        }
+    }
+    if ubuntu or debian {
+        for f in fonts {
+            if not plan.packages.contains(f.copy()) { plan.packages.push(f.copy()) }
+        }
+    } else if fonts.len() > 0 and plan.why.len() == 0 {
+        plan.why = String("install fonts (Noto, for every script and emoji) with this system's own package manager")
+    }
+    return plan
+}
+
+/// Sets up the agents' browser: Chromium or Chrome, and fonts, so the pages
+/// it shows and the pictures it takes look as on a desktop. It runs headless
+/// (server/browser.calx), so it needs no display. Says what it did, or what's
+/// still missing, as a step; it doesn't stop the install.
+fn browser_for_loom(steps: mut List<String>) {
+    let gaps = browser.missing()
+    if gaps.len() == 0 {
+        steps.push("the agents' browser: {browser.find() ?? String()}, with fonts")
+        return
+    }
+    let release = match fs.read_text(String("/etc/os-release")) {
+        ok(t) => t ?? String(),
+        err(_) => String(),
+    }
+    let plan = browser_plan(release, env.native_arch(), gaps.copy())
+    if which(String("apt-get")) != none and (plan.chrome or plan.packages.len() > 0) {
+        match browser_install(plan.copy()) {
+            ok => {},
+            err(e) => steps.push("the agents' browser didn't install: {e}"),
+        }
+    }
+    let left = browser.missing()
+    if left.len() == 0 {
+        steps.push("installed the agents' browser: {browser.find() ?? String()}, with fonts")
+        return
+    }
+    let how = if plan.why.len() > 0 { plan.why.copy() } else { String("then run loom install again") }
+    steps.push("the agents' browser lacks {left.join(", ")}: {how}")
+}
+
+fn browser_install(plan: BrowserPlan) ! Error {
+    _ = try sh("apt-get", words(["update"]))
+    if plan.chrome {
+        let dir = try fs.temp_dir()
+        let deb = "{dir}/google-chrome-stable_current_amd64.deb"
+        var req = get(String(CHROME_DEB), List<Header>(), 600000, 400000000)
+        let got = try req.wait()
+        if got.status != 200 { fail "Chrome's package didn't download ({got.status})" }
+        try fs.write(deb.copy(), got.body)
+        // Its own apt source comes with it, so it's updated as the system is.
+        let installed: String? = match sh("apt-get", [String("install"), String("-y"), deb]) {
+            ok(_) => none,
+            err(e) => some("{e}"),
+        }
+        if let err(e) = fs.remove_dir_all(dir) { eprintln("loom: {e}") }
+        if let why = installed { fail "{why}" }
+    }
+    if plan.packages.len() > 0 {
+        var args = words(["install", "-y", "--no-install-recommends"])
+        args.extend(plan.packages.copy())
+        _ = try sh("apt-get", args)
+    }
+}
+
+const CHROME_DEB: str = "https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb"
+
 /// Caddy's file for `domain`, with TLS from Let's Encrypt, in front of the instance.
 pub fn caddyfile(domain: String, port: u16) -> String {
     return "{MARK}\n{domain} \{\n    reverse_proxy 127.0.0.1:{port}\n\}\n"
@@ -315,6 +429,9 @@ pub fn install(plan: Plan) -> Done ! Error {
 
     // Sandboxes, for everyone but the owner.
     let boxes = if plan.sandboxes { try podman_for_loom(mut steps) } else { none }
+
+    // The agents' browser, before the service starts and looks for it.
+    browser_for_loom(mut steps)
 
     // The service.
     let existing = if fs.exists(String(UNIT)) { try fs.read_text(String(UNIT)) ?? String() } else { String() }
@@ -500,4 +617,21 @@ fn caddy_proxies_the_domain() {
     assert(caddyfile_ours(c))
     assert(caddyfile_ours(String(":80 \{\n\troot * /usr/share/caddy\n\tfile_server\n\}\n")))
     assert(not caddyfile_ours(String("example.org \{\n\treverse_proxy :3000\n\}\n")))
+}
+
+@test
+fn a_bare_server_gets_a_browser_and_fonts() {
+    let debian = String("PRETTY_NAME=\"Debian GNU/Linux 12 (bookworm)\"\nID=debian\n")
+    let d = browser_plan(debian, String("aarch64"), [String("a browser"), String("fonts")])
+    assert(not d.chrome and d.why == "" and d.packages.join(" ") == "chromium fonts-liberation fonts-noto-core fonts-noto-cjk fonts-noto-color-emoji")
+    let ubuntu = String("NAME=\"Ubuntu\"\nID=ubuntu\nID_LIKE=debian\n")
+    let u = browser_plan(ubuntu.copy(), String("x86_64"), [String("a browser that isn't a snap"), String("an emoji font")])
+    assert(u.chrome and u.packages.join(" ") == "fonts-noto-color-emoji")
+    let arm = browser_plan(ubuntu, String("aarch64"), [String("a browser")])
+    assert(not arm.chrome and arm.packages.len() == 0 and arm.why.contains("LOOM_BROWSER"))
+    let mint = browser_plan(String("ID=linuxmint\nID_LIKE=\"ubuntu debian\"\n"), String("x86_64"), [String("fonts for Chinese, Japanese and Korean")])
+    assert(not mint.chrome and mint.packages.join(" ") == "fonts-noto-cjk")
+    let fedora = browser_plan(String("ID=fedora\n"), String("x86_64"), [String("a browser")])
+    assert(fedora.packages.len() == 0 and fedora.why.contains("package manager"))
+    assert(browser_plan(String("ID=debian\n"), String("x86_64"), List<String>()).packages.len() == 0)
 }

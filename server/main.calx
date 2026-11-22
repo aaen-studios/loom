@@ -42,6 +42,7 @@ import server.instance.{Config, EventLife, Instance, SCRIPT_GRANT_MS, account_li
 import server.mcp
 import server.egress
 import server.backup
+import server.browser
 import server.push
 import server.installer
 import server.importer
@@ -105,10 +106,11 @@ usage: loom <command>
                             These four reach the running instance on this computer, at --url (or LOOM_URL,
                             or 127.0.0.1 at --port), with the script token you made in the app's server
                             settings: --token, or LOOM_SCRIPTS_TOKEN
-  status                    say what the instance holds
+  status                    say what the instance holds, and what the agents' browser lacks here
   install                   set loom up on a Linux server, as root: the loom user, a systemd service,
                             and Caddy for TLS with --domain DOMAIN, or Tailscale without one, and Podman
-                            for the sandboxes of everyone but the owner, unless given --no-sandboxes. Tailscale keeps
+                            for the sandboxes of everyone but the owner, unless given --no-sandboxes, and a browser
+                            and fonts for the agents' browsers, when they're missing. Tailscale keeps
                             what it serves: loom takes the first HTTPS port with nothing at / or /api (443, then
                             8443, 10000 and on), or --https-port N; --no-tailscale leaves it out. --import
                             openbot[:USER] stages OpenBot's data from USER (openbot) for the owner
@@ -721,8 +723,14 @@ fn run(a: Args) -> Said ! Error {
         let apns = try store.apns()
         let topic = if let c = apns.copy() { str_at(c, "topic") ?? String() } else { String() }
         let pushing = if apns != none { "APNs, for {topic}" } else { String("off") }
-        let text = "{version_line()}\ndata: {a.data}\naccounts: {accounts}\nACP agents: {programs.len()}\nruns as: {runs_as()}\npush: {pushing}"
-        return said(text, Obj.new().s("version", String(VERSION)).s("data", a.data.copy()).i("accounts", accounts).i("acp_agents", i64.wrap(programs.len())).s("user", env.user_name() ?? String()).b("elevated", env.is_elevated()).j("push", if apns != none { Obj.new().s("topic", topic).done() } else { Json.Null }).done())
+        // The agents' browser, and what this computer lacks for it.
+        let browser_exe = browser.find() ?? String()
+        let gaps = browser.missing()
+        var gap_list = List<Json>()
+        for g in gaps { gap_list.push(Json.Str(g.copy())) }
+        let browser_line = if gaps.len() > 0 { "{if browser_exe.len() > 0 { browser_exe.copy() } else { String("none") }}, lacking {gaps.join(", ")}" } else if browser_exe.len() > 0 { browser_exe.copy() } else { String("none") }
+        let text = "{version_line()}\ndata: {a.data}\naccounts: {accounts}\nACP agents: {programs.len()}\nruns as: {runs_as()}\npush: {pushing}\nbrowser: {browser_line}"
+        return said(text, Obj.new().s("version", String(VERSION)).s("data", a.data.copy()).i("accounts", accounts).i("acp_agents", i64.wrap(programs.len())).s("user", env.user_name() ?? String()).b("elevated", env.is_elevated()).j("push", if apns != none { Obj.new().s("topic", topic).done() } else { Json.Null }).j("browser", Obj.new().s("path", browser_exe).j("missing", Json.Array(gap_list)).done()).done())
     }
     fail "unknown command: {a.words.join(" ")}"
 }

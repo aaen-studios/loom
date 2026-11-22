@@ -1896,6 +1896,9 @@ pub struct Model {
     pub browsers: HashMap<String, Browser>,
     /// The agent whose browser this device watches.
     pub watching: Option<String>,
+    /// Whether it only follows the agent's browsing, in the small window, which
+    /// leaves the browser to close when the agent's turn ends.
+    pub watch_follows: bool,
     pub frame: Option<PageFrame>,
     rewatch: bool,
     /// Each conversation's queue, by conversation id.
@@ -2272,7 +2275,7 @@ impl Model {
         if std::mem::take(&mut self.rewatch) {
             if let Some(agent) = self.watching.clone() {
                 let id = self.id("browser.watch");
-                out.push(json!({"t": "cmd", "id": id, "name": "browser.watch", "args": {"agent": agent, "on": true}}));
+                out.push(json!({"t": "cmd", "id": id, "name": "browser.watch", "args": {"agent": agent, "on": true, "follow": self.watch_follows}}));
             }
         }
         let dirty: Vec<List> = self.dirty.drain().collect();
@@ -2955,23 +2958,29 @@ impl Model {
         self.browsers.get(agent).cloned().unwrap_or_default()
     }
 
-    /// Watches `agent`'s browser, or stops watching with None.
-    pub fn watch(&mut self, agent: Option<String>) -> Option<Value> {
-        if self.watching == agent {
+    /// Watches `agent`'s browser, or stops watching with None. With `follow`, it
+    /// only follows the agent's browsing, and doesn't keep the browser open
+    /// past the agent's turn, as the person watching it does.
+    pub fn watch(&mut self, agent: Option<String>, follow: bool) -> Option<Value> {
+        if self.watching == agent && (agent.is_none() || self.watch_follows == follow) {
             return None;
         }
         let id = self.id("browser.watch");
         let frame = match (&agent, &self.watching) {
             (Some(a), _) => {
-                json!({"t": "cmd", "id": id, "name": "browser.watch", "args": {"agent": a, "on": true}})
+                json!({"t": "cmd", "id": id, "name": "browser.watch", "args": {"agent": a, "on": true, "follow": follow}})
             }
             (None, Some(old)) => {
                 json!({"t": "cmd", "id": id, "name": "browser.watch", "args": {"agent": old, "on": false}})
             }
             (None, None) => return None,
         };
+        // The same browser, from following to watching or back, keeps its frame.
+        if self.watching != agent {
+            self.frame = None;
+        }
         self.watching = agent;
-        self.frame = None;
+        self.watch_follows = follow;
         Some(frame)
     }
 
@@ -5759,6 +5768,21 @@ mod tests {
         let dropped = m.drop_proposal("prop_1");
         assert_eq!(dropped["args"]["id"], "prop_1");
         assert!(m.proposals.is_empty());
+    }
+
+    #[test]
+    fn the_small_window_only_follows_the_browser() {
+        let mut m = Model::new();
+        let followed = m.watch(Some("a_1".into()), true).unwrap();
+        assert_eq!(followed["args"]["follow"], true);
+        assert!(m.watch(Some("a_1".into()), true).is_none());
+        // Opened beside the chat, the same browser is watched, which keeps it open.
+        let watched = m.watch(Some("a_1".into()), false).unwrap();
+        assert_eq!(watched["args"]["follow"], false);
+        assert_eq!(watched["args"]["on"], true);
+        let off = m.watch(None, true).unwrap();
+        assert_eq!(off["args"]["on"], false);
+        assert!(m.watch(None, false).is_none());
     }
 
     #[test]

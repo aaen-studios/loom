@@ -143,6 +143,9 @@ fn browser_part(i: Instance, app: mut App, agent: String, conversation: String) 
     let host = base.trim_prefix("http://").copy()
 
     _ = try app.cmd("q_b1", "memory.put", Obj.new().s("text", String("Log in with the shop account.")).s("agent", agent.copy()).s("site", base.copy()).done())
+    // The person watches, as the app does while the agent browses, so the
+    // browser stays open between the agent's turns.
+    _ = try app.cmd("q_bw", "browser.watch", Obj.new().s("agent", agent.copy()).b("on", true).done())
     let opened = try say(mut app, conversation.copy(), "m_b1", "/mcp browser_open \{\"url\":\"{base}/shop.html\"\}", 120000)
     try see(opened.contains("Page: Shop") and opened.contains("[loom: Your notes for {host}") and opened.contains("Log in with the shop account."), "a page on a site with notes shows the agent them", opened.copy())
     let snap = try say(mut app, conversation.copy(), "m_b2", String("/mcp browser_snapshot"))
@@ -196,6 +199,7 @@ fn browser_part(i: Instance, app: mut App, agent: String, conversation: String) 
     try check("{now_skills}".contains("shop-search"), "and then it is")
     let state = try app.cmd("q_b10", "browser.give", Obj.new().s("agent", agent.copy()).done())
     try check(bool_at(at(state, "value"), "recording") == some(false), "handing back leaves nothing recording")
+    _ = try app.cmd("q_b11", "browser.watch", Obj.new().s("agent", agent.copy()).b("on", false).done())
     let profile = "{i.data}/browsers"
     try check(fs.is_dir(profile), "the browser kept its profile in the instance's data")
     try fs.remove_dir_all(pages)

@@ -2,15 +2,19 @@ module tests.protocol.browser
 
 // The agent's browser (PLAN.md, "The agent's browser"): the fake agent opens
 // a page through loom's tools, reads its outline, types into a field and
-// submits it, follows a link, goes back and takes a picture. Deleting the
-// agent stops its browser. Without Chrome, Edge or Chromium on the computer,
-// it says it was skipped.
+// submits it, follows a link, goes back and takes a picture. It closes when the
+// agent's turn ends, unless the person watches it, and starts again where it
+// was on the next call; browser_close closes it at once, and with nothing to
+// do it closes after a while even while watched. Deleting the agent stops its
+// browser. Without Chrome, Edge or Chromium on the computer, it says it was
+// skipped.
 //
 //     calx tests/protocol/browser.calx
 import std.fs
 import std.process.{exit}
 import shared.obj.{Obj, at, bool_at, int_at, str_at}
 import server.browser
+import server.store.{now}
 import tests.kit.{App, Instance, check, reply_text}
 
 fn reply_in(app: mut App, conversation: String, wait_ms: u32 = 30000) -> String ! Error {
@@ -45,6 +49,14 @@ fn ref_of(outline: String, part: str) -> String {
     return String()
 }
 
+// Waits for browser.state to say `agent`'s browser is open, or isn't, as `open` says.
+fn until_open(app: mut App, agent: String, open: bool, wait_ms: u32 = 30000) ! Error {
+    loop {
+        let state = try app.until("browser.state", "", wait_ms)
+        if str_at(state.copy(), "agent") == some(agent.copy()) and bool_at(state, "open") == some(open) { return }
+    }
+}
+
 // A file's address, as a browser opens it.
 fn file_url(path: String) -> String {
     let p = path.replace("\\", "/")
@@ -71,7 +83,16 @@ fn run(i: Instance) ! Error {
     try app.send(Obj.new().s("t", String("send")).s("cid", String("m_1")).s("conversation", conversation.copy()).s("text", "/mcp browser_open \{\"url\":\"{file_url("{pages}/shop.html")}\"\}").done())
     let opened = try reply_in(mut app, conversation.copy(), 120000)
     try see(opened.starts_with("browser_open: Page: Shop") and opened.contains("heading \"Welcome\"") and opened.contains("textbox \"Search\""), "browser_open gives the page's outline", opened.copy())
-    let field = ref_of(opened.copy(), "textbox \"Search\"")
+
+    // --- Closing ---
+    try until_open(mut app, agent.copy(), false)
+    try check(true, "the turn's over and no one watches, so the browser closes")
+    let watching = try app.cmd("q_w0", "browser.watch", Obj.new().s("agent", agent.copy()).b("on", true).done())
+    try check(bool_at(at(watching, "value"), "open") == some(false), "watching doesn't open it")
+    let reopened = try say(mut app, conversation.copy(), "m_1b", String("/mcp browser_snapshot"))
+    try see(reopened.contains("[loom: Your browser had closed since you last used it, so it opened {file_url("{pages}/shop.html")} again") and reopened.contains("Page: Shop") and reopened.contains("heading \"Welcome\""), "the next call starts it again, on the page it was on", reopened.copy())
+    // The rest goes on watched, so each turn's end leaves it open.
+    let field = ref_of(reopened.copy(), "textbox \"Search\"")
     try check(field.len() > 0, "with a ref for the field")
 
     let typed = try say(mut app, conversation.copy(), "m_2", "/mcp browser_type \{\"ref\":\"{field}\",\"text\":\"socks\",\"submit\":true\}")
@@ -158,6 +179,24 @@ fn run(i: Instance) ! Error {
     let handed = try reply_in(mut app, conversation.copy())
     try see(handed.starts_with("browser_ask_person: Your person handed the browser back after 3 clicks and keys") and handed.contains("boots ("), "browser.give answers the agent, with what they did and the page", handed.copy())
     _ = try app.cmd("q_w5", "browser.watch", Obj.new().s("agent", agent.copy()).b("on", false).done())
+    try until_open(mut app, agent.copy(), false)
+    try check(true, "once no one watches it after the turn, it closes")
+
+    // --- browser_close ---
+    let closed = try say(mut app, conversation.copy(), "m_c1", "/mcp browser_open \{\"url\":\"{file_url("{pages}/second.html")}\"\}\n/mcp browser_close")
+    try see(closed.contains("Page: Second") and closed.contains("browser_close: Closed your browser."), "browser_close closes it in the middle of a turn", closed.copy())
+    let fresh = try say(mut app, conversation.copy(), "m_c2", String("/mcp browser_snapshot"))
+    try see(not fresh.contains("had closed") and not fresh.contains("Second page"), "and the next call starts it on a blank page", fresh.copy())
+    let none_open = try say(mut app, conversation.copy(), "m_c3", String("/mcp browser_snapshot\n/mcp browser_close\n/mcp browser_close"))
+    try see(none_open.contains("browser_close: Closed your browser.") and none_open.contains("browser_close: Your browser wasn't open."), "closing one that isn't open says so", none_open.copy())
+
+    // An app's small window only follows the agent's browsing, which keeps it open no longer than the turn.
+    _ = try app.cmd("q_f1", "browser.watch", Obj.new().s("agent", agent.copy()).b("on", true).b("follow", true).done())
+    let followed = try say(mut app, conversation.copy(), "m_f1", "/mcp browser_open \{\"url\":\"{file_url("{pages}/shop.html")}\"\}")
+    try see(followed.contains("Page: Shop"), "a browser that's followed opens", followed.copy())
+    try until_open(mut app, agent.copy(), false)
+    try check(true, "and closes when the turn ends")
+    _ = try app.cmd("q_f2", "browser.watch", Obj.new().s("agent", agent.copy()).b("on", false).done())
 
     let profile = "{i.data}/browsers"
     try check(fs.is_dir(profile.copy()), "the browser's profile is in the instance's data")
@@ -166,17 +205,45 @@ fn run(i: Instance) ! Error {
     try fs.remove_dir_all(pages)
 }
 
+// With a minute of a second, a browser that's watched but has nothing to do
+// closes after browser.IDLE_MINUTES of them.
+fn idle(i: Instance) ! Error {
+    var app = try App.connect(i.base.copy(), i.token.copy(), 0)
+    let made = try app.cmd("q_1", "agent.create", Obj.new().s("name", String("Idle")).s("acp_agent", String("fake")).s("instructions", String("You are a test.")).done())
+    let agent = str_at(at(at(made, "value"), "agent"), "id") ?? String()
+    let c = try app.cmd("q_2", "conversation.create", Obj.new().s("agent", agent.copy()).done())
+    let conversation = str_at(at(c, "value"), "conversation") ?? String()
+    _ = try app.cmd("q_3", "browser.watch", Obj.new().s("agent", agent.copy()).b("on", true).done())
+    let opened = try say(mut app, conversation.copy(), "m_1", String(#"/mcp browser_open {"url":"about:blank"}"#))
+    try see(opened.starts_with("browser_open: Page: "), "a watched browser opens", opened.copy())
+    let since = now()
+    try until_open(mut app, agent.copy(), false, 60000)
+    let waited = now() - since
+    try see(waited >= (browser.IDLE_MINUTES - 1) * 1000, "and closes once it's been idle a while, though watched", "{waited} ms")
+    _ = try app.cmd("q_4", "agent.delete", Obj.new().s("agent", agent).done())
+    app.close()
+}
+
 fn main() ! Error {
     if browser.find() == none {
         println("browser: skipped, there's no Chrome, Edge or Chromium here")
         return
     }
+    var failure: String? = none
     let inst = try Instance.start()
-    let failure: String? = match run(inst.copy()) {
-        ok => none,
-        err(e) => some("{e}"),
+    match run(inst.copy()) {
+        ok => {},
+        err(e) => failure = some("{e}"),
     }
     inst.stop()
+    if failure == none {
+        let quick = try Instance.start_with([String("--test-minute-ms"), String("1000")])
+        match idle(quick.copy()) {
+            ok => {},
+            err(e) => failure = some("{e}"),
+        }
+        quick.stop()
+    }
     if let f = failure {
         eprintln("\n{f}")
         exit(1)
