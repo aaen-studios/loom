@@ -1,0 +1,196 @@
+---
+// The foot of every page: where to go, the theme, the license, and the studio that makes loom.
+import Knot from './Knot.astro';
+import { GITHUB, GUIDES, STUDIO } from '../lib/site.mjs';
+---
+
+<footer class="foot">
+	<div class="wrap">
+		<div class="cols">
+			<div class="about">
+				<a class="home" href="/" aria-label="loom, home">
+					<Knot size={20} />
+					<span>loom</span>
+				</a>
+				<p>Open source under the MIT license. The name and the knot aren't covered by it, so forks use their own.</p>
+			</div>
+			<div class="col">
+				<h2>loom</h2>
+				<a href="/download/">Download</a>
+				<a href="/changelog/">Changelog</a>
+				<a href={GUIDES}>Guides</a>
+			</div>
+			<div class="col">
+				<h2>Source</h2>
+				<a href={GITHUB}>GitHub</a>
+				<a href={`${GITHUB}/blob/main/protocol/protocol.md`}>Protocol</a>
+				<a href="https://calxlang.com">Calx</a>
+			</div>
+		</div>
+		<div class="base">
+			<a class="studio" href={STUDIO.url}>
+				<svg viewBox="79 74 720 720" fill="currentColor" aria-hidden="true">
+					<path
+						fill-rule="evenodd"
+						d="M100 156a338.5 61 0 1 0 677 0a338.5 61 0 1 0 -677 0Z M117 148.5a321.5 45.5 0 1 0 643 0a321.5 45.5 0 1 0 -643 0Z M90 782L440 303L788 782L781 782L440 386L97 782Z"
+					></path>
+				</svg>
+				<span>An Aaen Studios project</span>
+			</a>
+			<div class="theme" role="radiogroup" aria-label="Theme">
+				<button type="button" role="radio" data-theme-pick="system" aria-label="System theme" title="System">
+					<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3.5" y="4.5" width="17" height="12" rx="2"></rect><path d="M9 20h6M12 16.5V20"></path></svg>
+				</button>
+				<button type="button" role="radio" data-theme-pick="light" aria-label="Light theme" title="Light">
+					<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="4"></circle><path d="M12 2.5v2M12 19.5v2M2.5 12h2M19.5 12h2M5.3 5.3l1.4 1.4M17.3 17.3l1.4 1.4M5.3 18.7l1.4-1.4M17.3 6.7l1.4-1.4"></path></svg>
+				</button>
+				<button type="button" role="radio" data-theme-pick="dark" aria-label="Dark theme" title="Dark">
+					<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 14.5A8 8 0 0 1 9.5 4a8 8 0 1 0 10.5 10.5Z"></path></svg>
+				</button>
+			</div>
+		</div>
+	</div>
+</footer>
+
+<style>
+	.foot {
+		margin-top: 120px;
+		border-top: 1px solid var(--line);
+		padding: 48px 0 40px;
+		font-size: 14px;
+	}
+	.cols {
+		display: grid;
+		grid-template-columns: 2fr 1fr 1fr;
+		gap: 32px;
+	}
+	.home {
+		display: inline-flex;
+		align-items: center;
+		gap: 6px;
+		color: var(--ink);
+		text-decoration: none;
+		font-size: 17px;
+		font-weight: var(--weight-semibold);
+		letter-spacing: -0.035em;
+	}
+	.about p {
+		margin-top: 12px;
+		max-width: 320px;
+		color: var(--ink-3);
+		font-size: 13.5px;
+	}
+	h2 {
+		font-size: 13.5px;
+		font-weight: var(--weight-semibold);
+		letter-spacing: 0;
+		margin: 2px 0 10px;
+	}
+	.col a {
+		display: block;
+		padding: 3px 0;
+		color: var(--ink-2);
+		text-decoration: none;
+	}
+	.col a:hover {
+		color: var(--ink);
+	}
+	.base {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		gap: 16px;
+		margin-top: 40px;
+		padding-top: 20px;
+		border-top: 1px solid var(--line);
+	}
+	.studio {
+		display: inline-flex;
+		align-items: center;
+		gap: 8px;
+		font-family: var(--mono);
+		font-size: 12.5px;
+		color: var(--ink-3);
+		text-decoration: underline dotted;
+		text-decoration-color: color-mix(in srgb, var(--ink-3) 70%, transparent);
+		text-underline-offset: 4px;
+		text-decoration-thickness: 1.5px;
+	}
+	.studio:hover {
+		color: var(--ink);
+		text-decoration-color: var(--ink);
+	}
+	.studio svg {
+		width: 15px;
+		height: 15px;
+		flex: none;
+	}
+	/* The theme, as the app's Appearance page picks it: the system's, light or dark. */
+	.theme {
+		display: inline-flex;
+		padding: 2px;
+		gap: 2px;
+		border: 1px solid var(--line);
+		border-radius: 8px;
+		background: var(--raised);
+	}
+	.theme button {
+		display: grid;
+		place-items: center;
+		width: 28px;
+		height: 24px;
+		border: 0;
+		border-radius: 6px;
+		background: transparent;
+		color: var(--ink-3);
+		cursor: pointer;
+	}
+	.theme button:hover {
+		color: var(--ink);
+	}
+	.theme button[aria-checked='true'] {
+		background: var(--bg);
+		color: var(--ink);
+		box-shadow: 0 0 0 1px var(--line-strong);
+	}
+	.theme svg {
+		width: 15px;
+		height: 15px;
+		fill: none;
+		stroke: currentColor;
+		stroke-width: 1.6;
+		stroke-linecap: round;
+		stroke-linejoin: round;
+	}
+	@media (max-width: 720px) {
+		.cols {
+			grid-template-columns: repeat(2, minmax(0, 1fr));
+		}
+		.about {
+			grid-column: 1 / -1;
+		}
+	}
+</style>
+
+<script>
+	const root = document.documentElement;
+	const buttons = [...document.querySelectorAll<HTMLButtonElement>('[data-theme-pick]')];
+	const show = () => {
+		const now = root.dataset.theme ?? 'system';
+		for (const b of buttons) b.setAttribute('aria-checked', String(b.dataset.themePick === now));
+	};
+	for (const b of buttons) {
+		b.addEventListener('click', () => {
+			const pick = b.dataset.themePick;
+			if (pick === 'light' || pick === 'dark') root.dataset.theme = pick;
+			else delete root.dataset.theme;
+			// Light is the default, so it needs nothing kept.
+			try {
+				if (pick === 'light') localStorage.removeItem('theme');
+				else localStorage.setItem('theme', pick ?? '');
+			} catch {}
+			show();
+		});
+	}
+	show();
+</script>

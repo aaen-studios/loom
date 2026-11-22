@@ -20,7 +20,8 @@ import std.fs
 import std.json.{Json}
 import std.process.{Stdio, exit}
 import shared.obj.{Obj, at, str_at}
-import tests.kit.{App, calx, device, loom, post_json}
+import shared.client.{Session, post_json}
+import tests.kit.{calx, device, loom}
 
 const WAIT: u64 = 600000
 
@@ -64,7 +65,7 @@ fn prepare(data: String, turns: usize) ! Error {
         fail "setup failed: {owner}"
     }
     let token = str_at(owner, "token") ?? String()
-    var app = try App.connect(base.copy(), token.copy(), 0)
+    var app = try Session.connect(base.copy(), token.copy(), 0)
     let made = try app.cmd("q_1", "agent.create", Obj.new().s("name", String("Fake")).s("acp_agent", String("fake")).s("instructions", String("")).done())
     let agent = str_at(at(at(made, "value"), "agent"), "id") ?? String()
     let conv = try app.cmd("q_2", "conversation.create", Obj.new().s("agent", agent.copy()).s("title", String("chat")).done())
@@ -90,7 +91,7 @@ fn say(data: String, text: String) ! Error {
     let port = (try fs.read_text("{data}/instance/port") ?? String()).trim().copy()
     let token = try fs.read_text("{data}/bench-token") ?? String()
     let conversation = try fs.read_text("{data}/bench-conversation") ?? String()
-    var app = try App.connect("127.0.0.1:{port}", token, 0)
+    var app = try Session.connect("127.0.0.1:{port}", token, 0)
     // The newest seq makes a client id this instance hasn't seen.
     try app.send(Obj.new().s("t", String("send")).s("cid", "bench{app.seq}").s("conversation", conversation).s("text", text).done())
     _ = try app.until("event", "run.finished", 600000)

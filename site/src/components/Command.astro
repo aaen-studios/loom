@@ -1,0 +1,90 @@
+---
+// A command to run, on one line, with a button that copies it.
+interface Props {
+	text: string;
+	class?: string;
+}
+const { text, class: cls } = Astro.props;
+---
+
+<div class:list={['cmd', cls]}>
+	<span class="prompt" aria-hidden="true">$</span>
+	<code>{text}</code>
+	<button type="button" class="copy" data-copy={text} aria-label="Copy the command" title="Copy">
+		<svg class="i-copy" viewBox="0 0 24 24" aria-hidden="true"><rect x="8.5" y="8.5" width="11" height="11" rx="2.5"></rect><path d="M15.5 8.5V6a1.5 1.5 0 0 0-1.5-1.5H6A1.5 1.5 0 0 0 4.5 6v8A1.5 1.5 0 0 0 6 15.5h2.5"></path></svg>
+		<svg class="i-done" viewBox="0 0 24 24" aria-hidden="true"><path d="m5 12.5 4.5 4.5L19 7.5"></path></svg>
+	</button>
+</div>
+
+<style>
+	.copy {
+		display: grid;
+		place-items: center;
+		flex: none;
+		width: 32px;
+		height: 32px;
+		border: 0;
+		border-radius: 7px;
+		background: transparent;
+		color: var(--ink-3);
+		cursor: pointer;
+		transition:
+			color 0.15s,
+			background-color 0.15s;
+	}
+	.copy:hover {
+		color: var(--ink);
+		background: var(--hover);
+	}
+	.copy svg {
+		grid-area: 1 / 1;
+		width: 16px;
+		height: 16px;
+		fill: none;
+		stroke: currentColor;
+		stroke-width: 1.7;
+		stroke-linecap: round;
+		stroke-linejoin: round;
+		transition:
+			opacity 0.15s,
+			transform 0.15s;
+	}
+	.i-done {
+		opacity: 0;
+		transform: scale(0.6);
+		color: var(--ok);
+	}
+	.copy.done .i-copy {
+		opacity: 0;
+		transform: scale(0.6);
+	}
+	.copy.done .i-done {
+		opacity: 1;
+		transform: none;
+	}
+</style>
+
+<script>
+	for (const b of document.querySelectorAll<HTMLButtonElement>('button[data-copy]')) {
+		if (b.dataset.ready) continue;
+		b.dataset.ready = '1';
+		let timer = 0;
+		b.addEventListener('click', async () => {
+			try {
+				await navigator.clipboard.writeText(b.dataset.copy ?? '');
+			} catch {
+				// Without the clipboard (an insecure page, or it's refused), select the text to copy by hand.
+				const code = b.parentElement?.querySelector('code');
+				if (code) getSelection()?.selectAllChildren(code);
+				return;
+			}
+			b.classList.add('done');
+			b.setAttribute('aria-label', 'Copied');
+			clearTimeout(timer);
+			timer = window.setTimeout(() => {
+				b.classList.remove('done');
+				b.setAttribute('aria-label', 'Copy the command');
+			}, 1600);
+		});
+	}
+</script>

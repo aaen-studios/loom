@@ -16,7 +16,8 @@ import std.sqlite.{Database, Value}
 import std.time.{Timestamp}
 import std.zip.{Writer}
 import shared.obj.{Obj, at, int_at, str_at}
-import tests.kit.{App, Instance, check, json_of, loom, reply_text}
+import shared.client.{Session, json_of, reply_text}
+import tests.kit.{Instance, check, loom}
 
 // What the copies hold that must never come over.
 const SECRETS: [str; 8] = ["PROVIDER_TOKEN_SECRET", "VAULT_SECRET_VALUE", "API_KEY_SECRET", "MCP_ENV_SECRET", "MCP_HEADER_SECRET", "GROK_SECRET", "GROK_ENV_SECRET", "GROK_HEADER_SECRET"]
@@ -116,7 +117,7 @@ fn value(r: Json) -> Json {
 }
 
 // Every agent.created event the app has read, by name.
-fn agent_named(app: App, name: str) -> Json {
+fn agent_named(app: Session, name: str) -> Json {
     var found = Json.Null
     for f in app.frames {
         if str_at(f.copy(), "kind") == some(String("agent.created")) and str_at(at(f.copy(), "agent"), "name") == some(String(name)) { found = at(f.copy(), "agent") }
@@ -125,7 +126,7 @@ fn agent_named(app: App, name: str) -> Json {
 }
 
 // The conversations made for an agent, as conversation.created told the app.
-fn conversations_of(app: App, agent: String) -> List<Json> {
+fn conversations_of(app: Session, agent: String) -> List<Json> {
     var out = List<Json>()
     for f in app.frames {
         let c = at(f.copy(), "conversation")
@@ -153,7 +154,7 @@ fn run(inst: Instance) ! Error {
     let gb = "{root}/Grok Bot"
     try openbot_fixture(ob.copy())
     try grok_fixture(gb.copy())
-    var app = try App.connect(inst.base.copy(), inst.token.copy(), 0)
+    var app = try Session.connect(inst.base.copy(), inst.token.copy(), 0)
 
     // --- What's there ---
     let scan = value(try app.cmd("q_1", "import.scan", Obj.new().s("openbot", ob.copy()).s("grokbot", gb.copy()).done()))
@@ -236,7 +237,7 @@ fn run(inst: Instance) ! Error {
 
     // --- Only the owner, and from the command line ---
     let member = try inst.second_account("ann")
-    var theirs = try App.connect(inst.base.copy(), member, 0)
+    var theirs = try Session.connect(inst.base.copy(), member, 0)
     let refused = try theirs.cmd("q_20", "import.scan", Obj.new().done())
     try check(str_at(at(refused, "error"), "code") == some(String("not_allowed")), "only the owner imports")
     theirs.close()

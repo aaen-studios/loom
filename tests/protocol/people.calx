@@ -19,7 +19,8 @@ import std.process.{exit}
 import shared.obj.{Obj, at, bool_at, int_at, str_at}
 import core.cache.{Cache}
 import core.conn.{Conn}
-import tests.kit.{App, Instance, check, device, json_of, loom, post_json}
+import shared.client.{Session, json_of, post_json}
+import tests.kit.{Instance, check, device, loom}
 
 fn code_of(answer: Json) -> String {
     return str_at(at(answer, "error"), "code") ?? String()
@@ -48,7 +49,7 @@ fn entries(log: Json) -> List<String> {
     return out
 }
 
-fn signed_out(app: mut App) -> bool {
+fn signed_out(app: mut Session) -> bool {
     loop {
         match app.until("never", "") {
             ok(_) => {},
@@ -60,7 +61,7 @@ fn signed_out(app: mut App) -> bool {
 // The agent programs a person has (PLAN.md, "Agents and keys"): the owner
 // gives each to everyone, or only to some people, and shares its settings
 // with everyone or some of them.
-fn programs(owner: mut App, ann: mut App, ann_id: String, ann_chat: String) ! Error {
+fn programs(owner: mut Session, ann: mut Session, ann_id: String, ann_chat: String) ! Error {
     var owner_id = String()
     if let Json.Array(list) = at(at(try owner.cmd("p_0", "user.list", Obj.new().done()), "value"), "users") {
         for p in list {
@@ -91,7 +92,7 @@ fn programs(owner: mut App, ann: mut App, ann_id: String, ann_chat: String) ! Er
 
 fn run() ! Error {
     let inst = try Instance.start()
-    var owner = try App.connect(inst.base.copy(), inst.token.copy(), 0)
+    var owner = try Session.connect(inst.base.copy(), inst.token.copy(), 0)
 
     try check(refused(try owner.cmd("q_1", "invite.create", Obj.new().s("role", String("owner")).done())) == "bad_request", "an invite can't make an owner")
     let made = try owner.cmd("q_2", "invite.create", Obj.new().done())
@@ -113,7 +114,7 @@ fn run() ! Error {
     let (again, again_body) = try join(inst.base.copy(), code.copy(), "bob", "a good password")
     try check(again == 410 and code_of(again_body) == "used_up", "a one-use invite works once")
 
-    var ann = try App.connect(inst.base.copy(), ann_token.copy(), 0)
+    var ann = try Session.connect(inst.base.copy(), ann_token.copy(), 0)
     try check(refused(try ann.cmd("q_1", "invite.create", Obj.new().done())) == "not_allowed", "a member can't invite")
     try check(refused(try ann.cmd("q_2", "user.list", Obj.new().done())) == "not_allowed", "or list people")
     // Her agents don't run as the instance's own user, which would reach everyone's data.
@@ -146,7 +147,7 @@ fn run() ! Error {
     try check(listed.contains("\"uses\":2"), "invite.list shows the invite")
 
     let (_, bob_joined) = try join(inst.base.copy(), bob_code, "bob", "bob's password")
-    var bob = try App.connect(inst.base.copy(), str_at(bob_joined, "token") ?? String(), 0)
+    var bob = try Session.connect(inst.base.copy(), str_at(bob_joined, "token") ?? String(), 0)
     try check(refused(try bob.cmd("q_0", "people.log", Obj.new().done())) == "not_allowed", "a member can't read the people log")
     try check(refused(try bob.cmd("q_1", "account.delete", Obj.new().done())) == "", "bob deletes his own account")
     try check(signed_out(mut bob), "and his session ends")
@@ -154,7 +155,7 @@ fn run() ! Error {
 
     try check(refused(try owner.cmd("q_7", "user.remove", Obj.new().s("user", ann_id.copy()).done())) == "", "the owner removes ann")
     try check(signed_out(mut ann), "her session ends")
-    let gone = match App.connect(inst.base.copy(), ann_token, 0) {
+    let gone = match Session.connect(inst.base.copy(), ann_token, 0) {
         ok(a) => {
             a.close()
             false
@@ -222,12 +223,12 @@ fn run() ! Error {
         try check(done.status.success(), "loom user password gives the owner a new password")
         let (status, login) = try post_json(inst.base.copy(), "/api/login", Obj.new().s("username", String("elliot")).s("password", String("the owner's new one")).j("device", device("Laptop")).done())
         try check(status == 200, "which logs in")
-        var laptop = try App.connect(inst.base.copy(), str_at(login, "token") ?? String(), 0)
+        var laptop = try Session.connect(inst.base.copy(), str_at(login, "token") ?? String(), 0)
         let later = entries(at(try laptop.cmd("q_1", "people.log", Obj.new().i("limit", 4).done()), "value"))
         laptop.close()
         if later.len() != 4 { eprintln("the people log:\n{later.join("\n")}") }
         try check(later.contains(String("elliot: Made a reset link for cora")) and later.contains(String("cora: cora set a new password with a reset link, and was signed out everywhere else")) and later[3] == ": elliot was given a new password from the command line, and signed out everywhere", "so do a reset link, its use and a new password from the command line")
-        let old_gone = match App.connect(inst.base.copy(), inst.token.copy(), 0) {
+        let old_gone = match Session.connect(inst.base.copy(), inst.token.copy(), 0) {
             ok(a) => {
                 a.close()
                 false

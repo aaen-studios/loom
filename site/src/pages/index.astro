@@ -1,0 +1,1000 @@
+---
+// The home page: what loom is, the app itself (a live copy, src/components/AppDemo.astro), what it
+// does, and how to get it.
+import Base from '../layouts/Base.astro';
+import AppDemo from '../components/AppDemo.astro';
+import Command from '../components/Command.astro';
+import Get from '../components/Get.astro';
+import Knot from '../components/Knot.astro';
+import { INSTALL } from '../lib/site.mjs';
+import { brains } from '../lib/registry.mjs';
+
+// The Brains page as the app draws it (desktop/src/app.rs, programs_page), with the ACP Registry's
+// own names, versions, descriptions and icons. When the panel comes into view, the first card
+// installs and joins Your brains, and the next card in the registry takes its place.
+const MINE = ['claude-acp', 'codex-acp'];
+const CARDS = ['opencode', 'gemini', 'github-copilot-cli', 'goose', 'cursor'];
+const listed = await brains([...MINE, ...CARDS]);
+const mine = listed.filter((b) => MINE.includes(b.id)).map((b) => ({ ...b, settings: b.id === 'claude-acp' ? '1 setting' : 'No settings' }));
+const cards = listed.filter((b) => CARDS.includes(b.id));
+
+// The Rules page as the app draws it (desktop/src/rules.rs), each rule in the server's own words
+// (server/rules.calx, said).
+const rules = [
+	{ said: 'Ask before commands like git push *', then: 'Asks you' },
+	{ said: 'Deny the path ~/.ssh/**', then: 'Denies' },
+	{ said: 'Allow the site github.com', then: 'Allows' },
+];
+const ON = ['Command', 'Path', 'Site', 'Tool'];
+const STARTERS = ['You', 'An agent', 'Routine', 'Webhook', 'Script'];
+
+// Each server's yarn is drawn from its name, as the app draws it.
+const servers = ['This computer', 'loom.example.com', 'loom.acme.dev'];
+
+// Each with an agent's thread, which works while the item is hovered.
+const more = [
+	{ title: 'Routines and webhooks', color: 'periwinkle', mood: 'thinking', text: 'An agent works on a schedule, or when a webhook comes in, and a run with nothing to say ends quietly.' },
+	{ title: 'Tasks', color: 'mint', mood: 'tool', text: 'Long jobs run beside the chat, carry on after a restart, and can be paused, resumed or retried.' },
+	{ title: 'A browser of its own', color: 'apricot', mood: 'writing', text: 'Watch an agent browse, take over for a login, and hand it back. Secrets go in without the agent seeing them.' },
+	{ title: 'Notes, skills and tables', color: 'pink', mood: 'thinking', text: 'Agents remember, keep skills, and share tables. Do a task once in its browser and the agent writes it up as a skill.' },
+	{ title: 'A backup brain', color: 'gold', mood: 'tool', text: 'When an agent’s program runs out of usage, another one takes the chat over, and the reply says so.' },
+	{ title: 'Plugins', color: 'lavender', mood: 'writing', text: 'Panels and tools that agents write themselves, walled off from the network and from the rest of loom.' },
+];
+
+// What people ask about loom, answered on the page and given to search engines as an FAQ. Each
+// answer is plain text with its links marked [like this](url) and its commands `like this`.
+const questions = [
+	{
+		q: 'Is loom free?',
+		a: 'Yes. loom is free and open source, under the MIT license. The agent programs it runs use your own account or API key with their provider, such as Anthropic or OpenAI.',
+	},
+	{
+		q: 'Do I need a server?',
+		a: 'No. The desktop app can run everything on your PC. On a Linux server, your agents keep working while your PC is off, and you can invite people, each with agents of their own in a sandbox.',
+	},
+	{
+		q: 'How do I put it on a server?',
+		a: 'As root on a Linux server, run `curl -fsSL https://loom.rip/install.sh | sudo sh`. It installs loom as a service, served over HTTPS by Caddy when you give it a domain, or on your tailnet with Tailscale. It runs in Docker too.',
+	},
+	{
+		q: 'Which AI agents does it work with?',
+		a: 'Any agent program in the ACP Registry, such as Claude Agent, Codex, Gemini CLI, OpenCode, goose, GitHub Copilot and Cursor, or any other program that speaks the Agent Client Protocol. loom installs them for you.',
+	},
+	{
+		q: 'Where are my chats and files kept?',
+		a: "On your PC or your server, in one folder: loom's database, your files, and the key that seals your secrets. A whole instance moves from one machine to another.",
+	},
+	{
+		q: 'Who makes loom?',
+		a: '[Aaen Studios](https://aaenz.no/), which also makes [Calx](https://calxlang.com), the language loom’s server and the app’s core are written in. The source is [on GitHub](https://github.com/aaen-studios/loom).',
+	},
+];
+const plain = (s: string) => s.replace(/\[([^\]]+)\]\([^)]+\)/g, '$1').replace(/`([^`]+)`/g, '$1');
+const linked = (s: string) =>
+	s
+		.replace(/&/g, '&amp;')
+		.replace(/</g, '&lt;')
+		.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2">$1</a>')
+		.replace(/`([^`]+)`/g, '<code>$1</code>');
+const faq = {
+	'@type': 'FAQPage',
+	mainEntity: questions.map(({ q, a }) => ({ '@type': 'Question', name: q, acceptedAnswer: { '@type': 'Answer', text: plain(a) } })),
+};
+---
+
+<Base
+	description="loom, by Aaen Studios, is a self-hostable agent app: chat with your own AI agents on Claude, Codex or any ACP agent program, on your server or your PC. Open source."
+	data={faq}
+>
+	<section class="hero">
+		<div class="wrap">
+			<div class="mark">
+				<h1>
+					<span class="wordmark">
+						<canvas class="weave" aria-hidden="true"></canvas>
+						<Knot size={64} class="hero-knot" />
+						<span class="word">loom<span class="base"></span></span>
+					</span>
+					<span class="kind">A self-hostable agent app.</span>
+				</h1>
+			</div>
+			<Get />
+		</div>
+		<div class="wrap demo-wrap">
+			<AppDemo />
+		</div>
+	</section>
+
+	<section class="feature" aria-labelledby="f-programs">
+		<div class="wrap split">
+			<div class="copy" data-reveal>
+				<h2 id="f-programs">Every agent runs on an agent program</h2>
+				<p>
+					Claude, Codex, OpenCode, Goose, Gemini CLI, or any other program that speaks the Agent Client Protocol. loom installs them from the ACP Registry, and gives each agent a name, a colour, its instructions and a folder to work in.
+				</p>
+			</div>
+			<div class="visual" data-reveal>
+				<div class="page brains" aria-label="The Brains page in loom's settings">
+					<div class="page-head"><span class="page-title">Brains</span></div>
+					<div class="group">
+						<div class="group-label">Your brains</div>
+						<div class="box mine">
+							{
+								mine.map((b) => (
+									<div class="row">
+										<span class="tile" style={`--icon: url(${b.icon})`} />
+										<span class="row-text">
+											<span class="row-title">{b.name}</span>
+											<span class="row-sub">Version {b.version} · {b.settings}</span>
+										</span>
+										<svg class="chevron" width="16" height="16" viewBox="0 0 24 24" aria-hidden="true">
+											<path d="M9 6l6 6-6 6" />
+										</svg>
+									</div>
+								))
+							}
+						</div>
+					</div>
+					<div class="group">
+						<div class="group-label">More brains, from the ACP Registry</div>
+						<div class="cards">
+							{
+								cards.map((b, i) => (
+									<div class="card" data-brain={b.id} data-name={b.name} data-version={b.version} data-icon={b.icon} hidden={i >= 4}>
+										<div class="card-top">
+											<span class="tile big" style={`--icon: url(${b.icon})`} />
+											<span class="btn-small">Install</span>
+										</div>
+										<span class="card-text">
+											<span class="row-title">{b.name}</span>
+											<span class="card-sub">{b.description}</span>
+										</span>
+									</div>
+								))
+							}
+						</div>
+					</div>
+				</div>
+			</div>
+		</div>
+	</section>
+
+	<section class="feature" aria-labelledby="f-asks">
+		<div class="wrap split flip">
+			<div class="copy" data-reveal>
+				<h2 id="f-asks">It asks before anything that matters</h2>
+				<p>
+					Each agent asks about everything, about what's risky, or nothing, as you choose. Rules allow, ask or deny by site, file, command or tool, and every action is recorded before it happens.
+				</p>
+			</div>
+			<div class="visual" data-reveal>
+				<div class="page rules" aria-label="The Rules page in loom's settings">
+					<div class="page-head">
+						<span class="page-title">Rules</span>
+						<span class="btn-small">New rule</span>
+					</div>
+					<div class="group">
+						<div class="group-label">Every agent</div>
+						<div class="box">
+							{
+								rules.map((r) => (
+									<div class="row">
+										<span class="row-text">
+											<span class="row-title">{r.said}</span>
+											<span class="row-sub">{r.then}</span>
+										</span>
+										<span class="btn-small">Remove</span>
+									</div>
+								))
+							}
+						</div>
+					</div>
+					<div class="group what-if">
+						<div class="group-label">What if</div>
+						<div class="box">
+							<div class="row">
+								<span class="row-text"><span class="row-title">On</span></span>
+								<span class="segments" data-on>{ON.map((o, i) => <span class:list={['segment', { on: i === 0 }]}>{o}</span>)}</span>
+							</div>
+							<div class="row field">
+								<span class="field-label" data-label>Command</span>
+								<span class="input" data-input><span class="typed"></span><span class="caret"></span></span>
+							</div>
+							<div class="row">
+								<span class="row-text"><span class="row-title">Started by</span></span>
+								<span class="segments" data-by>{STARTERS.map((s, i) => <span class:list={['segment', { on: i === 0 }]}>{s}</span>)}</span>
+							</div>
+							<div class="row result">
+								<span class="row-text">
+									<span class="row-title" data-verdict>What would it get?</span>
+									<span class="row-sub" data-why>Try an action, and see which rule or mode decides</span>
+								</span>
+								<span class="btn-small primary" data-check>Check</span>
+							</div>
+						</div>
+					</div>
+				</div>
+			</div>
+		</div>
+	</section>
+
+	<section class="feature" aria-labelledby="f-where">
+		<div class="wrap split">
+			<div class="copy" data-reveal>
+				<h2 id="f-where">On your PC, or on a server</h2>
+				<p>
+					The desktop app can run everything itself, with no server. Or put loom on a Linux server with one command, invite people, and each person's agents run in a sandbox of their own. One app signs in to as many servers as you like, and a whole instance moves between machines.
+				</p>
+			</div>
+			<div class="visual" data-reveal>
+				<div class="panel servers">
+					{
+						servers.map((s) => (
+							<div class="server-row">
+								<svg data-yarn={s} width="32" height="32" aria-hidden="true" />
+								<span class="server-text">
+									<b>{s}</b>
+									<small>Connected</small>
+								</span>
+							</div>
+						))
+					}
+				</div>
+				<Command text={INSTALL} class="server-cmd" />
+			</div>
+		</div>
+	</section>
+
+	<section class="more" aria-label="More of what loom does">
+		<div class="wrap">
+			<ul class="grid">
+				{
+					more.map((m, i) => (
+						<li data-reveal data-mood={m.mood} style={`--delay: ${(i % 3) * 0.08}s`}>
+							<h3>
+								<svg data-thread data-color={m.color} width="26" height="10" aria-hidden="true" />
+								{m.title}
+							</h3>
+							<p>{m.text}</p>
+						</li>
+					))
+				}
+			</ul>
+		</div>
+	</section>
+
+	<section class="questions" aria-labelledby="f-questions">
+		<div class="wrap">
+			<h2 id="f-questions" data-reveal>Questions</h2>
+			<dl>
+				{
+					questions.map(({ q, a }) => (
+						<div data-reveal>
+							<dt>{q}</dt>
+							<dd set:html={linked(a)} />
+						</div>
+					))
+				}
+			</dl>
+		</div>
+	</section>
+
+	<section class="end" aria-labelledby="f-end">
+		<div class="wrap">
+			<h2 id="f-end" data-reveal>Open source</h2>
+			<p>MIT licensed. The server and the app's core are written in <a href="https://calxlang.com">Calx</a>, and the desktop app is native.</p>
+			<Get compact />
+		</div>
+	</section>
+</Base>
+
+<style>
+	.hero {
+		padding-top: 72px;
+		text-align: center;
+	}
+	/* The heading: the wordmark, and what loom is under it. */
+	h1 {
+		display: grid;
+		justify-items: center;
+		gap: 22px;
+	}
+	/* The knot beside the wordmark: the app's proportions, a little tighter at this size. */
+	.wordmark {
+		position: relative;
+		display: inline-flex;
+		align-items: center;
+		gap: 0.3em;
+		font-size: clamp(64px, 12vw, 110px);
+		letter-spacing: -0.035em;
+		line-height: 1;
+	}
+	.wordmark :global(.hero-knot) {
+		width: 1.3em;
+		height: 1.3em;
+		/* The knot's box is mostly air above and below; it shouldn't make the line taller. */
+		margin: -0.3em 0;
+		/* design/logo/README.md: large uses go down to 2.2. */
+		stroke-width: 2.2;
+	}
+	/* Where the line sits, for the 3D letters to stand on. */
+	.base {
+		display: inline-block;
+		width: 0;
+		height: 0;
+	}
+	/* The agents' threads across the page, behind the wordmark (src/scripts/hero.ts). */
+	.weave {
+		position: absolute;
+		z-index: 0;
+		left: calc(50% - 50vw);
+		top: calc(50% - 1.7em);
+		width: 100vw;
+		height: 3.4em;
+		pointer-events: none;
+	}
+	.wordmark :global(.hero-knot),
+	.word {
+		position: relative;
+		z-index: 1;
+	}
+	.kind {
+		font-size: clamp(18px, 2.4vw, 21px);
+		font-weight: var(--weight-regular);
+		color: var(--ink-2);
+		letter-spacing: -0.01em;
+		line-height: 1.4;
+	}
+	.hero :global(.get) {
+		margin-top: 32px;
+	}
+	.demo-wrap {
+		margin-top: 56px;
+	}
+
+	.feature {
+		margin-top: 140px;
+	}
+	.split {
+		display: grid;
+		grid-template-columns: repeat(2, minmax(0, 1fr));
+		align-items: center;
+		gap: 64px;
+	}
+	.flip .copy {
+		order: 2;
+	}
+	.copy h2 {
+		font-size: clamp(26px, 3.4vw, 34px);
+		letter-spacing: -0.03em;
+	}
+	.copy p {
+		margin-top: 16px;
+		font-size: 17px;
+		color: var(--ink-2);
+		max-width: 480px;
+	}
+	.visual {
+		display: grid;
+		gap: 14px;
+	}
+
+	/* A page of loom's settings, as the app draws one (desktop/src/app.rs: settings_page, group, row,
+	   and the Brains page's cards), at the app's own sizes. */
+	.page {
+		display: grid;
+		gap: var(--space-xl);
+		padding: var(--space-xl);
+		border: 1px solid var(--line);
+		border-radius: 14px;
+		background: var(--bg);
+		box-shadow: var(--shadow);
+		text-align: left;
+	}
+	.page-head {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		gap: var(--space-m);
+		min-height: var(--control-button);
+	}
+	.page-title {
+		font-size: calc(var(--size-heading) - 2px);
+		font-weight: var(--weight-semibold);
+		letter-spacing: -0.01em;
+	}
+	.group {
+		display: grid;
+		gap: var(--space-s);
+	}
+	.group-label {
+		padding: 0 var(--space-xs);
+		font-size: var(--size-caption);
+		font-weight: var(--weight-medium);
+		color: var(--ink-3);
+	}
+	.box {
+		display: flex;
+		flex-direction: column;
+		border: 1px solid var(--line);
+		border-radius: var(--radius-card);
+		background: var(--card);
+		overflow: hidden;
+	}
+	.box > * + * {
+		border-top: 1px solid var(--line);
+	}
+	.row {
+		min-height: var(--control-row);
+		display: flex;
+		align-items: center;
+		gap: var(--space-m);
+		padding: calc(var(--space-s) + 2px) var(--space-l);
+	}
+	.row-text {
+		flex: 1;
+		min-width: 0;
+		display: flex;
+		flex-direction: column;
+		gap: 2px;
+	}
+	.row-title {
+		font-size: var(--size-body);
+		line-height: 1.35;
+		color: var(--ink);
+	}
+	.row-sub {
+		font-size: var(--size-caption);
+		line-height: 1.35;
+		color: var(--ink-3);
+	}
+	/* A brain's icon from the ACP Registry, drawn in the ink as the app draws it, in a square of its own. */
+	.tile {
+		--size: 34px;
+		position: relative;
+		flex: none;
+		width: var(--size);
+		height: var(--size);
+		border: 1px solid var(--line);
+		border-radius: calc(var(--radius-row) + 2px);
+		background: var(--bg);
+	}
+	.tile.big {
+		--size: 40px;
+	}
+	.tile::after {
+		content: '';
+		position: absolute;
+		inset: 25%;
+		background: var(--ink);
+		-webkit-mask: var(--icon) center / contain no-repeat;
+		mask: var(--icon) center / contain no-repeat;
+	}
+	.chevron {
+		flex: none;
+		fill: none;
+		stroke: var(--ink-3);
+		stroke-width: 2;
+		stroke-linecap: round;
+		stroke-linejoin: round;
+	}
+	.cards {
+		display: grid;
+		grid-template-columns: repeat(2, minmax(0, 1fr));
+		gap: var(--space-s);
+	}
+	.card {
+		min-width: 0;
+		display: flex;
+		flex-direction: column;
+		gap: var(--space-m);
+		padding: var(--space-l);
+		border: 1px solid var(--line);
+		border-radius: var(--radius-card);
+		background: var(--card);
+	}
+	.card[hidden] {
+		display: none;
+	}
+	.card-top {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		gap: var(--space-s);
+	}
+	.card-text {
+		display: flex;
+		flex-direction: column;
+		gap: 2px;
+	}
+	.card-text .row-title {
+		font-weight: var(--weight-medium);
+		white-space: nowrap;
+		overflow: hidden;
+		text-overflow: ellipsis;
+	}
+	.card-sub {
+		height: 32px;
+		overflow: hidden;
+		font-size: var(--size-caption);
+		line-height: 16px;
+		color: var(--ink-3);
+	}
+	.btn-small {
+		flex: none;
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		height: var(--control-button-small);
+		padding: 0 var(--space-m);
+		border: 1px solid var(--line-strong);
+		border-radius: var(--radius-button);
+		font-size: var(--size-small);
+		font-weight: var(--weight-medium);
+		color: var(--ink);
+		white-space: nowrap;
+		transition:
+			background-color 0.15s,
+			transform 0.15s;
+	}
+	.btn-small.primary {
+		border-color: transparent;
+		background: var(--button);
+		color: var(--button-ink);
+	}
+	.btn-small.pressed {
+		transform: scale(0.95);
+		background: var(--hover);
+	}
+	.btn-small.primary.pressed {
+		background: color-mix(in srgb, var(--button) 82%, var(--bg));
+	}
+	.brains :global(.installing) {
+		flex: none;
+		font-size: var(--size-caption);
+		color: var(--ink-3);
+		white-space: nowrap;
+	}
+	/* The brain that installed comes into Your brains, and the cards move up into its place. */
+	.row.arrived {
+		animation: arrive 0.5s cubic-bezier(0.2, 0.7, 0.3, 1) both;
+	}
+	@keyframes arrive {
+		from {
+			opacity: 0;
+			transform: translateY(6px);
+		}
+	}
+	.card.leaving {
+		transition:
+			opacity 0.25s,
+			transform 0.25s;
+		opacity: 0;
+		transform: scale(0.97);
+	}
+
+	/* What if: a choice of a few side by side, a field, and what the action would get. */
+	.segments {
+		flex: none;
+		display: flex;
+		gap: 2px;
+		padding: 2px;
+		border-radius: calc(var(--radius-row) + 2px);
+		background: var(--raised-2);
+	}
+	.segment {
+		display: flex;
+		align-items: center;
+		height: var(--control-segment);
+		padding: 0 var(--space-m);
+		border-radius: var(--radius-row);
+		font-size: var(--size-small);
+		color: var(--ink-2);
+		white-space: nowrap;
+		transition:
+			background-color 0.2s,
+			color 0.2s,
+			box-shadow 0.2s;
+	}
+	.segment.on {
+		background: var(--picked);
+		color: var(--ink);
+		font-weight: var(--weight-medium);
+		box-shadow: 0 1px 2px rgb(0 0 0 / 0.1);
+	}
+	.field-label {
+		flex: none;
+		width: var(--layout-field-label);
+		font-size: var(--size-body);
+	}
+	.input {
+		flex: 1;
+		min-width: 0;
+		display: flex;
+		align-items: center;
+		height: var(--control-button-small);
+		padding: 0 10px;
+		border: 1px solid var(--line-strong);
+		border-radius: var(--radius-input);
+		background: var(--bg);
+		font-size: var(--size-small);
+		white-space: nowrap;
+		overflow: hidden;
+	}
+	.caret {
+		width: 1px;
+		height: 15px;
+		margin-left: 1px;
+		background: var(--ink);
+		opacity: 0;
+	}
+	.input.typing .caret {
+		opacity: 1;
+	}
+	/* Where a row's choices don't fit beside its name, they go under it, and scroll if they must. */
+	@media (max-width: 560px) {
+		.row:has(.segments) {
+			flex-wrap: wrap;
+			row-gap: var(--space-s);
+		}
+		.row:has(.segments) .row-text {
+			flex-basis: 100%;
+		}
+		.segments {
+			max-width: 100%;
+			overflow-x: auto;
+			scrollbar-width: none;
+		}
+	}
+	.result .row-title {
+		font-weight: var(--weight-medium);
+	}
+	.result .row-text {
+		transition: opacity 0.2s;
+	}
+	.result.asking .row-text {
+		opacity: 0.4;
+	}
+	/* The servers in the app's server popup, each with its ball of yarn. */
+	.panel {
+		border: 1px solid var(--line);
+		border-radius: 14px;
+		background: var(--side);
+	}
+
+	.servers {
+		display: grid;
+		gap: 4px;
+		padding: 10px;
+	}
+	.server-row {
+		display: flex;
+		align-items: center;
+		gap: 12px;
+		padding: 8px 10px;
+		border-radius: 8px;
+	}
+	.server-row:first-child {
+		background: var(--active);
+	}
+	.server-text {
+		display: grid;
+		line-height: 1.3;
+		text-align: left;
+	}
+	.server-text b {
+		font-size: 14px;
+		font-weight: var(--weight-medium);
+	}
+	.server-text small {
+		font-size: 12.5px;
+		color: var(--ink-3);
+	}
+	.server-row svg {
+		width: 32px;
+		height: 32px;
+		flex: none;
+	}
+	.visual :global(.server-cmd) {
+		background: var(--bg);
+	}
+
+	.more {
+		margin-top: 140px;
+	}
+	.grid {
+		list-style: none;
+		margin: 0;
+		padding: 0;
+		display: grid;
+		grid-template-columns: repeat(3, minmax(0, 1fr));
+		gap: 0;
+		border-top: 1px solid var(--line);
+	}
+	.grid li {
+		padding: 28px 28px 32px 0;
+		border-bottom: 1px solid var(--line);
+	}
+	.grid li:not(:nth-child(3n + 1)) {
+		padding-left: 28px;
+		border-left: 1px solid var(--line);
+	}
+	.grid h3 {
+		display: flex;
+		align-items: center;
+		gap: 12px;
+		font-size: 16px;
+		letter-spacing: -0.01em;
+	}
+	.grid h3 svg {
+		width: 26px;
+		height: 10px;
+		flex: none;
+	}
+	.grid p {
+		padding-left: 38px;
+	}
+	.grid p {
+		margin-top: 8px;
+		font-size: 14.5px;
+		color: var(--ink-3);
+	}
+
+	.questions {
+		margin-top: 140px;
+	}
+	.questions h2 {
+		font-size: clamp(26px, 3.4vw, 34px);
+		letter-spacing: -0.03em;
+	}
+	.questions dl {
+		display: grid;
+		grid-template-columns: repeat(2, minmax(0, 1fr));
+		gap: 0 56px;
+		margin: 28px 0 0;
+		border-top: 1px solid var(--line);
+	}
+	.questions dl > div {
+		padding: 24px 0 26px;
+		border-bottom: 1px solid var(--line);
+	}
+	.questions dt {
+		font-size: 16px;
+		font-weight: var(--weight-semibold);
+		letter-spacing: -0.01em;
+	}
+	.questions dd {
+		margin: 8px 0 0;
+		font-size: 15px;
+		color: var(--ink-2);
+		max-width: 520px;
+	}
+	.questions dd :global(code) {
+		font-family: var(--mono);
+		font-size: 13px;
+		color: var(--ink);
+		overflow-wrap: anywhere;
+	}
+	.questions dd :global(a) {
+		color: var(--ink);
+		text-decoration: underline;
+		text-decoration-color: var(--line-strong);
+		text-underline-offset: 3px;
+	}
+	.end {
+		margin-top: 140px;
+		text-align: center;
+	}
+	.end h2 {
+		font-size: clamp(26px, 3.4vw, 34px);
+		letter-spacing: -0.03em;
+	}
+	.end p {
+		margin: 14px auto 0;
+		max-width: 520px;
+		font-size: 17px;
+		color: var(--ink-2);
+	}
+	.end p a {
+		text-decoration: underline;
+		text-decoration-color: var(--line-strong);
+		text-underline-offset: 4px;
+	}
+	.end :global(.get) {
+		margin-top: 28px;
+	}
+
+	@media (max-width: 900px) {
+		.split {
+			grid-template-columns: minmax(0, 1fr);
+			gap: 32px;
+		}
+		.flip .copy {
+			order: 0;
+		}
+		.grid {
+			grid-template-columns: repeat(2, minmax(0, 1fr));
+		}
+		.grid li,
+		.grid li:not(:nth-child(3n + 1)) {
+			padding: 24px 24px 28px 0;
+			border-left: 0;
+		}
+		.grid li:nth-child(2n) {
+			padding-left: 24px;
+			border-left: 1px solid var(--line);
+		}
+	}
+	@media (max-width: 640px) {
+		.hero {
+			padding-top: 56px;
+		}
+		.demo-wrap {
+			margin-top: 44px;
+		}
+		.questions dl {
+			grid-template-columns: minmax(0, 1fr);
+		}
+		.feature,
+		.more,
+		.questions,
+		.end {
+			margin-top: 96px;
+		}
+		.grid {
+			grid-template-columns: minmax(0, 1fr);
+		}
+		.grid li,
+		.grid li:nth-child(2n) {
+			padding: 22px 0 24px;
+			border-left: 0;
+		}
+	}
+</style>
+
+<script>
+	// The panels' little scenes, each played once when it comes into view, and the grid's threads,
+	// which work while their item is hovered.
+	import { threadOf, threadsIn, yarnsIn, type Mood } from '../scripts/thread';
+
+	const pause = (ms: number) => new Promise((done) => setTimeout(done, ms));
+	const still = matchMedia('(prefers-reduced-motion: reduce)').matches;
+	/** Runs play once el has risen into view. */
+	const whenShown = (el: Element | null, play: () => void) => {
+		if (!el) return;
+		if (el.classList.contains('shown')) play();
+		else el.addEventListener('shown', play, { once: true });
+	};
+
+	const ease = 'cubic-bezier(0.2, 0.7, 0.3, 1)';
+
+	// Brains: the first card installs and joins Your brains, as the app lists it once it's in, and the
+	// cards move up into its place, the next in the registry coming in last.
+	const brains = document.querySelector<HTMLElement>('.brains');
+	whenShown(brains?.closest('[data-reveal]') ?? null, async () => {
+		const mine = brains?.querySelector('.mine');
+		const all = [...(brains?.querySelectorAll<HTMLElement>('.card') ?? [])];
+		const card = all[0];
+		const next = all.find((c) => c.hidden);
+		const button = card?.querySelector('.btn-small');
+		const model = mine?.firstElementChild;
+		if (!mine || !card || !button || !model || still) return;
+		await pause(1100);
+		button.classList.add('pressed');
+		await pause(160);
+		const busy = document.createElement('span');
+		busy.className = 'installing';
+		busy.textContent = 'Installing…';
+		button.replaceWith(busy);
+		await pause(2400);
+		const row = model.cloneNode(true) as HTMLElement;
+		row.querySelector('.tile')?.setAttribute('style', `--icon: url(${card.dataset.icon})`);
+		const title = row.querySelector('.row-title');
+		const sub = row.querySelector('.row-sub');
+		if (title) title.textContent = card.dataset.name ?? '';
+		if (sub) sub.textContent = `Version ${card.dataset.version} · No settings`;
+		row.classList.add('arrived');
+		const others = all.filter((c) => c !== card && !c.hidden);
+		card.classList.add('leaving');
+		await pause(250);
+		const before = new Map(others.map((c) => [c, c.getBoundingClientRect()]));
+		card.remove();
+		mine.append(row);
+		if (next) next.hidden = false;
+		for (const c of others) {
+			const a = before.get(c);
+			const b = c.getBoundingClientRect();
+			if (a) c.animate([{ transform: `translate(${a.left - b.left}px, ${a.top - b.top}px)` }, { transform: 'none' }], { duration: 450, easing: ease });
+		}
+		next?.animate([{ opacity: 0, transform: 'translateY(6px)' }, { opacity: 1, transform: 'none' }], { duration: 450, delay: 150, easing: ease, fill: 'backwards' });
+	});
+
+	// Rules: What if tries an action at a time and says what it would get, in the server's own words
+	// (server/instance.calx, rule.check), going round while it's on screen.
+	const rules = document.querySelector<HTMLElement>('.rules');
+	const examples = [
+		{ on: 0, label: 'Command', text: 'git push origin main', by: 1, verdict: 'Asks you', why: 'Asks, by your rule "Ask before commands like git push *".' },
+		{ on: 1, label: 'Path', text: '~/.ssh/id_ed25519', by: 1, verdict: 'Denied', why: 'Denied by your rule "Deny the path ~/.ssh/**".' },
+		{ on: 2, label: 'Site', text: 'api.github.com', by: 2, verdict: 'Allowed', why: 'Allowed by your rule "Allow the site github.com".' },
+	];
+	if (rules) {
+		const pick = (list: HTMLElement | null, i: number) => list?.querySelectorAll('.segment').forEach((s, j) => s.classList.toggle('on', i === j));
+		const on = rules.querySelector<HTMLElement>('[data-on]');
+		const by = rules.querySelector<HTMLElement>('[data-by]');
+		const label = rules.querySelector('[data-label]');
+		const input = rules.querySelector<HTMLElement>('[data-input]');
+		const typed = rules.querySelector('.typed');
+		const check = rules.querySelector('[data-check]');
+		const result = rules.querySelector('.result');
+		const verdict = rules.querySelector('[data-verdict]');
+		const why = rules.querySelector('[data-why]');
+		const show = (e: (typeof examples)[number]) => {
+			pick(on, e.on);
+			pick(by, e.by);
+			if (label) label.textContent = e.label;
+			if (typed) typed.textContent = e.text;
+			if (verdict) verdict.textContent = e.verdict;
+			if (why) why.textContent = e.why;
+		};
+		if (still) show(examples[0]);
+		else {
+			let seen = false;
+			let wake = () => {};
+			new IntersectionObserver(([e]) => {
+				seen = e.isIntersecting;
+				if (seen) wake();
+			}).observe(rules);
+			const onScreen = () => (seen ? Promise.resolve() : new Promise<void>((done) => (wake = done)));
+			(async () => {
+				for (let i = 0; ; i = (i + 1) % examples.length) {
+					await onScreen();
+					const e = examples[i];
+					await pause(i === 0 ? 700 : 400);
+					pick(on, e.on);
+					if (label) label.textContent = e.label;
+					if (typed) typed.textContent = '';
+					input?.classList.add('typing');
+					await pause(350);
+					for (const ch of e.text) {
+						if (typed) typed.textContent += ch;
+						await pause(45 + Math.random() * 40);
+					}
+					input?.classList.remove('typing');
+					await pause(250);
+					pick(by, e.by);
+					await pause(450);
+					check?.classList.add('pressed');
+					result?.classList.add('asking');
+					await pause(160);
+					check?.classList.remove('pressed');
+					await pause(300);
+					if (verdict) verdict.textContent = e.verdict;
+					if (why) why.textContent = e.why;
+					result?.classList.remove('asking');
+					await pause(3200);
+				}
+			})();
+		}
+	}
+
+	// Servers: each with its ball of yarn, at rest while it's connected.
+	yarnsIn(document.querySelector('.servers') ?? undefined);
+
+	// The grid: each item's thread works while it's hovered, and they all twang as the grid arrives.
+	const items = [...document.querySelectorAll<HTMLElement>('.grid li')];
+	threadsIn(document.querySelector('.grid') ?? undefined);
+	items.forEach((li, i) => {
+		const th = threadOf(li.querySelector('svg[data-thread]'));
+		if (!th) return;
+		li.addEventListener('pointerenter', () => th.set((li.dataset.mood as Mood) ?? 'writing'));
+		li.addEventListener('pointerleave', () => th.set('idle'));
+		whenShown(li, () => setTimeout(() => th.pluck(1), 350 + (i % 3) * 120));
+	});
+</script>
+
+<script>
+	import { startHero } from '../scripts/hero';
+	const mark = document.querySelector<HTMLElement>('.hero .mark');
+	const canvas = mark?.querySelector<HTMLCanvasElement>('canvas.weave');
+	if (mark && canvas) startHero(mark, canvas);
+</script>

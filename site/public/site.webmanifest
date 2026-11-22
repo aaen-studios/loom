@@ -1,0 +1,13 @@
+{
+	"name": "loom",
+	"short_name": "loom",
+	"description": "A self-hostable agent app.",
+	"start_url": "/",
+	"display": "browser",
+	"background_color": "#ffffff",
+	"theme_color": "#ffffff",
+	"icons": [
+		{ "src": "/favicon.svg", "type": "image/svg+xml", "sizes": "any" },
+		{ "src": "/apple-touch-icon.png", "type": "image/png", "sizes": "256x256" }
+	]
+}

@@ -7,7 +7,7 @@ Loom is one program, `loom`, which keeps everything in one folder: the database,
 As root:
 
 ```sh
-curl -fsSL https://github.com/aaen-studios/loom/releases/latest/download/install.sh | sh -s -- --domain loom.example.com
+curl -fsSL https://loom.rip/install.sh | sh -s -- --domain loom.example.com
 ```
 
 The script downloads the newest `loom` for the machine (x64 or Arm) and checks it against the release's signed manifest. Then `loom install`:

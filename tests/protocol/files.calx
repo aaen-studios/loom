@@ -17,7 +17,8 @@ import std.json.{Json}
 import std.thread.{sleep}
 import std.process.{exit}
 import shared.obj.{Obj, at, int_at, str_at}
-import tests.kit.{App, Instance, check, fetch, loom, reply_text, upload}
+import shared.client.{Session, reply_text}
+import tests.kit.{Instance, check, fetch, loom, upload}
 
 fn file_blocks(message: Json) -> List<Json> {
     var out = List<Json>()
@@ -78,7 +79,7 @@ fn run(inst: Instance) ! Error {
     try check(thumb_ok, "an image gets a 512-pixel thumbnail")
 
     // --- Sending files to an agent, and getting one back ---
-    var app = try App.connect(base.copy(), token.copy(), 0)
+    var app = try Session.connect(base.copy(), token.copy(), 0)
     let made = try app.cmd("q_1", "agent.create", Obj.new().s("name", String("Fake")).s("acp_agent", String("fake")).done())
     let agent = str_at(at(at(made, "value"), "agent"), "id") ?? String()
     let conv = try app.cmd("q_2", "conversation.create", Obj.new().s("agent", agent.copy()).done())
@@ -113,7 +114,7 @@ fn run(inst: Instance) ! Error {
     try check(results(by_name) == 1, "file names are searched too")
     let other = try app.cmd("q_5", "messages.search", Obj.new().s("query", String("deploy")).s("agent", String("a_999")).done())
     try check(results(other) == 0, "and an agent's filter keeps to that agent")
-    var bob_app = try App.connect(base.copy(), bob, 0)
+    var bob_app = try Session.connect(base.copy(), bob, 0)
     let theirs = try bob_app.cmd("q_1", "messages.search", Obj.new().s("query", String("deploy")).done())
     try check(results(theirs) == 0, "no one finds someone else's messages")
     bob_app.close()

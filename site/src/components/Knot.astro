@@ -1,0 +1,34 @@
+---
+// loom's mark, the knot, from design/logo/knot.svg: one thread with a loop that crosses itself.
+// The falling stroke passes over the rising one, with a gap cut by a mask, so it works on any
+// background. Each use gets its own mask id.
+interface Props {
+	size?: number;
+	class?: string;
+	label?: string;
+}
+const { size = 20, class: cls, label } = Astro.props;
+const id = `knot-${Math.random().toString(36).slice(2, 8)}`;
+---
+
+<svg
+	class={cls}
+	width={size}
+	height={size}
+	viewBox="0 0 32 32"
+	fill="none"
+	stroke="currentColor"
+	stroke-width="2.6"
+	stroke-linecap="round"
+	stroke-linejoin="round"
+	role={label ? 'img' : undefined}
+	aria-label={label}
+	aria-hidden={label ? undefined : 'true'}
+>
+	<mask id={id} maskUnits="userSpaceOnUse" x="0" y="0" width="32" height="32">
+		<rect width="32" height="32" fill="white"></rect>
+		<path d="M13.67 22.24 C 14.8 23.3, 16.3 24.1, 18.14 24.34" stroke="black" stroke-width="5.6"></path>
+	</mask>
+	<path d="M3 24.5 H12 C 19 24.5, 22 18.5, 22 14 C 22 9.5, 19 7, 16 7 C 13 7, 10 9.5, 10 14" mask={`url(#${id})`}></path>
+	<path d="M10 14 C 10 19, 13.5 24.5, 20 24.5 H29"></path>
+</svg>

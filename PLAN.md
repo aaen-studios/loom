@@ -9,6 +9,7 @@ This is a rewrite. Loom v0.1 (a Rust engine with its own model loop, a React UI,
 - **Repo:** `aaen-studios/loom`. On the VPS as a T3 project.
 - **Board:** Acta, [`aaen-studios/loom`](https://acta.aaenz.no/aaen-studios/loom).
 - **Protocol:** [protocol/protocol.md](protocol/protocol.md).
+- **Site:** [loom.rip](https://loom.rip), from [`site/`](site/README.md).
 
 A word used throughout: an **instance** is one running loom server and its people, on a server or inside the desktop app. (A placeholder word; see [Open questions](#open-questions).)
 
@@ -115,7 +116,9 @@ One app signs in to as many instances as you like: the one on this computer, a s
 - **Each is its ball of yarn.** The sidebar's bottom row has a soft ball of yarn for each server, as each agent has its thread: its colour and its strands chosen from the server's name, resting while it's connected, its strands turning while it connects, and grey while it can't be reached. The one on screen has its name and how it is beside it, so it reads as the server you're on, and opens the server popup. The settings gear sits beside it. The sidebar collapses to a rail (Ctrl+B), which the app keeps: each agent as its thread, a dot on one with a reply waiting, the +, and at its foot the update icon over the gear over the yarn. A window too narrow for the sidebar and the chat makes it a rail on its own until there's room again, unless the person collapsed it. Another comes on screen when clicked, and has a dot when one of its agents said something there. With several, the sidebar names the server on screen above its agents.
 - **The others keep going.** A server away keeps its connection, so its replies notify and its unread marks gather. This PC's tools (screenshots, the clipboard, commands) answer only the server on screen.
 - **Adding and removing** are in the server popup: **Add a server** signs in beside the one on screen, with a setup code for a new server, and the server comes on screen once it's in. **Sign out and remove** takes one away, with its folder. The first server stays.
-- **Agents help.** An agent's `add_server` asks its person, and the device that said yes opens Add a server with the address in. With a link code the server gave (`loom install --json`, `loom link`, or an owner's or admin's `link.create` for someone), that yes is all: the app signs in with the code, which on a new server makes the person its owner, so they type nothing and the agent never sees a password or a token. A code works once, for 15 minutes ([protocol.md: Link codes](protocol/protocol.md#link-codes)). The import that follows, `loom import` on the server, makes itself a token that only imports, for 15 minutes. `install_server` gives the command that puts loom on a new Linux server. Add a server and Move sit at the bottom of the server popup, under its settings, since they're things to do rather than settings, and each has **Copy prompt**: a prompt to give one of the person's agents, which does the technical part with these tools. Technical jobs in the app offer one the same way.
+- **Agents help.** An agent's `add_server` asks its person, and the device that said yes opens Add a server with the address in. With a link code the server gave (`loom install --json`, `loom link`, or an owner's or admin's `link.create` for someone), that yes is all: the app signs in with the code, which on a new server makes the person its owner, so they type nothing and the agent never sees a password or a token. A code works once, for 15 minutes ([protocol.md: Link codes](protocol/protocol.md#link-codes)). The import that follows, `loom import` on the server, makes itself a token that only imports, for 15 minutes.
+- **Installing on a host, on one yes.** `install_server` with one of the person's [hosts](#your-hosts) does the whole thing. The plan comes first, as a card in the agent's reply ("Install loom on vps, through Tailscale, import from OpenBot, link it to Desk PC"), then one question, which the PC that reaches the host signs, with every command it'll run there shown. That PC makes those commands itself from the plan it signed (`shared/hosts.calx`), so a hacked instance can't slip one in, and runs them over ssh one after another (`core/install.calx`): the install script with `loom install --json --https-port auto` (or `--domain` for Caddy), then `loom import openbot --from-user` when there's something to import, with OpenBot's provider for Claude carried over unseen (`--carry-provider`). The link code `loom install` gives stays on that PC: its core hands it to its own app, which signs in there and makes the person the owner, and the import comes into their account then. Last, it asks the new server's `/api/version` until it says it's set up. Each step ticks its line on the card as it goes. A step that fails says plainly what failed and what to do next, and nothing after it runs, but for a failed import, which leaves loom working and can be run again. The agent hears what was done, never a code or a password ([protocol.md: Installing loom on a host](protocol/protocol.md#installing-loom-on-a-host)). Without a host, `install_server` gives the command to run by hand.
+- **In the server popup.** Add a server and Move sit at the bottom of the server popup, under its settings, since they're things to do rather than settings, and each has **Copy prompt**: a prompt to give one of the person's agents, which does the technical part with these tools. Technical jobs in the app offer one the same way.
 
 ## Sync: an event log with a cursor
 
@@ -340,7 +343,7 @@ Each agent program runs as its own process. The instance reads each one on a thr
 | `propose_skill`, `propose_note` | A skill or a note from past chats, which waits for the person to keep or drop it ([Teach a task](#sharing-and-learning)) |
 | Device tools | Your PC and phone, where you allow it ([Machines and devices](#machines-and-devices)) |
 | `list_commands`, `run_command` | Every loom command: agents, routines, tasks, plugins, MCP servers, agent programs, people, devices, moving ([Agents can do anything the app can](#agents-can-do-anything-the-app-can)) |
-| `add_server`, `install_server` | Another server in your app (asking first), and the command that puts loom on a new one ([Several servers in one app](#several-servers-in-one-app)) |
+| `add_server`, `install_server` | Another server in your app (asking first), and loom put on one of your hosts and signed in to, on one yes, or the command that installs it by hand ([Several servers in one app](#several-servers-in-one-app)) |
 | `html_preview`, `html_render` | A picture of a page of HTML and what its console said, and the page shown in the chat ([Pages in the chat](#pages-in-the-chat)) |
 | `show_card` | A card in the reply: choices that answer, a checklist, a table, progress or facts, changed in place as the work goes on ([Cards in the chat](#cards-in-the-chat)) |
 | `list_tables`, `create_table`, `write_rows`, `query_rows`, `delete_rows`, `drop_table` | Tables every agent of the person's shares, each its owner's, with what other agents wrote marked untrusted; dropping one asks first ([Shared tables](#shared-tables)) |
@@ -476,7 +479,7 @@ Servers you own, such as a VPS or a box at home, are devices too, so an agent re
 - **Kept with the computer that reaches them.** The keys are on your PC, so a host belongs to that PC's app: an SSH alias from `~/.ssh/config`, a Tailscale machine's name, or `user@name`. The app offers the ones it finds in the ssh config and on the tailnet (`tailscale status --json`), and you add one with a click or by typing it.
 - **Like This PC.** Each host is off, ask each time (the start) or allowed, set on that PC. Agents see it in `list_devices` as a host beside the PC that reaches it, and run commands there with `use_device`, which asks you first in the chat as This PC does. The PC signs your yes and checks it before it runs the command, so the instance can't say yes for you.
 - **Run on your PC.** The core runs `ssh` there (std.process), with `BatchMode` so it never waits for a password or a new host key nobody could answer, and the command after `--`. A host's name and target are only letters, digits and `.-_@:`, never starting with `-`, so neither is taken for one of ssh's options. The app only draws the Hosts page beside This PC in the server's settings.
-- **Commands only.** A host runs commands, which is what an agent needs to set a server up. Files and the rest go through commands.
+- **Commands, and installing loom.** A host runs commands, which is what an agent needs to set a server up. Files and the rest go through commands. Beside them, it takes one plan the person signs to install loom there and sign the app in, which always asks, even on a host whose commands are allowed ([Several servers in one app](#several-servers-in-one-app)).
 
 ## Memory
 
@@ -645,7 +648,7 @@ loom/
   desktop/    Rust: the GPUI app for Windows and macOS
   ios/        Swift: the iPhone app, its widgets, push extension and the Xcode project
   push/       Calx: the opt-in push relay (Phase 10)
-  site/       the public site and the docs
+  site/       the website, loom.rip, and the user guides
   tests/      the fake ACP agent, protocol and end-to-end tests
   scripts/    Calx: build, release, install
 ```
@@ -775,6 +778,5 @@ Nothing from v0.1's code carries over: the engine was Rust with its own model lo
 ## Open questions
 
 - **The word for an instance.** "Instance" is a placeholder.
-- **The domain**, for the site, invites and the push relay.
 - **The panel break-out test** at the start of Phase 7 ([The panel sandbox](#the-panel-sandbox)).
 - **The Calx checks** marked "Not documented" in [What Calx needs](#what-calx-needs).

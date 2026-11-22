@@ -20,7 +20,8 @@ import std.process.{exit}
 import shared.noise
 import shared.noise.{Joiner, Opened}
 import shared.obj.{Obj, at, bool_at, int_at, str_at}
-import tests.kit.{App, Instance, check, device, json_of}
+import shared.client.{Session, json_of}
+import tests.kit.{Instance, check, device}
 
 // A phone's side of /ws/noise.
 struct Phone {
@@ -94,7 +95,7 @@ fn json_headers() -> Json {
     return Obj.new().s("Content-Type", String("application/json")).done()
 }
 
-fn phones(app: mut App, id: str, on: bool) -> Json ! Error {
+fn phones(app: mut Session, id: str, on: bool) -> Json ! Error {
     let r = try app.cmd(id, "instance.phones", Obj.new().b("on", on).done())
     if bool_at(r.copy(), "ok") != some(true) { fail "instance.phones: {r}" }
     return at(r, "value")
@@ -102,7 +103,7 @@ fn phones(app: mut App, id: str, on: bool) -> Json ! Error {
 
 fn run() ! Error {
     var inst = try Instance.start_with([String("--lan")])
-    var app = try App.connect(inst.base.copy(), inst.token.copy(), 0)
+    var app = try Session.connect(inst.base.copy(), inst.token.copy(), 0)
 
     // Off until the owner turns phones on.
     let link0 = try app.cmd("q_1", "link.create", Obj.new().done())
@@ -165,7 +166,7 @@ fn run() ! Error {
     app.close()
     phone.ws.close()
     inst = try inst.restart_with([String("--lan")], 0)
-    var again = try App.connect(inst.base.copy(), inst.token.copy(), 0)
+    var again = try Session.connect(inst.base.copy(), inst.token.copy(), 0)
     let still = at(try again.cmd("q_4", "instance.phones", Obj.new().done()), "value")
     try check(bool_at(still.copy(), "on") == some(true) and int_at(still.copy(), "port") == some(port) and str_at(still, "key") == some(key.copy()), "phones stay on across a restart, on the same port with the same key")
     var back = try Phone.connect(port, key.copy())

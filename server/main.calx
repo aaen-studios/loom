@@ -35,6 +35,7 @@ import std.io
 import std.json.{Json, parse}
 import std.process.{Command, current_exe, exit}
 import std.thread.{sleep}
+import shared.client
 import shared.obj.{Obj, at, bool_at, merge, str_at}
 import shared.protocol
 import shared.release.{newer}
@@ -882,11 +883,8 @@ fn import_from_user(a: Args) -> Said ! Error {
     let where = str_at(staged.copy(), "path") ?? String()
     let brought = importer.summary(at(staged.copy(), "counts"))
     let base = if a.url.len() > 0 { a.url.copy() } else { env.variable(String("LOOM_URL")) ?? "http://127.0.0.1:{a.port}" }
-    var req = get("{base.trim_suffix("/")}/api/version", List<Header>(), 5000, 65536)
-    let set_up = match req.wait() {
-        ok(r) => if r.status == 200 { bool_at(json_text(String.from_utf8(r.body) ?? String()), "set_up") } else { none },
-        err(_) => none,
-    }
+    let (answered, _) = client.version(base.copy())
+    let set_up = bool_at(answered, "set_up")
     let waiting = Obj.new().s("from", String("openbot")).s("user", a.from_user.copy()).j("staged", staged.copy()).b("pending", true)
     if set_up == none { return said("Staged OpenBot's data from {a.from_user} in {where} ({brought}). No instance answers at {base}, so it comes in once loom runs and has its owner.", waiting.done()) }
     if set_up == some(false) { return said("Staged OpenBot's data from {a.from_user} in {where} ({brought}). It comes into the owner's account once they set loom up.", waiting.done()) }

@@ -18,7 +18,8 @@ import std.fs
 import std.json.{Json}
 import std.process.{Command, exit}
 import shared.obj.{Obj, at, int_at, str_at}
-import tests.kit.{App, Instance, calx, check, loom, reply_text}
+import shared.client.{Session, reply_text}
+import tests.kit.{Instance, calx, check, loom}
 
 const IMAGE: str = "localhost/loom-sandbox-test"
 
@@ -65,7 +66,7 @@ fn build_image(runtime: String) ! Error {
 const LONG: u32 = 600000
 
 // The agent's next message, which may take `wait_ms` to come.
-fn reply_in(app: mut App, wait_ms: u32) -> Json ! Error {
+fn reply_in(app: mut Session, wait_ms: u32) -> Json ! Error {
     loop {
         let created = try app.until("event", "message.created", wait_ms)
         let m = at(created, "message")
@@ -107,7 +108,7 @@ echo none
 // acp/, and starts her MCP server there too, a program only the image has.
 // The script has no environment there either, and Deno runs in the sandbox,
 // under its limits, while a call waits for her yes.
-fn code_mode(runtime: String, ann: mut App, ann_id: String) ! Error {
+fn code_mode(runtime: String, ann: mut Session, ann_id: String) ! Error {
     _ = try ann.cmd("q_10", "secret.put", Obj.new().s("name", String("FAKE_KEY")).s("value", String("s3cret")).done())
     let fake = Obj.new().s("name", String("fake")).s("command", String("/usr/local/bin/fake-mcp")).j("args", Json.Array(List<Json>())).j("env", Obj.new().j("FAKE_KEY", Obj.new().s("secret", String("FAKE_KEY")).done()).done()).done()
     _ = try ann.cmd("q_11", "mcp.put", fake)
@@ -147,11 +148,11 @@ fn run(runtime: String) ! Error {
     // A program that's only in the image, for the member.
     let added = try loom(inst.data.copy(), [String("acp"), String("add"), String("boxed"), String("/usr/local/bin/fake-agent")]).output()
     if not added.status.success() { fail "loom acp add failed: {added.error_text()}" }
-    var owner = try App.connect(inst.base.copy(), inst.token.copy(), 0)
+    var owner = try Session.connect(inst.base.copy(), inst.token.copy(), 0)
     _ = try owner.cmd("q_1", "acp.settings", Obj.new().s("name", String("boxed")).j("env", Obj.new().s("OWNER_KEY", String("the owner's own")).done()).done())
 
     let ann_token = try inst.second_account("ann")
-    var ann = try App.connect(inst.base.copy(), ann_token, 0)
+    var ann = try Session.connect(inst.base.copy(), ann_token, 0)
     _ = try ann.cmd("q_1", "secret.put", Obj.new().s("name", String("MY_KEY")).s("value", String("hers")).done())
     let made = try ann.cmd("q_2", "agent.create", Obj.new().s("name", String("Hers")).s("acp_agent", String("boxed")).s("instructions", String("Ann's agent.")).b("code_mode", false).s("folder", data.copy()).done())
     let agent = str_at(at(at(made, "value"), "agent"), "id") ?? String()

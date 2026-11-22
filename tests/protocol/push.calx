@@ -19,7 +19,8 @@ import std.text.utf8.{decode_lossy_unicode}
 import std.thread.{Task, sleep}
 import shared.obj.{Obj, at, bool_at, str_at}
 import server.store.{now}
-import tests.kit.{App, Instance, check, device, loom, post_json}
+import shared.client.{Session, post_json}
+import tests.kit.{Instance, check, device, loom}
 
 const TOKEN: str = "a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90"
 const GONE: str = "ffeeddccbbaa99887766554433221100ffeeddccbbaa99887766554433221100"
@@ -83,7 +84,7 @@ fn signed_by(auth: String, key: P256Key) -> bool {
 }
 
 fn set_up(i: Instance) ! Error {
-    var app = try App.connect(i.base.copy(), i.token.copy(), 0)
+    var app = try Session.connect(i.base.copy(), i.token.copy(), 0)
     let taken = try app.cmd("q_1", "push.register", Obj.new().s("token", String(TOKEN)).s("env", String("development")).done())
     try check(bool_at(taken, "ok") == some(true), "a device registers its APNs token")
     let short = try app.cmd("q_2", "push.register", Obj.new().s("token", String("abc")).done())
@@ -119,11 +120,11 @@ fn sending(i: Instance, seen: mut Receiver<String>) ! Error {
     // Two phones: one APNs takes, and one whose app was removed.
     let (_, login) = try post_json(i.base.copy(), "/api/login", Obj.new().s("username", String("elliot")).s("password", String("correct horse")).j("device", device("iPhone")).done())
     let (_, old_login) = try post_json(i.base.copy(), "/api/login", Obj.new().s("username", String("elliot")).s("password", String("correct horse")).j("device", device("Old iPhone")).done())
-    var old = try App.connect(i.base.copy(), str_at(old_login, "token") ?? String(), 0)
+    var old = try Session.connect(i.base.copy(), str_at(old_login, "token") ?? String(), 0)
     _ = try old.cmd("q_1", "push.register", Obj.new().s("token", String(GONE)).done())
     old.close()
     let phone_token = str_at(login, "token") ?? String()
-    var phone = try App.connect(i.base.copy(), phone_token.copy(), 0)
+    var phone = try Session.connect(i.base.copy(), phone_token.copy(), 0)
     _ = try phone.cmd("q_1", "push.register", Obj.new().s("token", String(TOKEN)).done())
     let made = try phone.cmd("q_2", "agent.create", Obj.new().s("name", String("Main")).s("acp_agent", String("fake")).s("instructions", String("Test.")).done())
     let agent = str_at(at(at(made, "value"), "agent"), "id") ?? String()
@@ -142,7 +143,7 @@ fn sending(i: Instance, seen: mut Receiver<String>) ! Error {
     try check(str_at(reply.copy(), "topic") == some(String("no.aaenz.loom")) and str_at(reply.copy(), "type") == some(String("alert")) and signed_by(str_at(reply, "auth") ?? String(), key), "as an alert for the app, with a provider token signed with the key")
 
     // At the desk, with the phone away: a question comes to the phone too.
-    var desk = try App.connect(i.base.copy(), i.token.copy(), 0)
+    var desk = try Session.connect(i.base.copy(), i.token.copy(), 0)
     try desk.send(Obj.new().s("t", String("send")).s("cid", String("m_2")).s("conversation", conversation.copy()).s("text", String("/ask rm -rf build\nok")).done())
     let needed = try desk.until("event", "approval.needed")
     let call = str_at(needed, "call") ?? String()
@@ -159,7 +160,7 @@ fn sending(i: Instance, seen: mut Receiver<String>) ! Error {
     _ = try desk.until("event", "run.finished")
 
     // With the phone open, it gets the notify over its connection, not as push.
-    var back = try App.connect(i.base.copy(), phone_token, 0)
+    var back = try Session.connect(i.base.copy(), phone_token, 0)
     try desk.send(Obj.new().s("t", String("send")).s("cid", String("m_4")).s("conversation", conversation).s("text", String(#"/mcp notify {"title":"Again","body":"Still failing."}"#)).done())
     _ = try back.until("event", "notify")
     _ = try desk.until("event", "run.finished")

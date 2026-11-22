@@ -11,7 +11,8 @@ import std.http.{Header, get, post}
 import std.json.{Json, parse}
 import std.process.{exit}
 import shared.obj.{Obj, at, bool_at, str_at}
-import tests.kit.{App, Instance, check, loom, reply_text}
+import shared.client.{Session, reply_text}
+import tests.kit.{Instance, check, loom}
 
 // A call to /api/scripts/OP: its status and its JSON. With `body`, a POST.
 fn call(base: String, token: String, op: str, body: Json?, extra: List<Header>) -> (u32, Json) ! Error {
@@ -30,7 +31,7 @@ fn call(base: String, token: String, op: str, body: Json?, extra: List<Header>) 
     return (got.status, j)
 }
 
-fn say(app: mut App, conversation: String, cid: str, text: String) -> String ! Error {
+fn say(app: mut Session, conversation: String, cid: str, text: String) -> String ! Error {
     try app.send(Obj.new().s("t", String("send")).s("cid", String(cid)).s("conversation", conversation.copy()).s("text", text).done())
     loop {
         let m = try app.reply()
@@ -43,7 +44,7 @@ fn code_of(j: Json) -> String {
 }
 
 fn run(i: Instance) ! Error {
-    var app = try App.connect(i.base.copy(), i.token.copy(), 0)
+    var app = try Session.connect(i.base.copy(), i.token.copy(), 0)
     let made = try app.cmd("q_1", "agent.create", Obj.new().s("name", String("Scribe")).s("acp_agent", String("fake")).s("instructions", String("You are a test.")).done())
     let agent = str_at(at(at(made, "value"), "agent"), "id") ?? String()
     _ = try app.cmd("q_2", "agent.create", Obj.new().s("name", String("Spare")).s("acp_agent", String("fake")).s("instructions", String("You are a test.")).done())

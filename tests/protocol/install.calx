@@ -1,0 +1,221 @@
+module tests.protocol.install
+
+// An agent installs loom on one of the person's hosts with install_server, on
+// one yes (PLAN.md, "Several servers in one app"). A real core runs as the PC
+// "Desk PC", with a stand-in for ssh (tests/fake_ssh) that plays the server:
+// its install prints what `loom install --json` would for a second, real
+// instance that no one has set up, with that instance's link code. The agent
+// asks from the laptop; the plan shows as a card, and the PC that reaches
+// the host is asked once. Its yes installs, imports OpenBot's data, signs the
+// app in with the link code (the test plays the app, as the core asks it to),
+// and checks /api/version there, each step changing the card, and the agent
+// never sees a code. A host whose install fails says what failed and what to
+// do next, and asks first even when its commands are allowed.
+//
+//     calx tests/protocol/install.calx
+import std.fs
+import std.json.{Json, parse}
+import std.process.{Child, Stdio, exit}
+import std.random.{Random}
+import std.time.{Instant}
+import shared.obj.{Obj, at, bool_at, str_at}
+import core.cache.{Cache}
+import core.conn.{Conn}
+import shared.client
+import shared.client.{Session, post_json, reply_text}
+import tests.kit.{Instance, calx, check, device, loom, remove_scratch}
+
+// The app's side of a core: what it sends the core, and what the core says.
+struct Core {
+    to_core: Sender<String>
+    from_core: Receiver<String>
+    thread: Thread?
+}
+
+impl Core {
+    fn start(base: String, token: String, cache: String, config: String, install: String) -> Core ! Error {
+        let inbox = Receiver<String>()
+        let to_core = inbox.sender()
+        let from_core = Receiver<String>()
+        var random = Random.system()
+        var conn = Conn.new(some("http://{base}"), some(token.copy()), "loom-test-{random.next_u32()}", try Cache.open(cache), inbox, from_core.sender())
+        let fake: List<String> = [calx(), try fs.absolute(String("tests/fake_ssh/main.calx")), String("--install"), install.copy()]
+        conn.host_programs(fake.copy(), fake, config)
+        let t = unsafe { Thread.spawn(conn) }
+        return Core { to_core: to_core, from_core: from_core, thread: some(t) }
+    }
+
+    fn send(mut self, frame: Json) {
+        self.to_core.send("{frame}")
+    }
+
+    // Reads what the core says until a frame whose `t` is `t` and whose `field`
+    // is `value`, if `field` isn't empty.
+    fn until(mut self, t: str, field: str, value: str) -> Json ! Error {
+        let start = unsafe { Instant.now() }
+        loop {
+            let waited = unsafe { Instant.now() }.nanos_since(start) / 1000000
+            if waited >= 90000 { fail "the core said no {t} {field}={value} in 90 s" }
+            let m = unsafe { self.from_core.wait_for((90000 - waited) * 1000000) } else { continue }
+            let f = try parse(m)
+            if (str_at(f.copy(), "t") ?? String()) != t { continue }
+            if field.len() == 0 or (str_at(f.copy(), field) ?? String()) == value { return f }
+        }
+    }
+
+    fn stop(mut self) {
+        self.to_core.send(String(#"{"t":"core.stop"}"#))
+        if let t = self.thread.take() {
+            t.join()
+        }
+    }
+}
+
+// A second instance, as one just installed: serving, with no owner yet.
+struct Fresh {
+    server: Child
+    data: String
+    base: String
+    link_code: String
+}
+
+fn fresh() -> Fresh ! Error {
+    let data = try fs.temp_dir()
+    let server = try loom(data.copy(), [String("serve"), String("--port"), String("0"), String("--allow-root")]).stdout(Stdio.Pipe).spawn()
+    let serving = server.wait_for_line(String("loom: serving"), 120000) else {
+        server.kill()
+        fail "the second instance didn't start"
+    }
+    let address = serving[serving.find("http://") ?? 0..].trim().trim_suffix("/").copy()
+    let code_line = server.wait_for_line(String("setup code:"), 10000) else {
+        server.kill()
+        fail "the second instance printed no setup code"
+    }
+    let link = client.new_link_code(address.copy(), code_line[12..].trim().copy()) ?? String()
+    return Fresh { server: server, data: data, base: address, link_code: link }
+}
+
+// The agent's next reply in `conversation`, as text.
+fn reply_in(app: mut Session, conversation: String) -> String ! Error {
+    loop {
+        let created = try app.until("event", "message.created", 120000)
+        let m = at(created, "message")
+        if str_at(m.copy(), "role") == some(String("agent")) and str_at(m.copy(), "conversation") == some(conversation.copy()) { return reply_text(m) }
+    }
+}
+
+fn post(app: Session, conversation: String, cid: str, text: String) ! Error {
+    try app.send(Obj.new().s("t", String("send")).s("cid", String(cid)).s("conversation", conversation).s("text", text).done())
+}
+
+// The newest card the laptop saw, as its items' text and done marks.
+fn last_card(app: Session) -> String {
+    var shown = String()
+    for f in app.frames {
+        if str_at(f.copy(), "t") != some(String("card")) { continue }
+        var lines = List<String>()
+        if let Json.Array(items) = at(at(f, "card"), "items") {
+            for item in items {
+                lines.push("{if bool_at(item.copy(), "done") == some(true) { "[x]" } else { "[ ]" }} {str_at(item, "text") ?? String()}")
+            }
+        }
+        shown = lines.join("\n")
+    }
+    return shown
+}
+
+fn run(i: Instance, two: Fresh, pc: mut Core, install: String) ! Error {
+    _ = try pc.until("core.conn", "state", "live")
+    let (answered, _) = client.version(two.base.copy())
+    let version = str_at(answered.copy(), "version") ?? String()
+    try check(bool_at(answered, "set_up") == some(false) and two.link_code.starts_with("loom-link-"), "a second instance, just installed, has no owner, and a link code that makes one")
+    let said = Obj.new().s("address", two.base.copy()).s("setup_code", String("SETUP-SECRET")).s("link_code", two.link_code.copy()).s("version", version.copy()).s("via", String("tailscale")).j("steps", Json.Array([Json.Str(String("made the loom user")), Json.Str(String("Tailscale serves it on HTTPS port 8443"))])).done()
+    try fs.write_text(install.copy(), "{said}")
+
+    pc.send(Obj.new().s("t", String("host.add")).s("target", String("root@vps")).s("via", String("ssh")).done())
+    _ = try pc.until("core.device", "", "")
+    pc.send(Obj.new().s("t", String("host.add")).s("target", String("broken")).s("via", String("tailscale")).done())
+    _ = try pc.until("core.device", "", "")
+    pc.send(Obj.new().s("t", String("host.set")).s("name", String("broken")).s("mode", String("allow")).done())
+    _ = try pc.until("core.device", "", "")
+
+    let (_, login) = try post_json(i.base.copy(), "/api/login", Obj.new().s("username", String("elliot")).s("password", String("correct horse")).j("device", device("Laptop")).done())
+    var app = try Session.connect(i.base.copy(), str_at(login, "token") ?? String(), 0)
+    let made = try app.cmd("q_1", "agent.create", Obj.new().s("name", String("Main")).s("acp_agent", String("fake")).s("instructions", String("Test.")).done())
+    let agent = str_at(at(at(made, "value"), "agent"), "id") ?? String()
+    let c = try app.cmd("q_2", "conversation.create", Obj.new().s("agent", agent.copy()).done())
+    let conversation = str_at(at(c, "value"), "conversation") ?? String()
+
+    try post(app, conversation.copy(), "m_1", String(#"/mcp install_server {"host":"nowhere"}"#))
+    try check((try reply_in(mut app, conversation.copy())).contains("nowhere isn't one of your person's hosts"), "install_server names a host the person has")
+    try post(app, conversation.copy(), "m_2", String(#"/mcp install_server {"host":"vps","import":"openbot","from_user":"root; id"}"#))
+    try check((try reply_in(mut app, conversation.copy())).contains("from_user is the Linux user"), "and what it imports from is only a user's name")
+
+    // --- The whole way, on one yes ---
+    try post(app, conversation.copy(), "m_3", String(#"/mcp install_server {"host":"vps","import":"openbot"}"#))
+    let asked = try app.until("event", "approval.needed")
+    try check(last_card(app) == "[ ] Install loom on vps, through Tailscale, on a free HTTPS port\n[ ] Import OpenBot's data from the user openbot, with its provider for Claude\n[ ] Sign the app on Desk PC in there, as its owner\n[ ] Check it answers at /api/version", "the plan comes first, as a card")
+    try check(str_at(asked.copy(), "title") == some(String("Install loom on vps, through Tailscale, import from OpenBot, link it to Desk PC")), "then one question, with the whole plan")
+    let request = str_at(asked.copy(), "request") ?? String()
+    try check(request.contains(#""tool":"install_loom""#) and request.contains(#""host":"vps""#) and request.contains(#""username":"elliot""#), "which the PC that reaches the host signs")
+    try check("{at(at(asked.copy(), "detail"), "commands")}".contains("install.sh | if [ \\\"$(id -u)\\\" = 0 ]; then sh -s -- --json --https-port auto;"), "and the person sees each command it runs there")
+    let call = str_at(asked, "call") ?? String()
+    _ = try pc.until("event", "kind", "approval.needed")
+    pc.send(Obj.new().s("t", String("approve")).s("call", call).b("allow", true).done())
+
+    let offer = try pc.until("core.offer", "", "")
+    try check(str_at(offer.copy(), "address") == some(two.base.copy()) and str_at(offer.copy(), "code") == some(two.link_code.copy()) and str_at(offer.copy(), "username") == some(String("elliot")), "the PC's yes installs and imports there, and the app is asked to sign in with the link code")
+    // As the app does with core.offer: a core for the new server, signed in with the code.
+    let (status, linked) = try client.link(two.base.copy(), two.link_code.copy(), String("elliot"), device("Desk PC"))
+    try check(status == 200 and bool_at(linked, "owner") == some(true), "which makes the person its owner, with nothing to type")
+
+    let reply = try reply_in(mut app, conversation.copy())
+    try check(reply.starts_with("install_server: Installed loom {version} on vps, at {two.base} (through Tailscale).") and reply.contains("- made the loom user"), "the agent hears what was installed, and where")
+    try check(reply.contains("Staged OpenBot's data from the user openbot, with its provider for Claude: 6 agents, 2 routines.") and reply.contains("Linked to your person's app") and reply.contains("Checked: loom {version} answers at {two.base}/api/version, set up."), "what came over, the link, and the check")
+    try check(not reply.contains(two.link_code.copy()) and not reply.contains("SETUP-SECRET"), "and never a code")
+    try check(last_card(app) == "[x] Installed loom {version} at {two.base} (through Tailscale)\n[x] Staged OpenBot's data: 6 agents, 2 routines\n[x] Signing this app in there\n[x] loom {version} answers at {two.base}", "each step changed the card as it went")
+    let (after, _) = client.version(two.base.copy())
+    try check(bool_at(after, "set_up") == some(true), "and the new server says it's set up")
+    let ran = try fs.read_text("{install}.ran") ?? String()
+    try check(ran.contains("root@vps: curl -fsSL https://github.com/aaen-studios/loom/releases/latest/download/install.sh | ") and ran.contains("root@vps: if [ \"$(id -u)\" = 0 ]; then /usr/local/bin/loom import openbot --from-user openbot --data /var/lib/loom --json --carry-provider;"), "the PC ran the plan's commands over ssh, as it made them from the plan")
+
+    // --- A failure partway ---
+    try post(app, conversation.copy(), "m_4", String(#"/mcp install_server {"host":"broken"}"#))
+    let again = try app.until("event", "approval.needed")
+    try check((str_at(again.copy(), "title") ?? String()).starts_with("Install loom on broken"), "an install asks even on a host whose commands are allowed")
+    _ = try pc.until("event", "kind", "approval.needed")
+    pc.send(Obj.new().s("t", String("approve")).s("call", str_at(again, "call") ?? String()).b("allow", true).done())
+    let failed = try reply_in(mut app, conversation.copy())
+    try check(failed.starts_with("install_server failed") and failed.contains("Installing loom on broken failed: Tailscale serves something at / or /api on every HTTPS port") and failed.contains("then call install_server again"), "a step that fails says what failed and what to do next")
+    try check(last_card(app).starts_with("[ ] Failed: Tailscale serves something") and last_card(app).contains("[ ] Sign the app on Desk PC in there"), "and the card shows where it stopped")
+    try check(not (try fs.read_text("{install}.ran") ?? String()).contains("broken: if ["), "nothing after it ran")
+
+    let logged = "{at(try app.cmd("q_3", "activity.list", Obj.new().s("agent", agent).done()), "value")}"
+    try check(logged.contains("Install loom on vps") and logged.contains("Failed: Install loom on broken"), "the activity log has both")
+    app.close()
+}
+
+fn main() ! Error {
+    let inst = try Instance.start()
+    var two = try fresh()
+    let folder = try fs.temp_dir()
+    let config = "{folder}/ssh_config"
+    try fs.write_text(config.copy(), String("Host vps\n    HostName 203.0.113.4\n    User root\n"))
+    let install = "{folder}/install.json"
+    var pc = try Core.start(inst.base.copy(), inst.token.copy(), "{folder}/core.db", config, install.copy())
+    let failure: String? = match run(inst.copy(), two.copy(), mut pc, install) {
+        ok => none,
+        err(e) => some("{e}"),
+    }
+    pc.stop()
+    two.server.kill()
+    _ = two.server.wait()
+    remove_scratch(two.data)
+    remove_scratch(folder)
+    inst.stop()
+    if let f = failure {
+        eprintln("\n{f}")
+        exit(1)
+    }
+    println("\ninstall: all good")
+}

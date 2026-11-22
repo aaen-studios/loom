@@ -1,15 +1,17 @@
 module tests.kit
 
 // What the protocol tests share: starting an instance with the fake agent,
-// HTTP calls, and an app's WebSocket session.
+// and files over HTTP. Logging in and an app's WebSocket session are
+// shared/client.calx's, as the command line has them.
 import std.env
 import std.fs
 import std.http.{Header, get, post}
-import std.http.websocket.{Message, WebSocket, connect}
-import std.json.{Json, parse}
+import std.json.{Json}
 import std.process.{Child, Command, Stdio}
 import std.thread.{sleep}
-import shared.obj.{Obj, at, int_at, str_at}
+import shared.client
+import shared.client.{json_of, post_json}
+import shared.obj.{Obj, str_at}
 
 const WAIT: u64 = 120000    // the first start builds the server and the agent
 
@@ -149,22 +151,9 @@ pub fn remove_scratch(data: String) {
     }
 }
 
+/// A device a test signs in, as the command line's would be.
 pub fn device(name: str) -> Json {
-    return Obj.new().s("name", String(name)).s("kind", String("cli")).s("tz", String("Europe/Oslo")).done()
-}
-
-pub fn post_json(base: String, path: str, body: Json) -> (u32, Json) ! Error {
-    let headers: List<Header> = [Header { name: String("Content-Type"), value: String("application/json") }]
-    var req = post("http://{base}{path}", headers, "{body}".to_bytes(), 30000, 1048576)
-    let r = try req.wait()
-    return (r.status, json_of(r.body))
-}
-
-pub fn json_of(body: List<u8>) -> Json {
-    return match parse(String.from_utf8(body.copy()) ?? String()) {
-        ok(v) => v,
-        err(_) => Json.Null,
-    }
+    return client.device(name, "cli", "Europe/Oslo")
 }
 
 fn auth(token: String) -> List<Header> {
@@ -186,86 +175,4 @@ pub fn fetch(base: String, token: String, path: String) -> (u32, String, List<u8
     var req = get("http://{base}{path}", auth(token), 30000, 104857600)
     let r = try req.wait()
     return (r.status, r.header(String("Content-Type")) ?? String(), r.body)
-}
-
-/// A connected app: its socket, and the newest seq it has applied.
-pub struct App {
-    ws: WebSocket
-    pub seq: i64
-    pub frames: List<Json>
-}
-
-impl App {
-    /// Opens /ws and says hello with `after`. Gives the app once it's synced.
-    pub fn connect(base: String, token: String, after: i64) -> App ! Error {
-        let ws = try connect("ws://{base}/ws")
-        var app = App { ws: ws, seq: after, frames: List<Json>() }
-        try app.send(Obj.new().s("t", String("hello")).s("token", token).j("versions", Json.Array([Json.Int(1)])).i("after", after).done())
-        _ = try app.until("synced", "")
-        return app
-    }
-
-    pub fn send(self, frame: Json) ! Error {
-        try self.ws.send_text("{frame}")
-    }
-
-    /// Reads frames until one whose `t` is `t` (and, for events, whose kind is `kind`),
-    /// and gives it. Every frame read is kept in `frames`. Each frame may take
-    /// `wait_ms` to come.
-    pub fn until(a: mut App, t: str, kind: str, wait_ms: u32 = 30000) -> Json ! Error {
-        loop {
-            let m = try a.ws.receive(wait_ms) else {
-                fail "no {t} {kind} came in {wait_ms / 1000} s"
-            }
-            let text = match m {
-                Message.Text(s) => s,
-                Message.Binary(_) => fail "a binary frame came",
-            }
-            let f = try parse(text)
-            if let seq = int_at(f.copy(), "seq") {
-                if (str_at(f.copy(), "t") ?? String()) == "event" {
-                    if seq != a.seq + 1 { fail "event {seq} came after {a.seq}" }
-                    a.seq = seq
-                }
-            }
-            a.frames.push(f.copy())
-            if (str_at(f.copy(), "t") ?? String()) == t and (kind.len() == 0 or (str_at(f.copy(), "kind") ?? String()) == kind) {
-                return f
-            }
-        }
-    }
-
-    pub fn cmd(a: mut App, id: str, name: str, args: Json) -> Json ! Error {
-        try a.send(Obj.new().s("t", String("cmd")).s("id", String(id)).s("name", String(name)).j("args", args).done())
-        loop {
-            let r = try a.until("result", "")
-            if (str_at(r.copy(), "id") ?? String()) == id { return r }
-        }
-    }
-
-    /// The agent's next finished message.
-    pub fn reply(a: mut App) -> Json ! Error {
-        loop {
-            let created = try a.until("event", "message.created")
-            let m = at(created, "message")
-            if str_at(m.copy(), "role") == some(String("agent")) { return m }
-        }
-    }
-
-    pub fn close(own self) {
-        self.ws.close()
-    }
-}
-
-/// The text of a message's text blocks, joined.
-pub fn reply_text(message: Json) -> String {
-    var out = String()
-    if let Json.Array(blocks) = at(message, "blocks") {
-        for b in blocks {
-            if (str_at(b.copy(), "kind") ?? String()) == "text" {
-                out.push_str(str_at(b, "text") ?? String())
-            }
-        }
-    }
-    return out
 }

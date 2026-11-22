@@ -13,7 +13,8 @@ module tests.protocol.isolated
 import std.json.{Json}
 import std.process.{exit}
 import shared.obj.{Obj, at, bool_at, str_at}
-import tests.kit.{App, Instance, check}
+import shared.client.{Session}
+import tests.kit.{Instance, check}
 
 fn code(r: Json) -> String {
     return str_at(at(r, "error"), "code") ?? String()
@@ -27,7 +28,7 @@ fn hosts(list: List<str>) -> Json {
 
 fn run() ! Error {
     let inst = try Instance.start()
-    var owner = try App.connect(inst.base.copy(), inst.token.copy(), 0)
+    var owner = try Session.connect(inst.base.copy(), inst.token.copy(), 0)
     let listed = try owner.cmd("q_1", "acp.list", Obj.new().done())
     try check(bool_at(at(listed, "value"), "sandboxes") == some(false), "acp.list says the instance has no sandboxes")
 
@@ -50,7 +51,7 @@ fn run() ! Error {
     try check(str_at(at(at(everything, "value"), "agent"), "name") == some(String("Mine still")), "a network of null, everything, is what it has already")
 
     let ann_token = try inst.second_account("ann")
-    var ann = try App.connect(inst.base.copy(), ann_token, 0)
+    var ann = try Session.connect(inst.base.copy(), ann_token, 0)
     let hers = try ann.cmd("q_1", "agent.create", Obj.new().s("name", String("Hers")).s("acp_agent", String("fake")).s("instructions", String("")).done())
     let her_agent = at(at(hers, "value"), "agent")
     try check(bool_at(her_agent.copy(), "isolated") == some(true), "a member's agents are always isolated")
