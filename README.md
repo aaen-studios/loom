@@ -1,38 +1,92 @@
-# Loom
+# loom
 
-A self-hostable agent app. You chat with your own AI agents from your PC and phone, and they do real work on your server, or on your PC if you don't want a server.
+loom is an app for chatting with your own AI agents from your computer and your phone. The agents do real work on a server of yours, or on your computer if you don't want a server.
 
-- Every agent runs on an existing agent program through the [Agent Client Protocol](https://agentclientprotocol.com): Claude Code, Codex, OpenCode, Gemini CLI and others. Loom runs everything around them: accounts, devices, conversations, memory, routines, approvals, push, plugins, and moving between machines.
-- The server and the app core are [Calx](https://calxlang.com). The desktop app is GPUI, on Windows and macOS. The iPhone app is Swift.
-- A server is optional. The desktop app can run the whole thing itself.
+Each agent runs on an agent program you already use, through the [Agent Client Protocol](https://agentclientprotocol.com): Claude Code, Codex, OpenCode, Gemini CLI and others. loom handles everything around them: accounts and the people you invite, devices, chats, memory, skills, routines, tasks, approvals, a browser, plugins, push, backups, and moving the whole thing between machines.
+
+## What it does
+
+- **Chats with your agents.** A reply reads as one answer, with what the agent did on the way folded under it. You can pin messages, branch a chat, ask on the side, queue or steer while it works, and move a chat to another agent program.
+- **Agents that can do anything the app can.** Every action in the app is also a tool, so an agent can make other agents, set up routines and plugins, invite people, install loom on a new server and move your instance there.
+- **Asks before it acts.** Each agent has a permission mode: ask first, ask when it's risky, or don't ask. Rules on commands, paths, sites and tools override the mode, and every action goes in an activity log.
+- **Your devices as tools.** Agents can run commands, read files and take screenshots on your computers, and on servers you reach over SSH or Tailscale, with each tool off, ask or allow.
+- **A browser for each agent.** You can watch it, take over, and record what you do to teach the agent a task.
+- **Memory, skills, routines and tasks.** Agents keep notes, learn skills, run on schedules or webhooks, and take on long jobs in chats of their own.
+- **Sandboxes.** On Linux, an agent can run in a sandbox with only the network hosts you allow. Members' agents always do.
+- **Several servers in one app.** The desktop app signs in to as many as you like, and can run one itself.
+- **Updates.** Releases are signed. The app checks while it's open, and one click updates the app and your servers.
+
+## Getting it
+
+**Windows.** Download `loom-setup.exe` from the [latest release](https://github.com/aaen-studios/loom/releases/latest). It installs for your user only, with no admin rights. On first start, choose to run loom on this computer, or sign in to a server.
+
+**A Linux server**, as root:
+
+```sh
+curl -fsSL https://github.com/aaen-studios/loom/releases/latest/download/install.sh | sudo sh
+```
+
+This makes a `loom` user and a systemd service. With `--domain loom.example.com` it puts Caddy in front for HTTPS, and without one it serves on your tailnet with Tailscale. It prints a one-time setup code, which you enter in the app to become the instance's owner.
+
+**Let an agent do it.** In the app, **Add a server** has **Copy prompt**: give that prompt to one of your agents, and it installs loom on one of your hosts, brings your OpenBot agents over if you have any, and signs the app in. You say yes once.
+
+**Docker.** Build the image from the [`Dockerfile`](Dockerfile), then:
+
+```sh
+docker run -d --name loom -p 127.0.0.1:8790:8790 -v loom-data:/data loom
+docker logs loom   # the setup code
+```
+
+Put a proxy with TLS in front of it.
+
+**Your phone.** In the desktop app, **Add a phone** shows a QR code. The phone reaches your computer over Noise, end to end, on your Wi-Fi or over Tailscale. Push notifications go through an opt-in relay and are sealed end to end. The iPhone app isn't released yet.
+
+**macOS.** The `loom` server runs on macOS. The Mac app isn't released yet.
 
 ## Status
 
-**Being rewritten.** The server, the core and the Windows app work: agents on ACP, approvals, devices as tools, memory, routines and webhooks, plugins and panels, push, backups, moving an instance, phones reaching an instance on a PC over Noise, and invites. The Mac and iPhone apps are next. [PLAN.md](PLAN.md) is the plan, and [protocol/protocol.md](protocol/protocol.md) is the wire protocol. Work is tracked on the [Acta board](https://acta.aaenz.no/aaen-studios/loom).
+loom 0.2 is a rewrite. The server and the Windows app are in daily use. The Mac and iPhone apps are being built. [PLAN.md](PLAN.md) is the plan, [protocol/protocol.md](protocol/protocol.md) is the wire protocol, and work is tracked on the [Acta board](https://acta.aaenz.no/aaen-studios/loom).
 
-## Running it
+The previous loom (0.1: a Rust engine with its own model loop, a React UI and Tauri) is at the [`v0.1`](https://github.com/aaen-studios/loom/tree/v0.1) tag. Its updater offers 0.2, which replaces it and leaves your 0.1 data in `~/.loom` where it is.
 
-- **On a Linux server**, as root: `curl -fsSL https://loom.rip/install.sh | sh`. It makes a `loom` user and a systemd service, and puts Caddy in front for TLS with `--domain`, or Tailscale without one. It prints the one-time setup code.
-- **In Docker**: `docker run -d --name loom -p 127.0.0.1:8790:8790 -v loom-data:/data ghcr.io/aaen-studios/loom`, then `docker logs loom` for the setup code. Put a proxy with TLS in front of it.
-- **With no server**: the desktop app runs an instance itself ("Run one on this computer").
+## How it's built
 
-The previous loom (v0.1: a Rust engine with its own model loop, a React UI, Tauri) is at the [`v0.1`](https://github.com/aaen-studios/loom/tree/v0.1) tag.
+| Part | Built with | What it does |
+|---|---|---|
+| Server | [Calx](https://calxlang.com) | Accounts, agents, chats, memory, routines, loom's tools and push. Runs on a server, or inside the desktop app |
+| Core | Calx, as a static library | Connection, sign-in, sync and the offline cache, shared by the desktop and iPhone apps |
+| Desktop app | Rust and [GPUI](https://www.gpui.rs) | Windows now, macOS next. Draws screens and reaches the system; everything else is in the core |
+| iPhone app | Swift and SwiftUI | Links the same core |
+
+The apps hold no logic, so the desktop and the phone can't disagree about data or the protocol.
+
+## Building
+
+You need [`calx`](https://calxlang.com) on your PATH, and for the desktop app, a recent stable Rust.
+
+```sh
+calx build server/main.calx -o loom      # the server: loom serve, loom install, …
+cd desktop && cargo run --release        # the desktop app; it builds the core itself
+calx scripts/check.calx                  # every Calx check and test, as CI runs them
+```
+
+The [desktop README](desktop/README.md), [server README](server/README.md) and [tests README](tests/README.md) have more.
 
 ## Layout
 
 | Folder | What's in it |
 |---|---|
-| [`protocol/`](protocol/) | The wire protocol between the apps and an instance |
-| [`shared/`](shared/) | Calx: the protocol's types and the command list, used by the server and the core |
-| [`server/`](server/) | Calx: the server, and the `loom` program |
-| [`core/`](core/) | Calx: the apps' core, a static library the desktop and iPhone apps link |
-| [`desktop/`](desktop/) | Rust: the GPUI app for Windows and macOS |
-| [`ios/`](ios/) | Swift: the iPhone app |
-| [`push/`](push/) | Calx: the opt-in push relay |
-| [`site/`](site/) | The website, [loom.rip](https://loom.rip), and the user guides |
-| [`design/`](design/) | Design tokens, generated into Rust, Swift and CSS |
-| [`tests/`](tests/) | The fake ACP agent, protocol and end-to-end tests |
-| [`scripts/`](scripts/) | Calx: build, release, install |
+| [`server/`](server/) | The server, and the `loom` program |
+| [`core/`](core/) | The apps' core |
+| [`shared/`](shared/) | Code the server and the core share: the protocol's types, the command list, the tools |
+| [`protocol/`](protocol/) | The wire protocol |
+| [`desktop/`](desktop/) | The GPUI app, and its installer in `desktop/setup/` |
+| [`ios/`](ios/) | The iPhone app |
+| [`push/`](push/) | The opt-in push relay |
+| [`design/`](design/) | Design tokens, generated into Rust, Swift and CSS, and the logo |
+| [`site/`](site/) | The website, [loom.rip](https://loom.rip) |
+| [`tests/`](tests/) | Fake agent programs and hosts, protocol tests, end-to-end tests and benchmarks |
+| [`scripts/`](scripts/) | Checks, tokens, icons and releases |
 
 ## License
 
