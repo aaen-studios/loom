@@ -39,6 +39,7 @@ pub struct Updater {
     asked_id: String?     // and its id for the answer
     found: Json           // the newer release's manifest, while its file comes
     key: String           // the public key releases are signed with, in hex
+    release: String?      // the newest release's version, from a checked manifest, until the core takes it
 }
 
 fn answer() -> Obj {
@@ -47,7 +48,7 @@ fn answer() -> Obj {
 
 impl Updater {
     pub fn new(version: own String, kind: own String, url: own String, dir: own String) -> Updater {
-        return Updater { version: version, kind: kind, url: url, dir: dir, step: Step.Waiting, next: some(unsafe { Instant.now() }), wait: FIRST_CHECK_NS, asked: false, asked_id: none, found: Json.Null, key: String(RELEASE_KEY) }
+        return Updater { version: version, kind: kind, url: url, dir: dir, step: Step.Waiting, next: some(unsafe { Instant.now() }), wait: FIRST_CHECK_NS, asked: false, asked_id: none, found: Json.Null, key: String(RELEASE_KEY), release: none }
     }
 
     /// The updater with another release key, for tests.
@@ -55,6 +56,11 @@ impl Updater {
         var u = self
         u.key = key_hex.copy()
         return u
+    }
+
+    /// The newest release's version, once a checked manifest has said it since the last call.
+    pub fn take_release(mut self) -> String? {
+        return self.release.take()
     }
 
     /// Looks now, for the app's `update.check`. The answer says what was found.
@@ -121,6 +127,8 @@ impl Updater {
                     return self.fail_check(String("the release manifest isn't signed with loom's release key"))
                 }
                 let version = str_at(manifest.copy(), "version") ?? String()
+                // Newer or not, the core compares it with its server's (core.release).
+                self.release = some(version.copy())
                 if not newer(version.copy(), self.version.copy()) {
                     let latest = answer().b("latest", true).s("version", self.version.copy())
                     return self.told(latest)

@@ -125,6 +125,14 @@ fn run(server: mut Child, data: String) ! Error {
     _ = try app.until("synced", "", "", 5000)
     println("ok    and says synced")
 
+    // --- Whether the instance is behind the newest release ---
+    app.send(Obj.new().s("t", String("release")).s("version", String("99.0.0")).done())
+    let behind = try app.until("core.server", "latest", String("99.0.0"), 5000)
+    try check(bool_at(behind.copy(), "behind") == some(true) and (str_at(behind, "loom") ?? String()).len() > 0, "a newer release than the instance's version makes it behind (core.server)")
+    app.send(Obj.new().s("t", String("release")).s("version", String("0.0.1")).done())
+    let ahead = try app.until("core.server", "latest", String("0.0.1"), 5000)
+    try check(bool_at(ahead, "behind") == some(false), "and an older one doesn't")
+
     // --- The app's frames go to the instance ---
     app.send(Obj.new().s("t", String("cmd")).s("id", String("q_1")).s("name", String("nothing.here")).j("args", Obj.new().done()).done())
     let listed = try app.until("result", "id", "q_1", 5000)

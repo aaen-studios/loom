@@ -29,6 +29,7 @@ import core.link
 import core.relay
 import core.pushbox
 import core.update.{Updater}
+import shared.release.{newer}
 import core.device.{Device}
 import std.fs
 
@@ -139,6 +140,9 @@ pub struct Conn {
     relay_place: String   // the place it goes to
     relay_url: String     // and where it listens
     push_relay: String?   // the push relay's key, base64, from welcome, when the instance pushes through one
+    loom: String          // the instance's own version, as welcome says it
+    latest: String        // the newest release's version, from this core's updater or the app ("release")
+    pub local: bool       // the instance is the one in this app, which updates with the app
 }
 
 impl Conn {
@@ -198,6 +202,9 @@ impl Conn {
             relay_place: String(),
             relay_url: String(),
             push_relay: none,
+            loom: String(),
+            latest: String(),
+            local: false,
         }
     }
 
@@ -465,7 +472,9 @@ impl Conn {
                 _ => String("An agent"),
             }
             let title = str_at(e.copy(), "title") ?? String()
-            self.tell(Obj.new().s("t", String("core.notify")).s("title", if title.len() > 0 { "{name}: {title}" } else { name }).s("body", str_at(e, "body") ?? String()).s("agent", agent_id).s("conversation", str_at(e, "conversation") ?? String()).s("kind", String("notify")).done())
+            // One from loom itself, with no agent, such as an update it made, is its title alone.
+            let shown = if agent_id.len() == 0 and title.len() > 0 { title.copy() } else if title.len() > 0 { "{name}: {title}" } else { name }
+            self.tell(Obj.new().s("t", String("core.notify")).s("title", shown).s("body", str_at(e, "body") ?? String()).s("agent", agent_id).s("conversation", str_at(e, "conversation") ?? String()).s("kind", String("notify")).done())
             return
         }
         if kind != "run.finished" and kind != "approval.needed" { return }
@@ -523,6 +532,8 @@ impl Conn {
                 }
             }
             self.push_relay = str_at(f.copy(), "relay")
+            self.loom = str_at(f.copy(), "loom") ?? String()
+            self.tell_server()
             self.state = State.Live
             self.failed = 0
             self.tell_state(0, String())
@@ -714,6 +725,12 @@ impl Conn {
             } else {
                 self.tell(Obj.new().s("t", String("core.update")).maybe("id", str_at(m, "id")).j("error", Obj.new().s("code", String("update")).s("message", String("This build doesn't update itself.")).done()).done())
             }
+            return true
+        }
+        // The newest release, as another server's core found it.
+        if t == "release" {
+            self.latest = str_at(m, "version") ?? String()
+            self.tell_server()
             return true
         }
         if t == "file.upload" or t == "file.get" {
@@ -1093,6 +1110,27 @@ impl Conn {
         if let s = said {
             self.tell(s)
         }
+        // The newest release, newer than the app or not: the app hands it to its other
+        // servers' cores, and each says whether its server is behind.
+        var release: String? = none
+        if let u = mut self.updater {
+            release = u.take_release()
+        }
+        if let v = release {
+            self.tell(Obj.new().s("t", String("core.release")).s("version", v.copy()).done())
+            self.latest = v
+            self.tell_server()
+        }
+    }
+
+    /// Tells the app the instance's version, the newest release's, and whether the
+    /// instance is behind it (`shared/release.calx`'s rule), once welcome has said its
+    /// version. The instance in this app updates with the app, so it's never behind.
+    fn tell_server(mut self) {
+        if self.loom.len() == 0 { return }
+        let behind = not self.local and self.latest.len() > 0 and newer(self.latest.copy(), self.loom.copy())
+        let frame = Obj.new().s("t", String("core.server")).maybe("server", self.server.copy()).s("loom", self.loom.copy()).s("latest", self.latest.copy()).b("behind", behind).done()
+        self.tell(frame)
     }
 
     /// Answers the transfers that have ended.

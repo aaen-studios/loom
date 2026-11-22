@@ -68,14 +68,17 @@ fn run() ! Error {
     let path = str_at(ready.copy(), "path") ?? String()
     try check(str_at(ready.copy(), "version") == some(String("0.3.0")) and str_at(ready.copy(), "notes") == some(String("Faster.")) and str_at(ready.copy(), "id") == some(String("u_1")), "a newer release is found, with its notes")
     try check(try fs.read_text(path) == some(String("new loom")), "and its file is downloaded and checked")
+    try check(u.take_release() == some(String("0.3.0")) and u.take_release() == none, "the updater says the newest release's version, once, for the core to compare with its server's")
 
     var same = Updater.new(String("0.3.0"), String("windows-desktop"), "{base}/good/manifest.json", keep.copy()).with_key(public.copy())
     try check(bool_at(try ask(mut same, "u_2"), "latest") == some(true), "an app with the newest release hears it's up to date")
+    try check(same.take_release() == some(String("0.3.0")), "and says the newest release's version even when it isn't newer than the app")
 
     let other = Ed25519Key.generate()
     try release("{root}/forged", "9.0.0", "evil".to_bytes(), other, "{base}/forged")
     var forged = Updater.new(String("0.2.0"), String("windows-desktop"), "{base}/forged/manifest.json", keep.copy()).with_key(public.copy())
     let refused = try ask(mut forged, "u_3")
+    try check(forged.take_release() == none, "but not a release whose manifest isn't signed with the key")
     try check(str_at(refused.copy(), "path") == none and "{refused}".contains("isn't signed"), "a release signed with another key is refused")
 
     try release("{root}/swapped", "0.4.0", "honest".to_bytes(), key, "{base}/swapped")
