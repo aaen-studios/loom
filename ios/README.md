@@ -17,6 +17,10 @@ open ios/Loom.xcodeproj
 
 [`scripts/ios.calx`](../scripts/ios.calx) builds `core/lib.calx` with `calx build --staticlib --target aarch64-ios` and `aarch64-ios-sim`, gives `loomcore.h` a module map so Swift imports it as `LoomCore`, puts both in `build/ios/LoomCore.xcframework`, and runs `xcodegen` with `LOOM_CORE=YES`, which includes [`core.yml`](core.yml) to link it. `Loom.xcodeproj` isn't kept in git: change [`project.yml`](project.yml) and run the script again.
 
+The app icon is the one [`scripts/icons.calx`](../scripts/icons.calx) makes, [`design/logo/ios/AppIcon.appiconset`](../design/logo/ios/AppIcon.appiconset), light, dark and tinted. Xcode's asset compiler doesn't follow links, so the script copies it into `build/ios/Icons.xcassets` each time, `--sample` too, and the project takes it from there.
+
+**The core doesn't build for iOS yet.** The Calx nightly's runtime includes `sys/random.h` and `libproc.h`, which the iOS SDKs don't have, so `calx build --target aarch64-ios-sim` stops there. The runtime on iOS ([CLX-408](https://acta.aaenz.no/aaen-studios/clx#CLX-408)) and std.net and std.http on iOS ([CLX-410](https://acta.aaenz.no/aaen-studios/clx#CLX-410)) are in review. Until they're in a nightly, only `--sample` builds, and the app can't reach an instance.
+
 A build without the core (`--sample`, or `xcodegen` run by hand) runs on [`SampleCore`](Loom/Core/SampleCore.swift): sample agents and chats, a reply that streams, and a question to answer, in the frames the core sends. SwiftUI previews use it too. With the core linked, `-sample` at launch runs on it as well.
 
 To run against an instance, set `LOOM_SERVER` in the scheme's environment, or type its address on the sign-in screen.
@@ -40,9 +44,9 @@ For a screenshot of each screen, launch it with `-sample`, and `-signedOut`, `-o
 
 ## Push
 
-Notifications show while the app runs, from the core's `core.notify`. Push to the lock screen comes with the instance's side ([LOO-47](https://acta.aaenz.no/aaen-studios/loom#LOO-47)). The place for it is ready:
+Notifications show while the app runs, from the core's `core.notify`. Push to the lock screen goes through APNs, from the instance or through the push relay ([protocol.md, "Push"](../protocol/protocol.md#push)):
 
 - **Permission**: Settings → Notifications asks, and on a yes the app registers with APNs.
-- **The token**: `Session.registered(pushToken:)` gets it, and sends the core the `push.register` command once `Session.pushRegisterReady` is turned on, when the instance has it.
+- **The token**: `Session.registered(pushToken:)` keeps it, and sends the core `push.register` with `token` and `env` on each `welcome`, since the core sends a command only while it's connected. The core seals it for the push relay when `welcome` has a `relay`.
 - **Allow and Deny**: an `approval.needed` notification has both, answered as `approve` without opening the app.
 - **Still to come**: the `aps-environment` entitlement, which needs the app signed with Elliot's Apple team, and the notification service extension for the push relay's encrypted notifications (Phase 10).

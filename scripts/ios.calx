@@ -10,7 +10,11 @@
 //    `aarch64-ios-sim`, into build/ios/<platform>/, with its header loomcore.h;
 // 2. gives the header a module map, so Swift imports it as `LoomCore`;
 // 3. puts the libraries in build/ios/LoomCore.xcframework, which the app links;
-// 4. runs `xcodegen` in ios/, with LOOM_CORE=YES so ios/core.yml links it.
+// 4. puts the app icon scripts/icons.calx makes, design/logo/ios/AppIcon.appiconset,
+//    in build/ios/Icons.xcassets, since Xcode's asset compiler doesn't follow links;
+// 5. runs `xcodegen` in ios/, with LOOM_CORE=YES so ios/core.yml links it.
+//
+// --sample does only the last two.
 //
 // CALX names the compiler to build with, `calx` otherwise.
 import std.env
@@ -45,6 +49,18 @@ fn core(target: str, folder: str, release: bool) ! Error {
     try fs.copy("{dir}/loomcore.h", "{dir}/include/loomcore.h")
 }
 
+/// The app's asset catalog, build/ios/Icons.xcassets, with the iPhone icon from
+/// design/logo/ios, made again each time so it has the icon as it is now.
+fn icons() ! Error {
+    let catalog = "{OUT}/Icons.xcassets"
+    if fs.exists(catalog.copy()) {
+        try fs.remove_dir_all(catalog.copy())
+    }
+    try fs.make_dir_all(catalog.copy())
+    try fs.write_text("{catalog}/Contents.json", String("\{\n  \"info\" : \{\n    \"author\" : \"xcode\",\n    \"version\" : 1\n  \}\n\}\n"))
+    try fs.copy_dir_all(String("design/logo/ios/AppIcon.appiconset"), "{catalog}/AppIcon.appiconset")
+}
+
 fn main() ! Error {
     if not fs.is_file(String("core/lib.calx")) or not fs.is_file(String("ios/project.yml")) {
         eprintln("run it from loom's root: calx scripts/ios.calx")
@@ -71,6 +87,7 @@ fn main() ! Error {
         try x.arg(String("-output")).arg(framework.copy()).run()
         println("made {OUT}/LoomCore.xcframework")
     }
+    try icons()
     var gen = Command.new(String("xcodegen")).arg(String("--quiet")).dir(String("ios"))
     gen = gen.env(String("LOOM_CORE"), String(if sample { "NO" } else { "YES" }))
     try gen.run()

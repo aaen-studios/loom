@@ -26,6 +26,10 @@ targets:
       - path: Loom
       - path: ../design/generated/Tokens.swift
         group: Loom/Design
+      # The app icon from design/logo/ios, which scripts/ios.calx puts in a catalog.
+      - path: ../build/ios/Icons.xcassets
+        group: Loom/Resources
+        optional: true
       - path: ../desktop/assets/fonts/Geist-Regular.ttf
         group: Loom/Resources/Fonts
       - path: ../desktop/assets/fonts/Geist-Medium.ttf

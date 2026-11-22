@@ -118,7 +118,7 @@ private struct Field_<Content: View>: View {
                 .font(Fonts.body)
                 .foregroundStyle(P.ink)
                 .padding(.horizontal, Tokens.Space.m)
-                .frame(minHeight: 46)
+                .frame(minHeight: Tokens.Control.buttonWide)
                 .background(P.raised, in: RoundedRectangle(cornerRadius: Tokens.Radius.input, style: .continuous))
                 .overlay(RoundedRectangle(cornerRadius: Tokens.Radius.input, style: .continuous).strokeBorder(P.line, lineWidth: 1))
         }

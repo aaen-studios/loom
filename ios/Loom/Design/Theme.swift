@@ -84,7 +84,7 @@ struct LoomButtonStyle: ButtonStyle {
         configuration.label
             .font(Fonts.ui(Tokens.PhoneSize.small, .medium))
             .padding(.horizontal, Tokens.Space.l)
-            .frame(maxWidth: wide ? .infinity : nil, minHeight: 44)
+            .frame(maxWidth: wide ? .infinity : nil, minHeight: wide ? Tokens.Control.buttonWide : 44)
             .foregroundStyle(primary ? P.buttonInk : P.ink)
             .background {
                 RoundedRectangle(cornerRadius: Tokens.Radius.button, style: .continuous)

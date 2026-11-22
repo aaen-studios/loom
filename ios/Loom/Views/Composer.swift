@@ -44,7 +44,7 @@ struct Composer: View {
                     Image(systemName: "plus")
                         .font(.system(size: 17, weight: .medium))
                         .foregroundStyle(P.ink2)
-                        .frame(width: 36, height: 36)
+                        .frame(width: Tokens.Control.iconComposer, height: Tokens.Control.iconComposer)
                         .contentShape(Circle())
                 }
                 .accessibilityLabel("Add photos or files")
@@ -68,7 +68,7 @@ struct Composer: View {
                     Image(systemName: busy && text.isEmpty && model.attachments.isEmpty ? "stop.fill" : "arrow.up")
                         .font(.system(size: 15, weight: .semibold))
                         .foregroundStyle(P.buttonInk)
-                        .frame(width: 34, height: 34)
+                        .frame(width: Tokens.Control.iconComposer, height: Tokens.Control.iconComposer)
                         .background(P.button, in: Circle())
                         .opacity(canSend || busy ? 1 : 0.35)
                 }
