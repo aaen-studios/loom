@@ -27,6 +27,9 @@ use crate::tokens::*;
 mod settings;
 use settings::{settings_found, settings_groups, system_dark};
 
+#[path = "rules.rs"]
+mod rules;
+
 /// The colours of one theme.
 #[derive(Clone, Copy)]
 pub struct Palette {
@@ -87,6 +90,7 @@ enum Screen {
     Memory,
     Profile,
     Defaults,
+    Rules,
     Routines,
     Tasks,
     Programs,
@@ -238,6 +242,21 @@ pub struct Loom {
     mcp_name_in: Entity<InputState>,
     mcp_cmd_in: Entity<InputState>,
     mcp_settings_in: Entity<TextareaState>,
+    /// The Rules page's form for a new rule, while it's open: what it does, what it's on,
+    /// what it matches, what the action does, who started the turn, and whose it is.
+    rule_open: bool,
+    rule_then: &'static str,
+    rule_on: &'static str,
+    rule_effect: &'static str,
+    rule_by: &'static str,
+    rule_agent: String,
+    rule_in: Entity<InputState>,
+    rule_note_in: Entity<InputState>,
+    /// The what-if: what it's on, who started the turn, and for which agent ("" for none).
+    check_on: &'static str,
+    check_by: &'static str,
+    check_agent: String,
+    check_in: Entity<InputState>,
     /// The program whose settings form is open, on the programs page.
     program_open: Option<String>,
     set_key_in: Entity<InputState>,
@@ -536,6 +555,9 @@ impl Loom {
         });
         let set_key_in = input(window, cx, "ANTHROPIC_API_KEY", false);
         let mcp_name_in = input(window, cx, "acta", false);
+        let rule_in = input(window, cx, "git push", false);
+        let rule_note_in = input(window, cx, "Why, for you later", false);
+        let check_in = input(window, cx, "git push origin main", false);
         let mcp_cmd_in = input(
             window,
             cx,
@@ -807,6 +829,18 @@ ACTA_KEY=secret:ACTA_KEY",
             mcp_name_in,
             mcp_cmd_in,
             mcp_settings_in,
+            rule_open: false,
+            rule_then: "deny",
+            rule_on: "command",
+            rule_effect: "",
+            rule_by: "",
+            rule_agent: String::new(),
+            rule_in,
+            rule_note_in,
+            check_on: "command",
+            check_by: "person",
+            check_agent: String::new(),
+            check_in,
             set_key_in,
             set_value_in,
             share_in,
@@ -933,6 +967,12 @@ ACTA_KEY=secret:ACTA_KEY",
                 for f in self.model.open_table(None) {
                     self.send(f);
                 }
+            }
+            Screen::Rules => {
+                let f = self.model.load_rules();
+                self.send(f);
+                self.rule_open = false;
+                self.model.what_if = None;
             }
             Screen::Defaults => {
                 // Shown as they were when the page opened, the instructions too.
@@ -1975,6 +2015,7 @@ ACTA_KEY=secret:ACTA_KEY",
             Screen::Server => self.server_page(cx),
             Screen::Profile => self.profile_page(cx),
             Screen::Defaults => self.defaults_page(cx),
+            Screen::Rules => self.rules_page(cx),
             Screen::Skills => self.skills_page(cx),
             Screen::Routines => self.routines_page(cx),
             Screen::Tasks => self.tasks_page(cx),

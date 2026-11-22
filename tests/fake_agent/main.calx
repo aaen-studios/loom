@@ -14,6 +14,10 @@ module tests.fake_agent.main
 //     /ask TITLE          a command (kind execute) that asks permission first,
 //                         and runs or fails by the answer
 //     /read TITLE         the same for a tool that only reads (kind read)
+//     /act KIND JSON      a tool call of KIND (execute, edit, fetch, ...) that asks
+//                         permission first, with JSON as its rawInput, its
+//                         locations from the JSON's "path", and its title from its
+//                         "title" (or KIND); says "allowed" or "denied"
 //     /slow MS            waits MS between chunks from here on
 //     /sleep MS           waits MS, or until the turn is cancelled
 //     /stop REASON        ends the turn with that stopReason (max_tokens, ...)
@@ -86,6 +90,7 @@ pub enum Step {
     Plan(List<String>)
     Tool(String)
     Ask(String, String)
+    Act(String, String)    // a kind, and the rawInput as JSON
     Slow(u64)
     Sleep(u64)
     Stop(String)
@@ -131,6 +136,9 @@ pub fn script(text: String) -> List<Step> {
             steps.push(Step.Tool(rest))
         } else if word == "/ask" {
             steps.push(Step.Ask(String("execute"), rest))
+        } else if word == "/act" {
+            let (kind, input) = split_word(rest.copy())
+            steps.push(Step.Act(kind, if input.len() > 0 { input } else { String(#"{}"#) }))
         } else if word == "/read" {
             steps.push(Step.Ask(String("read"), rest))
         } else if word == "/slow" {
@@ -372,13 +380,21 @@ impl Agent {
 
     // Asks the client's permission for a tool call. Gives whether it was
     // allowed, or none if the turn was cancelled first.
-    fn ask(a: mut Agent, session: String, tool: String, tool_kind: String, title: String) -> bool? {
+    fn ask(a: mut Agent, session: String, tool: String, tool_kind: String, title: String, raw: Json) -> bool? {
         a.next_id += 1
         let id = a.next_id
         var call = LinkedMap<String, Json>()
         call.insert("toolCallId", js(tool))
         call.insert("title", js(title))
         call.insert("kind", js(tool_kind))
+        if raw != Json.Null {
+            if let p = raw.get(String("path")) {
+                var place = LinkedMap<String, Json>()
+                place.insert("path", p.copy())
+                call.insert("locations", Json.Array([Json.Object(place)]))
+            }
+            call.insert("rawInput", raw.copy())
+        }
         var options = List<Json>()
         for kind in "allow_once allow_always reject_once reject_always".split(" ") {
             var o = LinkedMap<String, Json>()
@@ -595,7 +611,7 @@ impl Agent {
                 },
                 Step.Ask(kind, title) => {
                     let tool = a.tool_call(session.copy(), kind.copy(), title.copy())
-                    match a.ask(session.copy(), tool.copy(), kind.copy(), title.copy()) {
+                    match a.ask(session.copy(), tool.copy(), kind.copy(), title.copy(), Json.Null) {
                         some(true) => {
                             tool_update(session.copy(), tool.copy(), "in_progress", String())
                             tool_update(session.copy(), tool, "completed", "ran: {title}")
@@ -606,6 +622,30 @@ impl Agent {
                             reason = String("cancelled")
                         },
                     }
+                },
+                Step.Act(kind, input) => {
+                    let raw = match parse(input.copy()) {
+                        ok(j) => j,
+                        err(_) => Json.Null,
+                    }
+                    let title = (raw.get(String("title")) ?? Json.Null).as_str() ?? kind.copy()
+                    let tool = a.tool_call(session.copy(), kind.copy(), title.copy())
+                    let said = match a.ask(session.copy(), tool.copy(), kind.copy(), title, raw) {
+                        some(true) => {
+                            tool_update(session.copy(), tool, "completed", String("ran"))
+                            "allowed"
+                        },
+                        some(false) => {
+                            tool_update(session.copy(), tool, "failed", String("denied"))
+                            "denied"
+                        },
+                        none => {
+                            tool_update(session.copy(), tool, "failed", String("cancelled"))
+                            reason = String("cancelled")
+                            "cancelled"
+                        },
+                    }
+                    chunk(session.copy(), "agent_message_chunk", String(said))
                 },
                 Step.Slow(ms) => slow = ms,
                 Step.Sleep(ms) => {
