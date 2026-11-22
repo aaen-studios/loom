@@ -11556,13 +11556,9 @@ fn reply(
                         }
                         shown_any = true;
                     }
-                    Tools::Hidden => {
-                        // Only one that failed or was refused, which the person should know.
-                        for b in run.iter().filter(|b| went_wrong(b)) {
-                            body = body.child(tool_line(p, b, tools));
-                            shown_any = true;
-                        }
-                    }
+                    // None, failed ones too: the agent says so itself when a failure
+                    // matters to the person.
+                    Tools::Hidden => {}
                     Tools::Folded => {
                         let fold = format!("fold/{key}");
                         let opened = open.contains(&fold);

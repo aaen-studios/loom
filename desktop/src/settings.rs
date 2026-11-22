@@ -317,7 +317,7 @@ impl Loom {
             cx,
         );
         let tools_sub = match self.prefs.tools {
-            Tools::Hidden => "Only one that failed shows",
+            Tools::Hidden => "None, failed ones too",
             Tools::Folded => "One line for each run, to open",
             Tools::All => "Each on its own line",
         };
