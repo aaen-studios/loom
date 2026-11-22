@@ -30,7 +30,8 @@ import core.conn.{Conn}
 import core.pushbox
 import server.push.{relay_request}
 import server.store.{now}
-import tests.kit.{App, Instance, calx, check, device, post_json}
+import shared.client.{Session, post_json}
+import tests.kit.{Instance, calx, check, device}
 
 const TOKEN: str = "a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90"
 const GONE: str = "ffeeddccbbaa99887766554433221100ffeeddccbbaa99887766554433221100"
@@ -172,14 +173,14 @@ fn ask_relay(url: String, seed: List<u8>, time: i64, token: String, sent_body: s
 
 fn through(inst: Instance, relay_url: String, relay_key: String, apns_base: String, service: String, key: P256Key, seen: mut Receiver<String>) ! Error {
     // The owner turns it on, at a relay, and anyone sees it.
-    var desk = try App.connect(inst.base.copy(), inst.token.copy(), 0)
+    var desk = try Session.connect(inst.base.copy(), inst.token.copy(), 0)
     let off = try desk.cmd("q_1", "instance.relay", Obj.new().done())
     try check(bool_at(at(off, "value"), "on") == some(false), "the push relay is off at first")
     let wrong = try desk.cmd("q_2", "instance.relay", Obj.new().s("url", apns_base).done())
     try check(str_at(at(wrong, "error"), "code") == some(String("unreachable")), "an address that isn't a push relay is refused")
     _ = try pushed(mut seen)    // it asked the fake APNs for a key
     let member = try inst.second_account("sam")
-    var theirs = try App.connect(inst.base.copy(), member, 0)
+    var theirs = try Session.connect(inst.base.copy(), member, 0)
     let not_owner = try theirs.cmd("q_1", "instance.relay", Obj.new().s("url", relay_url.copy()).done())
     let early = try theirs.cmd("q_2", "push.register", Obj.new().s("sealed", sealed_for(relay_key.copy(), TOKEN, "production")).s("box", base64(X25519Key.generate().public_key().bytes())).done())
     try check(str_at(at(not_owner, "error"), "code") == some(String("not_allowed")) and str_at(at(early, "error"), "code") == some(String("not_here")), "only the owner turns it on, and a sealed token waits for it")

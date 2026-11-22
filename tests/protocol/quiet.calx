@@ -12,16 +12,17 @@ module tests.protocol.quiet
 import std.json.{Json}
 import std.process.{exit}
 import shared.obj.{Obj, at, bool_at, int_at, str_at}
-import tests.kit.{App, Instance, check, reply_text}
+import shared.client.{Session, reply_text}
+import tests.kit.{Instance, check}
 
-fn put(app: mut App, id: str, name: str, prompt: str) -> String ! Error {
+fn put(app: mut Session, id: str, name: str, prompt: str) -> String ! Error {
     let r = try app.cmd(id, "routine.put", Obj.new().s("name", String(name)).s("agent", String("Main")).s("prompt", String(prompt)).j("schedule", Obj.new().i("every", 600).done()).b("notify", true).done())
     return str_at(at(at(r, "value"), "routine"), "id") ?? String()
 }
 
 // Runs routine `id` by hand and gives the routine once its run has ended, with
 // the frames that came meanwhile.
-fn run_once(app: mut App, q: str, id: String) -> (Json, List<Json>) ! Error {
+fn run_once(app: mut Session, q: str, id: String) -> (Json, List<Json>) ! Error {
     let from = app.frames.len()
     let ran = try app.cmd(q, "routine.run", Obj.new().s("id", id.copy()).done())
     if bool_at(ran.copy(), "ok") != some(true) { fail "routine.run refused: {ran}" }
@@ -49,7 +50,7 @@ fn kinds(frames: List<Json>, kind: str) -> List<Json> {
 }
 
 fn run(i: Instance) ! Error {
-    var app = try App.connect(i.base.copy(), i.token.copy(), 0)
+    var app = try Session.connect(i.base.copy(), i.token.copy(), 0)
     _ = try app.cmd("q_a", "agent.create", Obj.new().s("name", String("Main")).s("acp_agent", String("fake")).s("instructions", String("Test.")).done())
 
     // Quiet: nothing is left in the chat, and no one hears.

@@ -15,7 +15,8 @@ import std.time.{Instant}
 import shared.obj.{Obj, at, str_at}
 import core.cache.{Cache}
 import core.conn.{Conn}
-import tests.kit.{App, Instance, check, remove_scratch, loom}
+import shared.client.{Session}
+import tests.kit.{Instance, check, remove_scratch, loom}
 
 // The app's side of a core: what it sends the core, and what the core tells it.
 struct Core {
@@ -69,7 +70,7 @@ fn moving(i: Instance, core: mut Core) -> (String, String) ! Error {
     let said = try parse(line.trim().copy())
     let listening = str_at(said.copy(), "listening") ?? String()
     let port = listening[(listening.find_last(":") ?? 0) + 1..].copy()
-    var owner = try App.connect(i.base.copy(), i.token.copy(), 0)
+    var owner = try Session.connect(i.base.copy(), i.token.copy(), 0)
     let done = try owner.cmd("q_1", "instance.move", Obj.new().s("to", str_at(said.copy(), "listening") ?? String()).s("code", str_at(said, "code") ?? String()).done())
     try check(at(done, "ok") == Json.Bool(true), "the instance moves with a core connected")
     owner.close()

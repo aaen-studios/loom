@@ -14,9 +14,10 @@ import std.json.{Json}
 import std.process.{exit}
 import std.thread.{sleep}
 import shared.obj.{Obj, at, str_at}
-import tests.kit.{App, Instance, check, remove_scratch, fetch, loom, reply_text, upload}
+import shared.client.{Session, reply_text}
+import tests.kit.{Instance, check, remove_scratch, fetch, loom, upload}
 
-fn reply_in(app: mut App, conversation: String) -> String ! Error {
+fn reply_in(app: mut Session, conversation: String) -> String ! Error {
     loop {
         let created = try app.until("event", "message.created")
         let m = at(created, "message")
@@ -24,7 +25,7 @@ fn reply_in(app: mut App, conversation: String) -> String ! Error {
     }
 }
 
-fn say(app: mut App, conversation: String, cid: str, text: str) -> String ! Error {
+fn say(app: mut Session, conversation: String, cid: str, text: str) -> String ! Error {
     try app.send(Obj.new().s("t", String("send")).s("cid", String(cid)).s("conversation", conversation.copy()).s("text", String(text)).done())
     return try reply_in(mut app, conversation)
 }
@@ -32,7 +33,7 @@ fn say(app: mut App, conversation: String, cid: str, text: str) -> String ! Erro
 // Fills the instance, exports it while it runs, and imports it into a new
 // folder. Gives that folder, and the uploaded file's SHA-256.
 fn before(i: Instance) -> (String, String) ! Error {
-    var app = try App.connect(i.base.copy(), i.token.copy(), 0)
+    var app = try Session.connect(i.base.copy(), i.token.copy(), 0)
     _ = try app.cmd("q_1", "secret.put", Obj.new().s("name", String("KEY")).s("value", String("s3cret-value")).done())
     _ = try app.cmd("q_2", "mcp.put", Obj.new().s("name", String("tool")).s("command", String("tool-server")).j("env", Obj.new().j("KEY", Obj.new().s("secret", String("KEY")).done()).done()).done())
     let made = try app.cmd("q_3", "agent.create", Obj.new().s("name", String("Main")).s("acp_agent", String("fake")).s("instructions", String("Test.")).b("code_mode", false).j("mcp", Json.Array([Json.Str(String("tool"))])).done())
@@ -59,7 +60,7 @@ fn before(i: Instance) -> (String, String) ! Error {
 }
 
 fn after(i: Instance, sha: String) ! Error {
-    var app = try App.connect(i.base.copy(), i.token.copy(), 0)
+    var app = try Session.connect(i.base.copy(), i.token.copy(), 0)
     // The instance's events came too, so they replay on connecting.
     var agent = String()
     for f in app.frames {

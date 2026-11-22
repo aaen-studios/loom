@@ -9,7 +9,8 @@ import std.fs
 import std.json.{Json}
 import std.process.{Child, Stdio, exit}
 import shared.obj.{Obj, at, bool_at, str_at}
-import tests.kit.{check, device, fetch, json_of, loom, post_json, remove_scratch}
+import shared.client.{json_of, post_json}
+import tests.kit.{check, device, fetch, loom, remove_scratch}
 
 fn version(base: String) -> (u32, Json) ! Error {
     let (status, _, body) = try fetch(base, String(), String("/api/version"))

@@ -12996,11 +12996,11 @@ fn thousands(n: i64) -> String {
 
 /// What "Copy prompt" gives for moving the instance, for an agent in loom to do it with
 /// its tools (move_instance, install_server), asking the person what it needs.
-const MOVE_PROMPT: &str = "Move my loom instance to another server for me. Ask me where it should go (a server I can reach, or one to rent) if I haven't said. If loom isn't on it yet, use install_server to get the command that puts it there, and run it or walk me through it. Then use move_instance to move this instance there, and tell me when it's done and what changed for me.";
+const MOVE_PROMPT: &str = "Move my loom instance to another server for me. Ask me where it should go (a server I can reach, or one to rent) if I haven't said. If loom isn't on it yet, use install_server: with the host, if it's one of my hosts (list_devices, kind host), which installs it on my one yes, and otherwise to get the command that puts it there, and run it or walk me through it. Then use move_instance to move this instance there, and tell me when it's done and what changed for me.";
 
 /// What "Copy prompt" gives for adding a server, for an agent in loom to set it up with
 /// its tools (install_server, add_server).
-const ADD_SERVER_PROMPT: &str = "Set up a new loom server for me and add it to my app. Ask me where it should run (a server I can reach, or a VPS to rent) if I haven't said. Use install_server to get the command that installs loom there, and run it or walk me through it. Then use add_server with its address and the link code loom install --json gave, so one yes from me signs my app in there, and tell me what to do next.";
+const ADD_SERVER_PROMPT: &str = "Set up a new loom server for me and add it to my app. Ask me where it should run (a server I can reach, or a VPS to rent) if I haven't said. If it's one of my hosts (list_devices, kind host), use install_server with that host, and import openbot if OpenBot runs there: it shows me the plan, and my one yes installs loom, brings OpenBot over and signs my app in. Otherwise use install_server to get the command that installs loom there, run it or walk me through it, and use add_server with its address and the link code loom install --json gave. Tell me what's done and what to do next.";
 
 /// What "Copy prompt" gives on the Plugins page, for an agent in loom to build one with
 /// its tools (save_plugin), asking the person what it should do.

@@ -3,26 +3,40 @@ module tests.fake_ssh.main
 // A stand-in for `ssh` and `tailscale`, for testing the person's hosts
 // (PLAN.md, "Your hosts") without reaching a real server.
 //
-//     calx tests/fake_ssh/main.calx -o BatchMode=yes -o ConnectTimeout=15 TARGET -- COMMAND
+//     calx tests/fake_ssh/main.calx [--install FILE] -o BatchMode=yes -o ConnectTimeout=15 TARGET -- COMMAND
 //         says "TARGET ran: COMMAND" and exits 0; for the target `down`, says
 //         ssh couldn't connect and exits 255. Says which options it was given
 //         when the command is `options`.
+//
+//         With --install, it plays a server loom is installed on: the install
+//         script's command prints what's in FILE, as `loom install --json`
+//         would, and `loom import openbot` what it stages. On the target
+//         `broken`, the install fails as Tailscale with no port free does. Each
+//         command it's given is added to FILE.ran, a line each.
 //     calx tests/fake_ssh/main.calx status --json
 //         says what `tailscale status --json` would: this machine, and the
 //         peers box (Linux) and phone (iOS).
 import std.env
+import std.fs
 import std.process.{exit}
 
 const TAILNET: str = #"{"Self":{"DNSName":"desk.tail1.ts.net.","OS":"windows"},"Peer":{"k1":{"DNSName":"box.tail1.ts.net.","HostName":"box","OS":"linux"},"k2":{"DNSName":"phone.tail1.ts.net.","HostName":"phone","OS":"iOS"}}}"#
+const STAGED: str = #"{"from":"openbot","user":"openbot","staged":{"path":"/var/lib/loom/imports/openbot","counts":{"agents":6,"routines":2}},"pending":true}"#
+const NO_PORT: str = #"{"error":{"code":"failed","message":"Tailscale serves something at / or /api on every HTTPS port loom tries (443, 8443, 10000, 10001, 10002, 10003): give one with --https-port N"}}"#
 
-fn main() {
+fn main() ! Error {
     let a = env.args()
     if a.len() > 0 and a[0] == "status" {
         println(TAILNET)
         return
     }
-    var options = List<String>()
     var i: usize = 0
+    var install = String()
+    if a.len() > 1 and a[0] == "--install" {
+        install = a[1].copy()
+        i = 2
+    }
+    var options = List<String>()
     while i < a.len() and a[i] == "-o" and i + 1 < a.len() {
         options.push(a[i + 1].copy())
         i += 2
@@ -40,6 +54,22 @@ fn main() {
     if command == "options" {
         println(options.join(" "))
         return
+    }
+    if install.len() > 0 {
+        try fs.append("{install}.ran", "{target}: {command}\n".to_bytes())
+        if command.contains("install.sh") {
+            println("loom: fetching the newest release")
+            if target == "broken" {
+                println(NO_PORT)
+                exit(1)
+            }
+            println((try fs.read_text(install) ?? String()).trim())
+            return
+        }
+        if command.contains(" import openbot ") {
+            println(STAGED)
+            return
+        }
     }
     println("{target} ran: {command}")
 }

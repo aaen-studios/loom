@@ -11,10 +11,10 @@ module server.setup
 // the setup code, and a link code for an agent to add it to the person's app.
 import std.env
 import std.fs
-import std.http.{Header, post}
 import std.json.{Json, parse}
 import std.process.{Command, current_exe, which}
 import std.thread.{sleep}
+import shared.client
 import shared.obj.{Obj, at, bool_at, str_at}
 
 pub const USER: str = "loom"
@@ -401,18 +401,7 @@ fn setup_code() -> String? ! Error {
 /// A link code that makes the owner, from the instance on `port` for its setup code
 /// (POST /api/link/new), for an agent to hand to add_server. None if it didn't answer.
 fn link_code(port: u16, setup: String) -> String? {
-    let headers: List<Header> = [Header { name: String("Content-Type"), value: String("application/json") }]
-    let body = Obj.new().s("setup_code", setup).done()
-    var req = post("http://127.0.0.1:{port}/api/link/new", headers, "{body}".to_bytes(), 10000, 65536)
-    let r = match req.wait() {
-        ok(r) => r,
-        err(_) => return none,
-    }
-    if r.status != 200 { return none }
-    return match parse(String.from_utf8(r.body) ?? String()) {
-        ok(j) => str_at(j, "code"),
-        err(_) => none,
-    }
+    return client.new_link_code("http://127.0.0.1:{port}", setup)
 }
 
 /// What `loom install` says once it's done, as JSON.

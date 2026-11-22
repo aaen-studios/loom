@@ -18,8 +18,12 @@ import shared.obj.{Obj, at, bool_at, int_at, str_at}
 import core.cache.{Cache}
 import core.hosts
 import core.hosts.{Host}
+import core.install.{Install}
+import shared.hosts.{install_plan}
 
 // What a device offers, as the instance and the app name them.
+// What a host does beside commands: put loom on it, as a plan the person signed.
+pub const INSTALL: str = "install_loom"
 pub const TOOLS: [str; 7] = ["run_command", "read_file", "list_files", "open", "screenshot", "read_clipboard", "write_clipboard"]
 // The ones the app does, since they need the system's screen and clipboard:
 // the core checks the call as for any tool, then asks the app.
@@ -56,6 +60,7 @@ pub struct Device {
     scan: Child?    // `tailscale status --json`, while hosts are being found
     scan_ssh: List<String>    // what the ssh config named, meanwhile
     scan_out: List<u8>    // what Tailscale said so far
+    installs: List<Install>    // loom going onto the person's hosts (core/install.calx)
 }
 
 fn hex(b: List<u8>) -> String {
@@ -110,7 +115,7 @@ impl Device {
     }
 
     fn with_key(key: own Ed25519Key, id: own String) -> Device {
-        return Device { key: key, modes: Map<String, String>(), done: List<String>(), running: List<Running>(), asked: List<String>(), id: id, hosts: List<Host>(), ssh: [String("ssh")], tailscale: [hosts.tailscale_program()], ssh_config: hosts.ssh_config_path(), scan: none, scan_ssh: List<String>(), scan_out: List<u8>() }
+        return Device { key: key, modes: Map<String, String>(), done: List<String>(), running: List<Running>(), asked: List<String>(), id: id, hosts: List<Host>(), ssh: [String("ssh")], tailscale: [hosts.tailscale_program()], ssh_config: hosts.ssh_config_path(), scan: none, scan_ssh: List<String>(), scan_out: List<u8>(), installs: List<Install>() }
     }
 
     pub fn public_key(self) -> String {
@@ -302,11 +307,15 @@ impl Device {
                 if h.name == host_name { host = some(Host { name: h.name.copy(), target: h.target.copy(), via: h.via.copy(), mode: h.mode.copy() }) }
             }
             if host == none { return some(refused(call, "This device has no host {host_name}.")) }
-            if tool != "run_command" { return some(refused(call, "A host only runs commands.")) }
+            if tool != "run_command" and tool != INSTALL { return some(refused(call, "A host only runs commands, and installs loom.")) }
+        } else if tool == INSTALL {
+            return some(refused(call, String("loom is installed on one of the person's hosts.")))
         }
         let mode = if let h = host { h.mode.copy() } else { self.mode(tool.copy()) }
         if mode == "off" { return some(refused(call, if host_name.len() > 0 { "Commands are off on {host_name}. The person can turn them on in their app." } else { "{tool} is off on this device. The person can turn it on in its app." })) }
-        if mode == "ask" and not self.trusted(text.copy(), at(f, "approval")) {
+        // An install runs several commands on one yes, so it always needs one,
+        // even on a host that's allowed.
+        if (mode == "ask" or tool == INSTALL) and not self.trusted(text.copy(), at(f, "approval")) {
             return some(refused(call, String("The person's yes for this didn't come from this device, so it isn't done. Approve it on this device.")))
         }
         if self.done.contains(call.copy()) { return some(refused(call, String("That request was done already."))) }
@@ -326,6 +335,16 @@ impl Device {
                 self.asked.push(call.copy())
                 return some(Obj.new().s("t", String("core.device_ask")).s("call", call).s("tool", tool.copy()).j("args", args).done())
             }
+        }
+        // loom onto the host, as the plan the person signed says: its commands
+        // are made here, from the plan (core/install.calx).
+        if tool == INSTALL {
+            let (plan, why) = install_plan(args)
+            if why.len() > 0 { return some(refused(call, why)) }
+            let h = host else return some(refused(call, "This device has no host {host_name}."))
+            let (i, first) = Install.start(call, h, plan, self.ssh.copy())
+            if not i.done() { self.installs.push(i) }
+            return some(first)
         }
         if tool == "run_command" {
             let command = str_at(args, "command") ?? String()
@@ -380,9 +399,18 @@ impl Device {
         return some(r.done())
     }
 
-    /// The results of commands that have ended.
-    pub fn poll(mut self) -> List<Json> {
+    /// The results of commands that have ended, and how installs on the
+    /// person's hosts are going: `device.progress` and `device.result` for the
+    /// instance, and `core.offer` for the app, when one is ready to sign in to.
+    pub fn poll(mut self, now_ms: i64) -> List<Json> {
         var out = List<Json>()
+        var going = List<Install>()
+        while self.installs.len() > 0 {
+            var i = self.installs.remove(0)
+            out.extend(i.poll(now_ms))
+            if not i.done() { going.push(i) }
+        }
+        self.installs = going
         var still = List<Running>()
         while self.running.len() > 0 {
             var run = self.running.remove(0)
@@ -474,6 +502,27 @@ fn hosts_are_kept_and_go_by_their_own_mode() {
     assert("{again.hosts_json()}".contains(#""mode":"ask""#))
     d.remove_host(cache, String("vps"))!
     assert("{d.hosts_json()}" == "[]")
+}
+
+@test
+fn installs_only_on_its_own_yes() {
+    let cache = Cache.open(String(":memory:"))!
+    var d = Device.with_key(Ed25519Key.generate(), String("d_1"))
+    assert(d.add_host(cache, Obj.new().s("target", String("root@vps")).done())! == none)
+    d.set_host(cache, String("vps"), String("allow"))!
+    let request = "{Obj.new().s("call", String("tc_1")).s("device", String("d_1")).s("host", String("vps")).s("tool", String(INSTALL)).j("args", Obj.new().s("domain", String("x; rm -rf /")).done()).i("at", 1000).done()}"
+    // Allowed commands or not, an install waits for this device's own signed yes.
+    let unsigned = d.call(cache, Obj.new().s("call", String("tc_1")).s("request", request.copy()).done(), 1000) ?? Json.Null
+    assert((str_at(unsigned, "output") ?? String()).contains("didn't come from this device"))
+    // Signed, the plan is still checked before anything runs.
+    let yes = d.sign(request.copy())
+    let signed = d.call(cache, Obj.new().s("call", String("tc_1")).s("request", request.copy()).j("approval", yes).done(), 1000) ?? Json.Null
+    assert((str_at(signed, "output") ?? String()).starts_with("domain is"))
+    // And it's only for a host.
+    let here = "{Obj.new().s("call", String("tc_2")).s("device", String("d_1")).s("tool", String(INSTALL)).j("args", Obj.new().done()).i("at", 1000).done()}"
+    let also = d.sign(here.copy())
+    let mine = d.call(cache, Obj.new().s("call", String("tc_2")).s("request", here).j("approval", also).done(), 1000) ?? Json.Null
+    assert((str_at(mine, "output") ?? String()).contains("on one of the person's hosts"))
 }
 
 @test

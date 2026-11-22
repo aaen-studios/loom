@@ -9,9 +9,10 @@ module tests.protocol.tables
 import std.json.{Json, parse}
 import std.process.{exit}
 import shared.obj.{Obj, at, int_at, str_at}
-import tests.kit.{App, Instance, check, reply_text}
+import shared.client.{Session, reply_text}
+import tests.kit.{Instance, check}
 
-fn reply_in(app: mut App, conversation: String) -> String ! Error {
+fn reply_in(app: mut Session, conversation: String) -> String ! Error {
     loop {
         let created = try app.until("event", "message.created")
         let m = at(created, "message")
@@ -19,13 +20,13 @@ fn reply_in(app: mut App, conversation: String) -> String ! Error {
     }
 }
 
-fn say(app: mut App, conversation: String, cid: str, text: String) -> String ! Error {
+fn say(app: mut Session, conversation: String, cid: str, text: String) -> String ! Error {
     try app.send(Obj.new().s("t", String("send")).s("cid", String(cid)).s("conversation", conversation.copy()).s("text", text).done())
     return try reply_in(mut app, conversation)
 }
 
 // An agent's call of `tool`, with `args`.
-fn call(app: mut App, conversation: String, cid: str, tool: str, args: Json) -> String ! Error {
+fn call(app: mut Session, conversation: String, cid: str, tool: str, args: Json) -> String ! Error {
     return try say(mut app, conversation, cid, "/mcp {tool} {args}")
 }
 
@@ -43,7 +44,7 @@ fn rows_of(v: Json) -> List<Json> {
     return List<Json>()
 }
 
-fn agent(app: mut App, id: str, conversation_id: str, name: str) -> (String, String) ! Error {
+fn agent(app: mut Session, id: str, conversation_id: str, name: str) -> (String, String) ! Error {
     let made = try app.cmd(id, "agent.create", Obj.new().s("name", String(name)).s("acp_agent", String("fake")).s("instructions", String("You are a test.")).done())
     let a = str_at(at(at(made, "value"), "agent"), "id") ?? String()
     let c = try app.cmd(conversation_id, "conversation.create", Obj.new().s("agent", a.copy()).done())
@@ -51,7 +52,7 @@ fn agent(app: mut App, id: str, conversation_id: str, name: str) -> (String, Str
 }
 
 fn run(i: Instance) ! Error {
-    var app = try App.connect(i.base.copy(), i.token.copy(), 0)
+    var app = try Session.connect(i.base.copy(), i.token.copy(), 0)
     let (owner, chat_a) = try agent(mut app, "q_1", "q_1c", "Keeper")
     let (_, chat_b) = try agent(mut app, "q_2", "q_2c", "Helper")
 

@@ -13,10 +13,11 @@ module tests.protocol.routines
 import std.json.{Json}
 import std.process.{exit}
 import shared.obj.{Obj, at, bool_at, int_at, str_at}
-import tests.kit.{App, Instance, check, reply_text}
+import shared.client.{Session, reply_text}
+import tests.kit.{Instance, check}
 
 // The next reply in `conversation`, as text.
-fn reply_in(app: mut App, conversation: String) -> String ! Error {
+fn reply_in(app: mut Session, conversation: String) -> String ! Error {
     loop {
         let created = try app.until("event", "message.created")
         let m = at(created, "message")
@@ -24,14 +25,14 @@ fn reply_in(app: mut App, conversation: String) -> String ! Error {
     }
 }
 
-fn say(app: mut App, conversation: String, cid: str, text: String) -> String ! Error {
+fn say(app: mut Session, conversation: String, cid: str, text: String) -> String ! Error {
     try app.send(Obj.new().s("t", String("send")).s("cid", String(cid)).s("conversation", conversation.copy()).s("text", text).done())
     return try reply_in(mut app, conversation)
 }
 
 // The next routine.updated event for routine `id` that says its last run
 // is `status`.
-fn last_is(app: mut App, id: String, status: str) -> Json ! Error {
+fn last_is(app: mut Session, id: String, status: str) -> Json ! Error {
     loop {
         let e = try app.until("event", "routine.updated")
         let r = at(e, "routine")
@@ -40,7 +41,7 @@ fn last_is(app: mut App, id: String, status: str) -> Json ! Error {
 }
 
 // Waits for run `run` to finish, if it hasn't already.
-fn finished(app: mut App, run_id: String) ! Error {
+fn finished(app: mut Session, run_id: String) ! Error {
     for f in app.frames {
         if str_at(f.copy(), "kind") == some(String("run.finished")) and str_at(f.copy(), "run") == some(run_id.copy()) { return }
     }
@@ -51,7 +52,7 @@ fn finished(app: mut App, run_id: String) ! Error {
 }
 
 fn run(i: Instance) -> i64 ! Error {
-    var app = try App.connect(i.base.copy(), i.token.copy(), 0)
+    var app = try Session.connect(i.base.copy(), i.token.copy(), 0)
     let made = try app.cmd("q_1", "agent.create", Obj.new().s("name", String("Main")).s("acp_agent", String("fake")).s("instructions", String("Test.")).done())
     let agent = str_at(at(at(made, "value"), "agent"), "id") ?? String()
 
@@ -135,7 +136,7 @@ fn run(i: Instance) -> i64 ! Error {
 
 // Off for a few of their gaps: Quiet waits for its next time, and Loud runs once.
 fn after_restart(i: Instance, seq: i64) ! Error {
-    var app = try App.connect(i.base.copy(), i.token.copy(), seq)
+    var app = try Session.connect(i.base.copy(), i.token.copy(), seq)
     // What came while it connected first, as the catch-up replays it, then what comes live.
     var seen = List<Json>()
     for f in app.frames {

@@ -18,9 +18,10 @@ import std.json.{Json, parse}
 import std.process.{Child, Stdio, exit}
 import shared.obj.{Obj, at, int_at, str_at}
 import shared.protocol.{moved_message}
-import tests.kit.{App, Instance, check, remove_scratch, fetch, loom, reply_text, upload}
+import shared.client.{Session, reply_text}
+import tests.kit.{Instance, check, remove_scratch, fetch, loom, upload}
 
-fn reply_in(app: mut App, conversation: String) -> String ! Error {
+fn reply_in(app: mut Session, conversation: String) -> String ! Error {
     loop {
         let created = try app.until("event", "message.created")
         let m = at(created, "message")
@@ -28,7 +29,7 @@ fn reply_in(app: mut App, conversation: String) -> String ! Error {
     }
 }
 
-fn say(app: mut App, conversation: String, cid: str, text: String) -> String ! Error {
+fn say(app: mut Session, conversation: String, cid: str, text: String) -> String ! Error {
     try app.send(Obj.new().s("t", String("send")).s("cid", String(cid)).s("conversation", conversation.copy()).s("text", text).done())
     return try reply_in(mut app, conversation)
 }
@@ -42,7 +43,7 @@ fn some_code() -> String {
 }
 
 // The key `welcome` gave the app.
-fn welcome_key(app: App) -> String {
+fn welcome_key(app: Session) -> String {
     for f in app.frames {
         if str_at(f.copy(), "t") == some(String("welcome")) { return str_at(f.copy(), "key") ?? String() }
     }
@@ -76,7 +77,7 @@ fn hello_there(base: String, token: String) -> Json ! Error {
 // Fills the instance and moves it. Gives the new place's folder, the app's
 // event number, the key, and the uploaded file's SHA-256.
 fn moving(i: Instance) -> (String, i64, String, String) ! Error {
-    var app = try App.connect(i.base.copy(), i.token.copy(), 0)
+    var app = try Session.connect(i.base.copy(), i.token.copy(), 0)
     let key = welcome_key(app)
     try check(key.len() > 0, "welcome carries the instance's key")
     let made = try app.cmd("q_1", "agent.create", Obj.new().s("name", String("Main")).s("acp_agent", String("fake")).s("instructions", String("Test.")).done())
@@ -89,7 +90,7 @@ fn moving(i: Instance) -> (String, i64, String, String) ! Error {
 
     // Only the owner moves it.
     let bob = try i.second_account("bob")
-    var bobs = try App.connect(i.base.copy(), bob, 0)
+    var bobs = try Session.connect(i.base.copy(), bob, 0)
     let not_owner = try bobs.cmd("q_b", "instance.move", Obj.new().s("to", String("http://127.0.0.1:1")).s("code", some_code()).done())
     try check(code(not_owner) == "not_allowed", "only the owner moves the instance")
     bobs.close()
@@ -133,7 +134,7 @@ fn moving(i: Instance) -> (String, i64, String, String) ! Error {
 }
 
 fn arrived(i: Instance, seq: i64, key: String, sha: String) ! Error {
-    var app = try App.connect(i.base.copy(), i.token.copy(), seq)
+    var app = try Session.connect(i.base.copy(), i.token.copy(), seq)
     try check(welcome_key(app) == key, "at the new place, the same token works, and the key is the same")
     var reset = true
     for f in app.frames {

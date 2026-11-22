@@ -9,9 +9,10 @@ module tests.protocol.summary
 import std.fs
 import std.process.{exit}
 import shared.obj.{Obj, at, int_at, str_at}
-import tests.kit.{App, Instance, check}
+import shared.client.{Session}
+import tests.kit.{Instance, check}
 
-fn reply_in(app: mut App, conversation: String) ! Error {
+fn reply_in(app: mut Session, conversation: String) ! Error {
     loop {
         let created = try app.until("event", "message.created")
         let m = at(created, "message")
@@ -20,7 +21,7 @@ fn reply_in(app: mut App, conversation: String) ! Error {
 }
 
 fn run(i: Instance) ! Error {
-    var app = try App.connect(i.base.copy(), i.token.copy(), 0)
+    var app = try Session.connect(i.base.copy(), i.token.copy(), 0)
     let made = try app.cmd("q_1", "agent.create", Obj.new().s("name", String("Main")).s("acp_agent", String("fake")).s("instructions", String("You are a test.")).done())
     let agent = str_at(at(at(made, "value"), "agent"), "id") ?? String()
     let other = try app.cmd("q_2", "agent.create", Obj.new().s("name", String("Other")).s("acp_agent", String("fake")).s("instructions", String("You are a test.")).done())
