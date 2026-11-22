@@ -50,6 +50,7 @@ pub mod radius {
 
 pub mod layout {
     pub const SIDEBAR: f32 = 260.0;
+    pub const RAIL: f32 = 56.0;
     pub const TITLEBAR: f32 = 48.0;
     pub const SETTINGS: f32 = 600.0;
     pub const PAGE: f32 = 520.0;

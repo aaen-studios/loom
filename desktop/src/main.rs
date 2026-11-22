@@ -14,6 +14,7 @@ mod panel_test;
 mod perf;
 mod place;
 mod prefs;
+mod rail;
 mod shell;
 mod smooth;
 mod thread;

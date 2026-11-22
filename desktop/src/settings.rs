@@ -75,7 +75,7 @@ fn page_words(screen: Screen) -> &'static str {
         Screen::Profile => "profile you name instructions what agents know",
         Screen::Appearance => "theme dark light mode system colours colors text size font fonts geist code monospace bigger smaller",
         Screen::ChatPrefs => {
-            "tool calls tools hidden folded thoughts thinking send enter ctrl composer replies messages bubbles plain style"
+            "tool calls tools hidden folded thoughts thinking send enter ctrl composer replies messages bubbles plain style search sidebar find"
         }
         Screen::AppPrefs => {
             "start login startup tray close background awake sleep notifications sound preview updates version restart"
@@ -366,9 +366,18 @@ impl Loom {
             |p, v| p.ctrl_enter = v,
             cx,
         )];
+        let sidebar = vec![self.pref_switch(
+            "pref-search",
+            "Search in the sidebar",
+            "Ctrl+F searches either way",
+            self.prefs.search,
+            |p, v| p.search = v,
+            cx,
+        )];
         let groups = vec![
             self.group(Some("Replies"), replies),
             self.group(Some("Composer"), composer),
+            self.group(Some("Sidebar"), sidebar),
         ];
         self.settings_page("chat-prefs-page", "Chat", None, groups)
     }

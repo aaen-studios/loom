@@ -311,6 +311,10 @@ pub struct Loom {
     side_w: Option<f32>,
     /// While the panel's edge is dragged: where the pointer and the width started.
     side_drag: Option<(f32, f32)>,
+    /// The sidebar, whole or a rail (rail.rs).
+    bar: crate::rail::Sidebar,
+    /// Whether Ctrl+F showed the search box while the prefs hide it, until it's cleared.
+    search_peek: bool,
     /// The browser panel's focus, so keys go to the page while the person has it.
     browser_keys: FocusHandle,
     /// The page beside the sidebar (its screen and agent), and when it last changed.
@@ -860,6 +864,8 @@ ACTA_KEY=secret:ACTA_KEY",
                 .ok()
                 .and_then(|w| w.trim().parse().ok()),
             side_drag: None,
+            bar: crate::rail::Sidebar::load(&data_dir()),
+            search_peek: false,
             browser_keys: cx.focus_handle(),
             page: ((Screen::Chat, None), Instant::now()),
             scene: ("", Instant::now()),
@@ -919,9 +925,11 @@ ACTA_KEY=secret:ACTA_KEY",
 
     /// Esc steps back: closes a menu, the server form, a page, or a step of making an
     /// agent, whichever is on top.
-    fn escape(&mut self, cx: &mut Context<Self>) {
+    fn escape(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.menu.is_some() {
             self.menu = None;
+        } else if self.popup.is_none() && (self.search_peek || !self.model.query.is_empty()) {
+            self.end_search(window, cx);
         } else if self.popup.is_some() {
             self.popup = None;
         } else if self.side.is_some() && self.screen == Screen::Chat {
@@ -948,6 +956,63 @@ ACTA_KEY=secret:ACTA_KEY",
 
     fn send(&self, frame: Value) {
         self.core.send(&frame.to_string());
+    }
+
+    // --- The sidebar, whole or a rail (rail.rs) ---
+
+    /// How wide what's open beside the chat is at the least, for whether the window has
+    /// room for the whole sidebar too.
+    fn beside(&self) -> f32 {
+        let open = self.screen == Screen::Chat
+            && (self.side.is_some() || self.browser_docked && self.model.watching.is_some());
+        if open {
+            SIDE_LEAST
+        } else {
+            0.0
+        }
+    }
+
+    /// Whether the sidebar is a rail, in a window `window` wide.
+    fn railed(&self, window: f32) -> bool {
+        self.bar.railed(window, self.beside())
+    }
+
+    /// How wide the sidebar is, once it's done moving, in a window `window` wide.
+    fn bar_width(&self, window: f32) -> f32 {
+        self.bar.width(window, self.beside())
+    }
+
+    /// The person's collapse or open, from the sidebar's control or Ctrl+B.
+    fn toggle_bar(&mut self, window: &Window, cx: &mut Context<Self>) {
+        let w = window.viewport_size().width.as_f32();
+        self.bar.toggle(w, self.beside());
+        self.bar.save(&data_dir());
+        cx.notify();
+    }
+
+    /// Ctrl+F: the search box, opening the sidebar if it's a rail and showing the box
+    /// if the prefs hide it.
+    fn find(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let w = window.viewport_size().width.as_f32();
+        if self.railed(w) {
+            self.bar.open(w, self.beside());
+            self.bar.save(&data_dir());
+        }
+        if !self.prefs.search {
+            self.search_peek = true;
+        }
+        self.search_in.update(cx, |s, cx| s.focus(window, cx));
+        cx.notify();
+    }
+
+    /// Clears the search, and hides the box again if only Ctrl+F showed it.
+    fn end_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.search_in
+            .update(cx, |s, cx| s.set_value("", window, cx));
+        self.model.search("");
+        self.search_peek = false;
+        window.focus(&self.keys, cx);
+        cx.notify();
     }
 
     /// Does what the core asks of this computer for an agent, once it has checked the
@@ -1769,6 +1834,7 @@ ACTA_KEY=secret:ACTA_KEY",
         let width = side_width(
             side == Screen::Plugins || side == Screen::Page,
             window.viewport_size().width.as_f32(),
+            self.bar_width(window.viewport_size().width.as_f32()),
             self.side_w,
         );
         let name = self
@@ -3260,7 +3326,7 @@ ACTA_KEY=secret:ACTA_KEY",
                         }
                         let w = window.viewport_size().width.as_f32();
                         let to = start + from - e.position.x.as_f32();
-                        this.side_w = Some(side_width(true, w, Some(to)));
+                        this.side_w = Some(side_width(true, w, this.bar_width(w), Some(to)));
                         cx.notify();
                     });
                 });
@@ -3348,7 +3414,10 @@ ACTA_KEY=secret:ACTA_KEY",
         let tint = thread::color(&agent.color, p.dark);
         let state = self.model.browser(&agent.id);
         self.decode_page(window);
-        let width = side_width(true, window.viewport_size().width.as_f32(), self.side_w);
+        let width = {
+            let ww = window.viewport_size().width.as_f32();
+            side_width(true, ww, self.bar_width(ww), self.side_w)
+        };
         let inner = width - 2.0 * space::L;
         let (fw, fh) = self
             .model
@@ -4199,9 +4268,7 @@ ACTA_KEY=secret:ACTA_KEY",
                     .cursor_pointer()
                     .soft_hover(transparent_black(), p.hover, None)
                     .on_click(cx.listener(move |this, _, window, cx| {
-                        this.search_in
-                            .update(cx, |s, cx| s.set_value("", window, cx));
-                        this.model.search("");
+                        this.end_search(window, cx);
                         this.select(id.clone(), cx);
                     }))
                     .child(
@@ -4247,7 +4314,9 @@ ACTA_KEY=secret:ACTA_KEY",
         list
     }
 
-    fn sidebar(&mut self, cx: &mut Context<Self>) -> Div {
+    /// The whole sidebar: the knot and the wordmark, the + and the collapse, search when
+    /// it's shown, the agents, and at the foot the server, the update icon and the gear.
+    fn whole_sidebar(&mut self, cx: &mut Context<Self>) -> Div {
         let p = self.p;
         let searching = !self.model.query.trim().is_empty();
         let mut list = div().flex().flex_col().gap(px(2.0)).px(px(space::S));
@@ -4343,6 +4412,7 @@ ACTA_KEY=secret:ACTA_KEY",
         }
         let server_open = self.popup.is_some_and(is_server);
         let settings_open = self.popup.is_some() && !server_open;
+        let search_shown = self.prefs.search || self.search_peek || searching;
         div()
             .w(px(layout::SIDEBAR))
             .h_full()
@@ -4350,9 +4420,6 @@ ACTA_KEY=secret:ACTA_KEY",
             .flex_none()
             .flex()
             .flex_col()
-            .bg(p.side)
-            .border_r_1()
-            .border_color(p.line)
             .child(
                 div()
                     .id("side-top")
@@ -4361,7 +4428,8 @@ ACTA_KEY=secret:ACTA_KEY",
                     .flex()
                     .items_center()
                     .justify_between()
-                    .px(px(space::L))
+                    .pl(px(space::L))
+                    .pr(px(space::M))
                     // The knot, and the wordmark beside it (design/logo/README.md).
                     .child(
                         div()
@@ -4385,33 +4453,26 @@ ACTA_KEY=secret:ACTA_KEY",
                     )
                     .child(
                         div()
-                            .id("new-agent")
-                            .occlude()
-                            .size(px(control::ICON_SMALL))
                             .flex()
                             .items_center()
-                            .justify_center()
-                            .rounded(px(radius::ROW))
-                            .text_color(p.ink_2)
-                            .cursor_pointer()
-                            .soft_hover(transparent_black(), p.hover, None)
-                            .child(Icon::new(IconName::Plus).small())
-                            .on_click(
-                                cx.listener(|this, _, _, cx| this.open(Screen::NewAgent, cx)),
-                            ),
+                            .gap(px(2.0))
+                            .child(self.new_agent_button("new-agent", control::ICON_SMALL, cx))
+                            .child(self.bar_button(false, cx)),
                     ),
             )
-            .child(
-                div()
-                    .px(px(space::M))
-                    .pb(px(space::S))
-                    .text_size(px(size::SMALL))
-                    .child(
-                        Input::new(&self.search_in)
-                            .prefix(Icon::new(IconName::Search).small().text_color(p.ink_3))
-                            .cleanable(true),
-                    ),
-            )
+            .when(search_shown, |d| {
+                d.child(
+                    div()
+                        .px(px(space::M))
+                        .pb(px(space::S))
+                        .text_size(px(size::SMALL))
+                        .child(
+                            Input::new(&self.search_in)
+                                .prefix(Icon::new(IconName::Search).small().text_color(p.ink_3))
+                                .cleanable(true),
+                        ),
+                )
+            })
             .child(
                 div()
                     .px(px(space::L + space::XS))
@@ -4431,7 +4492,7 @@ ACTA_KEY=secret:ACTA_KEY",
                     .overflow_y_scroll()
                     .child(if searching { self.hits(cx) } else { list }),
             )
-            .when_some(self.update_pop(cx), |d, pop| d.child(pop))
+            .when_some(self.update_pop(false, cx), |d, pop| d.child(pop))
             // The server, as its spool, on the left, and the settings on the right: each
             // opens the popup. While anything loom runs is behind, the update icon sits
             // just left of the gear.
@@ -4445,33 +4506,263 @@ ACTA_KEY=secret:ACTA_KEY",
                     .py(px(space::S))
                     .child(self.spools(server_open, cx))
                     .when_some(self.update_icon(cx), |d, icon| d.child(icon))
-                    .child(
-                        div()
-                            .id("settings")
-                            .size(px(control::ICON_LARGE))
-                            .flex_none()
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .rounded(px(radius::ROW))
-                            .text_color(if settings_open { p.ink } else { p.ink_3 })
-                            .cursor_pointer()
-                            .when(settings_open, |d| d.bg(p.active))
-                            .soft_hover(
-                                if settings_open {
-                                    p.active
-                                } else {
-                                    transparent_black()
-                                },
-                                p.hover,
-                                Some((if settings_open { p.ink } else { p.ink_3 }, p.ink)),
-                            )
-                            .child(Icon::new(Ico::Settings))
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                let last = this.settings_last;
-                                this.open(last, cx)
-                            })),
-                    ),
+                    .child(self.gear(settings_open, cx)),
+            )
+    }
+
+    /// The sidebar, whole or as a rail, its width easing between the two. What's in it is
+    /// laid out at its own width and the sidebar reveals it, so nothing reflows while it
+    /// moves.
+    fn sidebar(&mut self, railed: bool, cx: &mut Context<Self>) -> Div {
+        let p = self.p;
+        let k = motion::level(
+            &SharedString::from("sidebar-rail"),
+            railed,
+            crate::rail::SLIDE,
+        );
+        let width = layout::SIDEBAR + (layout::RAIL - layout::SIDEBAR) * k;
+        div()
+            .w(px(width))
+            .h_full()
+            .flex_none()
+            .overflow_hidden()
+            .bg(p.side)
+            .border_r_1()
+            .border_color(p.line)
+            .child(if railed {
+                self.rail(cx)
+            } else {
+                self.whole_sidebar(cx)
+            })
+    }
+
+    /// The control that collapses the sidebar to the rail (`rail` false), or opens it
+    /// from the rail.
+    fn bar_button(&self, rail: bool, cx: &mut Context<Self>) -> Stateful<Div> {
+        let p = self.p;
+        div()
+            .id(if rail { "bar-open" } else { "bar-collapse" })
+            .occlude()
+            .size(px(control::ICON_SMALL))
+            .flex_none()
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded(px(radius::ROW))
+            .cursor_pointer()
+            .soft_hover(transparent_black(), p.hover, Some((p.ink_3, p.ink)))
+            .child(
+                Icon::new(if rail {
+                    Ico::PanelLeftOpen
+                } else {
+                    Ico::PanelLeftClose
+                })
+                .small(),
+            )
+            .tooltip(tip(if rail { BAR_OPEN } else { BAR_COLLAPSE }))
+            .on_click(cx.listener(|this, _, window, cx| this.toggle_bar(window, cx)))
+    }
+
+    /// The + that makes an agent, `size` square.
+    fn new_agent_button(
+        &self,
+        id: &'static str,
+        size: f32,
+        cx: &mut Context<Self>,
+    ) -> Stateful<Div> {
+        let p = self.p;
+        div()
+            .id(id)
+            .occlude()
+            .size(px(size))
+            .flex_none()
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded(px(radius::ROW))
+            .text_color(p.ink_2)
+            .cursor_pointer()
+            .soft_hover(transparent_black(), p.hover, None)
+            .child(Icon::new(IconName::Plus).small())
+            .on_click(cx.listener(|this, _, _, cx| this.open(Screen::NewAgent, cx)))
+    }
+
+    /// The settings gear, which opens the popup on the page last open.
+    fn gear(&self, settings_open: bool, cx: &mut Context<Self>) -> Stateful<Div> {
+        let p = self.p;
+        div()
+            .id("settings")
+            .size(px(control::ICON_LARGE))
+            .flex_none()
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded(px(radius::ROW))
+            .text_color(if settings_open { p.ink } else { p.ink_3 })
+            .cursor_pointer()
+            .when(settings_open, |d| d.bg(p.active))
+            .soft_hover(
+                if settings_open {
+                    p.active
+                } else {
+                    transparent_black()
+                },
+                p.hover,
+                Some((if settings_open { p.ink } else { p.ink_3 }, p.ink)),
+            )
+            .child(Icon::new(Ico::Settings))
+            .on_click(cx.listener(|this, _, _, cx| {
+                let last = this.settings_last;
+                this.open(last, cx)
+            }))
+    }
+
+    /// The sidebar collapsed: the control that opens it, the +, each agent as its thread
+    /// (with a dot while a reply waits, and its name under the pointer), and at the foot
+    /// the update icon over the gear over the server's yarn.
+    fn rail(&mut self, cx: &mut Context<Self>) -> Div {
+        let p = self.p;
+        let mut list = div()
+            .flex()
+            .flex_col()
+            .items_center()
+            .gap(px(2.0))
+            .py(px(space::XS));
+        for a in self.model.agents.clone() {
+            let selected = self.model.selected.as_deref() == Some(a.id.as_str())
+                && self.screen == Screen::Chat;
+            let unread = self.model.unread.contains(&a.id);
+            let id = a.id.clone();
+            list = list.child(
+                div()
+                    .id(SharedString::from(format!("rail-{}", a.id)))
+                    .relative()
+                    .size(px(RAIL_ROW))
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded(px(radius::ROW))
+                    .cursor_pointer()
+                    .when(selected, |d| d.bg(p.active))
+                    .when(!selected, move |d| {
+                        d.soft_hover(transparent_black(), p.hover, None)
+                    })
+                    .tooltip(tip_text(a.name.clone()))
+                    .on_click(cx.listener(move |this, _, _, cx| this.select(id.clone(), cx)))
+                    .child(thread(
+                        format!("side-{}", a.id),
+                        self.model.mood(&a.id),
+                        thread::color(&a.color, p.dark),
+                        26.0,
+                        10.0,
+                        self.model.finished_at(&a.id),
+                    ))
+                    .when(unread, |d| d.child(rail_dot(p)))
+                    .when(a.pinned.is_some(), |d| {
+                        d.child(
+                            div()
+                                .absolute()
+                                .bottom(px(2.0))
+                                .right(px(2.0))
+                                .text_color(p.ink_3)
+                                .child(Icon::new(Ico::Pin).xsmall()),
+                        )
+                    }),
+            );
+        }
+        let server_open = self.popup.is_some_and(is_server);
+        let settings_open = self.popup.is_some() && !server_open;
+        // The other servers' yarns over the one on screen, which is at the very bottom.
+        let mut others = Vec::new();
+        let mut mine = None;
+        for (dir, model) in self.servers() {
+            let here = dir == self.here;
+            let state = spool_of(model);
+            let name = server_name(model, &dir);
+            let heard = !here && !model.unread.is_empty();
+            let button = div()
+                .id(SharedString::from(format!("rail-server-{dir}")))
+                .relative()
+                .size(px(control::SERVER))
+                .flex_none()
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded(px(radius::ROW))
+                .cursor_pointer()
+                .when(here && server_open, |d| d.bg(p.active))
+                .soft_hover(
+                    if here && server_open {
+                        p.active
+                    } else {
+                        transparent_black()
+                    },
+                    p.hover,
+                    None,
+                )
+                .tooltip(tip_text(if here {
+                    format!("{name} · {}", self.conn_words())
+                } else {
+                    name.clone()
+                }))
+                .child(self.yarn_marked(model, state, &name, 32.0))
+                .when(heard, |d| d.child(rail_dot(p)));
+            let button = if here {
+                button.on_click(cx.listener(|this, _, _, cx| this.open(Screen::Server, cx)))
+            } else {
+                button.on_click(cx.listener(move |this, _, _, cx| this.show_server(&dir, cx)))
+            };
+            if here {
+                mine = Some(button);
+            } else {
+                others.push(button);
+            }
+        }
+        let yarns = div()
+            .flex()
+            .flex_col()
+            .items_center()
+            .gap(px(space::XS))
+            .children(others)
+            .children(mine);
+        div()
+            .w(px(layout::RAIL))
+            .h_full()
+            .flex()
+            .flex_col()
+            .items_center()
+            .child(
+                div()
+                    .id("rail-top")
+                    .window_control_area(WindowControlArea::Drag)
+                    .w_full()
+                    .h(px(layout::TITLEBAR))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(self.bar_button(true, cx)),
+            )
+            .child(self.new_agent_button("rail-new-agent", RAIL_ROW, cx))
+            .child(
+                div()
+                    .id("rail-list")
+                    .w_full()
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scroll()
+                    .child(list),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .gap(px(space::XS))
+                    .pb(px(space::S))
+                    .when_some(self.update_icon(cx), |d, icon| d.child(icon))
+                    .child(self.gear(settings_open, cx))
+                    .child(yarns),
             )
     }
 
@@ -4570,7 +4861,9 @@ ACTA_KEY=secret:ACTA_KEY",
 
     /// The popup over the sidebar's foot: each device that's behind, with its versions and
     /// its own Update, or how its update stands, or plainly why it can't be updated here.
-    fn update_pop(&self, cx: &mut Context<Self>) -> Option<Stateful<Div>> {
+    /// From the rail (`rail`), it's beside the rail instead, level with the icon, and
+    /// placed in the window rather than the sidebar.
+    fn update_pop(&self, rail: bool, cx: &mut Context<Self>) -> Option<Stateful<Div>> {
         let behind = self.behind().to_vec();
         if behind.is_empty() || !self.update_pop_open() {
             return None;
@@ -4685,14 +4978,18 @@ ACTA_KEY=secret:ACTA_KEY",
                         })),
                 )
             });
-        Some(
-            div()
-                .id("update-pop")
-                .absolute()
-                .left(px(space::S))
+        let pop = div().id("update-pop").absolute();
+        let pop = if rail {
+            pop.left(px(layout::RAIL + space::XS))
+                .w(px(layout::SIDEBAR - 2.0 * space::S))
+                .bottom(px(rail_update_bottom(self.servers().len())))
+        } else {
+            pop.left(px(space::S))
                 .right(px(space::S))
                 .bottom(px(control::SERVER + space::S * 2.0 - space::XS))
-                .p(px(space::XS))
+        };
+        Some(
+            pop.p(px(space::XS))
                 .flex()
                 .flex_col()
                 .rounded(px(radius::CARD))
@@ -5467,11 +5764,12 @@ ACTA_KEY=secret:ACTA_KEY",
             Some(side) => side_width(
                 side == Screen::Plugins || side == Screen::Page,
                 w,
+                self.bar_width(w),
                 self.side_w,
             ),
             None => 0.0,
         };
-        (w - layout::SIDEBAR - side)
+        (w - self.bar_width(w) - side)
             .clamp(0.0, space::COLUMN)
             .round() as i32
     }
@@ -8366,6 +8664,7 @@ ACTA_KEY=secret:ACTA_KEY",
         let w = side_width(
             side == Screen::Plugins || side == Screen::Page,
             f32::from(size.width),
+            self.bar_width(f32::from(size.width)),
             self.side_w,
         );
         let rect = if self.popup.is_some() {
@@ -12316,6 +12615,24 @@ fn tip(words: &'static str) -> impl Fn(&mut Window, &mut App) -> AnyView + 'stat
     move |window, cx| gpui_kit::component::tooltip::Tooltip::new(words).build(window, cx)
 }
 
+/// As `tip`, for words made as the app runs, such as an agent's name on the rail.
+fn tip_text(words: String) -> impl Fn(&mut Window, &mut App) -> AnyView + 'static {
+    let words = SharedString::from(words);
+    move |window, cx| gpui_kit::component::tooltip::Tooltip::new(words.clone()).build(window, cx)
+}
+
+/// The dot on the rail at a thread's or a yarn's corner: something said there that
+/// wasn't seen yet.
+fn rail_dot(p: Palette) -> Div {
+    div()
+        .absolute()
+        .top(px(3.0))
+        .right(px(3.0))
+        .size(px(6.0))
+        .rounded_full()
+        .bg(p.ink)
+}
+
 /// What an approval would run, from the tool's input: its command if it has one.
 fn command_of(detail: &str) -> String {
     match serde_json::from_str::<Value>(detail) {
@@ -12640,9 +12957,21 @@ impl Render for Loom {
         let unroll = self.unroll(h);
         let root = div()
             .track_focus(&self.keys)
-            .on_key_down(cx.listener(|this, e: &KeyDownEvent, _, cx| {
-                if e.keystroke.key == "escape" {
-                    this.escape(cx);
+            .on_key_down(cx.listener(|this, e: &KeyDownEvent, window, cx| {
+                let k = &e.keystroke;
+                // Ctrl+B and Ctrl+F (Cmd on a Mac), only where the sidebar is.
+                let chord = k.modifiers.secondary(cx)
+                    && !k.modifiers.alt
+                    && !k.modifiers.shift
+                    && this.scene.0 == "app";
+                if k.key == "escape" {
+                    this.escape(window, cx);
+                } else if chord && k.key == "b" {
+                    this.toggle_bar(window, cx);
+                    cx.stop_propagation();
+                } else if chord && k.key == "f" {
+                    this.find(window, cx);
+                    cx.stop_propagation();
                 }
             }))
             .relative()
@@ -12683,6 +13012,11 @@ impl Render for Loom {
             _ => crate::perf::step("chat", || self.chat(window, cx)),
         };
         self.sync_panel(window, cx);
+        let ww = window.viewport_size().width.as_f32();
+        if self.bar.fit(ww, self.beside()) {
+            cx.notify();
+        }
+        let railed = self.railed(ww);
         let header = self.header(cx);
         // Drawn last, over the sheet that takes the pointer while it's open.
         let menu = self.menu_panel(cx).map(deferred);
@@ -12695,7 +13029,7 @@ impl Render for Loom {
             .when(self.side_drag.is_some(), |d| {
                 d.child(self.side_dragger(cx)).cursor_col_resize()
             })
-            .child(self.sidebar(cx))
+            .child(self.sidebar(railed, cx))
             .child(
                 div()
                     .flex_1()
@@ -12709,6 +13043,11 @@ impl Render for Loom {
                     .when_some(menu, |d, m| d.child(m))
                     .when_some(beside, |d, c| d.child(c))
                     .when_some(unroll, |d, u| d.child(u)),
+            )
+            // From the rail, the update popup comes out beside it, past the rail's edge.
+            .when_some(
+                railed.then(|| self.update_pop(true, cx)).flatten(),
+                |d, pop| d.child(pop),
             )
             .when_some(popup, |d, p| d.child(p))
             .when_some(toast, |d, t| d.child(t))
@@ -13132,7 +13471,26 @@ const SIDE_HEAD: f32 = 48.0;
 
 /// The narrowest the panel beside the chat drags to, and the least it leaves the chat.
 const SIDE_LEAST: f32 = 320.0;
-const CHAT_LEAST: f32 = 420.0;
+pub(crate) const CHAT_LEAST: f32 = 420.0;
+
+/// An agent's square on the rail, and the + over them.
+const RAIL_ROW: f32 = 40.0;
+
+/// How far the rail's update icon is from the window's bottom, over the gear over the
+/// yarns of `servers` servers, for the update popup to sit level with it.
+fn rail_update_bottom(servers: usize) -> f32 {
+    let yarns = servers.max(1) as f32;
+    space::S + yarns * control::SERVER + yarns * space::XS + control::ICON_LARGE + space::XS
+}
+/// The sidebar's collapse and open, under the pointer.
+#[cfg(target_os = "macos")]
+const BAR_COLLAPSE: &str = "Collapse sidebar  ⌘B";
+#[cfg(not(target_os = "macos"))]
+const BAR_COLLAPSE: &str = "Collapse sidebar  Ctrl+B";
+#[cfg(target_os = "macos")]
+const BAR_OPEN: &str = "Open sidebar  ⌘B";
+#[cfg(not(target_os = "macos"))]
+const BAR_OPEN: &str = "Open sidebar  Ctrl+B";
 /// The small browser window's width.
 const MINI_W: f32 = 280.0;
 
@@ -13144,8 +13502,8 @@ fn mini_page_height(fw: f32, fh: f32) -> f32 {
 /// How wide the panel beside the chat is, in a window `window` wide: as the person
 /// dragged it, or else a plugin's panel or the browser (`wide`) wider than an
 /// agent's page.
-fn side_width(wide: bool, window: f32, dragged: Option<f32>) -> f32 {
-    let most = (window - layout::SIDEBAR - CHAT_LEAST).max(SIDE_LEAST);
+fn side_width(wide: bool, window: f32, bar: f32, dragged: Option<f32>) -> f32 {
+    let most = (window - bar - CHAT_LEAST).max(SIDE_LEAST);
     match dragged {
         Some(w) => w.clamp(SIDE_LEAST, most),
         None if wide => (window * 0.45).clamp(360.0, 820.0).min(most),
@@ -13172,17 +13530,47 @@ fn svg_icon(path: SharedString, size: f32, ink: Hsla) -> AnyElement {
 
 #[cfg(test)]
 mod side_tests {
-    use super::{layout, side_width, CHAT_LEAST, SIDE_LEAST};
+    use super::{control, layout, rail_update_bottom, side_width, CHAT_LEAST, SIDE_LEAST};
+
+    #[test]
+    fn the_rail_gives_the_panel_the_room_the_sidebar_had() {
+        let window = 1000.0;
+        let whole = side_width(true, window, layout::SIDEBAR, Some(5000.0));
+        let rail = side_width(true, window, layout::RAIL, Some(5000.0));
+        assert_eq!(rail - whole, layout::SIDEBAR - layout::RAIL);
+        // The update popup from the rail sits level with the icon, over the gear and
+        // however many yarns there are.
+        assert!(rail_update_bottom(1) > control::SERVER + control::ICON_LARGE);
+        assert_eq!(
+            rail_update_bottom(2) - rail_update_bottom(1),
+            control::SERVER + super::space::XS
+        );
+    }
 
     #[test]
     fn the_panel_keeps_its_dragged_width_and_leaves_the_chat_room() {
         let window = 1400.0;
-        assert_eq!(side_width(true, window, Some(500.0)), 500.0);
-        assert_eq!(side_width(false, window, Some(100.0)), SIDE_LEAST);
+        assert_eq!(
+            side_width(true, window, layout::SIDEBAR, Some(500.0)),
+            500.0
+        );
+        assert_eq!(
+            side_width(false, window, layout::SIDEBAR, Some(100.0)),
+            SIDE_LEAST
+        );
         let most = window - layout::SIDEBAR - CHAT_LEAST;
-        assert_eq!(side_width(true, window, Some(5000.0)), most);
+        assert_eq!(
+            side_width(true, window, layout::SIDEBAR, Some(5000.0)),
+            most
+        );
         // Undragged, it's a share of the window, never past what leaves the chat room.
-        assert!(side_width(true, 1120.0, None) <= 1120.0 - layout::SIDEBAR - CHAT_LEAST);
-        assert!(side_width(false, window, None) < side_width(true, window, None));
+        assert!(
+            side_width(true, 1120.0, layout::SIDEBAR, None)
+                <= 1120.0 - layout::SIDEBAR - CHAT_LEAST
+        );
+        assert!(
+            side_width(false, window, layout::SIDEBAR, None)
+                < side_width(true, window, layout::SIDEBAR, None)
+        );
     }
 }
