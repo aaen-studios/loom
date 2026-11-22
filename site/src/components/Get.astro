@@ -1,0 +1,75 @@
+---
+// The two ways to get loom, side by side: the Windows app and a server. On Windows the app's
+// download comes first; elsewhere, where there's no app yet, the server does.
+import { latest, sizeOf } from '../lib/releases.mjs';
+import { LATEST } from '../lib/site.mjs';
+
+interface Props {
+	/** Without the line under the buttons. */
+	compact?: boolean;
+}
+const { compact = false } = Astro.props;
+const release = await latest();
+const size = sizeOf(release, 'loom-setup.exe');
+const meta = [release && `loom ${release.version}`, size].filter(Boolean).join(' · ');
+---
+
+<div class="get">
+	<div class="buttons">
+		<a class="btn btn-primary get-app" href={`${LATEST}/loom-setup.exe`} download>
+			<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 4v11M7 10.5l5 5 5-5M5 19.5h14"></path></svg>
+			Download for Windows
+		</a>
+		<a class="btn btn-quiet get-server" href="/download/#server">Run it on a server</a>
+	</div>
+	{!compact && meta && <p class="meta">{meta}</p>}
+</div>
+
+<style>
+	.get {
+		display: grid;
+		justify-items: center;
+		gap: 14px;
+	}
+	.buttons {
+		display: flex;
+		flex-wrap: wrap;
+		justify-content: center;
+		gap: 10px;
+	}
+	.meta {
+		font-size: 13px;
+		color: var(--ink-3);
+	}
+	/* Not on Windows: the server first, and the app's download quiet beside it. */
+	:global(html[data-os='other']) .get-server {
+		order: -1;
+		background: var(--button);
+		color: var(--button-ink);
+		border-color: transparent;
+	}
+	:global(html[data-os='other']) .get-app {
+		background: transparent;
+		color: var(--ink);
+		border-color: var(--line-strong);
+	}
+	:global(html[data-os='other']) .meta {
+		display: none;
+	}
+	@media (max-width: 480px) {
+		.buttons {
+			flex-direction: column;
+			align-self: stretch;
+			width: 100%;
+			max-width: 320px;
+		}
+	}
+</style>
+
+<script is:inline>
+	(() => {
+		const ua = navigator.userAgentData?.platform ?? navigator.platform ?? '';
+		const mobile = /Android|iPhone|iPad/i.test(navigator.userAgent);
+		document.documentElement.dataset.os = /Win/i.test(ua) && !mobile ? 'windows' : 'other';
+	})();
+</script>

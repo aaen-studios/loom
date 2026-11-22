@@ -12,7 +12,7 @@ A self-hostable agent app. You chat with your own AI agents from your PC and pho
 
 ## Running it
 
-- **On a Linux server**, as root: `curl -fsSL https://github.com/aaen-studios/loom/releases/latest/download/install.sh | sh`. It makes a `loom` user and a systemd service, and puts Caddy in front for TLS with `--domain`, or Tailscale without one. It prints the one-time setup code.
+- **On a Linux server**, as root: `curl -fsSL https://loom.rip/install.sh | sh`. It makes a `loom` user and a systemd service, and puts Caddy in front for TLS with `--domain`, or Tailscale without one. It prints the one-time setup code.
 - **In Docker**: `docker run -d --name loom -p 127.0.0.1:8790:8790 -v loom-data:/data ghcr.io/aaen-studios/loom`, then `docker logs loom` for the setup code. Put a proxy with TLS in front of it.
 - **With no server**: the desktop app runs an instance itself ("Run one on this computer").
 
@@ -29,7 +29,7 @@ The previous loom (v0.1: a Rust engine with its own model loop, a React UI, Taur
 | [`desktop/`](desktop/) | Rust: the GPUI app for Windows and macOS |
 | [`ios/`](ios/) | Swift: the iPhone app |
 | [`push/`](push/) | Calx: the opt-in push relay |
-| [`site/`](site/) | The public site and the docs |
+| [`site/`](site/) | The website, [loom.rip](https://loom.rip), and the user guides |
 | [`design/`](design/) | Design tokens, generated into Rust, Swift and CSS |
 | [`tests/`](tests/) | The fake ACP agent, protocol and end-to-end tests |
 | [`scripts/`](scripts/) | Calx: build, release, install |

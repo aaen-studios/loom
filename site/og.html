@@ -1,0 +1,70 @@
+<!doctype html>
+<!--
+  loom.rip's link preview, public/og.png: the knot and the wordmark, and what loom is. To make it
+  again after a change here, from site/ with its packages installed:
+
+    msedge --headless=new --hide-scrollbars --window-size=1200,630 --screenshot=public/og.png og.html
+
+  (msedge is Edge, or any Chromium, by its full path.)
+-->
+<meta charset="utf-8" />
+<style>
+	@font-face {
+		font-family: 'Geist';
+		src: url('node_modules/@fontsource-variable/geist/files/geist-latin-wght-normal.woff2') format('woff2');
+		font-weight: 100 900;
+	}
+	html,
+	body {
+		margin: 0;
+		width: 1200px;
+		height: 630px;
+		overflow: hidden;
+		background: #ffffff;
+		color: #111113;
+		font-family: 'Geist', sans-serif;
+		-webkit-font-smoothing: antialiased;
+	}
+	main {
+		display: grid;
+		place-content: center;
+		justify-items: center;
+		gap: 30px;
+		height: 100%;
+	}
+	h1 {
+		display: flex;
+		align-items: center;
+		gap: 0.3em;
+		margin: 0;
+		font-size: 150px;
+		font-weight: 600;
+		letter-spacing: -0.035em;
+		line-height: 1;
+	}
+	svg {
+		width: 1.3em;
+		height: 1.3em;
+		margin: -0.3em 0;
+	}
+	p {
+		margin: 0;
+		font-size: 40px;
+		color: #4a4a52;
+		letter-spacing: -0.01em;
+	}
+</style>
+<main>
+	<h1>
+		<svg viewBox="0 0 32 32" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+			<mask id="m" maskUnits="userSpaceOnUse" x="0" y="0" width="32" height="32">
+				<rect width="32" height="32" fill="white" />
+				<path d="M13.67 22.24 C 14.8 23.3, 16.3 24.1, 18.14 24.34" stroke="black" stroke-width="5.6" />
+			</mask>
+			<path d="M3 24.5 H12 C 19 24.5, 22 18.5, 22 14 C 22 9.5, 19 7, 16 7 C 13 7, 10 9.5, 10 14" mask="url(#m)" />
+			<path d="M10 14 C 10 19, 13.5 24.5, 20 24.5 H29" />
+		</svg>
+		<span>loom</span>
+	</h1>
+	<p>A self-hostable agent app.</p>
+</main>
