@@ -2,7 +2,7 @@ module core.update
 
 // The desktop app's updates (PLAN.md, "Updates and versions"). The core looks
 // at the newest release's manifest a little after it starts and then about
-// every half hour while the app runs (each wait a little longer or shorter, so
+// every ten minutes while the app runs (each wait a little longer or shorter, so
 // every app doesn't ask at once), or when the app asks. A look asks with the
 // last manifest's ETag, so one that didn't change is a 304 and nothing more; a
 // manifest with the same bytes as the last one that checked isn't looked at
@@ -22,8 +22,8 @@ import shared.obj.{Obj, at, str_at}
 import shared.release.{RELEASE_KEY, check_manifest, newer}
 
 const FIRST_CHECK_NS: u64 = 10000000000          // 10 s after the start
-const EVERY_NS: u64 = 1800000000000              // then every 30 minutes
-const JITTER_NS: u64 = 600000000000              // give or take up to 5 minutes
+const EVERY_NS: u64 = 600000000000               // then every 10 minutes
+const JITTER_NS: u64 = 120000000000              // give or take up to a minute
 const TIMEOUT_MS: u32 = 600000
 const MAX_DOWNLOAD: usize = 400000000
 
