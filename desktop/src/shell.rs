@@ -68,6 +68,11 @@ impl Tray {
         })
     }
 
+    /// Ticks "Start at login" as it is, after Settings changed it.
+    pub fn set_login(&self, on: bool) {
+        self.login.set_checked(on);
+    }
+
     /// What happened in the tray since the last look.
     pub fn actions(&self) -> Vec<TrayAction> {
         let mut out = Vec::new();
@@ -159,12 +164,14 @@ pub fn clicked() -> Vec<About> {
         .unwrap_or_default()
 }
 
-/// A system notification. A click on it, while the app runs, opens what it's about.
+/// A system notification, with its sound or without. A click on it, while the app
+/// runs, opens what it's about.
 #[cfg(windows)]
-pub fn notify(title: &str, body: &str, about: Option<About>) {
+pub fn notify(title: &str, body: &str, about: Option<About>, sound: bool) {
     let toast = tauri_winrt_notification::Toast::new(app_id())
         .title(title)
         .text1(body)
+        .sound(sound.then_some(tauri_winrt_notification::Sound::Default))
         .on_activated(move |_| {
             if let (Some(a), Ok(mut c)) = (about.clone(), CLICKED.lock()) {
                 c.push(a);
@@ -178,9 +185,12 @@ pub fn notify(title: &str, body: &str, about: Option<About>) {
 
 /// A system notification.
 #[cfg(not(windows))]
-pub fn notify(title: &str, body: &str, _about: Option<About>) {
+pub fn notify(title: &str, body: &str, _about: Option<About>, sound: bool) {
     let mut n = notify_rust::Notification::new();
     n.summary(title).body(body);
+    if sound {
+        n.sound_name("message-new-instant");
+    }
     if let Err(e) = n.show() {
         eprintln!("loom: the notification didn't show: {e}");
     }
@@ -213,8 +223,9 @@ fn old_exe() -> Option<std::path::PathBuf> {
 }
 
 /// Puts the update at `new` in this program's place and starts it, for the app to quit
-/// after. The old program is kept as loom.old.exe, and put back if the swap fails.
-pub fn apply_update(new: &std::path::Path) -> std::io::Result<()> {
+/// after, in the tray when `background`. The old program is kept as loom.old.exe, and
+/// put back if the swap fails.
+pub fn apply_update(new: &std::path::Path, background: bool) -> std::io::Result<()> {
     let exe = std::env::current_exe()?;
     let old = old_exe().unwrap_or_else(|| exe.with_extension("old.exe"));
     let _ = std::fs::remove_file(&old);
@@ -224,11 +235,56 @@ pub fn apply_update(new: &std::path::Path) -> std::io::Result<()> {
         let _ = std::fs::rename(&old, &exe);
         return Err(e);
     }
-    std::process::Command::new(&exe)
-        .arg("--updated")
-        .arg(std::process::id().to_string())
-        .spawn()?;
+    let mut started = std::process::Command::new(&exe);
+    started.arg("--updated").arg(std::process::id().to_string());
+    if background {
+        started.arg("--background");
+    }
+    started.spawn()?;
     Ok(())
+}
+
+/// Whether closing the window keeps loom in the tray, rather than quitting it.
+static KEEP_IN_TRAY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+
+pub fn keep_in_tray(on: bool) {
+    KEEP_IN_TRAY.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
+pub fn keeps_in_tray() -> bool {
+    KEEP_IN_TRAY.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Keeps the computer from sleeping, while `on`. Called from the window's thread.
+#[cfg(windows)]
+pub fn keep_awake(on: bool) {
+    use windows_sys::Win32::System::Power::{
+        SetThreadExecutionState, ES_CONTINUOUS, ES_SYSTEM_REQUIRED,
+    };
+    // SAFETY: it only sets this thread's execution state.
+    unsafe {
+        SetThreadExecutionState(if on {
+            ES_CONTINUOUS | ES_SYSTEM_REQUIRED
+        } else {
+            ES_CONTINUOUS
+        });
+    }
+}
+
+#[cfg(not(windows))]
+pub fn keep_awake(_on: bool) {}
+
+/// Whether the window is on screen, rather than hidden in the tray.
+#[cfg(windows)]
+pub fn window_shown(hwnd: isize) -> bool {
+    use windows_sys::Win32::UI::WindowsAndMessaging::IsWindowVisible;
+    // SAFETY: IsWindowVisible only reads the window's state, and takes any handle.
+    unsafe { IsWindowVisible(hwnd as _) != 0 }
+}
+
+#[cfg(not(windows))]
+pub fn window_shown(_hwnd: isize) -> bool {
+    true
 }
 
 /// After an update: waits for the old program to end, so two never run at once, and

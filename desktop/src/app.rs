@@ -18,9 +18,14 @@ use serde_json::Value;
 use crate::core::Core;
 use crate::model::{self, Approval, Conn, ImportSource, Message, Model, Mood};
 use crate::motion::{self, SoftHover};
+use crate::prefs::{Prefs, Text, Theme, Tools};
 use crate::shell;
 use crate::thread::{self, thread, Spool};
 use crate::tokens::*;
+
+#[path = "settings.rs"]
+mod settings;
+use settings::{settings_found, settings_groups, system_dark};
 
 /// The colours of one theme.
 #[derive(Clone, Copy)]
@@ -96,6 +101,9 @@ enum Screen {
     Page,
     Tables,
     Import,
+    Appearance,
+    ChatPrefs,
+    AppPrefs,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -123,6 +131,14 @@ enum Row {
 pub struct Loom {
     /// The server on screen: what it shows, its core, and the core's events.
     model: Model,
+    /// How this device shows loom, as the person set it in Settings.
+    prefs: Prefs,
+    /// Whether loom keeps the computer awake now, for an agent at work.
+    awake: bool,
+    /// Whether loom starts at login, as the system had it last time it was asked.
+    starts_at_login: bool,
+    /// What the last update check said.
+    update_said: Option<String>,
     core: Core,
     events: std::sync::mpsc::Receiver<String>,
     /// Its folder ("" for the first server).
@@ -226,6 +242,8 @@ pub struct Loom {
     share_month: bool,
     instructions_in: Entity<TextareaState>,
     search_in: Entity<InputState>,
+    /// Search over the settings, at the top of the popup's pages.
+    settings_in: Entity<InputState>,
     open_thoughts: HashSet<String>,
     tray: Option<shell::Tray>,
     hwnd: isize,
@@ -268,7 +286,7 @@ pub struct Loom {
     notice: Option<(String, Instant)>,
 }
 
-fn data_dir() -> String {
+pub fn data_dir() -> String {
     if let Ok(dir) = std::env::var("LOOM_DATA") {
         return dir;
     }
@@ -361,21 +379,15 @@ fn server_name(model: &Model, dir: &str) -> String {
 
 impl Loom {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let dark = match std::env::var("LOOM_THEME").as_deref() {
-            Ok("dark") => true,
-            Ok("light") => false,
-            _ => !matches!(
-                window.appearance(),
-                WindowAppearance::Light | WindowAppearance::VibrantLight
-            ),
-        };
+        let prefs = Prefs::load(&data_dir());
+        let dark = prefs.dark(system_dark(window));
         let (core, events) = Core::start(&core_config("", None));
         let (device_tx, device_rx) = std::sync::mpsc::channel();
 
         let composer = cx.new(|cx| {
             TextareaState::new(window, cx)
                 .auto_grow(1, 10)
-                .submit_on_enter(true)
+                .submit_on_enter(!prefs.ctrl_enter)
                 .placeholder("Reply")
         });
         cx.subscribe_in(
@@ -542,6 +554,23 @@ ACTA_KEY=secret:ACTA_KEY",
         if let Ok(server) = std::env::var("LOOM_SERVER") {
             server_in.update(cx, |s, cx| s.set_value(server, window, cx));
         }
+        let settings_in = input(window, cx, "Search settings", false);
+        cx.subscribe_in(
+            &settings_in,
+            window,
+            |this: &mut Loom, state, event: &InputEvent, _, cx| match event {
+                InputEvent::Change => cx.notify(),
+                // Enter opens the first page it found.
+                InputEvent::PressEnter { .. } => {
+                    let query = state.read(cx).value().to_string();
+                    if let Some((_, _, _, screen)) = settings_found(&query).first() {
+                        this.open(*screen, cx);
+                    }
+                }
+                _ => {}
+            },
+        )
+        .detach();
         let search_in = input(window, cx, "Search", false);
         cx.subscribe_in(
             &search_in,
@@ -579,6 +608,7 @@ ACTA_KEY=secret:ACTA_KEY",
                         }
                     }
                     loom.tray_actions(cx);
+                    loom.tick_prefs(cx);
                     loom.notification_clicks(cx);
                     loom.take_notice(cx);
                     if let Some(csv) = loom.model.exported.take() {
@@ -622,7 +652,7 @@ ACTA_KEY=secret:ACTA_KEY",
                                     agent: s("agent"),
                                     conversation: s("conversation"),
                                 };
-                                shell::notify(&s("title"), &s("body"), Some(about));
+                                loom.notify(&s("title"), &s("body"), about);
                             }
                             changed |= loom.model.take(&v);
                         }
@@ -643,7 +673,13 @@ ACTA_KEY=secret:ACTA_KEY",
 
         // Closing the window keeps loom in the tray, so routines and replies go on.
         let hwnd = shell::hwnd(window);
-        window.on_window_should_close(cx, move |_, _| {
+        // Unless the person turned that off, in Settings: then it quits.
+        shell::keep_in_tray(prefs.tray);
+        window.on_window_should_close(cx, move |_, cx| {
+            if !shell::keeps_in_tray() {
+                cx.quit();
+                return true;
+            }
             shell::show_window(hwnd, false);
             false
         });
@@ -662,8 +698,17 @@ ACTA_KEY=secret:ACTA_KEY",
         }
 
         let scroller = cx.new(|cx| MessageScrollerState::new(0, cx));
+        // "System" follows the system as it changes.
+        cx.observe_window_appearance(window, |this: &mut Loom, window, cx| {
+            this.apply_theme(window, cx);
+        })
+        .detach();
         let mut loom = Loom {
             model: Model::new(),
+            prefs,
+            awake: false,
+            starts_at_login: shell::starts_at_login(),
+            update_said: None,
             core,
             events,
             here: String::new(),
@@ -757,6 +802,7 @@ ACTA_KEY=secret:ACTA_KEY",
             share_month: false,
             instructions_in,
             search_in,
+            settings_in,
             open_thoughts: HashSet::new(),
             tray,
             hwnd,
@@ -1065,6 +1111,7 @@ ACTA_KEY=secret:ACTA_KEY",
     /// Brings in what the servers away said. Gives whether the window should redraw.
     fn pump_away(&mut self) -> bool {
         let mut changed = false;
+        let prefs = self.prefs.clone();
         for a in &mut self.away {
             let got: Vec<String> = std::iter::from_fn(|| a.events.try_recv().ok()).collect();
             for e in got {
@@ -1090,7 +1137,7 @@ ACTA_KEY=secret:ACTA_KEY",
                             agent: s("agent"),
                             conversation: s("conversation"),
                         };
-                        shell::notify(&s("title"), &s("body"), Some(about));
+                        settings::notify_as(&prefs, &s("title"), &s("body"), about);
                     }
                     _ => {}
                 }
@@ -1288,7 +1335,11 @@ ACTA_KEY=secret:ACTA_KEY",
     /// Shows the newest notice from the model, and hides one that's been up 8 seconds.
     fn take_notice(&mut self, cx: &mut Context<Self>) {
         if let Some(words) = self.model.checked.take() {
-            shell::notify("loom", &words, None);
+            // Settings shows it; away from the window, a notification does.
+            if !shell::window_shown(self.hwnd) {
+                shell::notify("loom", &words, None, self.prefs.sound);
+            }
+            self.update_said = Some(words);
         }
         if let Some(words) = self.model.notices.pop() {
             self.model.notices.clear();
@@ -1735,21 +1786,10 @@ ACTA_KEY=secret:ACTA_KEY",
             }
             return pages;
         }
-        vec![
-            (
-                "pop-profile",
-                Ico::CircleUserRound,
-                "About you",
-                Screen::Profile,
-            ),
-            ("pop-routines", Ico::Clock, "Routines", Screen::Routines),
-            ("pop-tasks", Ico::ListTodo, "Tasks", Screen::Tasks),
-            ("pop-skills", Ico::BookOpen, "Skills", Screen::Skills),
-            ("pop-programs", Ico::Brain, "Brains", Screen::Programs),
-            ("pop-mcp", Ico::Plug, "MCP servers", Screen::Mcp),
-            ("pop-plugins", Ico::Puzzle, "Plugins", Screen::Plugins),
-            ("pop-import", Ico::Import, "Import", Screen::Import),
-        ]
+        settings_groups()
+            .into_iter()
+            .flat_map(|(_, pages)| pages)
+            .collect()
     }
 
     /// The popup over the window: its pages down the left, the open one on the right.
@@ -1796,16 +1836,74 @@ ACTA_KEY=secret:ACTA_KEY",
                         .child("Settings")
                 }),
         );
-        for (id, icon, label, screen) in pages {
+        // The person's pages under their headings, or what search found; the server's
+        // in one list.
+        let query = self.settings_in.read(cx).value().trim().to_string();
+        let groups = if server {
+            vec![(None, pages)]
+        } else if query.is_empty() {
+            settings_groups()
+        } else {
+            vec![(None, settings_found(&query))]
+        };
+        if !server {
             nav = nav.child(
-                self.menu_item(id, icon, label, false)
-                    .when(screen == open, |d| d.bg(p.active))
-                    .on_click(cx.listener(move |this, _, _, cx| this.open(screen, cx))),
+                div()
+                    .px(px(space::XS))
+                    .pb(px(space::S))
+                    .text_size(px(size::SMALL))
+                    .child(
+                        Input::new(&self.settings_in)
+                            .prefix(Icon::new(IconName::Search).small().text_color(p.ink_3))
+                            .cleanable(true),
+                    ),
             );
         }
+        let nothing = !server && !query.is_empty() && groups.iter().all(|(_, g)| g.is_empty());
+        let mut list = div()
+            .id("popup-nav")
+            .flex_1()
+            .min_h_0()
+            .overflow_y_scroll()
+            .flex()
+            .flex_col()
+            .gap(px(2.0));
+        for (i, (heading, pages)) in groups.into_iter().enumerate() {
+            if let Some(h) = heading {
+                list = list.child(
+                    div()
+                        .px(px(space::M))
+                        .pt(px(if i == 0 { 0.0 } else { space::M }))
+                        .pb(px(space::XS))
+                        .text_size(px(size::CAPTION))
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(p.ink_3)
+                        .child(h),
+                );
+            } else if i > 0 {
+                list = list.child(div().h(px(space::S)));
+            }
+            for (id, icon, label, screen) in pages {
+                list = list.child(
+                    self.menu_item(id, icon, label, false)
+                        .when(screen == open, |d| d.bg(p.active))
+                        .on_click(cx.listener(move |this, _, _, cx| this.open(screen, cx))),
+                );
+            }
+        }
+        if nothing {
+            list = list.child(
+                div()
+                    .px(px(space::M))
+                    .py(px(space::S))
+                    .text_size(px(size::SMALL))
+                    .text_color(p.ink_3)
+                    .child("Nothing found"),
+            );
+        }
+        nav = nav.child(list);
         // What isn't a setting of this server, but something to do: at the bottom.
         if server {
-            nav = nav.child(div().flex_1());
             let actions = [
                 ("pop-move", Ico::Truck, "Move", Screen::Move),
                 (
@@ -1869,6 +1967,9 @@ ACTA_KEY=secret:ACTA_KEY",
             Screen::Mcp => self.mcp_page(cx),
             Screen::Plugins => self.plugins_page(cx),
             Screen::Import => self.import_page(cx),
+            Screen::Appearance => self.appearance_page(cx),
+            Screen::ChatPrefs => self.chat_prefs_page(cx),
+            Screen::AppPrefs => self.app_prefs_page(cx),
             Screen::AddServer => self.add_server_page(cx),
             _ => div(),
         };
@@ -3809,7 +3910,7 @@ ACTA_KEY=secret:ACTA_KEY",
                         .child("Restart to update"),
                 )
                 .on_click(cx.listener(move |this, _, _, cx| {
-                    match shell::apply_update(std::path::Path::new(&path)) {
+                    match shell::apply_update(std::path::Path::new(&path), false) {
                         Ok(()) => cx.quit(),
                         Err(e) => {
                             this.model
@@ -4639,6 +4740,11 @@ ACTA_KEY=secret:ACTA_KEY",
             .map(|a| self.model.mood(&a.id))
             .unwrap_or(Mood::Idle);
         let open = self.open_thoughts.clone();
+        let show = Show {
+            tools: self.prefs.tools,
+            thoughts_open: self.prefs.thoughts_open,
+            text_scale: self.prefs.text_scale(),
+        };
         let tools: Vec<model::Tool> = self.model.tools.clone();
         let files = Rc::new(self.model.files.clone());
         let this = cx.entity().downgrade();
@@ -4667,7 +4773,9 @@ ACTA_KEY=secret:ACTA_KEY",
                         .child("NEW"),
                 );
             let inner = match row {
-                Row::Message(m) if m.role == "person" => person(p, m, &files, this.clone()),
+                Row::Message(m) if m.role == "person" => {
+                    person(p, m, &files, show.text_scale, this.clone())
+                }
                 Row::Message(m) => reply(
                     p,
                     m,
@@ -4677,6 +4785,7 @@ ACTA_KEY=secret:ACTA_KEY",
                     &open,
                     &tools,
                     &files,
+                    show,
                     this.clone(),
                 ),
                 Row::Approval(a) => approval(p, a, this.clone()),
@@ -9774,7 +9883,10 @@ ACTA_KEY=secret:ACTA_KEY",
         for a in tray.actions() {
             match a {
                 shell::TrayAction::Open => shell::show_window(self.hwnd, true),
-                shell::TrayAction::StartAtLogin(on) => shell::set_start_at_login(on),
+                shell::TrayAction::StartAtLogin(on) => {
+                    shell::set_start_at_login(on);
+                    self.starts_at_login = shell::starts_at_login();
+                }
                 shell::TrayAction::CheckUpdates => {
                     self.send(serde_json::json!({"t": "update.check", "id": "app.update"}));
                 }
@@ -9791,7 +9903,13 @@ ACTA_KEY=secret:ACTA_KEY",
     }
 }
 
-fn person(p: Palette, m: &Message, files: &HashMap<String, String>, this: WeakEntity<Loom>) -> Div {
+fn person(
+    p: Palette,
+    m: &Message,
+    files: &HashMap<String, String>,
+    scale: f32,
+    this: WeakEntity<Loom>,
+) -> Div {
     let text: String = m
         .blocks
         .iter()
@@ -9835,7 +9953,7 @@ fn person(p: Palette, m: &Message, files: &HashMap<String, String>, this: WeakEn
                 .py(px(space::S + 2.0))
                 .rounded(px(radius::BUBBLE))
                 .bg(p.bubble)
-                .text_size(px(size::BODY))
+                .text_size(px(size::BODY * scale))
                 .text_color(p.ink)
                 .when(m.queued, |d| d.opacity(0.6))
                 .child(
@@ -9972,6 +10090,57 @@ fn file_view(
         .into_any_element()
 }
 
+/// What a reply shows as it's drawn, from the person's prefs.
+#[derive(Clone, Copy)]
+struct Show {
+    tools: Tools,
+    thoughts_open: bool,
+    text_scale: f32,
+}
+
+/// A tool call's title, as its agent named it.
+fn tool_title(b: &model::Block, tools: &[model::Tool]) -> String {
+    b.call
+        .as_ref()
+        .and_then(|c| tools.iter().find(|t| &t.call == c))
+        .map(|t| t.title.clone())
+        .unwrap_or_else(|| "Using a tool".to_string())
+}
+
+/// One tool call: its title, and how it went.
+fn tool_line(p: Palette, b: &model::Block, tools: &[model::Tool]) -> Div {
+    let t = b
+        .call
+        .as_ref()
+        .and_then(|c| tools.iter().find(|t| &t.call == c));
+    let (title, mark, color) = match t {
+        Some(t) => {
+            let (mark, color) = match t.status.as_deref() {
+                Some("done") => ("✓", p.ok),
+                Some("failed") => ("✕", p.bad),
+                Some("denied") => ("denied", p.bad),
+                _ => ("…", p.ink_3),
+            };
+            (t.title.clone(), mark, color)
+        }
+        None => ("Used a tool".to_string(), "", p.ink_3),
+    };
+    div()
+        .flex()
+        .items_center()
+        .gap(px(space::S))
+        .text_size(px(size::SMALL))
+        .child(div().text_color(p.ink_3).child("›_"))
+        .child(
+            div()
+                .font_family(font::MONO)
+                .text_color(p.ink_2)
+                .truncate()
+                .child(title),
+        )
+        .child(div().text_color(color).child(mark))
+}
+
 #[allow(clippy::too_many_arguments)]
 fn reply(
     p: Palette,
@@ -9982,6 +10151,7 @@ fn reply(
     open: &HashSet<String>,
     tools: &[model::Tool],
     files: &HashMap<String, String>,
+    show: Show,
     this: WeakEntity<Loom>,
 ) -> Div {
     let when = if m.live {
@@ -10009,13 +10179,26 @@ fn reply(
                     .child(when),
             ),
     );
-    for (i, b) in m.blocks.iter().enumerate() {
+    // What shows in the reply: everything but tool calls the person's prefs hide.
+    let blocks: Vec<(usize, &model::Block)> = m.blocks.iter().enumerate().collect();
+    let status = |b: &model::Block| {
+        b.call
+            .as_ref()
+            .and_then(|c| tools.iter().find(|t| &t.call == c))
+            .and_then(|t| t.status.clone())
+    };
+    let went_wrong = |b: &model::Block| matches!(status(b).as_deref(), Some("failed" | "denied"));
+    let mut shown_any = false;
+    let mut at = 0;
+    while at < blocks.len() {
+        let (i, b) = blocks[at];
         let key = format!("{}/{}", m.id, i);
         match b.kind.as_str() {
             "text" => {
+                shown_any |= !b.text.trim().is_empty();
                 body = body.child(
                     div()
-                        .text_size(px(size::REPLY))
+                        .text_size(px(size::REPLY * show.text_scale))
                         .line_height(relative(line::REPLY))
                         .text_color(p.ink)
                         .child(
@@ -10028,7 +10211,9 @@ fn reply(
                 );
             }
             "thought" => {
-                let shown = open.contains(&key);
+                shown_any = true;
+                // A key in `open` turns it the other way from the person's prefs.
+                let shown = open.contains(&key) != show.thoughts_open;
                 let this = this.clone();
                 let k = key.clone();
                 body = body.child(
@@ -10054,7 +10239,7 @@ fn reply(
                                     .pl(px(space::M))
                                     .border_l_1()
                                     .border_color(p.line_strong)
-                                    .text_size(px(size::SMALL))
+                                    .text_size(px(size::SMALL * show.text_scale))
                                     .text_color(p.ink_3)
                                     .child(b.text.clone()),
                             )
@@ -10062,61 +10247,117 @@ fn reply(
                 );
             }
             "tool" => {
-                let t = b
-                    .call
-                    .as_ref()
-                    .and_then(|c| tools.iter().find(|t| &t.call == c));
-                let (title, mark, color) = match t {
-                    Some(t) => {
-                        let (mark, color) = match t.status.as_deref() {
-                            Some("done") => ("✓", p.ok),
-                            Some("failed") => ("✕", p.bad),
-                            Some("denied") => ("denied", p.bad),
-                            _ => ("…", p.ink_3),
-                        };
-                        (t.title.clone(), mark, color)
+                // The run of tool calls this one starts.
+                let mut end = at;
+                while end < blocks.len() && blocks[end].1.kind == "tool" {
+                    end += 1;
+                }
+                let run: Vec<&model::Block> = blocks[at..end].iter().map(|(_, b)| *b).collect();
+                match show.tools {
+                    Tools::All => {
+                        for b in &run {
+                            body = body.child(tool_line(p, b, tools));
+                        }
+                        shown_any = true;
                     }
-                    None => ("Used a tool".to_string(), "", p.ink_3),
-                };
-                body = body.child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap(px(space::S))
-                        .text_size(px(size::SMALL))
-                        .child(div().text_color(p.ink_3).child("›_"))
-                        .child(
+                    Tools::Hidden => {
+                        // Only one that failed or was refused, which the person should know.
+                        for b in run.iter().filter(|b| went_wrong(b)) {
+                            body = body.child(tool_line(p, b, tools));
+                            shown_any = true;
+                        }
+                    }
+                    Tools::Folded => {
+                        let fold = format!("fold/{key}");
+                        let opened = open.contains(&fold);
+                        let running = run
+                            .iter()
+                            .rev()
+                            .find(|b| matches!(status(b).as_deref(), None | Some("running")))
+                            .filter(|_| m.live);
+                        let failed = run.iter().filter(|b| went_wrong(b)).count();
+                        let words = match running {
+                            Some(b) => format!("{}…", tool_title(b, tools)),
+                            None if run.len() == 1 => format!("Used {}", tool_title(run[0], tools)),
+                            None => format!("Used {} tools", run.len()),
+                        };
+                        let this = this.clone();
+                        body = body.child(
                             div()
-                                .font_family(font::MONO)
-                                .text_color(p.ink_2)
-                                .truncate()
-                                .child(title),
-                        )
-                        .child(div().text_color(color).child(mark)),
-                );
+                                .id(SharedString::from(format!("f-{key}")))
+                                .flex()
+                                .items_center()
+                                .gap(px(space::S))
+                                .text_size(px(size::SMALL))
+                                .text_color(p.ink_3)
+                                .cursor_pointer()
+                                .soft_ink(p.ink_3, p.ink)
+                                .child(if opened { "⌄" } else { "›" })
+                                .child(div().truncate().child(words))
+                                .when(failed > 0, |d| {
+                                    d.child(
+                                        div().text_color(p.bad).child(format!("{failed} failed")),
+                                    )
+                                })
+                                .on_click(move |_, _, cx| {
+                                    let _ = this.update(cx, |loom, cx| {
+                                        loom.toggle_thought(fold.clone(), cx)
+                                    });
+                                }),
+                        );
+                        if opened {
+                            let mut list = div()
+                                .flex()
+                                .flex_col()
+                                .gap(px(space::XS))
+                                .pl(px(space::M))
+                                .border_l_1()
+                                .border_color(p.line_strong);
+                            for b in &run {
+                                list = list.child(tool_line(p, b, tools));
+                            }
+                            body = body.child(list);
+                        }
+                        shown_any = true;
+                    }
+                }
+                at = end;
+                continue;
             }
             "plan" => {
+                shown_any = true;
                 body = body.child(
                     div()
-                        .text_size(px(size::SMALL))
+                        .text_size(px(size::SMALL * show.text_scale))
                         .text_color(p.ink_2)
                         .child(b.text.clone()),
                 );
             }
             "file" => {
                 if let Some(f) = &b.file {
+                    shown_any = true;
                     body = body.child(file_view(p, f, files, key, this.clone()));
                 }
             }
             _ => {}
         }
+        at += 1;
     }
-    if m.live && m.blocks.is_empty() {
+    // While it works with nothing to show yet: what it's doing, quietly.
+    if m.live && !shown_any {
+        let doing = m
+            .blocks
+            .iter()
+            .rev()
+            .find(|b| b.kind == "tool")
+            .map(|b| format!("{}…", tool_title(b, tools)))
+            .unwrap_or_else(|| "Thinking…".to_string());
         body = body.child(
             div()
                 .text_size(px(size::SMALL))
                 .text_color(p.ink_3)
-                .child("Thinking…"),
+                .truncate()
+                .child(doing),
         );
     }
     // The files it names, each a chip with its type, which opens it.
