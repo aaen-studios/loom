@@ -20,7 +20,12 @@ module server.importer
 // time. Only reading: SQLite is opened read-only, and nothing of the other app's
 // is ever written. Secrets are never read at all: OpenBot's API keys, its vault,
 // its logins and its MCP servers' environment and headers, and Grok Bot's
-// sand-secrets.json and credentials, stay where they are.
+// sand-secrets.json and credentials, stay where they are. The one exception is
+// the provider OpenBot's Claude uses (`provider` below): its endpoint is said,
+// and its token is read only when the person says to carry it over, straight
+// into the agent program's sealed settings (import.run's `carry_provider`).
+//
+// A bundle from OpenBot has `provider` too: {program, endpoint, token, text}, or null.
 import std.env
 import std.fs
 import std.json.{Json, parse}
@@ -76,7 +81,7 @@ pub fn scan(from: String, path: String) -> Json {
     match read(from.copy(), path) {
         ok(b) => {
             let counts = counted(b.copy())
-            return Obj.new().s("from", from.copy()).s("name", title(from)).b("found", true).s("where", str_at(b, "where") ?? String()).j("counts", counts.copy()).s("text", summary(counts)).done()
+            return Obj.new().s("from", from.copy()).s("name", title(from)).b("found", true).s("where", str_at(b.copy(), "where") ?? String()).j("counts", counts.copy()).s("text", summary(counts)).j("provider", at(b, "provider")).done()
         },
         err(e) => return Obj.new().s("from", from.copy()).s("name", title(from)).b("found", false).s("why", "{e}").done(),
     }
@@ -141,6 +146,8 @@ fn openbot(path: String) -> Json ! Error {
     let db = try Database.open_read(db_path)
     var left = List<String>()
     left.push(String("API keys, the vault, logins, webhook secrets and MCP servers' environment and headers stay in OpenBot: add the ones you need in loom."))
+    // A staged copy's files, where they were → where they are in it.
+    let staged = if given { json_of(read_text("{data}/{STAGED_FILES}")) } else { Json.Null }
 
     // Agents: as they are now, or the newest roster in the event log, or an old bots.json.
     var agents = List<Json>()
@@ -208,7 +215,7 @@ fn openbot(path: String) -> Json ! Error {
             let id = text(m[0].copy())
             let key = "{thread}:{id}"
             let files = if let l = attached.find(key.copy()) { l.copy() } else { List<Json>() }
-            if let msg = openbot_message(json_of(text(m[3].copy())), id, text(m[1].copy()), text(m[2].copy()), files, pins.get(key)) { messages.push(msg) }
+            if let msg = openbot_message(json_of(text(m[3].copy())), id, text(m[1].copy()), text(m[2].copy()), files, pins.get(key), staged.copy()) { messages.push(msg) }
         }
         let is_chat = if let a = chats.find(thread.copy()) { a == agent } else { false }
         var c = Obj.new().s("id", thread.copy()).s("agent", agent.copy()).s("title", text(r[2].copy())).i("at", millis(text(r[3].copy()))).b("chat", is_chat)
@@ -357,7 +364,7 @@ fn openbot(path: String) -> Json ! Error {
         try tdb.close()
     }
 
-    return Obj.new().s("from", String("openbot")).s("where", data).j("agents", Json.Array(agents)).j("conversations", Json.Array(conversations)).j("memories", Json.Array(memories)).j("routines", Json.Array(routines)).j("skills", Json.Array(skills)).j("mcp", Json.Array(mcp)).j("tables", Json.Array(tables)).j("not", strs(left)).done()
+    return Obj.new().s("from", String("openbot")).s("where", data.copy()).j("provider", provider(data, given)).j("agents", Json.Array(agents)).j("conversations", Json.Array(conversations)).j("memories", Json.Array(memories)).j("routines", Json.Array(routines)).j("skills", Json.Array(skills)).j("mcp", Json.Array(mcp)).j("tables", Json.Array(tables)).j("not", strs(left)).done()
 }
 
 // An OpenBot agent (AgentSummary) as a bundle's: its instructions from its
@@ -397,7 +404,7 @@ fn remit(j: Json) -> String {
 
 // A message of OpenBot's as a bundle's, or none for one with nothing to show:
 // a system note, or one with neither text nor files.
-fn openbot_message(j: Json, id: String, author: String, created: String, files: List<Json>, pinned: i64?) -> Json? {
+fn openbot_message(j: Json, id: String, author: String, created: String, files: List<Json>, pinned: i64?, staged: Json) -> Json? {
     let source = str_at(j.copy(), "source") ?? author.copy()
     if source == "system" { return none }
     let role = if source == "user" or source == "person" or source == "routine" { "person" } else { "agent" }
@@ -413,6 +420,16 @@ fn openbot_message(j: Json, id: String, author: String, created: String, files: 
         }
     }
     if words.trim().len() == 0 and all.len() == 0 { return none }
+    // A staged copy (server/stage.calx) has the files copied in, by where they were.
+    if staged != Json.Null {
+        var moved = List<Json>()
+        for f in all {
+            let p = str_at(f.copy(), "path") ?? String()
+            let to = (staged.get(p.copy()) ?? Json.Null).as_str() ?? p
+            moved.push(set(f, "path", Json.Str(to)))
+        }
+        all = moved
+    }
     var at_ms = millis(created)
     if at_ms == 0 { at_ms = millis(str_at(j, "createdAt") ?? String()) }
     var m = Obj.new().s("id", id).s("role", String(role)).s("text", words).i("at", at_ms).j("files", Json.Array(all))
@@ -489,6 +506,47 @@ fn hhmm(t: String) -> String {
     let m = i64.parse(parts[1].copy()) ?? 0
     if h < 0 or h > 23 or m < 0 or m > 59 { return String("09:00") }
     return "{pad(h)}:{pad(m)}"
+}
+
+// The file in a staged copy that maps the files it copied in, from where they were.
+pub const STAGED_FILES: str = "loom-files.json"
+
+// The settings of Claude Code's that say which provider it uses, and so which
+// OpenBot's Claude used: its endpoint, and the token or key for it.
+pub const PROVIDER_KEYS: [str; 3] = ["ANTHROPIC_BASE_URL", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY"]
+
+// Where OpenBot's Claude keeps its settings: Claude Code's settings.json, in the
+// home folder, or in a copy of the data folder given by `path`.
+fn claude_settings(data: String, given: bool) -> String {
+    return if given { "{data}/.claude/settings.json" } else { "{home()}/.claude/settings.json" }
+}
+
+/// The provider settings OpenBot's Claude has, the token among them: only for
+/// import.run, when the person said to carry them over. An empty object when there are none.
+pub fn provider_env(path: String) -> Json {
+    let given = path.trim().len() > 0
+    let data = if given { path.trim().copy() } else { "{app_data()}/OpenBot" }
+    let env_given = at(json_of(read_text(claude_settings(data, given))), "env")
+    var out = Obj.new()
+    for k in PROVIDER_KEYS {
+        if let v = str_at(env_given.copy(), k) {
+            if v.trim().len() > 0 { out = out.s(k, v.trim().copy()) }
+        }
+    }
+    return out.done()
+}
+
+// What a bundle says of that provider: the endpoint, whether there's a token,
+// and that in words, but never the token. Null when OpenBot's Claude has none
+// of its own.
+fn provider(data: String, given: bool) -> Json {
+    let env_given = provider_env(if given { data.copy() } else { String() })
+    let endpoint = str_at(env_given.copy(), "ANTHROPIC_BASE_URL") ?? String()
+    let token = str_at(env_given.copy(), "ANTHROPIC_AUTH_TOKEN") != none or str_at(env_given, "ANTHROPIC_API_KEY") != none
+    if endpoint.len() == 0 and not token { return Json.Null }
+    let with = if token { " with a token" } else { "" }
+    let words = if endpoint.len() > 0 { "OpenBot's Claude uses the endpoint {endpoint}{with}." } else { String("OpenBot's Claude uses an API key of its own.") }
+    return Obj.new().s("program", String("claude")).s("endpoint", endpoint).b("token", token).s("text", words).done()
 }
 
 // --- Grok Bot ---

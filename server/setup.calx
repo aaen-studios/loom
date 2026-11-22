@@ -15,7 +15,7 @@ import std.http.{Header, post}
 import std.json.{Json, parse}
 import std.process.{Command, current_exe, which}
 import std.thread.{sleep}
-import shared.obj.{Obj, str_at}
+import shared.obj.{Obj, at, bool_at, str_at}
 
 pub const USER: str = "loom"
 pub const HOME: str = "/var/lib/loom"
@@ -30,10 +30,15 @@ pub const CADDYFILE: str = "/etc/caddy/Caddyfile"
 const MARK: str = "# Written by loom install."
 
 /// How to install: a domain for Caddy, or none, and whether to set sandboxes up.
+/// Without a domain, Tailscale serves it unless `tailscale` is false, on
+/// `https_port`, or the first free HTTPS port when that's 0.
 pub struct Plan {
     pub domain: String
     pub port: u16
     pub sandboxes: bool
+    pub tailscale: bool
+    pub https_port: i64
+    pub version: String
 }
 
 /// What an install did, for `loom install` to say, in words or as JSON.
@@ -42,6 +47,99 @@ pub struct Done {
     pub setup_code: String?
     pub link_code: String?    // a link code that makes the owner (protocol.md, "Link codes"), for add_server
     pub steps: List<String>
+    pub version: String
+    pub via: String    // caddy, tailscale or local
+    pub local: String    // the instance on this machine
+    pub imported: Json    // what --import staged, or null
+}
+
+// The HTTPS ports Tailscale is asked for, in order, when the choice is loom's.
+const HTTPS_PORTS: [i64; 6] = [443, 8443, 10000, 10001, 10002, 10003]
+
+// The serve configs in `tailscale serve status --json`: the one in the
+// background, and each foreground session's.
+fn serve_configs(status: Json) -> List<Json> {
+    var out: List<Json> = [status.copy()]
+    if let Json.Object(sessions) = at(status, "Foreground") {
+        for (_, c) in sessions { out.push(c.copy()) }
+    }
+    return out
+}
+
+// What `status` serves at `/` and `/api` on HTTPS `port`, by path: where each goes.
+fn served_at(status: Json, port: i64) -> List<(String, String)> {
+    var out = List<(String, String)>()
+    for c in serve_configs(status) {
+        if let Json.Object(web) = at(c.copy(), "Web") {
+            for (host, site) in web {
+                if not host.ends_with(":{port}") { continue }
+                if let Json.Object(handlers) = at(site.copy(), "Handlers") {
+                    for (path, h) in handlers {
+                        if path == "/" or path == "/api" or path.starts_with("/api/") {
+                            let to = str_at(h.copy(), "Proxy") ?? str_at(h.copy(), "Path") ?? (if at(h.copy(), "Text") != Json.Null { String("a text page") } else { String("something") })
+                            out.push((path.copy(), to))
+                        }
+                    }
+                }
+            }
+        }
+        // A port forwarded as plain TCP is taken whatever path is asked for.
+        let tcp = at(c, "TCP").get("{port}") ?? Json.Null
+        if tcp != Json.Null and bool_at(tcp.copy(), "HTTPS") != some(true) {
+            out.push((String("/"), "a TCP forward to {str_at(tcp, "TCPForward") ?? String("somewhere")}"))
+        }
+    }
+    return out
+}
+
+// Whether `to`, a serve handler's proxy, is the instance on `loom_port`.
+fn is_loom(to: String, loom_port: u16) -> bool {
+    let t = to.trim_suffix("/").copy()
+    for host in ["http://127.0.0.1", "http://localhost", "127.0.0.1", "localhost", "http://[::1]"] {
+        if t == "{host}:{loom_port}" { return true }
+    }
+    return t == "{loom_port}"
+}
+
+/// The HTTPS port Tailscale should serve loom on, from what `tailscale serve
+/// status --json` gave: the one serving loom already, from an earlier install;
+/// else `wanted`, or with 0 the first of 443, 8443, 10000 and on where
+/// nothing else has `/` or `/api`. Fails when `wanted` is taken, saying by what.
+pub fn https_port(status: Json, wanted: i64, loom_port: u16) -> i64 ! Error {
+    var candidates = List<i64>()
+    if wanted > 0 { candidates.push(wanted) } else { candidates.extend(HTTPS_PORTS) }
+    // One serving loom already wins, so a second install keeps its address.
+    for p in candidates {
+        let there = served_at(status.copy(), p)
+        if there.len() > 0 and there.all(|x| { let (_, to) = x; is_loom(to.copy(), loom_port) }) { return p }
+    }
+    for p in candidates {
+        let there = served_at(status.copy(), p)
+        if there.len() == 0 { return p }
+        if wanted > 0 {
+            let (path, to) = there[0].copy()
+            fail "Tailscale serves {to} at {path} on HTTPS port {p} already, so loom leaves it: pick another with --https-port N, or auto"
+        }
+    }
+    fail "Tailscale serves something at / or /api on every HTTPS port loom tries ({HTTPS_PORTS.map(|p| "{p}").join(", ")}): give one with --https-port N"
+}
+
+/// This machine's name on the tailnet, from `tailscale status --json`, or the
+/// host of a site `serve status` names; "" when neither says.
+pub fn tailnet_name(status: Json, serve: Json) -> String {
+    let dns = (str_at(at(status, "Self"), "DNSName") ?? String()).trim_suffix(".").copy()
+    if dns.len() > 0 { return dns }
+    if let Json.Object(web) = at(serve, "Web") {
+        for (host, _) in web {
+            if let cut = host.find_last(":") { return host[..cut].copy() }
+        }
+    }
+    return String()
+}
+
+/// The address Tailscale serves loom at.
+pub fn tailnet_address(name: String, port: i64) -> String {
+    return if port == 443 { "https://{name}" } else { "https://{name}:{port}" }
 }
 
 /// The systemd unit that runs the instance as `loom`, with as little else as it needs.
@@ -228,7 +326,9 @@ pub fn install(plan: Plan) -> Done ! Error {
     steps.push("runs loom serve as {USER}, from {UNIT}")
 
     // In front of it: Caddy for a domain, or Tailscale.
-    var address = "http://127.0.0.1:{plan.port}"
+    let local = "http://127.0.0.1:{plan.port}"
+    var address = local.copy()
+    var via = String("local")
     if plan.domain.len() > 0 {
         if which(String("caddy")) == none {
             if which(String("apt-get")) == none { fail "Caddy isn't installed, and this system has no apt-get to install it with: install Caddy, then run loom install again" }
@@ -242,11 +342,26 @@ pub fn install(plan: Plan) -> Done ! Error {
         _ = try sh("systemctl", words(["enable", "caddy"]))
         _ = try sh("systemctl", words(["reload-or-restart", "caddy"]))
         address = "https://{plan.domain}"
+        via = String("caddy")
         steps.push("Caddy serves it at {address}, with TLS")
+    } else if not plan.tailscale {
+        steps.push("it listens only on this machine, at {local}, as --no-tailscale asked")
     } else if which(String("tailscale")) != none {
-        let served = try Command.new(String("tailscale")).args(words(["serve", "--bg", "--https=443"])).arg("http://127.0.0.1:{plan.port}").output()
+        // What Tailscale serves already stays: loom takes a port where nothing has / or /api.
+        let shown = try Command.new(String("tailscale")).args(words(["serve", "status", "--json"])).output()
+        let serving = if shown.status.success() { json_of(shown.text()) } else { Json.Null }
+        let port = try https_port(serving.copy(), plan.https_port, plan.port)
+        let served = try Command.new(String("tailscale")).args(words(["serve", "--bg"])).arg("--https={port}").arg(local.copy()).output()
         if served.status.success() {
-            steps.push("Tailscale serves it on your tailnet: `tailscale serve status` gives its address")
+            let me = try Command.new(String("tailscale")).args(words(["status", "--json"])).output()
+            let name = tailnet_name(if me.status.success() { json_of(me.text()) } else { Json.Null }, serving)
+            if name.len() > 0 {
+                address = tailnet_address(name, port)
+                via = String("tailscale")
+                steps.push("Tailscale serves it on your tailnet at {address}")
+            } else {
+                steps.push("Tailscale serves it on your tailnet on HTTPS port {port}: `tailscale serve status` gives its address")
+            }
         } else {
             steps.push("Tailscale didn't take it ({served.error_text().trim()}); it's at {address} on this machine")
         }
@@ -256,7 +371,14 @@ pub fn install(plan: Plan) -> Done ! Error {
 
     let code = try setup_code()
     let link = if let c = code.copy() { link_code(plan.port, c) } else { none }
-    return Done { address: address, setup_code: code, link_code: link, steps: steps }
+    return Done { address: address, setup_code: code, link_code: link, steps: steps, version: plan.version.copy(), via: via, local: local, imported: Json.Null }
+}
+
+fn json_of(text: String) -> Json {
+    return match parse(text) {
+        ok(j) => j,
+        err(_) => Json.Null,
+    }
 }
 
 /// The setup code the instance printed on its first start, from its log. None once the
@@ -299,7 +421,15 @@ pub fn done_json(d: Done) -> Json {
     for s in d.steps {
         steps.push(Json.Str(s.copy()))
     }
-    return Obj.new().s("address", d.address.copy()).maybe("setup_code", d.setup_code.copy()).maybe("link_code", d.link_code.copy()).j("steps", Json.Array(steps)).done()
+    return Obj.new().s("address", d.address.copy()).maybe("setup_code", d.setup_code.copy()).maybe("link_code", d.link_code.copy()).s("version", d.version.copy()).s("via", d.via.copy()).s("local", d.local.copy()).s("data", String(HOME)).s("user", String(USER)).s("service", String("loom")).j("import", d.imported.copy()).s("next", next_step(d.copy())).j("steps", Json.Array(steps)).done()
+}
+
+// What the person does next, in a sentence.
+fn next_step(d: Done) -> String {
+    if d.setup_code == none { return "Open the app and sign in at {d.address}." }
+    let brought = if d.imported != Json.Null { " What --import staged comes into their account then." } else { "" }
+    let agent = if d.link_code != none { " Or an agent of theirs adds it to their app with add_server and the link code, within 15 minutes." } else { "" }
+    return "Open the app, give it {d.address} and the setup code, and choose a username and password.{brought}{agent}"
 }
 
 /// The same, in words.
@@ -309,15 +439,10 @@ pub fn done_text(d: Done) -> String {
         lines.push("- {s}")
     }
     lines.push("")
-    lines.push("loom is at {d.address}")
-    if let code = d.setup_code.copy() {
-        lines.push("setup code: {code}")
-        lines.push("Open the app, give it the address and this code, and choose your username and password.")
-    }
-    if let link = d.link_code.copy() {
-        lines.push("link code: {link}")
-        lines.push("Or an agent of yours adds it to your app with add_server and this code, for 15 minutes.")
-    }
+    lines.push("loom {d.version} is at {d.address}")
+    if let code = d.setup_code.copy() { lines.push("setup code: {code}") }
+    if let link = d.link_code.copy() { lines.push("link code: {link}") }
+    lines.push(next_step(d))
     return lines.join("\n")
 }
 
@@ -335,6 +460,37 @@ fn the_unit_runs_it_as_loom() {
 fn a_free_range_comes_after_the_others() {
     assert(free_range(String()) == 100000)
     assert(free_range(String("ann:100000:65536\nbob:165536:65536\n")) == 231072)
+}
+
+@test
+fn tailscale_keeps_what_it_serves() {
+    // Nothing served: 443.
+    assert(https_port(parse(String("\{\}"))!, 0, 8790)! == 443)
+    assert(https_port(Json.Null, 0, 8790)! == 443)
+    // Another service at / on 443: the next free port.
+    let other = parse(String(#"{"TCP":{"443":{"HTTPS":true}},"Web":{"box.tail1234.ts.net:443":{"Handlers":{"/":{"Proxy":"http://127.0.0.1:3000"}}}}}"#))!
+    assert(https_port(other.copy(), 0, 8790)! == 8443)
+    // Asked for 443 by name, it says what's there instead.
+    match https_port(other.copy(), 443, 8790) {
+        ok(_) => panic("443 was taken"),
+        err(e) => assert("{e}".contains("http://127.0.0.1:3000") and "{e}".contains("--https-port")),
+    }
+    assert(https_port(other.copy(), 9443, 8790)! == 9443)
+    // Only another path on 443: / is free there.
+    let side = parse(String(#"{"Web":{"box.tail1234.ts.net:443":{"Handlers":{"/grafana":{"Proxy":"http://127.0.0.1:3001"}}}}}"#))!
+    assert(https_port(side, 0, 8790)! == 443)
+    // /api taken on 443 and 8443 too, by a foreground session: 10000.
+    let busy = parse(String(#"{"Web":{"box.tail1234.ts.net:443":{"Handlers":{"/api":{"Proxy":"http://127.0.0.1:4000"}}}},"Foreground":{"s1":{"Web":{"box.tail1234.ts.net:8443":{"Handlers":{"/":{"Path":"/srv/www"}}}}}}}"#))!
+    assert(https_port(busy, 0, 8790)! == 10000)
+    // A plain TCP forward takes the port.
+    let tcp = parse(String(#"{"TCP":{"443":{"TCPForward":"127.0.0.1:22"}}}"#))!
+    assert(https_port(tcp, 0, 8790)! == 8443)
+    // A second install finds loom where it put it, even past a free 443.
+    let ours = parse(String(#"{"Web":{"box.tail1234.ts.net:8443":{"Handlers":{"/":{"Proxy":"http://127.0.0.1:8790"}}}}}"#))!
+    assert(https_port(ours.copy(), 0, 8790)! == 8443)
+    assert(tailnet_name(Json.Null, ours) == "box.tail1234.ts.net")
+    assert(tailnet_name(parse(String(#"{"Self":{"DNSName":"vps.tail1234.ts.net."}}"#))!, Json.Null) == "vps.tail1234.ts.net")
+    assert(tailnet_address(String("vps.ts.net"), 443) == "https://vps.ts.net" and tailnet_address(String("vps.ts.net"), 8443) == "https://vps.ts.net:8443")
 }
 
 @test
