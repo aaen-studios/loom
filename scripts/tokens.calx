@@ -17,7 +17,7 @@ import shared.shape
 
 // The eight shapes, for Rust: each its points, then all of them in order.
 fn rust_shapes() -> String {
-    var out = String("\n#[rustfmt::skip]\npub mod thread_shape \{\n")
+    var out = String("\n#[rustfmt::skip]\n#[allow(clippy::approx_constant)]\npub mod thread_shape \{\n")
     out.push_str("    //! The thread shapes that come with loom, each {shape.POINTS} points along one strand, in a box from -1 to 1, y down.\n")
     var names = List<String>()
     var all = List<String>()
