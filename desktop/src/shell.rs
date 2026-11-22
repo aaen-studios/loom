@@ -217,6 +217,114 @@ fn app_id() -> &'static str {
     }
 }
 
+/// The app icon in loom's theme: loom.exe carries the light one first and the dark
+/// one second (build.rs). The window's and the taskbar's icon change at once; loom's
+/// Start menu and desktop shortcuts are pointed at the matching one, which Explorer
+/// shows from then on, on a thread of their own.
+#[cfg(windows)]
+pub fn follow_theme(hwnd: isize, dark: bool) {
+    use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
+    use windows_sys::Win32::UI::WindowsAndMessaging::*;
+    let id: usize = if dark { 2 } else { 1 };
+    // SAFETY: icons from this program's own resources, shared so they're never freed,
+    // given to its own window.
+    unsafe {
+        let inst = GetModuleHandleW(std::ptr::null());
+        for (which, side) in [
+            (ICON_BIG, GetSystemMetrics(SM_CXICON)),
+            (ICON_SMALL, GetSystemMetrics(SM_CXSMICON)),
+        ] {
+            let icon = LoadImageW(inst, id as _, IMAGE_ICON, side, side, LR_SHARED);
+            if !icon.is_null() && hwnd != 0 {
+                SendMessageW(hwnd as _, WM_SETICON, which as usize, icon as isize);
+            }
+        }
+    }
+    std::thread::spawn(move || {
+        let Ok(exe) = std::env::current_exe() else {
+            return;
+        };
+        let mut links = Vec::new();
+        if let Ok(d) = std::env::var("APPDATA") {
+            links.push(
+                std::path::Path::new(&d).join(r"Microsoft\Windows\Start Menu\Programs\loom.lnk"),
+            );
+        }
+        if let Ok(d) = std::env::var("USERPROFILE") {
+            links.push(std::path::Path::new(&d).join(r"Desktop\Loom.lnk"));
+            links.push(std::path::Path::new(&d).join(r"Desktop\loom.lnk"));
+        }
+        for lnk in links {
+            if lnk.exists() {
+                if let Err(e) = point_icon(&lnk, &exe, if dark { 1 } else { 0 }) {
+                    eprintln!("loom: {} keeps its icon: {e}", lnk.display());
+                }
+            }
+        }
+    });
+}
+
+#[cfg(not(windows))]
+pub fn follow_theme(_hwnd: isize, _dark: bool) {}
+
+/// Points the shortcut at `lnk`, if it opens `exe`, at `exe`'s icon number `index`,
+/// keeping everything else it has, such as its AppUserModelID.
+#[cfg(windows)]
+fn point_icon(
+    lnk: &std::path::Path,
+    exe: &std::path::Path,
+    index: i32,
+) -> windows::core::Result<()> {
+    use windows::core::{Interface, HSTRING};
+    use windows::Win32::System::Com::*;
+    use windows::Win32::UI::Shell::{
+        IShellLinkW, SHChangeNotify, ShellLink, SHCNE_UPDATEITEM, SHCNF_PATHW,
+    };
+    // The same file, however each path is spelt: a shortcut keeps the long path, and a
+    // program's own can have short 8.3 names in it, as C:\Users\RUNNER~1 does.
+    let same = |a: &[u16], b: &std::path::Path| {
+        let end = a.iter().position(|&c| c == 0).unwrap_or(a.len());
+        let a = std::path::PathBuf::from(String::from_utf16_lossy(&a[..end]));
+        match (std::fs::canonicalize(&a), std::fs::canonicalize(b)) {
+            (Ok(x), Ok(y)) => x == y,
+            _ => a
+                .to_string_lossy()
+                .eq_ignore_ascii_case(&b.to_string_lossy()),
+        }
+    };
+    // SAFETY: COM on this thread, for a shell link that's loaded, read, changed only
+    // if it's loom's and its icon differs, saved and released.
+    unsafe {
+        let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+        let link: IShellLinkW = CoCreateInstance(&ShellLink, None, CLSCTX_INPROC_SERVER)?;
+        let file: IPersistFile = link.cast()?;
+        let path = HSTRING::from(lnk.as_os_str());
+        file.Load(&path, STGM_READWRITE)?;
+        let mut target = [0u16; 1024];
+        link.GetPath(&mut target, std::ptr::null_mut(), 0)?;
+        if !same(&target, exe) {
+            return Ok(());
+        }
+        let mut icon = [0u16; 1024];
+        let mut now = -1;
+        link.GetIconLocation(&mut icon, &mut now)?;
+        if now == index && same(&icon, exe) {
+            return Ok(());
+        }
+        link.SetIconLocation(&HSTRING::from(exe.as_os_str()), index)?;
+        file.Save(&path, true)?;
+        use std::os::windows::ffi::OsStrExt;
+        let wide: Vec<u16> = lnk.as_os_str().encode_wide().chain(Some(0)).collect();
+        SHChangeNotify(
+            SHCNE_UPDATEITEM,
+            SHCNF_PATHW,
+            Some(wide.as_ptr() as _),
+            None,
+        );
+    }
+    Ok(())
+}
+
 /// Hands the update at `setup`, the new release's loom-setup.exe that the core
 /// downloaded and checked against the signed manifest, to that setup, for the app to
 /// quit after. The setup waits for this program to end, checks its own signature,
@@ -395,5 +503,79 @@ mod tests {
         assert_eq!(&jpeg[..3], &[0xFF, 0xD8, 0xFF]);
         let shot = image::load_from_memory(&jpeg).expect("a JPEG");
         assert!(shot.width().max(shot.height()) <= super::SHOT_SIDE);
+    }
+
+    /// loom.exe's icons, light then dark (build.rs), as this test program carries them too.
+    #[cfg(windows)]
+    #[test]
+    fn carries_the_light_and_the_dark_icon() {
+        use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
+        use windows_sys::Win32::UI::WindowsAndMessaging::{LoadImageW, IMAGE_ICON, LR_SHARED};
+        for id in [1usize, 2] {
+            // SAFETY: an icon from this program's own resources, shared, never freed.
+            let icon = unsafe {
+                LoadImageW(
+                    GetModuleHandleW(std::ptr::null()),
+                    id as _,
+                    IMAGE_ICON,
+                    32,
+                    32,
+                    LR_SHARED,
+                )
+            };
+            assert!(!icon.is_null(), "no icon {id}");
+        }
+    }
+
+    /// A shortcut to loom is pointed at the icon for the theme and keeps the rest; one
+    /// to another program is left alone.
+    #[cfg(windows)]
+    #[test]
+    fn points_loom_s_shortcut_at_the_theme_s_icon() {
+        use windows::core::{Interface, HSTRING};
+        use windows::Win32::System::Com::*;
+        use windows::Win32::UI::Shell::{IShellLinkW, ShellLink};
+        let dir = std::env::temp_dir().join(format!("loom-icon-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let exe = dir.join("loom.exe");
+        let other = dir.join("other.exe");
+        std::fs::write(&exe, b"MZ").unwrap();
+        std::fs::write(&other, b"MZ").unwrap();
+        let make = |lnk: &std::path::Path, target: &std::path::Path| unsafe {
+            let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+            let link: IShellLinkW =
+                CoCreateInstance(&ShellLink, None, CLSCTX_INPROC_SERVER).unwrap();
+            link.SetPath(&HSTRING::from(target.as_os_str())).unwrap();
+            link.SetIconLocation(&HSTRING::from(target.as_os_str()), 0)
+                .unwrap();
+            link.SetDescription(&HSTRING::from("kept")).unwrap();
+            let file: IPersistFile = link.cast().unwrap();
+            file.Save(&HSTRING::from(lnk.as_os_str()), true).unwrap();
+        };
+        let read = |lnk: &std::path::Path| unsafe {
+            let link: IShellLinkW =
+                CoCreateInstance(&ShellLink, None, CLSCTX_INPROC_SERVER).unwrap();
+            let file: IPersistFile = link.cast().unwrap();
+            file.Load(&HSTRING::from(lnk.as_os_str()), STGM_READ)
+                .unwrap();
+            let mut icon = [0u16; 1024];
+            let mut index = -1;
+            link.GetIconLocation(&mut icon, &mut index).unwrap();
+            let mut said = [0u16; 1024];
+            link.GetDescription(&mut said).unwrap();
+            let end = said.iter().position(|&c| c == 0).unwrap_or(0);
+            (index, String::from_utf16_lossy(&said[..end]))
+        };
+        let ours = dir.join("loom.lnk");
+        let theirs = dir.join("other.lnk");
+        make(&ours, &exe);
+        make(&theirs, &other);
+        super::point_icon(&ours, &exe, 1).unwrap();
+        super::point_icon(&theirs, &exe, 1).unwrap();
+        assert_eq!(read(&ours), (1, "kept".to_string()));
+        assert_eq!(read(&theirs).0, 0);
+        super::point_icon(&ours, &exe, 0).unwrap();
+        assert_eq!(read(&ours).0, 0);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

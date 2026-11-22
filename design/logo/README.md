@@ -8,12 +8,14 @@ The mark is **the knot**: one thread with a loop that crosses itself, the same k
 | `png/light-<size>.png` | The mark in ink (`#111113`) on transparent, for light backgrounds. 16 to 1024 px. |
 | `png/dark-<size>.png` | The mark in `#ededee` on transparent, for dark backgrounds. 16 to 1024 px. |
 | `png/app-<size>.png` | The app icon: the mark in white on a dark rounded square. 16 to 1024 px. |
-| [`app.ico`](app.ico) | The Windows icon: the app icon at 16, 24, 32, 48, 64, 128 and 256 px. |
+| `png/app-light-<size>.png` | The light app icon: the mark in ink on a white rounded square with a hairline edge. 16 to 1024 px. |
+| [`app-light.ico`](app-light.ico) | The Windows icon: the light app icon at 16, 24, 32, 48, 64, 128 and 256 px. It's loom.exe's first icon, the one Explorer shows. |
+| [`app.ico`](app.ico) | The dark app icon at the same sizes, loom.exe's second. The window, the taskbar and loom's shortcuts take whichever matches loom's theme, which follows the system's unless it's changed in Settings. |
 | [`wordmark.svg`](wordmark.svg) | The wordmark, "loom" in Geist SemiBold with its tracking, as outlined paths in `currentColor`, for places without Geist. `calx scripts/wordmark.calx` makes it. |
 | [`app.icns`](app.icns) | The Mac icon: the app icon inset on Apple's grid (824 of 1024 px, with room for the shadow macOS adds), 16 to 1024 px. |
 | [`ios/AppIcon.appiconset`](ios/AppIcon.appiconset) | The iPhone icon at 1024 px, for Xcode: the app icon as an opaque square (iOS rounds it), the mark alone in light for dark mode, and in gray for tinted. |
 
-`calx scripts/icons.calx` makes the last two from `png/app-1024.png` and `png/dark-1024.png`.
+`calx scripts/icons.calx` makes the Apple icons from `png/app-1024.png` and `png/dark-1024.png`, and the light app icon and `app-light.ico` from `png/app-1024.png` and `png/light-1024.png`.
 
 ## Drawing it
 

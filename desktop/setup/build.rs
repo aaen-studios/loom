@@ -23,7 +23,9 @@ fn main() {
 
     if std::env::var("CARGO_CFG_WINDOWS").is_ok() {
         let mut res = winresource::WindowsResource::new();
-        res.set_icon("../../design/logo/app.ico");
+        // The light app icon first, which Explorer shows, and the dark one second.
+        res.set_icon("../../design/logo/app-light.ico");
+        res.set_icon_with_id("../../design/logo/app.ico", "2");
         res.set("FileDescription", "loom setup");
         res.set("ProductName", "loom");
         res.set("CompanyName", "Aaen Studios");
