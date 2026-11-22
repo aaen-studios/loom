@@ -4453,22 +4453,6 @@ ACTA_KEY=secret:ACTA_KEY",
         let p = self.p;
         let searching = !self.model.query.trim().is_empty();
         let mut list = div().flex().flex_col().gap(px(2.0)).px(px(space::S));
-        // With several servers, the agents are under their server's name.
-        if !self.away.is_empty() {
-            list = list.child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(space::S))
-                    .px(px(space::M))
-                    .pt(px(space::XS))
-                    .pb(px(space::S))
-                    .text_size(px(size::CAPTION))
-                    .font_weight(FontWeight::MEDIUM)
-                    .text_color(p.ink_3)
-                    .child(div().truncate().child(server_name(&self.model, &self.here))),
-            );
-        }
         for a in self.model.agents.clone() {
             let selected = self.model.selected.as_deref() == Some(a.id.as_str())
                 && self.screen == Screen::Chat;
