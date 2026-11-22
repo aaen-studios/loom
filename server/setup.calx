@@ -8,9 +8,10 @@ module server.setup
 // or Tailscale when there isn't. Unless told not to, it sets up rootless Podman
 // for the `loom` user, for the sandboxes everyone but the owner runs their
 // agents in (server/sandbox.calx). Then it starts it, and gives the address
-// and the setup code.
+// the setup code, and a link code for an agent to add it to the person's app.
 import std.env
 import std.fs
+import std.http.{Header, post}
 import std.json.{Json, parse}
 import std.process.{Command, current_exe, which}
 import std.thread.{sleep}
@@ -44,6 +45,7 @@ pub struct Plan {
 pub struct Done {
     pub address: String
     pub setup_code: String?
+    pub link_code: String?    // a link code that makes the owner (protocol.md, "Link codes"), for add_server
     pub steps: List<String>
     pub version: String
     pub via: String    // caddy, tailscale or local
@@ -367,7 +369,9 @@ pub fn install(plan: Plan) -> Done ! Error {
         steps.push("it listens only on this machine: give a --domain for Caddy, or install Tailscale and run loom install again")
     }
 
-    return Done { address: address, setup_code: try setup_code(), steps: steps, version: plan.version.copy(), via: via, local: local, imported: Json.Null }
+    let code = try setup_code()
+    let link = if let c = code.copy() { link_code(plan.port, c) } else { none }
+    return Done { address: address, setup_code: code, link_code: link, steps: steps, version: plan.version.copy(), via: via, local: local, imported: Json.Null }
 }
 
 fn json_of(text: String) -> Json {
@@ -394,20 +398,38 @@ fn setup_code() -> String? ! Error {
     return none
 }
 
+/// A link code that makes the owner, from the instance on `port` for its setup code
+/// (POST /api/link/new), for an agent to hand to add_server. None if it didn't answer.
+fn link_code(port: u16, setup: String) -> String? {
+    let headers: List<Header> = [Header { name: String("Content-Type"), value: String("application/json") }]
+    let body = Obj.new().s("setup_code", setup).done()
+    var req = post("http://127.0.0.1:{port}/api/link/new", headers, "{body}".to_bytes(), 10000, 65536)
+    let r = match req.wait() {
+        ok(r) => r,
+        err(_) => return none,
+    }
+    if r.status != 200 { return none }
+    return match parse(String.from_utf8(r.body) ?? String()) {
+        ok(j) => str_at(j, "code"),
+        err(_) => none,
+    }
+}
+
 /// What `loom install` says once it's done, as JSON.
 pub fn done_json(d: Done) -> Json {
     var steps = List<Json>()
     for s in d.steps {
         steps.push(Json.Str(s.copy()))
     }
-    return Obj.new().s("address", d.address.copy()).maybe("setup_code", d.setup_code.copy()).s("version", d.version.copy()).s("via", d.via.copy()).s("local", d.local.copy()).s("data", String(HOME)).s("user", String(USER)).s("service", String("loom")).j("import", d.imported.copy()).s("next", next_step(d.copy())).j("steps", Json.Array(steps)).done()
+    return Obj.new().s("address", d.address.copy()).maybe("setup_code", d.setup_code.copy()).maybe("link_code", d.link_code.copy()).s("version", d.version.copy()).s("via", d.via.copy()).s("local", d.local.copy()).s("data", String(HOME)).s("user", String(USER)).s("service", String("loom")).j("import", d.imported.copy()).s("next", next_step(d.copy())).j("steps", Json.Array(steps)).done()
 }
 
 // What the person does next, in a sentence.
 fn next_step(d: Done) -> String {
     if d.setup_code == none { return "Open the app and sign in at {d.address}." }
     let brought = if d.imported != Json.Null { " What --import staged comes into their account then." } else { "" }
-    return "Open the app, give it {d.address} and the setup code, and choose a username and password.{brought}"
+    let agent = if d.link_code != none { " Or an agent of theirs adds it to their app with add_server and the link code, within 15 minutes." } else { "" }
+    return "Open the app, give it {d.address} and the setup code, and choose a username and password.{brought}{agent}"
 }
 
 /// The same, in words.
@@ -419,6 +441,7 @@ pub fn done_text(d: Done) -> String {
     lines.push("")
     lines.push("loom {d.version} is at {d.address}")
     if let code = d.setup_code.copy() { lines.push("setup code: {code}") }
+    if let link = d.link_code.copy() { lines.push("link code: {link}") }
     lines.push(next_step(d))
     return lines.join("\n")
 }

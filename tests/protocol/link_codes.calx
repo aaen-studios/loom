@@ -1,0 +1,335 @@
+module tests.protocol.link_codes
+
+// Link codes (protocol.md, "Link codes"): an agent sets loom up for its person
+// with nothing for them to type but yes. On a new server, the setup code gives a
+// link code, one at a time, that works once for 15 minutes; `loom link` gives one
+// too. An agent's add_server passes it on, the person's yes on a device is
+// answered by that device's core with `core.offer`, and a second core, for the
+// new server, signs in with it: the owner is made, with the person's username
+// and no password, which takes no login until they set one. On a server set up
+// already, `loom link` and an owner's `link.create` for someone give a code that
+// signs in to that account. A used, replaced, expired or stranger's code is
+// refused, and too many wrong ones are rate limited. `loom import`, with no
+// token, makes itself one that only imports, for 15 minutes, and drops it.
+//
+//     calx tests/protocol/link_codes.calx
+import std.bytes
+import std.fs
+import std.hash.{sha256}
+import std.http.{Header, post}
+import std.json.{Json, parse}
+import std.process.{Child, Stdio, exit}
+import std.random.{Random}
+import std.sqlite.{Database, Value}
+import std.time.{Instant, Timestamp}
+import shared.obj.{Obj, at, bool_at, int_at, str_at}
+import core.cache.{Cache}
+import core.conn.{Conn}
+import tests.kit.{App, Instance, calx, check, device, fetch, json_of, loom, post_json, remove_scratch}
+
+// The app's side of a core: what it sends the core, and what the core says.
+struct Core {
+    to_core: Sender<String>
+    from_core: Receiver<String>
+    thread: Thread?
+}
+
+impl Core {
+    // A core for `base`, with `token`, or with none, waiting for a login.
+    fn start(base: String, token: own String?, cache: String) -> Core ! Error {
+        let inbox = Receiver<String>()
+        let to_core = inbox.sender()
+        let from_core = Receiver<String>()
+        var random = Random.system()
+        let conn = Conn.new(some("http://{base}"), token, "loom-test-{random.next_u32()}", try Cache.open(cache), inbox, from_core.sender())
+        let t = unsafe { Thread.spawn(conn) }
+        return Core { to_core: to_core, from_core: from_core, thread: some(t) }
+    }
+
+    fn send(mut self, frame: Json) {
+        self.to_core.send("{frame}")
+    }
+
+    // Reads what the core says until a frame whose `t` is `t` and whose `field`
+    // is `value`, if `field` isn't empty.
+    fn until(mut self, t: str, field: str, value: str) -> Json ! Error {
+        let start = unsafe { Instant.now() }
+        loop {
+            let waited = unsafe { Instant.now() }.nanos_since(start) / 1000000
+            if waited >= 30000 { fail "the core said no {t} {field}={value} in 30 s" }
+            let m = unsafe { self.from_core.wait_for((30000 - waited) * 1000000) } else { continue }
+            let f = try parse(m)
+            if (str_at(f.copy(), "t") ?? String()) != t { continue }
+            if field.len() == 0 or (str_at(f.copy(), field) ?? String()) == value { return f }
+        }
+    }
+
+    fn stop(mut self) {
+        self.to_core.send(String(#"{"t":"core.stop"}"#))
+        if let t = self.thread.take() {
+            t.join()
+        }
+    }
+}
+
+// A new instance no one has set up: its server, folder, address and setup code.
+struct Fresh {
+    server: Child
+    data: String
+    base: String
+    setup: String
+}
+
+fn fresh() -> Fresh ! Error {
+    let data = try fs.temp_dir()
+    let agent = try fs.absolute(String("tests/fake_agent/main.calx"))
+    let added = try loom(data.copy(), [String("acp"), String("add"), String("fake"), calx(), agent]).output()
+    if not added.status.success() { fail "loom acp add failed: {added.error_text()}" }
+    let server = try loom(data.copy(), [String("serve"), String("--port"), String("0"), String("--allow-root")]).stdout(Stdio.Pipe).spawn()
+    let serving = server.wait_for_line(String("loom: serving"), 120000) else {
+        server.kill()
+        fail "the server didn't start"
+    }
+    let address = serving[serving.find("http://") ?? 0..].trim().copy()
+    let base = if address.ends_with("/") { address[7..address.len() - 1].copy() } else { address[7..].copy() }
+    let code_line = server.wait_for_line(String("setup code:"), 10000) else {
+        server.kill()
+        fail "the server didn't print a setup code"
+    }
+    return Fresh { server: server, data: data, base: base, setup: code_line[12..].trim().copy() }
+}
+
+fn now_ms() -> i64 {
+    return unsafe { Timestamp.now() }.unix_ms
+}
+
+// Runs SQL on the instance's database, as if time had passed.
+fn sql(data: String, statement: str, params: List<Value>) ! Error {
+    let db = try Database.open("{data}/loom.db")
+    _ = try db.execute(String(statement), params)
+    try db.close()
+}
+
+fn count(data: String, statement: str) -> i64 ! Error {
+    let db = try Database.open("{data}/loom.db")
+    let row = try db.query_one(String(statement), List<Value>())
+    try db.close()
+    let r = row else return 0
+    return match r[0].copy() {
+        Value.Int(n) => n,
+        _ => 0,
+    }
+}
+
+fn code_of(r: Json) -> String {
+    return str_at(r, "code") ?? String()
+}
+
+fn error_code(r: Json) -> String {
+    return str_at(at(r, "error"), "code") ?? String()
+}
+
+// `loom ...` on `data`, as an agent over SSH would run it, with --json.
+fn cli(data: String, args: own List<String>) -> (bool, Json, String) ! Error {
+    var all = args
+    all.push(String("--json"))
+    let out = try loom(data, all).output()
+    let text = out.text()
+    let j = match parse(text.trim().copy()) {
+        ok(v) => v,
+        err(_) => Json.Null,
+    }
+    return (out.status.success(), j, text)
+}
+
+// The agent's next reply in `conversation`, as text.
+fn reply_in(app: mut App, conversation: String) -> String ! Error {
+    loop {
+        let created = try app.until("event", "message.created")
+        let m = at(created, "message")
+        if str_at(m.copy(), "role") == some(String("agent")) and str_at(m.copy(), "conversation") == some(conversation.copy()) {
+            var out = String()
+            if let Json.Array(blocks) = at(m, "blocks") {
+                for b in blocks {
+                    if (str_at(b.copy(), "kind") ?? String()) == "text" { out.push_str(str_at(b, "text") ?? String()) }
+                }
+            }
+            return out
+        }
+    }
+}
+
+// A small Grok Bot data folder, to import: one agent.
+fn grok_fixture(root: String) ! Error {
+    let cache = "{root}/sand-client-persistence"
+    try fs.make_dir_all(cache.copy())
+    try fs.write_text("{cache}/onxw4zbo.blob", String(#"{"schemaVersion":1,"value":{"rows":[{"id":"g_scout","name":"Scout","title":"Scouts the web","description":"Looks things up.","avatarColor":"yellow","harness":"cursor","isGroup":false,"memberIds":[]}]}}"#))
+}
+
+fn script_post(base: String, token: String, op: str, body: Json) -> (u32, Json) ! Error {
+    let headers: List<Header> = [Header { name: String("Content-Type"), value: String("application/json") }, Header { name: String("Authorization"), value: "Bearer {token}" }]
+    var req = post("http://{base}/api/scripts/{op}", headers, "{body}".to_bytes(), 30000, 1048576)
+    let r = try req.wait()
+    let j = match parse(String.from_utf8(r.body) ?? String()) {
+        ok(v) => v,
+        err(_) => Json.Null,
+    }
+    return (r.status, j)
+}
+
+fn run(a: Instance, b: Fresh, desk: mut Core, folder: String) ! Error {
+    let gb = "{folder}/Grok Bot"
+    try grok_fixture(gb.copy())
+
+    // --- A new server ---
+    let (_, _, before) = try fetch(b.base.copy(), String(), String("/api/info"))
+    try check(bool_at(json_of(before), "setup") == some(true), "a new server says it's not set up")
+    let (ok_early, _, early) = try cli(b.data.copy(), [String("import"), String("grokbot"), gb.copy(), String("--url"), "http://{b.base}"])
+    try check(not ok_early and early.contains("no one has set this instance up yet"), "loom import with no token waits for the owner")
+
+    let (bad_status, bad) = try post_json(b.base.copy(), "/api/link/new", Obj.new().s("setup_code", String("not the code")).done())
+    try check(bad_status == 403 and error_code(bad) == "bad_code", "a wrong setup code gives no link code")
+    let (s1, first) = try post_json(b.base.copy(), "/api/link/new", Obj.new().s("setup_code", b.setup.copy()).done())
+    let expires = int_at(first.copy(), "expires") ?? 0
+    try check(s1 == 200 and code_of(first.copy()).starts_with("loom-link-") and bool_at(first.copy(), "owner") == some(true) and expires > now_ms() + 890000 and expires <= now_ms() + 900000, "the setup code gives a link code that makes the owner, for 15 minutes")
+    let (_, second) = try post_json(b.base.copy(), "/api/link/new", Obj.new().s("setup_code", b.setup.copy()).done())
+    let (replaced_status, replaced) = try post_json(b.base.copy(), "/api/link", Obj.new().s("code", code_of(first)).s("username", String("elliot")).j("device", device("Phone")).done())
+    try check(replaced_status == 403 and error_code(replaced) == "bad_code", "there's one at a time: a new one replaces the last")
+    try sql(b.data.copy(), "UPDATE owner_codes SET expires = 1", List<Value>())
+    let (expired_status, expired) = try post_json(b.base.copy(), "/api/link", Obj.new().s("code", code_of(second)).s("username", String("elliot")).j("device", device("Phone")).done())
+    try check(expired_status == 403 and error_code(expired) == "expired", "an expired one is refused")
+
+    let (made_ok, made, _) = try cli(b.data.copy(), [String("link")])
+    let code = str_at(made.copy(), "link_code") ?? String()
+    try check(made_ok and code.starts_with("loom-link-") and bool_at(made, "owner") == some(true), "loom link gives one too")
+    let (bad_name_status, bad_name) = try post_json(b.base.copy(), "/api/link", Obj.new().s("code", code.copy()).s("username", String("Not Valid!")).j("device", device("Phone")).done())
+    try check(bad_name_status == 400 and error_code(bad_name) == "bad_username", "a username that can't be one is refused, and the code kept")
+
+    // --- add_server, with the code ---
+    let (_, laptop_login) = try post_json(a.base.copy(), "/api/login", Obj.new().s("username", String("elliot")).s("password", String("correct horse")).j("device", device("Laptop")).done())
+    var app = try App.connect(a.base.copy(), str_at(laptop_login, "token") ?? String(), 0)
+    let made_agent = try app.cmd("q_1", "agent.create", Obj.new().s("name", String("Setup")).s("acp_agent", String("fake")).s("instructions", String("You are a test.")).done())
+    let agent = str_at(at(at(made_agent, "value"), "agent"), "id") ?? String()
+    let c = try app.cmd("q_2", "conversation.create", Obj.new().s("agent", agent).done())
+    let chat = str_at(at(c, "value"), "conversation") ?? String()
+    try app.send(Obj.new().s("t", String("send")).s("cid", String("m_1")).s("conversation", chat.copy()).s("text", String(#"/mcp add_server {"address":"https://x.example.com","link_code":"not a code!"}"#)).done())
+    let refused = try reply_in(mut app, chat.copy())
+    try check(refused.starts_with("add_server failed") and refused.contains("link_code"), "add_server refuses a link code that isn't one")
+
+    let offer = Obj.new().s("address", "http://{b.base}").s("link_code", code.copy()).done()
+    try app.send(Obj.new().s("t", String("send")).s("cid", String("m_2")).s("conversation", chat.copy()).s("text", "/mcp add_server {offer}").done())
+    let asked = try desk.until("event", "kind", "approval.needed")
+    try check(str_at(asked.copy(), "title") == some("Add the server http://{b.base} to your app, and sign in there"), "add_server with a code asks the person, saying it signs in")
+    desk.send(Obj.new().s("t", String("approve")).s("call", str_at(asked, "call") ?? String()).b("allow", true).done())
+    let told = try desk.until("core.offer", "", "")
+    try check(str_at(told.copy(), "address") == some("http://{b.base}") and str_at(told.copy(), "code") == some(code.copy()) and str_at(told.copy(), "username") == some(String("elliot")), "the core of the device that said yes says core.offer, with the code and the person's username")
+    let offered = try app.until("event", "server.offered")
+    try check(str_at(offered, "link_code") == some(code.copy()), "server.offered carries the code")
+    _ = try reply_in(mut app, chat.copy())
+
+    var new_core = try Core.start(b.base.copy(), none, "{folder}/core_b.db")
+    new_core.send(Obj.new().s("t", String("link")).s("id", String("l_1")).s("server", "http://{b.base}").s("code", code.copy()).maybe("username", str_at(told, "username")).j("device", device("Desk PC")).done())
+    let linked = try new_core.until("core.login", "id", "l_1")
+    _ = try new_core.until("core.conn", "state", "live")
+    let owner_id = str_at(linked.copy(), "user") ?? String()
+    new_core.stop()
+    let (_, users, _) = try cli(b.data.copy(), [String("user"), String("list")])
+    let owner = at(users, "users").at(0) ?? Json.Null
+    try check(bool_at(linked, "ok") == some(true) and str_at(owner.copy(), "id") == some(owner_id.copy()) and str_at(owner.copy(), "username") == some(String("elliot")) and str_at(owner, "role") == some(String("owner")), "the new server's core signs in with it, and the owner is made, with the person's username")
+
+    // --- Once ---
+    let (again_status, again) = try post_json(b.base.copy(), "/api/link", Obj.new().s("code", code.copy()).s("username", String("elliot")).j("device", device("Phone")).done())
+    try check(again_status == 403 and error_code(again) == "bad_code", "a link code works only once")
+    let (new_status, new_after) = try post_json(b.base.copy(), "/api/link/new", Obj.new().s("setup_code", b.setup.copy()).done())
+    let (setup_status, setup_after) = try post_json(b.base.copy(), "/api/setup", Obj.new().s("code", b.setup.copy()).s("username", String("eve")).s("password", String("correct horse")).j("device", device("Phone")).done())
+    let (_, _, after) = try fetch(b.base.copy(), String(), String("/api/info"))
+    try check(bool_at(json_of(after), "setup") == some(false) and new_status == 409 and error_code(new_after) == "already_set_up" and setup_status == 409 and error_code(setup_after) == "already_set_up", "once there's an owner, the server says so, and neither the setup code nor a new owner code does anything")
+    let (login_status, login) = try post_json(b.base.copy(), "/api/login", Obj.new().s("username", String("elliot")).s("password", String("anything at all")).j("device", device("Phone")).done())
+    try check(login_status == 401 and error_code(login) == "bad_password", "an owner with no password takes no login")
+
+    // --- Signing in to an account ---
+    let (_, signin, _) = try cli(b.data.copy(), [String("link")])
+    let (in_status, signed_in) = try post_json(b.base.copy(), "/api/link", Obj.new().s("code", str_at(signin.copy(), "link_code") ?? String()).j("device", device("Phone")).done())
+    try check(bool_at(signin, "owner") == some(false) and in_status == 200 and str_at(signed_in.copy(), "user") == some(owner_id.copy()) and bool_at(signed_in.copy(), "owner") == none, "on a server set up already, loom link signs in to the owner's account")
+    var owner_app = try App.connect(b.base.copy(), str_at(signed_in, "token") ?? String(), 0)
+    let weak = try owner_app.cmd("q_3", "password.set", Obj.new().s("password", String("short")).done())
+    let set = try owner_app.cmd("q_4", "password.set", Obj.new().s("password", String("a fine password")).done())
+    let twice = try owner_app.cmd("q_5", "password.set", Obj.new().s("password", String("another one here")).done())
+    let (pw_status, _) = try post_json(b.base.copy(), "/api/login", Obj.new().s("username", String("elliot")).s("password", String("a fine password")).j("device", device("Laptop")).done())
+    try check(error_code(weak) == "weak_password" and bool_at(set, "ok") == some(true) and error_code(twice) == "has_password" and pw_status == 200, "password.set gives it its first password, once, and then it logs in")
+
+    let added = try loom(b.data.copy(), [String("user"), String("add"), String("ann")]).input_text(String("their password\n")).output()
+    if not added.status.success() { fail "user add failed: {added.error_text()}" }
+    let (_, ann_login) = try post_json(b.base.copy(), "/api/login", Obj.new().s("username", String("ann")).s("password", String("their password")).j("device", device("Laptop")).done())
+    let ann = str_at(ann_login.copy(), "user") ?? String()
+    let for_ann = try owner_app.cmd("q_6", "link.create", Obj.new().s("user", ann.copy()).done())
+    let (ann_status, ann_in) = try post_json(b.base.copy(), "/api/link", Obj.new().s("code", code_of(at(for_ann, "value"))).j("device", device("Phone")).done())
+    try check(ann_status == 200 and str_at(ann_in, "user") == some(ann.copy()), "the owner's link.create for someone gives a code that signs in to their account")
+    var ann_app = try App.connect(b.base.copy(), str_at(ann_login, "token") ?? String(), 0)
+    let not_hers = try ann_app.cmd("q_7", "link.create", Obj.new().s("user", owner_id.copy()).done())
+    try check(error_code(not_hers) == "not_allowed", "a member can't make one for someone else")
+    ann_app.close()
+    let later = try owner_app.cmd("q_8", "link.create", Obj.new().s("user", ann.copy()).done())
+    try sql(b.data.copy(), "UPDATE link_codes SET expires = 1", List<Value>())
+    let (late_status, late) = try post_json(b.base.copy(), "/api/link", Obj.new().s("code", code_of(at(later, "value"))).j("device", device("Phone")).done())
+    try check(late_status == 403 and error_code(late) == "expired", "and once it has expired, it's refused")
+    owner_app.close()
+
+    // --- A stranger's code ---
+    let theirs = try app.cmd("q_9", "link.create", Obj.new().done())
+    let (other_status, other) = try post_json(b.base.copy(), "/api/link", Obj.new().s("code", code_of(at(theirs, "value"))).j("device", device("Phone")).done())
+    let (made_up_status, made_up) = try post_json(b.base.copy(), "/api/link", Obj.new().s("code", String("loom-link-00000000000000000000000000000000")).j("device", device("Phone")).done())
+    try check(other_status == 403 and error_code(other) == "bad_code" and made_up_status == 403 and error_code(made_up) == "bad_code", "another instance's code, or one made up, is refused")
+    app.close()
+
+    // --- A token that only imports ---
+    let token = "loom-script-test"
+    let hash = bytes.hex(sha256(String(token).to_bytes()))
+    try sql(b.data.copy(), "INSERT INTO script_grants (hash, user, scope, expires) VALUES (?, ?, 'import', ?)", [Value.Text(hash.copy()), Value.Text(owner_id.copy()), Value.Int(now_ms() + 60000)])
+    let (ask_status, ask) = try script_post(b.base.copy(), String(token), "ask", Obj.new().s("agent", String("Scout")).s("text", String("hi")).done())
+    let (import_status, imported) = try script_post(b.base.copy(), String(token), "import", Obj.new().s("from", String("grokbot")).s("path", gb.copy()).done())
+    try check(ask_status == 403 and error_code(ask) == "not_allowed" and import_status == 200 and int_at(at(imported, "came"), "agents") == some(1), "a script token for import is taken for an import, and for nothing else")
+    try sql(b.data.copy(), "UPDATE script_grants SET expires = 1 WHERE hash = ?", [Value.Text(hash)])
+    let (stale_status, _) = try script_post(b.base.copy(), String(token), "import", Obj.new().s("from", String("grokbot")).s("path", gb.copy()).done())
+    try check(stale_status == 401, "and not once it has expired")
+    try sql(b.data.copy(), "DELETE FROM script_grants", List<Value>())
+    let (cli_ok, cli_import, cli_text) = try cli(b.data.copy(), [String("import"), String("grokbot"), gb.copy(), String("--url"), "http://{b.base}"])
+    let grants = try count(b.data.copy(), "SELECT count(*) FROM script_grants")
+    let tokens = try count(b.data.copy(), "SELECT count(*) FROM script_tokens")
+    if not cli_ok { println("      {cli_text}") }
+    try check(cli_ok and (str_at(cli_import, "text") ?? String()).contains("here already") and grants == 0 and tokens == 0, "loom import with no token makes itself one, uses it and drops it, and scripts stay off")
+
+    // --- Too many wrong codes ---
+    var limited = false
+    for _ in 0..12 {
+        let (status, _) = try post_json(b.base.copy(), "/api/link", Obj.new().s("code", String("loom-link-wrong")).j("device", device("Phone")).done())
+        if status == 429 {
+            limited = true
+            break
+        }
+    }
+    try check(limited, "too many wrong codes from one address are rate limited")
+}
+
+fn main() ! Error {
+    let a = try Instance.start()
+    let b = try fresh()
+    let folder = (try fs.temp_dir()).replace("\\", "/")
+    var desk = try Core.start(a.base.copy(), some(a.token.copy()), "{folder}/core_a.db")
+    let failure: String? = match run(a.copy(), b.copy(), mut desk, folder.copy()) {
+        ok => none,
+        err(e) => some("{e}"),
+    }
+    desk.stop()
+    var s = b.server
+    s.kill()
+    _ = s.wait()
+    remove_scratch(b.data)
+    remove_scratch(folder)
+    a.stop()
+    if let f = failure {
+        eprintln("\n{f}")
+        exit(1)
+    }
+    println("\nlink codes: all good")
+}

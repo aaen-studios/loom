@@ -5,6 +5,7 @@ module server.main
 //     loom serve [--data DIR] [--port N] [--host ADDR] [--backups DIR [--backups-keep N]] [--sandboxes podman|docker [--sandbox-image IMAGE]] [--allow-root]
 //     loom user add NAME [--data DIR]          reads the password from standard input
 //     loom user list [--data DIR]
+//     loom link [NAME] [--data DIR]            a link code for an agent's add_server
 //     loom acp add NAME COMMAND [ARG...] [--data DIR]
 //     loom acp list [--data DIR]
 //     loom acp install ID [--env NAME=value]... [--registry URL] [--data DIR]
@@ -23,9 +24,11 @@ module server.main
 // Each but serve, mcp and egress takes --json, to answer in JSON.
 //
 // Run from source: calx server/main.calx serve
-import std.crypto.{PasswordHasher}
+import std.crypto.{PasswordHasher, random_bytes}
+import std.bytes
 import std.env
 import std.fs
+import std.hash.{sha256}
 import std.http.{Header, get, post}
 import std.http.server.{Server}
 import std.io
@@ -35,7 +38,7 @@ import std.thread.{sleep}
 import shared.obj.{Obj, at, bool_at, merge, str_at}
 import shared.protocol
 import shared.release.{newer}
-import server.instance.{Config, EventLife, Instance}
+import server.instance.{Config, EventLife, Instance, SCRIPT_GRANT_MS, account_link_code, owner_link_code}
 import server.mcp
 import server.egress
 import server.backup
@@ -44,7 +47,7 @@ import server.installer
 import server.importer
 import server.stage
 import server.move
-import server.store.{AcpAgent, Store}
+import server.store.{AcpAgent, Store, now}
 import server.setup
 import server.update
 
@@ -64,6 +67,9 @@ usage: loom <command>
                             each, from loom's image or --sandbox-image IMAGE: without, only the owner's run
   user add NAME             add an account; the password comes on standard input
   user list                 list the accounts
+  link [NAME]               a link code, once, for 15 minutes, for an agent's add_server: on an instance no
+                            one has set up, it makes the owner when the person says yes in the app; else it
+                            signs in to NAME, or the owner
   user password NAME        give NAME a new password, from standard input, and sign them out everywhere:
                             the owner's own reset
   acp add NAME COMMAND ...  add an ACP agent program, such as: acp add claude npx -y @agentclientprotocol/claude-agent-acp
@@ -81,7 +87,9 @@ usage: loom <command>
   import FILE               make a new instance in --data from a backup
   import openbot [PATH]     bring agents, chats, memories, routines, skills, MCP servers and tables over
   import grokbot [PATH]     from OpenBot or Grok Bot on this computer, or from PATH, a copy of its data
-                            folder, without their secrets. Through the running instance, as the four below.
+                            folder, without their secrets. Through the running instance, as the four below, or
+                            with no token, where it can open --data, with one it makes itself for the owner
+                            that only imports, for 15 minutes.
                             --carry-provider gives OpenBot's Claude endpoint and token to the Claude agent program
   import openbot --from-user USER
                             as root: take OpenBot's data from USER's folder (or from PATH), as a snapshot, into
@@ -440,8 +448,39 @@ fn main() ! Error {
 // `body`, or GET without. The address is --url, or LOOM_URL, or the instance at
 // --port here; the token is --token, or LOOM_SCRIPTS_TOKEN.
 fn script(a: Args, op: str, body: Json?) -> Json ! Error {
-    let token = if a.token.len() > 0 { a.token.copy() } else { env.variable(String("LOOM_SCRIPTS_TOKEN")) ?? String() }
+    var token = if a.token.len() > 0 { a.token.copy() } else { env.variable(String("LOOM_SCRIPTS_TOKEN")) ?? String() }
+    // An import with no token, run where it can open the instance's folder, makes
+    // itself one for the owner that only imports, for 15 minutes, and drops it after
+    // (protocol.md, "/api/scripts/*"). Whoever can open the folder could do more.
+    var grant = String()
+    if token.len() == 0 and op == "import" and fs.exists("{a.data}/loom.db") {
+        let store = try open_store(a.copy())
+        var owner = String()
+        for u in try store.users() {
+            if u.role == "owner" { owner = u.id.copy() }
+        }
+        if owner.len() == 0 { fail "no one has set this instance up yet: add it to your app first, with the link code (add_server, or loom link)" }
+        token = "loom-script-{bytes.hex(random_bytes(24))}"
+        grant = bytes.hex(sha256(token.to_bytes()))
+        try store.add_script_grant(grant.copy(), owner, "import", now() + SCRIPT_GRANT_MS)
+    }
     if token.len() == 0 { fail "give your script token with --token or LOOM_SCRIPTS_TOKEN: turn scripts on in the app, under the server, to get one" }
+    if grant.len() == 0 { return try script_call(a, op, body, token) }
+    let answer = match script_call(a.copy(), op, body, token) {
+        ok(v) => v,
+        err(e) => {
+            let store = try open_store(a.copy())
+            try store.drop_script_grant(grant)
+            fail "{e}"
+        },
+    }
+    let store = try open_store(a)
+    try store.drop_script_grant(grant)
+    return answer
+}
+
+// The call itself, with `token`.
+fn script_call(a: Args, op: str, body: Json?, token: String) -> Json ! Error {
     let base = if a.url.len() > 0 { a.url.copy() } else { env.variable(String("LOOM_URL")) ?? "http://127.0.0.1:{a.port}" }
     let url = "{base.trim_suffix("/")}/api/scripts/{op}"
     let auth = Header { name: String("Authorization"), value: "Bearer {token}" }
@@ -526,6 +565,26 @@ fn run(a: Args) -> Said ! Error {
         let gone = try store.revoke_all(u.id.copy())
         try store.log_people("password", "{u.username} was given a new password from the command line, and signed out everywhere", String())
         return said("{u.username} has a new password, and is signed out on {gone.len()} devices", Obj.new().s("id", u.id.copy()).s("username", u.username.copy()).i("signed_out", i64.wrap(gone.len())).done())
+    }
+    // A link code (protocol.md, "Link codes") for an agent to hand add_server, which
+    // the person's yes in the app signs in with: on an instance no one has set up,
+    // it makes the owner; else it signs in to NAME, or the owner.
+    if cmd == "link" and a.words.len() <= 2 {
+        let store = try open_store(a.copy())
+        if a.words.len() == 1 and try store.user_count() == 0 {
+            let (code, expires) = try owner_link_code(store, "cli")
+            return said("link code: {code}\nIt makes the owner, once, for 15 minutes: an agent hands it to add_server, and the person says yes in the app.", Obj.new().s("link_code", code).i("expires", expires).b("owner", true).done())
+        }
+        var name = sub.copy()
+        if name.len() == 0 {
+            for u in try store.users() {
+                if u.role == "owner" { name = u.username.copy() }
+            }
+        }
+        let u = try store.find_username(name.copy()) else { fail "there's no one called {name} here" }
+        let (code, expires) = try account_link_code(store, u.id.copy(), String("cli"))
+        try store.log_people("link", "A link code to sign in as {u.username} was made from the command line", String())
+        return said("link code: {code}\nIt signs a device in as {u.username}, once, for 15 minutes.", Obj.new().s("link_code", code).i("expires", expires).b("owner", false).s("username", u.username.copy()).done())
     }
     if cmd == "user" and sub == "list" {
         let store = try open_store(a)
