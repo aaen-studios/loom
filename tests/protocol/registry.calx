@@ -17,10 +17,11 @@ import std.http.server.{Server}
 import std.json.{Json}
 import std.process.{Command, exit}
 import std.thread.{Task, sleep}
+import std.text.utf8.{decode_lossy_unicode}
 import std.zip.{Writer}
 import shared.obj.{Obj, at, merge, str_at}
 import server.installer
-import tests.kit.{App, Instance, calx, check, reply_text}
+import tests.kit.{App, Instance, calx, check, json_of, loom, remove_scratch, reply_text}
 
 struct Serving {
     server: Server
@@ -64,7 +65,7 @@ fn error_code(answer: Json) -> String {
     return str_at(at(answer, "error"), "code") ?? String()
 }
 
-fn run(i: Instance) ! Error {
+fn run(i: Instance, registry: String) ! Error {
     var app = try App.connect(i.base.copy(), i.token.copy(), 0)
     let list = try app.cmd("q_1", "acp.registry", Obj.new().done())
     let bin = listed(list.copy(), "fake-bin")
@@ -110,6 +111,32 @@ fn run(i: Instance) ! Error {
     }
     try check(gone and not "{try app.cmd("q_11", "acp.list", Obj.new().done())}".contains("fake-bin"), "removing an agent removes what was installed")
     app.close()
+
+    // --- From the command line, straight on a data folder, as an agent setting a server up does ---
+    let other = try fs.temp_dir()
+    let failure: String? = match from_the_command_line(other.copy(), registry) {
+        ok => none,
+        err(e) => some("{e}"),
+    }
+    remove_scratch(other)
+    if let f = failure { fail f }
+}
+
+fn from_the_command_line(data: String, registry: String) ! Error {
+    let installed = try loom(data.copy(), [String("acp"), String("install"), String("fake-bin"), String("--env"), String("FAKE_SETTING=hi"), String("--env"), String("FAKE_KEY=SECRET_VALUE"), String("--registry"), registry.copy(), String("--json")]).output()
+    let program = at(json_of(installed.stdout.copy()), "program")
+    try check(installed.status.success() and (str_at(program.copy(), "command") ?? String()).ends_with("/acp/fake-bin/{exe_name()}") and "{at(program.copy(), "settings")}" == #"["FAKE_SETTING","FAKE_KEY"]"# and str_at(program, "version") == some(String("1.0.0")) and not installed.text().contains("SECRET_VALUE"), "loom acp install installs an agent from the registry into the data folder, with its settings, and gives back only their names")
+    let listed_programs = try loom(data.copy(), [String("acp"), String("list"), String("--json")]).output()
+    try check(listed_programs.text().contains("fake-bin") and fs.is_dir("{data}/acp/fake-bin"), "and acp list has it")
+    let changed = try loom(data.copy(), [String("acp"), String("settings"), String("fake-bin"), String("FAKE_SETTING=bye"), String("FAKE_KEY="), String("MODEL=fast"), String("--json")]).output()
+    try check(changed.status.success() and "{at(at(json_of(changed.stdout.copy()), "program"), "settings")}" == #"["FAKE_SETTING","MODEL"]"#, "loom acp settings sets and removes settings")
+    let db = try fs.read("{data}/loom.db")
+    try check(not decode_lossy_unicode(db.copy(), 0, db.len()).contains("SECRET_VALUE"), "kept sealed in the database")
+    let nowhere = try loom(data.copy(), [String("acp"), String("install"), String("fake-elsewhere"), String("--registry"), registry.copy(), String("--json")]).output()
+    let said = "{json_of(nowhere.stdout.copy())}"
+    try check(not nowhere.status.success() and said.contains("no build for") and said.contains("no other way to run"), "an agent with no build here says plainly why")
+    let missing = try loom(data.copy(), [String("acp"), String("settings"), String("nothing"), String("A=1"), String("--json")]).output()
+    try check(not missing.status.success() and "{json_of(missing.stdout.copy())}".contains("no ACP agent nothing"), "and settings for a program that isn't there are refused")
 }
 
 fn exe_name() -> String {
@@ -143,7 +170,7 @@ fn main() ! Error {
     try fs.write_text("{root}/registry.json", "{Obj.new().s("version", String("1.0.0")).j("agents", agents).done()}")
 
     let inst = try Instance.start_with([String("--registry"), "{base}/registry.json"])
-    let failure: String? = match run(inst.copy()) {
+    let failure: String? = match run(inst.copy(), "{base}/registry.json") {
         ok => none,
         err(e) => some("{e}"),
     }

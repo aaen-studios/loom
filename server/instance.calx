@@ -54,6 +54,7 @@ import server.rules
 import server.brains
 import server.egress
 import server.sandbox
+import server.stage
 import server.update
 import server.store.{AcpAgent, Device, Store, User, now, secret_key, site_of}
 import shared.tools
@@ -2287,6 +2288,11 @@ impl Instance {
             let versions = Json.Array([Json.Int(i64(protocol.NEWEST))])
             return some(json_response(200, Obj.new().s("instance", try i.store.meta("instance") ?? String()).s("key", try i.public_key()).j("protocol", versions).s("version", i.version.copy()).b("setup", users == 0).j("moved", i.moved.copy()).done()))
         }
+        // What answers here, for a script or an agent checking a server: no token needed.
+        if req.path == "/api/version" and req.method == "GET" {
+            let users = try i.store.user_count()
+            return some(json_response(200, Obj.new().s("name", String("loom")).s("version", i.version.copy()).j("protocol", Json.Array([Json.Int(i64(protocol.NEWEST))])).b("set_up", users > 0).done()))
+        }
         // Once moved, the rest is at the new place; while moving, nothing changes here.
         if i.moved != Json.Null {
             let to = str_at(i.moved.copy(), "address") ?? String()
@@ -3488,11 +3494,65 @@ impl Instance {
             if from == s { known = true }
         }
         if not known { return Answer.Refused(String("bad_request"), String("from is openbot or grokbot.")) }
-        let bundle = match importer.read(from.copy(), str_at(args, "path") ?? String()) {
+        let path = str_at(args.copy(), "path") ?? String()
+        let bundle = match importer.read(from.copy(), path.copy()) {
             ok(b) => b,
             err(e) => return Answer.Refused(String("not_found"), "{e}"),
         }
-        return Answer.Value(try i.bring(user, device, from, bundle))
+        var answer = try i.bring(user, device, from.copy(), bundle)
+        // The provider OpenBot's Claude used, when the person said to carry it over.
+        if from == "openbot" and bool_at(args, "carry_provider") == some(true) {
+            answer = merge(answer, Obj.new().j("provider", try i.carry_provider(user.copy(), device.copy(), path.copy())).done())
+        }
+        // A folder staged from another user's (server/stage.calx) keeps no token once it's been read.
+        if path.len() > 0 and fs.is_file("{path}/{stage.MARK}") and fs.is_file("{path}/.claude/settings.json") {
+            try fs.remove_file("{path}/.claude/settings.json")
+        }
+        return Answer.Value(answer)
+    }
+
+    // Copies the provider OpenBot's Claude uses (its endpoint and token, from
+    // Claude Code's settings) into the settings of the Claude agent program here,
+    // sealed as every program's settings are. Says which program, and the
+    // endpoint, never the token; or why it didn't.
+    fn carry_provider(i: mut Instance, user: String, device: String, path: String) -> Json ! Error {
+        let env_given = importer.provider_env(path)
+        if env_given.len() == 0 { return Obj.new().b("carried", false).s("why", String("OpenBot's Claude has no provider of its own to carry over.")).done() }
+        var found: AcpAgent? = none
+        for a in try i.store.acp_agents() {
+            if found == none and (a.name.contains("claude") or a.source.contains("claude")) { found = some(a.copy()) }
+        }
+        let program = found else return Obj.new().b("carried", false).s("why", String("There's no Claude agent program here to give it to: install Claude Agent, then import again.")).done()
+        try i.store.set_acp_settings(program.name.copy(), program.source.copy(), program.version.copy(), merge(program.env.copy(), env_given.copy()))
+        i.stop_program(program.name.copy())
+        let endpoint = str_at(env_given, "ANTHROPIC_BASE_URL") ?? String()
+        i.log(user, String(), "import", "{program.name} uses OpenBot's provider{if endpoint.len() > 0 { " at " } else { "" }}{endpoint} now", device)
+        return Obj.new().b("carried", true).s("program", program.name.copy()).s("endpoint", endpoint).done()
+    }
+
+    // An import staged by `loom import --from-user` or `loom install --import`
+    // (server/stage.calx), waiting in imports/pending.json: run for the owner once
+    // there is one, its answer in imports/done.json for the command that's waiting.
+    fn pending_import(i: mut Instance) ! Error {
+        let pending = "{i.data}/{stage.PENDING}"
+        if not fs.is_file(pending.copy()) { return }
+        var owner = String()
+        for u in try i.store.users() {
+            if owner.len() == 0 and u.role == "owner" { owner = u.id.copy() }
+        }
+        if owner.len() == 0 { return }
+        let taking = "{i.data}/{stage.TAKING}"
+        try fs.rename(pending, taking.copy())
+        let args = match parse(try fs.read_text(taking.copy()) ?? String()) {
+            ok(j) => j,
+            err(_) => Json.Null,
+        }
+        let out = match try i.command(owner, String("import"), String("import.run"), args) {
+            Answer.Value(v) => v,
+            Answer.Refused(code, message) => Obj.new().j("error", Obj.new().s("code", code).s("message", message).done()).done(),
+        }
+        try fs.write_text("{i.data}/{stage.DONE}", "{out}")
+        try fs.remove_file(taking)
     }
 
     // Writes what server.importer read into `user`'s data, and says what came.
@@ -4380,6 +4440,7 @@ impl Instance {
         i.next_due = t + (if i.minute_ms < 1000 { i.minute_ms } else { 1000 })
         // Routines run at the new place once the instance has moved there.
         if i.moving.len() > 0 or i.moved != Json.Null { return }
+        if let err(e) = i.pending_import() { eprintln("loom: a staged import: {e}") }
         let due = match i.store.due_routines(t) {
             ok(d) => d,
             err(e) => {

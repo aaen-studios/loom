@@ -252,6 +252,24 @@ fn fetch_json(address: String) -> Json ! Error {
     return try parse(text)
 }
 
+/// The registry at `address`, without fetching the icons: for `loom acp install`.
+pub fn read_registry(address: String) -> Json ! Error {
+    return try fetch_json(address)
+}
+
+/// Why `pick` found no way to run `entry` on `system`, and what to install for one.
+pub fn missing(entry: Json, system: String) -> String {
+    let name = str_at(entry.copy(), "name") ?? str_at(entry.copy(), "id") ?? String("That agent")
+    let dist = at(entry, "distribution")
+    let by_npx = at(dist.copy(), "npx") != Json.Null
+    let by_uvx = at(dist, "uvx") != Json.Null
+    let lead = "{name} has no build for {system}"
+    if by_npx and by_uvx { return "{lead}, and runs with npx or uvx otherwise, and neither is installed here: install Node.js (which brings npx) or uv (which brings uvx), then try again." }
+    if by_npx { return "{lead}, and runs with npx otherwise, which isn't installed here: install Node.js (which brings npx), then try again." }
+    if by_uvx { return "{lead}, and runs with uvx otherwise, which isn't installed here: install uv (which brings uvx), then try again." }
+    return "{lead}, and no other way to run."
+}
+
 // Whether a program is on the PATH, as npx and uvx need to be.
 pub fn on_path(name: str) -> bool {
     return process.which(String(name)) != none
@@ -266,7 +284,10 @@ fn picks_a_way_to_run_it() {
     assert(str_at(musl, "archive") == some(String("https://e/x.tar.gz")))
     let mac = pick(entry.copy(), String("darwin-aarch64"), true, false) ?? Json.Null
     assert(str_at(mac.copy(), "kind") == some(String("npx")) and str_at(mac, "version") == some(String("1.2.3")))
-    assert(pick(entry, String("darwin-aarch64"), false, true) == none)
+    assert(pick(entry.copy(), String("darwin-aarch64"), false, true) == none)
+    assert(missing(entry, String("darwin-aarch64")).contains("install Node.js"))
+    let only_bin = parse(#"{"id":"y","name":"Y","distribution":{"binary":{}}}"#)!
+    assert(missing(only_bin, String("linux-x86_64")) == "Y has no build for linux-x86_64, and no other way to run.")
 }
 
 @test
