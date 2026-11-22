@@ -1087,7 +1087,10 @@ impl Instance {
                 }
             }
         }
-        // With self-updates on, it looks a minute after it starts, then every six hours.
+        // Each agent picks from what its program offers, though only some have
+        // started a session on it yet.
+        try i.share_all_options()
+        // With self-updates on, it looks a minute after it starts, then every half hour.
         if try i.store.meta("auto_update") == some(String("on")) and update.refusal(i.host) == none {
             i.next_update_check = now() + i.minute_ms
         }
@@ -6748,10 +6751,21 @@ impl Instance {
     }
 
     // Keeps what an agent's program offers (its session config options) with
-    // the agent, for the person to pick from, when it's new or changed.
+    // the agent, for the person to pick from, when it's new or changed, and
+    // with each of the person's other agents on that program, which offers
+    // them the same before they've started a session on it.
     fn learn_options(i: Instance, user: String, id: String, config: Json) ! Error {
         let agent = try i.store.agent(user.copy(), id.copy()) else return
+        let program = str_at(agent, "acp_agent") ?? String()
         let options = acp.offered(config)
+        for a in try i.store.agents(user.copy()) {
+            if str_at(a.copy(), "acp_agent") != some(program.copy()) { continue }
+            try i.keep_options(user.copy(), a, options.copy(), id.copy())
+        }
+    }
+
+    // Puts `options` on `agent`, if they're new to it, and tells the apps.
+    fn keep_options(i: Instance, user: String, agent: Json, options: Json, by: String) ! Error {
         if at(agent.copy(), "options") == options { return }
         var o = Obj.new()
         if let Json.Object(m) = agent {
@@ -6759,7 +6773,37 @@ impl Instance {
         }
         let kept = o.j("options", options).done()
         try i.store.put_agent_json(user.copy(), kept.copy())
-        try i.event(user, "agent.updated", Obj.new().j("agent", kept).s("by", id).done())
+        try i.event(user, "agent.updated", Obj.new().j("agent", kept).s("by", by).done())
+    }
+
+    // What `program` offers, as another of the person's agents on it learned
+    // it, or null when none has.
+    fn program_options(i: Instance, user: String, program: String) -> Json ! Error {
+        for a in try i.store.agents(user) {
+            if str_at(a.copy(), "acp_agent") != some(program.copy()) { continue }
+            let options = at(a, "options")
+            if let Json.Array(list) = options.copy() {
+                if list.len() > 0 { return options }
+            }
+        }
+        return Json.Null
+    }
+
+    // At start: each agent without its program's options takes them from
+    // another of its person's agents on that program, which learned them.
+    fn share_all_options(i: Instance) ! Error {
+        for u in try i.store.users() {
+            for a in try i.store.agents(u.id.copy()) {
+                if let Json.Array(list) = at(a.copy(), "options") {
+                    if list.len() > 0 { continue }
+                }
+                let program = str_at(a.copy(), "acp_agent") ?? String()
+                let options = try i.program_options(u.id.copy(), program)
+                if options == Json.Null { continue }
+                let id = str_at(a.copy(), "id") ?? String()
+                try i.keep_options(u.id.copy(), a, options, id)
+            }
+        }
     }
 
     // Sets a run's session to what its agent's `config` says, one option at a
@@ -8326,6 +8370,9 @@ impl Instance {
             let color = str_at(args.copy(), "color") ?? String(COLORS[count % COLORS.len()])
             var agent = Obj.new().s("id", id).s("name", str_at(args.copy(), "name") ?? String("Agent")).s("color", color).s("acp_agent", program).s("instructions", str_at(args.copy(), "instructions") ?? String()).maybe("folder", str_at(args.copy(), "folder")).j("mcp", names_of(at(args.copy(), "mcp"))).maybe("permission", permission).maybe("busy", busy).maybe("backup", backup).b("code_mode", bool_at(args.copy(), "code_mode") ?? true).b("isolated", isolated).j("network", network).i("revision", 1).i("at", now()).done()
             if network == Json.Null { agent = without(agent, "network") }
+            // What its program offers, as the person's other agents on it learned it.
+            let offered = try i.program_options(user.copy(), program.copy())
+            if offered != Json.Null { agent = merge(agent, Obj.new().j("options", offered).done()) }
             try i.store.put_agent(user.copy(), agent.copy(), device.copy())
             i.log(user.copy(), str_at(agent.copy(), "id") ?? String(), "agent", "Made {str_at(agent.copy(), "name") ?? String()}", device.copy())
             try i.event(user, "agent.created", Obj.new().j("agent", agent.copy()).done())
@@ -8412,6 +8459,10 @@ impl Instance {
             if switched {
                 _ = o.m.remove(String("options"))
                 _ = o.m.remove(String("config"))
+                // The new program's, as the person's other agents on it learned it.
+                let program = str_at(args.copy(), "acp_agent") ?? String()
+                let offered = try i.program_options(user.copy(), program)
+                if offered != Json.Null { o.m.insert(String("options"), offered) }
             }
             // Its model, effort and the like, by option id; null (or "") goes
             // back to following the person's default for its program, or what
