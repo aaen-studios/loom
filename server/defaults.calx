@@ -5,6 +5,8 @@ module server.defaults
 // kept on the instance per person, so every device gets them:
 //
 // - `brain`: the agent program a new agent runs on, when agent.create names none;
+// - `backup`: the program an agent's turns move to when its own runs out of
+//   usage or doesn't start, for an agent with no `backup` of its own;
 // - `config`: per program, the options its agents start each session on, such
 //   as `{"claude": {"model": "opus", "effort": "high"}}`;
 // - `permission`: the permission mode of an agent with none of its own;
@@ -20,11 +22,11 @@ import shared.obj.{Obj, at, str_at}
 // How long the instructions every agent follows may be: they go into every session.
 pub const INSTRUCTIONS_MOST: usize = 8000
 
-const FIELDS: str = "brain config permission instructions busy"
+const FIELDS: str = "brain backup config permission instructions busy"
 
 // The defaults a person has before they change any.
 pub fn blank() -> Json {
-    return Obj.new().s("brain", String()).j("config", Obj.new().done()).s("permission", String("ask")).s("instructions", String()).s("busy", String("queue")).i("revision", 0).s("by", String()).i("at", 0).done()
+    return Obj.new().s("brain", String()).s("backup", String()).j("config", Obj.new().done()).s("permission", String("ask")).s("instructions", String()).s("busy", String("queue")).i("revision", 0).s("by", String()).i("at", 0).done()
 }
 
 // The defaults as kept, with each field there, its blank where it's missing.
@@ -95,6 +97,11 @@ pub fn apply(old: Json, args: Json) -> Json ! Error {
         let v = at(args.copy(), "brain")
         let brain = text_or(v, "") else fail "brain is the name of an agent program, or null."
         o.m.insert(String("brain"), Json.Str(brain))
+    }
+    if has(args.copy(), "backup") {
+        let v = at(args.copy(), "backup")
+        let backup = text_or(v, "") else fail "backup is the name of an agent program, or null."
+        o.m.insert(String("backup"), Json.Str(backup))
     }
     if has(args.copy(), "permission") {
         let v = at(args.copy(), "permission")
@@ -219,6 +226,10 @@ fn putting_changes_only_what_it_names() {
     let second = apply(first.copy(), Obj.new().j("config", Obj.new().j("claude", Obj.new().j("effort", Json.Null).done()).done()).s("busy", String("steer")).done())!
     assert("{at(second.copy(), "config")}" == #"{"claude":{"model":"opus"}}"#)
     assert(str_at(second.copy(), "brain") == some(String("claude")) and str_at(second.copy(), "busy") == some(String("steer")))
+    assert(str_at(second.copy(), "backup") == some(String()))
+    let backed = apply(second.copy(), Obj.new().s("backup", String("codex")).done())!
+    assert(str_at(backed.copy(), "backup") == some(String("codex")) and str_at(backed.copy(), "brain") == some(String("claude")))
+    assert(str_at(apply(backed, Obj.new().j("backup", Json.Null).done())!, "backup") == some(String()))
     let third = apply(second, Obj.new().j("config", Obj.new().j("claude", Obj.new().s("model", String()).done()).done()).j("permission", Json.Null).done())!
     assert("{at(third.copy(), "config")}" == "\{\}")
     assert(str_at(third, "permission") == some(String("ask")))

@@ -1,0 +1,208 @@
+module server.brains
+
+// A backup brain (PLAN.md, "A backup brain"): an agent's second
+// program, which takes over a turn when the first one's usage runs out or it
+// doesn't start, and the summary a chat that moves to another program starts
+// with. The instance does the moving; what's here only reads JSON and text.
+import std.json.{Json}
+import shared.obj.{Obj, at, str_at}
+
+// How long the summary a moved chat starts with may be, in bytes.
+pub const SUMMARY_MOST: usize = 8000
+// How many of the person's messages it lists, and how many of the newest it
+// gives word for word, and how long each of those may be.
+const ASKED_MOST: usize = 12
+const ASKED_CUT: usize = 200
+const NEWEST: usize = 6
+const NEWEST_CUT: usize = 1200
+
+// What an agent's `backup` is set to when it has none, even where the person's
+// defaults name one.
+pub const NONE: str = "none"
+
+// The program an agent's turns move to when its own can't answer: its own
+// `backup`, or the default's where it has none, or "" for none.
+pub fn backup_of(agent: Json, defaults: Json) -> String {
+    let mine = str_at(agent, "backup") ?? String()
+    if mine == NONE { return String() }
+    if mine.len() > 0 { return mine }
+    return str_at(defaults, "backup") ?? String()
+}
+
+// Whether an agent program's error says its usage, quota or rate limit ran
+// out, as Claude Code, Codex and the APIs under them word it.
+pub fn out_of_usage(message: String) -> bool {
+    let m = message.to_lower_root()
+    let phrases: List<str> = ["usage limit", "rate limit", "rate_limit", "ratelimit", "rate-limit", "quota", "limit reached", "too many requests", "credit balance", "out of credits", "insufficient_quota", "429"]
+    for p in phrases {
+        if m.contains(p) { return true }
+    }
+    return false
+}
+
+// A program as the chat names it.
+pub fn title(program: String) -> String {
+    if program == "claude" { return String("Claude Code") }
+    if program == "codex" { return String("Codex") }
+    if program == "opencode" { return String("OpenCode") }
+    if program == "gemini" { return String("Gemini CLI") }
+    return program.copy()
+}
+
+// The one line the chat shows when a turn or a chat moves from one program to
+// another: `why` is "usage" (its usage ran out), "start" (it didn't start) or
+// "hand" (the person moved it).
+pub fn moved_line(from: String, to: String, why: str) -> String {
+    let (a, b) = (title(from), title(to))
+    if why == "usage" { return "{a} ran out of usage, so {b} answers this chat now." }
+    if why == "start" { return "{a} didn't start, so {b} answers this chat now." }
+    return "Moved from {a} to {b}, with a summary of the chat so far."
+}
+
+// What a message says, its text blocks joined.
+fn said(m: Json) -> String {
+    var out = String()
+    if let Json.Array(blocks) = at(m, "blocks") {
+        for b in blocks {
+            if str_at(b.copy(), "kind") == some(String("text")) { out.push_str(str_at(b, "text") ?? String()) }
+        }
+    }
+    return out.trim().copy()
+}
+
+fn cut(text: String, most: usize) -> String {
+    var out = String()
+    for r in text.trim().runes() {
+        if out.len() >= most {
+            out.push_str("…")
+            break
+        }
+        out.push(if r == '\n' { ' ' } else { r })
+    }
+    return out
+}
+
+fn who(m: Json) -> String {
+    return if str_at(m, "role") == some(String("person")) { String("Your person") } else { String("You") }
+}
+
+// Loom's summary of a chat that moves from the program `from` to another, for
+// the new one to start with: `messages` are the chat's, oldest first, up to
+// the one being answered. It's made from the chat itself, not by a model, so it
+// costs nothing and works when the old program can't answer: what the person
+// asked, then the newest of it word for word, in SUMMARY_MOST bytes at most.
+pub fn summary(messages: List<Json>, from: String) -> String {
+    var spoken = List<Json>()
+    for m in messages {
+        if said(m.copy()).len() > 0 { spoken.push(m.copy()) }
+    }
+    let head = "[loom: This chat comes to you from {title(from)}, the agent program it ran on until now. To your person it's one conversation, and you're the same agent: carry on from where it is, without starting over. Loom's summary of it so far:"
+    let tail = String("For anything older, search_messages finds it.]")
+    if spoken.len() == 0 { return "{head}\n\n(Nothing said yet.)\n\n{tail}" }
+    var asked = List<String>()
+    var earlier: usize = 0
+    for m in spoken {
+        if str_at(m.copy(), "role") != some(String("person")) { continue }
+        asked.push("- {cut(said(m.copy()).split("\n")[0].copy(), ASKED_CUT)}")
+    }
+    while asked.len() > ASKED_MOST {
+        _ = asked.remove(0)
+        earlier += 1
+    }
+    var newest = List<String>()
+    let from_at = if spoken.len() > NEWEST { spoken.len() - NEWEST } else { 0 }
+    var k: usize = 0
+    for m in spoken {
+        if k >= from_at { newest.push("{who(m.copy())}: {cut(said(m.copy()), NEWEST_CUT)}") }
+        k += 1
+    }
+    var text = put_together(head.copy(), spoken.len(), asked.copy(), earlier, newest.copy(), tail.copy())
+    // Over the limit: fewer of the newest first, then fewer of what was asked.
+    while text.len() > SUMMARY_MOST and newest.len() > 1 {
+        _ = newest.remove(0)
+        text = put_together(head.copy(), spoken.len(), asked.copy(), earlier, newest.copy(), tail.copy())
+    }
+    while text.len() > SUMMARY_MOST and asked.len() > 0 {
+        _ = asked.remove(0)
+        earlier += 1
+        text = put_together(head.copy(), spoken.len(), asked.copy(), earlier, newest.copy(), tail.copy())
+    }
+    return text
+}
+
+fn put_together(head: String, count: usize, asked: List<String>, earlier: usize, newest: List<String>, tail: String) -> String {
+    var parts: List<String> = [head.copy(), "It has {count} messages."]
+    if asked.len() > 0 or earlier > 0 {
+        var list = String("What your person asked, oldest first:")
+        if earlier > 0 { list.push_str("\n- (and {earlier} earlier)") }
+        for a in asked { list.push_str("\n{a}") }
+        parts.push(list)
+    }
+    parts.push("The newest of it, word for word, newest last:\n\n{newest.join("\n\n")}")
+    parts.push(tail.copy())
+    return parts.join("\n\n")
+}
+
+@test
+fn the_agents_backup_wins_and_none_turns_it_off() {
+    let d = Obj.new().s("backup", String("codex")).done()
+    let plain = Obj.new().s("acp_agent", String("claude")).done()
+    assert(backup_of(plain, d.copy()) == "codex")
+    let picked = Obj.new().s("backup", String("opencode")).done()
+    assert(backup_of(picked, d.copy()) == "opencode")
+    let off = Obj.new().s("backup", String(NONE)).done()
+    assert(backup_of(off, d.copy()).len() == 0)
+    assert(backup_of(Obj.new().done(), Obj.new().done()).len() == 0)
+}
+
+@test
+fn usage_limits_are_told_apart() {
+    assert(out_of_usage(String("Claude AI usage limit reached|1795187133")))
+    assert(out_of_usage(String("You've hit your usage limit. Upgrade to Pro or try again in 3 hours.")))
+    assert(out_of_usage(String("429 Too Many Requests")))
+    assert(out_of_usage(String("Rate limit exceeded")))
+    assert(out_of_usage(String("insufficient_quota: You exceeded your current quota")))
+    assert(not out_of_usage(String("The fake agent failed")))
+    assert(not out_of_usage(String("Permission denied")))
+}
+
+@test
+fn the_line_says_what_moved_and_why() {
+    assert(moved_line(String("claude"), String("codex"), "usage") == "Claude Code ran out of usage, so Codex answers this chat now.")
+    assert(moved_line(String("fake"), String("codex"), "start") == "fake didn't start, so Codex answers this chat now.")
+    assert(moved_line(String("codex"), String("claude"), "hand").starts_with("Moved from Codex to Claude Code"))
+}
+
+fn said_by(role: str, text: String) -> Json {
+    return Obj.new().s("role", String(role)).j("blocks", Json.Array([Obj.new().s("kind", String("text")).s("text", text).done()])).done()
+}
+
+@test
+fn a_summary_lists_the_asks_and_the_newest() {
+    let empty = summary(List<Json>(), String("claude"))
+    assert(empty.contains("(Nothing said yet.)") and empty.starts_with("[loom:") and empty.ends_with("]"))
+    var chat = List<Json>()
+    for n in 0..20 {
+        chat.push(said_by("person", "Question {n}\nwith more"))
+        chat.push(said_by("agent", "Answer {n}"))
+    }
+    let s = summary(chat, String("claude"))
+    assert(s.contains("from Claude Code") and s.contains("It has 40 messages."))
+    assert(s.contains("- (and 8 earlier)") and s.contains("- Question 8") and not s.contains("- Question 7\n"))
+    assert(s.contains("You: Answer 19") and s.contains("Your person: Question 17 with more") and not s.contains("Your person: Question 16"))
+    assert(s.len() <= SUMMARY_MOST)
+}
+
+@test
+fn a_long_chat_is_cut_to_the_limit() {
+    var long = String()
+    for _ in 0..3000 { long.push_str("word ") }
+    var chat = List<Json>()
+    for _ in 0..30 {
+        chat.push(said_by("person", long.copy()))
+        chat.push(said_by("agent", long.copy()))
+    }
+    let s = summary(chat, String("codex"))
+    assert(s.len() <= SUMMARY_MOST and s.ends_with("search_messages finds it.]"))
+    assert(s.contains("The newest of it"))
+}
