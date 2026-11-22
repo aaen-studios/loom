@@ -27,6 +27,9 @@ import tests.kit.{App, Instance, calx, check, reply_text}
 // The first script waits while the instance fetches Deno.
 const LONG: u32 = 600000
 
+// What loom mcp lists in Code Mode.
+const DIRECT: str = "tools: search_tools, run_code, search_messages, list_devices, use_device, show_card, add_server, install_server"
+
 fn reply_in(app: mut App, conversation: String) -> String ! Error {
     loop {
         let created = try app.until("event", "message.created", LONG)
@@ -106,7 +109,9 @@ fn run(i: Instance) ! Error {
     var n: i64 = 0
 
     n += 1
-    try check(try say(mut app, chat.copy(), "m_{n}", String("/mcp list")) == "tools: search_tools, run_code", "its loom mcp offers search_tools and run_code alone")
+    try check(try say(mut app, chat.copy(), "m_{n}", String("/mcp list")) == DIRECT, "its loom mcp offers search_tools and run_code, with loom's tools for the person's app and devices beside them")
+    n += 1
+    let began = try say(mut app, chat.copy(), "m_{n}", String("/session"))
     n += 1
     try check(try say(mut app, chat.copy(), "m_{n}", String("/servers")) == "no servers", "and its session gets no other server: loom mcp reaches them")
     n += 1
@@ -122,13 +127,27 @@ fn run(i: Instance) ! Error {
     // --- The agent program doesn't ask before them: loom asks for each call ---
     n += 1
     let hints = try say(mut app, chat.copy(), "m_{n}", String("/mcp hints"))
-    try check(hints == "search_tools {#"{"readOnlyHint":true,"destructiveHint":false,"idempotentHint":true,"openWorldHint":false}"#}\nrun_code {#"{"readOnlyHint":false,"destructiveHint":false,"idempotentHint":false,"openWorldHint":false}"#}", "their annotations say search_tools only reads, and run_code destroys nothing and reaches nothing by itself, which Codex asks no one about")
+    try check(hints.starts_with("search_tools {#"{"readOnlyHint":true,"destructiveHint":false,"idempotentHint":true,"openWorldHint":false}"#}\nrun_code {#"{"readOnlyHint":false,"destructiveHint":false,"idempotentHint":false,"openWorldHint":false}"#}\n"), "their annotations say search_tools only reads, and run_code destroys nothing and reaches nothing by itself, which Codex asks no one about")
     n += 1
     let meta = try say(mut app, chat.copy(), "m_{n}", String("/meta"))
     try check(meta == "meta {#"{"claudeCode":{"options":{"allowedTools":["mcp__loom__search_tools","mcp__loom__run_code"]}}}"#}", "Claude's adapter is told to allow them, in the session's _meta")
     n += 1
     let opencode = try say(mut app, chat.copy(), "m_{n}", String("/env OPENCODE_CONFIG_CONTENT"))
     try check(opencode == "OPENCODE_CONFIG_CONTENT={#"{"permission":{"loom_search_tools":"allow","loom_run_code":"allow"}}"#}", "and OpenCode, in its config")
+
+    // --- The app's tools are called directly, and the tools stay put (LOO-168) ---
+    n += 1
+    try app.send(Obj.new().s("t", String("send")).s("cid", "m_{n}").s("conversation", chat.copy()).s("text", String(#"/mcp add_server {"address":"https://loom.example.com/"}"#)).done())
+    let adding = try app.until("event", "approval.needed", LONG)
+    try check(str_at(adding.copy(), "title") == some(String("Add the server https://loom.example.com to your app")), "add_server is called directly, beside Code Mode, and asks the person")
+    try app.send(Obj.new().s("t", String("approve")).s("call", str_at(adding, "call") ?? String()).b("allow", false).done())
+    try check((try reply_in(mut app, chat.copy())).starts_with("add_server failed"), "and a no is its answer")
+    n += 1
+    let devices = try say(mut app, chat.copy(), "m_{n}", String("/mcp list_devices"))
+    try check(devices.starts_with("list_devices: "), "so are the device tools")
+    n += 1
+    let later = try say(mut app, chat.copy(), "m_{n}", String("/session\n/mcp list"))
+    try check(later.starts_with(began.copy()) and later.ends_with(DIRECT), "and the chat's session keeps the same tools all through")
 
     // --- Scripts ---
     n += 1
@@ -177,7 +196,7 @@ fn run(i: Instance) ! Error {
     for frame in app.frames {
         if str_at(frame.copy(), "kind") == some(String("approval.needed")) { asked_about += 1 }
     }
-    try check(asked_about == 2, "in auto, the person was asked only about the two calls, never about a script itself")
+    try check(asked_about == 3, "in auto, the person was asked only about add_server and the two calls, never about a script itself")
 
     // --- In ask, which asks about everything, a script waits for a yes first ---
     _ = try app.cmd("q_9", "agent.update", Obj.new().s("agent", id.copy()).s("permission", String("ask")).done())
@@ -206,7 +225,19 @@ fn run(i: Instance) ! Error {
     try check(long.len() < 21000 and long.contains("more characters cut"), "what comes back is cut at its limit")
 
     // --- Off ---
+    n += 1
+    let before = try say(mut app, chat.copy(), "m_{n}", String("/session"))
     _ = try app.cmd("q_7", "agent.update", Obj.new().s("agent", id.copy()).b("code_mode", false).done())
+    // The chat's session doesn't change its tools under the agent: the next
+    // message goes to a fresh one, with the newest of the chat, that has the
+    // plain tools from its start.
+    n += 1
+    let moved = try say(mut app, chat.copy(), "m_{n}", String("/session\n/context\n/mcp list"))
+    let now_listed = moved[moved.find_last("tools: ") ?? 0..].copy()
+    try check(not moved.starts_with(before.copy()) and moved.contains("which had other tools") and now_listed.contains("message_agent") and not now_listed.contains("run_code"), "turned off, the chat goes on in a fresh session with the plain tools, told why")
+    n += 1
+    let stays = try say(mut app, chat.copy(), "m_{n}", String("/session"))
+    try check(moved.starts_with(stays.copy()), "and stays there")
     let c2 = try app.cmd("q_8", "conversation.create", Obj.new().s("agent", id).done())
     let plain = str_at(at(c2, "value"), "conversation") ?? String()
     n += 1
