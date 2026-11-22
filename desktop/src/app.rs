@@ -8753,7 +8753,34 @@ ACTA_KEY=secret:ACTA_KEY",
                 } else {
                     m.url.clone()
                 };
-                let row = self.row(Some(self.tile(Ico::Plug)), m.name.clone(), Some(what), None);
+                // Its last test, in place of what it runs, once there's been one.
+                let tested = self.model.mcp_tests.get(&m.name).cloned();
+                let sub = tested.as_ref().map(|t| t.said()).unwrap_or(what);
+                let testing = tested == Some(crate::model::McpTest::Testing);
+                let test_name = m.name.clone();
+                let test = self
+                    .small_button(
+                        format!("test-mcp-{}", m.name),
+                        if testing { "Testing…" } else { "Test" },
+                        false,
+                    )
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        cx.stop_propagation();
+                        if this.model.mcp_tests.get(&test_name)
+                            == Some(&crate::model::McpTest::Testing)
+                        {
+                            return;
+                        }
+                        let f = this.model.test_mcp(&test_name);
+                        this.send(f);
+                        cx.notify();
+                    }));
+                let row = self.row(
+                    Some(self.tile(Ico::Plug)),
+                    m.name.clone(),
+                    Some(sub),
+                    Some(test.into_any_element()),
+                );
                 rows.push(
                     self.link_row(SharedString::from(format!("mcp-{}", m.name)), row)
                         .on_click(cx.listener(move |this, _, window, cx| {

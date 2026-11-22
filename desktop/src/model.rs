@@ -354,6 +354,36 @@ pub fn mode_name(mode: &str) -> &'static str {
     }
 }
 
+/// What testing an MCP server found: it's starting, the tools it offers, or why
+/// it didn't start.
+#[derive(Clone, Debug, PartialEq)]
+pub enum McpTest {
+    Testing,
+    Works(Vec<String>),
+    Failed(String),
+}
+
+impl McpTest {
+    /// What its row says, as "3 tools: read, write, list".
+    pub fn said(&self) -> String {
+        match self {
+            McpTest::Testing => "Testing…".into(),
+            McpTest::Works(tools) if tools.is_empty() => "Started, with no tools".into(),
+            McpTest::Works(tools) => {
+                let shown: Vec<&str> = tools.iter().take(6).map(String::as_str).collect();
+                let more = if tools.len() > 6 { ", …" } else { "" };
+                let count = if tools.len() == 1 {
+                    "1 tool".to_string()
+                } else {
+                    format!("{} tools", tools.len())
+                };
+                format!("{count}: {}{more}", shown.join(", "))
+            }
+            McpTest::Failed(why) => why.clone(),
+        }
+    }
+}
+
 /// One of the person's MCP servers.
 #[derive(Clone, Debug)]
 pub struct McpServer {
@@ -2232,6 +2262,8 @@ pub struct Model {
     pub mcp_servers: Vec<McpServer>,
     pub secrets: Vec<String>,
     mcp_stale: bool,
+    /// The last test of each MCP server, by its name.
+    pub mcp_tests: HashMap<String, McpTest>,
     /// The Import page: what each other app has on the instance's computer, once it has
     /// said, the app being imported from while it is, and how the last import went.
     pub import_sources: Vec<ImportSource>,
@@ -3206,6 +3238,24 @@ impl Model {
                 }
                 _ => {}
             }
+            return;
+        }
+        if let Some(name) = id.strip_prefix("app.mcp_test:") {
+            let found = match f.get("error") {
+                Some(e) => McpTest::Failed(s(e, "message")),
+                None => McpTest::Works(
+                    f.pointer("/value/tools")
+                        .and_then(Value::as_array)
+                        .map(|l| {
+                            l.iter()
+                                .filter_map(Value::as_str)
+                                .map(String::from)
+                                .collect()
+                        })
+                        .unwrap_or_default(),
+                ),
+            };
+            self.mcp_tests.insert(name.to_string(), found);
             return;
         }
         if let Some(conversation) = id.strip_prefix("app.queue:") {
@@ -4609,6 +4659,12 @@ impl Model {
             json!({"t": "cmd", "id": a, "name": "mcp.list"}),
             json!({"t": "cmd", "id": b, "name": "secret.list"}),
         ]
+    }
+
+    /// Starts the MCP server `name` on the instance and asks for its tools.
+    pub fn test_mcp(&mut self, name: &str) -> Value {
+        self.mcp_tests.insert(name.to_string(), McpTest::Testing);
+        json!({"t": "cmd", "id": format!("app.mcp_test:{name}"), "name": "mcp.test", "args": {"name": name}})
     }
 
     pub fn put_mcp(&mut self, args: Value) -> Value {

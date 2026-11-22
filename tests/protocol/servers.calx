@@ -5,7 +5,8 @@ module tests.protocol.servers
 // runs a command with its environment, another is reached over HTTP with its
 // headers, and a value can be one of the person's secrets, which is filled in
 // only for the agent's process, and kept sealed. A server that's gone isn't
-// given any more.
+// given any more. Testing one starts it as a session would, and lists its
+// tools, or says why it didn't start.
 //
 //     calx tests/protocol/servers.calx
 import std.fs
@@ -14,7 +15,7 @@ import std.process.{exit}
 import std.text.utf8.{decode_lossy_unicode}
 import shared.obj.{Obj, at, str_at}
 import shared.client.{Session, reply_text}
-import tests.kit.{Instance, check}
+import tests.kit.{Instance, calx, check}
 
 fn reply_in(app: mut Session, conversation: String) -> String ! Error {
     loop {
@@ -70,6 +71,21 @@ fn run(i: Instance) ! Error {
     _ = try app.cmd("q_11", "mcp.delete", Obj.new().s("name", String("web")).done())
     let after = try servers_of(mut app, main_id, "q_12")
     try check(after.contains("acta") and not after.contains("web"), "a server that's deleted isn't given any more")
+
+    // --- Testing a server ---
+    _ = try app.cmd("q_t1", "secret.put", Obj.new().s("name", String("FAKE_KEY")).s("value", String("s3cret")).done())
+    let fake_main = try fs.absolute(String("tests/fake_mcp/main.calx"))
+    let fake = Obj.new().s("name", String("fake")).s("command", calx()).j("args", Json.Array([Json.Str(fake_main.copy())])).j("env", Obj.new().j("FAKE_KEY", Obj.new().s("secret", String("FAKE_KEY")).done()).done()).done()
+    _ = try app.cmd("q_t2", "mcp.put", fake)
+    let tested = try app.cmd("q_t3", "mcp.test", Obj.new().s("name", String("fake")).done())
+    try check("{at(at(tested, "value"), "tools")}".contains("key_length"), "testing a server starts it and lists its tools")
+    let keyless = Obj.new().s("name", String("keyless")).s("command", calx()).j("args", Json.Array([Json.Str(fake_main)])).j("env", Obj.new().j("FAKE_KEY", Obj.new().s("secret", String("NO_SUCH_KEY")).done()).done()).done()
+    _ = try app.cmd("q_t4", "mcp.put", keyless)
+    let lacking = try app.cmd("q_t5", "mcp.test", Obj.new().s("name", String("keyless")).done())
+    try check(code(lacking.copy()) == "mcp_failed" and "{lacking}".contains("NO_SUCH_KEY"), "one whose secret isn't there says which")
+    _ = try app.cmd("q_t6", "mcp.put", Obj.new().s("name", String("broken")).s("command", String("loom-no-such-program")).done())
+    let broken = try app.cmd("q_t7", "mcp.test", Obj.new().s("name", String("broken")).done())
+    try check(code(broken) == "mcp_failed", "and one that doesn't start says why")
     app.close()
 }
 
