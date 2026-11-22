@@ -969,6 +969,81 @@ impl Task {
     }
 }
 
+/// A skill or a note an agent proposes, which waits for the person to keep or drop it
+/// (protocol.md, "Teaching a task, and proposals").
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Proposal {
+    pub id: String,
+    pub agent: String,
+    /// skill or note.
+    pub kind: String,
+    /// A skill's name, when it's for, and how; or a note's text, its site and whether
+    /// every agent reads it.
+    pub name: String,
+    pub description: String,
+    pub body: String,
+    pub text: String,
+    pub site: String,
+    pub shared: bool,
+    pub why: String,
+    /// What the person did, a line a step, for a skill written from a recording.
+    pub steps: Vec<String>,
+}
+
+impl Proposal {
+    fn of(p: &Value) -> Proposal {
+        let skill = p.get("skill").cloned().unwrap_or(Value::Null);
+        let note = p.get("note").cloned().unwrap_or(Value::Null);
+        let steps = p
+            .get("steps")
+            .and_then(Value::as_array)
+            .map(|ss| ss.iter().filter_map(step_line).collect())
+            .unwrap_or_default();
+        Proposal {
+            id: s(p, "id"),
+            agent: s(p, "agent"),
+            kind: s(p, "kind"),
+            name: s(&skill, "name"),
+            description: s(&skill, "description"),
+            body: s(&skill, "body"),
+            text: s(&note, "text"),
+            site: s(&note, "site"),
+            shared: note.get("shared").and_then(Value::as_bool).unwrap_or(false),
+            why: s(p, "why"),
+            steps,
+        }
+    }
+
+    /// What it's called in the list: a skill's name, or the note.
+    pub fn title(&self) -> String {
+        if self.kind == "skill" {
+            self.name.clone()
+        } else {
+            self.text.clone()
+        }
+    }
+}
+
+/// One step of a recording, as the person reads it.
+fn step_line(step: &Value) -> Option<String> {
+    let what = match s(step, "kind").as_str() {
+        "page" => format!("On {}", s(step, "title")),
+        "click" => format!("Clicked {}", s(step, "on")),
+        "type" if step.get("secret").and_then(Value::as_bool) == Some(true) => {
+            format!("Typed something secret into {}", s(step, "into"))
+        }
+        "type" => format!(
+            "Typed \u{201c}{}\u{201d} into {}",
+            s(step, "text"),
+            s(step, "into")
+        ),
+        "key" => format!("Pressed {}", s(step, "key")),
+        "scroll" => format!("Scrolled {}", s(step, "direction")),
+        _ => return None,
+    };
+    Some(what)
+}
+
 #[derive(Clone, Debug)]
 pub struct Block {
     pub kind: String,
@@ -1370,6 +1445,10 @@ pub struct Browser {
     pub asked: String,
     /// What the agent asked the person to type into its page, while it waits.
     pub secret: String,
+    /// Whether what the person does in it is recorded, to teach the agent a task, and
+    /// how many steps the recording has.
+    pub recording: bool,
+    pub steps: i64,
 }
 
 /// The newest picture of the watched browser's page.
@@ -1473,6 +1552,9 @@ pub struct Model {
     /// The person's skills, by name, for the skills page.
     pub skills: Vec<Skill>,
     skills_stale: bool,
+    /// What agents propose that waits for the person, newest first.
+    pub proposals: Vec<Proposal>,
+    proposals_stale: bool,
     /// The person's shared tables, for the tables page, and the one open on it, with
     /// its newest rows and whether there are more.
     pub tables: Vec<SharedTable>,
@@ -1713,6 +1795,9 @@ impl Model {
         }
         if std::mem::take(&mut self.skills_stale) {
             out.push(self.load_skills());
+        }
+        if std::mem::take(&mut self.proposals_stale) {
+            out.push(self.load_proposals());
         }
         if std::mem::take(&mut self.tables_stale) && self.tables_open {
             out.extend(self.load_tables());
@@ -2276,6 +2361,9 @@ impl Model {
             "routine" => {
                 self.routines_stale = true;
             }
+            "proposal" => {
+                self.proposals_stale = true;
+            }
             // A flow that finished goes from the list.
             "flow" => {
                 let flow = RunningFlow::of(f.get("flow").unwrap_or(&Value::Null));
@@ -2375,6 +2463,8 @@ impl Model {
             person: f.get("person").and_then(Value::as_bool).unwrap_or(false),
             asked: s(f, "asked"),
             secret: s(f, "secret"),
+            recording: f.get("recording").and_then(Value::as_bool).unwrap_or(false),
+            steps: f.get("steps").and_then(Value::as_i64).unwrap_or(0),
         };
         if !b.open && self.watching.as_deref() == Some(agent.as_str()) {
             self.frame = None;
@@ -2417,6 +2507,16 @@ impl Model {
         let id = self.id("browser.hand");
         Some(
             json!({"t": "cmd", "id": id, "name": "browser.secret", "args": {"agent": agent, "value": value}}),
+        )
+    }
+
+    /// Starts or stops recording what the person does in the watched browser, which
+    /// they've taken over, to teach its agent the task.
+    pub fn record_browser(&mut self, on: bool) -> Option<Value> {
+        let agent = self.watching.clone()?;
+        let id = self.id("browser.hand");
+        Some(
+            json!({"t": "cmd", "id": id, "name": "browser.record", "args": {"agent": agent, "on": on}}),
         )
     }
 
@@ -2886,6 +2986,20 @@ impl Model {
                 self.notices.push(s(e, "message"));
             }
             self.routines_stale = true;
+        } else if id.starts_with("app.proposals") {
+            self.proposals = f
+                .pointer("/value/proposals")
+                .and_then(Value::as_array)
+                .map(|ps| ps.iter().map(Proposal::of).collect())
+                .unwrap_or_default();
+        } else if id.starts_with("app.proposal_") {
+            // A kept skill or note is in its list now; a refusal says why.
+            if let Some(e) = f.get("error") {
+                self.notices.push(s(e, "message"));
+            }
+            self.proposals_stale = true;
+            self.skills_stale = true;
+            self.notes_stale = true;
         } else if id.starts_with("app.skill_put") || id.starts_with("app.skill_delete") {
             if let Some(e) = f.get("error") {
                 self.notices.push(s(e, "message"));
@@ -4066,6 +4180,39 @@ impl Model {
         json!({"t": "cmd", "id": id, "name": "skill.delete", "args": {"name": name}})
     }
 
+    /// Asks for what agents propose that waits for the person.
+    pub fn load_proposals(&mut self) -> Value {
+        let id = self.id("app.proposals");
+        json!({"t": "cmd", "id": id, "name": "proposal.list", "args": {"status": "waiting"}})
+    }
+
+    /// Keeps a proposal, with what the person changed in it: a skill's name, when it's
+    /// for and how, or a note's text.
+    pub fn keep_proposal(&mut self, p: &Proposal) -> Value {
+        let id = self.id("app.proposal_keep");
+        self.proposals.retain(|q| q.id != p.id);
+        let changed = if p.kind == "skill" {
+            json!({"skill": {"name": p.name.trim(), "description": p.description.trim(), "body": p.body}})
+        } else {
+            json!({"note": {"text": p.text.trim()}})
+        };
+        let mut args = changed;
+        args["id"] = json!(p.id);
+        json!({"t": "cmd", "id": id, "name": "proposal.keep", "args": args})
+    }
+
+    pub fn drop_proposal(&mut self, proposal: &str) -> Value {
+        let id = self.id("app.proposal_drop");
+        self.proposals.retain(|q| q.id != proposal);
+        json!({"t": "cmd", "id": id, "name": "proposal.drop", "args": {"id": proposal}})
+    }
+
+    /// Asks an agent to look over its past chats and propose skills and notes, as a task.
+    pub fn ask_proposals(&mut self, agent: &str) -> Value {
+        let id = self.id("app.proposal_ask");
+        json!({"t": "cmd", "id": id, "name": "proposal.ask", "args": {"agent": agent}})
+    }
+
     /// Asks the instance for a one-time code that adds a phone; the core gives it back with
     /// the QR code's text.
     pub fn create_link(&mut self) -> Value {
@@ -4503,6 +4650,54 @@ mod tests {
             Some(CardBody::Choices(vec!["Red".into(), "Blue".into()]))
         );
         assert!(Card::of(&json!({"type": "chart"})).is_none());
+    }
+
+    #[test]
+    fn proposals_wait_and_are_kept_as_changed() {
+        let mut m = Model::new();
+        let list = m.load_proposals();
+        m.result(&json!({"t": "result", "id": list["id"], "ok": true, "value": {"proposals": [
+            {"id": "prop_2", "agent": "a_1", "kind": "skill", "why": "You showed me.",
+             "skill": {"name": "shop-search", "description": "Searching.", "body": "1. Search."},
+             "recording": "rec_1", "steps": [
+                {"kind": "page", "title": "Shop", "url": "https://shop.example"},
+                {"kind": "type", "into": "textbox \"Password\"", "secret": true},
+                {"kind": "click", "on": "button \"Go\""}]},
+            {"id": "prop_1", "agent": "a_1", "kind": "note", "note": {"text": "Ann likes wool.", "site": "", "shared": false}}
+        ]}}));
+        assert_eq!(m.proposals.len(), 2);
+        assert_eq!(m.proposals[0].title(), "shop-search");
+        assert_eq!(
+            m.proposals[0].steps,
+            vec![
+                "On Shop".to_string(),
+                "Typed something secret into textbox \"Password\"".to_string(),
+                "Clicked button \"Go\"".to_string()
+            ]
+        );
+        assert_eq!(m.proposals[1].title(), "Ann likes wool.");
+        let mut changed = m.proposals[0].clone();
+        changed.description = "Searching the shop.".into();
+        let keep = m.keep_proposal(&changed);
+        assert_eq!(keep["name"], "proposal.keep");
+        assert_eq!(keep["args"]["id"], "prop_2");
+        assert_eq!(keep["args"]["skill"]["description"], "Searching the shop.");
+        assert_eq!(m.proposals.len(), 1);
+        let dropped = m.drop_proposal("prop_1");
+        assert_eq!(dropped["args"]["id"], "prop_1");
+        assert!(m.proposals.is_empty());
+    }
+
+    #[test]
+    fn the_browser_says_when_it_records() {
+        let mut m = Model::new();
+        m.watching = Some("a_1".into());
+        m.browser_state(&json!({"agent": "a_1", "open": true, "person": true, "asked": "", "secret": "", "recording": true, "steps": 4}));
+        let b = m.browser("a_1");
+        assert!(b.recording && b.steps == 4);
+        let f = m.record_browser(false).unwrap();
+        assert_eq!(f["name"], "browser.record");
+        assert_eq!(f["args"]["on"], false);
     }
 
     #[test]

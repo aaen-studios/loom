@@ -191,7 +191,8 @@ gpui_kit::assets::icon_assets!(
         Bell,
         Palette,
         MessageSquare,
-        ArrowRightLeft
+        ArrowRightLeft,
+        Lightbulb
     ]
 );
 

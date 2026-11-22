@@ -87,6 +87,7 @@ enum Screen {
     EditAgent,
     Activity,
     Skills,
+    Proposals,
     Memory,
     Profile,
     Defaults,
@@ -194,6 +195,8 @@ pub struct Loom {
     /// On the skills page: none for the list, `Some(None)` for a new skill, `Some(Some(name))`
     /// for one being changed.
     skill_open: Option<Option<String>>,
+    /// On the proposals page: the one open, as the person is changing it before keeping it.
+    proposal_open: Option<model::Proposal>,
     /// The table the tables page is asking whether to drop.
     table_dropping: Option<String>,
     /// The open plugin panel: its plugin, the web view, and where it is (x, y, w, h).
@@ -798,6 +801,7 @@ ACTA_KEY=secret:ACTA_KEY",
             skill_desc_in,
             skill_body_in,
             skill_open: None,
+            proposal_open: None,
             table_dropping: None,
             panel: None,
             panel_context: None,
@@ -1017,6 +1021,11 @@ ACTA_KEY=secret:ACTA_KEY",
             Screen::Tasks => {
                 let f = self.model.load_tasks();
                 self.send(f);
+            }
+            Screen::Proposals => {
+                let f = self.model.load_proposals();
+                self.send(f);
+                self.proposal_open = None;
             }
             Screen::Skills => {
                 let f = self.model.load_skills();
@@ -2040,6 +2049,7 @@ ACTA_KEY=secret:ACTA_KEY",
             Screen::Defaults => self.defaults_page(cx),
             Screen::Rules => self.rules_page(cx),
             Screen::Skills => self.skills_page(cx),
+            Screen::Proposals => self.proposals_page(cx),
             Screen::Routines => self.routines_page(cx),
             Screen::Tasks => self.tasks_page(cx),
             Screen::Programs => self.programs_page(cx),
@@ -3106,8 +3116,13 @@ ACTA_KEY=secret:ACTA_KEY",
                     cx.stop_propagation();
                 }
             }));
-        let words = if person {
-            "You have it. Click and type on the page.".to_string()
+        let words = if person && state.recording {
+            match state.steps {
+                0 | 1 => "Recording. Do the task, then turn Record off.".to_string(),
+                n => format!("Recording, {n} steps. Do the task, then turn Record off."),
+            }
+        } else if person {
+            "You have it. Click and type on the page, or record a task to teach it.".to_string()
         } else if !state.asked.is_empty() {
             state.asked.clone()
         } else {
@@ -3128,6 +3143,32 @@ ACTA_KEY=secret:ACTA_KEY",
             }
             cx.notify();
         }));
+        // Teaching a task: while the person has the browser, what they do is kept
+        // as steps, and the agent writes them up as a skill for them to look at.
+        let recording = state.recording;
+        let record = person.then(|| {
+            div()
+                .flex()
+                .flex_none()
+                .items_center()
+                .gap(px(space::S))
+                .child(
+                    div()
+                        .text_size(px(size::SMALL))
+                        .text_color(if recording { p.ink } else { p.ink_2 })
+                        .child("Record"),
+                )
+                .child(
+                    self.switch("browser-record", recording)
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            if let Some(f) = this.model.record_browser(!recording) {
+                                this.send(f);
+                            }
+                            window.focus(&this.browser_keys, cx);
+                            cx.notify();
+                        })),
+                )
+        });
         div()
             .w(px(width))
             .h_full()
@@ -3197,6 +3238,7 @@ ACTA_KEY=secret:ACTA_KEY",
                             })
                             .child(words),
                     )
+                    .children(record)
                     .child(hand),
             )
     }
@@ -7094,6 +7136,190 @@ ACTA_KEY=secret:ACTA_KEY",
             "skills-page",
             "Skills",
             Some(action),
+            vec![self.group(None, rows)],
+        )
+    }
+
+    /// What agents propose from past chats, and skills written from a task the person
+    /// recorded in an agent's browser: each kept or dropped here, and nothing applied
+    /// without the person's yes. One opens to be read, and changed, before it's kept.
+    fn proposals_page(&mut self, cx: &mut Context<Self>) -> Div {
+        if let Some(open) = self.proposal_open.clone() {
+            let skill = open.kind == "skill";
+            let keep = self
+                .small_button("keep-proposal", "Keep", true)
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    let Some(mut p) = this.proposal_open.take() else {
+                        return;
+                    };
+                    if p.kind == "skill" {
+                        p.name = this.skill_name_in.read(cx).value().to_string();
+                        p.description = this.skill_desc_in.read(cx).value().to_string();
+                        p.body = this.skill_body_in.read(cx).value().to_string();
+                        if p.name.trim().is_empty() || p.description.trim().is_empty() {
+                            this.model
+                                .notices
+                                .push("Needs a name, and when it's for".into());
+                            this.proposal_open = Some(p);
+                            cx.notify();
+                            return;
+                        }
+                    } else {
+                        p.text = this.note_in.read(cx).value().to_string();
+                    }
+                    let f = this.model.keep_proposal(&p);
+                    this.send(f);
+                    cx.notify();
+                }));
+            let cancel = self
+                .small_button("cancel-proposal", "Cancel", false)
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.proposal_open = None;
+                    cx.notify();
+                }));
+            let id = open.id.clone();
+            let drop = self
+                .small_button("drop-proposal", "Drop", false)
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    let f = this.model.drop_proposal(&id);
+                    this.send(f);
+                    this.proposal_open = None;
+                    cx.notify();
+                }));
+            let p = self.p;
+            let from = format!(
+                "From {}{}",
+                self.who(&open.agent),
+                if open.why.is_empty() {
+                    String::new()
+                } else {
+                    format!(": {}", open.why)
+                }
+            );
+            let mut groups = vec![self.group(None, vec![self.note_row(from, p.ink_2)])];
+            if skill {
+                groups.push(self.group(
+                    None,
+                    vec![
+                        self.field_row("Name", Input::new(&self.skill_name_in)),
+                        self.field_row("When it's for", Input::new(&self.skill_desc_in)),
+                        self.text_row("How to do it", None, Textarea::new(&self.skill_body_in)),
+                    ],
+                ));
+                if !open.steps.is_empty() {
+                    let steps = open
+                        .steps
+                        .iter()
+                        .enumerate()
+                        .map(|(k, line)| self.note_row(format!("{}. {line}", k + 1), p.ink_2))
+                        .collect();
+                    groups.push(self.group(Some("What you did"), steps));
+                }
+            } else {
+                let mut rows = vec![self.field_row("Note", Input::new(&self.note_in))];
+                if !open.site.is_empty() || open.shared {
+                    let mut how = Vec::new();
+                    if !open.site.is_empty() {
+                        how.push(format!("Shown on {}", open.site));
+                    }
+                    if open.shared {
+                        how.push("every agent reads it".to_string());
+                    }
+                    rows.push(self.note_row(how.join(", "), p.ink_3));
+                }
+                groups.push(self.group(None, rows));
+            }
+            groups.push(self.form_actions(Some(drop), cancel, keep));
+            let title = if skill {
+                "Proposed skill"
+            } else {
+                "Proposed note"
+            };
+            return self.settings_page("proposals-page", title, None, groups);
+        }
+        // Asking the agent on screen to look over its chats for more.
+        let ask = self.model.selected.clone().map(|agent| {
+            let name = self.who(&agent);
+            self.small_button("ask-proposals", &format!("Ask {name}"), false)
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    let f = this.model.ask_proposals(&agent);
+                    this.send(f);
+                    this.model.notices.push(format!(
+                        "{name} is looking over your chats. What it proposes comes here."
+                    ));
+                    cx.notify();
+                }))
+                .into_any_element()
+        });
+        if self.model.proposals.is_empty() {
+            let groups = vec![self.empty(
+                Ico::Lightbulb,
+                "Nothing to look at",
+                "Skills and notes your agents propose from your chats, and tasks you teach them in their browser, wait here for your yes",
+                ask,
+            )];
+            return self.settings_page("proposals-page", "Proposals", None, groups);
+        }
+        let mut rows = Vec::new();
+        for k in self.model.proposals.clone() {
+            let kind = if k.kind == "skill" { "Skill" } else { "Note" };
+            let sub = format!("{kind} from {}", self.who(&k.agent));
+            let (keep_id, drop_id) = (k.clone(), k.id.clone());
+            let controls = div()
+                .flex()
+                .gap(px(space::S))
+                .child(
+                    self.small_button(SharedString::from(format!("drop-{}", k.id)), "Drop", false)
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            cx.stop_propagation();
+                            let f = this.model.drop_proposal(&drop_id);
+                            this.send(f);
+                            cx.notify();
+                        })),
+                )
+                .child(
+                    self.small_button(SharedString::from(format!("keep-{}", k.id)), "Keep", true)
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            cx.stop_propagation();
+                            let f = this.model.keep_proposal(&keep_id);
+                            this.send(f);
+                            cx.notify();
+                        })),
+                )
+                .into_any_element();
+            let icon = if k.kind == "skill" {
+                Ico::BookOpen
+            } else {
+                Ico::Lightbulb
+            };
+            let row = self.row(Some(self.tile(icon)), k.title(), Some(sub), Some(controls));
+            rows.push(
+                self.link_row(SharedString::from(format!("proposal-{}", k.id)), row)
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        if k.kind == "skill" {
+                            let (name, description, body) =
+                                (k.name.clone(), k.description.clone(), k.body.clone());
+                            this.skill_name_in
+                                .update(cx, |s, cx| s.set_value(name, window, cx));
+                            this.skill_desc_in
+                                .update(cx, |s, cx| s.set_value(description, window, cx));
+                            this.skill_body_in
+                                .update(cx, |s, cx| s.set_value(body, window, cx));
+                        } else {
+                            let text = k.text.clone();
+                            this.note_in
+                                .update(cx, |s, cx| s.set_value(text, window, cx));
+                        }
+                        this.proposal_open = Some(k.clone());
+                        cx.notify();
+                    }))
+                    .into_any_element(),
+            );
+        }
+        self.settings_page(
+            "proposals-page",
+            "Proposals",
+            ask,
             vec![self.group(None, rows)],
         )
     }

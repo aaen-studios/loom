@@ -43,7 +43,7 @@ const COMMANDS: [Command; 86] = [
     Command { name: "activity.list", args: "agent?, before?, limit?", does: "What agents ran, were allowed, and changed." },
     Command { name: "activity.export", args: "agent?", does: "The activity log as CSV, oldest first." },
     Command { name: "memory.list", args: "agent?, query?, limit?", does: "Notes, an agent's and the shared ones." },
-    Command { name: "memory.put", args: "text, agent? (left out: shared)", does: "Keeps a note." },
+    Command { name: "memory.put", args: "text, agent? (left out: shared), site? (the site it is for, shown to the agent there)", does: "Keeps a note." },
     Command { name: "memory.delete", args: "id", does: "Deletes a note." },
     Command { name: "table.list", args: "", does: "The person's shared tables: name, description, owner and how many rows." },
     Command { name: "table.create", args: "table, description?", does: "Makes a shared table, owned by whoever made it." },
@@ -125,6 +125,7 @@ pub fn access(name: String) -> Access {
     if name == "queue.steer" { return Access.Never(String("Steering is your person's: it stops the turn that's running.")) }
     if name.starts_with("scripts.") { return Access.Never(String("Scripts are your person's own: they turn them on in the app.")) }
     let runs = ["conversation.create", "conversation.rename", "conversation.branch", "conversation.move", "messages.list", "messages.search", "messages.pinned", "message.pin", "agent.create", "agent.update", "agent.revisions", "agent.rollback", "activity.list", "memory.list", "memory.put", "table.list", "table.create", "table.write", "table.rows", "table.delete_rows", "profile.get", "profile.put", "defaults.get", "rule.list", "rule.check", "routine.list", "routine.put", "routine.run", "routine.stop", "flow.list", "task.list", "task.start", "task.pause", "task.resume", "task.cancel", "task.retry", "queue.list", "queue.edit", "queue.order", "queue.drop", "skill.list", "skill.get", "skill.put", "plugin.list", "plugin.get", "plugin.put", "plugin.revisions", "mcp.list", "secret.list", "acp.list", "acp.registry"]
+    if name.starts_with("proposal.") { return Access.Never(String("Proposals are your person's to keep or drop, in the app. Use propose_skill or propose_note to make one.")) }
     for r in runs {
         if name == r { return Access.Runs }
     }
@@ -164,7 +165,7 @@ fn reading_runs_and_harm_asks() {
     assert(access(String("acp.install")) == Access.Asks(String("other")))
     assert(access(String("instance.move")) == Access.Asks(String("move")))
     assert(access(String("something.new")) == Access.Asks(String("other")))
-    for never in ["secret.put", "plugin.allow", "plugin.message", "account.delete", "browser.open", "queue.steer"] {
+    for never in ["secret.put", "plugin.allow", "plugin.message", "account.delete", "browser.open", "browser.record", "queue.steer", "proposal.keep", "proposal.ask"] {
         if let Access.Never(_) = access(String(never)) {} else { panic("an agent could run {never}") }
     }
     for c in COMMANDS {

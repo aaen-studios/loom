@@ -145,7 +145,15 @@ CREATE TABLE IF NOT EXISTS plugin_data (
     value TEXT NOT NULL, at INTEGER NOT NULL, PRIMARY KEY (user, plugin, key));
 CREATE TABLE IF NOT EXISTS memories (
     id INTEGER PRIMARY KEY, user TEXT NOT NULL REFERENCES users(id), agent TEXT NOT NULL,
-    text TEXT NOT NULL, by TEXT NOT NULL, at INTEGER NOT NULL);
+    text TEXT NOT NULL, by TEXT NOT NULL, at INTEGER NOT NULL, site TEXT NOT NULL DEFAULT '');
+CREATE TABLE IF NOT EXISTS recordings (
+    id TEXT PRIMARY KEY, user TEXT NOT NULL REFERENCES users(id), agent TEXT NOT NULL,
+    steps TEXT NOT NULL, proposal TEXT NOT NULL DEFAULT '', at INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS proposals (
+    id TEXT PRIMARY KEY, user TEXT NOT NULL REFERENCES users(id), agent TEXT NOT NULL,
+    kind TEXT NOT NULL, data TEXT NOT NULL, why TEXT NOT NULL, recording TEXT NOT NULL,
+    status TEXT NOT NULL, at INTEGER NOT NULL, decided INTEGER NOT NULL DEFAULT 0,
+    by TEXT NOT NULL DEFAULT '');
 CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5 (
     text, user UNINDEXED, agent UNINDEXED,
     tokenize = 'unicode61 remove_diacritics 2');
@@ -318,6 +326,12 @@ impl Store {
         if not recorded {
             try s.db.execute_script(String("ALTER TABLE activity ADD COLUMN status TEXT NOT NULL DEFAULT ''; ALTER TABLE activity ADD COLUMN input TEXT NOT NULL DEFAULT ''; ALTER TABLE activity ADD COLUMN why TEXT NOT NULL DEFAULT ''; ALTER TABLE activity ADD COLUMN ended INTEGER NOT NULL DEFAULT 0;"))
         }
+        // Notes from before a note could be tied to a site get the column.
+        var sited = false
+        for r in try s.db.query(String("PRAGMA table_info(memories)")) {
+            if text(r[1].copy()) == "site" { sited = true }
+        }
+        if not sited { try s.db.execute_script(String("ALTER TABLE memories ADD COLUMN site TEXT NOT NULL DEFAULT '';")) }
         // Settings kept before they were sealed are sealed once.
         for r in try s.db.query(String("SELECT name, env FROM acp_settings")) {
             let env = text(r[1].copy())
@@ -1320,8 +1334,18 @@ impl Store {
 
     // The same, kept at `at`, such as a note brought over from another app.
     pub fn remember_at(self, user: String, agent: String, what: String, by: String, at: i64) -> i64 ! Error {
+        return try self.remember_note(user, agent, what, by, at, String())
+    }
+
+    // A note tied to a site (site_of gives it), which the agent is shown when
+    // its browser visits that site. "" ties it to none.
+    pub fn remember_on(self, user: String, agent: String, what: String, by: String, site: String) -> i64 ! Error {
+        return try self.remember_note(user, agent, what, by, now(), site)
+    }
+
+    fn remember_note(self, user: String, agent: String, what: String, by: String, at: i64, site: String) -> i64 ! Error {
         try self.begin()
-        _ = try self.db.execute(String("INSERT INTO memories (user, agent, text, by, at) VALUES (?, ?, ?, ?, ?)"), [t(user.copy()), t(agent.copy()), t(what.copy()), t(by), Value.Int(at)])
+        _ = try self.db.execute(String("INSERT INTO memories (user, agent, text, by, at, site) VALUES (?, ?, ?, ?, ?, ?)"), [t(user.copy()), t(agent.copy()), t(what.copy()), t(by), Value.Int(at), t(site)])
         let id = self.db.last_insert_id()
         _ = try self.db.execute(String("INSERT INTO memories_fts (rowid, text, user, agent) VALUES (?, ?, ?, ?)"), [Value.Int(id), t(what), t(user), t(agent)])
         try self.commit()
@@ -1337,10 +1361,10 @@ impl Store {
         var sql = String()
         var args = List<Value>()
         if let fts = fts_any(query) {
-            sql = String("SELECT m.id, m.agent, m.text, m.by, m.at FROM memories_fts f JOIN memories m ON m.id = f.rowid WHERE memories_fts MATCH ? AND m.user = ?")
+            sql = String("SELECT m.id, m.agent, m.text, m.by, m.at, m.site FROM memories_fts f JOIN memories m ON m.id = f.rowid WHERE memories_fts MATCH ? AND m.user = ?")
             args = [t(fts), t(user)]
         } else {
-            sql = String("SELECT m.id, m.agent, m.text, m.by, m.at FROM memories m WHERE m.user = ?")
+            sql = String("SELECT m.id, m.agent, m.text, m.by, m.at, m.site FROM memories m WHERE m.user = ?")
             args = [t(user)]
         }
         if let a = agent {
@@ -1351,9 +1375,89 @@ impl Store {
         args.push(Value.Int(i64.wrap(u64(limit))))
         for r in try self.db.query(sql, args) {
             let owner = text(r[1].copy())
-            out.push(Obj.new().i("id", int(r[0].copy())).s("agent", owner.copy()).b("shared", owner.len() == 0).s("text", text(r[2].copy())).s("by", text(r[3].copy())).i("at", int(r[4].copy())).done())
+            out.push(Obj.new().i("id", int(r[0].copy())).s("agent", owner.copy()).b("shared", owner.len() == 0).s("text", text(r[2].copy())).s("by", text(r[3].copy())).i("at", int(r[4].copy())).s("site", text(r[5].copy())).done())
         }
         return out
+    }
+
+    // The notes `agent` reads that are tied to `host`'s site, or a site it's
+    // under (mail.example.com is under example.com), newest first: each
+    // `id`, `text`, `site` and `shared`.
+    pub fn site_notes(self, user: String, agent: String, host: String) -> List<Json> ! Error {
+        var out = List<Json>()
+        let here = site_of(host)
+        if here.len() == 0 { return out }
+        for r in try self.db.query(String("SELECT id, agent, text, site FROM memories WHERE user = ? AND (agent = ? OR agent = '') AND site != '' ORDER BY id DESC"), [t(user), t(agent)]) {
+            let site = text(r[3].copy())
+            if not site_covers(site.copy(), here.copy()) { continue }
+            out.push(Obj.new().i("id", int(r[0].copy())).s("text", text(r[2].copy())).s("site", site).b("shared", text(r[1].copy()).len() == 0).done())
+            if out.len() >= SITE_NOTES_MOST { break }
+        }
+        return out
+    }
+
+    // --- Teaching a task, and proposals (PLAN.md, "Sharing and learning") ---
+
+    // Keeps the steps the person recorded in `agent`'s browser. Gives its id.
+    pub fn add_recording(self, user: String, agent: String, steps: Json) -> String ! Error {
+        let id = try self.new_id("rec")
+        _ = try self.db.execute(String("INSERT INTO recordings (id, user, agent, steps, at) VALUES (?, ?, ?, ?, ?)"), [t(id.copy()), t(user), t(agent), t("{steps}"), Value.Int(now())])
+        return id
+    }
+
+    // A recording: `id`, `agent`, `steps`, `proposal` (the skill written from
+    // it, once one is) and `at`.
+    pub fn recording(self, user: String, id: String) -> Json? ! Error {
+        let r = try self.db.query_one(String("SELECT id, agent, steps, proposal, at FROM recordings WHERE user = ? AND id = ?"), [t(user), t(id)]) else return none
+        return some(recording_of(r))
+    }
+
+    // `agent`'s newest recording that no skill has been written from yet.
+    pub fn unwritten_recording(self, user: String, agent: String) -> String? ! Error {
+        let r = try self.db.query_one(String("SELECT id FROM recordings WHERE user = ? AND agent = ? AND proposal = '' ORDER BY at DESC, rowid DESC LIMIT 1"), [t(user), t(agent)]) else return none
+        return some(text(r[0].copy()))
+    }
+
+    pub fn recording_written(self, user: String, id: String, proposal: String) ! Error {
+        _ = try self.db.execute(String("UPDATE recordings SET proposal = ? WHERE user = ? AND id = ?"), [t(proposal), t(user), t(id)])
+    }
+
+    // Keeps an agent's proposal, waiting for the person: `kind` is skill or
+    // note, and `data` its skill (name, description, body) or note (text,
+    // site, shared). Gives it as proposal() does.
+    pub fn add_proposal(self, user: String, agent: String, kind: str, data: Json, why: String, recording: String) -> Json ! Error {
+        let id = try self.new_id("prop")
+        _ = try self.db.execute(String("INSERT INTO proposals (id, user, agent, kind, data, why, recording, status, at) VALUES (?, ?, ?, ?, ?, ?, ?, 'waiting', ?)"), [t(id.copy()), t(user.copy()), t(agent), t(String(kind)), t("{data}"), t(why), t(recording), Value.Int(now())])
+        return try self.proposal(user, id) ?? Json.Null
+    }
+
+    // A proposal: `id`, `agent`, `kind`, `skill` or `note`, `why`, `status`
+    // (waiting, kept or dropped), `at`, and once decided, `decided` and `by`;
+    // and for a skill written from a recording, `recording` and its `steps`.
+    pub fn proposal(self, user: String, id: String) -> Json? ! Error {
+        let r = try self.db.query_one(String("SELECT p.id, p.agent, p.kind, p.data, p.why, p.recording, p.status, p.at, p.decided, p.by, coalesce(r.steps, '') FROM proposals p LEFT JOIN recordings r ON r.id = p.recording AND r.user = p.user WHERE p.user = ? AND p.id = ?"), [t(user), t(id)]) else return none
+        return some(proposal_of(r))
+    }
+
+    // The person's proposals with `status`, or every one with "", newest first.
+    pub fn proposals(self, user: String, status: String, limit: usize) -> List<Json> ! Error {
+        var out = List<Json>()
+        var sql = String("SELECT p.id, p.agent, p.kind, p.data, p.why, p.recording, p.status, p.at, p.decided, p.by, coalesce(r.steps, '') FROM proposals p LEFT JOIN recordings r ON r.id = p.recording AND r.user = p.user WHERE p.user = ?")
+        var args: List<Value> = [t(user)]
+        if status.len() > 0 {
+            sql.push_str(" AND p.status = ?")
+            args.push(t(status))
+        }
+        sql.push_str(" ORDER BY p.at DESC, p.rowid DESC LIMIT ?")
+        args.push(Value.Int(i64.wrap(u64(limit))))
+        for r in try self.db.query(sql, args) { out.push(proposal_of(r)) }
+        return out
+    }
+
+    // Keeps or drops a waiting proposal, as `by` said, with what was kept in
+    // place of what was proposed. False when it isn't waiting.
+    pub fn decide_proposal(self, user: String, id: String, status: str, data: Json, by: String) -> bool ! Error {
+        return try self.db.execute(String("UPDATE proposals SET status = ?, data = ?, decided = ?, by = ? WHERE user = ? AND id = ? AND status = 'waiting'"), [t(String(status)), t("{data}"), Value.Int(now()), t(by), t(user), t(id)]) > 0
     }
 
     // Forgets note `id` of the person's, if `agent` (when given) may: its
@@ -1680,7 +1784,7 @@ impl Store {
 
     fn remove_rows(self, user: String) ! Error {
         _ = try self.db.execute(String("DELETE FROM sent WHERE device IN (SELECT id FROM devices WHERE user = ?)"), [t(user.copy())])
-        for table in ["push_tokens", "link_codes", "resets", "agent_revisions", "agents", "activity", "secrets", "mcp_servers", "skills", "messages", "conversations", "runs", "queue", "tasks", "sides", "branches", "routine_threads", "events", "acp_sessions", "files", "profiles", "defaults", "rules", "routines", "flows", "plugin_data", "plugin_revisions", "plugins", "usage", "memories", "memories_fts", "messages_fts", "shared_rows", "shared_tables", "script_tokens", "imported", "devices"] {
+        for table in ["push_tokens", "link_codes", "resets", "agent_revisions", "agents", "activity", "secrets", "mcp_servers", "skills", "messages", "conversations", "runs", "queue", "tasks", "sides", "branches", "routine_threads", "events", "acp_sessions", "files", "profiles", "defaults", "rules", "routines", "flows", "plugin_data", "plugin_revisions", "plugins", "usage", "memories", "memories_fts", "messages_fts", "shared_rows", "shared_tables", "script_tokens", "imported", "recordings", "proposals", "devices"] {
             _ = try self.db.execute("DELETE FROM {table} WHERE user = ?", [t(user.copy())])
         }
         _ = try self.db.execute(String("DELETE FROM invites WHERE by = ?"), [t(user.copy())])
@@ -1881,6 +1985,61 @@ impl Store {
 
 // A recall as FTS5 reads it: any of the words, each in quotes and a prefix,
 // best match first. None when it has no words.
+// How many site notes an agent is shown on a visit.
+const SITE_NOTES_MOST: usize = 20
+
+// A site, as a note is tied to it: an address's or a host's host and port,
+// lowercase, without who's logged in or a leading www. So
+// "https://www.Example.com/login" is example.com. "" for a file or nothing.
+pub fn site_of(given: String) -> String {
+    var s = given.trim().to_lower_root()
+    if let k = s.find("://") { s = s[k + 3..].copy() }
+    for end in ["/", "?", "#"] {
+        if let k = s.find(end) { s = s[..k].copy() }
+    }
+    if let k = s.find_last("@") { s = s[k + 1..].copy() }
+    if s.starts_with("www.") { s = s[4..].copy() }
+    return s
+}
+
+// Whether a note tied to `site` is for a page on `here`: the same site, or one
+// under it. Both as site_of gives them.
+pub fn site_covers(site: String, here: String) -> bool {
+    if site.len() == 0 or here.len() == 0 { return false }
+    return here == site or here.ends_with(".{site}")
+}
+
+// A recording from id, agent, steps, proposal and at.
+fn recording_of(r: List<Value>) -> Json {
+    let steps = match parse(text(r[2].copy())) {
+        ok(j) => j,
+        err(_) => Json.Array(List<Json>()),
+    }
+    return Obj.new().s("id", text(r[0].copy())).s("agent", text(r[1].copy())).j("steps", steps).s("proposal", text(r[3].copy())).i("at", int(r[4].copy())).done()
+}
+
+// A proposal from id, agent, kind, data, why, recording, status, at, decided,
+// by and its recording's steps.
+fn proposal_of(r: List<Value>) -> Json {
+    let kind = text(r[2].copy())
+    let data = match parse(text(r[3].copy())) {
+        ok(j) => j,
+        err(_) => Obj.new().done(),
+    }
+    var o = Obj.new().s("id", text(r[0].copy())).s("agent", text(r[1].copy())).s("kind", kind.copy()).j(if kind == "skill" { "skill" } else { "note" }, data).s("why", text(r[4].copy())).s("status", text(r[6].copy())).i("at", int(r[7].copy()))
+    let decided = int(r[8].copy())
+    if decided > 0 { o = o.i("decided", decided).s("by", text(r[9].copy())) }
+    let recording = text(r[5].copy())
+    if recording.len() > 0 {
+        let steps = match parse(text(r[10].copy())) {
+            ok(j) => j,
+            err(_) => Json.Array(List<Json>()),
+        }
+        o = o.s("recording", recording).j("steps", steps)
+    }
+    return o.done()
+}
+
 fn fts_any(query: String) -> String? {
     var parts = List<String>()
     for w in query.split_whitespace() {
@@ -2134,6 +2293,45 @@ fn rules_are_kept_per_person_and_go_with_their_agent() {
     s.delete_agent(a.id.copy(), String("a_1"))!
     assert(s.rules(a.id.copy())!.len() == 1)
     assert(s.delete_rule(a.id.copy(), String("r_1"))! and s.rules(a.id.copy())!.len() == 0)
+}
+
+@test
+fn notes_can_be_tied_to_a_site() {
+    assert(site_of(String("https://www.Example.com/login?next=/")) == "example.com")
+    assert(site_of(String("me@Shop.example.com:8443")) == "shop.example.com:8443")
+    assert(site_of(String("file:///C:/x.html")) == "")
+    assert(site_covers(String("example.com"), String("mail.example.com")) and not site_covers(String("example.com"), String("badexample.com")))
+    let s = test_store()
+    let a = s.add_user(String("ann"), String("pw"), "owner")!
+    _ = s.remember_on(a.id.copy(), String("a_1"), String("Log in with the work account."), String("a_1"), String("example.com"))!
+    _ = s.remember_on(a.id.copy(), String(""), String("Prices are in NOK."), String("d_1"), String("shop.example.com"))!
+    _ = s.remember_on(a.id.copy(), String("a_2"), String("Not a_1's."), String("a_2"), String("example.com"))!
+    _ = s.remember(a.id.copy(), String("a_1"), String("Not tied to a site."), String("a_1"))!
+    let notes = s.site_notes(a.id.copy(), String("a_1"), String("shop.example.com"))!
+    assert(notes.len() == 2 and "{notes[0]}".contains("NOK") and "{notes[1]}".contains("work account"))
+    assert(s.site_notes(a.id.copy(), String("a_1"), String("example.org"))!.len() == 0)
+    assert("{s.memories(a.id.copy(), some(String("a_1")), String("NOK"), 10)!}".contains("\"site\":\"shop.example.com\""))
+}
+
+@test
+fn proposals_wait_for_the_person() {
+    let s = test_store()
+    let a = s.add_user(String("ann"), String("pw"), "owner")!
+    let steps = parse(#"[{"kind":"page","url":"https://example.com"}]"#)!
+    let rec = s.add_recording(a.id.copy(), String("a_1"), steps)!
+    assert(s.unwritten_recording(a.id.copy(), String("a_1"))! == some(rec.copy()))
+    let skill = Obj.new().s("name", String("order-socks")).s("description", String("Ordering socks.")).s("body", String("1. Open the shop.")).done()
+    let p = s.add_proposal(a.id.copy(), String("a_1"), "skill", skill.copy(), String("You showed me."), rec.copy())!
+    let id = field(p.copy(), "id")
+    s.recording_written(a.id.copy(), rec.copy(), id.copy())!
+    assert(s.unwritten_recording(a.id.copy(), String("a_1"))! == none)
+    assert(field(p.copy(), "status") == "waiting" and "{p}".contains(#""steps":[{"kind":"page""#))
+    _ = s.add_proposal(a.id.copy(), String("a_1"), "note", Obj.new().s("text", String("Ann likes wool.")).done(), String("From Tuesday's chat."), String())!
+    assert(s.proposals(a.id.copy(), String("waiting"), 50)!.len() == 2)
+    assert(s.decide_proposal(a.id.copy(), id.copy(), "kept", skill.copy(), String("d_1"))!)
+    assert(not s.decide_proposal(a.id.copy(), id.copy(), "dropped", skill, String("d_1"))!)
+    assert(s.proposals(a.id.copy(), String("waiting"), 50)!.len() == 1)
+    assert(field(s.proposal(a.id.copy(), id)! ?? Json.Null, "by") == "d_1")
 }
 
 @test
