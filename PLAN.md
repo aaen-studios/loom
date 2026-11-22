@@ -337,6 +337,7 @@ Each agent program runs as its own process. The instance reads each one on a thr
 | `list_commands`, `run_command` | Every loom command: agents, routines, tasks, plugins, MCP servers, agent programs, people, devices, moving ([Agents can do anything the app can](#agents-can-do-anything-the-app-can)) |
 | `add_server`, `install_server` | Another server in your app (asking first), and the command that puts loom on a new one ([Several servers in one app](#several-servers-in-one-app)) |
 | `html_preview`, `html_render` | A picture of a page of HTML and what its console said, and the page shown in the chat ([Pages in the chat](#pages-in-the-chat)) |
+| `show_card` | A card in the reply: choices that answer, a checklist, a table, progress or facts, changed in place as the work goes on ([Cards in the chat](#cards-in-the-chat)) |
 | `list_tables`, `create_table`, `write_rows`, `query_rows`, `delete_rows`, `drop_table` | Tables every agent of the person's shares, each its owner's, with what other agents wrote marked untrusted; dropping one asks first ([Shared tables](#shared-tables)) |
 
 - **Shell, files and web fetch** come from the agent itself.
@@ -371,6 +372,17 @@ Ideas taken from OpenBot ([CopilotKit's](https://github.com/CopilotKit/OpenBot),
 
 - **An agent can check a page it wrote**: `html_preview` draws its HTML in a tab of the agent's browser of its own, off to the side, so the page the agent has open stays as it was, and gives a picture of it and what its console said, errors among them. The tab closes once the picture is taken.
 - **And show it**: `html_render` puts the page in the agent's reply, after what it has said so far, as a file of type `text/html` kept as the person's. A report, a chart or a small tool comes as a card in the chat, and opens beside it on the desktop in the same web view as a plugin's panel, walled off the same way: its scripts run, but it reaches no network and has no way into loom, so everything it needs goes inline.
+
+### Cards in the chat
+
+- **Small things an agent makes go in its reply as cards**, which the apps draw in the chat's own look: `show_card` puts one after what the agent has said so far. A card is one of:
+  - `choices`: two to six answers to the agent's question, each a button. The one the person clicks goes as their next message, and the buttons answer only while that reply is the chat's newest message.
+  - `checklist`: up to 30 items, each done or not.
+  - `table`: up to 8 columns and 50 rows of text.
+  - `progress`: how far along something is, from 0 to 1, with a label.
+  - `facts`: up to 12 labels, each with its value.
+- **A card changes as the work moves along.** Called again with a card's id from the same reply, `show_card` puts the new card in that one's place, so a checklist ticks itself off and a bar fills while the agent works. The apps get each change at once, and the finished reply keeps the card as it was last.
+- **The instance tidies what it's given**: text is cut short and kept to one line, and a card that can't be drawn is refused, saying why, so the agent fixes it. Anything bigger, or with its own look, is a page (above).
 
 ### Shared tables
 

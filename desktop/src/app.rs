@@ -4560,7 +4560,10 @@ ACTA_KEY=secret:ACTA_KEY",
     fn menu_panel(&mut self, cx: &mut Context<Self>) -> Option<Div> {
         let p = self.p;
         let menu = self.menu?;
+        // It takes the pointer, so a click on an item reaches it and not the sheet under
+        // it, which would close the menu first.
         let panel = div()
+            .occlude()
             .absolute()
             .top(px(layout::TITLEBAR - 4.0))
             .w(px(230.0))
@@ -4719,21 +4722,26 @@ ACTA_KEY=secret:ACTA_KEY",
                     let here = name == on;
                     let program = name.clone();
                     list = list.child(
-                        self.menu_item(format!("move-to-{name}"), Ico::Brain, &name, false)
-                            .when(here, |d| {
-                                d.child(
-                                    div()
-                                        .text_color(p.ink_2)
-                                        .child(Icon::new(Ico::Check).small()),
-                                )
-                            })
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                if let Some(f) = this.model.move_chat(&program) {
-                                    this.send(f);
-                                }
-                                this.menu = None;
-                                cx.notify();
-                            })),
+                        self.menu_item(
+                            format!("move-to-{name}"),
+                            Ico::Brain,
+                            &program_title(&name),
+                            false,
+                        )
+                        .when(here, |d| {
+                            d.child(
+                                div()
+                                    .text_color(p.ink_2)
+                                    .child(Icon::new(Ico::Check).small()),
+                            )
+                        })
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            if let Some(f) = this.model.move_chat(&program) {
+                                this.send(f);
+                            }
+                            this.menu = None;
+                            cx.notify();
+                        })),
                     );
                 }
                 list
@@ -4866,9 +4874,15 @@ ACTA_KEY=secret:ACTA_KEY",
             thoughts_open: self.prefs.thoughts_open,
             text_scale: self.prefs.text_scale(),
             bubbles: self.prefs.bubbles,
+            newest: false,
         };
-        let tools: Vec<model::Tool> = self.model.tools.clone();
-        let files = Rc::new(self.model.files.clone());
+        // The newest message, whose choices still answer.
+        let newest = rows.iter().rev().find_map(|r| match r {
+            Row::Message(m) if !m.queued => Some(m.id.clone()),
+            _ => None,
+        });
+        let tools = self.model.tools.clone();
+        let files = self.model.files.clone();
         let this = cx.entity().downgrade();
         let new_line = self.model.new_line.clone();
         let list = MessageScroller::new("chat", self.scroller.clone(), move |ix, _, _| {
@@ -4907,7 +4921,10 @@ ACTA_KEY=secret:ACTA_KEY",
                     &open,
                     &tools,
                     &files,
-                    show,
+                    Show {
+                        newest: newest.as_deref() == Some(m.id.as_str()),
+                        ..show
+                    },
                     this.clone(),
                 ),
                 Row::Approval(a) => approval(p, a, this.clone()),
@@ -6331,14 +6348,14 @@ ACTA_KEY=secret:ACTA_KEY",
             let default_backup = if self.model.defaults.backup.is_empty() {
                 "Default: None".to_string()
             } else {
-                format!("Default: {}", self.model.defaults.backup)
+                format!("Default: {}", program_title(&self.model.defaults.backup))
             };
             let mut choices: Vec<(String, String, Option<String>)> = vec![
                 ("default".into(), default_backup, None),
                 ("none".into(), "None".into(), Some("none".into())),
             ];
             for name in self.model.programs.iter().filter(|n| **n != a.program) {
-                choices.push((name.clone(), name.clone(), Some(name.clone())));
+                choices.push((name.clone(), program_title(name), Some(name.clone())));
             }
             let mut backups = div().flex().flex_wrap().gap(px(space::S));
             for (id, label, choice) in choices {
@@ -9737,8 +9754,12 @@ ACTA_KEY=secret:ACTA_KEY",
             let mut items = Vec::new();
             for name in programs.clone() {
                 items.push(
-                    self.segment(format!("default-brain-{name}"), &name, d.brain == name)
-                        .on_click(put(serde_json::json!({"brain": name}))),
+                    self.segment(
+                        format!("default-brain-{name}"),
+                        &program_title(&name),
+                        d.brain == name,
+                    )
+                    .on_click(put(serde_json::json!({"brain": name}))),
                 );
             }
             self.segments(items).into_any_element()
@@ -9751,8 +9772,12 @@ ACTA_KEY=secret:ACTA_KEY",
                 .on_click(put(serde_json::json!({"backup": null})))];
             for name in programs.clone() {
                 items.push(
-                    self.segment(format!("default-backup-{name}"), &name, d.backup == name)
-                        .on_click(put(serde_json::json!({"backup": name}))),
+                    self.segment(
+                        format!("default-backup-{name}"),
+                        &program_title(&name),
+                        d.backup == name,
+                    )
+                    .on_click(put(serde_json::json!({"backup": name}))),
                 );
             }
             self.segments(items).into_any_element()
@@ -9820,7 +9845,11 @@ ACTA_KEY=secret:ACTA_KEY",
                         )),
                     );
                 }
-                picks.push(self.text_row(&format!("{name} · {}", o.name), None, row));
+                picks.push(self.text_row(
+                    &format!("{} · {}", program_title(&name), o.name),
+                    None,
+                    row,
+                ));
             }
         }
         let models = self.group(
@@ -10430,6 +10459,14 @@ ACTA_KEY=secret:ACTA_KEY",
         cx.notify();
     }
 
+    /// An answer picked on an agent's choices card: it goes as the person's message.
+    pub fn choose(&mut self, answer: &str, cx: &mut Context<Self>) {
+        if let Some(frame) = self.model.send_choice(answer) {
+            self.send(frame);
+        }
+        cx.notify();
+    }
+
     /// Opens what each clicked notification was about, with the window up: its server,
     /// its agent and its conversation. The person clicked it, so the window comes forward.
     fn notification_clicks(&mut self, cx: &mut Context<Self>) {
@@ -10665,6 +10702,216 @@ struct Show {
     thoughts_open: bool,
     text_scale: f32,
     bubbles: bool,
+    /// Whether this is the chat's newest message, whose choices still answer.
+    newest: bool,
+}
+
+/// A card an agent put in its reply (PLAN.md, "Cards in the chat"), drawn plainly in
+/// the chat's own look: choices as buttons that answer, and the rest in a quiet box.
+fn card_view(
+    p: Palette,
+    card: &model::Card,
+    key: &str,
+    tint: Hsla,
+    show: Show,
+    this: WeakEntity<Loom>,
+) -> Div {
+    use model::CardBody;
+    let scale = show.text_scale;
+    let title = (!card.title.is_empty()).then(|| {
+        div()
+            .text_size(px(size::SMALL * scale))
+            .font_weight(FontWeight::MEDIUM)
+            .text_color(p.ink_2)
+            .child(card.title.clone())
+    });
+    // Choices stand on their own: a row of buttons under the reply, live while it's
+    // the newest message, and quiet once the chat has gone on.
+    if let CardBody::Choices(options) = &card.body {
+        let mut row = div().flex().flex_wrap().gap(px(space::S));
+        for (i, option) in options.iter().enumerate() {
+            let chip = div()
+                .id(SharedString::from(format!("choice-{key}-{i}")))
+                .px(px(space::M))
+                .py(px(space::XS + 2.0))
+                .rounded(px(radius::BUBBLE))
+                .border_1()
+                .text_size(px(size::SMALL * scale))
+                .child(option.clone());
+            row = row.child(if show.newest {
+                let this = this.clone();
+                let answer = option.clone();
+                chip.border_color(tint.opacity(0.55))
+                    .text_color(p.ink)
+                    .cursor_pointer()
+                    .soft_hover(p.bg, motion::mix(p.bg, tint, 0.14), None)
+                    .on_click(move |_, _, cx| {
+                        let _ = this.update(cx, |loom, cx| loom.choose(&answer, cx));
+                    })
+            } else {
+                chip.border_color(p.line).text_color(p.ink_3)
+            });
+        }
+        return div()
+            .flex()
+            .flex_col()
+            .gap(px(space::S))
+            .children(title)
+            .child(row);
+    }
+    let body = match &card.body {
+        CardBody::Checklist(items) => {
+            let mut list = div().flex().flex_col().gap(px(space::XS + 2.0));
+            for (text, done) in items {
+                let mark = div()
+                    .size(px(16.0))
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded_full()
+                    .border_1();
+                list = list.child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(space::S))
+                        .text_size(px(size::SMALL * scale))
+                        .child(if *done {
+                            mark.border_color(tint)
+                                .bg(tint)
+                                .text_color(p.bg)
+                                .child(Icon::new(Ico::Check).xsmall())
+                        } else {
+                            mark.border_color(p.line_strong)
+                        })
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .when(*done, |d| d.text_color(p.ink_3).line_through())
+                                .when(!*done, |d| d.text_color(p.ink))
+                                .child(text.clone()),
+                        ),
+                );
+            }
+            list
+        }
+        CardBody::Progress { label, value } => {
+            let pct = (value * 100.0).round() as u32;
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(space::S))
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(space::S))
+                        .text_size(px(size::SMALL * scale))
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .truncate()
+                                .text_color(p.ink)
+                                .child(label.clone()),
+                        )
+                        .child(div().text_color(p.ink_3).child(format!("{pct}%"))),
+                )
+                .child(
+                    div()
+                        .h(px(6.0))
+                        .w_full()
+                        .rounded_full()
+                        .bg(p.line)
+                        .child(div().h_full().w(relative(*value)).rounded_full().bg(tint)),
+                )
+        }
+        CardBody::Facts(items) => {
+            let mut list = div().flex().flex_col().gap(px(space::XS + 2.0));
+            for (label, value) in items {
+                list = list.child(
+                    div()
+                        .flex()
+                        .gap(px(space::M))
+                        .text_size(px(size::SMALL * scale))
+                        .child(
+                            div()
+                                .w(px(140.0))
+                                .flex_none()
+                                .truncate()
+                                .text_color(p.ink_3)
+                                .child(label.clone()),
+                        )
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .text_color(p.ink)
+                                .child(value.clone()),
+                        ),
+                );
+            }
+            list
+        }
+        CardBody::Table { columns, rows } => {
+            let line = |cells: &[String], head: bool| {
+                let mut r = div()
+                    .flex()
+                    .gap(px(space::M))
+                    .py(px(space::XS + 2.0))
+                    .text_size(px(if head {
+                        size::CAPTION
+                    } else {
+                        size::SMALL * scale
+                    }));
+                for c in cells {
+                    r = r.child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .when(head, |d| {
+                                d.font_weight(FontWeight::MEDIUM).text_color(p.ink_3)
+                            })
+                            .when(!head, |d| d.text_color(p.ink))
+                            .child(c.clone()),
+                    );
+                }
+                r
+            };
+            let mut table = div()
+                .flex()
+                .flex_col()
+                .child(line(columns, true).border_b_1().border_color(p.line_strong));
+            let last = rows.len().saturating_sub(1);
+            for (i, row) in rows.iter().enumerate() {
+                let r = line(row, false);
+                table = table.child(if i < last {
+                    r.border_b_1().border_color(p.line)
+                } else {
+                    r
+                });
+            }
+            table
+        }
+        CardBody::Choices(_) => div(),
+    };
+    div()
+        .w_full()
+        .max_w(relative(0.94))
+        .flex()
+        .flex_col()
+        .gap(px(space::S + 2.0))
+        .px(px(space::L))
+        .py(px(space::M))
+        .rounded(px(radius::CARD))
+        .border_1()
+        .border_color(p.line)
+        .bg(p.raised)
+        .children(title)
+        .child(body)
 }
 
 /// A tool call's title, as its agent named it.
@@ -10938,6 +11185,12 @@ fn reply(
                 if let Some(f) = &b.file {
                     shown_any = true;
                     body = body.child(file_view(p, f, files, key, this.clone()));
+                }
+            }
+            "card" => {
+                if let Some(c) = &b.card {
+                    shown_any = true;
+                    body = body.child(card_view(p, c, &key, tint, show, this.clone()));
                 }
             }
             _ => {}

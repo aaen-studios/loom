@@ -4,6 +4,7 @@
 //! lives here alone, from its deltas, until the finished message replaces it.
 
 use std::collections::{HashMap, HashSet};
+use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
@@ -913,6 +914,7 @@ pub struct Block {
     pub text: String,
     pub call: Option<String>,
     pub file: Option<FileRef>,
+    pub card: Option<Card>,
 }
 
 impl Block {
@@ -922,7 +924,101 @@ impl Block {
             text,
             call: None,
             file: None,
+            card: None,
         }
+    }
+
+    fn of(b: &Value) -> Block {
+        let kind = s(b, "kind");
+        Block {
+            text: s(b, "text"),
+            call: b.get("call").and_then(Value::as_str).map(str::to_string),
+            file: (kind == "file").then(|| FileRef::of(b)),
+            card: if kind == "card" {
+                b.get("card").and_then(Card::of)
+            } else {
+                None
+            },
+            kind,
+        }
+    }
+}
+
+/// A card an agent put in its reply with show_card (PLAN.md, "Cards in the chat"),
+/// as the instance tidied it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Card {
+    pub id: String,
+    pub title: String,
+    pub body: CardBody,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum CardBody {
+    /// Answers, each a button that sends it as the person's next message.
+    Choices(Vec<String>),
+    Checklist(Vec<(String, bool)>),
+    Table {
+        columns: Vec<String>,
+        rows: Vec<Vec<String>>,
+    },
+    /// How far along, 0 to 1, and what's going on.
+    Progress {
+        label: String,
+        value: f32,
+    },
+    Facts(Vec<(String, String)>),
+}
+
+impl Card {
+    pub fn of(v: &Value) -> Option<Card> {
+        let strings = |v: Option<&Value>| -> Vec<String> {
+            v.and_then(Value::as_array)
+                .map(|xs| {
+                    xs.iter()
+                        .map(|x| x.as_str().unwrap_or_default().to_string())
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
+        let items = v.get("items").and_then(Value::as_array);
+        let body = match v.get("type").and_then(Value::as_str)? {
+            "choices" => CardBody::Choices(strings(v.get("options"))),
+            "checklist" => CardBody::Checklist(
+                items?
+                    .iter()
+                    .map(|i| (s(i, "text"), i.get("done") == Some(&Value::Bool(true))))
+                    .collect(),
+            ),
+            "facts" => CardBody::Facts(
+                items?
+                    .iter()
+                    .map(|i| (s(i, "label"), s(i, "value")))
+                    .collect(),
+            ),
+            "table" => CardBody::Table {
+                columns: strings(v.get("columns")),
+                rows: v
+                    .get("rows")
+                    .and_then(Value::as_array)
+                    .map(|rs| rs.iter().map(|r| strings(Some(r))).collect())
+                    .unwrap_or_default(),
+            },
+            "progress" => CardBody::Progress {
+                label: s(v, "label"),
+                value: v
+                    .get("value")
+                    .and_then(Value::as_f64)
+                    .unwrap_or(0.0)
+                    .clamp(0.0, 1.0) as f32,
+            },
+            _ => return None,
+        };
+        Some(Card {
+            id: s(v, "id"),
+            title: s(v, "title"),
+            body,
+        })
     }
 }
 
@@ -1248,7 +1344,7 @@ pub struct Model {
     pub agents: Vec<Agent>,
     pub conversations: Vec<Conversation>,
     pub runs: Vec<Run>,
-    pub tools: Vec<Tool>,
+    pub tools: Rc<Vec<Tool>>,
     pub approvals: Vec<Approval>,
     pub programs: Vec<String>,
     /// Whether the instance has said which programs it has, since the last ask.
@@ -1282,7 +1378,7 @@ pub struct Model {
     /// Files for the next message.
     pub attachments: Vec<Attachment>,
     /// Files the core has fetched, by SHA-256, or SHA-256 and ".thumb": where they are.
-    pub files: HashMap<String, String>,
+    pub files: Rc<HashMap<String, String>>,
     /// file.get requests on their way: what they fetch, and whether to open it.
     getting: HashMap<String, (String, bool)>,
     /// Files fetched to be opened, for the app to open.
@@ -1505,16 +1601,7 @@ fn host_entry(typed: &str) -> Option<String> {
 fn blocks_of(v: &Value) -> Vec<Block> {
     v.get("blocks")
         .and_then(Value::as_array)
-        .map(|bs| {
-            bs.iter()
-                .map(|b| Block {
-                    kind: s(b, "kind"),
-                    text: s(b, "text"),
-                    call: b.get("call").and_then(Value::as_str).map(str::to_string),
-                    file: (s(b, "kind") == "file").then(|| FileRef::of(b)),
-                })
-                .collect()
-        })
+        .map(|bs| bs.iter().map(Block::of).collect())
         .unwrap_or_default()
 }
 
@@ -1993,6 +2080,7 @@ impl Model {
                 self.dirty.insert(List::Messages);
             }
             "delta" => self.delta(f),
+            "card" => self.card(f),
             "event" => self.event(f),
             "result" => self.result(f),
             "browser.state" => self.browser_state(f),
@@ -2182,6 +2270,24 @@ impl Model {
         if let Some(run) = self.runs.iter().find(|r| r.message == message) {
             self.last_delta.insert(run.agent.clone(), Instant::now());
         }
+    }
+
+    /// A card in a reply that's still being written, new or changed: it takes its
+    /// block's place whole.
+    fn card(&mut self, f: &Value) {
+        let Some(card) = f.get("card").and_then(Card::of) else {
+            return;
+        };
+        let message = s(f, "message");
+        let block = f.get("block").and_then(Value::as_u64).unwrap_or(0) as usize;
+        let blocks = self.live.entry(message).or_default();
+        while blocks.len() <= block {
+            blocks.push(Block::text("", String::new()));
+        }
+        blocks[block] = Block {
+            card: Some(card),
+            ..Block::text("card", String::new())
+        };
     }
 
     fn browser_state(&mut self, f: &Value) {
@@ -3041,15 +3147,17 @@ impl Model {
                     .collect();
             }
             List::Tools => {
-                self.tools = items
-                    .iter()
-                    .map(|t| Tool {
-                        call: s(t, "call"),
-                        run: s(t, "run"),
-                        title: s(t, "title"),
-                        status: t.get("status").and_then(Value::as_str).map(str::to_string),
-                    })
-                    .collect();
+                self.tools = Rc::new(
+                    items
+                        .iter()
+                        .map(|t| Tool {
+                            call: s(t, "call"),
+                            run: s(t, "run"),
+                            title: s(t, "title"),
+                            status: t.get("status").and_then(Value::as_str).map(str::to_string),
+                        })
+                        .collect(),
+                );
             }
             List::Approvals => {
                 self.approvals = items
@@ -3253,6 +3361,22 @@ impl Model {
             return None;
         }
         self.attachments.clear();
+        let mut frame = self.send_frame(agent, text);
+        if !files.is_empty() {
+            frame["files"] = json!(files);
+        }
+        Some(frame)
+    }
+
+    /// An answer the person picked on an agent's choices card, sent as their next
+    /// message, without what waits attached in the composer.
+    pub fn send_choice(&mut self, text: &str) -> Option<Value> {
+        let agent = self.selected.clone()?;
+        let text = text.trim();
+        (!text.is_empty()).then(|| self.send_frame(agent, text))
+    }
+
+    fn send_frame(&self, agent: String, text: &str) -> Value {
         let mut frame = json!({"t": "send", "agent": agent, "text": text});
         // Into the task's or the branch's conversation when the chat shows one; the core finds
         // the agent's chat otherwise.
@@ -3261,10 +3385,7 @@ impl Model {
         } else if let Some(branch) = &self.open_branch {
             frame["conversation"] = json!(branch);
         }
-        if !files.is_empty() {
-            frame["files"] = json!(files);
-        }
-        Some(frame)
+        frame
     }
 
     /// Starts sending a file for the next message.
@@ -3368,7 +3489,7 @@ impl Model {
                 if open {
                     self.to_open.push(path.to_string());
                 }
-                self.files.insert(key, path.to_string());
+                Rc::make_mut(&mut self.files).insert(key, path.to_string());
             }
             (e, _) => {
                 let page = self.page.as_ref().is_some_and(|p| p.file == key);
@@ -4241,6 +4362,32 @@ mod tests {
         assert_eq!(said["name"], "plugin.message");
         assert_eq!(said["args"]["text"], "hi");
         assert!(m.door(4, "fetch", &json!({})).is_err());
+    }
+
+    #[test]
+    fn a_card_takes_its_blocks_place() {
+        let mut m = Model::new();
+        let progress = |v: f64| json!({"id": "card_1", "type": "progress", "title": "", "label": "Copying", "value": v});
+        m.card(&json!({"t": "card", "message": "msg_1", "block": 2, "card": progress(0.2)}));
+        m.card(&json!({"t": "card", "message": "msg_1", "block": 2, "card": progress(0.7)}));
+        let blocks = &m.live["msg_1"];
+        assert_eq!(blocks.len(), 3);
+        assert_eq!(blocks[2].kind, "card");
+        assert_eq!(
+            blocks[2].card.as_ref().map(|c| &c.body),
+            Some(&CardBody::Progress {
+                label: "Copying".into(),
+                value: 0.7
+            })
+        );
+        let kept = Block::of(
+            &json!({"kind": "card", "card": {"id": "card_2", "type": "choices", "title": "Which?", "options": ["Red", "Blue"]}}),
+        );
+        assert_eq!(
+            kept.card.map(|c| c.body),
+            Some(CardBody::Choices(vec!["Red".into(), "Blue".into()]))
+        );
+        assert!(Card::of(&json!({"type": "chart"})).is_none());
     }
 
     #[test]
