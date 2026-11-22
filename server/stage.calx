@@ -1,0 +1,234 @@
+module server.stage
+
+// Taking another app's data out of another user's folder, for import, as root
+// (`loom import openbot --from-user USER`, `loom install --import openbot[:USER]`).
+// On a server OpenBot runs as a user of its own, in a folder only it can read,
+// and the loom service, which runs as `loom` behind ProtectHome, can't see it.
+// So root copies what an import reads into a staged folder in the instance's
+// own, which the instance can read:
+//
+// - openbot.db and the shared tables' agent-data.db, each as a consistent
+//   snapshot from SQLite's VACUUM INTO on a read-only connection, safe while
+//   OpenBot writes to them (a copy of the file would miss what's in its WAL);
+// - each agent's AGENTS.md or CLAUDE.md, the skills, the sidebar's pins;
+// - the files the chats name, except ones that look like secrets or are over
+//   25 MB, with a map from where they were (importer.STAGED_FILES);
+// - the provider OpenBot's Claude uses, from Claude Code's settings.json, and
+//   nothing else of that file, readable only by its owner, for import.run's
+//   `carry_provider`. The instance removes it once the import has run.
+//
+// The staged folder is then imported as any copy of OpenBot's data folder is.
+// An import waiting for the instance is a file in its folder, imports/pending.json,
+// which the instance takes once it has an owner (server/instance.calx).
+import std.fs
+import std.json.{Json, parse}
+import std.sqlite.{Database, Value}
+import shared.obj.{Obj, at, str_at}
+import server.importer
+
+/// Marks a staged folder, so only one of those is ever removed or written over.
+pub const MARK: str = "loom-stage.json"
+/// In the instance's folder: an import waiting for it, one it's running, and its answer.
+pub const PENDING: str = "imports/pending.json"
+pub const TAKING: str = "imports/taking.json"
+pub const DONE: str = "imports/done.json"
+
+/// The home folder of `user`, from /etc/passwd's text.
+pub fn home_of(user: String, passwd: String) -> String? {
+    for line in passwd.split("\n") {
+        let parts = line.trim().split(":")
+        if parts.len() >= 6 and parts[0] == user { return some(parts[5].copy()) }
+    }
+    return none
+}
+
+/// The folder holding OpenBot's openbot.db in `home`: where the desktop app keeps
+/// it, the folder itself, or one a few levels down.
+pub fn openbot_data(home: String) -> String? {
+    for c in ["{home}/.config/OpenBot", "{home}/OpenBot", home.copy(), "{home}/data", "{home}/.openbot"] {
+        if fs.is_file("{c}/openbot.db") { return some(c.copy()) }
+    }
+    var level: List<String> = [home.copy()]
+    for _ in 0..3 {
+        var next = List<String>()
+        for dir in level {
+            for name in listing(dir.copy()) {
+                if name == "node_modules" or name == ".git" or name == ".cache" { continue }
+                let p = "{dir}/{name}"
+                if not fs.is_dir(p.copy()) { continue }
+                if fs.is_file("{p}/openbot.db") { return some(p) }
+                next.push(p)
+            }
+        }
+        level = next
+    }
+    return none
+}
+
+/// OpenBot's workspace (each agent's folder, and Shared), beside its data, or "".
+pub fn openbot_workspace(home: String, data: String) -> String {
+    for w in ["{data}/workspace", "{data}/OpenBot", "{home}/OpenBot", data.copy()] {
+        if fs.is_dir("{w}/Agents") or fs.is_dir("{w}/Bots") or fs.is_dir("{w}/Shared") { return w.copy() }
+    }
+    return String()
+}
+
+/// Copies what an import reads from OpenBot's `data` and `workspace`, and `home`'s
+/// skills and Claude settings, into `to`, a folder under an instance's imports/.
+/// What was staged there before is replaced. Gives where, how much, and whether
+/// a provider came.
+pub fn stage_openbot(home: String, data: String, workspace: String, to: String) -> Json ! Error {
+    let dest = to.replace("\\", "/")
+    if not dest.contains("/imports/") { fail "{to} isn't a folder in an instance's imports/" }
+    if not fs.is_file("{data}/openbot.db") { fail "There's no OpenBot data in {data}: openbot.db isn't there." }
+    let part = "{dest}.part"
+    if fs.exists(part.copy()) {
+        if not fs.is_file("{part}/{MARK}") { fail "{part} is there already, and loom didn't stage it" }
+        try fs.remove_dir_all(part.copy())
+    }
+    try fs.make_dir_all(part.copy())
+    try fs.write_text("{part}/{MARK}", "{Obj.new().s("from", String("openbot")).s("home", home.copy()).s("data", data.copy()).s("workspace", workspace.copy()).done()}")
+
+    try snapshot("{data}/openbot.db", "{part}/openbot.db")
+    for f in ["bots.json", "openbot-sidebar-pins-v1.json"] {
+        if fs.is_file("{data}/{f}") { try fs.copy("{data}/{f}", "{part}/{f}") }
+    }
+    // OpenBot's own skills, as bundles, and the ones in ~/.agents/skills.
+    var skills: i64 = 0
+    for dir in listing("{data}/local-skills") {
+        for version in listing("{data}/local-skills/{dir}") {
+            let bundle = "{data}/local-skills/{dir}/{version}/bundle.zip"
+            if not fs.is_file(bundle.copy()) { continue }
+            try fs.make_dir_all("{part}/local-skills/{dir}/{version}")
+            try fs.copy(bundle, "{part}/local-skills/{dir}/{version}/bundle.zip")
+            skills += 1
+        }
+    }
+    for dir in listing("{home}/.agents/skills") {
+        let md = "{home}/.agents/skills/{dir}/SKILL.md"
+        if not fs.is_file(md.copy()) { continue }
+        try fs.make_dir_all("{part}/.agents/skills/{dir}")
+        try fs.copy(md, "{part}/.agents/skills/{dir}/SKILL.md")
+        skills += 1
+    }
+    // Each agent's instructions, and the shared tables.
+    if workspace.len() > 0 {
+        for kind in ["Agents", "Bots"] {
+            for dir in listing("{workspace}/{kind}") {
+                for f in ["AGENTS.md", "CLAUDE.md"] {
+                    let from = "{workspace}/{kind}/{dir}/{f}"
+                    if not fs.is_file(from.copy()) { continue }
+                    try fs.make_dir_all("{part}/workspace/{kind}/{dir}")
+                    try fs.copy(from, "{part}/workspace/{kind}/{dir}/{f}")
+                }
+            }
+        }
+        let tables = "{workspace}/Shared/Data/agent-data.db"
+        if fs.is_file(tables.copy()) {
+            try fs.make_dir_all("{part}/workspace/Shared/Data")
+            try snapshot(tables, "{part}/workspace/Shared/Data/agent-data.db")
+        }
+    }
+    // The provider OpenBot's Claude uses, and nothing else of its settings.
+    let claude_env = at(json_of(read_text("{home}/.claude/settings.json")), "env")
+    var carried = Obj.new()
+    var any = false
+    for k in importer.PROVIDER_KEYS {
+        if let v = str_at(claude_env.copy(), k) {
+            carried = carried.s(k, v)
+            any = true
+        }
+    }
+    if any {
+        try fs.make_dir_all("{part}/.claude")
+        let settings = "{part}/.claude/settings.json"
+        try fs.write_text(settings.copy(), String("\{\}"))
+        try fs.set_mode(settings.copy(), 0o600)
+        try fs.write_text(settings, "{Obj.new().j("env", carried.done()).done()}")
+    }
+
+    // The files the chats name, read as the import will read them.
+    let bundle = try importer.read(String("openbot"), part.copy())
+    var map = Obj.new()
+    var files: i64 = 0
+    var seen = List<String>()
+    if let Json.Array(cs) = at(bundle.copy(), "conversations") {
+        for c in cs {
+            if let Json.Array(ms) = at(c, "messages") {
+                for m in ms {
+                    if let Json.Array(fs_list) = at(m, "files") {
+                        for f in fs_list {
+                            let p = str_at(f.copy(), "path") ?? String()
+                            if p.len() == 0 or seen.contains(p.copy()) { continue }
+                            seen.push(p.copy())
+                            if importer.secret_file(p.copy()) or not fs.is_file(p.copy()) { continue }
+                            let size = match fs.metadata(p.copy()) {
+                                ok(meta) => meta.size,
+                                err(_) => continue,
+                            }
+                            if size == 0 or size > importer.FILE_MOST { continue }
+                            files += 1
+                            let name = file_name(str_at(f, "name") ?? p.copy())
+                            try fs.make_dir_all("{part}/files/{files}")
+                            try fs.copy(p.copy(), "{part}/files/{files}/{name}")
+                            map.m.insert(p.copy(), Json.Str("{dest}/files/{files}/{name}"))
+                        }
+                    }
+                }
+            }
+        }
+    }
+    try fs.write_text("{part}/{importer.STAGED_FILES}", "{map.done()}")
+
+    if fs.exists(dest.copy()) {
+        if not fs.is_file("{dest}/{MARK}") { fail "{dest} is there already, and loom didn't stage it" }
+        try fs.remove_dir_all(dest.copy())
+    }
+    try fs.rename(part, dest.copy())
+    return Obj.new().s("path", dest).s("data", data).s("workspace", workspace).j("counts", importer.counted(bundle)).i("files", files).i("skills", skills).b("provider", any).done()
+}
+
+/// A consistent snapshot of the SQLite database at `from`, written to `to`, while
+/// whatever owns it goes on writing: VACUUM INTO, on a connection that only reads.
+pub fn snapshot(from: String, to: String) ! Error {
+    if fs.exists(to.copy()) { try fs.remove_file(to.copy()) }
+    let db = try Database.open_read(from)
+    _ = try db.execute(String("VACUUM INTO ?"), [Value.Text(to.copy())])
+    try db.close()
+}
+
+// A file's name, without any folder, as a staged file keeps it.
+fn file_name(given: String) -> String {
+    let p = given.replace("\\", "/")
+    let base = if let cut = p.find_last("/") { p[cut + 1..].copy() } else { p }
+    return if base.len() == 0 or base == "." or base == ".." { String("file") } else { base }
+}
+
+fn listing(dir: String) -> List<String> {
+    return match fs.list(dir) {
+        ok(l) => l,
+        err(_) => List<String>(),
+    }
+}
+
+fn read_text(path: String) -> String {
+    return match fs.read_text(path) {
+        ok(some(t)) => t,
+        _ => String(),
+    }
+}
+
+fn json_of(raw: String) -> Json {
+    return match parse(raw) {
+        ok(j) => j,
+        err(_) => Json.Null,
+    }
+}
+
+@test
+fn finds_a_user_s_home() {
+    let passwd = String("root:x:0:0:root:/root:/bin/bash\nopenbot:x:998:998::/var/lib/openbot:/usr/sbin/nologin\n")
+    assert(home_of(String("openbot"), passwd.copy()) == some(String("/var/lib/openbot")))
+    assert(home_of(String("nobody"), passwd) == none)
+    assert(file_name(String("/a/b/report.txt")) == "report.txt" and file_name(String("C:\\x\\y.png")) == "y.png" and file_name(String("..")) == "file")
+}
