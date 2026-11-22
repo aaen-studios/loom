@@ -26,10 +26,12 @@ RUN sed -i "s/^const VERSION: str = \".*\"/const VERSION: str = \"$VERSION\"/" s
     && calx build --release server/main.calx -o /out/loom
 
 # What runs: Node, for the ACP agents most people use (they start with npx),
-# libcurl, which std.http uses on Linux, and git for agents that work in repos.
+# libcurl, which std.http uses on Linux, git for agents that work in repos, and
+# Chromium with fonts for every script and emoji, for the agents' browsers.
 FROM node:22-bookworm-slim
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates libcurl4 git \
+        chromium fonts-liberation fonts-noto-core fonts-noto-cjk fonts-noto-color-emoji fontconfig \
     && rm -rf /var/lib/apt/lists/* \
     && mkdir /data \
     && chown node:node /data

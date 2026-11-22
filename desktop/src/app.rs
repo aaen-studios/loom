@@ -3253,15 +3253,17 @@ ACTA_KEY=secret:ACTA_KEY",
         if agent.is_some() {
             self.browser_shut = None;
         }
-        if let Some(f) = self.model.watch(agent) {
+        // Opened beside the chat, the person watches it, which keeps it open.
+        if let Some(f) = self.model.watch(agent, false) {
             self.send(f);
         }
         cx.notify();
     }
 
-    /// Keeps the small browser window right for the agent on screen: watching its
+    /// Keeps the small browser window right for the agent on screen: following its
     /// browser while it's open and the person hasn't closed the window, and not
-    /// once it's closed.
+    /// once it's closed. The small window only follows, so the browser still
+    /// closes when the agent's turn ends.
     fn follow_browser(&mut self, agent: Option<&model::Agent>) {
         let Some(a) = agent else { return };
         let open = self.model.browser(&a.id).open;
@@ -3270,13 +3272,13 @@ ACTA_KEY=secret:ACTA_KEY",
             self.browser_shut = None;
         }
         let want = open && self.browser_shut.as_deref() != Some(a.id.as_str());
-        if want && !mine {
+        if want && (!mine || (!self.browser_docked && !self.model.watch_follows)) {
             self.browser_docked = false;
-            if let Some(f) = self.model.watch(Some(a.id.clone())) {
+            if let Some(f) = self.model.watch(Some(a.id.clone()), true) {
                 self.send(f);
             }
         } else if !open && mine && !self.browser_docked {
-            if let Some(f) = self.model.watch(None) {
+            if let Some(f) = self.model.watch(None, true) {
                 self.send(f);
             }
         }

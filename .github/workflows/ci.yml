@@ -87,7 +87,11 @@ jobs:
           curl -fsS http://127.0.0.1:8790/api/info | grep -q '"setup":true'
           curl -fsS http://127.0.0.1:8790/api/version | grep -q '"set_up":false'
           grep -q '"version":"' install.json
-          sudo -u loom /usr/local/bin/loom status --json --data /var/lib/loom | grep -q '"user":"loom"'
+          sudo -u loom /usr/local/bin/loom status --json --data /var/lib/loom | tee status.json
+          grep -q '"user":"loom"' status.json
+          # The agents' browser: installed, or there already, with what it lacks installed.
+          grep -q "the agents' browser: \|installed the agents' browser: " install.json
+          grep -q '"missing":\[\]' status.json
 
       - name: Sandboxes
         run: |
@@ -126,7 +130,10 @@ jobs:
           grep -q '"setup":true' info.json
           docker logs loom 2>&1 | grep -q 'setup code:'
           test "$(docker exec loom id -un)" = node
-          docker exec loom loom status --json --data /data | grep -q '"user":"node"'
+          docker exec loom loom status --json --data /data | tee status.json
+          grep -q '"user":"node"' status.json
+          # The agents' browser, with fonts, and nothing it lacks.
+          grep -q '"browser":{"path":"/usr/bin/chromium","missing":\[\]}' status.json
 
       - name: Logs
         if: failure()
