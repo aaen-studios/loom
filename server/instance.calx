@@ -30,6 +30,7 @@ import server.acp
 import server.acp.{Line, Out}
 import server.announce
 import server.browser
+import server.cards
 import server.codemode
 import server.commands
 import server.files
@@ -108,10 +109,11 @@ struct Block {
     call: String
     entries: Json
     file: Json    // a file block's `file`, `name`, `mime` and `size`
+    card: Json    // a card block's card (server/cards.calx)
 }
 
 fn new_block(kind: str) -> Block {
-    return Block { kind: String(kind), text: String(), call: String(), entries: Json.Null, file: Json.Null }
+    return Block { kind: String(kind), text: String(), call: String(), entries: Json.Null, file: Json.Null, card: Json.Null }
 }
 
 struct Run {
@@ -2396,6 +2398,9 @@ impl Instance {
         if name == "html_render" {
             return some(try i.render_page(g, args))
         }
+        if name == "show_card" {
+            return some(try i.show_card(g, args))
+        }
         // Shared tables: each tool is a table command, as the agent; dropping asks first.
         if name == "drop_table" {
             let table = str_at(args.copy(), "table") ?? String()
@@ -4053,6 +4058,57 @@ impl Instance {
         return tool_text("It's in the chat, as {title}, after what you've said so far. Your person opens it there.")
     }
 
+    // show_card (PLAN.md, "Cards in the chat"): a card goes in the reply after
+    // what the agent has said so far, or, given the id of one it showed earlier
+    // in the same reply, takes that one's place. The apps get each change at
+    // once, as a `card` frame, and the finished reply keeps the last of it.
+    fn show_card(i: mut Instance, g: Grant, args: Json) -> Json ! Error {
+        let run_id = i.calling_run(g.copy())
+        if run_id.len() == 0 { return tool_error(String("You aren't answering in a chat right now, so there's nowhere to show it.")) }
+        let asked = (str_at(args.copy(), "id") ?? String()).trim().copy()
+        var failed = String()
+        var frame = Json.Null
+        var user = String()
+        var shown = String()
+        if let r = mut i.runs.find(run_id) {
+            var place = r.blocks.len()
+            var count: usize = 0
+            var k: usize = 0
+            for b in r.blocks {
+                if b.kind == "card" {
+                    count += 1
+                    if asked.len() > 0 and str_at(b.card.copy(), "id") == some(asked.copy()) { place = k }
+                }
+                k += 1
+            }
+            if asked.len() > 0 and place == r.blocks.len() {
+                failed = "There's no card {asked} in this reply. Leave id out to show a new one."
+            } else {
+                let id = if asked.len() > 0 { asked.copy() } else { "card_{count + 1}" }
+                let (card, why) = cards.card_of(args, id.copy())
+                if why.len() > 0 {
+                    failed = why
+                } else {
+                    if place == r.blocks.len() {
+                        var b = new_block("card")
+                        b.card = card.copy()
+                        r.blocks.push(b)
+                    } else {
+                        r.blocks[place].card = card.copy()
+                    }
+                    frame = Obj.new().s("t", String("card")).s("run", r.id.copy()).s("message", r.message.copy()).i("block", i64.wrap(u64(place))).j("card", card).done()
+                    user = r.user.copy()
+                    shown = id
+                }
+            }
+        }
+        if failed.len() > 0 { return tool_error(failed) }
+        if shown.len() == 0 { return tool_error(String("The reply ended before the card could go in it.")) }
+        i.publish(user, frame)
+        if asked.len() > 0 { return tool_text("Changed {shown} in the chat.") }
+        return tool_text("It's in the chat, as {shown}, after what you've said so far. To change it as things move along, call show_card again with id {shown} and the whole card as it is now.")
+    }
+
     // A file an agent made: kept as the person's, and given as a file block.
     fn agent_file(i: mut Instance, user: String, name: String, mime: String, data: List<u8>) -> Json ! Error {
         let sha = bytes.hex(sha256(data.copy()))
@@ -4584,6 +4640,8 @@ impl Instance {
             for block in r.blocks {
                 if block.kind == "text" or block.kind == "thought" {
                     _ = i.server.send_text(s, "{Obj.new().s("t", String("delta")).s("run", r.id.copy()).s("message", r.message.copy()).i("block", b).s("kind", block.kind.copy()).i("pos", 0).s("text", block.text.copy()).done()}")
+                } else if block.kind == "card" {
+                    _ = i.server.send_text(s, "{Obj.new().s("t", String("card")).s("run", r.id.copy()).s("message", r.message.copy()).i("block", b).j("card", block.card.copy()).done()}")
                 }
                 b += 1
             }
@@ -6381,6 +6439,8 @@ impl Instance {
                 blocks.push(Obj.new().s("kind", b.kind.copy()).j("entries", b.entries.copy()).done())
             } else if b.kind == "file" {
                 blocks.push(b.file.copy())
+            } else if b.kind == "card" {
+                blocks.push(Obj.new().s("kind", b.kind.copy()).j("card", b.card.copy()).done())
             } else {
                 blocks.push(Obj.new().s("kind", b.kind.copy()).s("text", b.text.copy()).done())
                 if b.kind == "text" { said.push_str(b.text.copy()) }

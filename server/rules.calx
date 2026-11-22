@@ -348,17 +348,17 @@ pub fn decide(rules: List<Json>, a: Act) -> Verdict {
     for r in rules {
         match holds(r.copy(), a.copy()) {
             Holds.No => {},
-            Holds.Unreadable(why) => return Verdict { then: String("deny"), rule: r.copy(), why: "Denied by rule {str_at(r, "id") ?? String()}: {why}, so it denies." },
+            Holds.Unreadable(why) => return Verdict { then: String("deny"), rule: r.copy(), why: "A rule can't tell, since {why}, so it's denied." },
             Holds.Yes => {
                 let then = str_at(r.copy(), "then") ?? String()
-                if then == "deny" { return Verdict { then: then, rule: r.copy(), why: "Denied by rule {str_at(r.copy(), "id") ?? String()}: {said(r)}." } }
+                if then == "deny" { return Verdict { then: then, rule: r.copy(), why: "Denied by your rule \"{said(r)}\"." } }
                 if then == "ask" and asks == Json.Null { asks = r.copy() }
                 if then == "allow" and allows == Json.Null { allows = r.copy() }
             },
         }
     }
-    if asks != Json.Null { return Verdict { then: String("ask"), rule: asks.copy(), why: "Asked by rule {str_at(asks.copy(), "id") ?? String()}: {said(asks)}." } }
-    if allows != Json.Null { return Verdict { then: String("allow"), rule: allows.copy(), why: "Allowed by rule {str_at(allows.copy(), "id") ?? String()}: {said(allows)}." } }
+    if asks != Json.Null { return Verdict { then: String("ask"), rule: asks.copy(), why: "Asks, by your rule \"{said(asks)}\"." } }
+    if allows != Json.Null { return Verdict { then: String("allow"), rule: allows.copy(), why: "Allowed by your rule \"{said(allows)}\"." } }
     return Verdict { then: String(), rule: Json.Null, why: String() }
 }
 

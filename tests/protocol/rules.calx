@@ -142,7 +142,7 @@ fn run(i: Instance) ! Error {
     // --- Loom's own tools ---
     let notify_rule = at(value(try put(mut app, "q_27", Obj.new().s("then", String("deny")).s("tool", String("loom.notify")).s("agent", main_id.copy()).done())), "rule")
     let said = try say(mut app, main_chat.copy(), "m_7", String(#"/mcp notify {"title":"Hi","body":"there"}"#))
-    try check(said.starts_with("notify failed:") and said.contains("rule {str_at(notify_rule, "id") ?? String()}"), "one of loom's own tools a rule denies is refused, naming the rule")
+    try check(said.starts_with("notify failed:") and said.contains("Denied by your rule") and str_at(notify_rule, "id") != none, "one of loom's own tools a rule denies is refused, naming the rule")
     _ = try put(mut app, "q_28", Obj.new().s("then", String("ask")).s("tool", String("loom.remember")).done())
     try app.send(Obj.new().s("t", String("send")).s("cid", String("m_8")).s("conversation", main_chat.copy()).s("text", String(#"/mcp remember {"text":"Rules work."}"#)).done())
     let remember_ask = try app.until("event", "approval.needed")
