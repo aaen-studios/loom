@@ -4537,7 +4537,10 @@ ACTA_KEY=secret:ACTA_KEY",
     fn menu_panel(&mut self, cx: &mut Context<Self>) -> Option<Div> {
         let p = self.p;
         let menu = self.menu?;
+        // It takes the pointer, so a click on an item reaches it and not the sheet under
+        // it, which would close the menu first.
         let panel = div()
+            .occlude()
             .absolute()
             .top(px(layout::TITLEBAR - 4.0))
             .w(px(230.0))
