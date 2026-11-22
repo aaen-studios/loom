@@ -70,6 +70,8 @@ fn run(i: Instance) ! Error {
     let bin = listed(list.copy(), "fake-bin")
     try check((str_at(bin.copy(), "icon_svg") ?? String()).contains("currentColor") and at(listed(list.copy(), "fake-swapped"), "icon_svg") == Json.Null, "each agent comes with its icon, fetched by the instance, and one that isn't an SVG is left out")
     try check(str_at(bin.copy(), "how") == some(String("binary")) and str_at(bin, "installed") == none and at(listed(list.copy(), "fake-elsewhere"), "how") == Json.Null, "the registry lists its agents, and how each would run here")
+    let kept = try fs.read_text("{i.data}/acp/registry.json") ?? String()
+    try check(kept.contains("fake-bin") and kept.contains("currentColor"), "the instance keeps what it read, icons and all, so a restart answers at once")
 
     let installed = try app.cmd("q_2", "acp.install", Obj.new().s("id", String("fake-bin")).j("env", Obj.new().s("FAKE_SETTING", String("hello")).done()).done())
     let program = at(at(installed, "value"), "program")

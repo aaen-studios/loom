@@ -838,6 +838,19 @@ ACTA_KEY=secret:ACTA_KEY",
     /// elsewhere: keeps the choice, and starts the core again with it.
     /// Opens a page, asking the instance for what it shows.
     fn open(&mut self, screen: Screen, cx: &mut Context<Self>) {
+        // The Brains page's lists are slow to come the first time, so any settings
+        // page asks for them behind it.
+        let settings = self
+            .popup_pages(false)
+            .iter()
+            .any(|(_, _, _, s)| *s == screen);
+        if settings && screen != Screen::Programs {
+            if let Some(frames) = self.model.warm_programs() {
+                for f in frames {
+                    self.send(f);
+                }
+            }
+        }
         match screen {
             Screen::Server => {
                 let f = self.model.load_scripts();
@@ -2410,17 +2423,13 @@ ACTA_KEY=secret:ACTA_KEY",
             );
             groups.push(self.group(
                 Some("New task"),
-                vec![
-                    div()
-                        .px(px(space::L))
-                        .pt(px(space::M))
-                        .child(chips)
-                        .into_any_element(),
-                    div()
+                // One piece: who it's for, then what it is, with no line between.
+                vec![div()
                         .p(px(space::L))
                         .flex()
                         .flex_col()
                         .gap(px(space::M))
+                        .child(chips)
                         .child(Textarea::new(&self.task_prompt_in))
                         .child(
                             div()

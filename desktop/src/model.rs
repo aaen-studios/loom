@@ -3365,6 +3365,15 @@ impl Model {
         vec![self.programs(), self.registry_cmd()]
     }
 
+    /// Asks for the Brains page's lists ahead of it, once, when the settings open on
+    /// another page, so they're there by the time it's opened. None once they're asked.
+    pub fn warm_programs(&mut self) -> Option<Vec<Value>> {
+        if !self.registry.is_empty() || self.registry_loading {
+            return None;
+        }
+        Some(self.load_programs())
+    }
+
     fn registry_cmd(&mut self) -> Value {
         let id = self.id("app.registry");
         json!({"t": "cmd", "id": id, "name": "acp.registry"})
