@@ -421,15 +421,29 @@ pub fn first_start(data: &str) {
     }
 }
 
+/// Whether the window, put in its place while hidden (started in the tray), opens
+/// maximized the first time it's shown.
+#[cfg(windows)]
+static MAXIMIZE_WHEN_SHOWN: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
 /// Hides and shows the window, which GPUI can't do itself on Windows.
 #[cfg(windows)]
 pub fn show_window(hwnd: isize, show: bool) {
+    use std::sync::atomic::Ordering;
     use windows_sys::Win32::UI::WindowsAndMessaging::{
-        SetForegroundWindow, ShowWindow, SW_HIDE, SW_SHOW,
+        SetForegroundWindow, ShowWindow, SW_HIDE, SW_SHOW, SW_SHOWMAXIMIZED,
+    };
+    let how = if !show {
+        SW_HIDE
+    } else if MAXIMIZE_WHEN_SHOWN.swap(false, Ordering::Relaxed) {
+        SW_SHOWMAXIMIZED
+    } else {
+        SW_SHOW
     };
     // SAFETY: hwnd is the app's own window, which lives as long as the app.
     unsafe {
-        ShowWindow(hwnd as _, if show { SW_SHOW } else { SW_HIDE });
+        ShowWindow(hwnd as _, how);
         if show {
             SetForegroundWindow(hwnd as _);
         }
@@ -438,6 +452,133 @@ pub fn show_window(hwnd: isize, show: bool) {
 
 #[cfg(not(windows))]
 pub fn show_window(_hwnd: isize, _show: bool) {}
+
+/// Where the window is now, as Windows keeps it: its normal rectangle and whether
+/// it's maximized, also while it's minimized or hidden in the tray.
+#[cfg(windows)]
+pub fn window_place(hwnd: isize) -> Option<crate::place::Place> {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        GetWindowPlacement, SW_SHOWMAXIMIZED, SW_SHOWMINIMIZED, WINDOWPLACEMENT,
+        WPF_RESTORETOMAXIMIZED,
+    };
+    // SAFETY: a WINDOWPLACEMENT with its length set, for the app's own window.
+    let p = unsafe {
+        let mut p: WINDOWPLACEMENT = std::mem::zeroed();
+        p.length = std::mem::size_of::<WINDOWPLACEMENT>() as u32;
+        if GetWindowPlacement(hwnd as _, &mut p) == 0 {
+            return None;
+        }
+        p
+    };
+    let r = p.rcNormalPosition;
+    let show = p.showCmd as i32;
+    Some(crate::place::Place {
+        normal: crate::place::Rect {
+            left: r.left,
+            top: r.top,
+            right: r.right,
+            bottom: r.bottom,
+        },
+        maximized: show == SW_SHOWMAXIMIZED
+            || (show == SW_SHOWMINIMIZED && p.flags & WPF_RESTORETOMAXIMIZED != 0),
+    })
+}
+
+#[cfg(not(windows))]
+pub fn window_place(_hwnd: isize) -> Option<crate::place::Place> {
+    None
+}
+
+/// The screens' work areas, the main one first, in the workspace coordinates the
+/// window's place is kept in (they start at the main screen's work area).
+#[cfg(windows)]
+fn screens() -> Vec<crate::place::Rect> {
+    use windows_sys::Win32::Foundation::{LPARAM, RECT};
+    use windows_sys::Win32::Graphics::Gdi::{
+        EnumDisplayMonitors, GetMonitorInfoW, HDC, HMONITOR, MONITORINFO,
+    };
+    const MONITORINFOF_PRIMARY: u32 = 1;
+    unsafe extern "system" fn each(m: HMONITOR, _: HDC, _: *mut RECT, out: LPARAM) -> i32 {
+        // SAFETY: `out` is the Vec this call was given, and `info` has its size set.
+        unsafe {
+            let mut info: MONITORINFO = std::mem::zeroed();
+            info.cbSize = std::mem::size_of::<MONITORINFO>() as u32;
+            if GetMonitorInfoW(m, &mut info) != 0 {
+                let list = &mut *(out as *mut Vec<(bool, RECT)>);
+                list.push((info.dwFlags & MONITORINFOF_PRIMARY != 0, info.rcWork));
+            }
+        }
+        1
+    }
+    let mut found: Vec<(bool, RECT)> = Vec::new();
+    // SAFETY: the callback only runs during this call, while `found` lives.
+    unsafe {
+        EnumDisplayMonitors(
+            std::ptr::null_mut(),
+            std::ptr::null(),
+            Some(each),
+            &mut found as *mut _ as LPARAM,
+        );
+    }
+    found.sort_by_key(|(primary, _)| !primary);
+    let Some((_, main)) = found.first().copied() else {
+        return Vec::new();
+    };
+    found
+        .iter()
+        .map(|(_, r)| crate::place::Rect {
+            left: r.left - main.left,
+            top: r.top - main.top,
+            right: r.right - main.left,
+            bottom: r.bottom - main.top,
+        })
+        .collect()
+}
+
+/// Puts the window where it was, kept on the screens there are now. Shown, it opens
+/// there at once (maximized if it was); hidden, as when loom starts in the tray, it
+/// waits there and opens that way when it's first shown. Set twice, so a screen with
+/// another scale than the one the window opened on doesn't change its size.
+#[cfg(windows)]
+pub fn put_window(hwnd: isize, place: crate::place::Place, shown: bool) {
+    use windows_sys::Win32::Foundation::{POINT, RECT};
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        SetWindowPlacement, SW_HIDE, SW_SHOWMAXIMIZED, SW_SHOWNOACTIVATE, WINDOWPLACEMENT,
+    };
+    let place = place.fit(&screens());
+    let r = place.normal;
+    let p = WINDOWPLACEMENT {
+        length: std::mem::size_of::<WINDOWPLACEMENT>() as u32,
+        flags: 0,
+        showCmd: if !shown {
+            SW_HIDE
+        } else if place.maximized {
+            SW_SHOWMAXIMIZED
+        } else {
+            SW_SHOWNOACTIVATE
+        } as u32,
+        ptMinPosition: POINT { x: -1, y: -1 },
+        ptMaxPosition: POINT { x: -1, y: -1 },
+        rcNormalPosition: RECT {
+            left: r.left,
+            top: r.top,
+            right: r.right,
+            bottom: r.bottom,
+        },
+    };
+    // SAFETY: a filled-in WINDOWPLACEMENT for the app's own window.
+    unsafe {
+        SetWindowPlacement(hwnd as _, &p);
+        SetWindowPlacement(hwnd as _, &p);
+    }
+    MAXIMIZE_WHEN_SHOWN.store(
+        !shown && place.maximized,
+        std::sync::atomic::Ordering::Relaxed,
+    );
+}
+
+#[cfg(not(windows))]
+pub fn put_window(_hwnd: isize, _place: crate::place::Place, _shown: bool) {}
 
 /// The window's native handle, for `show_window`.
 pub fn hwnd(window: &gpui_kit::Window) -> isize {
@@ -577,5 +718,60 @@ mod tests {
         super::point_icon(&ours, &exe, 0).unwrap();
         assert_eq!(read(&ours).0, 0);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A window put in its place, hidden as when loom starts in the tray, reads back in
+    /// that place, maximized too, and is never shown or given the focus.
+    #[cfg(windows)]
+    #[test]
+    fn a_window_keeps_the_place_it_is_put_in() {
+        use crate::place::{Place, Rect};
+        use windows_sys::Win32::UI::WindowsAndMessaging::{
+            CreateWindowExW, DestroyWindow, IsWindowVisible, WS_OVERLAPPEDWINDOW,
+        };
+        let class: Vec<u16> = "STATIC\0".encode_utf16().collect();
+        // SAFETY: a plain hidden window of a system class, destroyed at the end.
+        let hwnd = unsafe {
+            CreateWindowExW(
+                0,
+                class.as_ptr(),
+                class.as_ptr(),
+                WS_OVERLAPPEDWINDOW,
+                0,
+                0,
+                400,
+                300,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null(),
+            )
+        } as isize;
+        assert_ne!(hwnd, 0);
+        // On the main screen wherever it is: its work area always holds this.
+        let main = super::screens()[0];
+        let normal = Rect {
+            left: main.left + 40,
+            top: main.top + 30,
+            right: main.left + 40 + 700,
+            bottom: main.top + 30 + 500,
+        };
+        for maximized in [false, true] {
+            let place = Place { normal, maximized };
+            super::put_window(hwnd, place, false);
+            let back = super::window_place(hwnd).expect("a placement");
+            assert_eq!(back.normal, normal);
+            // Hidden, it's maximized only once it's shown.
+            assert!(!back.maximized);
+            assert_eq!(
+                super::MAXIMIZE_WHEN_SHOWN.load(std::sync::atomic::Ordering::Relaxed),
+                maximized
+            );
+            // SAFETY: the window made above.
+            assert_eq!(unsafe { IsWindowVisible(hwnd as _) }, 0);
+        }
+        super::MAXIMIZE_WHEN_SHOWN.store(false, std::sync::atomic::Ordering::Relaxed);
+        // SAFETY: the window made above.
+        unsafe { DestroyWindow(hwnd as _) };
     }
 }
