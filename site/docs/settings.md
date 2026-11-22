@@ -1,0 +1,56 @@
+# Settings
+
+The gear at the bottom of the sidebar opens Settings, as a popup over the chat. Its pages are down the left, under three headings:
+
+- **You**: About you, Appearance, Chat, and App & notifications.
+- **Agents**: Defaults, Rules, Brains, Skills, Proposals, MCP servers and Plugins.
+- **Work**: Routines and Tasks.
+
+Import sits under them. Click outside the popup, or press Esc, to close it.
+
+The search at the top finds a page by its name or by what's on it: "dark" finds Appearance, and "steer" finds Defaults.
+
+What's about the server rather than you (Add a phone, People, Move, Add a server) is in the server popup instead. Click the server's name at the bottom of the sidebar to open it.
+
+## This device's settings
+
+Appearance, Chat, and App & notifications belong to the device you set them on, not to your account. They're kept in `prefs.json` in the app's data folder, so your laptop and your desktop can each be set their own way.
+
+Everything else in Settings is kept on the instance, so every device you sign in on has it.
+
+## Appearance
+
+- **Theme**: System (it follows Windows), Light or Dark.
+- **Chat text**: Small, Default or Large.
+- **Fonts**: the words in loom's own font, Geist, or the system's, and code in Geist Mono or the system's monospace font.
+
+## Chat
+
+Under **Replies**:
+
+- **Message style**: Bubbles, where an agent's replies sit in bubbles as yours do, with a touch of the agent's colour, or Plain text. Bubbles are the default.
+- **Tool calls**: how much of an agent's work a reply shows. **Hidden** shows none, except one that failed or was refused. **Folded** puts each run of calls on one line, which opens to show each. **Every call** shows each on its own line. Hidden is the default.
+- **Show thoughts open**: an agent's thinking shows open, rather than folded under Thought.
+
+Under **Composer**:
+
+- **Send with Ctrl+Enter**: Enter makes a new line, and Ctrl+Enter sends. Off by default, so Enter sends and Shift+Enter makes a new line.
+
+## App & notifications
+
+Under **This computer**:
+
+- **Start at login**: loom starts when you log in, in the tray.
+- **Keep running when closed**: closing the window keeps loom in the tray, so routines and replies go on. On by default. Turn it off and closing the window quits loom.
+- **Keep the computer awake**: the computer doesn't sleep while an agent is working.
+
+Under **Notifications**:
+
+- **Notifications**: loom tells you when an agent says something while you're away.
+- **Show what was said**: a notification shows the message. Turn it off and it says only who it's from.
+- **Play a sound**.
+
+Under **Updates**:
+
+- Loom's version, and **Check now**. Loom also looks for a new version every few hours.
+- **Update on its own**: a new version goes in by itself, while loom is in the tray and no agent is working. Otherwise the sidebar offers it, to restart into.

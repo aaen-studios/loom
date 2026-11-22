@@ -30,11 +30,35 @@ Loom keeps them sealed with the instance's `secret.key`, never shows their value
 
 ## Making an agent
 
-Choose **+** in the sidebar. An agent has a name, the program it runs on, its instructions, its permission mode (how often it asks first), and the MCP servers and skills it gets. Agents can change their own instructions, and every change is a revision you can go back to.
+Choose **+** at the top of the sidebar. An agent has a name, the program it runs on, its instructions, its permission mode (how often it asks first), and the MCP servers and skills it gets. Agents can change their own instructions, and every change is a revision you can go back to.
+
+**Edit agent**, in the agent's menu, opens its settings beside the chat, in groups:
+
+- **Brain**: its name, model and effort, permission mode, what a message while it answers does, its backup program, its colour, and its instructions. **Save** keeps the name and instructions; the rest changes as you pick it.
+- **Knows**: its memories, skills, tables and files, each counted, its MCP servers, and Code Mode ([In the chat](chat.md#how-an-agent-uses-its-tools)).
+- **Does**: its routines, and the tokens it used today and this month.
+- **Runs**: whether it's isolated, and its network ([Permissions](permissions.md#isolated-agents)).
+
+## Agent defaults
+
+The **Defaults** page, under Agents in Settings, sets what every agent of yours follows unless it sets its own:
+
+- **Brain**: the program a new agent runs on.
+- **Backup program**: what takes a turn over when an agent's own program runs out of usage or doesn't start ([In the chat](chat.md#a-backup-program)).
+- **Permission**: Asks first, When risky, or Doesn't ask, for agents without a mode of their own. It's Asks first until you change it.
+- **A message while it answers**: waits its turn, or steers at once.
+- **Model and effort** for each program, for agents that don't pick their own. A program's models show here once an agent on it has started.
+- **Instructions every agent follows**, told to each agent beside About you, under their own heading. Choose **Save** to keep them.
+
+The defaults are live: change one and every agent that follows it changes too. On an agent's edit page, each choice that follows the default says **Default:** and what that is. Pick it again to set the agent back to following.
+
+Agents made before the defaults keep the permission mode they were made with until you set them to follow. They're kept on the instance, so all your devices have them. An agent can read them, but changing them asks you first.
 
 ## MCP servers and secrets
 
 Set up MCP servers once, on the **MCP servers** page, and pick which each agent gets on its edit page. A setting can name one of your secrets, such as `ACTA_KEY=secret:ACTA_KEY`, which loom fills in only for the agent's process. Secrets are yours alone, sealed like program settings.
+
+In Code Mode, loom connects to the agent's MCP servers for it, and the agent reaches their tools through its scripts. With Code Mode off, the agent connects to them itself.
 
 ## Sharing keys with the people you invite
 
