@@ -13,9 +13,10 @@ module server.main
 //     loom files limit MB|off [--data DIR]
 //     loom install [--domain DOMAIN] [--port N] [--no-sandboxes]   as root, on a Linux server
 //     loom update [--check]
+//     loom egress                              in a sandbox closed to the network, started by the instance
 //     loom version
 //
-// Each but serve and mcp takes --json, to answer in JSON.
+// Each but serve, mcp and egress takes --json, to answer in JSON.
 //
 // Run from source: calx server/main.calx serve
 import std.bytes
@@ -33,6 +34,7 @@ import shared.protocol
 import shared.release.{MANIFEST, RELEASE_KEY, check_manifest, newer}
 import server.instance.{Config, EventLife, Instance}
 import server.mcp
+import server.egress
 import server.backup
 import server.push
 import server.installer
@@ -88,6 +90,8 @@ usage: loom <command>
   update                    update this program to the newest signed release (--check: only say if there's one)
   version                   print loom's version and the protocol versions it speaks
   mcp                       loom's own tools as an MCP server on standard input and output, which the instance starts for its agents
+  egress                    in a sandbox closed to the network: carries loom's tools and the proxy on 127.0.0.1:3128
+                            to the instance, over standard input and output
 
 Every command but version and mcp takes --data DIR, the instance's folder (default: loom-data).
 Every command but serve and mcp takes --json, to answer in JSON: an object, or {"error": {"code", "message"}} with a non-zero exit.
@@ -316,9 +320,14 @@ fn main() ! Error {
         exit(2)
     }
     let cmd = a.words[0].copy()
-    // These two don't answer once: one serves until it's stopped, the other speaks MCP.
+    // These don't answer once: one serves until it's stopped, one speaks MCP, and one
+    // carries a closed sandbox's connections until the instance ends its input.
     if cmd == "mcp" {
         try mcp.serve()
+        return
+    }
+    if cmd == "egress" {
+        try egress.serve_inside()
         return
     }
     if cmd == "serve" {

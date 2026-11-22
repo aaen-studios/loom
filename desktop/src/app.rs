@@ -184,6 +184,10 @@ pub struct Loom {
     queue_editing: Option<String>,
     code_in: Entity<InputState>,
     name_in: Entity<InputState>,
+    /// A host to add to the list of the agent being edited, and whether its
+    /// network is shown as a list, which starts empty, reaching nothing.
+    host_in: Entity<InputState>,
+    listing_hosts: bool,
     skill_name_in: Entity<InputState>,
     skill_desc_in: Entity<InputState>,
     skill_body_in: Entity<TextareaState>,
@@ -449,6 +453,23 @@ impl Loom {
         let pass_in = input(window, cx, "Password", true);
         let code_in = input(window, cx, "Setup code", false);
         let name_in = input(window, cx, "Name", false);
+        // A host for the agent's list: Enter adds it.
+        let host_in = input(window, cx, "github.com", false);
+        cx.subscribe_in(
+            &host_in,
+            window,
+            |this: &mut Loom, state, event: &InputEvent, window, cx| {
+                if let InputEvent::PressEnter { .. } = event {
+                    let typed = state.read(cx).value().to_string();
+                    if let Some(f) = this.model.add_host(&typed) {
+                        this.send(f);
+                    }
+                    state.update(cx, |s, cx| s.set_value("", window, cx));
+                    cx.notify();
+                }
+            },
+        )
+        .detach();
         // Naming a new agent: each change twangs its thread, and Enter weaves it.
         cx.subscribe_in(
             &name_in,
@@ -771,6 +792,8 @@ ACTA_KEY=secret:ACTA_KEY",
             queue_editing: None,
             code_in,
             name_in,
+            host_in,
+            listing_hosts: false,
             skill_name_in,
             skill_desc_in,
             skill_body_in,
@@ -6391,6 +6414,135 @@ ACTA_KEY=secret:ACTA_KEY",
             }
             picks.push(self.field("Backup program", backups));
         }
+        // Where it runs: in a sandbox or not, and what it reaches from there,
+        // from everything, through a list of hosts, to nothing. A member's agents
+        // always run in one; an instance without sandboxes can't isolate any.
+        let (isolated, network) = self
+            .model
+            .editing
+            .as_ref()
+            .and_then(|id| self.model.agent(id))
+            .map(|a| (a.isolated, a.network.clone()))
+            .unwrap_or((false, None));
+        let member = !self.model.programs_owner;
+        let locked = member || (!self.model.sandboxes && !isolated);
+        let isolate_how = if member {
+            "In a sandbox of your own, as every member's agents are"
+        } else if !self.model.sandboxes && !isolated {
+            "Needs sandboxes, which this instance doesn't run. On Linux, start it with --sandboxes podman"
+        } else {
+            "Runs in a sandbox, apart from the instance's files and your other agents"
+        };
+        let isolate = if locked {
+            self.row(
+                None,
+                "Isolated",
+                Some(isolate_how.to_string()),
+                Some(self.switch("edit-isolated", isolated).into_any_element()),
+            )
+            .into_any_element()
+        } else {
+            self.switch_row(
+                "edit-isolated",
+                "Isolated",
+                isolate_how,
+                isolated,
+                cx,
+                |this| {
+                    let on = this
+                        .model
+                        .editing
+                        .as_ref()
+                        .and_then(|id| this.model.agent(id))
+                        .is_some_and(|a| a.isolated);
+                    this.listing_hosts = false;
+                    if let Some(f) = this.model.set_isolated(!on) {
+                        this.send(f);
+                    }
+                },
+            )
+        };
+        let listing = match &network {
+            None => false,
+            Some(hosts) => self.listing_hosts || !hosts.is_empty(),
+        };
+        let mut reach = div().flex().flex_wrap().gap(px(space::S));
+        let choices: [(&'static str, &'static str, bool); 3] = [
+            ("all", "Everything", network.is_none()),
+            ("list", "Only these hosts", listing),
+            (
+                "none",
+                "Nothing",
+                network.as_ref().is_some_and(|h| h.is_empty()) && !listing,
+            ),
+        ];
+        for (id, label, on) in choices {
+            reach = reach.child(
+                self.button_owned(format!("edit-network-{id}"), label, on)
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        let hosts = this
+                            .model
+                            .editing
+                            .as_ref()
+                            .and_then(|a| this.model.agent(a))
+                            .and_then(|a| a.network.clone());
+                        this.listing_hosts = id == "list";
+                        let wanted = match id {
+                            "all" => None,
+                            "list" => Some(hosts.unwrap_or_default()),
+                            _ => Some(Vec::new()),
+                        };
+                        if let Some(f) = this.model.set_network(wanted) {
+                            this.send(f);
+                        }
+                        cx.notify();
+                    })),
+            );
+        }
+        let mut hosts_list = div().flex().flex_col().gap(px(space::S));
+        if listing {
+            let mut chips = div().flex().flex_wrap().gap(px(space::S));
+            for h in network.clone().unwrap_or_default() {
+                let host = h.clone();
+                chips = chips.child(
+                    self.button_owned(format!("edit-host-{h}"), &format!("{h}  ×"), false)
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            if let Some(f) = this.model.remove_host(&host) {
+                                this.send(f);
+                            }
+                            cx.notify();
+                        })),
+                );
+            }
+            hosts_list = hosts_list
+                .child(chips)
+                .child(
+                    div()
+                        .flex()
+                        .gap(px(space::S))
+                        .child(div().flex_1().child(Input::new(&self.host_in)))
+                        .child(
+                            self.button("edit-host-add", "Add", false)
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    let typed = this.host_in.read(cx).value().to_string();
+                                    if let Some(f) = this.model.add_host(&typed) {
+                                        this.send(f);
+                                    }
+                                    this.host_in.update(cx, |s, cx| s.set_value("", window, cx));
+                                    cx.notify();
+                                })),
+                        ),
+                )
+                .child(
+                    div()
+                        .text_size(px(size::CAPTION))
+                        .text_color(p.ink_3)
+                        .child(
+                            "A name, or *.example.com for every name under one. It reaches \
+                             nothing else, and never the instance's own computer.",
+                        ),
+                );
+        }
         // Its thread's colour.
         let color = self
             .model
@@ -6557,6 +6709,12 @@ ACTA_KEY=secret:ACTA_KEY",
                     .child(scripts)
                     .child(group("Does"))
                     .child(div().flex().flex_col().child(routines).child(usage))
+                    .child(group("Runs"))
+                    .child(isolate)
+                    .when(isolated, |d| {
+                        d.child(self.field("Network", reach))
+                            .when(listing, |d| d.child(hosts_list))
+                    })
                     .when(!self.model.revisions.is_empty(), |d| {
                         d.child(self.field("Versions", list))
                     }),
