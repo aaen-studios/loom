@@ -194,6 +194,9 @@ struct Reply: View {
             }
         case "file":
             if let f = b.file { FileView(file: f) }
+        case "notice" where !b.text.isEmpty:
+            // One line from loom, not the agent's own words: small and quiet.
+            Text(b.text).font(Fonts.caption).foregroundStyle(P.ink3)
         default:
             EmptyView()
         }

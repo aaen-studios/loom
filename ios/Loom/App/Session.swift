@@ -40,9 +40,10 @@ final class Session {
         flush()
     }
 
-    /// The core's config (core/README.md, "Config"): its cache in the app's own folder.
+    /// The core's config (core/README.md, "Config"): its cache in the app's own folder, and
+    /// the phone's time zone, which the core gives the instance in `hello`.
     private static func config() -> JSON {
-        var config: [String: JSON] = ["data": JSON(dataFolder().path)]
+        var config: [String: JSON] = ["data": JSON(dataFolder().path), "tz": JSON(TimeZone.current.identifier)]
         if let server = ProcessInfo.processInfo.environment["LOOM_SERVER"] {
             config["server"] = JSON(server)
         }
@@ -82,6 +83,9 @@ final class Session {
             case "core.notify":
                 Notifications.show(f)
                 model.take(f)
+            case "welcome":
+                model.take(f)
+                registerPush()
             default:
                 model.take(f)
             }
@@ -142,17 +146,20 @@ final class Session {
     /// The APNs device token, once the system gives it.
     var pushToken: String?
 
-    /// Hands the core this phone's APNs token. The instance's side, the `push.register`
-    /// command, comes with LOO-47; until then the token is kept here and nothing is sent.
+    /// Keeps this phone's APNs token, and hands it to the instance if it's connected.
     func registered(pushToken token: Data) {
         pushToken = token.map { String(format: "%02x", $0) }.joined()
-        guard Session.pushRegisterReady, let pushToken else { return }
-        send(["t": "cmd", "id": "app.push", "name": "push.register",
-              "args": ["token": JSON(pushToken), "environment": JSON(Session.apnsEnvironment)]])
+        if model.me != nil { registerPush() }
     }
 
-    /// Turned on once the instance has `push.register` (LOO-47).
-    static let pushRegisterReady = false
+    /// `push.register` with the APNs token, on each `welcome`, since the core sends a
+    /// command only while it's connected. The core seals it for the push relay when the
+    /// instance pushes through one.
+    private func registerPush() {
+        guard !sample, let pushToken else { return }
+        send(["t": "cmd", "id": "app.push", "name": "push.register",
+              "args": ["token": JSON(pushToken), "env": JSON(Session.apnsEnvironment)]])
+    }
 
     static var apnsEnvironment: String {
         #if DEBUG

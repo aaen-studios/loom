@@ -22,6 +22,21 @@ struct Agent: Identifiable, Equatable, Sendable {
 struct Conversation: Equatable, Sendable {
     var id: String
     var agent: String
+    /// Whether it's the agent's chat, the one the core's `send` with `agent` goes to: not
+    /// a task's conversation, the side questions', a branch or a routine's own thread.
+    var isChat = true
+
+    init(id: String, agent: String, isChat: Bool = true) {
+        self.id = id
+        self.agent = agent
+        self.isChat = isChat
+    }
+
+    init(_ c: JSON) {
+        id = c["id"].text
+        agent = c["agent"].text
+        isChat = c["task"].isNull && !(c["side"].bool ?? false) && c["branch_of"].isNull && c["routine"].isNull
+    }
 }
 
 /// A file in a message, or one sent: its SHA-256, name, type and size.
@@ -149,6 +164,9 @@ private struct Queued: Sendable {
     var conversation: String?
     var text: String
     var files: Int
+    /// The id it gets once it goes, for one the instance keeps in the conversation's
+    /// queue while the agent answers (`ack` with `queued`).
+    var message: String?
 
     init(_ q: JSON) {
         cid = q["cid"].text
@@ -214,7 +232,7 @@ final class Model {
     /// The conversation an agent's chat shows: its newest.
     func conversation(of agent: String?) -> String? {
         guard let agent else { return nil }
-        return conversations.first { $0.agent == agent }?.id
+        return conversations.first { $0.agent == agent && $0.isChat }?.id
     }
 
     var conversation: String? { conversation(of: selected) }
@@ -335,8 +353,13 @@ final class Model {
         case "core.file":
             fileCame(f)
         case "ack":
+            // One that waits in the instance's queue stays shown until its message is stored.
             let cid = f["cid"].text
-            queued.removeAll { $0.cid == cid }
+            if f["queued"].bool == true, let i = queued.firstIndex(where: { $0.cid == cid }) {
+                queued[i].message = f["message"].string
+            } else {
+                queued.removeAll { $0.cid == cid }
+            }
             dirty.insert(.messages)
         case "delta":
             delta(f)
@@ -361,7 +384,9 @@ final class Model {
         case "conversation":
             dirty.formUnion([.conversations, .messages])
         case "message":
-            live[f["message"]["id"].text] = nil
+            let id = f["message"]["id"].text
+            live[id] = nil
+            if kind == "message.created" { queued.removeAll { $0.message == id } }
             if f["conversation"].string == conversation { dirty.insert(.messages) }
             dirty.insert(.conversations)
         case "run":
@@ -421,7 +446,7 @@ final class Model {
             if let s = selected, agent(s) == nil { select(nil) }
         case .conversations:
             let before = conversation
-            conversations = items.map { Conversation(id: $0["id"].text, agent: $0["agent"].text) }
+            conversations = items.map(Conversation.init)
             if conversation != before { dirty.insert(.messages) }
         case .runs:
             runs = items.map {
@@ -442,7 +467,10 @@ final class Model {
                 return Approval(call: a["call"].text, run: a["run"].text, title: a["title"].text, detail: detail, canAlways: a["can_always"].bool ?? false)
             }
         case .outbox:
+            // The outbox has only what the instance hasn't acked: keep those it queued.
+            let waiting = queued.filter { $0.message != nil }
             queued = items.map(Queued.init)
+            queued += waiting.filter { w in !queued.contains { $0.cid == w.cid } }
             placeQueued()
         case .devices:
             devices = items.map { Device(id: $0["id"].text, name: $0["name"].text, kind: $0["kind"].text) }
@@ -467,6 +495,7 @@ final class Model {
         messages.removeAll { $0.queued }
         let conversation = self.conversation
         for q in queued {
+            if let m = q.message, messages.contains(where: { $0.id == m }) { continue }
             let here = q.conversation.map { $0 == conversation } ?? (q.agent != nil && q.agent == selected)
             guard here else { continue }
             var text = q.text
