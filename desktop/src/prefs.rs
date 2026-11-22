@@ -26,6 +26,17 @@ pub enum Tools {
     All,
 }
 
+/// Whether a reply shows its agent's thoughts.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Thoughts {
+    /// Not at all: it's a chat, and the answer is what matters.
+    Hidden,
+    /// Each under "Thought", to open.
+    Folded,
+    /// Each open.
+    Open,
+}
+
 /// How big the words of the chat are.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Text {
@@ -43,8 +54,7 @@ pub struct Prefs {
     pub system_font: bool,
     pub system_mono: bool,
     pub tools: Tools,
-    /// Whether an agent's thoughts show open, rather than folded under "Thought".
-    pub thoughts_open: bool,
+    pub thoughts: Thoughts,
     /// Whether an agent's replies show as bubbles, as the person's messages do.
     pub bubbles: bool,
     /// Whether Enter makes a new line and Ctrl+Enter sends, rather than Enter sending.
@@ -73,7 +83,7 @@ impl Default for Prefs {
             system_font: false,
             system_mono: false,
             tools: Tools::Hidden,
-            thoughts_open: false,
+            thoughts: Thoughts::Hidden,
             bubbles: true,
             ctrl_enter: false,
             tray: true,
@@ -127,7 +137,17 @@ impl Prefs {
                 "all" => Tools::All,
                 _ => d.tools,
             },
-            thoughts_open: b("thoughts_open", d.thoughts_open),
+            // Before thoughts could be hidden, `thoughts_open` chose open or folded. Every
+            // file kept it, so only an open one was chosen: folded comes to hidden.
+            thoughts: match (
+                s("thoughts"),
+                v.get("thoughts_open").and_then(Value::as_bool),
+            ) {
+                ("hidden", _) => Thoughts::Hidden,
+                ("folded", _) => Thoughts::Folded,
+                ("open", _) | ("", Some(true)) => Thoughts::Open,
+                _ => d.thoughts,
+            },
             bubbles: b("bubbles", d.bubbles),
             ctrl_enter: b("ctrl_enter", d.ctrl_enter),
             tray: b("tray", d.tray),
@@ -166,7 +186,14 @@ impl Prefs {
                 Tools::All => "all",
             }),
         );
-        m.insert("thoughts_open".into(), json!(self.thoughts_open));
+        m.insert(
+            "thoughts".into(),
+            json!(match self.thoughts {
+                Thoughts::Hidden => "hidden",
+                Thoughts::Folded => "folded",
+                Thoughts::Open => "open",
+            }),
+        );
         m.insert("system_font".into(), json!(self.system_font));
         m.insert("system_mono".into(), json!(self.system_mono));
         m.insert("bubbles".into(), json!(self.bubbles));
@@ -244,12 +271,30 @@ pub fn mono_font() -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use super::{Prefs, Theme, Tools};
+    use super::{Prefs, Theme, Thoughts, Tools};
+    use serde_json::json;
 
     #[test]
     fn tool_calls_are_hidden_until_the_person_asks_for_them() {
         assert_eq!(Prefs::default().tools, Tools::Hidden);
         assert_eq!(Prefs::from_json(&serde_json::Value::Null), Prefs::default());
+    }
+
+    #[test]
+    fn thoughts_are_hidden_until_the_person_asks_for_them() {
+        assert_eq!(Prefs::default().thoughts, Thoughts::Hidden);
+        // An older file, from when thoughts were open or folded.
+        let old = |open: bool| Prefs::from_json(&json!({"thoughts_open": open})).thoughts;
+        assert_eq!(old(true), Thoughts::Open);
+        assert_eq!(old(false), Thoughts::Hidden);
+        let now = |v: &str| Prefs::from_json(&json!({"thoughts": v, "thoughts_open": true}));
+        assert_eq!(now("folded").thoughts, Thoughts::Folded);
+        assert_eq!(now("hidden").thoughts, Thoughts::Hidden);
+        let kept = Prefs {
+            thoughts: Thoughts::Folded,
+            ..Prefs::default()
+        };
+        assert_eq!(Prefs::from_json(&kept.to_json()), kept);
     }
 
     #[test]

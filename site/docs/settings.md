@@ -30,7 +30,9 @@ Under **Replies**:
 
 - **Message style**: Bubbles, where an agent's replies sit in bubbles as yours do, with a touch of the agent's colour, or Plain text. Bubbles are the default.
 - **Tool calls**: how much of an agent's work a reply shows. **Hidden** shows none, not even one that failed: the agent tells you itself when a failure matters. **Folded** puts each run of calls on one line, which opens to show each. **Every call** shows each on its own line. Hidden is the default.
-- **Show thoughts open**: an agent's thinking shows open, rather than folded under Thought.
+- **Thoughts**: whether a reply shows an agent's thinking. **Hidden** shows none, **Folded** puts each under Thought, to open, and **Open** shows each open. Hidden is the default.
+
+However much of its work a reply shows, a finished turn reads as one answer: the agent's last words, with what it said and did on the way folded under one line, such as "3 steps", that opens with a click. While it works, one quiet line says what it's doing. A turn you stopped, or one that failed, keeps everything it had in view.
 
 Under **Composer**:
 

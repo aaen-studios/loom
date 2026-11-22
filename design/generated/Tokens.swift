@@ -54,6 +54,7 @@ enum Tokens {
         static let button: CGFloat = 8
         static let card: CGFloat = 10
         static let bubble: CGFloat = 14
+        static let bubbleJoined: CGFloat = 5
         static let composer: CGFloat = 16
     }
 

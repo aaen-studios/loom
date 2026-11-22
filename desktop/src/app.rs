@@ -18,7 +18,7 @@ use serde_json::Value;
 use crate::core::Core;
 use crate::model::{self, Approval, Conn, ImportSource, Message, Model, Mood, Offer, ServerUpdate};
 use crate::motion::{self, SoftHover};
-use crate::prefs::{Prefs, Text, Theme, Tools};
+use crate::prefs::{Prefs, Text, Theme, Thoughts, Tools};
 use crate::shell;
 use crate::thread::{self, thread, Spool};
 use crate::tokens::*;
@@ -180,6 +180,8 @@ pub struct Loom {
     update_over: (bool, bool),
     update_left: Option<Instant>,
     rows: Rc<Vec<Row>>,
+    /// How each row's bubble joins the person's next to it (`model::person_joins`).
+    joins: Rc<Vec<model::Joined>>,
     scroller: Entity<MessageScrollerState>,
     composer: Entity<TextareaState>,
     server_in: Entity<InputState>,
@@ -843,6 +845,7 @@ ACTA_KEY=secret:ACTA_KEY",
             update_over: (false, false),
             update_left: None,
             rows: Rc::new(Vec::new()),
+            joins: Rc::new(Vec::new()),
             scroller,
             composer,
             server_in,
@@ -1844,6 +1847,14 @@ ACTA_KEY=secret:ACTA_KEY",
                 _ => false,
             });
         let (old_len, new_len) = (old.len(), rows.len());
+        let messages: Vec<Option<&Message>> = rows
+            .iter()
+            .map(|r| match r {
+                Row::Message(m) => Some(m),
+                Row::Approval(_) => None,
+            })
+            .collect();
+        self.joins = Rc::new(model::person_joins(&messages));
         self.rows = Rc::new(rows);
         self.scroller.update(cx, |s, cx| {
             if same_start && new_len >= old_len {
@@ -5849,6 +5860,7 @@ ACTA_KEY=secret:ACTA_KEY",
             return div().flex_1();
         }
         let rows = self.rows.clone();
+        let joins = self.joins.clone();
         let agent = self
             .model
             .selected
@@ -5913,7 +5925,7 @@ ACTA_KEY=secret:ACTA_KEY",
         let open = self.open_thoughts.clone();
         let show = Show {
             tools: self.prefs.tools,
-            thoughts_open: self.prefs.thoughts_open,
+            thoughts: self.prefs.thoughts,
             text_scale: self.prefs.text_scale(),
             bubbles: self.prefs.bubbles,
             newest: false,
@@ -5951,10 +5963,17 @@ ACTA_KEY=secret:ACTA_KEY",
                         .text_color(tint)
                         .child("NEW"),
                 );
+            let joined = joins.get(ix).copied().unwrap_or_default();
             let inner = match row {
-                Row::Message(m) if m.role == "person" => {
-                    person(p, m, &files, show.text_scale, show.room, this.clone())
-                }
+                Row::Message(m) if m.role == "person" => person(
+                    p,
+                    m,
+                    &files,
+                    show.text_scale,
+                    show.room,
+                    joined,
+                    this.clone(),
+                ),
                 Row::Message(m) => reply(
                     p,
                     m,
@@ -5995,7 +6014,11 @@ ACTA_KEY=secret:ACTA_KEY",
             };
             let this = this.clone();
             let to_branch = this.clone();
-            let mut links = div().flex().flex_col().gap(px(2.0)).pt(px(space::XS));
+            let mut links = div().flex().flex_col().gap(px(2.0)).pt(px(if joined.below {
+                0.0
+            } else {
+                space::XS
+            }));
             for (i, (id, title)) in gone_on.into_iter().enumerate() {
                 let this = this.clone();
                 links = links.child(
@@ -6031,14 +6054,24 @@ ACTA_KEY=secret:ACTA_KEY",
                         .max_w(px(space::COLUMN + 2.0 * HOVER_REACH))
                         .mx(px(-HOVER_REACH))
                         .px(px(HOVER_REACH))
-                        .py(px(space::S))
+                        // Messages stand apart, but bubbles that join sit close, as
+                        // they do in a reply. The list's own gap under each row is
+                        // taken off (`with_row_style`), so it's here instead.
+                        .pt(px(if joined.above { 0.0 } else { space::S }))
+                        .pb(px(if joined.below {
+                            space::XS
+                        } else if ix + 1 == rows.len() {
+                            space::S
+                        } else {
+                            space::S + space::XXL
+                        }))
                         .relative()
                         .group("row")
                         .when_some(when, |d, when| {
                             d.child(
                                 div()
                                     .absolute()
-                                    .top(px(space::S + 4.0))
+                                    .top(px(if joined.above { 0.0 } else { space::S } + 4.0))
                                     .right(relative(1.0))
                                     .mr(px(-HOVER_REACH))
                                     .pr(px(space::M))
@@ -6118,6 +6151,7 @@ ACTA_KEY=secret:ACTA_KEY",
                 )
                 .into_any_element()
         })
+        .with_row_style(StyleRefinement::default().pb(px(0.0)))
         .with_bottom_fade(p.bg)
         // The last message scrolls up clear of the small browser window.
         .when(mini.is_some(), |l| {
@@ -11881,6 +11915,7 @@ fn person(
     files: &HashMap<String, String>,
     scale: f32,
     room: i32,
+    joined: model::Joined,
     this: WeakEntity<Loom>,
 ) -> Div {
     let text: String = m
@@ -11918,13 +11953,18 @@ fn person(
             ));
         }
     }
+    // Its corners on the right smaller where it joins the person's messages either side.
+    let c = model::corners(true, joined);
     out.when(!text.trim().is_empty(), |d| {
         d.child(
             div()
                 .max_w(px(520.0))
                 .px(px(space::L))
                 .py(px(space::S + 2.0))
-                .rounded(px(radius::BUBBLE))
+                .rounded_tl(px(c.tl))
+                .rounded_tr(px(c.tr))
+                .rounded_br(px(c.br))
+                .rounded_bl(px(c.bl))
                 .bg(p.bubble)
                 .text_size(px(size::BODY * scale))
                 .text_color(p.ink)
@@ -12067,7 +12107,7 @@ fn file_view(
 #[derive(Clone, Copy)]
 struct Show {
     tools: Tools,
-    thoughts_open: bool,
+    thoughts: Thoughts,
     text_scale: f32,
     bubbles: bool,
     /// Whether this is the chat's newest message, whose choices still answer.
@@ -12285,15 +12325,6 @@ fn card_view(
         .child(body)
 }
 
-/// A tool call's title, as its agent named it.
-fn tool_title(b: &model::Block, tools: &[model::Tool]) -> String {
-    b.call
-        .as_ref()
-        .and_then(|c| tools.iter().find(|t| &t.call == c))
-        .map(|t| t.title.clone())
-        .unwrap_or_else(|| "Using a tool".to_string())
-}
-
 /// One tool call: its title, and how it went.
 fn tool_line(p: Palette, b: &model::Block, tools: &[model::Tool]) -> Div {
     let t = b
@@ -12328,205 +12359,247 @@ fn tool_line(p: Palette, b: &model::Block, tools: &[model::Tool]) -> Div {
         .child(div().text_color(color).child(mark))
 }
 
-#[allow(clippy::too_many_arguments)]
-fn reply(
+/// What drawing one reply's parts needs (`model::parts`).
+struct ReplyDraw<'a> {
     p: Palette,
-    m: &Message,
-    name: &str,
+    m: &'a Message,
     tint: Hsla,
-    mood: Mood,
-    open: &HashSet<String>,
-    tools: &[model::Tool],
-    files: &HashMap<String, String>,
+    open: &'a HashSet<String>,
+    tools: &'a [model::Tool],
+    files: &'a HashMap<String, String>,
     show: Show,
-    this: WeakEntity<Loom>,
-) -> Div {
-    let when = if m.live {
-        "now".to_string()
-    } else {
-        time_of(m.at)
-    };
-    let mut body = div().flex().flex_col().gap(px(space::S)).flex_1().min_w_0();
-    body = body.child(
-        div()
-            .flex()
-            .items_center()
-            .gap(px(space::S))
-            .child(
-                div()
-                    .text_size(px(size::SMALL))
-                    .font_weight(FontWeight::MEDIUM)
-                    .text_color(p.ink)
-                    .child(name.to_string()),
-            )
-            .child(
-                div()
-                    .text_size(px(size::CAPTION))
-                    .text_color(p.ink_3)
-                    .child(when),
-            ),
-    );
-    // What shows in the reply: everything but tool calls the person's prefs hide.
-    let blocks: Vec<(usize, &model::Block)> = m.blocks.iter().enumerate().collect();
-    let status = |b: &model::Block| {
-        b.call
-            .as_ref()
-            .and_then(|c| tools.iter().find(|t| &t.call == c))
-            .and_then(|t| t.status.clone())
-    };
-    let went_wrong = |b: &model::Block| matches!(status(b).as_deref(), Some("failed" | "denied"));
-    let mut shown_any = false;
-    let mut at = 0;
-    while at < blocks.len() {
-        let (i, b) = blocks[at];
-        let key = format!("{}/{}", m.id, i);
-        match b.kind.as_str() {
-            "text" => {
-                if b.text.trim().is_empty() {
-                    at += 1;
-                    continue;
-                }
-                shown_any = true;
-                let words = div()
-                    .text_size(px(size::REPLY * show.text_scale))
-                    .line_height(relative(line::REPLY))
-                    .text_color(p.ink)
-                    .child(
-                        TextView::markdown(
-                            SharedString::from(format!("r-{key}-{}", show.room)),
-                            b.text.clone(),
-                        )
-                        .selectable(true),
-                    );
-                body = body.child(if show.bubbles {
-                    // A bubble with a breath of the agent's colour, its corner by the
-                    // thread squared off as a speech bubble's tail.
-                    div().flex().child(
-                        words
-                            .max_w(relative(0.94))
-                            .px(px(space::L))
-                            .py(px(space::S + 2.0))
-                            .rounded(px(radius::BUBBLE))
-                            .rounded_tl(px(radius::ROW))
-                            .bg(motion::mix(
-                                p.bubble,
-                                tint,
-                                if p.dark { 0.12 } else { 0.07 },
-                            )),
+    this: &'a WeakEntity<Loom>,
+}
+
+impl ReplyDraw<'_> {
+    fn key(&self, i: usize) -> String {
+        format!("{}/{}", self.m.id, i)
+    }
+
+    fn part(&self, part: &model::Part) -> AnyElement {
+        use model::Part;
+        match part {
+            Part::Bubbles(run) => self.bubbles(run),
+            Part::Tools(run) => self.tool_run(run),
+            Part::Block(i) => self.block(*i),
+            Part::Fold {
+                words,
+                working,
+                parts,
+            } => self.fold(words, *working, parts),
+            Part::Quiet(words) => div()
+                .text_size(px(size::SMALL))
+                .text_color(self.p.ink_3)
+                .truncate()
+                .child(words.clone())
+                .into_any_element(),
+        }
+    }
+
+    /// Words one after another, a bubble each, joined at their corners as one group.
+    fn bubbles(&self, run: &[usize]) -> AnyElement {
+        let (p, show) = (self.p, self.show);
+        let mut group =
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(if show.bubbles { space::XS } else { space::S }));
+        for (k, &i) in run.iter().enumerate() {
+            let words = div()
+                .text_size(px(size::REPLY * show.text_scale))
+                .line_height(relative(line::REPLY))
+                .text_color(p.ink)
+                .child(
+                    TextView::markdown(
+                        SharedString::from(format!("r-{}-{}", self.key(i), show.room)),
+                        self.m.blocks[i].text.clone(),
                     )
-                } else {
+                    .selectable(true),
+                );
+            group = group.child(if show.bubbles {
+                // A bubble with a breath of the agent's colour, its corner by the
+                // thread squared off as a speech bubble's tail, and smaller where it
+                // joins the next.
+                let c = model::corners(false, model::Joined::at(k, run.len()));
+                div().flex().child(
                     words
-                });
+                        .max_w(relative(0.94))
+                        .px(px(space::L))
+                        .py(px(space::S + 2.0))
+                        .rounded_tl(px(c.tl))
+                        .rounded_tr(px(c.tr))
+                        .rounded_br(px(c.br))
+                        .rounded_bl(px(c.bl))
+                        .bg(motion::mix(
+                            p.bubble,
+                            self.tint,
+                            if p.dark { 0.12 } else { 0.07 },
+                        )),
+                )
+            } else {
+                words
+            });
+        }
+        group.into_any_element()
+    }
+
+    /// A run of tool calls, as the person's prefs show them.
+    fn tool_run(&self, run: &[usize]) -> AnyElement {
+        let (p, tools) = (self.p, self.tools);
+        let blocks: Vec<&model::Block> = run.iter().map(|&i| &self.m.blocks[i]).collect();
+        let status = |b: &model::Block| {
+            b.call
+                .as_ref()
+                .and_then(|c| tools.iter().find(|t| &t.call == c))
+                .and_then(|t| t.status.clone())
+        };
+        match self.show.tools {
+            Tools::All | Tools::Hidden => {
+                let mut list = div().flex().flex_col().gap(px(space::XS));
+                for b in &blocks {
+                    list = list.child(tool_line(p, b, tools));
+                }
+                list.into_any_element()
             }
-            "thought" => {
-                shown_any = true;
-                // A key in `open` turns it the other way from the person's prefs.
-                let shown = open.contains(&key) != show.thoughts_open;
-                let this = this.clone();
-                let k = key.clone();
-                body = body.child(
-                    div()
+            Tools::Folded => {
+                let key = self.key(run[0]);
+                let fold = format!("fold/{key}");
+                let opened = self.open.contains(&fold);
+                let running = blocks
+                    .iter()
+                    .rev()
+                    .find(|b| matches!(status(b).as_deref(), None | Some("running")))
+                    .filter(|_| self.m.live);
+                let failed = blocks
+                    .iter()
+                    .filter(|b| matches!(status(b).as_deref(), Some("failed" | "denied")))
+                    .count();
+                let title = |b: &model::Block| model::tool_title(b.call.as_ref(), tools);
+                let words = match running {
+                    Some(b) => format!("{}…", title(b)),
+                    None if blocks.len() == 1 => format!("Used {}", title(blocks[0])),
+                    None => format!("Used {} tools", blocks.len()),
+                };
+                let this = self.this.clone();
+                let line = div()
+                    .id(SharedString::from(format!("f-{key}")))
+                    .flex()
+                    .items_center()
+                    .gap(px(space::S))
+                    .text_size(px(size::SMALL))
+                    .text_color(p.ink_3)
+                    .cursor_pointer()
+                    .soft_ink(p.ink_3, p.ink)
+                    .child(if opened { "⌄" } else { "›" })
+                    .child(div().truncate().child(words))
+                    .when(failed > 0, |d| {
+                        d.child(div().text_color(p.bad).child(format!("{failed} failed")))
+                    })
+                    .on_click(move |_, _, cx| {
+                        let _ = this.update(cx, |loom, cx| loom.toggle_thought(fold.clone(), cx));
+                    });
+                let mut out = div().flex().flex_col().gap(px(space::S)).child(line);
+                if opened {
+                    let mut list = div()
                         .flex()
                         .flex_col()
                         .gap(px(space::XS))
-                        .child(
-                            div()
-                                .id(SharedString::from(format!("t-{key}")))
-                                .text_size(px(size::CAPTION))
-                                .soft_ink(p.ink_3, p.ink)
-                                .cursor_pointer()
-                                .child(if shown { "⌄ Thought" } else { "› Thought" })
-                                .on_click(move |_, _, cx| {
-                                    let _ = this
-                                        .update(cx, |loom, cx| loom.toggle_thought(k.clone(), cx));
-                                }),
-                        )
-                        .when(shown, |d| {
-                            d.child(
-                                div()
-                                    .pl(px(space::M))
-                                    .border_l_1()
-                                    .border_color(p.line_strong)
-                                    .text_size(px(size::SMALL * show.text_scale))
-                                    .text_color(p.ink_3)
-                                    .child(b.text.clone()),
-                            )
-                        }),
-                );
-            }
-            "tool" => {
-                // The run of tool calls this one starts.
-                let mut end = at;
-                while end < blocks.len() && blocks[end].1.kind == "tool" {
-                    end += 1;
-                }
-                let run: Vec<&model::Block> = blocks[at..end].iter().map(|(_, b)| *b).collect();
-                match show.tools {
-                    Tools::All => {
-                        for b in &run {
-                            body = body.child(tool_line(p, b, tools));
-                        }
-                        shown_any = true;
+                        .pl(px(space::M))
+                        .border_l_1()
+                        .border_color(p.line_strong);
+                    for b in &blocks {
+                        list = list.child(tool_line(p, b, tools));
                     }
-                    // None, failed ones too: the agent says so itself when a failure
-                    // matters to the person.
-                    Tools::Hidden => {}
-                    Tools::Folded => {
-                        let fold = format!("fold/{key}");
-                        let opened = open.contains(&fold);
-                        let running = run
-                            .iter()
-                            .rev()
-                            .find(|b| matches!(status(b).as_deref(), None | Some("running")))
-                            .filter(|_| m.live);
-                        let failed = run.iter().filter(|b| went_wrong(b)).count();
-                        let words = match running {
-                            Some(b) => format!("{}…", tool_title(b, tools)),
-                            None if run.len() == 1 => format!("Used {}", tool_title(run[0], tools)),
-                            None => format!("Used {} tools", run.len()),
-                        };
-                        let this = this.clone();
-                        body = body.child(
+                    out = out.child(list);
+                }
+                out.into_any_element()
+            }
+        }
+    }
+
+    /// The turn's steps under one quiet line, which opens to show them: while it runs,
+    /// the step it's on, and once it's done, how many there were.
+    fn fold(&self, words: &str, working: bool, parts: &[model::Part]) -> AnyElement {
+        let p = self.p;
+        let key = format!("steps/{}", self.m.id);
+        let can_open = !parts.is_empty();
+        let opened = can_open && self.open.contains(&key);
+        let this = self.this.clone();
+        let k = key.clone();
+        let line = div()
+            .id(SharedString::from(format!("s-{}", self.m.id)))
+            .flex()
+            .items_center()
+            .gap(px(space::S))
+            .min_w_0()
+            .text_size(px(size::SMALL))
+            .text_color(p.ink_3)
+            .when(can_open, |d| {
+                d.cursor_pointer()
+                    .soft_ink(p.ink_3, p.ink)
+                    .child(if opened { "⌄" } else { "›" })
+                    .on_click(move |_, _, cx| {
+                        let _ = this.update(cx, |loom, cx| loom.toggle_thought(k.clone(), cx));
+                    })
+            })
+            .child(div().min_w_0().truncate().child(words.to_string()))
+            .when(working && !words.ends_with('…'), |d| d.child("…"));
+        let mut out = div().flex().flex_col().gap(px(space::S)).child(line);
+        if opened {
+            let mut list = div()
+                .flex()
+                .flex_col()
+                .gap(px(space::S))
+                .pl(px(space::M))
+                .border_l_1()
+                .border_color(p.line_strong);
+            for part in parts {
+                list = list.child(self.part(part));
+            }
+            out = out.child(list);
+        }
+        out.into_any_element()
+    }
+
+    /// A block on its own: a thought, a plan, a notice, a file or a card.
+    fn block(&self, i: usize) -> AnyElement {
+        let (p, show, tint) = (self.p, self.show, self.tint);
+        let b = &self.m.blocks[i];
+        let key = self.key(i);
+        match b.kind.as_str() {
+            "thought" => {
+                // A key in `open` turns it the other way from the person's prefs.
+                let shown = self.open.contains(&key) != (show.thoughts == Thoughts::Open);
+                let this = self.this.clone();
+                let k = key.clone();
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(space::XS))
+                    .child(
+                        div()
+                            .id(SharedString::from(format!("t-{key}")))
+                            .text_size(px(size::CAPTION))
+                            .soft_ink(p.ink_3, p.ink)
+                            .cursor_pointer()
+                            .child(if shown { "⌄ Thought" } else { "› Thought" })
+                            .on_click(move |_, _, cx| {
+                                let _ =
+                                    this.update(cx, |loom, cx| loom.toggle_thought(k.clone(), cx));
+                            }),
+                    )
+                    .when(shown, |d| {
+                        d.child(
                             div()
-                                .id(SharedString::from(format!("f-{key}")))
-                                .flex()
-                                .items_center()
-                                .gap(px(space::S))
-                                .text_size(px(size::SMALL))
-                                .text_color(p.ink_3)
-                                .cursor_pointer()
-                                .soft_ink(p.ink_3, p.ink)
-                                .child(if opened { "⌄" } else { "›" })
-                                .child(div().truncate().child(words))
-                                .when(failed > 0, |d| {
-                                    d.child(
-                                        div().text_color(p.bad).child(format!("{failed} failed")),
-                                    )
-                                })
-                                .on_click(move |_, _, cx| {
-                                    let _ = this.update(cx, |loom, cx| {
-                                        loom.toggle_thought(fold.clone(), cx)
-                                    });
-                                }),
-                        );
-                        if opened {
-                            let mut list = div()
-                                .flex()
-                                .flex_col()
-                                .gap(px(space::XS))
                                 .pl(px(space::M))
                                 .border_l_1()
-                                .border_color(p.line_strong);
-                            for b in &run {
-                                list = list.child(tool_line(p, b, tools));
-                            }
-                            body = body.child(list);
-                        }
-                        shown_any = true;
-                    }
-                }
-                at = end;
-                continue;
+                                .border_color(p.line_strong)
+                                .text_size(px(size::SMALL * show.text_scale))
+                                .text_color(p.ink_3)
+                                .child(b.text.clone()),
+                        )
+                    })
+                    .into_any_element()
             }
             "plan" => {
                 // Its steps, a line each, marked as the checklist card marks them: done
@@ -12568,75 +12641,88 @@ fn reply(
                             .child(div().flex_1().min_w_0().child(what.to_string())),
                     );
                 }
-                if !b.text.trim().is_empty() {
-                    shown_any = true;
-                    body = body.child(steps);
-                }
+                steps.into_any_element()
             }
-            "notice" => {
-                // One quiet line from loom, such as that another program took the chat
-                // over. It isn't the reply, so what it's doing still shows under it.
-                body = body.child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap(px(space::S))
-                        .text_size(px(size::CAPTION))
-                        .text_color(p.ink_3)
-                        .child(Icon::new(Ico::ArrowRightLeft).small())
-                        .child(b.text.clone()),
-                );
-            }
-            "file" => {
-                if let Some(f) = &b.file {
-                    shown_any = true;
-                    body = body.child(file_view(p, f, files, key, this.clone()));
-                }
-            }
-            "card" => {
-                if let Some(c) = &b.card {
-                    shown_any = true;
-                    body = body.child(card_view(p, c, &key, tint, show, this.clone()));
-                }
-            }
-            _ => {}
-        }
-        at += 1;
-    }
-    // While it works with nothing to show yet: what it's doing, quietly.
-    if m.live && !shown_any {
-        let doing = m
-            .blocks
-            .iter()
-            .rev()
-            .find(|b| b.kind == "tool")
-            .map(|b| format!("{}…", tool_title(b, tools)))
-            .unwrap_or_else(|| "Thinking…".to_string());
-        body = body.child(
-            div()
-                .text_size(px(size::SMALL))
+            // One quiet line from loom, such as that another program took the chat
+            // over. It isn't the reply, so what it's doing still shows under it.
+            "notice" => div()
+                .flex()
+                .items_center()
+                .gap(px(space::S))
+                .text_size(px(size::CAPTION))
                 .text_color(p.ink_3)
-                .truncate()
-                .child(doing),
-        );
-    } else if !shown_any {
-        // A finished turn that only used tools the person's prefs hide: a quiet line
-        // saying so, rather than its name over nothing.
-        let used: Vec<&model::Block> = m.blocks.iter().filter(|b| b.kind == "tool").collect();
-        let words = match used.as_slice() {
-            [] => None,
-            [one] => Some(format!("Used {}", tool_title(one, tools))),
-            many => Some(format!("Used {} tools", many.len())),
-        };
-        if let Some(words) = words {
-            body = body.child(
+                .child(Icon::new(Ico::ArrowRightLeft).small())
+                .child(b.text.clone())
+                .into_any_element(),
+            "file" => match &b.file {
+                Some(f) => file_view(p, f, self.files, key, self.this.clone()),
+                None => div().into_any_element(),
+            },
+            "card" => match &b.card {
+                Some(c) => card_view(p, c, &key, tint, show, self.this.clone()).into_any_element(),
+                None => div().into_any_element(),
+            },
+            _ => div().into_any_element(),
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn reply(
+    p: Palette,
+    m: &Message,
+    name: &str,
+    tint: Hsla,
+    mood: Mood,
+    open: &HashSet<String>,
+    tools: &[model::Tool],
+    files: &HashMap<String, String>,
+    show: Show,
+    this: WeakEntity<Loom>,
+) -> Div {
+    let when = if m.live {
+        "now".to_string()
+    } else {
+        time_of(m.at)
+    };
+    let mut body = div().flex().flex_col().gap(px(space::S)).flex_1().min_w_0();
+    body = body.child(
+        div()
+            .flex()
+            .items_center()
+            .gap(px(space::S))
+            .child(
                 div()
                     .text_size(px(size::SMALL))
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(p.ink)
+                    .child(name.to_string()),
+            )
+            .child(
+                div()
+                    .text_size(px(size::CAPTION))
                     .text_color(p.ink_3)
-                    .truncate()
-                    .child(words),
-            );
-        }
+                    .child(when),
+            ),
+    );
+    // What shows in the reply, and how it reads: its answer, and its steps folded
+    // under one line (`model::parts`).
+    let shows = model::Shows {
+        tools: show.tools != Tools::Hidden,
+        thoughts: show.thoughts != Thoughts::Hidden,
+    };
+    let drawing = ReplyDraw {
+        p,
+        m,
+        tint,
+        open,
+        tools,
+        files,
+        show,
+        this: &this,
+    };
+    for part in model::parts(m, tools, shows) {
+        body = body.child(drawing.part(&part));
     }
     // The files it names, each a chip with its type, which opens it.
     if !m.mentions.is_empty() {

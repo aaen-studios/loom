@@ -45,6 +45,7 @@ pub mod radius {
     pub const BUTTON: f32 = 8.0;
     pub const CARD: f32 = 10.0;
     pub const BUBBLE: f32 = 14.0;
+    pub const BUBBLE_JOINED: f32 = 5.0;
     pub const COMPOSER: f32 = 16.0;
 }
 
