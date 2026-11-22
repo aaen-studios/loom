@@ -280,9 +280,17 @@ fn point_icon(
     use windows::Win32::UI::Shell::{
         IShellLinkW, SHChangeNotify, ShellLink, SHCNE_UPDATEITEM, SHCNF_PATHW,
     };
+    // The same file, however each path is spelt: a shortcut keeps the long path, and a
+    // program's own can have short 8.3 names in it, as C:\Users\RUNNER~1 does.
     let same = |a: &[u16], b: &std::path::Path| {
         let end = a.iter().position(|&c| c == 0).unwrap_or(a.len());
-        String::from_utf16_lossy(&a[..end]).eq_ignore_ascii_case(&b.to_string_lossy())
+        let a = std::path::PathBuf::from(String::from_utf16_lossy(&a[..end]));
+        match (std::fs::canonicalize(&a), std::fs::canonicalize(b)) {
+            (Ok(x), Ok(y)) => x == y,
+            _ => a
+                .to_string_lossy()
+                .eq_ignore_ascii_case(&b.to_string_lossy()),
+        }
     };
     // SAFETY: COM on this thread, for a shell link that's loaded, read, changed only
     // if it's loom's and its icon differs, saved and released.
