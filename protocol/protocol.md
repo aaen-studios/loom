@@ -735,7 +735,7 @@ Version 1's commands:
 | `secret.list` | — | `secrets`: the person's secrets, each `name` and `at`. Never their values |
 | `secret.put` | `name` (letters, digits, `_`, `-` and `.`), `value` | `name`. It's sealed with XChaCha20-Poly1305 under the instance's `secret.key`, bound to the person and the name, and opened only to start an agent's MCP server, or to fill it into an agent's browser (`browser_fill_secret`) |
 | `secret.delete` | `name` | — |
-| `messages.search` | `query`, `agent`?, `after`? and `before`? (Unix ms), `limit`? (up to 100, 30 if left out) | `results`, best first, each with its `message` and a `snippet`: the words around the match, with each matched word between U+0002 and U+0003. Every word of `query` must be in the message, the last as a prefix, so it works while typing. It searches text blocks and file names, in conversations that aren't deleted. A person's message counts as its conversation's agent's |
+| `messages.search` | `query`, `agent`?, `after`? and `before`? (Unix ms), `limit`? (up to 100, 30 if left out) | `results`, best first, each with its `message` and a `snippet`: the words around the match, on one line and without the Markdown they were written in (a link as its text, no code ticks, bold, strike, list or heading marks), with each matched word between U+0002 and U+0003. Every word of `query` must be in the message, the last as a prefix, so it works while typing. It searches text blocks and file names, in conversations that aren't deleted. A person's message counts as its conversation's agent's |
 
 Arguments marked `?` are optional. "—" means `value` is `{}`.
 

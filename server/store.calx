@@ -18,10 +18,35 @@ import std.env.{os}
 import std.fs
 import std.hash.{sha256}
 import std.json.{Json, parse}
+import std.regex.{Regex}
 import std.sqlite.{Database, Value}
 import std.time.{Timestamp}
 import shared.obj.{Obj, int_at, merge, str_at, without}
 import server.defaults.{blank, filled}
+
+// A search snippet as words, without the Markdown it was written in: a link
+// as its text, no code ticks, bold or strike marks, list and heading marks,
+// and on one line. The marks around matched words (U+0002 and U+0003) stay
+// where they are, since only the Markdown around them goes.
+pub fn plain_snippet(snippet: String) -> String {
+    var s = snippet.copy()
+    let steps = [
+        (#"!?\[([^\]]*)\]\([^)]*\)"#, #"${1}"#),
+        (#"(^|\n)[ \t]*(#+|[-*+]|>|\d+\.)[ \t]+"#, #"${1}"#),
+        (#"\*\*|__|~~|`+"#, ""),
+        (#"\s*\n\s*"#, " "),
+    ]
+    for (pattern, with) in steps {
+        match Regex.new(String(pattern)) {
+            ok(found) => {
+                var re = found
+                s = re.replace_all(s.copy(), String(with))
+            },
+            err(_) => {},
+        }
+    }
+    return s
+}
 
 const SCHEMA: str = #"
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -1164,7 +1189,7 @@ impl Store {
         sql.push_str(" ORDER BY rank LIMIT ?")
         args.push(Value.Int(i64.wrap(u64(limit))))
         for r in try self.db.query(sql, args) {
-            out.push((try parse(text(r[0].copy())), text(r[1].copy())))
+            out.push((try parse(text(r[0].copy())), plain_snippet(text(r[1].copy()))))
         }
         return out
     }
@@ -2373,4 +2398,13 @@ fn settings_and_hook_secrets_are_kept_sealed() {
         err(_) => false,
     }
     assert(not opens)
+}
+
+@test
+fn snippets_lose_their_markdown() {
+    let mark = |w: str| "\u{2}{w}\u{3}"
+    assert(plain_snippet("- `{mark("report")}.csv`, last month's **numbers**") == "{mark("report")}.csv, last month's numbers")
+    assert(plain_snippet("see [the {mark("guide")}](https://example.com/x) and ~~old~~") == "see the {mark("guide")} and old")
+    assert(plain_snippet("# Title\n> quoted {mark("word")}\n1. first") == "Title quoted {mark("word")} first")
+    assert(plain_snippet(String("snake_case stays, and so does a * b")) == "snake_case stays, and so does a * b")
 }
