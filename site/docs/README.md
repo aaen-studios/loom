@@ -16,5 +16,6 @@ Loom is an app for agents that work for you: they answer, remember, run routines
 - [In the chat](chat.md): cards in replies, how agents use their tools in Code Mode, messages while an agent answers, a backup program, and moving a chat to another program.
 - [The agent's browser](browser.md): watching it, taking over, teaching it a task, and what agents propose.
 - [Permissions, rules and sandboxes](permissions.md): permission modes, rules with a what-if, and isolated agents with a network of their own.
+- [This PC and your servers](devices.md): letting agents use this computer, and run commands on servers you own, asking you first.
 
 How the apps talk to an instance is in [the protocol](../../protocol/protocol.md).

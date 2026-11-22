@@ -16,6 +16,8 @@ import std.process.{Child, Command, Stdio}
 import std.text.utf8.{decode_lossy_unicode}
 import shared.obj.{Obj, at, bool_at, int_at, str_at}
 import core.cache.{Cache}
+import core.hosts
+import core.hosts.{Host}
 
 // What a device offers, as the instance and the app name them.
 pub const TOOLS: [str; 7] = ["run_command", "read_file", "list_files", "open", "screenshot", "read_clipboard", "write_clipboard"]
@@ -29,6 +31,8 @@ const MOST: usize = 20000
 // after the list of done calls has moved on.
 const FRESH_MS: i64 = 900000
 const KEEP_DONE: usize = 500
+// How long Tailscale may take to say what's on the tailnet.
+const SCAN_MS: u64 = 5000
 // What an approval signs: this line, then the request's exact text.
 pub const SIGNED: str = "loom device call\n"
 
@@ -45,6 +49,13 @@ pub struct Device {
     running: List<Running>
     asked: List<String>    // calls handed to the app, whose answers it gives with `answered`
     pub id: String    // this device's id, from welcome
+    hosts: List<Host>    // the person's hosts this device reaches with ssh (core/hosts.calx)
+    pub ssh: List<String>    // the ssh program, with its first arguments: just `ssh`, but in tests
+    pub tailscale: List<String>    // the Tailscale program, the same way, for finding the tailnet's machines
+    pub ssh_config: String    // the person's ~/.ssh/config, for finding their hosts
+    scan: Child?    // `tailscale status --json`, while hosts are being found
+    scan_ssh: List<String>    // what the ssh config named, meanwhile
+    scan_out: List<u8>    // what Tailscale said so far
 }
 
 fn hex(b: List<u8>) -> String {
@@ -85,7 +96,21 @@ impl Device {
                 }
             }
         }
-        return Device { key: key, modes: modes, done: done, running: List<Running>(), asked: List<String>(), id: String() }
+        var d = Device.with_key(key, String())
+        d.modes = modes
+        d.done = done
+        if let text = try cache.meta("device_hosts") {
+            if let Json.Array(kept) = try parse(text) {
+                for k in kept {
+                    if let h = hosts.host_from(k.copy()) { d.hosts.push(h) }
+                }
+            }
+        }
+        return d
+    }
+
+    fn with_key(key: own Ed25519Key, id: own String) -> Device {
+        return Device { key: key, modes: Map<String, String>(), done: List<String>(), running: List<Running>(), asked: List<String>(), id: id, hosts: List<Host>(), ssh: [String("ssh")], tailscale: [hosts.tailscale_program()], ssh_config: hosts.ssh_config_path(), scan: none, scan_ssh: List<String>(), scan_out: List<u8>() }
     }
 
     pub fn public_key(self) -> String {
@@ -99,7 +124,120 @@ impl Device {
 
     /// What the instance hears from this device: its key and its tools' modes.
     pub fn frame(self) -> Json {
-        return Obj.new().s("t", String("device")).s("key", self.public_key()).j("tools", self.tools()).done()
+        var listed = List<Json>()
+        for h in self.hosts {
+            listed.push(Obj.new().s("name", h.name.copy()).s("target", h.target.copy()).s("via", h.via.copy()).j("tools", Obj.new().s("run_command", h.mode.copy()).done()).done())
+        }
+        return Obj.new().s("t", String("device")).s("key", self.public_key()).j("tools", self.tools()).j("hosts", Json.Array(listed)).done()
+    }
+
+    /// The person's hosts, as the app shows them: each one's name, target, via and mode.
+    pub fn hosts_json(self) -> Json {
+        var out = List<Json>()
+        for h in self.hosts {
+            out.push(h.json())
+        }
+        return Json.Array(out)
+    }
+
+    fn keep_hosts(self, cache: Cache) ! Error {
+        try cache.set_meta("device_hosts", "{self.hosts_json()}")
+    }
+
+    /// Adds the host the app's `host.add` gives (`target`, and `via`), asking
+    /// each time from the start. Why not, for one that can't be added.
+    pub fn add_host(mut self, cache: Cache, given: Json) -> String? ! Error {
+        let target = str_at(given.copy(), "target") ?? String()
+        let via = str_at(given, "via") ?? String("ssh")
+        let h = hosts.host_from(Obj.new().s("target", target).s("via", via).s("mode", String("ask")).done()) else return some(String("That isn't a host ssh can reach. Give an alias from your ssh config, a machine's name, or user@name."))
+        for k in self.hosts {
+            if k.name == h.name { return some("There's a host called {h.name} already.") }
+        }
+        self.hosts.push(h)
+        try self.keep_hosts(cache)
+        return none
+    }
+
+    /// Sets what agents may do on the host `name`: off, ask or allow.
+    pub fn set_host(mut self, cache: Cache, name: String, mode: String) ! Error {
+        if mode != "off" and mode != "ask" and mode != "allow" { return }
+        var kept = List<Host>()
+        for h in self.hosts {
+            kept.push(Host { name: h.name.copy(), target: h.target.copy(), via: h.via.copy(), mode: if h.name == name { mode.copy() } else { h.mode.copy() } })
+        }
+        self.hosts = kept
+        try self.keep_hosts(cache)
+    }
+
+    /// Takes the host `name` away.
+    pub fn remove_host(mut self, cache: Cache, name: String) ! Error {
+        var kept = List<Host>()
+        for h in self.hosts {
+            if h.name != name { kept.push(Host { name: h.name.copy(), target: h.target.copy(), via: h.via.copy(), mode: h.mode.copy() }) }
+        }
+        self.hosts = kept
+        try self.keep_hosts(cache)
+    }
+
+    /// Starts finding the person's hosts: the ssh config's at once, and the
+    /// tailnet's from `tailscale status --json`, which `scan_poll` gathers.
+    /// Their `core.hosts_found` now, when there's no Tailscale to ask.
+    pub fn scan_start(mut self) -> Json? {
+        self.scan_ssh = match fs.read_text(self.ssh_config.copy()) {
+            ok(text) => hosts.ssh_hosts(text ?? String()),
+            err(_) => List<String>(),
+        }
+        if self.scan != none { return none }
+        var c = Command.new(self.tailscale[0].copy())
+        for a in self.tailscale[1..] {
+            c = c.arg(a.copy())
+        }
+        match c.arg(String("status")).arg(String("--json")).stdout(Stdio.Pipe).stderr(Stdio.Null).timeout(SCAN_MS).spawn() {
+            ok(child) => {
+                self.scan = some(child)
+                self.scan_out = List<u8>()
+            },
+            err(_) => return some(self.found(List<String>())),
+        }
+        return none
+    }
+
+    /// The hosts found, once Tailscale has answered or given up.
+    pub fn scan_poll(mut self) -> Json? {
+        var child = self.scan.take() else return none
+        let got = child.read(0)
+        self.scan_out.extend(got)
+        if not child.ended() {
+            self.scan = some(child)
+            return none
+        }
+        let end = child.wait()
+        self.scan_out.extend(end.stdout.copy())
+        let tailnet = if end.status.success() { hosts.tailnet_hosts(text_of(self.scan_out.copy())) } else { List<String>() }
+        return some(self.found(tailnet))
+    }
+
+    // core.hosts_found: what the ssh config and the tailnet name, but the
+    // hosts already here.
+    fn found(self, tailnet: List<String>) -> Json {
+        var out = List<Json>()
+        var seen = List<String>()
+        for h in self.hosts {
+            seen.push(h.name.copy())
+        }
+        for n in self.scan_ssh {
+            if not seen.contains(n.copy()) {
+                seen.push(n.copy())
+                out.push(Obj.new().s("name", n.copy()).s("target", n.copy()).s("via", String("ssh")).done())
+            }
+        }
+        for n in tailnet {
+            if not seen.contains(n.copy()) {
+                seen.push(n.copy())
+                out.push(Obj.new().s("name", n.copy()).s("target", n.copy()).s("via", String("tailscale")).done())
+            }
+        }
+        return Obj.new().s("t", String("core.hosts_found")).j("found", Json.Array(out)).done()
     }
 
     /// Each tool's mode, `off` for one not turned on.
@@ -155,8 +293,19 @@ impl Device {
             return some(refused(call, String("That request isn't for this device.")))
         }
         let tool = str_at(request.copy(), "tool") ?? String()
-        let mode = self.mode(tool.copy())
-        if mode == "off" { return some(refused(call, "{tool} is off on this device. The person can turn it on in its app.")) }
+        // A command for one of the person's hosts, which this device reaches
+        // with ssh, goes by what the person set for that host.
+        let host_name = str_at(request.copy(), "host") ?? String()
+        var host: Host? = none
+        if host_name.len() > 0 {
+            for h in self.hosts {
+                if h.name == host_name { host = some(Host { name: h.name.copy(), target: h.target.copy(), via: h.via.copy(), mode: h.mode.copy() }) }
+            }
+            if host == none { return some(refused(call, "This device has no host {host_name}.")) }
+            if tool != "run_command" { return some(refused(call, "A host only runs commands.")) }
+        }
+        let mode = if let h = host { h.mode.copy() } else { self.mode(tool.copy()) }
+        if mode == "off" { return some(refused(call, if host_name.len() > 0 { "Commands are off on {host_name}. The person can turn them on in their app." } else { "{tool} is off on this device. The person can turn it on in its app." })) }
         if mode == "ask" and not self.trusted(text.copy(), at(f, "approval")) {
             return some(refused(call, String("The person's yes for this didn't come from this device, so it isn't done. Approve it on this device.")))
         }
@@ -181,7 +330,8 @@ impl Device {
         if tool == "run_command" {
             let command = str_at(args, "command") ?? String()
             if command.len() == 0 { return some(refused(call, String("command is empty."))) }
-            match shell(command).stdout(Stdio.Pipe).stderr(Stdio.Stdout).timeout(COMMAND_MS).spawn() {
+            let run = if let h = host { hosts.ssh_command(self.ssh.copy(), h.target.copy(), command) } else { shell(command) }
+            match run.stdin(Stdio.Null).stdout(Stdio.Pipe).stderr(Stdio.Stdout).timeout(COMMAND_MS).spawn() {
                 ok(child) => self.running.push(Running { call: call, child: child, out: List<u8>() }),
                 err(e) => return some(refused(call, "It didn't start: {e}")),
             }
@@ -242,7 +392,7 @@ impl Device {
                 let end = run.child.wait()
                 run.out.extend(end.stdout.copy())
                 let status = if end.status.timed_out { String("It ran out of time.") } else { "Exit status {end.status.code ?? -1}." }
-                let text = cut(text_of(run.out.copy()))
+                let text = cut(text_of(run.out.copy())).trim_end().copy()
                 out.push(Obj.new().s("t", String("device.result")).s("call", run.call.copy()).b("ok", end.status.success()).s("output", if text.len() > 0 { "{text}\n{status}" } else { status }).done())
             } else {
                 still.push(run)
@@ -290,14 +440,40 @@ fn opener(target: String) -> Command {
 
 @test
 fn signs_what_it_trusts() {
-    let key = Ed25519Key.generate()
-    let d = Device { key: key, modes: Map<String, String>(), done: List<String>(), running: List<Running>(), asked: List<String>(), id: String("d_1") }
+    let d = Device.with_key(Ed25519Key.generate(), String("d_1"))
     let request = String(#"{"call":"tc_1","device":"d_1","tool":"read_file","args":{"path":"x"},"at":1}"#)
     let approval = d.sign(request.copy())
     assert(d.trusted(request.copy(), approval.copy()))
     assert(not d.trusted(request.replace("x", "y"), approval))
-    let other = Device { key: Ed25519Key.generate(), modes: Map<String, String>(), done: List<String>(), running: List<Running>(), asked: List<String>(), id: String("d_1") }
+    let other = Device.with_key(Ed25519Key.generate(), String("d_1"))
     assert(not d.trusted(request.copy(), other.sign(request)))
+}
+
+@test
+fn hosts_are_kept_and_go_by_their_own_mode() {
+    let cache = Cache.open(String(":memory:"))!
+    var d = Device.with_key(Ed25519Key.generate(), String("d_1"))
+    assert(d.add_host(cache, Obj.new().s("target", String("root@vps")).done())! == none)
+    assert(d.add_host(cache, Obj.new().s("target", String("vps")).done())! != none)
+    assert(d.add_host(cache, Obj.new().s("target", String("-oProxyCommand=x")).done())! != none)
+    assert("{d.hosts_json()}" == #"[{"name":"vps","target":"root@vps","via":"ssh","mode":"ask"}]"#)
+    assert("{d.frame()}".contains(#""hosts":[{"name":"vps","target":"root@vps","via":"ssh","tools":{"run_command":"ask"}}]"#))
+    // Off, a command for it is refused, whatever the device's own commands are.
+    d.set_host(cache, String("vps"), String("off"))!
+    d.modes.insert(String("run_command"), String("allow"))
+    let request = Obj.new().s("call", String("tc_1")).s("device", String("d_1")).s("host", String("vps")).s("tool", String("run_command")).j("args", Obj.new().s("command", String("uptime")).done()).i("at", 1000).done()
+    let frame = Obj.new().s("call", String("tc_1")).s("request", "{request}").done()
+    let r = d.call(cache, frame, 1000) ?? Json.Null
+    assert(str_at(r, "output") == some(String("Commands are off on vps. The person can turn them on in their app.")))
+    // Asking, it needs this device's own yes.
+    d.set_host(cache, String("vps"), String("ask"))!
+    let asked = d.call(cache, Obj.new().s("call", String("tc_1")).s("request", "{request}").done(), 1000) ?? Json.Null
+    assert((str_at(asked, "output") ?? String()).contains("didn't come from this device"))
+    // Kept for next time, and taken away.
+    let again = Device.load(cache)!
+    assert("{again.hosts_json()}".contains(#""mode":"ask""#))
+    d.remove_host(cache, String("vps"))!
+    assert("{d.hosts_json()}" == "[]")
 }
 
 @test

@@ -753,6 +753,10 @@ impl Conn {
             self.device_answer(m)
             return true
         }
+        if t == "host.add" or t == "host.set" or t == "host.remove" or t == "hosts.scan" {
+            self.host_frame(t.copy(), m)
+            return true
+        }
         if t == "approve" and (bool_at(m.copy(), "allow") ?? false) {
             if let signed = self.signed(m.copy()) {
                 if self.state == State.Live and self.put("{signed}") { return true }
@@ -1324,23 +1328,77 @@ impl Conn {
     /// Sets the tools the app gives (none to only ask), and tells the app and the
     /// instance what they are now.
     fn device_tools(mut self, given: Json) {
-        var tools = Json.Null
-        var frame = Json.Null
         var failed = String()
         if let d = mut self.device {
             if given != Json.Null {
                 if let err(e) = d.set_modes(self.cache, given) { failed = "{e}" }
             }
-            tools = d.tools()
-            frame = d.frame()
         }
         if failed.len() > 0 { self.tell_error("cache", failed) }
+        self.device_changed(given != Json.Null)
+    }
+
+    /// Tells the app what this device offers, its tools and its hosts, and the
+    /// instance too when it `changed`.
+    fn device_changed(mut self, changed: bool) {
+        var tools = Json.Null
+        var listed = Json.Null
+        var frame = Json.Null
+        if let d = self.device {
+            tools = d.tools()
+            listed = d.hosts_json()
+            frame = d.frame()
+        }
         if tools == Json.Null {
             self.tell_error("device", String("This device's key couldn't be kept, so it offers no tools."))
             return
         }
-        self.tell(Obj.new().s("t", String("core.device")).j("tools", tools).done())
-        if given != Json.Null and self.state == State.Live { _ = self.put("{frame}") }
+        if changed and self.state == State.Live { _ = self.put("{frame}") }
+        self.tell(Obj.new().s("t", String("core.device")).j("tools", tools).j("hosts", listed).done())
+    }
+
+    /// The person's hosts (core/hosts.calx): `host.add` (`target`, `via`),
+    /// `host.set` (`name`, `mode`), `host.remove` (`name`), and `hosts.scan`,
+    /// which finds the ones in ~/.ssh/config and on the tailnet.
+    fn host_frame(mut self, t: String, m: Json) {
+        var why = String()
+        var found = Json.Null
+        if let d = mut self.device {
+            if t == "host.add" {
+                match d.add_host(self.cache, m.copy()) {
+                    ok(some(no)) => why = no,
+                    ok(none) => {},
+                    err(e) => why = "{e}",
+                }
+            } else if t == "host.set" {
+                if let err(e) = d.set_host(self.cache, str_at(m.copy(), "name") ?? String(), str_at(m.copy(), "mode") ?? String()) { why = "{e}" }
+            } else if t == "host.remove" {
+                if let err(e) = d.remove_host(self.cache, str_at(m.copy(), "name") ?? String()) { why = "{e}" }
+            } else if let now_found = d.scan_start() {
+                found = now_found
+            }
+        } else {
+            why = String("This device's key couldn't be kept, so it has no hosts.")
+        }
+        if why.len() > 0 {
+            self.tell_error("host", why)
+            return
+        }
+        if t == "hosts.scan" {
+            if found != Json.Null { self.tell(found) }
+            return
+        }
+        self.device_changed(true)
+    }
+
+    /// The ssh and Tailscale programs a device uses, each with its first
+    /// arguments, and the ssh config it reads: for tests, which give stand-ins.
+    pub fn host_programs(mut self, ssh: List<String>, tailscale: List<String>, ssh_config: String) {
+        if let d = mut self.device {
+            d.ssh = ssh.copy()
+            d.tailscale = tailscale.copy()
+            d.ssh_config = ssh_config.copy()
+        }
     }
 
     /// An approval given here, of a call to a device: signed with this device's key, so
@@ -1387,10 +1445,15 @@ impl Conn {
 
     fn poll_device(mut self) {
         var results = List<Json>()
-        if let d = mut self.device { results = d.poll() }
+        var found = Json.Null
+        if let d = mut self.device {
+            results = d.poll()
+            if let f = d.scan_poll() { found = f }
+        }
         for r in results {
             _ = self.put("{r}")
         }
+        if found != Json.Null { self.tell(found) }
     }
 
     // --- Following a move (protocol.md, "moved") ---

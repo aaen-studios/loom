@@ -445,6 +445,32 @@ pub fn server_args(name: &str, line: &str, settings: &str) -> Value {
     json!({"name": name.trim(), "command": command, "args": args, "env": pairs})
 }
 
+/// One of the person's hosts, a server this device reaches with ssh: its name, what ssh
+/// is given, where it came from (`ssh` or `tailscale`), and what agents may do there
+/// (`off`, `ask` or `allow`; empty for one only found).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Host {
+    pub name: String,
+    pub target: String,
+    pub via: String,
+    pub mode: String,
+}
+
+fn hosts_of(v: Option<&Value>) -> Vec<Host> {
+    v.and_then(Value::as_array)
+        .map(|list| {
+            list.iter()
+                .map(|h| Host {
+                    name: s(h, "name"),
+                    target: s(h, "target"),
+                    via: s(h, "via"),
+                    mode: s(h, "mode"),
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 /// The tools a device offers agents, as the core names them.
 pub const DEVICE_TOOLS: [&str; 7] = [
     "run_command",
@@ -1816,6 +1842,10 @@ pub struct Model {
     programs_stale: bool,
     /// What this device offers agents, each tool with `off`, `ask` or `allow`.
     pub device_tools: Vec<(String, String)>,
+    /// The person's hosts this device reaches with ssh, as the core keeps them, and
+    /// the ones it found in the ssh config and on the tailnet that aren't added yet.
+    pub hosts: Vec<Host>,
+    pub hosts_found: Vec<Host>,
     /// The person's MCP servers, and the names of their secrets.
     pub mcp_servers: Vec<McpServer>,
     pub secrets: Vec<String>,
@@ -2412,6 +2442,14 @@ impl Model {
                         })
                         .collect();
                 }
+                if f.get("hosts").is_some() {
+                    self.hosts = hosts_of(f.get("hosts"));
+                    let added: Vec<String> = self.hosts.iter().map(|h| h.name.clone()).collect();
+                    self.hosts_found.retain(|h| !added.contains(&h.name));
+                }
+            }
+            "core.hosts_found" => {
+                self.hosts_found = hosts_of(f.get("found"));
             }
             "core.update" => {
                 let asked = f.get("id").is_some();
@@ -4176,6 +4214,36 @@ impl Model {
         json!({"t": "device.tools", "tools": {tool: mode}})
     }
 
+    /// Asks the core to find the person's hosts: in the ssh config and on the tailnet.
+    pub fn scan_hosts(&self) -> Value {
+        json!({"t": "hosts.scan"})
+    }
+
+    /// Adds a host by what ssh is given (an alias, a name, or user@name), from where it
+    /// was found. None for nothing typed. The core checks the rest.
+    pub fn add_ssh_host(&self, target: &str, via: &str) -> Option<Value> {
+        let target = target.trim();
+        if target.is_empty() {
+            return None;
+        }
+        let via = if via == "tailscale" {
+            "tailscale"
+        } else {
+            "ssh"
+        };
+        Some(json!({"t": "host.add", "target": target, "via": via}))
+    }
+
+    /// Sets what agents may do on a host: `off`, `ask` or `allow`.
+    pub fn set_ssh_host(&self, name: &str, mode: &str) -> Value {
+        json!({"t": "host.set", "name": name, "mode": mode})
+    }
+
+    /// Takes a host away.
+    pub fn remove_ssh_host(&self, name: &str) -> Value {
+        json!({"t": "host.remove", "name": name})
+    }
+
     /// Asks for the programs page: the instance's programs, and the registry's.
     pub fn load_programs(&mut self) -> Vec<Value> {
         self.registry_loading = self.registry.is_empty();
@@ -4859,6 +4927,52 @@ mod tests {
             files: Vec::new(),
         });
         m
+    }
+
+    #[test]
+    fn hosts_as_the_core_keeps_them_and_finds_them() {
+        let mut m = Model::new();
+        m.take(&json!({"t": "core.hosts_found", "found": [
+            {"name": "vps", "target": "vps", "via": "ssh"},
+            {"name": "box", "target": "box", "via": "tailscale"}
+        ]}));
+        assert_eq!(m.hosts_found.len(), 2);
+        assert_eq!(m.hosts_found[1].via, "tailscale");
+        // Adding one sends the core its target, and where it was found.
+        assert_eq!(
+            m.add_ssh_host(" box ", "tailscale"),
+            Some(json!({"t": "host.add", "target": "box", "via": "tailscale"}))
+        );
+        assert_eq!(m.add_ssh_host("  ", "ssh"), None);
+        // Once the core has it, it isn't offered any more.
+        m.take(
+            &json!({"t": "core.device", "tools": {"run_command": "ask"}, "hosts": [
+                {"name": "box", "target": "box", "via": "tailscale", "mode": "ask"}
+            ]}),
+        );
+        assert_eq!(
+            m.hosts,
+            vec![Host {
+                name: "box".into(),
+                target: "box".into(),
+                via: "tailscale".into(),
+                mode: "ask".into()
+            }]
+        );
+        assert_eq!(m.hosts_found.len(), 1);
+        assert_eq!(m.hosts_found[0].name, "vps");
+        assert_eq!(
+            m.set_ssh_host("box", "allow"),
+            json!({"t": "host.set", "name": "box", "mode": "allow"})
+        );
+        assert_eq!(
+            m.remove_ssh_host("box"),
+            json!({"t": "host.remove", "name": "box"})
+        );
+        assert_eq!(m.scan_hosts(), json!({"t": "hosts.scan"}));
+        // A core.device without hosts leaves them as they are.
+        m.take(&json!({"t": "core.device", "tools": {}}));
+        assert_eq!(m.hosts.len(), 1);
     }
 
     #[test]
