@@ -30,7 +30,9 @@ The scripts run with no network, no files and no programs, and their only way ou
 
 The first script waits a moment, while the instance downloads Deno, which runs them.
 
-Code Mode is on for every agent. To give an agent each tool plainly instead, turn off **Code Mode** on its edit page, under **Knows**.
+The tools that reach your app and devices are given to the agent directly as well: adding a server, the command that installs one, your devices, cards in replies, and searching your chats. An agent setting loom up for you doesn't have to look them up first.
+
+Code Mode is on for every agent. To give an agent each tool plainly instead, turn off **Code Mode** on its edit page, under **Knows**. The change starts with the agent's next message, in a fresh session, so its tools never change in the middle of one.
 
 ## A message while it answers
 
