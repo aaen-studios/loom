@@ -12747,6 +12747,9 @@ fn core_config(dir: &str, server: Option<&str>) -> String {
             config["token"] = token.into();
         }
     }
+    // What the core fetches for an update: the release's installer, which swaps loom.exe
+    // in once the app has quit, and can put the old one back (desktop/setup).
+    config["platform"] = "windows-installer".into();
     if local_mode() {
         config["mode"] = "local".into();
         config["username"] = std::env::var("USERNAME")
