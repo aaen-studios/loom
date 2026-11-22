@@ -285,6 +285,8 @@ pub struct Loom {
     open_thoughts: HashSet<String>,
     tray: Option<shell::Tray>,
     hwnd: isize,
+    /// Where the window was last kept (place.rs), so it's written only when it moves.
+    place: Option<crate::place::Place>,
     /// On the welcome screen: the server sign-in instead of Start, and with it the setup
     /// code, for a server that has no owner yet.
     server_form: bool,
@@ -743,6 +745,15 @@ ACTA_KEY=secret:ACTA_KEY",
         .detach();
 
         let hwnd = shell::hwnd(window);
+        // The window opens where it was closed, and keeps its place as it moves and
+        // resizes (place.rs). Started in the tray, it waits there hidden.
+        let background = std::env::args().any(|a| a == "--background");
+        let place = crate::place::Place::load(&data_dir());
+        if let Some(p) = place {
+            shell::put_window(hwnd, p, !background);
+        }
+        cx.observe_window_bounds(window, |this: &mut Loom, _, _| this.keep_place())
+            .detach();
         // The window, taskbar and shortcuts show the icon in loom's theme.
         shell::follow_theme(hwnd, dark);
         // Closing the window keeps loom in the tray, so routines and replies go on.
@@ -765,7 +776,7 @@ ACTA_KEY=secret:ACTA_KEY",
         let data = data_dir();
         shell::first_start(&data);
         let tray = shell::Tray::new(shell::starts_at_login());
-        if std::env::args().any(|a| a == "--background") {
+        if background {
             // Started at login: straight to the tray.
             cx.defer(move |_| shell::show_window(hwnd, false));
         }
@@ -898,6 +909,7 @@ ACTA_KEY=secret:ACTA_KEY",
             open_thoughts: HashSet::new(),
             tray,
             hwnd,
+            place,
             notice: None,
         };
         loom.fetch();
