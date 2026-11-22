@@ -85,6 +85,23 @@ pub fn all() -> List<Json> {
     ]
 }
 
+// Code Mode's two tools (PLAN.md, "Code Mode"), which an agent in Code Mode
+// gets in place of every other: loom's own, its MCP servers' and plugins'.
+pub fn code_tools() -> List<Json> {
+    let limit = Obj.new().s("type", String("integer")).s("description", String("How many to give, up to 30. 10 if left out.")).done()
+    let timeout = Obj.new().s("type", String("integer")).s("description", String("Seconds the script may run, up to 300. 60 if left out. Time spent waiting on a tool, such as your person's yes, doesn't count.")).done()
+    return [
+        tool("search_tools", "Finds the tools your scripts can call in run_code: loom's own (loom.*), your person's MCP servers' (mcp.<server>.*) and their plugins' (plugins.<plugin>.*). Gives each one's TypeScript signature and what it does, its arguments and what they're for. Search before you write a script that uses a tool you haven't seen.", object(Obj.new().j("query", text_arg("Words for what you want done, such as \"send a notification\" or \"github issue\", or a tool's whole name. Empty lists every tool's name.")).j("limit", limit), List<str>())),
+        tool("run_code", "Runs a TypeScript script in Deno, which has no network, files or environment of its own: it reaches the world only through the tools, each a typed async function, such as `const notes = await loom.recall(\{query: \"deploy\"\})` or `await mcp.github.create_issue(\{...\})`. Do several steps in one script and keep what they give in variables: only what the script returns, and what it logs with console.log, comes back to you, cut at 20,000 characters. A tool gives its structured content, or its text, parsed when it's JSON. A tool that fails, or that your person says no to, throws. Await works at the top, and return ends the script with its value. At most 100 tool calls a script.", object(Obj.new().j("code", text_arg("The script, in TypeScript. loom, mcp and plugins are there already: don't import them.")).j("timeout", timeout), ["code"])),
+    ]
+}
+
+@test
+fn code_mode_has_two_tools() {
+    let tools = code_tools()
+    assert(tools.len() == 2 and "{tools[0]}".contains("\"name\":\"search_tools\"") and "{tools[1]}".contains("\"required\":[\"code\"]"))
+}
+
 @test
 fn every_tool_has_a_schema() {
     let tools = all()

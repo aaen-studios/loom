@@ -75,6 +75,9 @@ pub struct Agent {
     pub default_mode: String,
     /// When it was pinned to the top of the list, if it is.
     pub pinned: Option<i64>,
+    /// Whether it reaches tools through scripts, search_tools and run_code (Code
+    /// Mode, the default), rather than each tool plainly.
+    pub code_mode: bool,
 }
 
 /// One of the things an agent's program lets the person pick, such as its model.
@@ -2932,6 +2935,7 @@ impl Model {
                         options: config_options(a),
                         config: config_values(a),
                         pinned: a.get("pinned").and_then(Value::as_i64),
+                        code_mode: a.get("code_mode").and_then(Value::as_bool).unwrap_or(true),
                     })
                     .collect();
                 // Pinned agents first, in the order they were pinned; the rest as they were.
@@ -3387,6 +3391,18 @@ impl Model {
 
     /// Opens the edit page for the selected agent: asks for its revisions.
     /// Gives the agent on the edit page another thread colour.
+    /// Turns Code Mode on or off for the agent being edited, from its next session.
+    pub fn set_code_mode(&mut self, on: bool) -> Option<Value> {
+        let agent = self.editing.clone()?;
+        if let Some(a) = self.agents.iter_mut().find(|a| a.id == agent) {
+            a.code_mode = on;
+        }
+        let id = self.id("app.code_mode");
+        Some(
+            json!({"t": "cmd", "id": id, "name": "agent.update", "args": {"agent": agent, "code_mode": on}}),
+        )
+    }
+
     pub fn set_color(&mut self, color: &str) -> Option<Value> {
         let agent = self.editing.clone()?;
         if let Some(a) = self.agents.iter_mut().find(|a| a.id == agent) {

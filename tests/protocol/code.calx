@@ -1,0 +1,198 @@
+module tests.protocol.code
+
+// Code Mode (PLAN.md, "Code Mode"): an agent's session gets loom mcp alone,
+// which offers search_tools and run_code. search_tools gives loom's tools and
+// an MCP server's as TypeScript signatures, and run_code runs a script in a
+// Deno with no permissions, which the instance fetches the first time, that
+// calls them with await: loom's own, and the fake MCP server's
+// (tests/fake_mcp), whose key the server gets but the script never can. A call
+// the agent's permission mode doesn't allow waits for the person's yes, and a
+// no throws in the script. Only what the script logs and returns comes back,
+// cut at its limit, and a script that runs too long or calls too often is
+// stopped. Turned off for an agent, its session gets every tool plainly again.
+//
+// Without Deno for this computer, or a network to fetch it, the runs are
+// skipped, and it says so.
+//
+//     calx tests/protocol/code.calx
+import std.fs
+import std.json.{Json}
+import std.process.{exit}
+import shared.obj.{Obj, at, str_at}
+import tests.kit.{App, Instance, calx, check, reply_text}
+
+// The first script waits while the instance fetches Deno.
+const LONG: u32 = 600000
+
+fn reply_in(app: mut App, conversation: String) -> String ! Error {
+    loop {
+        let created = try app.until("event", "message.created", LONG)
+        let m = at(created, "message")
+        if str_at(m.copy(), "role") == some(String("agent")) and str_at(m.copy(), "conversation") == some(conversation.copy()) { return reply_text(m) }
+    }
+}
+
+fn say(app: mut App, conversation: String, cid: String, text: String) -> String ! Error {
+    try app.send(Obj.new().s("t", String("send")).s("cid", cid).s("conversation", conversation.copy()).s("text", text).done())
+    return try reply_in(mut app, conversation)
+}
+
+// The step that has the fake agent run `code`.
+fn script(code: str) -> String {
+    return "/mcp run_code {Obj.new().s("code", String(code)).done()}"
+}
+
+const ECHO: str = #"
+    const r = await mcp.fake.echo({ text: "hi" });
+    console.log("got", r.said);
+    const k = await mcp.fake.key_length();
+    return { n: 2, k };
+    "#
+
+const LOOM_TOOLS: str = #"
+    await loom.notify({ title: "From a script", body: "hello" });
+    return await loom.remember({ text: "scripted note" });
+    "#
+
+const WALLED: str = #"
+    const out = [];
+    for (const f of [() => Deno.env.get("FAKE_KEY"), () => Deno.readTextFileSync("/etc/hosts"), () => Deno.writeTextFileSync("x.txt", "x"), () => new Deno.Command(Deno.build.os === "windows" ? "C:/Windows/System32/whoami.exe" : "/bin/sh").outputSync()]) {
+      try { out.push(String(f())); } catch (e) { out.push(e.name); }
+    }
+    try { await fetch("https://example.com"); out.push("fetched"); } catch (e) { out.push(e.name); }
+    return out.join(",");
+    "#
+
+const THROWS: str = #"
+    const x = 1;
+    throw new Error("boom");
+    "#
+
+const ADDS: str = #"
+    const s = await mcp.fake.add({ a: 2, b: 3 });
+    return s;
+    "#
+
+const REFUSED: str = #"
+    try { await mcp.fake.add({ a: 1, b: 1 }); return "added"; } catch (e) { return "refused: " + e.message; }
+    "#
+
+const MANY: str = #"
+    let i = 0;
+    try { for (; i < 150; i++) await loom.recall({}); } catch (e) { return i + " " + e.message; }
+    "#
+
+const LONG_TEXT: str = #"
+    return "x".repeat(50000);
+    "#
+
+fn run(i: Instance) ! Error {
+    var app = try App.connect(i.base.copy(), i.token.copy(), 0)
+    _ = try app.cmd("q_1", "secret.put", Obj.new().s("name", String("FAKE_KEY")).s("value", String("s3cret")).done())
+    let server = try fs.absolute(String("tests/fake_mcp/main.calx"))
+    let fake = Obj.new().s("name", String("fake")).s("command", calx()).j("args", Json.Array([Json.Str(server)])).j("env", Obj.new().j("FAKE_KEY", Obj.new().s("secret", String("FAKE_KEY")).done()).done()).done()
+    _ = try app.cmd("q_2", "mcp.put", fake)
+    let made = try app.cmd("q_3", "agent.create", Obj.new().s("name", String("Coder")).s("acp_agent", String("fake")).s("instructions", String("Test.")).j("mcp", Json.Array([Json.Str(String("fake"))])).done())
+    let agent = at(at(made, "value"), "agent")
+    let id = str_at(agent.copy(), "id") ?? String()
+    try check(at(agent, "code_mode") == Json.Bool(true), "an agent is in Code Mode from the start")
+    // Its mode allows what only reads, and asks about the rest.
+    _ = try app.cmd("q_4", "agent.update", Obj.new().s("agent", id.copy()).s("permission", String("auto")).done())
+    let c = try app.cmd("q_5", "conversation.create", Obj.new().s("agent", id.copy()).done())
+    let chat = str_at(at(c, "value"), "conversation") ?? String()
+    var n: i64 = 0
+
+    n += 1
+    try check(try say(mut app, chat.copy(), "m_{n}", String("/mcp list")) == "tools: search_tools, run_code", "its loom mcp offers search_tools and run_code alone")
+    n += 1
+    try check(try say(mut app, chat.copy(), "m_{n}", String("/servers")) == "no servers", "and its session gets no other server: loom mcp reaches them")
+    n += 1
+    let found = try say(mut app, chat.copy(), "m_{n}", String(#"/mcp search_tools {"query":"notification"}"#))
+    try check(found.contains(#"loom.notify(args: { title: string; body: string }): Promise<any>"#) and found.contains("- title: A few words."), "search_tools gives loom's tools as TypeScript signatures, with their arguments")
+    n += 1
+    let theirs = try say(mut app, chat.copy(), "m_{n}", String(#"/mcp search_tools {"query":"echo text back"}"#))
+    try check(theirs.contains(#"mcp.fake.echo(args: { text: string }): Promise<any>"#) and theirs.contains("Only reads."), "and an MCP server's, under mcp")
+    n += 1
+    let every = try say(mut app, chat.copy(), "m_{n}", String(#"/mcp search_tools {}"#))
+    try check(every.contains("loom.remember") and every.contains("mcp.fake.add") and every.contains("mcp.fake.key_length"), "an empty search lists every tool")
+
+    // --- Scripts ---
+    n += 1
+    let first = try say(mut app, chat.copy(), "m_{n}", script(ECHO))
+    if first.contains("Deno couldn't be fetched") or first.contains("Deno has no build") {
+        println("skip  scripts: {first}")
+        app.close()
+        return
+    }
+    let echoed = "run_code: Logged:\ngot hi\n\nReturned:\n{#"{"n":2,"k":6}"#}"
+    try check(first == echoed, "run_code runs a script that calls an MCP server's tools, and gives what it logs and returns")
+    let deno = "{i.data}/acp/.deno"
+    try check(fs.exists(deno), "Deno was fetched into the instance's acp folder")
+
+    n += 1
+    _ = try say(mut app, chat.copy(), "m_{n}", script(LOOM_TOOLS))
+    var note = Json.Null
+    for frame in app.frames {
+        if str_at(frame.copy(), "kind") == some(String("notify")) { note = frame.copy() }
+    }
+    try check(str_at(note, "title") == some(String("From a script")), "and loom's own tools")
+
+    n += 1
+    let walled = try say(mut app, chat.copy(), "m_{n}", script(WALLED))
+    try check(walled == "run_code: Returned:\nNotCapable,NotCapable,NotCapable,NotCapable,NotCapable", "the script has no environment, files, programs or network: the key reached the server, never the script")
+
+    n += 1
+    let threw = try say(mut app, chat.copy(), "m_{n}", script(THROWS))
+    try check(threw.starts_with("run_code failed") and threw.contains("line 2"), "a script that throws fails, with the line of its code")
+
+    // --- Asking the person ---
+    n += 1
+    try app.send(Obj.new().s("t", String("send")).s("cid", "m_{n}").s("conversation", chat.copy()).s("text", script(ADDS)).done())
+    let asked = try app.until("event", "approval.needed", LONG)
+    try check(str_at(asked.copy(), "title") == some(String("Use add on the MCP server fake")), "a call its mode doesn't allow asks the person, and the script waits")
+    try app.send(Obj.new().s("t", String("approve")).s("call", str_at(asked, "call") ?? String()).b("allow", true).done())
+    try check(try reply_in(mut app, chat.copy()) == "run_code: Returned:\n5", "a yes lets it go on")
+    n += 1
+    try app.send(Obj.new().s("t", String("send")).s("cid", "m_{n}").s("conversation", chat.copy()).s("text", script(REFUSED)).done())
+    let again = try app.until("event", "approval.needed", LONG)
+    try app.send(Obj.new().s("t", String("approve")).s("call", str_at(again, "call") ?? String()).b("allow", false).done())
+    try check(try reply_in(mut app, chat.copy()) == "run_code: Returned:\nrefused: Your person said no.", "and a no throws in the script")
+    let logged = "{try app.cmd("q_6", "activity.list", Obj.new().s("agent", id.copy()).done())}"
+    try check(logged.contains("fake: add"), "the calls it makes are in the activity log")
+
+    // --- Limits ---
+    n += 1
+    let slow = try say(mut app, chat.copy(), "m_{n}", "/mcp run_code {Obj.new().s("code", String(#"while (true) {}"#)).i("timeout", 2).done()}")
+    try check(slow.starts_with("run_code failed") and slow.contains("ran out of time, after 2 seconds"), "a script that runs too long is stopped")
+    n += 1
+    let many = try say(mut app, chat.copy(), "m_{n}", script(MANY))
+    try check(many == "run_code: Returned:\n100 A script makes 100 tool calls at most, and this one has.", "and one that calls too often is refused after 100")
+    n += 1
+    let long = try say(mut app, chat.copy(), "m_{n}", script(LONG_TEXT))
+    try check(long.len() < 21000 and long.contains("more characters cut"), "what comes back is cut at its limit")
+
+    // --- Off ---
+    _ = try app.cmd("q_7", "agent.update", Obj.new().s("agent", id.copy()).b("code_mode", false).done())
+    let c2 = try app.cmd("q_8", "conversation.create", Obj.new().s("agent", id).done())
+    let plain = str_at(at(c2, "value"), "conversation") ?? String()
+    n += 1
+    let listed = try say(mut app, plain.copy(), "m_{n}", String("/mcp list"))
+    n += 1
+    let servers = try say(mut app, plain, "m_{n}", String("/servers"))
+    try check(listed.contains("message_agent") and not listed.contains("run_code") and servers.contains("fake ") and servers.contains("FAKE_KEY=s3cret"), "turned off, the agent gets every tool plainly, and its MCP servers")
+    app.close()
+}
+
+fn main() ! Error {
+    let inst = try Instance.start()
+    let failure: String? = match run(inst.copy()) {
+        ok => none,
+        err(e) => some("{e}"),
+    }
+    inst.stop()
+    if let f = failure {
+        eprintln("\n{f}")
+        exit(1)
+    }
+    println("\ncode: all good")
+}

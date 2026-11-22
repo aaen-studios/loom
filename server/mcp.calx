@@ -6,29 +6,54 @@ module server.mcp
 // environment. It asks the instance for the tools and hands each call to it,
 // so what an agent may do is decided there, with its person's rights.
 //
+// In Code Mode (PLAN.md, "Code Mode"), with LOOM_CODE_MODE=1, it offers only
+// search_tools and run_code, and is itself the client of the agent's MCP
+// servers and its person's plugins' tool servers, which the instance gives it
+// and the agent program isn't given. A script's calls come here, and go to the
+// instance (loom's own tools) or to the server, once the instance says the
+// agent's permission mode allows the call or the person said yes.
+//
 // MCP is JSON-RPC 2.0, one message a line. Requests are answered in turn: a
 // message_agent call waits for the other agent's reply.
 import std.env
+import std.fs
 import std.http.{Header, get, post}
 import std.io
 import std.json.{Json, parse}
-import shared.obj.{Obj, at, str_at}
+import std.process.{Child}
+import std.time.{Instant}
+import shared.obj.{Obj, at, int_at, str_at}
+import shared.tools
+import server.codemode
+import server.codemode.{Tool}
+import server.mcpclient.{Server}
+import server.mcpclient
 
 const PROTOCOL: str = "2025-06-18"
 const CALL_WAIT: u32 = 3600000    // message_agent waits on a whole reply
+const DENO_WAIT: u32 = 900000     // the first script waits while Deno is fetched
 const MAX_ANSWER: usize = 16777216
 
 fn reply(id: Json, result: Json) {
     println("{Obj.new().s("jsonrpc", String("2.0")).j("id", id).j("result", result).done()}")
 }
 
-fn reply_error(id: Json, code: i64, message: String) {
-    println("{Obj.new().s("jsonrpc", String("2.0")).j("id", id).j("error", Obj.new().i("code", code).s("message", message).done()).done()}")
+fn reply_error(id: Json, number: i64, message: String) {
+    println("{Obj.new().s("jsonrpc", String("2.0")).j("id", id).j("error", Obj.new().i("code", number).s("message", message).done()).done()}")
+}
+
+// A tool result for the agent to read.
+fn said(text: String) -> Json {
+    return Obj.new().j("content", Json.Array([Obj.new().s("type", String("text")).s("text", text).done()])).done()
 }
 
 // A tool result that says what went wrong, for the agent to read.
 fn failed(text: String) -> Json {
     return Obj.new().j("content", Json.Array([Obj.new().s("type", String("text")).s("text", text).done()])).b("isError", true).done()
+}
+
+fn is_error(result: Json) -> bool {
+    return at(result, "isError") == Json.Bool(true)
 }
 
 struct Link {
@@ -41,16 +66,21 @@ impl Link {
         return [Header { name: String("Authorization"), value: "Bearer {self.token}" }, Header { name: String("Content-Type"), value: String("application/json") }]
     }
 
-    fn tools(self) -> Json ! Error {
-        var req = get("{self.base}/api/mcp/tools", self.headers(), 30000, MAX_ANSWER)
+    fn fetch(self, path: str, wait: u32) -> Json ! Error {
+        var req = get("{self.base}{path}", self.headers(), wait, MAX_ANSWER)
         let r = try req.wait()
-        if r.status != 200 { fail "the instance answered {r.status}" }
-        return try parse(String.from_utf8(r.body) ?? String())
+        let text = String.from_utf8(r.body) ?? String()
+        if r.status != 200 { fail "the instance answered {r.status}: {text}" }
+        return try parse(text)
     }
 
-    fn call(self, name: String, arguments: Json) -> Json {
-        let body = Obj.new().s("name", name).j("arguments", arguments).done()
-        var req = post("{self.base}/api/mcp/call", self.headers(), "{body}".to_bytes(), CALL_WAIT, MAX_ANSWER)
+    fn tools(self) -> Json ! Error {
+        return try self.fetch("/api/mcp/tools", 30000)
+    }
+
+    // A POST to the instance, whose answer is a tool result.
+    fn send(self, path: str, body: Json) -> Json {
+        var req = post("{self.base}{path}", self.headers(), "{body}".to_bytes(), CALL_WAIT, MAX_ANSWER)
         match req.wait() {
             ok(r) => {
                 let text = String.from_utf8(r.body) ?? String()
@@ -63,9 +93,201 @@ impl Link {
             err(e) => return failed("loom didn't answer: {e}"),
         }
     }
+
+    fn call(self, name: String, arguments: Json) -> Json {
+        return self.send("/api/mcp/call", Obj.new().s("name", name).j("arguments", arguments).done())
+    }
 }
 
-fn handle(link: Link, m: Json) {
+// --- Code Mode ---
+
+struct Code {
+    on: bool
+    deno: String
+    loaded: bool
+    tools: List<Tool>
+    servers: Map<String, Server>
+    trouble: List<String>    // servers that didn't start, and why
+    runs: i64
+}
+
+impl Code {
+    // Every tool a script can call: loom's own, and each server's, which are
+    // started the first time.
+    fn load(self: mut Code, link: Link) {
+        if self.loaded { return }
+        self.loaded = true
+        match link.tools() {
+            ok(t) => {
+                var listed = List<Json>()
+                if let Json.Array(l) = at(t, "tools") { listed = l.copy() }
+                self.tools.extend(codemode.tools_of(String("loom"), listed))
+            },
+            err(e) => self.trouble.push("loom's own tools: {e}"),
+        }
+        let given = match link.fetch("/api/mcp/servers", 30000) {
+            ok(g) => g,
+            err(e) => {
+                self.trouble.push("the MCP servers: {e}")
+                Json.Null
+            },
+        }
+        if let Json.Array(specs) = at(given, "servers") {
+            for spec in specs {
+                let name = str_at(spec.copy(), "name") ?? String()
+                match mcpclient.start(spec.copy()) {
+                    ok(s) => {
+                        var server = s
+                        match server.tools() {
+                            ok(listed) => self.tools.extend(codemode.tools_of(name.copy(), listed)),
+                            err(e) => self.trouble.push("{name}: {e}"),
+                        }
+                        self.servers.insert(name, server)
+                    },
+                    err(e) => self.trouble.push("{name} didn't start: {e}"),
+                }
+            }
+        }
+    }
+
+    fn search(self: mut Code, link: Link, args: Json) -> Json {
+        self.load(link)
+        let limit = int_at(args.copy(), "limit") ?? 10
+        let most: usize = if limit < 1 { 1 } else if limit > 30 { 30 } else { usize.wrap(limit) }
+        return said(codemode.search(self.tools.copy(), str_at(args, "query") ?? String(), most, self.trouble.copy()))
+    }
+
+    // Where Deno is, asking the instance, which fetches it the first time.
+    fn deno_path(self: mut Code, link: Link) -> String ! Error {
+        if self.deno.len() > 0 { return self.deno.copy() }
+        let got = try link.fetch("/api/mcp/deno", DENO_WAIT)
+        if let e = str_at(got.copy(), "error") { fail "{e}" }
+        self.deno = str_at(got, "path") ?? String()
+        if self.deno.len() == 0 { fail "the instance didn't say where Deno is" }
+        return self.deno.copy()
+    }
+
+    fn run(self: mut Code, link: Link, args: Json) -> Json {
+        let script = str_at(args.copy(), "code") ?? String()
+        if script.trim().len() == 0 { return failed(String("code is empty: give the script.")) }
+        if script.len() > codemode.CODE_MOST { return failed("The script is over {codemode.CODE_MOST} bytes.") }
+        let asked = int_at(args, "timeout") ?? 0
+        let limit_ms: u64 = if asked <= 0 { codemode.TIME_MS } else if u64.wrap(asked) * 1000 > codemode.TIME_MOST_MS { codemode.TIME_MOST_MS } else { u64.wrap(asked) * 1000 }
+        let deno = match self.deno_path(link) {
+            ok(d) => d,
+            err(e) => return failed("Scripts can't run here: Deno couldn't be fetched ({e}). Use the tools some other way."),
+        }
+        // A folder of its own for each script, its prelude and Deno's cache,
+        // removed once it's done.
+        let folder = match fs.temp_dir() {
+            ok(d) => d,
+            err(e) => return failed("Scripts can't run here: there's no folder for them ({e})."),
+        }
+        self.load(link)
+        self.runs += 1
+        let n = self.runs
+        let result = match codemode.start(deno, folder.copy(), n, script) {
+            ok(child) => {
+                var c = child
+                let r = self.drive(link, mut c, n, limit_ms)
+                c.kill_tree()
+                _ = c.wait()
+                r
+            },
+            err(e) => failed("Deno didn't start: {e}"),
+        }
+        if let err(e) = fs.remove_dir_all(folder) { eprintln("loom mcp: {e}") }
+        return result
+    }
+
+    // Reads the script's lines, answering its calls, until it ends, runs out
+    // of time, or stops.
+    fn drive(self: mut Code, link: Link, c: mut Child, n: i64, limit_ms: u64) -> Json {
+        var logged = List<String>()
+        var size: usize = 0
+        var spent: u64 = 0
+        var calls: usize = 0
+        loop {
+            if spent >= limit_ms {
+                return failed(codemode.told(logged, true, "it ran out of time, after {limit_ms / 1000} seconds of its own."))
+            }
+            let began = unsafe { Instant.now() }
+            let line = c.read_line(limit_ms - spent)
+            spent += unsafe { Instant.now() }.nanos_since(began) / 1000000
+            let text = line else {
+                if not c.ended() { continue }
+                let out = c.wait()
+                let why = codemode.places_fixed(out.error_text().trim().copy(), n)
+                return failed(codemode.told(logged, true, if why.len() > 0 { why } else { "Deno stopped: {out.status}" }))
+            }
+            let m = match parse(text.copy()) {
+                ok(j) => j,
+                err(_) => Json.Null,
+            }
+            let kind = str_at(m.copy(), "t") ?? String()
+            if kind == "call" {
+                calls += 1
+                let id = at(m.copy(), "id")
+                let path = str_at(m.copy(), "tool") ?? String()
+                let answer = if calls > codemode.CALLS_MOST { Obj.new().j("id", id).b("ok", false).s("error", "A script makes {codemode.CALLS_MOST} tool calls at most, and this one has.").done() } else {
+                    match self.call(link, path, at(m, "args")) {
+                        ok(v) => Obj.new().j("id", id).b("ok", true).j("value", v).done(),
+                        err(e) => Obj.new().j("id", id).b("ok", false).s("error", "{e}").done(),
+                    }
+                }
+                if let err(_) = c.write_text("{answer}\n") { continue }
+                continue
+            }
+            if kind == "end" {
+                if at(m.copy(), "ok") == Json.Bool(true) { return said(codemode.told(logged, false, codemode.shown(at(m, "value")))) }
+                return failed(codemode.told(logged, true, codemode.places_fixed(str_at(m, "error") ?? String(), n)))
+            }
+            // A line it logged, or one it wrote itself.
+            let line_text = if kind == "log" { str_at(m, "text") ?? String() } else { text }
+            if size <= codemode.OUTPUT_MOST {
+                size += line_text.len() + 1
+                logged.push(line_text)
+            }
+        }
+    }
+
+    // A script's call to the tool at `path`: its value, or why it failed.
+    fn call(self: mut Code, link: Link, path: String, args: Json) -> Json ! Error {
+        let t = codemode.find(self.tools.copy(), path.copy()) else { fail "There's no tool {path}. search_tools finds them." }
+        if t.server == "loom" {
+            let result = link.call(t.name.copy(), args)
+            if is_error(result.copy()) { fail "{codemode.error_of(result)}" }
+            return codemode.value_of(result)
+        }
+        // The instance says whether it may: by the agent's permission mode, or
+        // the person's yes, which this waits for.
+        let allowed = link.send("/api/mcp/allow", Obj.new().s("server", t.server.copy()).s("tool", t.name.copy()).b("read_only", t.read_only).j("arguments", args.copy()).done())
+        if is_error(allowed.copy()) { fail "{codemode.error_of(allowed)}" }
+        let act = int_at(allowed, "act") ?? 0
+        var server = self.servers.remove(t.server.copy()) else { fail "{t.server} isn't running." }
+        // What came of it, for the activity log.
+        var why = String()
+        var value = Json.Null
+        match server.call(t.name.copy(), args) {
+            ok(result) => {
+                if is_error(result.copy()) { why = codemode.error_of(result) } else { value = codemode.value_of(result) }
+            },
+            err(e) => why = "{e}",
+        }
+        self.servers.insert(t.server.copy(), server)
+        if act > 0 { _ = link.send("/api/mcp/done", Obj.new().i("act", act).b("ok", why.len() == 0).s("why", why.copy()).done()) }
+        if why.len() > 0 { fail "{why}" }
+        return value
+    }
+
+    fn stop(self: Code) {
+        for (_, s) in self.servers {
+            s.stop()
+        }
+    }
+}
+
+fn handle(link: Link, c: mut Code, m: Json) {
     let id = m.get(String("id")) else return    // a notification, such as notifications/initialized
     let method = str_at(m.copy(), "method") ?? String()
     let params = at(m, "params")
@@ -76,12 +298,26 @@ fn handle(link: Link, m: Json) {
     } else if method == "ping" {
         reply(id, Obj.new().done())
     } else if method == "tools/list" {
+        if c.on {
+            reply(id, Obj.new().j("tools", Json.Array(tools.code_tools())).done())
+            return
+        }
         match link.tools() {
             ok(t) => reply(id, t),
             err(e) => reply_error(id, -32603, "loom's instance didn't answer: {e}"),
         }
     } else if method == "tools/call" {
-        reply(id, link.call(str_at(params.copy(), "name") ?? String(), at(params, "arguments")))
+        let name = str_at(params.copy(), "name") ?? String()
+        let arguments = at(params, "arguments")
+        // In Code Mode a call by a tool's own name still goes to the instance,
+        // which decides it as ever.
+        if c.on and name == "search_tools" {
+            reply(id, c.search(link, arguments))
+        } else if c.on and name == "run_code" {
+            reply(id, c.run(link, arguments))
+        } else {
+            reply(id, link.call(name, arguments))
+        }
     } else {
         reply_error(id, -32601, "loom doesn't offer {method}")
     }
@@ -92,12 +328,14 @@ pub fn serve() ! Error {
     let base = env.variable(String("LOOM_URL")) else { fail "LOOM_URL isn't set: loom mcp is started by loom's instance" }
     let token = env.variable(String("LOOM_MCP_TOKEN")) else { fail "LOOM_MCP_TOKEN isn't set: loom mcp is started by loom's instance" }
     let link = Link { base: base, token: token }
+    var c = Code { on: env.variable(String("LOOM_CODE_MODE")) == some(String("1")), deno: String(), loaded: false, tools: List<Tool>(), servers: Map<String, Server>(), trouble: List<String>(), runs: 0 }
     var input = io.Lines()
     while let line = input.next() {
         if line.trim().len() == 0 { continue }
         match parse(line.copy()) {
-            ok(m) => handle(link, m),
+            ok(m) => handle(link, mut c, m),
             err(_) => reply_error(Json.Null, -32700, String("that line isn't JSON")),
         }
     }
+    c.stop()
 }

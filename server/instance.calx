@@ -30,6 +30,7 @@ import server.acp
 import server.acp.{Line, Out}
 import server.announce
 import server.browser
+import server.codemode
 import server.commands
 import server.files
 import server.files.{Thumb}
@@ -204,6 +205,9 @@ pub struct Instance {
     install_done: Receiver<installer.Done>
     fetching: List<Waiter>    // commands waiting on the registry
     installs: Map<i64, Install>    // installs on the installer's thread
+    deno_job: i64    // the installer's job fetching Deno for Code Mode, or 0
+    deno_waiters: List<Request>    // loom mcp's asks for Deno, answered once it's fetched
+    code_acts: Map<i64, String>    // a script's call to an MCP server, as recorded -> the token it came with
     leftovers: List<String>    // folders of removed ACP agents and plugins, removed once their programs have let go
     device_calls: Map<String, DeviceCall>    // tc_ id -> a call sent to a device
     sealer: XChaCha20Poly1305    // seals and opens secrets, with secret.key, which only the instance reads
@@ -783,7 +787,7 @@ impl Instance {
         }
         let browser_done = Receiver<browser.Back>()
         let browser_to = browser_done.sender()
-        var i = Instance { browsers: LinkedMap<String, Browser>(), watchers: Map<u32, String>(), browser_done: browser_done, browser_to: browser_to, stopped_browsers: List<Thread>(), fills: Map<String, Fill>(), turns_ended: List<(String, String, String)>(), next_browser_sweep: 0, task_stops: Map<String, String>(), resumes: List<(String, String)>(), push_to: push_to, push_gone: push_gone, move_to: move_to, move_done: move_done, lan: config.lan, bridge: none, stop_bridge: none, lan_port: 0, announcer: none, stop_announcer: none, to_close: List<ServerSocket>(), boxes: none, gate: none, stop_gate: none, moving: String(), move_waiters: List<Waiter>(), moved: moved, version: config.version.copy(), store: store, server: server, data: config.data.copy(), sessions: Map<u32, Session>(), runs: LinkedMap<String, Run>(), procs: LinkedMap<String, Proc>(), approvals: LinkedMap<String, Approval>(), lines: lines, lines_to: to, hash_to: hash_to, hash_done: hash_done, next_job: 0, auths: Map<i64, Auth>(), dummy_hash: dummy, failures: LinkedMap<String, List<i64>>(), thumbs: files.start(), events: config.events, next_prune: 0, grants: Map<String, Grant>(), calls: Map<String, Request>(), context: Map<String, (i64, i64)>(), registry_at: config.registry.copy(), registry: Json.Null, registry_time: 0, registry_fetching: false, install_to: install_to, install_done: install_done, fetching: List<Waiter>(), installs: Map<i64, Install>(), leftovers: List<String>(), next_sweep: 0, device_calls: Map<String, DeviceCall>(), minute_ms: config.minute_ms, next_due: 0, routine_runs: Map<String, RoutineRun>(), routine_marks: Map<String, (String, String)>(), run_chains: Map<String, List<String>>(), panel_calls: Map<String, Waiter>(), script_calls: Map<String, Request>(), running_flows: LinkedMap<String, flows.Flow>(), flow_steps: Map<String, (String, usize)>(), advancing: List<String>(), flow_results: List<(String, usize, bool, String)>(), flows_due: List<String>(), slow_calls: Map<String, String>(), acting: 0, call_actions: Map<String, i64>(), tool_actions: Map<String, i64>(), sealer: try secret_key(config.data.copy()) }
+        var i = Instance { browsers: LinkedMap<String, Browser>(), watchers: Map<u32, String>(), browser_done: browser_done, browser_to: browser_to, stopped_browsers: List<Thread>(), fills: Map<String, Fill>(), turns_ended: List<(String, String, String)>(), next_browser_sweep: 0, task_stops: Map<String, String>(), resumes: List<(String, String)>(), push_to: push_to, push_gone: push_gone, move_to: move_to, move_done: move_done, lan: config.lan, bridge: none, stop_bridge: none, lan_port: 0, announcer: none, stop_announcer: none, to_close: List<ServerSocket>(), boxes: none, gate: none, stop_gate: none, moving: String(), move_waiters: List<Waiter>(), moved: moved, version: config.version.copy(), store: store, server: server, data: config.data.copy(), sessions: Map<u32, Session>(), runs: LinkedMap<String, Run>(), procs: LinkedMap<String, Proc>(), approvals: LinkedMap<String, Approval>(), lines: lines, lines_to: to, hash_to: hash_to, hash_done: hash_done, next_job: 0, auths: Map<i64, Auth>(), dummy_hash: dummy, failures: LinkedMap<String, List<i64>>(), thumbs: files.start(), events: config.events, next_prune: 0, grants: Map<String, Grant>(), calls: Map<String, Request>(), context: Map<String, (i64, i64)>(), registry_at: config.registry.copy(), registry: Json.Null, registry_time: 0, registry_fetching: false, install_to: install_to, install_done: install_done, fetching: List<Waiter>(), installs: Map<i64, Install>(), deno_job: 0, deno_waiters: List<Request>(), code_acts: Map<i64, String>(), leftovers: List<String>(), next_sweep: 0, device_calls: Map<String, DeviceCall>(), minute_ms: config.minute_ms, next_due: 0, routine_runs: Map<String, RoutineRun>(), routine_marks: Map<String, (String, String)>(), run_chains: Map<String, List<String>>(), panel_calls: Map<String, Waiter>(), script_calls: Map<String, Request>(), running_flows: LinkedMap<String, flows.Flow>(), flow_steps: Map<String, (String, usize)>(), advancing: List<String>(), flow_results: List<(String, usize, bool, String)>(), flows_due: List<String>(), slow_calls: Map<String, String>(), acting: 0, call_actions: Map<String, i64>(), tool_actions: Map<String, i64>(), sealer: try secret_key(config.data.copy()) }
         if config.sandboxes.len() > 0 and not i.lan { try i.sandboxes_on(config.sandboxes.copy(), config.sandbox_image.copy()) }
         // An action the last run of the instance left started, it never finished.
         try i.store.settle_cut_short()
@@ -1851,15 +1855,28 @@ impl Instance {
                 exe = String("loom")
             }
         }
-        let env = Json.Array([Obj.new().s("name", String("LOOM_URL")).s("value", base).done(), Obj.new().s("name", String("LOOM_MCP_TOKEN")).s("value", token).done()])
-        let loom = Obj.new().s("name", String("loom")).s("command", exe).j("args", Json.Array([Json.Str(String("mcp"))])).j("env", env).done()
-        var out: List<Json> = [loom]
-        // And the person's MCP servers the agent has.
         let wanted = match i.store.agent(user.copy(), agent.copy()) {
             ok(some(a)) => a,
             _ => Json.Null,
         }
-        if let Json.Array(names) = at(wanted, "mcp") {
+        // In Code Mode, the agent's other servers are reached through `loom mcp`
+        // (PLAN.md, "Code Mode"), so it's the only one.
+        let code_mode = bool_at(wanted.copy(), "code_mode") ?? true
+        var env: List<Json> = [Obj.new().s("name", String("LOOM_URL")).s("value", base).done(), Obj.new().s("name", String("LOOM_MCP_TOKEN")).s("value", token).done()]
+        if code_mode { env.push(Obj.new().s("name", String("LOOM_CODE_MODE")).s("value", String("1")).done()) }
+        let loom = Obj.new().s("name", String("loom")).s("command", exe).j("args", Json.Array([Json.Str(String("mcp"))])).j("env", Json.Array(env)).done()
+        if code_mode { return Json.Array([loom]) }
+        var out: List<Json> = [loom]
+        out.extend(i.agent_servers(user, wanted, http, boxed))
+        return Json.Array(out)
+    }
+
+    // The person's MCP servers the agent has, as ACP's session/new takes them,
+    // and every plugin's tool server its person allowed, which runs from the
+    // instance's own folders, so not in a sandbox.
+    fn agent_servers(i: Instance, user: String, agent: Json, http: bool, boxed: bool) -> List<Json> {
+        var out = List<Json>()
+        if let Json.Array(names) = at(agent, "mcp") {
             for n in names {
                 let name = n.as_str() ?? String()
                 let server = match i.store.mcp_server(user.copy(), name.copy()) {
@@ -1869,10 +1886,8 @@ impl Instance {
                 if let s = i.session_server(user.copy(), server, http) { out.push(s) }
             }
         }
-        // And every plugin's tool server its person allowed, which runs from the
-        // instance's own folders, so not in a sandbox.
         if not boxed { out.extend(i.plugin_servers(user)) }
-        return Json.Array(out)
+        return out
     }
 
     // One of the person's MCP servers as ACP's session/new takes it, with its
@@ -2039,13 +2054,16 @@ impl Instance {
         let h = req.header(String("Authorization")) ?? String()
         let token = if h.starts_with("Bearer ") { h[7..].copy() } else { String() }
         var grant = Grant { user: String(), agent: String(), conversation: String() }
-        if let g = i.grants.find(token) {
+        if let g = i.grants.find(token.copy()) {
             grant = Grant { user: g.user.copy(), agent: g.agent.copy(), conversation: g.conversation.copy() }
         } else {
             return some(http_error(401, "unauthorized", String("That isn't a token for loom's tools.")))
         }
         if req.path == "/api/mcp/tools" and req.method == "GET" {
             return some(json_response(200, Obj.new().j("tools", Json.Array(tools.all())).done()))
+        }
+        for path in ["/api/mcp/servers", "/api/mcp/deno", "/api/mcp/allow", "/api/mcp/done"] {
+            if req.path == path { return try i.code_route(req, grant, token) }
         }
         if req.path != "/api/mcp/call" or req.method != "POST" {
             return some(http_error(404, "not_found", String("There's nothing here.")))
@@ -2082,6 +2100,85 @@ impl Instance {
             },
             none => return none,
         }
+    }
+
+    // Code Mode's routes, from `loom mcp` (PLAN.md, "Code Mode"): the servers
+    // it's the client of, where Deno is, and a script's calls to those servers,
+    // which the agent's permission mode allows or the person does.
+    fn code_route(i: mut Instance, req: Request, g: Grant, token: String) -> Response? ! Error {
+        if req.path == "/api/mcp/servers" and req.method == "GET" {
+            let agent = try i.store.agent(g.user.copy(), g.agent.copy()) ?? Json.Null
+            let boxed = if let p = i.procs.find(g.agent.copy()) { p.boxed } else { true }
+            return some(json_response(200, Obj.new().j("servers", Json.Array(i.agent_servers(g.user, agent, true, boxed))).done()))
+        }
+        if req.path == "/api/mcp/deno" and req.method == "GET" {
+            return try i.deno_for(req)
+        }
+        if req.method != "POST" { return some(http_error(404, "not_found", String("There's nothing here."))) }
+        let body = match parse(req.text() ?? String()) {
+            ok(j) => j,
+            err(_) => return some(http_error(400, "bad_request", String("The body isn't JSON."))),
+        }
+        if req.path == "/api/mcp/done" {
+            let act = int_at(body.copy(), "act") ?? 0
+            var mine = false
+            if let t = i.code_acts.find(act) { mine = t == token }
+            if mine {
+                _ = i.code_acts.remove(act)
+                i.settle(act, String(if bool_at(body.copy(), "ok") == some(true) { "done" } else { "failed" }), str_at(body, "why") ?? String())
+            }
+            return some(json_response(200, Obj.new().done()))
+        }
+        let server = str_at(body.copy(), "server") ?? String()
+        let tool = str_at(body.copy(), "tool") ?? String()
+        let read_only = bool_at(body.copy(), "read_only") ?? false
+        let args = at(body, "arguments")
+        let agent = try i.store.agent(g.user.copy(), g.agent.copy()) else return some(json_response(200, tool_error(String("You were deleted."))))
+        // As the agent program's own request would be: one that only reads is
+        // of kind read, and the rest other.
+        let kind = if read_only { "read" } else { "other" }
+        let act: i64 = if read_only { 0 } else { i.record(g.user.copy(), g.agent.copy(), "tool", "{server}: {tool}", args.copy(), g.agent.copy()) }
+        if act > 0 { i.code_acts.insert(act, token.copy()) }
+        if acp.allows(str_at(agent, "permission") ?? String("ask"), String(kind)) {
+            return some(json_response(200, merge(tool_text(String("Allowed by your permission mode.")), Obj.new().i("act", act).done())))
+        }
+        let place = if server.starts_with("plugin-") { "the plugin {server[7..]}" } else { "the MCP server {server}" }
+        let action = Obj.new().s("name", String("code.call")).j("args", Obj.new().s("server", server.copy()).s("tool", tool.copy()).j("arguments", args).i("act", act).done()).done()
+        return match try i.ask_person(req, g, "Use {tool} on {place}", kind, action) {
+            some(refused) => {
+                if act > 0 {
+                    _ = i.code_acts.remove(act)
+                    let (status, why) = how_it_went(refused.copy())
+                    i.settle(act, status, why)
+                }
+                some(json_response(200, without(refused, "loom_rule")))
+            },
+            none => none,
+        }
+    }
+
+    // Where Code Mode's Deno is: in the instance's acp/ folder, which members'
+    // sandboxes see too, at the same path.
+    fn deno_folder(i: Instance) -> String ! Error {
+        return "{try fs.absolute(i.data.copy())}/acp/.deno/{codemode.DENO_VERSION}"
+    }
+
+    // GET /api/mcp/deno: where Deno is, for a script. The first time, it's
+    // fetched on the installer's thread, and the request waits for it.
+    fn deno_for(i: mut Instance, req: Request) -> Response? ! Error {
+        let folder = try i.deno_folder()
+        let program = if os() == "windows" { "{folder}/deno.exe" } else { "{folder}/deno" }
+        if fs.exists(program.copy()) { return some(json_response(200, Obj.new().s("path", program).done())) }
+        let how = codemode.deno_release(installer.platform()) else {
+            return some(json_response(200, Obj.new().s("error", "Deno has no build for this computer, {installer.platform()}").done()))
+        }
+        i.deno_waiters.push(req.copy())
+        if i.deno_job == 0 {
+            i.next_job += 1
+            i.deno_job = i.next_job
+            i.install_to.send(installer.Job { id: i.deno_job, work: installer.Work.Install(how, folder) })
+        }
+        return none
     }
 
     // The agent `key` names, by id or by name, among `user`'s.
@@ -5705,6 +5802,19 @@ impl Instance {
             try i.slow_cmd(Waiter { socket: none, id: a.call.copy() }, user, name, at(a.action.copy(), "args"))
             return
         }
+        // A script's call to an MCP server (PLAN.md, "Code Mode"): `loom mcp`
+        // makes it once it hears yes.
+        if name == "code.call" {
+            let act = int_at(at(a.action.copy(), "args"), "act") ?? 0
+            let answer = if allow { merge(tool_text(String("Your person said yes.")), Obj.new().i("act", act).done()) } else { rule_refusal("person-said-no", String("Your person said no.")) }
+            if not allow and act > 0 {
+                _ = i.code_acts.remove(act)
+                i.settle(act, String("refused"), String("person-said-no: Your person said no."))
+            }
+            i.answer_call(a.call.copy(), answer.copy())
+            try i.tool_done(user, a.call, if allow { none } else { some(String("denied")) }, answer)
+            return
+        }
         var result = rule_refusal("person-said-no", String("Your person said no."))
         if allow {
             result = match try i.command(user.copy(), by.copy(), name, at(a.action.copy(), "args")) {
@@ -6026,6 +6136,16 @@ impl Instance {
 
     // What the installer's thread finished: the registry, or an install.
     fn installed(i: mut Instance, d: installer.Done) ! Error {
+        if i.deno_job > 0 and d.id == i.deno_job {
+            i.deno_job = 0
+            let answer = if d.error.len() > 0 { Obj.new().s("error", "Deno didn't install: {d.error}").done() } else { Obj.new().s("path", str_at(d.value, "command") ?? String()).done() }
+            let waiting = i.deno_waiters.copy()
+            i.deno_waiters = List<Request>()
+            for w in waiting {
+                i.server.respond(w.copy(), json_response(200, answer.copy()))
+            }
+            return
+        }
         if let job = i.installs.remove(d.id) {
             if d.error.len() > 0 {
                 i.answer_cmd(job.waiter, Answer.Refused(String("install_failed"), "{job.name} didn't install: {d.error}"))
@@ -6293,7 +6413,7 @@ impl Instance {
             // Each new agent takes the next of the eight thread colours, unless it names one.
             let count = (try i.store.agents(user.copy())).len()
             let color = str_at(args.copy(), "color") ?? String(COLORS[count % COLORS.len()])
-            let agent = Obj.new().s("id", id).s("name", str_at(args.copy(), "name") ?? String("Agent")).s("color", color).s("acp_agent", program).s("instructions", str_at(args.copy(), "instructions") ?? String()).maybe("folder", str_at(args.copy(), "folder")).j("mcp", names_of(at(args.copy(), "mcp"))).maybe("permission", permission).maybe("busy", busy).i("revision", 1).i("at", now()).done()
+            let agent = Obj.new().s("id", id).s("name", str_at(args.copy(), "name") ?? String("Agent")).s("color", color).s("acp_agent", program).s("instructions", str_at(args.copy(), "instructions") ?? String()).maybe("folder", str_at(args.copy(), "folder")).j("mcp", names_of(at(args.copy(), "mcp"))).maybe("permission", permission).maybe("busy", busy).b("code_mode", bool_at(args.copy(), "code_mode") ?? true).i("revision", 1).i("at", now()).done()
             try i.store.put_agent(user.copy(), agent.copy(), device.copy())
             i.log(user.copy(), str_at(agent.copy(), "id") ?? String(), "agent", "Made {str_at(agent.copy(), "name") ?? String()}", device.copy())
             try i.event(user, "agent.created", Obj.new().j("agent", agent.copy()).done())
@@ -6327,6 +6447,7 @@ impl Instance {
                 o.m.insert(String("busy"), Json.Str(busy))
             }
             if let Json.Array(_) = at(args.copy(), "mcp") { o.m.insert(String("mcp"), names_of(at(args.copy(), "mcp"))) }
+            if let on = bool_at(args.copy(), "code_mode") { o.m.insert(String("code_mode"), Json.Bool(on)) }
             // Another program offers other options: what it had goes.
             var switched = false
             if let program = str_at(args.copy(), "acp_agent") {

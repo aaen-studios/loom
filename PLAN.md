@@ -284,7 +284,7 @@ What loom gives an agent when it starts a session:
 
 - `cwd`: the agent's workspace folder.
 - A system prompt built from the agent's instructions, in `append` mode, where the agent supports it. Where it doesn't, the instructions go in the folder as `AGENTS.md` or `CLAUDE.md`.
-- `mcpServers`: `loom mcp` (below), and the person's MCP servers. The agent connects to them itself, so loom needs no MCP client of its own.
+- `mcpServers`: `loom mcp` (below). In [Code Mode](#code-mode), the default, that's all, and `loom mcp` is the client of the agent's MCP servers and its person's plugins' tool servers. With Code Mode off, they're given too, and the agent connects to them itself.
 - What changes during a conversation (the time, which device you're on, a routine's context) goes in with the next prompt, never as an edit to the instructions.
 
 What comes back:
@@ -336,8 +336,20 @@ Each agent program runs as its own process. The instance reads each one on a thr
 | `list_tables`, `create_table`, `write_rows`, `query_rows`, `delete_rows`, `drop_table` | Tables every agent of the person's shares, each its owner's, with what other agents wrote marked untrusted; dropping one asks first ([Shared tables](#shared-tables)) |
 
 - **Shell, files and web fetch** come from the agent itself.
-- **MCP servers** (Acta, Cloudflare, Composio for mail and the rest) are passed to the agent, which connects to them itself.
+- **MCP servers** (Acta, Cloudflare, Composio for mail and the rest) are reached through `loom mcp` in Code Mode (below), or passed to the agent, which connects to them itself, with Code Mode off.
 - **A browser** is loom's own, below ([The agent's browser](#the-agents-browser)), so you can watch it and take over.
+
+### Code Mode
+
+An agent that's given every tool's definition fills its context with them before it has done anything, and every result passes through it, even what only goes on to the next tool. So, as Cloudflare's [Code Mode](https://blog.cloudflare.com/code-mode-mcp/) and Anthropic's [code execution with MCP](https://www.anthropic.com/engineering/code-execution-with-mcp) do it, an agent gets two tools in their place, and writes a script that calls the rest.
+
+- **`search_tools`** finds tools by words and gives each as a TypeScript signature, made from its JSON Schema, with what it does and what each argument is for: `loom.notify(args: { title: string; body: string }): Promise<any>`. Without words, it lists every tool's name.
+- **`run_code`** runs a TypeScript script. Each tool is an async function: loom's own under `loom` (`await loom.recall({query})`), the agent's MCP servers' under `mcp.<server>` (`await mcp.github.create_issue({...})`), and its person's plugins' tool servers under `plugins.<plugin>`. A name that can't be a JavaScript name has `_` for each character that can't be. A tool gives its structured content, or its text, parsed when it's JSON, and throws when it fails. Only what the script returns and what it logs with `console.log` goes back to the agent, so it can read a whole document, pick out three lines and pass on only those.
+- **The script runs in Deno with no permissions:** no network, no files, no environment and no programs, and no npm or remote imports. Its only way out is its standard output, where each call goes to `loom mcp` as a line of JSON and is answered on its standard input. So a key never reaches the script, or the model: the MCP servers get their settings and secrets, as before, and the script only gets what they answer. A small prelude, written by `loom mcp` from Calx (`server/codemode.calx`), makes `loom`, `mcp` and `plugins` and the bridge; loom's own code stays Calx.
+- **Deno is fetched on first use**, as agent programs are: the instance downloads a pinned release of `denoland/deno` for its machine into `acp/.deno/<version>/`, checks its SHA-256, and unpacks it. The first script waits for it. Members' sandboxes see `acp/` read-only at the same path, so a member's scripts run in Deno inside their sandbox, with their MCP servers.
+- **Approvals still ask.** Loom's own tools keep their own rules, as when called plainly. A call to an MCP server's or a plugin's tool is put to the agent's permission mode as the agent program's own request would be, of kind `read` for one marked `readOnlyHint` and `other` for the rest: one the mode allows goes at once, and otherwise the person is asked, as with any approval, while the script waits. A no throws in the script. Each call that isn't read-only is in the activity log, with what came of it.
+- **Limits:** 60 seconds of the script's own time, or up to 300 when it asks, with time spent waiting on a tool (the person's yes, another agent's reply) not counted; 100 tool calls; 20,000 characters of what it logs and returns, cut beyond; 512 MB of memory; a script of 200 KB.
+- **On for every agent**, with a switch for each (`code_mode` on the agent) back to plain tools, where the agent gets every tool's definition and its servers as before. Calling one of loom's tools by its own name still works in Code Mode.
 
 ## Agents that do things
 

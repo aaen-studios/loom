@@ -1,0 +1,106 @@
+module tests.fake_mcp.main
+
+// A fake MCP server, for testing Code Mode (PLAN.md, "Code Mode") without a
+// real one. It speaks MCP over standard input and output, one message a line,
+// and offers three tools:
+//
+//     echo {text}         gives {said: text} as structured content; only reads
+//     add {a, b}          gives a + b, whole numbers, as text; changes something, so it asks
+//     key_length          says how long its FAKE_KEY environment variable is,
+//                         so a test sees the key reached the server, not the script
+//
+// It ends when its input does. It needs only the standard library, since loom
+// mcp starts it from an agent's folder.
+//
+//     calx tests/fake_mcp/main.calx
+import std.env
+import std.io
+import std.json.{Json, parse}
+
+fn text(s: str) -> Json {
+    return Json.Str(String(s))
+}
+
+fn object(pairs: List<(str, Json)>) -> Json {
+    var m = LinkedMap<String, Json>()
+    for (k, v) in pairs {
+        m.insert(String(k), v.copy())
+    }
+    return Json.Object(m)
+}
+
+fn schema(props: List<(str, str, str)>, required: List<str>) -> Json {
+    var m = LinkedMap<String, Json>()
+    for (name, kind, about) in props {
+        m.insert(String(name), object([("type", text(kind)), ("description", text(about))]))
+    }
+    var names = List<Json>()
+    for r in required {
+        names.push(text(r))
+    }
+    return object([("type", text("object")), ("properties", Json.Object(m)), ("required", Json.Array(names))])
+}
+
+fn tool(name: str, about: str, input: Json, reads: bool) -> Json {
+    return object([("name", text(name)), ("description", text(about)), ("inputSchema", input.copy()), ("annotations", object([("readOnlyHint", Json.Bool(reads))]))])
+}
+
+fn tools() -> Json {
+    let echo = tool("echo", "Says the text back.", schema([("text", "string", "What to say back.")], ["text"]), true)
+    let add = tool("add", "Adds two numbers, and keeps the sum.", schema([("a", "integer", "The first."), ("b", "integer", "The second.")], ["a", "b"]), false)
+    let key = tool("key_length", "Says how long the server's key is.", schema(List<(str, str, str)>(), List<str>()), true)
+    return object([("tools", Json.Array([echo, add, key]))])
+}
+
+fn content(said: String) -> Json {
+    return Json.Array([object([("type", text("text")), ("text", Json.Str(said.copy()))])])
+}
+
+fn number(j: Json) -> i64 {
+    return match j {
+        Json.Int(n) => n,
+        _ => 0,
+    }
+}
+
+fn call(params: Json) -> Json {
+    let name = (params.get(String("name")) ?? Json.Null).as_str() ?? String()
+    let args = params.get(String("arguments")) ?? Json.Null
+    if name == "echo" {
+        let said = (args.get(String("text")) ?? Json.Null).as_str() ?? String()
+        return object([("content", content(said.copy())), ("structuredContent", object([("said", Json.Str(said))]))])
+    }
+    if name == "add" {
+        let sum = number(args.get(String("a")) ?? Json.Null) + number(args.get(String("b")) ?? Json.Null)
+        return object([("content", content("{sum}"))])
+    }
+    if name == "key_length" {
+        let key = env.variable(String("FAKE_KEY")) ?? String()
+        return object([("content", content("{key.len()}"))])
+    }
+    return object([("content", content("no tool {name}")), ("isError", Json.Bool(true))])
+}
+
+fn main() {
+    var input = io.Lines()
+    while let line = input.next() {
+        let m = match parse(line.copy()) {
+            ok(j) => j,
+            err(_) => continue,
+        }
+        let id = m.get(String("id")) else continue
+        let method = (m.get(String("method")) ?? Json.Null).as_str() ?? String()
+        let params = m.get(String("params")) ?? Json.Null
+        let result = if method == "initialize" {
+            object([("protocolVersion", text("2025-06-18")), ("capabilities", object([("tools", object(List<(str, Json)>()))])), ("serverInfo", object([("name", text("fake")), ("version", text("1"))]))])
+        } else if method == "tools/list" {
+            tools()
+        } else if method == "tools/call" {
+            call(params)
+        } else {
+            object(List<(str, Json)>())
+        }
+        println("{object([("jsonrpc", text("2.0")), ("id", id), ("result", result)])}")
+        io.flush()
+    }
+}

@@ -35,7 +35,7 @@ fn say(app: mut App, conversation: String, cid: str, text: String) -> String ! E
 }
 
 fn agent(app: mut App, id: str, name: str) -> String ! Error {
-    let made = try app.cmd(id, "agent.create", Obj.new().s("name", String(name)).s("acp_agent", String("fake")).s("instructions", String("You are a test.")).done())
+    let made = try app.cmd(id, "agent.create", Obj.new().s("name", String(name)).s("acp_agent", String("fake")).s("instructions", String("You are a test.")).b("code_mode", false).done())
     return str_at(at(at(made, "value"), "agent"), "id") ?? String()
 }
 
