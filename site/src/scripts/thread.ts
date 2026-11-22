@@ -267,8 +267,9 @@ const threads = new WeakMap<SVGSVGElement, Thread>();
 export const threadOf = (svg: Element | null) => (svg ? threads.get(svg as SVGSVGElement) : undefined);
 
 // ---------------------------------------------------------------------------------------------
-// A server's ball of yarn (thread.rs, yarn): a soft ball in a pale tint with four strands of the
-// tint wound round it, each tilted its own way by a number from the server's name.
+// A server's ball of yarn (thread.rs, yarn), at rest as a connected one is: a soft ball in a pale
+// tint with four strands of the tint wound round it, each tilted its own way by a number from the
+// server's name.
 
 const MASK = (1n << 64n) - 1n;
 const YARN_COLORS = ['periwinkle', 'apricot', 'mint', 'pink', 'sky', 'gold', 'lavender'];
@@ -321,10 +322,6 @@ export function yarnsIn(root: ParentNode = document) {
 		wound.setAttribute('d', strands);
 		wound.setAttribute('fill', 'none');
 		wound.setAttribute('stroke-width', String(line));
-		// While its server connects, the strands turn round the ball's middle (.turning).
-		wound.classList.add('strands');
-		wound.style.transformOrigin = `${c}px ${c}px`;
-		wound.style.transformBox = 'view-box';
 		// Pale tint on the sidebar's colour, as thread.rs's mix(tint, side, 0.78).
 		ball.style.fill = `color-mix(in srgb, var(--thread-${color}) 22%, var(--side))`;
 		wound.style.stroke = `var(--thread-${color})`;

@@ -8,9 +8,11 @@ The guides are in [`docs/`](docs/): running loom, agents and keys, people, phone
 
 | Page | What it is |
 |---|---|
-| `/` | The wordmark with the agents' threads woven through it, the downloads, a live copy of the desktop app, and what loom does |
+| `/` | The wordmark with the agents' threads behind it, the downloads, a live copy of the desktop app, and what loom does |
 | `/download/` | The Windows app, and the server for Linux, Docker, or as one program for Linux, macOS and Windows |
 | `/changelog/` | Every release's notes, from GitHub's releases |
+| `/changelog.xml` | The same as an Atom feed |
+| `/llms.txt` | What loom is, for AI assistants and search |
 | `/404.html` | A page that isn't there |
 
 The Mac and iPhone apps go on the download page once they ship.
@@ -22,9 +24,12 @@ It's [Astro](https://astro.build), with every page drawn by hand, built to plain
 - **The tokens** come from [`design/generated/tokens.css`](../design/generated/tokens.css), made from `design/tokens.toml`, so a change to the design changes the site with it. Light is the main look; the footer's switch picks dark, or the system's.
 - **The fonts** are Geist and Geist Mono, from the `@fontsource-variable` packages, served by the site itself.
 - **The threads** are [`src/scripts/thread.ts`](src/scripts/thread.ts), a port of the app's `desktop/src/thread.rs`: the same moods (idle, thinking, writing, a tool, waiting, failed), easing and snap, and the servers' yarn drawn from their names. Hovering one plucks it.
-- **The weave** on the first screen is [`src/scripts/weave.ts`](src/scripts/weave.ts), a port of the app's `weave` and `weave_over`: the threads come in from the left, pass over and under the letters of "loom", and gather into one as the page scrolls on.
+- **The threads behind the wordmark** are [`src/scripts/hero.ts`](src/scripts/hero.ts), drawn as the app's `weave` draws them: they come in from the left as one cord, which comes apart behind the word into its seven colours, and then they drift slowly. They show through the letters' holes.
 - **The live copy of the app** is [`src/components/AppDemo.astro`](src/components/AppDemo.astro), played by [`src/scripts/demo.ts`](src/scripts/demo.ts): its sizes, colours and words are the app's (`desktop/src/app.rs`), so when the app's look or wording changes, it changes here too. Its approval answers a click.
-- **The releases** are read from GitHub's API once per build ([`src/lib/releases.mjs`](src/lib/releases.mjs)). A build for the web server fails without them, which leaves the live site as it was; a local one carries on with none. The download links are the newest release's (`releases/latest/download/…`), so they stay right between builds.
+- **The Brains and Rules panels** are copies of those settings pages (`desktop/src/app.rs`, `desktop/src/rules.rs`), with the rules and What if's answers in the server's own words (`server/rules.calx`, `server/instance.calx`). The brains are the ACP Registry's own, with their names, versions, descriptions and icons, read once per build ([`src/lib/registry.mjs`](src/lib/registry.mjs)).
+- **The releases** are read from GitHub's API once per build ([`src/lib/releases.mjs`](src/lib/releases.mjs)). A build for the web server fails without them or the registry, which leaves the live site as it was; a local one carries on without. The download links are the newest release's (`releases/latest/download/…`), so they stay right between builds.
+- **Search engines** get each page's title and description, link previews, structured data (the app, its newest version and downloads, and where each page sits), the sitemap with when each page was built, and the releases' feed.
+- **No scrollbar.** When nobody has scrolled a few seconds after the page opens, an arrow at the bottom says there's more ([`src/components/Nudge.astro`](src/components/Nudge.astro)).
 - **Motion** stops off screen and in a hidden tab, and holds still with reduced motion.
 
 ## Running it

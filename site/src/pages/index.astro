@@ -7,21 +7,28 @@ import Command from '../components/Command.astro';
 import Get from '../components/Get.astro';
 import Knot from '../components/Knot.astro';
 import { INSTALL } from '../lib/site.mjs';
+import { brains } from '../lib/registry.mjs';
 
-// The Brains page: the programs installed, and the registry's to install. When the panel comes into
-// view, OpenCode installs and joins the others.
-const mine = ['Claude', 'Codex'];
-const registry = ['OpenCode', 'Goose', 'Gemini CLI'];
+// The Brains page as the app draws it (desktop/src/app.rs, programs_page), with the ACP Registry's
+// own names, versions, descriptions and icons. When the panel comes into view, the first card
+// installs and joins Your brains, and the next card in the registry takes its place.
+const MINE = ['claude-acp', 'codex-acp'];
+const CARDS = ['opencode', 'gemini', 'github-copilot-cli', 'goose', 'cursor'];
+const listed = await brains([...MINE, ...CARDS]);
+const mine = listed.filter((b) => MINE.includes(b.id)).map((b) => ({ ...b, settings: b.id === 'claude-acp' ? '1 setting' : 'No settings' }));
+const cards = listed.filter((b) => CARDS.includes(b.id));
 
+// The Rules page as the app draws it (desktop/src/rules.rs), each rule in the server's own words
+// (server/rules.calx, said).
 const rules = [
-	{ what: 'git push *', code: true, says: 'Ask' },
-	{ what: '~/.ssh/**', code: true, says: 'Deny' },
-	{ what: 'github.com', code: true, says: 'Allow' },
-	{ what: 'Started by a webhook', code: false, says: 'Ask' },
+	{ said: 'Ask before commands like git push *', then: 'Asks you' },
+	{ said: 'Deny the path ~/.ssh/**', then: 'Denies' },
+	{ said: 'Allow the site github.com', then: 'Allows' },
 ];
+const ON = ['Command', 'Path', 'Site', 'Tool'];
+const STARTERS = ['You', 'An agent', 'Routine', 'Webhook', 'Script'];
 
-// Each server's yarn is drawn from its name, as the app draws it. The last one connects when the
-// panel comes into view.
+// Each server's yarn is drawn from its name, as the app draws it.
 const servers = ['This computer', 'loom.example.com', 'loom.acme.dev'];
 
 // Each with an agent's thread, which works while the item is hovered.
@@ -35,18 +42,19 @@ const more = [
 ];
 ---
 
-<Base description="loom is a self-hostable agent app. Chat with your own AI agents from your PC; they work on your server, or on your PC if you don't want one.">
+<Base description="loom is a self-hostable agent app. Chat with your own AI agents, on Claude, Codex or any ACP agent program, working on your server or on your PC. Open source.">
 	<section class="hero">
 		<div class="wrap">
 			<div class="mark">
-				<svg class="band under" aria-hidden="true"></svg>
 				<h1>
-					<Knot size={64} class="hero-knot" />
-					<span class="word">loom</span>
+					<span class="wordmark">
+						<canvas class="weave" aria-hidden="true"></canvas>
+						<Knot size={64} class="hero-knot" />
+						<span class="word">loom<span class="base"></span></span>
+					</span>
+					<span class="kind">A self-hostable agent app.</span>
 				</h1>
-				<svg class="band over" aria-hidden="true"></svg>
 			</div>
-			<p class="kind">A self-hostable agent app.</p>
 			<Get />
 		</div>
 		<div class="wrap demo-wrap">
@@ -63,27 +71,45 @@ const more = [
 				</p>
 			</div>
 			<div class="visual" data-reveal>
-				<div class="panel brains">
-					<div class="panel-title">Brains</div>
-					<div class="group-label">Your brains</div>
-					<div class="group mine">
-						{
-							mine.map((p) => (
-								<div class="row">
-									<span class="row-name">{p}</span>
-								</div>
-							))
-						}
+				<div class="page brains" aria-label="The Brains page in loom's settings">
+					<div class="page-head"><span class="page-title">Brains</span></div>
+					<div class="group">
+						<div class="group-label">Your brains</div>
+						<div class="box mine">
+							{
+								mine.map((b) => (
+									<div class="row">
+										<span class="tile" style={`--icon: url(${b.icon})`} />
+										<span class="row-text">
+											<span class="row-title">{b.name}</span>
+											<span class="row-sub">Version {b.version} · {b.settings}</span>
+										</span>
+										<svg class="chevron" width="16" height="16" viewBox="0 0 24 24" aria-hidden="true">
+											<path d="M9 6l6 6-6 6" />
+										</svg>
+									</div>
+								))
+							}
+						</div>
 					</div>
-					<div class="group more-brains">
-						{
-							registry.map((p) => (
-								<div class="row" data-brain={p}>
-									<span class="row-name">{p}</span>
-									<span class="chip">Install</span>
-								</div>
-							))
-						}
+					<div class="group">
+						<div class="group-label">More brains, from the ACP Registry</div>
+						<div class="cards">
+							{
+								cards.map((b, i) => (
+									<div class="card" data-brain={b.id} data-name={b.name} data-version={b.version} data-icon={b.icon} hidden={i >= 4}>
+										<div class="card-top">
+											<span class="tile big" style={`--icon: url(${b.icon})`} />
+											<span class="btn-small">Install</span>
+										</div>
+										<span class="card-text">
+											<span class="row-title">{b.name}</span>
+											<span class="card-sub">{b.description}</span>
+										</span>
+									</div>
+								))
+							}
+						</div>
 					</div>
 				</div>
 			</div>
@@ -99,17 +125,50 @@ const more = [
 				</p>
 			</div>
 			<div class="visual" data-reveal>
-				<div class="panel rules">
-					<div class="panel-title">Rules</div>
+				<div class="page rules" aria-label="The Rules page in loom's settings">
+					<div class="page-head">
+						<span class="page-title">Rules</span>
+						<span class="btn-small">New rule</span>
+					</div>
 					<div class="group">
-						{
-							rules.map((r, i) => (
-								<div class="row" style={`--i: ${i}`}>
-									<span class="row-name">{r.code ? <code>{r.what}</code> : r.what}</span>
-									<span class:list={['row-value', { bad: r.says === 'Deny' }]}>{r.says}</span>
-								</div>
-							))
-						}
+						<div class="group-label">Every agent</div>
+						<div class="box">
+							{
+								rules.map((r) => (
+									<div class="row">
+										<span class="row-text">
+											<span class="row-title">{r.said}</span>
+											<span class="row-sub">{r.then}</span>
+										</span>
+										<span class="btn-small">Remove</span>
+									</div>
+								))
+							}
+						</div>
+					</div>
+					<div class="group what-if">
+						<div class="group-label">What if</div>
+						<div class="box">
+							<div class="row">
+								<span class="row-text"><span class="row-title">On</span></span>
+								<span class="segments" data-on>{ON.map((o, i) => <span class:list={['segment', { on: i === 0 }]}>{o}</span>)}</span>
+							</div>
+							<div class="row field">
+								<span class="field-label" data-label>Command</span>
+								<span class="input" data-input><span class="typed"></span><span class="caret"></span></span>
+							</div>
+							<div class="row">
+								<span class="row-text"><span class="row-title">Started by</span></span>
+								<span class="segments" data-by>{STARTERS.map((s, i) => <span class:list={['segment', { on: i === 0 }]}>{s}</span>)}</span>
+							</div>
+							<div class="row result">
+								<span class="row-text">
+									<span class="row-title" data-verdict>What would it get?</span>
+									<span class="row-sub" data-why>Try an action, and see which rule or mode decides</span>
+								</span>
+								<span class="btn-small primary" data-check>Check</span>
+							</div>
+						</div>
 					</div>
 				</div>
 			</div>
@@ -127,8 +186,8 @@ const more = [
 			<div class="visual" data-reveal>
 				<div class="panel servers">
 					{
-						servers.map((s, i) => (
-							<div class="server-row" data-last={i === servers.length - 1 ? '' : undefined}>
+						servers.map((s) => (
+							<div class="server-row">
 								<svg data-yarn={s} width="32" height="32" aria-hidden="true" />
 								<span class="server-text">
 									<b>{s}</b>
@@ -175,43 +234,23 @@ const more = [
 		padding-top: 72px;
 		text-align: center;
 	}
-	/* The wordmark, with the agents' threads woven through it across the page: a band behind it,
-	   and the stretches that pass over its letters in front (src/scripts/weave.ts). */
-	.mark {
-		position: relative;
+	/* The heading: the wordmark, and what loom is under it. */
+	h1 {
 		display: grid;
 		justify-items: center;
-	}
-	.band {
-		position: absolute;
-		z-index: 0;
-		top: 50%;
-		left: calc(50% - 50vw);
-		width: 100vw;
-		height: 1.6em;
-		/* Centred on the letters' bodies rather than the line, a little below its middle. */
-		margin-top: -0.74em;
-		font-size: clamp(60px, 10vw, 88px);
-		overflow: visible;
-		pointer-events: none;
-	}
-	.band.over {
-		z-index: 2;
-	}
-	.mark h1 {
-		position: relative;
-		z-index: 1;
+		gap: 22px;
 	}
 	/* The knot beside the wordmark: the app's proportions, a little tighter at this size. */
-	h1 {
+	.wordmark {
+		position: relative;
 		display: inline-flex;
 		align-items: center;
 		gap: 0.3em;
-		font-size: clamp(60px, 10vw, 88px);
+		font-size: clamp(64px, 12vw, 110px);
 		letter-spacing: -0.035em;
 		line-height: 1;
 	}
-	h1 :global(.hero-knot) {
+	.wordmark :global(.hero-knot) {
 		width: 1.3em;
 		height: 1.3em;
 		/* The knot's box is mostly air above and below; it shouldn't make the line taller. */
@@ -219,11 +258,33 @@ const more = [
 		/* design/logo/README.md: large uses go down to 2.2. */
 		stroke-width: 2.2;
 	}
+	/* Where the line sits, for the 3D letters to stand on. */
+	.base {
+		display: inline-block;
+		width: 0;
+		height: 0;
+	}
+	/* The agents' threads across the page, behind the wordmark (src/scripts/hero.ts). */
+	.weave {
+		position: absolute;
+		z-index: 0;
+		left: calc(50% - 50vw);
+		top: calc(50% - 1.7em);
+		width: 100vw;
+		height: 3.4em;
+		pointer-events: none;
+	}
+	.wordmark :global(.hero-knot),
+	.word {
+		position: relative;
+		z-index: 1;
+	}
 	.kind {
-		margin-top: 18px;
 		font-size: clamp(18px, 2.4vw, 21px);
+		font-weight: var(--weight-regular);
 		color: var(--ink-2);
 		letter-spacing: -0.01em;
+		line-height: 1.4;
 	}
 	.hero :global(.get) {
 		margin-top: 32px;
@@ -259,97 +320,287 @@ const more = [
 		gap: 14px;
 	}
 
-	/* The app's settings, as it draws them: a page's title, then a group, a box of rows with what
-	   a row is on the left and its value or control on the right. */
-	.panel {
-		padding: 20px;
+	/* A page of loom's settings, as the app draws one (desktop/src/app.rs: settings_page, group, row,
+	   and the Brains page's cards), at the app's own sizes. */
+	.page {
+		display: grid;
+		gap: var(--space-xl);
+		padding: var(--space-xl);
 		border: 1px solid var(--line);
 		border-radius: 14px;
-		background: var(--side);
-	}
-	.panel-title {
-		font-size: 17px;
-		font-weight: var(--weight-semibold);
-		letter-spacing: -0.02em;
-		margin: 0 2px 14px;
-	}
-	.group {
-		border: 1px solid var(--line);
-		border-radius: var(--radius-card);
 		background: var(--bg);
-		overflow: hidden;
+		box-shadow: var(--shadow);
+		text-align: left;
 	}
-	.row {
+	.page-head {
 		display: flex;
 		align-items: center;
 		justify-content: space-between;
-		gap: 12px;
-		min-height: 50px;
-		padding: 0 16px;
-		font-size: 14px;
+		gap: var(--space-m);
+		min-height: var(--control-button);
 	}
-	.row + .row {
-		border-top: 1px solid var(--line);
+	.page-title {
+		font-size: calc(var(--size-heading) - 2px);
+		font-weight: var(--weight-semibold);
+		letter-spacing: -0.01em;
 	}
-	.row code {
-		font-size: 12.5px;
-	}
-	.row-value {
-		color: var(--ink-3);
-		font-size: 13.5px;
-	}
-	.row-value.bad {
-		color: var(--bad);
+	.group {
+		display: grid;
+		gap: var(--space-s);
 	}
 	.group-label {
-		margin: 0 4px 8px;
-		font-size: 12.5px;
+		padding: 0 var(--space-xs);
+		font-size: var(--size-caption);
 		font-weight: var(--weight-medium);
 		color: var(--ink-3);
 	}
-	.more-brains {
-		margin-top: 12px;
+	.box {
+		display: flex;
+		flex-direction: column;
+		border: 1px solid var(--line);
+		border-radius: var(--radius-card);
+		background: var(--card);
+		overflow: hidden;
 	}
-	.brains :global(.installing) {
+	.box > * + * {
+		border-top: 1px solid var(--line);
+	}
+	.row {
+		min-height: var(--control-row);
+		display: flex;
+		align-items: center;
+		gap: var(--space-m);
+		padding: calc(var(--space-s) + 2px) var(--space-l);
+	}
+	.row-text {
+		flex: 1;
+		min-width: 0;
+		display: flex;
+		flex-direction: column;
+		gap: 2px;
+	}
+	.row-title {
+		font-size: var(--size-body);
+		line-height: 1.35;
+		color: var(--ink);
+	}
+	.row-sub {
 		font-size: var(--size-caption);
+		line-height: 1.35;
 		color: var(--ink-3);
 	}
+	/* A brain's icon from the ACP Registry, drawn in the ink as the app draws it, in a square of its own. */
+	.tile {
+		--size: 34px;
+		position: relative;
+		flex: none;
+		width: var(--size);
+		height: var(--size);
+		border: 1px solid var(--line);
+		border-radius: calc(var(--radius-row) + 2px);
+		background: var(--bg);
+	}
+	.tile.big {
+		--size: 40px;
+	}
+	.tile::after {
+		content: '';
+		position: absolute;
+		inset: 25%;
+		background: var(--ink);
+		-webkit-mask: var(--icon) center / contain no-repeat;
+		mask: var(--icon) center / contain no-repeat;
+	}
+	.chevron {
+		flex: none;
+		fill: none;
+		stroke: var(--ink-3);
+		stroke-width: 2;
+		stroke-linecap: round;
+		stroke-linejoin: round;
+	}
+	.cards {
+		display: grid;
+		grid-template-columns: repeat(2, minmax(0, 1fr));
+		gap: var(--space-s);
+	}
+	.card {
+		min-width: 0;
+		display: flex;
+		flex-direction: column;
+		gap: var(--space-m);
+		padding: var(--space-l);
+		border: 1px solid var(--line);
+		border-radius: var(--radius-card);
+		background: var(--card);
+	}
+	.card[hidden] {
+		display: none;
+	}
+	.card-top {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		gap: var(--space-s);
+	}
+	.card-text {
+		display: flex;
+		flex-direction: column;
+		gap: 2px;
+	}
+	.card-text .row-title {
+		font-weight: var(--weight-medium);
+		white-space: nowrap;
+		overflow: hidden;
+		text-overflow: ellipsis;
+	}
+	.card-sub {
+		height: 32px;
+		overflow: hidden;
+		font-size: var(--size-caption);
+		line-height: 16px;
+		color: var(--ink-3);
+	}
+	.btn-small {
+		flex: none;
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		height: var(--control-button-small);
+		padding: 0 var(--space-m);
+		border: 1px solid var(--line-strong);
+		border-radius: var(--radius-button);
+		font-size: var(--size-small);
+		font-weight: var(--weight-medium);
+		color: var(--ink);
+		white-space: nowrap;
+		transition:
+			background-color 0.15s,
+			transform 0.15s;
+	}
+	.btn-small.primary {
+		border-color: transparent;
+		background: var(--button);
+		color: var(--button-ink);
+	}
+	.btn-small.pressed {
+		transform: scale(0.95);
+		background: var(--hover);
+	}
+	.btn-small.primary.pressed {
+		background: color-mix(in srgb, var(--button) 82%, var(--bg));
+	}
+	.brains :global(.installing) {
+		flex: none;
+		font-size: var(--size-caption);
+		color: var(--ink-3);
+		white-space: nowrap;
+	}
+	/* The brain that installed comes into Your brains, and the cards move up into its place. */
 	.row.arrived {
-		animation: arrive 0.45s cubic-bezier(0.2, 0.7, 0.3, 1) both;
+		animation: arrive 0.5s cubic-bezier(0.2, 0.7, 0.3, 1) both;
 	}
 	@keyframes arrive {
 		from {
 			opacity: 0;
-			transform: translateY(8px);
+			transform: translateY(6px);
 		}
 	}
-	.row.going {
+	.card.leaving {
 		transition:
-			opacity 0.3s,
-			transform 0.3s;
+			opacity 0.25s,
+			transform 0.25s;
 		opacity: 0;
-		transform: translateY(-6px);
+		transform: scale(0.97);
 	}
-	/* The rules come in one after another. */
-	.rules .row {
-		transition:
-			opacity 0.5s cubic-bezier(0.2, 0.7, 0.3, 1),
-			transform 0.5s cubic-bezier(0.2, 0.7, 0.3, 1);
-		transition-delay: calc(0.25s + var(--i) * 0.12s);
+
+	/* What if: a choice of a few side by side, a field, and what the action would get. */
+	.segments {
+		flex: none;
+		display: flex;
+		gap: 2px;
+		padding: 2px;
+		border-radius: calc(var(--radius-row) + 2px);
+		background: var(--raised-2);
 	}
-	:global(.js) [data-reveal]:not(.shown) .rules .row {
-		opacity: 0;
-		transform: translateX(-8px);
-	}
-	.chip {
-		display: inline-flex;
+	.segment {
+		display: flex;
 		align-items: center;
-		height: 28px;
-		padding: 0 12px;
-		border-radius: var(--radius-button);
-		border: 1px solid var(--line-strong);
-		font-size: 13px;
+		height: var(--control-segment);
+		padding: 0 var(--space-m);
+		border-radius: var(--radius-row);
+		font-size: var(--size-small);
+		color: var(--ink-2);
+		white-space: nowrap;
+		transition:
+			background-color 0.2s,
+			color 0.2s,
+			box-shadow 0.2s;
+	}
+	.segment.on {
+		background: var(--picked);
+		color: var(--ink);
 		font-weight: var(--weight-medium);
+		box-shadow: 0 1px 2px rgb(0 0 0 / 0.1);
+	}
+	.field-label {
+		flex: none;
+		width: var(--layout-field-label);
+		font-size: var(--size-body);
+	}
+	.input {
+		flex: 1;
+		min-width: 0;
+		display: flex;
+		align-items: center;
+		height: var(--control-button-small);
+		padding: 0 10px;
+		border: 1px solid var(--line-strong);
+		border-radius: var(--radius-input);
+		background: var(--bg);
+		font-size: var(--size-small);
+		white-space: nowrap;
+		overflow: hidden;
+	}
+	.caret {
+		width: 1px;
+		height: 15px;
+		margin-left: 1px;
+		background: var(--ink);
+		opacity: 0;
+	}
+	.input.typing .caret {
+		opacity: 1;
+	}
+	/* Where a row's choices don't fit beside its name, they go under it, and scroll if they must. */
+	@media (max-width: 560px) {
+		.row:has(.segments) {
+			flex-wrap: wrap;
+			row-gap: var(--space-s);
+		}
+		.row:has(.segments) .row-text {
+			flex-basis: 100%;
+		}
+		.segments {
+			max-width: 100%;
+			overflow-x: auto;
+			scrollbar-width: none;
+		}
+	}
+	.result .row-title {
+		font-weight: var(--weight-medium);
+	}
+	.result .row-text {
+		transition: opacity 0.2s;
+	}
+	.result.asking .row-text {
+		opacity: 0.4;
+	}
+	/* The servers in the app's server popup, each with its ball of yarn. */
+	.panel {
+		border: 1px solid var(--line);
+		border-radius: 14px;
+		background: var(--side);
 	}
 
 	.servers {
@@ -511,41 +762,119 @@ const more = [
 		else el.addEventListener('shown', play, { once: true });
 	};
 
-	// Brains: OpenCode installs, and joins the brains already there.
-	const brains = document.querySelector('.brains');
+	const ease = 'cubic-bezier(0.2, 0.7, 0.3, 1)';
+
+	// Brains: the first card installs and joins Your brains, as the app lists it once it's in, and the
+	// cards move up into its place, the next in the registry coming in last.
+	const brains = document.querySelector<HTMLElement>('.brains');
 	whenShown(brains?.closest('[data-reveal]') ?? null, async () => {
-		const row = brains?.querySelector<HTMLElement>('[data-brain="OpenCode"]');
 		const mine = brains?.querySelector('.mine');
-		const chip = row?.querySelector('.chip');
-		if (!row || !mine || !chip || still) return;
-		await pause(900);
+		const all = [...(brains?.querySelectorAll<HTMLElement>('.card') ?? [])];
+		const card = all[0];
+		const next = all.find((c) => c.hidden);
+		const button = card?.querySelector('.btn-small');
+		const model = mine?.firstElementChild;
+		if (!mine || !card || !button || !model || still) return;
+		await pause(1100);
+		button.classList.add('pressed');
+		await pause(160);
 		const busy = document.createElement('span');
 		busy.className = 'installing';
 		busy.textContent = 'Installing…';
-		chip.replaceWith(busy);
-		await pause(2200);
-		row.classList.add('going');
-		await pause(300);
-		busy.remove();
-		row.classList.remove('going');
+		button.replaceWith(busy);
+		await pause(2400);
+		const row = model.cloneNode(true) as HTMLElement;
+		row.querySelector('.tile')?.setAttribute('style', `--icon: url(${card.dataset.icon})`);
+		const title = row.querySelector('.row-title');
+		const sub = row.querySelector('.row-sub');
+		if (title) title.textContent = card.dataset.name ?? '';
+		if (sub) sub.textContent = `Version ${card.dataset.version} · No settings`;
 		row.classList.add('arrived');
+		const others = all.filter((c) => c !== card && !c.hidden);
+		card.classList.add('leaving');
+		await pause(250);
+		const before = new Map(others.map((c) => [c, c.getBoundingClientRect()]));
+		card.remove();
 		mine.append(row);
+		if (next) next.hidden = false;
+		for (const c of others) {
+			const a = before.get(c);
+			const b = c.getBoundingClientRect();
+			if (a) c.animate([{ transform: `translate(${a.left - b.left}px, ${a.top - b.top}px)` }, { transform: 'none' }], { duration: 450, easing: ease });
+		}
+		next?.animate([{ opacity: 0, transform: 'translateY(6px)' }, { opacity: 1, transform: 'none' }], { duration: 450, delay: 150, easing: ease, fill: 'backwards' });
 	});
 
-	// Servers: the last one connects, its strands turning until it's in.
-	const servers = document.querySelector('.servers');
-	yarnsIn(servers ?? undefined);
-	const last = servers?.querySelector<HTMLElement>('[data-last]');
-	const state = last?.querySelector('small');
-	if (last && state && !still) {
-		last.classList.add('turning');
-		state.textContent = 'Connecting…';
-		whenShown(servers?.closest('[data-reveal]') ?? null, async () => {
-			await pause(2400);
-			last.classList.remove('turning');
-			state.textContent = 'Connected';
-		});
+	// Rules: What if tries an action at a time and says what it would get, in the server's own words
+	// (server/instance.calx, rule.check), going round while it's on screen.
+	const rules = document.querySelector<HTMLElement>('.rules');
+	const examples = [
+		{ on: 0, label: 'Command', text: 'git push origin main', by: 1, verdict: 'Asks you', why: 'Asks, by your rule "Ask before commands like git push *".' },
+		{ on: 1, label: 'Path', text: '~/.ssh/id_ed25519', by: 1, verdict: 'Denied', why: 'Denied by your rule "Deny the path ~/.ssh/**".' },
+		{ on: 2, label: 'Site', text: 'api.github.com', by: 2, verdict: 'Allowed', why: 'Allowed by your rule "Allow the site github.com".' },
+	];
+	if (rules) {
+		const pick = (list: HTMLElement | null, i: number) => list?.querySelectorAll('.segment').forEach((s, j) => s.classList.toggle('on', i === j));
+		const on = rules.querySelector<HTMLElement>('[data-on]');
+		const by = rules.querySelector<HTMLElement>('[data-by]');
+		const label = rules.querySelector('[data-label]');
+		const input = rules.querySelector<HTMLElement>('[data-input]');
+		const typed = rules.querySelector('.typed');
+		const check = rules.querySelector('[data-check]');
+		const result = rules.querySelector('.result');
+		const verdict = rules.querySelector('[data-verdict]');
+		const why = rules.querySelector('[data-why]');
+		const show = (e: (typeof examples)[number]) => {
+			pick(on, e.on);
+			pick(by, e.by);
+			if (label) label.textContent = e.label;
+			if (typed) typed.textContent = e.text;
+			if (verdict) verdict.textContent = e.verdict;
+			if (why) why.textContent = e.why;
+		};
+		if (still) show(examples[0]);
+		else {
+			let seen = false;
+			let wake = () => {};
+			new IntersectionObserver(([e]) => {
+				seen = e.isIntersecting;
+				if (seen) wake();
+			}).observe(rules);
+			const onScreen = () => (seen ? Promise.resolve() : new Promise<void>((done) => (wake = done)));
+			(async () => {
+				for (let i = 0; ; i = (i + 1) % examples.length) {
+					await onScreen();
+					const e = examples[i];
+					await pause(i === 0 ? 700 : 400);
+					pick(on, e.on);
+					if (label) label.textContent = e.label;
+					if (typed) typed.textContent = '';
+					input?.classList.add('typing');
+					await pause(350);
+					for (const ch of e.text) {
+						if (typed) typed.textContent += ch;
+						await pause(45 + Math.random() * 40);
+					}
+					input?.classList.remove('typing');
+					await pause(250);
+					pick(by, e.by);
+					await pause(450);
+					check?.classList.add('pressed');
+					result?.classList.add('asking');
+					await pause(160);
+					check?.classList.remove('pressed');
+					await pause(300);
+					if (verdict) verdict.textContent = e.verdict;
+					if (why) why.textContent = e.why;
+					result?.classList.remove('asking');
+					await pause(3200);
+				}
+			})();
+		}
 	}
+
+	// Servers: each with its ball of yarn, at rest while it's connected.
+	yarnsIn(document.querySelector('.servers') ?? undefined);
 
 	// The grid: each item's thread works while it's hovered, and they all twang as the grid arrives.
 	const items = [...document.querySelectorAll<HTMLElement>('.grid li')];
@@ -560,9 +889,8 @@ const more = [
 </script>
 
 <script>
-	import { weave } from '../scripts/weave';
-	const under = document.querySelector<SVGSVGElement>('.hero .band.under');
-	const over = document.querySelector<SVGSVGElement>('.hero .band.over');
-	const word = document.querySelector<HTMLElement>('.hero h1 .word');
-	if (under && over && word) weave(under, over, word, ['periwinkle', 'mint', 'apricot', 'pink', 'sky', 'gold', 'lavender']);
+	import { startHero } from '../scripts/hero';
+	const mark = document.querySelector<HTMLElement>('.hero .mark');
+	const canvas = mark?.querySelector<HTMLCanvasElement>('canvas.weave');
+	if (mark && canvas) startHero(mark, canvas);
 </script>

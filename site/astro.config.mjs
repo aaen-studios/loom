@@ -13,7 +13,13 @@ export default defineConfig({
 	// /download/ rather than /download, as the web server sends every page.
 	trailingSlash: 'always',
 	devToolbar: { enabled: false },
-	integrations: [sitemap({ filter: (page) => !page.includes('/404') })],
+	// Every page, with when it was last built: the site is built again whenever what's on it changes.
+	integrations: [
+		sitemap({
+			filter: (page) => !page.includes('/404'),
+			serialize: (item) => ({ ...item, lastmod: new Date().toISOString() }),
+		}),
+	],
 	vite: {
 		// The tokens and the logo live in design/, outside this folder.
 		server: { fs: { allow: [fileURLToPath(new URL('..', import.meta.url))] } },

@@ -9,15 +9,23 @@
 	--text: 640px;
 	--gutter: 24px;
 	--shadow: 0 1px 2px rgb(0 0 0 / 0.04), 0 12px 40px -12px rgb(0 0 0 / 0.18);
+	/* As the app has them: a group's box a step off the page, and the picked one of a few standing
+	   up off its track (desktop/src/app.rs, card_fill and segment). */
+	--card: var(--side);
+	--picked: var(--bg);
 }
 
 @media (prefers-color-scheme: dark) {
 	:root:not([data-theme='light']) {
 		--shadow: 0 1px 2px rgb(0 0 0 / 0.5), 0 24px 64px -16px rgb(0 0 0 / 0.7);
+		--card: var(--raised);
+		--picked: var(--line-strong);
 	}
 }
 :root[data-theme='dark'] {
 	--shadow: 0 1px 2px rgb(0 0 0 / 0.5), 0 24px 64px -16px rgb(0 0 0 / 0.7);
+	--card: var(--raised);
+	--picked: var(--line-strong);
 }
 
 @media (max-width: 640px) {
@@ -49,6 +57,15 @@ body {
 	-moz-osx-font-smoothing: grayscale;
 	text-rendering: optimizeLegibility;
 	overflow-x: hidden;
+}
+
+/* No scrollbar: the page scrolls as ever, and the nudge (src/components/Nudge.astro) says there's
+   more when nobody has scrolled yet. */
+html {
+	scrollbar-width: none;
+}
+html::-webkit-scrollbar {
+	display: none;
 }
 
 h1,
@@ -195,16 +212,6 @@ svg {
 .js [data-reveal].shown {
 	opacity: 1;
 	transform: none;
-}
-
-/* A server's yarn while it connects: its strands turn (desktop/src/thread.rs, 1.6 rad/s). */
-.turning .strands {
-	animation: yarn-turn 3.93s linear infinite;
-}
-@keyframes yarn-turn {
-	to {
-		transform: rotate(1turn);
-	}
 }
 
 @media (prefers-reduced-motion: reduce) {
