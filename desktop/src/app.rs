@@ -221,6 +221,10 @@ pub struct Loom {
     /// the next draw, which has the window: a file's `[name]` as it's attached and
     /// taken off.
     composer_edits: Vec<(bool, String)>,
+    /// What's written and attached but not sent in each chat the person left, by
+    /// `draft_key`, and the chat the composer holds now.
+    drafts: HashMap<String, (String, Vec<String>)>,
+    draft_for: String,
     server_in: Entity<InputState>,
     user_in: Entity<InputState>,
     pass_in: Entity<InputState>,
@@ -972,6 +976,8 @@ ACTA_KEY=secret:ACTA_KEY",
             scroller,
             composer,
             composer_edits: Vec::new(),
+            drafts: HashMap::new(),
+            draft_for: String::new(),
             server_in,
             user_in,
             pass_in,
@@ -1952,6 +1958,37 @@ ACTA_KEY=secret:ACTA_KEY",
             self.composer_edits.push((false, model::file_mark(&a.name)));
         }
         self.model.unattach(id);
+        cx.notify();
+    }
+
+    /// Which chat the composer writes in: the agent's, or a task or branch of it, on
+    /// this server.
+    fn draft_key(&self) -> String {
+        let agent = self.model.selected.clone().unwrap_or_default();
+        let task = self.model.task_open().map(|t| t.id.clone());
+        let side = task
+            .or_else(|| self.model.open_branch.clone())
+            .unwrap_or_default();
+        format!("{}/{agent}/{side}", self.here)
+    }
+
+    /// Once the person opens another chat, keeps what they'd written and attached in
+    /// the one they left, and puts back what they'd left in this one.
+    fn swap_draft(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let key = self.draft_key();
+        if key == self.draft_for {
+            return;
+        }
+        let text = self.composer.read(cx).value().to_string();
+        let files = self.model.park_attachments();
+        let left = std::mem::replace(&mut self.draft_for, key.clone());
+        if !text.trim().is_empty() || !files.is_empty() {
+            self.drafts.insert(left, (text, files));
+        }
+        let (text, files) = self.drafts.remove(&key).unwrap_or_default();
+        self.model.unpark_attachments(&files);
+        self.composer
+            .update(cx, |c, cx| c.set_value(text, window, cx));
         cx.notify();
     }
 
@@ -14184,6 +14221,7 @@ impl Render for Loom {
             _ => crate::perf::step("chat", || self.chat(window, cx)),
         };
         self.sync_panel(window, cx);
+        self.swap_draft(window, cx);
         self.edit_composer(window, cx);
         self.sync_server_name(window, cx);
         let ww = window.viewport_size().width.as_f32();
