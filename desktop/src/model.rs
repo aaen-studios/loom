@@ -1067,7 +1067,11 @@ impl Block {
     fn of(b: &Value) -> Block {
         let kind = s(b, "kind");
         Block {
-            text: s(b, "text"),
+            text: if kind == "plan" {
+                plan_text(b)
+            } else {
+                s(b, "text")
+            },
             call: b.get("call").and_then(Value::as_str).map(str::to_string),
             file: (kind == "file").then(|| FileRef::of(b)),
             card: if kind == "card" {
@@ -1078,6 +1082,38 @@ impl Block {
             kind,
         }
     }
+}
+
+/// A title as it reads after other words: "Clean out the build" goes on "Wants to clean
+/// out the build". A first word in capitals, such as "README" or "PR", stays as it is.
+fn mid_sentence(title: &str) -> String {
+    let mut c = title.chars();
+    match (c.next(), c.next()) {
+        (Some(first), Some(second)) if first.is_uppercase() && !second.is_uppercase() => {
+            first.to_lowercase().chain(title.chars().skip(1)).collect()
+        }
+        _ => title.to_string(),
+    }
+}
+
+/// A plan's entries (ACP's `plan`, kept in its block as `entries`), a line each, starting
+/// with how far it is: `done`, `doing` or `todo`, then a space and what it is.
+fn plan_text(b: &Value) -> String {
+    let Some(entries) = b.get("entries").and_then(Value::as_array) else {
+        return s(b, "text");
+    };
+    entries
+        .iter()
+        .map(|e| {
+            let state = match s(e, "status").as_str() {
+                "completed" => "done",
+                "in_progress" => "doing",
+                _ => "todo",
+            };
+            format!("{state} {}", s(e, "content").trim())
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// A card an agent put in its reply with show_card (PLAN.md, "Cards in the chat"),
@@ -1512,7 +1548,10 @@ pub struct Model {
     pub made_agent: Option<String>,
     /// The instance refused to make the agent asked for last.
     pub make_failed: bool,
+    /// What went wrong, for the window to show.
     pub notices: Vec<String>,
+    /// Good news for the window to show, such as that something was done.
+    pub said: Vec<String>,
     /// Where the instance is moving to, while the owner's instance.move is under way.
     pub moving: Option<String>,
     /// Files for the next message.
@@ -2197,7 +2236,7 @@ impl Model {
             "core.file" => self.file_came(f),
             "core.moved" => {
                 self.moving = None;
-                self.notices.push(format!(
+                self.said.push(format!(
                     "Your instance moved to {}. The app is connected there now.",
                     s(f, "address")
                 ));
@@ -3534,7 +3573,7 @@ impl Model {
             };
         };
         if let Some(a) = self.approvals.iter().find(|a| a.run == r.id) {
-            return format!("Wants to {}", a.title);
+            return format!("Wants to {}", mid_sentence(&a.title));
         }
         if let Some(t) = self
             .tools
@@ -4735,8 +4774,9 @@ mod tests {
         m.move_instance("https://new.example", "loom-move-1");
         m.take(&json!({"t": "core.moved", "address": "https://new.example"}));
         assert!(m.moving.is_none());
+        // Good news, said as such rather than as something that went wrong.
         assert!(m
-            .notices
+            .said
             .last()
             .unwrap()
             .contains("moved to https://new.example"));
@@ -5638,6 +5678,30 @@ mod tests {
         m.result(&json!({"t": "result", "id": f["id"], "ok": false, "error": {"code": "not_here", "message": "No sandboxes."}}));
         assert_eq!(m.notices.last().map(String::as_str), Some("No sandboxes."));
         assert!(m.dirty.contains(&List::Agents));
+    }
+
+    #[test]
+    fn a_plan_shows_its_entries_and_how_far_each_is() {
+        let b = Block::of(&json!({"kind": "plan", "entries": [
+            {"content": "Read the notes", "status": "completed", "priority": "high"},
+            {"content": " Check the files ", "status": "in_progress"},
+            {"content": "Write a summary", "status": "pending"},
+        ]}));
+        assert_eq!(
+            b.text,
+            "done Read the notes\ndoing Check the files\ntodo Write a summary"
+        );
+    }
+
+    #[test]
+    fn a_title_reads_on_after_other_words() {
+        assert_eq!(
+            mid_sentence("Clean out the old build"),
+            "clean out the old build"
+        );
+        assert_eq!(mid_sentence("README check"), "README check");
+        assert_eq!(mid_sentence("run git push"), "run git push");
+        assert_eq!(mid_sentence(""), "");
     }
 
     #[test]

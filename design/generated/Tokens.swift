@@ -73,7 +73,7 @@ enum Tokens {
         static let lineStrong: UInt32 = 0x2e2e33
         static let ink: UInt32 = 0xededee
         static let ink2: UInt32 = 0xb4b4ba
-        static let ink3: UInt32 = 0x7c7c85
+        static let ink3: UInt32 = 0x86868f
         static let button: UInt32 = 0xededee
         static let buttonInk: UInt32 = 0x0b0b0c
         static let bubble: UInt32 = 0x1c1c1f
@@ -92,7 +92,7 @@ enum Tokens {
         static let lineStrong: UInt32 = 0xdcdce0
         static let ink: UInt32 = 0x111113
         static let ink2: UInt32 = 0x4a4a52
-        static let ink3: UInt32 = 0x8a8a93
+        static let ink3: UInt32 = 0x707079
         static let button: UInt32 = 0x111113
         static let buttonInk: UInt32 = 0xffffff
         static let bubble: UInt32 = 0xf1f1f3
