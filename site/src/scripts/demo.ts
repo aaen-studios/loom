@@ -1,8 +1,13 @@
 // Plays the live copy of the app (src/components/AppDemo.astro) in a loop: a message is typed and
-// sent, the agent thinks, uses a tool, answers, asks before it deploys and waits for the yes, then
-// finishes. The moods, the sidebar's previews ("Thinking", the tool's title, "Wants to …") and the
-// wording are the app's (desktop/src/model.rs). Clicking Allow once or Deny answers the approval;
-// left alone, it's allowed after a moment.
+// sent, the agent thinks, uses a tool, writes, asks before it deploys and waits for the yes, then
+// finishes. While the turn runs, one quiet line under the reply says the step it's on; once it's
+// done, its last words are the answer and the steps before them fold under one line that opens
+// (desktop/src/model.rs, parts). The moods, the sidebar's previews ("Thinking", the tool's title,
+// "Wants to …") and the wording are the app's. Clicking Allow once, Always allow or Deny answers
+// the approval; left alone, it's allowed after a moment.
+//
+// The sidebar's control collapses it to the rail and opens it again, and a narrow window has the
+// rail, as the app's does (desktop/src/rail.rs).
 //
 // It plays only while it's on screen, and with reduced motion it shows the finished chat instead.
 import { Thread, threadsIn, yarnsIn, type Mood } from './thread';
@@ -18,6 +23,26 @@ const HELD = "Okay, I won't deploy. Main stays as it is.";
 /** A pause that ends early, with an error, when the demo is stopped. */
 class Stopped extends Error {}
 
+/** A reply's fold: its quiet line, and the steps under it, which open on a click. */
+function foldOf(reply: HTMLElement) {
+	const fold = reply.querySelector<HTMLElement>('[data-fold]')!;
+	const line = fold.querySelector<HTMLButtonElement>('.fold-line')!;
+	const words = fold.querySelector<HTMLElement>('.words')!;
+	const steps = fold.querySelector<HTMLElement>('.steps')!;
+	line.addEventListener('click', () => {
+		if (fold.classList.contains('bare')) return;
+		steps.hidden = !steps.hidden;
+		line.setAttribute('aria-expanded', String(!steps.hidden));
+		line.querySelector('.chevron')!.textContent = steps.hidden ? '›' : '⌄';
+	});
+	/** Sets the line's words; with nothing under it to open, it has no chevron. */
+	const say = (text: string) => {
+		words.textContent = text;
+		fold.classList.toggle('bare', steps.childElementCount === 0);
+	};
+	return { steps, say };
+}
+
 export function play(app: HTMLElement) {
 	const threads = threadsIn(app);
 	yarnsIn(app);
@@ -30,6 +55,7 @@ export function play(app: HTMLElement) {
 	const head = threads.find((t) => t.svg.hasAttribute('data-head'))!;
 	const msgs = app.querySelector<HTMLElement>('.msgs')!;
 	const history = [...msgs.children];
+	for (const reply of msgs.querySelectorAll<HTMLElement>('.reply')) foldOf(reply);
 	const typed = app.querySelector<HTMLElement>('.typed')!;
 	const tpl = (id: string) => (document.getElementById(id) as HTMLTemplateElement).content.firstElementChild!.cloneNode(true) as HTMLElement;
 	const preview = (agent: string, text: string, mood: Mood) => {
@@ -38,6 +64,28 @@ export function play(app: HTMLElement) {
 		if (p) p.textContent = text;
 		byAgent.get(agent)?.set(mood);
 	};
+
+	// The sidebar: collapsed by its control, and a rail anyway in a narrow window.
+	const bar = app.querySelector<HTMLButtonElement>('[data-bar]')!;
+	const narrow = matchMedia('(max-width: 860px)');
+	let collapsed = false;
+	const rail = () => {
+		const railed = collapsed || narrow.matches;
+		app.classList.toggle('railed', railed);
+		bar.setAttribute('aria-label', railed ? 'Open the sidebar' : 'Collapse the sidebar');
+	};
+	bar.addEventListener('click', () => {
+		collapsed = !app.classList.contains('railed');
+		// Opened in a narrow window, it stays open until it's collapsed again.
+		if (!collapsed && narrow.matches) {
+			app.classList.remove('railed');
+			bar.setAttribute('aria-label', 'Collapse the sidebar');
+			return;
+		}
+		rail();
+	});
+	narrow.addEventListener('change', rail);
+	rail();
 
 	let run = 0;
 	let onScreen = false;
@@ -82,14 +130,42 @@ export function play(app: HTMLElement) {
 		}
 	}
 
-	async function stream(into: HTMLElement, text: string, id: number) {
-		const p = document.createElement('p');
-		into.append(p);
+	/** Words as they come, on the fold's quiet line, the step the turn is on. */
+	async function stream(say: (text: string) => void, text: string, id: number) {
 		const words = text.split(' ');
 		for (let i = 1; i <= words.length; i++) {
-			p.textContent = words.slice(0, i).join(' ');
+			say(`${words.slice(0, i).join(' ')}…`);
 			await wait(45 + Math.random() * 70, id);
 		}
+	}
+
+	/** A tool call among the reply's steps, running until it's marked. */
+	function tool(steps: HTMLElement, title: string) {
+		const line = tpl('demo-tool');
+		line.querySelector('.title')!.textContent = title;
+		steps.append(line);
+		return (how: 'done' | 'denied') => {
+			line.classList.add(how);
+			line.querySelector('.mark')!.textContent = how === 'done' ? '✓' : 'denied';
+		};
+	}
+
+	/** Words that came before the answer, among the steps, as the bubble they were. */
+	function words(steps: HTMLElement, text: string) {
+		const said = tpl('demo-said');
+		const p = document.createElement('p');
+		p.textContent = text;
+		said.append(p);
+		steps.append(said);
+	}
+
+	/** A finished reply: its steps under one line, and its answer. */
+	function finish(reply: HTMLElement, say: (text: string) => void, steps: HTMLElement, answer: string) {
+		const p = document.createElement('p');
+		p.textContent = answer;
+		reply.querySelector(':scope > .body > .said')!.append(p);
+		const n = steps.childElementCount;
+		say(n === 1 ? '1 step' : `${n} steps`);
 	}
 
 	/** The approval, answered by a click or, after a while, by itself. */
@@ -100,18 +176,18 @@ export function play(app: HTMLElement) {
 		msgs.append(row);
 		return new Promise<'allow' | 'deny'>((done, fail) => {
 			let answered = false;
-			const answer = (a: 'allow' | 'deny', button: HTMLElement) => {
+			const answer = (a: string, button: HTMLElement) => {
 				if (answered) return;
 				answered = true;
 				button.classList.add('pressed');
 				setTimeout(() => {
 					row.classList.add('leaving');
 					setTimeout(() => row.remove(), 350);
-					done(a);
+					done(a === 'deny' ? 'deny' : 'allow');
 				}, 220);
 			};
 			for (const b of row.querySelectorAll<HTMLButtonElement>('button[data-answer]')) {
-				b.addEventListener('click', () => answer(b.dataset.answer as 'allow' | 'deny', b));
+				b.addEventListener('click', () => answer(b.dataset.answer!, b));
 			}
 			wait(4200, id).then(
 				() => answer('allow', row.querySelector<HTMLElement>('.primary')!),
@@ -133,46 +209,51 @@ export function play(app: HTMLElement) {
 		const reply = tpl('demo-reply');
 		msgs.append(reply);
 		const replyThread = threadsIn(reply)[0];
-		const words = reply.querySelector<HTMLElement>('.waiting-words')!;
-		const said = reply.querySelector<HTMLElement>('.said')!;
-		const time = reply.querySelector<HTMLElement>('.who span')!;
+		const { steps, say } = foldOf(reply);
 
 		mood('thinking', replyThread);
 		preview('Juniper', 'Thinking', 'thinking');
-		words.textContent = 'Thinking…';
+		say('Thinking…');
 		await wait(1700, id);
 
 		mood('tool', replyThread);
 		preview('Juniper', TOOL, 'tool');
-		words.textContent = `${TOOL}…`;
+		const fetched = tool(steps, TOOL);
+		say(`${TOOL}…`);
 		await wait(1600, id);
+		fetched('done');
 
-		words.textContent = '';
 		mood('writing', replyThread);
 		preview('Juniper', '', 'writing');
-		await stream(said, ANSWER, id);
+		await stream(say, ANSWER, id);
+		words(steps, ANSWER);
 		await wait(300, id);
 
 		mood('waiting', replyThread);
 		preview('Juniper', `Wants to ${ASK[0].toLowerCase()}${ASK.slice(1)}`, 'waiting');
+		const deploy = tool(steps, ASK);
+		say(`${ASK}…`);
 		const answer = await approve(id);
 
 		if (answer === 'allow') {
 			mood('tool', replyThread);
 			preview('Juniper', ASK, 'tool');
 			await wait(1900, id);
+			deploy('done');
 			mood('writing', replyThread);
 			preview('Juniper', '', 'writing');
-			await stream(said, SHIPPED, id);
+			await stream(say, SHIPPED, id);
+			finish(reply, say, steps, SHIPPED);
 		} else {
+			deploy('denied');
 			mood('writing', replyThread);
 			preview('Juniper', '', 'writing');
-			await stream(said, HELD, id);
+			await stream(say, HELD, id);
+			finish(reply, say, steps, HELD);
 		}
 		await wait(200, id);
 		mood('idle', replyThread);
 		preview('Juniper', '', 'idle');
-		time.textContent = '09:14';
 		await wait(6000, id);
 
 		// Back to the start, quietly, and again.
@@ -201,12 +282,11 @@ export function play(app: HTMLElement) {
 		you.querySelector('.bubble')!.textContent = SEND;
 		const reply = tpl('demo-reply');
 		reply.classList.remove('fresh');
-		reply.querySelector('.who span')!.textContent = '09:14';
-		for (const text of [ANSWER, SHIPPED]) {
-			const p = document.createElement('p');
-			p.textContent = text;
-			reply.querySelector('.said')!.append(p);
-		}
+		const { steps, say } = foldOf(reply);
+		tool(steps, TOOL)('done');
+		words(steps, ANSWER);
+		tool(steps, ASK)('done');
+		finish(reply, say, steps, SHIPPED);
 		msgs.append(you, reply);
 		threadsIn(reply);
 		mood('idle');
