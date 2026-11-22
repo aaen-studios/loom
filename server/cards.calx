@@ -1,0 +1,138 @@
+module server.cards
+
+// Cards in the chat (PLAN.md, "Cards in the chat"): small things an agent
+// puts in its reply with show_card, which the apps draw as part of it.
+//
+// - `choices`: up to six answers, each a button; the person's click sends it
+//   as their next message;
+// - `checklist`: up to 30 items, each done or not;
+// - `table`: up to 8 columns and 50 rows of text;
+// - `progress`: how far along something is, 0 to 1, with a label;
+// - `facts`: up to 12 labels, each with its value.
+//
+// Each has a `title`, which may be empty, and an `id` the agent uses to change
+// it later in the same reply. What's here only checks and tidies the JSON the
+// agent gave; the instance keeps it as a `card` block.
+import std.json.{Json}
+import shared.obj.{Obj, at, str_at}
+
+pub const TYPES: str = "choices checklist table progress facts"
+const TITLE_MOST: usize = 80
+const OPTION_MOST: usize = 80
+const OPTIONS_MOST: usize = 6
+const ITEMS_MOST: usize = 30
+const FACTS_MOST: usize = 12
+const COLUMNS_MOST: usize = 8
+const ROWS_MOST: usize = 50
+const CELL_MOST: usize = 200
+
+// `text`, trimmed, on one line, and cut at `most` bytes with "…".
+fn tidy(text: String, most: usize) -> String {
+    var out = String()
+    for r in text.trim().runes() {
+        if out.len() >= most {
+            out.push_str("…")
+            break
+        }
+        out.push(if r == '\n' or r == '\r' or r == '\t' { ' ' } else { r })
+    }
+    return out
+}
+
+// A cell, an option or a value as text: a string as it is, a number or a
+// true or false as JSON writes it, and nothing for null.
+fn words(v: Json) -> String {
+    if let s = v.as_str() { return s }
+    if v == Json.Null { return String() }
+    return "{v}"
+}
+
+fn list(v: Json) -> List<Json> {
+    if let Json.Array(xs) = v { return xs.copy() }
+    return List<Json>()
+}
+
+// The card `args` describes, tidied, with `id`, or why it can't be one.
+// `args` is show_card's: `type`, `title`, and the fields of its type.
+pub fn card_of(args: Json, id: String) -> (Json, String) {
+    let kind = (str_at(args.copy(), "type") ?? String()).trim().copy()
+    var known = false
+    for t in TYPES.split(" ") {
+        if kind == t { known = true }
+    }
+    if not known { return (Json.Null, "type is {if kind.len() == 0 { String("missing") } else { "\"{kind}\"" }}: it's one of choices, checklist, table, progress or facts.") }
+    let title = tidy(str_at(args.copy(), "title") ?? String(), TITLE_MOST)
+    var card = Obj.new().s("id", id).s("type", kind.copy()).s("title", title)
+    if kind == "choices" {
+        var options = List<Json>()
+        for o in list(at(args.copy(), "options")) {
+            let w = tidy(words(o), OPTION_MOST)
+            if w.len() > 0 { options.push(Json.Str(w)) }
+        }
+        if options.len() < 2 or options.len() > OPTIONS_MOST { return (Json.Null, "options has {options.len()} answers: give 2 to {OPTIONS_MOST}, each a few words.") }
+        card = card.j("options", Json.Array(options))
+    } else if kind == "checklist" {
+        var items = List<Json>()
+        for item in list(at(args.copy(), "items")) {
+            let text = tidy(if let s = item.as_str() { s } else { words(at(item.copy(), "text")) }, CELL_MOST)
+            if text.len() == 0 { continue }
+            let done = at(item, "done") == Json.Bool(true)
+            items.push(Obj.new().s("text", text).b("done", done).done())
+        }
+        if items.len() == 0 or items.len() > ITEMS_MOST { return (Json.Null, "items has {items.len()}: give 1 to {ITEMS_MOST}, each \{\"text\", \"done\"\}.") }
+        card = card.j("items", Json.Array(items))
+    } else if kind == "facts" {
+        var items = List<Json>()
+        for item in list(at(args.copy(), "items")) {
+            let label = tidy(words(at(item.copy(), "label")), OPTION_MOST)
+            let value = tidy(words(at(item, "value")), CELL_MOST)
+            if label.len() == 0 and value.len() == 0 { continue }
+            items.push(Obj.new().s("label", label).s("value", value).done())
+        }
+        if items.len() == 0 or items.len() > FACTS_MOST { return (Json.Null, "items has {items.len()}: give 1 to {FACTS_MOST}, each \{\"label\", \"value\"\}.") }
+        card = card.j("items", Json.Array(items))
+    } else if kind == "table" {
+        var columns = List<Json>()
+        for c in list(at(args.copy(), "columns")) {
+            columns.push(Json.Str(tidy(words(c), OPTION_MOST)))
+        }
+        if columns.len() == 0 or columns.len() > COLUMNS_MOST { return (Json.Null, "columns has {columns.len()}: give 1 to {COLUMNS_MOST} names.") }
+        var rows = List<Json>()
+        for row in list(at(args.copy(), "rows")) {
+            var cells = List<Json>()
+            for c in list(row) {
+                if cells.len() < columns.len() { cells.push(Json.Str(tidy(words(c), CELL_MOST))) }
+            }
+            while cells.len() < columns.len() {
+                cells.push(Json.Str(String()))
+            }
+            rows.push(Json.Array(cells))
+        }
+        if rows.len() > ROWS_MOST { return (Json.Null, "rows has {rows.len()}: {ROWS_MOST} at most. Show the rest with html_render, or a shared table.") }
+        card = card.j("columns", Json.Array(columns)).j("rows", Json.Array(rows))
+    } else {
+        let v = at(args.copy(), "value").as_f64() else return (Json.Null, String("value is missing: give how far along it is, from 0 to 1."))
+        if v < 0.0 or v > 1.0 { return (Json.Null, "value is {v}: give it from 0 to 1, such as 0.4 for 40%.") }
+        card = card.s("label", tidy(str_at(args, "label") ?? String(), TITLE_MOST)).j("value", Json.Float(v))
+    }
+    return (card.done(), String())
+}
+
+@test
+fn checks_and_tidies() {
+    let (c, why) = card_of(Obj.new().s("type", String("choices")).s("title", String(" Which one? ")).j("options", Json.Array([Json.Str(String("Red")), Json.Str(String("  ")), Json.Int(2)])).done(), String("card_1"))
+    assert(why.len() == 0)
+    assert("{c}" == "\{\"id\":\"card_1\",\"type\":\"choices\",\"title\":\"Which one?\",\"options\":[\"Red\",\"2\"]\}")
+    let (_, one) = card_of(Obj.new().s("type", String("choices")).j("options", Json.Array([Json.Str(String("Only"))])).done(), String("card_2"))
+    assert(one.starts_with("options has 1"))
+    let (_, odd) = card_of(Obj.new().s("type", String("chart")).done(), String("card_3"))
+    assert(odd.starts_with("type is \"chart\""))
+    let (t, _) = card_of(Obj.new().s("type", String("table")).j("columns", Json.Array([Json.Str(String("A")), Json.Str(String("B"))])).j("rows", Json.Array([Json.Array([Json.Str(String("1"))]), Json.Array([Json.Str(String("x")), Json.Str(String("y")), Json.Str(String("z"))])])).done(), String("card_4"))
+    assert("{at(t, "rows")}" == "[[\"1\",\"\"],[\"x\",\"y\"]]")
+    let (p, _) = card_of(Obj.new().s("type", String("progress")).s("label", String("Uploading")).j("value", Json.Float(0.5)).done(), String("card_5"))
+    assert(at(p, "value").as_f64() == some(0.5))
+    let (_, far) = card_of(Obj.new().s("type", String("progress")).j("value", Json.Int(3)).done(), String("card_6"))
+    assert(far.starts_with("value is 3"))
+    let (l, _) = card_of(Obj.new().s("type", String("checklist")).j("items", Json.Array([Json.Str(String("Plain")), Obj.new().s("text", String("Done one")).b("done", true).done()])).done(), String("card_7"))
+    assert("{at(l, "items")}" == "[\{\"text\":\"Plain\",\"done\":false\},\{\"text\":\"Done one\",\"done\":true\}]")
+}
