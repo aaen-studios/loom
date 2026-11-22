@@ -1100,6 +1100,13 @@ impl Block {
         }
     }
 
+    fn file(f: FileRef) -> Block {
+        Block {
+            file: Some(f),
+            ..Block::text("file", String::new())
+        }
+    }
+
     fn of(b: &Value) -> Block {
         let kind = s(b, "kind");
         Block {
@@ -1279,9 +1286,54 @@ impl FileRef {
 pub struct Attachment {
     pub id: String,
     pub name: String,
+    /// Where it is on this computer, which a picture's thumbnail is drawn from.
+    pub path: String,
     /// Once it's up.
     pub file: Option<FileRef>,
     pub error: Option<String>,
+}
+
+impl Attachment {
+    /// A picture, by its name, which the composer shows as a thumbnail.
+    pub fn image(&self) -> bool {
+        let name = self.name.to_ascii_lowercase();
+        [".png", ".jpg", ".jpeg", ".gif", ".webp"]
+            .iter()
+            .any(|e| name.ends_with(e))
+    }
+}
+
+/// How a file's name reads in a message's words, where it was attached: `[image.png]`.
+pub fn file_mark(name: &str) -> String {
+    format!("[{name}]")
+}
+
+/// A name for a pasted file that no attachment waiting has yet: `image.png`, then
+/// `image 2.png`, so each reads as itself in the message.
+pub fn free_name(stem: &str, ext: &str, attachments: &[Attachment]) -> String {
+    let taken = |n: &str| attachments.iter().any(|a| a.name == n);
+    let mut name = format!("{stem}.{ext}");
+    let mut k = 2;
+    while taken(&name) {
+        name = format!("{stem} {k}.{ext}");
+        k += 1;
+    }
+    name
+}
+
+/// A person's words with each of the message's files marked where it was attached
+/// (`file_mark`) made a link to it, `loom-file:` and its SHA-256, which the chat opens.
+/// A name that can't be a link's words is left as it is.
+pub fn link_files(text: &str, files: &[FileRef]) -> String {
+    let mut out = text.to_string();
+    for f in files {
+        if f.name.is_empty() || f.name.contains([']', '[', '`', '\n']) {
+            continue;
+        }
+        let mark = file_mark(&f.name);
+        out = out.replacen(&mark, &format!("{mark}(loom-file:{})", f.file), 1);
+    }
+    out
 }
 
 /// A message search found.
@@ -2036,6 +2088,11 @@ pub struct Model {
     pub to_send: Vec<Value>,
     /// The page shown beside the chat, from an agent's html_render.
     pub page: Option<FileRef>,
+    /// The picture shown big over the window, from the chat.
+    pub viewing: Option<FileRef>,
+    /// The files of messages this app sent, by SHA-256, so one waiting to be sent shows
+    /// them.
+    sent_files: HashMap<String, FileRef>,
     /// Whether the person's scripts are on (PLAN.md, "Scripts"), and the port the
     /// instance listens on, once asked; and a new script token, shown once.
     pub scripts: Option<(bool, u64)>,
@@ -2219,7 +2276,8 @@ struct Queued {
     agent: Option<String>,
     conversation: Option<String>,
     text: String,
-    files: usize,
+    /// Its files: what the app knows of each from sending it, or only which file.
+    files: Vec<FileRef>,
 }
 
 impl Queued {
@@ -2232,7 +2290,21 @@ impl Queued {
                 .and_then(Value::as_str)
                 .map(str::to_string),
             text: s(q, "text"),
-            files: q.get("files").and_then(Value::as_array).map_or(0, Vec::len),
+            files: q
+                .get("files")
+                .and_then(Value::as_array)
+                .map(|a| {
+                    a.iter()
+                        .filter_map(Value::as_str)
+                        .map(|sha| FileRef {
+                            file: sha.to_string(),
+                            name: "A file".into(),
+                            mime: String::new(),
+                            size: 0,
+                        })
+                        .collect()
+                })
+                .unwrap_or_default(),
         }
     }
 }
@@ -2746,7 +2818,13 @@ impl Model {
             "instance.update" => self.server_update = Some(ServerUpdate::of(f)),
             "core.data" => self.data(f),
             "core.queued" => {
-                self.queued.push(Queued::of(f));
+                let mut q = Queued::of(f);
+                for file in &mut q.files {
+                    if let Some(known) = self.sent_files.get(&file.file) {
+                        *file = known.clone();
+                    }
+                }
+                self.queued.push(q);
                 self.place_queued();
             }
             "core.file" => self.file_came(f),
@@ -3992,24 +4070,13 @@ impl Model {
                 None => q.agent.is_some() && q.agent == agent,
             };
             if here {
-                let mut text = q.text.clone();
-                if q.files > 0 {
-                    let files = if q.files == 1 {
-                        "1 file".to_string()
-                    } else {
-                        format!("{} files", q.files)
-                    };
-                    text = if text.is_empty() {
-                        files
-                    } else {
-                        format!("{text}\n\n{files}")
-                    };
-                }
+                let mut blocks: Vec<Block> = q.files.iter().cloned().map(Block::file).collect();
+                blocks.push(Block::text("text", q.text.clone()));
                 self.messages.push(Message {
                     id: q.cid.clone(),
                     role: "person".into(),
                     at: i64::MAX,
-                    blocks: vec![Block::text("text", text)],
+                    blocks,
                     live: false,
                     queued: true,
                     from_agent: None,
@@ -4151,15 +4218,20 @@ impl Model {
         if self.uploading() {
             return None;
         }
-        let files: Vec<String> = self
+        let refs: Vec<FileRef> = self
             .attachments
             .iter()
-            .filter_map(|a| a.file.as_ref().map(|f| f.file.clone()))
+            .filter_map(|a| a.file.clone())
             .collect();
+        let files: Vec<String> = refs.iter().map(|f| f.file.clone()).collect();
         if text.is_empty() && files.is_empty() {
             return None;
         }
         self.attachments.clear();
+        // So the message shows its files while it waits to be sent, not just how many.
+        for f in refs {
+            self.sent_files.insert(f.file.clone(), f);
+        }
         let mut frame = self.send_frame(agent, text);
         if !files.is_empty() {
             frame["files"] = json!(files);
@@ -4197,6 +4269,7 @@ impl Model {
         self.attachments.push(Attachment {
             id: id.clone(),
             name,
+            path: path.to_string(),
             file: None,
             error: None,
         });
@@ -4265,6 +4338,37 @@ impl Model {
         Some(json!({"t": "file.get", "id": id, "file": f.file, "name": f.name}))
     }
 
+    /// Shows a picture big over the window, fetched whole unless it's here already. Its
+    /// thumbnail shows until then.
+    pub fn view(&mut self, f: &FileRef) -> Option<Value> {
+        self.viewing = Some(f.clone());
+        if self.files.contains_key(&f.file) || self.getting.values().any(|(k, _)| *k == f.file) {
+            return None;
+        }
+        let id = self.id("app.get");
+        self.getting.insert(id.clone(), (f.file.clone(), false));
+        Some(json!({"t": "file.get", "id": id, "file": f.file, "name": f.name}))
+    }
+
+    /// The pictures in the chat on screen, in order, for the viewer to step through.
+    pub fn pictures(&self) -> Vec<FileRef> {
+        self.shown()
+            .iter()
+            .flat_map(|m| m.blocks.iter())
+            .filter_map(|b| b.file.clone())
+            .filter(FileRef::image)
+            .collect()
+    }
+
+    /// The viewer's next picture (`by` 1) or the one before (-1), if there is one.
+    pub fn view_step(&mut self, by: i32) -> Option<Value> {
+        let now = self.viewing.clone()?;
+        let all = self.pictures();
+        let at = all.iter().position(|f| f.file == now.file)?;
+        let next = all.get(at.checked_add_signed(by as isize)?)?.clone();
+        self.view(&next)
+    }
+
     /// Where the open page is on this computer, once it's fetched.
     pub fn page_path(&self) -> Option<&String> {
         self.files.get(&self.page.as_ref()?.file)
@@ -4295,7 +4399,11 @@ impl Model {
                 if page {
                     self.page = None;
                 }
-                if open || page {
+                let viewed = self.viewing.as_ref().is_some_and(|v| v.file == key);
+                if viewed {
+                    self.viewing = None;
+                }
+                if open || page || viewed {
                     self.notices
                         .push(e.unwrap_or_else(|| "The file couldn't be fetched.".into()));
                 }
@@ -5683,6 +5791,49 @@ mod tests {
         assert_eq!(corners(false, Joined::at(1, 3)), c(J, B, B, J));
         assert_eq!(corners(false, Joined::at(2, 3)), c(J, B, B, B));
         const { assert!(J < B) };
+    }
+
+    #[test]
+    fn a_file_reads_as_a_link_where_it_was_attached() {
+        let file = |sha: &str, name: &str| FileRef {
+            file: sha.into(),
+            name: name.into(),
+            mime: "image/png".into(),
+            size: 13,
+        };
+        let attached = |name: &str| Attachment {
+            id: name.into(),
+            name: name.into(),
+            path: String::new(),
+            file: None,
+            error: None,
+        };
+        assert_eq!(free_name("image", "png", &[]), "image.png");
+        let waiting = [attached("image.png"), attached("image 2.png")];
+        assert_eq!(free_name("image", "png", &waiting), "image 3.png");
+        let files = [file("aa", "image.png"), file("bb", "odd]name.png")];
+        assert_eq!(
+            link_files("look [image.png] and [odd]name.png]", &files),
+            "look [image.png](loom-file:aa) and [odd]name.png]"
+        );
+    }
+
+    #[test]
+    fn a_message_waiting_to_be_sent_shows_its_files() {
+        let mut m = Model::new();
+        m.selected = Some("a_1".into());
+        let up = m.attach("C:/x/image.png");
+        let id = up["id"].as_str().unwrap().to_string();
+        m.take(&json!({"t": "core.file", "id": id, "file": {"file": "aa", "name": "image.png", "mime": "image/png", "size": 13}}));
+        assert!(m.attachments[0].image());
+        let sent = m.send("look [image.png]").unwrap();
+        assert_eq!(sent["files"], json!(["aa"]));
+        m.take(&json!({"t": "core.queued", "cid": "m_1", "agent": "a_1", "text": "look [image.png]", "files": ["aa"]}));
+        let shown = m.shown();
+        let waiting = shown.iter().find(|x| x.queued).unwrap();
+        let f = waiting.blocks.iter().find_map(|b| b.file.clone()).unwrap();
+        assert_eq!((f.name.as_str(), f.image()), ("image.png", true));
+        assert_eq!(m.pictures().len(), 1);
     }
 
     #[test]
