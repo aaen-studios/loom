@@ -46,6 +46,7 @@ chip = 6
 button = 8
 card = 10
 bubble = 14
+bubble-joined = 5    # a bubble's corners where it joins the next from the same sender, and an agent's by its thread
 composer = 16
 
 [layout]

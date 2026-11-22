@@ -205,9 +205,10 @@ fn run(server: Child, data: String) ! Error {
     }
     try check(int_at(first_delta.copy(), "pos") == some(0) and (str_at(first_delta.copy(), "text") ?? String()).starts_with("one two "), "the reconnect gets the reply so far from position 0, before synced")
     let created = try back.until("event", "message.created")
-    let reply = reply_text(at(created, "message"))
+    let reply = reply_text(at(created.copy(), "message"))
     println("      the reply: {reply}")
     try check(reply == words, "the finished reply is whole")
+    try check(str_at(at(created, "message"), "status") == some(String("done")), "the finished reply says its turn ended done")
     let finished = try back.until("event", "run.finished")
     try check(str_at(finished, "status") == some(String("done")), "the run finishes done")
 
@@ -256,8 +257,14 @@ fn run(server: Child, data: String) ! Error {
     try back.send(Obj.new().s("t", String("send")).s("cid", String("m_3")).s("conversation", conversation.copy()).s("text", String("/sleep 20000\nlate")).done())
     let ack3 = try back.until("ack", "")
     try back.send(Obj.new().s("t", String("cancel")).s("run", str_at(ack3, "run") ?? String()).done())
+    // The person's message comes first, then the reply so far.
+    var stopped = try back.until("event", "message.created")
+    while str_at(at(stopped.copy(), "message"), "role") != some(String("agent")) { stopped = try back.until("event", "message.created") }
     let cancelled = try back.until("event", "run.finished")
     try check(str_at(cancelled, "status") == some(String("cancelled")), "a cancel ends the run")
+    try check(str_at(at(stopped, "message"), "status") == some(String("cancelled")), "and its reply so far says it was stopped")
+    let kept = try back.cmd("q_kept", "messages.list", Obj.new().s("conversation", conversation.copy()).done())
+    try check("{at(at(kept, "value"), "messages")}".contains("\"status\":\"cancelled\""), "and is kept saying so")
 
     // --- The second account sees none of it ---
     var b = try App.connect(base.copy(), bob_token, 0)

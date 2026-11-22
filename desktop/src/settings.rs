@@ -332,6 +332,17 @@ impl Loom {
             Tools::Folded => "One line for each run, to open",
             Tools::All => "Each on its own line",
         };
+        let thoughts = self.pref_choice(
+            "thoughts",
+            self.prefs.thoughts,
+            &[
+                (Thoughts::Hidden, "Hidden"),
+                (Thoughts::Folded, "Folded"),
+                (Thoughts::Open, "Open"),
+            ],
+            |p, v| p.thoughts = v,
+            cx,
+        );
         let style = self.pref_choice(
             "style",
             self.prefs.bubbles,
@@ -349,14 +360,8 @@ impl Loom {
             .into_any_element(),
             self.row(None, "Tool calls", Some(tools_sub.into()), Some(tools))
                 .into_any_element(),
-            self.pref_switch(
-                "pref-thoughts",
-                "Show thoughts open",
-                "Rather than folded under Thought",
-                self.prefs.thoughts_open,
-                |p, v| p.thoughts_open = v,
-                cx,
-            ),
+            self.row(None, "Thoughts", None, Some(thoughts))
+                .into_any_element(),
         ];
         let composer = vec![self.pref_switch(
             "pref-ctrl-enter",

@@ -586,6 +586,7 @@ A message is a list of **content blocks**:
   "agent": "a_2",
   "run": "run_77",
   "at": 1795187133000,
+  "status": "done",
   "blocks": [
     { "kind": "thought", "text": "The user means the CI run on main." },
     { "kind": "tool", "call": "tc_3" },
@@ -597,6 +598,7 @@ A message is a list of **content blocks**:
 A reply that names files in its text, in `code` like `notes/hours.md`, also has `mentions`: each of them (ten at most) that is a file in its agent's folder or the shared folder, with `path` as the reply wrote it, `name` and `size`. The apps show them as chips, and `agent.file` opens one.
 
 - `role` is `person` or `agent`. A person's message has `from` (a device id) instead of `agent` and `run`. A message one agent sent another with `message_agent` is a `person` message too, in the other agent's conversation, with the sending agent's id as `from`. One a plugin's panel sent with `plugin.message` has `plugin:<id>` as `from`, and one brought over with `import.run` has `import:openbot` or `import:grokbot`, as its pin's `by` does. An imported agent's reply has `agent` and no `run`.
+- An agent's reply to a run has `status`, how its turn ended, as `run.finished` says it: `done`, `cancelled`, `failed` or `limit`. The apps show a reply that ended `done` as one answer, its last words, with what it said and did on the way folded under one line, and keep everything in view for one that ended any other way ([PLAN.md](../PLAN.md#one-answer-at-the-end)). A reply kept before replies said, or an imported one, has none, and reads as `done`.
 - Block kinds in version 1: `text` (Markdown), `thought` (the agent's reasoning, shown folded), `tool` (a tool call, whose details are in its `tool.*` events), `plan` (the agent's plan, as `entries` with `content` and `status`), `file` (`file`, `name`, `mime`, `size`) and `card` (`card`: an agent's card, below). `notice` (`text`) is one line from loom in an agent's reply, not the agent's own words, such as that another program took the chat over ([A backup brain](#a-backup-brain)); the apps show it small and quiet, and a transcript or a summary of the chat leaves it out.
 
 **While a reply is being written**, its message exists but isn't finished. `run.started` gives its id, and deltas fill its blocks:

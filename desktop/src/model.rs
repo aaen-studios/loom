@@ -1412,9 +1412,19 @@ pub struct Message {
     pub pinned: bool,
     /// Files the reply names that are in its agent's folder, shown as chips.
     pub mentions: Vec<Mention>,
+    /// How an agent's turn ended (`done`, `cancelled`, `failed` or `limit`), or empty
+    /// when the message doesn't say: a person's, one still being written, or one kept
+    /// before messages said.
+    pub status: String,
 }
 
 impl Message {
+    /// A turn that didn't end by itself: stopped, failed, or out of tokens. Such a reply
+    /// keeps everything it had in view, since there's no answer to fold its steps under.
+    pub fn cut_short(&self) -> bool {
+        !self.live && matches!(self.status.as_str(), "cancelled" | "failed" | "limit")
+    }
+
     /// A finished reply of an agent's with nothing to show: no words, thoughts, tool
     /// calls, plan, files or cards, and nothing it names or pins.
     pub fn is_empty_reply(&self) -> bool {
@@ -1464,6 +1474,243 @@ fn mentions_of(m: &Value) -> Vec<Mention> {
                 .collect()
         })
         .unwrap_or_default()
+}
+
+/// What of an agent's work its replies show, from the person's prefs.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Shows {
+    pub tools: bool,
+    pub thoughts: bool,
+}
+
+/// One piece of a reply as it's drawn, its blocks named by their place in the message.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Part {
+    /// Words, one bubble each, with nothing else between them: a group whose bubbles
+    /// join (`joined`).
+    Bubbles(Vec<usize>),
+    /// A run of tool calls, drawn as the person's prefs say.
+    Tools(Vec<usize>),
+    /// Anything else on its own: a thought, a plan, a notice, a file or a card.
+    Block(usize),
+    /// The turn's steps, folded under one quiet line that opens to show them. While the
+    /// turn runs (`working`), the line is the step it's on and changes as it goes, and
+    /// it's there even with no steps to open yet. Once it's done, it says how many.
+    Fold {
+        words: String,
+        working: bool,
+        parts: Vec<Part>,
+    },
+    /// A finished turn that only used tools the person's prefs hide, said in a line.
+    Quiet(String),
+}
+
+/// A tool call's title, as its agent named it.
+pub fn tool_title(call: Option<&String>, tools: &[Tool]) -> String {
+    call.and_then(|c| tools.iter().find(|t| &t.call == c))
+        .map(|t| t.title.clone())
+        .unwrap_or_else(|| "Using a tool".to_string())
+}
+
+/// Words that ask the person something, which stay in view though they came mid-turn.
+fn asks(text: &str) -> bool {
+    text.trim_end().ends_with('?')
+}
+
+/// How a reply reads: one answer at the end, as a chat does (PLAN.md, "One answer at the
+/// end"). Its last words are the answer, wherever they came in the turn. What it said on
+/// the way there, its thoughts and its tool calls are steps, folded under one line; while
+/// it works, that line is the latest step. Cards, files, plans, notices and words that
+/// ask the person something stay in view, in their places. A turn cut short keeps all it
+/// had in view, and so does a person's message.
+pub fn parts(m: &Message, tools: &[Tool], shows: Shows) -> Vec<Part> {
+    let n = m.blocks.len();
+    let said = |i: usize| m.blocks[i].kind == "text" && !m.blocks[i].text.trim().is_empty();
+    // Whether a block has anything to draw, as the prefs have it.
+    let drawn = |i: usize| match m.blocks[i].kind.as_str() {
+        "text" => said(i),
+        "thought" => shows.thoughts && !m.blocks[i].text.trim().is_empty(),
+        "tool" => shows.tools,
+        "plan" => !m.blocks[i].text.trim().is_empty(),
+        "file" => m.blocks[i].file.is_some(),
+        "card" => m.blocks[i].card.is_some(),
+        "notice" => true,
+        _ => false,
+    };
+    let all: Vec<usize> = (0..n).filter(|&i| drawn(i)).collect();
+    let quiet = |out: Vec<Part>| {
+        if !out.is_empty() || m.live {
+            return out;
+        }
+        let used = m.blocks.iter().filter(|b| b.kind == "tool").count();
+        match used {
+            0 => out,
+            1 => {
+                let b = m.blocks.iter().find(|b| b.kind == "tool");
+                vec![Part::Quiet(format!(
+                    "Used {}",
+                    tool_title(b.and_then(|b| b.call.as_ref()), tools)
+                ))]
+            }
+            many => vec![Part::Quiet(format!("Used {many} tools"))],
+        }
+    };
+    if m.role != "agent" || m.cut_short() {
+        return quiet(lay_out(m, &all));
+    }
+    let answer = if m.live {
+        None
+    } else {
+        (0..n).rev().find(|&i| said(i))
+    };
+    // What stays in view. While the turn runs, words that ask only count once more has
+    // come after them, so words still coming don't show and then fold away.
+    let stays = |i: usize| match m.blocks[i].kind.as_str() {
+        "text" => Some(i) == answer || (asks(&m.blocks[i].text) && (!m.live || i + 1 < n)),
+        "thought" | "tool" => false,
+        _ => true,
+    };
+    let kept: Vec<usize> = all.iter().copied().filter(|&i| stays(i)).collect();
+    let steps: Vec<usize> = all.iter().copied().filter(|&i| !stays(i)).collect();
+    let mut out = Vec::new();
+    if m.live {
+        out.extend(lay_out(m, &kept));
+        out.push(Part::Fold {
+            words: working_words(m, tools),
+            working: true,
+            parts: lay_out(m, &steps),
+        });
+        return out;
+    }
+    if !steps.is_empty() {
+        out.push(Part::Fold {
+            words: if steps.len() == 1 {
+                "1 step".to_string()
+            } else {
+                format!("{} steps", steps.len())
+            },
+            working: false,
+            parts: lay_out(m, &steps),
+        });
+    }
+    out.extend(lay_out(m, &kept));
+    quiet(out)
+}
+
+/// The blocks `shown`, in order, with words next to each other as one group of
+/// bubbles and tool calls next to each other as one run.
+fn lay_out(m: &Message, shown: &[usize]) -> Vec<Part> {
+    let mut out: Vec<Part> = Vec::new();
+    for &i in shown {
+        match (m.blocks[i].kind.as_str(), out.last_mut()) {
+            ("text", Some(Part::Bubbles(run))) | ("tool", Some(Part::Tools(run))) => run.push(i),
+            ("text", _) => out.push(Part::Bubbles(vec![i])),
+            ("tool", _) => out.push(Part::Tools(vec![i])),
+            _ => out.push(Part::Block(i)),
+        }
+    }
+    out
+}
+
+/// The step a running turn is on, in a line: the first line of what it last said, the
+/// tool it last called, or that it's thinking.
+fn working_words(m: &Message, tools: &[Tool]) -> String {
+    for b in m.blocks.iter().rev() {
+        match b.kind.as_str() {
+            "text" => {
+                if let Some(line) = b.text.lines().map(str::trim).find(|l| !l.is_empty()) {
+                    return line.to_string();
+                }
+            }
+            "tool" => return format!("{}…", tool_title(b.call.as_ref(), tools)),
+            "thought" => return "Thinking…".to_string(),
+            _ => {}
+        }
+    }
+    "Thinking…".to_string()
+}
+
+/// Where a bubble sits in its group of bubbles from the same sender, one after another:
+/// whether one comes just before it and just after it.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub struct Joined {
+    pub above: bool,
+    pub below: bool,
+}
+
+impl Joined {
+    /// The bubble at `i` of a group of `n`.
+    pub fn at(i: usize, n: usize) -> Joined {
+        Joined {
+            above: i > 0,
+            below: i + 1 < n,
+        }
+    }
+}
+
+/// A bubble's corners, as radii: top left, top right, bottom right, bottom left.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct Corners {
+    pub tl: f32,
+    pub tr: f32,
+    pub br: f32,
+    pub bl: f32,
+}
+
+/// The corners of a bubble, the person's own (`mine`) on the right or an agent's on the
+/// left. The corners on the sender's side are smaller where the bubble joins another,
+/// as a messaging app's are: every bubble but the last at the bottom, and every bubble but
+/// the first at the top. An agent's first is small at the top anyway, its corner by the
+/// thread squared off as a speech bubble's tail.
+pub fn corners(mine: bool, joined: Joined) -> Corners {
+    use crate::tokens::radius::{BUBBLE, BUBBLE_JOINED};
+    let top = if joined.above || !mine {
+        BUBBLE_JOINED
+    } else {
+        BUBBLE
+    };
+    let bottom = if joined.below { BUBBLE_JOINED } else { BUBBLE };
+    if mine {
+        Corners {
+            tl: BUBBLE,
+            tr: top,
+            br: bottom,
+            bl: BUBBLE,
+        }
+    } else {
+        Corners {
+            tl: top,
+            tr: BUBBLE,
+            br: BUBBLE,
+            bl: bottom,
+        }
+    }
+}
+
+/// How each of the chat's rows joins the ones beside it (`None` for a row that isn't a
+/// message): the person's messages next to each other, each with words, are one group,
+/// and so are those another agent sent with message_agent, each its own sender's. An
+/// agent's reply joins only its own bubbles (`parts`).
+pub fn person_joins(rows: &[Option<&Message>]) -> Vec<Joined> {
+    let sender = |m: &Message| {
+        (m.role == "person"
+            && m.blocks
+                .iter()
+                .any(|b| b.kind == "text" && !b.text.trim().is_empty()))
+        .then(|| m.from_agent.clone())
+    };
+    let senders: Vec<Option<Option<String>>> = rows.iter().map(|r| r.and_then(sender)).collect();
+    (0..rows.len())
+        .map(|i| {
+            let Some(me) = &senders[i] else {
+                return Joined::default();
+            };
+            Joined {
+                above: i > 0 && senders[i - 1].as_ref() == Some(me),
+                below: senders.get(i + 1).and_then(Option::as_ref) == Some(me),
+            }
+        })
+        .collect()
 }
 
 #[derive(Clone, Debug)]
@@ -2268,6 +2515,7 @@ impl Model {
             queued: false,
             pinned: m.get("pinned").is_some_and(|p| !p.is_null()),
             mentions: mentions_of(m),
+            status: s(m, "status"),
             // `from` is a device, the agent that sent it, or a routine.
             from_agent: m.get("from").and_then(Value::as_str).and_then(|f| {
                 if f.starts_with("a_") {
@@ -3683,6 +3931,7 @@ impl Model {
                     queued: true,
                     from_agent: None,
                     mentions: Vec::new(),
+                    status: String::new(),
                     pinned: false,
                 });
             }
@@ -3724,6 +3973,7 @@ impl Model {
                 queued: false,
                 from_agent: None,
                 mentions: Vec::new(),
+                status: String::new(),
                 pinned: false,
             });
         }
@@ -5058,6 +5308,7 @@ mod tests {
             queued: false,
             from_agent: None,
             mentions: Vec::new(),
+            status: String::new(),
             pinned: false,
         };
         assert!(reply(Vec::new()).is_empty_reply());
@@ -5069,6 +5320,383 @@ mod tests {
             ..reply(Vec::new())
         };
         assert!(!live.is_empty_reply());
+    }
+
+    /// An agent's reply of these blocks: `text:…`, `thought:…`, `tool:CALL`, `card`.
+    fn turn(blocks: &[&str], live: bool, status: &str) -> Message {
+        let blocks = blocks
+            .iter()
+            .map(|b| match b.split_once(':') {
+                Some(("tool", call)) => Block::of(&json!({"kind": "tool", "call": call})),
+                Some((kind, text)) => Block::text(kind, text.to_string()),
+                None => Block::of(
+                    &json!({"kind": "card", "card": {"id": "card_1", "type": "facts", "title": "", "items": [{"label": "a", "value": "b"}]}}),
+                ),
+            })
+            .collect();
+        Message {
+            id: "msg_1".into(),
+            role: "agent".into(),
+            at: 1,
+            blocks,
+            live,
+            queued: false,
+            from_agent: None,
+            mentions: Vec::new(),
+            pinned: false,
+            status: status.into(),
+        }
+    }
+
+    fn tools() -> Vec<Tool> {
+        let tool = |call: &str, title: &str| Tool {
+            call: call.into(),
+            run: "run_1".into(),
+            title: title.into(),
+            status: Some("done".into()),
+        };
+        vec![tool("tc_1", "Search the web"), tool("tc_2", "ls")]
+    }
+
+    const QUIET: Shows = Shows {
+        tools: false,
+        thoughts: false,
+    };
+    const EVERYTHING: Shows = Shows {
+        tools: true,
+        thoughts: true,
+    };
+
+    fn fold(words: &str, working: bool, parts: Vec<Part>) -> Part {
+        Part::Fold {
+            words: words.into(),
+            working,
+            parts,
+        }
+    }
+
+    #[test]
+    fn a_finished_turn_is_one_answer_with_its_steps_folded() {
+        let m = turn(
+            &[
+                "text:Checking first whether there's a release.",
+                "thought:The person wants the newest.",
+                "tool:tc_1",
+                "text:OpenBot's data is in its folder.",
+                "tool:tc_2",
+                "text:Installed, and moved over.",
+            ],
+            false,
+            "done",
+        );
+        // What it said on the way folds away, and the hidden thought and tools with it.
+        assert_eq!(
+            parts(&m, &tools(), QUIET),
+            vec![
+                fold("2 steps", false, vec![Part::Bubbles(vec![0, 3])]),
+                Part::Bubbles(vec![5]),
+            ]
+        );
+        // Shown, the thought and the tools are steps too, in their places.
+        assert_eq!(
+            parts(&m, &tools(), EVERYTHING),
+            vec![
+                fold(
+                    "5 steps",
+                    false,
+                    vec![
+                        Part::Bubbles(vec![0]),
+                        Part::Block(1),
+                        Part::Tools(vec![2]),
+                        Part::Bubbles(vec![3]),
+                        Part::Tools(vec![4]),
+                    ]
+                ),
+                Part::Bubbles(vec![5]),
+            ]
+        );
+        // A turn that only answered is the answer alone.
+        let one = turn(&["thought:Easy.", "text:Yes."], false, "done");
+        assert_eq!(parts(&one, &tools(), QUIET), vec![Part::Bubbles(vec![1])]);
+        // A message kept before messages said how their turn ended reads as done.
+        let old = turn(&["text:Looking.", "tool:tc_1", "text:Found it."], false, "");
+        assert_eq!(
+            parts(&old, &tools(), QUIET),
+            vec![
+                fold("1 step", false, vec![Part::Bubbles(vec![0])]),
+                Part::Bubbles(vec![2]),
+            ]
+        );
+    }
+
+    #[test]
+    fn while_a_turn_runs_one_line_shows_the_step_it_is_on() {
+        let tools = tools();
+        let empty = turn(&[], true, "");
+        assert_eq!(
+            parts(&empty, &tools, QUIET),
+            vec![fold("Thinking…", true, vec![])]
+        );
+        let said = turn(&["text:Checking first.\nThen more."], true, "");
+        assert_eq!(
+            parts(&said, &tools, QUIET),
+            vec![fold("Checking first.", true, vec![Part::Bubbles(vec![0])])]
+        );
+        let calling = turn(&["text:Checking first.", "tool:tc_1"], true, "");
+        assert_eq!(
+            parts(&calling, &tools, QUIET),
+            vec![fold("Search the web…", true, vec![Part::Bubbles(vec![0])])]
+        );
+        let thinking = turn(
+            &["text:Checking first.", "tool:tc_1", "thought:Hm."],
+            true,
+            "",
+        );
+        assert_eq!(
+            parts(&thinking, &tools, EVERYTHING),
+            vec![fold(
+                "Thinking…",
+                true,
+                vec![Part::Bubbles(vec![0]), Part::Tools(vec![1]), Part::Block(2)]
+            )]
+        );
+    }
+
+    #[test]
+    fn an_answer_before_the_last_tool_call_is_still_the_answer() {
+        let m = turn(&["text:I'll tidy up after.", "tool:tc_2"], false, "done");
+        assert_eq!(parts(&m, &tools(), QUIET), vec![Part::Bubbles(vec![0])]);
+        assert_eq!(
+            parts(&m, &tools(), EVERYTHING),
+            vec![
+                fold("1 step", false, vec![Part::Tools(vec![1])]),
+                Part::Bubbles(vec![0]),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_turn_cut_short_keeps_what_it_had() {
+        for status in ["cancelled", "failed", "limit"] {
+            let m = turn(
+                &["text:Looking.", "tool:tc_1", "text:Found two."],
+                false,
+                status,
+            );
+            // With the tool hidden, the two are one group of bubbles.
+            assert_eq!(parts(&m, &tools(), QUIET), vec![Part::Bubbles(vec![0, 2])]);
+            assert_eq!(
+                parts(&m, &tools(), EVERYTHING),
+                vec![
+                    Part::Bubbles(vec![0]),
+                    Part::Tools(vec![1]),
+                    Part::Bubbles(vec![2]),
+                ]
+            );
+        }
+    }
+
+    #[test]
+    fn cards_and_questions_stay_in_view() {
+        let m = turn(
+            &[
+                "text:Looking.",
+                "card",
+                "tool:tc_1",
+                "text:Which one do you want?",
+                "tool:tc_2",
+                "text:Done.",
+            ],
+            false,
+            "done",
+        );
+        assert_eq!(
+            parts(&m, &tools(), QUIET),
+            vec![
+                fold("1 step", false, vec![Part::Bubbles(vec![0])]),
+                Part::Block(1),
+                Part::Bubbles(vec![3, 5]),
+            ]
+        );
+        // While it runs, the card shows, and so does a question once more came after it.
+        let running = turn(
+            &["text:Looking.", "card", "text:Which one?", "tool:tc_1"],
+            true,
+            "",
+        );
+        assert_eq!(
+            parts(&running, &tools(), QUIET),
+            vec![
+                Part::Block(1),
+                Part::Bubbles(vec![2]),
+                fold("Search the web…", true, vec![Part::Bubbles(vec![0])]),
+            ]
+        );
+        // Words still coming that end in a question mark for now aren't one yet.
+        let coming = turn(&["text:Which one?"], true, "");
+        assert_eq!(
+            parts(&coming, &tools(), QUIET),
+            vec![fold("Which one?", true, vec![Part::Bubbles(vec![0])])]
+        );
+    }
+
+    #[test]
+    fn a_turn_that_only_used_hidden_tools_says_so() {
+        let one = turn(&["tool:tc_2"], false, "done");
+        assert_eq!(
+            parts(&one, &tools(), QUIET),
+            vec![Part::Quiet("Used ls".into())]
+        );
+        let two = turn(&["tool:tc_1", "tool:tc_2"], false, "done");
+        assert_eq!(
+            parts(&two, &tools(), QUIET),
+            vec![Part::Quiet("Used 2 tools".into())]
+        );
+        assert_eq!(
+            parts(&two, &tools(), EVERYTHING),
+            vec![fold("2 steps", false, vec![Part::Tools(vec![0, 1])])]
+        );
+    }
+
+    #[test]
+    fn a_persons_message_keeps_all_it_has() {
+        let m = Message {
+            role: "person".into(),
+            ..turn(&["text:One.", "text:Two."], false, "")
+        };
+        assert_eq!(parts(&m, &tools(), QUIET), vec![Part::Bubbles(vec![0, 1])]);
+    }
+
+    #[test]
+    fn joined_bubbles_round_only_their_outer_corners() {
+        use crate::tokens::radius::{BUBBLE as B, BUBBLE_JOINED as J};
+        assert_eq!(Joined::at(0, 1), Joined::default());
+        assert_eq!(
+            [Joined::at(0, 3), Joined::at(1, 3), Joined::at(2, 3)],
+            [
+                Joined {
+                    above: false,
+                    below: true
+                },
+                Joined {
+                    above: true,
+                    below: true
+                },
+                Joined {
+                    above: true,
+                    below: false
+                },
+            ]
+        );
+        let c = |tl, tr, br, bl| Corners { tl, tr, br, bl };
+        // The person's on the right: round alone, smaller on the right where it joins.
+        assert_eq!(corners(true, Joined::at(0, 1)), c(B, B, B, B));
+        assert_eq!(corners(true, Joined::at(0, 3)), c(B, B, J, B));
+        assert_eq!(corners(true, Joined::at(1, 3)), c(B, J, J, B));
+        assert_eq!(corners(true, Joined::at(2, 3)), c(B, J, B, B));
+        // An agent's on the left, its top corner by the thread always small.
+        assert_eq!(corners(false, Joined::at(0, 1)), c(J, B, B, B));
+        assert_eq!(corners(false, Joined::at(0, 3)), c(J, B, B, J));
+        assert_eq!(corners(false, Joined::at(1, 3)), c(J, B, B, J));
+        assert_eq!(corners(false, Joined::at(2, 3)), c(J, B, B, B));
+        assert!(J < B);
+    }
+
+    #[test]
+    fn the_persons_messages_next_to_each_other_join() {
+        let person = |text: &str, from: Option<&str>| Message {
+            role: "person".into(),
+            from_agent: from.map(str::to_string),
+            ..turn(&[text], false, "")
+        };
+        let rows = [
+            person("text:One", None),
+            person("text:Two", None),
+            turn(&["text:Hi."], false, "done"),
+            person("text:Three", None),
+            person("text:From Ann", Some("Ann")),
+            person("file:", None),
+            person("text:Four", None),
+        ];
+        let mut with_approval: Vec<Option<&Message>> = rows.iter().map(Some).collect();
+        with_approval.push(None);
+        let j = person_joins(&with_approval);
+        let (alone, first, last) = (
+            Joined::default(),
+            Joined::at(0, 2),
+            Joined {
+                above: true,
+                below: false,
+            },
+        );
+        // Another agent's isn't the person's, and a message without words has no bubble.
+        assert_eq!(
+            j,
+            vec![first, last, alone, alone, alone, alone, alone, alone]
+        );
+    }
+
+    #[test]
+    fn a_reply_reads_as_one_answer_while_it_runs_and_once_it_is_kept() {
+        let mut m = Model::new();
+        m.conversations = vec![Conversation {
+            id: "c_1".into(),
+            agent: "a_1".into(),
+            task: None,
+            side: false,
+            branch_of: None,
+            branch_at: None,
+            routine: None,
+            program: None,
+            title: String::new(),
+        }];
+        m.select(Some("a_1".into()));
+        m.runs = vec![Run {
+            id: "run_1".into(),
+            conversation: "c_1".into(),
+            agent: "a_1".into(),
+            message: "msg_1".into(),
+        }];
+        let delta = |block: u64, kind: &str, text: &str| json!({"t": "delta", "run": "run_1", "message": "msg_1", "block": block, "kind": kind, "pos": 0, "text": text});
+        m.take(&delta(
+            0,
+            "text",
+            "Checking first whether there's a release.",
+        ));
+        m.tools = Rc::new(vec![Tool {
+            call: "tc_1".into(),
+            run: "run_1".into(),
+            title: "Search the web".into(),
+            status: Some("running".into()),
+        }]);
+        let now = |m: &Model| {
+            let shown = m.shown();
+            parts(&shown[0], &m.tools, QUIET)
+        };
+        assert_eq!(
+            now(&m),
+            vec![fold("Search the web…", true, vec![Part::Bubbles(vec![0])])]
+        );
+        // The turn ends: its message, whole, takes the place of what the deltas built.
+        let kept = |status: &str| {
+            json!({"id": "msg_1", "conversation": "c_1", "role": "agent", "agent": "a_1", "run": "run_1", "at": 2, "status": status, "blocks": [
+                {"kind": "text", "text": "Checking first whether there's a release."},
+                {"kind": "tool", "call": "tc_1"},
+                {"kind": "text", "text": "Installed."}]})
+        };
+        m.take(&json!({"t": "event", "kind": "message.created", "conversation": "c_1", "message": kept("done")}));
+        m.runs.clear();
+        m.messages = vec![m.message_of(&kept("done"))];
+        assert_eq!(
+            now(&m),
+            vec![
+                fold("1 step", false, vec![Part::Bubbles(vec![0])]),
+                Part::Bubbles(vec![2]),
+            ]
+        );
+        // Stopped, it keeps both, as one group.
+        m.messages = vec![m.message_of(&kept("cancelled"))];
+        assert_eq!(now(&m), vec![Part::Bubbles(vec![0, 2])]);
     }
 
     #[test]
