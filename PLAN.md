@@ -9,6 +9,7 @@ This is a rewrite. Loom v0.1 (a Rust engine with its own model loop, a React UI,
 - **Repo:** `aaen-studios/loom`. On the VPS as a T3 project.
 - **Board:** Acta, [`aaen-studios/loom`](https://acta.aaenz.no/aaen-studios/loom).
 - **Protocol:** [protocol/protocol.md](protocol/protocol.md).
+- **Site:** [loom.rip](https://loom.rip), from [`site/`](site/README.md).
 
 A word used throughout: an **instance** is one running loom server and its people, on a server or inside the desktop app. (A placeholder word; see [Open questions](#open-questions).)
 
@@ -634,7 +635,7 @@ loom/
   desktop/    Rust: the GPUI app for Windows and macOS
   ios/        Swift: the iPhone app, its widgets, push extension and the Xcode project
   push/       Calx: the opt-in push relay (Phase 10)
-  site/       the public site and the docs
+  site/       the website, loom.rip, and the user guides
   tests/      the fake ACP agent, protocol and end-to-end tests
   scripts/    Calx: build, release, install
 ```
@@ -764,6 +765,5 @@ Nothing from v0.1's code carries over: the engine was Rust with its own model lo
 ## Open questions
 
 - **The word for an instance.** "Instance" is a placeholder.
-- **The domain**, for the site, invites and the push relay.
 - **The panel break-out test** at the start of Phase 7 ([The panel sandbox](#the-panel-sandbox)).
 - **The Calx checks** marked "Not documented" in [What Calx needs](#what-calx-needs).

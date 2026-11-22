@@ -1,0 +1,568 @@
+---
+// The home page: what loom is, the app itself (a live copy, src/components/AppDemo.astro), what it
+// does, and how to get it.
+import Base from '../layouts/Base.astro';
+import AppDemo from '../components/AppDemo.astro';
+import Command from '../components/Command.astro';
+import Get from '../components/Get.astro';
+import Knot from '../components/Knot.astro';
+import { INSTALL } from '../lib/site.mjs';
+
+// The Brains page: the programs installed, and the registry's to install. When the panel comes into
+// view, OpenCode installs and joins the others.
+const mine = ['Claude', 'Codex'];
+const registry = ['OpenCode', 'Goose', 'Gemini CLI'];
+
+const rules = [
+	{ what: 'git push *', code: true, says: 'Ask' },
+	{ what: '~/.ssh/**', code: true, says: 'Deny' },
+	{ what: 'github.com', code: true, says: 'Allow' },
+	{ what: 'Started by a webhook', code: false, says: 'Ask' },
+];
+
+// Each server's yarn is drawn from its name, as the app draws it. The last one connects when the
+// panel comes into view.
+const servers = ['This computer', 'loom.example.com', 'loom.acme.dev'];
+
+// Each with an agent's thread, which works while the item is hovered.
+const more = [
+	{ title: 'Routines and webhooks', color: 'periwinkle', mood: 'thinking', text: 'An agent works on a schedule, or when a webhook comes in, and a run with nothing to say ends quietly.' },
+	{ title: 'Tasks', color: 'mint', mood: 'tool', text: 'Long jobs run beside the chat, carry on after a restart, and can be paused, resumed or retried.' },
+	{ title: 'A browser of its own', color: 'apricot', mood: 'writing', text: 'Watch an agent browse, take over for a login, and hand it back. Secrets go in without the agent seeing them.' },
+	{ title: 'Notes, skills and tables', color: 'pink', mood: 'thinking', text: 'Agents remember, keep skills, and share tables. Do a task once in its browser and the agent writes it up as a skill.' },
+	{ title: 'A backup brain', color: 'gold', mood: 'tool', text: 'When an agent’s program runs out of usage, another one takes the chat over, and the reply says so.' },
+	{ title: 'Plugins', color: 'lavender', mood: 'writing', text: 'Panels and tools that agents write themselves, walled off from the network and from the rest of loom.' },
+];
+---
+
+<Base description="loom is a self-hostable agent app. Chat with your own AI agents from your PC; they work on your server, or on your PC if you don't want one.">
+	<section class="hero">
+		<div class="wrap">
+			<div class="mark">
+				<svg class="band under" aria-hidden="true"></svg>
+				<h1>
+					<Knot size={64} class="hero-knot" />
+					<span class="word">loom</span>
+				</h1>
+				<svg class="band over" aria-hidden="true"></svg>
+			</div>
+			<p class="kind">A self-hostable agent app.</p>
+			<Get />
+		</div>
+		<div class="wrap demo-wrap">
+			<AppDemo />
+		</div>
+	</section>
+
+	<section class="feature" aria-labelledby="f-programs">
+		<div class="wrap split">
+			<div class="copy" data-reveal>
+				<h2 id="f-programs">Every agent runs on an agent program</h2>
+				<p>
+					Claude, Codex, OpenCode, Goose, Gemini CLI, or any other program that speaks the Agent Client Protocol. loom installs them from the ACP Registry, and gives each agent a name, a colour, its instructions and a folder to work in.
+				</p>
+			</div>
+			<div class="visual" data-reveal>
+				<div class="panel brains">
+					<div class="panel-title">Brains</div>
+					<div class="group-label">Your brains</div>
+					<div class="group mine">
+						{
+							mine.map((p) => (
+								<div class="row">
+									<span class="row-name">{p}</span>
+								</div>
+							))
+						}
+					</div>
+					<div class="group more-brains">
+						{
+							registry.map((p) => (
+								<div class="row" data-brain={p}>
+									<span class="row-name">{p}</span>
+									<span class="chip">Install</span>
+								</div>
+							))
+						}
+					</div>
+				</div>
+			</div>
+		</div>
+	</section>
+
+	<section class="feature" aria-labelledby="f-asks">
+		<div class="wrap split flip">
+			<div class="copy" data-reveal>
+				<h2 id="f-asks">It asks before anything that matters</h2>
+				<p>
+					Each agent asks about everything, about what's risky, or nothing, as you choose. Rules allow, ask or deny by site, file, command or tool, and every action is recorded before it happens.
+				</p>
+			</div>
+			<div class="visual" data-reveal>
+				<div class="panel rules">
+					<div class="panel-title">Rules</div>
+					<div class="group">
+						{
+							rules.map((r, i) => (
+								<div class="row" style={`--i: ${i}`}>
+									<span class="row-name">{r.code ? <code>{r.what}</code> : r.what}</span>
+									<span class:list={['row-value', { bad: r.says === 'Deny' }]}>{r.says}</span>
+								</div>
+							))
+						}
+					</div>
+				</div>
+			</div>
+		</div>
+	</section>
+
+	<section class="feature" aria-labelledby="f-where">
+		<div class="wrap split">
+			<div class="copy" data-reveal>
+				<h2 id="f-where">On your PC, or on a server</h2>
+				<p>
+					The desktop app can run everything itself, with no server. Or put loom on a Linux server with one command, invite people, and each person's agents run in a sandbox of their own. One app signs in to as many servers as you like, and a whole instance moves between machines.
+				</p>
+			</div>
+			<div class="visual" data-reveal>
+				<div class="panel servers">
+					{
+						servers.map((s, i) => (
+							<div class="server-row" data-last={i === servers.length - 1 ? '' : undefined}>
+								<svg data-yarn={s} width="32" height="32" aria-hidden="true" />
+								<span class="server-text">
+									<b>{s}</b>
+									<small>Connected</small>
+								</span>
+							</div>
+						))
+					}
+				</div>
+				<Command text={INSTALL} class="server-cmd" />
+			</div>
+		</div>
+	</section>
+
+	<section class="more" aria-label="More of what loom does">
+		<div class="wrap">
+			<ul class="grid">
+				{
+					more.map((m, i) => (
+						<li data-reveal data-mood={m.mood} style={`--delay: ${(i % 3) * 0.08}s`}>
+							<h3>
+								<svg data-thread data-color={m.color} width="26" height="10" aria-hidden="true" />
+								{m.title}
+							</h3>
+							<p>{m.text}</p>
+						</li>
+					))
+				}
+			</ul>
+		</div>
+	</section>
+
+	<section class="end" aria-labelledby="f-end">
+		<div class="wrap">
+			<h2 id="f-end" data-reveal>Open source</h2>
+			<p>MIT licensed. The server and the app's core are written in <a href="https://calxlang.com">Calx</a>, and the desktop app is native.</p>
+			<Get compact />
+		</div>
+	</section>
+</Base>
+
+<style>
+	.hero {
+		padding-top: 72px;
+		text-align: center;
+	}
+	/* The wordmark, with the agents' threads woven through it across the page: a band behind it,
+	   and the stretches that pass over its letters in front (src/scripts/weave.ts). */
+	.mark {
+		position: relative;
+		display: grid;
+		justify-items: center;
+	}
+	.band {
+		position: absolute;
+		z-index: 0;
+		top: 50%;
+		left: calc(50% - 50vw);
+		width: 100vw;
+		height: 1.6em;
+		/* Centred on the letters' bodies rather than the line, a little below its middle. */
+		margin-top: -0.74em;
+		font-size: clamp(60px, 10vw, 88px);
+		overflow: visible;
+		pointer-events: none;
+	}
+	.band.over {
+		z-index: 2;
+	}
+	.mark h1 {
+		position: relative;
+		z-index: 1;
+	}
+	/* The knot beside the wordmark: the app's proportions, a little tighter at this size. */
+	h1 {
+		display: inline-flex;
+		align-items: center;
+		gap: 0.3em;
+		font-size: clamp(60px, 10vw, 88px);
+		letter-spacing: -0.035em;
+		line-height: 1;
+	}
+	h1 :global(.hero-knot) {
+		width: 1.3em;
+		height: 1.3em;
+		/* The knot's box is mostly air above and below; it shouldn't make the line taller. */
+		margin: -0.3em 0;
+		/* design/logo/README.md: large uses go down to 2.2. */
+		stroke-width: 2.2;
+	}
+	.kind {
+		margin-top: 18px;
+		font-size: clamp(18px, 2.4vw, 21px);
+		color: var(--ink-2);
+		letter-spacing: -0.01em;
+	}
+	.hero :global(.get) {
+		margin-top: 32px;
+	}
+	.demo-wrap {
+		margin-top: 56px;
+	}
+
+	.feature {
+		margin-top: 140px;
+	}
+	.split {
+		display: grid;
+		grid-template-columns: repeat(2, minmax(0, 1fr));
+		align-items: center;
+		gap: 64px;
+	}
+	.flip .copy {
+		order: 2;
+	}
+	.copy h2 {
+		font-size: clamp(26px, 3.4vw, 34px);
+		letter-spacing: -0.03em;
+	}
+	.copy p {
+		margin-top: 16px;
+		font-size: 17px;
+		color: var(--ink-2);
+		max-width: 480px;
+	}
+	.visual {
+		display: grid;
+		gap: 14px;
+	}
+
+	/* The app's settings, as it draws them: a page's title, then a group, a box of rows with what
+	   a row is on the left and its value or control on the right. */
+	.panel {
+		padding: 20px;
+		border: 1px solid var(--line);
+		border-radius: 14px;
+		background: var(--side);
+	}
+	.panel-title {
+		font-size: 17px;
+		font-weight: var(--weight-semibold);
+		letter-spacing: -0.02em;
+		margin: 0 2px 14px;
+	}
+	.group {
+		border: 1px solid var(--line);
+		border-radius: var(--radius-card);
+		background: var(--bg);
+		overflow: hidden;
+	}
+	.row {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		gap: 12px;
+		min-height: 50px;
+		padding: 0 16px;
+		font-size: 14px;
+	}
+	.row + .row {
+		border-top: 1px solid var(--line);
+	}
+	.row code {
+		font-size: 12.5px;
+	}
+	.row-value {
+		color: var(--ink-3);
+		font-size: 13.5px;
+	}
+	.row-value.bad {
+		color: var(--bad);
+	}
+	.group-label {
+		margin: 0 4px 8px;
+		font-size: 12.5px;
+		font-weight: var(--weight-medium);
+		color: var(--ink-3);
+	}
+	.more-brains {
+		margin-top: 12px;
+	}
+	.brains :global(.installing) {
+		font-size: var(--size-caption);
+		color: var(--ink-3);
+	}
+	.row.arrived {
+		animation: arrive 0.45s cubic-bezier(0.2, 0.7, 0.3, 1) both;
+	}
+	@keyframes arrive {
+		from {
+			opacity: 0;
+			transform: translateY(8px);
+		}
+	}
+	.row.going {
+		transition:
+			opacity 0.3s,
+			transform 0.3s;
+		opacity: 0;
+		transform: translateY(-6px);
+	}
+	/* The rules come in one after another. */
+	.rules .row {
+		transition:
+			opacity 0.5s cubic-bezier(0.2, 0.7, 0.3, 1),
+			transform 0.5s cubic-bezier(0.2, 0.7, 0.3, 1);
+		transition-delay: calc(0.25s + var(--i) * 0.12s);
+	}
+	:global(.js) [data-reveal]:not(.shown) .rules .row {
+		opacity: 0;
+		transform: translateX(-8px);
+	}
+	.chip {
+		display: inline-flex;
+		align-items: center;
+		height: 28px;
+		padding: 0 12px;
+		border-radius: var(--radius-button);
+		border: 1px solid var(--line-strong);
+		font-size: 13px;
+		font-weight: var(--weight-medium);
+	}
+
+	.servers {
+		display: grid;
+		gap: 4px;
+		padding: 10px;
+	}
+	.server-row {
+		display: flex;
+		align-items: center;
+		gap: 12px;
+		padding: 8px 10px;
+		border-radius: 8px;
+	}
+	.server-row:first-child {
+		background: var(--active);
+	}
+	.server-text {
+		display: grid;
+		line-height: 1.3;
+		text-align: left;
+	}
+	.server-text b {
+		font-size: 14px;
+		font-weight: var(--weight-medium);
+	}
+	.server-text small {
+		font-size: 12.5px;
+		color: var(--ink-3);
+	}
+	.server-row svg {
+		width: 32px;
+		height: 32px;
+		flex: none;
+	}
+	.visual :global(.server-cmd) {
+		background: var(--bg);
+	}
+
+	.more {
+		margin-top: 140px;
+	}
+	.grid {
+		list-style: none;
+		margin: 0;
+		padding: 0;
+		display: grid;
+		grid-template-columns: repeat(3, minmax(0, 1fr));
+		gap: 0;
+		border-top: 1px solid var(--line);
+	}
+	.grid li {
+		padding: 28px 28px 32px 0;
+		border-bottom: 1px solid var(--line);
+	}
+	.grid li:not(:nth-child(3n + 1)) {
+		padding-left: 28px;
+		border-left: 1px solid var(--line);
+	}
+	.grid h3 {
+		display: flex;
+		align-items: center;
+		gap: 12px;
+		font-size: 16px;
+		letter-spacing: -0.01em;
+	}
+	.grid h3 svg {
+		width: 26px;
+		height: 10px;
+		flex: none;
+	}
+	.grid p {
+		padding-left: 38px;
+	}
+	.grid p {
+		margin-top: 8px;
+		font-size: 14.5px;
+		color: var(--ink-3);
+	}
+
+	.end {
+		margin-top: 140px;
+		text-align: center;
+	}
+	.end h2 {
+		font-size: clamp(26px, 3.4vw, 34px);
+		letter-spacing: -0.03em;
+	}
+	.end p {
+		margin: 14px auto 0;
+		max-width: 520px;
+		font-size: 17px;
+		color: var(--ink-2);
+	}
+	.end p a {
+		text-decoration: underline;
+		text-decoration-color: var(--line-strong);
+		text-underline-offset: 4px;
+	}
+	.end :global(.get) {
+		margin-top: 28px;
+	}
+
+	@media (max-width: 900px) {
+		.split {
+			grid-template-columns: minmax(0, 1fr);
+			gap: 32px;
+		}
+		.flip .copy {
+			order: 0;
+		}
+		.grid {
+			grid-template-columns: repeat(2, minmax(0, 1fr));
+		}
+		.grid li,
+		.grid li:not(:nth-child(3n + 1)) {
+			padding: 24px 24px 28px 0;
+			border-left: 0;
+		}
+		.grid li:nth-child(2n) {
+			padding-left: 24px;
+			border-left: 1px solid var(--line);
+		}
+	}
+	@media (max-width: 640px) {
+		.hero {
+			padding-top: 56px;
+		}
+		.demo-wrap {
+			margin-top: 44px;
+		}
+		.feature,
+		.more,
+		.end {
+			margin-top: 96px;
+		}
+		.grid {
+			grid-template-columns: minmax(0, 1fr);
+		}
+		.grid li,
+		.grid li:nth-child(2n) {
+			padding: 22px 0 24px;
+			border-left: 0;
+		}
+	}
+</style>
+
+<script>
+	// The panels' little scenes, each played once when it comes into view, and the grid's threads,
+	// which work while their item is hovered.
+	import { threadOf, threadsIn, yarnsIn, type Mood } from '../scripts/thread';
+
+	const pause = (ms: number) => new Promise((done) => setTimeout(done, ms));
+	const still = matchMedia('(prefers-reduced-motion: reduce)').matches;
+	/** Runs play once el has risen into view. */
+	const whenShown = (el: Element | null, play: () => void) => {
+		if (!el) return;
+		if (el.classList.contains('shown')) play();
+		else el.addEventListener('shown', play, { once: true });
+	};
+
+	// Brains: OpenCode installs, and joins the brains already there.
+	const brains = document.querySelector('.brains');
+	whenShown(brains?.closest('[data-reveal]') ?? null, async () => {
+		const row = brains?.querySelector<HTMLElement>('[data-brain="OpenCode"]');
+		const mine = brains?.querySelector('.mine');
+		const chip = row?.querySelector('.chip');
+		if (!row || !mine || !chip || still) return;
+		await pause(900);
+		const busy = document.createElement('span');
+		busy.className = 'installing';
+		busy.textContent = 'Installing…';
+		chip.replaceWith(busy);
+		await pause(2200);
+		row.classList.add('going');
+		await pause(300);
+		busy.remove();
+		row.classList.remove('going');
+		row.classList.add('arrived');
+		mine.append(row);
+	});
+
+	// Servers: the last one connects, its strands turning until it's in.
+	const servers = document.querySelector('.servers');
+	yarnsIn(servers ?? undefined);
+	const last = servers?.querySelector<HTMLElement>('[data-last]');
+	const state = last?.querySelector('small');
+	if (last && state && !still) {
+		last.classList.add('turning');
+		state.textContent = 'Connecting…';
+		whenShown(servers?.closest('[data-reveal]') ?? null, async () => {
+			await pause(2400);
+			last.classList.remove('turning');
+			state.textContent = 'Connected';
+		});
+	}
+
+	// The grid: each item's thread works while it's hovered, and they all twang as the grid arrives.
+	const items = [...document.querySelectorAll<HTMLElement>('.grid li')];
+	threadsIn(document.querySelector('.grid') ?? undefined);
+	items.forEach((li, i) => {
+		const th = threadOf(li.querySelector('svg[data-thread]'));
+		if (!th) return;
+		li.addEventListener('pointerenter', () => th.set((li.dataset.mood as Mood) ?? 'writing'));
+		li.addEventListener('pointerleave', () => th.set('idle'));
+		whenShown(li, () => setTimeout(() => th.pluck(1), 350 + (i % 3) * 120));
+	});
+</script>
+
+<script>
+	import { weave } from '../scripts/weave';
+	const under = document.querySelector<SVGSVGElement>('.hero .band.under');
+	const over = document.querySelector<SVGSVGElement>('.hero .band.over');
+	const word = document.querySelector<HTMLElement>('.hero h1 .word');
+	if (under && over && word) weave(under, over, word, ['periwinkle', 'mint', 'apricot', 'pink', 'sky', 'gold', 'lavender']);
+</script>

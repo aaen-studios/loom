@@ -1,0 +1,36 @@
+---
+// A page that isn't there: a slack thread, as an agent's is when it fails, and the way home.
+import Base from '../layouts/Base.astro';
+---
+
+<Base title="Not found" description="There's no page at this address on loom.rip.">
+	<div class="wrap page">
+		<svg class="slack" data-thread data-color="grey" data-mood="failed" width="200" height="40" aria-hidden="true"></svg>
+		<h1>There's no page here</h1>
+		<a class="btn btn-quiet" href="/">loom.rip</a>
+	</div>
+</Base>
+
+<style>
+	.page {
+		display: grid;
+		justify-items: center;
+		gap: 20px;
+		padding-top: 18vh;
+		text-align: center;
+	}
+	.slack {
+		width: 200px;
+		height: 40px;
+		margin-bottom: 8px;
+	}
+	h1 {
+		font-size: 28px;
+		letter-spacing: -0.03em;
+	}
+</style>
+
+<script>
+	import { threadsIn } from '../scripts/thread';
+	threadsIn();
+</script>

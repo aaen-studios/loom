@@ -1,0 +1,108 @@
+---
+// Every page's frame: the head (title, description, link previews, icons, structured data), the
+// header and the footer. The theme follows the system's unless the footer's switch picked one.
+import '@fontsource-variable/geist';
+import '@fontsource-variable/geist-mono';
+import '../styles/global.css';
+import Header from '../components/Header.astro';
+import Footer from '../components/Footer.astro';
+import { GITHUB, ORIGIN, STUDIO } from '../lib/site.mjs';
+
+interface Props {
+	/** The page's own title; the home page has none, and is just "loom". */
+	title?: string;
+	description: string;
+	/** Extra structured data for this page. */
+	data?: object;
+}
+const { title, description, data } = Astro.props;
+const full = title ? `${title} | loom` : 'loom, a self-hostable agent app';
+const canonical = new URL(Astro.url.pathname, ORIGIN).href;
+const image = new URL('/og.png', ORIGIN).href;
+
+const graph = {
+	'@context': 'https://schema.org',
+	'@graph': [
+		{ '@type': 'Organization', '@id': `${STUDIO.url}#organization`, name: STUDIO.name, url: STUDIO.url },
+		{ '@type': 'WebSite', '@id': `${ORIGIN}/#website`, name: 'loom', url: `${ORIGIN}/` },
+		{
+			'@type': 'SoftwareApplication',
+			'@id': `${ORIGIN}/#app`,
+			name: 'loom',
+			url: `${ORIGIN}/`,
+			applicationCategory: 'DeveloperApplication',
+			operatingSystem: 'Windows, Linux, macOS',
+			license: 'https://opensource.org/licenses/MIT',
+			codeRepository: GITHUB,
+			offers: { '@type': 'Offer', price: '0', priceCurrency: 'USD' },
+			publisher: { '@id': `${STUDIO.url}#organization` },
+		},
+		...(data ? [data] : []),
+	],
+};
+---
+
+<!doctype html>
+<html lang="en" data-theme="light">
+	<head>
+		<meta charset="utf-8" />
+		<meta name="viewport" content="width=device-width, initial-scale=1" />
+		<title>{full}</title>
+		<meta name="description" content={description} />
+		<link rel="canonical" href={canonical} />
+		<meta name="color-scheme" content="light dark" />
+		<meta name="theme-color" content="#ffffff" />
+
+		<link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+		<link rel="icon" href="/favicon-32.png" sizes="32x32" type="image/png" />
+		<link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+		<link rel="sitemap" href="/sitemap-index.xml" />
+
+		<meta property="og:type" content="website" />
+		<meta property="og:site_name" content="loom" />
+		<meta property="og:title" content={title ?? 'loom'} />
+		<meta property="og:description" content={description} />
+		<meta property="og:url" content={canonical} />
+		<meta property="og:image" content={image} />
+		<meta property="og:image:width" content="1200" />
+		<meta property="og:image:height" content="630" />
+		<meta property="og:image:alt" content="loom's knot and wordmark" />
+		<meta name="twitter:card" content="summary_large_image" />
+
+		<script type="application/ld+json" set:html={JSON.stringify(graph)} />
+
+		<!-- Light is loom's main look. The footer's switch can pick dark, or the system's; that's
+		     set before the page paints, so it never flashes. -->
+		<script is:inline>
+			document.documentElement.classList.add('js');
+			try {
+				const t = localStorage.getItem('theme');
+				if (t === 'dark') document.documentElement.dataset.theme = 'dark';
+				else if (t === 'system') delete document.documentElement.dataset.theme;
+			} catch {}
+		</script>
+	</head>
+	<body>
+		<Header />
+		<main>
+			<slot />
+		</main>
+		<Footer />
+		<script>
+			// Each [data-reveal] rises into place the first time it's on screen, and says so with a
+			// "shown" event, which the home page's panels start their little scenes on.
+			const seen = new IntersectionObserver(
+				(entries) => {
+					for (const e of entries) {
+						if (!e.isIntersecting) continue;
+						e.target.classList.add('shown');
+						e.target.dispatchEvent(new CustomEvent('shown'));
+						seen.unobserve(e.target);
+					}
+				},
+				{ rootMargin: '0px 0px -12% 0px' },
+			);
+			for (const el of document.querySelectorAll('[data-reveal]')) seen.observe(el);
+		</script>
+	</body>
+</html>

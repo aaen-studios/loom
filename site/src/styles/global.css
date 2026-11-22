@@ -1,0 +1,220 @@
+/* loom.rip's base: the design tokens (generated from design/tokens.toml), then the few rules every
+   page shares. The look is the app's: near-monochrome, Geist, and colour only in agents' threads. */
+@import '../../../design/generated/tokens.css';
+
+:root {
+	--ui: 'Geist Variable', var(--font-ui), system-ui, sans-serif;
+	--mono: 'Geist Mono Variable', var(--font-mono), ui-monospace, monospace;
+	--page: 1120px;
+	--text: 640px;
+	--gutter: 24px;
+	--shadow: 0 1px 2px rgb(0 0 0 / 0.04), 0 12px 40px -12px rgb(0 0 0 / 0.18);
+}
+
+@media (prefers-color-scheme: dark) {
+	:root:not([data-theme='light']) {
+		--shadow: 0 1px 2px rgb(0 0 0 / 0.5), 0 24px 64px -16px rgb(0 0 0 / 0.7);
+	}
+}
+:root[data-theme='dark'] {
+	--shadow: 0 1px 2px rgb(0 0 0 / 0.5), 0 24px 64px -16px rgb(0 0 0 / 0.7);
+}
+
+@media (max-width: 640px) {
+	:root {
+		--gutter: 16px;
+	}
+}
+
+*,
+*::before,
+*::after {
+	box-sizing: border-box;
+}
+
+html {
+	-webkit-text-size-adjust: 100%;
+	text-size-adjust: 100%;
+	scroll-padding-top: 80px;
+}
+
+body {
+	margin: 0;
+	background: var(--bg);
+	color: var(--ink);
+	font-family: var(--ui);
+	font-size: 16px;
+	line-height: 1.6;
+	-webkit-font-smoothing: antialiased;
+	-moz-osx-font-smoothing: grayscale;
+	text-rendering: optimizeLegibility;
+	overflow-x: hidden;
+}
+
+h1,
+h2,
+h3 {
+	margin: 0;
+	font-weight: var(--weight-semibold);
+	letter-spacing: -0.025em;
+	line-height: 1.15;
+	text-wrap: balance;
+}
+
+p {
+	margin: 0;
+	text-wrap: pretty;
+}
+
+a {
+	color: inherit;
+}
+
+code,
+kbd,
+pre {
+	font-family: var(--mono);
+	font-size: 0.9em;
+}
+
+img,
+svg {
+	display: block;
+}
+
+::selection {
+	background: color-mix(in srgb, var(--thread-sky) 30%, transparent);
+}
+
+:focus-visible {
+	outline: 2px solid var(--thread-sky);
+	outline-offset: 2px;
+	border-radius: 4px;
+}
+
+.wrap {
+	width: 100%;
+	max-width: calc(var(--page) + 2 * var(--gutter));
+	margin: 0 auto;
+	padding: 0 var(--gutter);
+}
+
+.visually-hidden {
+	position: absolute;
+	width: 1px;
+	height: 1px;
+	overflow: hidden;
+	clip-path: inset(50%);
+	white-space: nowrap;
+}
+
+/* Buttons, as the app draws them: a filled one for the thing to do, and a quiet one beside it. */
+.btn {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	gap: 8px;
+	height: 44px;
+	padding: 0 20px;
+	border-radius: 10px;
+	border: 1px solid transparent;
+	font: inherit;
+	font-size: 15px;
+	font-weight: var(--weight-medium);
+	text-decoration: none;
+	white-space: nowrap;
+	cursor: pointer;
+	transition:
+		background-color 0.15s,
+		border-color 0.15s,
+		transform 0.15s;
+}
+.btn:active {
+	transform: translateY(1px);
+}
+.btn svg {
+	width: 18px;
+	height: 18px;
+	flex: none;
+}
+.btn-primary {
+	background: var(--button);
+	color: var(--button-ink);
+}
+.btn-primary:hover {
+	background: color-mix(in srgb, var(--button) 86%, var(--bg));
+}
+.btn-quiet {
+	background: transparent;
+	color: var(--ink);
+	border-color: var(--line-strong);
+}
+.btn-quiet:hover {
+	background: var(--hover);
+}
+
+/* A command to copy: one line of mono with its copy button. */
+.cmd {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	min-width: 0;
+	padding: 6px 6px 6px 16px;
+	border: 1px solid var(--line);
+	border-radius: 10px;
+	background: var(--raised);
+	font-family: var(--mono);
+	font-size: 13.5px;
+}
+.cmd code {
+	flex: 1;
+	min-width: 0;
+	overflow-x: auto;
+	white-space: nowrap;
+	scrollbar-width: none;
+	font-size: inherit;
+	padding: 6px 0;
+}
+.cmd code::-webkit-scrollbar {
+	display: none;
+}
+.cmd .prompt {
+	color: var(--ink-3);
+	user-select: none;
+}
+
+/* What rises into place as the page scrolls to it (the observer is in Base.astro). Without
+   scripts, it's simply there. */
+.js [data-reveal] {
+	opacity: 0;
+	transform: translateY(18px);
+	transition:
+		opacity 0.7s cubic-bezier(0.2, 0.7, 0.3, 1) var(--delay, 0s),
+		transform 0.7s cubic-bezier(0.2, 0.7, 0.3, 1) var(--delay, 0s);
+}
+.js [data-reveal].shown {
+	opacity: 1;
+	transform: none;
+}
+
+/* A server's yarn while it connects: its strands turn (desktop/src/thread.rs, 1.6 rad/s). */
+.turning .strands {
+	animation: yarn-turn 3.93s linear infinite;
+}
+@keyframes yarn-turn {
+	to {
+		transform: rotate(1turn);
+	}
+}
+
+@media (prefers-reduced-motion: reduce) {
+	.js [data-reveal] {
+		transform: none;
+	}
+	*,
+	*::before,
+	*::after {
+		transition: none !important;
+		animation: none !important;
+	}
+}

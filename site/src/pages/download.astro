@@ -1,0 +1,245 @@
+---
+// Everything there is to download, from the newest release: the Windows app, and the server for a
+// Linux server, Docker, or the program on its own. The links are the newest release's, so they stay
+// right between builds; the version and sizes are this build's.
+import Base from '../layouts/Base.astro';
+import Command from '../components/Command.astro';
+import { latest, sizeOf, day } from '../lib/releases.mjs';
+import { DOCKER, GITHUB, GUIDES, INSTALL, LATEST } from '../lib/site.mjs';
+
+const release = await latest();
+const version = release?.version;
+const programs = [
+	{ name: 'Linux', detail: 'x64', file: 'loom-linux' },
+	{ name: 'Linux', detail: 'Arm', file: 'loom-linux-arm64' },
+	{ name: 'macOS', detail: 'Apple silicon', file: 'loom-macos' },
+	{ name: 'Windows', detail: 'x64', file: 'loom-windows.exe' },
+];
+const setup = sizeOf(release, 'loom-setup.exe');
+---
+
+<Base title="Download" description="Download loom for Windows, or install it on a Linux server, in Docker, or as one program for Linux, macOS and Windows.">
+	<div class="wrap page">
+		<h1>Download</h1>
+		{version && <p class="version">loom {version}{release && <>, {day(release.date)}</>}</p>}
+
+		<section aria-labelledby="app">
+			<h2 id="app">Desktop app</h2>
+			<div class="app">
+				<div class="app-text">
+					<h3>Windows</h3>
+					<p>Runs your agents on this computer, or signs in to loom on your servers. It installs for you alone, with no administrator, and keeps itself up to date.</p>
+				</div>
+				<div class="app-get">
+					<a class="btn btn-primary" href={`${LATEST}/loom-setup.exe`} download>
+						<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 4v11M7 10.5l5 5 5-5M5 19.5h14"></path></svg>
+						Download for Windows
+					</a>
+					<span class="meta">{[version && `loom ${version}`, setup, 'x64'].filter(Boolean).join(' · ')}</span>
+				</div>
+			</div>
+		</section>
+
+		<section aria-labelledby="server" id="server">
+			<h2>Server</h2>
+			<div class="ways">
+				<div class="way">
+					<h3>Linux</h3>
+					<Command text={INSTALL} />
+					<p>Makes a <code>loom</code> user and a service, puts Caddy in front for TLS with <code>--domain</code>, or Tailscale without one, and prints the one-time setup code.</p>
+				</div>
+				<div class="way">
+					<h3>Docker</h3>
+					<Command text={DOCKER} />
+					<p><code>docker logs loom</code> shows the setup code. Put a proxy with TLS in front of it.</p>
+				</div>
+				<div class="way">
+					<h3>The program on its own</h3>
+					<ul class="files">
+						{
+							programs.map((p) => (
+								<li>
+									<a href={`${LATEST}/${p.file}`} download>
+										<span class="os">{p.name}</span>
+										<span class="detail">{p.detail}</span>
+										<span class="size">{sizeOf(release, p.file)}</span>
+										<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 4v11M7 10.5l5 5 5-5M5 19.5h14"></path></svg>
+									</a>
+								</li>
+							))
+						}
+					</ul>
+					<p><code>loom serve</code> runs it, and <code>loom</code> on its own lists every command.</p>
+				</div>
+			</div>
+		</section>
+
+		<section class="more" aria-label="More">
+			<p>
+				Each release is signed: its <code>manifest.json</code> holds every file's SHA-256, and <code>manifest.json.sig</code> signs it. The app, the installer and <code>loom update</code> check it before they put anything in.
+			</p>
+			<ul class="links">
+				<li><a href={release ? release.url : `${GITHUB}/releases`}>{version ? `Every file in ${version}` : 'Releases'}</a></li>
+				<li><a href={GUIDES}>Guides</a></li>
+				<li><a href="/changelog/">Changelog</a></li>
+			</ul>
+		</section>
+	</div>
+</Base>
+
+<style>
+	.page {
+		max-width: calc(880px + 2 * var(--gutter));
+		padding-top: 72px;
+	}
+	h1 {
+		font-size: clamp(36px, 6vw, 52px);
+		letter-spacing: -0.035em;
+	}
+	.version {
+		margin-top: 10px;
+		color: var(--ink-3);
+		font-size: 15px;
+	}
+	section {
+		margin-top: 64px;
+	}
+	h2 {
+		font-size: 22px;
+		padding-bottom: 14px;
+		border-bottom: 1px solid var(--line);
+	}
+	h3 {
+		font-size: 16px;
+		letter-spacing: -0.01em;
+	}
+	section p {
+		color: var(--ink-2);
+		font-size: 15px;
+	}
+	code {
+		font-size: 0.88em;
+		padding: 1px 5px;
+		border-radius: 5px;
+		background: var(--raised);
+		border: 1px solid var(--line);
+	}
+	.app {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		gap: 32px;
+		padding-top: 24px;
+	}
+	.app-text {
+		max-width: 420px;
+	}
+	.app-text p {
+		margin-top: 6px;
+	}
+	.app-get {
+		display: flex;
+		flex-direction: column;
+		align-items: flex-end;
+		gap: 10px;
+	}
+	.meta {
+		color: var(--ink-3);
+		font-size: 13px;
+	}
+	.ways {
+		display: grid;
+		gap: 36px;
+		padding-top: 24px;
+	}
+	.way {
+		display: grid;
+		gap: 10px;
+	}
+	.way > p {
+		font-size: 14px;
+		color: var(--ink-3);
+	}
+	.files {
+		list-style: none;
+		margin: 0;
+		padding: 0;
+		border: 1px solid var(--line);
+		border-radius: 10px;
+		overflow: hidden;
+	}
+	.files li + li {
+		border-top: 1px solid var(--line);
+	}
+	.files a {
+		display: grid;
+		grid-template-columns: 110px 1fr auto 18px;
+		align-items: center;
+		gap: 12px;
+		padding: 12px 16px;
+		text-decoration: none;
+		font-size: 14.5px;
+		transition: background-color 0.15s;
+	}
+	.files a:hover {
+		background: var(--hover);
+	}
+	.files .detail,
+	.files .size {
+		color: var(--ink-3);
+	}
+	.files .size {
+		font-variant-numeric: tabular-nums;
+		font-size: 13.5px;
+	}
+	.files svg {
+		width: 17px;
+		height: 17px;
+		color: var(--ink-3);
+	}
+	.more {
+		border-top: 1px solid var(--line);
+		padding-top: 28px;
+	}
+	.more p {
+		font-size: 14px;
+		color: var(--ink-3);
+		max-width: 640px;
+	}
+	.links {
+		display: flex;
+		flex-wrap: wrap;
+		gap: 8px 24px;
+		list-style: none;
+		margin: 18px 0 0;
+		padding: 0;
+		font-size: 14.5px;
+	}
+	.links a {
+		color: var(--ink);
+		text-decoration: underline;
+		text-decoration-color: var(--line-strong);
+		text-underline-offset: 4px;
+	}
+	.links a:hover {
+		text-decoration-color: var(--ink);
+	}
+	@media (max-width: 720px) {
+		.page {
+			padding-top: 48px;
+		}
+		.app {
+			flex-direction: column;
+			align-items: stretch;
+		}
+		.app-get {
+			align-items: stretch;
+		}
+		.meta {
+			text-align: center;
+		}
+		.files a {
+			grid-template-columns: 70px 1fr auto 18px;
+		}
+	}
+</style>
