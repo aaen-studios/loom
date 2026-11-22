@@ -59,7 +59,7 @@ jobs:
       - name: Collect
         shell: bash
         run: |
-          mkdir -p dist
+          mkdir -p dist build/release
           cp desktop/target/release/loom.exe dist/loom.exe
           cp desktop/setup/target/release/loom-setup.exe dist/loom-setup-stub.exe
           ls -l dist
@@ -115,14 +115,19 @@ jobs:
           if [ "$GITHUB_REF_TYPE" = tag ]; then version="${GITHUB_REF_NAME#v}"; else version="0.0.0-dry"; fi
           perl -pi -e "s/^const VERSION: str = \".*\"/const VERSION: str = \"$version\"/" server/main.calx
           grep -q "const VERSION: str = \"$version\"" server/main.calx
-          mkdir -p dist
-          calx build --release server/main.calx -o "dist/${{ matrix.out }}"
+          mkdir -p dist build/release
+          calx build --release server/main.calx -o "build/release/${{ matrix.out }}"
           # The push relay, for Linux servers (push/README.md).
           if [ -n "${{ matrix.push }}" ]; then
             perl -pi -e "s/^const VERSION: str = \".*\"/const VERSION: str = \"$version\"/" push/main.calx
             grep -q "const VERSION: str = \"$version\"" push/main.calx
-            calx build --release push/main.calx -o "dist/${{ matrix.push }}"
+            calx build --release push/main.calx -o "build/release/${{ matrix.push }}"
           fi
+          # Only the programs go in the release: a build also leaves its debug symbols
+          # beside them (a .dSYM folder on macOS), which a release can't hold.
+          cp "build/release/${{ matrix.out }}" dist/
+          if [ -n "${{ matrix.push }}" ]; then cp "build/release/${{ matrix.push }}" dist/; fi
+          ls -l dist
 
       - uses: actions/upload-artifact@v4
         with:
