@@ -5879,6 +5879,7 @@ ACTA_KEY=secret:ACTA_KEY",
                     .find(|(d, _)| *d == dir)
                     .map(|(_, m)| server_name(m, &dir))?;
                 let here = dir == self.here;
+                let rename_dir = dir.clone();
                 panel = panel
                     .child(
                         self.menu_item(
@@ -5897,6 +5898,20 @@ ACTA_KEY=secret:ACTA_KEY",
                             cx.notify();
                         })),
                     )
+                    .child({
+                        // Its page, on screen, with the name field ready to type in.
+                        let dir = rename_dir;
+                        self.menu_item("ctx-rename-server", Ico::Pencil, "Rename", false)
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.ctx = None;
+                                if dir != this.here {
+                                    this.show_server(&dir, cx);
+                                }
+                                this.open(Screen::Server, cx);
+                                this.server_name_in.update(cx, |s, cx| s.focus(window, cx));
+                                cx.notify();
+                            }))
+                    })
                     .child(
                         self.menu_item("ctx-copy-server", Ico::Copy, "Copy address", false)
                             .on_click(cx.listener(move |this, _, _, cx| {
