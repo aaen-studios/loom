@@ -44,6 +44,7 @@ pub enum In {
     Do(Op)
     Watch(bool)    // whether someone's watching: frames come only while they are
     Input(Json)    // the person's click, wheel, key or text, while they've taken over
+    Record(bool)    // start or stop keeping what the person does, as steps
     Stop
 }
 
@@ -52,6 +53,7 @@ pub enum Back {
     Done(String, String, Json)    // a call, and its MCP result
     Frame(String, String, i64, i64)    // the page as a JPEG, in base64, and its width and height
     Open(String, bool)    // whether its browser is open now
+    Steps(String, Json, bool)    // what the person's done while recording, as steps, and whether the recording's ended
 }
 
 struct Worker {
@@ -68,6 +70,9 @@ struct Worker {
     hidden: List<(String, String)>    // secrets filled into this browser, and their names, kept out of what the agent reads
     watched: bool
     casting: bool    // whether the page sends frames
+    recording: bool    // whether what the person does is kept as steps
+    steps: List<Json>    // what they've done since they started recording
+    last_url: String    // the page the last step was on
 }
 
 impl Task for Worker {
@@ -94,6 +99,7 @@ impl Task for Worker {
                     }
                     w.back.send(Back.Done(w.key.copy(), op.call.copy(), merge(result, Obj.new().s("loom_site", site).done())))
                 },
+                some(In.Record(on)) => w.record(on),
                 some(In.Watch(on)) => {
                     w.watched = on
                     w.cast()
@@ -117,7 +123,7 @@ impl Task for Worker {
 pub fn start(key: String, profile: String, guarded: bool, back: Sender<Back>) -> (Sender<In>, Thread) {
     let inbox = Receiver<In>()
     let to = inbox.sender()
-    let t = unsafe { Thread.spawn(Worker { key: key.copy(), profile: profile.copy(), guarded: guarded, inbox: inbox, back: back.copy(), child: none, page: none, port: String(), next_id: 0, refs: Map<String, i64>(), hidden: List<(String, String)>(), watched: false, casting: false }) }
+    let t = unsafe { Thread.spawn(Worker { key: key.copy(), profile: profile.copy(), guarded: guarded, inbox: inbox, back: back.copy(), child: none, page: none, port: String(), next_id: 0, refs: Map<String, i64>(), hidden: List<(String, String)>(), watched: false, casting: false, recording: false, steps: List<Json>(), last_url: String() }) }
     return (to, t)
 }
 
@@ -172,6 +178,12 @@ impl Worker {
         w.child = none
         w.refs.clear()
         w.casting = false
+        // A recording ends with its browser, keeping what it had.
+        if w.recording {
+            w.recording = false
+            w.back.send(Back.Steps(w.key.copy(), Json.Array(w.steps.copy()), true))
+            w.steps.clear()
+        }
         if was { w.back.send(Back.Open(w.key.copy(), false)) }
     }
 
@@ -220,6 +232,10 @@ impl Worker {
     // The person's click, wheel, key or text, while they've taken over.
     fn input(w: mut Worker, e: Json) ! Error {
         if w.page == none { return }
+        // Kept before it's done: what a click lands on is what's under it now.
+        if w.recording {
+            if let err(why) = w.keep_step(e.copy()) { eprintln("loom: recording in the browser: {why}") }
+        }
         let kind = str_at(e.copy(), "kind") ?? String()
         let x = at(e.copy(), "x").as_f64() ?? 0.0
         let y = at(e.copy(), "y").as_f64() ?? 0.0
@@ -237,6 +253,137 @@ impl Worker {
             _ = try w.call("Input.insertText", Obj.new().s("text", str_at(e, "text") ?? String()).done())
         }
         w.refs.clear()
+    }
+
+    // Starts or stops recording what the person does (PLAN.md, "Teach a
+    // task"). Stopping sends what was kept, as the recording's end.
+    fn record(w: mut Worker, on: bool) {
+        if on {
+            if w.page == none or w.recording { return }
+            w.recording = true
+            w.steps.clear()
+            w.last_url = String()
+            if let err(why) = w.note_page() { eprintln("loom: recording in the browser: {why}") }
+            w.back.send(Back.Steps(w.key.copy(), Json.Array(w.steps.copy()), false))
+            return
+        }
+        if not w.recording { return }
+        // A click or a key just before may have opened a page that's still loading.
+        if w.page != none {
+            w.settle()
+            if let err(why) = w.note_page() { eprintln("loom: recording in the browser: {why}") }
+        }
+        w.recording = false
+        w.back.send(Back.Steps(w.key.copy(), Json.Array(w.steps.copy()), true))
+        w.steps.clear()
+    }
+
+    // A step for the page the browser is on, when it's another than the last
+    // step's.
+    fn note_page(w: mut Worker) ! Error {
+        let h = try w.call("Page.getNavigationHistory", Obj.new().done())
+        let k = int_at(h.copy(), "currentIndex") ?? 0
+        let entry = at(h, "entries").at(usize.wrap(k)) ?? Json.Null
+        let url = str_at(entry.copy(), "url") ?? String()
+        if url == w.last_url or url.len() == 0 { return }
+        w.last_url = url.copy()
+        let step = Obj.new().s("kind", String("page")).s("title", w.hide(short(str_at(entry, "title") ?? String(), 200))).s("url", w.hide(short(url, STEP_TEXT_MOST))).done()
+        w.push_step(step)
+    }
+
+    fn last_step(w: Worker) -> Json? {
+        if w.steps.len() == 0 { return none }
+        return some(w.steps[w.steps.len() - 1].copy())
+    }
+
+    // What the person just did, as a step: a click on what's under it, text
+    // typed into the field that has the focus (never what goes into a password
+    // field), a key, or a scroll.
+    fn keep_step(w: mut Worker, e: Json) ! Error {
+        let kind = str_at(e.copy(), "kind") ?? String()
+        if kind == "move" { return }
+        try w.note_page()
+        if kind == "click" {
+            let x = at(e.copy(), "x").as_f64() ?? 0.0
+            let y = at(e, "y").as_f64() ?? 0.0
+            let (what, _) = try w.describe("document.elementFromPoint({x}, {y})")
+            w.push_step(Obj.new().s("kind", String("click")).s("on", what).done())
+            return
+        }
+        if kind == "text" {
+            let typed = str_at(e, "text") ?? String()
+            if typed.len() == 0 { return }
+            let (into, secret) = try w.describe(String("document.activeElement"))
+            if secret {
+                // Only that something secret went in, never what.
+                if let last = w.last_step() {
+                    if str_at(last.copy(), "kind") == some(String("type")) and str_at(last.copy(), "into") == some(into.copy()) and bool_at(last, "secret") == some(true) { return }
+                }
+                w.push_step(Obj.new().s("kind", String("type")).s("into", into).b("secret", true).done())
+                return
+            }
+            // Typing goes on in the same field as one step.
+            if let last = w.last_step() {
+                if str_at(last.copy(), "kind") == some(String("type")) and str_at(last.copy(), "into") == some(into.copy()) and bool_at(last.copy(), "secret") != some(true) {
+                    let had = str_at(last, "text") ?? String()
+                    let n = w.steps.len() - 1
+                    w.steps[n] = Obj.new().s("kind", String("type")).s("into", into).s("text", w.hide(short("{had}{typed}", STEP_TEXT_MOST))).done()
+                    w.back.send(Back.Steps(w.key.copy(), Json.Array(w.steps.copy()), false))
+                    return
+                }
+            }
+            let step = Obj.new().s("kind", String("type")).s("into", into).s("text", w.hide(short(typed, STEP_TEXT_MOST))).done()
+            w.push_step(step)
+            return
+        }
+        if kind == "key" {
+            let key = str_at(e, "key") ?? String()
+            // Backspace while typing takes the last character back out of the step.
+            if key == "Backspace" {
+                if let last = w.last_step() {
+                    let had = str_at(last.copy(), "text") ?? String()
+                    if str_at(last.copy(), "kind") == some(String("type")) and had.len() > 0 {
+                        var runes = List<rune>()
+                        for r in had.runes() { runes.push(r) }
+                        _ = runes.pop()
+                        var less = String()
+                        for r in runes { less.push(r) }
+                        let n = w.steps.len() - 1
+                        w.steps[n] = Obj.new().s("kind", String("type")).s("into", str_at(last, "into") ?? String()).s("text", less).done()
+                        w.back.send(Back.Steps(w.key.copy(), Json.Array(w.steps.copy()), false))
+                        return
+                    }
+                }
+            }
+            if key.len() > 0 { w.push_step(Obj.new().s("kind", String("key")).s("key", key).done()) }
+            return
+        }
+        if kind == "wheel" {
+            let direction = if (at(e, "dy").as_f64() ?? 0.0) < 0.0 { String("up") } else { String("down") }
+            // A run of scrolls one way is one step.
+            if let last = w.last_step() {
+                if str_at(last.copy(), "kind") == some(String("scroll")) and str_at(last, "direction") == some(direction.copy()) { return }
+            }
+            w.push_step(Obj.new().s("kind", String("scroll")).s("direction", direction).done())
+        }
+    }
+
+    fn push_step(w: mut Worker, step: own Json) {
+        if w.steps.len() >= STEPS_MOST { return }
+        w.steps.push(step)
+        w.back.send(Back.Steps(w.key.copy(), Json.Array(w.steps.copy()), false))
+    }
+
+    // The part of the page `element` (a script that gives one) is in, as an
+    // outline line names it, such as button "Sign in", and whether it takes
+    // something secret, as a password field does.
+    fn describe(w: mut Worker, element: String) -> (String, bool) ! Error {
+        let r = try w.call("Runtime.evaluate", Obj.new().s("expression", "({DESCRIBE})({element})").b("returnByValue", true).done())
+        let v = at(at(r, "result"), "value")
+        let role = str_at(v.copy(), "role") ?? String("page")
+        let name = w.hide(short(str_at(v.copy(), "name") ?? String(), 120))
+        let what = if name.len() > 0 { "{role} \"{name}\"" } else { role }
+        return (what, bool_at(v, "secret") ?? false)
     }
 
     // Starts the browser, and opens the DevTools connection to its page.
@@ -690,6 +837,61 @@ pub fn console_line(event: String, p: Json) -> String? {
     return none
 }
 
+// How many steps a recording keeps, and how long a step's text gets.
+pub const STEPS_MOST: usize = 300
+const STEP_TEXT_MOST: usize = 500
+
+// Names the part of the page an element is in, as an outline would: its role,
+// its name, and whether it takes a secret (a password or a one-time code).
+const DESCRIBE: str = #"
+function(e) {
+  if (!e) return null;
+  const pick = (e.closest && e.closest('a,button,input,select,textarea,label,summary,[role],[contenteditable],[onclick]')) || e;
+  const tag = (pick.tagName || '').toLowerCase();
+  const type = (pick.getAttribute && pick.getAttribute('type') || '').toLowerCase();
+  const roles = {a: 'link', button: 'button', select: 'combobox', textarea: 'textbox', summary: 'button', label: 'label'};
+  let role = pick.getAttribute && pick.getAttribute('role') || roles[tag] || '';
+  if (!role && tag === 'input') role = type === 'submit' || type === 'button' ? 'button' : (type === 'checkbox' || type === 'radio' ? type : 'textbox');
+  if (!role && pick.isContentEditable) role = 'textbox';
+  if (!role) role = 'text';
+  const attr = (n) => (pick.getAttribute && pick.getAttribute(n)) || '';
+  let name = attr('aria-label');
+  if (!name && pick.labels && pick.labels.length) name = pick.labels[0].innerText;
+  if (!name) name = attr('placeholder') || attr('title') || attr('alt');
+  if (!name && (type === 'submit' || type === 'button')) name = pick.value || '';
+  if (!name && tag !== 'input' && tag !== 'textarea') name = pick.innerText || '';
+  if (!name) name = attr('name');
+  const auto = attr('autocomplete').toLowerCase();
+  const secret = type === 'password' || auto.includes('password') || auto.includes('one-time-code');
+  return {role: role, name: String(name).replace(/\s+/g, ' ').trim(), secret: secret};
+}
+"#
+
+// A recording's steps, as the agent reads them to write a skill: one line
+// each, numbered.
+pub fn steps_text(steps: Json) -> String {
+    var lines = List<String>()
+    let Json.Array(list) = steps else return String()
+    for s in list {
+        let kind = str_at(s.copy(), "kind") ?? String()
+        var line = String()
+        if kind == "page" {
+            line = "On the page {str_at(s.copy(), "title") ?? String()} ({str_at(s, "url") ?? String()})"
+        } else if kind == "click" {
+            line = "Clicked {str_at(s, "on") ?? String()}"
+        } else if kind == "type" {
+            let into = str_at(s.copy(), "into") ?? String()
+            line = if bool_at(s.copy(), "secret") == some(true) { "Typed something secret into {into} (it isn't kept)" } else { "Typed \"{str_at(s, "text") ?? String()}\" into {into}" }
+        } else if kind == "key" {
+            line = "Pressed {str_at(s, "key") ?? String()}"
+        } else if kind == "scroll" {
+            line = "Scrolled {str_at(s, "direction") ?? String()}"
+        }
+        if line.len() > 0 { lines.push("{lines.len() + 1}. {line}") }
+    }
+    return lines.join("\n")
+}
+
 // Selects what an element holds, so typing replaces it.
 const SELECT_ALL: str = "function() \{ if (this.select) \{ this.select(); return; \} const r = document.createRange(); r.selectNodeContents(this); const s = getSelection(); s.removeAllRanges(); s.addRange(r); \}"
 
@@ -868,6 +1070,13 @@ fn hosts_are_what_a_secret_is_for() {
     assert(host_of(String("http://me:pw@localhost:8080#top")) == "localhost:8080")
     assert(host_of(String("file:///C:/x.html")) == "")
     assert(host_of(String("about:blank")) == "")
+}
+
+@test
+fn steps_read_as_lines() {
+    let steps = parse(#"[{"kind":"page","title":"Shop","url":"https://shop.example"},{"kind":"click","on":"link \"Socks\""},{"kind":"type","into":"textbox \"Search\"","text":"wool"},{"kind":"type","into":"textbox \"Password\"","secret":true},{"kind":"key","key":"Enter"},{"kind":"scroll","direction":"down"}]"#)!
+    let t = steps_text(steps)
+    assert(t == "1. On the page Shop (https://shop.example)\n2. Clicked link \"Socks\"\n3. Typed \"wool\" into textbox \"Search\"\n4. Typed something secret into textbox \"Password\" (it isn't kept)\n5. Pressed Enter\n6. Scrolled down")
 }
 
 @test

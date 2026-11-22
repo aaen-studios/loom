@@ -52,7 +52,7 @@ import server.defaults
 import server.rules
 import server.brains
 import server.sandbox
-import server.store.{AcpAgent, Device, Store, User, now, secret_key}
+import server.store.{AcpAgent, Device, Store, User, now, secret_key, site_of}
 import shared.tools
 
 pub struct Config {
@@ -283,6 +283,10 @@ struct Browser {
     actions: i64    // the person's clicks and keys since they took over
     secret_ask: Json    // browser_ask_secret, while it waits: its call, why, ref and submit; or null
     site: String    // the host of the page it's on, as its last call left it, for rules on sites
+    recording: bool    // whether what the person does is being recorded, to teach the agent
+    steps: i64    // how many steps the recording has
+    record_by: String    // the device that started it
+    told: String    // the site whose notes the agent was told of last
 }
 
 // A browser_fill_secret call, until its secret is in: what it fills, for the
@@ -332,6 +336,9 @@ const CONTEXT_RENEW_PERCENT: i64 = 80
 // running that it started itself, and what it's told when one carries on.
 const TASKS_RUNNING_MOST: i64 = 3
 const TASK_RESULT_MOST: usize = 2000
+
+// Proposals (PLAN.md, "Teach a task"): how many may wait for the person at once.
+const PROPOSALS_WAITING_MOST: usize = 50
 const TASK_RESTARTED: str = "[loom: The instance restarted while you worked on this task. Carry on from where you were.]"
 const TASK_RESUMED: str = "[loom: Your person paused this task, and has resumed it now. Carry on from where you stopped.]"
 const TASK_RETRIED: str = "[loom: Your person asked you to try this task again. What happened the last time is above.]"
@@ -1254,12 +1261,14 @@ impl Instance {
                     browser.Back.Done(key, call, done) => {
                         // Where the page is now, for the rules on sites.
                         let site = str_at(done.copy(), "loom_site")
-                        let result = without(done, "loom_site")
-                        if let b = mut i.browsers.find(key) {
+                        let given = without(done, "loom_site")
+                        if let b = mut i.browsers.find(key.copy()) {
                             b.busy -= 1
                             b.used = now()
-                            if let s = site { b.site = s }
+                            if let s = site.copy() { b.site = s }
                         }
+                        // A page on a site with notes tied to it: the agent is shown them, once a visit.
+                        let result = i.with_site_notes(key, site ?? String(), given)
                         // A secret for a site it hasn't gone to waits for the person's yes.
                         let needs = str_at(result.copy(), "needs")
                         let fill = i.fills.remove(call.copy())
@@ -1275,7 +1284,25 @@ impl Instance {
                     browser.Back.Open(key, open) => {
                         if let b = mut i.browsers.find(key.copy()) {
                             b.open = open
-                            if not open { b.person = false }
+                            if not open {
+                                b.person = false
+                                b.told = String()
+                            }
+                        }
+                        i.browser_state(key)
+                    },
+                    browser.Back.Steps(key, steps, ended) => {
+                        var count: i64 = 0
+                        if let Json.Array(list) = steps.copy() { count = i64.wrap(u64(list.len())) }
+                        if let b = mut i.browsers.find(key.copy()) {
+                            b.steps = count
+                            if ended { b.recording = false }
+                        }
+                        if ended {
+                            match i.recorded(key.copy(), steps) {
+                                ok => {},
+                                err(e) => eprintln("loom: keeping a recording: {e}"),
+                            }
                         }
                         i.browser_state(key)
                     },
@@ -1347,7 +1374,7 @@ impl Instance {
         if not i.browsers.contains(key.copy()) {
             let profile = try fs.absolute("{i.data}/browsers/{g.user}/{g.agent}")
             let (to, thread) = browser.start(key.copy(), profile, i.sandboxed(g.user.copy()), i.browser_to.copy())
-            i.browsers.insert(key.copy(), Browser { to: to, thread: thread, busy: 0, used: now(), open: false, person: false, asked: String(), asks: List<String>(), held: List<browser.Op>(), actions: 0, secret_ask: Json.Null, site: String() })
+            i.browsers.insert(key.copy(), Browser { to: to, thread: thread, busy: 0, used: now(), open: false, person: false, asked: String(), asks: List<String>(), held: List<browser.Op>(), actions: 0, secret_ask: Json.Null, site: String(), recording: false, steps: 0, record_by: String(), told: String() })
             i.watch_changed(key.copy())
         }
         let call = try i.store.new_id("bc")
@@ -1489,9 +1516,9 @@ impl Instance {
         let (_, agent) = key.split_once("/") ?? (String(), String())
         var o = Obj.new().s("agent", agent)
         if let b = i.browsers.find(key) {
-            return o.b("open", b.open).b("person", b.person).s("asked", if b.asks.len() > 0 { b.asked.copy() } else { String() }).s("secret", str_at(b.secret_ask.copy(), "why") ?? String())
+            return o.b("open", b.open).b("person", b.person).s("asked", if b.asks.len() > 0 { b.asked.copy() } else { String() }).s("secret", str_at(b.secret_ask.copy(), "why") ?? String()).b("recording", b.recording).i("steps", b.steps)
         }
-        o = o.b("open", false).b("person", false).s("asked", String()).s("secret", String())
+        o = o.b("open", false).b("person", false).s("asked", String()).s("secret", String()).b("recording", false).i("steps", 0)
         return o
     }
 
@@ -1530,7 +1557,7 @@ impl Instance {
 
     // browser.watch, browser.take, browser.give and browser.input
     // (protocol.md, "The agent's browser").
-    fn browser_cmd(i: mut Instance, s: ServerSocket, user: String, name: String, args: Json) -> Answer ! Error {
+    fn browser_cmd(i: mut Instance, s: ServerSocket, user: String, device: String, name: String, args: Json) -> Answer ! Error {
         let agent = str_at(args.copy(), "agent") ?? String()
         if try i.store.agent(user.copy(), agent.copy()) == none { return Answer.Refused(String("not_found"), "There's no agent {agent}.") }
         let key = "{user}/{agent}"
@@ -1566,6 +1593,35 @@ impl Instance {
             i.browser_state(key.copy())
             return Answer.Value(i.browser_status(key).done())
         }
+        if name == "browser.record" {
+            // Teaching a task: what the person does while they have the
+            // browser is kept as steps, and the agent writes them up as a
+            // skill once they stop (PLAN.md, "Teach a task").
+            let on = bool_at(args, "on") ?? true
+            var refused = (String(), String())
+            if let b = mut i.browsers.find(key.copy()) {
+                if not b.open {
+                    refused = (String("not_open"), String("The browser isn't open."))
+                } else if on {
+                    if not b.person {
+                        refused = (String("not_yours"), String("Take over the browser first, then record."))
+                    } else if not b.recording {
+                        b.recording = true
+                        b.steps = 0
+                        b.record_by = device.copy()
+                        b.to.send(browser.In.Record(true))
+                    }
+                } else if b.recording {
+                    b.to.send(browser.In.Record(false))
+                }
+            } else {
+                refused = (String("not_open"), String("The browser isn't open."))
+            }
+            let (code, why) = refused
+            if code.len() > 0 { return Answer.Refused(code, why) }
+            i.browser_state(key.copy())
+            return Answer.Value(i.browser_status(key).done())
+        }
         if name != "browser.take" and name != "browser.give" and name != "browser.input" { return Answer.Refused(String("unknown_command"), "There's no command {name}.") }
         var refused = String()
         if let b = mut i.browsers.find(key.copy()) {
@@ -1579,6 +1635,8 @@ impl Instance {
             } else if name == "browser.give" {
                 b.person = false
                 b.used = now()
+                // Handing back ends a recording, before the agent's calls go on.
+                if b.recording { b.to.send(browser.In.Record(false)) }
                 for call in b.asks {
                     b.to.send(browser.In.Do(browser.Op { call: call.copy(), name: String("handed_back"), args: Obj.new().i("actions", b.actions).done() }))
                 }
@@ -1601,6 +1659,104 @@ impl Instance {
         if name == "browser.give" { i.log(user, agent, "browser", String("You handed the browser back"), String()) }
         i.browser_state(key.copy())
         return Answer.Value(i.browser_status(key).done())
+    }
+
+    // A browser call's result, with the notes tied to `host`'s site, where
+    // its page is now, the first time the agent's there since it was on
+    // another (PLAN.md, "Teach a task"). A result that failed, or that waits
+    // on the person's yes, gets none.
+    fn with_site_notes(i: mut Instance, key: String, host: String, result: own Json) -> Json {
+        if result.get(String("content")) == none or result.get(String("isError")) != none { return result }
+        let plain = result
+        let here = site_of(host)
+        if here.len() == 0 { return plain }
+        var fresh = false
+        if let b = mut i.browsers.find(key.copy()) {
+            if b.told != here {
+                b.told = here.copy()
+                fresh = true
+            }
+        }
+        if not fresh { return plain }
+        let (user, agent) = key.split_once("/") ?? (String(), String())
+        let notes = match i.store.site_notes(user, agent, here.copy()) {
+            ok(n) => n,
+            err(e) => {
+                eprintln("loom: site notes: {e}")
+                return plain
+            },
+        }
+        if notes.len() == 0 { return plain }
+        var lines = List<String>()
+        for n in notes {
+            let shared = if bool_at(n.copy(), "shared") == some(true) { " (shared)" } else { "" }
+            lines.push("- {int_at(n.copy(), "id") ?? 0}{shared}: {str_at(n, "text") ?? String()}")
+        }
+        var content = List<Json>()
+        if let Json.Array(had) = at(plain.copy(), "content") { content = had }
+        content.push(Obj.new().s("type", String("text")).s("text", "[loom: Your notes for {here}, kept for when you're on it:\n{lines.join("\n")}]").done())
+        return merge(plain, Obj.new().j("content", Json.Array(content)).done())
+    }
+
+    // A recording ended: its steps are kept, with every secret of the
+    // person's taken out, and the agent starts a task of writing them up as a
+    // skill, which waits for the person's yes as a proposal.
+    fn recorded(i: mut Instance, key: String, steps: Json) ! Error {
+        let (user, agent_id) = key.split_once("/") ?? (String(), String())
+        let Json.Array(list) = steps.copy() else return
+        var did = 0
+        for s in list {
+            if str_at(s, "kind") != some(String("page")) { did += 1 }
+        }
+        var by = String()
+        if let b = i.browsers.find(key.copy()) { by = b.record_by.copy() }
+        if did == 0 {
+            i.log(user, agent_id, "browser", String("You stopped recording before doing anything"), by)
+            return
+        }
+        let agent = try i.store.agent(user.copy(), agent_id.copy()) else return
+        let kept = try i.without_secrets(user.copy(), steps)
+        let rec = try i.store.add_recording(user.copy(), agent_id.copy(), kept.copy())
+        i.log(user.copy(), agent_id.copy(), "browser", "You recorded a task of {list.len()} steps, to teach it", by.copy())
+        let prompt = "Your person taught you a task: they took over your browser and did it, recording each step. Write it up as a skill with save_skill, passing recording \"{rec}\": a name, when it's for, and how to do it, step by step, in Markdown, so you or another agent can do it again with the browser tools. Say what each step is for, and write the person's own choices (what they searched for, what they typed) as what to ask or decide each time, where they'd change. Where they typed something secret, name the field and say to use browser_fill_secret or browser_ask_secret; never write a secret down. Your person reads the skill before it's kept, and may change it.\n\nWhat they did:\n\n{browser.steps_text(kept)}"
+        let from = String("your person, who recorded this in your browser to teach you")
+        let task = try i.start_task(user.copy(), agent, String("Write up the task you were shown"), prompt, from, if by.len() > 0 { by } else { agent_id })
+        try i.store.set_meta("recording_task/{user}/{str_at(task, "id") ?? String()}", rec)
+    }
+
+    // `steps` with every one of the person's secrets that's in them named, not
+    // said.
+    fn without_secrets(i: Instance, user: String, steps: Json) -> Json ! Error {
+        var text = "{steps}"
+        for s in try i.store.secret_names(user.copy()) {
+            let name = str_at(s, "name") ?? String()
+            let value = try i.secret(user.copy(), name.copy()) ?? String()
+            // In JSON, as it's written there.
+            let written = "{Json.Str(value.copy())}"
+            let inner = written[1..written.len() - 1].copy()
+            if inner.len() >= 3 { text = text.replace(inner, "[secret {name}]") }
+        }
+        return try parse(text)
+    }
+
+    // Keeps an agent's proposal of a skill or a note, which waits for the
+    // person to keep or drop it, and tells their devices.
+    fn propose(i: Instance, g: Grant, kind: str, data: Json, why: String, recording: String) -> Json ! Error {
+        let waiting = try i.store.proposals(g.user.copy(), String("waiting"), PROPOSALS_WAITING_MOST + 1)
+        if waiting.len() >= PROPOSALS_WAITING_MOST { fail "Your person has {PROPOSALS_WAITING_MOST} proposals waiting already. Wait until they've gone through them." }
+        let p = try i.store.add_proposal(g.user.copy(), g.agent.copy(), kind, data.copy(), cut_short(why, 500), recording)
+        let what = if kind == "skill" { "the skill {str_at(data, "name") ?? String()}" } else { "a note: {cut_short(str_at(data, "text") ?? String(), 100)}" }
+        i.log(g.user.copy(), g.agent.copy(), "memory", "Proposed {what}", g.agent.copy())
+        try i.event(g.user, "proposal.created", Obj.new().j("proposal", p.copy()).done())
+        return p
+    }
+
+    // The recording the calling run writes up, if it's a task started from one.
+    fn recording_of_run(i: Instance, g: Grant) -> String ! Error {
+        let run = i.calling_run(g.copy())
+        let r = i.runs.find(run) else return String()
+        let task = try i.store.task_in(g.user.copy(), r.conversation.copy()) else return String()
+        return try i.store.meta("recording_task/{g.user}/{str_at(task, "id") ?? String()}") ?? String()
     }
 
     // Stops `user`'s browsers, or only `agent`'s, and removes their profiles.
@@ -2331,6 +2487,41 @@ impl Instance {
             let skill = try i.store.skill(g.user, skill_name.copy()) else return some(tool_error("There's no skill {skill_name}. list_skills gives their names."))
             return some(tool_text(str_at(skill, "body") ?? String()))
         }
+        // A skill written from what the person recorded, or one an agent
+        // proposes, waits for the person's yes (PLAN.md, "Teach a task").
+        var from_recording = (str_at(args.copy(), "recording") ?? String()).trim().copy()
+        if name == "save_skill" and from_recording.len() == 0 { from_recording = try i.recording_of_run(g.copy()) }
+        if name == "propose_skill" or (name == "save_skill" and from_recording.len() > 0) {
+            let skill_name = (str_at(args.copy(), "name") ?? String()).trim().copy()
+            if not valid_skill(skill_name.copy()) { return some(tool_error(String("A skill's name is lowercase letters, digits and hyphens, up to 64, like \"release-notes\"."))) }
+            let description = (str_at(args.copy(), "description") ?? String()).trim().copy()
+            if description.len() == 0 { return some(tool_error(String("A skill needs a description: when it's for, which is how an agent knows to read it."))) }
+            let body = str_at(args.copy(), "body") ?? String()
+            if body.trim().len() == 0 { return some(tool_error(String("The skill's body is empty: say how to do it."))) }
+            if from_recording.len() > 0 {
+                let rec = try i.store.recording(g.user.copy(), from_recording.copy()) else return some(tool_error("There's no recording {from_recording}."))
+                if str_at(rec.copy(), "agent") != some(g.agent.copy()) { return some(tool_error("The recording {from_recording} wasn't made in your browser.")) }
+                let earlier = str_at(rec, "proposal") ?? String()
+                if earlier.len() > 0 {
+                    if let p = try i.store.proposal(g.user.copy(), earlier) {
+                        if str_at(p, "status") == some(String("waiting")) { return some(tool_error(String("You've written that recording up already, and your person hasn't decided on it yet."))) }
+                    }
+                }
+            }
+            let why = (str_at(args, "why") ?? String()).trim().copy()
+            let skill = Obj.new().s("name", skill_name.copy()).s("description", description).s("body", body).done()
+            let made = try i.propose(g.copy(), "skill", skill, if why.len() > 0 { why } else if from_recording.len() > 0 { String("Written from what you showed it in its browser.") } else { String() }, from_recording.copy())
+            if from_recording.len() > 0 { try i.store.recording_written(g.user.copy(), from_recording, str_at(made, "id") ?? String()) }
+            return some(tool_text("Proposed the skill {skill_name}. Your person reads it and keeps or drops it in their app; it isn't saved until they keep it, so don't save it again meanwhile."))
+        }
+        if name == "propose_note" {
+            let what = (str_at(args.copy(), "text") ?? String()).trim().copy()
+            if what.len() == 0 { return some(tool_error(String("text is empty."))) }
+            let site = site_of(str_at(args.copy(), "site") ?? String())
+            let note = Obj.new().s("text", what).s("site", site).b("shared", bool_at(args.copy(), "shared") ?? false).done()
+            _ = try i.propose(g.copy(), "note", note, (str_at(args, "why") ?? String()).trim().copy(), String())
+            return some(tool_text(String("Proposed. Your person keeps or drops it in their app; it isn't a note until they keep it.")))
+        }
         if name == "save_skill" {
             let a = Obj.new().s("name", str_at(args.copy(), "name") ?? String()).s("description", str_at(args.copy(), "description") ?? String()).s("body", str_at(args, "body") ?? String()).done()
             return some(match try i.command(g.user, g.agent, String("skill.put"), a) {
@@ -2415,10 +2606,11 @@ impl Instance {
         if name == "remember" {
             let what = (str_at(args.copy(), "text") ?? String()).trim().copy()
             if what.len() == 0 { return some(tool_error(String("text is empty."))) }
-            let shared = bool_at(args, "shared") ?? false
-            let id = try i.store.remember(g.user.copy(), if shared { String() } else { g.agent.copy() }, what.copy(), g.agent.copy())
+            let shared = bool_at(args.copy(), "shared") ?? false
+            let site = site_of(str_at(args, "site") ?? String())
+            let id = try i.store.remember_on(g.user.copy(), if shared { String() } else { g.agent.copy() }, what.copy(), g.agent.copy(), site.copy())
             i.log(g.user, g.agent.copy(), "memory", "Remembered: {cut_short(what, 120)}", g.agent)
-            return some(tool_text("Remembered, as note {id}."))
+            return some(tool_text(if site.len() > 0 { "Remembered, as note {id}, for {site}: you're shown it when your browser's there." } else { "Remembered, as note {id}." }))
         }
         if name == "update_profile" {
             let what = (str_at(args, "text") ?? String()).trim().copy()
@@ -6549,7 +6741,7 @@ impl Instance {
             return
         }
         if name.starts_with("browser.") {
-            let answer = try i.browser_cmd(s, user, name, args)
+            let answer = try i.browser_cmd(s, user, device, name, args)
             i.answer_cmd(Waiter { socket: some(s), id: id }, answer)
             return
         }
@@ -6817,6 +7009,63 @@ impl Instance {
                 to.send(Out.Stop)
             }
         }
+    }
+
+    // proposal.list, proposal.keep, proposal.drop and proposal.ask: what
+    // agents propose waits for the person, who keeps or drops each, and asks an
+    // agent to look over its chats for more (PLAN.md, "Teach a task"). Only
+    // the person, on one of their devices.
+    fn proposal_command(i: mut Instance, user: String, device: String, name: String, args: Json) -> Answer ! Error {
+        if not device.starts_with("d_") { return Answer.Refused(String("forbidden"), String("Proposals are your person's to keep or drop, in the app.")) }
+        if name == "proposal.list" {
+            let status = str_at(args, "status") ?? String("waiting")
+            if status != "waiting" and status != "kept" and status != "dropped" and status != "all" { return Answer.Refused(String("bad_request"), String("status is waiting, kept, dropped or all.")) }
+            let list = try i.store.proposals(user, if status == "all" { String() } else { status }, 200)
+            return Answer.Value(Obj.new().j("proposals", Json.Array(list)).done())
+        }
+        if name == "proposal.ask" {
+            let agent = try i.store.agent(user.copy(), str_at(args, "agent") ?? String()) else return Answer.Refused(String("not_found"), String("There's no such agent."))
+            let agent_id = str_at(agent.copy(), "id") ?? String()
+            var chat = String()
+            if let c = try i.store.newest_conversation(user.copy(), agent_id.copy()) {
+                let transcript = try i.transcript(user.copy(), str_at(c, "id") ?? String(), none)
+                if transcript.len() > 0 { chat = "\n\nYour chat with them, newest last:\n\n{transcript}" }
+            }
+            let prompt = "Your person asks you to look over your past chats with them for what's worth keeping, and propose it: a way of doing a kind of task they'd want done the same way again, with propose_skill, and a lasting fact about them or their work, with propose_note (tied to a site, with site, when it's about one). Look further back with search_messages. Don't propose what's in list_skills or recall already, or what only mattered once; nothing at all is a fine answer. Your person keeps or drops each one, so say in why where it came from. End with a line on what you proposed.{chat}"
+            let from = try i.writing_from(user.copy(), device.copy())
+            let task = try i.start_task(user, agent, String("Propose skills and notes from past chats"), prompt, from, device)
+            return Answer.Value(Obj.new().j("task", task).done())
+        }
+        if name != "proposal.keep" and name != "proposal.drop" { return Answer.Refused(String("unknown_command"), "There's no command {name}.") }
+        let id = str_at(args.copy(), "id") ?? String()
+        let p = try i.store.proposal(user.copy(), id.copy()) else return Answer.Refused(String("not_found"), "There's no proposal {id}.")
+        if str_at(p.copy(), "status") != some(String("waiting")) { return Answer.Refused(String("not_now"), "That proposal was {str_at(p, "status") ?? String()} already.") }
+        let kind = str_at(p.copy(), "kind") ?? String()
+        let agent = str_at(p.copy(), "agent") ?? String()
+        // What the person kept: what was proposed, with what they changed.
+        let part: str = if kind == "skill" { "skill" } else { "note" }
+        let data = merge(at(p.copy(), part), at(args, part))
+        if name == "proposal.drop" {
+            _ = try i.store.decide_proposal(user.copy(), id.copy(), "dropped", at(p, part), device.copy())
+            i.log(user.copy(), agent, "memory", "Dropped a proposal", device)
+        } else if kind == "skill" {
+            let skill_name = str_at(data.copy(), "name") ?? String()
+            let put = try i.command(user.copy(), device.copy(), String("skill.put"), data.copy())
+            if let Answer.Refused(code, message) = put { return Answer.Refused(code, message) }
+            _ = try i.store.decide_proposal(user.copy(), id.copy(), "kept", data, device.copy())
+            i.log(user.copy(), agent, "memory", "Kept the proposed skill {skill_name}", device)
+        } else {
+            let what = (str_at(data.copy(), "text") ?? String()).trim().copy()
+            if what.len() == 0 { return Answer.Refused(String("bad_request"), String("The note is empty.")) }
+            let shared = bool_at(data.copy(), "shared") ?? false
+            let site = site_of(str_at(data.copy(), "site") ?? String())
+            _ = try i.store.remember_on(user.copy(), if shared { String() } else { agent.copy() }, what.copy(), agent.copy(), site)
+            _ = try i.store.decide_proposal(user.copy(), id.copy(), "kept", data, device.copy())
+            i.log(user.copy(), agent, "memory", "Kept the proposed note: {cut_short(what, 100)}", device)
+        }
+        let decided = try i.store.proposal(user.copy(), id) ?? Json.Null
+        try i.event(user, "proposal.updated", Obj.new().j("proposal", decided.copy()).done())
+        return Answer.Value(Obj.new().j("proposal", decided).done())
     }
 
     // A command's value, or its error's code and message.
@@ -7188,9 +7437,12 @@ impl Instance {
         if name == "memory.put" {
             let what = (str_at(args.copy(), "text") ?? String()).trim().copy()
             if what.len() == 0 { return Answer.Refused(String("bad_request"), String("The note is empty.")) }
-            let agent = str_at(args, "agent") ?? String()
-            let id = try i.store.remember(user, agent, what, device)
+            let agent = str_at(args.copy(), "agent") ?? String()
+            let id = try i.store.remember_on(user, agent, what, device, site_of(str_at(args, "site") ?? String()))
             return Answer.Value(Obj.new().i("id", id).done())
+        }
+        if name.starts_with("proposal.") {
+            return try i.proposal_command(user, device, name, args)
         }
         if name == "memory.delete" {
             let id = int_at(args, "id") ?? 0

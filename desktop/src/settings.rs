@@ -45,6 +45,12 @@ pub(super) fn settings_groups() -> Vec<(Option<&'static str>, Vec<Page>)> {
                 ("pop-rules", Ico::ShieldCheck, "Rules", Screen::Rules),
                 ("pop-programs", Ico::Brain, "Brains", Screen::Programs),
                 ("pop-skills", Ico::BookOpen, "Skills", Screen::Skills),
+                (
+                    "pop-proposals",
+                    Ico::Lightbulb,
+                    "Proposals",
+                    Screen::Proposals,
+                ),
                 ("pop-mcp", Ico::Plug, "MCP servers", Screen::Mcp),
                 ("pop-plugins", Ico::Puzzle, "Plugins", Screen::Plugins),
             ],
@@ -82,6 +88,7 @@ fn page_words(screen: Screen) -> &'static str {
             "rules allow deny ask what if permissions site path file folder command shell tool webhook routine"
         }
         Screen::Skills => "skills how to",
+        Screen::Proposals => "proposals proposed suggestions suggested keep drop notes skills learn teach recorded",
         Screen::Mcp => "mcp servers tools keys connectors",
         Screen::Plugins => "plugins panels",
         Screen::Routines => "routines schedule every day cron webhook",
