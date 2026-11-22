@@ -16,7 +16,7 @@ use gpui_kit::*;
 use serde_json::Value;
 
 use crate::core::Core;
-use crate::model::{self, Approval, Conn, ImportSource, Message, Model, Mood, ServerUpdate};
+use crate::model::{self, Approval, Conn, ImportSource, Message, Model, Mood, Offer, ServerUpdate};
 use crate::motion::{self, SoftHover};
 use crate::prefs::{Prefs, Text, Theme, Tools};
 use crate::shell;
@@ -96,6 +96,7 @@ enum Screen {
     Tasks,
     Programs,
     ThisDevice,
+    Hosts,
     AddPhone,
     Mcp,
     Plugins,
@@ -196,6 +197,8 @@ pub struct Loom {
     /// network is shown as a list, which starts empty, reaching nothing.
     host_in: Entity<InputState>,
     listing_hosts: bool,
+    /// One of the person's own hosts to add, by what ssh is given, on the Hosts page.
+    ssh_host_in: Entity<InputState>,
     skill_name_in: Entity<InputState>,
     skill_desc_in: Entity<InputState>,
     skill_body_in: Entity<TextareaState>,
@@ -490,6 +493,23 @@ impl Loom {
             },
         )
         .detach();
+        // One of the person's hosts: Enter adds it.
+        let ssh_host_in = input(window, cx, "vps, or root@vps", false);
+        cx.subscribe_in(
+            &ssh_host_in,
+            window,
+            |this: &mut Loom, state, event: &InputEvent, window, cx| {
+                if let InputEvent::PressEnter { .. } = event {
+                    let typed = state.read(cx).value().to_string();
+                    if let Some(f) = this.model.add_ssh_host(&typed, "ssh") {
+                        this.send(f);
+                    }
+                    state.update(cx, |s, cx| s.set_value("", window, cx));
+                    cx.notify();
+                }
+            },
+        )
+        .detach();
         // Naming a new agent: each change twangs its thread, and Enter weaves it.
         cx.subscribe_in(
             &name_in,
@@ -702,8 +722,12 @@ ACTA_KEY=secret:ACTA_KEY",
                     for a in &mut loom.away {
                         offered.append(&mut a.model.offered);
                     }
-                    for address in offered {
-                        loom.add_server(Some(address), cx);
+                    for offer in offered {
+                        if offer.code.is_empty() {
+                            loom.add_server(Some(offer.address), cx);
+                        } else {
+                            loom.link_server(offer, cx);
+                        }
                     }
                     if got.is_empty() {
                         return;
@@ -832,6 +856,7 @@ ACTA_KEY=secret:ACTA_KEY",
             name_in,
             host_in,
             listing_hosts: false,
+            ssh_host_in,
             skill_name_in,
             skill_desc_in,
             skill_body_in,
@@ -1159,6 +1184,12 @@ ACTA_KEY=secret:ACTA_KEY",
                 let f = self.model.device_get();
                 self.send(f);
             }
+            Screen::Hosts => {
+                let f = self.model.device_get();
+                self.send(f);
+                let f = self.model.scan_hosts();
+                self.send(f);
+            }
             Screen::People => {
                 self.model.people_open = true;
                 for f in self.model.load_people() {
@@ -1465,25 +1496,72 @@ ACTA_KEY=secret:ACTA_KEY",
     /// app has already is put on screen instead.
     fn add_server(&mut self, address: Option<String>, cx: &mut Context<Self>) {
         if let Some(a) = &address {
-            let same = |m: &Model| {
-                m.server.as_deref().map(|s| s.trim_end_matches('/'))
-                    == Some(a.trim_end_matches('/'))
-            };
-            if same(&self.model) {
-                return;
-            }
-            if let Some(dir) = self
-                .away
-                .iter()
-                .find(|x| same(&x.model))
-                .map(|x| x.dir.clone())
-            {
-                self.show_server(&dir, cx);
+            if self.show_known(a, cx) {
                 return;
             }
         }
         self.fill_server = Some(address.unwrap_or_default());
         self.open(Screen::AddServer, cx);
+    }
+
+    /// Puts the server at `address` on screen if the app has it already, and says
+    /// whether it did.
+    fn show_known(&mut self, address: &str, cx: &mut Context<Self>) -> bool {
+        let same = |m: &Model| {
+            m.server.as_deref().map(|s| s.trim_end_matches('/'))
+                == Some(address.trim_end_matches('/'))
+        };
+        if same(&self.model) {
+            return true;
+        }
+        if let Some(dir) = self
+            .away
+            .iter()
+            .find(|x| same(&x.model))
+            .map(|x| x.dir.clone())
+        {
+            self.show_server(&dir, cx);
+            return true;
+        }
+        false
+    }
+
+    /// A server an agent offered with a link code, which the person said yes to here:
+    /// the popup to add it opens signing in with the code, and the server comes on
+    /// screen once it's in. A code that didn't work leaves the form, with why.
+    fn link_server(&mut self, offer: Offer, cx: &mut Context<Self>) {
+        if self.show_known(&offer.address, cx) {
+            return;
+        }
+        self.fill_server = Some(offer.address.clone());
+        self.open(Screen::AddServer, cx);
+        let dir = self.start_adding(&offer.address);
+        if let Some(a) = self.away.iter_mut().find(|a| a.dir == dir) {
+            if !a.model.logging_in {
+                let frame = a.model.link_offered(&offer);
+                a.core.send(&frame.to_string());
+            }
+        }
+        cx.notify();
+    }
+
+    /// The folder of the server being added, with a core of its own beside the one on
+    /// screen, started the first time.
+    fn start_adding(&mut self, server: &str) -> String {
+        if let Some(dir) = self.adding.clone() {
+            return dir;
+        }
+        // The app keeps it once it's signed in. A folder left from one that never
+        // was is started afresh.
+        let dirs = server_dirs();
+        let n = (2..)
+            .find(|n| !dirs.contains(&format!("servers/{n}")))
+            .unwrap_or(2);
+        let dir = format!("servers/{n}");
+        let _ = std::fs::remove_dir_all(server_folder(&dir));
+        self.away.push(Away::start(dir.clone(), Some(server)));
+        self.adding = Some(dir.clone());
+        dir
     }
 
     /// Signs in to the server in the add-a-server form: with a core of its own beside
@@ -1497,22 +1575,7 @@ ACTA_KEY=secret:ACTA_KEY",
         } else {
             String::new()
         };
-        let dir = match self.adding.clone() {
-            Some(dir) => dir,
-            None => {
-                // The app keeps it once it's signed in. A folder left from one that never
-                // was is started afresh.
-                let dirs = server_dirs();
-                let n = (2..)
-                    .find(|n| !dirs.contains(&format!("servers/{n}")))
-                    .unwrap_or(2);
-                let dir = format!("servers/{n}");
-                let _ = std::fs::remove_dir_all(server_folder(&dir));
-                self.away.push(Away::start(dir.clone(), Some(&server)));
-                self.adding = Some(dir.clone());
-                dir
-            }
-        };
+        let dir = self.start_adding(&server);
         if let Some(a) = self.away.iter_mut().find(|a| a.dir == dir) {
             if a.model.logging_in {
                 return;
@@ -2110,6 +2173,7 @@ ACTA_KEY=secret:ACTA_KEY",
             if !self.local() {
                 pages.push(("pop-people", Ico::Users, "People", Screen::People));
                 pages.push(("pop-device", Ico::Monitor, "This PC", Screen::ThisDevice));
+                pages.push(("pop-hosts", Ico::Server, "Hosts", Screen::Hosts));
             }
             return pages;
         }
@@ -2291,6 +2355,7 @@ ACTA_KEY=secret:ACTA_KEY",
             Screen::Tasks => self.tasks_page(cx),
             Screen::Programs => self.programs_page(cx),
             Screen::ThisDevice => self.device_page(cx),
+            Screen::Hosts => self.hosts_page(cx),
             Screen::Move => self.move_page(cx),
             Screen::People => self.people_page(cx),
             Screen::AddPhone => self.add_phone_page(cx),
@@ -9676,6 +9741,118 @@ ACTA_KEY=secret:ACTA_KEY",
         self.settings_page("device-page", "This PC", None, groups)
     }
 
+    /// The Hosts page: the person's own servers, which this computer reaches with ssh,
+    /// each with what agents may do there, and the ones found in the ssh config and on
+    /// the tailnet, to add. The core keeps them and runs the commands.
+    fn hosts_page(&mut self, cx: &mut Context<Self>) -> Div {
+        let p = self.p;
+        let mut rows = Vec::new();
+        for h in self.model.hosts.clone() {
+            let mut choices = Vec::new();
+            for (choice, label) in [("off", "Off"), ("ask", "Ask"), ("allow", "Allow")] {
+                let name = h.name.clone();
+                choices.push(
+                    self.segment(format!("host-{}-{choice}", h.name), label, h.mode == choice)
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            let f = this.model.set_ssh_host(&name, choice);
+                            this.send(f);
+                            cx.notify();
+                        })),
+                );
+            }
+            let name = h.name.clone();
+            let remove = self
+                .small_button(format!("host-{}-remove", h.name), "Remove", false)
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    let f = this.model.remove_ssh_host(&name);
+                    this.send(f);
+                    cx.notify();
+                }));
+            let via = if h.via == "tailscale" {
+                "Tailscale"
+            } else {
+                "SSH"
+            };
+            rows.push(
+                self.row(
+                    Some(self.tile(Ico::Server)),
+                    h.name.clone(),
+                    Some(format!("{} · {via}", h.target)),
+                    Some(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(space::S))
+                            .child(self.segments(choices))
+                            .child(remove)
+                            .into_any_element(),
+                    ),
+                )
+                .into_any_element(),
+            );
+            if h.mode == "allow" {
+                rows.push(self.note_row(
+                    format!("Agents can run any command on {} without asking", h.name),
+                    p.bad,
+                ));
+            }
+        }
+        let add = div()
+            .flex()
+            .gap(px(space::S))
+            .child(div().flex_1().child(Input::new(&self.ssh_host_in)))
+            .child(self.button("host-add", "Add", false).on_click(cx.listener(
+                |this, _, window, cx| {
+                    let typed = this.ssh_host_in.read(cx).value().to_string();
+                    if let Some(f) = this.model.add_ssh_host(&typed, "ssh") {
+                        this.send(f);
+                    }
+                    this.ssh_host_in
+                        .update(cx, |s, cx| s.set_value("", window, cx));
+                    cx.notify();
+                },
+            )));
+        rows.push(
+            div()
+                .px(px(space::L))
+                .py(px(space::S + 2.0))
+                .child(add)
+                .into_any_element(),
+        );
+        let mut groups = vec![self.group(Some("Hosts"), rows)];
+        if !self.model.hosts_found.is_empty() {
+            let mut found = Vec::new();
+            for h in self.model.hosts_found.clone() {
+                let (target, via) = (h.target.clone(), h.via.clone());
+                let from = if h.via == "tailscale" {
+                    "On your tailnet"
+                } else {
+                    "In your ssh config"
+                };
+                found.push(
+                    self.row(
+                        Some(self.tile(Ico::Server)),
+                        h.name.clone(),
+                        Some(from.into()),
+                        Some(
+                            self.small_button(format!("found-{}", h.name), "Add", false)
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    if let Some(f) = this.model.add_ssh_host(&target, &via) {
+                                        this.send(f);
+                                    }
+                                    cx.notify();
+                                }))
+                                .into_any_element(),
+                        ),
+                    )
+                    .into_any_element(),
+                );
+            }
+            groups.push(self.group(Some("Found"), found));
+        }
+        self.settings_page("hosts-page", "Hosts", None, groups)
+    }
+
     /// Adding a server to the app: its address, the account, and for a new server, its
     /// setup code. It signs in beside the server on screen, and comes on screen once it's in.
     fn add_server_page(&mut self, cx: &mut Context<Self>) -> Div {
@@ -13162,7 +13339,7 @@ const MOVE_PROMPT: &str = "Move my loom instance to another server for me. Ask m
 
 /// What "Copy prompt" gives for adding a server, for an agent in loom to set it up with
 /// its tools (install_server, add_server).
-const ADD_SERVER_PROMPT: &str = "Set up a new loom server for me and add it to my app. Ask me where it should run (a server I can reach, or a VPS to rent) if I haven't said. Use install_server to get the command that installs loom there, and run it or walk me through it. Then use add_server so my app offers to add it, and tell me what to do next.";
+const ADD_SERVER_PROMPT: &str = "Set up a new loom server for me and add it to my app. Ask me where it should run (a server I can reach, or a VPS to rent) if I haven't said. Use install_server to get the command that installs loom there, and run it or walk me through it. Then use add_server with its address and the link code loom install --json gave, so one yes from me signs my app in there, and tell me what to do next.";
 
 /// What "Copy prompt" gives on the Plugins page, for an agent in loom to build one with
 /// its tools (save_plugin), asking the person what it should do.
@@ -13461,6 +13638,7 @@ fn is_server(s: Screen) -> bool {
             | Screen::AddPhone
             | Screen::People
             | Screen::ThisDevice
+            | Screen::Hosts
             | Screen::Move
             | Screen::AddServer
     )

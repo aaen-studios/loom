@@ -1,0 +1,178 @@
+module tests.protocol.hosts
+
+// The person's hosts as devices (PLAN.md, "Your hosts"): a real core runs as
+// the PC "Desk PC", with a stand-in for ssh and Tailscale (tests/fake_ssh) and
+// an ssh config of its own, so no real server is reached. It finds the hosts
+// in the config and on the tailnet, adds them, and refuses a target that isn't
+// one. Talking from the laptop, an agent lists them as devices, beside the PC
+// that reaches them, and runs a command on a host that asks only once the PC
+// says yes, which runs it through ssh there; one allowed runs at once; a host
+// only runs commands, one that's off refuses, and one taken away is gone.
+//
+//     calx tests/protocol/hosts.calx
+import std.fs
+import std.json.{Json, parse}
+import std.process.{exit}
+import std.random.{Random}
+import std.time.{Instant}
+import shared.obj.{Obj, at, str_at}
+import core.cache.{Cache}
+import core.conn.{Conn}
+import tests.kit.{App, Instance, calx, check, device, post_json, reply_text}
+
+// The app's side of a core: what it sends the core, and what the core says.
+struct Core {
+    to_core: Sender<String>
+    from_core: Receiver<String>
+    thread: Thread?
+}
+
+impl Core {
+    fn start(base: String, token: String, cache: String, config: String) -> Core ! Error {
+        let inbox = Receiver<String>()
+        let to_core = inbox.sender()
+        let from_core = Receiver<String>()
+        var random = Random.system()
+        var conn = Conn.new(some("http://{base}"), some(token.copy()), "loom-test-{random.next_u32()}", try Cache.open(cache), inbox, from_core.sender())
+        let fake: List<String> = [calx(), try fs.absolute(String("tests/fake_ssh/main.calx"))]
+        conn.host_programs(fake.copy(), fake, config)
+        let t = unsafe { Thread.spawn(conn) }
+        return Core { to_core: to_core, from_core: from_core, thread: some(t) }
+    }
+
+    fn send(mut self, frame: Json) {
+        self.to_core.send("{frame}")
+    }
+
+    // Reads what the core says until a frame whose `t` is `t` and whose `field`
+    // is `value`, if `field` isn't empty.
+    fn until(mut self, t: str, field: str, value: str) -> Json ! Error {
+        let start = unsafe { Instant.now() }
+        loop {
+            let waited = unsafe { Instant.now() }.nanos_since(start) / 1000000
+            if waited >= 60000 { fail "the core said no {t} {field}={value} in 60 s" }
+            let m = unsafe { self.from_core.wait_for((60000 - waited) * 1000000) } else { continue }
+            let f = try parse(m)
+            if (str_at(f.copy(), "t") ?? String()) != t { continue }
+            if field.len() == 0 or (str_at(f.copy(), field) ?? String()) == value { return f }
+        }
+    }
+
+    fn stop(mut self) {
+        self.to_core.send(String(#"{"t":"core.stop"}"#))
+        if let t = self.thread.take() {
+            t.join()
+        }
+    }
+}
+
+// The agent's next reply in `conversation`, as text.
+fn reply_in(app: mut App, conversation: String) -> String ! Error {
+    loop {
+        let created = try app.until("event", "message.created")
+        let m = at(created, "message")
+        if str_at(m.copy(), "role") == some(String("agent")) and str_at(m.copy(), "conversation") == some(conversation.copy()) { return reply_text(m) }
+    }
+}
+
+fn post(app: App, conversation: String, cid: str, text: String) ! Error {
+    try app.send(Obj.new().s("t", String("send")).s("cid", String(cid)).s("conversation", conversation).s("text", text).done())
+}
+
+// The fake agent's step that runs `command` on `host` with use_device.
+fn on_host(host: str, tool: str, command: str) -> String {
+    let args = Obj.new().s("device", String(host)).s("tool", String(tool)).j("args", Obj.new().s("command", String(command)).done()).done()
+    return "/mcp use_device {args}"
+}
+
+fn names(found: Json) -> String {
+    var out = List<String>()
+    if let Json.Array(list) = at(found, "found") {
+        for f in list {
+            out.push("{str_at(f.copy(), "name") ?? String()}:{str_at(f, "via") ?? String()}")
+        }
+    }
+    return out.join(" ")
+}
+
+fn run(i: Instance, pc: mut Core) ! Error {
+    _ = try pc.until("core.conn", "state", "live")
+
+    // --- Finding and adding hosts ---
+    pc.send(Obj.new().s("t", String("hosts.scan")).done())
+    let found = try pc.until("core.hosts_found", "", "")
+    try check(names(found) == "vps:ssh pi:ssh box:tailscale", "the PC finds the hosts in its ssh config and the machines on its tailnet, but phones")
+    pc.send(Obj.new().s("t", String("host.add")).s("target", String("root@vps")).s("via", String("ssh")).done())
+    let added = try pc.until("core.device", "", "")
+    try check("{at(added, "hosts")}" == #"[{"name":"vps","target":"root@vps","via":"ssh","mode":"ask"}]"#, "a host the person adds asks before each command from the start")
+    pc.send(Obj.new().s("t", String("host.add")).s("target", String("-oProxyCommand=calc")).done())
+    let bad = try pc.until("error", "code", "host")
+    try check((str_at(bad, "message") ?? String()).contains("isn't a host ssh can reach"), "a target that isn't a host is refused")
+    pc.send(Obj.new().s("t", String("host.add")).s("target", String("box")).s("via", String("tailscale")).done())
+    _ = try pc.until("core.device", "", "")
+    pc.send(Obj.new().s("t", String("host.set")).s("name", String("box")).s("mode", String("allow")).done())
+    let set = try pc.until("core.device", "", "")
+    try check("{at(set, "hosts")}".contains(#"{"name":"box","target":"box","via":"tailscale","mode":"allow"}"#), "and each host has its own off, ask or allow")
+    pc.send(Obj.new().s("t", String("hosts.scan")).done())
+    try check(names(try pc.until("core.hosts_found", "", "")) == "pi:ssh", "a host already added isn't offered again")
+
+    // --- An agent uses them, from the laptop ---
+    let (_, login) = try post_json(i.base.copy(), "/api/login", Obj.new().s("username", String("elliot")).s("password", String("correct horse")).j("device", device("Laptop")).done())
+    var app = try App.connect(i.base.copy(), str_at(login, "token") ?? String(), 0)
+    let made = try app.cmd("q_1", "agent.create", Obj.new().s("name", String("Main")).s("acp_agent", String("fake")).s("instructions", String("Test.")).done())
+    let agent = str_at(at(at(made, "value"), "agent"), "id") ?? String()
+    let c = try app.cmd("q_2", "conversation.create", Obj.new().s("agent", agent.copy()).done())
+    let conversation = str_at(at(c, "value"), "conversation") ?? String()
+
+    try post(app, conversation.copy(), "m_1", String("/mcp list_devices"))
+    let listed = try reply_in(mut app, conversation.copy())
+    try check(listed.contains(#""name":"vps","kind":"host","via":"ssh","target":"root@vps","through":"Desk PC""#) and listed.contains(#""run_command":"ask""#) and listed.contains(#""name":"box","kind":"host""#), "an agent lists the hosts as devices, with the PC that reaches them")
+
+    try post(app, conversation.copy(), "m_2", on_host("vps", "run_command", "uptime"))
+    let asked = try app.until("event", "approval.needed")
+    try check(str_at(asked.copy(), "title") == some(String("Run on vps: uptime")) and (str_at(asked.copy(), "request") ?? String()).contains(#""host":"vps""#), "a command on a host asks the person first, with the exact request")
+    let call = str_at(asked, "call") ?? String()
+    let heard = try pc.until("event", "kind", "approval.needed")
+    try check(str_at(heard, "call") == some(call.copy()), "and the PC that reaches it hears the question")
+    pc.send(Obj.new().s("t", String("approve")).s("call", call).b("allow", true).done())
+    let ran = try reply_in(mut app, conversation.copy())
+    try check(ran == "use_device: root@vps ran: uptime\nExit status 0.", "a yes given on the PC runs it there, through ssh to the host")
+
+    try post(app, conversation.copy(), "m_3", on_host("box", "run_command", "options"))
+    try check(try reply_in(mut app, conversation.copy()) == "use_device: BatchMode=yes ConnectTimeout=15\nExit status 0.", "a host that's allowed runs at once, and ssh never waits for a password")
+    try post(app, conversation.copy(), "m_4", on_host("vps", "read_file", "x"))
+    try check((try reply_in(mut app, conversation.copy())).contains("only runs commands"), "a host only runs commands")
+
+    pc.send(Obj.new().s("t", String("host.set")).s("name", String("vps")).s("mode", String("off")).done())
+    _ = try pc.until("core.device", "", "")
+    try post(app, conversation.copy(), "m_5", on_host("vps", "run_command", "uptime"))
+    try check((try reply_in(mut app, conversation.copy())).contains("Commands are off on vps"), "and one that's off refuses")
+
+    pc.send(Obj.new().s("t", String("host.remove")).s("name", String("box")).done())
+    _ = try pc.until("core.device", "", "")
+    try post(app, conversation.copy(), "m_6", String("/mcp list_devices"))
+    try check(not (try reply_in(mut app, conversation.copy())).contains(#""name":"box""#), "a host taken away is gone")
+
+    let logged = "{at(try app.cmd("q_3", "activity.list", Obj.new().s("agent", agent).done()), "value")}"
+    try check(logged.contains("Run on vps: uptime") and logged.contains("Run on box: options"), "the activity log has what was run on each host")
+    app.close()
+}
+
+fn main() ! Error {
+    let inst = try Instance.start()
+    let folder = try fs.temp_dir()
+    let config = "{folder}/ssh_config"
+    try fs.write_text(config.copy(), String("Host vps\n    HostName 203.0.113.4\n    User root\n\nHost pi *.lan\n"))
+    var pc = try Core.start(inst.base.copy(), inst.token.copy(), "{folder}/core.db", config)
+    let failure: String? = match run(inst.copy(), mut pc) {
+        ok => none,
+        err(e) => some("{e}"),
+    }
+    pc.stop()
+    inst.stop()
+    if let f = failure {
+        eprintln("\n{f}")
+        exit(1)
+    }
+    println("\nhosts: all good")
+}

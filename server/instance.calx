@@ -36,6 +36,7 @@ import server.commands
 import server.files
 import server.files.{Thumb}
 import shared.files.{is_sha, safe_name}
+import shared.hosts.{good_target}
 import server.hashing
 import server.importer
 import server.hashing.{Done, Job}
@@ -53,6 +54,7 @@ import server.rules
 import server.brains
 import server.egress
 import server.sandbox
+import server.stage
 import server.update
 import server.store.{AcpAgent, Device, Store, User, now, secret_key, site_of}
 import shared.tools
@@ -122,6 +124,7 @@ struct Session {
     live: bool
     key: String    // the device's public key, as it says it
     tools: Json    // what it offers as a tool, and how: {run_command: "ask", ...}
+    hosts: Json    // the person's hosts it reaches with ssh: [{name, target, via, tools}], checked
 }
 
 // A call to one of the person's devices, until its result comes.
@@ -388,8 +391,45 @@ const TASK_RETRIED: str = "[loom: Your person asked you to try this task again. 
 const HOOK_MOST: usize = 20000
 // How long a code to add a device by QR code works: five minutes.
 const LINK_MS: i64 = 300000
+// How long a link code an agent hands the app works (protocol.md, "Link codes"):
+// fifteen minutes, for an install to finish and the person to say yes.
+pub const LINK_CODE_MS: i64 = 900000
+// How long the script token `loom import` makes itself works.
+pub const SCRIPT_GRANT_MS: i64 = 900000
 // How long a password reset link works: a day.
 const RESET_MS: i64 = 86400000
+
+// A new link code, as an agent hands it to add_server: "loom-link-" and 32 hex digits.
+fn new_link_code() -> String {
+    return "loom-link-{bytes.hex(random_bytes(16))}"
+}
+
+/// A link code that makes the owner of an instance no one has set up yet, made by
+/// `by` ("setup" or "cli"), and when it expires. It replaces the last one.
+pub fn owner_link_code(store: Store, by: str) -> (String, i64) ! Error {
+    let code = new_link_code()
+    let expires = now() + LINK_CODE_MS
+    try store.add_owner_code(bytes.hex(sha256(code.to_bytes())), by, expires)
+    return (code, expires)
+}
+
+/// A link code that signs a new device in to `user`'s account, made by `by` (a
+/// device, or "cli"), and when it expires.
+pub fn account_link_code(store: Store, user: String, by: String) -> (String, i64) ! Error {
+    let code = new_link_code()
+    let expires = now() + LINK_CODE_MS
+    try store.add_link_code(bytes.hex(sha256(code.to_bytes())), user, by, expires, now())
+    return (code, expires)
+}
+
+/// Whether `code` looks like a link code: what add_server passes on.
+pub fn is_link_code(code: String) -> bool {
+    if code.len() == 0 or code.len() > 100 { return false }
+    for ch in code.runes() {
+        if not ((ch >= 'a' and ch <= 'z') or (ch >= '0' and ch <= '9') or ch == '-') { return false }
+    }
+    return true
+}
 // How much a plugin's panel keeps, in bytes, at most.
 const PLUGIN_DATA_MOST: i64 = 1000000
 
@@ -448,6 +488,32 @@ fn tool_error(text: String) -> Json {
 // is taken off before the agent gets the result.
 fn rule_refusal(rule: str, text: String) -> Json {
     return merge(tool_error(text), Obj.new().s("loom_rule", String(rule)).done())
+}
+
+// The hosts a device says it reaches (the `device` frame's `hosts`), as the
+// instance keeps them: each with a name and target ssh can take, its `via`,
+// and its `run_command` off, ask or allow, at most 50, once each.
+fn hosts_given(given: Json) -> Json {
+    var out = List<Json>()
+    var names = List<String>()
+    if let Json.Array(hs) = given {
+        for h in hs {
+            let name = str_at(h.copy(), "name") ?? String()
+            let target = str_at(h.copy(), "target") ?? name.copy()
+            if not good_target(name.copy()) or not good_target(target.copy()) or names.contains(name.copy()) or out.len() >= 50 { continue }
+            let mode = (at(at(h.copy(), "tools"), "run_command")).as_str() ?? String("off")
+            let via = str_at(h, "via") ?? String("ssh")
+            names.push(name.copy())
+            out.push(Obj.new().s("name", name).s("target", target).s("via", if via == "tailscale" { via } else { String("ssh") }).j("tools", Obj.new().s("run_command", if mode == "ask" or mode == "allow" { mode } else { String("off") }).done()).done())
+        }
+    }
+    return Json.Array(out)
+}
+
+@test
+fn hosts_a_device_gives_are_checked() {
+    let given = parse(String(#"[{"name":"vps","target":"root@vps","via":"ssh","tools":{"run_command":"ask"}},{"name":"-oProxyCommand=x","tools":{"run_command":"allow"}},{"name":"vps","tools":{}},{"name":"box","via":"carrier pigeon","tools":{"run_command":"yes"}}]"#))!
+    assert("{hosts_given(given)}" == #"[{"name":"vps","target":"root@vps","via":"ssh","tools":{"run_command":"ask"}},{"name":"box","target":"box","via":"ssh","tools":{"run_command":"off"}}]"#)
 }
 
 // A tool's result when one of the person's rules denied it (PLAN.md, "Rules,
@@ -576,7 +642,7 @@ fn answer_text(a: Answer) -> Json {
 fn install_text(domain: String) -> String {
     let flags = if domain.len() > 0 { " -s -- --domain {domain}" } else { String() }
     let front = if domain.len() > 0 { "Caddy serves it at https://{domain}, with a certificate from Let's Encrypt, so point {domain}'s DNS at the server first." } else { String("With no domain, it's served through Tailscale when Tailscale is on the server, and on the server alone otherwise. Give a domain for Caddy and HTTPS.") }
-    return "On a Linux server (x86-64 or arm64), as root:\n\ncurl -fsSL https://github.com/aaen-studios/loom/releases/latest/download/install.sh | sudo sh{flags}\n\nIt fetches loom, checks it, and makes the loom user and the service. {front} At the end it prints the server's address and a setup code. Then add the server to your person's app with add_server and that address; they make the first account there with the code. To move this whole instance there instead, run loom receive on it, and use move_instance with the code it prints."
+    return "On a Linux server (x86-64 or arm64), as root:\n\ncurl -fsSL https://github.com/aaen-studios/loom/releases/latest/download/install.sh | sudo sh{flags}\n\nIt fetches loom, checks it, and makes the loom user and the service. {front} At the end it prints the server's address, a setup code and a link code (with --json, `address`, `setup_code` and `link_code`). Then add the server to your person's app with add_server, that address and the link code: their yes makes them its owner and signs their app in, with nothing to type. Once they're in, `sudo -u loom loom import openbot --data /var/lib/loom` brings OpenBot over, with a script token it makes itself. The link code works once, for 15 minutes; `sudo -u loom loom link --data /var/lib/loom --json` makes a new one. To move this whole instance there instead, run loom receive on it, and use move_instance with the code it prints."
 }
 
 // What the schedule tool says it did, with the webhook when there is one.
@@ -1423,7 +1489,7 @@ impl Instance {
                     if req.path == "/ws" and req.method == "GET" {
                         // upgrade answers the request itself.
                         match i.server.upgrade(req.copy()) {
-                            ok(s) => i.sessions.insert(s.id(), Session { socket: s, user: String(), device: String(), live: false, key: String(), tools: Json.Null }),
+                            ok(s) => i.sessions.insert(s.id(), Session { socket: s, user: String(), device: String(), live: false, key: String(), tools: Json.Null, hosts: Json.Null }),
                             err(e) => eprintln("loom: /ws from {req.client}: {e}"),
                         }
                         continue
@@ -2259,6 +2325,11 @@ impl Instance {
             let versions = Json.Array([Json.Int(i64(protocol.NEWEST))])
             return some(json_response(200, Obj.new().s("instance", try i.store.meta("instance") ?? String()).s("key", try i.public_key()).j("protocol", versions).s("version", i.version.copy()).b("setup", users == 0).j("moved", i.moved.copy()).done()))
         }
+        // What answers here, for a script or an agent checking a server: no token needed.
+        if req.path == "/api/version" and req.method == "GET" {
+            let users = try i.store.user_count()
+            return some(json_response(200, Obj.new().s("name", String("loom")).s("version", i.version.copy()).j("protocol", Json.Array([Json.Int(i64(protocol.NEWEST))])).b("set_up", users > 0).done()))
+        }
         // Once moved, the rest is at the new place; while moving, nothing changes here.
         if i.moved != Json.Null {
             let to = str_at(i.moved.copy(), "address") ?? String()
@@ -2291,6 +2362,7 @@ impl Instance {
         if req.path.starts_with("/api/reset/") { return try i.reset(req, body) }
         if req.path == "/api/login" { return try i.login(req, body) }
         if req.path == "/api/link" { return some(try i.link(req, body)) }
+        if req.path == "/api/link/new" { return some(try i.new_owner_code(req, body)) }
         if req.path == "/api/logout" { return try i.logout(req) }
         return some(http_error(404, "not_found", String("There's nothing here.")))
     }
@@ -2422,10 +2494,21 @@ impl Instance {
         if not from_here(req.copy()) { return some(http_error(403, "not_here", String("Scripts reach the instance only from its own computer."))) }
         let h = req.header(String("Authorization")) ?? String()
         let token = if h.starts_with("Bearer ") { h[7..].copy() } else { String() }
-        let user = (if token.len() > 0 { try i.store.script_token_user(bytes.hex(sha256(token.to_bytes()))) } else { none }) else {
+        let op = req.path.trim_prefix("/api/scripts/").copy()
+        let hash = bytes.hex(sha256(token.to_bytes()))
+        var found = if token.len() > 0 { try i.store.script_token_user(hash.copy()) } else { none }
+        // Or a token a script made itself from the data folder, for one route, for a while.
+        if found == none and token.len() > 0 {
+            if let (whose, scope, expires) = try i.store.script_grant(hash) {
+                if expires > now() {
+                    if scope != op { return some(http_error(403, "not_allowed", "That script token is only for {scope}.")) }
+                    found = some(whose)
+                }
+            }
+        }
+        let user = found else {
             return some(http_error(401, "unauthorized", String("That isn't a script token. Your person turns scripts on in the app, which gives one.")))
         }
-        let op = req.path.trim_prefix("/api/scripts/").copy()
         if op == "approvals" and req.method == "GET" {
             var out = List<Json>()
             for (call, a) in i.approvals {
@@ -2811,10 +2894,17 @@ impl Instance {
             return try i.message_agent(req, g, args)
         }
         if name == "add_server" {
-            let address = (str_at(args, "address") ?? String()).trim().trim_suffix("/").copy()
+            let address = (str_at(args.copy(), "address") ?? String()).trim().trim_suffix("/").copy()
             if not address.starts_with("https://") and not address.starts_with("http://") { return some(tool_error(String("address is the server's http:// or https:// address, such as https://loom.example.com."))) }
-            let action = Obj.new().s("name", String("server.offer")).j("args", Obj.new().s("address", address.copy()).done()).done()
-            return try i.ask_person(req, g, "Add the server {address} to your app", "other", action)
+            // A link code the server gave (loom install --json, loom link): the person's
+            // yes signs the app in with it, so neither they nor the agent types anything.
+            let code = (str_at(args, "link_code") ?? String()).trim().copy()
+            if code.len() > 0 and not is_link_code(code.copy()) { return some(tool_error(String("link_code is the code loom install --json or loom link gave, such as loom-link-3f2a…."))) }
+            var offer = Obj.new().s("address", address.copy())
+            if code.len() > 0 { offer = offer.s("link_code", code.copy()) }
+            let action = Obj.new().s("name", String("server.offer")).j("args", offer.done()).done()
+            let title = if code.len() > 0 { "Add the server {address} to your app, and sign in there" } else { "Add the server {address} to your app" }
+            return try i.ask_person(req, g, title, "other", action)
         }
         if name == "install_server" {
             let domain = (str_at(args, "domain") ?? String()).trim().copy()
@@ -3460,11 +3550,65 @@ impl Instance {
             if from == s { known = true }
         }
         if not known { return Answer.Refused(String("bad_request"), String("from is openbot or grokbot.")) }
-        let bundle = match importer.read(from.copy(), str_at(args, "path") ?? String()) {
+        let path = str_at(args.copy(), "path") ?? String()
+        let bundle = match importer.read(from.copy(), path.copy()) {
             ok(b) => b,
             err(e) => return Answer.Refused(String("not_found"), "{e}"),
         }
-        return Answer.Value(try i.bring(user, device, from, bundle))
+        var answer = try i.bring(user, device, from.copy(), bundle)
+        // The provider OpenBot's Claude used, when the person said to carry it over.
+        if from == "openbot" and bool_at(args, "carry_provider") == some(true) {
+            answer = merge(answer, Obj.new().j("provider", try i.carry_provider(user.copy(), device.copy(), path.copy())).done())
+        }
+        // A folder staged from another user's (server/stage.calx) keeps no token once it's been read.
+        if path.len() > 0 and fs.is_file("{path}/{stage.MARK}") and fs.is_file("{path}/.claude/settings.json") {
+            try fs.remove_file("{path}/.claude/settings.json")
+        }
+        return Answer.Value(answer)
+    }
+
+    // Copies the provider OpenBot's Claude uses (its endpoint and token, from
+    // Claude Code's settings) into the settings of the Claude agent program here,
+    // sealed as every program's settings are. Says which program, and the
+    // endpoint, never the token; or why it didn't.
+    fn carry_provider(i: mut Instance, user: String, device: String, path: String) -> Json ! Error {
+        let env_given = importer.provider_env(path)
+        if env_given.len() == 0 { return Obj.new().b("carried", false).s("why", String("OpenBot's Claude has no provider of its own to carry over.")).done() }
+        var found: AcpAgent? = none
+        for a in try i.store.acp_agents() {
+            if found == none and (a.name.contains("claude") or a.source.contains("claude")) { found = some(a.copy()) }
+        }
+        let program = found else return Obj.new().b("carried", false).s("why", String("There's no Claude agent program here to give it to: install Claude Agent, then import again.")).done()
+        try i.store.set_acp_settings(program.name.copy(), program.source.copy(), program.version.copy(), merge(program.env.copy(), env_given.copy()))
+        i.stop_program(program.name.copy())
+        let endpoint = str_at(env_given, "ANTHROPIC_BASE_URL") ?? String()
+        i.log(user, String(), "import", "{program.name} uses OpenBot's provider{if endpoint.len() > 0 { " at " } else { "" }}{endpoint} now", device)
+        return Obj.new().b("carried", true).s("program", program.name.copy()).s("endpoint", endpoint).done()
+    }
+
+    // An import staged by `loom import --from-user` or `loom install --import`
+    // (server/stage.calx), waiting in imports/pending.json: run for the owner once
+    // there is one, its answer in imports/done.json for the command that's waiting.
+    fn pending_import(i: mut Instance) ! Error {
+        let pending = "{i.data}/{stage.PENDING}"
+        if not fs.is_file(pending.copy()) { return }
+        var owner = String()
+        for u in try i.store.users() {
+            if owner.len() == 0 and u.role == "owner" { owner = u.id.copy() }
+        }
+        if owner.len() == 0 { return }
+        let taking = "{i.data}/{stage.TAKING}"
+        try fs.rename(pending, taking.copy())
+        let args = match parse(try fs.read_text(taking.copy()) ?? String()) {
+            ok(j) => j,
+            err(_) => Json.Null,
+        }
+        let out = match try i.command(owner, String("import"), String("import.run"), args) {
+            Answer.Value(v) => v,
+            Answer.Refused(code, message) => Obj.new().j("error", Obj.new().s("code", code).s("message", message).done()).done(),
+        }
+        try fs.write_text("{i.data}/{stage.DONE}", "{out}")
+        try fs.remove_file(taking)
     }
 
     // Writes what server.importer read into `user`'s data, and says what came.
@@ -4352,6 +4496,7 @@ impl Instance {
         i.next_due = t + (if i.minute_ms < 1000 { i.minute_ms } else { 1000 })
         // Routines run at the new place once the instance has moved there.
         if i.moving.len() > 0 or i.moved != Json.Null { return }
+        if let err(e) = i.pending_import() { eprintln("loom: a staged import: {e}") }
         let due = match i.store.due_routines(t) {
             ok(d) => d,
             err(e) => {
@@ -5150,9 +5295,13 @@ impl Instance {
         // so it takes as long as a wrong password.
         var user: User? = none
         var stored = i.dummy_hash.copy()
+        // An account made from a link code has no password until the person sets
+        // one, and takes none: the hashing thread would make an empty hash a new one.
         if let (u, h) = try i.store.login_record(username.copy()) {
-            user = some(u)
-            stored = h
+            if h.len() > 0 {
+                user = some(u)
+                stored = h
+            }
         }
         i.hash_later(Auth { req: req.copy(), body: body.copy(), user: user, setup: false, username: username, address: address, invite: String(), role: String(), reset: String() }, password, stored)
         return none
@@ -5184,13 +5333,57 @@ impl Instance {
         let address = client_address(req.client.copy())
         if let wait = i.limited(address.copy(), String()) { return rate_limited(wait) }
         let code = str_at(body.copy(), "code") ?? String()
-        let taken = try i.store.take_link_code(bytes.hex(sha256(code.to_bytes()))) else {
+        let hash = bytes.hex(sha256(code.to_bytes()))
+        // A link code that makes the owner, on an instance no one has set up yet.
+        if let expires = try i.store.owner_code(hash.copy()) {
+            return try i.link_owner(body, expires)
+        }
+        let taken = try i.store.take_link_code(hash) else {
             i.failed(address, String())
             return http_error(403, "bad_code", String("That code isn't one this instance made, or it's been used."))
         }
         let (user, expires) = taken
-        if expires <= now() { return http_error(403, "expired", String("That code has expired. Show a new one on the device that's connected.")) }
+        if expires <= now() { return http_error(403, "expired", String("That code has expired. Ask for a new one.")) }
         return json_response(200, try i.new_device(user, body))
+    }
+
+    // The owner, from a link code, with the username the app gives and no password
+    // until they set one (`password.set`), and their first device.
+    fn link_owner(i: Instance, body: Json, expires: i64) -> Response ! Error {
+        if try i.store.user_count() > 0 {
+            try i.store.drop_owner_codes()
+            return http_error(409, "already_set_up", String("This instance has its owner already."))
+        }
+        if expires <= now() { return http_error(403, "expired", String("That code has expired. Ask for a new one.")) }
+        let username = str_at(body.copy(), "username") ?? String("owner")
+        if not valid_username(username.copy()) {
+            return http_error(400, "bad_username", String("A username is 1 to 32 of a-z, 0-9, _ and -."))
+        }
+        let user = try i.store.add_user_hashed(username, String(), "owner")
+        try i.store.drop_owner_codes()
+        try i.store.delete_meta("setup_code")
+        try i.store.log_people("joined", "{user.username} set up the instance with a link code, as its owner", user.username.copy())
+        println("loom: {user.username} set up the instance with a link code")
+        return json_response(200, merge(try i.new_device(user.id, body), Obj.new().b("owner", true).done()))
+    }
+
+    // POST /api/link/new: a link code that makes the owner, for the setup code, on
+    // an instance no one has set up yet. A wrong setup code counts as a wrong
+    // password does.
+    fn new_owner_code(i: mut Instance, req: Request, body: Json) -> Response ! Error {
+        if try i.store.user_count() > 0 {
+            return http_error(409, "already_set_up", String("This instance has its owner already."))
+        }
+        let address = client_address(req.client.copy())
+        if let wait = i.limited(address.copy(), String()) { return rate_limited(wait) }
+        let code = try i.store.meta("setup_code") ?? String()
+        let given = str_at(body, "setup_code") ?? String()
+        if code.len() == 0 or not compare_digest(given.to_bytes(), code.to_bytes()) {
+            i.failed(address, String())
+            return http_error(403, "bad_code", String("That setup code isn't this instance's."))
+        }
+        let (link, expires) = try owner_link_code(i.store, "setup")
+        return json_response(200, Obj.new().s("code", link).i("expires", expires).b("owner", true).done())
     }
 
     fn hash_later(i: mut Instance, auth: own Auth, password: own String, stored: own String) {
@@ -5354,7 +5547,8 @@ impl Instance {
             if let tz = str_at(f.copy(), "tz") { try i.store.update_device_tz(device, tz) }
             if let session = mut i.sessions.find(s.id()) {
                 if let key = str_at(f.copy(), "key") { session.key = key }
-                if let Json.Object(_) = at(f.copy(), "tools") { session.tools = at(f, "tools") }
+                if let Json.Object(_) = at(f.copy(), "tools") { session.tools = at(f.copy(), "tools") }
+                if let Json.Array(_) = at(f.copy(), "hosts") { session.hosts = hosts_given(at(f, "hosts")) }
             }
         } else if t == "device.result" {
             try i.device_result(user, device, f)
@@ -5420,7 +5614,7 @@ impl Instance {
             }
         }
         _ = i.server.send_text(s, "{Obj.new().s("t", String("synced")).i("seq", last).done()}")
-        i.sessions.insert(s.id(), Session { socket: s, user: user.copy(), device: device.id, live: true, key: String(), tools: Json.Null })
+        i.sessions.insert(s.id(), Session { socket: s, user: user.copy(), device: device.id, live: true, key: String(), tools: Json.Null, hosts: Json.Null })
         // The owner's first device after an update the instance made by itself hears of
         // it live, so it notifies.
         if i.told_update != Json.Null and try i.store.role(user) == some(String("owner")) { try i.tell_owner_update() }
@@ -6780,7 +6974,15 @@ impl Instance {
             if s.live and s.user == user and s.tools != Json.Null and not seen.contains(s.device.copy()) {
                 seen.push(s.device.copy())
                 if let d = try i.store.device(user.copy(), s.device.copy()) {
-                    out.push(Obj.new().s("id", d.id).s("name", d.name).s("kind", d.kind).j("tools", s.tools.copy()).done())
+                    out.push(Obj.new().s("id", d.id.copy()).s("name", d.name.copy()).s("kind", d.kind).j("tools", s.tools.copy()).done())
+                    // Its hosts, each a device of its own that it reaches with
+                    // ssh (PLAN.md, "Your hosts").
+                    if let Json.Array(hs) = s.hosts.copy() {
+                        for h in hs {
+                            let name = str_at(h.copy(), "name") ?? String()
+                            out.push(Obj.new().s("id", "{d.id}/{name}").s("name", name).s("kind", String("host")).s("via", str_at(h.copy(), "via") ?? String("ssh")).s("target", str_at(h.copy(), "target") ?? String()).s("through", d.name.copy()).s("device", d.id.copy()).j("tools", at(h, "tools")).done())
+                        }
+                    }
                 }
             }
         }
@@ -6798,15 +7000,21 @@ impl Instance {
             if str_at(d.copy(), "id") == some(key.trim()) or (str_at(d.copy(), "name") ?? String()).to_lower_root() == key.trim().to_lower_root() { target = d.copy() }
         }
         if target == Json.Null { return some(tool_error("{key} isn't connected, or offers no tools. list_devices gives the devices that do.")) }
-        let device = str_at(target.copy(), "id") ?? String()
+        // A host goes to the device that reaches it, with the host named in
+        // the request, which that device signs and runs through ssh.
+        let host = if str_at(target.copy(), "kind") == some(String("host")) { str_at(target.copy(), "name") ?? String() } else { String() }
+        if host.len() > 0 and tool_name != "run_command" { return some(tool_error("{host} is a host: it only runs commands (run_command).")) }
+        let device = if host.len() > 0 { str_at(target.copy(), "device") ?? String() } else { str_at(target.copy(), "id") ?? String() }
         let device_name = str_at(target.copy(), "name") ?? String()
         let mode = (at(target, "tools").get(tool_name.copy()) ?? Json.Null).as_str() ?? String("off")
-        if mode != "ask" and mode != "allow" { return some(rule_refusal("device-tool-off", "{tool_name} is off on {device_name}. Your person can turn it on in that device's app.")) }
+        if mode != "ask" and mode != "allow" { return some(rule_refusal("device-tool-off", if host.len() > 0 { "Commands are off on {host}. Your person can turn them on in their app's settings, under Hosts." } else { "{tool_name} is off on {device_name}. Your person can turn it on in that device's app." })) }
         let tool_args = at(args, "args")
         let run_id = i.calling_run(g.copy())
         if mode == "ask" and run_id.len() == 0 { return some(rule_refusal("needs-a-chat", String("That needs your person's yes, and they can only give it during a chat with you."))) }
         let call = try i.store.new_id("tc")
-        let request = "{Obj.new().s("call", call.copy()).s("device", device.copy()).s("tool", tool_name.copy()).j("args", tool_args.copy()).s("agent", g.agent.copy()).i("at", now()).done()}"
+        var asked = Obj.new().s("call", call.copy()).s("device", device.copy())
+        if host.len() > 0 { asked = asked.s("host", host.copy()) }
+        let request = "{asked.s("tool", tool_name.copy()).j("args", tool_args.copy()).s("agent", g.agent.copy()).i("at", now()).done()}"
         let what = str_at(tool_args.copy(), "command") ?? str_at(tool_args.copy(), "path") ?? str_at(tool_args.copy(), "target") ?? cut_short(str_at(tool_args, "text") ?? String(), 80)
         let (kind, title) = if tool_name == "run_command" {
             (String("execute"), "Run on {device_name}: {what}")
@@ -7720,9 +7928,16 @@ impl Instance {
         // agent, once the person said yes on a device, which adds it.
         if name == "server.offer" {
             if not device.starts_with("d_") { return Answer.Refused(String("forbidden"), String("Only the person, on one of their devices, adds a server to their app.")) }
-            let address = (str_at(args, "address") ?? String()).trim().copy()
+            let address = (str_at(args.copy(), "address") ?? String()).trim().copy()
             if not address.starts_with("https://") and not address.starts_with("http://") { return Answer.Refused(String("bad_request"), String("address is the server's http:// or https:// address.")) }
-            try i.event(user, "server.offered", Obj.new().s("address", address).s("by", device).done())
+            let code = (str_at(args, "link_code") ?? String()).trim().copy()
+            var offered = Obj.new().s("address", address).s("by", device)
+            if code.len() > 0 {
+                if not is_link_code(code.copy()) { return Answer.Refused(String("bad_request"), String("link_code is a code loom gave, of a-z, 0-9 and -.")) }
+                // The person's username here, for the owner a code makes on a new server.
+                offered = offered.s("link_code", code).s("username", try i.store.username(user.copy()) ?? String())
+            }
+            try i.event(user, "server.offered", offered.done())
             return Answer.Value(empty)
         }
         if name == "conversation.branch" { return try i.branch(user, device, args) }
@@ -8009,6 +8224,20 @@ impl Instance {
         if name == "link.create" {
             // Only a device the person holds shows a code, never an agent.
             if not device.starts_with("d_") { return Answer.Refused(String("forbidden"), String("Only a device can make a code to add another.")) }
+            // A link code for someone else's account, from the owner or an admin, as a
+            // reset link is: for the app an agent adds the server to.
+            if let whose = str_at(args.copy(), "user") {
+                if whose != user {
+                    let role = try i.store.role(user.copy()) ?? String()
+                    let theirs = try i.store.role(whose.copy()) else return Answer.Refused(String("not_found"), "There's no one {whose} here.")
+                    if role != "owner" and role != "admin" { return Answer.Refused(String("not_allowed"), String("Only the owner and admins make a link code for someone else.")) }
+                    if theirs == "owner" or (theirs == "admin" and role != "owner") { return Answer.Refused(String("not_allowed"), String("Only the owner makes a link code for an admin, and only the owner for the owner.")) }
+                }
+                let (code, expires) = try account_link_code(i.store, whose.copy(), device)
+                let theirs_name = try i.store.username(whose) ?? String()
+                try i.people_logged("link", "Made a link code to sign in as {theirs_name}", user)
+                return Answer.Value(Obj.new().s("code", code).i("expires", expires).done())
+            }
             let code = bytes.hex(random_bytes(16))
             let expires = now() + LINK_MS
             try i.store.add_link_code(bytes.hex(sha256(code.to_bytes())), user, device, expires, now())
@@ -8016,6 +8245,19 @@ impl Instance {
             // A phone reaches an instance in the desktop app over Noise.
             if i.bridge != none { value = value.j("noise", try i.phones()) }
             return Answer.Value(value.done())
+        }
+        // The first password of an account a link code made, which had none, for
+        // signing in elsewhere with a username. Changing one is a reset.
+        if name == "password.set" {
+            if not device.starts_with("d_") { return Answer.Refused(String("forbidden"), String("Only the person sets their password, on one of their devices.")) }
+            if try i.store.has_password(user.copy()) { return Answer.Refused(String("has_password"), String("You have a password already. A new one comes with a reset link, or loom user password on the server.")) }
+            let password = str_at(args, "password") ?? String()
+            if password.len() < 8 { return Answer.Refused(String("weak_password"), String("A password needs at least 8 characters.")) }
+            // Hashed here, once: an account sets its first password only once.
+            try i.store.set_password(user.copy(), password)
+            let name_here = try i.store.username(user.copy()) ?? String()
+            try i.people_logged("password", "{name_here} set their password", user)
+            return Answer.Value(empty)
         }
         if name.starts_with("invite.") or name.starts_with("user.") or name == "account.delete" or name == "password.reset" or name == "people.log" {
             return try i.people_cmd(user, device, name, args)

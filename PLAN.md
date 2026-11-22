@@ -113,7 +113,7 @@ One app signs in to as many instances as you like: the one on this computer, a s
 - **Each is its ball of yarn.** The sidebar's bottom row has a soft ball of yarn for each server, as each agent has its thread: its colour and its strands chosen from the server's name, resting while it's connected, its strands turning while it connects, and grey while it can't be reached. The one on screen has its name and how it is beside it, so it reads as the server you're on, and opens the server popup. The settings gear sits beside it. The sidebar collapses to a rail (Ctrl+B), which the app keeps: each agent as its thread, a dot on one with a reply waiting, the +, and at its foot the update icon over the gear over the yarn. A window too narrow for the sidebar and the chat makes it a rail on its own until there's room again, unless the person collapsed it. Another comes on screen when clicked, and has a dot when one of its agents said something there. With several, the sidebar names the server on screen above its agents.
 - **The others keep going.** A server away keeps its connection, so its replies notify and its unread marks gather. This PC's tools (screenshots, the clipboard, commands) answer only the server on screen.
 - **Adding and removing** are in the server popup: **Add a server** signs in beside the one on screen, with a setup code for a new server, and the server comes on screen once it's in. **Sign out and remove** takes one away, with its folder. The first server stays.
-- **Agents help.** An agent's `add_server` asks its person, and the device that said yes opens Add a server with the address in. `install_server` gives the command that puts loom on a new Linux server. Add a server and Move sit at the bottom of the server popup, under its settings, since they're things to do rather than settings, and each has **Copy prompt**: a prompt to give one of the person's agents, which does the technical part with these tools. Technical jobs in the app offer one the same way.
+- **Agents help.** An agent's `add_server` asks its person, and the device that said yes opens Add a server with the address in. With a link code the server gave (`loom install --json`, `loom link`, or an owner's or admin's `link.create` for someone), that yes is all: the app signs in with the code, which on a new server makes the person its owner, so they type nothing and the agent never sees a password or a token. A code works once, for 15 minutes ([protocol.md: Link codes](protocol/protocol.md#link-codes)). The import that follows, `loom import` on the server, makes itself a token that only imports, for 15 minutes. `install_server` gives the command that puts loom on a new Linux server. Add a server and Move sit at the bottom of the server popup, under its settings, since they're things to do rather than settings, and each has **Copy prompt**: a prompt to give one of the person's agents, which does the technical part with these tools. Technical jobs in the app offer one the same way.
 
 ## Sync: an event log with a cursor
 
@@ -129,7 +129,7 @@ An instance has accounts, and the owner decides who's in. (Only an instance on a
 
 The data is kept per person from the first day, so a second person never needs a migration. The screens for inviting and managing people come later, in Phase 10, when other people start using loom. Until then, accounts are made from the command line.
 
-- **Setup.** On first start the server prints a one-time setup link. Whoever opens it creates the owner account.
+- **Setup.** On first start the server prints a one-time setup link. Whoever opens it creates the owner account. Or an agent sets it up for its person: the setup code (or `loom link` on the server) gives a one-time link code, the agent's `add_server` hands it to the app, and the person's yes there makes them the owner, with their username and no password, and signs the app in. They set a password when they want one, to sign in somewhere with it; phones join by QR code without one ([Several servers in one app](#several-servers-in-one-app)).
 - **Roles.** Owner, admin and member. Owners and admins invite and manage people.
 - **Invites.** An invite is a link (`https://<instance>/join/<code>`) that opens the app. It's good for one use or several, it expires, and it says which role it gives. The person picks a username and password, and they're in. Open sign-up stays off unless the owner turns it on.
 - **Login.** Username and password, hashed with argon2id. Each login makes a device token (32 random bytes, kept on the server as a SHA-256 hash), so the password is used only to log in. Two-factor with TOTP comes later, and Calx already has the HMAC it needs.
@@ -223,7 +223,7 @@ Agents live in the database, and are made and edited in the app.
 Say you ask: "Set up loom on this VPS and move me there." The agent:
 
 1. Connects with `ssh`, using the address and key you give it. That's an approval.
-2. Runs the install script (`curl -fsSL …/releases/latest/download/install.sh | sudo sh`). It downloads the server for that machine and runs `loom install`, which makes the `loom` user and the service, and sets up Caddy for TLS if there's a domain, or Tailscale if there isn't.
+2. Runs the install script (`curl -fsSL …/releases/latest/download/install.sh | sudo sh`). It downloads the server for that machine and runs `loom install`, which makes the `loom` user and the service, and sets up Caddy for TLS if there's a domain, or Tailscale if there isn't, on an HTTPS port nothing else on the tailnet uses. `loom install --json` gives the address and the setup code; `GET /api/version` says loom answers there; `loom acp install` and `loom acp settings` give it agent programs; and `--import openbot` brings OpenBot over from the same server.
 3. Starts `loom receive` there, and reads the move code it prints.
 4. Asks you once: "Move this instance to the new server?" Then it moves it, and your apps follow.
 
@@ -256,7 +256,7 @@ Later: Calx library plugins in the server (Calx's own `@export` plugins), once l
 ## Server
 
 - **One Calx process** on std.http.server (std.net's event loop underneath, WebSockets included), listening on 127.0.0.1. On the VPS, the domain comes in through the Cloudflare tunnel and Caddy, which handle TLS. Self-hosters put Caddy or their own proxy in front.
-- **HTTP routes** for what isn't a live session: `/api/setup`, `/api/login`, `/api/join/<code>`, `/hooks/<id>` for webhooks, and `/ws` for the WebSocket.
+- **HTTP routes** for what isn't a live session: `/api/setup`, `/api/login`, `/api/link` and `/api/link/new`, `/api/join/<code>`, `/hooks/<id>` for webhooks, and `/ws` for the WebSocket.
 - **Slow work** (password hashing, files, reading each agent program) runs on worker threads, through std.thread and its queues, so the event loop never waits.
 - **Its own Unix user** on a server, `loom`, with its own folder. "Shell on the VPS" means what that user can do. (In the desktop app it runs as you.)
 - **Config** in one TOML file: the address to listen on, the data folder, the instance's ACP agents, push settings. Secrets come from a separate file only `loom` can read.
@@ -467,6 +467,15 @@ Commands and files run in the core (std.process and std.fs). Screenshots (`xcap`
 
 In a desktop instance, the instance's machine and your PC are the same machine, so device tools are for your other devices: the phone, and other computers.
 
+### Your hosts
+
+Servers you own, such as a VPS or a box at home, are devices too, so an agent reaches them through loom instead of finding your `~/.ssh/config` and running ssh as root by itself.
+
+- **Kept with the computer that reaches them.** The keys are on your PC, so a host belongs to that PC's app: an SSH alias from `~/.ssh/config`, a Tailscale machine's name, or `user@name`. The app offers the ones it finds in the ssh config and on the tailnet (`tailscale status --json`), and you add one with a click or by typing it.
+- **Like This PC.** Each host is off, ask each time (the start) or allowed, set on that PC. Agents see it in `list_devices` as a host beside the PC that reaches it, and run commands there with `use_device`, which asks you first in the chat as This PC does. The PC signs your yes and checks it before it runs the command, so the instance can't say yes for you.
+- **Run on your PC.** The core runs `ssh` there (std.process), with `BatchMode` so it never waits for a password or a new host key nobody could answer, and the command after `--`. A host's name and target are only letters, digits and `.-_@:`, never starting with `-`, so neither is taken for one of ssh's options. The app only draws the Hosts page beside This PC in the server's settings.
+- **Commands only.** A host runs commands, which is what an agent needs to set a server up. Files and the rest go through commands.
+
 ## Memory
 
 - `remember`, `recall` and `forget` keep and search notes in SQLite with full-text search (FTS5), per person and per agent. A note can be shared by all the person's agents, and tied to a site, so the agent is shown it when its browser is there ([Teach a task](#sharing-and-learning)). `recall` finds any of its words, best match first. The person reads, adds and deletes them on the agent's **Memory** page.
@@ -536,7 +545,9 @@ An instance moves whole, in any direction: desktop to server, server to desktop,
 
 What another agent app keeps on the instance's computer comes over in one go, from **Import** in the settings, `import.run` (an agent's asks first), or `loom import openbot|grokbot [PATH]`. On a server, PATH is a copy of the app's data folder. Only the owner imports, since it reads the computer's files ([protocol.md](protocol/protocol.md#commands)).
 
+- **From another user, on a server.** OpenBot on a server runs as a user of its own, in a folder only it can read, and the `loom` service can't see it. `loom import openbot --from-user openbot`, as root, copies what an import reads into the instance's `imports/` (`server/stage.calx`): the database and shared tables as snapshots, safe while OpenBot writes, each agent's instructions, the skills, and the files the chats have, but not ones that look like secrets. The instance imports it for its owner, at once or once the owner has set up, so `loom install --import openbot` brings OpenBot over in the same step as the install.
 - **Only reading, never secrets.** `server/importer.calx` reads the other app's files and opens its SQLite read-only, and never opens what holds a secret: API keys, vaults, logins, OAuth and webhook secrets, MCP servers' environment and headers, and files that look like keys. What needs a key gets it again in loom, as a secret.
+- **The provider, after one yes.** The one exception: `import.scan` says which endpoint OpenBot's Claude uses (such as a proxy, from Claude Code's settings), never its token, and the app asks "Use the same for Claude Agent?". On yes, `import.run` copies the endpoint and token into the Claude agent program's settings itself, sealed, so no agent reads the token (`--carry-provider` from the command line).
 - **Once.** Each thing is kept with the other app's id (`imported`, in the database), so importing again brings only what's new, and never over the person's own skill, MCP server or table of the same name.
 - **Said plainly.** The answer counts what came and says, a sentence each, what couldn't or what changed on the way, such as a weekly routine that became daily.
 - **OpenBot** (its `openbot.db`, an event log whose `projection_*` tables hold things as they are, and its workspace): agents with their `AGENTS.md` (or their title and description), nearest thread colour, model and pin, on the agent program named for their provider; each agent's chat with its messages, times, pins and the files they had that are still there, and the threads beside it as branches of it, or as their routine's own; memories; routines, on loom's schedules (hourly becomes every 60 minutes; weekly and monthly, daily at their time); skills, from its bundles and `~/.agents/skills`, as their `SKILL.md`; MCP servers; and the shared tables, each its owner agent's, with their rows.

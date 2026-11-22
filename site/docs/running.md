@@ -16,11 +16,32 @@ The script downloads the newest `loom` for the machine (x64 or Arm) and checks i
 - runs `loom serve` as that user from a systemd service, `loom.service`;
 - sets up rootless Podman, for the sandboxes the agents of everyone but the owner run in ([People](people.md)), unless you give `--no-sandboxes`;
 - puts Caddy in front for TLS when you give `--domain`, or, without one, serves it on your tailnet if Tailscale is installed ([Tailscale](tailscale.md));
-- prints the address and the one-time **setup code**.
+- prints the address and the one-time **setup code**. With `--json` it prints them as JSON instead: `address`, `setup_code`, `version` and the rest.
 
 In the desktop app, choose **I have a server** and give its address. Pick a username and password, then choose **New server? Add its setup code** and put the code in. That account is the owner.
 
 Run the script again to update loom, or use `loom update`, which checks the release's signature before it swaps the program.
+
+To check a server answers, open `/api/version` at its address: it gives loom's version, and `set_up`, whether it has its owner yet, with no sign-in.
+
+### Agent programs from the command line
+
+```sh
+sudo -u loom loom acp install claude-acp --env ANTHROPIC_API_KEY=… --data /var/lib/loom
+sudo -u loom loom acp settings claude-acp ANTHROPIC_MODEL=opus --data /var/lib/loom
+```
+
+`acp install` installs an agent program from the ACP Registry, as **Brains** does. When the program needs `npx` or `uvx` and they aren't there, it says what to install. `acp settings` sets a program's settings, kept sealed; `NAME=` removes one.
+
+### Bringing OpenBot over
+
+OpenBot on a server runs as a user of its own, in a folder the `loom` user can't read. As root:
+
+```sh
+loom import openbot --from-user openbot --data /var/lib/loom
+```
+
+It takes a snapshot of OpenBot's database, safe while OpenBot runs, copies its agents' instructions, skills and the files its chats have into `/var/lib/loom/imports/`, and imports them into the owner's account: at once, or once the owner has set loom up. `--carry-provider` also gives the endpoint and token OpenBot's Claude uses to loom's Claude agent program. To do it while installing, give `loom install --import openbot` (or `openbot:USER`).
 
 ## In Docker
 

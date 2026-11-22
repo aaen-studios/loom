@@ -5,13 +5,18 @@ module server.main
 //     loom serve [--data DIR] [--port N] [--host ADDR] [--backups DIR [--backups-keep N]] [--sandboxes podman|docker [--sandbox-image IMAGE]] [--allow-root]
 //     loom user add NAME [--data DIR]          reads the password from standard input
 //     loom user list [--data DIR]
+//     loom link [NAME] [--data DIR]            a link code for an agent's add_server
 //     loom acp add NAME COMMAND [ARG...] [--data DIR]
 //     loom acp list [--data DIR]
+//     loom acp install ID [--env NAME=value]... [--registry URL] [--data DIR]
+//     loom acp settings NAME NAME=value|NAME=... [--data DIR]
 //     loom receive [--data DIR] [--port N] [--host ADDR]
 //     loom status [--data DIR]
-//     loom import openbot|grokbot [PATH]       through the running instance, with a script token
+//     loom import openbot|grokbot [PATH] [--carry-provider]   through the running instance, with a script token
+//     loom import openbot [PATH] --from-user USER [--carry-provider]   as root, staged into --data
 //     loom files limit MB|off [--data DIR]
-//     loom install [--domain DOMAIN] [--port N] [--no-sandboxes]   as root, on a Linux server
+//     loom install [--domain DOMAIN] [--port N] [--no-sandboxes] [--no-tailscale] [--https-port N|auto]
+//                  [--import openbot[:USER]] [--carry-provider]   as root, on a Linux server
 //     loom update [--check]
 //     loom egress                              in a sandbox closed to the network, started by the instance
 //     loom version
@@ -19,26 +24,30 @@ module server.main
 // Each but serve, mcp and egress takes --json, to answer in JSON.
 //
 // Run from source: calx server/main.calx serve
-import std.crypto.{PasswordHasher}
+import std.crypto.{PasswordHasher, random_bytes}
+import std.bytes
 import std.env
 import std.fs
+import std.hash.{sha256}
 import std.http.{Header, get, post}
 import std.http.server.{Server}
 import std.io
 import std.json.{Json, parse}
-import std.process.{current_exe, exit}
+import std.process.{Command, current_exe, exit}
 import std.thread.{sleep}
-import shared.obj.{Obj, at, bool_at, str_at}
+import shared.obj.{Obj, at, bool_at, merge, str_at}
 import shared.protocol
 import shared.release.{newer}
-import server.instance.{Config, EventLife, Instance}
+import server.instance.{Config, EventLife, Instance, SCRIPT_GRANT_MS, account_link_code, owner_link_code}
 import server.mcp
 import server.egress
 import server.backup
 import server.push
 import server.installer
+import server.importer
+import server.stage
 import server.move
-import server.store.{Store}
+import server.store.{AcpAgent, Store, now}
 import server.setup
 import server.update
 
@@ -58,10 +67,17 @@ usage: loom <command>
                             each, from loom's image or --sandbox-image IMAGE: without, only the owner's run
   user add NAME             add an account; the password comes on standard input
   user list                 list the accounts
+  link [NAME]               a link code, once, for 15 minutes, for an agent's add_server: on an instance no
+                            one has set up, it makes the owner when the person says yes in the app; else it
+                            signs in to NAME, or the owner
   user password NAME        give NAME a new password, from standard input, and sign them out everywhere:
                             the owner's own reset
   acp add NAME COMMAND ...  add an ACP agent program, such as: acp add claude npx -y @agentclientprotocol/claude-agent-acp
   acp list                  list the ACP agent programs
+  acp install ID            install an agent program from the ACP Registry, such as claude-acp, with its settings
+                            as --env NAME=value (each its own --env). Says what to install when it needs npx or uvx
+  acp settings NAME NAME=value ...
+                            set an agent program's settings, kept sealed; NAME= removes one
   files limit MB|off        cap the files each person can keep, in megabytes
   push key FILE KEY_ID TEAM_ID BUNDLE_ID
                             send push to the iPhone app through APNs, signed with Apple's AuthKey_<id>.p8
@@ -71,7 +87,13 @@ usage: loom <command>
   import FILE               make a new instance in --data from a backup
   import openbot [PATH]     bring agents, chats, memories, routines, skills, MCP servers and tables over
   import grokbot [PATH]     from OpenBot or Grok Bot on this computer, or from PATH, a copy of its data
-                            folder, without their secrets. Through the running instance, as the four below
+                            folder, without their secrets. Through the running instance, as the four below, or
+                            with no token, where it can open --data, with one it makes itself for the owner
+                            that only imports, for 15 minutes.
+                            --carry-provider gives OpenBot's Claude endpoint and token to the Claude agent program
+  import openbot --from-user USER
+                            as root: take OpenBot's data from USER's folder (or from PATH), as a snapshot, into
+                            --data's imports/, and import it for the owner, now or once they set up
   receive                   take a move into --data: prints a one-time move code, listens on --port and
                             --host, and returns once the instance has come. --data must hold no instance,
                             or one no one has set up yet
@@ -86,7 +108,10 @@ usage: loom <command>
   status                    say what the instance holds
   install                   set loom up on a Linux server, as root: the loom user, a systemd service,
                             and Caddy for TLS with --domain DOMAIN, or Tailscale without one, and Podman
-                            for the sandboxes of everyone but the owner, unless given --no-sandboxes
+                            for the sandboxes of everyone but the owner, unless given --no-sandboxes. Tailscale keeps
+                            what it serves: loom takes the first HTTPS port with nothing at / or /api (443, then
+                            8443, 10000 and on), or --https-port N; --no-tailscale leaves it out. --import
+                            openbot[:USER] stages OpenBot's data from USER (openbot) for the owner
   update                    update this program to the newest signed release (--check: only say if there's one)
   version                   print loom's version and the protocol versions it speaks
   mcp                       loom's own tools as an MCP server on standard input and output, which the instance starts for its agents
@@ -128,13 +153,46 @@ struct Args {
     conversation: String
     release: String    // for tests only: a manifest's address, in place of loom's releases
     release_key: String    // and the public key, in hex, its releases are signed with
+    env: List<String>    // acp install: settings, as NAME=value
+    from_user: String    // import: the user whose data it takes, as root
+    from_home: String    // for tests only: that user's home folder, without root
+    carry_provider: bool    // import: give OpenBot's provider to the Claude agent program
+    https_port: i64    // install: Tailscale's HTTPS port, or 0 for the first free one
+    no_tailscale: bool
+    import_from: String    // install: openbot[:USER], staged for the owner
 }
 
 fn read_args(given: List<String>) -> Args ! Error {
-    var a = Args { words: List<String>(), data: String("loom-data"), port: 8790, host: String("127.0.0.1"), fast_hashes: false, keep_events: none, registry: String(installer.REGISTRY), minute_ms: 60000, allow_root: false, json: false, domain: String(), apns: String(), backups: String(), backups_keep: 7, backup_every_ms: 86400000, lan: false, sandboxes: String(), sandbox_image: String(), no_sandboxes: false, url: String(), token: String(), conversation: String(), release: String(), release_key: String() }
+    var a = Args { words: List<String>(), data: String("loom-data"), port: 8790, host: String("127.0.0.1"), fast_hashes: false, keep_events: none, registry: String(installer.REGISTRY), minute_ms: 60000, allow_root: false, json: false, domain: String(), apns: String(), backups: String(), backups_keep: 7, backup_every_ms: 86400000, lan: false, sandboxes: String(), sandbox_image: String(), no_sandboxes: false, url: String(), token: String(), conversation: String(), release: String(), release_key: String(), env: List<String>(), from_user: String(), from_home: String(), carry_provider: false, https_port: 0, no_tailscale: false, import_from: String() }
     var i: usize = 0
     while i < given.len() {
         let w = given[i].copy()
+        // acp install's settings, import's user, and install's Tailscale port and import.
+        if w == "--env" or w == "--from-user" or w == "--test-from-home" or w == "--https-port" or w == "--import" {
+            if i + 1 >= given.len() { fail "{w} needs a value" }
+            let v = given[i + 1].copy()
+            if w == "--env" {
+                if not v.contains("=") or v.starts_with("=") { fail "--env takes NAME=value, not {v}" }
+                a.env.push(v)
+            } else if w == "--from-user" {
+                a.from_user = v
+            } else if w == "--test-from-home" {
+                a.from_home = v
+            } else if w == "--import" {
+                a.import_from = v
+            } else if v != "auto" {
+                let port = i64.parse(v.copy()) else { fail "--https-port takes a port or auto, not {v}" }
+                if port < 1 or port > 65535 { fail "--https-port takes a port from 1 to 65535, or auto" }
+                a.https_port = port
+            }
+            i += 2
+            continue
+        }
+        if w == "--carry-provider" or w == "--no-tailscale" {
+            if w == "--carry-provider" { a.carry_provider = true } else { a.no_tailscale = true }
+            i += 1
+            continue
+        }
         // Where the ACP Registry is: a mirror of it, or a test's.
         if w == "--registry" {
             if i + 1 >= given.len() { fail "{w} needs an address" }
@@ -390,8 +448,39 @@ fn main() ! Error {
 // `body`, or GET without. The address is --url, or LOOM_URL, or the instance at
 // --port here; the token is --token, or LOOM_SCRIPTS_TOKEN.
 fn script(a: Args, op: str, body: Json?) -> Json ! Error {
-    let token = if a.token.len() > 0 { a.token.copy() } else { env.variable(String("LOOM_SCRIPTS_TOKEN")) ?? String() }
+    var token = if a.token.len() > 0 { a.token.copy() } else { env.variable(String("LOOM_SCRIPTS_TOKEN")) ?? String() }
+    // An import with no token, run where it can open the instance's folder, makes
+    // itself one for the owner that only imports, for 15 minutes, and drops it after
+    // (protocol.md, "/api/scripts/*"). Whoever can open the folder could do more.
+    var grant = String()
+    if token.len() == 0 and op == "import" and fs.exists("{a.data}/loom.db") {
+        let store = try open_store(a.copy())
+        var owner = String()
+        for u in try store.users() {
+            if u.role == "owner" { owner = u.id.copy() }
+        }
+        if owner.len() == 0 { fail "no one has set this instance up yet: add it to your app first, with the link code (add_server, or loom link)" }
+        token = "loom-script-{bytes.hex(random_bytes(24))}"
+        grant = bytes.hex(sha256(token.to_bytes()))
+        try store.add_script_grant(grant.copy(), owner, "import", now() + SCRIPT_GRANT_MS)
+    }
     if token.len() == 0 { fail "give your script token with --token or LOOM_SCRIPTS_TOKEN: turn scripts on in the app, under the server, to get one" }
+    if grant.len() == 0 { return try script_call(a, op, body, token) }
+    let answer = match script_call(a.copy(), op, body, token) {
+        ok(v) => v,
+        err(e) => {
+            let store = try open_store(a.copy())
+            try store.drop_script_grant(grant)
+            fail "{e}"
+        },
+    }
+    let store = try open_store(a)
+    try store.drop_script_grant(grant)
+    return answer
+}
+
+// The call itself, with `token`.
+fn script_call(a: Args, op: str, body: Json?, token: String) -> Json ! Error {
     let base = if a.url.len() > 0 { a.url.copy() } else { env.variable(String("LOOM_URL")) ?? "http://127.0.0.1:{a.port}" }
     let url = "{base.trim_suffix("/")}/api/scripts/{op}"
     let auth = Header { name: String("Authorization"), value: "Bearer {token}" }
@@ -477,6 +566,26 @@ fn run(a: Args) -> Said ! Error {
         try store.log_people("password", "{u.username} was given a new password from the command line, and signed out everywhere", String())
         return said("{u.username} has a new password, and is signed out on {gone.len()} devices", Obj.new().s("id", u.id.copy()).s("username", u.username.copy()).i("signed_out", i64.wrap(gone.len())).done())
     }
+    // A link code (protocol.md, "Link codes") for an agent to hand add_server, which
+    // the person's yes in the app signs in with: on an instance no one has set up,
+    // it makes the owner; else it signs in to NAME, or the owner.
+    if cmd == "link" and a.words.len() <= 2 {
+        let store = try open_store(a.copy())
+        if a.words.len() == 1 and try store.user_count() == 0 {
+            let (code, expires) = try owner_link_code(store, "cli")
+            return said("link code: {code}\nIt makes the owner, once, for 15 minutes: an agent hands it to add_server, and the person says yes in the app.", Obj.new().s("link_code", code).i("expires", expires).b("owner", true).done())
+        }
+        var name = sub.copy()
+        if name.len() == 0 {
+            for u in try store.users() {
+                if u.role == "owner" { name = u.username.copy() }
+            }
+        }
+        let u = try store.find_username(name.copy()) else { fail "there's no one called {name} here" }
+        let (code, expires) = try account_link_code(store, u.id.copy(), String("cli"))
+        try store.log_people("link", "A link code to sign in as {u.username} was made from the command line", String())
+        return said("link code: {code}\nIt signs a device in as {u.username}, once, for 15 minutes.", Obj.new().s("link_code", code).i("expires", expires).b("owner", false).s("username", u.username.copy()).done())
+    }
     if cmd == "user" and sub == "list" {
         let store = try open_store(a)
         var lines = List<String>()
@@ -541,10 +650,15 @@ fn run(a: Args) -> Said ! Error {
         let m = try backup.export(a.data.copy(), a.words[1].copy(), String(VERSION))
         return said("wrote {a.words[1]}: the instance {str_at(m.copy(), "instance") ?? String()}, with the key to its secrets, so keep it as safe as them", Obj.new().s("file", a.words[1].copy()).j("backup", m).done())
     }
+    // OpenBot's data from the user it runs as, as root: staged into the instance's
+    // folder (server/stage.calx), and imported for its owner.
+    if cmd == "import" and sub == "openbot" and a.words.len() <= 3 and a.from_user.len() > 0 {
+        return try import_from_user(a)
+    }
     // From another agent app (PLAN.md, "Importing from OpenBot and Grok Bot"),
     // through the running instance, as the person's script.
     if cmd == "import" and (sub == "openbot" or sub == "grokbot") and a.words.len() <= 3 {
-        var body = Obj.new().s("from", sub.copy())
+        var body = Obj.new().s("from", sub.copy()).b("carry_provider", a.carry_provider)
         if a.words.len() == 3 { body = body.s("path", try fs.absolute(a.words[2].copy())) }
         let v = try script(a.copy(), "import", some(body.done()))
         var lines: List<String> = [str_at(v.copy(), "text") ?? String()]
@@ -559,8 +673,26 @@ fn run(a: Args) -> Said ! Error {
         return said("made the instance {str_at(m.copy(), "instance") ?? String()} in {a.data}. Install its ACP agents again here: {programs}", Obj.new().s("data", a.data.copy()).j("backup", m).done())
     }
     if cmd == "install" {
-        let d = try setup.install(setup.Plan { domain: a.domain.copy(), port: a.port, sandboxes: not a.no_sandboxes })
+        // What --import names is checked before anything is installed.
+        var import_user = String()
+        if a.import_from.len() > 0 {
+            let parts = a.import_from.split(":")
+            if parts[0] != "openbot" or parts.len() > 2 { fail "--import takes openbot or openbot:USER, not {a.import_from}" }
+            import_user = if parts.len() == 2 { parts[1].copy() } else { String("openbot") }
+        }
+        var d = try setup.install(setup.Plan { domain: a.domain.copy(), port: a.port, sandboxes: not a.no_sandboxes, tailscale: not a.no_tailscale, https_port: a.https_port, version: String(VERSION) })
+        if import_user.len() > 0 {
+            let staged = try stage_into(try user_home(import_user.copy()), String(), String(setup.HOME), a.carry_provider)
+            d.steps.push("staged OpenBot's data from {import_user}, which comes into the owner's account once they set up: {importer.summary(at(staged.copy(), "counts"))}")
+            d.imported = merge(staged, Obj.new().s("from", String("openbot")).s("user", import_user).b("pending", true).done())
+        }
         return said(setup.done_text(d.copy()), setup.done_json(d))
+    }
+    if cmd == "acp" and sub == "install" and a.words.len() == 3 {
+        return try acp_install(a.copy(), a.words[2].copy())
+    }
+    if cmd == "acp" and sub == "settings" and a.words.len() >= 3 {
+        return try acp_settings(a.copy(), a.words[2].copy())
     }
     if cmd == "receive" and a.words.len() == 1 {
         // The move code is said first, and the answer once the instance has come.
@@ -605,6 +737,189 @@ fn reads_options_anywhere() {
     let given: List<String> = [String("user"), String("--data"), String("d"), String("add"), String("ann")]
     let a = read_args(given)!
     assert(a.data == "d" and a.words.len() == 3 and a.words[2] == "ann")
+}
+
+// --- Commands that work on the data folder for an agent setting loom up (PLAN.md, "Agents can do anything the app can") ---
+
+// Gives files root wrote in the instance's folder to whoever owns that folder (the
+// loom user, on a server loom install set up), so the instance can read and change them.
+fn own_like_data(data: String, paths: List<String>) ! Error {
+    if env.os() == "windows" or not env.is_elevated() { return }
+    for p in paths {
+        if not fs.exists(p.copy()) { continue }
+        let out = try Command.new(String("chown")).arg(String("-R")).arg("--reference={data}").arg(p.copy()).output()
+        if not out.status.success() { fail "couldn't give {p} to {data}'s owner: {out.error_text().trim()}" }
+    }
+}
+
+// The database's files and the key to its secrets, which a command run as root may have made.
+fn store_files(data: String) -> List<String> {
+    return ["{data}/loom.db", "{data}/loom.db-wal", "{data}/loom.db-shm", "{data}/secret.key"]
+}
+
+// An ACP agent program as `acp install` and `acp settings` give it: its settings by name only.
+fn program_said(p: AcpAgent) -> Json {
+    var args = List<Json>()
+    for w in p.args { args.push(Json.Str(w.copy())) }
+    var names = List<Json>()
+    if let Json.Object(m) = p.env.copy() {
+        for (k, _) in m { names.push(Json.Str(k.copy())) }
+    }
+    return Obj.new().s("name", p.name.copy()).s("command", p.command.copy()).j("args", Json.Array(args)).s("source", p.source.copy()).s("version", p.version.copy()).j("settings", Json.Array(names)).done()
+}
+
+fn names_of(program: Json) -> String {
+    var out = List<String>()
+    if let Json.Array(list) = at(program, "settings") {
+        for n in list { out.push(n.as_str() ?? String()) }
+    }
+    return if out.len() == 0 { String("none") } else { out.join(", ") }
+}
+
+// `loom acp install ID [--env NAME=value]...`: an agent program from the ACP Registry
+// (--registry for a mirror), as acp.install installs it, straight into the data folder.
+fn acp_install(a: Args, id: String) -> Said ! Error {
+    if importer.skill_name(id.copy()) != id { fail "{id} isn't an ACP Registry id, such as claude-acp" }
+    let registry = try installer.read_registry(a.registry.copy())
+    var entry = Json.Null
+    if let Json.Array(agents) = at(registry, "agents") {
+        for x in agents {
+            if str_at(x.copy(), "id") == some(id.copy()) { entry = x.copy() }
+        }
+    }
+    if entry == Json.Null { fail "There's no {id} in the ACP Registry at {a.registry}." }
+    let npx = installer.on_path("npx")
+    let uvx = installer.on_path("uvx")
+    let how = installer.pick(entry.copy(), installer.platform(), npx, uvx) else { fail installer.missing(entry, installer.platform()) }
+    let data = try fs.absolute(a.data.copy())
+    let folder = "{data.replace("\\", "/")}/acp/{id}"
+    try fs.make_dir_all("{data}/acp")
+    let got = try installer.install(how.copy(), folder.copy())
+    var args = List<String>()
+    if let Json.Array(items) = at(got.copy(), "args") {
+        for x in items { args.push(x.as_str() ?? String()) }
+    }
+    let store = try open_store(a.copy())
+    // The registry's settings, under what it had, under what's given now.
+    var settings = at(got.copy(), "env")
+    if let had = try store.acp_agent(id.copy()) { settings = merge(settings, had.env) }
+    var given = Obj.new()
+    for kv in a.env {
+        let cut = kv.find("=") ?? 0
+        given.m.insert(kv[..cut].copy(), Json.Str(kv[cut + 1..].copy()))
+    }
+    settings = merge(settings, given.done())
+    try store.set_acp_agent(id.copy(), str_at(got, "command") ?? String(), args)
+    try store.set_acp_settings(id.copy(), id.copy(), str_at(how, "version") ?? String(), settings)
+    let kept = try store.acp_agent(id.copy()) else { fail "{id} wasn't kept" }
+    let program = program_said(kept)
+    var owned = store_files(data.copy())
+    owned.push(folder)
+    try own_like_data(data, owned)
+    let text = "installed {id} {str_at(program.copy(), "version") ?? String()}: {str_at(program.copy(), "command") ?? String()}\nsettings: {names_of(program.copy())}\nAgents on it start with these at their next message, once it isn't running."
+    return said(text, Obj.new().j("program", program).done())
+}
+
+// `loom acp settings NAME NAME=value...`: sets an agent program's settings, sealed as
+// acp.settings keeps them; NAME= with nothing after removes one.
+fn acp_settings(a: Args, name: String) -> Said ! Error {
+    let store = try open_store(a.copy())
+    let program = try store.acp_agent(name.copy()) else { fail "There's no ACP agent {name}: loom acp list lists them." }
+    var settings = Obj.new()
+    if let Json.Object(had) = program.env.copy() {
+        for (k, v) in had { settings.m.insert(k.copy(), v.copy()) }
+    }
+    for kv in a.words[3..] {
+        let cut = kv.find("=") else { fail "settings are NAME=value, or NAME= to remove one, not {kv}" }
+        let key = kv[..cut].copy()
+        if key.len() == 0 { fail "settings are NAME=value, or NAME= to remove one, not {kv}" }
+        let v = kv[cut + 1..].copy()
+        if v.len() == 0 { _ = settings.m.remove(key) } else { settings.m.insert(key, Json.Str(v)) }
+    }
+    try store.set_acp_settings(name.copy(), program.source.copy(), program.version.copy(), settings.done())
+    let kept = try store.acp_agent(name.copy()) else { fail "{name} wasn't kept" }
+    let changed = program_said(kept)
+    let data = try fs.absolute(a.data.copy())
+    try own_like_data(data.copy(), store_files(data))
+    return said("{name}'s settings: {names_of(changed.copy())}\nAgents on it start with these at their next message, once it isn't running.", Obj.new().j("program", changed).done())
+}
+
+// The home folder of `user`, whose data only root may read.
+fn user_home(user: String) -> String ! Error {
+    if env.os() == "windows" { fail "--from-user takes another user's data on a Linux or Mac server" }
+    if not env.is_elevated() and env.user_name() != some(user.copy()) { fail "reading {user}'s data needs root: run it with sudo" }
+    let passwd = try fs.read_text(String("/etc/passwd")) ?? String()
+    let home = stage.home_of(user.copy(), passwd) else { fail "There's no user {user} on this computer." }
+    return home
+}
+
+// Stages OpenBot's data from `home` into `data`'s imports/openbot, and leaves it
+// waiting for the instance in imports/pending.json. `path` is OpenBot's data
+// folder, or "" to find it in `home`.
+fn stage_into(home: String, path: String, data: String, carry: bool) -> Json ! Error {
+    let found = if path.len() > 0 { some(path.copy()) } else { stage.openbot_data(home.copy()) }
+    let openbot_data = found else { fail "There's no OpenBot data in {home}: no openbot.db there or a few folders down. Give its folder: loom import openbot DIR --from-user USER" }
+    let workspace = stage.openbot_workspace(home.copy(), openbot_data.copy())
+    let instance = (try fs.absolute(data)).replace("\\", "/")
+    try fs.make_dir_all("{instance}/imports")
+    let staged = try stage.stage_openbot(home, openbot_data, workspace, "{instance}/imports/openbot")
+    let done = "{instance}/{stage.DONE}"
+    if fs.exists(done.copy()) { try fs.remove_file(done) }
+    let pending = Obj.new().s("from", String("openbot")).s("path", str_at(staged.copy(), "path") ?? String()).b("carry_provider", carry).done()
+    try fs.write_text("{instance}/{stage.PENDING}", "{pending}")
+    try own_like_data(instance.copy(), ["{instance}/imports"])
+    return staged
+}
+
+// `loom import openbot [PATH] --from-user USER [--carry-provider]`, as root: stages
+// it, then waits for the running instance to import it for its owner. With no
+// owner yet, or no instance answering, it comes in once there's one.
+fn import_from_user(a: Args) -> Said ! Error {
+    let path = if a.words.len() == 3 { (try fs.absolute(a.words[2].copy())).replace("\\", "/") } else { String() }
+    if not fs.is_file("{a.data}/loom.db") { fail "{a.data} holds no instance: give its folder with --data, such as --data /var/lib/loom" }
+    let home = if a.from_home.len() > 0 { a.from_home.copy() } else { try user_home(a.from_user.copy()) }
+    let staged = try stage_into(home, path, a.data.copy(), a.carry_provider)
+    let where = str_at(staged.copy(), "path") ?? String()
+    let brought = importer.summary(at(staged.copy(), "counts"))
+    let base = if a.url.len() > 0 { a.url.copy() } else { env.variable(String("LOOM_URL")) ?? "http://127.0.0.1:{a.port}" }
+    var req = get("{base.trim_suffix("/")}/api/version", List<Header>(), 5000, 65536)
+    let set_up = match req.wait() {
+        ok(r) => if r.status == 200 { bool_at(json_text(String.from_utf8(r.body) ?? String()), "set_up") } else { none },
+        err(_) => none,
+    }
+    let waiting = Obj.new().s("from", String("openbot")).s("user", a.from_user.copy()).j("staged", staged.copy()).b("pending", true)
+    if set_up == none { return said("Staged OpenBot's data from {a.from_user} in {where} ({brought}). No instance answers at {base}, so it comes in once loom runs and has its owner.", waiting.done()) }
+    if set_up == some(false) { return said("Staged OpenBot's data from {a.from_user} in {where} ({brought}). It comes into the owner's account once they set loom up.", waiting.done()) }
+    // The instance takes it within a second, and writes what came.
+    let instance = (try fs.absolute(a.data.copy())).replace("\\", "/")
+    let done = "{instance}/{stage.DONE}"
+    var waited: i64 = 0
+    while not fs.is_file(done.copy()) {
+        // Still waiting after 15 s: the instance answering there isn't the one in --data.
+        if waited >= 15000 and fs.is_file("{instance}/{stage.PENDING}") { return said("Staged OpenBot's data in {where}, but the instance at {base} hasn't taken it: is {a.data} its folder? It comes in once the instance that keeps its data there runs.", waiting.done()) }
+        if waited >= IMPORT_WAIT_MS { return said("Staged OpenBot's data in {where}; the instance hasn't finished importing it after {IMPORT_WAIT_MS / 60000} minutes, and goes on.", waiting.done()) }
+        unsafe { sleep(250000000) }
+        waited += 250
+    }
+    let answer = json_text(try fs.read_text(done.copy()) ?? String())
+    try fs.remove_file(done)
+    if at(answer.copy(), "error") != Json.Null { fail str_at(at(answer, "error"), "message") ?? String("the import failed") }
+    var lines: List<String> = [str_at(answer.copy(), "text") ?? String()]
+    if let p = str_at(at(answer.copy(), "provider"), "program") { lines.push("{p} uses OpenBot's provider now.") } else if let why = str_at(at(answer.copy(), "provider"), "why") { lines.push(why) }
+    if let Json.Array(left) = at(answer.copy(), "not") {
+        for n in left { lines.push("- {n.as_str() ?? String()}") }
+    }
+    return said(lines.join("\n"), merge(answer, Obj.new().j("staged", staged).done()))
+}
+
+// How long `loom import --from-user` waits for the instance's import.
+const IMPORT_WAIT_MS: i64 = 600000
+
+fn json_text(text: String) -> Json {
+    return match parse(text) {
+        ok(j) => j,
+        err(_) => Json.Null,
+    }
 }
 
 // `loom update`: the newest release, if its manifest is signed with the release key and

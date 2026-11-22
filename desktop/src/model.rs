@@ -205,6 +205,16 @@ fn config_values(a: &Value) -> Vec<(String, String)> {
         .unwrap_or_default()
 }
 
+/// A server an agent offered, that the person said yes to on this device, as the
+/// core says it (`core.offer`). With a link code, the app signs in with it.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Offer {
+    pub address: String,
+    pub code: String,
+    /// The person's username where it was offered, for the owner a code makes.
+    pub username: String,
+}
+
 /// The person's agent defaults: what every agent of theirs follows where it has
 /// nothing of its own.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -433,6 +443,32 @@ pub fn server_args(name: &str, line: &str, settings: &str) -> Value {
     let command = words.next().unwrap_or_default();
     let args: Vec<&str> = words.collect();
     json!({"name": name.trim(), "command": command, "args": args, "env": pairs})
+}
+
+/// One of the person's hosts, a server this device reaches with ssh: its name, what ssh
+/// is given, where it came from (`ssh` or `tailscale`), and what agents may do there
+/// (`off`, `ask` or `allow`; empty for one only found).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Host {
+    pub name: String,
+    pub target: String,
+    pub via: String,
+    pub mode: String,
+}
+
+fn hosts_of(v: Option<&Value>) -> Vec<Host> {
+    v.and_then(Value::as_array)
+        .map(|list| {
+            list.iter()
+                .map(|h| Host {
+                    name: s(h, "name"),
+                    target: s(h, "target"),
+                    via: s(h, "via"),
+                    mode: s(h, "mode"),
+                })
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// The tools a device offers agents, as the core names them.
@@ -1623,7 +1659,7 @@ pub struct Model {
     pub server: Option<String>,
     /// Servers an agent offered and the person said yes to on this device, for the
     /// app to add.
-    pub offered: Vec<String>,
+    pub offered: Vec<Offer>,
     pub synced: bool,
     pub login_error: Option<String>,
     pub logging_in: bool,
@@ -1806,6 +1842,10 @@ pub struct Model {
     programs_stale: bool,
     /// What this device offers agents, each tool with `off`, `ask` or `allow`.
     pub device_tools: Vec<(String, String)>,
+    /// The person's hosts this device reaches with ssh, as the core keeps them, and
+    /// the ones it found in the ssh config and on the tailnet that aren't added yet.
+    pub hosts: Vec<Host>,
+    pub hosts_found: Vec<Host>,
     /// The person's MCP servers, and the names of their secrets.
     pub mcp_servers: Vec<McpServer>,
     pub secrets: Vec<String>,
@@ -2312,6 +2352,15 @@ impl Model {
                     self.logging_in = false;
                 }
             }
+            // An agent offered another server, and the person said yes here: the core
+            // decided it's this device's to add.
+            "core.offer" => {
+                self.offered.push(Offer {
+                    address: s(f, "address"),
+                    code: s(f, "code"),
+                    username: s(f, "username"),
+                });
+            }
             "core.login" => {
                 self.logging_in = false;
                 if let Some(e) = f.get("error") {
@@ -2393,6 +2442,14 @@ impl Model {
                         })
                         .collect();
                 }
+                if f.get("hosts").is_some() {
+                    self.hosts = hosts_of(f.get("hosts"));
+                    let added: Vec<String> = self.hosts.iter().map(|h| h.name.clone()).collect();
+                    self.hosts_found.retain(|h| !added.contains(&h.name));
+                }
+            }
+            "core.hosts_found" => {
+                self.hosts_found = hosts_of(f.get("found"));
             }
             "core.update" => {
                 let asked = f.get("id").is_some();
@@ -2557,10 +2614,6 @@ impl Model {
                     self.flows.push(flow);
                 }
             }
-            // An agent offered another server, and the person said yes here.
-            "server" if kind == "server.offered" && s(f, "by") == self.me => {
-                self.offered.push(s(f, "address"));
-            }
             "defaults" => {
                 if let Some(d) = f.get("defaults") {
                     self.take_defaults(d, false);
@@ -2575,10 +2628,6 @@ impl Model {
             }
             "queue" => {
                 self.queues.insert(s(f, "conversation"), Model::queue_of(f));
-            }
-            // An agent offered another server, and the person said yes here.
-            "server" if kind == "server.offered" && s(f, "by") == self.me => {
-                self.offered.push(s(f, "address"));
             }
             "task" => {
                 let task = Task::of(f.get("task").unwrap_or(&Value::Null));
@@ -3947,6 +3996,19 @@ impl Model {
         }
     }
 
+    /// Signs in to an offered server with its link code, for the core of that server:
+    /// on a new one the code makes the owner, as the person's username.
+    pub fn link_offered(&mut self, offer: &Offer) -> Value {
+        self.logging_in = true;
+        self.login_error = None;
+        let device = json!({"name": device_name(), "kind": "windows"});
+        let mut frame = json!({"t": "link", "server": offer.address.trim(), "code": offer.code, "device": device});
+        if !offer.username.is_empty() {
+            frame["username"] = json!(offer.username);
+        }
+        frame
+    }
+
     pub fn programs(&mut self) -> Value {
         let id = self.id("app.acp");
         json!({"t": "cmd", "id": id, "name": "acp.list"})
@@ -4150,6 +4212,36 @@ impl Model {
     /// Sets how agents may use one of this device's tools: `off`, `ask` or `allow`.
     pub fn set_device_tool(&self, tool: &str, mode: &str) -> Value {
         json!({"t": "device.tools", "tools": {tool: mode}})
+    }
+
+    /// Asks the core to find the person's hosts: in the ssh config and on the tailnet.
+    pub fn scan_hosts(&self) -> Value {
+        json!({"t": "hosts.scan"})
+    }
+
+    /// Adds a host by what ssh is given (an alias, a name, or user@name), from where it
+    /// was found. None for nothing typed. The core checks the rest.
+    pub fn add_ssh_host(&self, target: &str, via: &str) -> Option<Value> {
+        let target = target.trim();
+        if target.is_empty() {
+            return None;
+        }
+        let via = if via == "tailscale" {
+            "tailscale"
+        } else {
+            "ssh"
+        };
+        Some(json!({"t": "host.add", "target": target, "via": via}))
+    }
+
+    /// Sets what agents may do on a host: `off`, `ask` or `allow`.
+    pub fn set_ssh_host(&self, name: &str, mode: &str) -> Value {
+        json!({"t": "host.set", "name": name, "mode": mode})
+    }
+
+    /// Takes a host away.
+    pub fn remove_ssh_host(&self, name: &str) -> Value {
+        json!({"t": "host.remove", "name": name})
     }
 
     /// Asks for the programs page: the instance's programs, and the registry's.
@@ -4835,6 +4927,52 @@ mod tests {
             files: Vec::new(),
         });
         m
+    }
+
+    #[test]
+    fn hosts_as_the_core_keeps_them_and_finds_them() {
+        let mut m = Model::new();
+        m.take(&json!({"t": "core.hosts_found", "found": [
+            {"name": "vps", "target": "vps", "via": "ssh"},
+            {"name": "box", "target": "box", "via": "tailscale"}
+        ]}));
+        assert_eq!(m.hosts_found.len(), 2);
+        assert_eq!(m.hosts_found[1].via, "tailscale");
+        // Adding one sends the core its target, and where it was found.
+        assert_eq!(
+            m.add_ssh_host(" box ", "tailscale"),
+            Some(json!({"t": "host.add", "target": "box", "via": "tailscale"}))
+        );
+        assert_eq!(m.add_ssh_host("  ", "ssh"), None);
+        // Once the core has it, it isn't offered any more.
+        m.take(
+            &json!({"t": "core.device", "tools": {"run_command": "ask"}, "hosts": [
+                {"name": "box", "target": "box", "via": "tailscale", "mode": "ask"}
+            ]}),
+        );
+        assert_eq!(
+            m.hosts,
+            vec![Host {
+                name: "box".into(),
+                target: "box".into(),
+                via: "tailscale".into(),
+                mode: "ask".into()
+            }]
+        );
+        assert_eq!(m.hosts_found.len(), 1);
+        assert_eq!(m.hosts_found[0].name, "vps");
+        assert_eq!(
+            m.set_ssh_host("box", "allow"),
+            json!({"t": "host.set", "name": "box", "mode": "allow"})
+        );
+        assert_eq!(
+            m.remove_ssh_host("box"),
+            json!({"t": "host.remove", "name": "box"})
+        );
+        assert_eq!(m.scan_hosts(), json!({"t": "hosts.scan"}));
+        // A core.device without hosts leaves them as they are.
+        m.take(&json!({"t": "core.device", "tools": {}}));
+        assert_eq!(m.hosts.len(), 1);
     }
 
     #[test]
@@ -5629,14 +5767,55 @@ mod tests {
         let mut m = Model::new();
         m.take(&json!({"t": "core.conn", "state": "live", "server": "https://loom.example.com"}));
         assert_eq!(m.server.as_deref(), Some("https://loom.example.com"));
-        m.take(&json!({"t": "welcome", "device": "d_1"}));
-        m.take(&json!({"t": "event", "kind": "server.offered", "address": "https://two.example.com", "by": "d_2"}));
-        assert!(
-            m.offered.is_empty(),
-            "one said yes to on another device is that one's"
-        );
+        // The core says which offers are this device's; the event alone adds nothing.
         m.take(&json!({"t": "event", "kind": "server.offered", "address": "https://two.example.com", "by": "d_1"}));
-        assert_eq!(m.offered, vec!["https://two.example.com".to_string()]);
+        assert!(m.offered.is_empty(), "the core decides, not the event");
+        m.take(&json!({"t": "core.offer", "address": "https://two.example.com"}));
+        assert_eq!(
+            m.offered,
+            vec![Offer {
+                address: "https://two.example.com".into(),
+                ..Offer::default()
+            }]
+        );
+    }
+
+    #[test]
+    fn one_yes_to_a_server_with_a_link_code_signs_in_there() {
+        // The yes card: the agent's add_server asks, as one of loom's own tools.
+        let mut here = Model::new();
+        here.take(&json!({"t": "event", "kind": "approval.needed", "call": "tc_1", "run": "run_1", "title": "Add the server https://two.example.com to your app, and sign in there", "can_always": false}));
+        // The person's yes there is the only one: the core of the device that gave it
+        // says core.offer with the code.
+        here.take(&json!({"t": "core.offer", "address": "https://two.example.com", "code": "loom-link-3f2a", "username": "elliot"}));
+        let offer = here.offered.pop().expect("an offer for this device");
+        assert_eq!(offer.code, "loom-link-3f2a");
+        // The new server's own model signs in with it, as the person, with nothing typed.
+        let mut there = Model::new();
+        let frame = there.link_offered(&offer);
+        assert_eq!(frame["t"], "link");
+        assert_eq!(frame["server"], "https://two.example.com");
+        assert_eq!(frame["code"], "loom-link-3f2a");
+        assert_eq!(frame["username"], "elliot");
+        assert!(frame.get("password").is_none());
+        assert!(
+            there.logging_in,
+            "the add-a-server popup says it's signing in"
+        );
+        // A code that didn't work leaves the form, with why, to sign in by hand.
+        there.take(&json!({"t": "core.login", "error": {"code": "expired", "message": "That code has expired. Ask for a new one."}}));
+        assert!(!there.logging_in);
+        assert_eq!(
+            there.login_error.as_deref(),
+            Some("That code has expired. Ask for a new one.")
+        );
+        // With no username, the server names the owner itself.
+        let bare = there.link_offered(&Offer {
+            address: "https://three.example.com".into(),
+            code: "loom-link-9b".into(),
+            username: String::new(),
+        });
+        assert!(bare.get("username").is_none());
     }
 
     #[test]

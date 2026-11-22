@@ -1,0 +1,52 @@
+module tests.protocol.version
+
+// GET /api/version, which answers without a token, so a script or an agent
+// setting a server up can tell loom is there and whether it has its owner yet:
+// before setup and after it.
+//
+//     calx tests/protocol/version.calx
+import std.fs
+import std.json.{Json}
+import std.process.{Child, Stdio, exit}
+import shared.obj.{Obj, at, bool_at, str_at}
+import tests.kit.{check, device, fetch, json_of, loom, post_json, remove_scratch}
+
+fn version(base: String) -> (u32, Json) ! Error {
+    let (status, _, body) = try fetch(base, String(), String("/api/version"))
+    return (status, json_of(body))
+}
+
+fn run(server: Child) ! Error {
+    let serving = server.wait_for_line(String("loom: serving"), 120000) else { fail "the server didn't start" }
+    let address = serving[serving.find("http://") ?? 0..].trim().trim_suffix("/").copy()
+    let base = address[7..].copy()
+    let code_line = server.wait_for_line(String("setup code:"), 10000) else { fail "the server didn't print a setup code" }
+    let code = code_line[12..].trim().copy()
+
+    let (status, before) = try version(base.copy())
+    try check(status == 200 and str_at(before.copy(), "name") == some(String("loom")) and (str_at(before.copy(), "version") ?? String()).len() > 0 and "{at(before.copy(), "protocol")}" == "[1]", "GET /api/version says it's loom, its version and protocol, with no token")
+    try check(bool_at(before, "set_up") == some(false), "and that no one has set it up yet")
+    let (made, _) = try post_json(base.copy(), "/api/setup", Obj.new().s("code", code).s("username", String("elliot")).s("password", String("correct horse")).j("device", device("Desk PC")).done())
+    try check(made == 200, "the owner sets it up")
+    let (_, after) = try version(base.copy())
+    try check(bool_at(after, "set_up") == some(true), "and then it says it has its owner")
+    let (root_status, _, _) = try fetch(base, String(), String("/"))
+    try check(root_status == 404, "while everything else still needs a token or isn't there")
+}
+
+fn main() ! Error {
+    let data = try fs.temp_dir()
+    var server = try loom(data.copy(), [String("serve"), String("--port"), String("0"), String("--allow-root")]).stdout(Stdio.Pipe).spawn()
+    let failure: String? = match run(server) {
+        ok => none,
+        err(e) => some("{e}"),
+    }
+    server.kill()
+    _ = server.wait()
+    remove_scratch(data)
+    if let f = failure {
+        eprintln("\n{f}")
+        exit(1)
+    }
+    println("\nversion: all good")
+}

@@ -147,6 +147,7 @@ pub struct Conn {
     relay_url: String     // and where it listens
     push_relay: String?   // the push relay's key, base64, from welcome, when the instance pushes through one
     loom: String          // the instance's own version, as welcome says it
+    me: String            // this device's id, as welcome says it
     latest: String        // the newest release's version, from this core's updater or the app ("release")
     pub local: bool       // the instance is the one in this app, which updates with the app
     may: bool             // this person may update the instance, as instance.updates said
@@ -216,6 +217,7 @@ impl Conn {
             relay_url: String(),
             push_relay: none,
             loom: String(),
+            me: String(),
             latest: String(),
             local: false,
             may: false,
@@ -566,7 +568,9 @@ impl Conn {
             self.failed = 0
             self.tell_server()
             self.tell_state(0, String())
-            self.offer(str_at(f.copy(), "device") ?? String())
+            let me = str_at(f.copy(), "device") ?? String()
+            self.me = me.copy()
+            self.offer(me)
             self.flush()
         } else if t == "synced" {
             self.synced = true
@@ -588,6 +592,11 @@ impl Conn {
                     self.tell_error("cache", "{e}")
                     return
                 },
+            }
+            // A server an agent offered, that the person said yes to on this device:
+            // the app adds it, signed in with its link code when it came with one.
+            if (str_at(f.copy(), "kind") ?? String()) == "server.offered" and self.me.len() > 0 and str_at(f.copy(), "by") == some(self.me.copy()) {
+                self.tell(Obj.new().s("t", String("core.offer")).s("address", address(str_at(f.copy(), "address") ?? String())).maybe("code", str_at(f.copy(), "link_code")).maybe("username", str_at(f.copy(), "username")).done())
             }
             if (str_at(f.copy(), "kind") ?? String()) == "message.created" {
                 let id = str_at(at(f.copy(), "message"), "id") ?? String()
@@ -742,6 +751,10 @@ impl Conn {
         }
         if t == "device.answer" {
             self.device_answer(m)
+            return true
+        }
+        if t == "host.add" or t == "host.set" or t == "host.remove" or t == "hosts.scan" {
+            self.host_frame(t.copy(), m)
             return true
         }
         if t == "approve" and (bool_at(m.copy(), "allow") ?? false) {
@@ -1039,6 +1052,25 @@ impl Conn {
     /// device joins that instance with the code, as a login does with a password.
     fn join(mut self, m: Json) {
         let id = str_at(m.copy(), "id")
+        // Or a link code an agent's add_server gave (`core.offer`), for the server at
+        // `server`: on a new server it makes the owner, as `username`.
+        if let code = str_at(m.copy(), "code") {
+            let server = address(str_at(m.copy(), "server") ?? String())
+            if not valid_server(server.copy()) or code.len() == 0 {
+                self.tell(Obj.new().s("t", String("core.login")).maybe("id", id).j("error", Obj.new().s("code", String("bad_server")).s("message", String("That isn't a server's http:// or https:// address.")).done()).done())
+                return
+            }
+            if self.pending != none {
+                self.tell(Obj.new().s("t", String("core.login")).maybe("id", id).j("error", Obj.new().s("code", String("busy")).s("message", String("A login is already on its way.")).done()).done())
+                return
+            }
+            var body = Obj.new().s("code", code).maybe("username", str_at(m.copy(), "username"))
+            let device = at(m, "device")
+            if device != Json.Null { body = body.j("device", device) }
+            let base = self.reach(server.copy())
+            self.pending = some(Pending.start(Kind.Link, server, base, id, self.with_tz(body.done())))
+            return
+        }
         let l = link.read(str_at(m.copy(), "qr") ?? String()) else {
             self.tell(Obj.new().s("t", String("core.login")).maybe("id", id).j("error", Obj.new().s("code", String("bad_qr")).s("message", String("That isn't a loom code. Show the QR code on a device that's signed in, under Add a device.")).done()).done())
             return
@@ -1296,23 +1328,77 @@ impl Conn {
     /// Sets the tools the app gives (none to only ask), and tells the app and the
     /// instance what they are now.
     fn device_tools(mut self, given: Json) {
-        var tools = Json.Null
-        var frame = Json.Null
         var failed = String()
         if let d = mut self.device {
             if given != Json.Null {
                 if let err(e) = d.set_modes(self.cache, given) { failed = "{e}" }
             }
-            tools = d.tools()
-            frame = d.frame()
         }
         if failed.len() > 0 { self.tell_error("cache", failed) }
+        self.device_changed(given != Json.Null)
+    }
+
+    /// Tells the app what this device offers, its tools and its hosts, and the
+    /// instance too when it `changed`.
+    fn device_changed(mut self, changed: bool) {
+        var tools = Json.Null
+        var listed = Json.Null
+        var frame = Json.Null
+        if let d = self.device {
+            tools = d.tools()
+            listed = d.hosts_json()
+            frame = d.frame()
+        }
         if tools == Json.Null {
             self.tell_error("device", String("This device's key couldn't be kept, so it offers no tools."))
             return
         }
-        self.tell(Obj.new().s("t", String("core.device")).j("tools", tools).done())
-        if given != Json.Null and self.state == State.Live { _ = self.put("{frame}") }
+        if changed and self.state == State.Live { _ = self.put("{frame}") }
+        self.tell(Obj.new().s("t", String("core.device")).j("tools", tools).j("hosts", listed).done())
+    }
+
+    /// The person's hosts (core/hosts.calx): `host.add` (`target`, `via`),
+    /// `host.set` (`name`, `mode`), `host.remove` (`name`), and `hosts.scan`,
+    /// which finds the ones in ~/.ssh/config and on the tailnet.
+    fn host_frame(mut self, t: String, m: Json) {
+        var why = String()
+        var found = Json.Null
+        if let d = mut self.device {
+            if t == "host.add" {
+                match d.add_host(self.cache, m.copy()) {
+                    ok(some(no)) => why = no,
+                    ok(none) => {},
+                    err(e) => why = "{e}",
+                }
+            } else if t == "host.set" {
+                if let err(e) = d.set_host(self.cache, str_at(m.copy(), "name") ?? String(), str_at(m.copy(), "mode") ?? String()) { why = "{e}" }
+            } else if t == "host.remove" {
+                if let err(e) = d.remove_host(self.cache, str_at(m.copy(), "name") ?? String()) { why = "{e}" }
+            } else if let now_found = d.scan_start() {
+                found = now_found
+            }
+        } else {
+            why = String("This device's key couldn't be kept, so it has no hosts.")
+        }
+        if why.len() > 0 {
+            self.tell_error("host", why)
+            return
+        }
+        if t == "hosts.scan" {
+            if found != Json.Null { self.tell(found) }
+            return
+        }
+        self.device_changed(true)
+    }
+
+    /// The ssh and Tailscale programs a device uses, each with its first
+    /// arguments, and the ssh config it reads: for tests, which give stand-ins.
+    pub fn host_programs(mut self, ssh: List<String>, tailscale: List<String>, ssh_config: String) {
+        if let d = mut self.device {
+            d.ssh = ssh.copy()
+            d.tailscale = tailscale.copy()
+            d.ssh_config = ssh_config.copy()
+        }
     }
 
     /// An approval given here, of a call to a device: signed with this device's key, so
@@ -1359,10 +1445,15 @@ impl Conn {
 
     fn poll_device(mut self) {
         var results = List<Json>()
-        if let d = mut self.device { results = d.poll() }
+        var found = Json.Null
+        if let d = mut self.device {
+            results = d.poll()
+            if let f = d.scan_poll() { found = f }
+        }
         for r in results {
             _ = self.put("{r}")
         }
+        if found != Json.Null { self.tell(found) }
     }
 
     // --- Following a move (protocol.md, "moved") ---

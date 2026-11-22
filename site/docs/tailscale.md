@@ -4,7 +4,9 @@
 
 ## A server without a domain
 
-Install Tailscale on the server and sign it in (`tailscale up`). Then `loom install` without `--domain` serves loom on your tailnet with `tailscale serve`, over HTTPS, at the server's `….ts.net` name. `tailscale serve status` shows the address to give the app. Install Tailscale on your PC and phone too, signed in to the same account.
+Install Tailscale on the server and sign it in (`tailscale up`). Then `loom install` without `--domain` serves loom on your tailnet with `tailscale serve`, over HTTPS, at the server's `….ts.net` name, and prints that address.
+
+What Tailscale serves already stays as it is. When something else has `/` or `/api` on port 443, loom takes the next free HTTPS port (8443, then 10000 and on), and its address has that port. `--https-port N` picks the port, and `--no-tailscale` leaves Tailscale alone. Install Tailscale on your PC and phone too, signed in to the same account.
 
 If Tailscale isn't there when you install, loom listens only on the server itself. Install Tailscale and run `loom install` again.
 
