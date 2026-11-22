@@ -32,7 +32,26 @@ const release = await latest();
 const graph = {
 	'@context': 'https://schema.org',
 	'@graph': [
-		{ '@type': 'Organization', '@id': `${STUDIO.url}#organization`, name: STUDIO.name, url: STUDIO.url, sameAs: ['https://github.com/aaen-studios'] },
+		{
+			'@type': 'Organization',
+			'@id': `${STUDIO.url}#organization`,
+			name: STUDIO.name,
+			url: STUDIO.url,
+			sameAs: ['https://github.com/aaen-studios'],
+			owns: [{ '@id': `${ORIGIN}/#app` }],
+		},
+		{
+			'@type': 'WebPage',
+			'@id': `${canonical}#webpage`,
+			url: canonical,
+			name: full,
+			description,
+			inLanguage: 'en',
+			isPartOf: { '@id': `${ORIGIN}/#website` },
+			about: { '@id': `${ORIGIN}/#app` },
+			primaryImageOfPage: { '@type': 'ImageObject', url: image, width: 1200, height: 630 },
+			publisher: { '@id': `${STUDIO.url}#organization` },
+		},
 		{
 			'@type': 'WebSite',
 			'@id': `${ORIGIN}/#website`,
@@ -68,9 +87,11 @@ const graph = {
 				'A browser of its own for each agent',
 				'Plugins that agents write themselves',
 			],
+			keywords: 'self-hosted AI agents, agent app, Agent Client Protocol, ACP, Claude, Codex, AI assistant, open source',
 			license: 'https://opensource.org/licenses/MIT',
 			isAccessibleForFree: true,
 			codeRepository: GITHUB,
+			sameAs: [GITHUB],
 			offers: { '@type': 'Offer', price: '0', priceCurrency: 'USD' },
 			author: { '@id': `${STUDIO.url}#organization` },
 			publisher: { '@id': `${STUDIO.url}#organization` },
@@ -100,6 +121,9 @@ const graph = {
 		<meta name="description" content={description} />
 		<meta name="robots" content={hidden ? 'noindex' : 'index, follow, max-image-preview:large, max-snippet:-1'} />
 		{!hidden && <link rel="canonical" href={canonical} />}
+		<meta name="author" content={STUDIO.name} />
+		<meta name="application-name" content="loom" />
+		<meta name="apple-mobile-web-app-title" content="loom" />
 		<meta name="color-scheme" content="light dark" />
 		<meta name="theme-color" content="#ffffff" media="(prefers-color-scheme: light)" />
 		<meta name="theme-color" content="#0b0b0c" media="(prefers-color-scheme: dark)" />

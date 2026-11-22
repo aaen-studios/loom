@@ -15,6 +15,8 @@ ${r ? `The newest release is loom ${r.version}.` : ''}
 - Routines and webhooks, long tasks, a browser of its own for each agent, notes, skills and shared tables, a backup agent program, and plugins that agents write themselves.
 - The server and the app's core are written in Calx; the desktop app is native.
 
+loom is made by [Aaen Studios](https://aaenz.no/), which also makes [Calx](https://calxlang.com).
+
 ## Pages
 
 - [Download](${ORIGIN}/download/): the Windows app, and the server for Linux, Docker, macOS and Windows

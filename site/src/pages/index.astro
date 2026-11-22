@@ -40,9 +40,52 @@ const more = [
 	{ title: 'A backup brain', color: 'gold', mood: 'tool', text: 'When an agent’s program runs out of usage, another one takes the chat over, and the reply says so.' },
 	{ title: 'Plugins', color: 'lavender', mood: 'writing', text: 'Panels and tools that agents write themselves, walled off from the network and from the rest of loom.' },
 ];
+
+// What people ask about loom, answered on the page and given to search engines as an FAQ. Each
+// answer is plain text with its links marked [like this](url) and its commands `like this`.
+const questions = [
+	{
+		q: 'Is loom free?',
+		a: 'Yes. loom is free and open source, under the MIT license. The agent programs it runs use your own account or API key with their provider, such as Anthropic or OpenAI.',
+	},
+	{
+		q: 'Do I need a server?',
+		a: 'No. The desktop app can run everything on your PC. On a Linux server, your agents keep working while your PC is off, and you can invite people, each with agents of their own in a sandbox.',
+	},
+	{
+		q: 'How do I put it on a server?',
+		a: 'As root on a Linux server, run `curl -fsSL https://loom.rip/install.sh | sudo sh`. It installs loom as a service, served over HTTPS by Caddy when you give it a domain, or on your tailnet with Tailscale. It runs in Docker too.',
+	},
+	{
+		q: 'Which AI agents does it work with?',
+		a: 'Any agent program in the ACP Registry, such as Claude Agent, Codex, Gemini CLI, OpenCode, goose, GitHub Copilot and Cursor, or any other program that speaks the Agent Client Protocol. loom installs them for you.',
+	},
+	{
+		q: 'Where are my chats and files kept?',
+		a: "On your PC or your server, in one folder: loom's database, your files, and the key that seals your secrets. A whole instance moves from one machine to another.",
+	},
+	{
+		q: 'Who makes loom?',
+		a: '[Aaen Studios](https://aaenz.no/), which also makes [Calx](https://calxlang.com), the language loom’s server and the app’s core are written in. The source is [on GitHub](https://github.com/aaen-studios/loom).',
+	},
+];
+const plain = (s: string) => s.replace(/\[([^\]]+)\]\([^)]+\)/g, '$1').replace(/`([^`]+)`/g, '$1');
+const linked = (s: string) =>
+	s
+		.replace(/&/g, '&amp;')
+		.replace(/</g, '&lt;')
+		.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2">$1</a>')
+		.replace(/`([^`]+)`/g, '<code>$1</code>');
+const faq = {
+	'@type': 'FAQPage',
+	mainEntity: questions.map(({ q, a }) => ({ '@type': 'Question', name: q, acceptedAnswer: { '@type': 'Answer', text: plain(a) } })),
+};
 ---
 
-<Base description="loom is a self-hostable agent app. Chat with your own AI agents, on Claude, Codex or any ACP agent program, working on your server or on your PC. Open source.">
+<Base
+	description="loom, by Aaen Studios, is a self-hostable agent app: chat with your own AI agents on Claude, Codex or any ACP agent program, on your server or your PC. Open source."
+	data={faq}
+>
 	<section class="hero">
 		<div class="wrap">
 			<div class="mark">
@@ -217,6 +260,22 @@ const more = [
 					))
 				}
 			</ul>
+		</div>
+	</section>
+
+	<section class="questions" aria-labelledby="f-questions">
+		<div class="wrap">
+			<h2 id="f-questions" data-reveal>Questions</h2>
+			<dl>
+				{
+					questions.map(({ q, a }) => (
+						<div data-reveal>
+							<dt>{q}</dt>
+							<dd set:html={linked(a)} />
+						</div>
+					))
+				}
+			</dl>
 		</div>
 	</section>
 
@@ -681,6 +740,47 @@ const more = [
 		color: var(--ink-3);
 	}
 
+	.questions {
+		margin-top: 140px;
+	}
+	.questions h2 {
+		font-size: clamp(26px, 3.4vw, 34px);
+		letter-spacing: -0.03em;
+	}
+	.questions dl {
+		display: grid;
+		grid-template-columns: repeat(2, minmax(0, 1fr));
+		gap: 0 56px;
+		margin: 28px 0 0;
+		border-top: 1px solid var(--line);
+	}
+	.questions dl > div {
+		padding: 24px 0 26px;
+		border-bottom: 1px solid var(--line);
+	}
+	.questions dt {
+		font-size: 16px;
+		font-weight: var(--weight-semibold);
+		letter-spacing: -0.01em;
+	}
+	.questions dd {
+		margin: 8px 0 0;
+		font-size: 15px;
+		color: var(--ink-2);
+		max-width: 520px;
+	}
+	.questions dd :global(code) {
+		font-family: var(--mono);
+		font-size: 13px;
+		color: var(--ink);
+		overflow-wrap: anywhere;
+	}
+	.questions dd :global(a) {
+		color: var(--ink);
+		text-decoration: underline;
+		text-decoration-color: var(--line-strong);
+		text-underline-offset: 3px;
+	}
 	.end {
 		margin-top: 140px;
 		text-align: center;
@@ -732,8 +832,12 @@ const more = [
 		.demo-wrap {
 			margin-top: 44px;
 		}
+		.questions dl {
+			grid-template-columns: minmax(0, 1fr);
+		}
 		.feature,
 		.more,
+		.questions,
 		.end {
 			margin-top: 96px;
 		}
