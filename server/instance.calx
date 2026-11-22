@@ -48,6 +48,7 @@ import server.gate
 import server.tables
 import server.flows
 import server.defaults
+import server.brains
 import server.sandbox
 import server.store.{AcpAgent, Device, Store, User, now, secret_key}
 import shared.tools
@@ -128,6 +129,9 @@ struct Run {
     from: String    // where the person is writing from, as the agent is told it
     usage: Json    // the tokens the turn used, as its program reported them: input, output and total
     note: String    // what loom tells the agent with this prompt, such as that it was stopped for it, or ""
+    program: String    // the agent program answering it: the agent's, the one its chat moved to, or its backup
+    proc: String    // the key of the program's process in `procs`, proc_key(agent, program)
+    tried: List<String>    // the programs that couldn't answer it, before its backup took over
 }
 
 struct Approval {
@@ -138,6 +142,7 @@ struct Approval {
     options: Json
     title: String    // what it asks, for the activity log
     action: Json    // for one of loom's own tools: the command to run if allowed, {name, args}; null for an ACP request
+    proc: String    // for an ACP request: the key of the process that asked, in `procs`
 }
 
 // A command's answer: its value, or its error's code and message.
@@ -173,6 +178,8 @@ struct Proc {
     profiled: Map<String, i64>    // ACP session -> the revision of the person's profile it has
     configs: Map<String, Json>    // ACP session -> its configOptions, as it last gave them
     waiting: List<String>
+    key: String    // its key in `procs`: proc_key(agent, program)
+    stopped: bool    // whether it was told to stop, so it's let go of
 }
 
 pub struct Instance {
@@ -738,6 +745,12 @@ fn valid_username(name: String) -> bool {
         if not fine { return false }
     }
     return true
+}
+
+// An agent program's process, by its agent and the program it runs: an agent
+// whose chat moved to another program, or to its backup, has one for each.
+fn proc_key(agent: String, program: String) -> String {
+    return "{agent}~{program}"
 }
 
 fn error_frame(code: str, message: String, ref_id: String?) -> String {
@@ -2108,7 +2121,10 @@ impl Instance {
     fn code_route(i: mut Instance, req: Request, g: Grant, token: String) -> Response? ! Error {
         if req.path == "/api/mcp/servers" and req.method == "GET" {
             let agent = try i.store.agent(g.user.copy(), g.agent.copy()) ?? Json.Null
-            let boxed = if let p = i.procs.find(g.agent.copy()) { p.boxed } else { true }
+            var boxed = true
+            for (_, p) in i.procs {
+                if p.agent == g.agent { boxed = p.boxed }
+            }
             return some(json_response(200, Obj.new().j("servers", Json.Array(i.agent_servers(g.user, agent, true, boxed))).done()))
         }
         if req.path == "/api/mcp/deno" and req.method == "GET" {
@@ -4804,20 +4820,49 @@ impl Instance {
         }
         let agent = try i.store.agent(user.copy(), agent_id.copy())
         let revision = int_at(agent.copy() ?? Json.Null, "revision") ?? 0
+        // The program that answers: the one the chat was moved to, or the agent's own.
+        let its_own = str_at(agent.copy() ?? Json.Null, "acp_agent") ?? String()
+        let program = try i.store.conversation_program(user.copy(), conversation_id.copy()) ?? its_own
+        // A chat the person moved to another program: its first turn there
+        // starts with loom's summary of it, and the reply says so first.
+        var notice = String()
+        if let moved_from = try i.store.summary_to_hand(user.copy(), conversation_id.copy()) {
+            let summary = try i.summary_of(user.copy(), conversation_id.copy(), answering.copy(), moved_from.copy())
+            note = if note.len() > 0 { "{summary}\n\n{note}" } else { summary }
+            notice = brains.moved_line(moved_from, program.copy(), "hand")
+            try i.store.summary_handed(conversation_id.copy())
+        }
         try i.event(user.copy(), "run.started", Obj.new().s("run", run_id.copy()).s("conversation", conversation_id.copy()).s("agent", agent_id.copy()).i("revision", revision).s("message", reply.copy()).s("answering", answering.copy()).done())
-        i.runs.insert(run_id.copy(), Run { id: run_id.copy(), user: user.copy(), conversation: conversation_id, agent: agent_id.copy(), message: reply, answering: answering.copy(), prompt: text.copy(), files: sent_files.copy(), session: String(), blocks: List<Block>(), tools: LinkedMap<String, String>(), denied: List<String>(), from: from.copy(), usage: Json.Null, note: note.copy() })
+        i.runs.insert(run_id.copy(), Run { id: run_id.copy(), user: user.copy(), conversation: conversation_id, agent: agent_id.copy(), message: reply, answering: answering.copy(), prompt: text.copy(), files: sent_files.copy(), session: String(), blocks: List<Block>(), tools: LinkedMap<String, String>(), denied: List<String>(), from: from.copy(), usage: Json.Null, note: note.copy(), program: program.copy(), proc: proc_key(agent_id.copy(), program.copy()), tried: List<String>() })
+        if notice.len() > 0 { i.notice(run_id.copy(), notice) }
         let a = agent else {
             try i.finish(run_id, String("failed"), some(String("The conversation's agent was deleted.")))
             return
         }
-        let program = str_at(a.copy(), "acp_agent") ?? String()
+        try i.give(user, a, run_id)
+    }
+
+    // Gives a run to its program's process, started first if it isn't running.
+    // A program that can't take it, because its usage is used up or it doesn't
+    // start, hands it to the agent's backup, where it has one.
+    fn give(i: mut Instance, user: String, a: Json, run_id: String) ! Error {
+        var program = String()
+        var key = String()
+        if let r = i.runs.find(run_id.copy()) {
+            program = r.program.copy()
+            key = r.proc.copy()
+        } else {
+            return
+        }
         if not try i.may_use(user.copy(), program.copy()) {
             try i.finish(run_id, String("failed"), some(not_given(program)))
             return
         }
-        // A person past their budget on the owner's shared settings waits for it to begin again.
-        if let (left, per) = try i.budget_left(user.copy(), program) {
+        // A person past their budget on the owner's shared settings waits for it to
+        // begin again, or goes to their backup.
+        if let (left, per) = try i.budget_left(user.copy(), program.copy()) {
             if left <= 0 {
+                if try i.fail_over(run_id.copy(), "usage") { return }
                 let when = if per == "month" { "this month" } else { "today" }
                 try i.finish(run_id, String("limit"), some("The tokens the owner shares for this agent program are used up {when}. Add your own key as a secret, or wait."))
                 return
@@ -4829,27 +4874,96 @@ impl Instance {
             try i.finish(run_id, String("failed"), some("Your sandbox's folder holds more than the {sandbox.DISK_BYTES / 1073741824} GB each person has. Delete what you don't need from it, then try again."))
             return
         }
-        if not i.procs.contains(agent_id.copy()) {
-            match i.start_proc(user, a) {
+        if not i.procs.contains(key.copy()) {
+            match i.start_proc(user, a, program) {
                 ok => {},
                 err(e) => {
+                    if try i.fail_over(run_id.copy(), "start") { return }
                     try i.finish(run_id, String("failed"), some("The agent program didn't start: {e}"))
                     return
                 },
             }
         }
-        var p = i.procs.remove(agent_id.copy()) else return
+        var p = i.procs.remove(key.copy()) else return
         if p.ready {
             i.proceed(mut p, run_id)
         } else {
             p.waiting.push(run_id.copy())
         }
-        i.procs.insert(agent_id, p)
+        i.procs.insert(key, p)
     }
 
-    fn start_proc(i: mut Instance, user: String, agent: Json) ! Error {
+    // A line from loom at the start of a run's reply, such as that another
+    // program took it over: a `notice` block, sent as it comes.
+    fn notice(i: mut Instance, run_id: String, text: String) {
+        var r = i.runs.remove(run_id.copy()) else return
+        var b = new_block("notice")
+        b.text = text.copy()
+        r.blocks.push(b)
+        let n = r.blocks.len()
+        i.publish(r.user.copy(), Obj.new().s("t", String("delta")).s("run", r.id.copy()).s("message", r.message.copy()).i("block", i64.wrap(u64(n - 1))).s("kind", String("notice")).i("pos", 0).s("text", text).done())
+        i.runs.insert(run_id.copy(), r)
+    }
+
+    // Loom's summary of a conversation up to the message `answering` (left out
+    // of it, since the prompt has it), for a program it moves to from `from`.
+    fn summary_of(i: Instance, user: String, conversation: String, answering: String, from: String) -> String ! Error {
+        let (all, _) = try i.store.messages(user, conversation, none, 500)
+        var before = List<Json>()
+        for m in all {
+            if answering.len() > 0 and str_at(m.copy(), "id") == some(answering.copy()) { break }
+            before.push(m.copy())
+        }
+        return brains.summary(before, from)
+    }
+
+    // A run its program couldn't take, because its usage ran out (`why`
+    // "usage") or it didn't start ("start"), goes to the agent's backup program,
+    // if it has one it hasn't tried: the chat moves there, the backup starts with
+    // loom's summary of it, and the reply says so in one line. Gives whether it
+    // went; when it didn't, the run is the caller's to finish.
+    fn fail_over(i: mut Instance, run_id: String, why: str) -> bool ! Error {
+        var user = String()
+        var agent_id = String()
+        var conversation = String()
+        var answering = String()
+        var program = String()
+        var tried = List<String>()
+        if let r = i.runs.find(run_id.copy()) {
+            user = r.user.copy()
+            agent_id = r.agent.copy()
+            conversation = r.conversation.copy()
+            answering = r.answering.copy()
+            program = r.program.copy()
+            tried = r.tried.copy()
+        } else {
+            return false
+        }
+        let agent = try i.store.agent(user.copy(), agent_id.copy()) else return false
+        let backup = brains.backup_of(agent.copy(), try i.store.defaults(user.copy()))
+        if backup.len() == 0 or backup == program or tried.contains(backup.copy()) { return false }
+        if try i.store.acp_agent(backup.copy()) == none or not try i.may_use(user.copy(), backup.copy()) { return false }
+        let summary = try i.summary_of(user.copy(), conversation.copy(), answering, program.copy())
+        let line = brains.moved_line(program.copy(), backup.copy(), why)
+        if let r = mut i.runs.find(run_id.copy()) {
+            r.tried.push(program.copy())
+            r.program = backup.copy()
+            r.proc = proc_key(agent_id.copy(), backup.copy())
+            r.session = String()
+            r.note = if r.note.len() > 0 { "{summary}\n\n{r.note}" } else { summary }
+        }
+        i.notice(run_id.copy(), line.copy())
+        // The chat stays on the backup, until the person moves it back.
+        try i.store.set_conversation_program(user.copy(), conversation.copy(), backup.copy(), String())
+        try i.event(user.copy(), "conversation.updated", Obj.new().j("conversation", Obj.new().s("id", conversation).s("program", backup).done()).done())
+        i.log(user.copy(), agent_id.copy(), "session", line, agent_id)
+        try i.give(user, agent, run_id)
+        return true
+    }
+
+    fn start_proc(i: mut Instance, user: String, agent: Json, program: String) ! Error {
         let id = str_at(agent.copy(), "id") ?? String()
-        let program = str_at(agent.copy(), "acp_agent") ?? String()
+        let key = proc_key(id.copy(), program.copy())
         let acp_agent = try i.store.acp_agent(program.copy()) else {
             fail "there's no ACP agent named {program}; add one with `loom acp add`"
         }
@@ -4900,11 +5014,11 @@ impl Instance {
             try i.put_file(user.copy(), "{folder}/CLAUDE.md", instructions.to_bytes())
         }
         i.write_skills(user.copy(), folder.copy())
-        let to = try acp.start(id.copy(), command, args, settings, folder, i.lines_to.copy())
-        var p = Proc { agent: id.copy(), user: user.copy(), to: to, ready: false, images: false, program: program, resume: false, load: false, mcp_http: false, boxed: boxed, shared: shared, next_id: 1, pending: Map<i64, Pending>(), sessions: Map<String, String>(), told: Map<String, String>(), profiled: Map<String, i64>(), configs: Map<String, Json>(), waiting: List<String>() }
+        let to = try acp.start(key.copy(), command, args, settings, folder, i.lines_to.copy())
+        var p = Proc { agent: id.copy(), user: user.copy(), to: to, ready: false, images: false, program: program.copy(), resume: false, load: false, mcp_http: false, boxed: boxed, shared: shared, next_id: 1, pending: Map<i64, Pending>(), sessions: Map<String, String>(), told: Map<String, String>(), profiled: Map<String, i64>(), configs: Map<String, Json>(), waiting: List<String>(), key: key.copy(), stopped: false }
         p.pending.insert(1, Pending.Init)
         p.to.send(Out.Send(acp.request(1, "initialize", acp.initialize_params())))
-        i.procs.insert(id, p)
+        i.procs.insert(key, p)
     }
 
     // Whether an ACP session's context is CONTEXT_RENEW_PERCENT full or more,
@@ -4956,6 +5070,19 @@ impl Instance {
         var known = String()
         if let session = p.sessions.find(conversation.copy()) {
             known = session.copy()
+        }
+        // A chat that went to another program since (PLAN.md, "A backup brain")
+        // comes back to a fresh session, which loom's summary starts: the one it
+        // had here missed what the other program said.
+        if known.len() > 0 {
+            let kept = match i.store.acp_session(user.copy(), conversation.copy(), p.program.copy()) {
+                ok(s) => s,
+                err(_) => none,
+            }
+            if kept != some(known.copy()) {
+                _ = p.sessions.remove(conversation.copy())
+                known = String()
+            }
         }
         // One endless chat (PLAN.md): a session whose context is nearly full
         // gives way to a fresh one, which carries on from the newest of the
@@ -5189,12 +5316,14 @@ impl Instance {
     fn agent_line(i: mut Instance, line: Line) ! Error {
         var p = i.procs.remove(line.agent.copy()) else return
         let text = line.text else {
-            // The program ended: every run it had fails.
+            // The program ended: every run it had fails, or goes to the agent's
+            // backup when the program ended before it had started.
             var ended = List<String>()
             for (id, r) in i.runs {
-                if r.agent == line.agent { ended.push(id.copy()) }
+                if r.proc == line.agent { ended.push(id.copy()) }
             }
             for id in ended {
+                if not p.ready and try i.fail_over(id.copy(), "start") { continue }
                 try i.finish(id, String("failed"), some("The agent program stopped (exit status {line.exit ?? -1})."))
             }
             return
@@ -5221,7 +5350,8 @@ impl Instance {
             },
             none => try i.answer(mut p, m),
         }
-        i.procs.insert(line.agent.copy(), p)
+        // One told to stop is let go of: the agent starts it again at its next run.
+        if not p.stopped { i.procs.insert(line.agent.copy(), p) }
     }
 
     // An answer to one of loom's own requests.
@@ -5234,12 +5364,14 @@ impl Instance {
             Pending.Init => {
                 if let e = error {
                     eprintln("loom: agent {p.agent} didn't initialize: {e}")
+                    p.to.send(Out.Stop)
+                    p.stopped = true
                     let waiting = p.waiting.copy()
                     p.waiting = List<String>()
                     for run in waiting {
-                        try i.finish(run, String("failed"), some("The agent program didn't start: {str_at(e, "message") ?? String()}"))
+                        if try i.fail_over(run.copy(), "start") { continue }
+                        try i.finish(run, String("failed"), some("The agent program didn't start: {str_at(e.copy(), "message") ?? String()}"))
                     }
-                    p.to.send(Out.Stop)
                     return
                 }
                 p.ready = true
@@ -5259,7 +5391,11 @@ impl Instance {
             },
             Pending.NewSession(run) => {
                 if let e = error {
-                    try i.finish(run, String("failed"), some("The agent couldn't start a session: {str_at(e, "message") ?? String()}"))
+                    // A program that can't start a session is out of usage, or didn't
+                    // really start: the agent's backup takes the turn, if it has one.
+                    let message = str_at(e, "message") ?? String()
+                    if try i.fail_over(run.copy(), if brains.out_of_usage(message.copy()) { "usage" } else { "start" }) { return }
+                    try i.finish(run, String("failed"), some("The agent couldn't start a session: {message}"))
                     return
                 }
                 let sid = str_at(result.copy(), "sessionId") ?? String()
@@ -5289,7 +5425,10 @@ impl Instance {
             },
             Pending.Prompt(run) => {
                 if let e = error {
-                    try i.finish(run, String("failed"), some(str_at(e, "message") ?? String("The agent failed.")))
+                    let message = str_at(e, "message") ?? String("The agent failed.")
+                    // Its usage or rate limit ran out: the agent's backup takes the turn.
+                    if brains.out_of_usage(message.copy()) and try i.fail_over(run.copy(), "usage") { return }
+                    try i.finish(run, String("failed"), some(message))
                     return
                 }
                 i.used(p, run.copy(), at(result.copy(), "usage"))
@@ -5314,8 +5453,9 @@ impl Instance {
         p.sessions.insert(conversation, sid.copy())
         if let Json.Array(_) = config {
             p.configs.insert(sid.copy(), config.copy())
-            // What a new session starts on is what the agent offers.
-            if new { try i.learn_options(user, p.agent.copy(), config) }
+            // What a new session starts on is what the agent offers: its own
+            // program's, not a backup's or another a chat moved to.
+            if new and try i.runs_own(user.copy(), p.agent.copy(), p.program.copy()) { try i.learn_options(user, p.agent.copy(), config) }
         }
         i.configure(mut p, run, sid)
     }
@@ -5344,8 +5484,16 @@ impl Instance {
             ok(d) => d,
             err(_) => defaults.blank(),
         }
+        // On another program than its own, the agent's own picks are for its own,
+        // so only the person's defaults for that program apply.
         let wanted = match i.store.agent(p.user.copy(), p.agent.copy()) {
-            ok(some(a)) => defaults.config_of(a, kept),
+            ok(some(a)) => {
+                if str_at(a.copy(), "acp_agent") == some(p.program.copy()) {
+                    defaults.config_of(a, kept)
+                } else {
+                    defaults.config_of(Obj.new().s("acp_agent", p.program.copy()).done(), kept)
+                }
+            },
             _ => Json.Null,
         }
         let todo = acp.config_todo(config, wanted)
@@ -5357,6 +5505,20 @@ impl Instance {
         p.next_id += 1
         p.pending.insert(p.next_id, Pending.Config(run.copy(), sid.copy(), option.copy(), value.copy()))
         p.to.send(Out.Send(acp.request(p.next_id, "session/set_config_option", Obj.new().s("sessionId", sid).s("configId", option).s("value", value).done())))
+    }
+
+    // Why `program` can't be a backup program for `user`'s agents, or none when it can:
+    // it has to be installed, and theirs to use.
+    fn backup_refused(i: Instance, user: String, program: String) -> Answer? ! Error {
+        if try i.store.acp_agent(program.copy()) == none { return some(Answer.Refused(String("not_found"), "There's no ACP agent {program}.")) }
+        if not try i.may_use(user, program.copy()) { return some(Answer.Refused(String("not_allowed"), not_given(program))) }
+        return none
+    }
+
+    // Whether `program` is the agent's own, rather than a backup's or one a chat moved to.
+    fn runs_own(i: Instance, user: String, agent: String, program: String) -> bool ! Error {
+        let a = try i.store.agent(user, agent) else return false
+        return str_at(a, "acp_agent") == some(program.copy())
     }
 
     // Whose run it is, or "" for one that isn't running.
@@ -5574,7 +5736,7 @@ impl Instance {
             return
         }
         let can_always = acp.pick_option(options.copy(), true, true) != acp.pick_option(options.copy(), true, false)
-        i.approvals.insert(call.copy(), Approval { call: call.copy(), run: run.copy(), agent: p.agent.copy(), rpc: rpc.copy(), options: options, title: str_at(tool_call.copy(), "title") ?? String(), action: Json.Null })
+        i.approvals.insert(call.copy(), Approval { call: call.copy(), run: run.copy(), agent: p.agent.copy(), rpc: rpc.copy(), options: options, title: str_at(tool_call.copy(), "title") ?? String(), action: Json.Null, proc: p.key.copy() })
         try i.event(user, "approval.needed", Obj.new().s("run", run).s("call", call).s("tool", kind).s("title", str_at(tool_call.copy(), "title") ?? String()).j("detail", cut_input(at(tool_call, "rawInput"))).b("can_always", can_always).done())
     }
 
@@ -5683,7 +5845,7 @@ impl Instance {
         i.device_calls.insert(call.copy(), DeviceCall { user: g.user.copy(), device: device.copy(), agent: g.agent.copy(), title: title.copy() })
         if mode == "ask" {
             let action = Obj.new().s("name", String("device.call")).s("device", device.copy()).s("request", request.copy()).done()
-            i.approvals.insert(call.copy(), Approval { call: call.copy(), run: run_id.copy(), agent: g.agent.copy(), rpc: Json.Null, options: Json.Null, title: title.copy(), action: action })
+            i.approvals.insert(call.copy(), Approval { call: call.copy(), run: run_id.copy(), agent: g.agent.copy(), rpc: Json.Null, options: Json.Null, title: title.copy(), action: action, proc: String() })
             try i.event(g.user, "approval.needed", Obj.new().s("run", run_id).s("call", call).s("tool", kind).s("title", title).j("detail", Obj.new().s("device", device_name).s("tool", tool_name).j("args", cut_input(at(args, "args"))).done()).b("can_always", false).s("device", device).s("request", request).done())
             return none
         }
@@ -5769,7 +5931,7 @@ impl Instance {
             some(o) => Obj.new().s("outcome", String("selected")).s("optionId", o).done(),
             none => Obj.new().s("outcome", String("cancelled")).done(),
         }
-        if let p = i.procs.find(a.agent.copy()) {
+        if let p = i.procs.find(a.proc.copy()) {
             var to = p.to.copy()
             to.send(Out.Send(acp.respond(a.rpc.copy(), Obj.new().j("outcome", outcome).done())))
         }
@@ -5847,7 +6009,7 @@ impl Instance {
             r.blocks.push(b)
         }
         try i.event(g.user.copy(), "tool.started", Obj.new().s("run", run_id.copy()).s("call", call.copy()).s("tool", String(kind)).s("title", title.copy()).j("input", cut_input(at(action.copy(), "args"))).j("locations", Json.Null).done())
-        i.approvals.insert(call.copy(), Approval { call: call.copy(), run: run_id.copy(), agent: g.agent.copy(), rpc: Json.Null, options: Json.Null, title: title.copy(), action: action.copy() })
+        i.approvals.insert(call.copy(), Approval { call: call.copy(), run: run_id.copy(), agent: g.agent.copy(), rpc: Json.Null, options: Json.Null, title: title.copy(), action: action.copy(), proc: String() })
         i.hold_call(call.copy(), req.copy())
         try i.event(g.user, "approval.needed", Obj.new().s("run", run_id).s("call", call).s("tool", String(kind)).s("title", title).j("detail", cut_input(at(action, "args"))).b("can_always", false).done())
         return none
@@ -5875,10 +6037,10 @@ impl Instance {
     // stop, which ends the run as cancelled.
     fn stop_run(i: mut Instance, run_id: String) ! Error {
         var session = String()
-        var agent = String()
+        var key = String()
         if let r = i.runs.find(run_id.copy()) {
             session = r.session.copy()
-            agent = r.agent.copy()
+            key = r.proc.copy()
         }
         var open = List<String>()
         for (call, a) in i.approvals {
@@ -5887,7 +6049,7 @@ impl Instance {
         for call in open {
             try i.answer_approval(call, false, false, String("cancel"))
         }
-        if let p = i.procs.find(agent) {
+        if let p = i.procs.find(key) {
             var to = p.to.copy()
             if session.len() > 0 {
                 to.send(Out.Send(acp.notify("session/cancel", Obj.new().s("sessionId", session).done())))
@@ -6267,16 +6429,16 @@ impl Instance {
     fn stop_idle_of(i: mut Instance, user: String) {
         if not i.sandboxed(user.copy()) { return }
         var idle = List<String>()
-        for (agent, p) in i.procs {
+        for (key, p) in i.procs {
             if p.user != user { continue }
             var busy = false
             for (_, r) in i.runs {
-                if r.agent == agent { busy = true }
+                if r.proc == key { busy = true }
             }
-            if not busy { idle.push(agent.copy()) }
+            if not busy { idle.push(key.copy()) }
         }
-        for agent in idle {
-            if let p = i.procs.remove(agent) {
+        for key in idle {
+            if let p = i.procs.remove(key) {
                 var to = p.to.copy()
                 to.send(Out.Stop)
             }
@@ -6285,17 +6447,17 @@ impl Instance {
 
     fn stop_program(i: mut Instance, program: String) {
         var idle = List<String>()
-        for (agent, p) in i.procs {
+        for (key, p) in i.procs {
             if p.program == program {
                 var busy = false
                 for (_, r) in i.runs {
-                    if r.agent == agent { busy = true }
+                    if r.proc == key { busy = true }
                 }
-                if not busy { idle.push(agent.copy()) }
+                if not busy { idle.push(key.copy()) }
             }
         }
-        for agent in idle {
-            if let p = i.procs.remove(agent) {
+        for key in idle {
+            if let p = i.procs.remove(key) {
                 var to = p.to.copy()
                 to.send(Out.Stop)
             }
@@ -6374,6 +6536,24 @@ impl Instance {
             try i.event(user, "conversation.created", Obj.new().j("conversation", c.copy()).done())
             return Answer.Value(Obj.new().s("conversation", str_at(c, "id") ?? String()).done())
         }
+        // A chat moved to another program by hand (PLAN.md, "A backup brain"):
+        // its next turn there starts with loom's summary of it.
+        if name == "conversation.move" {
+            let id = str_at(args.copy(), "conversation") ?? String()
+            let c = try i.store.conversation(user.copy(), id.copy()) else return Answer.Refused(String("not_found"), "There's no conversation {id}.")
+            let program = str_at(args, "program") ?? String()
+            if try i.store.acp_agent(program.copy()) == none { return Answer.Refused(String("not_found"), "There's no ACP agent {program}.") }
+            if not try i.may_use(user.copy(), program.copy()) { return Answer.Refused(String("not_allowed"), not_given(program)) }
+            let agent_id = str_at(c.copy(), "agent") ?? String()
+            let agent = try i.store.agent(user.copy(), agent_id.copy()) else return Answer.Refused(String("not_found"), String("The conversation's agent was deleted."))
+            let now_on = str_at(c.copy(), "program") ?? (str_at(agent, "acp_agent") ?? String())
+            if program == now_on { return Answer.Value(Obj.new().j("conversation", c).done()) }
+            if i.answering(user.copy(), id.copy()) != none { return Answer.Refused(String("busy"), String("The agent is answering in it. Move it once the turn is over, or stop the turn first.")) }
+            try i.store.set_conversation_program(user.copy(), id.copy(), program.copy(), now_on.copy())
+            i.log(user.copy(), agent_id, "session", "Moved a chat from {brains.title(now_on)} to {brains.title(program.copy())}", device)
+            try i.event(user.copy(), "conversation.updated", Obj.new().j("conversation", Obj.new().s("id", id.copy()).s("program", program).done()).done())
+            return Answer.Value(Obj.new().j("conversation", try i.store.conversation(user, id) ?? c).done())
+        }
         if name == "conversation.rename" or name == "conversation.delete" {
             let id = str_at(args.copy(), "conversation") ?? String()
             if try i.store.conversation(user.copy(), id.copy()) == none { return Answer.Refused(String("not_found"), "There's no conversation {id}.") }
@@ -6409,11 +6589,20 @@ impl Instance {
             let busy = str_at(args.copy(), "busy")
             if busy != none and busy != some(String("queue")) and busy != some(String("steer")) { return Answer.Refused(String("bad_request"), String("busy is queue or steer.")) }
             if not try i.may_use(user.copy(), program.copy()) { return Answer.Refused(String("not_allowed"), not_given(program.copy())) }
+            // Left out, its backup program is the default's.
+            var backup = str_at(args.copy(), "backup")
+            if let b = backup.copy() {
+                if b.len() == 0 {
+                    backup = none
+                } else if b != brains.NONE {
+                    if let why = try i.backup_refused(user.copy(), b) { return why }
+                }
+            }
             let id = try i.store.new_id("a")
             // Each new agent takes the next of the eight thread colours, unless it names one.
             let count = (try i.store.agents(user.copy())).len()
             let color = str_at(args.copy(), "color") ?? String(COLORS[count % COLORS.len()])
-            let agent = Obj.new().s("id", id).s("name", str_at(args.copy(), "name") ?? String("Agent")).s("color", color).s("acp_agent", program).s("instructions", str_at(args.copy(), "instructions") ?? String()).maybe("folder", str_at(args.copy(), "folder")).j("mcp", names_of(at(args.copy(), "mcp"))).maybe("permission", permission).maybe("busy", busy).b("code_mode", bool_at(args.copy(), "code_mode") ?? true).i("revision", 1).i("at", now()).done()
+            let agent = Obj.new().s("id", id).s("name", str_at(args.copy(), "name") ?? String("Agent")).s("color", color).s("acp_agent", program).s("instructions", str_at(args.copy(), "instructions") ?? String()).maybe("folder", str_at(args.copy(), "folder")).j("mcp", names_of(at(args.copy(), "mcp"))).maybe("permission", permission).maybe("busy", busy).maybe("backup", backup).b("code_mode", bool_at(args.copy(), "code_mode") ?? true).i("revision", 1).i("at", now()).done()
             try i.store.put_agent(user.copy(), agent.copy(), device.copy())
             i.log(user.copy(), str_at(agent.copy(), "id") ?? String(), "agent", "Made {str_at(agent.copy(), "name") ?? String()}", device.copy())
             try i.event(user, "agent.created", Obj.new().j("agent", agent.copy()).done())
@@ -6445,6 +6634,16 @@ impl Instance {
             } else if let busy = str_at(args.copy(), "busy") {
                 if busy != "queue" and busy != "steer" { return Answer.Refused(String("bad_request"), String("busy is queue or steer.")) }
                 o.m.insert(String("busy"), Json.Str(busy))
+            }
+            // Its backup program, "none" for none whatever the default is; null
+            // (or "") goes back to the default's.
+            if defaults.follows(args.copy(), "backup") {
+                _ = o.m.remove(String("backup"))
+            } else if let backup = str_at(args.copy(), "backup") {
+                if backup != brains.NONE and some(backup.copy()) != str_at(old.copy(), "backup") {
+                    if let why = try i.backup_refused(user.copy(), backup.copy()) { return why }
+                }
+                o.m.insert(String("backup"), Json.Str(backup))
             }
             if let Json.Array(_) = at(args.copy(), "mcp") { o.m.insert(String("mcp"), names_of(at(args.copy(), "mcp"))) }
             if let on = bool_at(args.copy(), "code_mode") { o.m.insert(String("code_mode"), Json.Bool(on)) }
@@ -6614,6 +6813,10 @@ impl Instance {
             if brain.len() > 0 and some(brain.copy()) != str_at(old, "brain") {
                 if try i.store.acp_agent(brain.copy()) == none { return Answer.Refused(String("not_found"), "There's no ACP agent {brain}.") }
                 if not try i.may_use(user.copy(), brain.copy()) { return Answer.Refused(String("not_allowed"), not_given(brain)) }
+            }
+            let backup = str_at(next.copy(), "backup") ?? String()
+            if backup.len() > 0 and some(backup.copy()) != str_at(old.copy(), "backup") {
+                if let why = try i.backup_refused(user.copy(), backup) { return why }
             }
             let kept = try i.store.put_defaults(user.copy(), next, device.copy())
             i.log(user.copy(), String(), "agent", "Changed the agent defaults: revision {int_at(kept.copy(), "revision") ?? 0}", device.copy())

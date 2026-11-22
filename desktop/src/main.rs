@@ -190,7 +190,8 @@ gpui_kit::assets::icon_assets!(
         ExternalLink,
         Bell,
         Palette,
-        MessageSquare
+        MessageSquare,
+        ArrowRightLeft
     ]
 );
 

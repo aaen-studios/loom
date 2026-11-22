@@ -112,6 +112,8 @@ enum Menu {
     Agent,
     Model,
     Permission,
+    /// Which program the open chat moves to.
+    MoveTo,
 }
 
 /// The composer's + menu, open at its first list or at one it leads to.
@@ -4581,6 +4583,8 @@ ACTA_KEY=secret:ACTA_KEY",
                             for f in this.model.load_mcp() {
                                 this.send(f);
                             }
+                            let f = this.model.programs();
+                            this.send(f);
                             for f in this.model.edit_agent() {
                                 this.send(f);
                             }
@@ -4638,6 +4642,15 @@ ACTA_KEY=secret:ACTA_KEY",
                     })),
                 )
                 .child(
+                    self.menu_item("move-to", Ico::ArrowRightLeft, "Move to…", false)
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            let f = this.model.programs();
+                            this.send(f);
+                            this.menu = Some(Menu::MoveTo);
+                            cx.notify();
+                        })),
+                )
+                .child(
                     self.menu_item("fresh", Ico::RotateCcw, "Start fresh", false)
                         .on_click(cx.listener(|this, _, _, cx| {
                             if let Some(f) = this.model.start_fresh() {
@@ -4657,6 +4670,51 @@ ACTA_KEY=secret:ACTA_KEY",
                             cx.notify();
                         })),
                 ),
+            Menu::MoveTo => {
+                // Each installed program, the one the chat runs on ticked. Moving hands the
+                // new one loom's summary of the chat.
+                let on = self.model.chat_program().unwrap_or_default();
+                let mut list = panel.left(px(space::S)).child(
+                    self.menu_item("move-back", Ico::ArrowLeft, "Move this chat to", false)
+                        .text_color(p.ink_2)
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.menu = Some(Menu::Agent);
+                            cx.notify();
+                        })),
+                );
+                if self.model.programs.is_empty() {
+                    list = list.child(
+                        div()
+                            .px(px(space::M))
+                            .py(px(space::S))
+                            .text_size(px(size::SMALL))
+                            .text_color(p.ink_3)
+                            .child("No brains installed"),
+                    );
+                }
+                for name in self.model.programs.clone() {
+                    let here = name == on;
+                    let program = name.clone();
+                    list = list.child(
+                        self.menu_item(format!("move-to-{name}"), Ico::Brain, &name, false)
+                            .when(here, |d| {
+                                d.child(
+                                    div()
+                                        .text_color(p.ink_2)
+                                        .child(Icon::new(Ico::Check).small()),
+                                )
+                            })
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                if let Some(f) = this.model.move_chat(&program) {
+                                    this.send(f);
+                                }
+                                this.menu = None;
+                                cx.notify();
+                            })),
+                    );
+                }
+                list
+            }
             Menu::Model => {
                 let agent = self
                     .model
@@ -6245,6 +6303,35 @@ ACTA_KEY=secret:ACTA_KEY",
                 );
             }
             picks.push(self.field("A message while it answers", busy));
+            // Its backup program, which takes a turn over when its own runs out of usage
+            // or doesn't start: the default's, none, or one of the other programs.
+            let default_backup = if self.model.defaults.backup.is_empty() {
+                "Default: None".to_string()
+            } else {
+                format!("Default: {}", self.model.defaults.backup)
+            };
+            let mut choices: Vec<(String, String, Option<String>)> = vec![
+                ("default".into(), default_backup, None),
+                ("none".into(), "None".into(), Some("none".into())),
+            ];
+            for name in self.model.programs.iter().filter(|n| **n != a.program) {
+                choices.push((name.clone(), name.clone(), Some(name.clone())));
+            }
+            let mut backups = div().flex().flex_wrap().gap(px(space::S));
+            for (id, label, choice) in choices {
+                let agent_id = a.id.clone();
+                let on = a.backup == choice.clone().unwrap_or_default();
+                backups = backups.child(
+                    self.button_owned(format!("edit-backup-{id}"), &label, on)
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            if let Some(f) = this.model.set_backup(&agent_id, choice.as_deref()) {
+                                this.send(f);
+                            }
+                            cx.notify();
+                        })),
+                );
+            }
+            picks.push(self.field("Backup program", backups));
         }
         // Its thread's colour.
         let color = self
@@ -9498,17 +9585,43 @@ ACTA_KEY=secret:ACTA_KEY",
             }
             self.segments(items).into_any_element()
         };
-        let new_agents = self.group(
-            Some("New agents"),
-            vec![self
-                .row(
+        // What takes an agent's turn over when its own program runs out of usage or
+        // doesn't start, for agents without a backup of their own.
+        let backup: Option<AnyElement> = (!programs.is_empty()).then(|| {
+            let mut items = vec![self
+                .segment("default-backup-none", "None", d.backup.is_empty())
+                .on_click(put(serde_json::json!({"backup": null})))];
+            for name in programs.clone() {
+                items.push(
+                    self.segment(format!("default-backup-{name}"), &name, d.backup == name)
+                        .on_click(put(serde_json::json!({"backup": name}))),
+                );
+            }
+            self.segments(items).into_any_element()
+        });
+        let mut rows = vec![self
+            .row(
+                None,
+                "Brain",
+                Some("The program a new agent runs on".into()),
+                Some(brain),
+            )
+            .into_any_element()];
+        if let Some(backup) = backup {
+            rows.push(
+                self.row(
                     None,
-                    "Brain",
-                    Some("The program a new agent runs on".into()),
-                    Some(brain),
+                    "Backup program",
+                    Some(
+                        "Takes a turn over when an agent's own runs out of usage or doesn't start"
+                            .into(),
+                    ),
+                    Some(backup),
                 )
-                .into_any_element()],
-        );
+                .into_any_element(),
+            );
+        }
+        let new_agents = self.group(Some("Brains"), rows);
         // Each program's model and effort, from what an agent on it has said it offers.
         let mut picks = Vec::new();
         for name in programs {
@@ -10646,6 +10759,20 @@ fn reply(
                     div()
                         .text_size(px(size::SMALL * show.text_scale))
                         .text_color(p.ink_2)
+                        .child(b.text.clone()),
+                );
+            }
+            "notice" => {
+                // One quiet line from loom, such as that another program took the chat
+                // over. It isn't the reply, so what it's doing still shows under it.
+                body = body.child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(space::S))
+                        .text_size(px(size::CAPTION))
+                        .text_color(p.ink_3)
+                        .child(Icon::new(Ico::ArrowRightLeft).small())
                         .child(b.text.clone()),
                 );
             }
