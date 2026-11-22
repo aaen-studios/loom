@@ -6127,7 +6127,7 @@ ACTA_KEY=secret:ACTA_KEY",
             .editing
             .as_ref()
             .and_then(|id| self.model.agent(id))
-            .map_or(true, |a| a.code_mode);
+            .is_none_or(|a| a.code_mode);
         let scripts = self.switch_row(
             "edit-code-mode",
             "Code Mode",
@@ -6140,7 +6140,7 @@ ACTA_KEY=secret:ACTA_KEY",
                     .editing
                     .as_ref()
                     .and_then(|id| this.model.agent(id))
-                    .map_or(true, |a| a.code_mode);
+                    .is_none_or(|a| a.code_mode);
                 if let Some(f) = this.model.set_code_mode(!on) {
                     this.send(f);
                 }
