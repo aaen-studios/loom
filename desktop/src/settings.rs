@@ -36,6 +36,12 @@ pub(super) fn settings_groups() -> Vec<(Option<&'static str>, Vec<Page>)> {
         (
             Some("Agents"),
             vec![
+                (
+                    "pop-defaults",
+                    Ico::SlidersHorizontal,
+                    "Defaults",
+                    Screen::Defaults,
+                ),
                 ("pop-programs", Ico::Brain, "Brains", Screen::Programs),
                 ("pop-skills", Ico::BookOpen, "Skills", Screen::Skills),
                 ("pop-mcp", Ico::Plug, "MCP servers", Screen::Mcp),
@@ -68,6 +74,9 @@ fn page_words(screen: Screen) -> &'static str {
             "start login startup tray close background awake sleep notifications sound preview updates version restart"
         }
         Screen::Programs => "brains models agent programs claude codex gemini opencode acp registry install tokens limits",
+        Screen::Defaults => {
+            "defaults every agent brain model effort permission mode ask allow instructions busy queue steer"
+        }
         Screen::Skills => "skills how to",
         Screen::Mcp => "mcp servers tools keys connectors",
         Screen::Plugins => "plugins panels",
@@ -483,6 +492,7 @@ mod tests {
         assert!(screens("dark") == vec![Screen::Appearance]);
         assert!(screens("Tool calls") == vec![Screen::ChatPrefs]);
         assert!(screens("brains") == vec![Screen::Programs]);
+        assert!(screens("steer") == vec![Screen::Defaults]);
         assert!(screens("zzz").is_empty());
     }
 }

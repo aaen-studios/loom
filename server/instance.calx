@@ -46,6 +46,7 @@ import server.routines
 import server.gate
 import server.tables
 import server.flows
+import server.defaults
 import server.sandbox
 import server.store.{AcpAgent, Device, Store, User, now, secret_key}
 import shared.tools
@@ -2620,7 +2621,7 @@ impl Instance {
     // looser than its own (PLAN.md, "Agents talking to agents have limits"):
     // ask, then auto, then allow.
     fn more_than_it_has(i: Instance, g: Grant, mode: String) -> String? ! Error {
-        let mine = str_at(try i.store.agent(g.user, g.agent) ?? Json.Null, "permission") ?? String("ask")
+        let mine = defaults.mode_of(try i.store.agent(g.user.copy(), g.agent) ?? Json.Null, try i.store.defaults(g.user))
         if mode_rank(mode.copy()) <= mode_rank(mine.copy()) { return none }
         return some("You're on {mine}, so you can't give an agent {mode}: no more than you have yourself. Your person can, in the app.")
     }
@@ -2642,13 +2643,22 @@ impl Instance {
             if str_at(a.copy(), "folder") != none { access = commands.Access.Asks(String("other")) }
         }
         if name == "agent.update" {
-            let mode = str_at(a.copy(), "permission")
-            if let m = mode.copy() {
-                if m != "ask" and m != "auto" and m != "allow" { return some(tool_error(String("permission is ask, auto or allow."))) }
+            let changes_mode = defaults.has(a.copy(), "permission")
+            if changes_mode {
+                // Following the defaults again is the default's mode.
+                let m = if defaults.follows(a.copy(), "permission") { defaults.mode_of(Json.Null, try i.store.defaults(g.user.copy())) } else { str_at(a.copy(), "permission") ?? String() }
+                if m != "ask" and m != "auto" and m != "allow" { return some(tool_error(String("permission is ask, auto, allow, or null to follow your person's default."))) }
                 if m != "ask" and str_at(a.copy(), "agent") == some(g.agent.copy()) { return some(rule_refusal("own-mode", String("An agent can't loosen its own permission mode. Your person can, in the app."))) }
                 if let why = try i.more_than_it_has(g.copy(), m) { return some(rule_refusal("no-more-than-its-own", why)) }
             }
-            if mode != none or str_at(a.copy(), "folder") != none { access = commands.Access.Asks(String("other")) }
+            if changes_mode or str_at(a.copy(), "folder") != none { access = commands.Access.Asks(String("other")) }
+        }
+        // The default permission mode is every following agent's, so an
+        // agent proposes no more than its own, and the person says yes.
+        if name == "defaults.put" and defaults.has(a.copy(), "permission") {
+            let m = str_at(a.copy(), "permission") ?? String("ask")
+            if m != "ask" and m != "auto" and m != "allow" { return some(tool_error(String("permission is ask, auto or allow."))) }
+            if let why = try i.more_than_it_has(g.copy(), m) { return some(rule_refusal("no-more-than-its-own", why)) }
         }
         if name == "agent.delete" and str_at(a.copy(), "agent") == some(g.agent.copy()) { return some(rule_refusal("not-itself", String("An agent can't delete itself. Your person can, in the app."))) }
         match access {
@@ -4442,12 +4452,19 @@ impl Instance {
         let message_id = try i.store.new_id("msg")
         // A message to an agent that's still answering waits its turn in the
         // conversation's queue, and becomes a message when it goes.
-        if i.answering(user.copy(), conversation_id.copy()) != none {
+        // Where the agent's `busy`, or the person's default, says steer, it
+        // goes first and the running turn stops for it, as queue.steer does.
+        if let running = i.answering(user.copy(), conversation_id.copy()) {
+            let agent = try i.store.agent(user.copy(), str_at(conversation.copy(), "agent") ?? String()) ?? Json.Null
+            let steer = defaults.busy_of(agent, try i.store.defaults(user.copy())) == "steer"
             let item = Obj.new().s("id", message_id.copy()).s("text", text).j("files", Json.Array(sent_files)).s("from", device.copy()).i("at", now()).done()
-            try i.store.put_queued(user.copy(), conversation_id.copy(), item, false)
+            try i.store.put_queued(user.copy(), conversation_id.copy(), if steer { merge(item, Obj.new().b("steered", true).done()) } else { item }, steer)
             try i.store.remember_sent(device, cid.copy(), message_id.copy(), String())
-            _ = i.server.send_text(s, "{Obj.new().s("t", String("ack")).s("cid", cid.copy()).s("message", message_id).b("queued", true).done()}")
+            var ack = Obj.new().s("t", String("ack")).s("cid", cid.copy()).s("message", message_id).b("queued", true)
+            if steer { ack = ack.b("steered", true) }
+            _ = i.server.send_text(s, "{ack.done()}")
             try i.queue_changed(user, conversation_id)
+            if steer { try i.stop_run(running) }
             return
         }
         let run_id = try i.store.new_id("run")
@@ -5010,6 +5027,19 @@ impl Instance {
             prompt.push(Obj.new().s("type", String("text")).s("text", "[loom: Your person's agents share the folder {i.shared_folder(user.copy())}. Put files there for another agent, and look there for what they leave. To hand one over with a message, give message_agent its path in files.]").done())
             p.told.insert(shared_told, String("1"))
         }
+        // The instructions every agent of the person's follows (PLAN.md,
+        // "Agent defaults"), when the session hasn't had them as they are now.
+        let every = match i.store.defaults(user.copy()) {
+            ok(d) => defaults.told(d),
+            _ => String(),
+        }
+        let every_told = "{session}#every"
+        let had_every = if let t = p.told.find(every_told.copy()) { t.copy() } else { String() }
+        if every != had_every {
+            let said = if every.len() > 0 { every.copy() } else { String("[loom: Your person took back the instructions they gave every agent of theirs. Don't follow them any more.]") }
+            prompt.push(Obj.new().s("type", String("text")).s("text", said).done())
+            p.told.insert(every_told, every)
+        }
         // The person's profile (PLAN.md, "Memory"), when the session hasn't
         // had this revision of it.
         let profile = match i.store.profile(user.copy()) {
@@ -5212,8 +5242,13 @@ impl Instance {
     // time, then gives it the prompt.
     fn configure(i: Instance, p: mut Proc, run: String, sid: String) {
         let config = if let c = p.configs.find(sid.copy()) { c.copy() } else { Json.Null }
+        // The agent's own picks, over the person's defaults for its program.
+        let kept = match i.store.defaults(p.user.copy()) {
+            ok(d) => d,
+            err(_) => defaults.blank(),
+        }
         let wanted = match i.store.agent(p.user.copy(), p.agent.copy()) {
-            ok(some(a)) => at(a, "config"),
+            ok(some(a)) => defaults.config_of(a, kept),
             _ => Json.Null,
         }
         let todo = acp.config_todo(config, wanted)
@@ -5429,7 +5464,7 @@ impl Instance {
             return
         }
         let agent = try i.store.agent(r.user.copy(), r.agent.copy()) ?? Json.Null
-        let mode = str_at(agent, "permission") ?? String("ask")
+        let mode = defaults.mode_of(agent, try i.store.defaults(r.user.copy()))
         let kind = acp.tool_kind(str_at(tool_call.copy(), "kind") ?? String())
         let user = r.user.copy()
         let run = r.id.copy()
@@ -6241,14 +6276,24 @@ impl Instance {
             return Answer.Value(Obj.new().j("messages", Json.Array(messages)).b("more", more).done())
         }
         if name == "agent.create" {
-            let program = str_at(args.copy(), "acp_agent") ?? String()
+            // Left out, it runs on the person's default brain.
+            var program = str_at(args.copy(), "acp_agent") ?? String()
+            if program.len() == 0 { program = str_at(try i.store.defaults(user.copy()), "brain") ?? String() }
+            if program.len() == 0 { return Answer.Refused(String("bad_request"), String("Name the agent program it runs on, acp_agent: there's no default brain.")) }
             if try i.store.acp_agent(program.copy()) == none { return Answer.Refused(String("not_found"), "There's no ACP agent {program}.") }
+            // Left out, its permission mode and what a message does while it's busy follow the defaults.
+            let permission = str_at(args.copy(), "permission")
+            if let mode = permission.copy() {
+                if not defaults.is_mode(mode.copy()) { return Answer.Refused(String("bad_request"), "permission is ask, auto, allow, or a list of kinds such as read,search,edit, not {mode}.") }
+            }
+            let busy = str_at(args.copy(), "busy")
+            if busy != none and busy != some(String("queue")) and busy != some(String("steer")) { return Answer.Refused(String("bad_request"), String("busy is queue or steer.")) }
             if not try i.may_use(user.copy(), program.copy()) { return Answer.Refused(String("not_allowed"), not_given(program.copy())) }
             let id = try i.store.new_id("a")
             // Each new agent takes the next of the eight thread colours, unless it names one.
             let count = (try i.store.agents(user.copy())).len()
             let color = str_at(args.copy(), "color") ?? String(COLORS[count % COLORS.len()])
-            let agent = Obj.new().s("id", id).s("name", str_at(args.copy(), "name") ?? String("Agent")).s("color", color).s("acp_agent", program).s("instructions", str_at(args.copy(), "instructions") ?? String()).maybe("folder", str_at(args.copy(), "folder")).j("mcp", names_of(at(args.copy(), "mcp"))).s("permission", str_at(args, "permission") ?? String("ask")).i("revision", 1).i("at", now()).done()
+            let agent = Obj.new().s("id", id).s("name", str_at(args.copy(), "name") ?? String("Agent")).s("color", color).s("acp_agent", program).s("instructions", str_at(args.copy(), "instructions") ?? String()).maybe("folder", str_at(args.copy(), "folder")).j("mcp", names_of(at(args.copy(), "mcp"))).maybe("permission", permission).maybe("busy", busy).i("revision", 1).i("at", now()).done()
             try i.store.put_agent(user.copy(), agent.copy(), device.copy())
             i.log(user.copy(), str_at(agent.copy(), "id") ?? String(), "agent", "Made {str_at(agent.copy(), "name") ?? String()}", device.copy())
             try i.event(user, "agent.created", Obj.new().j("agent", agent.copy()).done())
@@ -6263,9 +6308,23 @@ impl Instance {
                     o.m.insert(k.copy(), v.copy())
                 }
             }
-            let keys: List<str> = ["name", "acp_agent", "instructions", "folder", "permission", "color"]
+            let keys: List<str> = ["name", "acp_agent", "instructions", "folder", "color"]
             for key in keys {
                 if let v = str_at(args.copy(), key) { o.m.insert(String(key), Json.Str(v)) }
+            }
+            // Its permission mode, and what a message does while it's busy:
+            // null (or "") goes back to following the person's defaults.
+            if defaults.follows(args.copy(), "permission") {
+                _ = o.m.remove(String("permission"))
+            } else if let mode = str_at(args.copy(), "permission") {
+                if not defaults.is_mode(mode.copy()) { return Answer.Refused(String("bad_request"), "permission is ask, auto, allow, or a list of kinds such as read,search,edit, not {mode}.") }
+                o.m.insert(String("permission"), Json.Str(mode))
+            }
+            if defaults.follows(args.copy(), "busy") {
+                _ = o.m.remove(String("busy"))
+            } else if let busy = str_at(args.copy(), "busy") {
+                if busy != "queue" and busy != "steer" { return Answer.Refused(String("bad_request"), String("busy is queue or steer.")) }
+                o.m.insert(String("busy"), Json.Str(busy))
             }
             if let Json.Array(_) = at(args.copy(), "mcp") { o.m.insert(String("mcp"), names_of(at(args.copy(), "mcp"))) }
             // Another program offers other options: what it had goes.
@@ -6278,9 +6337,10 @@ impl Instance {
                 _ = o.m.remove(String("options"))
                 _ = o.m.remove(String("config"))
             }
-            // Its model, effort and the like, by option id; "" goes back to
-            // what the program starts on. A value the program doesn't offer
-            // is refused.
+            // Its model, effort and the like, by option id; null (or "") goes
+            // back to following the person's default for its program, or what
+            // the program starts on without one. A value the program doesn't
+            // offer is refused.
             if let Json.Object(changes) = at(args.copy(), "config") {
                 var config = LinkedMap<String, Json>()
                 if let Json.Object(c) = at(old.copy(), "config") {
@@ -6288,7 +6348,11 @@ impl Instance {
                 }
                 let offered = if switched { Json.Null } else { at(old.copy(), "options") }
                 for (k, v) in changes {
-                    let value = v.as_str() else return Answer.Refused(String("bad_request"), "config.{k} is a string.")
+                    if v == Json.Null {
+                        _ = config.remove(k.copy())
+                        continue
+                    }
+                    let value = v.as_str() else return Answer.Refused(String("bad_request"), "config.{k} is a string, or null.")
                     if value.len() == 0 {
                         _ = config.remove(k.copy())
                         continue
@@ -6415,6 +6479,25 @@ impl Instance {
             let what = (str_at(args, "text") ?? String()).trim().copy()
             if what.len() > PROFILE_MOST { return Answer.Refused(String("bad_request"), "The profile is over {PROFILE_MOST} bytes.") }
             return Answer.Value(Obj.new().j("profile", try i.store.put_profile(user, what, device)).done())
+        }
+        if name == "defaults.get" {
+            return Answer.Value(Obj.new().j("defaults", try i.store.defaults(user)).done())
+        }
+        if name == "defaults.put" {
+            let old = try i.store.defaults(user.copy())
+            let next = match defaults.apply(old.copy(), args) {
+                ok(d) => d,
+                err(e) => return Answer.Refused(String("bad_request"), "{e}"),
+            }
+            let brain = str_at(next.copy(), "brain") ?? String()
+            if brain.len() > 0 and some(brain.copy()) != str_at(old, "brain") {
+                if try i.store.acp_agent(brain.copy()) == none { return Answer.Refused(String("not_found"), "There's no ACP agent {brain}.") }
+                if not try i.may_use(user.copy(), brain.copy()) { return Answer.Refused(String("not_allowed"), not_given(brain)) }
+            }
+            let kept = try i.store.put_defaults(user.copy(), next, device.copy())
+            i.log(user.copy(), String(), "agent", "Changed the agent defaults: revision {int_at(kept.copy(), "revision") ?? 0}", device.copy())
+            try i.event(user, "defaults.updated", Obj.new().j("defaults", kept.copy()).s("by", device).done())
+            return Answer.Value(Obj.new().j("defaults", kept).done())
         }
         if name == "memory.list" {
             let limit = int_at(args.copy(), "limit") ?? 100

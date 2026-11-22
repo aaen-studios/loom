@@ -1,0 +1,268 @@
+module server.defaults
+
+// The person's agent defaults (PLAN.md, "Agent defaults"): what every agent of
+// theirs follows, live, unless its own settings change that field. They're
+// kept on the instance per person, so every device gets them:
+//
+// - `brain`: the agent program a new agent runs on, when agent.create names none;
+// - `config`: per program, the options its agents start each session on, such
+//   as `{"claude": {"model": "opus", "effort": "high"}}`;
+// - `permission`: the permission mode of an agent with none of its own;
+// - `instructions`: what every agent is told, beside the person's profile;
+// - `busy`: what a message to an agent that's still answering does, `queue`
+//   (it waits its turn) or `steer` (the turn stops for it).
+//
+// The instance does the rest, with the store. What's here only reads and
+// checks JSON.
+import std.json.{Json}
+import shared.obj.{Obj, at, str_at}
+
+// How long the instructions every agent follows may be: they go into every session.
+pub const INSTRUCTIONS_MOST: usize = 8000
+
+const FIELDS: str = "brain config permission instructions busy"
+
+// The defaults a person has before they change any.
+pub fn blank() -> Json {
+    return Obj.new().s("brain", String()).j("config", Obj.new().done()).s("permission", String("ask")).s("instructions", String()).s("busy", String("queue")).i("revision", 0).s("by", String()).i("at", 0).done()
+}
+
+// The defaults as kept, with each field there, its blank where it's missing.
+pub fn filled(kept: Json) -> Json {
+    var m = LinkedMap<String, Json>()
+    if let Json.Object(b) = blank() {
+        for (k, v) in b {
+            let had = kept.get(k.copy()) ?? Json.Null
+            let keep = match had {
+                Json.Null => false,
+                _ => had.kind() == v.kind(),
+            }
+            m.insert(k.copy(), if keep { had } else { v.copy() })
+        }
+    }
+    return Json.Object(m)
+}
+
+// Whether `mode` is a permission mode: ask, auto, allow, or a list of the
+// kinds of tool to allow, like "read,search,edit".
+pub fn is_mode(mode: String) -> bool {
+    if mode == "ask" or mode == "auto" or mode == "allow" { return true }
+    if mode.trim().len() == 0 { return false }
+    for k in mode.split(",") {
+        let kind = k.trim().copy()
+        var known = false
+        for one in "read edit delete move search execute think fetch".split(" ") {
+            if kind == one { known = true }
+        }
+        if not known { return false }
+    }
+    return true
+}
+
+// Whether `args` has member `key`, null or not: null is how a field goes back
+// to following the default.
+pub fn has(args: Json, key: str) -> bool {
+    if let Json.Object(m) = args { return m.contains(String(key)) }
+    return false
+}
+
+// A string member's value, `fallback` for null, or none for anything else.
+fn text_or(v: Json, fallback: str) -> String? {
+    if v == Json.Null { return some(String(fallback)) }
+    return v.as_str()
+}
+
+// Whether member `key` of `args` says "follow the default": null, or "".
+pub fn follows(args: Json, key: str) -> bool {
+    if not has(args.copy(), key) { return false }
+    let v = at(args, key)
+    if v == Json.Null { return true }
+    return v.as_str() == some(String())
+}
+
+// `old` with what defaults.put's `args` change. A field left out stays; in
+// `config`, an option set to null or "" goes back to what the program starts
+// on, and a program set to null loses all of its. Gives the new defaults
+// (without revision, by and at), or why they're refused. Whether `brain` is
+// an installed program the person may use is the instance's to check.
+pub fn apply(old: Json, args: Json) -> Json ! Error {
+    var o = Obj.new()
+    let had = filled(old)
+    for field in FIELDS.split(" ") {
+        o.m.insert(field.copy(), had.get(field.copy()) ?? Json.Null)
+    }
+    if has(args.copy(), "brain") {
+        let v = at(args.copy(), "brain")
+        let brain = text_or(v, "") else fail "brain is the name of an agent program, or null."
+        o.m.insert(String("brain"), Json.Str(brain))
+    }
+    if has(args.copy(), "permission") {
+        let v = at(args.copy(), "permission")
+        let mode = text_or(v, "ask") else fail "permission is ask, auto, allow, or a list of kinds."
+        if not is_mode(mode.copy()) { fail "permission is ask, auto, allow, or a list of kinds such as read,search,edit, not {mode}." }
+        o.m.insert(String("permission"), Json.Str(mode))
+    }
+    if has(args.copy(), "instructions") {
+        let v = at(args.copy(), "instructions")
+        let text = text_or(v, "") else fail "instructions is text."
+        if text.len() > INSTRUCTIONS_MOST { fail "The instructions are over {INSTRUCTIONS_MOST} bytes." }
+        o.m.insert(String("instructions"), Json.Str(text))
+    }
+    if has(args.copy(), "busy") {
+        let v = at(args.copy(), "busy")
+        let busy = text_or(v, "queue") ?? String()
+        if busy != "queue" and busy != "steer" { fail "busy is queue or steer." }
+        o.m.insert(String("busy"), Json.Str(busy))
+    }
+    if has(args.copy(), "config") {
+        let changes = at(args.copy(), "config")
+        var config = LinkedMap<String, Json>()
+        if let Json.Object(c) = at(had.copy(), "config") { config = c.copy() }
+        if let Json.Object(programs) = changes {
+            for (program, options) in programs {
+                if options == Json.Null {
+                    _ = config.remove(program.copy())
+                    continue
+                }
+                let Json.Object(wanted) = options.copy() else fail "config.{program} is an object of option ids and values."
+                var now = LinkedMap<String, Json>()
+                if let Json.Object(c) = config.find(program.copy()) { now = c.copy() }
+                for (id, value) in wanted {
+                    if value == Json.Null or value.as_str() == some(String()) {
+                        _ = now.remove(id.copy())
+                        continue
+                    }
+                    let v = value.as_str() else fail "config.{program}.{id} is a string."
+                    now.insert(id.copy(), Json.Str(v))
+                }
+                if now.len() == 0 {
+                    _ = config.remove(program.copy())
+                } else {
+                    config.insert(program.copy(), Json.Object(now))
+                }
+            }
+        } else if changes != Json.Null {
+            fail "config is an object of programs, each of option ids and values."
+        } else {
+            config = LinkedMap<String, Json>()
+        }
+        o.m.insert(String("config"), Json.Object(config))
+    }
+    return o.done()
+}
+
+// The permission mode an agent works in: its own, or the default's.
+pub fn mode_of(agent: Json, defaults: Json) -> String {
+    if let mode = str_at(agent, "permission") {
+        if mode.len() > 0 { return mode }
+    }
+    let d = str_at(defaults, "permission") ?? String()
+    return if d.len() > 0 { d } else { String("ask") }
+}
+
+// What a message to the agent does while it's answering: its own `busy`, or the default's.
+pub fn busy_of(agent: Json, defaults: Json) -> String {
+    if let busy = str_at(agent, "busy") {
+        if busy.len() > 0 { return busy }
+    }
+    return if str_at(defaults, "busy") == some(String("steer")) { String("steer") } else { String("queue") }
+}
+
+// The options an agent's sessions are set to, by id: the default's for its
+// program, with the agent's own over them. A value its program doesn't offer
+// is passed over when the session is set (acp.config_todo), so the session
+// stays on what the program starts on.
+pub fn config_of(agent: Json, defaults: Json) -> Json {
+    var m = LinkedMap<String, Json>()
+    let program = str_at(agent.copy(), "acp_agent") ?? String()
+    if let Json.Object(per) = at(defaults, "config").get(program) ?? Json.Null {
+        for (k, v) in per { m.insert(k.copy(), v.copy()) }
+    }
+    if let Json.Object(mine) = at(agent, "config") {
+        for (k, v) in mine { m.insert(k.copy(), v.copy()) }
+    }
+    return Json.Object(m)
+}
+
+// The instructions every agent follows, as a session is told them, or "" when there are none.
+pub fn told(defaults: Json) -> String {
+    let text = (str_at(defaults, "instructions") ?? String()).trim().copy()
+    if text.len() == 0 { return String() }
+    return "[loom: Instructions your person gives every agent of theirs. Follow them, as you do your own.\n{text}]"
+}
+
+@test
+fn blank_defaults_ask_and_queue() {
+    let b = blank()
+    assert(str_at(b.copy(), "permission") == some(String("ask")))
+    assert(str_at(b.copy(), "busy") == some(String("queue")))
+    let f = filled(Obj.new().s("busy", String("steer")).i("permission", 3).done())
+    assert(str_at(f.copy(), "busy") == some(String("steer")))
+    assert(str_at(f.copy(), "permission") == some(String("ask")))
+    assert(str_at(f, "instructions") == some(String()))
+}
+
+@test
+fn modes_are_checked() {
+    assert(is_mode(String("ask")) and is_mode(String("auto")) and is_mode(String("allow")))
+    assert(is_mode(String("read, search,edit")))
+    assert(not is_mode(String("")))
+    assert(not is_mode(String("read,everything")))
+}
+
+@test
+fn putting_changes_only_what_it_names() {
+    let first = apply(blank(), Obj.new().s("permission", String("auto")).s("brain", String("claude")).j("config", Obj.new().j("claude", Obj.new().s("model", String("opus")).s("effort", String("high")).done()).done()).done())!
+    assert(str_at(first.copy(), "permission") == some(String("auto")))
+    assert(str_at(first.copy(), "busy") == some(String("queue")))
+    assert("{at(first.copy(), "config")}" == #"{"claude":{"model":"opus","effort":"high"}}"#)
+    let second = apply(first.copy(), Obj.new().j("config", Obj.new().j("claude", Obj.new().j("effort", Json.Null).done()).done()).s("busy", String("steer")).done())!
+    assert("{at(second.copy(), "config")}" == #"{"claude":{"model":"opus"}}"#)
+    assert(str_at(second.copy(), "brain") == some(String("claude")) and str_at(second.copy(), "busy") == some(String("steer")))
+    let third = apply(second, Obj.new().j("config", Obj.new().j("claude", Obj.new().s("model", String()).done()).done()).j("permission", Json.Null).done())!
+    assert("{at(third.copy(), "config")}" == "\{\}")
+    assert(str_at(third, "permission") == some(String("ask")))
+    assert(refused(Obj.new().s("permission", String("sometimes")).done()))
+    assert(refused(Obj.new().s("busy", String("drop")).done()))
+    var long = String()
+    for _ in 0..INSTRUCTIONS_MOST + 1 { long.push_str("x") }
+    assert(refused(Obj.new().s("instructions", long).done()))
+}
+
+@test
+fn an_agent_follows_what_it_hasnt_set() {
+    let d = apply(blank(), Obj.new().s("permission", String("auto")).s("busy", String("steer")).j("config", Obj.new().j("claude", Obj.new().s("model", String("opus")).s("effort", String("high")).done()).done()).done())!
+    let plain = Obj.new().s("acp_agent", String("claude")).done()
+    assert(mode_of(plain.copy(), d.copy()) == "auto")
+    assert(busy_of(plain.copy(), d.copy()) == "steer")
+    assert("{config_of(plain, d.copy())}" == #"{"model":"opus","effort":"high"}"#)
+    let set = Obj.new().s("acp_agent", String("claude")).s("permission", String("ask")).s("busy", String("queue")).j("config", Obj.new().s("effort", String("low")).done()).done()
+    assert(mode_of(set.copy(), d.copy()) == "ask")
+    assert(busy_of(set.copy(), d.copy()) == "queue")
+    assert("{config_of(set, d.copy())}" == #"{"model":"opus","effort":"low"}"#)
+    let codex = Obj.new().s("acp_agent", String("codex")).done()
+    assert("{config_of(codex.copy(), d.copy())}" == "\{\}")
+    assert(mode_of(codex, blank()) == "ask")
+}
+
+@test
+fn null_and_empty_follow_the_default() {
+    let args = Obj.new().j("permission", Json.Null).s("busy", String()).s("name", String("x")).done()
+    assert(follows(args.copy(), "permission") and follows(args.copy(), "busy"))
+    assert(not follows(args.copy(), "name") and not follows(args.copy(), "color"))
+    assert(has(args.copy(), "permission") and not has(args, "color"))
+}
+
+@test
+fn instructions_are_told_under_their_heading() {
+    assert(told(blank()).len() == 0)
+    let said = told(Obj.new().s("instructions", String("  Answer in Norwegian.  ")).done())
+    assert(said.starts_with("[loom: Instructions your person gives every agent") and said.ends_with("\nAnswer in Norwegian.]"))
+}
+
+fn refused(args: Json) -> bool {
+    return match apply(blank(), args) {
+        ok(_) => false,
+        err(_) => true,
+    }
+}

@@ -55,14 +55,24 @@ pub struct Agent {
     pub id: String,
     pub name: String,
     pub color: String,
+    /// Its own permission mode, or "" when it follows the person's default.
     pub permission: String,
+    /// Its own answer to a message while it's busy (queue or steer), or "" when it
+    /// follows the person's default.
+    pub busy: String,
+    /// The program it runs on.
+    pub program: String,
     pub instructions: String,
     /// The names of the person's MCP servers it has.
     pub mcp: Vec<String>,
     /// What its program offers to pick: its model, reasoning effort and the like.
     pub options: Vec<ConfigOption>,
-    /// What the person picked, by option id; the rest are what the program starts on.
+    /// What the person picked, by option id; the rest follow the defaults.
     pub config: Vec<(String, String)>,
+    /// The person's defaults it follows where it has nothing of its own: the picks
+    /// for its program, and the permission mode.
+    pub defaulted: Vec<(String, String)>,
+    pub default_mode: String,
     /// When it was pinned to the top of the list, if it is.
     pub pinned: Option<i64>,
 }
@@ -81,16 +91,38 @@ pub struct ConfigOption {
 }
 
 impl Agent {
-    /// The value option `id` is on: the person's pick, or what the program starts on.
+    /// The value option `id` is on: the agent's own pick, or the person's default for
+    /// its program where the program offers it, or what the program starts on.
     pub fn chosen(&self, id: &str) -> String {
         if let Some((_, v)) = self.config.iter().find(|(k, _)| k == id) {
             return v.clone();
         }
-        self.options
-            .iter()
-            .find(|o| o.id == id)
-            .map(|o| o.default.clone())
-            .unwrap_or_default()
+        self.followed(id)
+    }
+
+    /// The value option `id` is on while it follows the default.
+    pub fn followed(&self, id: &str) -> String {
+        let option = self.options.iter().find(|o| o.id == id);
+        if let Some((_, v)) = self.defaulted.iter().find(|(k, _)| k == id) {
+            if option.is_some_and(|o| o.values.iter().any(|(value, _)| value == v)) {
+                return v.clone();
+            }
+        }
+        option.map(|o| o.default.clone()).unwrap_or_default()
+    }
+
+    /// Whether option `id` follows the default, with no pick of the agent's own.
+    pub fn follows(&self, id: &str) -> bool {
+        !self.config.iter().any(|(k, _)| k == id)
+    }
+
+    /// The permission mode it works in: its own, or the default's.
+    pub fn mode(&self) -> &str {
+        if self.permission.is_empty() {
+            &self.default_mode
+        } else {
+            &self.permission
+        }
     }
 
     /// The options the picker shows: the model, then the reasoning effort.
@@ -159,6 +191,79 @@ fn config_values(a: &Value) -> Vec<(String, String)> {
                 .collect()
         })
         .unwrap_or_default()
+}
+
+/// The person's agent defaults: what every agent of theirs follows where it has
+/// nothing of its own.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Defaults {
+    /// The program a new agent runs on, or "" for none.
+    pub brain: String,
+    /// Per program, the picks its agents start on, by option id.
+    pub config: Vec<(String, Vec<(String, String)>)>,
+    pub permission: String,
+    pub instructions: String,
+    /// "queue" or "steer".
+    pub busy: String,
+    pub revision: i64,
+}
+
+impl Defaults {
+    pub fn of(d: &Value) -> Defaults {
+        let config = d
+            .get("config")
+            .and_then(Value::as_object)
+            .map(|m| {
+                m.iter()
+                    .map(|(program, picks)| {
+                        (program.clone(), config_values(&json!({"config": picks})))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        let or = |v: String, fallback: &str| {
+            if v.is_empty() {
+                fallback.to_string()
+            } else {
+                v
+            }
+        };
+        Defaults {
+            brain: s(d, "brain"),
+            config,
+            permission: or(s(d, "permission"), "ask"),
+            instructions: s(d, "instructions"),
+            busy: or(s(d, "busy"), "queue"),
+            revision: d.get("revision").and_then(Value::as_i64).unwrap_or(0),
+        }
+    }
+
+    /// The picks for `program`'s agents, by option id.
+    pub fn picks(&self, program: &str) -> Vec<(String, String)> {
+        self.config
+            .iter()
+            .find(|(p, _)| p == program)
+            .map(|(_, picks)| picks.clone())
+            .unwrap_or_default()
+    }
+
+    /// The pick for `program`'s option `option`, if there is one.
+    pub fn pick(&self, program: &str, option: &str) -> Option<String> {
+        self.picks(program)
+            .into_iter()
+            .find(|(k, _)| k == option)
+            .map(|(_, v)| v)
+    }
+}
+
+/// What a permission mode is, in words.
+pub fn mode_name(mode: &str) -> &'static str {
+    match mode {
+        "allow" => "Doesn't ask",
+        "auto" => "Asks when it's risky",
+        "ask" | "" => "Asks first",
+        _ => "Allows some kinds",
+    }
 }
 
 /// One of the person's MCP servers.
@@ -1265,6 +1370,12 @@ pub struct Model {
     pub profile: Option<(String, i64, String)>,
     /// The profile came, and the page's text should show it.
     pub profile_came: bool,
+    /// The person's agent defaults, once they've come, asked for on each connect and
+    /// kept up to date by `defaults.updated`.
+    pub defaults: Defaults,
+    defaults_stale: bool,
+    /// The defaults came anew, and the Defaults page's instructions should show them.
+    pub defaults_came: bool,
     /// The agent programs on the instance, for the programs page.
     pub installed: Vec<Program>,
     /// Whether this person is the instance's owner, who gives programs and their settings
@@ -1428,6 +1539,9 @@ impl Model {
         }
         if std::mem::take(&mut self.people_stale) {
             out.extend(self.load_people());
+        }
+        if std::mem::take(&mut self.defaults_stale) {
+            out.push(self.load_defaults());
         }
         if std::mem::take(&mut self.tasks_stale) {
             out.push(self.load_tasks());
@@ -1779,6 +1893,7 @@ impl Model {
             "synced" => {
                 self.synced = true;
                 self.routines_stale = true;
+                self.defaults_stale = true;
                 self.rewatch = true;
                 self.queue_stale = true;
                 self.tasks_stale = true;
@@ -1981,6 +2096,11 @@ impl Model {
             // An agent offered another server, and the person said yes here.
             "server" if kind == "server.offered" && s(f, "by") == self.me => {
                 self.offered.push(s(f, "address"));
+            }
+            "defaults" => {
+                if let Some(d) = f.get("defaults") {
+                    self.take_defaults(d, false);
+                }
             }
             "queue" => {
                 self.queues.insert(s(f, "conversation"), Model::queue_of(f));
@@ -2572,6 +2692,14 @@ impl Model {
                 self.notices.push(s(e, "message"));
             }
             self.notes_stale = true;
+        } else if id.starts_with("app.defaults") {
+            if let Some(e) = f.get("error") {
+                self.notices.push(s(e, "message"));
+                return;
+            }
+            if let Some(d) = f.pointer("/value/defaults") {
+                self.take_defaults(d, id.starts_with("app.defaults_get"));
+            }
         } else if id.starts_with("app.profile") {
             if let Some(e) = f.get("error") {
                 self.notices.push(s(e, "message"));
@@ -2786,6 +2914,10 @@ impl Model {
                         name: s(a, "name"),
                         color: s(a, "color"),
                         permission: s(a, "permission"),
+                        busy: s(a, "busy"),
+                        program: s(a, "acp_agent"),
+                        defaulted: self.defaults.picks(&s(a, "acp_agent")),
+                        default_mode: self.defaults.permission.clone(),
                         instructions: s(a, "instructions"),
                         mcp: a
                             .get("mcp")
@@ -3754,6 +3886,31 @@ impl Model {
     }
 
     /// Asks for the person's profile, for the About you page.
+    /// Asks for the person's agent defaults.
+    pub fn load_defaults(&mut self) -> Value {
+        let id = self.id("app.defaults_get");
+        json!({"t": "cmd", "id": id, "name": "defaults.get"})
+    }
+
+    /// Changes the person's agent defaults: the fields in `args`, the rest as they are.
+    pub fn put_defaults(&mut self, args: Value) -> Value {
+        let id = self.id("app.defaults_put");
+        json!({"t": "cmd", "id": id, "name": "defaults.put", "args": args})
+    }
+
+    /// The defaults came: every agent follows them anew. `fresh` shows their
+    /// instructions on the Defaults page, as they also are when they changed.
+    fn take_defaults(&mut self, d: &Value, fresh: bool) {
+        let now = Defaults::of(d);
+        if fresh || now.instructions != self.defaults.instructions {
+            self.defaults_came = true;
+        }
+        if now != self.defaults {
+            self.defaults = now;
+            self.dirty.insert(List::Agents);
+        }
+    }
+
     pub fn load_profile(&mut self) -> Value {
         let id = self.id("app.profile_get");
         json!({"t": "cmd", "id": id, "name": "profile.get"})
@@ -3828,11 +3985,34 @@ impl Model {
         )
     }
 
-    pub fn set_permission(&mut self, permission: &str) -> Option<Value> {
-        let agent = self.selected.clone()?;
+    /// Sets an agent's permission mode, or with None, has it follow the default.
+    pub fn set_permission(&mut self, agent: &str, permission: Option<&str>) -> Option<Value> {
+        let a = self.agents.iter_mut().find(|a| a.id == agent)?;
+        a.permission = permission.unwrap_or_default().to_string();
         let id = self.id("app.permission");
         Some(
             json!({"t": "cmd", "id": id, "name": "agent.update", "args": {"agent": agent, "permission": permission}}),
+        )
+    }
+
+    /// Sets what a message to an agent while it's busy does, queue or steer, or with
+    /// None, has it follow the default.
+    pub fn set_busy(&mut self, agent: &str, busy: Option<&str>) -> Option<Value> {
+        let a = self.agents.iter_mut().find(|a| a.id == agent)?;
+        a.busy = busy.unwrap_or_default().to_string();
+        let id = self.id("app.busy");
+        Some(
+            json!({"t": "cmd", "id": id, "name": "agent.update", "args": {"agent": agent, "busy": busy}}),
+        )
+    }
+
+    /// Has one of an agent's options, such as its model, follow the default again.
+    pub fn follow_config(&mut self, agent: &str, option: &str) -> Option<Value> {
+        let a = self.agents.iter_mut().find(|a| a.id == agent)?;
+        a.config.retain(|(k, _)| k != option);
+        let id = self.id("app.config");
+        Some(
+            json!({"t": "cmd", "id": id, "name": "agent.update", "args": {"agent": agent, "config": {option: null}}}),
         )
     }
 
@@ -4097,6 +4277,51 @@ mod tests {
             &json!({"t": "core.data", "what": "agents", "items": [{"id": "a_1", "name": "Main"}]}),
         );
         assert_eq!(m.agent("a_1").unwrap().picked(), None);
+    }
+
+    #[test]
+    fn an_agent_follows_the_defaults_it_has_nothing_of_its_own_for() {
+        let mut m = Model::new();
+        let options = json!([
+            {"id": "effort", "name": "Effort", "category": "thought_level", "value": "medium", "options": [{"value": "medium", "name": "Medium"}, {"value": "high", "name": "High"}]},
+            {"id": "model", "name": "Model", "category": "model", "value": "opus", "options": [{"value": "opus", "name": "Opus"}, {"value": "sonnet", "name": "Sonnet"}]}
+        ]);
+        let agents = json!({"t": "core.data", "what": "agents", "items": [
+            {"id": "a_1", "name": "Main", "acp_agent": "claude", "options": options, "config": {"effort": "high"}},
+            {"id": "a_2", "name": "Careful", "acp_agent": "claude", "options": options, "permission": "ask"}
+        ]});
+        m.take(&agents);
+        assert_eq!(
+            m.agent("a_1").unwrap().mode(),
+            "",
+            "before the defaults come"
+        );
+        assert!(m.take(&json!({"t": "event", "kind": "defaults.updated", "defaults": {
+            "brain": "claude", "permission": "auto", "busy": "steer", "instructions": "Be brief.",
+            "config": {"claude": {"model": "sonnet", "effort": "medium"}, "codex": {"model": "gpt"}}
+        }})));
+        assert!(m.defaults_came && m.defaults.busy == "steer");
+        // The instance says the agents changed by sending them again.
+        m.take(&agents);
+        let main = m.agent("a_1").cloned().unwrap();
+        assert_eq!(main.mode(), "auto");
+        assert_eq!(main.picked().as_deref(), Some("Sonnet · High"));
+        assert!(main.follows("model") && !main.follows("effort"));
+        assert_eq!(m.agent("a_2").unwrap().mode(), "ask");
+        // A default its program doesn't offer leaves what the program starts on.
+        m.take(&json!({"t": "event", "kind": "defaults.updated", "defaults": {"config": {"claude": {"model": "haiku"}}}}));
+        m.take(&agents);
+        assert_eq!(m.agent("a_1").unwrap().followed("model"), "opus");
+        assert_eq!(m.agent("a_1").unwrap().mode(), "ask");
+        // Null sends a field back to following the default.
+        let f = m.set_permission("a_2", None).unwrap();
+        assert!(f["args"]["permission"].is_null());
+        assert_eq!(m.agent("a_2").unwrap().permission, "");
+        let f = m.follow_config("a_1", "effort").unwrap();
+        assert!(f["args"]["config"]["effort"].is_null());
+        assert!(m.agent("a_1").unwrap().follows("effort"));
+        let f = m.set_busy("a_1", Some("queue")).unwrap();
+        assert_eq!(f["args"]["busy"], "queue");
     }
 
     #[test]
