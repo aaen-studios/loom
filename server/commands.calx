@@ -35,7 +35,7 @@ const COMMANDS: [Command; 81] = [
     Command { name: "message.pin", args: "message, pinned? (false unpins it)", does: "Pins a message in its conversation, for every device to see." },
     Command { name: "messages.pinned", args: "conversation", does: "The pinned messages in a conversation, the newest pin first." },
     Command { name: "agent.create", args: "name, acp_agent? (left out: the default brain), instructions, mcp? (names of MCP servers), color?", does: "Makes an agent. It starts out asking first." },
-    Command { name: "agent.update", args: #"agent, and what changes: name, instructions, mcp, color, folder, permission (ask, auto or allow), busy (queue or steer), config ({option: value}); null follows the default"#, does: "Changes an agent. A looser permission mode asks the person." },
+    Command { name: "agent.update", args: #"agent, and what changes: name, instructions, mcp, color, folder, permission (ask, auto or allow), busy (queue or steer), config ({option: value}), code_mode (false for plain tools); null follows the default"#, does: "Changes an agent. A looser permission mode asks the person." },
     Command { name: "agent.revisions", args: "agent", does: "Every revision of an agent's instructions." },
     Command { name: "agent.rollback", args: "agent, revision", does: "Puts an agent back as it was at a revision." },
     Command { name: "agent.delete", args: "agent", does: "Deletes an agent." },

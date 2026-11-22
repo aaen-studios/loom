@@ -35,7 +35,7 @@ fn before(i: Instance) -> (String, String) ! Error {
     var app = try App.connect(i.base.copy(), i.token.copy(), 0)
     _ = try app.cmd("q_1", "secret.put", Obj.new().s("name", String("KEY")).s("value", String("s3cret-value")).done())
     _ = try app.cmd("q_2", "mcp.put", Obj.new().s("name", String("tool")).s("command", String("tool-server")).j("env", Obj.new().j("KEY", Obj.new().s("secret", String("KEY")).done()).done()).done())
-    let made = try app.cmd("q_3", "agent.create", Obj.new().s("name", String("Main")).s("acp_agent", String("fake")).s("instructions", String("Test.")).j("mcp", Json.Array([Json.Str(String("tool"))])).done())
+    let made = try app.cmd("q_3", "agent.create", Obj.new().s("name", String("Main")).s("acp_agent", String("fake")).s("instructions", String("Test.")).b("code_mode", false).j("mcp", Json.Array([Json.Str(String("tool"))])).done())
     let agent = str_at(at(at(made, "value"), "agent"), "id") ?? String()
     let c = try app.cmd("q_4", "conversation.create", Obj.new().s("agent", agent).done())
     let conversation = str_at(at(c, "value"), "conversation") ?? String()

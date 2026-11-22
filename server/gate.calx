@@ -2,10 +2,12 @@ module server.gate
 
 // The one way out of a sandbox to the instance (server/sandbox.calx): a
 // listener on 127.0.0.1 that sandboxes reach through pasta (or, for Docker's,
-// on the gateway of its network `loom`), and that passes
-// only `loom mcp`'s two routes, GET /api/mcp/tools and POST /api/mcp/call, on
-// to the instance, with their agent's token. Everything else it turns away,
-// so a sandbox never reaches the instance's sign-in, its sessions or its files.
+// on the gateway of its network `loom`), and that passes only `loom mcp`'s
+// routes on to the instance, with their agent's token: GET /api/mcp/tools and
+// POST /api/mcp/call, and for Code Mode, GET /api/mcp/servers and
+// /api/mcp/deno and POST /api/mcp/allow and /api/mcp/done. Everything else it
+// turns away, so a sandbox never reaches the instance's sign-in, its sessions
+// or its files.
 import std.http.{Header, Request, get, post}
 import std.http.server.{Response, Server}
 import std.http.server
@@ -70,9 +72,9 @@ impl Task for Gate {
             if g.stop.next() != none { break }
             match listening.next_event(10) {
                 some(Request(req)) => {
-                    let tools = req.path == "/api/mcp/tools" and req.method == "GET"
-                    let call = req.path == "/api/mcp/call" and req.method == "POST"
-                    if not tools and not call {
+                    let reads = req.method == "GET" and (req.path == "/api/mcp/tools" or req.path == "/api/mcp/servers" or req.path == "/api/mcp/deno")
+                    let call = req.method == "POST" and (req.path == "/api/mcp/call" or req.path == "/api/mcp/allow" or req.path == "/api/mcp/done")
+                    if not reads and not call {
                         listening.respond(req, refuse("From a sandbox, only loom's tools are reached."))
                         continue
                     }

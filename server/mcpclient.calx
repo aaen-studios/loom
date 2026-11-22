@@ -1,0 +1,212 @@
+module server.mcpclient
+
+// The person's MCP servers and their plugins' tool servers, as `loom mcp`
+// reaches them in Code Mode (PLAN.md, "Code Mode"): there, the agent program
+// isn't given them, so `loom mcp` is their client. A server with a command is
+// started as a child, speaking MCP's JSON-RPC a line at a time on its standard
+// input and output; one with a url is spoken to over MCP's Streamable HTTP.
+// Each is started the first time a script or a search needs the tools, and
+// kept until `loom mcp` ends.
+import std.http.{Header, post}
+import std.json.{Json, parse}
+import std.process.{Child, Command, Stdio}
+import std.time.{Instant}
+import shared.obj.{Obj, at, int_at, str_at}
+
+const PROTOCOL: str = "2025-06-18"
+const START_MS: u64 = 60000
+// A call may take a while: a build, a search across a mailbox.
+pub const CALL_MS: u64 = 600000
+const ANSWER_MOST: usize = 67108864
+
+pub struct Server {
+    pub name: String
+    child: Child?
+    url: String
+    headers: List<Header>
+    session: String    // Mcp-Session-Id, over HTTP
+    next: i64
+}
+
+// [{name, value}], as the instance gives a server's env and headers.
+fn pairs(list: Json) -> List<(String, String)> {
+    var out = List<(String, String)>()
+    if let Json.Array(items) = list {
+        for p in items {
+            out.push((str_at(p.copy(), "name") ?? String(), str_at(p, "value") ?? String()))
+        }
+    }
+    return out
+}
+
+fn millis_since(from: Instant) -> u64 {
+    return unsafe { Instant.now() }.nanos_since(from) / 1000000
+}
+
+// Starts the server `spec` says, as the instance's /api/mcp/servers gives it:
+// {name, command, args, env} or {name, url, headers}, and says initialize.
+pub fn start(spec: Json) -> Server ! Error {
+    let name = str_at(spec.copy(), "name") ?? String()
+    var s = Server { name: name.copy(), child: none, url: String(), headers: List<Header>(), session: String(), next: 0 }
+    if let address = str_at(spec.copy(), "url") {
+        s.url = address
+        for (k, v) in pairs(at(spec.copy(), "headers")) {
+            s.headers.push(Header { name: k.copy(), value: v.copy() })
+        }
+    } else {
+        let command = str_at(spec.copy(), "command") ?? String()
+        if command.len() == 0 { fail "{name} has neither a command nor a url" }
+        var args = List<String>()
+        if let Json.Array(given) = at(spec.copy(), "args") {
+            for a in given {
+                args.push(a.as_str() ?? String())
+            }
+        }
+        // Its own settings on top of this program's environment, as the agent
+        // program would start it, but without loom's token.
+        var c = Command.new(command).args(args).env_remove(String("LOOM_MCP_TOKEN")).env_remove(String("LOOM_URL")).env_remove(String("LOOM_CODE_MODE"))
+        for (k, v) in pairs(at(spec, "env")) {
+            c = c.env(k.copy(), v.copy())
+        }
+        s.child = some(try c.stdin(Stdio.Pipe).stdout(Stdio.Pipe).stderr(Stdio.Null).own_group().spawn())
+    }
+    let info = Obj.new().s("name", String("loom")).s("version", String("1")).done()
+    _ = try s.request("initialize", Obj.new().s("protocolVersion", String(PROTOCOL)).j("capabilities", Obj.new().done()).j("clientInfo", info).done(), START_MS)
+    try s.notify("notifications/initialized")
+    return s
+}
+
+impl Server {
+    // Every tool the server offers, a page at a time.
+    pub fn tools(self: mut Server) -> List<Json> ! Error {
+        var out = List<Json>()
+        var cursor = String()
+        loop {
+            let params = if cursor.len() > 0 { Obj.new().s("cursor", cursor.copy()).done() } else { Obj.new().done() }
+            let r = try self.request("tools/list", params, START_MS)
+            if let Json.Array(page) = at(r.copy(), "tools") {
+                out.extend(page.copy())
+            }
+            cursor = str_at(r, "nextCursor") ?? String()
+            if cursor.len() == 0 or out.len() > 2000 { return out }
+        }
+    }
+
+    // Calls the tool `name`: its MCP result.
+    pub fn call(self: mut Server, name: String, arguments: Json) -> Json ! Error {
+        return try self.request("tools/call", Obj.new().s("name", name).j("arguments", arguments).done(), CALL_MS)
+    }
+
+    pub fn stop(self: Server) {
+        if let c = self.child {
+            var running = c
+            running.kill_tree()
+            _ = running.wait()
+        }
+    }
+
+    fn request(self: mut Server, method: str, params: Json, ms: u64) -> Json ! Error {
+        self.next += 1
+        let id = self.next
+        let m = Obj.new().s("jsonrpc", String("2.0")).i("id", id).s("method", String(method)).j("params", params).done()
+        let answer = if self.url.len() > 0 { try self.over_http(m, id, ms) } else { try self.over_stdio(m, id, ms) }
+        if let e = answer.get(String("error")) {
+            fail "{self.name} answered {method} with an error: {str_at(e, "message") ?? String("no message")}"
+        }
+        return at(answer, "result")
+    }
+
+    fn notify(self: mut Server, method: str) ! Error {
+        let m = Obj.new().s("jsonrpc", String("2.0")).s("method", String(method)).done()
+        if self.url.len() > 0 {
+            _ = try self.over_http(m, -1, START_MS)
+            return
+        }
+        if let c = self.child { try c.write_text("{m}\n") }
+    }
+
+    // A request over stdio: lines are read until the answer to `id` comes.
+    // What the server asks of loom (roots, sampling) it doesn't get.
+    fn over_stdio(self: Server, m: Json, id: i64, ms: u64) -> Json ! Error {
+        let c = self.child else { fail "{self.name} isn't running" }
+        try c.write_text("{m}\n")
+        let began = unsafe { Instant.now() }
+        loop {
+            let spent = millis_since(began)
+            if spent >= ms { fail "{self.name} didn't answer in {ms / 1000} seconds" }
+            let line = c.read_line(ms - spent) else {
+                if c.ended() { fail "{self.name} stopped" }
+                continue
+            }
+            let got = match parse(line) {
+                ok(j) => j,
+                err(_) => continue,
+            }
+            let asked = str_at(got.copy(), "method")
+            if let rid = got.get(String("id")) {
+                if asked != none {
+                    let no = Obj.new().s("jsonrpc", String("2.0")).j("id", rid).j("error", Obj.new().i("code", -32601).s("message", String("loom doesn't offer that")).done()).done()
+                    try c.write_text("{no}\n")
+                    continue
+                }
+                if int_at(got.copy(), "id") == some(id) { return got }
+            }
+        }
+    }
+
+    // A request over Streamable HTTP. The answer is JSON, or an event stream
+    // with the answer among its events.
+    fn over_http(self: mut Server, m: Json, id: i64, ms: u64) -> Json ! Error {
+        var headers = self.headers.copy()
+        headers.push(Header { name: String("Content-Type"), value: String("application/json") })
+        headers.push(Header { name: String("Accept"), value: String("application/json, text/event-stream") })
+        headers.push(Header { name: String("MCP-Protocol-Version"), value: String(PROTOCOL) })
+        if self.session.len() > 0 { headers.push(Header { name: String("Mcp-Session-Id"), value: self.session.copy() }) }
+        var req = post(self.url.copy(), headers, "{m}".to_bytes(), u32.wrap(ms), ANSWER_MOST)
+        let r = try req.wait()
+        var kind = String()
+        for h in r.headers {
+            let n = h.name.to_lower_root()
+            if n == "mcp-session-id" { self.session = h.value.copy() }
+            if n == "content-type" { kind = h.value.to_lower_root() }
+        }
+        if id < 0 { return Json.Null }
+        let text = String.from_utf8(r.body.copy()) ?? String()
+        if r.status != 200 { fail "{self.name} answered {r.status}: {text.trim()}" }
+        if not kind.contains("text/event-stream") { return try parse(text) }
+        return answer_in_stream(text, id) ?? { fail "{self.name}'s event stream had no answer" }
+    }
+}
+
+// The message with `id` among a server-sent event stream's events: each
+// event's data lines, joined.
+fn answer_in_stream(text: String, id: i64) -> Json? {
+    var data = List<String>()
+    var lines = text.replace("\r\n", "\n").split("\n")
+    lines.push(String())
+    for line in lines {
+        if line.starts_with("data:") {
+            data.push(line[5..].trim_start().copy())
+            continue
+        }
+        if line.len() > 0 or data.len() == 0 { continue }
+        let event = data.join("\n")
+        data = List<String>()
+        if let ok(j) = parse(event) {
+            if int_at(j.copy(), "id") == some(id) { return some(j) }
+        }
+    }
+    return none
+}
+
+@test
+fn finds_the_answer_in_a_stream() {
+    let parts: List<str> = ["event: message\n", #"data: {"jsonrpc":"2.0","method":"notifications/progress"}"#, "\n\nevent: message\r\n", #"data: {"jsonrpc":"2.0","id":3,"#, "\r\n", #"data: "result":{}}"#, "\r\n"]
+    var stream = String()
+    for p in parts {
+        stream = "{stream}{p}"
+    }
+    let got = answer_in_stream(stream.copy(), 3) ?? Json.Null
+    assert("{got}" == #"{"jsonrpc":"2.0","id":3,"result":{}}"#)
+    assert(answer_in_stream(stream, 4) == none)
+}

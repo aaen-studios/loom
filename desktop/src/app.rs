@@ -6121,6 +6121,31 @@ ACTA_KEY=secret:ACTA_KEY",
                 })),
             );
         }
+        // Code Mode: its tools reached through scripts, or each given plainly.
+        let code_mode = self
+            .model
+            .editing
+            .as_ref()
+            .and_then(|id| self.model.agent(id))
+            .is_none_or(|a| a.code_mode);
+        let scripts = self.switch_row(
+            "edit-code-mode",
+            "Code Mode",
+            "Uses its tools by writing small scripts, which keeps its context small",
+            code_mode,
+            cx,
+            |this| {
+                let on = this
+                    .model
+                    .editing
+                    .as_ref()
+                    .and_then(|id| this.model.agent(id))
+                    .is_none_or(|a| a.code_mode);
+                if let Some(f) = this.model.set_code_mode(!on) {
+                    this.send(f);
+                }
+            },
+        );
         // Its model and reasoning effort, as the chat's picker has them, once
         // its program has said what it offers; then its permission mode and what a
         // message while it's busy does. Each first offers the person's default, which
@@ -6384,6 +6409,7 @@ ACTA_KEY=secret:ACTA_KEY",
                             .child(files),
                     )
                     .child(self.field("MCP servers", servers))
+                    .child(scripts)
                     .child(group("Does"))
                     .child(div().flex().flex_col().child(routines).child(usage))
                     .when(!self.model.revisions.is_empty(), |d| {

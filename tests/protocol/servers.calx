@@ -57,9 +57,9 @@ fn run(i: Instance) ! Error {
     try check(code(try app.cmd("q_5", "mcp.put", Obj.new().s("name", String("both")).s("command", String("x")).s("url", String("https://x")).done())) == "bad_request", "and a server has a command or a url, not both")
     try check(code(try app.cmd("q_6", "mcp.put", Obj.new().s("name", String("odd")).s("url", String("ftp://x")).done())) == "bad_request", "and a url is http or https")
 
-    let made = try app.cmd("q_7", "agent.create", Obj.new().s("name", String("Main")).s("acp_agent", String("fake")).s("instructions", String("Test.")).j("mcp", Json.Array([Json.Str(String("acta")), Json.Str(String("web"))])).done())
+    let made = try app.cmd("q_7", "agent.create", Obj.new().s("name", String("Main")).s("acp_agent", String("fake")).s("instructions", String("Test.")).b("code_mode", false).j("mcp", Json.Array([Json.Str(String("acta")), Json.Str(String("web"))])).done())
     let main_id = str_at(at(at(made, "value"), "agent"), "id") ?? String()
-    let plain = try app.cmd("q_8", "agent.create", Obj.new().s("name", String("Plain")).s("acp_agent", String("fake")).s("instructions", String("Test.")).done())
+    let plain = try app.cmd("q_8", "agent.create", Obj.new().s("name", String("Plain")).s("acp_agent", String("fake")).s("instructions", String("Test.")).b("code_mode", false).done())
     let plain_id = str_at(at(at(plain, "value"), "agent"), "id") ?? String()
 
     let got = try servers_of(mut app, main_id.copy(), "q_9")

@@ -1,0 +1,570 @@
+module server.codemode
+
+// Code Mode (PLAN.md, "Code Mode"): an agent gets two tools in place of every
+// other. search_tools finds tools and gives each as a TypeScript signature,
+// and run_code runs the agent's script in Deno with no permissions at all: no
+// network, no files, no environment, no programs. The script calls each tool
+// as an async function (`await loom.notify({...})`, `await
+// mcp.github.create_issue({...})`), and each call comes back to `loom mcp`
+// over the script's standard output, as one line of JSON, and is answered on
+// its standard input, so the script never holds a key. Only what the script
+// returns and logs goes back to the agent.
+//
+// Here: the catalog of tools and their signatures, the search, the prelude
+// each script runs with, starting Deno, and what the agent is told. `loom mcp`
+// (server/mcp.calx) runs the script and makes the calls; the instance
+// fetches Deno.
+import std.env
+import std.fs
+import std.json.{Json, parse}
+import std.process.{Child, Command, Stdio}
+import shared.obj.{Obj, at, bool_at, str_at}
+
+// The Deno that runs scripts: a release of denoland/deno, fetched by the
+// instance the first time a script runs, into its acp/ folder, and checked
+// against the SHA-256 GitHub gives for each file.
+pub const DENO_VERSION: str = "2.9.8"
+
+// What a script may do, at most.
+pub const TIME_MS: u64 = 60000          // of its own time, unless it asks for more
+pub const TIME_MOST_MS: u64 = 300000
+pub const CALLS_MOST: usize = 100
+pub const OUTPUT_MOST: usize = 20000    // characters of what it logs and returns
+pub const CODE_MOST: usize = 200000     // bytes of script
+const MEMORY_MB: str = "512"
+
+// The Deno release for `system`, as installer.platform() names it, in the
+// shape installer.install takes; none where Deno has no build.
+pub fn deno_release(system: String) -> Json? {
+    let builds: List<(str, str, str)> = [
+        ("linux-x86_64", "x86_64-unknown-linux-gnu", "e890975bc2549807bbcc0b584ffafda72cc7c93349dd99c80483dd784f6c4609"),
+        ("linux-aarch64", "aarch64-unknown-linux-gnu", "d49596c20b9788cf8f5d8ddf644103d4bde56ed239753f0bdb92ba9361d51905"),
+        ("darwin-x86_64", "x86_64-apple-darwin", "4b2f5edd2639b7470f034238b321d7002d8dfb4726d8558f52c17afac370eb2c"),
+        ("darwin-aarch64", "aarch64-apple-darwin", "9f0bf660393da2eaff044cdc7444cb08c73f235849b61d224d825a194ce7c98e"),
+        ("windows-x86_64", "x86_64-pc-windows-msvc", "cba84b26e0df5ae7f74fc66b86a95b866872a86292ebd84fa1e959927edd93bf"),
+        ("windows-aarch64", "aarch64-pc-windows-msvc", "b413b92b735b50c198e8fe3b85af1aa50e29d5f72e229aab701d132286e14cef"),
+    ]
+    for (s, target, digest) in builds {
+        if system != s { continue }
+        let program = if system.starts_with("windows-") { "deno.exe" } else { "deno" }
+        let address = "https://github.com/denoland/deno/releases/download/v{DENO_VERSION}/deno-{target}.zip"
+        return some(Obj.new().s("kind", String("binary")).s("version", String(DENO_VERSION)).s("archive", address).s("sha256", String(digest)).s("cmd", String(program)).done())
+    }
+    return none
+}
+
+// --- The catalog ---
+
+// A tool a script can call.
+pub struct Tool {
+    pub path: String          // as a script calls it: loom.notify, mcp.github.create_issue
+    pub server: String        // "loom", or the server's name as the instance gives it
+    pub name: String          // the tool's own name, as its server knows it
+    pub description: String
+    pub input: Json           // its arguments, as JSON Schema
+    pub output: Json          // what it gives, where it says
+    pub read_only: bool       // its readOnlyHint
+}
+
+// A name as a script writes it: each character that can't be in a
+// JavaScript name becomes _.
+pub fn ident(name: String) -> String {
+    var out = String()
+    for ch in name.runes() {
+        let fits = (ch >= 'a' and ch <= 'z') or (ch >= 'A' and ch <= 'Z') or (ch >= '0' and ch <= '9') or ch == '_' or ch == '$'
+        out.push(if fits { ch } else { '_' })
+    }
+    if out.len() == 0 { return String("_") }
+    for d in "0123456789".runes() {
+        if out.starts_with("{d}") { return "_{out}" }
+    }
+    return out
+}
+
+// Where a server's tools are, in a script: loom's own under loom, a plugin's
+// (a server named plugin-ID) under plugins.ID, and the rest under mcp.NAME.
+pub fn space_of(server: String) -> String {
+    if server == "loom" { return String("loom") }
+    if server.starts_with("plugin-") { return "plugins.{ident(server[7..].copy())}" }
+    return "mcp.{ident(server)}"
+}
+
+// The tools a server listed, as `tools/list` gave them.
+pub fn tools_of(server: String, listed: List<Json>) -> List<Tool> {
+    let space = space_of(server.copy())
+    var out = List<Tool>()
+    for t in listed {
+        let name = str_at(t.copy(), "name") ?? String()
+        if name.len() == 0 { continue }
+        out.push(Tool { path: "{space}.{ident(name.copy())}", server: server.copy(), name: name, description: str_at(t.copy(), "description") ?? String(), input: at(t.copy(), "inputSchema"), output: at(t.copy(), "outputSchema"), read_only: bool_at(at(t, "annotations"), "readOnlyHint") ?? false })
+    }
+    return out
+}
+
+// The tool a script called by `path`.
+pub fn find(tools: List<Tool>, path: String) -> Tool? {
+    for t in tools {
+        if t.path == path { return some(t.copy()) }
+    }
+    return none
+}
+
+// --- Signatures ---
+
+fn json_text(s: String) -> String {
+    return "{Json.Str(s.copy())}"
+}
+
+// A property's name in a TypeScript object type: as it is, or quoted.
+fn key(name: String) -> String {
+    if ident(name.copy()) == name { return name.copy() }
+    return json_text(name)
+}
+
+fn union(parts: List<String>) -> String {
+    if parts.len() == 0 { return String("any") }
+    return parts.join(" | ")
+}
+
+// The TypeScript type a JSON Schema describes, as near as it goes.
+pub fn ts_type(schema: Json, depth: usize) -> String {
+    if depth > 4 { return String("any") }
+    if let Json.Array(values) = at(schema.copy(), "enum") {
+        var parts = List<String>()
+        for v in values {
+            parts.push("{v}")
+        }
+        return union(parts)
+    }
+    if let c = schema.get(String("const")) { return "{c}" }
+    for word in ["anyOf", "oneOf"] {
+        if let Json.Array(options) = at(schema.copy(), word) {
+            var parts = List<String>()
+            for o in options {
+                parts.push(ts_type(o, depth + 1))
+            }
+            return union(parts)
+        }
+    }
+    let kind = at(schema.copy(), "type")
+    if let Json.Array(kinds) = kind {
+        var parts = List<String>()
+        for k in kinds {
+            parts.push(ts_type(merge_type(schema.copy(), k), depth))
+        }
+        return union(parts)
+    }
+    let k = kind.as_str() ?? String()
+    if k == "string" { return String("string") }
+    if k == "integer" or k == "number" { return String("number") }
+    if k == "boolean" { return String("boolean") }
+    if k == "null" { return String("null") }
+    if k == "array" {
+        let items = at(schema, "items")
+        if items == Json.Null { return String("any[]") }
+        return "Array<{ts_type(items, depth + 1)}>"
+    }
+    if k == "object" or at(schema.copy(), "properties") != Json.Null {
+        return object_type(schema, depth)
+    }
+    return String("any")
+}
+
+// `schema` with its type made the one `kind`, for a type that's a list.
+fn merge_type(schema: Json, kind: Json) -> Json {
+    var o = Obj.new()
+    if let Json.Object(m) = schema {
+        for (k, v) in m {
+            o.m.insert(k.copy(), v.copy())
+        }
+    }
+    o.m.insert(String("type"), kind.copy())
+    return o.done()
+}
+
+fn required_of(schema: Json) -> List<String> {
+    var out = List<String>()
+    if let Json.Array(names) = at(schema, "required") {
+        for n in names {
+            out.push(n.as_str() ?? String())
+        }
+    }
+    return out
+}
+
+fn object_type(schema: Json, depth: usize) -> String {
+    let required = required_of(schema.copy())
+    var fields = List<String>()
+    if let Json.Object(props) = at(schema.copy(), "properties") {
+        for (name, p) in props {
+            let mark = if required.contains(name.copy()) { "" } else { "?" }
+            fields.push("{key(name.copy())}{mark}: {ts_type(p.copy(), depth + 1)}")
+        }
+    }
+    let more = at(schema, "additionalProperties")
+    if fields.len() == 0 {
+        if let Json.Object(_) = more.copy() { return "Record<string, {ts_type(more, depth + 1)}>" }
+        return String("Record<string, any>")
+    }
+    return "\{ {fields.join("; ")} \}"
+}
+
+// A tool as search_tools gives it: its signature, what it does, and what each
+// argument is for.
+pub fn signature(t: Tool) -> String {
+    let required = required_of(t.input.copy())
+    let args = ts_type(t.input.copy(), 0)
+    let optional = if required.len() == 0 { "?" } else { "" }
+    let gives = if t.output == Json.Null { String("any") } else { ts_type(t.output.copy(), 0) }
+    var lines: List<String> = ["{t.path}(args{optional}: {args}): Promise<{gives}>"]
+    let about = t.description.trim().copy()
+    if about.len() > 0 { lines.push("  {cut(about.replace("\n", " "), 600)}") }
+    if let Json.Object(props) = at(t.input.copy(), "properties") {
+        for (name, p) in props {
+            if let d = str_at(p.copy(), "description") { lines.push("  - {name}: {cut(d.replace("\n", " "), 300)}") }
+        }
+    }
+    if t.read_only { lines.push(String("  Only reads.")) }
+    return lines.join("\n")
+}
+
+// --- The search ---
+
+fn words(text: String) -> List<String> {
+    var out = List<String>()
+    var word = String()
+    for ch in text.to_lower_root().runes() {
+        if (ch >= 'a' and ch <= 'z') or (ch >= '0' and ch <= '9') or ch > '\u{7f}' {
+            word.push(ch)
+        } else if word.len() > 0 {
+            out.push(word.copy())
+            word = String()
+        }
+    }
+    if word.len() > 0 { out.push(word) }
+    return out
+}
+
+// How well `t` matches the words: each in its name counts three, and each in
+// what it does, one. A word matches the start of another, so "notif" finds
+// notify.
+fn score(t: Tool, wanted: List<String>) -> i64 {
+    let named = words(t.path.copy())
+    let about = words(t.description.copy())
+    var total: i64 = 0
+    for w in wanted {
+        for n in named {
+            if n.starts_with(w.copy()) {
+                total += 3
+                break
+            }
+        }
+        for a in about {
+            if a.starts_with(w.copy()) {
+                total += 1
+                break
+            }
+        }
+    }
+    return total
+}
+
+// search_tools: the tools that best match `query`, up to `limit`, or every
+// tool's name for an empty query. `trouble` says which servers didn't start.
+pub fn search(tools: List<Tool>, query: String, limit: usize, trouble: List<String>) -> String {
+    var out = List<String>()
+    let q = query.trim().copy()
+    if q.len() == 0 {
+        var names = List<String>()
+        for t in tools {
+            names.push(t.path.copy())
+        }
+        out.push("Every tool, {tools.len()} of them. Search with words to get their signatures.\n\n{names.join("\n")}")
+    } else if let exact = find(tools.copy(), q.copy()) {
+        out.push(signature(exact))
+    } else {
+        let wanted = words(q.copy())
+        var scored = List<(i64, usize)>()
+        var n: usize = 0
+        for t in tools {
+            let s = score(t.copy(), wanted.copy())
+            if s > 0 { scored.push((s, n)) }
+            n += 1
+        }
+        // Best first, and in the catalog's order among equals.
+        var picked = List<usize>()
+        while picked.len() < limit {
+            var best: i64 = 0
+            var at_best: usize = 0
+            for (s, k) in scored {
+                if s > best and not picked.contains(k) {
+                    best = s
+                    at_best = k
+                }
+            }
+            if best == 0 { break }
+            picked.push(at_best)
+        }
+        if picked.len() == 0 {
+            out.push("No tool matches {q}. Search with other words, or with none for every tool's name.")
+        } else {
+            var listed = List<String>()
+            for k in picked {
+                listed.push(signature(tools[k].copy()))
+            }
+            out.push("{picked.len()} of {scored.len()} matching tools. Call them in run_code, with await.\n\n{listed.join("\n\n")}")
+        }
+    }
+    if trouble.len() > 0 { out.push("Not reached: {trouble.join("; ")}") }
+    return out.join("\n\n")
+}
+
+// --- Running a script ---
+
+// The prelude every script imports: loom, mcp and plugins, whose functions
+// each send a call on standard output and wait for its answer on standard
+// input, and console, whose lines go to loom mcp as what the script logged.
+// Generated here, so loom's code stays Calx; it's the same for every script.
+pub const PRELUDE: str = ##"
+    const enc = new TextEncoder();
+    function send(m) {
+      const b = enc.encode(JSON.stringify(m) + "\n");
+      let o = 0;
+      while (o < b.length) o += Deno.stdout.writeSync(b.subarray(o));
+    }
+    const waiting = new Map();
+    let next = 0;
+    (async () => {
+      const dec = new TextDecoder();
+      let buf = "";
+      for await (const chunk of Deno.stdin.readable) {
+        buf += dec.decode(chunk, { stream: true });
+        let n;
+        while ((n = buf.indexOf("\n")) >= 0) {
+          const line = buf.slice(0, n);
+          buf = buf.slice(n + 1);
+          if (!line.trim()) continue;
+          const m = JSON.parse(line);
+          const w = waiting.get(m.id);
+          if (!w) continue;
+          waiting.delete(m.id);
+          if (m.ok) w.resolve(m.value); else w.reject(new Error(m.error));
+        }
+      }
+    })();
+    function call(tool, args) {
+      const id = ++next;
+      return new Promise((resolve, reject) => {
+        waiting.set(id, { resolve, reject });
+        send({ t: "call", id, tool, args: args === undefined ? {} : args });
+      });
+    }
+    function space(prefix) {
+      return new Proxy({}, {
+        get(_, name) {
+          if (typeof name !== "string" || name === "then") return undefined;
+          return (args) => call(prefix + name, args);
+        },
+      });
+    }
+    function spaces(prefix) {
+      return new Proxy({}, {
+        get(_, name) {
+          if (typeof name !== "string" || name === "then") return undefined;
+          return space(prefix + name + ".");
+        },
+      });
+    }
+    export const loom = space("loom.");
+    export const mcp = spaces("mcp.");
+    export const plugins = spaces("plugins.");
+    function show(v) {
+      if (typeof v === "string") return v;
+      if (v instanceof Error) return String(v.stack || v);
+      try { const s = JSON.stringify(v, null, 2); return s === undefined ? String(v) : s; } catch { return String(v); }
+    }
+    const log = (...xs) => send({ t: "log", text: xs.map(show).join(" ") });
+    for (const k of ["log", "info", "debug", "warn", "error", "trace", "dir", "table"]) console[k] = log;
+    export async function __run(f) {
+      try {
+        const v = await f();
+        let value = null;
+        try { value = v === undefined ? null : JSON.parse(JSON.stringify(v)); } catch { value = String(v); }
+        send({ t: "end", ok: true, value });
+      } catch (e) {
+        send({ t: "end", ok: false, error: show(e) });
+      }
+      Deno.exit(0);
+    }
+    "##
+
+// The script's own file: the prelude imported and the code in a function,
+// with the code from its second line.
+pub fn script_text(code: String) -> String {
+    return "import \{ loom, mcp, plugins, __run \} from \"./loom.js\"; await __run(async () => \{\n{code}\n\});\n"
+}
+
+// Starts `code` in Deno, in `folder` (made for this script alone), as its
+// `n`th script. Deno is given no permission, and asked for none: it reads only
+// the script and the prelude, the module loader's, and nothing from the
+// network or npm. Its environment is only what it needs to start.
+pub fn start(deno: String, folder: String, n: i64, code: String) -> Child ! Error {
+    let prelude = "{folder}/loom.js"
+    if not fs.exists(prelude.copy()) { try fs.write_text(prelude, String(PRELUDE)) }
+    let file = "{folder}/run-{n}.ts"
+    try fs.write_text(file.copy(), script_text(code))
+    let args: List<String> = [String("run"), String("--quiet"), String("--no-prompt"), String("--no-remote"), String("--no-npm"), String("--no-config"), String("--no-lock"), String("--no-check"), "--v8-flags=--max-old-space-size={MEMORY_MB}", file]
+    var c = Command.new(deno).args(args).dir(folder.copy()).env_clear().env(String("DENO_DIR"), "{folder}/deno").env(String("NO_COLOR"), String("1")).env(String("DENO_NO_UPDATE_CHECK"), String("1"))
+    // Windows's own folder, which programs there need to start.
+    for name in ["SystemRoot", "SYSTEMROOT", "TEMP", "TMP"] {
+        if let v = env.variable(String(name)) { c = c.env(String(name), v) }
+    }
+    return try c.stdin(Stdio.Pipe).stdout(Stdio.Pipe).stderr(Stdio.Pipe).own_group().spawn()
+}
+
+// What Deno said about the script, with each place in the script's file
+// (file:///…/run-3.ts:5:9) given as the line of the agent's code (line 4:9).
+pub fn places_fixed(text: String, n: i64) -> String {
+    let mark = "run-{n}.ts:"
+    var out = String()
+    var rest = text.copy()
+    while let k = rest.find(mark.copy()) {
+        // The place starts after the space or bracket before it.
+        var from: usize = 0
+        var j: usize = 0
+        for ch in rest[..k].runes() {
+            j += "{ch}".len()
+            if ch == ' ' or ch == '(' or ch == '\n' or ch == '"' { from = j }
+        }
+        out = "{out}{rest[..from]}"
+        var digits = String()
+        var after = k + mark.len()
+        for ch in rest[after..].runes() {
+            if ch < '0' or ch > '9' { break }
+            digits.push(ch)
+        }
+        after += digits.len()
+        let line = i64.parse(digits.copy()) ?? 0
+        out = if line > 1 { "{out}line {line - 1}" } else { "{out}the start" }
+        rest = rest[after..].copy()
+    }
+    return "{out}{rest}"
+}
+
+// At most `most` characters of `text`, saying how many more there were.
+pub fn cut(text: String, most: usize) -> String {
+    var n: usize = 0
+    var end: usize = 0
+    for ch in text.runes() {
+        if n == most {
+            var left: usize = 0
+            for _ in text[end..].runes() { left += 1 }
+            return "{text[..end]}… ({left} more characters cut)"
+        }
+        n += 1
+        end += "{ch}".len()
+    }
+    return text.copy()
+}
+
+// What a tool's MCP result is, in a script: its structured content if it has
+// some, else its text, as JSON where it parses, else the content itself.
+pub fn value_of(result: Json) -> Json {
+    let structured = at(result.copy(), "structuredContent")
+    if structured != Json.Null { return structured }
+    var texts = List<String>()
+    var other = false
+    if let Json.Array(parts) = at(result.copy(), "content") {
+        for p in parts {
+            match str_at(p.copy(), "text") {
+                some(t) => texts.push(t),
+                none => other = true,
+            }
+        }
+    }
+    if other { return at(result, "content") }
+    let text = texts.join("\n")
+    if let ok(j) = parse(text.copy()) { return j }
+    return Json.Str(text)
+}
+
+// The words a failed MCP result gives.
+pub fn error_of(result: Json) -> String {
+    var texts = List<String>()
+    if let Json.Array(parts) = at(result, "content") {
+        for p in parts {
+            if let t = str_at(p, "text") { texts.push(t) }
+        }
+    }
+    return if texts.len() == 0 { String("it failed, and didn't say why") } else { texts.join("\n") }
+}
+
+// What the agent is told of a run: what it logged, then what it returned or
+// why it failed, cut at OUTPUT_MOST.
+pub fn told(logged: List<String>, failed: bool, said: String) -> String {
+    var parts = List<String>()
+    if logged.len() > 0 { parts.push("Logged:\n{logged.join("\n")}") }
+    if failed {
+        parts.push("The script failed: {said}")
+    } else if said.len() > 0 and said != "null" {
+        parts.push("Returned:\n{said}")
+    } else if logged.len() == 0 {
+        parts.push(String("The script ran, and returned nothing."))
+    }
+    return cut(parts.join("\n\n"), OUTPUT_MOST)
+}
+
+// What a script returned, as the agent reads it: text as it is, the rest as JSON.
+pub fn shown(value: Json) -> String {
+    if let s = value.as_str() { return s }
+    return "{value}"
+}
+
+@test
+fn names_fit_a_script() {
+    assert(ident(String("create-issue")) == "create_issue" and ident(String("2fa")) == "_2fa" and ident(String("a.b")) == "a_b")
+    assert(space_of(String("loom")) == "loom" and space_of(String("plugin-build-board")) == "plugins.build_board" and space_of(String("acta")) == "mcp.acta")
+}
+
+@test
+fn signatures_come_from_schemas() {
+    let listed = parse(#"[{"name":"create-issue","description":"Opens an issue.","inputSchema":{"type":"object","properties":{"title":{"type":"string","description":"Its title."},"labels":{"type":"array","items":{"type":"string"}},"state":{"enum":["open","closed"]},"weight":{"type":["integer","null"]}},"required":["title"]},"annotations":{"readOnlyHint":false}},{"name":"list","inputSchema":{"type":"object"},"annotations":{"readOnlyHint":true}}]"#)!
+    var tools = List<Json>()
+    if let Json.Array(l) = listed { tools = l.copy() }
+    let catalog = tools_of(String("github"), tools)
+    let s = signature(catalog[0].copy())
+    assert(s.starts_with(#"mcp.github.create_issue(args: { title: string; labels?: Array<string>; state?: "open" | "closed"; weight?: number | null }): Promise<any>"#))
+    assert(s.contains("  Opens an issue.") and s.contains("  - title: Its title."))
+    assert(signature(catalog[1].copy()) == "mcp.github.list(args?: Record<string, any>): Promise<any>\n  Only reads.")
+    assert(find(catalog.copy(), String("mcp.github.list")) != none and find(catalog, String("mcp.github.nope")) == none)
+}
+
+@test
+fn searches_by_words() {
+    let listed = parse(#"[{"name":"notify","description":"Sends your person a notification."},{"name":"recall","description":"Searches your notes."},{"name":"remember","description":"Keeps a note."}]"#)!
+    var tools = List<Json>()
+    if let Json.Array(l) = listed { tools = l.copy() }
+    let catalog = tools_of(String("loom"), tools)
+    let found = search(catalog.copy(), String("notification"), 10, List<String>())
+    assert(found.starts_with("1 of 1 matching tools") and found.contains("loom.notify(args?: any): Promise<any>"))
+    let notes = search(catalog.copy(), String("note"), 1, List<String>())
+    assert(notes.starts_with("1 of 2 matching tools") and notes.contains("loom.recall"))
+    assert(search(catalog.copy(), String(""), 10, [String("acta: it didn't start")]).contains("loom.notify\nloom.recall\nloom.remember\n\nNot reached: acta: it didn't start"))
+    assert(search(catalog, String("loom.remember"), 10, List<String>()).starts_with("loom.remember("))
+}
+
+@test
+fn places_are_lines_of_the_code() {
+    let said = String("error: Uncaught (in promise) Error: no\n    at file:///C:/t/run-2.ts:4:9\n    at __run (file:///C:/t/loom.js:70:23)")
+    assert(places_fixed(said, 2) == "error: Uncaught (in promise) Error: no\n    at line 3:9\n    at __run (file:///C:/t/loom.js:70:23)")
+}
+
+@test
+fn results_become_values() {
+    assert("{value_of(parse(#"{"content":[{"type":"text","text":"{\"a\":1}"}]}"#)!)}" == #"{"a":1}"#)
+    assert(value_of(parse(#"{"content":[{"type":"text","text":"hello"}]}"#)!) == Json.Str(String("hello")))
+    assert("{value_of(parse(#"{"content":[],"structuredContent":{"n":2}}"#)!)}" == #"{"n":2}"#)
+    assert(cut(String("abcdef"), 3) == "abc… (3 more characters cut)" and cut(String("abc"), 3) == "abc")
+    assert(told(List<String>(), false, String("null")) == "The script ran, and returned nothing.")
+    assert(told([String("hi")], true, String("boom")) == "Logged:\nhi\n\nThe script failed: boom")
+}
