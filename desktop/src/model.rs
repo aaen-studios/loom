@@ -150,8 +150,9 @@ impl Agent {
         }
         out
     }
-
-    /// What the picker button says, as "Opus · High"; None when there's nothing to pick.
+    /// What the header's brain chip says, as "Opus · High"; None when there's nothing
+    /// What the header's chips say together, as "Opus · High"; None when there's nothing
+    /// to pick.
     pub fn picked(&self) -> Option<String> {
         let names: Vec<String> = self
             .picks()

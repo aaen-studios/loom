@@ -116,6 +116,7 @@ enum Screen {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Menu {
     Agent,
+    /// The agent's brain: its program's settings, such as its model and effort.
     Model,
     Permission,
 }
@@ -5121,7 +5122,6 @@ ACTA_KEY=secret:ACTA_KEY",
                     .justify_center()
                     .child(self.bar_button(true, cx)),
             )
-            .child(self.new_agent_button("rail-new-agent", RAIL_ROW, cx))
             .child(
                 div()
                     .id("rail-list")
@@ -5530,38 +5530,7 @@ ACTA_KEY=secret:ACTA_KEY",
                 .gap(px(space::L))
                 .when(pinned > 0 || pins_open, |d| d.child(pins))
                 .when(browsing || watching, |d| d.child(globe))
-                .when_some(agent.picked(), |d, picked| {
-                    d.child(
-                        div()
-                            .id("model-menu")
-                            .occlude()
-                            .px(px(space::S))
-                            .py(px(space::XS))
-                            .rounded(px(radius::ROW))
-                            .text_size(px(size::CAPTION))
-                            .text_color(p.ink_2)
-                            .cursor_pointer()
-                            .soft_hover(transparent_black(), p.hover, None)
-                            .when(self.menu == Some(Menu::Model), |d| d.bg(p.hover))
-                            .flex()
-                            .items_center()
-                            .gap(px(space::XS))
-                            .child(picked)
-                            .child(
-                                Icon::new(IconName::ChevronDown)
-                                    .xsmall()
-                                    .text_color(p.ink_3),
-                            )
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.menu = if this.menu == Some(Menu::Model) {
-                                    None
-                                } else {
-                                    Some(Menu::Model)
-                                };
-                                cx.notify();
-                            })),
-                    )
-                })
+                .children(self.brain_chip(&agent, cx))
                 .child(
                     div()
                         .id("permission-menu")
@@ -5783,16 +5752,84 @@ ACTA_KEY=secret:ACTA_KEY",
         })
     }
 
-    /// The model picker's list: each option the agent's program offers (its model,
-    /// then its reasoning effort) under its name, first following the default, then
-    /// each value, the one it's on ticked.
-    fn model_picks(&self, agent: &model::Agent, cx: &mut Context<Self>) -> Div {
+    /// The header's brain chip: the program's icon and what the agent is set to on it,
+    /// such as "Opus 5.5 · Medium". It opens one menu just under it, with each setting
+    /// the program offers (its model, then its effort) under its name.
+    fn brain_chip(&self, agent: &model::Agent, cx: &mut Context<Self>) -> Option<Stateful<Div>> {
         let p = self.p;
-        let mut list = div().flex().flex_col();
+        let picked = agent.picked()?;
+        let listed = self.model.program_listed(&agent.program).cloned();
+        let open = self.menu == Some(Menu::Model);
+        let menu = open.then(|| self.brain_menu(agent, cx));
+        Some(
+            div()
+                .id("brain-chip")
+                .relative()
+                .occlude()
+                .px(px(space::S))
+                .py(px(space::XS))
+                .rounded(px(radius::ROW))
+                .text_size(px(size::CAPTION))
+                .text_color(p.ink_2)
+                .cursor_pointer()
+                .soft_hover(transparent_black(), p.hover, None)
+                .when(open, |d| d.bg(p.hover))
+                .flex()
+                .items_center()
+                .gap(px(space::XS + 2.0))
+                .child(self.brain_icon(listed.as_ref(), 12.0))
+                .child(picked)
+                .child(
+                    Icon::new(IconName::ChevronDown)
+                        .xsmall()
+                        .text_color(p.ink_3),
+                )
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.menu = if this.menu == Some(Menu::Model) {
+                        None
+                    } else {
+                        Some(Menu::Model)
+                    };
+                    cx.notify();
+                }))
+                .when_some(menu, |d, menu| {
+                    d.child(
+                        div().absolute().bottom_0().right_0().child(deferred(
+                            anchored()
+                                .anchor(Anchor::TopRight)
+                                .snap_to_window_with_margin(px(space::S))
+                                .child(div().pt(px(space::XS)).child(menu)),
+                        )),
+                    )
+                }),
+        )
+    }
+
+    /// The brain chip's menu: each setting under its name, with the person's default
+    /// marked on its choice. Picking that one has the agent follow the default, and
+    /// picking another gives it its own.
+    fn brain_menu(&self, agent: &model::Agent, cx: &mut Context<Self>) -> Div {
+        let p = self.p;
+        let mut panel = div()
+            .occlude()
+            .min_w(px(220.0))
+            .p(px(space::XS))
+            .flex()
+            .flex_col()
+            .bg(p.raised)
+            .border_1()
+            .border_color(p.line_strong)
+            .rounded(px(radius::CARD))
+            .shadow_lg()
+            .on_mouse_down_out(cx.listener(|this, _, _, cx| {
+                this.menu = None;
+                cx.notify();
+            }));
         for (n, o) in agent.picks().into_iter().enumerate() {
             let follows = agent.follows(&o.id);
             let on = agent.chosen(&o.id);
-            list = list.child(
+            let default = agent.followed(&o.id);
+            panel = panel.child(
                 div()
                     .px(px(space::M))
                     .pt(px(if n == 0 { space::XS } else { space::M }))
@@ -5801,27 +5838,19 @@ ACTA_KEY=secret:ACTA_KEY",
                     .text_color(p.ink_3)
                     .child(o.name.clone()),
             );
-            let (agent_id, option) = (agent.id.clone(), o.id.clone());
-            list = list.child(
-                self.pick_row(
-                    format!("pick-{}-default", o.id),
-                    format!("Default: {}", value_name(&o, &agent.followed(&o.id))),
-                    follows,
-                )
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    if let Some(f) = this.model.follow_config(&agent_id, &option) {
-                        this.send(f);
-                    }
-                    cx.notify();
-                })),
-            );
             for (value, name) in o.values.clone() {
                 let (agent_id, option) = (agent.id.clone(), o.id.clone());
-                let picked = !follows && value == on;
-                list = list.child(
-                    self.pick_row(format!("pick-{}-{value}", o.id), name, picked)
+                let is_default = value == default;
+                let picked = if follows { is_default } else { value == on };
+                panel = panel.child(
+                    self.pick_row(format!("pick-{}-{value}", o.id), name, picked, is_default)
                         .on_click(cx.listener(move |this, _, _, cx| {
-                            if let Some(f) = this.model.set_config(&agent_id, &option, &value) {
+                            let f = if is_default {
+                                this.model.follow_config(&agent_id, &option)
+                            } else {
+                                this.model.set_config(&agent_id, &option, &value)
+                            };
+                            if let Some(f) = f {
                                 this.send(f);
                             }
                             cx.notify();
@@ -5829,11 +5858,12 @@ ACTA_KEY=secret:ACTA_KEY",
                 );
             }
         }
-        list
+        panel
     }
 
-    /// One choice in the model picker, ticked when it's the one.
-    fn pick_row(&self, id: String, label: String, picked: bool) -> Stateful<Div> {
+    /// One choice in a setting's menu, ticked when it's the one, and saying so beside
+    /// the person's default.
+    fn pick_row(&self, id: String, label: String, picked: bool, default: bool) -> Stateful<Div> {
         let p = self.p;
         div()
             .id(SharedString::from(id))
@@ -5848,6 +5878,14 @@ ACTA_KEY=secret:ACTA_KEY",
             .text_color(p.ink)
             .soft_hover(transparent_black(), p.hover, None)
             .child(div().flex_1().child(label))
+            .when(default, |d| {
+                d.child(
+                    div()
+                        .text_size(px(size::CAPTION))
+                        .text_color(p.ink_3)
+                        .child("default"),
+                )
+            })
             .when(picked, |d| {
                 d.child(
                     div()
@@ -6263,17 +6301,8 @@ ACTA_KEY=secret:ACTA_KEY",
                         cx.notify();
                     })),
                 ),
-            Menu::Model => {
-                let agent = self
-                    .model
-                    .selected
-                    .as_ref()
-                    .and_then(|id| self.model.agent(id))
-                    .cloned()?;
-                panel
-                    .right(px(space::S))
-                    .child(self.model_picks(&agent, cx))
-            }
+            // It opens under the brain chip in the header (`brain_chip`).
+            Menu::Model => return None,
             Menu::Permission => {
                 let default_title = format!(
                     "Default: {}",
