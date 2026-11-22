@@ -6,8 +6,9 @@ module server.mcp
 // environment. It asks the instance for the tools and hands each call to it,
 // so what an agent may do is decided there, with its person's rights.
 //
-// In Code Mode (PLAN.md, "Code Mode"), with LOOM_CODE_MODE=1, it offers only
-// search_tools and run_code, and is itself the client of the agent's MCP
+// In Code Mode (PLAN.md, "Code Mode"), with LOOM_CODE_MODE=1, it offers
+// search_tools and run_code, with loom's tools that reach the person's app and
+// devices beside them (tools.DIRECT_TOOLS), and is itself the client of the agent's MCP
 // servers and its person's plugins' tool servers, which the instance gives it
 // and the agent program isn't given. A script's calls come here, and go to the
 // instance (loom's own tools) or to the server, once the instance says the
@@ -304,7 +305,7 @@ fn handle(link: Link, c: mut Code, m: Json) {
         reply(id, Obj.new().done())
     } else if method == "tools/list" {
         if c.on {
-            reply(id, Obj.new().j("tools", Json.Array(tools.code_tools())).done())
+            reply(id, Obj.new().j("tools", Json.Array(tools.code_mode_tools())).done())
             return
         }
         match link.tools() {
