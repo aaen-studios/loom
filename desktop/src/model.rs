@@ -1505,6 +1505,25 @@ pub enum Part {
     Quiet(String),
 }
 
+/// What Copy puts on the clipboard for a message: the words it shows, a paragraph each.
+/// For a reply that's its answer, not what it said on the way, folded under it.
+pub fn copy_text(m: &Message, tools: &[Tool]) -> String {
+    let shows = Shows {
+        tools: false,
+        thoughts: false,
+    };
+    parts(m, tools, shows)
+        .iter()
+        .filter_map(|part| match part {
+            Part::Bubbles(run) => Some(run),
+            _ => None,
+        })
+        .flatten()
+        .map(|&i| m.blocks[i].text.trim())
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
 /// A tool call's title, as its agent named it.
 pub fn tool_title(call: Option<&String>, tools: &[Tool]) -> String {
     call.and_then(|c| tools.iter().find(|t| &t.call == c))
@@ -1711,6 +1730,61 @@ pub fn person_joins(rows: &[Option<&Message>]) -> Vec<Joined> {
             }
         })
         .collect()
+}
+
+/// How long a pause between messages has a time line drawn across the chat.
+pub const LINE_GAP_MS: i64 = 30 * 60 * 1000;
+
+/// How one of the chat's rows sits among the rows around it.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub struct Flow {
+    pub joined: Joined,
+    /// A time line goes above it: it's the chat's first message, or it came on a new
+    /// day or after a pause of [`LINE_GAP_MS`] or more.
+    pub line: bool,
+    /// A reply that has its agent's name above it: the first reply since the last time
+    /// line. The rest of a stretch go without, since the name would say nothing new.
+    pub head: bool,
+}
+
+/// How each of the chat's rows sits among the rows around it (`None` for a row that
+/// isn't a message). `day` gives the day a time falls on, in the person's own time zone.
+/// Bubbles don't join across a time line. A message still waiting in the outbox has
+/// no time line of its own.
+pub fn flow(rows: &[Option<&Message>], day: impl Fn(i64) -> i64) -> Vec<Flow> {
+    let joins = person_joins(rows);
+    let mut out: Vec<Flow> = joins
+        .into_iter()
+        .map(|joined| Flow {
+            joined,
+            ..Flow::default()
+        })
+        .collect();
+    let mut last: Option<i64> = None;
+    let mut replied = false;
+    for (i, row) in rows.iter().enumerate() {
+        let Some(m) = row else { continue };
+        if !m.queued && m.at > 0 {
+            let line = match last {
+                None => true,
+                Some(t) => m.at - t >= LINE_GAP_MS || day(m.at) != day(t),
+            };
+            if line {
+                out[i].line = true;
+                out[i].joined.above = false;
+                if i > 0 {
+                    out[i - 1].joined.below = false;
+                }
+                replied = false;
+            }
+            last = Some(m.at);
+        }
+        if m.role != "person" {
+            out[i].head = !replied;
+            replied = true;
+        }
+    }
+    out
 }
 
 #[derive(Clone, Debug)]
@@ -5608,7 +5682,7 @@ mod tests {
         assert_eq!(corners(false, Joined::at(0, 3)), c(J, B, B, J));
         assert_eq!(corners(false, Joined::at(1, 3)), c(J, B, B, J));
         assert_eq!(corners(false, Joined::at(2, 3)), c(J, B, B, B));
-        assert!(J < B);
+        const { assert!(J < B) };
     }
 
     #[test]
@@ -5643,6 +5717,63 @@ mod tests {
             j,
             vec![first, last, alone, alone, alone, alone, alone, alone]
         );
+    }
+
+    #[test]
+    fn copy_takes_a_messages_words_and_a_replys_answer() {
+        let person = Message {
+            role: "person".into(),
+            ..turn(&["text:One", "text:Two "], false, "")
+        };
+        assert_eq!(copy_text(&person, &[]), "One\n\nTwo");
+        let reply = turn(
+            &["text:Looking.", "tool:", "text:Here it is."],
+            false,
+            "done",
+        );
+        assert_eq!(copy_text(&reply, &[]), "Here it is.");
+    }
+
+    #[test]
+    fn a_time_line_goes_where_the_chat_paused_and_a_reply_is_named_once_after_it() {
+        const MIN: i64 = 60 * 1000;
+        let at = |m: Message, at: i64| Message { at, ..m };
+        let person = |text: &str| Message {
+            role: "person".into(),
+            ..turn(&[text], false, "")
+        };
+        let reply = || turn(&["text:Hi."], false, "done");
+        // A day is 1000 minutes here, so the last message is on a new day.
+        let start = 10 * MIN;
+        let rows = [
+            at(person("text:One"), start),
+            at(reply(), start + MIN),
+            at(person("text:Two"), start + 2 * MIN),
+            at(reply(), start + 3 * MIN),
+            at(person("text:Three"), start + 40 * MIN),
+            at(person("text:Four"), start + 41 * MIN),
+            at(reply(), start + 42 * MIN),
+            Message {
+                queued: true,
+                ..at(person("text:Waiting"), 0)
+            },
+            at(person("text:Five"), 1000 * MIN + 5 * MIN),
+        ];
+        let mut list: Vec<Option<&Message>> = rows.iter().map(Some).collect();
+        list.insert(7, None);
+        let f = flow(&list, |t| t / (1000 * MIN));
+        let lines: Vec<usize> = (0..f.len()).filter(|&i| f[i].line).collect();
+        let heads: Vec<usize> = (0..f.len()).filter(|&i| f[i].head).collect();
+        // The first message, a pause of half an hour, and a new day; not the queued one.
+        assert_eq!(lines, vec![0, 4, 9]);
+        // The first reply after each line has its name; the next in the stretch doesn't.
+        assert_eq!(heads, vec![1, 6]);
+        // Three and Four join, since no line comes between them.
+        assert_eq!(f[4].joined, Joined::at(0, 2));
+        assert_eq!(f[5].joined, Joined::at(1, 2));
+        // Waiting and Five would join, but a line comes between them.
+        assert_eq!(f[8].joined, Joined::default());
+        assert_eq!(f[9].joined, Joined::default());
     }
 
     #[test]
