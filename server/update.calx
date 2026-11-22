@@ -114,8 +114,9 @@ pub fn download(m: Json) -> List<u8> ! Error {
 }
 
 /// Whether this program can be swapped where it is: its folder takes a new file.
+/// It tries a name of its own, never `.new`, which may hold a program waiting to go in.
 pub fn writable(exe: String) ! Error {
-    let probe = "{exe}.new"
+    let probe = "{exe}.probe"
     match fs.write(probe.copy(), List<u8>()) {
         ok => {},
         err(e) => fail "loom can't write beside its program, {exe} ({e}), so it can't update it there",

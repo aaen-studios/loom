@@ -219,6 +219,10 @@ fn run(root: String, first: mut Child?) ! Error {
     _ = try app.cmd("u_7", "instance.update", Obj.new().done())
     let waiting = try until_state(mut app, "waiting", 60000)
     try check(str_at(waiting, "version") == some(v2.copy()), "the newer release is downloaded and checked, and waits for the turn")
+    // An app looking at the popup, and asking again, while it waits leaves the program that waits alone.
+    let looked = try app.cmd("u_7b", "instance.updates", Obj.new().done())
+    let asked_again = try app.cmd("u_7c", "instance.update", Obj.new().done())
+    try check(str_at(at(at(looked, "value"), "update"), "state") == some(String("waiting")) and str_at(at(asked_again, "value"), "state") == some(String("waiting")) and fs.exists("{exe}.new"), "asking while it waits joins it, and the new program stays where it waits")
     let reply = try app.reply()
     try check("{reply}".contains("slept"), "the turn goes on to its end")
     _ = try until_state(mut app, "restarting", 30000)
