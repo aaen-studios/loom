@@ -47,6 +47,10 @@ jobs:
       - name: Check and test
         run: calx scripts/check.calx
 
+      - name: The browser a server fetches for itself (Linux)
+        if: runner.os == 'Linux'
+        run: calx tests/setup/browser_fetch.calx
+
   # loom install on a fresh server, through install.sh as a person runs it, with a
   # release served from a folder: the user, the service, and the instance answering.
   install:

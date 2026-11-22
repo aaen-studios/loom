@@ -14,7 +14,8 @@ module server.backup
 //
 // Installed ACP agent programs (acp/) stay out, as they're for one machine
 // and are installed again from the registry, and so do plugins' tool
-// folders (plugins/), which the instance writes again from the database.
+// folders (plugins/), which the instance writes again from the database, and
+// the browser it fetched for itself (browser/).
 // `loom import` makes a new data folder from one, with `restore`.
 import std.fs
 import std.json.{Json, parse}
@@ -29,8 +30,9 @@ import server.store.{now}
 pub const FORMAT: i64 = 1
 
 // The top of the data folder that doesn't go: the live database, which goes
-// as its snapshot, and what's made again where it lands.
-const LEFT_OUT: [str; 5] = ["loom.db", "loom.db-wal", "loom.db-shm", "acp", "plugins"]
+// as its snapshot, and what's made again where it lands: the browser and fonts
+// the instance fetched for itself (server/chrome.calx) are fetched again there.
+const LEFT_OUT: [str; 6] = ["loom.db", "loom.db-wal", "loom.db-shm", "acp", "plugins", "browser"]
 
 // Writes the instance in `data` to the file `to`, and gives its loom.json.
 // The file appears whole or not at all.
