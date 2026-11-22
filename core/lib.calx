@@ -6,8 +6,10 @@ module core.lib
 //
 // loom_core_start runs the connection (core/conn.calx) on a thread of its
 // own, and a second thread hands what it says to the app's on_event, so a
-// slow app never holds up the socket. loom_core_stop ends both and waits
-// for them, so no on_event comes after it returns.
+// slow app never holds up the socket. It returns at once: the instance in
+// the app, when there is one, starts on the connection's thread first, so
+// the app's window doesn't wait for it. loom_core_stop ends both and waits
+// for them, and for the instance, so no on_event comes after it returns.
 import std.crypto.{PasswordHasher}
 import std.fs
 import std.json.{Json, parse}
@@ -125,8 +127,76 @@ struct Core {
     to_core: Sender<String>?
     conn: Thread?
     relay: Thread?
-    local: Thread?
-    stop_local: Sender<bool>?
+}
+
+/// The core's own thread: it starts the instance in the app first, when the config asks
+/// for one, then runs the connection, so loom_core_start doesn't wait for the instance
+/// and the app draws its window from the cache meanwhile. What the app sends before the
+/// connection runs waits in its inbox. Once the connection ends, it stops the instance
+/// and waits for it.
+struct Boot {
+    cfg: Json
+    inbox: Receiver<String>
+    to_app: Sender<String>
+}
+
+impl Task for Boot {
+    fn run(own self) {
+        var b = self
+        let cfg = b.cfg.copy()
+        var server = str_at(cfg.copy(), "server")
+        var token = str_at(cfg.copy(), "token")
+        let service = str_at(cfg.copy(), "keyring") ?? String(KEYRING)
+        var path = String(":memory:")
+        let data = str_at(cfg.copy(), "data")
+        if let d = data {
+            path = "{d}/core.db"
+        }
+        var local: Thread? = none
+        var stop_local: Sender<bool>? = none
+        if str_at(cfg.copy(), "mode") == some(String("local")) {
+            match start_local(cfg.copy(), data.copy() ?? String(".")) {
+                ok((t, stop, url, tok)) => {
+                    local = some(t)
+                    stop_local = some(stop)
+                    server = some(url)
+                    token = some(tok)
+                    // Its own cache: the address changes every launch, and the instance elsewhere keeps core.db.
+                    if let d = data {
+                        path = "{d}/local.db"
+                    }
+                },
+                err(e) => b.to_app.send("{Obj.new().s("t", String("error")).s("code", String("local")).s("message", "{e}").done()}"),
+            }
+        }
+        let cache = match Cache.open(path.copy()) {
+            ok(c) => c,
+            err(e) => {
+                // The app still works, from the instance alone, and hears why it can't read offline.
+                b.to_app.send("{Obj.new().s("t", String("error")).s("code", String("cache")).s("message", "can't open {path}: {e}").done()}")
+                Cache.open(String(":memory:"))!
+            },
+        }
+        var conn = Conn.new(server, token, service, cache, b.inbox, b.to_app)
+        conn.tz = str_at(cfg.copy(), "tz")
+        if let d = data {
+            conn.files = some("{d}/files")
+            // Updates, for an app that says its version. An empty `update` turns them off.
+            let feed = str_at(cfg.copy(), "update") ?? String(MANIFEST)
+            if let v = str_at(cfg.copy(), "version") {
+                if feed.len() > 0 {
+                    conn.updater = some(Updater.new(v, str_at(cfg.copy(), "platform") ?? String("windows-desktop"), feed, "{d}/update"))
+                }
+            }
+        }
+        conn.run()
+        if let s = mut stop_local {
+            s.send(true)
+        }
+        if let t = local.take() {
+            t.join()
+        }
+    }
 }
 
 /// Starts the instance in the app, and waits for its address and token.
@@ -170,58 +240,13 @@ fn core_start(config: *const u8, len: usize, on_event: extern "C" fn(*const u8, 
         err(_) => none,
     }
     let cfg = parsed ?? Obj.new().done()
-    var server = str_at(cfg.copy(), "server")
-    var token = str_at(cfg.copy(), "token")
-    let service = str_at(cfg.copy(), "keyring") ?? String(KEYRING)
-    var path = String(":memory:")
-    let data = str_at(cfg.copy(), "data")
-    if let d = data {
-        path = "{d}/core.db"
-    }
-    var local: Thread? = none
-    var stop_local: Sender<bool>? = none
-    if str_at(cfg.copy(), "mode") == some(String("local")) {
-        match start_local(cfg.copy(), data.copy() ?? String(".")) {
-            ok((t, stop, url, tok)) => {
-                local = some(t)
-                stop_local = some(stop)
-                server = some(url)
-                token = some(tok)
-                // Its own cache: the address changes every launch, and the instance elsewhere keeps core.db.
-                if let d = data {
-                    path = "{d}/local.db"
-                }
-            },
-            err(e) => sink.tell("{Obj.new().s("t", String("error")).s("code", String("local")).s("message", "{e}").done()}"),
-        }
-    }
-    let cache = match Cache.open(path.copy()) {
-        ok(c) => c,
-        err(e) => {
-            // The app still works, from the instance alone, and hears why it can't read offline.
-            sink.tell("{Obj.new().s("t", String("error")).s("code", String("cache")).s("message", "can't open {path}: {e}").done()}")
-            Cache.open(String(":memory:"))!
-        },
-    }
     let inbox = Receiver<String>()
     let to_core = inbox.sender()
     let from_core = Receiver<String>()
-    var conn = Conn.new(server, token, service, cache, inbox, from_core.sender())
-    conn.tz = str_at(cfg.copy(), "tz")
-    if let d = data {
-        conn.files = some("{d}/files")
-        // Updates, for an app that says its version. An empty `update` turns them off.
-        let feed = str_at(cfg.copy(), "update") ?? String(MANIFEST)
-        if let v = str_at(cfg.copy(), "version") {
-            if feed.len() > 0 {
-                conn.updater = some(Updater.new(v, str_at(cfg.copy(), "platform") ?? String("windows-desktop"), feed, "{d}/update"))
-            }
-        }
-    }
-    let conn_thread = unsafe { Thread.spawn(conn) }
+    let conn_thread = unsafe { Thread.spawn(Boot { cfg: cfg, inbox: inbox, to_app: from_core.sender() }) }
     let relay_thread = unsafe { Thread.spawn(Relay { sink: sink, from_core: from_core }) }
     unsafe {
-        return Box(Core { to_core: some(to_core), conn: some(conn_thread), relay: some(relay_thread), local: local, stop_local: stop_local }).into_ptr().cast<u8>()
+        return Box(Core { to_core: some(to_core), conn: some(conn_thread), relay: some(relay_thread) }).into_ptr().cast<u8>()
     }
 }
 
@@ -249,12 +274,6 @@ fn core_stop(core: *u8) {
         t.join()
     }
     if let t = c.value.relay.take() {
-        t.join()
-    }
-    if let s = mut c.value.stop_local {
-        s.send(true)
-    }
-    if let t = c.value.local.take() {
         t.join()
     }
 }

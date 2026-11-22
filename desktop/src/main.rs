@@ -11,6 +11,7 @@ mod model;
 mod motion;
 mod panel;
 mod panel_test;
+mod perf;
 mod prefs;
 mod shell;
 mod smooth;
@@ -87,6 +88,7 @@ pub const VERSION: &str = match option_env!("LOOM_VERSION") {
 };
 
 fn main() {
+    perf::start();
     // Started by an agent of the instance in this app, for loom's own tools.
     if std::env::args().nth(1).as_deref() == Some("mcp") {
         std::process::exit(core::mcp());
@@ -123,6 +125,8 @@ fn main() {
                     ..TitleBar::title_bar_options()
                 }),
                 app_owns_titlebar_drag: true,
+                // A build for measuring opens behind what the person is doing.
+                focus: !cfg!(feature = "perf"),
                 ..Default::default()
             },
             cx,

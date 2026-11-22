@@ -1,0 +1,198 @@
+module tests.bench.chat
+
+// Times what an instance does most: streaming a long reply, finishing turns, and
+// catching a device up on a long chat. It builds the server with --release, as it
+// ships, starts it in a folder of its own with the fake agent, and says how long
+// each part took and the CPU time the server used for it.
+//
+//     calx run --release tests/bench/chat.calx -- [DELTAS] [TURNS]
+//
+// DELTAS (10000 by default) is how many words the long reply streams, one delta
+// each. TURNS (1000) is how many short turns go into one chat before a new
+// device catches up on it: each is the person's message and the agent's reply.
+import std.env
+import std.fs
+import std.json.{Json}
+import std.process.{Child, Command, Stdio, exit}
+import std.thread.{sleep}
+import std.time.{Instant}
+import shared.obj.{Obj, at, str_at}
+import core.cache.{Cache}
+import core.conn.{Conn}
+import tests.kit.{App, calx, device, post_json, remove_scratch}
+
+const WAIT: u64 = 600000
+
+fn ms(a: Instant, b: Instant) -> f64 {
+    return f64.nearest(b.nanos_since(a)) / 1000000.0
+}
+
+fn cpu_ms(c: Child) -> f64 {
+    let u = unsafe { c.usage() }
+    return f64.nearest(u.cpu_ns) / 1000000.0
+}
+
+fn mem_mb(c: Child) -> f64 {
+    let u = unsafe { c.usage() }
+    return f64.nearest(u.memory) / 1048576.0
+}
+
+fn arg_or(args: List<String>, n: usize, default: usize) -> usize {
+    if n < args.len() { return usize.parse(args[n].copy()) ?? default }
+    return default
+}
+
+fn run(server: Child, base: String, token: String, deltas: usize, turns: usize) ! Error {
+    var app = try App.connect(base.copy(), token.copy(), 0)
+    let made = try app.cmd("q_1", "agent.create", Obj.new().s("name", String("Fake")).s("acp_agent", String("fake")).s("instructions", String("")).done())
+    let agent = str_at(at(at(made, "value"), "agent"), "id") ?? String()
+    let conv = try app.cmd("q_2", "conversation.create", Obj.new().s("agent", agent.copy()).s("title", String("bench")).done())
+    let conversation = str_at(at(conv, "value"), "conversation") ?? String()
+
+    // A first turn starts the agent's program, which isn't what's measured.
+    try app.send(Obj.new().s("t", String("send")).s("cid", String("warm")).s("conversation", conversation.copy()).s("text", String("warm")).done())
+    _ = try app.until("event", "run.finished", 120000)
+
+    // --- A long reply, a word a delta ---
+    var words = String()
+    for n in 0..deltas {
+        if n > 0 { words.push_str(" ") }
+        words.push_str("w{n}")
+    }
+    app.frames = List<Json>()
+    let c0 = cpu_ms(server)
+    let t0 = unsafe { Instant.now() }
+    try app.send(Obj.new().s("t", String("send")).s("cid", String("long")).s("conversation", conversation.copy()).s("text", words).done())
+    _ = try app.until("event", "run.finished", 120000)
+    let t1 = unsafe { Instant.now() }
+    let c1 = cpu_ms(server)
+    var got: usize = 0
+    for f in app.frames {
+        if str_at(f.copy(), "t") == some(String("delta")) { got += 1 }
+    }
+    let stream_ms = ms(t0, t1)
+    println("stream     {got} deltas in {stream_ms:.0} ms ({f64.nearest(got) / stream_ms * 1000.0:.0}/s), server CPU {c1 - c0:.0} ms ({(c1 - c0) * 1000.0 / f64.nearest(got):.1} us a delta)")
+
+    // --- Short turns ---
+    app.frames = List<Json>()
+    let c2 = cpu_ms(server)
+    let t2 = unsafe { Instant.now() }
+    // From sending to: the ack, the first word of the reply, and the turn's end.
+    var to_ack: f64 = 0.0
+    var to_word: f64 = 0.0
+    var to_end: f64 = 0.0
+    for n in 0..turns {
+        let s0 = unsafe { Instant.now() }
+        try app.send(Obj.new().s("t", String("send")).s("cid", "t{n}").s("conversation", conversation.copy()).s("text", "a short reply number {n}").done())
+        _ = try app.until("ack", "", 120000)
+        let s1 = unsafe { Instant.now() }
+        _ = try app.until("delta", "", 120000)
+        let s2 = unsafe { Instant.now() }
+        _ = try app.until("event", "run.finished", 120000)
+        let s3 = unsafe { Instant.now() }
+        to_ack += ms(s0, s1)
+        to_word += ms(s0, s2)
+        to_end += ms(s0, s3)
+        if n % 50 == 0 { app.frames = List<Json>() }
+    }
+    let t3 = unsafe { Instant.now() }
+    let c3 = cpu_ms(server)
+    let turns_ms = ms(t2, t3)
+    let seq = app.seq
+    let k = f64.nearest(turns)
+    println("turns      {turns} turns in {turns_ms:.0} ms ({turns_ms / k:.2} ms a turn), server CPU {(c3 - c2) / k:.2} ms a turn, {seq} events now")
+    println("           a turn: ack after {to_ack / k:.2} ms, first word after {to_word / k:.2} ms, done after {to_end / k:.2} ms")
+    app.close()
+
+    // --- A new device catches up on everything ---
+    let c4 = cpu_ms(server)
+    let t4 = unsafe { Instant.now() }
+    let fresh = try App.connect(base.copy(), token.copy(), 0)
+    let t5 = unsafe { Instant.now() }
+    let c5 = cpu_ms(server)
+    println("catch-up   {fresh.frames.len()} frames, to seq {fresh.seq}, in {ms(t4, t5):.0} ms, server CPU {c5 - c4:.0} ms")
+    var f2 = fresh
+    // --- Opening the chat: its newest page ---
+    let t6 = unsafe { Instant.now() }
+    let page = try f2.cmd("q_3", "messages.list", Obj.new().s("conversation", conversation.copy()).done())
+    let t7 = unsafe { Instant.now() }
+    var count: usize = 0
+    if let Json.Array(ms_) = at(at(page, "value"), "messages") { count = ms_.len() }
+    println("page       messages.list gave {count} in {ms(t6, t7):.1} ms")
+    f2.close()
+
+    // --- A new app's core catches up, into a cache of its own ---
+    let cache_dir = try fs.temp_dir()
+    let inbox = Receiver<String>()
+    var to_core = inbox.sender()
+    var from_core = Receiver<String>()
+    let conn = Conn.new(some("http://{base}"), some(token.copy()), String("loom-bench"), try Cache.open("{cache_dir}/core.db"), inbox, from_core.sender())
+    let t8 = unsafe { Instant.now() }
+    let thread = unsafe { Thread.spawn(conn) }
+    var events: usize = 0
+    loop {
+        let m = unsafe { from_core.wait_for(120000000000) } else { fail "the core didn't sync in 2 minutes" }
+        if m.starts_with(#"{"t":"event""#) { events += 1 }
+        if m.starts_with(#"{"t":"synced""#) { break }
+    }
+    let t9 = unsafe { Instant.now() }
+    to_core.send(String(#"{"t":"core.stop"}"#))
+    thread.join()
+    println("core       caught up on {events} events into its cache in {ms(t8, t9):.0} ms ({ms(t8, t9) * 1000.0 / f64.nearest(events):.0} us an event)")
+    remove_scratch(cache_dir)
+
+    // --- Idle ---
+    let c8 = cpu_ms(server)
+    unsafe { sleep(5000000000) }
+    let c9 = cpu_ms(server)
+    println("idle       server CPU {(c9 - c8) / 5.0:.1} ms a second, memory {mem_mb(server):.1} MB")
+}
+
+fn main() ! Error {
+    let args = env.args()
+    let deltas = arg_or(args.copy(), 0, 10000)
+    let turns = arg_or(args, 1, 1000)
+    let data = try fs.temp_dir()
+    let bin = if env.os() == "windows" { "{data}/loom-bench.exe" } else { "{data}/loom-bench" }
+    println("building the server (--release)")
+    let built = try Command.new(calx()).arg(String("build")).arg(String("--release")).arg(String("server/main.calx")).arg(String("-o")).arg(bin.copy()).output()
+    if not built.status.success() {
+        eprintln(built.error_text())
+        exit(1)
+    }
+    let agent = try fs.absolute(String("tests/fake_agent/main.calx"))
+    let home = "{data}/instance"
+    let added = try Command.new(bin.copy()).arg(String("acp")).arg(String("add")).arg(String("fake")).arg(calx()).arg(agent).arg(String("--data")).arg(home.copy()).arg(String("--test-fast-hashes")).output()
+    if not added.status.success() { fail "loom acp add failed: {added.error_text()}" }
+    let t0 = unsafe { Instant.now() }
+    var server = try Command.new(bin.copy()).arg(String("serve")).arg(String("--port")).arg(String("0")).arg(String("--allow-root")).arg(String("--data")).arg(home.copy()).arg(String("--test-fast-hashes")).stdout(Stdio.Pipe).spawn()
+    let serving = server.wait_for_line(String("loom: serving"), WAIT) else {
+        server.kill()
+        fail "the server didn't start"
+    }
+    let t1 = unsafe { Instant.now() }
+    println("start      serving in {ms(t0, t1):.0} ms, memory {mem_mb(server):.1} MB")
+    let address = serving[serving.find("http://") ?? 0..].trim().copy()
+    let base = if address.ends_with("/") { address[7..address.len() - 1].copy() } else { address[7..].copy() }
+    let code_line = server.wait_for_line(String("setup code:"), 10000) else {
+        server.kill()
+        fail "the server didn't print a setup code"
+    }
+    let code = code_line[12..].trim().copy()
+    let (status, owner) = try post_json(base.copy(), "/api/setup", Obj.new().s("code", code).s("username", String("bench")).s("password", String("correct horse")).j("device", device("Bench")).done())
+    if status != 200 {
+        server.kill()
+        fail "setup failed: {owner}"
+    }
+    let failure: String? = match run(server, base, str_at(owner, "token") ?? String(), deltas, turns) {
+        ok => none,
+        err(e) => some("{e}"),
+    }
+    server.kill()
+    _ = server.wait()
+    remove_scratch(home)
+    if let f = failure {
+        eprintln("\n{f}")
+        exit(1)
+    }
+}
