@@ -1,0 +1,191 @@
+module tests.protocol.rules
+
+// Rules on what's touched (PLAN.md, "Rules, records and limits"): the person
+// puts rules on a site, a path, a command, an MCP tool and its effect, and
+// who started the turn, for one agent or for every agent. Each allows, asks
+// or denies. Deny wins first, then ask, then allow, and with none the
+// permission mode decides. rule.check, the what-if, says what an action
+// would get and which rule decided, and the agent's own tool calls and
+// loom's tools get just that. An agent reads the rules and asks what-ifs at
+// once, but changing them asks the person, and another account sees none.
+//
+//     calx tests/protocol/rules.calx
+import std.json.{Json}
+import std.process.{exit}
+import shared.obj.{Obj, at, str_at}
+import tests.kit.{App, Instance, check, reply_text}
+
+fn reply_in(app: mut App, conversation: String) -> String ! Error {
+    loop {
+        let created = try app.until("event", "message.created")
+        let m = at(created, "message")
+        if str_at(m.copy(), "role") == some(String("agent")) and str_at(m.copy(), "conversation") == some(conversation.copy()) { return reply_text(m) }
+    }
+}
+
+fn say(app: mut App, conversation: String, cid: str, text: String) -> String ! Error {
+    try app.send(Obj.new().s("t", String("send")).s("cid", String(cid)).s("conversation", conversation.copy()).s("text", text).done())
+    return try reply_in(mut app, conversation)
+}
+
+fn value(answer: Json) -> Json {
+    return at(answer, "value")
+}
+
+fn code(answer: Json) -> String {
+    return str_at(at(answer, "error"), "code") ?? String()
+}
+
+fn put(app: mut App, id: str, args: Json) -> Json ! Error {
+    return try app.cmd(id, "rule.put", args)
+}
+
+fn what_if(app: mut App, id: str, args: Json) -> Json ! Error {
+    return value(try app.cmd(id, "rule.check", args))
+}
+
+fn count(list: Json) -> usize {
+    if let Json.Array(items) = list { return items.len() }
+    return 0
+}
+
+// The newest event of `kind` among what the app has read.
+fn last(app: App, kind: str) -> Json {
+    var found = Json.Null
+    for f in app.frames {
+        if str_at(f.copy(), "kind") == some(String(kind)) { found = f.copy() }
+    }
+    return found
+}
+
+fn activity_entry(app: mut App, id: str, agent: String, text: str) -> Json ! Error {
+    let got = try app.cmd(id, "activity.list", Obj.new().s("agent", agent).done())
+    if let Json.Array(es) = at(value(got), "activity") {
+        for e in es {
+            if str_at(e.copy(), "text") == some(String(text)) { return e.copy() }
+        }
+    }
+    return Json.Null
+}
+
+fn chat(app: mut App, id: str, agent: String) -> String ! Error {
+    let c = try app.cmd(id, "conversation.create", Obj.new().s("agent", agent).done())
+    return str_at(value(c), "conversation") ?? String()
+}
+
+fn run(i: Instance) ! Error {
+    var app = try App.connect(i.base.copy(), i.token.copy(), 0)
+    let main_made = try app.cmd("q_1", "agent.create", Obj.new().s("name", String("Main")).s("acp_agent", String("fake")).s("instructions", String("You are a test.")).s("permission", String("allow")).done())
+    let main_id = str_at(at(value(main_made), "agent"), "id") ?? String()
+    let other_made = try app.cmd("q_2", "agent.create", Obj.new().s("name", String("Other")).s("acp_agent", String("fake")).s("instructions", String("You are a test.")).s("permission", String("ask")).done())
+    let other_id = str_at(at(value(other_made), "agent"), "id") ?? String()
+
+    // --- Putting rules ---
+    try check(code(try put(mut app, "q_3", Obj.new().s("then", String("deny")).done())) == "bad_request", "a rule with nothing to match is refused")
+    try check(code(try put(mut app, "q_4", Obj.new().s("then", String("sometimes")).s("command", String("rm")).done())) == "bad_request", "and one whose outcome isn't allow, ask or deny")
+    try check(code(try put(mut app, "q_5", Obj.new().s("then", String("deny")).s("started_by", String("cron")).done())) == "bad_request", "and one with a starter that isn't one")
+    try check(code(try put(mut app, "q_6", Obj.new().s("then", String("deny")).s("command", String("rm")).s("agent", String("Nobody")).done())) == "not_found", "and one for an agent that isn't there")
+    let rm = at(value(try put(mut app, "q_7", Obj.new().s("then", String("deny")).s("command", String("rm")).s("note", String("Never delete.")).done())), "rule")
+    let rm_id = str_at(rm.copy(), "id") ?? String()
+    let heard = last(app, "rules.updated")
+    try check(str_at(rm.copy(), "agent") == some(String()) and str_at(rm, "said") == some(String("Deny commands like rm")) and count(at(heard.copy(), "rules")) == 1 and (str_at(heard, "by") ?? String()).starts_with("d_"), "the person puts a rule for every agent, in words, and every device hears it")
+    let github = at(value(try put(mut app, "q_8", Obj.new().s("then", String("ask")).s("site", String("https://github.com/aaen-studios")).s("agent", String("Main")).done())), "rule")
+    let github_id = str_at(github.copy(), "id") ?? String()
+    try check(str_at(github.copy(), "site") == some(String("github.com")) and str_at(github, "agent") == some(main_id.copy()), "a rule on a site keeps its host, for the agent it names")
+    let git = at(value(try put(mut app, "q_9", Obj.new().s("then", String("allow")).s("command", String("git status")).s("agent", other_id.copy()).done())), "rule")
+    let git_id = str_at(git, "id") ?? String()
+    let hooks = at(value(try put(mut app, "q_10", Obj.new().s("then", String("deny")).s("effect", String("write")).s("started_by", String("webhook")).done())), "rule")
+    let hooks_id = str_at(hooks, "id") ?? String()
+    let all = value(try app.cmd("q_11", "rule.list", Obj.new().done()))
+    let for_other = value(try app.cmd("q_12", "rule.list", Obj.new().s("agent", String("Other")).done()))
+    try check(count(at(all, "rules")) == 4 and count(at(for_other, "rules")) == 3, "rule.list gives all of them, or an agent's own and every agent's")
+
+    // --- What if ---
+    let denied = try what_if(mut app, "q_13", Obj.new().s("agent", String("Main")).s("command", String("cd /tmp && rm -rf x")).done())
+    try check(str_at(denied.copy(), "outcome") == some(String("deny")) and str_at(denied.copy(), "decided") == some(String("rule")) and str_at(at(denied, "rule"), "id") == some(rm_id.copy()), "the what-if denies a command a deny rule matches, chained or not, past a mode that allows everything")
+    let plain = try what_if(mut app, "q_14", Obj.new().s("agent", String("Main")).s("command", String("ls")).done())
+    try check(str_at(plain.copy(), "outcome") == some(String("allow")) and str_at(plain.copy(), "decided") == some(String("mode")) and str_at(plain, "mode") == some(String("allow")), "with no rule about it, the permission mode decides")
+    let allowed = try what_if(mut app, "q_15", Obj.new().s("agent", String("Other")).s("command", String("git status")).done())
+    try check(str_at(allowed.copy(), "outcome") == some(String("allow")) and str_at(at(allowed, "rule"), "id") == some(git_id.copy()), "an allow rule allows past a mode that asks")
+    let asks = try what_if(mut app, "q_16", Obj.new().s("agent", String("Other")).s("command", String("git status && git push")).done())
+    try check(str_at(asks.copy(), "outcome") == some(String("ask")) and str_at(asks, "decided") == some(String("mode")), "but only when every chained command matches it")
+    let site = try what_if(mut app, "q_17", Obj.new().s("agent", String("Main")).s("site", String("https://api.github.com/repos")).done())
+    try check(str_at(site.copy(), "outcome") == some(String("ask")) and str_at(at(site, "rule"), "id") == some(github_id.copy()), "a site rule takes the hosts under it")
+    let elsewhere = try what_if(mut app, "q_18", Obj.new().s("agent", String("Other")).s("site", String("github.com")).done())
+    try check(str_at(elsewhere, "decided") == some(String("mode")), "and is only the agent's it names")
+    let hooked = try what_if(mut app, "q_19", Obj.new().s("agent", String("Main")).s("command", String("ls")).s("started_by", String("webhook")).done())
+    try check(str_at(hooked.copy(), "outcome") == some(String("deny")) and str_at(at(hooked, "rule"), "id") == some(hooks_id.copy()), "who started the turn counts")
+    let hook_reads = try what_if(mut app, "q_20", Obj.new().s("agent", String("Main")).s("path", String("/srv/notes.md")).s("effect", String("read")).s("started_by", String("webhook")).done())
+    try check(str_at(hook_reads, "outcome") == some(String("allow")), "and every condition must hold: a webhook's turn may still read")
+    let loom_own = try what_if(mut app, "q_21", Obj.new().s("agent", String("Main")).s("tool", String("loom.notify")).done())
+    try check(str_at(loom_own, "decided") == some(String("loom")), "loom's own tools follow loom's rules when no rule is about them")
+    try check(code(try app.cmd("q_22", "rule.check", Obj.new().s("command", String("ls")).s("started_by", String("cron")).done())) == "bad_request", "a what-if with a starter that isn't one is refused")
+
+    // --- The agent's own tool calls ---
+    let main_chat = try chat(mut app, "q_23", main_id.copy())
+    let refused = try say(mut app, main_chat.copy(), "m_1", String(#"/act execute {"title":"Remove the folder","command":"rm -rf /tmp/x"}"#))
+    let answered = last(app, "approval.answered")
+    try check(refused == "denied" and str_at(answered.copy(), "by") == some(String("rule")) and str_at(answered, "rule") == some(rm_id.copy()), "a command a rule denies is denied without asking, and says which rule")
+    let logged = try activity_entry(mut app, "q_24", main_id.copy(), "Remove the folder")
+    try check(str_at(logged.copy(), "status") == some(String("refused")) and (str_at(logged, "why") ?? String()).starts_with("rule {rm_id}: "), "and the activity log names the rule")
+    try check(try say(mut app, main_chat.copy(), "m_2", String(#"/act execute {"command":"ls -la"}"#)) == "allowed", "while what no rule is about goes as the mode says")
+    try app.send(Obj.new().s("t", String("send")).s("cid", String("m_3")).s("conversation", main_chat.copy()).s("text", String(#"/act fetch {"url":"https://github.com/aaen-studios/loom"}"#)).done())
+    let needed = try app.until("event", "approval.needed")
+    try check(str_at(needed.copy(), "rule") == some(github_id.copy()) and at(needed.copy(), "can_always") == Json.Bool(false), "a fetch a rule asks about asks the person, past a mode that allows, with no always")
+    try app.send(Obj.new().s("t", String("approve")).s("call", str_at(needed, "call") ?? String()).b("allow", true).done())
+    try check(try reply_in(mut app, main_chat.copy()) == "allowed", "and goes once they say yes")
+    let other_chat = try chat(mut app, "q_25", other_id.copy())
+    try check(try say(mut app, other_chat.copy(), "m_4", String(#"/act execute {"command":["bash","-lc","git status"]}"#)) == "allowed" and str_at(last(app, "approval.answered"), "by") == some(String("rule")), "an allow rule answers yes by itself, for a command given as words too")
+    _ = try app.cmd("q_26", "rule.put", Obj.new().s("then", String("deny")).s("path", String("/srv/secrets")).done())
+    try check(try say(mut app, other_chat.copy(), "m_6", String(#"/act edit {"path":"/srv/secrets/key.pem"}"#)) == "denied", "a path in a folder a rule denies is denied")
+
+    // --- Loom's own tools ---
+    let notify_rule = at(value(try put(mut app, "q_27", Obj.new().s("then", String("deny")).s("tool", String("loom.notify")).s("agent", main_id.copy()).done())), "rule")
+    let said = try say(mut app, main_chat.copy(), "m_7", String(#"/mcp notify {"title":"Hi","body":"there"}"#))
+    try check(said.starts_with("notify failed:") and said.contains("Denied by your rule") and str_at(notify_rule, "id") != none, "one of loom's own tools a rule denies is refused, naming the rule")
+    _ = try put(mut app, "q_28", Obj.new().s("then", String("ask")).s("tool", String("loom.remember")).done())
+    try app.send(Obj.new().s("t", String("send")).s("cid", String("m_8")).s("conversation", main_chat.copy()).s("text", String(#"/mcp remember {"text":"Rules work."}"#)).done())
+    let remember_ask = try app.until("event", "approval.needed")
+    try check((str_at(remember_ask.copy(), "title") ?? String()).starts_with("Use remember"), "one a rule asks about waits for the person")
+    try app.send(Obj.new().s("t", String("approve")).s("call", str_at(remember_ask, "call") ?? String()).b("allow", true).done())
+    try check((try reply_in(mut app, main_chat.copy())).starts_with("remember: Remembered"), "and runs once they say yes")
+
+    // --- Agents and the rules ---
+    let read = try say(mut app, main_chat.copy(), "m_9", "/mcp run_command {Obj.new().s("name", String("rule.check")).j("args", Obj.new().s("command", String("rm x")).done()).done()}")
+    try check(read.starts_with("run_command:") and read.contains(#""outcome":"deny""#), "an agent asks a what-if at once")
+    try app.send(Obj.new().s("t", String("send")).s("cid", String("m_10")).s("conversation", main_chat.copy()).s("text", "/mcp run_command {Obj.new().s("name", String("rule.delete")).j("args", Obj.new().s("id", rm_id.copy()).done()).done()}").done())
+    let removing = try app.until("event", "approval.needed")
+    try check(str_at(removing.copy(), "tool") == some(String("delete")), "but removing a rule asks the person")
+    try app.send(Obj.new().s("t", String("approve")).s("call", str_at(removing, "call") ?? String()).b("allow", false).done())
+    _ = try reply_in(mut app, main_chat.copy())
+    try check(str_at(try what_if(mut app, "q_29", Obj.new().s("agent", String("Main")).s("command", String("rm x")).done()), "outcome") == some(String("deny")), "and a no keeps it")
+
+    // --- Changing and removing ---
+    let changed = at(value(try put(mut app, "q_30", Obj.new().s("id", rm_id.copy()).s("then", String("ask")).done())), "rule")
+    try check(str_at(changed.copy(), "command") == some(String("rm")) and str_at(changed, "then") == some(String("ask")), "a change keeps what it doesn't name")
+    try check(code(try app.cmd("q_31", "rule.delete", Obj.new().s("id", String("r_999")).done())) == "not_found", "removing a rule that isn't there is not_found")
+    _ = try app.cmd("q_32", "rule.delete", Obj.new().s("id", rm_id.copy()).done())
+    try check(str_at(try what_if(mut app, "q_33", Obj.new().s("agent", String("Main")).s("command", String("rm x")).done()), "decided") == some(String("mode")), "once it's removed, the mode decides again")
+
+    // --- Another account ---
+    let theirs = try i.second_account("ann")
+    var ann = try App.connect(i.base.copy(), theirs, 0)
+    try check(count(at(value(try ann.cmd("a_1", "rule.list", Obj.new().done())), "rules")) == 0, "another account sees none of them")
+    try check(code(try ann.cmd("a_2", "rule.delete", Obj.new().s("id", github_id).done())) == "not_found", "and can't remove one")
+    ann.close()
+    app.close()
+}
+
+fn main() ! Error {
+    let inst = try Instance.start()
+    let failure: String? = match run(inst.copy()) {
+        ok => none,
+        err(e) => some("{e}"),
+    }
+    inst.stop()
+    if let f = failure {
+        eprintln("\n{f}")
+        exit(1)
+    }
+    println("\nrules: all good")
+}

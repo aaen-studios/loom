@@ -49,6 +49,7 @@ import server.gate
 import server.tables
 import server.flows
 import server.defaults
+import server.rules
 import server.brains
 import server.egress
 import server.sandbox
@@ -135,6 +136,7 @@ struct Run {
     program: String    // the agent program answering it: the agent's, the one its chat moved to, or its backup
     proc: String    // the key of the program's process in `procs`, proc_key(agent, program)
     tried: List<String>    // the programs that couldn't answer it, before its backup took over
+    starter: String    // who started the turn, as rules name it: person, agent, routine, webhook, script or plugin
 }
 
 struct Approval {
@@ -282,6 +284,7 @@ struct Browser {
     held: List<browser.Op>    // the agent's calls while the person has it
     actions: i64    // the person's clicks and keys since they took over
     secret_ask: Json    // browser_ask_secret, while it waits: its call, why, ref and submit; or null
+    site: String    // the host of the page it's on, as its last call left it, for rules on sites
 }
 
 // A browser_fill_secret call, until its secret is in: what it fills, for the
@@ -400,6 +403,17 @@ fn rule_refusal(rule: str, text: String) -> Json {
     return merge(tool_error(text), Obj.new().s("loom_rule", String(rule)).done())
 }
 
+// A tool's result when one of the person's rules denied it (PLAN.md, "Rules,
+// records and limits"): the activity log names the rule as `rule <id>`.
+fn denied_by(v: rules.Verdict) -> Json {
+    return merge(tool_error(v.why.copy()), Obj.new().s("loom_rule", "rule {str_at(v.rule, "id") ?? String()}").done())
+}
+
+// A rule as the apps and agents get it: as kept, with `said`, the rule in words.
+fn rule_shown(r: Json) -> Json {
+    return merge(r.copy(), Obj.new().s("said", rules.said(r)).done())
+}
+
 // How a tool's result went, for the activity log: done, failed or refused,
 // and why. A refusal's why starts with its rule.
 fn how_it_went(result: Json) -> (String, String) {
@@ -419,6 +433,14 @@ fn how_it_went(result: Json) -> (String, String) {
 
 // Whether a call to loom's tool `name` only reads, so isn't an action the
 // activity log records: lists, searches, reading and looking.
+// Who started a turn, as rules name it, from who asked for it: a script, an
+// agent (by its id), or the person, on one of their devices.
+fn starter_of(by: String) -> str {
+    if by == "script" { return "script" }
+    if by.starts_with("a_") { return "agent" }
+    return "person"
+}
+
 fn tool_reads(name: String, args: Json) -> bool {
     if name == "run_command" {
         let command = str_at(args, "name") ?? String()
@@ -1396,10 +1418,14 @@ impl Instance {
             }
             while let back = i.browser_done.next() {
                 match back {
-                    browser.Back.Done(key, call, result) => {
+                    browser.Back.Done(key, call, done) => {
+                        // Where the page is now, for the rules on sites.
+                        let site = str_at(done.copy(), "loom_site")
+                        let result = without(done, "loom_site")
                         if let b = mut i.browsers.find(key) {
                             b.busy -= 1
                             b.used = now()
+                            if let s = site { b.site = s }
                         }
                         // A secret for a site it hasn't gone to waits for the person's yes.
                         let needs = str_at(result.copy(), "needs")
@@ -1511,7 +1537,7 @@ impl Instance {
                 }
             }
             let (to, thread) = browser.start(key.copy(), profile, i.isolated(g.user.copy(), agent), proxy, i.browser_to.copy())
-            i.browsers.insert(key.copy(), Browser { to: to, thread: thread, busy: 0, used: now(), open: false, person: false, asked: String(), asks: List<String>(), held: List<browser.Op>(), actions: 0, secret_ask: Json.Null })
+            i.browsers.insert(key.copy(), Browser { to: to, thread: thread, busy: 0, used: now(), open: false, person: false, asked: String(), asks: List<String>(), held: List<browser.Op>(), actions: 0, secret_ask: Json.Null, site: String() })
             i.watch_changed(key.copy())
         }
         let call = try i.store.new_id("bc")
@@ -2253,7 +2279,7 @@ impl Instance {
         i.script_calls.insert(run_id.copy(), req)
         i.log(user.copy(), agent_id, "message", "Your script asked: {cut_short(text.copy(), 120)}", String("script"))
         let context = "the person's own script, on the instance's computer, with the script token they made: it speaks for them"
-        try i.start_run(user, conversation, run_id, message_id, text, List<Json>(), context, String())
+        try i.start_run(user, conversation, run_id, message_id, text, List<Json>(), context, String(), "script")
         return none
     }
 
@@ -2288,6 +2314,29 @@ impl Instance {
             let command = str_at(args.copy(), "name") ?? String()
             let what = if name == "run_command" { "run_command {command}" } else { name.copy() }
             act = i.record(grant.user.copy(), grant.agent.copy(), "tool", what, args.copy(), grant.agent.copy())
+        }
+        // The person's rules on what's touched come before loom's own: one
+        // that denies refuses it, and one that asks puts it to the person.
+        let v = try i.judge(grant.user.copy(), grant.agent.copy(), i.calling_run(grant.copy()), i.loom_tool_act(grant.copy(), name.copy(), args.copy()))
+        if v.then == "deny" {
+            let refused = denied_by(v)
+            let (status, why) = how_it_went(refused.copy())
+            i.settle(act, status, why)
+            return some(json_response(200, without(refused, "loom_rule")))
+        }
+        if v.then == "ask" {
+            let action = Obj.new().s("name", String("tool.call")).j("args", Obj.new().s("name", name.copy()).j("arguments", args.copy()).done()).done()
+            i.acting = act
+            let asked = try i.ask_person(req.copy(), grant.copy(), "Use {name}, as rule {str_at(v.rule, "id") ?? String()} asks", if tool_reads(name.copy(), args.copy()) { "read" } else { "other" }, action)
+            i.acting = 0
+            match asked {
+                some(result) => {
+                    let (status, why) = how_it_went(result.copy())
+                    i.settle(act, status, why)
+                    return some(json_response(200, without(result, "loom_rule")))
+                },
+                none => return none,
+            }
         }
         i.acting = act
         let answered = match i.tool(req.copy(), grant, name, args) {
@@ -2361,8 +2410,21 @@ impl Instance {
         let kind = if read_only { "read" } else { "other" }
         let act: i64 = if read_only { 0 } else { i.record(g.user.copy(), g.agent.copy(), "tool", "{server}: {tool}", args.copy(), g.agent.copy()) }
         if act > 0 { i.code_acts.insert(act, token.copy()) }
-        if acp.allows(mode, String(kind)) {
-            return some(json_response(200, merge(tool_text(String("Allowed by your permission mode.")), Obj.new().i("act", act).done())))
+        // The person's rules first, on the tool and what it does, then the permission mode.
+        var touched = rules.act()
+        touched.tool = some("{server}.{tool}")
+        touched.effect = String(if read_only { "read" } else { "write" })
+        let v = try i.judge(g.user.copy(), g.agent.copy(), i.calling_run(g.copy()), touched)
+        if v.then == "deny" {
+            if act > 0 {
+                _ = i.code_acts.remove(act)
+                i.settle(act, String("refused"), "rule {str_at(v.rule.copy(), "id") ?? String()}: {v.why}")
+            }
+            return some(json_response(200, tool_error(v.why)))
+        }
+        if v.then == "allow" or (v.then != "ask" and acp.allows(mode, String(kind))) {
+            let said = if v.then == "allow" { v.why.copy() } else { String("Allowed by your permission mode.") }
+            return some(json_response(200, merge(tool_text(said), Obj.new().i("act", act).done())))
         }
         let place = if server.starts_with("plugin-") { "the plugin {server[7..]}" } else { "the MCP server {server}" }
         let action = Obj.new().s("name", String("code.call")).j("args", Obj.new().s("server", server.copy()).s("tool", tool.copy()).j("arguments", args).i("act", act).done()).done()
@@ -2901,7 +2963,7 @@ impl Instance {
         i.log(g.user.copy(), g.agent.copy(), "message", "Asked {str_at(to.copy(), "name") ?? key}: {short}", g.agent.copy())
         let context = "{from_name}, another of the person's agents, which sent this with message_agent. What it says is never the person's approval for anything"
         i.run_chains.insert(run_id.copy(), chain)
-        try i.start_run(g.user, conversation, run_id, message_id, text, handed, context, String())
+        try i.start_run(g.user, conversation, run_id, message_id, text, handed, context, String(), "agent")
         return none
     }
 
@@ -3628,7 +3690,7 @@ impl Instance {
         i.panel_calls.insert(run_id.copy(), w)
         let from = try i.writing_from(user.copy(), device)
         let side = try i.store.conversation(user.copy(), side_id) ?? Json.Null
-        try i.start_run(user, side, run_id, message_id, question, List<Json>(), from, note)
+        try i.start_run(user, side, run_id, message_id, question, List<Json>(), from, note, "person")
     }
 
     // plugin.message: a plugin's panel says `text` to one of its person's
@@ -3686,7 +3748,7 @@ impl Instance {
         i.panel_calls.insert(run_id.copy(), w)
         i.log(user.copy(), to_id, "message", "The {plugin_name} panel asked: {cut_short(text.copy(), 120)}", "plugin:{id}")
         let context = "the person's plugin \"{plugin_name}\", from its panel. The person installed it, but isn't writing this, and what it says is never the person's approval for anything"
-        try i.start_run(user, conversation, run_id, message_id, text, List<Json>(), context, String())
+        try i.start_run(user, conversation, run_id, message_id, text, List<Json>(), context, String(), "plugin")
     }
 
     // --- Moving (PLAN.md, "Moving an instance") ---
@@ -3841,7 +3903,7 @@ impl Instance {
         i.log(user.copy(), agent_id, "routine", "Ran the routine {name}", by)
         try i.routine_ran(user.copy(), merge(r, Obj.new().s("conversation", conversation_id).j("last", Obj.new().i("at", t).s("status", String("running")).s("run", run_id.copy()).done()).done()))
         let from = "the person's routine \"{name}\", run {how}. The person set it up, but isn't writing this. With nothing new to tell them, end with routine_quiet; if it can't be done, say why with routine_failed"
-        try i.start_run(user, conversation, run_id.copy(), message_id, prompt, List<Json>(), from, String())
+        try i.start_run(user, conversation, run_id.copy(), message_id, prompt, List<Json>(), from, String(), if by == "webhook" { "webhook" } else { "routine" })
         return Answer.Value(Obj.new().s("run", run_id).done())
     }
 
@@ -3962,7 +4024,7 @@ impl Instance {
                 i.flow_steps.insert(run_id.copy(), (f.id.copy(), k))
                 i.log(f.user.copy(), agent_id, "routine", "Ran step {f.steps[k].name} of the flow of {f.name}", String("schedule"))
                 let from = "the person's routine \"{f.name}\": step {f.steps[k].name} of its flow, which hands each agent's answer on to the next. The person set it up, but isn't writing this"
-                try i.start_run(f.user.copy(), conversation, run_id, message_id, f.steps[k].prompt.copy(), List<Json>(), from, inputs)
+                try i.start_run(f.user.copy(), conversation, run_id, message_id, f.steps[k].prompt.copy(), List<Json>(), from, inputs, "routine")
                 for (flow_id, _, _, _) in i.flow_results {
                     if flow_id == id { again = true }
                 }
@@ -4915,7 +4977,7 @@ impl Instance {
         try i.event(user.copy(), "message.created", Obj.new().s("conversation", conversation_id).j("message", message).done())
         let from = try i.writing_from(user.copy(), device)
         let note = if steered { String("[loom: Your person stopped you to say this. Carry on from where you were, with it in mind.]") } else { String() }
-        try i.start_run(user, conversation, run_id, message_id, text, sent_files, from, note)
+        try i.start_run(user, conversation, run_id, message_id, text, sent_files, from, note, "person")
     }
 
     // --- Tasks (PLAN.md, "Work that waits its turn") ---
@@ -4947,7 +5009,7 @@ impl Instance {
         try i.store.put_message(user.copy(), message.copy())
         try i.event(user.copy(), "message.created", Obj.new().s("conversation", conversation_id).j("message", message).done())
         let run_id = try i.store.new_id("run")
-        try i.start_run(user.copy(), marked, run_id, message_id, prompt, List<Json>(), from, String())
+        try i.start_run(user.copy(), marked, run_id, message_id, prompt, List<Json>(), from, String(), starter_of(by.copy()))
         return try i.store.task(user, id) ?? task
     }
 
@@ -4963,8 +5025,8 @@ impl Instance {
             try i.store.put_task(user.copy(), merge(task.copy(), Obj.new().i("attempts", (int_at(task.copy(), "attempts") ?? 1) + 1).done()))
         }
         let run_id = try i.store.new_id("run")
-        let from = "your person's task \"{str_at(task, "title") ?? String()}\""
-        try i.start_run(user, conversation, run_id.copy(), String(), String(), List<Json>(), from, note)
+        let from = "your person's task \"{str_at(task.copy(), "title") ?? String()}\""
+        try i.start_run(user, conversation, run_id.copy(), String(), String(), List<Json>(), from, note, starter_of(str_at(task.copy(), "by") ?? String()))
         return Answer.Value(Obj.new().s("run", run_id).done())
     }
 
@@ -5106,7 +5168,7 @@ impl Instance {
 
     // --- Runs ---
 
-    fn start_run(i: mut Instance, user: String, conversation: Json, run_id: String, answering: String, text: String, sent_files: List<Json>, from: String, given_note: String) ! Error {
+    fn start_run(i: mut Instance, user: String, conversation: Json, run_id: String, answering: String, text: String, sent_files: List<Json>, from: String, given_note: String, starter: str) ! Error {
         let conversation_id = str_at(conversation.copy(), "id") ?? String()
         let agent_id = str_at(conversation, "agent") ?? String()
         let reply = try i.store.new_id("msg")
@@ -5138,7 +5200,7 @@ impl Instance {
             try i.store.summary_handed(conversation_id.copy())
         }
         try i.event(user.copy(), "run.started", Obj.new().s("run", run_id.copy()).s("conversation", conversation_id.copy()).s("agent", agent_id.copy()).i("revision", revision).s("message", reply.copy()).s("answering", answering.copy()).done())
-        i.runs.insert(run_id.copy(), Run { id: run_id.copy(), user: user.copy(), conversation: conversation_id, agent: agent_id.copy(), message: reply, answering: answering.copy(), prompt: text.copy(), files: sent_files.copy(), session: String(), blocks: List<Block>(), tools: LinkedMap<String, String>(), denied: List<String>(), from: from.copy(), usage: Json.Null, note: note.copy(), program: program.copy(), proc: proc_key(agent_id.copy(), program.copy()), tried: List<String>() })
+        i.runs.insert(run_id.copy(), Run { id: run_id.copy(), user: user.copy(), conversation: conversation_id, agent: agent_id.copy(), message: reply, answering: answering.copy(), prompt: text.copy(), files: sent_files.copy(), session: String(), blocks: List<Block>(), tools: LinkedMap<String, String>(), denied: List<String>(), from: from.copy(), usage: Json.Null, note: note.copy(), program: program.copy(), proc: proc_key(agent_id.copy(), program.copy()), tried: List<String>(), starter: String(starter) })
         if notice.len() > 0 { i.notice(run_id.copy(), notice) }
         let a = agent else {
             try i.finish(run_id, String("failed"), some(String("The conversation's agent was deleted.")))
@@ -6047,21 +6109,40 @@ impl Instance {
             return
         }
         let agent = try i.store.agent(r.user.copy(), r.agent.copy()) ?? Json.Null
-        let mode = defaults.mode_of(agent, try i.store.defaults(r.user.copy()))
+        let mode = defaults.mode_of(agent.copy(), try i.store.defaults(r.user.copy()))
         let kind = acp.tool_kind(str_at(tool_call.copy(), "kind") ?? String())
         let user = r.user.copy()
         let run = r.id.copy()
         i.runs.insert(run_id, r)
-        if acp.allows(mode, kind.copy()) {
+        let title = str_at(tool_call.copy(), "title") ?? String()
+        // The person's rules on what it touches come first: deny, then ask, then allow.
+        let v = try i.judge(user.copy(), p.agent.copy(), run.copy(), rules.of_tool_call(tool_call.copy(), kind.copy(), i.agent_folder(user.copy(), agent)))
+        if v.then == "deny" {
+            let option = acp.pick_option(options, false, false) ?? String("reject_once")
+            p.to.send(Out.Send(acp.respond(rpc, Obj.new().j("outcome", Obj.new().s("outcome", String("selected")).s("optionId", option).done()).done())))
+            if let denied_run = mut i.runs.find(run.copy()) { denied_run.denied.push(call.copy()) }
+            let rule_id = str_at(v.rule.copy(), "id") ?? String()
+            if let act = i.tool_actions.remove(call.copy()) { i.settle(act, String("refused"), "rule {rule_id}: {v.why}") }
+            i.log_verdict(user.copy(), p.agent.copy(), v.copy(), title)
+            try i.event(user, "approval.answered", Obj.new().s("call", call).b("allow", false).b("always", false).s("by", String("rule")).s("rule", rule_id).s("why", v.why).done())
+            return
+        }
+        if v.then == "allow" or (v.then != "ask" and acp.allows(mode, kind.copy())) {
             let option = acp.pick_option(options, true, false) ?? String("allow_once")
             p.to.send(Out.Send(acp.respond(rpc, Obj.new().j("outcome", Obj.new().s("outcome", String("selected")).s("optionId", option).done()).done())))
-            i.log(user.copy(), p.agent.copy(), "approval", "Allowed by its permission mode: {str_at(tool_call.copy(), "title") ?? String()}", String("auto"))
+            if v.then == "allow" {
+                i.log_verdict(user.copy(), p.agent.copy(), v.copy(), title)
+                try i.event(user, "approval.answered", Obj.new().s("call", call).b("allow", true).b("always", false).s("by", String("rule")).s("rule", str_at(v.rule, "id") ?? String()).done())
+                return
+            }
+            i.log(user.copy(), p.agent.copy(), "approval", "Allowed by its permission mode: {title}", String("auto"))
             try i.event(user, "approval.answered", Obj.new().s("call", call).b("allow", true).b("always", false).s("by", String("auto")).done())
             return
         }
-        let can_always = acp.pick_option(options.copy(), true, true) != acp.pick_option(options.copy(), true, false)
+        // A yes for always would let the program stop asking, past the rule that asked.
+        let can_always = v.then != "ask" and acp.pick_option(options.copy(), true, true) != acp.pick_option(options.copy(), true, false)
         i.approvals.insert(call.copy(), Approval { call: call.copy(), run: run.copy(), agent: p.agent.copy(), rpc: rpc.copy(), options: options, title: str_at(tool_call.copy(), "title") ?? String(), action: Json.Null, proc: p.key.copy() })
-        try i.event(user, "approval.needed", Obj.new().s("run", run).s("call", call).s("tool", kind).s("title", str_at(tool_call.copy(), "title") ?? String()).j("detail", cut_input(at(tool_call, "rawInput"))).b("can_always", can_always).done())
+        try i.event(user, "approval.needed", Obj.new().s("run", run).s("call", call).s("tool", kind).s("title", str_at(tool_call.copy(), "title") ?? String()).j("detail", cut_input(at(tool_call, "rawInput"))).b("can_always", can_always).maybe("rule", str_at(v.rule, "id")).done())
     }
 
     fn approve(i: mut Instance, s: ServerSocket, user: String, device: String, f: Json) ! Error {
@@ -6301,6 +6382,11 @@ impl Instance {
             try i.tool_done(user, a.call, if allow { none } else { some(String("denied")) }, answer)
             return
         }
+        // One of loom's own tools a rule asked about: a yes runs it now, as the agent called it.
+        if name == "tool.call" and allow {
+            try i.run_asked_tool(user, a)
+            return
+        }
         var result = rule_refusal("person-said-no", String("Your person said no."))
         if allow {
             result = match try i.command(user.copy(), by.copy(), name, at(a.action.copy(), "args")) {
@@ -6313,10 +6399,200 @@ impl Instance {
         try i.tool_done(user, a.call, if allow { none } else { some(String("denied")) }, result)
     }
 
+    // Runs one of loom's own tools that a rule asked the person about, once
+    // they've said yes, with the agent's call that waited for it. A tool that
+    // waits on something else in turn answers the call itself.
+    fn run_asked_tool(i: mut Instance, user: String, a: Approval) ! Error {
+        let req = i.calls.remove(a.call.copy()) else return
+        let act = i.call_actions.remove(a.call.copy()) ?? 0
+        var conversation = String()
+        if let r = i.runs.find(a.run.copy()) { conversation = r.conversation.copy() }
+        let g = Grant { user: user.copy(), agent: a.agent.copy(), conversation: conversation }
+        let called = at(a.action.copy(), "args")
+        i.acting = act
+        var failed = String()
+        let answered: Json? = match i.tool(req.copy(), g, str_at(called.copy(), "name") ?? String(), at(called, "arguments")) {
+            ok(r) => r,
+            err(e) => {
+                failed = "{e}"
+                none
+            },
+        }
+        i.acting = 0
+        if failed.len() > 0 {
+            i.settle(act, String("failed"), failed.copy())
+            i.server.respond(req, json_response(200, tool_error(failed.copy())))
+            try i.tool_done(user, a.call, some(String("failed")), tool_error(failed))
+            return
+        }
+        match answered {
+            some(result) => {
+                let (status, why) = how_it_went(result.copy())
+                i.settle(act, status, why)
+                i.server.respond(req, json_response(200, without(result.copy(), "loom_rule")))
+                try i.tool_done(user, a.call, none, result)
+            },
+            none => try i.tool_done(user, a.call, none, tool_text(String("Your person said yes."))),
+        }
+    }
+
     // A tool of loom's own that waited on the person ends, in the agent's chat.
     fn tool_done(i: Instance, user: String, call: String, status: String?, result: Json) ! Error {
         let ended = status.copy() ?? String(if bool_at(result.copy(), "isError") == some(true) { "failed" } else { "done" })
         try i.event(user, "tool.finished", Obj.new().s("call", call).s("status", ended).j("output", Json.Array([Obj.new().s("kind", String("text")).s("text", str_at(at(at(result, "content"), "0"), "text") ?? String()).done()])).done())
+    }
+
+    // --- Rules on what's touched (PLAN.md, "Rules, records and limits") ---
+
+    // The rules an agent works under: its own, and the person's for every agent.
+    fn rules_for(i: Instance, user: String, agent: String) -> List<Json> ! Error {
+        var out = List<Json>()
+        for r in try i.store.rules(user) {
+            let scope = str_at(r.copy(), "agent") ?? String()
+            if scope.len() == 0 or scope == agent { out.push(r.copy()) }
+        }
+        return out
+    }
+
+    // What the rules make of `a`, an action of `agent`'s in the run `run` ("" for
+    // none), with who started the turn, where `a` doesn't say, and the
+    // person's role filled in.
+    fn judge(i: Instance, user: String, agent: String, run: String, a: own rules.Act) -> rules.Verdict ! Error {
+        var act = a
+        if act.started_by.len() == 0 {
+            if let r = i.runs.find(run) { act.started_by = r.starter.copy() }
+        }
+        act.role = try i.store.role(user.copy()) ?? String()
+        return rules.decide(try i.rules_for(user, agent), act)
+    }
+
+    // What a call to one of loom's own tools touches: the tool, as
+    // loom.<name>, whether it only reads, the site a browser tool opens or
+    // is on, and the command or path a device tool is given.
+    fn loom_tool_act(i: Instance, g: Grant, name: String, args: Json) -> rules.Act {
+        var a = rules.act()
+        a.tool = some("loom.{name}")
+        a.effect = String(if tool_reads(name.copy(), args.copy()) { "read" } else { "write" })
+        if name == "browser_open" {
+            a = rules.with_site(a, str_at(args.copy(), "url") ?? String())
+        } else if name.starts_with("browser_") and name != "browser_ask_person" and name != "browser_ask_secret" {
+            if let b = i.browsers.find("{g.user}/{g.agent}") {
+                if b.site.len() > 0 { a.site = some(b.site.copy()) }
+            }
+        }
+        if name == "use_device" {
+            let inner = at(args, "args")
+            if let c = str_at(inner.copy(), "command") { a.command = some(c) }
+            if let p = str_at(inner, "path") { a.paths.push(p) }
+        }
+        return a
+    }
+
+    // rule.list, rule.put, rule.delete and rule.check, the what-if: the
+    // person's rules, per agent or for every agent, by `device` (or an agent).
+    fn rule_command(i: Instance, user: String, device: String, name: String, args: Json) -> Answer ! Error {
+        // The agent a command names, by id or name: "" for every agent.
+        var agent = String()
+        var agent_json = Json.Null
+        if let key = str_at(args.copy(), "agent") {
+            if key.trim().len() > 0 {
+                let found = try i.find_agent(user.copy(), key.copy()) else return Answer.Refused(String("not_found"), "There's no agent {key}.")
+                agent = str_at(found.copy(), "id") ?? String()
+                agent_json = found
+            }
+        }
+        if name == "rule.list" {
+            if agent.len() == 0 { return Answer.Value(Obj.new().j("rules", try i.rules_shown(user)).done()) }
+            var out = List<Json>()
+            for r in try i.rules_for(user, agent) { out.push(rule_shown(r)) }
+            return Answer.Value(Obj.new().j("rules", Json.Array(out)).done())
+        }
+        if name == "rule.put" {
+            let kept = try i.store.rules(user.copy())
+            let id_given = str_at(args.copy(), "id")
+            var old = Json.Null
+            if let id = id_given.copy() {
+                for r in kept {
+                    if str_at(r.copy(), "id") == some(id.copy()) { old = r.copy() }
+                }
+                if old == Json.Null { return Answer.Refused(String("not_found"), "There's no rule {id}.") }
+            } else if kept.len() >= rules.MOST {
+                return Answer.Refused(String("full"), "There are {rules.MOST} rules already. Remove one first.")
+            }
+            // A change keeps what it doesn't name, and null takes a condition off.
+            let wanted = if old == Json.Null { args.copy() } else { merge(old.copy(), args.copy()) }
+            let made = match rules.made(wanted) {
+                ok(m) => m,
+                err(e) => return Answer.Refused(String("bad_request"), "{e}"),
+            }
+            let scope = if defaults.has(args.copy(), "agent") or old == Json.Null { agent.copy() } else { str_at(old.copy(), "agent") ?? String() }
+            let id = id_given ?? try i.store.new_id("r")
+            let at_time = int_at(old.copy(), "at") ?? now()
+            let rule = merge(made, Obj.new().s("id", id).s("agent", scope.copy()).s("by", device.copy()).i("at", at_time).done())
+            try i.store.put_rule(user.copy(), rule.copy())
+            let shown = rule_shown(rule)
+            i.log(user.copy(), scope, "agent", "{if old == Json.Null { "Added" } else { "Changed" }} a rule: {str_at(shown.copy(), "said") ?? String()}", device.copy())
+            try i.event(user.copy(), "rules.updated", Obj.new().j("rules", try i.rules_shown(user)).s("by", device).done())
+            return Answer.Value(Obj.new().j("rule", shown).done())
+        }
+        if name == "rule.delete" {
+            let id = str_at(args, "id") ?? String()
+            var said = String()
+            var scope = String()
+            for r in try i.store.rules(user.copy()) {
+                if str_at(r.copy(), "id") == some(id.copy()) {
+                    said = rules.said(r.copy())
+                    scope = str_at(r, "agent") ?? String()
+                }
+            }
+            if not try i.store.delete_rule(user.copy(), id.copy()) { return Answer.Refused(String("not_found"), "There's no rule {id}.") }
+            i.log(user.copy(), scope, "agent", "Removed a rule: {said}", device.copy())
+            try i.event(user.copy(), "rules.updated", Obj.new().j("rules", try i.rules_shown(user)).s("by", device).done())
+            return Answer.Value(Obj.new().done())
+        }
+        if name == "rule.check" {
+            var a = rules.of_args(args.copy())
+            if not rules.is_starter(a.started_by.copy()) { return Answer.Refused(String("bad_request"), "started_by is one of {String(rules.STARTERS).replace(" ", ", ")}.") }
+            if a.effect.len() > 0 and a.effect != "read" and a.effect != "write" { return Answer.Refused(String("bad_request"), String("effect is read or write.")) }
+            if a.effect.len() == 0 {
+                let guessed = rules.kind_of(a.copy())
+                a.effect = String(if guessed == "fetch" { "read" } else { "write" })
+            }
+            let kind = acp.tool_kind(str_at(args.copy(), "kind") ?? rules.kind_of(a.copy()))
+            a.role = try i.store.role(user.copy()) ?? String()
+            var list = List<Json>()
+            for r in try i.store.rules(user.copy()) {
+                let scope = str_at(r.copy(), "agent") ?? String()
+                if scope.len() == 0 or (agent.len() > 0 and scope == agent) { list.push(r.copy()) }
+            }
+            let tool = a.tool.copy() ?? String()
+            let v = rules.decide(list, a)
+            let mode = defaults.mode_of(agent_json, try i.store.defaults(user))
+            var o = Obj.new().s("kind", kind.copy()).s("mode", mode.copy())
+            if v.then.len() > 0 {
+                o = o.s("outcome", v.then.copy()).s("decided", String("rule")).j("rule", rule_shown(v.rule.copy())).s("why", v.why.copy())
+            } else if tool.starts_with("loom.") {
+                o = o.s("outcome", String("loom")).s("decided", String("loom")).j("rule", Json.Null).s("why", String("No rule is about it, so loom's own rules decide: reading and everyday changes run at once, and what deletes, installs, lets people in, reaches outside or loosens a permission asks every time."))
+            } else if acp.allows(mode.copy(), kind.copy()) {
+                o = o.s("outcome", String("allow")).s("decided", String("mode")).j("rule", Json.Null).s("why", "No rule is about it, so the permission mode decides: {mode} allows {kind}.")
+            } else {
+                o = o.s("outcome", String("ask")).s("decided", String("mode")).j("rule", Json.Null).s("why", "No rule is about it, so the permission mode decides: {mode} asks about {kind}.")
+            }
+            return Answer.Value(o.done())
+        }
+        return Answer.Refused(String("bad_request"), "loom has no command {name}.")
+    }
+
+    // The activity log's line for a rule that answered an agent's request by itself.
+    fn log_verdict(i: Instance, user: String, agent: String, v: rules.Verdict, title: String) {
+        let what = if v.then == "deny" { "Denied" } else { "Allowed" }
+        i.log(user, agent, "approval", "{what} by rule {str_at(v.rule.copy(), "id") ?? String()}: {title}", "rule {str_at(v.rule, "id") ?? String()}")
+    }
+
+    fn rules_shown(i: Instance, user: String) -> Json ! Error {
+        var out = List<Json>()
+        for r in try i.store.rules(user) { out.push(rule_shown(r)) }
+        return Json.Array(out)
     }
 
     // One of loom's own tools that deletes or changes a permission mode: it
@@ -7200,6 +7476,7 @@ impl Instance {
             try i.event(user, "defaults.updated", Obj.new().j("defaults", kept.copy()).s("by", device).done())
             return Answer.Value(Obj.new().j("defaults", kept).done())
         }
+        if name.starts_with("rule.") { return try i.rule_command(user, device, name, args) }
         if name == "memory.list" {
             let limit = int_at(args.copy(), "limit") ?? 100
             let n: i64 = if limit < 1 { 1 } else if limit > 500 { 500 } else { limit }

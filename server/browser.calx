@@ -18,7 +18,7 @@ import std.http.websocket.{Message, WebSocket, connect}
 import std.json.{Json, parse}
 import std.process.{Child, Command, Stdio, which}
 import std.thread.{Task, sleep}
-import shared.obj.{Obj, at, bool_at, int_at, str_at}
+import shared.obj.{Obj, at, bool_at, int_at, merge, str_at}
 import server.store.{now}
 
 // How long a browser stays open with nothing to do: ten minutes.
@@ -87,7 +87,13 @@ impl Task for Worker {
                             error("{e}")
                         },
                     }
-                    w.back.send(Back.Done(w.key.copy(), op.call.copy(), result))
+                    // The page's host as the call left it, for the person's rules on
+                    // sites; the instance takes it off before the agent gets the result.
+                    var site = String()
+                    if op.name != "preview" and w.page != none {
+                        if let ok(h) = w.host() { site = h }
+                    }
+                    w.back.send(Back.Done(w.key.copy(), op.call.copy(), merge(result, Obj.new().s("loom_site", site).done())))
                 },
                 some(In.Watch(on)) => {
                     w.watched = on

@@ -272,6 +272,67 @@ impl Defaults {
     }
 }
 
+/// One of the person's rules on what agents touch, as the instance gives it.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Rule {
+    pub id: String,
+    /// The agent it's for, or "" for every agent.
+    pub agent: String,
+    /// allow, ask or deny.
+    pub then: String,
+    /// The rule in words, as the instance says it.
+    pub said: String,
+    pub note: String,
+}
+
+impl Rule {
+    pub fn of(r: &Value) -> Rule {
+        Rule {
+            id: s(r, "id"),
+            agent: s(r, "agent"),
+            then: s(r, "then"),
+            said: s(r, "said"),
+            note: s(r, "note"),
+        }
+    }
+
+    pub fn all(list: &Value) -> Vec<Rule> {
+        list.as_array()
+            .map(|l| l.iter().map(Rule::of).collect())
+            .unwrap_or_default()
+    }
+}
+
+/// What the what-if said an action would get.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct WhatIf {
+    /// allow, ask or deny, or loom when loom's own rules decide.
+    pub outcome: String,
+    /// rule, mode or loom: what decided.
+    pub decided: String,
+    pub why: String,
+}
+
+impl WhatIf {
+    pub fn of(v: &Value) -> WhatIf {
+        WhatIf {
+            outcome: s(v, "outcome"),
+            decided: s(v, "decided"),
+            why: s(v, "why"),
+        }
+    }
+
+    /// The outcome in a word or two.
+    pub fn verdict(&self) -> &'static str {
+        match self.outcome.as_str() {
+            "allow" => "Allowed",
+            "ask" => "Asks you",
+            "deny" => "Denied",
+            _ => "Loom's own rules",
+        }
+    }
+}
+
 /// What a permission mode is, in words.
 pub fn mode_name(mode: &str) -> &'static str {
     match mode {
@@ -1490,6 +1551,12 @@ pub struct Model {
     defaults_stale: bool,
     /// The defaults came anew, and the Defaults page's instructions should show them.
     pub defaults_came: bool,
+    /// The person's rules on what agents touch, asked for on each connect and kept up
+    /// to date by `rules.updated`.
+    pub rules: Vec<Rule>,
+    rules_stale: bool,
+    /// What the Rules page's what-if last said, until it asks again.
+    pub what_if: Option<WhatIf>,
     /// The agent programs on the instance, for the programs page.
     pub installed: Vec<Program>,
     /// Whether this person is the instance's owner, who gives programs and their settings
@@ -1665,6 +1732,9 @@ impl Model {
         }
         if std::mem::take(&mut self.defaults_stale) {
             out.push(self.load_defaults());
+        }
+        if std::mem::take(&mut self.rules_stale) {
+            out.push(self.load_rules());
         }
         if std::mem::take(&mut self.tasks_stale) {
             out.push(self.load_tasks());
@@ -2017,6 +2087,7 @@ impl Model {
                 self.synced = true;
                 self.routines_stale = true;
                 self.defaults_stale = true;
+                self.rules_stale = true;
                 self.rewatch = true;
                 self.queue_stale = true;
                 self.tasks_stale = true;
@@ -2224,6 +2295,13 @@ impl Model {
             "defaults" => {
                 if let Some(d) = f.get("defaults") {
                     self.take_defaults(d, false);
+                }
+            }
+            "rules" => {
+                if let Some(list) = f.get("rules") {
+                    self.rules = Rule::all(list);
+                    // What the what-if said may be stale now.
+                    self.what_if = None;
                 }
             }
             "queue" => {
@@ -2834,6 +2912,19 @@ impl Model {
                 self.notices.push(s(e, "message"));
             }
             self.notes_stale = true;
+        } else if id.starts_with("app.rule") {
+            if let Some(e) = f.get("error") {
+                self.notices.push(s(e, "message"));
+                return;
+            }
+            if let Some(list) = f.pointer("/value/rules") {
+                self.rules = Rule::all(list);
+            }
+            if id.starts_with("app.rule_check") {
+                if let Some(v) = f.get("value") {
+                    self.what_if = Some(WhatIf::of(v));
+                }
+            }
         } else if id.starts_with("app.defaults") {
             if let Some(e) = f.get("error") {
                 self.notices.push(s(e, "message"));
@@ -4130,7 +4221,31 @@ impl Model {
         json!({"t": "cmd", "id": cmd, "name": "routine.delete", "args": {"id": id}})
     }
 
-    /// Asks for the person's profile, for the About you page.
+    /// Asks for the person's rules on what agents touch.
+    pub fn load_rules(&mut self) -> Value {
+        let id = self.id("app.rules_list");
+        json!({"t": "cmd", "id": id, "name": "rule.list"})
+    }
+
+    /// Adds a rule, or changes one with an `id` in `args`. `rules.updated` brings the list.
+    pub fn put_rule(&mut self, args: Value) -> Value {
+        let id = self.id("app.rule_put");
+        json!({"t": "cmd", "id": id, "name": "rule.put", "args": args})
+    }
+
+    pub fn delete_rule(&mut self, rule: &str) -> Value {
+        self.rules.retain(|r| r.id != rule);
+        let id = self.id("app.rule_delete");
+        json!({"t": "cmd", "id": id, "name": "rule.delete", "args": {"id": rule}})
+    }
+
+    /// Asks what an action would get, for the what-if: `args` as rule.check takes them.
+    pub fn check_rule(&mut self, args: Value) -> Value {
+        self.what_if = None;
+        let id = self.id("app.rule_check");
+        json!({"t": "cmd", "id": id, "name": "rule.check", "args": args})
+    }
+
     /// Asks for the person's agent defaults.
     pub fn load_defaults(&mut self) -> Value {
         let id = self.id("app.defaults_get");
@@ -4558,6 +4673,33 @@ mod tests {
         assert!(m
             .branch_open()
             .is_some_and(|c| c.routine.as_deref() == Some("rt_1")));
+    }
+
+    #[test]
+    fn rules_come_with_each_change_and_the_what_if_answers() {
+        let mut m = Model::new();
+        m.take(&json!({"t": "event", "kind": "rules.updated", "rules": [
+            {"id": "r_1", "agent": "", "then": "deny", "command": "rm", "said": "Deny commands like rm"},
+            {"id": "r_2", "agent": "a_1", "then": "ask", "site": "github.com", "said": "Ask before the site github.com", "note": "Mine"}
+        ]}));
+        assert_eq!(m.rules.len(), 2);
+        assert_eq!(m.rules[1].agent, "a_1");
+        assert_eq!(m.rules[1].note, "Mine");
+        let f = m.check_rule(json!({"command": "rm -rf x"}));
+        assert_eq!(f["name"], "rule.check");
+        let id = f["id"].as_str().unwrap().to_string();
+        m.take(&json!({"t": "result", "id": id, "value": {"outcome": "deny", "decided": "rule", "why": "Denied by rule r_1."}}));
+        let w = m.what_if.clone().unwrap();
+        assert_eq!((w.verdict(), w.decided.as_str()), ("Denied", "rule"));
+        let f = m.delete_rule("r_1");
+        assert_eq!(f["args"]["id"], "r_1");
+        assert_eq!(m.rules.len(), 1);
+        let f = m.put_rule(json!({"then": "allow", "command": "ls"}));
+        let id = f["id"].as_str().unwrap().to_string();
+        m.take(
+            &json!({"t": "result", "id": id, "error": {"code": "bad_request", "message": "no"}}),
+        );
+        assert!(m.notices.iter().any(|n| n == "no"));
     }
 
     #[test]
