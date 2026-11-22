@@ -1,0 +1,212 @@
+module shared.client
+
+// A small client of a loom instance (protocol/protocol.md), for what talks to
+// one from Calx without being the app's core: the `loom` command line, a device
+// setting loom up on a host, and the tests. It speaks HTTP for setup, login,
+// link codes and /api/version, and the WebSocket session for commands and
+// events. The core keeps its own connection, which reconnects and caches
+// (core/conn.calx); this one waits for each answer.
+//
+// An address is the instance's `http://` or `https://` address, or `host:port`
+// for `http://host:port`.
+import std.http.{Header, Request, get, post}
+import std.http.websocket.{Message, WebSocket, connect}
+import std.json.{Json, parse}
+import shared.obj.{Obj, at, int_at, str_at}
+import shared.protocol
+
+/// `address` as a base for HTTP: with its scheme, without a slash at the end.
+pub fn base_of(address: String) -> String {
+    let a = address.trim().trim_suffix("/").copy()
+    if a.starts_with("http://") or a.starts_with("https://") { return a }
+    return "http://{a}"
+}
+
+/// The WebSocket's address at `address`: `ws://` for `http://`, `wss://` for `https://`.
+pub fn ws_url(address: String) -> String {
+    let base = base_of(address)
+    if base.starts_with("https://") { return "wss://{base[8..]}/ws" }
+    return "ws://{base[7..]}/ws"
+}
+
+/// A body as JSON, or null when it isn't.
+pub fn json_of(body: List<u8>) -> Json {
+    return match parse(String.from_utf8(body.copy()) ?? String()) {
+        ok(v) => v,
+        err(_) => Json.Null,
+    }
+}
+
+fn auth(token: String) -> List<Header> {
+    if token.len() == 0 { return List<Header>() }
+    return [Header { name: String("Authorization"), value: "Bearer {token}" }]
+}
+
+/// POSTs `body` as JSON to `path`, with `token` when it isn't "": the status, and
+/// the answer as JSON.
+pub fn post_json(address: String, path: str, body: Json, token: String = String()) -> (u32, Json) ! Error {
+    var headers = auth(token)
+    headers.push(Header { name: String("Content-Type"), value: String("application/json") })
+    var req = post("{base_of(address)}{path}", headers, "{body}".to_bytes(), 30000, 1048576)
+    let r = try req.wait()
+    return (r.status, json_of(r.body))
+}
+
+/// GETs `path`, with `token` when it isn't "": the status, and the answer as JSON.
+pub fn get_json(address: String, path: str, token: String = String()) -> (u32, Json) ! Error {
+    var req = get("{base_of(address)}{path}", auth(token), 30000, 1048576)
+    let r = try req.wait()
+    return (r.status, json_of(r.body))
+}
+
+/// The device a login makes, as `/api/setup`, `/api/login` and `/api/link` take it.
+pub fn device(name: str, kind: str, tz: str) -> Json {
+    return Obj.new().s("name", String(name)).s("kind", String(kind)).s("tz", String(tz)).done()
+}
+
+/// Makes the owner with the setup code (`POST /api/setup`): the status, and the
+/// user, device and token, or the error.
+pub fn setup(address: String, code: String, username: String, password: String, d: Json) -> (u32, Json) ! Error {
+    return try post_json(address, "/api/setup", Obj.new().s("code", code).s("username", username).s("password", password).j("device", d).done())
+}
+
+/// Logs in (`POST /api/login`): the status, and the user, device and token, or the error.
+pub fn login(address: String, username: String, password: String, d: Json) -> (u32, Json) ! Error {
+    return try post_json(address, "/api/login", Obj.new().s("username", username).s("password", password).j("device", d).done())
+}
+
+/// Signs a device in with a link code (`POST /api/link`), as `username` for the owner
+/// a new server's code makes ("" for none): the status, and the user, device and
+/// token, or the error.
+pub fn link(address: String, code: String, username: String, d: Json) -> (u32, Json) ! Error {
+    var body = Obj.new().s("code", code)
+    if username.len() > 0 { body = body.s("username", username) }
+    return try post_json(address, "/api/link", body.j("device", d).done())
+}
+
+/// A link code that makes the owner, for the setup code (`POST /api/link/new`), or
+/// none when the instance didn't give one.
+pub fn new_link_code(address: String, setup_code: String) -> String? {
+    return match post_json(address, "/api/link/new", Obj.new().s("setup_code", setup_code).done()) {
+        ok((status, body)) => if status == 200 { str_at(body, "code") } else { none },
+        err(_) => none,
+    }
+}
+
+/// Starts asking `/api/version`, without waiting, for a loop that can't stop:
+/// `version_of` reads its answer once it's done.
+pub fn ask_version(address: String, timeout_ms: u32) -> Request {
+    return get("{base_of(address)}/api/version", List<Header>(), timeout_ms, 65536)
+}
+
+/// What `/api/version` answered, once the request is done: its JSON, when it's
+/// loom's, or why it isn't.
+pub fn version_of(r: mut Request) -> (Json, String) {
+    let res = match r.wait() {
+        ok(res) => res,
+        err(e) => return (Json.Null, "{e}"),
+    }
+    if res.status != 200 { return (Json.Null, "it answers {res.status}") }
+    let j = json_of(res.body)
+    if str_at(j.copy(), "name") != some(String("loom")) { return (Json.Null, String("what answers isn't loom")) }
+    return (j, String())
+}
+
+/// `/api/version` at `address`, waiting for it: name, version, protocol and
+/// set_up, or why it couldn't be read.
+pub fn version(address: String) -> (Json, String) {
+    var r = ask_version(address, 5000)
+    return version_of(mut r)
+}
+
+/// A WebSocket session with an instance, signed in with a device token: hello,
+/// then frames both ways. It keeps the newest event it has, and every frame
+/// read.
+pub struct Session {
+    ws: WebSocket
+    pub seq: i64
+    pub frames: List<Json>
+}
+
+impl Session {
+    /// Opens the WebSocket at `address` and says hello with `token` and `after`.
+    /// Gives the session once it's synced.
+    pub fn connect(address: String, token: String, after: i64) -> Session ! Error {
+        let ws = try connect(ws_url(address))
+        var s = Session { ws: ws, seq: after, frames: List<Json>() }
+        try s.send(Obj.new().s("t", String("hello")).s("token", token).j("versions", Json.Array([Json.Int(i64(protocol.NEWEST))])).i("after", after).done())
+        _ = try s.until("synced", "")
+        return s
+    }
+
+    pub fn send(self, frame: Json) ! Error {
+        try self.ws.send_text("{frame}")
+    }
+
+    /// Reads frames until one whose `t` is `t` (and, for events, whose kind is
+    /// `kind`), and gives it. Every frame read is kept in `frames`, and events
+    /// must come in order. Each frame may take `wait_ms` to come.
+    pub fn until(s: mut Session, t: str, kind: str, wait_ms: u32 = 30000) -> Json ! Error {
+        loop {
+            let m = try s.ws.receive(wait_ms) else {
+                fail "no {t} {kind} came in {wait_ms / 1000} s"
+            }
+            let text = match m {
+                Message.Text(x) => x,
+                Message.Binary(_) => fail "a binary frame came",
+            }
+            let f = try parse(text)
+            if let seq = int_at(f.copy(), "seq") {
+                if (str_at(f.copy(), "t") ?? String()) == "event" {
+                    if seq != s.seq + 1 { fail "event {seq} came after {s.seq}" }
+                    s.seq = seq
+                }
+            }
+            s.frames.push(f.copy())
+            if (str_at(f.copy(), "t") ?? String()) == t and (kind.len() == 0 or (str_at(f.copy(), "kind") ?? String()) == kind) {
+                return f
+            }
+        }
+    }
+
+    /// Runs the command `name` with `args`, as `cmd` with `id`, and gives its `result`.
+    pub fn cmd(s: mut Session, id: str, name: str, args: Json) -> Json ! Error {
+        try s.send(Obj.new().s("t", String("cmd")).s("id", String(id)).s("name", String(name)).j("args", args).done())
+        loop {
+            let r = try s.until("result", "")
+            if (str_at(r.copy(), "id") ?? String()) == id { return r }
+        }
+    }
+
+    /// The agent's next finished message.
+    pub fn reply(s: mut Session) -> Json ! Error {
+        loop {
+            let created = try s.until("event", "message.created")
+            let m = at(created, "message")
+            if str_at(m.copy(), "role") == some(String("agent")) { return m }
+        }
+    }
+
+    pub fn close(own self) {
+        self.ws.close()
+    }
+}
+
+/// The text of a message's text blocks, joined.
+pub fn reply_text(message: Json) -> String {
+    var out = String()
+    if let Json.Array(blocks) = at(message, "blocks") {
+        for b in blocks {
+            if (str_at(b.copy(), "kind") ?? String()) == "text" {
+                out.push_str(str_at(b, "text") ?? String())
+            }
+        }
+    }
+    return out
+}
+
+@test
+fn addresses_take_either_form() {
+    assert(base_of(String("127.0.0.1:8790")) == "http://127.0.0.1:8790" and base_of(String("https://loom.example.com/")) == "https://loom.example.com")
+    assert(ws_url(String("127.0.0.1:8790")) == "ws://127.0.0.1:8790/ws" and ws_url(String("https://vps.tail1.ts.net:8443")) == "wss://vps.tail1.ts.net:8443/ws")
+}

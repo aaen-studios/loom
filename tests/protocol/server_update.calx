@@ -26,7 +26,8 @@ import std.process.{Child, Command, exit}
 import std.thread.{Task, sleep}
 import shared.obj.{Obj, at, bool_at, str_at}
 import server.update
-import tests.kit.{App, Instance, calx, check, json_of}
+import shared.client.{Session, json_of}
+import tests.kit.{Instance, calx, check}
 
 struct Serving {
     server: Server
@@ -96,7 +97,7 @@ fn release(dir: String, version: String, exe: String, key: Ed25519Key, base: Str
 }
 
 // Reads frames until an instance.update whose state is `state`, and gives it.
-fn until_state(app: mut App, state: str, wait_ms: u32) -> Json ! Error {
+fn until_state(app: mut Session, state: str, wait_ms: u32) -> Json ! Error {
     loop {
         let f = try app.until("instance.update", "", wait_ms)
         if str_at(f.copy(), "state") == some(String(state)) { return f }
@@ -117,8 +118,8 @@ fn wait_version(base: String, version: String) ! Error {
 }
 
 // The welcome an app gets, and the app.
-fn connect(base: String, token: String) -> (App, Json) ! Error {
-    let app = try App.connect(base, token, 0)
+fn connect(base: String, token: String) -> (Session, Json) ! Error {
+    let app = try Session.connect(base, token, 0)
     var welcome = Json.Null
     for f in app.frames {
         if str_at(f.copy(), "t") == some(String("welcome")) { welcome = f.copy() }
@@ -126,7 +127,7 @@ fn connect(base: String, token: String) -> (App, Json) ! Error {
     return (app, welcome)
 }
 
-fn send(app: App, cid: str, conversation: String, text: str) ! Error {
+fn send(app: Session, cid: str, conversation: String, text: str) ! Error {
     try app.send(Obj.new().s("t", String("send")).s("cid", String(cid)).s("conversation", conversation).s("text", String(text)).done())
 }
 
@@ -190,7 +191,7 @@ fn run(root: String, first: mut Child?) ! Error {
     try check(str_at(welcome, "loom") == some(v1.copy()), "and welcome does, as loom")
 
     // --- Only an owner or admin updates it ---
-    var theirs = try App.connect(b.copy(), member, 0)
+    var theirs = try Session.connect(b.copy(), member, 0)
     let no = try theirs.cmd("u_1", "instance.update", Obj.new().done())
     try check(str_at(at(no, "error"), "code") == some(String("not_allowed")), "a member's instance.update is refused not_allowed")
     let seen = try theirs.cmd("u_2", "instance.updates", Obj.new().done())
@@ -258,7 +259,7 @@ fn run(root: String, first: mut Child?) ! Error {
     try check(true, "with now, a turn that's running doesn't hold the update up")
     app2.close()
     try wait_version(b.copy(), v3.copy())
-    var app3 = try App.connect(b.copy(), token.copy(), 0)
+    var app3 = try Session.connect(b.copy(), token.copy(), 0)
     var cut_failed = false
     var task_again = false
     for f in app3.frames {
@@ -283,7 +284,7 @@ fn run(root: String, first: mut Child?) ! Error {
     app3.close()
     try wait_version(b.copy(), v4.copy())
     try check(true, "the instance finds the newer release by itself, and updates once it's quiet")
-    var app4 = try App.connect(b.copy(), token.copy(), 0)
+    var app4 = try Session.connect(b.copy(), token.copy(), 0)
     let told = try app4.until("event", "notify", 30000)
     try check((str_at(told, "body") ?? String()).contains("updated itself to {v4}"), "and tells its owner, live, once they're back")
     app4.close()

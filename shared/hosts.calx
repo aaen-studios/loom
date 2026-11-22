@@ -1,10 +1,23 @@
 module shared.hosts
 
 // What a host's name or ssh target may be (PLAN.md, "Your hosts"), which the
-// device that reaches it and the instance both check.
+// device that reaches it and the instance both check, and what installing
+// loom on one runs there (PLAN.md, "Several servers in one app"): the instance
+// shows the person these commands, and the device that reaches the host builds
+// the same ones from the plan they signed, so it never runs a command the
+// instance made up.
+import std.json.{Json}
+import shared.obj.{Obj, bool_at, str_at}
 
 // The longest name or target kept.
 const LONGEST: usize = 100
+
+/// Where the install script is, for the newest release.
+pub const INSTALL_URL: str = "https://github.com/aaen-studios/loom/releases/latest/download/install.sh"
+/// The `loom` program an install leaves on the server, for root.
+pub const LOOM_BIN: str = "/usr/local/bin/loom"
+/// The instance's folder there.
+pub const LOOM_DATA: str = "/var/lib/loom"
 
 /// Whether `target` can be given to ssh as the host to reach: letters, digits,
 /// and `.`, `-`, `_`, `@` and `:` (for user@host), not starting with `-` or
@@ -19,8 +32,88 @@ pub fn good_target(target: String) -> bool {
     return true
 }
 
+/// Whether `domain` is a name for Caddy to serve loom at: letters, digits,
+/// dots and hyphens, not starting with either. "" is none.
+pub fn good_domain(domain: String) -> bool {
+    if domain.len() > 253 or domain.starts_with("-") or domain.starts_with(".") { return false }
+    for r in domain.to_lower_root().runes() {
+        if not ((r >= 'a' and r <= 'z') or (r >= '0' and r <= '9') or r == '.' or r == '-') { return false }
+    }
+    return true
+}
+
+/// Whether `user` is a Linux user's name: lowercase letters, digits, `_` and
+/// `-`, starting with a letter or `_`, up to 32.
+pub fn good_user(user: String) -> bool {
+    if user.len() == 0 or user.len() > 32 { return false }
+    var first = true
+    for r in user.runes() {
+        let fine = (r >= 'a' and r <= 'z') or r == '_' or (not first and ((r >= '0' and r <= '9') or r == '-'))
+        if not fine { return false }
+        first = false
+    }
+    return true
+}
+
+/// What installing loom on a host does, as the person signs it: `domain` ("" for
+/// Tailscale), `import` ("" or openbot), `from_user` (the user OpenBot runs as),
+/// `carry_provider`, and `username`, theirs in this app, for the owner the link
+/// makes. Tidied, or why it can't be.
+pub fn install_plan(given: Json) -> (Json, String) {
+    let domain = (str_at(given.copy(), "domain") ?? String()).trim().to_lower_root()
+    if not good_domain(domain.copy()) { return (Json.Null, String("domain is a name such as loom.example.com, of letters, digits, dots and hyphens.")) }
+    let from = (str_at(given.copy(), "import") ?? String()).trim().to_lower_root()
+    if from.len() > 0 and from != "openbot" { return (Json.Null, String("import is openbot, the app whose data comes over from the server's other user, or left out.")) }
+    let user = (str_at(given.copy(), "from_user") ?? String("openbot")).trim().copy()
+    if from.len() > 0 and not good_user(user.copy()) { return (Json.Null, String("from_user is the Linux user OpenBot runs as, such as openbot.")) }
+    let username = (str_at(given.copy(), "username") ?? String()).trim().copy()
+    var plan = Obj.new().s("domain", domain).s("import", from.copy())
+    if from.len() > 0 { plan = plan.s("from_user", user).b("carry_provider", bool_at(given, "carry_provider") ?? true) }
+    return (plan.s("username", username).done(), String())
+}
+
+// `command`, as root: itself for root, and through sudo, which may not ask for
+// a password, for anyone else.
+fn as_root(command: String) -> String {
+    return "if [ \"$(id -u)\" = 0 ]; then {command}; else sudo -n {command}; fi"
+}
+
+/// The command that installs loom on the host, as `plan` says: the install
+/// script, then `loom install --json`, which says what it did as JSON.
+pub fn install_command(plan: Json) -> String {
+    let domain = str_at(plan, "domain") ?? String()
+    let flags = if domain.len() > 0 { " --domain {domain}" } else { String() }
+    return "curl -fsSL {INSTALL_URL} | {as_root("sh -s -- --json --https-port auto{flags}")}"
+}
+
+/// The command that brings OpenBot's data over on the host, as `plan` says, or
+/// "" for a plan with no import.
+pub fn import_command(plan: Json) -> String {
+    if str_at(plan.copy(), "import") != some(String("openbot")) { return String() }
+    let user = str_at(plan.copy(), "from_user") ?? String("openbot")
+    let carry = if bool_at(plan, "carry_provider") == some(true) { " --carry-provider" } else { "" }
+    return as_root("{LOOM_BIN} import openbot --from-user {user} --data {LOOM_DATA} --json{carry}")
+}
+
 @test
 fn targets_are_only_hosts() {
     assert(good_target(String("vps")) and good_target(String("root@vps.example.com")) and good_target(String("box-2:22")))
     assert(not good_target(String("-oProxyCommand=x")) and not good_target(String("a b")) and not good_target(String("a;b")) and not good_target(String("")) and not good_target(String("@vps")))
+}
+
+@test
+fn plans_are_checked_and_make_their_commands() {
+    let (plan, why) = install_plan(Obj.new().s("domain", String("Loom.Example.com")).s("import", String("openbot")).s("username", String("elliot")).done())
+    assert(why.len() == 0)
+    assert(install_command(plan.copy()) == #"curl -fsSL https://github.com/aaen-studios/loom/releases/latest/download/install.sh | if [ "$(id -u)" = 0 ]; then sh -s -- --json --https-port auto --domain loom.example.com; else sudo -n sh -s -- --json --https-port auto --domain loom.example.com; fi"#)
+    assert(import_command(plan.copy()).contains("then /usr/local/bin/loom import openbot --from-user openbot --data /var/lib/loom --json --carry-provider; else sudo -n "))
+    let (plain, _) = install_plan(Obj.new().done())
+    assert(import_command(plain.copy()) == "" and not install_command(plain).contains("--domain"))
+    let (_, bad) = install_plan(Obj.new().s("domain", String("x; rm -rf /")).done())
+    assert(bad.starts_with("domain is"))
+    let (_, who) = install_plan(Obj.new().s("import", String("openbot")).s("from_user", String("root; id")).done())
+    assert(who.starts_with("from_user"))
+    let (_, other) = install_plan(Obj.new().s("import", String("grokbot")).done())
+    assert(other.starts_with("import is"))
+    assert(good_user(String("openbot")) and good_user(String("_svc-2")) and not good_user(String("2x")) and not good_user(String("-x")) and not good_user(String("")))
 }

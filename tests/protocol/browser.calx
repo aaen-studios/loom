@@ -15,9 +15,10 @@ import std.process.{exit}
 import shared.obj.{Obj, at, bool_at, int_at, str_at}
 import server.browser
 import server.store.{now}
-import tests.kit.{App, Instance, check, reply_text}
+import shared.client.{Session, reply_text}
+import tests.kit.{Instance, check}
 
-fn reply_in(app: mut App, conversation: String, wait_ms: u32 = 30000) -> String ! Error {
+fn reply_in(app: mut Session, conversation: String, wait_ms: u32 = 30000) -> String ! Error {
     loop {
         let created = try app.until("event", "message.created", wait_ms)
         let m = at(created, "message")
@@ -25,7 +26,7 @@ fn reply_in(app: mut App, conversation: String, wait_ms: u32 = 30000) -> String 
     }
 }
 
-fn say(app: mut App, conversation: String, cid: str, text: String) -> String ! Error {
+fn say(app: mut Session, conversation: String, cid: str, text: String) -> String ! Error {
     try app.send(Obj.new().s("t", String("send")).s("cid", String(cid)).s("conversation", conversation.copy()).s("text", text).done())
     return try reply_in(mut app, conversation)
 }
@@ -50,7 +51,7 @@ fn ref_of(outline: String, part: str) -> String {
 }
 
 // Waits for browser.state to say `agent`'s browser is open, or isn't, as `open` says.
-fn until_open(app: mut App, agent: String, open: bool, wait_ms: u32 = 30000) ! Error {
+fn until_open(app: mut Session, agent: String, open: bool, wait_ms: u32 = 30000) ! Error {
     loop {
         let state = try app.until("browser.state", "", wait_ms)
         if str_at(state.copy(), "agent") == some(agent.copy()) and bool_at(state, "open") == some(open) { return }
@@ -72,7 +73,7 @@ fn run(i: Instance) ! Error {
         "#))
     try fs.write_text("{pages}/second.html", String("<!doctype html><title>Second</title><h1>Second page</h1>"))
 
-    var app = try App.connect(i.base.copy(), i.token.copy(), 0)
+    var app = try Session.connect(i.base.copy(), i.token.copy(), 0)
     let made = try app.cmd("q_1", "agent.create", Obj.new().s("name", String("Browser")).s("acp_agent", String("fake")).s("instructions", String("You are a test.")).done())
     let agent = str_at(at(at(made, "value"), "agent"), "id") ?? String()
     let c = try app.cmd("q_2", "conversation.create", Obj.new().s("agent", agent.copy()).done())
@@ -208,7 +209,7 @@ fn run(i: Instance) ! Error {
 // With a minute of a second, a browser that's watched but has nothing to do
 // closes after browser.IDLE_MINUTES of them.
 fn idle(i: Instance) ! Error {
-    var app = try App.connect(i.base.copy(), i.token.copy(), 0)
+    var app = try Session.connect(i.base.copy(), i.token.copy(), 0)
     let made = try app.cmd("q_1", "agent.create", Obj.new().s("name", String("Idle")).s("acp_agent", String("fake")).s("instructions", String("You are a test.")).done())
     let agent = str_at(at(at(made, "value"), "agent"), "id") ?? String()
     let c = try app.cmd("q_2", "conversation.create", Obj.new().s("agent", agent.copy()).done())

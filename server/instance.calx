@@ -36,7 +36,7 @@ import server.commands
 import server.files
 import server.files.{Thumb}
 import shared.files.{is_sha, safe_name}
-import shared.hosts.{good_target}
+import shared.hosts.{good_domain, good_target, import_command, install_command, install_plan}
 import server.hashing
 import server.importer
 import server.hashing.{Done, Job}
@@ -133,6 +133,16 @@ struct DeviceCall {
     device: String
     agent: String
     title: String
+}
+
+// loom going onto one of the person's hosts, for install_server (PLAN.md,
+// "Several servers in one app"): the run its plan card is in, and each step's
+// line on the card, by the step the device names in `device.progress`.
+struct Setup {
+    run: String
+    card: String    // the card's id in the run
+    host: String
+    steps: List<(String, String, bool)>    // step, its line, done
 }
 
 struct Block {
@@ -253,6 +263,7 @@ pub struct Instance {
     code_acts: Map<i64, String>    // a script's call to an MCP server, as recorded -> the token it came with
     leftovers: List<String>    // folders of removed ACP agents and plugins, removed once their programs have let go
     device_calls: Map<String, DeviceCall>    // tc_ id -> a call sent to a device
+    setups: Map<String, Setup>    // tc_ id -> loom going onto one of the person's hosts
     sealer: XChaCha20Poly1305    // seals and opens secrets, with secret.key, which only the instance reads
     next_sweep: i64
     minute_ms: i64
@@ -459,8 +470,28 @@ struct Auth {
 const RATE_TRIES: usize = 10
 const RATE_WINDOW_MS: i64 = 900000
 
-// The agents' thread colours, as design/tokens.toml names them.
+// The thread colours new agents take in turn, as design/tokens.toml names them.
 const COLORS: [str; 8] = ["periwinkle", "mint", "apricot", "pink", "sky", "gold", "lavender", "grey"]
+
+// Every colour an agent's thread can have: one of these, or its own as "#rrggbb".
+const THREAD_COLORS: [str; 12] = ["periwinkle", "mint", "apricot", "pink", "sky", "gold", "lavender", "grey", "coral", "moss", "teal", "plum"]
+
+pub fn color_ok(c: String) -> bool {
+    for name in THREAD_COLORS {
+        if c == name { return true }
+    }
+    if c.len() != 7 or not c.starts_with("#") { return false }
+    for ch in c[1..].runes() {
+        if not ((ch >= '0' and ch <= '9') or (ch >= 'a' and ch <= 'f') or (ch >= 'A' and ch <= 'F')) { return false }
+    }
+    return true
+}
+
+@test
+fn a_thread_colour_is_one_of_loom_s_or_its_own() {
+    assert(color_ok(String("teal")) and color_ok(String("#5B8def")))
+    assert(not color_ok(String("blue")) and not color_ok(String("#5b8de")) and not color_ok(String("#5b8deg")) and not color_ok(String("5b8def0")))
+}
 
 // The address a request came from, without its port.
 fn client_address(client: String) -> String {
@@ -562,7 +593,7 @@ fn tool_reads(name: String, args: Json) -> bool {
         let command = str_at(args, "name") ?? String()
         return command.ends_with(".list") or command.ends_with(".get") or command.ends_with(".search") or command.ends_with(".revisions")
     }
-    let reads = ["list_agents", "list_acp_agents", "search_messages", "list_skills", "read_skill", "list_devices", "recall", "list_routines", "list_plugins", "read_plugin", "browser_snapshot", "browser_screenshot", "html_preview", "list_tables", "query_rows", "install_server", "list_commands"]
+    let reads = ["list_agents", "list_acp_agents", "search_messages", "list_skills", "read_skill", "list_devices", "recall", "list_routines", "list_plugins", "read_plugin", "browser_snapshot", "browser_screenshot", "html_preview", "list_tables", "query_rows", "list_commands"]
     for r in reads {
         if name == r { return true }
     }
@@ -645,7 +676,7 @@ fn answer_text(a: Answer) -> Json {
 fn install_text(domain: String) -> String {
     let flags = if domain.len() > 0 { " -s -- --domain {domain}" } else { String() }
     let front = if domain.len() > 0 { "Caddy serves it at https://{domain}, with a certificate from Let's Encrypt, so point {domain}'s DNS at the server first." } else { String("With no domain, it's served through Tailscale when Tailscale is on the server, and on the server alone otherwise. Give a domain for Caddy and HTTPS.") }
-    return "On a Linux server (x86-64 or arm64), as root:\n\ncurl -fsSL https://github.com/aaen-studios/loom/releases/latest/download/install.sh | sudo sh{flags}\n\nIt fetches loom, checks it, and makes the loom user and the service. {front} At the end it prints the server's address, a setup code and a link code (with --json, `address`, `setup_code` and `link_code`). Then add the server to your person's app with add_server, that address and the link code: their yes makes them its owner and signs their app in, with nothing to type. Once they're in, `sudo -u loom loom import openbot --data /var/lib/loom` brings OpenBot over, with a script token it makes itself. The link code works once, for 15 minutes; `sudo -u loom loom link --data /var/lib/loom --json` makes a new one. To move this whole instance there instead, run loom receive on it, and use move_instance with the code it prints."
+    return "On a Linux server (x86-64 or arm64), as root:\n\ncurl -fsSL https://github.com/aaen-studios/loom/releases/latest/download/install.sh | sudo sh{flags}\n\nIt fetches loom, checks it, and makes the loom user and the service. {front} At the end it prints the server's address, a setup code and a link code (with --json, `address`, `setup_code` and `link_code`). Then add the server to your person's app with add_server, that address and the link code: their yes makes them its owner and signs their app in, with nothing to type. Once they're in, `sudo -u loom loom import openbot --data /var/lib/loom` brings OpenBot over, with a script token it makes itself. The link code works once, for 15 minutes; `sudo -u loom loom link --data /var/lib/loom --json` makes a new one. To move this whole instance there instead, run loom receive on it, and use move_instance with the code it prints. If the server is one of your person's hosts (list_devices, kind host), call install_server with host instead: it does all of this on one yes from them."
 }
 
 // What the schedule tool says it did, with the webhook when there is one.
@@ -1021,7 +1052,7 @@ impl Instance {
         }
         let browser_done = Receiver<browser.Back>()
         let browser_to = browser_done.sender()
-        var i = Instance { release: config.release.copy(), host: update.host(config.in_app), exe: current_exe(), update_to: update_to, update_back: update_back, updating: no_update(), next_update_check: 0, last_busy: now(), restart_stops: List<String>(), restart: false, told_update: Json.Null, told_update_at: 0, browsers: LinkedMap<String, Browser>(), watchers: Map<u32, String>(), followers: List<u32>(), browser_done: browser_done, browser_to: browser_to, stopped_browsers: List<Thread>(), fills: Map<String, Fill>(), turns_ended: List<(String, String, String)>(), next_browser_sweep: 0, browser_pages: Map<String, String>(), browsers_to_check: List<String>(), task_stops: Map<String, String>(), resumes: List<(String, String)>(), push_to: push_to, push_gone: push_gone, move_to: move_to, move_done: move_done, lan: config.lan, bridge: none, stop_bridge: none, lan_port: 0, announcer: none, stop_announcer: none, to_close: List<ServerSocket>(), boxes: none, gate: none, stop_gate: none, doors: LinkedMap<String, egress.Door>(), moving: String(), move_waiters: List<Waiter>(), moved: moved, version: config.version.copy(), store: store, server: server, data: config.data.copy(), sessions: Map<u32, Session>(), runs: LinkedMap<String, Run>(), procs: LinkedMap<String, Proc>(), approvals: LinkedMap<String, Approval>(), lines: lines, lines_to: to, hash_to: hash_to, hash_done: hash_done, next_job: 0, auths: Map<i64, Auth>(), dummy_hash: dummy, failures: LinkedMap<String, List<i64>>(), thumbs: files.start(), events: config.events, next_prune: 0, grants: Map<String, Grant>(), calls: Map<String, Request>(), context: Map<String, (i64, i64)>(), registry_at: config.registry.copy(), registry: Json.Null, registry_time: 0, registry_fetching: false, install_to: install_to, install_done: install_done, fetching: List<Waiter>(), installs: Map<i64, Install>(), deno_job: 0, deno_waiters: List<Request>(), code_acts: Map<i64, String>(), leftovers: List<String>(), next_sweep: 0, device_calls: Map<String, DeviceCall>(), minute_ms: config.minute_ms, next_due: 0, routine_runs: Map<String, RoutineRun>(), routine_marks: Map<String, (String, String)>(), run_chains: Map<String, List<String>>(), panel_calls: Map<String, Waiter>(), script_calls: Map<String, Request>(), running_flows: LinkedMap<String, flows.Flow>(), flow_steps: Map<String, (String, usize)>(), advancing: List<String>(), flow_results: List<(String, usize, bool, String)>(), flows_due: List<String>(), slow_calls: Map<String, String>(), acting: 0, call_actions: Map<String, i64>(), tool_actions: Map<String, i64>(), sealer: try secret_key(config.data.copy()) }
+        var i = Instance { release: config.release.copy(), host: update.host(config.in_app), exe: current_exe(), update_to: update_to, update_back: update_back, updating: no_update(), next_update_check: 0, last_busy: now(), restart_stops: List<String>(), restart: false, told_update: Json.Null, told_update_at: 0, browsers: LinkedMap<String, Browser>(), watchers: Map<u32, String>(), followers: List<u32>(), browser_pages: Map<String, String>(), browsers_to_check: List<String>(), browser_done: browser_done, browser_to: browser_to, stopped_browsers: List<Thread>(), fills: Map<String, Fill>(), turns_ended: List<(String, String, String)>(), next_browser_sweep: 0, task_stops: Map<String, String>(), resumes: List<(String, String)>(), push_to: push_to, push_gone: push_gone, move_to: move_to, move_done: move_done, lan: config.lan, bridge: none, stop_bridge: none, lan_port: 0, announcer: none, stop_announcer: none, to_close: List<ServerSocket>(), boxes: none, gate: none, stop_gate: none, doors: LinkedMap<String, egress.Door>(), moving: String(), move_waiters: List<Waiter>(), moved: moved, version: config.version.copy(), store: store, server: server, data: config.data.copy(), sessions: Map<u32, Session>(), runs: LinkedMap<String, Run>(), procs: LinkedMap<String, Proc>(), approvals: LinkedMap<String, Approval>(), lines: lines, lines_to: to, hash_to: hash_to, hash_done: hash_done, next_job: 0, auths: Map<i64, Auth>(), dummy_hash: dummy, failures: LinkedMap<String, List<i64>>(), thumbs: files.start(), events: config.events, next_prune: 0, grants: Map<String, Grant>(), calls: Map<String, Request>(), context: Map<String, (i64, i64)>(), registry_at: config.registry.copy(), registry: Json.Null, registry_time: 0, registry_fetching: false, install_to: install_to, install_done: install_done, fetching: List<Waiter>(), installs: Map<i64, Install>(), deno_job: 0, deno_waiters: List<Request>(), code_acts: Map<i64, String>(), leftovers: List<String>(), next_sweep: 0, device_calls: Map<String, DeviceCall>(), setups: Map<String, Setup>(), minute_ms: config.minute_ms, next_due: 0, routine_runs: Map<String, RoutineRun>(), routine_marks: Map<String, (String, String)>(), run_chains: Map<String, List<String>>(), panel_calls: Map<String, Waiter>(), script_calls: Map<String, Request>(), running_flows: LinkedMap<String, flows.Flow>(), flow_steps: Map<String, (String, usize)>(), advancing: List<String>(), flow_results: List<(String, usize, bool, String)>(), flows_due: List<String>(), slow_calls: Map<String, String>(), acting: 0, call_actions: Map<String, i64>(), tool_actions: Map<String, i64>(), sealer: try secret_key(config.data.copy()) }
         if config.sandboxes.len() > 0 and not i.lan { try i.sandboxes_on(config.sandboxes.copy(), config.sandbox_image.copy()) }
         // An action the last run of the instance left started, it never finished.
         try i.store.settle_cut_short()
@@ -2988,10 +3019,10 @@ impl Instance {
             return try i.ask_person(req, g, title, "other", action)
         }
         if name == "install_server" {
-            let domain = (str_at(args, "domain") ?? String()).trim().copy()
-            for ch in domain.to_lower_root().runes() {
-                if not ((ch >= 'a' and ch <= 'z') or (ch >= '0' and ch <= '9') or ch == '.' or ch == '-') { return some(tool_error(String("domain is a name such as loom.example.com, of letters, digits, dots and hyphens."))) }
-            }
+            let domain = (str_at(args.copy(), "domain") ?? String()).trim().copy()
+            if not good_domain(domain.copy()) { return some(tool_error(String("domain is a name such as loom.example.com, of letters, digits, dots and hyphens."))) }
+            let host = (str_at(args.copy(), "host") ?? String()).trim().copy()
+            if host.len() > 0 { return try i.install_on_host(req, g, host, args) }
             return some(tool_text(install_text(domain)))
         }
         if name == "list_commands" {
@@ -5059,6 +5090,17 @@ impl Instance {
         let run_id = i.calling_run(g.copy())
         if run_id.len() == 0 { return tool_error(String("You aren't answering in a chat right now, so there's nowhere to show it.")) }
         let asked = (str_at(args.copy(), "id") ?? String()).trim().copy()
+        let (shown, failed) = i.put_card(run_id, args)
+        if failed.len() > 0 { return tool_error(failed) }
+        if asked.len() > 0 { return tool_text("Changed {shown} in the chat.") }
+        return tool_text("It's in the chat, as {shown}, after what you've said so far. To change it as things move along, call show_card again with id {shown} and the whole card as it is now.")
+    }
+
+    // Puts the card `args` describes in the run `run_id`'s reply, after what's
+    // there so far, or in place of the card with `args`'s id. Its id, or why
+    // it couldn't.
+    fn put_card(i: mut Instance, run_id: String, args: Json) -> (String, String) {
+        let asked = (str_at(args.copy(), "id") ?? String()).trim().copy()
         var failed = String()
         var frame = Json.Null
         var user = String()
@@ -5095,11 +5137,10 @@ impl Instance {
                 }
             }
         }
-        if failed.len() > 0 { return tool_error(failed) }
-        if shown.len() == 0 { return tool_error(String("The reply ended before the card could go in it.")) }
+        if failed.len() > 0 { return (String(), failed) }
+        if shown.len() == 0 { return (String(), String("The reply ended before the card could go in it.")) }
         i.publish(user, frame)
-        if asked.len() > 0 { return tool_text("Changed {shown} in the chat.") }
-        return tool_text("It's in the chat, as {shown}, after what you've said so far. To change it as things move along, call show_card again with id {shown} and the whole card as it is now.")
+        return (shown, String())
     }
 
     // A file an agent made: kept as the person's, and given as a file block.
@@ -5633,6 +5674,8 @@ impl Instance {
             }
         } else if t == "device.result" {
             try i.device_result(user, device, f)
+        } else if t == "device.progress" {
+            try i.device_progress(user, device, f)
         } else if t == "hello" {
             i.server.close_socket(s, protocol.CLOSE_PROTOCOL, String("hello was sent already"))
         } else {
@@ -7130,6 +7173,121 @@ impl Instance {
         return none
     }
 
+    // install_server on one of the person's hosts (PLAN.md, "Several servers in
+    // one app"): the plan as a card, then one question, which the device that
+    // reaches the host signs, as a yes to a command there is. That device
+    // makes the plan's commands itself and runs them, and says how each step
+    // goes, which the card shows. The agent's call is answered with what was
+    // done once it's over.
+    fn install_on_host(i: mut Instance, req: Request, g: Grant, key: String, args: Json) -> Json? ! Error {
+        var target = Json.Null
+        for d in try i.live_devices(g.user.copy()) {
+            let named = str_at(d.copy(), "id") == some(key.copy()) or (str_at(d.copy(), "name") ?? String()).to_lower_root() == key.to_lower_root()
+            if named and str_at(d.copy(), "kind") == some(String("host")) { target = d.copy() }
+        }
+        if target == Json.Null { return some(tool_error("{key} isn't one of your person's hosts, or the computer that reaches it isn't connected. list_devices gives the hosts, as kind host; your person adds one in their app's settings, under Hosts.")) }
+        let host = str_at(target.copy(), "name") ?? String()
+        let device = str_at(target.copy(), "device") ?? String()
+        let through = str_at(target.copy(), "through") ?? String("the computer that reaches it")
+        let mode = (at(target, "tools").get(String("run_command")) ?? Json.Null).as_str() ?? String("off")
+        if mode != "ask" and mode != "allow" { return some(rule_refusal("device-tool-off", "Commands are off on {host}. Your person can turn them on in their app's settings, under Hosts.")) }
+        let run_id = i.calling_run(g.copy())
+        if run_id.len() == 0 { return some(rule_refusal("needs-a-chat", String("That needs your person's yes, and they can only give it during a chat with you."))) }
+        // The plan as the device will sign it, with the person's username here
+        // for the owner the link makes there.
+        var given = Obj.new().s("domain", str_at(args.copy(), "domain") ?? String()).s("import", str_at(args.copy(), "import") ?? String()).s("from_user", str_at(args.copy(), "from_user") ?? String("openbot"))
+        if let carry = bool_at(args, "carry_provider") { given = given.b("carry_provider", carry) }
+        let (plan, why) = install_plan(given.s("username", try i.store.username(g.user.copy()) ?? String()).done())
+        if why.len() > 0 { return some(tool_error(why)) }
+        let domain = str_at(plan.copy(), "domain") ?? String()
+        let from = str_at(plan.copy(), "import") ?? String()
+        let carry = bool_at(plan.copy(), "carry_provider") == some(true)
+        var steps = List<(String, String, bool)>()
+        let front = if domain.len() > 0 { "at https://{domain}, through Caddy" } else { String("through Tailscale, on a free HTTPS port") }
+        steps.push((String("install"), "Install loom on {host}, {front}", false))
+        if from.len() > 0 { steps.push((String("import"), "Import OpenBot's data from the user {str_at(plan.copy(), "from_user") ?? String()}{if carry { ", with its provider for Claude" } else { "" }}", false)) }
+        steps.push((String("link"), "Sign the app on {through} in there, as its owner", false))
+        steps.push((String("check"), String("Check it answers at /api/version"), false))
+        let title = "Install loom on {host}, {if domain.len() > 0 { domain.copy() } else { String("through Tailscale") }}{if from.len() > 0 { ", import from OpenBot" } else { "" }}, link it to {through}"
+        let card = try i.setup_card(run_id.copy(), String(), host.copy(), steps.copy())
+        let call = try i.store.new_id("tc")
+        let request = "{Obj.new().s("call", call.copy()).s("device", device.copy()).s("host", host.copy()).s("tool", String("install_loom")).j("args", plan.copy()).s("agent", g.agent.copy()).i("at", now()).done()}"
+        // What it runs there, word for word, for the person to see before their yes.
+        var runs_there: List<Json> = [Json.Str(install_command(plan.copy()))]
+        let importing = import_command(plan.copy())
+        if importing.len() > 0 { runs_there.push(Json.Str(importing)) }
+        let detail = Obj.new().s("host", host.copy()).s("through", through).j("plan", plan).j("commands", Json.Array(runs_there)).done()
+        if let r = mut i.runs.find(run_id.copy()) {
+            var b = new_block("tool")
+            b.call = call.copy()
+            r.blocks.push(b)
+        }
+        try i.event(g.user.copy(), "tool.started", Obj.new().s("run", run_id.copy()).s("call", call.copy()).s("tool", String("execute")).s("title", title.copy()).j("input", detail.copy()).j("locations", Json.Null).done())
+        i.hold_call(call.copy(), req.copy())
+        i.device_calls.insert(call.copy(), DeviceCall { user: g.user.copy(), device: device.copy(), agent: g.agent.copy(), title: title.copy() })
+        i.setups.insert(call.copy(), Setup { run: run_id.copy(), card: card, host: host.copy(), steps: steps })
+        // An install always asks, even on a host that's allowed: it's several
+        // commands, and the device acts on none without its own signed yes.
+        let action = Obj.new().s("name", String("device.call")).s("device", device.copy()).s("request", request.copy()).done()
+        i.approvals.insert(call.copy(), Approval { call: call.copy(), run: run_id.copy(), agent: g.agent.copy(), rpc: Json.Null, options: Json.Null, title: title.copy(), action: action, proc: String() })
+        try i.event(g.user, "approval.needed", Obj.new().s("run", run_id).s("call", call).s("tool", String("execute")).s("title", title).j("detail", detail).b("can_always", false).s("device", device).s("request", request).done())
+        return none
+    }
+
+    // The plan card of an install on `host`, as its steps stand: put in the
+    // run's reply, or in place of the card `id`. Its id.
+    fn setup_card(i: mut Instance, run_id: String, id: String, host: String, steps: List<(String, String, bool)>) -> String ! Error {
+        var items = List<Json>()
+        for (_, text, done) in steps {
+            items.push(Obj.new().s("text", text).b("done", done).done())
+        }
+        var args = Obj.new().s("type", String("checklist")).s("title", "loom on {host}").j("items", Json.Array(items))
+        if id.len() > 0 { args = args.s("id", id) }
+        let (shown, why) = i.put_card(run_id, args.done())
+        if why.len() > 0 { fail why }
+        return shown
+    }
+
+    // `device.progress`, from the device installing loom on a host: a step's
+    // line on the plan card says how it went.
+    fn device_progress(i: mut Instance, user: String, device: String, f: Json) ! Error {
+        let call = str_at(f.copy(), "call") ?? String()
+        var mine = false
+        if let dc = i.device_calls.find(call.copy()) { mine = dc.user == user and dc.device == device }
+        if not mine { return }
+        let step = str_at(f.copy(), "step") ?? String()
+        let status = str_at(f.copy(), "status") ?? String()
+        let said = cut_short(str_at(f, "said") ?? String(), 160)
+        if status != "done" and status != "failed" { return }
+        var run_id = String()
+        var card = String()
+        var host = String()
+        var steps = List<(String, String, bool)>()
+        if let s = mut i.setups.find(call.copy()) {
+            var changed = List<(String, String, bool)>()
+            for (name, text, done) in s.steps {
+                if name != step {
+                    changed.push((name.copy(), text.copy(), done))
+                } else if status == "done" {
+                    changed.push((name.copy(), if said.len() > 0 { said.copy() } else { text.copy() }, true))
+                } else {
+                    changed.push((name.copy(), "Failed: {said}", false))
+                }
+            }
+            s.steps = changed.copy()
+            run_id = s.run.copy()
+            card = s.card.copy()
+            host = s.host.copy()
+            steps = changed
+        }
+        if card.len() == 0 { return }
+        // The run may have ended meanwhile, cancelled: then there's no card to change.
+        match i.setup_card(run_id, card, host, steps) {
+            ok(_) => {},
+            err(_) => {},
+        }
+    }
+
     fn send_device_call(i: mut Instance, call: String, device: String, request: String, approval: Json) ! Error {
         let frame = "{Obj.new().s("t", String("device.call")).s("call", call.copy()).s("request", request).j("approval", approval).done()}"
         var sent = false
@@ -7168,6 +7326,7 @@ impl Instance {
     // screenshot: its `data` in base64, its `mime`, and the `file` it's kept as.
     fn device_done(i: mut Instance, call: String, status: String, output: String, picture: Json) ! Error {
         let dc = i.device_calls.remove(call.copy()) else return
+        _ = i.setups.remove(call.copy())
         var result = if status == "done" { tool_text(output.copy()) } else if status == "denied" { rule_refusal("person-said-no", output.copy()) } else { tool_error(output.copy()) }
         var shown = List<Json>()
         if picture != Json.Null {
@@ -8158,6 +8317,9 @@ impl Instance {
             if network_why.len() > 0 { return Answer.Refused(String("bad_request"), network_why) }
             if network != Json.Null and not isolated { return Answer.Refused(String("bad_request"), String("An agent's network is kept in its sandbox: make it isolated too.")) }
             if (asked_isolated == some(true) or network != Json.Null) and i.boxes == none { return Answer.Refused(String("not_here"), no_sandboxes()) }
+            if let c = str_at(args.copy(), "color") {
+                if c.len() > 0 and not color_ok(c.copy()) { return Answer.Refused(String("bad_request"), "color is a thread colour, such as periwinkle or teal, or one of its own as #rrggbb, not {c}.") }
+            }
             let id = try i.store.new_id("a")
             // Each new agent takes the next of the eight thread colours, unless it names one.
             let count = (try i.store.agents(user.copy())).len()
@@ -8177,6 +8339,9 @@ impl Instance {
                 for (k, v) in m {
                     o.m.insert(k.copy(), v.copy())
                 }
+            }
+            if let c = str_at(args.copy(), "color") {
+                if c.len() > 0 and not color_ok(c.copy()) { return Answer.Refused(String("bad_request"), "color is a thread colour, such as periwinkle or teal, or one of its own as #rrggbb, not {c}.") }
             }
             let keys: List<str> = ["name", "acp_agent", "instructions", "folder", "color"]
             for key in keys {

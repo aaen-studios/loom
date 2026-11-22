@@ -75,7 +75,7 @@ fn page_words(screen: Screen) -> &'static str {
         Screen::Profile => "profile you name instructions what agents know",
         Screen::Appearance => "theme dark light mode system colours colors text size font fonts geist code monospace bigger smaller",
         Screen::ChatPrefs => {
-            "tool calls tools hidden folded thoughts thinking send enter ctrl composer replies messages bubbles plain style search sidebar find"
+            "tool calls tools hidden folded thoughts thinking send enter ctrl composer replies messages bubbles plain style search sidebar find width wide narrow comfortable full column"
         }
         Screen::AppPrefs => {
             "start login startup tray close background awake sleep notifications sound preview updates version restart"
@@ -343,6 +343,17 @@ impl Loom {
             |p, v| p.thoughts = v,
             cx,
         );
+        let width = self.pref_choice(
+            "width",
+            self.prefs.width,
+            &[
+                (Width::Normal, "Normal"),
+                (Width::Comfortable, "Comfortable"),
+                (Width::Full, "Full width"),
+            ],
+            |p, v| p.width = v,
+            cx,
+        );
         let style = self.pref_choice(
             "style",
             self.prefs.bubbles,
@@ -351,6 +362,8 @@ impl Loom {
             cx,
         );
         let replies = vec![
+            self.row(None, "Chat width", None, Some(width))
+                .into_any_element(),
             self.row(
                 None,
                 "Message style",

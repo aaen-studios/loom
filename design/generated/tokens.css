@@ -24,6 +24,7 @@
   --space-xl: 24px;
   --space-xxl: 32px;
   --space-column: 740px;
+  --space-column-wide: 980px;
   --radius-window: 10px;
   --radius-input: 8px;
   --radius-row: 6px;
@@ -115,6 +116,10 @@
   --thread-gold: #e8d27a;
   --thread-lavender: #b49cff;
   --thread-grey: #9aa0a6;
+  --thread-coral: #f29286;
+  --thread-moss: #b3d47a;
+  --thread-teal: #6fd4c8;
+  --thread-plum: #d39ae8;
 }
 
 @media (prefers-color-scheme: light) {
@@ -144,6 +149,10 @@
     --thread-gold: #b8961a;
     --thread-lavender: #7d5fd6;
     --thread-grey: #6b7078;
+    --thread-coral: #d9534a;
+    --thread-moss: #6b8f23;
+    --thread-teal: #11998e;
+    --thread-plum: #9b4fb5;
   }
 }
 
@@ -173,4 +182,8 @@
   --thread-gold: #b8961a;
   --thread-lavender: #7d5fd6;
   --thread-grey: #6b7078;
+  --thread-coral: #d9534a;
+  --thread-moss: #6b8f23;
+  --thread-teal: #11998e;
+  --thread-plum: #9b4fb5;
 }

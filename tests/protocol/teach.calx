@@ -20,7 +20,8 @@ import std.process.{exit}
 import std.thread.{Task}
 import shared.obj.{Obj, at, bool_at, merge, str_at}
 import server.browser
-import tests.kit.{App, Instance, check, reply_text}
+import shared.client.{Session, reply_text}
+import tests.kit.{Instance, check}
 
 struct Serving {
     server: Server
@@ -34,7 +35,7 @@ impl Task for Serving {
     }
 }
 
-fn reply_in(app: mut App, conversation: String, wait_ms: u32 = 30000) -> String ! Error {
+fn reply_in(app: mut Session, conversation: String, wait_ms: u32 = 30000) -> String ! Error {
     loop {
         let created = try app.until("event", "message.created", wait_ms)
         let m = at(created, "message")
@@ -42,7 +43,7 @@ fn reply_in(app: mut App, conversation: String, wait_ms: u32 = 30000) -> String 
     }
 }
 
-fn say(app: mut App, conversation: String, cid: str, text: String, wait_ms: u32 = 30000) -> String ! Error {
+fn say(app: mut Session, conversation: String, cid: str, text: String, wait_ms: u32 = 30000) -> String ! Error {
     try app.send(Obj.new().s("t", String("send")).s("cid", String(cid)).s("conversation", conversation.copy()).s("text", text).done())
     return try reply_in(mut app, conversation, wait_ms)
 }
@@ -55,7 +56,7 @@ fn see(passed: bool, what: str, got: String) ! Error {
 
 // The `n`th proposal made (from 1), from the proposal.created events read so
 // far, or the next to come. It comes before the reply that says so.
-fn proposed(app: mut App, n: usize) -> Json ! Error {
+fn proposed(app: mut Session, n: usize) -> Json ! Error {
     loop {
         var seen: usize = 0
         for f in app.frames {
@@ -68,13 +69,13 @@ fn proposed(app: mut App, n: usize) -> Json ! Error {
     }
 }
 
-fn proposals(app: mut App, id: str) -> List<Json> ! Error {
+fn proposals(app: mut Session, id: str) -> List<Json> ! Error {
     let r = try app.cmd(id, "proposal.list", Obj.new().done())
     let Json.Array(list) = at(at(r, "value"), "proposals") else return List<Json>()
     return list
 }
 
-fn proposals_part(app: mut App, agent: String, conversation: String) ! Error {
+fn proposals_part(app: mut Session, agent: String, conversation: String) ! Error {
     let note = try say(mut app, conversation.copy(), "m_1", String(#"/mcp propose_note {"text":"Ann buys wool socks.","site":"https://www.Shop.example/socks","why":"From our chat on Tuesday."}"#))
     try see(note.starts_with("propose_note: Proposed."), "propose_note proposes a note", note.copy())
     let p_note = try proposed(mut app, 1)
@@ -127,7 +128,7 @@ fn proposals_part(app: mut App, agent: String, conversation: String) ! Error {
     try see(looked.contains("propose_skill") and looked.contains("Ann buys wool socks"), "which is given the chat", looked)
 }
 
-fn browser_part(i: Instance, app: mut App, agent: String, conversation: String) ! Error {
+fn browser_part(i: Instance, app: mut Session, agent: String, conversation: String) ! Error {
     let pages = try fs.temp_dir()
     try fs.write_text("{pages}/shop.html", String(#"
         <!doctype html><title>Shop</title>
@@ -206,7 +207,7 @@ fn browser_part(i: Instance, app: mut App, agent: String, conversation: String) 
 }
 
 fn run(i: Instance) ! Error {
-    var app = try App.connect(i.base.copy(), i.token.copy(), 0)
+    var app = try Session.connect(i.base.copy(), i.token.copy(), 0)
     let made = try app.cmd("q_a", "agent.create", Obj.new().s("name", String("Teacher")).s("acp_agent", String("fake")).s("instructions", String("You are a test.")).done())
     let agent = str_at(at(at(made, "value"), "agent"), "id") ?? String()
     let c = try app.cmd("q_c", "conversation.create", Obj.new().s("agent", agent.copy()).done())
@@ -236,7 +237,7 @@ fn main() ! Error {
 }
 
 // The event of `kind` about proposal `id`, read already or still to come.
-fn heard(app: mut App, kind: str, id: String) -> Json ! Error {
+fn heard(app: mut Session, kind: str, id: String) -> Json ! Error {
     loop {
         for f in app.frames {
             if str_at(f.copy(), "kind") == some(String(kind)) and str_at(at(f.copy(), "proposal"), "id") == some(id.copy()) { return f.copy() }

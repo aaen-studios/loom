@@ -21,7 +21,8 @@ import core.cache.{Cache}
 import core.conn.{Conn}
 import core.link
 import core.relay
-import tests.kit.{App, Instance, check, fetch}
+import shared.client.{Session}
+import tests.kit.{Instance, check, fetch}
 
 // The app's side of a core with no instance yet.
 struct Core {
@@ -78,7 +79,7 @@ fn phone() -> Json {
 }
 
 fn run(inst: Instance, core: mut Core, service: String) ! Error {
-    var app = try App.connect(inst.base.copy(), inst.token.copy(), 0)
+    var app = try Session.connect(inst.base.copy(), inst.token.copy(), 0)
     let on = at(try app.cmd("q_1", "instance.phones", Obj.new().b("on", true).done()), "value")
     let port = int_at(on.copy(), "port") ?? 0
     let noise_key = bytes.from_base64(str_at(on, "key") ?? String()) ?? List<u8>()

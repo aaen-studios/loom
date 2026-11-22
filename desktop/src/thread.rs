@@ -26,8 +26,19 @@ pub fn now() -> f32 {
     START.get_or_init(Instant::now).elapsed().as_secs_f32()
 }
 
-/// The thread colour named `name`, for the theme.
+/// The thread colour named `name`, for the theme. An agent's own colour, `#rrggbb`,
+/// keeps its hue and is made light or dark enough to read on the theme, as loom's
+/// own are.
 pub fn color(name: &str, dark: bool) -> Hsla {
+    if let Some(c) = hex(name) {
+        let mut c: Hsla = rgb(c).into();
+        c.l = if dark {
+            c.l.clamp(0.62, 0.8)
+        } else {
+            c.l.clamp(0.3, 0.52)
+        };
+        return c;
+    }
     let c = if dark {
         match name {
             "mint" => thread_color_dark::MINT,
@@ -37,6 +48,10 @@ pub fn color(name: &str, dark: bool) -> Hsla {
             "gold" => thread_color_dark::GOLD,
             "lavender" => thread_color_dark::LAVENDER,
             "grey" => thread_color_dark::GREY,
+            "coral" => thread_color_dark::CORAL,
+            "moss" => thread_color_dark::MOSS,
+            "teal" => thread_color_dark::TEAL,
+            "plum" => thread_color_dark::PLUM,
             _ => thread_color_dark::PERIWINKLE,
         }
     } else {
@@ -48,10 +63,133 @@ pub fn color(name: &str, dark: bool) -> Hsla {
             "gold" => thread_color_light::GOLD,
             "lavender" => thread_color_light::LAVENDER,
             "grey" => thread_color_light::GREY,
+            "coral" => thread_color_light::CORAL,
+            "moss" => thread_color_light::MOSS,
+            "teal" => thread_color_light::TEAL,
+            "plum" => thread_color_light::PLUM,
             _ => thread_color_light::PERIWINKLE,
         }
     };
     rgb(c).into()
+}
+
+/// An agent's own colour, `#rrggbb`, as a number, or none when `s` isn't one.
+pub fn hex(s: &str) -> Option<u32> {
+    let digits = s.strip_prefix('#')?;
+    if digits.len() != 6 || !digits.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return None;
+    }
+    u32::from_str_radix(digits, 16).ok()
+}
+
+/// How full the wheel's colours are at its edge.
+const WHEEL_FULL: f32 = 0.72;
+
+/// The colour at `hue` (0 to 1) and `sat` (0 to 1) on the colour wheel, as an agent's
+/// own, `#rrggbb`.
+fn wheel_hex(hue: f32, sat: f32) -> String {
+    let c: Rgba = hsla(hue.rem_euclid(1.0), sat.clamp(0.0, 1.0), 0.5, 1.0).into();
+    let byte = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() as u8;
+    format!("#{:02x}{:02x}{:02x}", byte(c.r), byte(c.g), byte(c.b))
+}
+
+/// What's at `(x, y)` on a colour wheel `size` across, from its top left: the hue
+/// round it, and how full from its middle out. Outside the wheel is nothing.
+pub fn wheel_pick(x: f32, y: f32, size: f32) -> Option<String> {
+    let r = size / 2.0;
+    let (dx, dy) = (x - r, y - r);
+    let d = (dx * dx + dy * dy).sqrt() / r;
+    if d > 1.04 {
+        return None;
+    }
+    let hue = dy.atan2(dx).rem_euclid(TAU) / TAU;
+    Some(wheel_hex(hue, d.min(1.0) * WHEEL_FULL))
+}
+
+/// Where an agent's own colour sits on a colour wheel: its hue as the angle, and how
+/// full it is as the distance out, 0 to 1.
+fn wheel_place(color: &str) -> Option<(f32, f32)> {
+    let c: Hsla = rgb(hex(color)?).into();
+    Some((c.h * TAU, (c.s / WHEEL_FULL).min(1.0)))
+}
+
+/// A colour wheel, `size` across: every hue round it, in `wedges` slices, grey in the
+/// middle and full at its edge, as the theme shows it. With `mark`, an agent's own
+/// colour, a small ring sits where it is.
+pub fn wheel(size: f32, wedges: usize, dark: bool, mark: Option<String>) -> impl IntoElement {
+    canvas(
+        |_, _, _| {},
+        move |bounds, _, window, _| {
+            let (x0, y0) = (bounds.origin.x.as_f32(), bounds.origin.y.as_f32());
+            let r = size / 2.0;
+            let (cx, cy) = (x0 + r, y0 + r);
+            let at = |a: f32, d: f32| point(px(cx + d * a.cos()), px(cy + d * a.sin()));
+            // Grey under it all, so nothing light shows between two slices.
+            let mut under = PathBuilder::fill();
+            for i in 0..=48 {
+                let p = at(TAU * i as f32 / 48.0, r - 0.5);
+                if i == 0 {
+                    under.move_to(p)
+                } else {
+                    under.line_to(p)
+                }
+            }
+            under.close();
+            if let Ok(path) = under.build() {
+                window.paint_path(path, color(&wheel_hex(0.0, 0.0), dark));
+            }
+            // Thin slices from the middle out, each grey at the middle and full at the
+            // edge: at a lightness of a half, a colour's channels run straight from
+            // grey to full as its saturation does, so a gradient is the wheel exactly.
+            for w in 0..wedges {
+                // A little past each edge, so no seam shows between them.
+                let a0 = TAU * w as f32 / wedges as f32 - 0.02;
+                let a1 = TAU * (w + 1) as f32 / wedges as f32 + 0.02;
+                let mut pb = PathBuilder::fill();
+                pb.move_to(at(0.0, 0.0));
+                for i in 0..=2 {
+                    pb.line_to(at(a0 + (a1 - a0) * i as f32 / 2.0, r));
+                }
+                pb.close();
+                let hue = (w as f32 + 0.5) / wedges as f32;
+                // Its way out, as CSS turns it: 0 up, 90 to the right.
+                let toward = 90.0 + (a0 + a1) / 2.0 * 180.0 / PI;
+                if let Ok(path) = pb.build() {
+                    window.paint_path(
+                        path,
+                        linear_gradient(
+                            toward,
+                            linear_color_stop(color(&wheel_hex(hue, 0.0), dark), 0.0),
+                            linear_color_stop(color(&wheel_hex(hue, WHEEL_FULL), dark), 1.0),
+                        ),
+                    );
+                }
+            }
+            if let Some((a, d)) = mark.as_deref().and_then(wheel_place) {
+                let out = (d * r).min(r - 4.0);
+                let (mx, my) = (cx + out * a.cos(), cy + out * a.sin());
+                for (width, ink) in [(4.0, rgb(0x000000)), (2.0, rgb(0xffffff))] {
+                    let mut ring = PathBuilder::stroke(px(width));
+                    for i in 0..=24 {
+                        let t = TAU * i as f32 / 24.0;
+                        let p = point(px(mx + 6.0 * t.cos()), px(my + 6.0 * t.sin()));
+                        if i == 0 {
+                            ring.move_to(p)
+                        } else {
+                            ring.line_to(p)
+                        }
+                    }
+                    if let Ok(path) = ring.build() {
+                        window.paint_path(
+                            path,
+                            Hsla::from(ink).opacity(if width > 3.0 { 0.25 } else { 1.0 }),
+                        );
+                    }
+                }
+            }
+        },
+    )
+    .size(px(size))
 }
 
 /// Whether a thread in this state moves, so the window keeps drawing frames. A thread
@@ -516,7 +654,7 @@ fn weave_layer(
 
 #[cfg(test)]
 mod tests {
-    use super::bend;
+    use super::{bend, color, hex, wheel_hex, wheel_pick, wheel_place, WHEEL_FULL};
     use crate::model::Mood;
 
     const MOODS: [Mood; 6] = [
@@ -586,5 +724,26 @@ mod tests {
         assert!(pts[0].1.abs() < 0.01 && pts[pts.len() - 1].1.abs() < 0.01);
         let idle = points(Mood::Idle, 26.0, 11.0, 0.5);
         assert!(idle.windows(2).all(|w| w[1].0 > w[0].0));
+    }
+
+    #[test]
+    fn an_agent_s_own_colour_reads_in_both_themes() {
+        assert_eq!(hex("#5B8def"), Some(0x5b8def));
+        assert_eq!(hex("teal"), None);
+        assert_eq!(hex("#5b8de"), None);
+        // A pale yellow is made dark enough on light, and a deep one light enough on dark.
+        assert!(color("#fff5b0", false).l <= 0.52);
+        assert!(color("#3a3000", true).l >= 0.62);
+        // Every hue the picker gives is an agent's own colour.
+        for i in 0..36 {
+            assert!(hex(&wheel_hex(i as f32 / 36.0, WHEEL_FULL)).is_some());
+        }
+        assert_eq!(wheel_hex(0.0, WHEEL_FULL), "#db2424");
+        // The wheel: grey in its middle, full red at its right edge, nothing outside.
+        assert_eq!(wheel_pick(50.0, 50.0, 100.0).as_deref(), Some("#808080"));
+        assert_eq!(wheel_pick(100.0, 50.0, 100.0).as_deref(), Some("#db2424"));
+        assert_eq!(wheel_pick(0.0, 0.0, 100.0), None);
+        let (a, d) = wheel_place("#db2424").unwrap();
+        assert!(a.abs() < 0.01 && (d - 1.0).abs() < 0.02);
     }
 }

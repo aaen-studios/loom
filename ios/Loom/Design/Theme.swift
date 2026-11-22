@@ -37,11 +37,25 @@ enum P {
     static let ok = Color.loom(L.ok, D.ok)
     static let bad = Color.loom(L.bad, D.bad)
 
-    /// An agent's thread colour, by the name the instance gives it.
+    /// An agent's thread colour, by the name the instance gives it, or its own as
+    /// #rrggbb, kept to its hue and made light or dark enough for the appearance.
     static func thread(_ name: String) -> Color {
         typealias TL = Tokens.ThreadColorLight
         typealias TD = Tokens.ThreadColorDark
+        if name.count == 7, name.hasPrefix("#"), let rgb = UInt32(name.dropFirst(), radix: 16) {
+            let base = UIColor(loom: rgb)
+            return Color(UIColor { traits in
+                var h: CGFloat = 0, s: CGFloat = 0, l: CGFloat = 0, a: CGFloat = 0
+                base.getHue(&h, saturation: &s, brightness: &l, alpha: &a)
+                let dark = traits.userInterfaceStyle == .dark
+                return UIColor(hue: h, saturation: dark ? min(s, 0.55) : max(s, 0.5), brightness: dark ? max(l, 0.85) : min(max(l, 0.45), 0.75), alpha: 1)
+            })
+        }
         switch name {
+        case "coral": return .loom(TL.coral, TD.coral)
+        case "moss": return .loom(TL.moss, TD.moss)
+        case "teal": return .loom(TL.teal, TD.teal)
+        case "plum": return .loom(TL.plum, TD.plum)
         case "mint": return .loom(TL.mint, TD.mint)
         case "apricot": return .loom(TL.apricot, TD.apricot)
         case "pink": return .loom(TL.pink, TD.pink)

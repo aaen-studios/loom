@@ -21,7 +21,8 @@ import std.text.utf8.{decode_lossy_unicode}
 import std.zip.{Writer}
 import shared.obj.{Obj, at, merge, str_at}
 import server.installer
-import tests.kit.{App, Instance, calx, check, json_of, loom, remove_scratch, reply_text}
+import shared.client.{Session, json_of, reply_text}
+import tests.kit.{Instance, calx, check, loom, remove_scratch}
 
 struct Serving {
     server: Server
@@ -56,7 +57,7 @@ fn listed(answer: Json, id: str) -> Json {
     return Json.Null
 }
 
-fn say(app: mut App, conversation: String, cid: str, text: str) -> String ! Error {
+fn say(app: mut Session, conversation: String, cid: str, text: str) -> String ! Error {
     try app.send(Obj.new().s("t", String("send")).s("cid", String(cid)).s("conversation", conversation).s("text", String(text)).done())
     return reply_text(try app.reply())
 }
@@ -66,7 +67,7 @@ fn error_code(answer: Json) -> String {
 }
 
 fn run(i: Instance, registry: String) ! Error {
-    var app = try App.connect(i.base.copy(), i.token.copy(), 0)
+    var app = try Session.connect(i.base.copy(), i.token.copy(), 0)
     let list = try app.cmd("q_1", "acp.registry", Obj.new().done())
     let bin = listed(list.copy(), "fake-bin")
     try check((str_at(bin.copy(), "icon_svg") ?? String()).contains("currentColor") and at(listed(list.copy(), "fake-swapped"), "icon_svg") == Json.Null, "each agent comes with its icon, fetched by the instance, and one that isn't an SVG is left out")
@@ -95,7 +96,7 @@ fn run(i: Instance, registry: String) ! Error {
     try check(error_code(try app.cmd("q_9", "acp.install", Obj.new().s("id", String("nothing")).done())) == "not_found", "and one that isn't in the registry")
 
     let member = try i.second_account("ann")
-    var theirs = try App.connect(i.base.copy(), member, 0)
+    var theirs = try Session.connect(i.base.copy(), member, 0)
     _ = try theirs.cmd("q_1", "acp.registry", Obj.new().done())
     try check(error_code(try theirs.cmd("q_2", "acp.install", Obj.new().s("id", String("fake-bin")).done())) == "not_allowed", "only the owner installs")
     theirs.close()

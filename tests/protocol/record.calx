@@ -11,10 +11,11 @@ module tests.protocol.record
 import std.json.{Json}
 import std.process.{exit}
 import shared.obj.{Obj, at, str_at}
-import tests.kit.{App, Instance, check, reply_text}
+import shared.client.{Session, reply_text}
+import tests.kit.{Instance, check}
 
 // The agent's next reply in `conversation`, as text.
-fn reply_in(app: mut App, conversation: String) -> String ! Error {
+fn reply_in(app: mut Session, conversation: String) -> String ! Error {
     loop {
         let created = try app.until("event", "message.created")
         let m = at(created, "message")
@@ -22,13 +23,13 @@ fn reply_in(app: mut App, conversation: String) -> String ! Error {
     }
 }
 
-fn say(app: mut App, conversation: String, cid: str, text: String) -> String ! Error {
+fn say(app: mut Session, conversation: String, cid: str, text: String) -> String ! Error {
     try app.send(Obj.new().s("t", String("send")).s("cid", String(cid)).s("conversation", conversation.copy()).s("text", text).done())
     return try reply_in(mut app, conversation)
 }
 
 // The agent's activity, newest first.
-fn activity(app: mut App, id: str, agent: String) -> List<Json> ! Error {
+fn activity(app: mut Session, id: str, agent: String) -> List<Json> ! Error {
     let got = try app.cmd(id, "activity.list", Obj.new().s("agent", agent).done())
     if let Json.Array(es) = at(at(got, "value"), "activity") { return es.copy() }
     return List<Json>()
@@ -43,7 +44,7 @@ fn entry(entries: List<Json>, text: str) -> Json {
 }
 
 fn run(i: Instance) ! Error {
-    var app = try App.connect(i.base.copy(), i.token.copy(), 0)
+    var app = try Session.connect(i.base.copy(), i.token.copy(), 0)
     let made = try app.cmd("q_1", "agent.create", Obj.new().s("name", String("Main")).s("acp_agent", String("fake")).s("instructions", String("You are a test.")).done())
     let main_id = str_at(at(at(made, "value"), "agent"), "id") ?? String()
     _ = try app.cmd("q_2", "agent.create", Obj.new().s("name", String("Helper")).s("acp_agent", String("fake")).s("instructions", String("You are a test.")).done())
