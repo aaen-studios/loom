@@ -120,6 +120,18 @@ enum Menu {
     Permission,
 }
 
+/// What a right-click opened a menu on, at the pointer. An agent's opens the agent menu
+/// (`menu_at`) instead.
+#[derive(Clone, PartialEq, Eq)]
+enum Ctx {
+    /// A message in the chat, by its id.
+    Message(String),
+    /// A server in the sidebar's foot, by its folder.
+    Server(String),
+    /// The sidebar's list of agents, under its last.
+    Agents,
+}
+
 /// The composer's + menu, open at its first list or at one it leads to.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Plus {
@@ -166,6 +178,8 @@ pub struct Loom {
     /// Where the agent menu opens when an agent was right-clicked in the sidebar, in
     /// the window; under the header's name otherwise.
     menu_at: Option<Point<Pixels>>,
+    /// A menu a right-click opened, where and on what.
+    ctx: Option<(Point<Pixels>, Ctx)>,
     /// The menu item that can't be undone and waits for its second click, until the
     /// menu closes.
     armed: Option<&'static str>,
@@ -881,6 +895,7 @@ ACTA_KEY=secret:ACTA_KEY",
             screen: Screen::Chat,
             menu: None,
             menu_at: None,
+            ctx: None,
             armed: None,
             fresh_armed: false,
             custom_color: false,
@@ -1004,8 +1019,9 @@ ACTA_KEY=secret:ACTA_KEY",
     /// Esc steps back: closes a menu, the server form, a page, or a step of making an
     /// agent, whichever is on top.
     fn escape(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.menu.is_some() {
+        if self.menu.is_some() || self.ctx.is_some() {
             self.menu = None;
+            self.ctx = None;
         } else if self.popup.is_none() && (self.search_peek || !self.model.query.is_empty()) {
             self.end_search(window, cx);
         } else if self.popup.is_some() {
@@ -1925,6 +1941,7 @@ ACTA_KEY=secret:ACTA_KEY",
     /// pointer, the same menu as the header's.
     fn agent_menu_at(&mut self, agent: String, at: Point<Pixels>, cx: &mut Context<Self>) {
         self.select(agent, cx);
+        self.ctx = None;
         self.menu = Some(Menu::Agent);
         self.menu_at = Some(at);
         cx.notify();
@@ -2167,7 +2184,13 @@ ACTA_KEY=secret:ACTA_KEY",
                 .gap(px(space::M))
                 .rounded(px(radius::ROW))
                 .cursor_pointer()
-                .soft_hover(transparent_black(), p.hover, None);
+                .soft_hover(transparent_black(), p.hover, None)
+                .on_mouse_down(MouseButton::Right, {
+                    let dir = dir.clone();
+                    cx.listener(move |this, e: &MouseDownEvent, _, cx| {
+                        this.open_ctx(e.position, Ctx::Server(dir.clone()), cx)
+                    })
+                });
             if here {
                 button = button
                     .flex_1()
@@ -2578,7 +2601,7 @@ ACTA_KEY=secret:ACTA_KEY",
     /// behind it hovers, and a click anywhere, the button that opened it too, closes it.
     /// The menus themselves are drawn over it.
     fn menu_scrim(&self, cx: &mut Context<Self>) -> Option<Stateful<Div>> {
-        if self.menu.is_none() && self.plus.is_none() {
+        if self.menu.is_none() && self.plus.is_none() && self.ctx.is_none() {
             return None;
         }
         Some(
@@ -2592,6 +2615,7 @@ ACTA_KEY=secret:ACTA_KEY",
                 .on_any_mouse_down(cx.listener(|this, _, _, cx| {
                     this.menu = None;
                     this.plus = None;
+                    this.ctx = None;
                     cx.notify();
                 })),
         )
@@ -4492,7 +4516,8 @@ ACTA_KEY=secret:ACTA_KEY",
                     .on_mouse_down(MouseButton::Right, {
                         let id = id.clone();
                         cx.listener(move |this, e: &MouseDownEvent, _, cx| {
-                            this.agent_menu_at(id.clone(), e.position, cx)
+                            cx.stop_propagation();
+                            this.agent_menu_at(id.clone(), e.position, cx);
                         })
                     })
                     .on_click(cx.listener(move |this, _, _, cx| this.select(id.clone(), cx)))
@@ -4627,6 +4652,12 @@ ACTA_KEY=secret:ACTA_KEY",
                     .flex_1()
                     .min_h_0()
                     .overflow_y_scroll()
+                    .on_mouse_down(
+                        MouseButton::Right,
+                        cx.listener(|this, e: &MouseDownEvent, _, cx| {
+                            this.open_ctx(e.position, Ctx::Agents, cx)
+                        }),
+                    )
                     .child(if searching { self.hits(cx) } else { list }),
             )
             .when_some(self.update_pop(false, cx), |d, pop| d.child(pop))
@@ -4789,7 +4820,8 @@ ACTA_KEY=secret:ACTA_KEY",
                     .on_mouse_down(MouseButton::Right, {
                         let id = id.clone();
                         cx.listener(move |this, e: &MouseDownEvent, _, cx| {
-                            this.agent_menu_at(id.clone(), e.position, cx)
+                            cx.stop_propagation();
+                            this.agent_menu_at(id.clone(), e.position, cx);
                         })
                     })
                     .on_click(cx.listener(move |this, _, _, cx| this.select(id.clone(), cx)))
@@ -4826,6 +4858,12 @@ ACTA_KEY=secret:ACTA_KEY",
             let heard = !here && !model.unread.is_empty();
             let button = div()
                 .id(SharedString::from(format!("rail-server-{dir}")))
+                .on_mouse_down(MouseButton::Right, {
+                    let dir = dir.clone();
+                    cx.listener(move |this, e: &MouseDownEvent, _, cx| {
+                        this.open_ctx(e.position, Ctx::Server(dir.clone()), cx)
+                    })
+                })
                 .relative()
                 .size(px(control::SERVER))
                 .flex_none()
@@ -5254,7 +5292,10 @@ ACTA_KEY=secret:ACTA_KEY",
                 .rounded(px(radius::ROW))
                 .cursor_pointer()
                 .soft_hover(transparent_black(), p.hover, None)
-                .when(self.menu == Some(Menu::Agent), |d| d.bg(p.hover))
+                .when(
+                    self.menu == Some(Menu::Agent) && self.menu_at.is_none(),
+                    |d| d.bg(p.hover),
+                )
                 .on_click(cx.listener(|this, _, _, cx| {
                     this.menu_at = None;
                     this.menu = if this.menu == Some(Menu::Agent) {
@@ -5617,6 +5658,134 @@ ACTA_KEY=secret:ACTA_KEY",
                         .child(Icon::new(Ico::Check).small()),
                 )
             })
+    }
+
+    /// Opens a right-click menu at the pointer, in place of any menu open.
+    fn open_ctx(&mut self, at: Point<Pixels>, on: Ctx, cx: &mut Context<Self>) {
+        self.menu = None;
+        self.plus = None;
+        self.ctx = Some((at, on));
+        cx.notify();
+    }
+
+    /// The menu a right-click opened, at the pointer, with what can be done to what was
+    /// clicked: the same things its buttons and the agent menu do.
+    fn ctx_menu(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let p = self.p;
+        let (at, on) = self.ctx.clone()?;
+        let close = |this: &mut Loom, cx: &mut Context<Loom>| {
+            this.ctx = None;
+            cx.notify();
+        };
+        let mut panel = div()
+            .occlude()
+            .w(px(layout::MENU))
+            .p(px(space::XS))
+            .flex()
+            .flex_col()
+            .bg(p.raised)
+            .border_1()
+            .border_color(p.line_strong)
+            .rounded(px(radius::CARD))
+            .shadow_lg()
+            .on_mouse_down_out(cx.listener(move |this, _, _, cx| close(this, cx)));
+        match on {
+            Ctx::Message(id) => {
+                let m = self.rows.iter().find_map(|r| match r {
+                    Row::Message(m) if m.id == id => Some(m.clone()),
+                    _ => None,
+                })?;
+                let text = model::copy_text(&m, &self.model.tools);
+                if !text.is_empty() {
+                    panel = panel.child(
+                        self.menu_item("ctx-copy", Ico::Copy, "Copy", false)
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                cx.write_to_clipboard(ClipboardItem::new_string(text.clone()));
+                                this.notice = Some(("Copied.".into(), Instant::now(), true));
+                                close(this, cx);
+                            })),
+                    );
+                }
+                let pinned = m.pinned;
+                let pin_id = m.id.clone();
+                panel = panel
+                    .child(
+                        self.menu_item(
+                            "ctx-pin",
+                            if pinned { Ico::PinOff } else { Ico::Pin },
+                            if pinned { "Unpin" } else { "Pin" },
+                            false,
+                        )
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            let f = this.model.pin(&pin_id, !pinned);
+                            this.send(f);
+                            close(this, cx);
+                        })),
+                    )
+                    .child(
+                        self.menu_item("ctx-branch", Ico::GitBranch, "Branch from here", false)
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                let f = this.model.branch(&m.id);
+                                this.send(f);
+                                close(this, cx);
+                            })),
+                    );
+            }
+            Ctx::Server(dir) => {
+                let name = self
+                    .servers()
+                    .into_iter()
+                    .find(|(d, _)| *d == dir)
+                    .map(|(_, m)| server_name(m, &dir))?;
+                let here = dir == self.here;
+                panel = panel
+                    .child(
+                        self.menu_item(
+                            "ctx-server",
+                            Ico::Settings,
+                            if here { "Server settings" } else { "Open" },
+                            false,
+                        )
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.ctx = None;
+                            if here {
+                                this.open(Screen::Server, cx);
+                            } else {
+                                this.show_server(&dir, cx);
+                            }
+                            cx.notify();
+                        })),
+                    )
+                    .child(
+                        self.menu_item("ctx-copy-server", Ico::Copy, "Copy address", false)
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                cx.write_to_clipboard(ClipboardItem::new_string(name.clone()));
+                                this.notice = Some(("Copied.".into(), Instant::now(), true));
+                                close(this, cx);
+                            })),
+                    );
+            }
+            Ctx::Agents => {
+                panel = panel.child(
+                    self.menu_item("ctx-new-agent", Ico::Plus, "New agent", false)
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.ctx = None;
+                            this.open(Screen::NewAgent, cx);
+                            cx.notify();
+                        })),
+                );
+            }
+        }
+        Some(
+            deferred(
+                anchored()
+                    .position(at)
+                    .snap_to_window_with_margin(px(space::S))
+                    .child(panel),
+            )
+            .with_priority(1)
+            .into_any_element(),
+        )
     }
 
     fn menu_panel(&mut self, cx: &mut Context<Self>) -> Option<Div> {
@@ -6026,12 +6195,22 @@ ACTA_KEY=secret:ACTA_KEY",
                         }),
                 );
             }
+            // A right-click on a kept message: Copy, Pin and Branch from here.
+            let on_right = branch_at.clone().map(|id| {
+                let this = this.clone();
+                move |e: &MouseDownEvent, _: &mut Window, cx: &mut App| {
+                    let _ = this.update(cx, |loom, cx| {
+                        loom.open_ctx(e.position, Ctx::Message(id.clone()), cx)
+                    });
+                }
+            });
             div()
                 .w_full()
                 .flex()
                 .flex_col()
                 .items_center()
                 .px(px(space::XL))
+                .when_some(on_right, |d, f| d.on_mouse_down(MouseButton::Right, f))
                 .when(is_new, |d| d.child(divider))
                 .children(time_line)
                 .child(
@@ -12971,7 +13150,7 @@ fn reply(
         .w_full()
         .flex()
         .gap(px(space::M))
-        .child(div().pt(px(if head { 4.0 } else { 10.0 })).child(thread(
+        .child(div().pt(px(if head { 4.0 } else { 16.0 })).child(thread(
             format!("msg-{}", m.id),
             mood,
             tint,
@@ -13515,6 +13694,7 @@ impl Render for Loom {
             None => deferred(m).into_any_element(),
         });
         let menu_scrim = self.menu_scrim(cx);
+        let ctx_menu = self.ctx_menu(cx);
         let popup = self.popup_view(window, cx);
         let toast = self.toast(window, cx);
         let out = root
@@ -13546,6 +13726,7 @@ impl Render for Loom {
             .when_some(popup, |d, p| d.child(p))
             .when_some(toast, |d, t| d.child(t))
             .when_some(menu_scrim, |d, s| d.child(s))
+            .when_some(ctx_menu, |d, m| d.child(m))
             .when_some(whole, |d, c| d.child(c))
             .when_some(splash, |d, s| d.child(s))
             .child(motion_ticker());

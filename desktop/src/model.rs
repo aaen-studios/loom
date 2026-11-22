@@ -1505,6 +1505,25 @@ pub enum Part {
     Quiet(String),
 }
 
+/// What Copy puts on the clipboard for a message: the words it shows, a paragraph each.
+/// For a reply that's its answer, not what it said on the way, folded under it.
+pub fn copy_text(m: &Message, tools: &[Tool]) -> String {
+    let shows = Shows {
+        tools: false,
+        thoughts: false,
+    };
+    parts(m, tools, shows)
+        .iter()
+        .filter_map(|part| match part {
+            Part::Bubbles(run) => Some(run),
+            _ => None,
+        })
+        .flatten()
+        .map(|&i| m.blocks[i].text.trim())
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
 /// A tool call's title, as its agent named it.
 pub fn tool_title(call: Option<&String>, tools: &[Tool]) -> String {
     call.and_then(|c| tools.iter().find(|t| &t.call == c))
@@ -5698,6 +5717,21 @@ mod tests {
             j,
             vec![first, last, alone, alone, alone, alone, alone, alone]
         );
+    }
+
+    #[test]
+    fn copy_takes_a_messages_words_and_a_replys_answer() {
+        let person = Message {
+            role: "person".into(),
+            ..turn(&["text:One", "text:Two "], false, "")
+        };
+        assert_eq!(copy_text(&person, &[]), "One\n\nTwo");
+        let reply = turn(
+            &["text:Looking.", "tool:", "text:Here it is."],
+            false,
+            "done",
+        );
+        assert_eq!(copy_text(&reply, &[]), "Here it is.");
     }
 
     #[test]
