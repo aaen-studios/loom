@@ -29,7 +29,7 @@ Everything else in Settings is kept on the instance, so every device you sign in
 Under **Replies**:
 
 - **Message style**: Bubbles, where an agent's replies sit in bubbles as yours do, with a touch of the agent's colour, or Plain text. Bubbles are the default.
-- **Tool calls**: how much of an agent's work a reply shows. **Hidden** shows none, except one that failed or was refused. **Folded** puts each run of calls on one line, which opens to show each. **Every call** shows each on its own line. Hidden is the default.
+- **Tool calls**: how much of an agent's work a reply shows. **Hidden** shows none, not even one that failed: the agent tells you itself when a failure matters. **Folded** puts each run of calls on one line, which opens to show each. **Every call** shows each on its own line. Hidden is the default.
 - **Show thoughts open**: an agent's thinking shows open, rather than folded under Thought.
 
 Under **Composer**:

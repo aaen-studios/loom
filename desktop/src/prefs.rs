@@ -18,7 +18,7 @@ pub enum Theme {
 /// How much of an agent's tool calls a reply shows.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Tools {
-    /// None, but for one that failed or was denied.
+    /// None, not even one that failed: the agent says so when it matters.
     Hidden,
     /// One line for each run of them, which opens to show each.
     Folded,
