@@ -14,6 +14,7 @@ mod panel_test;
 mod perf;
 mod place;
 mod prefs;
+mod rail;
 mod shell;
 mod smooth;
 mod thread;
@@ -119,7 +120,9 @@ fn main() {
         gpui_kit::open_window(
             WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
-                window_min_size: Some(size(px(720.), px(480.))),
+                // As narrow as the rail beside the chat at its narrowest: below the
+                // whole sidebar's room, the sidebar is a rail (rail.rs).
+                window_min_size: Some(size(px(tokens::layout::RAIL + app::CHAT_LEAST), px(480.))),
                 titlebar: Some(TitlebarOptions {
                     title: Some("loom".into()),
                     ..TitleBar::title_bar_options()

@@ -51,6 +51,7 @@ composer = 16
 
 [layout]
 sidebar = 260
+rail = 56            # the sidebar, collapsed
 titlebar = 48
 settings = 600       # the settings page's column
 page = 520           # a narrow page's column, such as an agent's edit page

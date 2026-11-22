@@ -71,6 +71,8 @@ pub struct Prefs {
     /// Whether a downloaded update goes in on its own, while loom is in the tray and
     /// no agent works.
     pub auto_update: bool,
+    /// Whether the sidebar shows the search box over the agents.
+    pub search: bool,
 }
 
 impl Default for Prefs {
@@ -90,6 +92,7 @@ impl Default for Prefs {
             sound: true,
             awake: false,
             auto_update: false,
+            search: false,
         }
     }
 }
@@ -153,6 +156,7 @@ impl Prefs {
             sound: b("sound", d.sound),
             awake: b("awake", d.awake),
             auto_update: b("auto_update", d.auto_update),
+            search: b("search", d.search),
         }
     }
 
@@ -200,6 +204,7 @@ impl Prefs {
         m.insert("sound".into(), json!(self.sound));
         m.insert("awake".into(), json!(self.awake));
         m.insert("auto_update".into(), json!(self.auto_update));
+        m.insert("search".into(), json!(self.search));
         Value::Object(m)
     }
 
@@ -299,8 +304,21 @@ mod tests {
             tools: Tools::Folded,
             ctrl_enter: true,
             sound: false,
+            search: true,
             ..Prefs::default()
         };
         assert_eq!(Prefs::from_json(&p.to_json()), p);
+    }
+
+    #[test]
+    fn search_is_hidden_until_the_person_shows_it() {
+        assert!(!Prefs::default().search);
+        // A prefs file kept before search could be hidden still loads, with it hidden.
+        let older = serde_json::json!({"theme": "dark", "bubbles": false, "tray": false});
+        let p = Prefs::from_json(&older);
+        assert!(!p.search && p.theme == Theme::Dark && !p.bubbles && !p.tray);
+        let shown = Prefs::from_json(&serde_json::json!({"search": true}));
+        assert!(shown.search);
+        assert_eq!(Prefs::from_json(&shown.to_json()), shown);
     }
 }
