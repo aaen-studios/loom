@@ -173,6 +173,11 @@ impl Code {
         if script.len() > codemode.CODE_MOST { return failed("The script is over {codemode.CODE_MOST} bytes.") }
         let asked = int_at(args, "timeout") ?? 0
         let limit_ms: u64 = if asked <= 0 { codemode.TIME_MS } else if u64.wrap(asked) * 1000 > codemode.TIME_MOST_MS { codemode.TIME_MOST_MS } else { u64.wrap(asked) * 1000 }
+        // The agent program doesn't ask before run_code, so the instance says
+        // whether the script may run: at once, unless the agent's permission
+        // mode is `ask`, when the person sees the script and says yes first.
+        let allowed = link.send("/api/mcp/allow", Obj.new().s("server", String("loom")).s("tool", String("run_code")).b("script", true).j("arguments", Obj.new().s("code", script.copy()).done()).done())
+        if is_error(allowed.copy()) { return failed(codemode.error_of(allowed)) }
         let deno = match self.deno_path(link) {
             ok(d) => d,
             err(e) => return failed("Scripts can't run here: Deno couldn't be fetched ({e}). Use the tools some other way."),
