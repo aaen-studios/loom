@@ -1,0 +1,614 @@
+module server.rules
+
+// Rules on what's touched (PLAN.md, "Rules, records and limits"): beside an
+// agent's permission mode, a rule allows, asks about or denies an action by
+// what it touches. A rule has an outcome, `then` (`allow`, `ask` or `deny`),
+// and one or more conditions, all of which must hold:
+//
+// - `site`: the host a browser tool or a fetch goes to, such as `github.com`
+//   (that host and every one under it) or `*.bank.no`;
+// - `path`: a file path, as a glob (`/srv/secrets/**`, `**/.env`), or a path
+//   with no wildcards, which is that file or folder and everything in it;
+// - `command`: a shell command, by its start (`git push`) or as a glob
+//   (`rm -rf *`), checked against each command a line chains together;
+// - `tool`: an MCP tool, as `server.tool` (`github.create_issue`), a glob
+//   (`github.delete_*`), or a server's name alone for all of its tools.
+//   Loom's own tools are `loom.<name>`;
+// - `effect`: what the action does, `read` (it only looks) or `write`;
+// - `started_by`: who started the turn: `person` (from one of their
+//   devices), `owner`, `admin` or `member` (the person, by their role),
+//   `agent` (another agent, with message_agent), `routine`, `webhook`,
+//   `script` or `plugin`.
+//
+// Deny is checked first, then ask, then allow, and with none the permission
+// mode decides. A rule that can't be read denies everything, and so does an
+// action whose site, path, command or starter a rule is about but can't be
+// read. An allow rule on paths or commands holds only when every path and
+// every chained command matches it; deny and ask hold when any does.
+//
+// The instance keeps them, per agent and for every agent; what's here only
+// reads, checks and matches JSON.
+import std.env
+import std.json.{Json}
+import std.path.{glob_matches, glob_matches_name, is_absolute, join, normalize, root}
+import std.url.{Url}
+import shared.obj.{Obj, at, str_at}
+
+// How many rules a person has at most, and how long a condition can be.
+pub const MOST: usize = 200
+pub const LONGEST: usize = 500
+
+pub const CONDITIONS: str = "site path command tool effect started_by"
+pub const OUTCOMES: str = "allow ask deny"
+pub const STARTERS: str = "person owner admin member agent routine webhook script plugin"
+
+// What an action touches, as far as the rules go. A fact an action doesn't
+// have is none (or empty); one it has but can't be read is marked unreadable.
+pub struct Act {
+    pub site: String?    // the host, lowercase, maybe with its port
+    pub site_ok: bool
+    pub paths: List<String>
+    pub paths_ok: bool
+    pub command: String?
+    pub command_ok: bool
+    pub tool: String?    // server.tool
+    pub effect: String    // read or write, or "" when it isn't known
+    pub started_by: String    // one of STARTERS but the roles, or "" when it isn't known
+    pub role: String    // the person's role: owner, admin or member
+}
+
+// An action that touches nothing yet.
+pub fn act() -> Act {
+    return Act { site: none, site_ok: true, paths: List<String>(), paths_ok: true, command: none, command_ok: true, tool: none, effect: String(), started_by: String(), role: String() }
+}
+
+// What the rules make of an action: `then` is allow, ask or deny, or "" when
+// no rule is about it and the permission mode decides; `rule` is the one that
+// decided, or null; `why` says so in words.
+pub struct Verdict {
+    pub then: String
+    pub rule: Json
+    pub why: String
+}
+
+// Whether `s` is who a rule can say started a turn.
+pub fn is_starter(s: String) -> bool {
+    return one_of(s, STARTERS)
+}
+
+fn one_of(value: String, list: str) -> bool {
+    for v in list.split(" ") {
+        if value == v { return true }
+    }
+    return false
+}
+
+fn wild(pattern: String) -> bool {
+    return pattern.contains("*") or pattern.contains("?") or pattern.contains("[")
+}
+
+// A site as a rule keeps it: the host of an address, lowercase, without
+// a scheme, a path or who's logged in.
+fn site_pattern(text: String) -> String {
+    var s = text.trim().to_lower_root()
+    if let (_, rest) = s.split_once("://") { s = rest.copy() }
+    for end in ["/", "?", "#"] {
+        if let k = s.find(end) { s = s[..k].copy() }
+    }
+    if let k = s.find_last("@") { s = s[k + 1..].copy() }
+    return s
+}
+
+// A rule from rule.put's `args`: its outcome, conditions and note, checked,
+// or why it can't be one. The instance adds its id, agent, by and at.
+pub fn made(args: Json) -> Json ! Error {
+    let then = str_at(args.copy(), "then") ?? String()
+    if not one_of(then.copy(), OUTCOMES) { fail "then is allow, ask or deny." }
+    var o = Obj.new().s("then", then)
+    var conditions = 0
+    for c in CONDITIONS.split(" ") {
+        let v = args.get(c.copy()) ?? Json.Null
+        if v == Json.Null { continue }
+        let given = v.as_str() else fail "{c} is text."
+        var value = given.trim().copy()
+        if value.len() == 0 { continue }
+        if value.len() > LONGEST { fail "{c} is over {LONGEST} bytes." }
+        if value.contains("\n") { fail "{c} is one line." }
+        if c == "site" {
+            value = site_pattern(value)
+            if value.len() == 0 or value.contains(" ") { fail "site is a host, such as github.com or *.github.com." }
+        } else if c == "tool" {
+            if value.contains(" ") { fail "tool is server.tool, such as github.create_issue, or a server's name." }
+        } else if c == "effect" {
+            if value != "read" and value != "write" { fail "effect is read or write." }
+        } else if c == "started_by" {
+            if not one_of(value.copy(), STARTERS) { fail "started_by is one of {STARTERS.replace(" ", ", ")}." }
+        }
+        o.m.insert(c.copy(), Json.Str(value))
+        conditions += 1
+    }
+    if conditions == 0 { fail "A rule needs something to match: a site, a path, a command, a tool, an effect or who started the turn." }
+    if let note = str_at(args, "note") {
+        if note.len() > LONGEST { fail "note is over {LONGEST} bytes." }
+        if note.trim().len() > 0 { o = o.s("note", note.trim().copy()) }
+    }
+    return o.done()
+}
+
+// Whether a kept rule can be read: it's one made would make.
+pub fn readable(rule: Json) -> bool {
+    return match made(rule) {
+        ok(_) => true,
+        err(_) => false,
+    }
+}
+
+// A rule in words, for the apps and the activity log: "Deny commands like
+// git push, when a webhook started the turn".
+pub fn said(rule: Json) -> String {
+    if not readable(rule.copy()) { return String("A rule that can't be read, so it denies everything") }
+    let then = str_at(rule.copy(), "then") ?? String()
+    var what = List<String>()
+    if let v = str_at(rule.copy(), "site") { what.push("the site {v}") }
+    if let v = str_at(rule.copy(), "path") { what.push("the path {v}") }
+    if let v = str_at(rule.copy(), "command") { what.push("commands like {v}") }
+    if let v = str_at(rule.copy(), "tool") { what.push(if v.contains(".") { "the tool {v}" } else { "the tools of {v}" }) }
+    if let v = str_at(rule.copy(), "effect") { what.push(if v == "read" { String("what only reads") } else { String("what changes something") }) }
+    let verb = if then == "allow" { "Allow" } else if then == "ask" { "Ask before" } else { "Deny" }
+    var text = if what.len() > 0 { "{verb} {what.join(", ")}" } else { "{verb} everything" }
+    if let v = str_at(rule, "started_by") { text = "{text}, when {starter_words(v)} started the turn" }
+    return text
+}
+
+fn starter_words(s: String) -> String {
+    if s == "person" { return String("the person") }
+    if s == "owner" { return String("the owner") }
+    if s == "admin" { return String("an admin") }
+    if s == "member" { return String("a member") }
+    if s == "agent" { return String("another agent") }
+    if s == "routine" { return String("a routine") }
+    if s == "webhook" { return String("a webhook") }
+    if s == "script" { return String("a script") }
+    return String("a plugin")
+}
+
+// --- Matching ---
+
+enum Holds {
+    No
+    Yes
+    Unreadable(String)
+}
+
+fn site_matches(host: String, pattern: String) -> bool {
+    // A port counts only when the rule names one.
+    var h = host.to_lower_root()
+    if not pattern.contains(":") {
+        if let k = h.find(":") { h = h[..k].copy() }
+    }
+    if wild(pattern.copy()) { return glob_matches_name(h, pattern) }
+    return h == pattern or h.ends_with(".{pattern}")
+}
+
+// The folder `~` stands for in a rule's path.
+fn home() -> String {
+    return env.variable(String("HOME")) ?? env.variable(String("USERPROFILE")) ?? String()
+}
+
+pub fn path_matches(given: String, rule_path: String) -> bool {
+    var pattern = rule_path.copy()
+    if pattern == "~" or pattern.starts_with("~/") or pattern.starts_with("~\\") {
+        let h = home()
+        if h.len() == 0 { return false }
+        pattern = if pattern.len() == 1 { h } else { join(h, pattern[2..].copy()) }
+    }
+    let p = normalize(given)
+    var g = normalize(pattern)
+    // A pattern with no root is matched at any depth, as .gitignore does.
+    if root(g.copy()).len() == 0 and not is_absolute(g.copy()) and not g.starts_with("**") {
+        g = "{root(p.copy())}**/{g}"
+    } else if root(g.copy()).len() == 0 and g.starts_with("**") {
+        g = "{root(p.copy())}{g}"
+    }
+    if wild(rule_path.copy()) { return glob_matches(p, g) }
+    // A path with no wildcards is that file or folder, and all that's in it.
+    return glob_matches(p.copy(), g.copy()) or glob_matches(p, "{g}/**")
+}
+
+// The commands a line chains together: split where the shell would run
+// another, inside $( ) and backticks too.
+pub fn commands_in(line: String) -> List<String> {
+    var s = line.copy()
+    for sep in [";", "|", "&", "\n", "(", ")", "`", "\{", "\}"] {
+        s = s.replace(sep, "\n")
+    }
+    var out = List<String>()
+    for part in s.split("\n") {
+        var t = part.trim().copy()
+        while t.ends_with("$") { t = t[..t.len() - 1].trim().copy() }
+        if t.len() > 0 { out.push(t) }
+    }
+    return out
+}
+
+// A command without what only wraps it: assignments such as FOO=1, and
+// sudo, env, nohup, time, command, exec, nice and doas before it.
+pub fn bare(command: String) -> String {
+    var words = List<String>()
+    for w in command.split(" ") {
+        if w.len() > 0 { words.push(w.copy()) }
+    }
+    var k: usize = 0
+    while k < words.len() {
+        let w = words[k].copy()
+        let assigns = w.contains("=") and not w.starts_with("=") and not w.starts_with("-")
+        if assigns or one_of(w.copy(), "sudo env nohup time command exec nice doas builtin") {
+            k += 1
+            continue
+        }
+        break
+    }
+    var rest = List<String>()
+    while k < words.len() {
+        rest.push(words[k].copy())
+        k += 1
+    }
+    return rest.join(" ")
+}
+
+fn command_matches(command: String, pattern: String) -> bool {
+    if wild(pattern.copy()) { return glob_matches_name(command, pattern) }
+    return command == pattern or command.starts_with("{pattern} ") or command.starts_with("{pattern}\t")
+}
+
+fn tool_matches(tool: String, pattern: String) -> bool {
+    if wild(pattern.copy()) { return glob_matches_name(tool, pattern) }
+    if not pattern.contains(".") { return tool.starts_with("{pattern}.") }
+    return tool == pattern
+}
+
+fn starter_matches(a: Act, wanted: String) -> bool {
+    if a.started_by == wanted { return true }
+    return a.started_by == "person" and a.role == wanted and (wanted == "owner" or wanted == "admin" or wanted == "member")
+}
+
+// Whether `rule` is about the action `a`: every condition it has holds.
+fn holds(rule: Json, a: Act) -> Holds {
+    if not readable(rule.copy()) { return Holds.Unreadable(String("it can't be read")) }
+    let allow = str_at(rule.copy(), "then") == some(String("allow"))
+    var unread = String()
+    var no = false
+    if let pattern = str_at(rule.copy(), "site") {
+        match a.site.copy() {
+            none => no = true,
+            some(host) => {
+                if not a.site_ok { unread = String("the site can't be read") } else if not site_matches(host, pattern) { no = true }
+            },
+        }
+    }
+    if let pattern = str_at(rule.copy(), "path") {
+        if not a.paths_ok {
+            unread = String("a path can't be read")
+        } else if a.paths.len() == 0 {
+            no = true
+        } else {
+            var any = false
+            var all = true
+            for p in a.paths {
+                if path_matches(p.copy(), pattern.copy()) { any = true } else { all = false }
+            }
+            if not (if allow { all } else { any }) { no = true }
+        }
+    }
+    if let pattern = str_at(rule.copy(), "command") {
+        match a.command.copy() {
+            none => no = true,
+            some(line) => {
+                if not a.command_ok {
+                    unread = String("the command can't be read")
+                } else {
+                    let parts = commands_in(line.copy())
+                    var any = false
+                    var all = parts.len() > 0
+                    for part in parts {
+                        let plain = command_matches(part.copy(), pattern.copy())
+                        if plain or command_matches(bare(part.copy()), pattern.copy()) { any = true }
+                        if not plain { all = false }
+                    }
+                    // What runs inside another command, or writes a file, is never allowed by a rule.
+                    if allow and (line.contains("$(") or line.contains("`") or line.contains(">")) { all = false }
+                    if not (if allow { all } else { any }) { no = true }
+                }
+            },
+        }
+    }
+    if let pattern = str_at(rule.copy(), "tool") {
+        match a.tool.copy() {
+            none => no = true,
+            some(t) => {
+                if not tool_matches(t, pattern) { no = true }
+            },
+        }
+    }
+    if let effect = str_at(rule.copy(), "effect") {
+        if a.effect != effect { no = true }
+    }
+    if let wanted = str_at(rule, "started_by") {
+        if a.started_by.len() == 0 { unread = String("who started the turn can't be read") } else if not starter_matches(a.copy(), wanted) { no = true }
+    }
+    if no { return Holds.No }
+    if unread.len() > 0 { return Holds.Unreadable(unread) }
+    return Holds.Yes
+}
+
+// What `rules` make of the action `a`: deny first, then ask, then allow.
+pub fn decide(rules: List<Json>, a: Act) -> Verdict {
+    var asks = Json.Null
+    var allows = Json.Null
+    for r in rules {
+        match holds(r.copy(), a.copy()) {
+            Holds.No => {},
+            Holds.Unreadable(why) => return Verdict { then: String("deny"), rule: r.copy(), why: "Denied by rule {str_at(r, "id") ?? String()}: {why}, so it denies." },
+            Holds.Yes => {
+                let then = str_at(r.copy(), "then") ?? String()
+                if then == "deny" { return Verdict { then: then, rule: r.copy(), why: "Denied by rule {str_at(r.copy(), "id") ?? String()}: {said(r)}." } }
+                if then == "ask" and asks == Json.Null { asks = r.copy() }
+                if then == "allow" and allows == Json.Null { allows = r.copy() }
+            },
+        }
+    }
+    if asks != Json.Null { return Verdict { then: String("ask"), rule: asks.copy(), why: "Asked by rule {str_at(asks.copy(), "id") ?? String()}: {said(asks)}." } }
+    if allows != Json.Null { return Verdict { then: String("allow"), rule: allows.copy(), why: "Allowed by rule {str_at(allows.copy(), "id") ?? String()}: {said(allows)}." } }
+    return Verdict { then: String(), rule: Json.Null, why: String() }
+}
+
+// --- What an action touches ---
+
+// The host of an address, or none for one that has none to read.
+fn host_in(address: String) -> String? {
+    let u = match Url.parse(address.trim().copy()) {
+        ok(parsed) => parsed,
+        err(_) => return none,
+    }
+    let host = u.host.copy() ?? String()
+    if host.len() == 0 { return none }
+    return match u.port {
+        some(p) => some("{host}:{p}"),
+        none => some(host),
+    }
+}
+
+// `a` with the site of `address`: a host such as github.com, or an address.
+pub fn with_site(a: own Act, address: String) -> Act {
+    var out = a
+    let text = address.trim().copy()
+    if text.len() == 0 { return out }
+    if text.contains("://") {
+        match host_in(text) {
+            some(h) => out.site = some(h),
+            none => {
+                out.site = some(String())
+                out.site_ok = false
+            },
+        }
+    } else {
+        out.site = some(site_pattern(text))
+    }
+    return out
+}
+
+// A command as an ACP agent gives it: text, or a list of words, where
+// ["bash", "-lc", SCRIPT] is SCRIPT. none for neither.
+pub fn command_of(v: Json) -> String? {
+    if let s = v.as_str() { return some(s) }
+    let Json.Array(words) = v else return none
+    var list = List<String>()
+    for w in words {
+        let s = w.as_str() else return none
+        list.push(s)
+    }
+    if list.len() >= 3 and (list[1] == "-c" or list[1] == "-lc" or list[1] == "/c" or list[1] == "-Command") { return some(list[2].copy()) }
+    return some(list.join(" "))
+}
+
+fn add_path(a: mut Act, folder: String, v: Json) {
+    let p = v.as_str() else {
+        if v != Json.Null { a.paths_ok = false }
+        return
+    }
+    if p.trim().len() == 0 { return }
+    let full = if root(p.copy()).len() > 0 or folder.len() == 0 { p.copy() } else { join(folder.copy(), p.copy()) }
+    a.paths.push(normalize(full))
+}
+
+// What an ACP agent's tool call touches, by its `kind` (one of
+// acp.tool_kind's), its rawInput and its locations. Relative paths are in
+// `folder`, the agent's workspace. An MCP tool the program calls itself is
+// titled mcp__server__tool.
+pub fn of_tool_call(tool_call: Json, kind: String, folder: String) -> Act {
+    var a = act()
+    let input = at(tool_call.copy(), "rawInput")
+    if kind == "execute" {
+        let c = at(input.copy(), "command")
+        if c != Json.Null {
+            match command_of(c) {
+                some(text) => a.command = some(text),
+                none => {
+                    a.command = some(String())
+                    a.command_ok = false
+                },
+            }
+        }
+    }
+    let url = at(input.copy(), "url")
+    if let address = url.as_str() { a = with_site(a, address) } else if url != Json.Null {
+        a.site = some(String())
+        a.site_ok = false
+    }
+    for key in ["file_path", "path", "notebook_path"] {
+        add_path(mut a, folder.copy(), at(input.copy(), key))
+    }
+    if let Json.Array(places) = at(tool_call.copy(), "locations") {
+        for place in places {
+            add_path(mut a, folder.copy(), at(place, "path"))
+        }
+    }
+    let title = str_at(tool_call, "title") ?? String()
+    if title.starts_with("mcp__") {
+        if let (server, tool) = title[5..].split_once("__") { a.tool = some("{server}.{tool}") }
+    }
+    a.effect = String(if one_of(kind, "read search think fetch") { "read" } else { "write" })
+    return a
+}
+
+// What a what-if names: `site` (a host or an address), `path` (one, or a
+// list), `command`, `tool`, `effect`, and `started_by`, `person` if left out.
+pub fn of_args(args: Json) -> Act {
+    var a = act()
+    if let s = str_at(args.copy(), "site") { a = with_site(a, s) }
+    let p = at(args.copy(), "path")
+    if let Json.Array(list) = p.copy() {
+        for one in list { add_path(mut a, String(), one) }
+    } else {
+        add_path(mut a, String(), p)
+    }
+    if let c = str_at(args.copy(), "command") {
+        if c.trim().len() > 0 { a.command = some(c.trim().copy()) }
+    }
+    if let t = str_at(args.copy(), "tool") {
+        if t.trim().len() > 0 { a.tool = some(t.trim().copy()) }
+    }
+    a.effect = str_at(args.copy(), "effect") ?? String()
+    a.started_by = str_at(args, "started_by") ?? String("person")
+    return a
+}
+
+// The kind of tool a what-if is, for the permission mode, when it names
+// none: a command executes, a site is fetched, an MCP tool reads or is
+// other, and a path is read or edited, by its effect.
+pub fn kind_of(a: Act) -> String {
+    if a.command != none { return String("execute") }
+    if a.tool != none { return String(if a.effect == "read" { "read" } else { "other" }) }
+    if a.site != none { return String("fetch") }
+    if a.paths.len() > 0 { return String(if a.effect == "read" { "read" } else { "edit" }) }
+    return String(if a.effect == "read" { "read" } else { "other" })
+}
+
+@test
+fn rules_are_checked() {
+    let r = made(Obj.new().s("then", String("deny")).s("site", String("https://User@GitHub.com/x?y")).s("note", String("  no  ")).done())!
+    assert("{r}" == #"{"then":"deny","site":"github.com","note":"no"}"#)
+    assert(not readable(Obj.new().s("then", String("deny")).done()))
+    assert(not readable(Obj.new().s("then", String("maybe")).s("path", String("/x")).done()))
+    assert(not readable(Obj.new().s("then", String("ask")).s("effect", String("delete")).done()))
+    assert(not readable(Obj.new().s("then", String("ask")).s("started_by", String("cron")).done()))
+    assert(not readable(Obj.new().s("then", String("ask")).i("path", 3).done()))
+    assert(readable(Obj.new().s("then", String("ask")).s("started_by", String("webhook")).s("id", String("r_1")).done()))
+}
+
+@test
+fn sites_match_their_hosts_and_below() {
+    assert(site_matches(String("api.github.com"), String("github.com")))
+    assert(site_matches(String("github.com:443"), String("github.com")))
+    assert(not site_matches(String("notgithub.com"), String("github.com")))
+    assert(site_matches(String("x.bank.no"), String("*.bank.no")))
+    assert(not site_matches(String("localhost:8080"), String("localhost:9000")))
+    let a = with_site(act(), String("https://Docs.Example.com:8443/a"))
+    assert(a.site == some(String("docs.example.com:8443")) and a.site_ok)
+    assert(not with_site(act(), String("https://")).site_ok)
+}
+
+@test
+fn paths_match_as_globs_and_folders() {
+    assert(path_matches(String("/srv/secrets/key.pem"), String("/srv/secrets")))
+    assert(path_matches(String("/srv/secrets"), String("/srv/secrets/")))
+    assert(not path_matches(String("/srv/secretsx/key"), String("/srv/secrets")))
+    assert(path_matches(String("/home/x/app/.env"), String("**/.env")))
+    assert(path_matches(String("/home/x/.env"), String(".env")))
+    assert(path_matches(String("/work/src/main.rs"), String("/work/**/*.rs")))
+    assert(not path_matches(String("/work/../etc/passwd"), String("/work/**")))
+    assert(path_matches(String("/work/../etc/passwd"), String("/etc")))
+}
+
+@test
+fn commands_are_split_where_the_shell_would() {
+    assert(commands_in(String("cd x && git push origin; echo $(rm -rf /) | cat")).join("|") == "cd x|git push origin|echo|rm -rf /|cat")
+    assert(bare(String("FOO=1 sudo rm -rf /tmp")) == "rm -rf /tmp")
+    assert(command_matches(String("git push origin"), String("git push")))
+    assert(not command_matches(String("git pushy"), String("git push")))
+    assert(command_matches(String("rm -rf /tmp/x"), String("rm *")))
+    assert(command_of(Json.Array([Json.Str(String("bash")), Json.Str(String("-lc")), Json.Str(String("ls -la"))])) == some(String("ls -la")))
+}
+
+fn a_rule(then: str, key: str, value: str) -> Json {
+    return Obj.new().s("id", "r_{key}").s("then", String(then)).s(key, String(value)).done()
+}
+
+fn run_of(command: str) -> Act {
+    var a = act()
+    a.command = some(String(command))
+    a.effect = String("write")
+    a.started_by = String("person")
+    a.role = String("owner")
+    return a
+}
+
+@test
+fn deny_wins_then_ask_then_allow() {
+    let rules: List<Json> = [a_rule("allow", "command", "git"), a_rule("ask", "command", "git push"), a_rule("deny", "command", "git push --force")]
+    assert(decide(rules.copy(), run_of("git status")).then == "allow")
+    assert(decide(rules.copy(), run_of("git push origin")).then == "ask")
+    assert(decide(rules.copy(), run_of("git push --force origin")).then == "deny")
+    assert(decide(rules.copy(), run_of("ls")).then == "")
+    // Chained: deny holds when any part does, allow only when every part does.
+    assert(decide(rules.copy(), run_of("git status && git push --force")).then == "deny")
+    assert(decide([a_rule("allow", "command", "git")], run_of("git status && curl x")).then == "")
+    assert(decide([a_rule("allow", "command", "git")], run_of("git log > out.txt")).then == "")
+    assert(decide([a_rule("deny", "command", "rm")], run_of("FOO=1 sudo rm -rf /")).then == "deny")
+}
+
+@test
+fn what_cant_be_read_denies() {
+    let broken = Obj.new().s("id", String("r_9")).s("then", String("allow")).s("effect", String("sometimes")).done()
+    let v = decide([broken], run_of("ls"))
+    assert(v.then == "deny" and v.why.contains("can't be read"))
+    var unread = run_of("ls")
+    unread.command_ok = false
+    assert(decide([a_rule("allow", "command", "ls")], unread.copy()).then == "deny")
+    // A rule about something else isn't about it.
+    assert(decide([a_rule("allow", "site", "github.com")], unread).then == "")
+    var no_start = run_of("ls")
+    no_start.started_by = String()
+    assert(decide([a_rule("deny", "started_by", "webhook")], no_start).then == "deny")
+}
+
+@test
+fn conditions_all_hold() {
+    let r = Obj.new().s("id", String("r_1")).s("then", String("deny")).s("effect", String("write")).s("started_by", String("webhook")).done()
+    var hook = run_of("touch x")
+    hook.started_by = String("webhook")
+    assert(decide([r.copy()], hook.copy()).then == "deny")
+    var reads = hook.copy()
+    reads.effect = String("read")
+    assert(decide([r.copy()], reads).then == "")
+    assert(decide([r], run_of("touch x")).then == "")
+    let owner_only = a_rule("allow", "started_by", "owner")
+    assert(decide([owner_only.copy()], run_of("x")).then == "allow")
+    var member = run_of("x")
+    member.role = String("member")
+    assert(decide([owner_only], member).then == "")
+}
+
+@test
+fn tool_calls_say_what_they_touch() {
+    let call = Obj.new().s("title", String("mcp__github__create_issue")).j("rawInput", Obj.new().s("file_path", String("src/a.rs")).done()).j("locations", Json.Array([Obj.new().s("path", String("/w/b.rs")).done()])).done()
+    let a = of_tool_call(call, String("edit"), String("/w"))
+    assert(a.tool == some(String("github.create_issue")) and a.paths.join(",") == "/w/src/a.rs,/w/b.rs" and a.effect == "write")
+    let fetch = of_tool_call(Obj.new().j("rawInput", Obj.new().s("url", String("https://example.com/x")).done()).done(), String("fetch"), String())
+    assert(fetch.site == some(String("example.com")) and fetch.effect == "read")
+    let run = of_tool_call(Obj.new().j("rawInput", Obj.new().i("command", 3).done()).done(), String("execute"), String())
+    assert(not run.command_ok)
+    assert(tool_matches(String("github.create_issue"), String("github")) and tool_matches(String("github.delete_repo"), String("github.delete_*")) and not tool_matches(String("gitlab.x"), String("github")))
+    assert(kind_of(of_args(Obj.new().s("command", String("ls")).done())) == "execute")
+    assert(said(a_rule("deny", "command", "git push")) == "Deny commands like git push")
+}

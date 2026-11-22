@@ -42,6 +42,7 @@ pub(super) fn settings_groups() -> Vec<(Option<&'static str>, Vec<Page>)> {
                     "Defaults",
                     Screen::Defaults,
                 ),
+                ("pop-rules", Ico::ShieldCheck, "Rules", Screen::Rules),
                 ("pop-programs", Ico::Brain, "Brains", Screen::Programs),
                 ("pop-skills", Ico::BookOpen, "Skills", Screen::Skills),
                 ("pop-mcp", Ico::Plug, "MCP servers", Screen::Mcp),
@@ -76,6 +77,9 @@ fn page_words(screen: Screen) -> &'static str {
         Screen::Programs => "brains models agent programs claude codex gemini opencode acp registry install tokens limits",
         Screen::Defaults => {
             "defaults every agent brain model effort permission mode ask allow instructions busy queue steer"
+        }
+        Screen::Rules => {
+            "rules allow deny ask what if permissions site path file folder command shell tool webhook routine"
         }
         Screen::Skills => "skills how to",
         Screen::Mcp => "mcp servers tools keys connectors",
@@ -493,6 +497,7 @@ mod tests {
         assert!(screens("Tool calls") == vec![Screen::ChatPrefs]);
         assert!(screens("brains") == vec![Screen::Programs]);
         assert!(screens("steer") == vec![Screen::Defaults]);
+        assert!(screens("webhook deny") == vec![Screen::Rules]);
         assert!(screens("zzz").is_empty());
     }
 }

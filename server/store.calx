@@ -20,7 +20,7 @@ import std.hash.{sha256}
 import std.json.{Json, parse}
 import std.sqlite.{Database, Value}
 import std.time.{Timestamp}
-import shared.obj.{Obj, int_at, merge, without}
+import shared.obj.{Obj, int_at, merge, str_at, without}
 import server.defaults.{blank, filled}
 
 const SCHEMA: str = #"
@@ -107,6 +107,9 @@ CREATE TABLE IF NOT EXISTS profiles (
 CREATE TABLE IF NOT EXISTS defaults (
     user TEXT PRIMARY KEY REFERENCES users(id), json TEXT NOT NULL, revision INTEGER NOT NULL,
     by TEXT NOT NULL, at INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS rules (
+    id TEXT PRIMARY KEY, user TEXT NOT NULL REFERENCES users(id), agent TEXT NOT NULL,
+    json TEXT NOT NULL, at INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS routines (
     id TEXT PRIMARY KEY, user TEXT NOT NULL REFERENCES users(id), json TEXT NOT NULL,
     next INTEGER NOT NULL);
@@ -722,7 +725,9 @@ impl Store {
     }
 
     pub fn delete_agent(self, user: String, id: String) ! Error {
-        _ = try self.db.execute(String("UPDATE agents SET deleted = 1 WHERE id = ? AND user = ?"), [t(id), t(user)])
+        _ = try self.db.execute(String("UPDATE agents SET deleted = 1 WHERE id = ? AND user = ?"), [t(id.copy()), t(user.copy())])
+        // Its own rules go with it.
+        _ = try self.db.execute(String("DELETE FROM rules WHERE agent = ? AND user = ?"), [t(id), t(user)])
     }
 
     pub fn add_conversation(self, user: String, agent: String, title: String) -> Json ! Error {
@@ -1370,6 +1375,40 @@ impl Store {
         return merge(kept, Obj.new().i("revision", revision).s("by", by).i("at", at).done())
     }
 
+    // --- Rules on what's touched (PLAN.md, "Rules, records and limits") ---
+
+    // The person's rules, oldest first, each with its `id` and `agent` ("" for
+    // every agent). One whose JSON can't be read comes as a rule that can't be
+    // read, which denies everything, rather than being left out.
+    pub fn rules(self, user: String) -> List<Json> ! Error {
+        var out = List<Json>()
+        for r in try self.db.query(String("SELECT id, agent, json, at FROM rules WHERE user = ? ORDER BY rowid"), [t(user)]) {
+            let kept = match parse(text(r[2].copy())) {
+                ok(j) => j,
+                err(_) => Obj.new().s("unreadable", String("its JSON")).done(),
+            }
+            out.push(merge(kept, Obj.new().s("id", text(r[0].copy())).s("agent", text(r[1].copy())).i("at", int(r[3].copy())).done()))
+        }
+        return out
+    }
+
+    // Keeps a rule, new or changed: `rule` has its `id` and `agent`.
+    pub fn put_rule(self, user: String, rule: Json) ! Error {
+        let id = str_at(rule.copy(), "id") ?? String()
+        let agent = str_at(rule.copy(), "agent") ?? String()
+        let at = int_at(rule.copy(), "at") ?? now()
+        let stored = without(without(without(rule, "id"), "agent"), "at")
+        _ = try self.db.execute(String("INSERT INTO rules (id, user, agent, json, at) VALUES (?, ?, ?, ?, ?) ON CONFLICT (id) DO UPDATE SET agent = excluded.agent, json = excluded.json"), [t(id), t(user), t(agent), t("{stored}"), Value.Int(at)])
+    }
+
+    // Removes one of the person's rules. Gives whether there was one.
+    pub fn delete_rule(self, user: String, id: String) -> bool ! Error {
+        let had = try self.db.query_one(String("SELECT id FROM rules WHERE id = ? AND user = ?"), [t(id.copy()), t(user.copy())])
+        if had == none { return false }
+        _ = try self.db.execute(String("DELETE FROM rules WHERE id = ? AND user = ?"), [t(id), t(user)])
+        return true
+    }
+
     // --- Routines (PLAN.md, "Routines") ---
 
     // A routine as it's kept: its webhook's secret sealed.
@@ -1608,7 +1647,7 @@ impl Store {
 
     fn remove_rows(self, user: String) ! Error {
         _ = try self.db.execute(String("DELETE FROM sent WHERE device IN (SELECT id FROM devices WHERE user = ?)"), [t(user.copy())])
-        for table in ["push_tokens", "link_codes", "resets", "agent_revisions", "agents", "activity", "secrets", "mcp_servers", "skills", "messages", "conversations", "runs", "queue", "tasks", "sides", "branches", "routine_threads", "events", "acp_sessions", "files", "profiles", "defaults", "routines", "flows", "plugin_data", "plugin_revisions", "plugins", "usage", "memories", "memories_fts", "messages_fts", "shared_rows", "shared_tables", "script_tokens", "imported", "devices"] {
+        for table in ["push_tokens", "link_codes", "resets", "agent_revisions", "agents", "activity", "secrets", "mcp_servers", "skills", "messages", "conversations", "runs", "queue", "tasks", "sides", "branches", "routine_threads", "events", "acp_sessions", "files", "profiles", "defaults", "rules", "routines", "flows", "plugin_data", "plugin_revisions", "plugins", "usage", "memories", "memories_fts", "messages_fts", "shared_rows", "shared_tables", "script_tokens", "imported", "devices"] {
             _ = try self.db.execute("DELETE FROM {table} WHERE user = ?", [t(user.copy())])
         }
         _ = try self.db.execute(String("DELETE FROM invites WHERE by = ?"), [t(user.copy())])
@@ -2027,6 +2066,23 @@ fn memory_is_kept_per_agent_and_shared() {
     assert(not s.forget(a.id.copy(), id, some(String("a_2")))!)
     assert(s.forget(a.id.copy(), id, some(String("a_1")))!)
     assert(s.memories(a.id.copy(), some(String("a_1")), String("1Password"), 10)!.len() == 0)
+}
+
+@test
+fn rules_are_kept_per_person_and_go_with_their_agent() {
+    let s = test_store()
+    let a = s.add_user(String("ann"), String("pw"), "owner")!
+    let b = s.add_user(String("bob"), String("pw"), "member")!
+    s.put_rule(a.id.copy(), Obj.new().s("id", String("r_1")).s("agent", String()).s("then", String("deny")).s("command", String("rm")).i("at", 5).done())!
+    s.put_rule(a.id.copy(), Obj.new().s("id", String("r_2")).s("agent", String("a_1")).s("then", String("ask")).s("site", String("github.com")).done())!
+    s.put_rule(a.id.copy(), Obj.new().s("id", String("r_1")).s("agent", String()).s("then", String("ask")).s("command", String("rm")).i("at", 5).done())!
+    let kept = s.rules(a.id.copy())!
+    assert(kept.len() == 2 and "{kept[0]}".contains(#""then":"ask""#) and str_at(kept[1].copy(), "agent") == some(String("a_1")))
+    assert(s.rules(b.id.copy())!.len() == 0)
+    assert(not s.delete_rule(b.id.copy(), String("r_1"))!)
+    s.delete_agent(a.id.copy(), String("a_1"))!
+    assert(s.rules(a.id.copy())!.len() == 1)
+    assert(s.delete_rule(a.id.copy(), String("r_1"))! and s.rules(a.id.copy())!.len() == 0)
 }
 
 @test
