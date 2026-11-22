@@ -232,6 +232,10 @@ pub struct Loom {
     /// A host to add to the list of the agent being edited, and whether its
     /// network is shown as a list, which starts empty, reaching nothing.
     host_in: Entity<InputState>,
+    /// The name the person gave the server on screen, on its page.
+    server_name_in: Entity<InputState>,
+    /// The server whose name the field has in it, by `server_key`.
+    server_name_for: Option<String>,
     listing_hosts: bool,
     /// One of the person's own hosts to add, by what ssh is given, on the Hosts page.
     ssh_host_in: Entity<InputState>,
@@ -448,6 +452,17 @@ fn spool_of(model: &Model) -> Spool {
 }
 
 /// A server's name as the sidebar shows it: its host, or where it is.
+/// Which server a name the person gave is for: its address, or empty for the instance
+/// in the app.
+fn server_key(model: &Model, dir: &str) -> String {
+    if dir.is_empty() && local_mode() {
+        return String::new();
+    }
+    model.server.clone().unwrap_or_default()
+}
+
+/// A server as it reads: its address, or what the app calls it when it has none. The
+/// yarn's colour comes from this, so a name the person gives doesn't change it.
 fn server_name(model: &Model, dir: &str) -> String {
     if dir.is_empty() && local_mode() {
         return "This computer".into();
@@ -535,6 +550,24 @@ impl Loom {
                         if let Some(f) = this.model.set_color(&typed) {
                             this.send(f);
                         }
+                        cx.notify();
+                    }
+                }
+            },
+        )
+        .detach();
+        // The server's own name on this device: each change keeps it, and an empty one
+        // goes back to its address.
+        let server_name_in = input(window, cx, "", false);
+        cx.subscribe_in(
+            &server_name_in,
+            window,
+            |this: &mut Loom, state, event: &InputEvent, _, cx| {
+                if let InputEvent::Change = event {
+                    let typed = state.read(cx).value().trim().to_string();
+                    if let Some(key) = this.server_name_for.clone() {
+                        this.prefs.rename_server(&key, &typed);
+                        this.prefs.save(&data_dir());
                         cx.notify();
                     }
                 }
@@ -931,6 +964,8 @@ ACTA_KEY=secret:ACTA_KEY",
             code_in,
             name_in,
             host_in,
+            server_name_in,
+            server_name_for: None,
             listing_hosts: false,
             ssh_host_in,
             skill_name_in,
@@ -2012,6 +2047,31 @@ ACTA_KEY=secret:ACTA_KEY",
         cx.notify();
     }
 
+    /// A server as the person sees it: the name they gave it on this device, or its
+    /// address.
+    fn label(&self, model: &Model, dir: &str) -> String {
+        self.prefs
+            .server_name(&server_key(model, dir))
+            .unwrap_or_else(|| server_name(model, dir))
+    }
+
+    /// Puts the server on screen's name in its page's field, once for each server. A
+    /// change made while it's set isn't kept, since the key is cleared until it's done.
+    fn sync_server_name(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let key = server_key(&self.model, &self.here);
+        if self.server_name_for.as_ref() == Some(&key) {
+            return;
+        }
+        self.server_name_for = None;
+        let given = self.prefs.server_name(&key).unwrap_or_default();
+        let address = server_name(&self.model, &self.here);
+        self.server_name_in.update(cx, |s, cx| {
+            s.set_value(given, window, cx);
+            s.set_placeholder(address, window, cx);
+        });
+        self.server_name_for = Some(key);
+    }
+
     fn select(&mut self, agent: String, cx: &mut Context<Self>) {
         self.screen = Screen::Chat;
         self.popup = None;
@@ -2276,7 +2336,7 @@ ACTA_KEY=secret:ACTA_KEY",
                                     .font_weight(FontWeight::MEDIUM)
                                     .text_color(p.ink)
                                     .truncate()
-                                    .child(name.clone()),
+                                    .child(self.label(model, &dir)),
                             )
                             .child(
                                 div()
@@ -2689,11 +2749,14 @@ ACTA_KEY=secret:ACTA_KEY",
     /// The popup's first server page: where the instance is and how it is, and scripts.
     fn server_page(&mut self, cx: &mut Context<Self>) -> Div {
         let p = self.p;
-        let where_ = if self.local() {
+        let given = self.prefs.server_name(&server_key(&self.model, &self.here));
+        let where_ = if let Some(given) = given {
+            given
+        } else if self.local() {
             "On this computer".to_string()
         } else {
             match &self.model.server {
-                Some(_) => server_name(&self.model, &self.here),
+                Some(_) => self.label(&self.model, &self.here),
                 None => "On a server".into(),
             }
         };
@@ -2736,7 +2799,20 @@ ACTA_KEY=secret:ACTA_KEY",
                 Some(control.into_any_element()),
             )
             .min_h(px(control::ROW_TALL));
-        let mut groups = vec![self.group(None, vec![here.into_any_element()])];
+        // A name of the person's own for it, on this device; empty is its address.
+        let name = self.row(
+            None,
+            "Name",
+            None,
+            Some(
+                div()
+                    .w(px(240.0))
+                    .child(Input::new(&self.server_name_in).small())
+                    .into_any_element(),
+            ),
+        );
+        let mut groups =
+            vec![self.group(None, vec![here.into_any_element(), name.into_any_element()])];
         if let Some(g) = self.self_update_group(cx) {
             groups.push(g);
         }
@@ -4948,9 +5024,9 @@ ACTA_KEY=secret:ACTA_KEY",
                     None,
                 )
                 .tooltip(tip_text(if here {
-                    format!("{name} · {}", self.conn_words())
+                    format!("{} · {}", self.label(model, &dir), self.conn_words())
                 } else {
-                    name.clone()
+                    self.label(model, &dir)
                 }))
                 .child(self.yarn_marked(model, state, &name, 32.0))
                 .when(heard, |d| d.child(rail_dot(p)));
@@ -5027,7 +5103,7 @@ ACTA_KEY=secret:ACTA_KEY",
         self.servers()
             .into_iter()
             .find(|(dir, _)| *dir == b.device)
-            .map(|(dir, m)| server_name(m, &dir))
+            .map(|(dir, m)| self.label(m, &dir))
             .unwrap_or_else(|| "A server".into())
     }
 
@@ -5803,6 +5879,7 @@ ACTA_KEY=secret:ACTA_KEY",
                     .find(|(d, _)| *d == dir)
                     .map(|(_, m)| server_name(m, &dir))?;
                 let here = dir == self.here;
+                let rename_dir = dir.clone();
                 panel = panel
                     .child(
                         self.menu_item(
@@ -5821,6 +5898,20 @@ ACTA_KEY=secret:ACTA_KEY",
                             cx.notify();
                         })),
                     )
+                    .child({
+                        // Its page, on screen, with the name field ready to type in.
+                        let dir = rename_dir;
+                        self.menu_item("ctx-rename-server", Ico::Pencil, "Rename", false)
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.ctx = None;
+                                if dir != this.here {
+                                    this.show_server(&dir, cx);
+                                }
+                                this.open(Screen::Server, cx);
+                                this.server_name_in.update(cx, |s, cx| s.focus(window, cx));
+                                cx.notify();
+                            }))
+                    })
                     .child(
                         self.menu_item("ctx-copy-server", Ico::Copy, "Copy address", false)
                             .on_click(cx.listener(move |this, _, _, cx| {
@@ -13959,6 +14050,7 @@ impl Render for Loom {
         };
         self.sync_panel(window, cx);
         self.edit_composer(window, cx);
+        self.sync_server_name(window, cx);
         let ww = window.viewport_size().width.as_f32();
         if self.bar.fit(ww, self.beside()) {
             cx.notify();

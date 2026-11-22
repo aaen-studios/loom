@@ -3,6 +3,7 @@
 //! `prefs.json` in the app's data folder, so each device has its own. What belongs to
 //! the account (agent defaults, the profile) lives on the instance instead.
 
+use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use serde_json::{json, Map, Value};
@@ -83,6 +84,9 @@ pub struct Prefs {
     /// Whether the sidebar shows the search box over the agents.
     pub search: bool,
     pub width: Width,
+    /// The names the person gave servers on this device, by address (empty for the
+    /// instance in the app).
+    pub server_names: BTreeMap<String, String>,
 }
 
 impl Default for Prefs {
@@ -104,6 +108,7 @@ impl Default for Prefs {
             auto_update: false,
             search: false,
             width: Width::Normal,
+            server_names: BTreeMap::new(),
         }
     }
 }
@@ -173,6 +178,16 @@ impl Prefs {
                 "full" => Width::Full,
                 _ => d.width,
             },
+            server_names: v
+                .get("server_names")
+                .and_then(Value::as_object)
+                .map(|m| {
+                    m.iter()
+                        .filter_map(|(k, v)| Some((k.clone(), v.as_str()?.to_string())))
+                        .filter(|(_, v)| !v.trim().is_empty())
+                        .collect()
+                })
+                .unwrap_or_default(),
         }
     }
 
@@ -229,7 +244,23 @@ impl Prefs {
                 Width::Full => "full",
             }),
         );
+        m.insert("server_names".into(), json!(self.server_names));
         Value::Object(m)
+    }
+
+    /// The name the person gave the server at `key`, if they gave it one.
+    pub fn server_name(&self, key: &str) -> Option<String> {
+        self.server_names.get(key).cloned()
+    }
+
+    /// Names the server at `key`, or with an empty name, takes its name away.
+    pub fn rename_server(&mut self, key: &str, name: &str) {
+        let name = name.trim();
+        if name.is_empty() {
+            self.server_names.remove(key);
+        } else {
+            self.server_names.insert(key.to_string(), name.to_string());
+        }
     }
 
     /// Whether the window is dark, for a system that's `system_dark`.
@@ -343,6 +374,17 @@ mod tests {
         };
         assert_eq!(Prefs::from_json(&p.to_json()), p);
         assert_eq!(Prefs::default().width, Width::Normal);
+    }
+
+    #[test]
+    fn a_server_keeps_the_name_the_person_gave_it() {
+        let mut p = Prefs::default();
+        assert_eq!(p.server_name("https://vps:8443"), None);
+        p.rename_server("https://vps:8443", "  Home  ");
+        assert_eq!(p.server_name("https://vps:8443").as_deref(), Some("Home"));
+        assert_eq!(Prefs::from_json(&p.to_json()), p);
+        p.rename_server("https://vps:8443", " ");
+        assert_eq!(p.server_name("https://vps:8443"), None);
     }
 
     #[test]
