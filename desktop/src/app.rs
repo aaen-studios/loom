@@ -164,6 +164,8 @@ pub struct Loom {
     here: String,
     /// The other servers the app is signed in to, each with its own core.
     away: Vec<Away>,
+    /// The server to put on screen at the first draw: the one open when the app closed.
+    reopen: Option<String>,
     /// An address for the server form, put in once there's a window to do it with.
     fill_server: Option<String>,
     /// The server being added in the popup, by folder, until it signs in.
@@ -423,6 +425,20 @@ fn server_dirs() -> Vec<String> {
 fn is_server_dir(dir: &str) -> bool {
     dir.strip_prefix("servers/")
         .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
+}
+
+/// The server that was on screen when the app last closed, kept in `last-server`: one
+/// of the app's server folders, or None for the first.
+fn last_server() -> Option<String> {
+    let file = std::path::Path::new(&data_dir()).join("last-server");
+    let dir = std::fs::read_to_string(file).ok()?.trim().to_string();
+    is_server_dir(&dir).then_some(dir)
+}
+
+/// Keeps which server is on screen, for the next start.
+fn keep_last_server(dir: &str) {
+    let file = std::path::Path::new(&data_dir()).join("last-server");
+    let _ = std::fs::write(file, dir);
 }
 
 fn keep_server_dirs(dirs: &[String]) -> std::io::Result<()> {
@@ -926,6 +942,7 @@ ACTA_KEY=secret:ACTA_KEY",
                 .into_iter()
                 .map(|dir| Away::start(dir, None))
                 .collect(),
+            reopen: last_server(),
             fill_server: None,
             adding: None,
             device_tx,
@@ -1591,6 +1608,7 @@ ACTA_KEY=secret:ACTA_KEY",
         std::mem::swap(&mut self.events, &mut a.events);
         std::mem::swap(&mut self.model, &mut a.model);
         std::mem::swap(&mut self.here, &mut a.dir);
+        keep_last_server(&self.here);
         // The one away notifies whatever the window does; the one here, only while it's
         // not looked at, and it's looked at now.
         a.core.send(r#"{"t":"app.active","active":false}"#);
@@ -1774,11 +1792,46 @@ ACTA_KEY=secret:ACTA_KEY",
         self.here.is_empty() && local_mode()
     }
 
+    /// Whether the first server is out of the app: not the instance on this computer and
+    /// signed in nowhere, while the app has others. It stays running, since it's the one
+    /// that updates the app, but the app shows the others.
+    fn first_out(&self) -> bool {
+        let first = if self.here.is_empty() {
+            Some(&self.model)
+        } else {
+            self.away
+                .iter()
+                .find(|a| a.dir.is_empty())
+                .map(|a| &a.model)
+        };
+        !self.away.is_empty()
+            && !local_mode()
+            && first.is_some_and(|m| m.conn == Some(Conn::SignedOut))
+    }
+
+    /// At each draw: the server open when the app closed comes on screen once, and a
+    /// first server that's out of the app gives the screen to another.
+    fn settle_server(&mut self, cx: &mut Context<Self>) {
+        if let Some(dir) = self.reopen.take() {
+            if self.away.iter().any(|a| a.dir == dir) {
+                self.show_server(&dir, cx);
+            }
+        }
+        if self.here.is_empty() && self.first_out() {
+            if let Some(dir) = self.away.first().map(|a| a.dir.clone()) {
+                self.show_server(&dir, cx);
+            }
+        }
+    }
+
     /// Every server, in the order the sidebar shows them: the first, then the rest as
-    /// they were added. Each is its folder and what it shows.
+    /// they were added. Each is its folder and what it shows. A first server out of the
+    /// app isn't among them.
     fn servers(&self) -> Vec<(String, &Model)> {
+        let out = self.first_out();
         let mut all: Vec<(String, &Model)> = vec![(self.here.clone(), &self.model)];
         all.extend(self.away.iter().map(|a| (a.dir.clone(), &a.model)));
+        all.retain(|(d, _)| !(out && d.is_empty()));
         let key = |d: &str| {
             d.strip_prefix("servers/")
                 .and_then(|n| n.parse::<u64>().ok())
@@ -2555,14 +2608,17 @@ ACTA_KEY=secret:ACTA_KEY",
             );
         } else if server {
             let local = self.local();
+            // With other servers in the app, it leaves the sidebar too (`first_out`).
+            let others = !self.away.is_empty();
             nav = nav.child(
                 self.menu_item(
                     "pop-sign-out",
                     if local { Ico::Power } else { Ico::LogOut },
-                    if local {
-                        "Close this instance"
-                    } else {
-                        "Sign out"
+                    match (local, others) {
+                        (true, true) => "Stop and remove",
+                        (true, false) => "Close this instance",
+                        (false, true) => "Sign out and remove",
+                        (false, false) => "Sign out",
                     },
                     false,
                 )
@@ -10669,11 +10725,32 @@ ACTA_KEY=secret:ACTA_KEY",
                 )
                 .on_click(cx.listener(|this, _, _, cx| this.sign_in_added(cx))),
             );
-        let groups = vec![
+        let mut groups = vec![
             self.group(None, rows),
             actions.into_any_element(),
             self.agent_group("add-server-prompt", ADD_SERVER_PROMPT, cx),
         ];
+        // While the instance on this computer is out of the app, it can come back, with
+        // the agents and chats it had.
+        if self.first_out() {
+            let start = self
+                .small_button("add-server-local", "Run here", false)
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.popup = None;
+                    this.set_local(true, cx);
+                }));
+            groups.push(self.group(
+                None,
+                vec![self
+                    .row(
+                        Some(self.tile(Ico::Monitor)),
+                        "This computer",
+                        Some("Run loom here, with the agents it had".into()),
+                        Some(start.into_any_element()),
+                    )
+                    .into_any_element()],
+            ));
+        }
         self.settings_page("add-server-page", "Add a server", None, groups)
     }
 
@@ -13857,6 +13934,8 @@ impl Render for Loom {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         crate::perf::frame_start();
         let p = self.p;
+        // Before anything is drawn from it: which server is on screen.
+        self.settle_server(cx);
         self.finish_weaving(window, cx);
         if let Some(address) = self.fill_server.take() {
             self.server_in
