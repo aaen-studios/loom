@@ -188,7 +188,9 @@ impl Task for Boot {
             let feed = str_at(cfg.copy(), "update") ?? String(MANIFEST)
             if let v = str_at(cfg.copy(), "version") {
                 if feed.len() > 0 {
-                    conn.updater = some(Updater.new(v, str_at(cfg.copy(), "platform") ?? String("windows-desktop"), feed, "{d}/update"))
+                    let updater = Updater.new(v, str_at(cfg.copy(), "platform") ?? String("windows-desktop"), feed, "{d}/update")
+                    // A test's releases, in a build from source, are signed with a key of their own.
+                    conn.updater = some(if let k = str_at(cfg.copy(), "update_key") { updater.with_key(k) } else { updater })
                 }
             }
         }
