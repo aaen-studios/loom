@@ -51,6 +51,29 @@ pub mod radius {
 pub mod layout {
     pub const SIDEBAR: f32 = 260.0;
     pub const TITLEBAR: f32 = 48.0;
+    pub const SETTINGS: f32 = 600.0;
+    pub const PAGE: f32 = 520.0;
+    pub const NAV: f32 = 210.0;
+    pub const MENU: f32 = 230.0;
+    pub const MENU_WIDE: f32 = 240.0;
+    pub const FIELD_LABEL: f32 = 120.0;
+}
+
+pub mod control {
+    pub const BUTTON: f32 = 34.0;
+    pub const BUTTON_SMALL: f32 = 30.0;
+    pub const BUTTON_WIDE: f32 = 46.0;
+    pub const SEGMENT: f32 = 26.0;
+    pub const CHIP: f32 = 28.0;
+    pub const ICON: f32 = 28.0;
+    pub const ICON_SMALL: f32 = 26.0;
+    pub const ICON_COMPOSER: f32 = 32.0;
+    pub const ICON_LARGE: f32 = 34.0;
+    pub const LEAD: f32 = 30.0;
+    pub const SERVER: f32 = 46.0;
+    pub const CHOICE: f32 = 50.0;
+    pub const ROW: f32 = 54.0;
+    pub const ROW_TALL: f32 = 68.0;
 }
 
 pub mod color_dark {

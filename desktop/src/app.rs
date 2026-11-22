@@ -1748,7 +1748,7 @@ ACTA_KEY=secret:ACTA_KEY",
         let p = self.p;
         div()
             .id(id)
-            .size(px(28.0))
+            .size(px(control::ICON))
             .flex_none()
             .flex()
             .items_center()
@@ -1802,7 +1802,7 @@ ACTA_KEY=secret:ACTA_KEY",
                 button = button
                     .flex_1()
                     .min_w_0()
-                    .h(px(46.0))
+                    .h(px(control::SERVER))
                     .px(px(space::S))
                     .when(server_open, |d| d.bg(p.active))
                     .child(self.server_yarn(state, &name, 32.0))
@@ -1903,7 +1903,7 @@ ACTA_KEY=secret:ACTA_KEY",
         let w = (size.width.as_f32() - 2.0 * space::XXL).clamp(320.0, 900.0);
         let h = (size.height.as_f32() - 2.0 * space::XXL).clamp(320.0, 640.0);
         let mut nav = div()
-            .w(px(210.0))
+            .w(px(layout::NAV))
             .flex_none()
             .h_full()
             .flex()
@@ -2256,7 +2256,7 @@ ACTA_KEY=secret:ACTA_KEY",
                 Some(format!("loom {}", crate::VERSION)),
                 Some(status.into_any_element()),
             )
-            .min_h(px(68.0));
+            .min_h(px(control::ROW_TALL));
         let groups = vec![
             self.group(None, vec![here.into_any_element()]),
             self.scripts_group(cx),
@@ -2406,7 +2406,7 @@ ACTA_KEY=secret:ACTA_KEY",
                     .child(
                         div()
                             .id("task-back")
-                            .size(px(28.0))
+                            .size(px(control::ICON))
                             .flex_none()
                             .flex()
                             .items_center()
@@ -2480,7 +2480,7 @@ ACTA_KEY=secret:ACTA_KEY",
                     .child(
                         div()
                             .id("branch-back")
-                            .size(px(28.0))
+                            .size(px(control::ICON))
                             .flex_none()
                             .flex()
                             .items_center()
@@ -2560,7 +2560,7 @@ ACTA_KEY=secret:ACTA_KEY",
             chips = chips.child(
                 div()
                     .id(SharedString::from(format!("{prefix}-{}", a.id)))
-                    .h(px(28.0))
+                    .h(px(control::CHIP))
                     .px(px(space::M))
                     .flex()
                     .items_center()
@@ -2605,7 +2605,7 @@ ACTA_KEY=secret:ACTA_KEY",
         let chip = |id: String, label: String, picked: bool| {
             div()
                 .id(SharedString::from(id))
-                .h(px(28.0))
+                .h(px(control::CHIP))
                 .px(px(space::M))
                 .flex()
                 .items_center()
@@ -2743,7 +2743,7 @@ ACTA_KEY=secret:ACTA_KEY",
                 words = format!("{words} · {}", t.result.lines().next().unwrap_or_default());
             }
             let lead = div()
-                .size(px(30.0))
+                .size(px(control::LEAD))
                 .flex_none()
                 .flex()
                 .items_center()
@@ -2922,7 +2922,7 @@ ACTA_KEY=secret:ACTA_KEY",
             }))
             .child(
                 div()
-                    .h(px(28.0))
+                    .h(px(control::CHIP))
                     .px(px(space::S))
                     .flex()
                     .items_center()
@@ -3384,7 +3384,7 @@ ACTA_KEY=secret:ACTA_KEY",
             let tool = |name: &str, icon: Icon| {
                 div()
                     .id(SharedString::from(format!("queue-{name}-{}", item.id)))
-                    .size(px(26.0))
+                    .size(px(control::ICON_SMALL))
                     .flex_none()
                     .flex()
                     .items_center()
@@ -3456,7 +3456,9 @@ ACTA_KEY=secret:ACTA_KEY",
                         )),
                     )
                 })
-                .when(k == 0, |d| d.child(div().size(px(26.0)).flex_none()))
+                .when(k == 0, |d| {
+                    d.child(div().size(px(control::ICON_SMALL)).flex_none())
+                })
                 .child(tool("steer", Icon::new(Ico::Zap)).on_click(cx.listener(
                     move |this, _, _, cx| {
                         let f = this.model.queue_cmd("queue.steer", &steer_id, None);
@@ -3623,7 +3625,7 @@ ACTA_KEY=secret:ACTA_KEY",
         div()
             .id(id.into())
             .px(px(space::L))
-            .h(px(34.0))
+            .h(px(control::BUTTON))
             .flex()
             .items_center()
             .justify_center()
@@ -3707,7 +3709,7 @@ ACTA_KEY=secret:ACTA_KEY",
                                 div()
                                     .id("local")
                                     .w_full()
-                                    .h(px(50.0))
+                                    .h(px(control::CHOICE))
                                     .flex()
                                     .items_center()
                                     .justify_center()
@@ -3821,7 +3823,7 @@ ACTA_KEY=secret:ACTA_KEY",
                     .child(
                         div()
                             .id("back")
-                            .size(px(30.0))
+                            .size(px(control::ICON))
                             .flex()
                             .items_center()
                             .justify_center()
@@ -3871,7 +3873,7 @@ ACTA_KEY=secret:ACTA_KEY",
                         true,
                     )
                     .w_full()
-                    .h(px(46.0))
+                    .h(px(control::BUTTON_WIDE))
                     .on_click(cx.listener(|this, _, _, cx| this.sign_in_server(cx))),
                 ),
             )
@@ -4163,7 +4165,7 @@ ACTA_KEY=secret:ACTA_KEY",
                         div()
                             .id("new-agent")
                             .occlude()
-                            .size(px(26.0))
+                            .size(px(control::ICON_SMALL))
                             .flex()
                             .items_center()
                             .justify_center()
@@ -4222,7 +4224,7 @@ ACTA_KEY=secret:ACTA_KEY",
                     .child(
                         div()
                             .id("settings")
-                            .size(px(34.0))
+                            .size(px(control::ICON_LARGE))
                             .flex_none()
                             .flex()
                             .items_center()
@@ -4496,7 +4498,7 @@ ACTA_KEY=secret:ACTA_KEY",
         let panel = div()
             .occlude()
             .mb(px(space::S))
-            .w(px(240.0))
+            .w(px(layout::MENU_WIDE))
             .max_h(px(320.0))
             .p(px(space::XS))
             .flex()
@@ -4731,7 +4733,7 @@ ACTA_KEY=secret:ACTA_KEY",
             .occlude()
             .absolute()
             .top(px(layout::TITLEBAR - 4.0))
-            .w(px(230.0))
+            .w(px(layout::MENU))
             .p(px(space::XS))
             .flex()
             .flex_col()
@@ -5376,7 +5378,7 @@ ACTA_KEY=secret:ACTA_KEY",
                                 .child(
                                     div()
                                         .id("plus")
-                                        .size(px(32.0))
+                                        .size(px(control::ICON_COMPOSER))
                                         .flex()
                                         .items_center()
                                         .justify_center()
@@ -5419,7 +5421,7 @@ ACTA_KEY=secret:ACTA_KEY",
                             d.child(
                                 div()
                                     .id("dictate")
-                                    .size(px(32.0))
+                                    .size(px(control::ICON_COMPOSER))
                                     .flex_none()
                                     .flex()
                                     .items_center()
@@ -5444,7 +5446,7 @@ ACTA_KEY=secret:ACTA_KEY",
                         .child(
                             div()
                                 .id("send")
-                                .size(px(32.0))
+                                .size(px(control::ICON_COMPOSER))
                                 .flex_none()
                                 .flex()
                                 .items_center()
@@ -5566,7 +5568,7 @@ ACTA_KEY=secret:ACTA_KEY",
                         .absolute()
                         .top(px(space::L))
                         .left(px(space::L))
-                        .size(px(34.0))
+                        .size(px(control::ICON_LARGE))
                         .flex()
                         .items_center()
                         .justify_center()
@@ -5783,7 +5785,7 @@ ACTA_KEY=secret:ACTA_KEY",
             swatches = swatches.child(
                 div()
                     .id(("swatch", i))
-                    .size(px(34.0))
+                    .size(px(control::ICON_LARGE))
                     .flex()
                     .items_center()
                     .justify_center()
@@ -5876,7 +5878,7 @@ ACTA_KEY=secret:ACTA_KEY",
                 div()
                     .id("weave-it")
                     .mt(px(space::S))
-                    .h(px(46.0))
+                    .h(px(control::BUTTON_WIDE))
                     .px(px(space::XXL))
                     .flex()
                     .items_center()
@@ -6705,7 +6707,7 @@ ACTA_KEY=secret:ACTA_KEY",
             swatches = swatches.child(
                 div()
                     .id(("edit-swatch", i))
-                    .size(px(28.0))
+                    .size(px(control::ICON))
                     .flex()
                     .items_center()
                     .justify_center()
@@ -6806,7 +6808,7 @@ ACTA_KEY=secret:ACTA_KEY",
             .child(
                 div()
                     .w_full()
-                    .max_w(px(520.0))
+                    .max_w(px(layout::PAGE))
                     .flex()
                     .flex_col()
                     .gap(px(space::L))
@@ -7468,7 +7470,7 @@ ACTA_KEY=secret:ACTA_KEY",
             let dropping = self.table_dropping.as_deref() == Some(name.as_str());
             let back = div()
                 .id("tables-back")
-                .size(px(28.0))
+                .size(px(control::ICON))
                 .flex_none()
                 .flex()
                 .items_center()
@@ -8102,7 +8104,7 @@ ACTA_KEY=secret:ACTA_KEY",
                 );
             }
             let lead = div()
-                .size(px(30.0))
+                .size(px(control::LEAD))
                 .flex_none()
                 .flex()
                 .items_center()
@@ -9109,7 +9111,7 @@ ACTA_KEY=secret:ACTA_KEY",
                 .map(|c| c.to_uppercase().to_string())
                 .unwrap_or_default();
             let lead = div()
-                .size(px(30.0))
+                .size(px(control::LEAD))
                 .flex_none()
                 .flex()
                 .items_center()
@@ -9362,13 +9364,13 @@ ACTA_KEY=secret:ACTA_KEY",
         let p = self.p;
         let column = div()
             .w_full()
-            .max_w(px(600.0))
+            .max_w(px(layout::SETTINGS))
             .flex()
             .flex_col()
             .gap(px(space::XL))
             .child(
                 div()
-                    .min_h(px(34.0))
+                    .min_h(px(control::BUTTON))
                     .flex()
                     .items_center()
                     .justify_between()
@@ -9446,7 +9448,7 @@ ACTA_KEY=secret:ACTA_KEY",
     fn tile(&self, icon: Ico) -> AnyElement {
         let p = self.p;
         div()
-            .size(px(30.0))
+            .size(px(control::LEAD))
             .flex_none()
             .flex()
             .items_center()
@@ -9471,7 +9473,7 @@ ACTA_KEY=secret:ACTA_KEY",
     ) -> Div {
         let p = self.p;
         div()
-            .min_h(px(54.0))
+            .min_h(px(control::ROW))
             .flex()
             .items_center()
             .gap(px(space::M))
@@ -9530,7 +9532,7 @@ ACTA_KEY=secret:ACTA_KEY",
             .py(px(space::S + 2.0))
             .child(
                 div()
-                    .w(px(FIELD_LABEL))
+                    .w(px(layout::FIELD_LABEL))
                     .flex_none()
                     .text_size(px(size::BODY))
                     .text_color(p.ink)
@@ -9548,7 +9550,7 @@ ACTA_KEY=secret:ACTA_KEY",
         primary: bool,
     ) -> Stateful<Div> {
         self.button_owned(id, label, primary)
-            .h(px(30.0))
+            .h(px(control::BUTTON_SMALL))
             .px(px(space::M))
     }
 
@@ -9601,7 +9603,7 @@ ACTA_KEY=secret:ACTA_KEY",
         let p = self.p;
         div()
             .id(id.into())
-            .h(px(26.0))
+            .h(px(control::SEGMENT))
             .px(px(space::M))
             .flex()
             .items_center()
@@ -11741,7 +11743,7 @@ fn approval(p: Palette, a: &Approval, this: WeakEntity<Loom>) -> Div {
         div()
             .id(SharedString::from(id))
             .px(px(space::M))
-            .h(px(30.0))
+            .h(px(control::BUTTON_SMALL))
             .flex()
             .items_center()
             .rounded(px(radius::BUTTON))
@@ -12346,10 +12348,6 @@ fn appear<E: Styled>(d: E, k: f32) -> E {
 
 /// How long the opening weave lasts on every launch, in seconds.
 const SPLASH_SECONDS: f32 = 1.6;
-
-/// How wide a field's label is, in a row a field fills, so what's under the field lines
-/// up with it.
-const FIELD_LABEL: f32 = 120.0;
 
 /// How long a notice stays, unless it's clicked away.
 const NOTICE_SECONDS: f32 = 8.0;
