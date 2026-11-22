@@ -62,7 +62,7 @@ fn page_words(screen: Screen) -> &'static str {
         Screen::Profile => "profile you name instructions what agents know",
         Screen::Appearance => "theme dark light mode system colours colors text size font bigger smaller",
         Screen::ChatPrefs => {
-            "tool calls tools hidden folded thoughts thinking send enter ctrl composer replies messages"
+            "tool calls tools hidden folded thoughts thinking send enter ctrl composer replies messages bubbles plain style"
         }
         Screen::AppPrefs => {
             "start login startup tray close background awake sleep notifications sound preview updates version restart"
@@ -264,7 +264,21 @@ impl Loom {
             Tools::Folded => "One line for each run, to open",
             Tools::All => "Each on its own line",
         };
+        let style = self.pref_choice(
+            "style",
+            self.prefs.bubbles,
+            &[(true, "Bubbles"), (false, "Plain")],
+            |p, v| p.bubbles = v,
+            cx,
+        );
         let replies = vec![
+            self.row(
+                None,
+                "Message style",
+                Some("How agents' replies look".into()),
+                Some(style),
+            )
+            .into_any_element(),
             self.row(None, "Tool calls", Some(tools_sub.into()), Some(tools))
                 .into_any_element(),
             self.pref_switch(

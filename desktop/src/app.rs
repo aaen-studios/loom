@@ -4744,6 +4744,7 @@ ACTA_KEY=secret:ACTA_KEY",
             tools: self.prefs.tools,
             thoughts_open: self.prefs.thoughts_open,
             text_scale: self.prefs.text_scale(),
+            bubbles: self.prefs.bubbles,
         };
         let tools: Vec<model::Tool> = self.model.tools.clone();
         let files = Rc::new(self.model.files.clone());
@@ -10096,6 +10097,7 @@ struct Show {
     tools: Tools,
     thoughts_open: bool,
     text_scale: f32,
+    bubbles: bool,
 }
 
 /// A tool call's title, as its agent named it.
@@ -10195,20 +10197,38 @@ fn reply(
         let key = format!("{}/{}", m.id, i);
         match b.kind.as_str() {
             "text" => {
-                shown_any |= !b.text.trim().is_empty();
-                body = body.child(
-                    div()
-                        .text_size(px(size::REPLY * show.text_scale))
-                        .line_height(relative(line::REPLY))
-                        .text_color(p.ink)
-                        .child(
-                            TextView::markdown(
-                                SharedString::from(format!("r-{key}")),
-                                b.text.clone(),
-                            )
+                if b.text.trim().is_empty() {
+                    at += 1;
+                    continue;
+                }
+                shown_any = true;
+                let words = div()
+                    .text_size(px(size::REPLY * show.text_scale))
+                    .line_height(relative(line::REPLY))
+                    .text_color(p.ink)
+                    .child(
+                        TextView::markdown(SharedString::from(format!("r-{key}")), b.text.clone())
                             .selectable(true),
-                        ),
-                );
+                    );
+                body = body.child(if show.bubbles {
+                    // A bubble with a breath of the agent's colour, its corner by the
+                    // thread squared off as a speech bubble's tail.
+                    div().flex().child(
+                        words
+                            .max_w(relative(0.94))
+                            .px(px(space::L))
+                            .py(px(space::S + 2.0))
+                            .rounded(px(radius::BUBBLE))
+                            .rounded_tl(px(radius::ROW))
+                            .bg(motion::mix(
+                                p.bubble,
+                                tint,
+                                if p.dark { 0.12 } else { 0.07 },
+                            )),
+                    )
+                } else {
+                    words
+                });
             }
             "thought" => {
                 shown_any = true;

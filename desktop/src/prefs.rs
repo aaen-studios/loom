@@ -39,6 +39,8 @@ pub struct Prefs {
     pub tools: Tools,
     /// Whether an agent's thoughts show open, rather than folded under "Thought".
     pub thoughts_open: bool,
+    /// Whether an agent's replies show as bubbles, as the person's messages do.
+    pub bubbles: bool,
     /// Whether Enter makes a new line and Ctrl+Enter sends, rather than Enter sending.
     pub ctrl_enter: bool,
     /// Whether closing the window keeps loom running in the tray.
@@ -62,6 +64,7 @@ impl Default for Prefs {
             text: Text::Normal,
             tools: Tools::Hidden,
             thoughts_open: false,
+            bubbles: true,
             ctrl_enter: false,
             tray: true,
             notify: true,
@@ -112,6 +115,7 @@ impl Prefs {
                 _ => d.tools,
             },
             thoughts_open: b("thoughts_open", d.thoughts_open),
+            bubbles: b("bubbles", d.bubbles),
             ctrl_enter: b("ctrl_enter", d.ctrl_enter),
             tray: b("tray", d.tray),
             notify: b("notify", d.notify),
@@ -149,6 +153,7 @@ impl Prefs {
             }),
         );
         m.insert("thoughts_open".into(), json!(self.thoughts_open));
+        m.insert("bubbles".into(), json!(self.bubbles));
         m.insert("ctrl_enter".into(), json!(self.ctrl_enter));
         m.insert("tray".into(), json!(self.tray));
         m.insert("notify".into(), json!(self.notify));
