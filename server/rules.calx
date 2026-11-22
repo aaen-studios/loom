@@ -30,7 +30,7 @@ module server.rules
 // reads, checks and matches JSON.
 import std.env
 import std.json.{Json}
-import std.path.{glob_matches, glob_matches_name, is_absolute, join, normalize, root}
+import std.path.{glob_matches_hidden, glob_matches_name_hidden, is_absolute, join, normalize, root}
 import std.url.{Url}
 import shared.obj.{Obj, at, str_at}
 
@@ -186,7 +186,7 @@ fn site_matches(host: String, pattern: String) -> bool {
     if not pattern.contains(":") {
         if let k = h.find(":") { h = h[..k].copy() }
     }
-    if wild(pattern.copy()) { return glob_matches_name(h, pattern) }
+    if wild(pattern.copy()) { return glob_matches_name_hidden(h, pattern) }
     return h == pattern or h.ends_with(".{pattern}")
 }
 
@@ -210,9 +210,9 @@ pub fn path_matches(given: String, rule_path: String) -> bool {
     } else if root(g.copy()).len() == 0 and g.starts_with("**") {
         g = "{root(p.copy())}{g}"
     }
-    if wild(rule_path.copy()) { return glob_matches(p, g) }
+    if wild(rule_path.copy()) { return glob_matches_hidden(p, g) }
     // A path with no wildcards is that file or folder, and all that's in it.
-    return glob_matches(p.copy(), g.copy()) or glob_matches(p, "{g}/**")
+    return glob_matches_hidden(p.copy(), g.copy()) or glob_matches_hidden(p, "{g}/**")
 }
 
 // The commands a line chains together: split where the shell would run
@@ -257,12 +257,12 @@ pub fn bare(command: String) -> String {
 }
 
 fn command_matches(command: String, pattern: String) -> bool {
-    if wild(pattern.copy()) { return glob_matches_name(command, pattern) }
+    if wild(pattern.copy()) { return glob_matches_name_hidden(command, pattern) }
     return command == pattern or command.starts_with("{pattern} ") or command.starts_with("{pattern}\t")
 }
 
 fn tool_matches(tool: String, pattern: String) -> bool {
-    if wild(pattern.copy()) { return glob_matches_name(tool, pattern) }
+    if wild(pattern.copy()) { return glob_matches_name_hidden(tool, pattern) }
     if not pattern.contains(".") { return tool.starts_with("{pattern}.") }
     return tool == pattern
 }
@@ -528,6 +528,10 @@ fn paths_match_as_globs_and_folders() {
     assert(path_matches(String("/work/src/main.rs"), String("/work/**/*.rs")))
     assert(not path_matches(String("/work/../etc/passwd"), String("/work/**")))
     assert(path_matches(String("/work/../etc/passwd"), String("/etc")))
+    // Hidden names are matched like any other.
+    assert(path_matches(String("/srv/secrets/.key"), String("/srv/secrets")))
+    assert(path_matches(String("/home/x/.ssh/id_ed25519"), String("/home/x/**")))
+    assert(path_matches(String("/work/.git/config"), String("/work/*/config")))
 }
 
 @test
@@ -537,6 +541,8 @@ fn commands_are_split_where_the_shell_would() {
     assert(command_matches(String("git push origin"), String("git push")))
     assert(not command_matches(String("git pushy"), String("git push")))
     assert(command_matches(String("rm -rf /tmp/x"), String("rm *")))
+    assert(command_matches(String("./deploy.sh"), String("*")))
+    assert(command_matches(String(".venv/bin/pip install x"), String("*pip install*")))
     assert(command_of(Json.Array([Json.Str(String("bash")), Json.Str(String("-lc")), Json.Str(String("ls -la"))])) == some(String("ls -la")))
 }
 

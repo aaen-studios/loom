@@ -36,7 +36,7 @@ How they're checked:
 - A rule that can't be read denies. So does an action whose command, path, site or starter a rule is about but loom can't make out.
 - Where a command line chains several commands, each one is checked. An allow holds only when every command and every path on the line matches it, and a deny or an ask holds when any does.
 - An allow answers an agent program's own requests, such as running a command. Loom's own tools keep their own rules, so for those a rule can only ask or deny.
-- For now, `*` and `**` don't match hidden files and folders, as in the shell. Name them in the pattern, as in `**/.env`.
+- `*` and `**` match hidden files and folders too, unlike in the shell: a rule on `/srv/secrets` covers `/srv/secrets/.key`, and a command rule of `*` covers `./deploy.sh`.
 
 Rules aren't part of an agent's revisions, so rolling an agent back never takes one away. An agent can read your rules and try a what-if, but adding, changing or removing a rule asks you first.
 
