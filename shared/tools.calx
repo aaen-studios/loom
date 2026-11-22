@@ -128,7 +128,7 @@ fn code_mode_has_two_tools() {
 @test
 fn every_tool_has_a_schema() {
     let tools = all()
-    assert(tools.len() == 55)
+    assert(tools.len() == 56)
     for t in tools {
         assert("{t}".contains("\"inputSchema\":\{\"type\":\"object\""))
     }
