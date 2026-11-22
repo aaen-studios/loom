@@ -60,9 +60,9 @@ pub(super) fn settings_groups() -> Vec<(Option<&'static str>, Vec<Page>)> {
 fn page_words(screen: Screen) -> &'static str {
     match screen {
         Screen::Profile => "profile you name instructions what agents know",
-        Screen::Appearance => "theme dark light mode system colours colors text size font bigger smaller",
+        Screen::Appearance => "theme dark light mode system colours colors text size font fonts geist code monospace bigger smaller",
         Screen::ChatPrefs => {
-            "tool calls tools hidden folded thoughts thinking send enter ctrl composer replies messages"
+            "tool calls tools hidden folded thoughts thinking send enter ctrl composer replies messages bubbles plain style"
         }
         Screen::AppPrefs => {
             "start login startup tray close background awake sleep notifications sound preview updates version restart"
@@ -110,6 +110,8 @@ impl Loom {
     ) {
         change(&mut self.prefs);
         self.prefs.save(&data_dir());
+        crate::prefs::use_fonts(&self.prefs);
+        crate::theme(cx, self.p.dark);
         self.apply_theme(window, cx);
         let ctrl_enter = self.prefs.ctrl_enter;
         self.composer
@@ -224,25 +226,60 @@ impl Loom {
             |p, v| p.text = v,
             cx,
         );
-        let groups = vec![self.group(
-            None,
-            vec![
-                self.row(
-                    None,
-                    "Theme",
-                    Some("System follows Windows".into()),
-                    Some(theme),
-                )
-                .into_any_element(),
-                self.row(
-                    None,
-                    "Chat text",
-                    Some("How big messages are".into()),
-                    Some(text),
-                )
-                .into_any_element(),
-            ],
-        )];
+        let font = self.pref_choice(
+            "font",
+            self.prefs.system_font,
+            &[(false, "Geist"), (true, "System")],
+            |p, v| p.system_font = v,
+            cx,
+        );
+        let mono = self.pref_choice(
+            "mono",
+            self.prefs.system_mono,
+            &[(false, "Geist Mono"), (true, "System")],
+            |p, v| p.system_mono = v,
+            cx,
+        );
+        let groups = vec![
+            self.group(
+                None,
+                vec![
+                    self.row(
+                        None,
+                        "Theme",
+                        Some("System follows Windows".into()),
+                        Some(theme),
+                    )
+                    .into_any_element(),
+                    self.row(
+                        None,
+                        "Chat text",
+                        Some("How big messages are".into()),
+                        Some(text),
+                    )
+                    .into_any_element(),
+                ],
+            ),
+            self.group(
+                Some("Fonts"),
+                vec![
+                    self.row(
+                        None,
+                        "Words",
+                        Some("loom's own, or Windows'".into()),
+                        Some(font),
+                    )
+                    .into_any_element(),
+                    self.row(
+                        None,
+                        "Code",
+                        Some("In replies and tool calls".into()),
+                        Some(mono),
+                    )
+                    .into_any_element(),
+                ],
+            ),
+        ];
         self.settings_page("appearance-page", "Appearance", None, groups)
     }
 
@@ -264,7 +301,21 @@ impl Loom {
             Tools::Folded => "One line for each run, to open",
             Tools::All => "Each on its own line",
         };
+        let style = self.pref_choice(
+            "style",
+            self.prefs.bubbles,
+            &[(true, "Bubbles"), (false, "Plain")],
+            |p, v| p.bubbles = v,
+            cx,
+        );
         let replies = vec![
+            self.row(
+                None,
+                "Message style",
+                Some("How agents' replies look".into()),
+                Some(style),
+            )
+            .into_any_element(),
             self.row(None, "Tool calls", Some(tools_sub.into()), Some(tools))
                 .into_any_element(),
             self.pref_switch(

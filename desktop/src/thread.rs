@@ -569,8 +569,8 @@ mod tests {
                 .map(|s| over_word(k, s as f32 * 0.25 + 0.1))
                 .collect();
             assert_eq!(stretches.iter().filter(|o| **o).count(), 2);
-            for s in 0..4 {
-                assert_ne!(stretches[s], over_word(k + 1, s as f32 * 0.25 + 0.1));
+            for (s, over) in stretches.iter().enumerate() {
+                assert_ne!(*over, over_word(k + 1, s as f32 * 0.25 + 0.1));
             }
         }
     }
