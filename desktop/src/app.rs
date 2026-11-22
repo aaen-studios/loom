@@ -5018,6 +5018,28 @@ ACTA_KEY=secret:ACTA_KEY",
         cx.notify();
     }
 
+    /// How wide the chat's column is, to the pixel: the window less the sidebar and
+    /// the panel beside the chat, at most the column's widest.
+    ///
+    /// A message's text has it in its id. GPUI answers "how wide would you be" with the
+    /// size it last wrapped to, so a bubble that hugs its text would keep a narrow width
+    /// after the chat widens (a panel closing, the window growing). A new id is a new
+    /// text, which measures itself afresh.
+    fn chat_room(&self, window: &Window) -> i32 {
+        let w = window.viewport_size().width.as_f32();
+        let side = match self.side {
+            Some(side) => side_width(
+                side == Screen::Plugins || side == Screen::Page,
+                w,
+                self.side_w,
+            ),
+            None => 0.0,
+        };
+        (w - layout::SIDEBAR - side)
+            .clamp(0.0, space::COLUMN)
+            .round() as i32
+    }
+
     fn chat(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Div {
         let p = self.p;
         // A new account starts by picking who to talk to, once the instance has said it has no agents.
@@ -5096,6 +5118,7 @@ ACTA_KEY=secret:ACTA_KEY",
             text_scale: self.prefs.text_scale(),
             bubbles: self.prefs.bubbles,
             newest: false,
+            room: self.chat_room(window),
         };
         // The newest message, whose choices still answer.
         let newest = rows.iter().rev().find_map(|r| match r {
@@ -5131,7 +5154,7 @@ ACTA_KEY=secret:ACTA_KEY",
                 );
             let inner = match row {
                 Row::Message(m) if m.role == "person" => {
-                    person(p, m, &files, show.text_scale, this.clone())
+                    person(p, m, &files, show.text_scale, show.room, this.clone())
                 }
                 Row::Message(m) => reply(
                     p,
@@ -10945,6 +10968,7 @@ fn person(
     m: &Message,
     files: &HashMap<String, String>,
     scale: f32,
+    room: i32,
     this: WeakEntity<Loom>,
 ) -> Div {
     let text: String = m
@@ -10995,7 +11019,7 @@ fn person(
                 .when(m.queued, |d| d.opacity(0.6))
                 .child(
                     TextView::markdown(
-                        SharedString::from(format!("m-{}", m.id)),
+                        SharedString::from(format!("m-{}-{room}", m.id)),
                         model::literal_html(&text),
                     )
                     .selectable(true),
@@ -11136,6 +11160,9 @@ struct Show {
     bubbles: bool,
     /// Whether this is the chat's newest message, whose choices still answer.
     newest: bool,
+    /// How wide the chat's column is, to the pixel (`Loom::chat_room`), in the text's
+    /// id, so text measures itself again when the column changes.
+    room: i32,
 }
 
 /// A card an agent put in its reply (PLAN.md, "Cards in the chat"), drawn plainly in
@@ -11453,8 +11480,11 @@ fn reply(
                     .line_height(relative(line::REPLY))
                     .text_color(p.ink)
                     .child(
-                        TextView::markdown(SharedString::from(format!("r-{key}")), b.text.clone())
-                            .selectable(true),
+                        TextView::markdown(
+                            SharedString::from(format!("r-{key}-{}", show.room)),
+                            b.text.clone(),
+                        )
+                        .selectable(true),
                     );
                 body = body.child(if show.bubbles {
                     // A bubble with a breath of the agent's colour, its corner by the
