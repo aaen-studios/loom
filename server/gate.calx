@@ -1,6 +1,7 @@
 module server.gate
 
-// The one way out of a sandbox to the instance (server/sandbox.calx): a
+// The one way out of a sandbox to the instance (server/sandbox.calx), and of a
+// closed one through its egress (server/egress.calx): a
 // listener on 127.0.0.1 that sandboxes reach through pasta (or, for Docker's,
 // on the gateway of its network `loom`), and that passes only `loom mcp`'s
 // routes on to the instance, with their agent's token: GET /api/mcp/tools and

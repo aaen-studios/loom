@@ -1,0 +1,74 @@
+module tests.protocol.isolated
+
+// Isolated agents and their networks (PLAN.md, "Rules, records and limits"),
+// as the commands take them, on an instance without sandboxes, as a PC's is:
+// it refuses to isolate an agent or hold it to a network rather than pretend,
+// since nothing here would keep it. A network is a list of hosts, kept only in
+// a sandbox; a host that isn't one is refused. A member's agents are always
+// isolated, and can't be made otherwise. tests/protocol/sandbox.calx runs them
+// in sandboxes, where Podman or Docker is here, and tests/protocol/egress.calx
+// what a closed network lets out.
+//
+//     calx tests/protocol/isolated.calx
+import std.json.{Json}
+import std.process.{exit}
+import shared.obj.{Obj, at, bool_at, str_at}
+import tests.kit.{App, Instance, check}
+
+fn code(r: Json) -> String {
+    return str_at(at(r, "error"), "code") ?? String()
+}
+
+fn hosts(list: List<str>) -> Json {
+    var out = List<Json>()
+    for h in list { out.push(Json.Str(String(h))) }
+    return Json.Array(out)
+}
+
+fn run() ! Error {
+    let inst = try Instance.start()
+    var owner = try App.connect(inst.base.copy(), inst.token.copy(), 0)
+    let listed = try owner.cmd("q_1", "acp.list", Obj.new().done())
+    try check(bool_at(at(listed, "value"), "sandboxes") == some(false), "acp.list says the instance has no sandboxes")
+
+    let isolated = try owner.cmd("q_2", "agent.create", Obj.new().s("name", String("Boxed")).s("acp_agent", String("fake")).s("instructions", String("")).b("isolated", true).done())
+    try check(code(isolated.copy()) == "not_here", "an isolated agent is refused where there are no sandboxes to keep it")
+    let unboxed = try owner.cmd("q_3", "agent.create", Obj.new().s("name", String("Listed")).s("acp_agent", String("fake")).s("instructions", String("")).j("network", hosts(["github.com"])).done())
+    try check(code(unboxed) == "bad_request", "a network without isolation is refused: it's kept in a sandbox")
+    let bad = try owner.cmd("q_4", "agent.create", Obj.new().s("name", String("Bad")).s("acp_agent", String("fake")).s("instructions", String("")).b("isolated", true).j("network", hosts(["http://github.com/x"])).done())
+    try check(code(bad) == "bad_request", "a host that isn't one is refused")
+
+    let made = try owner.cmd("q_5", "agent.create", Obj.new().s("name", String("Mine")).s("acp_agent", String("fake")).s("instructions", String("")).done())
+    let agent = at(at(made, "value"), "agent")
+    let id = str_at(agent.copy(), "id") ?? String()
+    try check(bool_at(agent, "isolated") == some(false), "the owner's agents aren't isolated unless they're made so")
+    let to_isolated = try owner.cmd("q_6", "agent.update", Obj.new().s("agent", id.copy()).b("isolated", true).done())
+    try check(code(to_isolated) == "not_here", "nor can one be isolated later, here")
+    let to_network = try owner.cmd("q_7", "agent.update", Obj.new().s("agent", id.copy()).j("network", hosts([])).done())
+    try check(code(to_network) == "bad_request", "or given a network of its own")
+    let everything = try owner.cmd("q_8", "agent.update", Obj.new().s("agent", id.copy()).j("network", Json.Null).s("name", String("Mine still")).done())
+    try check(str_at(at(at(everything, "value"), "agent"), "name") == some(String("Mine still")), "a network of null, everything, is what it has already")
+
+    let ann_token = try inst.second_account("ann")
+    var ann = try App.connect(inst.base.copy(), ann_token, 0)
+    let hers = try ann.cmd("q_1", "agent.create", Obj.new().s("name", String("Hers")).s("acp_agent", String("fake")).s("instructions", String("")).done())
+    let her_agent = at(at(hers, "value"), "agent")
+    try check(bool_at(her_agent.copy(), "isolated") == some(true), "a member's agents are always isolated")
+    let out = try ann.cmd("q_2", "agent.update", Obj.new().s("agent", str_at(her_agent, "id") ?? String()).b("isolated", false).done())
+    try check(code(out) == "not_allowed", "and can't be made otherwise")
+    let not_out = try ann.cmd("q_3", "agent.create", Obj.new().s("name", String("Out")).s("acp_agent", String("fake")).s("instructions", String("")).b("isolated", false).done())
+    try check(code(not_out) == "not_allowed", "not even when they're made")
+    ann.close()
+    owner.close()
+    inst.stop()
+}
+
+fn main() {
+    match run() {
+        ok => println("\nisolated: all good"),
+        err(e) => {
+            eprintln("\nisolated: {e}")
+            exit(1)
+        },
+    }
+}

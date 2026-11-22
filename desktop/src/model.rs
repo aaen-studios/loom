@@ -81,6 +81,11 @@ pub struct Agent {
     /// Whether it reaches tools through scripts, search_tools and run_code (Code
     /// Mode, the default), rather than each tool plainly.
     pub code_mode: bool,
+    /// Whether it runs in a sandbox: every member's agent does, and the owner's marked
+    /// isolated.
+    pub isolated: bool,
+    /// The hosts it may reach from its sandbox, or None for everything; empty is none.
+    pub network: Option<Vec<String>>,
 }
 
 /// One of the things an agent's program lets the person pick, such as its model.
@@ -1394,6 +1399,8 @@ pub struct Model {
     /// Whether this person is the instance's owner, who gives programs and their settings
     /// to people, as acp.list said.
     pub programs_owner: bool,
+    /// Whether the instance runs sandboxes, which an isolated agent needs, as acp.list said.
+    pub sandboxes: bool,
     /// The ACP Registry's agents, once it's been read.
     pub registry: Vec<Listed>,
     /// Which registry agent each program on the instance is, by the program's name.
@@ -1477,6 +1484,22 @@ fn s(v: &Value, key: &str) -> String {
         .and_then(Value::as_str)
         .unwrap_or_default()
         .to_string()
+}
+
+/// A host as it's typed, as the list keeps it: `https://GitHub.com/x` is
+/// `github.com`. The instance says whether it's a host at all.
+fn host_entry(typed: &str) -> Option<String> {
+    let mut h = typed.trim().to_lowercase();
+    for scheme in ["https://", "http://"] {
+        if let Some(rest) = h.strip_prefix(scheme) {
+            h = rest.to_string();
+        }
+    }
+    if let Some(cut) = h.find('/') {
+        h.truncate(cut);
+    }
+    let h = h.trim_end_matches('.').to_string();
+    (!h.is_empty()).then_some(h)
 }
 
 fn blocks_of(v: &Value) -> Vec<Block> {
@@ -2884,6 +2907,17 @@ impl Model {
                 .pointer("/value/owner")
                 .and_then(Value::as_bool)
                 .unwrap_or(false);
+            self.sandboxes = f
+                .pointer("/value/sandboxes")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+        } else if id.starts_with("app.place") {
+            // Where it runs was refused, as on an instance without sandboxes, or
+            // while it answers: the list as the instance has it again.
+            if let Some(e) = f.get("error") {
+                self.notices.push(s(e, "message"));
+                self.dirty.insert(List::Agents);
+            }
         } else if id.starts_with("app.new_agent") {
             if let Some(e) = f.get("error") {
                 self.notices.push(s(e, "message"));
@@ -2947,6 +2981,13 @@ impl Model {
                         config: config_values(a),
                         pinned: a.get("pinned").and_then(Value::as_i64),
                         code_mode: a.get("code_mode").and_then(Value::as_bool).unwrap_or(true),
+                        isolated: a.get("isolated").and_then(Value::as_bool).unwrap_or(false),
+                        network: a.get("network").and_then(Value::as_array).map(|hs| {
+                            hs.iter()
+                                .filter_map(Value::as_str)
+                                .map(str::to_string)
+                                .collect()
+                        }),
                     })
                     .collect();
                 // Pinned agents first, in the order they were pinned; the rest as they were.
@@ -3415,6 +3456,59 @@ impl Model {
         )
     }
 
+    /// Runs the agent being edited in a sandbox, or not. Out of one, it has the
+    /// network of the instance's computer, so its own list goes.
+    pub fn set_isolated(&mut self, on: bool) -> Option<Value> {
+        let agent = self.editing.clone()?;
+        if let Some(a) = self.agents.iter_mut().find(|a| a.id == agent) {
+            a.isolated = on;
+            if !on {
+                a.network = None;
+            }
+        }
+        let id = self.id("app.place");
+        let args = if on {
+            json!({"agent": agent, "isolated": true})
+        } else {
+            json!({"agent": agent, "isolated": false, "network": null})
+        };
+        Some(json!({"t": "cmd", "id": id, "name": "agent.update", "args": args}))
+    }
+
+    /// Sets what the agent being edited reaches from its sandbox: None for
+    /// everything, or the hosts on a list, none when it's empty.
+    pub fn set_network(&mut self, hosts: Option<Vec<String>>) -> Option<Value> {
+        let agent = self.editing.clone()?;
+        if let Some(a) = self.agents.iter_mut().find(|a| a.id == agent) {
+            a.network = hosts.clone();
+        }
+        let id = self.id("app.place");
+        Some(
+            json!({"t": "cmd", "id": id, "name": "agent.update", "args": {"agent": agent, "network": hosts}}),
+        )
+    }
+
+    /// Adds `host` to the list of the agent being edited, as the instance keeps
+    /// it: lowercase, without a scheme, a path or a trailing dot. None when it's
+    /// empty, or on the list already.
+    pub fn add_host(&mut self, host: &str) -> Option<Value> {
+        let agent = self.agent(self.editing.as_ref()?)?;
+        let host = host_entry(host)?;
+        let mut hosts = agent.network.clone().unwrap_or_default();
+        if hosts.contains(&host) {
+            return None;
+        }
+        hosts.push(host);
+        self.set_network(Some(hosts))
+    }
+
+    pub fn remove_host(&mut self, host: &str) -> Option<Value> {
+        let agent = self.agent(self.editing.as_ref()?)?;
+        let mut hosts = agent.network.clone().unwrap_or_default();
+        hosts.retain(|h| h != host);
+        self.set_network(Some(hosts))
+    }
+
     pub fn set_color(&mut self, color: &str) -> Option<Value> {
         let agent = self.editing.clone()?;
         if let Some(a) = self.agents.iter_mut().find(|a| a.id == agent) {
@@ -3438,6 +3532,8 @@ impl Model {
         vec![
             self.revisions_cmd(),
             json!({"t": "cmd", "id": id, "name": "agent.summary", "args": {"agent": agent}}),
+            // Whether it can be isolated here, and whether it's the owner's.
+            self.programs(),
         ]
     }
 
@@ -5011,8 +5107,9 @@ mod tests {
         let mut m = Model::new();
         m.select(Some("a_1".into()));
         let asked = m.edit_agent();
-        assert_eq!(asked.len(), 2);
+        assert_eq!(asked.len(), 3);
         assert_eq!(asked[1]["name"], "agent.summary");
+        assert_eq!(asked[2]["name"], "acp.list");
         assert_eq!(m.summary, None);
         m.result(
             &json!({"t": "result", "id": asked[1]["id"], "ok": true, "value": {
@@ -5026,6 +5123,37 @@ mod tests {
         assert_eq!(tokens_text(1_200_000), "1.2M");
         let f = m.set_color("teal").unwrap();
         assert_eq!(f["args"]["color"], "teal");
+    }
+
+    #[test]
+    fn an_agent_runs_isolated_with_a_list_of_hosts() {
+        let mut m = Model::new();
+        m.take(&json!({"t": "core.data", "what": "agents", "items": [
+            {"id": "a_1", "name": "One", "isolated": true, "network": ["github.com"]},
+            {"id": "a_2", "name": "Two"},
+        ]}));
+        assert_eq!(m.agents[0].network, Some(vec!["github.com".to_string()]));
+        assert!(!m.agents[1].isolated && m.agents[1].network.is_none());
+        m.select(Some("a_1".into()));
+        let asked = m.edit_agent();
+        m.result(&json!({"t": "result", "id": asked[2]["id"], "ok": true, "value": {"programs": [], "owner": true, "sandboxes": true}}));
+        assert!(m.sandboxes);
+        let f = m.add_host(" https://Registry.NPMJS.org/x ").unwrap();
+        assert_eq!(
+            f["args"]["network"],
+            json!(["github.com", "registry.npmjs.org"])
+        );
+        assert!(m.add_host("github.com").is_none());
+        let f = m.remove_host("github.com").unwrap();
+        assert_eq!(f["args"]["network"], json!(["registry.npmjs.org"]));
+        let f = m.set_isolated(false).unwrap();
+        assert_eq!(f["args"]["isolated"], false);
+        assert_eq!(f["args"]["network"], Value::Null);
+        assert!(m.agents[0].network.is_none());
+        // Refused, as without sandboxes: the list as the instance has it comes again.
+        m.result(&json!({"t": "result", "id": f["id"], "ok": false, "error": {"code": "not_here", "message": "No sandboxes."}}));
+        assert_eq!(m.notices.last().map(String::as_str), Some("No sandboxes."));
+        assert!(m.dirty.contains(&List::Agents));
     }
 
     #[test]

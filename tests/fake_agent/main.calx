@@ -28,6 +28,10 @@ module tests.fake_agent.main
 //     /session            says its session id: "session ID"
 //     /usage USED SIZE    reports its context as USED tokens of a SIZE window (usage_update)
 //     /env NAME           says NAME=VALUE, its environment variable NAME
+//     /net HOST:PORT      says whether HOST:PORT can be reached straight ("direct
+//                         open" or "direct closed"), and through the proxy
+//                         HTTPS_PROXY names with CONNECT ("proxy 200", the
+//                         status it answers, or "proxy none")
 //     /servers            says the MCP servers the session was given, but loom:
 //                         "NAME command ARGS K=V" or "NAME url K=V" each, or "no servers"
 //     /meta               says the _meta its session was given: "meta JSON",
@@ -59,6 +63,7 @@ import std.image.{Color, Image, Kind}
 import std.io
 import std.url
 import std.json.{Json, parse}
+import std.net.{Event, Net}
 import std.process.{Child, Command, Stdio, exit}
 import std.thread.{Task}
 import std.time.{Instant}
@@ -99,6 +104,7 @@ pub enum Step {
     Context
     Mcp(String, String)
     Env(String)
+    Net(String)
     Servers
     Config
     Meta
@@ -168,6 +174,8 @@ pub fn script(text: String) -> List<Step> {
             steps.push(Step.Usage(i64.parse(used) ?? 0, i64.parse(size) ?? 0))
         } else if word == "/env" {
             steps.push(Step.Env(rest))
+        } else if word == "/net" {
+            steps.push(Step.Net(rest))
         } else if word == "/image" {
             steps.push(Step.Image)
         } else if word == "/link" {
@@ -177,6 +185,74 @@ pub fn script(text: String) -> List<Step> {
         }
     }
     return steps
+}
+
+// Opens a connection to `host`:`port` on `net`, and gives what came back
+// after sending `send`, until the first line break, or none if it closed
+// first or nothing came in 5 seconds. "" when `send` is empty and it opened.
+fn talk(net: Net, host: String, port: u16, send: String) -> String? {
+    let conn = match net.connect(host, port) {
+        ok(c) => c,
+        err(_) => return none,
+    }
+    var events = List<Event>()
+    var got = List<u8>()
+    var open = false
+    let start = unsafe { Instant.now() }
+    while unsafe { Instant.now() }.nanos_since(start) < 5000000000 {
+        net.poll(200, mut events)
+        for e in events {
+            match e {
+                Connected(c) => {
+                    if c == conn {
+                        open = true
+                        if send.len() == 0 {
+                            net.close(conn)
+                            return some(String())
+                        }
+                        net.write(conn, send.to_bytes())
+                    }
+                },
+                Received(c) => if c == conn { _ = net.read(conn, mut got) },
+                Closed(c) => if c == conn {
+                    let text = String.from_utf8(got.copy()) ?? String()
+                    return if text.len() > 0 { some(text) } else { none }
+                },
+                _ => {},
+            }
+        }
+        let text = String.from_utf8(got.copy()) ?? String()
+        if text.contains("\r\n") {
+            net.close(conn)
+            return some(text.split("\r\n")[0].copy())
+        }
+    }
+    if open { net.close(conn) }
+    return none
+}
+
+// What /net says of `target`, host:port: whether it's reached straight, and
+// what the proxy HTTPS_PROXY names says to a CONNECT for it.
+fn reach(target: String) -> String {
+    let net = match Net.new() {
+        ok(n) => n,
+        err(e) => return "net {target}: {e}",
+    }
+    let cut = target.find_last(":") ?? target.len()
+    let host = target[..cut].copy()
+    let port = u16.parse(if cut < target.len() { target[cut + 1..].copy() } else { String("443") }) ?? 443
+    let direct = if talk(net, host.copy(), port, String()) != none { "open" } else { "closed" }
+    var proxied = String("none")
+    if let proxy = env.variable(String("HTTPS_PROXY")) {
+        let address = proxy.trim_prefix("http://").trim_suffix("/").copy()
+        let at = address.find_last(":") ?? address.len()
+        let p_host = address[..at].copy()
+        let p_port = u16.parse(if at < address.len() { address[at + 1..].copy() } else { String("80") }) ?? 80
+        let said = talk(net, p_host, p_port, "CONNECT {target} HTTP/1.1\r\nHost: {target}\r\n\r\n") ?? String("no answer")
+        let words = said.split(" ")
+        proxied = if words.len() > 1 { words[1].copy() } else { said }
+    }
+    return "net {target}: direct {direct}, proxy {proxied}"
 }
 
 // "/tool ls -la" -> ("/tool", "ls -la")
@@ -624,6 +700,7 @@ impl Agent {
                 Step.Files => chunk(session.copy(), "agent_message_chunk", if got.len() == 0 { String("no files") } else { got.join(", ") }),
                 Step.Session => chunk(session.copy(), "agent_message_chunk", "session {session}"),
                 Step.Env(name) => chunk(session.copy(), "agent_message_chunk", "{name}={env.variable(name.copy()) ?? String()}"),
+                Step.Net(target) => chunk(session.copy(), "agent_message_chunk", reach(target)),
                 Step.Servers => chunk(session.copy(), "agent_message_chunk", a.servers(session.copy())),
                 Step.Usage(used, size) => {
                     var u = LinkedMap<String, Json>()

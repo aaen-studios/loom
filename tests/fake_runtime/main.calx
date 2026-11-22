@@ -1,0 +1,24 @@
+module tests.fake_runtime.main
+
+// A stand-in for `podman` or `docker`, for testing a sandbox's egress
+// (server/egress.calx) on any computer, without containers. It takes only
+// `exec -i BOX PROGRAM ARGS...`, and runs the `loom` built next to it with ARGS,
+// on the same standard input and output, as the runtime would run the image's
+// `loom` in the sandbox.
+//
+//     fake-runtime exec -i loom-u_1-a_1 loom egress
+import std.env
+import std.process.{Command, current_exe, exit}
+
+fn main() ! Error {
+    let args = env.args()
+    if args.len() < 4 or args[0] != "exec" or args[1] != "-i" {
+        eprintln("fake-runtime takes only: exec -i BOX PROGRAM ARGS...")
+        exit(2)
+    }
+    let me = current_exe().replace("\\", "/")
+    let dir = if let cut = me.find_last("/") { me[..cut].copy() } else { String(".") }
+    let loom = if env.os() == "windows" { "{dir}/loom.exe" } else { "{dir}/loom" }
+    let status = try Command.new(loom).args(args[4..].copy()).status()
+    exit(if status.success() { 0 } else { 1 })
+}
