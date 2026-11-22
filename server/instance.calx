@@ -6012,9 +6012,32 @@ impl Instance {
         return size > 0 and used * 100 >= size * CONTEXT_RENEW_PERCENT
     }
 
-    // A run that goes into a fresh session in place of a full one: it's given
-    // the newest of the chat before its message, and told where the rest is.
-    fn carry_over(i: mut Instance, user: String, agent: String, run_id: String) ! Error {
+    // The tools an agent's sessions start with: "code" in Code Mode, the
+    // default, or "plain" (PLAN.md, "Code Mode").
+    fn tools_of(i: Instance, user: String, agent: String) -> str {
+        let wanted = match i.store.agent(user, agent) {
+            ok(some(a)) => a,
+            _ => Json.Null,
+        }
+        return if bool_at(wanted, "code_mode") ?? true { "code" } else { "plain" }
+    }
+
+    // Whether the session `session` started with other tools than its agent's
+    // sessions start with now, since its Code Mode was switched. An agent's
+    // tools never change inside a session, so such a one gives way to a fresh
+    // session. One kept before sessions kept their tools is taken as it is.
+    fn tools_changed(i: Instance, user: String, agent: String, conversation: String, session: String) -> bool {
+        let kept = match i.store.acp_session_tools(user.copy(), conversation, session) {
+            ok(k) => k,
+            err(_) => String(),
+        }
+        return kept.len() > 0 and kept != i.tools_of(user, agent)
+    }
+
+    // A run that goes into a fresh session in place of a full one, or one whose
+    // tools changed (`full` false): it's given the newest of the chat before its
+    // message, and told where the rest is.
+    fn carry_over(i: mut Instance, user: String, agent: String, run_id: String, full: bool) ! Error {
         var conversation = String()
         var answering = String()
         if let r = i.runs.find(run_id.copy()) {
@@ -6029,11 +6052,13 @@ impl Instance {
             let last = str_at(before[before.len() - 1].copy(), "id") ?? String()
             said = try i.transcript(user.copy(), conversation, some(last))
         }
-        let carried = "[loom: Your chat with your person goes on from an earlier session, which grew too long, so this one starts fresh. To them it's one conversation: carry on as if nothing changed, and don't mention it. The newest of it, newest last:\n\n{if said.len() > 0 { said } else { String("(Nothing said yet.)") }}\n\nFor anything older, search_messages finds it.]"
+        let why = if full { "which grew too long, so this one starts fresh." } else { "which had other tools, since your person changed how you reach them, so this one starts fresh. Use the tools you have now, whatever the chat below used." }
+        let carried = "[loom: Your chat with your person goes on from an earlier session, {why} To them it's one conversation: carry on as if nothing changed, and don't mention it. The newest of it, newest last:\n\n{if said.len() > 0 { said } else { String("(Nothing said yet.)") }}\n\nFor anything older, search_messages finds it.]"
         if let r = mut i.runs.find(run_id) {
             r.note = if r.note.len() > 0 { "{carried}\n\n{r.note}" } else { carried }
         }
-        i.log(user, agent.copy(), "session", String("Carried the chat on in a fresh session: the last one's context was nearly full"), agent)
+        let logged = if full { "Carried the chat on in a fresh session: the last one's context was nearly full" } else { "Carried the chat on in a fresh session: the agent's Code Mode changed, and a session keeps its tools" }
+        i.log(user, agent.copy(), "session", String(logged), agent)
     }
 
     // Gives a run to its agent: a new ACP session first if the conversation
@@ -6071,12 +6096,17 @@ impl Instance {
         // One endless chat (PLAN.md): a session whose context is nearly full
         // gives way to a fresh one, which carries on from the newest of the
         // chat, so the conversation never overflows or resends all of itself.
-        if known.len() > 0 and i.nearly_full(known.copy()) {
-            _ = i.context.remove(known.copy())
-            _ = p.sessions.remove(conversation.copy())
-            if let err(e) = i.carry_over(user.copy(), agent.copy(), run_id.copy()) { eprintln("loom: carrying a chat over to a fresh session: {e}") }
-            i.new_session(mut p, run_id)
-            return
+        // So does one whose tools aren't the ones its agent's sessions start
+        // with now: an agent's tools never change inside a session.
+        if known.len() > 0 {
+            let full = i.nearly_full(known.copy())
+            if full or i.tools_changed(user.copy(), agent.copy(), conversation.copy(), known.copy()) {
+                _ = i.context.remove(known.copy())
+                _ = p.sessions.remove(conversation.copy())
+                if let err(e) = i.carry_over(user.copy(), agent.copy(), run_id.copy(), full) { eprintln("loom: carrying a chat over to a fresh session: {e}") }
+                i.new_session(mut p, run_id)
+                return
+            }
         }
         if known.len() > 0 {
             if let run = mut i.runs.find(run_id.copy()) {
@@ -6096,6 +6126,13 @@ impl Instance {
                 },
             }
             if let session = kept {
+                // Picked up with the tools it started with, or, since they
+                // changed, carried on in a fresh session.
+                if i.tools_changed(user.copy(), agent.copy(), conversation.copy(), session.copy()) {
+                    if let err(e) = i.carry_over(user.copy(), agent.copy(), run_id.copy(), false) { eprintln("loom: carrying a chat over to a fresh session: {e}") }
+                    i.new_session(mut p, run_id)
+                    return
+                }
                 let folder = match fs.absolute(i.folder_of(user, agent)) {
                     ok(path) => path,
                     err(_) => String("."),
@@ -6430,14 +6467,19 @@ impl Instance {
     fn session_ready(i: mut Instance, p: mut Proc, run: String, sid: String, new: bool, config: Json) ! Error {
         var conversation = String()
         var user = String()
+        var agent = String()
         if let rr = mut i.runs.find(run.copy()) {
             rr.session = sid.copy()
             conversation = rr.conversation.copy()
             user = rr.user.copy()
+            agent = rr.agent.copy()
         } else {
             return
         }
-        if new { try i.store.put_acp_session(user.copy(), conversation.copy(), p.program.copy(), sid.copy()) }
+        // Kept with the tools it has, which are its agent's now: a new one's,
+        // and one picked up again with the same tools (or kept before sessions
+        // kept theirs, which has them from now on).
+        try i.store.put_acp_session(user.copy(), conversation.copy(), p.program.copy(), sid.copy(), i.tools_of(user.copy(), agent))
         p.sessions.insert(conversation, sid.copy())
         if let Json.Array(_) = config {
             p.configs.insert(sid.copy(), config.copy())
