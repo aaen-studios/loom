@@ -34,6 +34,8 @@ RUN apt-get update \
     && mkdir /data \
     && chown node:node /data
 COPY --from=build /out/loom /usr/local/bin/loom
+# The image is updated by pulling it, so the instance doesn't update itself here.
+ENV LOOM_SERVICE=docker
 # The image's own unprivileged user, whose rights its agents get.
 USER node
 VOLUME /data

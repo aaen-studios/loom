@@ -1,0 +1,314 @@
+module server.update
+
+// Updating the server's own program (PLAN.md, "Updates and versions"), for
+// `loom update` and the instance's `instance.update`. The newest release's
+// manifest is used only once its Ed25519 signature is the release key's, and
+// its program only once its SHA-256 is the manifest's. The program goes beside
+// this one, as `.new`, and takes its place with two renames, the old one kept
+// as `.old` until the next update.
+//
+// The instance downloads and checks on a thread of its own (`start`), so its
+// loop never waits, and swaps once nothing runs. How it comes back depends on
+// how it runs (`host`): systemd starts it again, by hand it starts the new
+// program itself, and in Docker or the desktop app it doesn't update itself.
+import std.bytes
+import std.env
+import std.fs
+import std.hash.{sha256}
+import std.http.{Header, get}
+import std.json.{Json}
+import std.process.{Command, current_exe, exit}
+import std.thread.{Task}
+import shared.obj.{at, str_at}
+import shared.release.{MANIFEST, RELEASE_KEY, check_manifest, newer}
+
+const DOWNLOAD_MOST: usize = 400000000
+const DOWNLOAD_MS: u32 = 600000
+
+/// The status the instance exits with under systemd, which starts the new program:
+/// EX_TEMPFAIL, so the unit's Restart=on-failure takes it.
+pub const SYSTEMD_EXIT: u8 = 75
+
+/// Where releases come from: a manifest's address, and the public key, in hex,
+/// they must be signed with.
+pub struct Source {
+    pub manifest: String
+    pub key: String
+}
+
+impl Source {
+    /// loom's own releases on GitHub, signed with the release key.
+    pub fn official() -> Source {
+        return Source { manifest: String(MANIFEST), key: String(RELEASE_KEY) }
+    }
+}
+
+/// How the instance runs, which says how it comes back after an update.
+pub enum Host {
+    Systemd    // a unit with Restart=on-failure starts it again
+    Docker    // the image is updated by pulling it
+    App    // inside the desktop app, which updates with the app
+    Hand    // run by hand: it starts the new program itself
+}
+
+/// How this instance runs. `in_app` is an instance inside the desktop app.
+pub fn host(in_app: bool) -> Host {
+    if in_app { return Host.App }
+    let service = env.variable(String("LOOM_SERVICE")) ?? String()
+    if service == "docker" or fs.exists(String("/.dockerenv")) or fs.exists(String("/run/.containerenv")) { return Host.Docker }
+    if service == "systemd" or env.variable(String("INVOCATION_ID")) != none { return Host.Systemd }
+    return Host.Hand
+}
+
+/// Why an instance that runs as `h` doesn't update itself, or none when it does.
+pub fn refusal(h: Host) -> String? {
+    return match h {
+        Host.Docker => some(String("This instance runs in a container, which is updated by pulling its image again: docker pull ghcr.io/aaen-studios/loom, then start it again.")),
+        Host.App => some(String("This instance is in the desktop app, and updates with the app.")),
+        _ => none,
+    }
+}
+
+/// The name of this machine's server program in a manifest's `files`. linux-server and
+/// windows-server are x64; Linux on Arm has a build of its own, and macOS's is for Apple silicon.
+pub fn kind() -> String {
+    if env.os() == "linux" and env.native_arch() == "aarch64" { return String("linux-arm64-server") }
+    return "{env.os()}-server"
+}
+
+/// The body of a GET, or why there's none.
+fn fetch(url: String, most: usize) -> List<u8> ! Error {
+    var req = get(url.copy(), List<Header>(), DOWNLOAD_MS, most)
+    let r = try req.wait()
+    if r.status != 200 { fail "{url} answered {r.status}" }
+    return r.body.copy()
+}
+
+/// The newest release's manifest, once its signature is `src`'s key's.
+pub fn manifest(src: Source) -> Json ! Error {
+    let text = try fetch(src.manifest.copy(), 1048576)
+    let sig = String.from_utf8(try fetch("{src.manifest}.sig", 4096)) ?? String()
+    let m = check_manifest(text, sig, src.key.copy()) else {
+        fail "the release manifest isn't signed with loom's release key, so it isn't used"
+    }
+    return m
+}
+
+/// The manifest's version.
+pub fn version_of(m: Json) -> String {
+    return str_at(m, "version") ?? String()
+}
+
+/// This machine's program in `m`, downloaded, once its SHA-256 is the manifest's.
+pub fn download(m: Json) -> List<u8> ! Error {
+    let version = version_of(m.copy())
+    let file = at(m, "files").get(kind()) ?? Json.Null
+    let url = str_at(file.copy(), "url") else {
+        fail "release {version} has no program for {kind()}"
+    }
+    let data = try fetch(url, DOWNLOAD_MOST)
+    if bytes.hex(sha256(data.copy())) != (str_at(file, "sha256") ?? String()) {
+        fail "the downloaded program isn't the one the release names, so it isn't used"
+    }
+    return data
+}
+
+/// Whether this program can be swapped where it is: its folder takes a new file.
+pub fn writable(exe: String) ! Error {
+    let probe = "{exe}.new"
+    match fs.write(probe.copy(), List<u8>()) {
+        ok => {},
+        err(e) => fail "loom can't write beside its program, {exe} ({e}), so it can't update it there",
+    }
+    try fs.remove_file(probe)
+}
+
+/// Puts `data` beside `exe`, as `exe.new`, ready to swap in. Gives its SHA-256.
+pub fn stage(exe: String, data: List<u8>) -> String ! Error {
+    let new = "{exe}.new"
+    let sha = bytes.hex(sha256(data.copy()))
+    try fs.write(new.copy(), data)
+    if env.os() != "windows" {
+        try fs.set_mode(new, 0o755)
+    }
+    return sha
+}
+
+/// Swaps the staged program in: `exe` becomes `exe.old`, and `exe.new` takes its place.
+/// A running program can be renamed on every system, though not written over.
+pub fn swap(exe: String) ! Error {
+    let new = "{exe}.new"
+    let old = "{exe}.old"
+    if not fs.exists(new.copy()) { fail "there's no new program beside {exe}" }
+    if fs.exists(old.copy()) { try fs.remove_file(old.copy()) }
+    try fs.rename(exe.copy(), old.copy())
+    match fs.rename(new, exe.copy()) {
+        ok => {},
+        err(e) => {
+            // Put the old one back, so the instance still has a program to start.
+            match fs.rename(old, exe) {
+                ok => {},
+                err(_) => {},
+            }
+            fail "the new program didn't take the old one's place: {e}"
+        },
+    }
+}
+
+/// The SHA-256 of the program running now, to tell after a restart whether the new
+/// one is what runs.
+pub fn running_sha() -> String {
+    return match fs.read(current_exe()) {
+        ok(data) => bytes.hex(sha256(data)),
+        err(_) => String(),
+    }
+}
+
+/// Comes back as the new program, once the old one has stopped serving: systemd starts
+/// it, and by hand it starts it with the same arguments, on the port this one had (so
+/// one started with --port 0 keeps its address), then this one ends.
+pub fn come_back(h: Host, port: u16) -> never {
+    match h {
+        Host.Systemd => {
+            println("loom: updated, so systemd starts the new program")
+            exit(SYSTEMD_EXIT)
+        },
+        _ => {},
+    }
+    // The new one waits for the port, which this one has let go of.
+    match Command.new(current_exe()).args(same_port(env.args(), port)).env(String("LOOM_RESTARTED"), String("1")).spawn() {
+        ok(_) => {
+            println("loom: updated, and the new program is starting")
+            exit(0)
+        },
+        err(e) => {
+            eprintln("loom: updated, but the new program didn't start ({e}): start it again by hand")
+            exit(1)
+        },
+    }
+}
+
+/// `args` with `--port` saying `port`.
+pub fn same_port(args: List<String>, port: u16) -> List<String> {
+    var out = List<String>()
+    var k: usize = 0
+    while k < args.len() {
+        if args[k] == "--port" and k + 1 < args.len() {
+            k += 2
+            continue
+        }
+        out.push(args[k].copy())
+        k += 1
+    }
+    out.push(String("--port"))
+    out.push("{port}")
+    return out
+}
+
+/// Whether this program was started by an update of itself, so it waits for the port.
+pub fn restarted() -> bool {
+    return env.variable(String("LOOM_RESTARTED")) == some(String("1"))
+}
+
+// --- The instance's thread ---
+
+/// What the thread is asked: look at `source`, and if there's a release newer than
+/// `current`, download it and stage it beside `exe`.
+pub struct Job {
+    pub source: Source
+    pub current: String
+    pub exe: String
+    pub auto: bool    // the instance looks by itself, not for a person
+}
+
+/// What it found.
+pub enum Back {
+    Latest(String, bool)    // the newest is this version, which runs already; and whether it looked by itself
+    Staged(String, String, bool)    // that version is staged, with its SHA-256
+    Failed(String, String, bool)    // the version it was for, if it knew, and why
+}
+
+struct Worker {
+    jobs: Receiver<Job>
+    back: Sender<Back>
+}
+
+impl Task for Worker {
+    fn run(own self) {
+        var w = self
+        while let job = w.jobs.wait() {
+            w.back.send(work(job))
+        }
+    }
+}
+
+fn work(job: Job) -> Back {
+    let m = match manifest(job.source.copy()) {
+        ok(m) => m,
+        err(e) => return Back.Failed(String(), "{e}", job.auto),
+    }
+    let version = version_of(m.copy())
+    if not newer(version.copy(), job.current.copy()) { return Back.Latest(version, job.auto) }
+    if let err(e) = writable(job.exe.copy()) { return Back.Failed(version, "{e}", job.auto) }
+    let data = match download(m) {
+        ok(d) => d,
+        err(e) => return Back.Failed(version, "{e}", job.auto),
+    }
+    return match stage(job.exe.copy(), data) {
+        ok(sha) => Back.Staged(version, sha, job.auto),
+        err(e) => Back.Failed(version, "the new program couldn't be kept beside the old one: {e}", job.auto),
+    }
+}
+
+/// Starts the thread that downloads and checks updates.
+pub fn start() -> (Sender<Job>, Receiver<Back>) {
+    let jobs = Receiver<Job>()
+    let to = jobs.sender()
+    let back = Receiver<Back>()
+    _ = unsafe { Thread.spawn(Worker { jobs: jobs, back: back.sender() }) }
+    return (to, back)
+}
+
+@test
+fn only_some_hosts_update_themselves() {
+    assert(refusal(Host.App) != none and refusal(Host.Docker) != none)
+    assert(refusal(Host.Systemd) == none and refusal(Host.Hand) == none)
+    assert(host(true) == Host.App)
+}
+
+@test
+fn the_program_is_named_for_this_machine() {
+    let k = kind()
+    assert(k.ends_with("-server"))
+    assert(k.starts_with(env.os()))
+}
+
+@test
+fn a_staged_program_takes_the_old_ones_place() {
+    let dir = fs.temp_dir()!
+    let exe = "{dir}/loom"
+    fs.write(exe.copy(), "old".to_bytes())!
+    writable(exe.copy())!
+    assert(not fs.exists("{exe}.new"))
+    let sha = stage(exe.copy(), "new".to_bytes())!
+    assert(sha == bytes.hex(sha256("new".to_bytes())))
+    swap(exe.copy())!
+    assert(fs.read_text(exe.copy())! == some(String("new")))
+    assert(fs.read_text("{exe}.old")! == some(String("old")))
+    assert(not fs.exists("{exe}.new"))
+    // A second swap with nothing staged changes nothing.
+    assert(match swap(exe.copy()) {
+        ok => false,
+        err(_) => true,
+    })
+    assert(fs.read_text(exe.copy())! == some(String("new")))
+    fs.remove_dir_all(dir)!
+}
+
+@test
+fn the_new_program_keeps_the_port() {
+    let given: List<String> = [String("serve"), String("--port"), String("0"), String("--data"), String("d")]
+    let out = same_port(given, 8790)
+    assert(out.join(" ") == "serve --data d --port 8790")
+    assert(same_port([String("serve")], 1).join(" ") == "serve --port 1")
+}
