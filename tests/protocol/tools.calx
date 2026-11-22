@@ -83,7 +83,7 @@ fn run(i: Instance) ! Error {
 
     _ = try say(mut app, conversation.copy(), "m_7", String(#"/mcp update_agent {"agent":"Helper","name":"Helper 2","permission":"allow"}"#))
     let changed = at(last(app, "agent.updated"), "agent")
-    try check(str_at(changed.copy(), "name") == some(String("Helper 2")) and str_at(changed, "permission") == some(String("ask")), "update_agent renames an agent, but leaves its permission mode")
+    try check(str_at(changed.copy(), "name") == some(String("Helper 2")) and str_at(changed, "permission") == none, "update_agent renames an agent, but leaves its permission mode: still the default")
 
     _ = try say(mut app, conversation.copy(), "m_8", String(#"/mcp create_agent {"name":"Third","acp_agent":"fake","instructions":"Hi.","permission":"allow"}"#))
     let third = at(last(app, "agent.created"), "agent")
@@ -165,8 +165,9 @@ fn run(i: Instance) ! Error {
     let left = try say(mut app, risky, "m_21", String("/mcp list_agents"))
     var loosened = false
     for f in app.frames {
+        // An agent with no mode of its own follows the default, ask here.
         let changed_agent = at(f.copy(), "agent")
-        if str_at(f.copy(), "kind") == some(String("agent.updated")) and str_at(changed_agent.copy(), "id") != some(main_id.copy()) and str_at(changed_agent, "permission") != some(String("ask")) { loosened = true }
+        if str_at(f.copy(), "kind") == some(String("agent.updated")) and str_at(changed_agent.copy(), "id") != some(main_id.copy()) and (str_at(changed_agent, "permission") ?? String("ask")) != "ask" { loosened = true }
     }
     try check(not left.contains("Third") and not loosened, "Third is gone, and no agent loosened another")
 

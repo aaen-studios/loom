@@ -25,7 +25,7 @@ struct Command {
     does: str
 }
 
-const COMMANDS: [Command; 79] = [
+const COMMANDS: [Command; 81] = [
     Command { name: "conversation.create", args: "agent, title?", does: "Makes a conversation with an agent." },
     Command { name: "conversation.rename", args: "conversation, title", does: "Renames a conversation." },
     Command { name: "conversation.branch", args: "message, title?", does: "Branches a chat at a message: a new conversation that goes on from there, apart from the chat." },
@@ -34,8 +34,8 @@ const COMMANDS: [Command; 79] = [
     Command { name: "messages.search", args: "query, agent?, after?, before? (Unix ms), limit?", does: "Finds words in every chat, and in file names." },
     Command { name: "message.pin", args: "message, pinned? (false unpins it)", does: "Pins a message in its conversation, for every device to see." },
     Command { name: "messages.pinned", args: "conversation", does: "The pinned messages in a conversation, the newest pin first." },
-    Command { name: "agent.create", args: "name, acp_agent, instructions, mcp? (names of MCP servers), color?", does: "Makes an agent. It starts out asking first." },
-    Command { name: "agent.update", args: "agent, and what changes: name, instructions, mcp, color, folder, permission (ask, auto or allow)", does: "Changes an agent. A looser permission mode asks the person." },
+    Command { name: "agent.create", args: "name, acp_agent? (left out: the default brain), instructions, mcp? (names of MCP servers), color?", does: "Makes an agent. It starts out asking first." },
+    Command { name: "agent.update", args: #"agent, and what changes: name, instructions, mcp, color, folder, permission (ask, auto or allow), busy (queue or steer), config ({option: value}); null follows the default"#, does: "Changes an agent. A looser permission mode asks the person." },
     Command { name: "agent.revisions", args: "agent", does: "Every revision of an agent's instructions." },
     Command { name: "agent.rollback", args: "agent, revision", does: "Puts an agent back as it was at a revision." },
     Command { name: "agent.delete", args: "agent", does: "Deletes an agent." },
@@ -52,6 +52,8 @@ const COMMANDS: [Command; 79] = [
     Command { name: "table.drop", args: "table", does: "Drops a shared table and every row in it." },
     Command { name: "profile.get", args: "", does: "The person's profile, which every agent starts with." },
     Command { name: "profile.put", args: "text", does: "Writes the person's whole profile anew." },
+    Command { name: "defaults.get", args: "", does: "The agent defaults every agent follows unless it sets its own: brain, config (per program), permission, instructions and busy." },
+    Command { name: "defaults.put", args: #"what changes: brain, config ({program: {option: value or null}}), permission (ask, auto or allow), instructions, busy (queue or steer)"#, does: "Changes the agent defaults, for every agent that follows them." },
     Command { name: "routine.list", args: "", does: "Routines, with when each runs next and how it last went." },
     Command { name: "routine.put", args: #"name, agent, prompt, schedule ({every: minutes}, {daily: HH:MM} or {weekdays: HH:MM}), tz?, notify?, on?, catch_up?, webhook?, flow? (steps of name, agent, prompt and after: the steps each waits for); or id and what changes"#, does: "Makes or changes a routine." },
     Command { name: "routine.run", args: "id", does: "Runs a routine now." },
@@ -117,7 +119,7 @@ pub fn access(name: String) -> Access {
     if name.starts_with("browser.") { return Access.Never(String("Use your browser_ tools.")) }
     if name == "queue.steer" { return Access.Never(String("Steering is your person's: it stops the turn that's running.")) }
     if name.starts_with("scripts.") { return Access.Never(String("Scripts are your person's own: they turn them on in the app.")) }
-    let runs = ["conversation.create", "conversation.rename", "conversation.branch", "messages.list", "messages.search", "messages.pinned", "message.pin", "agent.create", "agent.update", "agent.revisions", "agent.rollback", "activity.list", "memory.list", "memory.put", "table.list", "table.create", "table.write", "table.rows", "table.delete_rows", "profile.get", "profile.put", "routine.list", "routine.put", "routine.run", "routine.stop", "flow.list", "task.list", "task.start", "task.pause", "task.resume", "task.cancel", "task.retry", "queue.list", "queue.edit", "queue.order", "queue.drop", "skill.list", "skill.get", "skill.put", "plugin.list", "plugin.get", "plugin.put", "plugin.revisions", "mcp.list", "secret.list", "acp.list", "acp.registry"]
+    let runs = ["conversation.create", "conversation.rename", "conversation.branch", "messages.list", "messages.search", "messages.pinned", "message.pin", "agent.create", "agent.update", "agent.revisions", "agent.rollback", "activity.list", "memory.list", "memory.put", "table.list", "table.create", "table.write", "table.rows", "table.delete_rows", "profile.get", "profile.put", "defaults.get", "routine.list", "routine.put", "routine.run", "routine.stop", "flow.list", "task.list", "task.start", "task.pause", "task.resume", "task.cancel", "task.retry", "queue.list", "queue.edit", "queue.order", "queue.drop", "skill.list", "skill.get", "skill.put", "plugin.list", "plugin.get", "plugin.put", "plugin.revisions", "mcp.list", "secret.list", "acp.list", "acp.registry"]
     for r in runs {
         if name == r { return Access.Runs }
     }
@@ -163,7 +165,8 @@ fn reading_runs_and_harm_asks() {
     for c in COMMANDS {
         if let Access.Never(_) = access(String(c.name)) { panic("{c.name} is listed but never runs") }
     }
-    assert(catalog().len() == 79)
+    assert(catalog().len() == 81)
+    assert(access(String("defaults.get")) == Access.Runs and access(String("defaults.put")) == Access.Asks(String("other")))
     assert(access(String("import.run")) == Access.Asks(String("other")))
     assert(access(String("table.write")) == Access.Runs and access(String("table.delete_rows")) == Access.Runs)
     assert(access(String("table.drop")) == Access.Asks(String("delete")))

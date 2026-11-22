@@ -20,7 +20,8 @@ import std.hash.{sha256}
 import std.json.{Json, parse}
 import std.sqlite.{Database, Value}
 import std.time.{Timestamp}
-import shared.obj.{Obj, merge}
+import shared.obj.{Obj, int_at, merge, without}
+import server.defaults.{blank, filled}
 
 const SCHEMA: str = #"
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -103,6 +104,9 @@ CREATE TABLE IF NOT EXISTS files (
 CREATE TABLE IF NOT EXISTS profiles (
     user TEXT NOT NULL REFERENCES users(id), revision INTEGER NOT NULL, text TEXT NOT NULL,
     by TEXT NOT NULL, at INTEGER NOT NULL, PRIMARY KEY (user, revision));
+CREATE TABLE IF NOT EXISTS defaults (
+    user TEXT PRIMARY KEY REFERENCES users(id), json TEXT NOT NULL, revision INTEGER NOT NULL,
+    by TEXT NOT NULL, at INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS routines (
     id TEXT PRIMARY KEY, user TEXT NOT NULL REFERENCES users(id), json TEXT NOT NULL,
     next INTEGER NOT NULL);
@@ -1346,6 +1350,26 @@ impl Store {
         return Obj.new().s("text", what).i("revision", revision + 1).s("by", by).i("at", at).done()
     }
 
+    // --- The person's agent defaults (PLAN.md, "Agent defaults") ---
+
+    // What every agent of the person's follows unless it sets its own, as
+    // kept: its fields, `revision`, `by` and `at`. Blank until they're put.
+    pub fn defaults(self, user: String) -> Json ! Error {
+        let r = try self.db.query_one(String("SELECT json, revision, by, at FROM defaults WHERE user = ?"), [t(user)]) else return blank()
+        let kept = try parse(text(r[0].copy()))
+        return filled(merge(kept, Obj.new().i("revision", int(r[1].copy())).s("by", text(r[2].copy())).i("at", int(r[3].copy())).done()))
+    }
+
+    // Keeps the person's defaults anew, by a device or an agent, as the next revision.
+    pub fn put_defaults(self, user: String, fields: Json, by: String) -> Json ! Error {
+        let revision = (int_at(try self.defaults(user.copy()), "revision") ?? 0) + 1
+        let at = now()
+        let kept = filled(fields)
+        let stored = without(without(without(kept.copy(), "revision"), "by"), "at")
+        _ = try self.db.execute(String("INSERT INTO defaults (user, json, revision, by, at) VALUES (?, ?, ?, ?, ?) ON CONFLICT (user) DO UPDATE SET json = excluded.json, revision = excluded.revision, by = excluded.by, at = excluded.at"), [t(user), t("{stored}"), Value.Int(revision), t(by.copy()), Value.Int(at)])
+        return merge(kept, Obj.new().i("revision", revision).s("by", by).i("at", at).done())
+    }
+
     // --- Routines (PLAN.md, "Routines") ---
 
     // A routine as it's kept: its webhook's secret sealed.
@@ -1584,7 +1608,7 @@ impl Store {
 
     fn remove_rows(self, user: String) ! Error {
         _ = try self.db.execute(String("DELETE FROM sent WHERE device IN (SELECT id FROM devices WHERE user = ?)"), [t(user.copy())])
-        for table in ["push_tokens", "link_codes", "resets", "agent_revisions", "agents", "activity", "secrets", "mcp_servers", "skills", "messages", "conversations", "runs", "queue", "tasks", "sides", "branches", "routine_threads", "events", "acp_sessions", "files", "profiles", "routines", "flows", "plugin_data", "plugin_revisions", "plugins", "usage", "memories", "memories_fts", "messages_fts", "shared_rows", "shared_tables", "script_tokens", "imported", "devices"] {
+        for table in ["push_tokens", "link_codes", "resets", "agent_revisions", "agents", "activity", "secrets", "mcp_servers", "skills", "messages", "conversations", "runs", "queue", "tasks", "sides", "branches", "routine_threads", "events", "acp_sessions", "files", "profiles", "defaults", "routines", "flows", "plugin_data", "plugin_revisions", "plugins", "usage", "memories", "memories_fts", "messages_fts", "shared_rows", "shared_tables", "script_tokens", "imported", "devices"] {
             _ = try self.db.execute("DELETE FROM {table} WHERE user = ?", [t(user.copy())])
         }
         _ = try self.db.execute(String("DELETE FROM invites WHERE by = ?"), [t(user.copy())])
@@ -2003,6 +2027,21 @@ fn memory_is_kept_per_agent_and_shared() {
     assert(not s.forget(a.id.copy(), id, some(String("a_2")))!)
     assert(s.forget(a.id.copy(), id, some(String("a_1")))!)
     assert(s.memories(a.id.copy(), some(String("a_1")), String("1Password"), 10)!.len() == 0)
+}
+
+@test
+fn agent_defaults_are_kept_per_person() {
+    let s = test_store()
+    let a = s.add_user(String("ann"), String("pw"), "owner")!
+    let b = s.add_user(String("bob"), String("pw"), "member")!
+    let blank_now = s.defaults(a.id.copy())!
+    assert(int_at(blank_now.copy(), "revision") == some(0) and "{blank_now}".contains(#""permission":"ask""#))
+    _ = s.put_defaults(a.id.copy(), Obj.new().s("permission", String("auto")).s("busy", String("steer")).done(), String("d_1"))!
+    let kept = s.put_defaults(a.id.copy(), merge(s.defaults(a.id.copy())!, Obj.new().s("instructions", String("Be brief.")).done()), String("a_1"))!
+    assert(int_at(kept.copy(), "revision") == some(2))
+    let now_kept = s.defaults(a.id.copy())!
+    assert("{now_kept}".contains(#""permission":"auto""#) and "{now_kept}".contains(#""busy":"steer""#) and "{now_kept}".contains("Be brief.") and "{now_kept}".contains(#""by":"a_1""#))
+    assert("{s.defaults(b.id.copy())!}".contains(#""busy":"queue""#))
 }
 
 @test
