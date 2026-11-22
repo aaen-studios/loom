@@ -5030,9 +5030,22 @@ ACTA_KEY=secret:ACTA_KEY",
     }
 
     /// The control that collapses the sidebar to the rail (`rail` false), or opens it
-    /// from the rail.
+    /// from the rail. On the rail it's loom's knot until the pointer comes onto the
+    /// rail, and then fades into the control; a click on either opens the sidebar.
     fn bar_button(&self, rail: bool, cx: &mut Context<Self>) -> Stateful<Div> {
         let p = self.p;
+        let shown = if rail {
+            let key = SharedString::from(RAIL_HOVER);
+            motion::level(&key, motion::hovered(&key), 0.12)
+        } else {
+            1.0
+        };
+        let icon = Icon::new(if rail {
+            Ico::PanelLeftOpen
+        } else {
+            Ico::PanelLeftClose
+        })
+        .small();
         div()
             .id(if rail { "bar-open" } else { "bar-collapse" })
             .occlude()
@@ -5044,14 +5057,20 @@ ACTA_KEY=secret:ACTA_KEY",
             .rounded(px(radius::ROW))
             .cursor_pointer()
             .soft_hover(transparent_black(), p.hover, Some((p.ink_3, p.ink)))
-            .child(
-                Icon::new(if rail {
-                    Ico::PanelLeftOpen
-                } else {
-                    Ico::PanelLeftClose
-                })
-                .small(),
-            )
+            .relative()
+            .when(rail, |d| {
+                d.child(
+                    div()
+                        .absolute()
+                        .size_full()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .opacity(1.0 - shown)
+                        .child(svg().path("logo/knot.svg").size(px(20.0)).text_color(p.ink)),
+                )
+            })
+            .child(div().opacity(shown).child(icon))
             .tooltip(tip(if rail { BAR_OPEN } else { BAR_COLLAPSE }))
             .on_click(cx.listener(|this, _, window, cx| this.toggle_bar(window, cx)))
     }
@@ -5236,7 +5255,8 @@ ACTA_KEY=secret:ACTA_KEY",
             .gap(px(space::XS))
             .children(others)
             .children(mine);
-        div()
+        let body = div()
+            .id("rail")
             .w(px(layout::RAIL))
             .h_full()
             .flex()
@@ -5272,7 +5292,10 @@ ACTA_KEY=secret:ACTA_KEY",
                     .when_some(self.update_icon(cx), |d, icon| d.child(icon))
                     .child(self.gear(settings_open, cx))
                     .child(yarns),
-            )
+            );
+        div()
+            .h_full()
+            .child(motion::tracks_hover(body, RAIL_HOVER.into()))
     }
 
     // --- The update icon (core/updates.calx decides; this draws it) ---
@@ -15105,6 +15128,8 @@ pub(crate) const CHAT_LEAST: f32 = 420.0;
 
 /// An agent's square on the rail, and the + over them.
 const RAIL_ROW: f32 = 40.0;
+/// The key the folded rail keeps the pointer's being on it under.
+const RAIL_HOVER: &str = "rail-hover";
 
 /// How far the rail's update icon is from the window's bottom, over the gear over the
 /// yarns of `servers` servers, for the update popup to sit level with it.

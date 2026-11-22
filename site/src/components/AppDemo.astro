@@ -35,6 +35,14 @@ const [claude] = await brains(['claude-acp']);
 				<button type="button" class="icon-btn small bar" data-bar aria-label="Collapse the sidebar">
 					<svg class="i shut" viewBox="0 0 24 24"><rect width="18" height="18" x="3" y="3" rx="2"></rect><path d="M9 3v18m7 12-3-3 3-3"></path></svg>
 					<svg class="i open" viewBox="0 0 24 24"><rect width="18" height="18" x="3" y="3" rx="2"></rect><path d="M9 3v18m5-12 3 3-3 3"></path></svg>
+					<svg class="knot" width="20" height="20" viewBox="0 0 32 32" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round">
+						<mask id="demo-knot-rail" maskUnits="userSpaceOnUse" x="0" y="0" width="32" height="32">
+							<rect width="32" height="32" fill="white"></rect>
+							<path d="M13.67 22.24 C 14.8 23.3, 16.3 24.1, 18.14 24.34" stroke="black" stroke-width="5.6"></path>
+						</mask>
+						<path d="M3 24.5 H12 C 19 24.5, 22 18.5, 22 14 C 22 9.5, 19 7, 16 7 C 13 7, 10 9.5, 10 14" mask="url(#demo-knot-rail)"></path>
+						<path d="M10 14 C 10 19, 13.5 24.5, 20 24.5 H29"></path>
+					</svg>
 				</button>
 			</span>
 		</div>
@@ -270,11 +278,36 @@ const [claude] = await brains(['claude-acp']);
 		color: var(--ink);
 	}
 	.bar .open,
+	.bar .knot,
 	.app.railed .bar .shut {
 		display: none;
 	}
-	.app.railed .bar .open {
+	/* On the rail it's loom's knot until the pointer comes onto the rail, and then the
+	   control fades in over it. */
+	.bar {
+		position: relative;
+	}
+	.app.railed .bar .open,
+	.app.railed .bar .knot {
 		display: block;
+		transition: opacity 120ms ease-out;
+	}
+	.app.railed .bar .open {
+		opacity: 0;
+	}
+	.app.railed .bar .knot {
+		position: absolute;
+		inset: 0;
+		margin: auto;
+		color: var(--ink);
+	}
+	.app.railed .side:hover .bar .open,
+	.app.railed .bar:focus-visible .open {
+		opacity: 1;
+	}
+	.app.railed .side:hover .bar .knot,
+	.app.railed .bar:focus-visible .knot {
+		opacity: 0;
 	}
 	.list {
 		display: grid;
