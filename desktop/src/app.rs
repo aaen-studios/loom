@@ -16,7 +16,7 @@ use gpui_kit::*;
 use serde_json::Value;
 
 use crate::core::Core;
-use crate::model::{self, Approval, Conn, ImportSource, Message, Model, Mood, ServerUpdate};
+use crate::model::{self, Approval, Conn, ImportSource, Message, Model, Mood, Offer, ServerUpdate};
 use crate::motion::{self, SoftHover};
 use crate::prefs::{Prefs, Text, Theme, Tools};
 use crate::shell;
@@ -696,8 +696,12 @@ ACTA_KEY=secret:ACTA_KEY",
                     for a in &mut loom.away {
                         offered.append(&mut a.model.offered);
                     }
-                    for address in offered {
-                        loom.add_server(Some(address), cx);
+                    for offer in offered {
+                        if offer.code.is_empty() {
+                            loom.add_server(Some(offer.address), cx);
+                        } else {
+                            loom.link_server(offer, cx);
+                        }
                     }
                     if got.is_empty() {
                         return;
@@ -1388,25 +1392,72 @@ ACTA_KEY=secret:ACTA_KEY",
     /// app has already is put on screen instead.
     fn add_server(&mut self, address: Option<String>, cx: &mut Context<Self>) {
         if let Some(a) = &address {
-            let same = |m: &Model| {
-                m.server.as_deref().map(|s| s.trim_end_matches('/'))
-                    == Some(a.trim_end_matches('/'))
-            };
-            if same(&self.model) {
-                return;
-            }
-            if let Some(dir) = self
-                .away
-                .iter()
-                .find(|x| same(&x.model))
-                .map(|x| x.dir.clone())
-            {
-                self.show_server(&dir, cx);
+            if self.show_known(a, cx) {
                 return;
             }
         }
         self.fill_server = Some(address.unwrap_or_default());
         self.open(Screen::AddServer, cx);
+    }
+
+    /// Puts the server at `address` on screen if the app has it already, and says
+    /// whether it did.
+    fn show_known(&mut self, address: &str, cx: &mut Context<Self>) -> bool {
+        let same = |m: &Model| {
+            m.server.as_deref().map(|s| s.trim_end_matches('/'))
+                == Some(address.trim_end_matches('/'))
+        };
+        if same(&self.model) {
+            return true;
+        }
+        if let Some(dir) = self
+            .away
+            .iter()
+            .find(|x| same(&x.model))
+            .map(|x| x.dir.clone())
+        {
+            self.show_server(&dir, cx);
+            return true;
+        }
+        false
+    }
+
+    /// A server an agent offered with a link code, which the person said yes to here:
+    /// the popup to add it opens signing in with the code, and the server comes on
+    /// screen once it's in. A code that didn't work leaves the form, with why.
+    fn link_server(&mut self, offer: Offer, cx: &mut Context<Self>) {
+        if self.show_known(&offer.address, cx) {
+            return;
+        }
+        self.fill_server = Some(offer.address.clone());
+        self.open(Screen::AddServer, cx);
+        let dir = self.start_adding(&offer.address);
+        if let Some(a) = self.away.iter_mut().find(|a| a.dir == dir) {
+            if !a.model.logging_in {
+                let frame = a.model.link_offered(&offer);
+                a.core.send(&frame.to_string());
+            }
+        }
+        cx.notify();
+    }
+
+    /// The folder of the server being added, with a core of its own beside the one on
+    /// screen, started the first time.
+    fn start_adding(&mut self, server: &str) -> String {
+        if let Some(dir) = self.adding.clone() {
+            return dir;
+        }
+        // The app keeps it once it's signed in. A folder left from one that never
+        // was is started afresh.
+        let dirs = server_dirs();
+        let n = (2..)
+            .find(|n| !dirs.contains(&format!("servers/{n}")))
+            .unwrap_or(2);
+        let dir = format!("servers/{n}");
+        let _ = std::fs::remove_dir_all(server_folder(&dir));
+        self.away.push(Away::start(dir.clone(), Some(server)));
+        self.adding = Some(dir.clone());
+        dir
     }
 
     /// Signs in to the server in the add-a-server form: with a core of its own beside
@@ -1420,22 +1471,7 @@ ACTA_KEY=secret:ACTA_KEY",
         } else {
             String::new()
         };
-        let dir = match self.adding.clone() {
-            Some(dir) => dir,
-            None => {
-                // The app keeps it once it's signed in. A folder left from one that never
-                // was is started afresh.
-                let dirs = server_dirs();
-                let n = (2..)
-                    .find(|n| !dirs.contains(&format!("servers/{n}")))
-                    .unwrap_or(2);
-                let dir = format!("servers/{n}");
-                let _ = std::fs::remove_dir_all(server_folder(&dir));
-                self.away.push(Away::start(dir.clone(), Some(&server)));
-                self.adding = Some(dir.clone());
-                dir
-            }
-        };
+        let dir = self.start_adding(&server);
         if let Some(a) = self.away.iter_mut().find(|a| a.dir == dir) {
             if a.model.logging_in {
                 return;
@@ -12811,7 +12847,7 @@ const MOVE_PROMPT: &str = "Move my loom instance to another server for me. Ask m
 
 /// What "Copy prompt" gives for adding a server, for an agent in loom to set it up with
 /// its tools (install_server, add_server).
-const ADD_SERVER_PROMPT: &str = "Set up a new loom server for me and add it to my app. Ask me where it should run (a server I can reach, or a VPS to rent) if I haven't said. Use install_server to get the command that installs loom there, and run it or walk me through it. Then use add_server so my app offers to add it, and tell me what to do next.";
+const ADD_SERVER_PROMPT: &str = "Set up a new loom server for me and add it to my app. Ask me where it should run (a server I can reach, or a VPS to rent) if I haven't said. Use install_server to get the command that installs loom there, and run it or walk me through it. Then use add_server with its address and the link code loom install --json gave, so one yes from me signs my app in there, and tell me what to do next.";
 
 /// What "Copy prompt" gives on the Plugins page, for an agent in loom to build one with
 /// its tools (save_plugin), asking the person what it should do.

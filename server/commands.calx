@@ -25,7 +25,7 @@ struct Command {
     does: str
 }
 
-const COMMANDS: [Command; 88] = [
+const COMMANDS: [Command; 89] = [
     Command { name: "conversation.create", args: "agent, title?", does: "Makes a conversation with an agent." },
     Command { name: "conversation.rename", args: "conversation, title", does: "Renames a conversation." },
     Command { name: "conversation.branch", args: "message, title?", does: "Branches a chat at a message: a new conversation that goes on from there, apart from the chat." },
@@ -105,10 +105,11 @@ const COMMANDS: [Command; 88] = [
     Command { name: "invite.delete", args: "invite", does: "Takes back an invite." },
     Command { name: "device.rename", args: "device, name", does: "Renames one of the person's devices." },
     Command { name: "device.revoke", args: "device", does: "Signs one of the person's devices out, for good." },
-    Command { name: "link.create", args: "", does: "A one-time code for a phone to join the account." },
+    Command { name: "link.create", args: "user? (someone else here, for the owner or an admin)", does: "A one-time code for a phone to join the account, or with user, a link code to sign in to theirs." },
+    Command { name: "password.set", args: "password", does: "The first password of an account a link code made, which has none." },
     Command { name: "instance.phones", args: "on?", does: "Lets phones reach the instance on this computer, or stops them." },
     Command { name: "instance.relay", args: "url? (empty turns it off)", does: "Sets the push relay phones are reached through." },
-    Command { name: "server.offer", args: "address", does: "Adds another server to the person's app, for them to sign in to." },
+    Command { name: "server.offer", args: "address, link_code? (from loom install --json or loom link)", does: "Adds another server to the person's app, signed in with link_code, or for them to sign in to." },
     Command { name: "instance.move", args: "to (the new place's address), code (from loom receive)", does: "Moves the whole instance to another computer." },
     Command { name: "instance.updates", args: "auto? (true lets the instance update itself)", does: "How the instance's updates stand: its version, whether it updates itself, and an update under way." },
     Command { name: "instance.update", args: "now? (true stops what runs rather than waiting)", does: "Updates the instance to the newest signed release, and restarts it once nothing runs." },
@@ -118,7 +119,7 @@ const COMMANDS: [Command; 88] = [
 
 // Whether an agent may run `name`, and how.
 pub fn access(name: String) -> Access {
-    if name == "account.delete" or name == "password.reset" { return Access.Never(String("That's your person's own to do, in the app.")) }
+    if name == "account.delete" or name == "password.reset" or name == "password.set" { return Access.Never(String("That's your person's own to do, in the app.")) }
     if name == "secret.put" { return Access.Never(String("A secret's value is never an agent's: ask your person to keep it in the app, or use browser_ask_secret.")) }
     if name == "plugin.allow" { return Access.Never(String("Only your person allows what a plugin asks for, in the app.")) }
     if name == "plugin.message" or name == "chat.ask" { return Access.Never(String("Use message_agent.")) }
