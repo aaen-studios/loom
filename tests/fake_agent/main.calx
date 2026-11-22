@@ -50,9 +50,11 @@ module tests.fake_agent.main
 //
 // With --load it offers session/load, and plays a line back when a session is
 // loaded; with --resume it offers session/resume; with --forget it offers
-// session/load and refuses every one. Without, it offers neither.
+// session/load and refuses every one. Without, it offers neither. With
+// --limited it answers every session/prompt with a usage-limit error, as a
+// program whose usage ran out does; with --broken it doesn't initialize.
 //
-//     calx tests/fake_agent/main.calx [--load | --resume | --forget]
+//     calx tests/fake_agent/main.calx [--load | --resume | --forget | --limited | --broken]
 import std.bytes
 import std.crypto.{random_bytes}
 import std.env
@@ -728,7 +730,9 @@ impl Agent {
         let name = method(m.copy())
         let id = m.get(String("id"))
         let params = m.get(String("params")) ?? Json.Null
-        if name == "initialize" {
+        if name == "initialize" and a.picks_up == "broken" {
+            respond_error(id ?? Json.Null, -32603, String("the fake agent is broken"))
+        } else if name == "initialize" {
             var prompt = LinkedMap<String, Json>()
             prompt.insert("image", Json.Bool(true))
             prompt.insert("audio", Json.Bool(false))
@@ -792,6 +796,8 @@ impl Agent {
             var r = LinkedMap<String, Json>()
             r.insert("configOptions", config_options(a.values(session)))
             respond(id ?? Json.Null, Json.Object(r))
+        } else if name == "session/prompt" and a.picks_up == "limited" {
+            respond_error(id ?? Json.Null, -32000, String("You've hit your usage limit. Try again in 3 hours."))
         } else if name == "session/prompt" {
             a.turn(id ?? Json.Null, params)
         } else if let i = id {

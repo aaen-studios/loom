@@ -62,6 +62,9 @@ pub struct Agent {
     pub busy: String,
     /// The program it runs on.
     pub program: String,
+    /// Its own backup program, which takes over when its own runs out of usage or
+    /// doesn't start: "" when it follows the person's default, "none" for none.
+    pub backup: String,
     pub instructions: String,
     /// The names of the person's MCP servers it has.
     pub mcp: Vec<String>,
@@ -202,6 +205,9 @@ fn config_values(a: &Value) -> Vec<(String, String)> {
 pub struct Defaults {
     /// The program a new agent runs on, or "" for none.
     pub brain: String,
+    /// The program an agent's turns move to when its own runs out of usage or
+    /// doesn't start, for agents without a backup of their own; "" for none.
+    pub backup: String,
     /// Per program, the picks its agents start on, by option id.
     pub config: Vec<(String, Vec<(String, String)>)>,
     pub permission: String,
@@ -233,6 +239,7 @@ impl Defaults {
         };
         Defaults {
             brain: s(d, "brain"),
+            backup: s(d, "backup"),
             config,
             permission: or(s(d, "permission"), "ask"),
             instructions: s(d, "instructions"),
@@ -908,6 +915,9 @@ pub struct Conversation {
     pub branch_at: Option<String>,
     /// For a routine's thread of its own: the routine. Not the agent's chat either.
     pub routine: Option<String>,
+    /// The program it was moved to, by hand or to its agent's backup, in place of
+    /// its agent's own.
+    pub program: Option<String>,
     pub title: String,
 }
 
@@ -3010,6 +3020,7 @@ impl Model {
                         permission: s(a, "permission"),
                         busy: s(a, "busy"),
                         program: s(a, "acp_agent"),
+                        backup: s(a, "backup"),
                         defaulted: self.defaults.picks(&s(a, "acp_agent")),
                         default_mode: self.defaults.permission.clone(),
                         instructions: s(a, "instructions"),
@@ -3060,6 +3071,7 @@ impl Model {
                         branch_of: c.get("branch_of").and_then(Value::as_str).map(String::from),
                         branch_at: c.get("branch_at").and_then(Value::as_str).map(String::from),
                         routine: c.get("routine").and_then(Value::as_str).map(String::from),
+                        program: c.get("program").and_then(Value::as_str).map(String::from),
                         title: s(c, "title"),
                     })
                     .collect();
@@ -4137,6 +4149,39 @@ impl Model {
         )
     }
 
+    /// Sets an agent's backup program: a program, "none" for none, or with None, the
+    /// person's default.
+    pub fn set_backup(&mut self, agent: &str, backup: Option<&str>) -> Option<Value> {
+        let a = self.agents.iter_mut().find(|a| a.id == agent)?;
+        a.backup = backup.unwrap_or_default().to_string();
+        let id = self.id("app.backup");
+        Some(
+            json!({"t": "cmd", "id": id, "name": "agent.update", "args": {"agent": agent, "backup": backup}}),
+        )
+    }
+
+    /// The program the open chat runs on: the one it was moved to, or its agent's own.
+    pub fn chat_program(&self) -> Option<String> {
+        let agent = self.agent(self.selected.as_ref()?)?;
+        let moved = self
+            .conversation()
+            .and_then(|id| self.conversations.iter().find(|c| c.id == id))
+            .and_then(|c| c.program.clone());
+        Some(moved.unwrap_or_else(|| agent.program.clone()))
+    }
+
+    /// Moves the open chat to another program, which starts with loom's summary of it.
+    pub fn move_chat(&mut self, program: &str) -> Option<Value> {
+        let conversation = self.conversation()?;
+        if self.chat_program().as_deref() == Some(program) {
+            return None;
+        }
+        let id = self.id("app.move");
+        Some(
+            json!({"t": "cmd", "id": id, "name": "conversation.move", "args": {"conversation": conversation, "program": program}}),
+        )
+    }
+
     /// Has one of an agent's options, such as its model, follow the default again.
     pub fn follow_config(&mut self, agent: &str, option: &str) -> Option<Value> {
         let a = self.agents.iter_mut().find(|a| a.id == agent)?;
@@ -4318,6 +4363,7 @@ mod tests {
                 branch_of: None,
                 branch_at: None,
                 routine: None,
+                program: None,
                 title: String::new(),
             },
             Conversation {
@@ -4328,6 +4374,7 @@ mod tests {
                 branch_of: None,
                 branch_at: None,
                 routine: None,
+                program: None,
                 title: String::new(),
             },
         ];
@@ -4364,6 +4411,7 @@ mod tests {
             branch_of: None,
             branch_at: None,
             routine: routine.map(String::from),
+            program: None,
             title: String::new(),
         };
         // The thread first, as if it were newer than the chat.
@@ -4483,6 +4531,41 @@ mod tests {
     }
 
     #[test]
+    fn a_chat_moves_to_another_program_and_an_agent_has_a_backup() {
+        let mut m = Model::new();
+        m.take(&json!({"t": "core.data", "what": "agents", "items": [
+            {"id": "a_1", "name": "Main", "acp_agent": "claude", "backup": "none"}
+        ]}));
+        m.take(
+            &json!({"t": "core.data", "what": "conversations", "items": [
+                {"id": "c_1", "agent": "a_1", "title": "Chat"}
+            ]}),
+        );
+        m.select(Some("a_1".into()));
+        assert_eq!(m.agent("a_1").unwrap().backup, "none");
+        m.take(&json!({"t": "event", "kind": "defaults.updated", "defaults": {"backup": "codex"}}));
+        assert_eq!(m.defaults.backup, "codex");
+        let f = m.set_backup("a_1", None).unwrap();
+        assert!(f["args"]["backup"].is_null());
+        assert_eq!(m.agent("a_1").unwrap().backup, "");
+        let f = m.set_backup("a_1", Some("opencode")).unwrap();
+        assert_eq!(f["args"]["backup"], "opencode");
+        // The chat runs on its agent's program until it's moved.
+        assert_eq!(m.chat_program().as_deref(), Some("claude"));
+        assert!(m.move_chat("claude").is_none(), "it's there already");
+        let f = m.move_chat("codex").unwrap();
+        assert_eq!(f["name"], "conversation.move");
+        assert_eq!(f["args"]["conversation"], "c_1");
+        assert_eq!(f["args"]["program"], "codex");
+        m.take(
+            &json!({"t": "core.data", "what": "conversations", "items": [
+                {"id": "c_1", "agent": "a_1", "title": "Chat", "program": "codex"}
+            ]}),
+        );
+        assert_eq!(m.chat_program().as_deref(), Some("codex"));
+    }
+
+    #[test]
     fn a_skill_from_the_plus_menu_starts_the_message() {
         assert_eq!(with_skill("review", ""), "Use the review skill. ");
         assert_eq!(
@@ -4527,6 +4610,7 @@ mod tests {
                 branch_of: None,
                 branch_at: None,
                 routine: None,
+                program: None,
                 title: String::new(),
             },
             Conversation {
@@ -4537,6 +4621,7 @@ mod tests {
                 branch_of: None,
                 branch_at: None,
                 routine: None,
+                program: None,
                 title: String::new(),
             },
         ];
@@ -4751,6 +4836,7 @@ mod tests {
             branch_of: None,
             branch_at: None,
             routine: None,
+            program: None,
             title: String::new(),
         };
         let mut m = Model::new();
@@ -4773,6 +4859,7 @@ mod tests {
             branch_of: Some("c_chat".into()),
             branch_at: Some("msg_3".into()),
             routine: None,
+            program: None,
             title: "Socks, again".into(),
             ..chat
         });
@@ -4818,6 +4905,7 @@ mod tests {
                 branch_of: None,
                 branch_at: None,
                 routine: None,
+                program: None,
                 title: String::new(),
             },
             Conversation {
@@ -4828,6 +4916,7 @@ mod tests {
                 branch_of: None,
                 branch_at: None,
                 routine: None,
+                program: None,
                 title: String::new(),
             },
         ];
@@ -4865,6 +4954,7 @@ mod tests {
             branch_of: None,
             branch_at: None,
             routine: None,
+            program: None,
             title: String::new(),
         }];
         m.select(Some("a_1".into()));
@@ -5118,6 +5208,7 @@ mod tests {
             branch_of: None,
             branch_at: None,
             routine: None,
+            program: None,
             title: String::new(),
         };
         m.conversations = vec![

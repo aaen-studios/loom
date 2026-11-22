@@ -78,6 +78,9 @@ CREATE TABLE IF NOT EXISTS runs (
 CREATE TABLE IF NOT EXISTS branches (
     conversation TEXT PRIMARY KEY, user TEXT NOT NULL REFERENCES users(id), from_conversation TEXT NOT NULL,
     from_message TEXT NOT NULL, handed INTEGER NOT NULL DEFAULT 0);
+CREATE TABLE IF NOT EXISTS conversation_programs (
+    conversation TEXT PRIMARY KEY, user TEXT NOT NULL REFERENCES users(id), program TEXT NOT NULL,
+    summary_from TEXT NOT NULL DEFAULT '');
 CREATE TABLE IF NOT EXISTS routine_threads (
     conversation TEXT PRIMARY KEY, user TEXT NOT NULL REFERENCES users(id), routine TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS sides (
@@ -247,6 +250,9 @@ fn conversation_of(r: List<Value>) -> Json {
     // A routine's thread of its own: the routine.
     let routine = text(r[8].copy())
     if routine.len() > 0 { o = o.s("routine", routine) }
+    // A chat moved to another program than its agent's, by hand or to its backup.
+    let program = text(r[9].copy())
+    if program.len() > 0 { o = o.s("program", program) }
     return o.done()
 }
 
@@ -742,7 +748,7 @@ impl Store {
     }
 
     pub fn conversation(self, user: String, id: String) -> Json? ! Error {
-        let row = try self.db.query_one(String("SELECT c.id, c.agent, c.title, c.at, k.id, s.agent, b.from_conversation, b.from_message, rt.routine FROM conversations c LEFT JOIN tasks k ON k.conversation = c.id LEFT JOIN sides s ON s.conversation = c.id LEFT JOIN branches b ON b.conversation = c.id LEFT JOIN routine_threads rt ON rt.conversation = c.id WHERE c.id = ? AND c.user = ? AND c.deleted = 0"), [t(id), t(user)])
+        let row = try self.db.query_one(String("SELECT c.id, c.agent, c.title, c.at, k.id, s.agent, b.from_conversation, b.from_message, rt.routine, cp.program FROM conversations c LEFT JOIN tasks k ON k.conversation = c.id LEFT JOIN sides s ON s.conversation = c.id LEFT JOIN branches b ON b.conversation = c.id LEFT JOIN routine_threads rt ON rt.conversation = c.id LEFT JOIN conversation_programs cp ON cp.conversation = c.id WHERE c.id = ? AND c.user = ? AND c.deleted = 0"), [t(id), t(user)])
         let r = row else return none
         return some(conversation_of(r))
     }
@@ -750,13 +756,13 @@ impl Store {
     // `agent`'s conversation with the newest message, as the apps show its
     // chat. A task's conversation is the task's, not the chat.
     pub fn newest_conversation(self, user: String, agent: String) -> Json? ! Error {
-        let r = try self.db.query_one(String("SELECT c.id, c.agent, c.title, c.at, NULL, NULL, NULL, NULL, NULL FROM conversations c LEFT JOIN messages m ON m.conversation = c.id AND m.user = c.user WHERE c.user = ? AND c.agent = ? AND c.deleted = 0 AND c.id NOT IN (SELECT conversation FROM tasks) AND c.id NOT IN (SELECT conversation FROM sides) AND c.id NOT IN (SELECT conversation FROM branches) AND c.id NOT IN (SELECT conversation FROM routine_threads) GROUP BY c.id ORDER BY max(coalesce(m.at, c.at)) DESC, c.rowid DESC LIMIT 1"), [t(user), t(agent)]) else return none
+        let r = try self.db.query_one(String("SELECT c.id, c.agent, c.title, c.at, NULL, NULL, NULL, NULL, NULL, (SELECT program FROM conversation_programs WHERE conversation = c.id) FROM conversations c LEFT JOIN messages m ON m.conversation = c.id AND m.user = c.user WHERE c.user = ? AND c.agent = ? AND c.deleted = 0 AND c.id NOT IN (SELECT conversation FROM tasks) AND c.id NOT IN (SELECT conversation FROM sides) AND c.id NOT IN (SELECT conversation FROM branches) AND c.id NOT IN (SELECT conversation FROM routine_threads) GROUP BY c.id ORDER BY max(coalesce(m.at, c.at)) DESC, c.rowid DESC LIMIT 1"), [t(user), t(agent)]) else return none
         return some(conversation_of(r))
     }
 
     pub fn conversations(self, user: String) -> List<Json> ! Error {
         var out = List<Json>()
-        for r in try self.db.query(String("SELECT c.id, c.agent, c.title, c.at, k.id, s.agent, b.from_conversation, b.from_message, rt.routine FROM conversations c LEFT JOIN tasks k ON k.conversation = c.id LEFT JOIN sides s ON s.conversation = c.id LEFT JOIN branches b ON b.conversation = c.id LEFT JOIN routine_threads rt ON rt.conversation = c.id WHERE c.user = ? AND c.deleted = 0 ORDER BY c.at"), [t(user)]) {
+        for r in try self.db.query(String("SELECT c.id, c.agent, c.title, c.at, k.id, s.agent, b.from_conversation, b.from_message, rt.routine, cp.program FROM conversations c LEFT JOIN tasks k ON k.conversation = c.id LEFT JOIN sides s ON s.conversation = c.id LEFT JOIN branches b ON b.conversation = c.id LEFT JOIN routine_threads rt ON rt.conversation = c.id LEFT JOIN conversation_programs cp ON cp.conversation = c.id WHERE c.user = ? AND c.deleted = 0 ORDER BY c.at"), [t(user)]) {
             out.push(conversation_of(r))
         }
         return out
@@ -772,6 +778,7 @@ impl Store {
         _ = try self.db.execute(String("DELETE FROM sides WHERE conversation = ? AND user = ?"), [t(id.copy()), t(user.copy())])
         _ = try self.db.execute(String("DELETE FROM branches WHERE conversation = ? AND user = ?"), [t(id.copy()), t(user.copy())])
         _ = try self.db.execute(String("DELETE FROM routine_threads WHERE conversation = ? AND user = ?"), [t(id.copy()), t(user.copy())])
+        _ = try self.db.execute(String("DELETE FROM conversation_programs WHERE conversation = ? AND user = ?"), [t(id.copy()), t(user.copy())])
         _ = try self.db.execute(String("UPDATE conversations SET deleted = 1 WHERE id = ? AND user = ?"), [t(id), t(user)])
     }
 
@@ -804,6 +811,32 @@ impl Store {
 
     pub fn branch_handed(self, conversation: String) ! Error {
         _ = try self.db.execute(String("UPDATE branches SET handed = 1 WHERE conversation = ?"), [t(conversation)])
+    }
+
+    // --- Moved chats (PLAN.md, "A backup brain") ---
+
+    // Puts `conversation` on the agent program `program`, in place of its
+    // agent's. With `from`, the program it was on, its next turn starts with
+    // loom's summary of it; with "", it doesn't.
+    pub fn set_conversation_program(self, user: String, conversation: String, program: String, from: String) ! Error {
+        _ = try self.db.execute(String("INSERT INTO conversation_programs (conversation, user, program, summary_from) VALUES (?, ?, ?, ?) ON CONFLICT (conversation) DO UPDATE SET program = excluded.program, summary_from = excluded.summary_from"), [t(conversation), t(user), t(program), t(from)])
+    }
+
+    // The program `conversation` was moved to, if it was.
+    pub fn conversation_program(self, user: String, conversation: String) -> String? ! Error {
+        let r = try self.db.query_one(String("SELECT program FROM conversation_programs WHERE conversation = ? AND user = ?"), [t(conversation), t(user)]) else return none
+        return some(text(r[0].copy()))
+    }
+
+    // The program `conversation` moved from by hand, while its next turn is to
+    // start with loom's summary of it; none once it has.
+    pub fn summary_to_hand(self, user: String, conversation: String) -> String? ! Error {
+        let r = try self.db.query_one(String("SELECT summary_from FROM conversation_programs WHERE conversation = ? AND user = ? AND summary_from != ''"), [t(conversation), t(user)]) else return none
+        return some(text(r[0].copy()))
+    }
+
+    pub fn summary_handed(self, conversation: String) ! Error {
+        _ = try self.db.execute(String("UPDATE conversation_programs SET summary_from = '' WHERE conversation = ?"), [t(conversation)])
     }
 
     // --- Scripts (PLAN.md, "Scripts") ---
@@ -2046,6 +2079,24 @@ fn acp_sessions_are_kept_per_conversation_and_program() {
     s.put_acp_session(a.id.copy(), String("c_1"), String("codex"), String("s_2"))!
     assert(s.acp_session(a.id.copy(), String("c_1"), String("claude"))! == none)
     assert(s.acp_session(a.id.copy(), String("c_1"), String("codex"))! == some(String("s_2")))
+}
+
+@test
+fn a_moved_chat_keeps_its_program_and_hands_its_summary_once() {
+    let s = test_store()
+    let a = s.add_user(String("a"), String("password1"), "owner")!
+    let c = s.add_conversation(a.id.copy(), String("a_1"), String("Chat"))!
+    let id = field(c, "id")
+    assert(s.conversation_program(a.id.copy(), id.copy())! == none)
+    assert(field(s.conversation(a.id.copy(), id.copy())! ?? Json.Null, "program").len() == 0)
+    s.set_conversation_program(a.id.copy(), id.copy(), String("codex"), String("claude"))!
+    assert(s.conversation_program(a.id.copy(), id.copy())! == some(String("codex")))
+    assert(field(s.conversation(a.id.copy(), id.copy())! ?? Json.Null, "program") == "codex")
+    assert(s.summary_to_hand(a.id.copy(), id.copy())! == some(String("claude")))
+    s.summary_handed(id.copy())!
+    assert(s.summary_to_hand(a.id.copy(), id.copy())! == none)
+    s.delete_conversation(a.id.copy(), id.copy())!
+    assert(s.conversation_program(a.id.copy(), id)! == none)
 }
 
 @test

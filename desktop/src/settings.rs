@@ -76,7 +76,7 @@ fn page_words(screen: Screen) -> &'static str {
         }
         Screen::Programs => "brains models agent programs claude codex gemini opencode acp registry install tokens limits",
         Screen::Defaults => {
-            "defaults every agent brain model effort permission mode ask allow instructions busy queue steer"
+            "defaults every agent brain backup model effort permission mode ask allow instructions busy queue steer"
         }
         Screen::Rules => {
             "rules allow deny ask what if permissions site path file folder command shell tool webhook routine"
