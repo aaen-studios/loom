@@ -164,6 +164,9 @@ pub struct Loom {
     p: Palette,
     screen: Screen,
     menu: Option<Menu>,
+    /// The menu item that can't be undone and waits for its second click, until the
+    /// menu closes.
+    armed: Option<&'static str>,
     plus: Option<Plus>,
     /// The settings or server popup over the window, open at this page.
     popup: Option<Screen>,
@@ -781,6 +784,7 @@ ACTA_KEY=secret:ACTA_KEY",
             p: Palette::new(dark),
             screen: Screen::Chat,
             menu: None,
+            armed: None,
             plus: None,
             popup: None,
             side: None,
@@ -4717,6 +4721,9 @@ ACTA_KEY=secret:ACTA_KEY",
 
     fn menu_panel(&mut self, cx: &mut Context<Self>) -> Option<Div> {
         let p = self.p;
+        if self.menu != Some(Menu::Agent) {
+            self.armed = None;
+        }
         let menu = self.menu?;
         // It takes the pointer, so a click on an item reaches it and not the sheet under
         // it, which would close the menu first.
@@ -4834,25 +4841,57 @@ ACTA_KEY=secret:ACTA_KEY",
                             cx.notify();
                         })),
                 )
+                // These can't be undone: the first click asks for a second.
                 .child(
-                    self.menu_item("fresh", Ico::RotateCcw, "Start fresh", false)
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            if let Some(f) = this.model.start_fresh() {
-                                this.send(f);
-                            }
-                            this.menu = None;
+                    self.menu_item(
+                        "fresh",
+                        Ico::RotateCcw,
+                        if self.armed == Some("fresh") {
+                            "Click again to start fresh"
+                        } else {
+                            "Start fresh"
+                        },
+                        self.armed == Some("fresh"),
+                    )
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        if this.armed != Some("fresh") {
+                            this.armed = Some("fresh");
                             cx.notify();
-                        })),
+                            return;
+                        }
+                        if let Some(f) = this.model.start_fresh() {
+                            this.send(f);
+                        }
+                        this.menu = None;
+                        cx.notify();
+                    })),
                 )
                 .child(
-                    self.menu_item("delete", Ico::Trash, "Delete agent", true)
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            if let Some(f) = this.model.delete_agent() {
-                                this.send(f);
-                            }
-                            this.menu = None;
+                    self.menu_item(
+                        "delete",
+                        Ico::Trash,
+                        if self.armed == Some("delete") {
+                            "Click again to delete"
+                        } else {
+                            "Delete agent"
+                        },
+                        true,
+                    )
+                    .when(self.armed == Some("delete"), |d| {
+                        d.bg(motion::mix(p.raised, p.bad, 0.12))
+                    })
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        if this.armed != Some("delete") {
+                            this.armed = Some("delete");
                             cx.notify();
-                        })),
+                            return;
+                        }
+                        if let Some(f) = this.model.delete_agent() {
+                            this.send(f);
+                        }
+                        this.menu = None;
+                        cx.notify();
+                    })),
                 ),
             Menu::MoveTo => {
                 // Each installed program, the one the chat runs on ticked. Moving hands the
