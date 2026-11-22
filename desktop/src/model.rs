@@ -1378,6 +1378,21 @@ pub struct Message {
     pub mentions: Vec<Mention>,
 }
 
+impl Message {
+    /// A finished reply of an agent's with nothing to show: no words, thoughts, tool
+    /// calls, plan, files or cards, and nothing it names or pins.
+    pub fn is_empty_reply(&self) -> bool {
+        self.role == "agent"
+            && !self.live
+            && !self.pinned
+            && self.mentions.is_empty()
+            && self
+                .blocks
+                .iter()
+                .all(|b| matches!(b.kind.as_str(), "text" | "thought") && b.text.trim().is_empty())
+    }
+}
+
 /// A file a reply names, as `notes/hours.md`, in its agent's folder or the shared one.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Mention {
@@ -3476,7 +3491,14 @@ impl Model {
 
     /// The selected chat's messages, with the replies still being written at the end.
     pub fn shown(&self) -> Vec<Message> {
-        let mut out = self.messages.clone();
+        // A finished reply with nothing in it, such as a turn that only changed a
+        // setting, would be the agent's name and time over nothing: it's left out.
+        let mut out: Vec<Message> = self
+            .messages
+            .iter()
+            .filter(|m| !m.is_empty_reply())
+            .cloned()
+            .collect();
         let conversation = self.conversation();
         for r in &self.runs {
             if Some(&r.conversation) != conversation.as_ref() {
@@ -4663,6 +4685,30 @@ mod tests {
         assert_eq!(said["name"], "plugin.message");
         assert_eq!(said["args"]["text"], "hi");
         assert!(m.door(4, "fetch", &json!({})).is_err());
+    }
+
+    #[test]
+    fn an_empty_reply_is_left_out() {
+        let reply = |blocks: Vec<Block>| Message {
+            id: "msg_1".into(),
+            role: "agent".into(),
+            at: 1,
+            blocks,
+            live: false,
+            queued: false,
+            from_agent: None,
+            mentions: Vec::new(),
+            pinned: false,
+        };
+        assert!(reply(Vec::new()).is_empty_reply());
+        assert!(reply(vec![Block::text("text", "  \n".into())]).is_empty_reply());
+        assert!(!reply(vec![Block::text("text", "Done.".into())]).is_empty_reply());
+        assert!(!reply(vec![Block::text("tool", String::new())]).is_empty_reply());
+        let live = Message {
+            live: true,
+            ..reply(Vec::new())
+        };
+        assert!(!live.is_empty_reply());
     }
 
     #[test]
