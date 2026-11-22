@@ -180,6 +180,8 @@ pub struct Loom {
     menu_at: Option<Point<Pixels>>,
     /// A menu a right-click opened, where and on what.
     ctx: Option<(Point<Pixels>, Ctx)>,
+    /// When the picture viewer opened, which it fades in from.
+    viewer_at: Instant,
     /// The menu item that can't be undone and waits for its second click, until the
     /// menu closes.
     armed: Option<&'static str>,
@@ -212,6 +214,10 @@ pub struct Loom {
     flow: Rc<Vec<model::Flow>>,
     scroller: Entity<MessageScrollerState>,
     composer: Entity<TextareaState>,
+    /// Text to put in the composer at its cursor (true), or take out of it (false), on
+    /// the next draw, which has the window: a file's `[name]` as it's attached and
+    /// taken off.
+    composer_edits: Vec<(bool, String)>,
     server_in: Entity<InputState>,
     user_in: Entity<InputState>,
     pass_in: Entity<InputState>,
@@ -896,6 +902,7 @@ ACTA_KEY=secret:ACTA_KEY",
             menu: None,
             menu_at: None,
             ctx: None,
+            viewer_at: Instant::now(),
             armed: None,
             fresh_armed: false,
             custom_color: false,
@@ -913,6 +920,7 @@ ACTA_KEY=secret:ACTA_KEY",
             flow: Rc::new(Vec::new()),
             scroller,
             composer,
+            composer_edits: Vec::new(),
             server_in,
             user_in,
             pass_in,
@@ -1019,7 +1027,9 @@ ACTA_KEY=secret:ACTA_KEY",
     /// Esc steps back: closes a menu, the server form, a page, or a step of making an
     /// agent, whichever is on top.
     fn escape(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.menu.is_some() || self.ctx.is_some() {
+        if self.model.viewing.is_some() {
+            self.model.viewing = None;
+        } else if self.menu.is_some() || self.ctx.is_some() {
             self.menu = None;
             self.ctx = None;
         } else if self.popup.is_none() && (self.search_peek || !self.model.query.is_empty()) {
@@ -1804,6 +1814,25 @@ ACTA_KEY=secret:ACTA_KEY",
         self.send(frame);
     }
 
+    /// Shows a picture from the chat big over the window.
+    pub fn view(&mut self, f: &model::FileRef, cx: &mut Context<Self>) {
+        if self.model.viewing.is_none() {
+            self.viewer_at = Instant::now();
+        }
+        if let Some(frame) = self.model.view(f) {
+            self.send(frame);
+        }
+        cx.notify();
+    }
+
+    /// The viewer's next picture (1) or the one before (-1).
+    fn view_step(&mut self, by: i32, cx: &mut Context<Self>) {
+        if let Some(frame) = self.model.view_step(by) {
+            self.send(frame);
+        }
+        cx.notify();
+    }
+
     /// Opens a file from the chat in its own program.
     pub fn open_file(&mut self, f: &model::FileRef, cx: &mut Context<Self>) {
         if let Some(frame) = self.model.open_file(f) {
@@ -1818,14 +1847,45 @@ ACTA_KEY=secret:ACTA_KEY",
             if path.is_file() {
                 let frame = self.model.attach(&path.to_string_lossy());
                 self.send(frame);
+                // Its name goes in the words where the cursor is, as a link to it once
+                // it's sent (`model::link_files`).
+                if let Some(a) = self.model.attachments.last() {
+                    self.composer_edits
+                        .push((true, format!("{} ", model::file_mark(&a.name))));
+                }
             }
         }
         cx.notify();
     }
 
     pub fn unattach(&mut self, id: &str, cx: &mut Context<Self>) {
+        if let Some(a) = self.model.attachments.iter().find(|a| a.id == id) {
+            self.composer_edits.push((false, model::file_mark(&a.name)));
+        }
         self.model.unattach(id);
         cx.notify();
+    }
+
+    /// Puts in and takes out the composer's file names, now that there's a window.
+    fn edit_composer(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        for (put, words) in std::mem::take(&mut self.composer_edits) {
+            self.composer.update(cx, |c, cx| {
+                if put {
+                    c.insert(words, window, cx);
+                } else {
+                    let text = c.value().to_string();
+                    let next = text.replacen(&format!("{words} "), "", 1);
+                    let next = if next == text {
+                        text.replacen(&words, "", 1)
+                    } else {
+                        next
+                    };
+                    if next != text {
+                        c.set_value(next, window, cx);
+                    }
+                }
+            });
+        }
     }
 
     /// Asks the system for files to attach.
@@ -1874,9 +1934,14 @@ ACTA_KEY=secret:ACTA_KEY",
                             }
                         },
                     };
-                    let dir = std::path::Path::new(&data_dir()).join("pasted");
-                    let at = chrono::Local::now().format("%Y-%m-%d %H.%M.%S");
-                    let path = dir.join(format!("Pasted {at}.{ext}"));
+                    // A short name, as it reads in the message, in a folder of its own so
+                    // another paste can have it too.
+                    let at = chrono::Local::now().format("%Y-%m-%d %H.%M.%S%.3f");
+                    let dir = std::path::Path::new(&data_dir())
+                        .join("pasted")
+                        .join(at.to_string());
+                    let name = model::free_name("image", ext, &self.model.attachments);
+                    let path = dir.join(name);
                     let written =
                         std::fs::create_dir_all(&dir).and_then(|_| std::fs::write(&path, &bytes));
                     match written {
@@ -5788,6 +5853,146 @@ ACTA_KEY=secret:ACTA_KEY",
         )
     }
 
+    /// A picture from the chat, big over the window: whole once it's fetched, its
+    /// thumbnail until then. A click beside it or Esc closes it, the arrows (or ← and →)
+    /// go between the chat's pictures, and Open hands it to its own program.
+    fn viewer(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Option<Stateful<Div>> {
+        let f = self.model.viewing.clone()?;
+        let files = self.model.files.clone();
+        let path = files
+            .get(&f.file)
+            .or_else(|| files.get(&format!("{}.thumb", f.file)))
+            .cloned();
+        let all = self.model.pictures();
+        let at = all.iter().position(|x| x.file == f.file);
+        let (before, after) = match at {
+            Some(i) => (i > 0, i + 1 < all.len()),
+            None => (false, false),
+        };
+        let key = SharedString::from(format!("viewer-{:?}", self.viewer_at));
+        let k = motion::arrive(&key, 0.15);
+        if k < 1.0 {
+            window.request_animation_frame();
+        }
+        let size = window.viewport_size();
+        let (w, h) = (size.width.as_f32(), size.height.as_f32());
+        let round = |id: &'static str, icon: IconName| {
+            div()
+                .id(id)
+                .size(px(36.0))
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded_full()
+                .cursor_pointer()
+                .text_color(white())
+                .bg(white().opacity(0.08))
+                .hover(|s| s.bg(white().opacity(0.18)))
+                .child(Icon::new(icon).small())
+        };
+        let picture = match path {
+            Some(path) => img(std::path::PathBuf::from(path))
+                .max_w(px((w - 160.0).max(100.0)))
+                .max_h(px((h - 140.0).max(100.0)))
+                .rounded(px(radius::ROW))
+                .into_any_element(),
+            None => div()
+                .size(px(160.0))
+                .rounded(px(radius::ROW))
+                .bg(white().opacity(0.06))
+                .into_any_element(),
+        };
+        let opened = f.clone();
+        let caption = match at {
+            Some(i) if all.len() > 1 => format!("{} · {} of {}", f.name, i + 1, all.len()),
+            _ => f.name.clone(),
+        };
+        Some(
+            div()
+                .id("viewer")
+                .absolute()
+                .top_0()
+                .left_0()
+                .size_full()
+                .occlude()
+                .opacity(k)
+                .bg(black().opacity(0.9))
+                .flex()
+                .flex_col()
+                .items_center()
+                .justify_center()
+                .gap(px(space::M))
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|this, _, _, cx| {
+                        this.model.viewing = None;
+                        cx.notify();
+                    }),
+                )
+                .child(
+                    div()
+                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                        .child(picture),
+                )
+                .child(
+                    div()
+                        .text_size(px(size::SMALL))
+                        .text_color(white().opacity(0.7))
+                        .child(caption),
+                )
+                .child(
+                    div()
+                        .absolute()
+                        .top(px(layout::TITLEBAR + space::S))
+                        .right(px(space::M))
+                        .flex()
+                        .gap(px(space::S))
+                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                        .child(
+                            round("viewer-open", IconName::ExternalLink)
+                                .tooltip(tip("Open in its program"))
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.model.viewing = None;
+                                    this.open_file(&opened, cx);
+                                    cx.notify();
+                                })),
+                        )
+                        .child(round("viewer-close", IconName::Close).on_click(cx.listener(
+                            |this, _, _, cx| {
+                                this.model.viewing = None;
+                                cx.notify();
+                            },
+                        ))),
+                )
+                .when(before, |d| {
+                    d.child(
+                        div()
+                            .absolute()
+                            .left(px(space::L))
+                            .top(px(h / 2.0 - 18.0))
+                            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                            .child(
+                                round("viewer-before", IconName::ChevronLeft)
+                                    .on_click(cx.listener(|this, _, _, cx| this.view_step(-1, cx))),
+                            ),
+                    )
+                })
+                .when(after, |d| {
+                    d.child(
+                        div()
+                            .absolute()
+                            .right(px(space::L))
+                            .top(px(h / 2.0 - 18.0))
+                            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                            .child(
+                                round("viewer-after", IconName::ChevronRight)
+                                    .on_click(cx.listener(|this, _, _, cx| this.view_step(1, cx))),
+                            ),
+                    )
+                }),
+        )
+    }
+
     fn menu_panel(&mut self, cx: &mut Context<Self>) -> Option<Div> {
         let p = self.p;
         if self.menu != Some(Menu::Agent) {
@@ -6352,6 +6557,48 @@ ACTA_KEY=secret:ACTA_KEY",
                 (Some(f), None) => (model::size_of(f.size), p.ink_3),
                 (None, None) => ("Sending…".to_string(), p.ink_3),
             };
+            // A picture as itself, its × in its corner, faint while it goes up.
+            if a.image() && a.error.is_none() {
+                let going_up = a.file.is_none();
+                attached = attached.child(
+                    div()
+                        .relative()
+                        .size(px(64.0))
+                        .flex_none()
+                        .rounded(px(radius::ROW))
+                        .overflow_hidden()
+                        .border_1()
+                        .border_color(p.line)
+                        .bg(p.bubble)
+                        .when(going_up, |d| d.opacity(0.6))
+                        .child(
+                            img(std::path::PathBuf::from(&a.path))
+                                .size_full()
+                                .object_fit(ObjectFit::Cover),
+                        )
+                        .child(
+                            div()
+                                .id(SharedString::from(format!("unattach-{}", a.id)))
+                                .absolute()
+                                .top(px(3.0))
+                                .right(px(3.0))
+                                .size(px(18.0))
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .rounded_full()
+                                .bg(black().opacity(0.6))
+                                .text_color(white())
+                                .cursor_pointer()
+                                .tooltip(tip_text(a.name.clone()))
+                                .child(Icon::new(IconName::Close).xsmall())
+                                .on_click(
+                                    cx.listener(move |this, _, _, cx| this.unattach(&id, cx)),
+                                ),
+                        ),
+                );
+                continue;
+            }
             attached = attached.child(
                 div()
                     .flex()
@@ -12347,6 +12594,28 @@ fn person(
             ));
         }
     }
+    // Each file reads as a link where it was attached, which opens it: a picture big over
+    // the window, anything else in its own program.
+    let attached: Vec<model::FileRef> = m.blocks.iter().filter_map(|b| b.file.clone()).collect();
+    let words = model::link_files(&model::literal_html(&text), &attached);
+    let opener = this.clone();
+    let on_link = move |url: &SharedString, _: &ClickEvent, _: &mut Window, cx: &mut App| match url
+        .strip_prefix("loom-file:")
+    {
+        Some(sha) => {
+            if let Some(f) = attached.iter().find(|f| f.file == sha) {
+                let f = f.clone();
+                let _ = opener.update(cx, |loom, cx| {
+                    if f.image() {
+                        loom.view(&f, cx);
+                    } else {
+                        loom.open_file(&f, cx);
+                    }
+                });
+            }
+        }
+        None => cx.open_url(url),
+    };
     // Its corners on the right smaller where it joins the person's messages either side.
     let c = model::corners(true, joined);
     out.when(!text.trim().is_empty(), |d| {
@@ -12364,11 +12633,9 @@ fn person(
                 .text_color(p.ink)
                 .when(m.queued, |d| d.opacity(0.6))
                 .child(
-                    TextView::markdown(
-                        SharedString::from(format!("m-{}-{room}", m.id)),
-                        model::literal_html(&text),
-                    )
-                    .selectable(true),
+                    TextView::markdown(SharedString::from(format!("m-{}-{room}", m.id)), words)
+                        .selectable(true)
+                        .on_link_click(on_link),
                 ),
         )
     })
@@ -12435,10 +12702,11 @@ fn file_view(
             )
             .into_any_element();
     }
-    let open = move |_: &ClickEvent, _: &mut Window, cx: &mut App| {
-        let _ = this.update(cx, |loom, cx| loom.open_file(&file, cx));
-    };
     if f.image() {
+        // A picture opens big over the window, inside loom.
+        let open = move |_: &ClickEvent, _: &mut Window, cx: &mut App| {
+            let _ = this.update(cx, |loom, cx| loom.view(&file, cx));
+        };
         let picture = match files.get(&format!("{}.thumb", f.file)) {
             Some(path) => img(std::path::PathBuf::from(path))
                 .max_w(px(320.0))
@@ -12460,6 +12728,9 @@ fn file_view(
             .child(picture)
             .into_any_element();
     }
+    let open = move |_: &ClickEvent, _: &mut Window, cx: &mut App| {
+        let _ = this.update(cx, |loom, cx| loom.open_file(&file, cx));
+    };
     div()
         .id(id)
         .max_w(px(320.0))
@@ -13620,6 +13891,18 @@ impl Render for Loom {
         let unroll = self.unroll(h);
         let root = div()
             .track_focus(&self.keys)
+            // While a picture is open big, ← and → go between the chat's pictures, before
+            // the composer can take them.
+            .capture_key_down(cx.listener(|this, e: &KeyDownEvent, _, cx| {
+                if this.model.viewing.is_some() {
+                    match e.keystroke.key.as_str() {
+                        "left" => this.view_step(-1, cx),
+                        "right" => this.view_step(1, cx),
+                        _ => return,
+                    }
+                    cx.stop_propagation();
+                }
+            }))
             .on_key_down(cx.listener(|this, e: &KeyDownEvent, window, cx| {
                 let k = &e.keystroke;
                 // Ctrl+B and Ctrl+F (Cmd on a Mac), only where the sidebar is.
@@ -13675,6 +13958,7 @@ impl Render for Loom {
             _ => crate::perf::step("chat", || self.chat(window, cx)),
         };
         self.sync_panel(window, cx);
+        self.edit_composer(window, cx);
         let ww = window.viewport_size().width.as_f32();
         if self.bar.fit(ww, self.beside()) {
             cx.notify();
@@ -13696,6 +13980,7 @@ impl Render for Loom {
         let menu_scrim = self.menu_scrim(cx);
         let ctx_menu = self.ctx_menu(cx);
         let popup = self.popup_view(window, cx);
+        let viewer = self.viewer(window, cx);
         let toast = self.toast(window, cx);
         let out = root
             .flex()
@@ -13724,6 +14009,7 @@ impl Render for Loom {
                 |d, pop| d.child(pop),
             )
             .when_some(popup, |d, p| d.child(p))
+            .when_some(viewer, |d, v| d.child(v))
             .when_some(toast, |d, t| d.child(t))
             .when_some(menu_scrim, |d, s| d.child(s))
             .when_some(ctx_menu, |d, m| d.child(m))
