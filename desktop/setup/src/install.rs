@@ -574,7 +574,10 @@ fn make_shortcut(exe: &Path, lnk: &Path) -> Result<(), String> {
             link.SetWorkingDirectory(&HSTRING::from(dir.as_os_str()))
                 .map_err(fail)?;
         }
-        link.SetIconLocation(&HSTRING::from(exe.as_os_str()), 0)
+        // loom.exe's light icon, or its dark one for a dark system; loom keeps it
+        // matching its own theme after (desktop/src/shell.rs).
+        let icon = if crate::window::dark_mode() { 1 } else { 0 };
+        link.SetIconLocation(&HSTRING::from(exe.as_os_str()), icon)
             .map_err(fail)?;
         link.SetDescription(&HSTRING::from("loom")).map_err(fail)?;
         let store: IPropertyStore = link.cast().map_err(fail)?;
