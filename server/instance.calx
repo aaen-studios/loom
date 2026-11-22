@@ -51,6 +51,7 @@ import server.flows
 import server.defaults
 import server.rules
 import server.brains
+import server.egress
 import server.sandbox
 import server.store.{AcpAgent, Device, Store, User, now, secret_key, site_of}
 import shared.tools
@@ -253,6 +254,7 @@ pub struct Instance {
     boxes: sandbox.Sandboxes?    // where the agents of everyone but the owner run (server/sandbox.calx)
     gate: Thread?    // the sandboxes' way to loom's tools (server/gate.calx)
     stop_gate: Sender<bool>?
+    doors: LinkedMap<String, egress.Door>    // "user/agent" -> the egress of an agent closed to the network (server/egress.calx)
     moving: String    // where the instance is moving to, while it is
     move_waiters: List<Waiter>    // instance.move commands waiting on the move
     moved: Json    // once the instance has moved: the signed moved frame, which every device gets
@@ -727,6 +729,84 @@ fn names_of(j: Json) -> Json {
     return Json.Array(out)
 }
 
+// The hosts an agent's network lets it reach, or none for everything: its
+// `network`, a list (PLAN.md, "Rules, records and limits"), empty for none.
+fn hosts_of(agent: Json) -> List<String>? {
+    let Json.Array(items) = at(agent, "network") else return none
+    var out = List<String>()
+    for item in items {
+        if let s = item.as_str() { out.push(s) }
+    }
+    return some(out)
+}
+
+// The `network` a command gives: its hosts as entries of an allowlist, Json.Null
+// for everything, or the text saying what's wrong with it.
+fn network_arg(args: Json) -> (Json, String) {
+    let v = at(args, "network")
+    if v == Json.Null { return (Json.Null, String()) }
+    let Json.Array(items) = v else return (Json.Null, String("network is a list of hosts the agent may reach, [] for none, or null for everything."))
+    if items.len() > egress.HOSTS_MOST { return (Json.Null, "network has at most {egress.HOSTS_MOST} hosts.") }
+    var out = List<Json>()
+    for item in items {
+        let text = item.as_str() else return (Json.Null, String("Each host in network is text, such as github.com or *.npmjs.org."))
+        let e = egress.entry(text.copy()) else return (Json.Null, "{text} isn't a host: write a name such as github.com, *.npmjs.org for every name under one, or an address.")
+        let j = Json.Str(e)
+        if not out.contains(j.copy()) { out.push(j) }
+    }
+    return (Json.Array(out), String())
+}
+
+// Whether a network of `mine` covers `theirs`: everything covers all, and a
+// list covers a list whose every host it lets be reached.
+fn covers(mine: List<String>?, theirs: List<String>?) -> bool {
+    let m = mine else return true
+    let t = theirs else return false
+    for h in t {
+        if h.starts_with("*.") {
+            // A star is covered only by the same star or a wider one.
+            var wider = false
+            for e in m {
+                if e.starts_with("*.") and (h == e or h.ends_with(e[1..].copy())) { wider = true }
+            }
+            if not wider { return false }
+        } else if not egress.allows(m.copy(), h.copy()) {
+            return false
+        }
+    }
+    return true
+}
+
+@test
+fn a_list_covers_only_what_it_lets_be_reached() {
+    let none_at_all = some(List<String>())
+    let github: List<String>? = some([String("github.com")])
+    let npm: List<String>? = some([String("*.npmjs.org")])
+    assert(covers(none, none))
+    assert(covers(none, github.copy()))
+    assert(not covers(github.copy(), none))
+    assert(covers(github.copy(), none_at_all.copy()))
+    assert(not covers(none_at_all.copy(), github.copy()))
+    assert(covers(npm.copy(), some([String("registry.npmjs.org")])))
+    assert(covers(npm.copy(), some([String("*.registry.npmjs.org")])))
+    assert(not covers(some([String("registry.npmjs.org")]), npm.copy()))
+}
+
+@test
+fn a_network_is_hosts_or_null() {
+    let (list, why) = network_arg(Obj.new().j("network", Json.Array([Json.Str(String("GitHub.com")), Json.Str(String("github.com"))])).done())
+    assert(why.len() == 0 and list == Json.Array([Json.Str(String("github.com"))]))
+    let (all, _) = network_arg(Obj.new().done())
+    assert(all == Json.Null)
+    let (_, bad) = network_arg(Obj.new().j("network", Json.Array([Json.Str(String("http://x.com"))])).done())
+    assert(bad.contains("isn't a host"))
+}
+
+// Why an agent can't be isolated here, or given a network of its own.
+fn no_sandboxes() -> String {
+    return String("This instance runs no sandboxes, so it can't keep an agent isolated or hold it to a network of its own. On Linux, the owner starts it with --sandboxes podman or --sandboxes docker.")
+}
+
 // Why a person's agent can't run on `program`: the owner kept it to others.
 fn not_given(program: String) -> String {
     return "The owner hasn't given you the agent program {program}. Ask them for it, or switch this agent to one you have."
@@ -831,7 +911,7 @@ impl Instance {
         }
         let browser_done = Receiver<browser.Back>()
         let browser_to = browser_done.sender()
-        var i = Instance { browsers: LinkedMap<String, Browser>(), watchers: Map<u32, String>(), browser_done: browser_done, browser_to: browser_to, stopped_browsers: List<Thread>(), fills: Map<String, Fill>(), turns_ended: List<(String, String, String)>(), next_browser_sweep: 0, task_stops: Map<String, String>(), resumes: List<(String, String)>(), push_to: push_to, push_gone: push_gone, move_to: move_to, move_done: move_done, lan: config.lan, bridge: none, stop_bridge: none, lan_port: 0, announcer: none, stop_announcer: none, to_close: List<ServerSocket>(), boxes: none, gate: none, stop_gate: none, moving: String(), move_waiters: List<Waiter>(), moved: moved, version: config.version.copy(), store: store, server: server, data: config.data.copy(), sessions: Map<u32, Session>(), runs: LinkedMap<String, Run>(), procs: LinkedMap<String, Proc>(), approvals: LinkedMap<String, Approval>(), lines: lines, lines_to: to, hash_to: hash_to, hash_done: hash_done, next_job: 0, auths: Map<i64, Auth>(), dummy_hash: dummy, failures: LinkedMap<String, List<i64>>(), thumbs: files.start(), events: config.events, next_prune: 0, grants: Map<String, Grant>(), calls: Map<String, Request>(), context: Map<String, (i64, i64)>(), registry_at: config.registry.copy(), registry: Json.Null, registry_time: 0, registry_fetching: false, install_to: install_to, install_done: install_done, fetching: List<Waiter>(), installs: Map<i64, Install>(), deno_job: 0, deno_waiters: List<Request>(), code_acts: Map<i64, String>(), leftovers: List<String>(), next_sweep: 0, device_calls: Map<String, DeviceCall>(), minute_ms: config.minute_ms, next_due: 0, routine_runs: Map<String, RoutineRun>(), routine_marks: Map<String, (String, String)>(), run_chains: Map<String, List<String>>(), panel_calls: Map<String, Waiter>(), script_calls: Map<String, Request>(), running_flows: LinkedMap<String, flows.Flow>(), flow_steps: Map<String, (String, usize)>(), advancing: List<String>(), flow_results: List<(String, usize, bool, String)>(), flows_due: List<String>(), slow_calls: Map<String, String>(), acting: 0, call_actions: Map<String, i64>(), tool_actions: Map<String, i64>(), sealer: try secret_key(config.data.copy()) }
+        var i = Instance { browsers: LinkedMap<String, Browser>(), watchers: Map<u32, String>(), browser_done: browser_done, browser_to: browser_to, stopped_browsers: List<Thread>(), fills: Map<String, Fill>(), turns_ended: List<(String, String, String)>(), next_browser_sweep: 0, task_stops: Map<String, String>(), resumes: List<(String, String)>(), push_to: push_to, push_gone: push_gone, move_to: move_to, move_done: move_done, lan: config.lan, bridge: none, stop_bridge: none, lan_port: 0, announcer: none, stop_announcer: none, to_close: List<ServerSocket>(), boxes: none, gate: none, stop_gate: none, doors: LinkedMap<String, egress.Door>(), moving: String(), move_waiters: List<Waiter>(), moved: moved, version: config.version.copy(), store: store, server: server, data: config.data.copy(), sessions: Map<u32, Session>(), runs: LinkedMap<String, Run>(), procs: LinkedMap<String, Proc>(), approvals: LinkedMap<String, Approval>(), lines: lines, lines_to: to, hash_to: hash_to, hash_done: hash_done, next_job: 0, auths: Map<i64, Auth>(), dummy_hash: dummy, failures: LinkedMap<String, List<i64>>(), thumbs: files.start(), events: config.events, next_prune: 0, grants: Map<String, Grant>(), calls: Map<String, Request>(), context: Map<String, (i64, i64)>(), registry_at: config.registry.copy(), registry: Json.Null, registry_time: 0, registry_fetching: false, install_to: install_to, install_done: install_done, fetching: List<Waiter>(), installs: Map<i64, Install>(), deno_job: 0, deno_waiters: List<Request>(), code_acts: Map<i64, String>(), leftovers: List<String>(), next_sweep: 0, device_calls: Map<String, DeviceCall>(), minute_ms: config.minute_ms, next_due: 0, routine_runs: Map<String, RoutineRun>(), routine_marks: Map<String, (String, String)>(), run_chains: Map<String, List<String>>(), panel_calls: Map<String, Waiter>(), script_calls: Map<String, Request>(), running_flows: LinkedMap<String, flows.Flow>(), flow_steps: Map<String, (String, usize)>(), advancing: List<String>(), flow_results: List<(String, usize, bool, String)>(), flows_due: List<String>(), slow_calls: Map<String, String>(), acting: 0, call_actions: Map<String, i64>(), tool_actions: Map<String, i64>(), sealer: try secret_key(config.data.copy()) }
         if config.sandboxes.len() > 0 and not i.lan { try i.sandboxes_on(config.sandboxes.copy(), config.sandbox_image.copy()) }
         // An action the last run of the instance left started, it never finished.
         try i.store.settle_cut_short()
@@ -911,7 +991,9 @@ impl Instance {
         println("loom: the agents of everyone but the owner run in sandboxes, which reach loom's tools at {host}:{port}")
     }
 
-    // Whether `user`'s agents run in a sandbox: everyone's but the owner's.
+    // Whether `user` is a member, whose agents all run in their sandbox:
+    // everyone but the owner. Their budgets and what programs they're given
+    // follow from it too.
     fn sandboxed(i: Instance, user: String) -> bool {
         return match i.store.role(user) {
             ok(r) => r != some(String("owner")),
@@ -919,15 +1001,35 @@ impl Instance {
         }
     }
 
-    // `agent`'s folder, where its program runs and its instructions and skills
-    // are: the folder it names, or one in the data folder. A sandboxed person's
-    // agents always have theirs in the person's own folder, whatever they name.
+    // Whether `agent` runs in a sandbox (PLAN.md, "Rules, records and limits"):
+    // every member's, and the owner's that are marked isolated.
+    fn isolated(i: Instance, user: String, agent: Json) -> bool {
+        return i.sandboxed(user) or bool_at(agent, "isolated") == some(true)
+    }
+
+    // The sandbox `agent` runs in: its person's, or its own for one closed to
+    // the network. none for the owner's agents that aren't isolated.
+    fn place(i: Instance, user: String, agent: Json) -> sandbox.Place? {
+        if not i.isolated(user.copy(), agent.copy()) { return none }
+        let closed = hosts_of(agent.copy()) != none
+        return some(sandbox.Place { user: user.copy(), agent: if closed { str_at(agent, "id") ?? String() } else { String() } })
+    }
+
+    // The agent `id` of `user`'s, or one with only its id once it's gone.
+    fn agent_or_id(i: Instance, user: String, id: String) -> Json {
+        return match i.store.agent(user, id.copy()) {
+            ok(some(a)) => a,
+            _ => Obj.new().s("id", id).done(),
+        }
+    }
+
     // The folder all of `user`'s agents read and write (PLAN.md, "Sharing and
-    // learning"), made when it's first given. A sandboxed person's is in their
-    // own folder, so their sandbox has it.
-    fn shared_folder(i: Instance, user: String) -> String {
+    // learning"), made when it's first given. A sandbox's is in its person's
+    // own folder, so the sandbox has it: a member's agents share it, and the
+    // owner's isolated ones share one apart from the rest of the owner's.
+    fn shared_folder(i: Instance, user: String, isolated: bool) -> String {
         var path = "{i.data}/shared/{user}"
-        if i.sandboxed(user.copy()) {
+        if isolated {
             path = if let b = i.boxes { "{b.home(user)}/shared" } else { "{i.data}/sandboxes/{user}/shared" }
         }
         if not fs.exists(path.copy()) {
@@ -939,13 +1041,78 @@ impl Instance {
         }
     }
 
+    // The shared folder as `agent` sees it.
+    fn shared_of(i: Instance, user: String, agent: String) -> String {
+        let a = i.agent_or_id(user.copy(), agent)
+        return i.shared_folder(user.copy(), i.isolated(user, a))
+    }
+
+    // `agent`'s folder, where its program runs and its instructions and skills
+    // are: the folder it names, or one in the data folder. An agent in a
+    // sandbox always has its in the person's own folder, whatever it names.
     fn agent_folder(i: Instance, user: String, agent: Json) -> String {
         let id = str_at(agent.copy(), "id") ?? String()
-        if i.sandboxed(user.copy()) {
+        if i.isolated(user.copy(), agent.copy()) {
             if let b = i.boxes { return "{b.home(user)}/agents/{id}" }
             return "{i.data}/sandboxes/{user}/agents/{id}"
         }
         return str_at(agent, "folder") ?? "{i.data}/agents/{id}"
+    }
+
+    // The egress of `user`'s `agent`, closed to the network, started if it
+    // isn't, with the agent's list. Its sandbox is ready first.
+    fn door(i: mut Instance, user: String, agent: Json) -> u16 ! Error {
+        let id = str_at(agent.copy(), "id") ?? String()
+        let key = "{user}/{id}"
+        if let d = i.doors.find(key.copy()) { return d.port }
+        let b = i.boxes.copy() else { fail "this instance has no sandboxes" }
+        let place = sandbox.Place { user: user.copy(), agent: id }
+        try b.ready(place.copy())
+        let d = try egress.open(b.runtime.copy(), place.name(), b.gate_host.copy(), b.gate, hosts_of(agent) ?? List<String>())
+        let port = d.port
+        i.doors.insert(key, d)
+        return port
+    }
+
+    // Stops the egresses of `user`'s `agent`, or all of `user`'s, or with no
+    // user, every one.
+    fn close_doors(i: mut Instance, user: String, agent: String?) {
+        var gone = List<String>()
+        for (k, _) in i.doors {
+            let mine = if user.len() == 0 { true } else {
+                match agent.copy() {
+                    some(a) => k == "{user}/{a}",
+                    none => k.starts_with("{user}/"),
+                }
+            }
+            if mine { gone.push(k.copy()) }
+        }
+        for k in gone {
+            if let d = i.doors.remove(k) { d.close() }
+        }
+    }
+
+    // After `user`'s agent `id` moves to another sandbox, or out of one: its
+    // program stops, and so does its browser, so the next message starts both
+    // where it runs now. The sandbox of its own it had, closed to the network,
+    // goes, with its egress; the person's folder stays.
+    fn moved_agent(i: mut Instance, user: String, id: String, was: sandbox.Place?) {
+        // Each program it runs on, its backup's too.
+        var keys = List<String>()
+        for (key, p) in i.procs {
+            if p.agent == id and p.user == user { keys.push(key.copy()) }
+        }
+        for key in keys {
+            if let p = i.procs.remove(key) {
+                var to = p.to.copy()
+                to.send(Out.Stop)
+            }
+        }
+        i.close_browser("{user}/{id}")
+        i.close_doors(user.copy(), some(id.copy()))
+        if let old = was {
+            if let b = i.boxes { b.drop_place(old) }
+        }
     }
 
     // --- Budgets (PLAN.md, "Agents and keys") ---
@@ -1056,43 +1223,43 @@ impl Instance {
         if let err(e) = i.store.add_usage(p.user.copy(), p.program.copy(), run, input, output, total, p.shared) { eprintln("loom: usage: {e}") }
     }
 
-    // Writing in an agent's folder: through the person's sandbox when they have
-    // one, since what's in their folder is theirs to make links in.
-    fn box_of(i: Instance, user: String) -> sandbox.Sandboxes? ! Error {
-        if not i.sandboxed(user.copy()) { return none }
-        let b = i.boxes else { fail "this instance has no sandboxes for anyone but the owner" }
-        try b.ready(user)
+    // Writing in an agent's folder: through its sandbox when it has one, since
+    // what's in its person's folder is theirs to make links in.
+    fn box_of(i: Instance, place: sandbox.Place?) -> sandbox.Sandboxes? ! Error {
+        let p = place else return none
+        let b = i.boxes else { fail "this instance has no sandboxes: agents of people other than the owner, and isolated ones, run in one, and the owner starts it with --sandboxes podman or --sandboxes docker" }
+        try b.ready(p)
         return some(b.copy())
     }
 
-    fn put_file(i: Instance, user: String, path: String, data: List<u8>) ! Error {
-        if let b = try i.box_of(user.copy()) {
-            try b.write(user, path, data)
+    fn put_file(i: Instance, place: sandbox.Place?, path: String, data: List<u8>) ! Error {
+        if let b = try i.box_of(place.copy()) {
+            try b.write(place.copy() ?? sandbox.Place { user: String(), agent: String() }, path, data)
             return
         }
         if let cut = path.find_last("/") { try fs.make_dir_all(path[..cut].copy()) }
         try fs.write(path, data)
     }
 
-    fn put_dir(i: Instance, user: String, path: String) ! Error {
-        if let b = try i.box_of(user.copy()) {
-            try b.make_dir(user, path)
+    fn put_dir(i: Instance, place: sandbox.Place?, path: String) ! Error {
+        if let b = try i.box_of(place.copy()) {
+            try b.make_dir(place.copy() ?? sandbox.Place { user: String(), agent: String() }, path)
             return
         }
         try fs.make_dir_all(path)
     }
 
-    fn drop_file(i: Instance, user: String, path: String) ! Error {
-        if let b = try i.box_of(user.copy()) {
-            try b.remove_file(user, path)
+    fn drop_file(i: Instance, place: sandbox.Place?, path: String) ! Error {
+        if let b = try i.box_of(place.copy()) {
+            try b.remove_file(place.copy() ?? sandbox.Place { user: String(), agent: String() }, path)
             return
         }
         if fs.exists(path.copy()) { try fs.remove_file(path) }
     }
 
-    fn drop_dir(i: Instance, user: String, path: String) ! Error {
-        if let b = try i.box_of(user.copy()) {
-            try b.remove_dir(user, path)
+    fn drop_dir(i: Instance, place: sandbox.Place?, path: String) ! Error {
+        if let b = try i.box_of(place.copy()) {
+            try b.remove_dir(place.copy() ?? sandbox.Place { user: String(), agent: String() }, path)
             return
         }
         try fs.remove_dir(path)
@@ -1343,6 +1510,7 @@ impl Instance {
         for (k, _) in i.browsers { keys.push(k.copy()) }
         for k in keys { i.close_browser(k) }
         while let t = i.stopped_browsers.pop() { t.join() }
+        i.close_doors(String(), none)
         if let s = mut i.stop_gate { s.send(true) }
         if let t = i.gate.take() { t.join() }
         i.phones_off()
@@ -1371,9 +1539,31 @@ impl Instance {
             wire = String("fill")
             wire_args = Obj.new().s("ref", str_at(args.copy(), "ref") ?? String()).b("submit", bool_at(args.copy(), "submit") ?? false).s("name", secret_name.copy()).s("value", value).j("hosts", try i.secret_hosts(g.user.copy(), secret_name)).done()
         }
+        // An agent closed to the network reaches, in its browser too, only the
+        // hosts on its list: it's said at once for the page it opens, and its
+        // egress turns away everything else the page asks for.
+        let agent = i.agent_or_id(g.user.copy(), g.agent.copy())
+        let hosts = hosts_of(agent.copy())
+        if let list = hosts.copy() {
+            if op == "open" {
+                let host = browser.host_of(str_at(args.copy(), "url") ?? String())
+                let bare = if let (h, _) = egress.host_port(host.copy(), 0) { h } else { host.copy() }
+                if bare.len() > 0 and not egress.allows(list.copy(), bare.copy()) {
+                    let why = if list.len() == 0 { String("You have no network: your person keeps you from every site.") } else { "Your network lets you reach only {list.join(", ")}, not {bare}. Your person can change that in the app." }
+                    return some(rule_refusal("network", why))
+                }
+            }
+        }
         if not i.browsers.contains(key.copy()) {
             let profile = try fs.absolute("{i.data}/browsers/{g.user}/{g.agent}")
-            let (to, thread) = browser.start(key.copy(), profile, i.sandboxed(g.user.copy()), i.browser_to.copy())
+            var proxy: u16 = 0
+            if hosts != none {
+                proxy = match i.door(g.user.copy(), agent.copy()) {
+                    ok(p) => p,
+                    err(e) => return some(tool_error("Your browser can't start, since your network's way out didn't: {e}")),
+                }
+            }
+            let (to, thread) = browser.start(key.copy(), profile, i.isolated(g.user.copy(), agent), proxy, i.browser_to.copy())
             i.browsers.insert(key.copy(), Browser { to: to, thread: thread, busy: 0, used: now(), open: false, person: false, asked: String(), asks: List<String>(), held: List<browser.Op>(), actions: 0, secret_ask: Json.Null, site: String(), recording: false, steps: 0, record_by: String(), told: String() })
             i.watch_changed(key.copy())
         }
@@ -2046,15 +2236,17 @@ impl Instance {
         let address = i.server.url()
         var base = if address.ends_with("/") { address[..address.len() - 1].copy() } else { address }
         var exe = current_exe()
-        if boxed {
-            if let b = i.boxes {
-                base = b.gate_url()
-                exe = String("loom")
-            }
-        }
         let wanted = match i.store.agent(user.copy(), agent.copy()) {
             ok(some(a)) => a,
             _ => Json.Null,
+        }
+        if boxed {
+            if let b = i.boxes {
+                // The gate, or in a sandbox closed to the network, its egress.
+                let place = i.place(user.copy(), merge(wanted.copy(), Obj.new().s("id", agent.copy()).done())) ?? sandbox.Place { user: user.copy(), agent: String() }
+                base = b.tools_url(place)
+                exe = String("loom")
+            }
         }
         // In Code Mode, the agent's other servers are reached through `loom mcp`
         // (PLAN.md, "Code Mode"), so it's the only one.
@@ -2461,7 +2653,10 @@ impl Instance {
         }
         if name == "create_agent" {
             // A new agent always starts out asking: only the person changes that.
-            let a = Obj.new().s("name", str_at(args.copy(), "name") ?? String("Agent")).s("acp_agent", str_at(args.copy(), "acp_agent") ?? String()).s("instructions", str_at(args, "instructions") ?? String()).s("permission", String("ask")).done()
+            // An isolated agent's are isolated too, with no more network than its own.
+            let made = Obj.new().s("name", str_at(args.copy(), "name") ?? String("Agent")).s("acp_agent", str_at(args.copy(), "acp_agent") ?? String()).s("instructions", str_at(args, "instructions") ?? String()).s("permission", String("ask")).done()
+            let (a, why) = try i.reach_for(g.copy(), made, true)
+            if why.len() > 0 { return some(rule_refusal("no-more-than-its-own", why)) }
             return some(answer_text(try i.command(g.user, g.agent, String("agent.create"), a)))
         }
         if name == "update_agent" or name == "edit_instructions" {
@@ -2936,7 +3131,7 @@ impl Instance {
         var handed = List<Json>()
         if paths.len() > 0 {
             let mine = i.folder_of(g.user.copy(), g.agent.copy())
-            let shared = i.shared_folder(g.user.copy())
+            let shared = i.shared_of(g.user.copy(), g.agent.copy())
             for p in paths {
                 let path = handoff_path(p.copy(), mine.copy(), shared.copy()) else return some(tool_error("{p} isn't a file in your folder or the shared folder ({shared}), so it can't be handed over."))
                 let data = try fs.read(path.copy())
@@ -2970,8 +3165,8 @@ impl Instance {
         var out = List<Json>()
         let named = named_paths(said)
         if named.len() == 0 { return out }
+        let shared = i.shared_of(user.copy(), agent.copy())
         let mine = i.folder_of(user.copy(), agent)
-        let shared = i.shared_folder(user)
         for p in named {
             let path = handoff_path(p.copy(), mine.copy(), shared.copy()) else continue
             let size = match fs.metadata(path.copy()) {
@@ -3010,6 +3205,34 @@ impl Instance {
         return some("You're on {mine}, so you can't give an agent {mode}: no more than you have yourself. Your person can, in the app.")
     }
 
+    // What an agent that makes or changes another gives it of where it runs,
+    // no more than its own (PLAN.md, "Agents talking to agents have limits"):
+    // an isolated agent's new agents are isolated, with its network unless
+    // they name a narrower one. The text is why not, when it isn't empty.
+    fn reach_for(i: Instance, g: Grant, a: Json, making: bool) -> (Json, String) ! Error {
+        let me = try i.store.agent(g.user.copy(), g.agent.copy()) ?? Json.Null
+        if not i.isolated(g.user.copy(), me.copy()) { return (a.copy(), String()) }
+        let mine = hosts_of(me)
+        if bool_at(a.copy(), "isolated") == some(false) { return (a.copy(), String("You run isolated, in a sandbox, so you can't give an agent more than that: no more than you have yourself. Your person can, in the app.")) }
+        var out = a.copy()
+        if defaults.has(a.copy(), "network") {
+            let (given, why) = network_arg(a.copy())
+            if why.len() > 0 { return (a.copy(), why) }
+            if not covers(mine.copy(), hosts_of(Obj.new().j("network", given).done())) {
+                let yours = if let list = mine { if list.len() == 0 { String("nothing") } else { list.join(", ") } } else { String("everything") }
+                return (a.copy(), "Your network reaches {yours}, so you can't give an agent more: no more than you have yourself. Your person can, in the app.")
+            }
+        } else if making {
+            if let list = mine {
+                var hosts = List<Json>()
+                for h in list { hosts.push(Json.Str(h.copy())) }
+                out = merge(out, Obj.new().j("network", Json.Array(hosts)).done())
+            }
+        }
+        if making { out = merge(out, Obj.new().b("isolated", true).done()) }
+        return (out, String())
+    }
+
     // run_command: one of loom's commands, run as the person's app runs it,
     // with their rights (PLAN.md, "Agents can do anything the app can"). server/commands.calx
     // says which go at once, which ask the person first, and which are
@@ -3025,6 +3248,17 @@ impl Instance {
         if name == "agent.create" {
             a = merge(a, Obj.new().s("permission", String("ask")).done())
             if str_at(a.copy(), "folder") != none { access = commands.Access.Asks(String("other")) }
+            let (given, why) = try i.reach_for(g.copy(), a.copy(), true)
+            if why.len() > 0 { return some(rule_refusal("no-more-than-its-own", why)) }
+            a = given
+        }
+        // Where an agent runs, and its network, are the person's to loosen:
+        // an agent asks them, and never gives more than it has itself.
+        if name == "agent.update" and (defaults.has(a.copy(), "isolated") or defaults.has(a.copy(), "network")) {
+            if str_at(a.copy(), "agent") == some(g.agent.copy()) { return some(rule_refusal("own-place", String("An agent can't change where it runs itself, or its own network. Your person can, in the app."))) }
+            let (_, why) = try i.reach_for(g.copy(), a.copy(), false)
+            if why.len() > 0 { return some(rule_refusal("no-more-than-its-own", why)) }
+            access = commands.Access.Asks(String("other"))
         }
         if name == "agent.update" {
             let changes_mode = defaults.has(a.copy(), "permission")
@@ -3252,7 +3486,7 @@ impl Instance {
                 try i.store.put_agent(user.copy(), made.copy(), by.copy())
                 try i.store.mark_imported(user.copy(), from.copy(), "agent", source_id.copy(), id.copy())
                 i.write_instructions(user.copy(), made.copy())
-                i.write_skills(user.copy(), i.agent_folder(user.copy(), made.copy()))
+                i.write_skills(user.copy(), made.copy())
                 try i.event(user.copy(), "agent.created", Obj.new().j("agent", made).done())
                 agents.insert(source_id, id)
                 tally(mut came, "agents")
@@ -4311,11 +4545,11 @@ impl Instance {
 
     // Where the agent finds a file sent to it: a copy in its folder, under the name it was
     // sent with, so its tools see the right extension.
-    fn agent_copy(i: Instance, user: String, folder: String, f: Json) -> String ! Error {
+    fn agent_copy(i: Instance, place: sandbox.Place?, folder: String, f: Json) -> String ! Error {
         let sha = str_at(f.copy(), "file") ?? String()
         let dir = "{folder}/files/{sha[..12]}"
         let path = "{dir}/{str_at(f, "name") ?? String("file")}"
-        if not fs.exists(path.copy()) { try i.put_file(user, path.copy(), try fs.read("{i.data}/files/{sha}")) }
+        if not fs.exists(path.copy()) { try i.put_file(place, path.copy(), try fs.read("{i.data}/files/{sha}")) }
         return try fs.absolute(path)
     }
 
@@ -4442,6 +4676,7 @@ impl Instance {
         }
         if user.len() > 0 { i.leftovers.push("{i.data}/plugins/{user}") }
         i.drop_browsers(user.copy(), none)
+        i.close_doors(user.copy(), none)
         if let b = i.boxes { b.remove(user.copy()) }
         i.next_sweep = 0
         println("loom: removed {name}")
@@ -5193,7 +5428,7 @@ impl Instance {
             }
         }
         // A sandbox's folder is kept to its disk limit here, since no storage option reaches it.
-        let used = if i.sandboxed(user.copy()) { if let b = i.boxes { b.used(user.copy()) ?? 0 } else { 0 } } else { 0 }
+        let used = if let p = i.place(user.copy(), a.copy()) { if let b = i.boxes { b.used(p) ?? 0 } else { 0 } } else { 0 }
         if used > sandbox.DISK_BYTES {
             try i.finish(run_id, String("failed"), some("Your sandbox's folder holds more than the {sandbox.DISK_BYTES / 1073741824} GB each person has. Delete what you don't need from it, then try again."))
             return
@@ -5293,25 +5528,31 @@ impl Instance {
         }
         let folder = i.agent_folder(user.copy(), agent.copy())
         // Only the owner's agents run as the instance's own user (PLAN.md,
-        // "Sandboxes"). Anyone else's would reach everyone's data and the owner's
-        // keys, so theirs run in their sandbox, with their own secrets for settings.
-        let boxed = i.sandboxed(user.copy())
+        // "Sandboxes"), unless they're isolated. Anyone else's would reach
+        // everyone's data and the owner's keys, so theirs run in their sandbox,
+        // with their own secrets for settings. An agent closed to the network
+        // runs in one of its own, which reaches out only through its egress.
+        let place = i.place(user.copy(), agent.copy())
+        let boxed = place != none
         let shared = try i.share_for(user.copy(), program.copy()) != none
         var command = acp_agent.command.copy()
         var args = acp_agent.args.copy()
         // With OpenCode's config allowing Code Mode's tools, as loom asks for
         // each call in a script (acp.program_env).
         var settings = acp.program_env(acp_agent.env.copy())
-        if boxed {
-            let b = i.boxes else {
-                fail "Agents of people other than the owner run in their own sandbox, and this instance has none: the owner starts it with --sandboxes podman or --sandboxes docker"
+        if let p = place.copy() {
+            let b = i.boxes.copy() else {
+                if i.sandboxed(user.copy()) { fail "Agents of people other than the owner run in their own sandbox, and this instance has none: the owner starts it with --sandboxes podman or --sandboxes docker" }
+                fail "This agent is isolated, so it runs in a sandbox, and this instance has none: on Linux, the owner starts it with --sandboxes podman or --sandboxes docker"
             }
-            try b.ready(user.copy())
+            try b.ready(p.copy())
+            if p.closed() { _ = try i.door(user.copy(), agent.copy()) }
             // The program's settings when the owner shares them, under the person's
-            // own secrets of the same names, which always win.
+            // own secrets of the same names, which always win. The owner's own
+            // isolated agents get the program's settings, which are the owner's.
             var theirs = Obj.new()
             var names = List<String>()
-            if shared {
+            if shared or not i.sandboxed(user.copy()) {
                 if let Json.Object(m) = acp_agent.env.copy() {
                     for (k, v) in m {
                         if not env_name(k.copy()) { continue }
@@ -5320,12 +5561,14 @@ impl Instance {
                     }
                 }
             }
-            for s in try i.store.secret_names(user.copy()) {
-                let n = str_at(s, "name") ?? String()
-                if not env_name(n.copy()) { continue }
-                if let v = try i.secret(user.copy(), n.copy()) {
-                    theirs.m.insert(n.copy(), Json.Str(v))
-                    if not names.contains(n.copy()) { names.push(n) }
+            if i.sandboxed(user.copy()) {
+                for s in try i.store.secret_names(user.copy()) {
+                    let n = str_at(s, "name") ?? String()
+                    if not env_name(n.copy()) { continue }
+                    if let v = try i.secret(user.copy(), n.copy()) {
+                        theirs.m.insert(n.copy(), Json.Str(v))
+                        if not names.contains(n.copy()) { names.push(n) }
+                    }
                 }
             }
             settings = acp.program_env(theirs.done())
@@ -5334,17 +5577,17 @@ impl Instance {
                     if not names.contains(k.copy()) { names.push(k.copy()) }
                 }
             }
-            let (c, a) = b.wrap(user.copy(), folder.copy(), names, command, args)
+            let (c, a) = b.wrap(p, folder.copy(), names, command, args)
             command = c
             args = a
         }
-        try i.put_dir(user.copy(), folder.copy())
-        let instructions = str_at(agent, "instructions") ?? String()
+        try i.put_dir(place.copy(), folder.copy())
+        let instructions = str_at(agent.copy(), "instructions") ?? String()
         if instructions.len() > 0 {
-            try i.put_file(user.copy(), "{folder}/AGENTS.md", instructions.to_bytes())
-            try i.put_file(user.copy(), "{folder}/CLAUDE.md", instructions.to_bytes())
+            try i.put_file(place.copy(), "{folder}/AGENTS.md", instructions.to_bytes())
+            try i.put_file(place.copy(), "{folder}/CLAUDE.md", instructions.to_bytes())
         }
-        i.write_skills(user.copy(), folder.copy())
+        i.write_skills(user.copy(), agent)
         let to = try acp.start(key.copy(), command, args, settings, folder, i.lines_to.copy())
         var p = Proc { agent: id.copy(), user: user.copy(), to: to, ready: false, images: false, program: program.copy(), resume: false, load: false, mcp_http: false, boxed: boxed, shared: shared, next_id: 1, pending: Map<i64, Pending>(), sessions: Map<String, String>(), told: Map<String, String>(), profiled: Map<String, i64>(), configs: Map<String, Json>(), waiting: List<String>(), key: key.copy(), stopped: false }
         p.pending.insert(1, Pending.Init)
@@ -5482,17 +5725,20 @@ impl Instance {
     fn write_instructions(i: Instance, user: String, agent: Json) {
         let id = str_at(agent.copy(), "id") ?? String()
         let folder = i.agent_folder(user.copy(), agent.copy())
+        let place = i.place(user.copy(), agent.copy())
         let instructions = str_at(agent, "instructions") ?? String()
         let names: List<str> = ["AGENTS.md", "CLAUDE.md"]
         for n in names {
-            if let err(e) = i.put_file(user.copy(), "{folder}/{n}", instructions.to_bytes()) { eprintln("loom: agent {id}'s {n}: {e}") }
+            if let err(e) = i.put_file(place.copy(), "{folder}/{n}", instructions.to_bytes()) { eprintln("loom: agent {id}'s {n}: {e}") }
         }
     }
 
     // Puts `user`'s skills in an agent's folder, as `.claude/skills/<name>/SKILL.md`,
     // and takes out the ones loom put there that are gone. A folder loom made
     // has a `.loom` file in it; others are the person's own and stay.
-    fn write_skills(i: Instance, user: String, folder: String) {
+    fn write_skills(i: Instance, user: String, agent: Json) {
+        let folder = i.agent_folder(user.copy(), agent.copy())
+        let place = i.place(user.copy(), agent)
         let skills = match i.store.skills(user.copy(), true) {
             ok(s) => s,
             err(e) => {
@@ -5507,8 +5753,8 @@ impl Instance {
             if not valid_skill(name.copy()) { continue }
             names.push(name.copy())
             let dir = "{root}/{name}"
-            if let err(e) = i.put_file(user.copy(), "{dir}/.loom", "Written by loom from its skills. Changes here are overwritten.\n".to_bytes()) { eprintln("loom: skill {name}: {e}") }
-            if let err(e) = i.put_file(user.copy(), "{dir}/SKILL.md", skill_file(s).to_bytes()) { eprintln("loom: skill {name}: {e}") }
+            if let err(e) = i.put_file(place.copy(), "{dir}/.loom", "Written by loom from its skills. Changes here are overwritten.\n".to_bytes()) { eprintln("loom: skill {name}: {e}") }
+            if let err(e) = i.put_file(place.copy(), "{dir}/SKILL.md", skill_file(s).to_bytes()) { eprintln("loom: skill {name}: {e}") }
         }
         let present = match fs.list(root.copy()) {
             ok(entries) => entries,
@@ -5522,9 +5768,9 @@ impl Instance {
             // Only the two files loom wrote, then the folder if that left it empty.
             let written: List<str> = ["SKILL.md", ".loom"]
             for f in written {
-                if let err(e) = i.drop_file(user.copy(), "{dir}/{f}") { eprintln("loom: skill {name}: {e}") }
+                if let err(e) = i.drop_file(place.copy(), "{dir}/{f}") { eprintln("loom: skill {name}: {e}") }
             }
-            if let err(e) = i.drop_dir(user.copy(), dir) { eprintln("loom: skill {name}'s folder stays: {e}") }
+            if let err(e) = i.drop_dir(place.copy(), dir) { eprintln("loom: skill {name}'s folder stays: {e}") }
         }
     }
 
@@ -5535,7 +5781,7 @@ impl Instance {
             err(_) => return,
         }
         for a in agents {
-            i.write_skills(user.copy(), i.agent_folder(user.copy(), a))
+            i.write_skills(user.copy(), a)
         }
     }
 
@@ -5579,7 +5825,7 @@ impl Instance {
         // learning"), once a session.
         let shared_told = "{session}#shared"
         if let _ = p.told.find(shared_told.copy()) {} else {
-            prompt.push(Obj.new().s("type", String("text")).s("text", "[loom: Your person's agents share the folder {i.shared_folder(user.copy())}. Put files there for another agent, and look there for what they leave. To hand one over with a message, give message_agent its path in files.]").done())
+            prompt.push(Obj.new().s("type", String("text")).s("text", "[loom: Your person's agents share the folder {i.shared_of(user.copy(), agent.copy())}. Put files there for another agent, and look there for what they leave. To hand one over with a message, give message_agent its path in files.]").done())
             p.told.insert(shared_told, String("1"))
         }
         // The instructions every agent of the person's follows (PLAN.md,
@@ -5631,7 +5877,8 @@ impl Instance {
                 err(e) => eprintln("loom: reading {sha} for an agent: {e}"),
             }
         }
-        let path = match i.agent_copy(user.copy(), i.folder_of(user.copy(), agent), f) {
+        let place = i.place(user.copy(), i.agent_or_id(user.copy(), agent.copy()))
+        let path = match i.agent_copy(place, i.folder_of(user.copy(), agent), f) {
             ok(p) => p,
             err(e) => {
                 eprintln("loom: copying {sha} to the agent's folder: {e}")
@@ -5889,7 +6136,7 @@ impl Instance {
                 i.publish(r.user.copy(), delta)
             } else if kind == "agent_message_chunk" {
                 // A file the agent sends back: an image, or a link to a file it made.
-                if let file = try i.file_from_agent(r.user.copy(), content) {
+                if let file = try i.file_from_agent(r.user.copy(), r.agent.copy(), content) {
                     var b = new_block("file")
                     b.file = file
                     r.blocks.push(b)
@@ -5948,7 +6195,7 @@ impl Instance {
     // A file in what an agent wrote, kept as the person's: an image block's bytes, an
     // embedded resource's blob, or a file:// link to a file on this machine. None for
     // anything else, or a file too big for the person's space.
-    fn file_from_agent(i: mut Instance, user: String, content: Json) -> Json? ! Error {
+    fn file_from_agent(i: mut Instance, user: String, agent: String, content: Json) -> Json? ! Error {
         let kind = str_at(content.copy(), "type") ?? String()
         var data: List<u8>? = none
         var name = String("file")
@@ -5973,9 +6220,9 @@ impl Instance {
             mime = str_at(content, "mimeType") ?? String()
             // A sandboxed agent's link is read in its sandbox: the instance reads
             // as its own user, which reads everything.
-            if i.sandboxed(user.copy()) {
+            if let p = i.place(user.copy(), i.agent_or_id(user.copy(), agent.copy())) {
                 let b = i.boxes else return none
-                data = b.read(user.copy(), path.copy())
+                data = b.read(p, path.copy())
                 if data == none { eprintln("loom: the sandboxed agent's file {path} isn't in its sandbox") }
             } else {
                 match fs.read(path.copy()) {
@@ -7202,11 +7449,23 @@ impl Instance {
                     if let why = try i.backup_refused(user.copy(), b) { return why }
                 }
             }
+            // Where it runs (PLAN.md, "Rules, records and limits"): in a sandbox
+            // when it's isolated, as every member's agent is, and with a network
+            // from everything to nothing.
+            let member = i.sandboxed(user.copy())
+            let asked_isolated = bool_at(args.copy(), "isolated")
+            if member and asked_isolated == some(false) { return Answer.Refused(String("not_allowed"), String("A member's agents always run in their sandbox.")) }
+            let isolated = member or asked_isolated == some(true)
+            let (network, network_why) = network_arg(args.copy())
+            if network_why.len() > 0 { return Answer.Refused(String("bad_request"), network_why) }
+            if network != Json.Null and not isolated { return Answer.Refused(String("bad_request"), String("An agent's network is kept in its sandbox: make it isolated too.")) }
+            if (asked_isolated == some(true) or network != Json.Null) and i.boxes == none { return Answer.Refused(String("not_here"), no_sandboxes()) }
             let id = try i.store.new_id("a")
             // Each new agent takes the next of the eight thread colours, unless it names one.
             let count = (try i.store.agents(user.copy())).len()
             let color = str_at(args.copy(), "color") ?? String(COLORS[count % COLORS.len()])
-            let agent = Obj.new().s("id", id).s("name", str_at(args.copy(), "name") ?? String("Agent")).s("color", color).s("acp_agent", program).s("instructions", str_at(args.copy(), "instructions") ?? String()).maybe("folder", str_at(args.copy(), "folder")).j("mcp", names_of(at(args.copy(), "mcp"))).maybe("permission", permission).maybe("busy", busy).maybe("backup", backup).b("code_mode", bool_at(args.copy(), "code_mode") ?? true).i("revision", 1).i("at", now()).done()
+            var agent = Obj.new().s("id", id).s("name", str_at(args.copy(), "name") ?? String("Agent")).s("color", color).s("acp_agent", program).s("instructions", str_at(args.copy(), "instructions") ?? String()).maybe("folder", str_at(args.copy(), "folder")).j("mcp", names_of(at(args.copy(), "mcp"))).maybe("permission", permission).maybe("busy", busy).maybe("backup", backup).b("code_mode", bool_at(args.copy(), "code_mode") ?? true).b("isolated", isolated).j("network", network).i("revision", 1).i("at", now()).done()
+            if network == Json.Null { agent = without(agent, "network") }
             try i.store.put_agent(user.copy(), agent.copy(), device.copy())
             i.log(user.copy(), str_at(agent.copy(), "id") ?? String(), "agent", "Made {str_at(agent.copy(), "name") ?? String()}", device.copy())
             try i.event(user, "agent.created", Obj.new().j("agent", agent.copy()).done())
@@ -7251,6 +7510,36 @@ impl Instance {
             }
             if let Json.Array(_) = at(args.copy(), "mcp") { o.m.insert(String("mcp"), names_of(at(args.copy(), "mcp"))) }
             if let on = bool_at(args.copy(), "code_mode") { o.m.insert(String("code_mode"), Json.Bool(on)) }
+            // Where it runs: isolated or not, and its network. A member's agents
+            // are always isolated. A change that moves it to another sandbox, or
+            // out of one, waits until it isn't answering; a new list for one closed
+            // to the network holds from its next connection.
+            let member = i.sandboxed(user.copy())
+            let was_isolated = i.isolated(user.copy(), old.copy())
+            var isolated = was_isolated
+            if let on = bool_at(args.copy(), "isolated") {
+                if member and not on { return Answer.Refused(String("not_allowed"), String("A member's agents always run in their sandbox.")) }
+                isolated = on
+            }
+            var network = at(old.copy(), "network")
+            if defaults.has(args.copy(), "network") {
+                let (given, why) = network_arg(args.copy())
+                if why.len() > 0 { return Answer.Refused(String("bad_request"), why) }
+                network = given
+            }
+            if network != Json.Null and not isolated { return Answer.Refused(String("bad_request"), String("An agent's network is kept in its sandbox: make it isolated too.")) }
+            let tighter = (isolated and not was_isolated) or (network != Json.Null and at(old.copy(), "network") == Json.Null)
+            if tighter and i.boxes == none { return Answer.Refused(String("not_here"), no_sandboxes()) }
+            let old_place = i.place(user.copy(), old.copy())
+            o.m.insert(String("isolated"), Json.Bool(isolated))
+            if network == Json.Null { _ = o.m.remove(String("network")) } else { o.m.insert(String("network"), network.copy()) }
+            let new_place = i.place(user.copy(), Json.Object(o.m.copy()))
+            let moves = old_place != new_place
+            if moves {
+                for (_, r) in i.runs {
+                    if r.user == user and r.agent == id { return Answer.Refused(String("busy"), String("The agent is answering. Change where it runs once it's done, or stop it.")) }
+                }
+            }
             // Another program offers other options: what it had goes.
             var switched = false
             if let program = str_at(args.copy(), "acp_agent") {
@@ -7288,6 +7577,15 @@ impl Instance {
             }
             let agent = o.i("revision", (int_at(old, "revision") ?? 0) + 1).done()
             try i.store.put_agent(user.copy(), agent.copy(), device.copy())
+            if moves {
+                i.moved_agent(user.copy(), id.copy(), old_place)
+            } else if new_place != none and at(agent.copy(), "network") != at(old.copy(), "network") {
+                if let d = mut i.doors.find("{user}/{id}") { d.hosts.send(hosts_of(agent.copy()) ?? List<String>()) }
+            }
+            if at(agent.copy(), "network") != at(old.copy(), "network") or isolated != was_isolated {
+                let where_now = if not isolated { String("on the instance's computer") } else if let list = hosts_of(agent.copy()) { if list.len() == 0 { String("isolated, with no network") } else { "isolated, reaching only {list.join(", ")}" } } else { String("isolated, with the internet") }
+                i.log(user.copy(), id.copy(), "agent", "Runs {where_now}", device.copy())
+            }
             // New sessions start with the new instructions.
             if str_at(args.copy(), "instructions") != none { i.write_instructions(user.copy(), agent.copy()) }
             i.log(user.copy(), id.copy(), "agent", "Changed: revision {int_at(agent.copy(), "revision") ?? 0}", device.copy())
@@ -7570,7 +7868,7 @@ impl Instance {
             let id = str_at(args.copy(), "agent") ?? String()
             if try i.store.agent(user.copy(), id.copy()) == none { return Answer.Refused(String("not_found"), "There's no agent {id}.") }
             let given = str_at(args, "path") ?? String()
-            let path = handoff_path(given.copy(), i.folder_of(user.copy(), id), i.shared_folder(user.copy())) else return Answer.Refused(String("not_found"), "{given} isn't a file in the agent's folder or the shared folder.")
+            let path = handoff_path(given.copy(), i.folder_of(user.copy(), id), i.shared_of(user.copy(), id.copy())) else return Answer.Refused(String("not_found"), "{given} isn't a file in the agent's folder or the shared folder.")
             let data = try fs.read(path.copy())
             if data.len() > HANDOFF_BYTES_MOST { return Answer.Refused(String("too_large"), "{given} is {data.len()} bytes, and a file opened from an agent's folder is {HANDOFF_BYTES_MOST} at most.") }
             let file_name = if let cut = path.replace("\\", "/").find_last("/") { path[cut + 1..].copy() } else { path.copy() }
@@ -7633,7 +7931,13 @@ impl Instance {
         if name == "agent.delete" {
             let id = str_at(args, "agent") ?? String()
             if try i.store.agent(user.copy(), id.copy()) == none { return Answer.Refused(String("not_found"), "There's no agent {id}.") }
+            let gone = i.place(user.copy(), try i.store.agent(user.copy(), id.copy()) ?? Json.Null)
             try i.store.delete_agent(user.copy(), id.copy())
+            // Its own sandbox, closed to the network, goes with it, and its egress.
+            i.close_doors(user.copy(), some(id.copy()))
+            if let p = gone {
+                if let b = i.boxes { b.drop_place(p) }
+            }
             i.drop_browsers(user.copy(), some(id.copy()))
             i.log(user.copy(), id.copy(), "agent", String("Deleted"), device.copy())
             try i.event(user, "agent.deleted", Obj.new().s("agent", id).done())
@@ -7660,7 +7964,7 @@ impl Instance {
                 if try i.may_use(user.copy(), a.name.copy()) { programs.push(try i.program_shared(user.copy(), a)) }
             }
             // Whether they're the owner, who gives programs and their settings to people.
-            return Answer.Value(Obj.new().j("programs", Json.Array(programs)).b("owner", not i.sandboxed(user)).done())
+            return Answer.Value(Obj.new().j("programs", Json.Array(programs)).b("owner", not i.sandboxed(user)).b("sandboxes", i.boxes != none).done())
         }
         if name == "acp.share" or name == "acp.members" {
             if try i.store.role(user.copy()) != some(String("owner")) { return Answer.Refused(String("not_allowed"), String("Only the instance's owner shares an agent program or its settings.")) }

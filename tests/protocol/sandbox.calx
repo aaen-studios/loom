@@ -195,6 +195,49 @@ fn run(runtime: String) ! Error {
 
     try code_mode(runtime.copy(), mut ann, ann_id.copy())
 
+    // An agent closed to the network (PLAN.md, "Rules, records and limits"):
+    // one of hers with a list runs in a sandbox of its own, with no network but
+    // its egress, which lets out only what the list lets, and loom's tools.
+    let listed_made = try ann.cmd("q_20", "agent.create", Obj.new().s("name", String("Listed")).s("acp_agent", String("boxed")).s("instructions", String("")).b("code_mode", false).j("network", Json.Array([Json.Str(String("github.com"))])).done())
+    let closed_agent = str_at(at(at(listed_made, "value"), "agent"), "id") ?? String()
+    let listed_chat = str_at(at(try ann.cmd("q_21", "conversation.create", Obj.new().s("agent", closed_agent.copy()).done()), "value"), "conversation") ?? String()
+    try ann.send(Obj.new().s("t", String("send")).s("cid", String("m_5")).s("conversation", listed_chat.copy()).s("text", String("/net github.com:443\n/net example.org:443\n/env HOME\n/mcp list")).done())
+    let closed_said = reply_text(try ann.reply())
+    println("      the agent said: {closed_said}")
+    try check(closed_said.contains("net github.com:443: direct closed") and not closed_said.contains("github.com:443: direct closed, proxy 403"), "an agent with a list reaches nothing straight, and its list through the egress")
+    try check(closed_said.contains("net example.org:443: direct closed, proxy 403"), "and nothing else, through it either")
+    try check(closed_said.contains("HOME={home}") and closed_said.contains("remember"), "it has her folder, and loom's tools through the egress")
+    let own_box = try Command.new(runtime.copy()).args([String("inspect"), String("--format"), String(#"{{.HostConfig.NetworkMode}}"#), "loom-{ann_id}-{closed_agent}"]).output()
+    try check(own_box.status.success() and own_box.text().trim() == "none", "in a sandbox of its own, with no network")
+    _ = try ann.until("event", "run.finished")
+    _ = try ann.cmd("q_22", "agent.update", Obj.new().s("agent", closed_agent.copy()).j("network", Json.Array(List<Json>())).done())
+    try ann.send(Obj.new().s("t", String("send")).s("cid", String("m_6")).s("conversation", listed_chat.copy()).s("text", String("/net github.com:443")).done())
+    let nothing = reply_text(try ann.reply())
+    try check(nothing.contains("direct closed, proxy 403"), "with an empty list, nothing gets out, from its next connection")
+    _ = try ann.until("event", "run.finished")
+    _ = try ann.cmd("q_23", "agent.update", Obj.new().s("agent", closed_agent.copy()).j("network", Json.Null).done())
+    let dropped = try Command.new(runtime.copy()).args([String("container"), String("inspect"), "loom-{ann_id}-{closed_agent}"]).output()
+    try check(not dropped.status.success(), "opening its network back up takes its own sandbox away")
+
+    // The owner's agents can be isolated too, and run in a sandbox of the
+    // owner's, on the program's settings, which are the owner's own.
+    var owner_id = String()
+    if let Json.Array(people) = at(at(try owner.cmd("q_5", "user.list", Obj.new().done()), "value"), "users") {
+        for p in people {
+            if str_at(p.copy(), "username") == some(String("elliot")) { owner_id = str_at(p, "user") ?? String() }
+        }
+    }
+    let isolated_made = try owner.cmd("q_6", "agent.create", Obj.new().s("name", String("Isolated")).s("acp_agent", String("boxed")).s("instructions", String("")).b("code_mode", false).b("isolated", true).done())
+    let isolated = str_at(at(at(isolated_made, "value"), "agent"), "id") ?? String()
+    let isolated_chat = str_at(at(try owner.cmd("q_7", "conversation.create", Obj.new().s("agent", isolated.copy()).done()), "value"), "conversation") ?? String()
+    try owner.send(Obj.new().s("t", String("send")).s("cid", String("m_1")).s("conversation", isolated_chat).s("text", String("/env HOME\n/env OWNER_KEY\n/mcp list")).done())
+    let owner_said = reply_text(try owner.reply())
+    println("      the owner's agent said: {owner_said}")
+    try check(owner_said.contains("HOME={data}/sandboxes/{owner_id}"), "the owner's isolated agent runs in a sandbox, in the owner's folder there")
+    try check(owner_said.contains("OWNER_KEY=the owner's own") and owner_said.contains("remember"), "on the owner's own settings, with loom's tools")
+    let owner_box = try Command.new(runtime.copy()).args([String("container"), String("inspect"), "loom-{owner_id}"]).output()
+    try check(owner_box.status.success(), "in the owner's sandbox")
+
     _ = try owner.cmd("q_3", "user.remove", Obj.new().s("user", ann_id.copy()).done())
     let there = try Command.new(runtime).args([String("container"), String("inspect"), "loom-{ann_id}"]).output()
     try check(not there.status.success(), "removing her removes her sandbox")

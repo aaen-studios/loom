@@ -60,6 +60,7 @@ struct Worker {
     key: String
     profile: String
     guarded: bool
+    proxy: u16    // the agent's egress on the instance's loopback, when its network is closed, or 0
     inbox: Receiver<In>
     back: Sender<Back>
     child: Child?
@@ -120,10 +121,10 @@ impl Task for Worker {
 // Starts the thread for the agent `key` names, whose browser keeps its profile
 // in `profile`. What it has to say comes to `back`. The thread ends once it's
 // sent Stop, with its browser stopped.
-pub fn start(key: String, profile: String, guarded: bool, back: Sender<Back>) -> (Sender<In>, Thread) {
+pub fn start(key: String, profile: String, guarded: bool, proxy: u16, back: Sender<Back>) -> (Sender<In>, Thread) {
     let inbox = Receiver<In>()
     let to = inbox.sender()
-    let t = unsafe { Thread.spawn(Worker { key: key.copy(), profile: profile.copy(), guarded: guarded, inbox: inbox, back: back.copy(), child: none, page: none, port: String(), next_id: 0, refs: Map<String, i64>(), hidden: List<(String, String)>(), watched: false, casting: false, recording: false, steps: List<Json>(), last_url: String() }) }
+    let t = unsafe { Thread.spawn(Worker { key: key.copy(), profile: profile.copy(), guarded: guarded, proxy: proxy, inbox: inbox, back: back.copy(), child: none, page: none, port: String(), next_id: 0, refs: Map<String, i64>(), hidden: List<(String, String)>(), watched: false, casting: false, recording: false, steps: List<Json>(), last_url: String() }) }
     return (to, t)
 }
 
@@ -452,6 +453,12 @@ impl Worker {
         if fs.exists(port_file.copy()) { try fs.remove_file(port_file.copy()) }
         var args: List<String> = ["--headless=new", "--remote-debugging-port=0", "--user-data-dir={w.profile}", "--no-first-run", "--no-default-browser-check", "--disable-background-networking", "--window-size=1280,800"]
         if not sandbox { args.push(String("--no-sandbox")) }
+        // An agent closed to the network browses through its egress, which lets it
+        // reach only the hosts on its list: every request, the computer's own too,
+        // and nothing over UDP, which a proxy doesn't carry.
+        if w.proxy > 0 {
+            args.extend(["--proxy-server=http://127.0.0.1:{w.proxy}", String("--proxy-bypass-list=<-loopback>"), String("--disable-quic"), String("--force-webrtc-ip-handling-policy=disable_non_proxied_udp")])
+        }
         args.push(String("about:blank"))
         let child = try Command.new(exe).args(args).stdin(Stdio.Null).stdout(Stdio.Pipe).stderr(Stdio.Stdout).own_group().spawn()
         // The browser writes the port it took, and its own address, once it listens.
