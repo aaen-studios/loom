@@ -85,6 +85,20 @@ enum Tokens {
         static let rowTall: CGFloat = 68
     }
 
+    enum PhoneSize {
+        static let caption: CGFloat = 12.5
+        static let small: CGFloat = 14
+        static let body: CGFloat = 16
+        static let reply: CGFloat = 16
+        static let composer: CGFloat = 16
+        static let heading: CGFloat = 28
+        static let hero: CGFloat = 34
+    }
+
+    enum PhoneSpace {
+        static let gutter: CGFloat = 20
+    }
+
     enum ColorDark {
         static let bg: UInt32 = 0x0b0b0c
         static let side: UInt32 = 0x0f0f10

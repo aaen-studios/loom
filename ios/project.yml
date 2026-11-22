@@ -1,0 +1,59 @@
+# The iPhone app's Xcode project, for XcodeGen. `calx scripts/ios.calx` builds the
+# core and runs `xcodegen` here, which makes Loom.xcodeproj. The project isn't kept
+# in git: change this file instead (ios/README.md).
+name: Loom
+include:
+  # The Calx core, linked as LoomCore.xcframework, once scripts/ios.calx has made it.
+  # Without it the app is built on sample frames, for working on the screens alone.
+  - path: core.yml
+    enable: ${LOOM_CORE}
+options:
+  bundleIdPrefix: no.aaenz
+  deploymentTarget:
+    iOS: "18.0"
+  createIntermediateGroups: true
+settings:
+  base:
+    SWIFT_VERSION: "6.0"
+    MARKETING_VERSION: "0.1.0"
+    CURRENT_PROJECT_VERSION: "1"
+    CODE_SIGN_STYLE: Automatic
+targets:
+  Loom:
+    type: application
+    platform: iOS
+    sources:
+      - path: Loom
+      - path: ../design/generated/Tokens.swift
+        group: Loom/Design
+      # The app icon from design/logo/ios, which scripts/ios.calx puts in a catalog.
+      - path: ../build/ios/Icons.xcassets
+        group: Loom/Resources
+        optional: true
+      - path: ../desktop/assets/fonts/Geist-Regular.ttf
+        group: Loom/Resources/Fonts
+      - path: ../desktop/assets/fonts/Geist-Medium.ttf
+        group: Loom/Resources/Fonts
+      - path: ../desktop/assets/fonts/Geist-SemiBold.ttf
+        group: Loom/Resources/Fonts
+      - path: ../desktop/assets/fonts/GeistMono-Regular.ttf
+        group: Loom/Resources/Fonts
+      - path: ../desktop/assets/fonts/GeistMono-Medium.ttf
+        group: Loom/Resources/Fonts
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: no.aaenz.loom
+        PRODUCT_NAME: Loom
+        INFOPLIST_FILE: Loom/Info.plist
+        CODE_SIGN_ENTITLEMENTS: Loom/Loom.entitlements
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        TARGETED_DEVICE_FAMILY: "1"
+        SWIFT_STRICT_CONCURRENCY: complete
+        ENABLE_PREVIEWS: YES
+schemes:
+  Loom:
+    build:
+      targets:
+        Loom: all
+    run:
+      config: Debug

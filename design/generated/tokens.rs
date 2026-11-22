@@ -76,6 +76,20 @@ pub mod control {
     pub const ROW_TALL: f32 = 68.0;
 }
 
+pub mod phone_size {
+    pub const CAPTION: f32 = 12.5;
+    pub const SMALL: f32 = 14.0;
+    pub const BODY: f32 = 16.0;
+    pub const REPLY: f32 = 16.0;
+    pub const COMPOSER: f32 = 16.0;
+    pub const HEADING: f32 = 28.0;
+    pub const HERO: f32 = 34.0;
+}
+
+pub mod phone_space {
+    pub const GUTTER: f32 = 20.0;
+}
+
 pub mod color_dark {
     pub const BG: u32 = 0x0b0b0c;
     pub const SIDE: u32 = 0x0f0f10;

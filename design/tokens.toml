@@ -75,6 +75,20 @@ choice = 50          # a big choice, such as where the server runs
 row = 54             # a settings row, at least
 row-tall = 68        # a settings row with a picture, at least
 
+# The iPhone app's type: the same scale, a little larger for a screen held in
+# the hand. Dynamic Type scales it from here.
+[phone.size]
+caption = 12.5
+small = 14
+body = 16
+reply = 16
+composer = 16
+heading = 28
+hero = 34
+
+[phone.space]
+gutter = 20         # the chat's sides
+
 # The app is near-monochrome. The only colour is the agents' threads.
 [color.dark]
 bg = "#0b0b0c"

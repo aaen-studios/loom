@@ -1,0 +1,14 @@
+# Links the Calx core (core/), which scripts/ios.calx builds into
+# build/ios/LoomCore.xcframework. Included by project.yml when LOOM_CORE is YES.
+targets:
+  Loom:
+    dependencies:
+      - framework: ../build/ios/LoomCore.xcframework
+        embed: false
+      - sdk: Security.framework
+      - sdk: SystemConfiguration.framework
+      - sdk: Network.framework
+      - sdk: CFNetwork.framework
+    settings:
+      base:
+        SWIFT_ACTIVE_COMPILATION_CONDITIONS: $(inherited) LOOM_CORE

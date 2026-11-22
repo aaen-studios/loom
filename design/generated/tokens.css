@@ -54,6 +54,14 @@
   --control-choice: 50px;
   --control-row: 54px;
   --control-row-tall: 68px;
+  --phone-size-caption: 12.5;
+  --phone-size-small: 14;
+  --phone-size-body: 16;
+  --phone-size-reply: 16;
+  --phone-size-composer: 16;
+  --phone-size-heading: 28;
+  --phone-size-hero: 34;
+  --phone-space-gutter: 20;
   --thread-stroke-small: 1.6px;
   --thread-stroke-large: 2.2px;
   --thread-motion-idle-amplitude: 0.035;
