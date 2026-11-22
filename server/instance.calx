@@ -53,6 +53,7 @@ import server.rules
 import server.brains
 import server.egress
 import server.sandbox
+import server.update
 import server.store.{AcpAgent, Device, Store, User, now, secret_key, site_of}
 import shared.tools
 
@@ -69,7 +70,34 @@ pub struct Config {
     pub lan: bool    // whether phones may reach it on the network, through the Noise bridge: an instance in the desktop app
     pub sandboxes: String    // what runs sandboxes for everyone but the owner (podman), or "" for none
     pub sandbox_image: String    // the image they run
+    pub release: update.Source    // where its own updates come from: loom's releases, but for tests
+    pub in_app: bool    // an instance inside the desktop app, which updates with the app
 }
+
+// An update of the instance's own program (server/update.calx), while one is
+// under way: its `state` is downloading, waiting (for nothing to run),
+// restarting, failed or latest; "" for none.
+struct Updating {
+    state: String
+    version: String    // the release it's for
+    why: String    // why it failed
+    now: bool    // stop what runs, rather than wait for it to end
+    auto: bool    // the instance started it itself
+    by: String    // who asked, or "" for the instance itself
+    sha: String    // the staged program's SHA-256
+    since: i64    // when it began stopping runs, with now
+}
+
+fn no_update() -> Updating {
+    return Updating { state: String(), version: String(), why: String(), now: false, auto: false, by: String(), sha: String(), since: 0 }
+}
+
+// How long an update stopping runs for `now` waits for them to end, before
+// the restart cuts them short.
+const UPDATE_STOP_MS: i64 = 15000
+// How long after the owner's instance starts it waits to tell them of an update
+// it made by itself, when none of their devices connects before.
+const UPDATE_TELL_MS: i64 = 120000
 
 // How long events are kept (PLAN.md, "Sync"): `age_ms`, but always each
 // person's newest `keep`, looked at every `every_ms`. A device further behind
@@ -269,6 +297,18 @@ pub struct Instance {
     next_browser_sweep: i64
     task_stops: Map<String, String>    // a task's run -> "pause" or "cancel", as the person asked
     resumes: List<(String, String)>    // a person and a task the restart cut short, to carry on from the loop
+    release: update.Source    // where its own updates come from
+    host: update.Host    // how it runs, which says whether and how it updates itself
+    exe: String    // the program's path, taken at start: on Linux the running program follows its file when an update renames it to .old
+    update_to: Sender<update.Job>    // the thread that downloads and checks updates
+    update_back: Receiver<update.Back>
+    updating: Updating
+    next_update_check: i64    // when it next looks for a release by itself, with self-updates on; 0 with them off
+    last_busy: i64    // when something last ran, or came from an app
+    restart_stops: List<String>    // runs stopped for a restart, which the restart finishes
+    restart: bool    // the loop stopped to start again as the new program
+    told_update: Json    // an update the instance made by itself, to tell its owner of once, or null
+    told_update_at: i64    // when to tell them, if none of their devices has come by then
 }
 
 // An agent's browser (server/browser.calx), on its thread.
@@ -904,6 +944,7 @@ impl Instance {
         let (install_to, install_done) = installer.start()
         let (push_to, push_gone) = push.start(config.apns.copy())
         let (move_to, move_done) = move.start()
+        let (update_to, update_back) = update.start()
         // A moved instance stays moved, and keeps telling devices where it went.
         var moved = Json.Null
         if let text = try store.meta("moved") {
@@ -911,7 +952,7 @@ impl Instance {
         }
         let browser_done = Receiver<browser.Back>()
         let browser_to = browser_done.sender()
-        var i = Instance { browsers: LinkedMap<String, Browser>(), watchers: Map<u32, String>(), browser_done: browser_done, browser_to: browser_to, stopped_browsers: List<Thread>(), fills: Map<String, Fill>(), turns_ended: List<(String, String, String)>(), next_browser_sweep: 0, task_stops: Map<String, String>(), resumes: List<(String, String)>(), push_to: push_to, push_gone: push_gone, move_to: move_to, move_done: move_done, lan: config.lan, bridge: none, stop_bridge: none, lan_port: 0, announcer: none, stop_announcer: none, to_close: List<ServerSocket>(), boxes: none, gate: none, stop_gate: none, doors: LinkedMap<String, egress.Door>(), moving: String(), move_waiters: List<Waiter>(), moved: moved, version: config.version.copy(), store: store, server: server, data: config.data.copy(), sessions: Map<u32, Session>(), runs: LinkedMap<String, Run>(), procs: LinkedMap<String, Proc>(), approvals: LinkedMap<String, Approval>(), lines: lines, lines_to: to, hash_to: hash_to, hash_done: hash_done, next_job: 0, auths: Map<i64, Auth>(), dummy_hash: dummy, failures: LinkedMap<String, List<i64>>(), thumbs: files.start(), events: config.events, next_prune: 0, grants: Map<String, Grant>(), calls: Map<String, Request>(), context: Map<String, (i64, i64)>(), registry_at: config.registry.copy(), registry: Json.Null, registry_time: 0, registry_fetching: false, install_to: install_to, install_done: install_done, fetching: List<Waiter>(), installs: Map<i64, Install>(), deno_job: 0, deno_waiters: List<Request>(), code_acts: Map<i64, String>(), leftovers: List<String>(), next_sweep: 0, device_calls: Map<String, DeviceCall>(), minute_ms: config.minute_ms, next_due: 0, routine_runs: Map<String, RoutineRun>(), routine_marks: Map<String, (String, String)>(), run_chains: Map<String, List<String>>(), panel_calls: Map<String, Waiter>(), script_calls: Map<String, Request>(), running_flows: LinkedMap<String, flows.Flow>(), flow_steps: Map<String, (String, usize)>(), advancing: List<String>(), flow_results: List<(String, usize, bool, String)>(), flows_due: List<String>(), slow_calls: Map<String, String>(), acting: 0, call_actions: Map<String, i64>(), tool_actions: Map<String, i64>(), sealer: try secret_key(config.data.copy()) }
+        var i = Instance { release: config.release.copy(), host: update.host(config.in_app), exe: current_exe(), update_to: update_to, update_back: update_back, updating: no_update(), next_update_check: 0, last_busy: now(), restart_stops: List<String>(), restart: false, told_update: Json.Null, told_update_at: 0, browsers: LinkedMap<String, Browser>(), watchers: Map<u32, String>(), browser_done: browser_done, browser_to: browser_to, stopped_browsers: List<Thread>(), fills: Map<String, Fill>(), turns_ended: List<(String, String, String)>(), next_browser_sweep: 0, task_stops: Map<String, String>(), resumes: List<(String, String)>(), push_to: push_to, push_gone: push_gone, move_to: move_to, move_done: move_done, lan: config.lan, bridge: none, stop_bridge: none, lan_port: 0, announcer: none, stop_announcer: none, to_close: List<ServerSocket>(), boxes: none, gate: none, stop_gate: none, doors: LinkedMap<String, egress.Door>(), moving: String(), move_waiters: List<Waiter>(), moved: moved, version: config.version.copy(), store: store, server: server, data: config.data.copy(), sessions: Map<u32, Session>(), runs: LinkedMap<String, Run>(), procs: LinkedMap<String, Proc>(), approvals: LinkedMap<String, Approval>(), lines: lines, lines_to: to, hash_to: hash_to, hash_done: hash_done, next_job: 0, auths: Map<i64, Auth>(), dummy_hash: dummy, failures: LinkedMap<String, List<i64>>(), thumbs: files.start(), events: config.events, next_prune: 0, grants: Map<String, Grant>(), calls: Map<String, Request>(), context: Map<String, (i64, i64)>(), registry_at: config.registry.copy(), registry: Json.Null, registry_time: 0, registry_fetching: false, install_to: install_to, install_done: install_done, fetching: List<Waiter>(), installs: Map<i64, Install>(), deno_job: 0, deno_waiters: List<Request>(), code_acts: Map<i64, String>(), leftovers: List<String>(), next_sweep: 0, device_calls: Map<String, DeviceCall>(), minute_ms: config.minute_ms, next_due: 0, routine_runs: Map<String, RoutineRun>(), routine_marks: Map<String, (String, String)>(), run_chains: Map<String, List<String>>(), panel_calls: Map<String, Waiter>(), script_calls: Map<String, Request>(), running_flows: LinkedMap<String, flows.Flow>(), flow_steps: Map<String, (String, usize)>(), advancing: List<String>(), flow_results: List<(String, usize, bool, String)>(), flows_due: List<String>(), slow_calls: Map<String, String>(), acting: 0, call_actions: Map<String, i64>(), tool_actions: Map<String, i64>(), sealer: try secret_key(config.data.copy()) }
         if config.sandboxes.len() > 0 and not i.lan { try i.sandboxes_on(config.sandboxes.copy(), config.sandbox_image.copy()) }
         // An action the last run of the instance left started, it never finished.
         try i.store.settle_cut_short()
@@ -928,6 +969,25 @@ impl Instance {
             let f = flows.picked_up(kept)
             i.flows_due.push(f.id.copy())
             i.running_flows.insert(f.id.copy(), f)
+        }
+        // An update the last program swapped in before it restarted: whether the
+        // program running now is the one it put there. One it made by itself is
+        // told to the owner once (`told_update`).
+        if let text = try i.store.meta("updated") {
+            try i.store.delete_meta("updated")
+            if let ok(u) = parse(text) {
+                let worked = update.running_sha() == (str_at(u.copy(), "sha") ?? String())
+                let updated_to = str_at(u.copy(), "to") ?? String()
+                println(if worked { "loom: updated to {updated_to}" } else { "loom: the update to {updated_to} didn't take: this is {i.version}" })
+                if bool_at(u.copy(), "auto") == some(true) {
+                    i.told_update = Obj.new().b("worked", worked).s("to", updated_to).s("from", str_at(u, "from") ?? String()).done()
+                    i.told_update_at = now() + UPDATE_TELL_MS
+                }
+            }
+        }
+        // With self-updates on, it looks a minute after it starts, then every six hours.
+        if try i.store.meta("auto_update") == some(String("on")) and update.refusal(i.host) == none {
+            i.next_update_check = now() + i.minute_ms
         }
         // Phones that were on stay on.
         if i.lan and try i.store.meta("phones") == some(String("on")) {
@@ -1272,6 +1332,16 @@ impl Instance {
         return Obj.new().b("on", true).i("port", i64(i.lan_port)).s("key", bytes.base64(key.public_key().bytes())).done()
     }
 
+    /// The port it listens on, which an update's new program takes over.
+    pub fn port(self) -> u16 {
+        return self.server.port
+    }
+
+    /// The program it was started as, which an update swaps a new one into.
+    pub fn program(self) -> String {
+        return self.exe.copy()
+    }
+
     pub fn url(self) -> String {
         return self.server.url()
     }
@@ -1343,6 +1413,8 @@ impl Instance {
     fn run(i: mut Instance, until: own Receiver<bool>?) ! Error {
         var stop = until
         loop {
+            // An update swapped the program in: it stops here, and main starts the new one.
+            if i.restart { break }
             if let s = mut stop {
                 if s.next() != none { break }
             }
@@ -1391,7 +1463,9 @@ impl Instance {
                 },
                 _ => {},
             }
-            if now() >= i.next_due { i.due() }
+            // While an update stops what runs, nothing new starts: the restart picks it all up.
+            let holding = i.holding()
+            if now() >= i.next_due and not holding { i.due() }
             while let line = i.lines.next() {
                 match i.agent_line(line) {
                     ok => {},
@@ -1476,15 +1550,17 @@ impl Instance {
                 }
             }
             if now() >= i.next_browser_sweep { i.close_idle_browsers() }
+            while let back = i.update_back.next() { i.update_came(back) }
+            i.update_tick()
             // Tasks first: what waits in a task's conversation goes after it.
-            while i.resumes.len() > 0 {
+            while i.resumes.len() > 0 and not holding {
                 let (user, task) = i.resumes.remove(0)
                 match i.task_go(user, task, String(TASK_RESTARTED), false) {
                     ok(_) => {},
                     err(e) => eprintln("loom: carrying on a task: {e}"),
                 }
             }
-            while i.turns_ended.len() > 0 {
+            while i.turns_ended.len() > 0 and not holding {
                 let (user, conversation, status) = i.turns_ended.remove(0)
                 match i.next_queued(user, conversation, status) {
                     ok => {},
@@ -1493,7 +1569,7 @@ impl Instance {
             }
             // Then the routine flows a run's end moved along: a step's agent's
             // program may have been in the middle of being handled then.
-            while i.flows_due.len() > 0 {
+            while i.flows_due.len() > 0 and not holding {
                 let id = i.flows_due.remove(0)
                 match i.advance_flow(id) {
                     ok => {},
@@ -2181,7 +2257,7 @@ impl Instance {
         if req.path == "/api/info" and req.method == "GET" {
             let users = try i.store.user_count()
             let versions = Json.Array([Json.Int(i64(protocol.NEWEST))])
-            return some(json_response(200, Obj.new().s("instance", try i.store.meta("instance") ?? String()).s("key", try i.public_key()).j("protocol", versions).b("setup", users == 0).j("moved", i.moved.copy()).done()))
+            return some(json_response(200, Obj.new().s("instance", try i.store.meta("instance") ?? String()).s("key", try i.public_key()).j("protocol", versions).s("version", i.version.copy()).b("setup", users == 0).j("moved", i.moved.copy()).done()))
         }
         // Once moved, the rest is at the new place; while moving, nothing changes here.
         if i.moved != Json.Null {
@@ -3995,6 +4071,271 @@ impl Instance {
     }
 
     // `message` signed with the instance's key, as hex.
+    // --- Updating itself (PLAN.md, "Updates and versions"; server/update.calx) ---
+
+    // Whether `user` may update the instance: the owner and admins.
+    fn may_update(i: Instance, user: String) -> bool ! Error {
+        let role = try i.store.role(user) ?? String()
+        return role == "owner" or role == "admin"
+    }
+
+    // How an update stands, as instance.update's answer and frame have it.
+    fn update_json(i: Instance) -> Json {
+        let u = i.updating.copy()
+        var o = Obj.new().s("state", u.state.copy())
+        if u.version.len() > 0 { o = o.s("version", u.version.copy()) }
+        if u.why.len() > 0 { o = o.s("why", u.why.copy()) }
+        if u.now { o = o.b("now", true) }
+        if u.auto { o = o.b("auto", true) }
+        return o.done()
+    }
+
+    // Tells every owner and admin connected how the update stands. It isn't an
+    // event: it's how things are now, which `welcome` gives a device that comes later.
+    fn tell_update(i: Instance) {
+        let frame = "{merge(Obj.new().s("t", String("instance.update")).done(), i.update_json())}"
+        for (_, s) in i.sessions {
+            if not s.live { continue }
+            let may = match i.may_update(s.user.copy()) {
+                ok(m) => m,
+                err(_) => false,
+            }
+            if may { _ = i.server.send_text(s.socket, frame.copy()) }
+        }
+    }
+
+    // Why this instance can't update itself, or none when it can: one in Docker or
+    // the desktop app, or one whose program sits where it can't write.
+    fn update_refused(i: Instance) -> String? {
+        if let why = update.refusal(i.host) { return some(why) }
+        return match update.writable(i.exe.copy()) {
+            ok => none,
+            err(e) => some("{e}. On a server set up with loom install, run sudo loom install again, which puts the program where the service can update it."),
+        }
+    }
+
+    // Asks the update thread to look for a newer release, and stage it.
+    fn look_for_update(i: mut Instance, auto: bool, by: String, now_too: bool) {
+        i.updating = Updating { state: String("downloading"), version: String(), why: String(), now: now_too, auto: auto, by: by.copy(), sha: String(), since: 0 }
+        i.update_to.send(update.Job { source: i.release.copy(), current: i.version.copy(), exe: i.exe.copy(), auto: auto })
+        if not auto { i.tell_update() }
+    }
+
+    // instance.update, and instance.updates.
+    fn update_cmd(i: mut Instance, user: String, device: String, name: String, args: Json) -> Answer ! Error {
+        let role = try i.store.role(user.copy()) ?? String()
+        let may = role == "owner" or role == "admin"
+        if name == "instance.updates" {
+            if at(args.copy(), "auto") != Json.Null {
+                if role != "owner" or not device.starts_with("d_") { return Answer.Refused(String("not_allowed"), String("Only the instance's owner, on one of their devices, lets it update itself.")) }
+                let on = bool_at(args.copy(), "auto") ?? false
+                if on {
+                    if let why = i.update_refused() { return Answer.Refused(String("not_here"), why) }
+                    try i.store.set_meta("auto_update", String("on"))
+                    i.next_update_check = now() + i.minute_ms
+                } else {
+                    try i.store.delete_meta("auto_update")
+                    i.next_update_check = 0
+                }
+            }
+            let why = i.update_refused()
+            var o = Obj.new().s("version", i.version.copy()).b("auto", try i.store.meta("auto_update") == some(String("on"))).b("may", may).b("owner", role == "owner").b("can", why == none).maybe("why", why)
+            if may { o = o.j("update", i.update_json()) }
+            return Answer.Value(o.done())
+        }
+        if not may { return Answer.Refused(String("not_allowed"), String("Only the instance's owner and admins update it.")) }
+        if let why = i.update_refused() { return Answer.Refused(String("not_here"), why) }
+        if i.moving.len() > 0 { return Answer.Refused(String("moving"), "The instance is moving to {i.moving}.") }
+        let now_too = bool_at(args, "now") ?? false
+        let state = i.updating.state.copy()
+        if state == "downloading" or state == "waiting" {
+            // One under way, the instance's own too, is the person's now.
+            i.updating.auto = false
+            i.updating.by = user.copy()
+            if now_too and not i.updating.now {
+                i.updating.now = true
+                if state == "waiting" { i.updating.since = now() }
+            }
+            i.tell_update()
+        } else if state != "restarting" {
+            i.look_for_update(false, user, now_too)
+        }
+        return Answer.Value(i.update_json())
+    }
+
+    // What the update thread found.
+    fn update_came(i: mut Instance, back: update.Back) {
+        if i.updating.state != "downloading" { return }
+        match back {
+            update.Back.Latest(version, _) => {
+                if i.updating.auto {
+                    i.updating = no_update()
+                    return
+                }
+                i.updating.state = String("latest")
+                i.updating.version = version.copy()
+            },
+            update.Back.Staged(version, sha, _) => {
+                println("loom: {version} is downloaded and checked, and goes in once nothing runs")
+                i.updating.state = String("waiting")
+                i.updating.version = version.copy()
+                i.updating.sha = sha.copy()
+                if i.updating.now { i.updating.since = now() }
+            },
+            update.Back.Failed(version, why, _) => {
+                eprintln("loom: the update didn't work: {why}")
+                if i.updating.auto {
+                    i.updating = no_update()
+                    i.self_update_failed(version, why)
+                    return
+                }
+                i.updating.state = String("failed")
+                i.updating.version = version.copy()
+                i.updating.why = why.copy()
+            },
+        }
+        i.tell_update()
+    }
+
+    // A self-update that didn't work is told to the owner, once for each release.
+    fn self_update_failed(i: Instance, version: String, why: String) {
+        let key = if version.len() > 0 { version.copy() } else { why.copy() }
+        match i.store.meta("update_failed") {
+            ok(some(told)) => if told == key { return },
+            _ => {},
+        }
+        if let err(e) = i.store.set_meta("update_failed", key) { eprintln("loom: {e}") }
+        let what = if version.len() > 0 { "to {version}" } else { String("") }
+        match i.notify_owner("loom couldn't update itself{if what.len() > 0 { " " } else { "" }}{what}: {why}") {
+            ok => {},
+            err(e) => eprintln("loom: telling the owner: {e}"),
+        }
+    }
+
+    // A notification to the owner, from loom itself rather than an agent.
+    fn notify_owner(i: Instance, body: String) ! Error {
+        for u in try i.store.users() {
+            if u.role == "owner" { try i.event(u.id.copy(), "notify", Obj.new().s("agent", String()).s("title", String("loom")).s("body", body.copy()).done()) }
+        }
+    }
+
+    // Tells the owner of the update the instance made by itself before it restarted.
+    fn tell_owner_update(i: mut Instance) ! Error {
+        let u = i.told_update.copy()
+        i.told_update = Json.Null
+        let to = str_at(u.copy(), "to") ?? String()
+        let body = if bool_at(u, "worked") == some(true) { "loom updated itself to {to}." } else { "loom tried to update itself to {to}, but {i.version} still runs." }
+        try i.notify_owner(body)
+    }
+
+    // Whether anything is working that a restart would cut short: a run (a task's
+    // and a flow's step are runs), what waits to start on the loop, an install,
+    // a move, a login being checked, or a browser the person has taken over.
+    fn update_busy(i: Instance) -> bool {
+        if i.runs.len() > 0 or i.resumes.len() > 0 or i.turns_ended.len() > 0 or i.flows_due.len() > 0 { return true }
+        return i.other_busy()
+    }
+
+    // The same, but for runs: what an update with `now` still waits for.
+    fn other_busy(i: Instance) -> bool {
+        if i.installs.len() > 0 or i.deno_job > 0 or i.moving.len() > 0 or i.auths.len() > 0 { return true }
+        for (_, b) in i.browsers {
+            if b.person or b.recording { return true }
+        }
+        return false
+    }
+
+    // Whether an update is stopping what runs, so nothing new starts.
+    fn holding(i: Instance) -> bool {
+        return i.updating.state == "waiting" and i.updating.now
+    }
+
+    // Once a loop: looks for a release by itself when it's time, and restarts into a
+    // staged one once nothing runs.
+    fn update_tick(i: mut Instance) {
+        let t = now()
+        if i.update_busy() { i.last_busy = t }
+        if i.told_update != Json.Null and t >= i.told_update_at {
+            match i.tell_owner_update() {
+                ok => {},
+                err(e) => eprintln("loom: telling the owner: {e}"),
+            }
+        }
+        if i.next_update_check > 0 and t >= i.next_update_check {
+            i.next_update_check = t + 360 * i.minute_ms
+            let state = i.updating.state.copy()
+            if state.len() == 0 or state == "latest" or state == "failed" { i.look_for_update(true, String(), false) }
+        }
+        if i.updating.state != "waiting" { return }
+        if i.updating.now {
+            // Each run is stopped as the stop button does, and the restart finishes it.
+            var stopping = List<String>()
+            for (id, _) in i.runs {
+                if not i.restart_stops.contains(id.copy()) { stopping.push(id.copy()) }
+            }
+            for id in stopping {
+                i.restart_stops.push(id.copy())
+                match i.stop_run(id) {
+                    ok => {},
+                    err(e) => eprintln("loom: stopping a run to update: {e}"),
+                }
+            }
+            if i.other_busy() { return }
+            if i.runs.len() > 0 and t - i.updating.since < UPDATE_STOP_MS { return }
+            i.restart_now()
+            return
+        }
+        if i.update_busy() { return }
+        // By itself, it waits for a few quiet minutes, so it doesn't restart under someone.
+        if i.updating.auto and t - i.last_busy < 5 * i.minute_ms { return }
+        i.restart_now()
+    }
+
+    // Swaps the staged program in and stops the loop, for main to start it.
+    fn restart_now(i: mut Instance) {
+        match update.swap(i.exe.copy()) {
+            ok => {},
+            err(e) => {
+                eprintln("loom: the update didn't go in: {e}")
+                let auto = i.updating.auto
+                let version = i.updating.version.copy()
+                i.updating.state = String("failed")
+                i.updating.why = "{e}"
+                i.restart_stops = List<String>()
+                // Runs stopped for it, which the restart would have finished, finish now.
+                match i.finish_cut_runs() {
+                    ok => {},
+                    err(e2) => eprintln("loom: finishing stopped runs: {e2}"),
+                }
+                i.tell_update()
+                if auto { i.self_update_failed(version, "{e}") }
+                return
+            },
+        }
+        let kept = Obj.new().s("from", i.version.copy()).s("to", i.updating.version.copy()).s("sha", i.updating.sha.copy()).b("auto", i.updating.auto).s("by", i.updating.by.copy()).done()
+        if let err(e) = i.store.set_meta("updated", "{kept}") { eprintln("loom: {e}") }
+        println("loom: restarting to run {i.updating.version}")
+        i.updating.state = String("restarting")
+        i.tell_update()
+        i.restart = true
+    }
+
+    // Runs the store has running that the loop no longer does: those an update
+    // stopped for a restart that didn't come. Each is cancelled, as stopped.
+    fn finish_cut_runs(i: mut Instance) ! Error {
+        for (user, run, conversation) in try i.store.unfinished_runs() {
+            if i.runs.contains(run.copy()) { continue }
+            try i.store.finish_run(run.copy(), String("cancelled"))
+            try i.event(user.copy(), "run.finished", Obj.new().s("run", run).s("conversation", conversation.copy()).s("status", String("cancelled")).done())
+            i.turns_ended.push((user.copy(), conversation.copy(), String("cancelled")))
+        }
+    }
+
+    /// Whether the loop stopped to start again as the program an update swapped in.
+    pub fn restart_wanted(self) -> bool {
+        return self.restart
+    }
+
     fn sign(i: Instance, message: String) -> String ! Error {
         let seed = try i.store.meta("key") ?? String()
         let key = Ed25519Key.from_seed(bytes.from_hex(seed) ?? List<u8>()) else {
@@ -4991,6 +5332,8 @@ impl Instance {
             try i.hello(s, f)
             return
         }
+        // Someone is using the instance: a self-update waits for a quiet moment.
+        if t == "send" or t == "cmd" or t == "approve" or t == "cancel" { i.last_busy = now() }
         if t == "send" {
             try i.send(s, user, device, f)
         } else if t == "approve" {
@@ -5052,7 +5395,10 @@ impl Instance {
         // once events have been pruned, or one ahead of the newest (the
         // instance was restored from an older backup), gets a snapshot.
         let reset = after > last or (first > 1 and after < first - 1)
-        _ = i.server.send_text(s, "{Obj.new().s("t", String("welcome")).i("version", i64(version)).s("user", user.copy()).s("device", device.id.copy()).i("seq", last).b("reset", reset).s("key", try i.public_key()).maybe("relay", try i.relay_key()).done()}")
+        // The instance's own version, and to an owner or admin, an update under way.
+        var welcome = Obj.new().s("t", String("welcome")).i("version", i64(version)).s("loom", i.version.copy()).s("user", user.copy()).s("device", device.id.copy()).i("seq", last).b("reset", reset).s("key", try i.public_key()).maybe("relay", try i.relay_key())
+        if i.updating.state.len() > 0 and i.updating.state != "latest" and try i.may_update(user.copy()) { welcome = welcome.j("update", i.update_json()) }
+        _ = i.server.send_text(s, "{welcome.done()}")
         if reset {
             _ = i.server.send_text(s, "{try i.snapshot(user.copy(), last)}")
         } else {
@@ -5074,7 +5420,10 @@ impl Instance {
             }
         }
         _ = i.server.send_text(s, "{Obj.new().s("t", String("synced")).i("seq", last).done()}")
-        i.sessions.insert(s.id(), Session { socket: s, user: user, device: device.id, live: true, key: String(), tools: Json.Null })
+        i.sessions.insert(s.id(), Session { socket: s, user: user.copy(), device: device.id, live: true, key: String(), tools: Json.Null })
+        // The owner's first device after an update the instance made by itself hears of
+        // it live, so it notifies.
+        if i.told_update != Json.Null and try i.store.role(user) == some(String("owner")) { try i.tell_owner_update() }
     }
 
     fn snapshot(i: Instance, user: String, seq: i64) -> Json ! Error {
@@ -6902,6 +7251,13 @@ impl Instance {
             try i.store.put_message(r.user.copy(), message.copy())
             try i.event(r.user.copy(), "message.created", Obj.new().s("conversation", r.conversation.copy()).j("message", message).done())
         }
+        // A run an update stopped to restart keeps its reply so far, and the restart
+        // does the rest, as for any run a restart cuts short: the run is failed, saying
+        // so, its task carries on, its flow's step goes again and its queue goes on.
+        if let k = i.restart_stops.position(|x| x == r.id) {
+            _ = i.restart_stops.remove(k)
+            return
+        }
         try i.store.finish_run(r.id.copy(), status.copy())
         // A task's run ends it, fails it, or stops it: cancelled when the
         // person cancelled the task, and otherwise paused, to resume.
@@ -7380,6 +7736,7 @@ impl Instance {
         if name == "instance.move" {
             return try i.start_move(user, device, args)
         }
+        if name == "instance.update" or name == "instance.updates" { return try i.update_cmd(user, device, name, args) }
         if name == "conversation.create" {
             let agent = str_at(args.copy(), "agent") ?? String()
             if try i.store.agent(user.copy(), agent.copy()) == none { return Answer.Refused(String("not_found"), "There's no agent {agent}.") }

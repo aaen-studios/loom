@@ -19,6 +19,10 @@ import shared.obj.{Obj}
 pub const USER: str = "loom"
 pub const HOME: str = "/var/lib/loom"
 pub const BIN: str = "/usr/local/bin/loom"
+// The program the service runs: the loom user's own copy, in its folder, so the
+// instance can swap in an update (server/update.calx). /usr is read-only to the
+// service, and BIN stays root's, for the command line.
+pub const SERVICE_BIN: str = "/var/lib/loom/bin/loom"
 pub const UNIT: str = "/etc/systemd/system/loom.service"
 pub const CADDYFILE: str = "/etc/caddy/Caddyfile"
 // Marks the files loom wrote, so a second install may write them again.
@@ -58,14 +62,16 @@ pub fn unit(port: u16, boxes: String?) -> String {
     lines.push(String("[Service]"))
     lines.push("User={USER}")
     lines.push("Group={USER}")
+    // So an update knows systemd starts it again (server/update.calx).
+    lines.push(String("Environment=LOOM_SERVICE=systemd"))
     if let uid = boxes.copy() {
-        lines.push("ExecStart={BIN} serve --data {HOME} --port {port} --sandboxes podman")
+        lines.push("ExecStart={SERVICE_BIN} serve --data {HOME} --port {port} --sandboxes podman")
         lines.push("Environment=XDG_RUNTIME_DIR=/run/user/{uid}")
         lines.push("Environment=DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/{uid}/bus")
         // ProtectHome covers /run/user too, where rootless Podman keeps its state.
         lines.push("ReadWritePaths=/run/user/{uid}")
     } else {
-        lines.push("ExecStart={BIN} serve --data {HOME} --port {port}")
+        lines.push("ExecStart={SERVICE_BIN} serve --data {HOME} --port {port}")
         lines.push(String("NoNewPrivileges=yes"))
     }
     let rest: List<String> = [
@@ -197,6 +203,15 @@ pub fn install(plan: Plan) -> Done ! Error {
         try fs.rename_synced(next, String(BIN))
         steps.push("put loom in {BIN}")
     }
+    // And the service's own copy, which it updates itself.
+    let folder = String(SERVICE_BIN[..SERVICE_BIN.find_last("/") ?? 0])
+    try fs.make_dir_all(folder.copy())
+    let service_next = "{SERVICE_BIN}.new"
+    try fs.copy(String(BIN), service_next.copy())
+    try fs.set_mode(service_next.copy(), 0o755)
+    try fs.rename_synced(service_next, String(SERVICE_BIN))
+    _ = try sh("chown", [String("-R"), String("loom:loom"), folder])
+    steps.push("the service runs its own copy, {SERVICE_BIN}, which it can update")
 
     // Sandboxes, for everyone but the owner.
     let boxes = if plan.sandboxes { try podman_for_loom(mut steps) } else { none }
@@ -284,7 +299,8 @@ pub fn done_text(d: Done) -> String {
 @test
 fn the_unit_runs_it_as_loom() {
     let u = unit(8790, none)
-    assert(u.contains("User=loom") and u.contains("ExecStart=/usr/local/bin/loom serve --data /var/lib/loom --port 8790\n") and u.contains("NoNewPrivileges=yes"))
+    assert(u.contains("User=loom") and u.contains("ExecStart=/var/lib/loom/bin/loom serve --data /var/lib/loom --port 8790\n") and u.contains("NoNewPrivileges=yes"))
+    assert(u.contains("Environment=LOOM_SERVICE=systemd\n"))
     let boxed = unit(8790, some(String("998")))
     assert(boxed.contains("--port 8790 --sandboxes podman") and boxed.contains("XDG_RUNTIME_DIR=/run/user/998") and boxed.contains("After=user@998.service") and boxed.contains("ReadWritePaths=/run/user/998"))
     assert(not boxed.contains("NoNewPrivileges"))

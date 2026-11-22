@@ -19,19 +19,18 @@ module server.main
 // Each but serve, mcp and egress takes --json, to answer in JSON.
 //
 // Run from source: calx server/main.calx serve
-import std.bytes
 import std.crypto.{PasswordHasher}
 import std.env
 import std.fs
-import std.hash.{sha256}
 import std.http.{Header, get, post}
 import std.http.server.{Server}
 import std.io
 import std.json.{Json, parse}
 import std.process.{current_exe, exit}
+import std.thread.{sleep}
 import shared.obj.{Obj, at, bool_at, str_at}
 import shared.protocol
-import shared.release.{MANIFEST, RELEASE_KEY, check_manifest, newer}
+import shared.release.{newer}
 import server.instance.{Config, EventLife, Instance}
 import server.mcp
 import server.egress
@@ -41,6 +40,7 @@ import server.installer
 import server.move
 import server.store.{Store}
 import server.setup
+import server.update
 
 const VERSION: str = "0.2.0-dev"
 
@@ -126,10 +126,12 @@ struct Args {
     url: String    // for scripts: the instance's address
     token: String    // and the person's script token
     conversation: String
+    release: String    // for tests only: a manifest's address, in place of loom's releases
+    release_key: String    // and the public key, in hex, its releases are signed with
 }
 
 fn read_args(given: List<String>) -> Args ! Error {
-    var a = Args { words: List<String>(), data: String("loom-data"), port: 8790, host: String("127.0.0.1"), fast_hashes: false, keep_events: none, registry: String(installer.REGISTRY), minute_ms: 60000, allow_root: false, json: false, domain: String(), apns: String(), backups: String(), backups_keep: 7, backup_every_ms: 86400000, lan: false, sandboxes: String(), sandbox_image: String(), no_sandboxes: false, url: String(), token: String(), conversation: String() }
+    var a = Args { words: List<String>(), data: String("loom-data"), port: 8790, host: String("127.0.0.1"), fast_hashes: false, keep_events: none, registry: String(installer.REGISTRY), minute_ms: 60000, allow_root: false, json: false, domain: String(), apns: String(), backups: String(), backups_keep: 7, backup_every_ms: 86400000, lan: false, sandboxes: String(), sandbox_image: String(), no_sandboxes: false, url: String(), token: String(), conversation: String(), release: String(), release_key: String() }
     var i: usize = 0
     while i < given.len() {
         let w = given[i].copy()
@@ -234,6 +236,16 @@ fn read_args(given: List<String>) -> Args ! Error {
             i += 2
             continue
         }
+        // For tests only: releases from a test's own manifest, signed with its own key.
+        // serve refuses it without --test-fast-hashes, so one stray flag can't point a
+        // real instance at releases loom didn't sign.
+        if w == "--test-release" {
+            if i + 2 >= given.len() { fail "{w} needs a manifest's address and a public key in hex" }
+            a.release = given[i + 1].copy()
+            a.release_key = given[i + 2].copy()
+            i += 3
+            continue
+        }
         // For tests only: hashes that take microseconds instead of 65 ms.
         if w == "--test-fast-hashes" {
             a.fast_hashes = true
@@ -280,11 +292,18 @@ fn elevated_refusal() -> String {
 }
 
 fn serve(a: Args) ! Error {
+    // A mistake in the arguments is said first, before anything about how it runs.
+    if a.release.len() > 0 and not a.fast_hashes {
+        eprintln("loom: --test-release is for loom's own tests, which give --test-fast-hashes too: it points the instance at releases loom didn't sign")
+        exit(2)
+    }
     if env.is_elevated() and not a.allow_root {
         eprintln(elevated_refusal())
         exit(2)
     }
-    var i = try Instance.open(Config { data: a.data.copy(), port: a.port, host: a.host.copy(), hasher: hasher(a.copy()), events: event_life(a.copy()), registry: a.registry.copy(), minute_ms: a.minute_ms, apns: a.apns.copy(), version: String(VERSION), lan: a.lan, sandboxes: a.sandboxes.copy(), sandbox_image: a.sandbox_image.copy() })
+    let source = if a.release.len() > 0 { update.Source { manifest: a.release.copy(), key: a.release_key.copy() } } else { update.Source.official() }
+    let config = Config { data: a.data.copy(), port: a.port, host: a.host.copy(), hasher: hasher(a.copy()), events: event_life(a.copy()), registry: a.registry.copy(), minute_ms: a.minute_ms, apns: a.apns.copy(), version: String(VERSION), lan: a.lan, sandboxes: a.sandboxes.copy(), sandbox_image: a.sandbox_image.copy(), release: source, in_app: false }
+    var i = try open_waiting(config)
     if a.backups.len() > 0 {
         // Backups inside the instance's folder would go into the next one.
         let dir = try fs.absolute(a.backups.copy())
@@ -299,7 +318,29 @@ fn serve(a: Args) ! Error {
     }
     io.flush()
     try i.serve()
+    // An update swapped the program in while the loop stopped: the new one runs now.
+    if i.restart_wanted() {
+        io.flush()
+        update.come_back(update.host(false), i.program(), i.port())
+    }
     println("loom: stopped")
+}
+
+// Opens the instance. Started by an update of itself, it waits up to 10 s for the port,
+// which the program before it is letting go of.
+fn open_waiting(config: Config) -> Instance ! Error {
+    if not update.restarted() { return try Instance.open(config) }
+    var tries: usize = 0
+    loop {
+        match Instance.open(config.copy()) {
+            ok(i) => return i,
+            err(e) => {
+                tries += 1
+                if tries >= 40 { fail "{e}" }
+                unsafe { sleep(250000000) }
+            },
+        }
+    }
 }
 
 // What a command answers: words for a person, and the same as JSON for a
@@ -539,7 +580,7 @@ fn run(a: Args) -> Said ! Error {
         return said("received the instance {str_at(m.copy(), "instance") ?? String()} in {a.data}. Install its ACP agents again here: {programs}. Then start it with loom serve", Obj.new().s("data", a.data.copy()).j("received", m).done())
     }
     if cmd == "update" {
-        return try update(a.words.contains(String("--check")))
+        return try update_self(a.words.contains(String("--check")))
     }
     if cmd == "status" {
         let store = try open_store(a.copy())
@@ -566,25 +607,14 @@ fn reads_options_anywhere() {
     assert(a.data == "d" and a.words.len() == 3 and a.words[2] == "ann")
 }
 
-// The body of a GET, or why there's none.
-fn fetch(url: String) -> List<u8> ! Error {
-    var req = get(url.copy(), List<Header>(), 600000, 400000000)
-    let r = try req.wait()
-    if r.status != 200 { fail "{url} answered {r.status}" }
-    return r.body.copy()
-}
-
 // `loom update`: the newest release, if its manifest is signed with the release key and
-// it's newer, takes this program's place once its SHA-256 is the manifest's. The old
-// program stays beside it, as .old, until the next update. The instance runs the new one
-// once it's restarted.
-fn update(check_only: bool) -> Said ! Error {
-    let text = try fetch(String(MANIFEST))
-    let sig = String.from_utf8(try fetch("{MANIFEST}.sig")) ?? String()
-    let manifest = check_manifest(text, sig, String(RELEASE_KEY)) else {
-        fail "the release manifest isn't signed with loom's release key, so it isn't used"
-    }
-    let version = str_at(manifest.copy(), "version") ?? String()
+// it's newer, takes this program's place once its SHA-256 is the manifest's
+// (server/update.calx, which the instance's instance.update uses too). The old
+// program stays beside it, as .old, until the next update. A running instance
+// runs the new one once it's restarted; the app's Update restarts it too.
+fn update_self(check_only: bool) -> Said ! Error {
+    let manifest = try update.manifest(update.Source.official())
+    let version = update.version_of(manifest.copy())
     let answer = Obj.new().s("version", String(VERSION)).s("newest", version.copy())
     if not newer(version.copy(), String(VERSION)) {
         return said("loom {VERSION} is the newest", answer.b("updated", false).done())
@@ -592,25 +622,10 @@ fn update(check_only: bool) -> Said ! Error {
     if check_only {
         return said("loom {version} is out; this is {VERSION}. `loom update` takes it.", answer.b("updated", false).done())
     }
-    // linux-server and windows-server are x64; Linux on Arm has a build of its own, and macOS's is for Apple silicon.
-    let kind = if env.os() == "linux" and env.native_arch() == "aarch64" { String("linux-arm64-server") } else { "{env.os()}-server" }
-    let file = at(manifest.copy(), "files").get(kind.copy()) ?? Json.Null
-    let url = str_at(file.copy(), "url") else {
-        fail "release {version} has no program for {kind}"
-    }
-    let data = try fetch(url)
-    if bytes.hex(sha256(data.copy())) != (str_at(file, "sha256") ?? String()) {
-        fail "the downloaded program isn't the one the release names, so it isn't used"
-    }
     let exe = current_exe()
-    let new = "{exe}.new"
-    let old = "{exe}.old"
-    try fs.write(new.copy(), data)
-    if env.os() != "windows" {
-        try fs.set_mode(new.copy(), 0o755)
-    }
-    if fs.exists(old.copy()) { try fs.remove_file(old.copy()) }
-    try fs.rename(exe.copy(), old)
-    try fs.rename(new, exe)
+    try update.writable(exe.copy())
+    let data = try update.download(manifest)
+    _ = try update.stage(exe.copy(), data)
+    try update.swap(exe)
     return said("updated loom {VERSION} to {version}; restart the instance to run it", answer.b("updated", true).done())
 }

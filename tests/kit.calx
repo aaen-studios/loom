@@ -47,7 +47,14 @@ impl Instance {
         if not added.status.success() { fail "loom acp add failed: {added.error_text()}" }
         var args: List<String> = [String("serve"), String("--port"), String("0"), String("--allow-root")]
         args.extend(extra)
-        let server = try loom(data.copy(), args).stdout(Stdio.Pipe).spawn()
+        let cmd = loom(data.copy(), args)
+        return try Instance.launch(data, cmd)
+    }
+
+    /// An instance `cmd` serves on `data`, a `loom serve` the test put together, with its
+    /// owner set up.
+    pub fn launch(data: own String, cmd: own Command) -> Instance ! Error {
+        let server = try cmd.stdout(Stdio.Pipe).spawn()
         let serving = server.wait_for_line(String("loom: serving"), WAIT) else {
             server.kill()
             fail "the server didn't start"

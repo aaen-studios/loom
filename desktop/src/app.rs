@@ -16,7 +16,7 @@ use gpui_kit::*;
 use serde_json::Value;
 
 use crate::core::Core;
-use crate::model::{self, Approval, Conn, ImportSource, Message, Model, Mood};
+use crate::model::{self, Approval, Conn, ImportSource, Message, Model, Mood, ServerUpdate};
 use crate::motion::{self, SoftHover};
 use crate::prefs::{Prefs, Text, Theme, Tools};
 use crate::shell;
@@ -684,6 +684,7 @@ ACTA_KEY=secret:ACTA_KEY",
                     if loom.pump_away() {
                         cx.notify();
                     }
+                    loom.spread_release();
                     loom.watch_adding(cx);
                     // A server an agent offered, and the person said yes to here.
                     let mut offered = std::mem::take(&mut loom.model.offered);
@@ -720,6 +721,7 @@ ACTA_KEY=secret:ACTA_KEY",
                             changed |= crate::perf::step("take", || loom.model.take(&v));
                         }
                     }
+                    loom.spread_release();
                     loom.fetch();
                     loom.open_fetched(cx);
                     if changed {
@@ -1248,6 +1250,22 @@ ACTA_KEY=secret:ACTA_KEY",
             }
         }
         changed
+    }
+
+    /// The newest release, as the core that looks for app updates found it, goes to
+    /// every server's core, and each says whether its server is behind (`core.server`).
+    fn spread_release(&mut self) {
+        let mut found: Vec<String> = self.model.release.take().into_iter().collect();
+        for a in &mut self.away {
+            found.extend(a.model.release.take());
+        }
+        for version in found {
+            let frame = serde_json::json!({"t": "release", "version": version}).to_string();
+            self.core.send(&frame);
+            for a in &self.away {
+                a.core.send(&frame);
+            }
+        }
     }
 
     /// Puts the server whose folder is `dir` on screen, and the one there away.
@@ -1785,6 +1803,32 @@ ACTA_KEY=secret:ACTA_KEY",
         thread::yarn(state, tint, self.p.ink_3, self.p.side, seed, size).into_any_element()
     }
 
+    /// A server's yarn, with a small open ring at its foot while a newer loom is out
+    /// than the server runs: quiet, in the yarn's own grey, for the server popup to say more.
+    fn yarn_marked(&self, model: &Model, state: Spool, name: &str, size: f32) -> AnyElement {
+        let p = self.p;
+        let behind = model.version.as_ref().is_some_and(|v| v.behind);
+        div()
+            .relative()
+            .flex_none()
+            .size(px(size))
+            .child(self.server_yarn(state, name, size))
+            .when(behind, |d| {
+                d.child(
+                    div()
+                        .absolute()
+                        .right(px(-1.0))
+                        .bottom(px(-1.0))
+                        .size(px(8.0))
+                        .rounded_full()
+                        .border_2()
+                        .border_color(p.side)
+                        .bg(p.ink_3),
+                )
+            })
+            .into_any_element()
+    }
+
     /// Each server the app is signed in to, in a row. The one on screen is a box with its
     /// spool, its name and how it is, which opens the server popup; another is its spool
     /// alone, which comes on screen, with a dot when one of its agents said something there.
@@ -1817,7 +1861,7 @@ ACTA_KEY=secret:ACTA_KEY",
                     .h(px(control::SERVER))
                     .px(px(space::S))
                     .when(server_open, |d| d.bg(p.active))
-                    .child(self.server_yarn(state, &name, 32.0))
+                    .child(self.yarn_marked(model, state, &name, 32.0))
                     .child(
                         div()
                             .flex_1()
@@ -1849,7 +1893,7 @@ ACTA_KEY=secret:ACTA_KEY",
                 button = button.flex_none().p(px(space::S));
                 let heard = !model.unread.is_empty();
                 button = button
-                    .child(self.server_yarn(state, &name, 32.0))
+                    .child(self.yarn_marked(model, state, &name, 32.0))
                     .when(heard, |d| {
                         d.child(
                             div()
@@ -2261,19 +2305,109 @@ ACTA_KEY=secret:ACTA_KEY",
                 p.ink_2
             })
             .child(words);
+        // Its version, and quietly, a newer one that's out or an update under way, with
+        // Update for an owner or admin.
+        let (line, action) = self.version_line();
+        let mut control = div().flex().items_center().gap(px(space::M)).child(status);
+        if let Some((label, now)) = action {
+            control = control.child(self.small_button("server-update", label, false).on_click(
+                cx.listener(move |this, _, _, cx| {
+                    let f = this.model.update_server(now);
+                    this.send(f);
+                    cx.notify();
+                }),
+            ));
+        }
         let here = self
             .row(
-                Some(self.server_yarn(state, &server_name(&self.model, &self.here), 40.0)),
+                Some(self.yarn_marked(
+                    &self.model,
+                    state,
+                    &server_name(&self.model, &self.here),
+                    40.0,
+                )),
                 where_,
-                Some(format!("loom {}", crate::VERSION)),
-                Some(status.into_any_element()),
+                Some(line),
+                Some(control.into_any_element()),
             )
             .min_h(px(control::ROW_TALL));
-        let groups = vec![
-            self.group(None, vec![here.into_any_element()]),
-            self.scripts_group(cx),
-        ];
+        let mut groups = vec![self.group(None, vec![here.into_any_element()])];
+        if let Some(g) = self.self_update_group(cx) {
+            groups.push(g);
+        }
+        groups.push(self.scripts_group(cx));
         self.settings_page("server-page", "This server", None, groups)
+    }
+
+    /// The server's version in a line, as quiet as the rest of the row, and what the
+    /// person may do about it: a label, and whether it stops what runs.
+    fn version_line(&self) -> (String, Option<(&'static str, bool)>) {
+        if self.local() {
+            return (format!("loom {}", crate::VERSION), None);
+        }
+        let Some(v) = self.model.version.clone() else {
+            return ("loom".into(), None);
+        };
+        let ours = format!("loom {}", v.loom);
+        let may = self.model.updates.as_ref().is_some_and(|u| u.may && u.can);
+        let next = |u: &ServerUpdate| {
+            if u.version.is_empty() {
+                v.latest.clone()
+            } else {
+                u.version.clone()
+            }
+        };
+        match self.model.server_update.as_ref() {
+            Some(u) if u.state == "downloading" => (format!("{ours} · getting the newest…"), None),
+            Some(u) if u.state == "waiting" => (
+                format!(
+                    "{ours} · {} is ready, and goes in once nothing runs",
+                    next(u)
+                ),
+                may.then_some(("Now", true)),
+            ),
+            Some(u) if u.state == "restarting" => {
+                (format!("{ours} · restarting into {}…", next(u)), None)
+            }
+            Some(u) if u.state == "failed" => (
+                format!("{ours} · the update didn't work: {}", u.why),
+                may.then_some(("Try again", false)),
+            ),
+            Some(u) if u.state == "latest" => (format!("{ours} · the newest"), None),
+            _ if v.behind => (
+                format!("{ours} · {} is out", v.latest),
+                may.then_some(("Update", false)),
+            ),
+            _ => (ours, None),
+        }
+    }
+
+    /// For the owner of a server elsewhere: whether it updates itself, once nothing runs.
+    fn self_update_group(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        if self.local() {
+            return None;
+        }
+        let u = self.model.updates.clone().filter(|u| u.owner)?;
+        let on = u.auto;
+        let toggle =
+            self.switch("self-update-switch", on)
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    let f = this.model.set_auto_update(!on);
+                    this.send(f);
+                    cx.notify();
+                }));
+        let sub = if u.can {
+            "Takes each new release once nothing runs, and tells you after".to_string()
+        } else {
+            u.why.clone()
+        };
+        let row = self.row(
+            Some(self.tile(Ico::RotateCcw)),
+            "Updates itself",
+            Some(sub),
+            u.can.then(|| toggle.into_any_element()),
+        );
+        Some(self.group(None, vec![row.into_any_element()]))
     }
 
     /// Scripts on the instance's computer (PLAN.md, "Scripts"): off until turned on,
@@ -12604,6 +12738,16 @@ fn core_config(dir: &str, server: Option<&str>) -> String {
         }
         Err(_) if !crate::VERSION.contains("-dev") => config["version"] = crate::VERSION.into(),
         Err(_) => {}
+    }
+    // For trying things in a build from source: the key a test's releases are signed
+    // with, and a device token to start with. A release never reads them.
+    if crate::VERSION.contains("-dev") {
+        if let Ok(key) = std::env::var("LOOM_UPDATE_KEY") {
+            config["update_key"] = key.into();
+        }
+        if let Ok(token) = std::env::var("LOOM_TOKEN") {
+            config["token"] = token.into();
+        }
     }
     // What the core fetches for an update: the release's installer, which swaps loom.exe
     // in once the app has quit, and can put the old one back (desktop/setup).

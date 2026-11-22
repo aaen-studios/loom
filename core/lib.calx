@@ -23,6 +23,7 @@ import shared.release.{MANIFEST}
 import server.instance.{Config, EventLife, Instance}
 import server.mcp
 import server.installer
+import server.update.{Source as ServerSource}
 
 /// The credential store's service the device token is kept under, by the instance's address.
 const KEYRING: str = "loom"
@@ -63,6 +64,7 @@ struct Local {
     data: String
     username: String
     kind: String
+    version: String    // the app's, which the instance in it says it is
     ready: Sender<String>
     stop: Receiver<bool>
 }
@@ -77,7 +79,7 @@ impl Task for Local {
             ok(some(t)) => u16.parse(t.trim().copy()) ?? 0,
             _ => 0,
         }
-        var i = match open_local(l.data.copy(), last) {
+        var i = match open_local(l.data.copy(), last, l.version.copy()) {
             ok(i) => i,
             err(e) => {
                 l.ready.send("error:{e}")
@@ -108,18 +110,18 @@ impl Task for Local {
 
 // The instance in the app, on the port it had last time if it's free, or on
 // a new one.
-fn open_local(data: String, last: u16) -> Instance ! Error {
+fn open_local(data: String, last: u16, version: String) -> Instance ! Error {
     if last != 0 {
-        match Instance.open(local_config(data.copy(), last)) {
+        match Instance.open(local_config(data.copy(), last, version.copy())) {
             ok(i) => return i,
             err(_) => {},
         }
     }
-    return try Instance.open(local_config(data, 0))
+    return try Instance.open(local_config(data, 0, version))
 }
 
-fn local_config(data: String, port: u16) -> Config {
-    return Config { data: data.copy(), port: port, host: String("127.0.0.1"), hasher: PasswordHasher(), events: EventLife.standard(), registry: String(installer.REGISTRY), minute_ms: 60000, apns: String(), version: String("desktop"), lan: true, sandboxes: String(), sandbox_image: String() }
+fn local_config(data: String, port: u16, version: String) -> Config {
+    return Config { data: data.copy(), port: port, host: String("127.0.0.1"), hasher: PasswordHasher(), events: EventLife.standard(), registry: String(installer.REGISTRY), minute_ms: 60000, apns: String(), version: version.copy(), lan: true, sandboxes: String(), sandbox_image: String(), release: ServerSource.official(), in_app: true }
 }
 
 /// What the app holds between calls.
@@ -179,13 +181,16 @@ impl Task for Boot {
         }
         var conn = Conn.new(server, token, service, cache, b.inbox, b.to_app)
         conn.tz = str_at(cfg.copy(), "tz")
+        conn.local = str_at(cfg.copy(), "mode") == some(String("local"))
         if let d = data {
             conn.files = some("{d}/files")
             // Updates, for an app that says its version. An empty `update` turns them off.
             let feed = str_at(cfg.copy(), "update") ?? String(MANIFEST)
             if let v = str_at(cfg.copy(), "version") {
                 if feed.len() > 0 {
-                    conn.updater = some(Updater.new(v, str_at(cfg.copy(), "platform") ?? String("windows-desktop"), feed, "{d}/update"))
+                    let updater = Updater.new(v, str_at(cfg.copy(), "platform") ?? String("windows-desktop"), feed, "{d}/update")
+                    // A test's releases, in a build from source, are signed with a key of their own.
+                    conn.updater = some(if let k = str_at(cfg.copy(), "update_key") { updater.with_key(k) } else { updater })
                 }
             }
         }
@@ -204,7 +209,7 @@ pub fn start_local(cfg: Json, data: String) -> (Thread, Sender<bool>, String, St
     var ready = Receiver<String>()
     let stop = Receiver<bool>()
     let stop_to = stop.sender()
-    let task = Local { data: "{data}/instance", username: str_at(cfg.copy(), "username") ?? String("me"), kind: str_at(cfg, "kind") ?? String("windows"), ready: ready.sender(), stop: stop }
+    let task = Local { data: "{data}/instance", username: str_at(cfg.copy(), "username") ?? String("me"), kind: str_at(cfg.copy(), "kind") ?? String("windows"), version: str_at(cfg, "version") ?? String("desktop"), ready: ready.sender(), stop: stop }
     let t = unsafe { Thread.spawn(task) }
     // Opening it can take a moment the first time, while it makes its database.
     let said = unsafe { ready.wait_for(60000000000) } else {

@@ -1512,8 +1512,58 @@ pub struct PageFrame {
     pub seq: u64,
 }
 
+/// The instance's version against loom's newest release, as the core says it
+/// (`core.server`): the core decides whether it's behind.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ServerVersion {
+    pub loom: String,
+    pub latest: String,
+    pub behind: bool,
+}
+
+/// An update of the instance under way, as `instance.update` says it: its state
+/// (downloading, waiting, restarting, failed or latest), the release and why it failed.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ServerUpdate {
+    pub state: String,
+    pub version: String,
+    pub why: String,
+}
+
+impl ServerUpdate {
+    fn of(v: &Value) -> ServerUpdate {
+        ServerUpdate {
+            state: s(v, "state"),
+            version: s(v, "version"),
+            why: s(v, "why"),
+        }
+    }
+}
+
+/// What `instance.updates` said: whether the instance updates itself, whether this
+/// person may update it (an owner or admin) or turn that on (the owner), and whether
+/// it can, with why not.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Updates {
+    pub auto: bool,
+    pub may: bool,
+    pub owner: bool,
+    pub can: bool,
+    pub why: String,
+}
+
 #[derive(Default)]
 pub struct Model {
+    /// The instance's version against the newest release, once the core has said.
+    pub version: Option<ServerVersion>,
+    /// An update of the instance under way, while there's one.
+    pub server_update: Option<ServerUpdate>,
+    /// How the instance's updates are set, once asked.
+    pub updates: Option<Updates>,
+    updates_stale: bool,
+    /// The newest release's version, as this server's core found it, for the app to
+    /// hand to its other servers' cores.
+    pub release: Option<String>,
     /// Each agent's browser, by agent id.
     pub browsers: HashMap<String, Browser>,
     /// The agent whose browser this device watches.
@@ -1878,6 +1928,9 @@ impl Model {
         if std::mem::take(&mut self.tasks_stale) {
             out.push(self.load_tasks());
         }
+        if std::mem::take(&mut self.updates_stale) {
+            out.push(self.load_updates());
+        }
         if std::mem::take(&mut self.queue_stale) {
             if let Some(conversation) = self.conversation() {
                 out.push(json!({"t": "cmd", "id": format!("app.queue:{conversation}"), "name": "queue.list", "args": {"conversation": conversation}}));
@@ -2230,6 +2283,7 @@ impl Model {
                 self.rewatch = true;
                 self.queue_stale = true;
                 self.tasks_stale = true;
+                self.updates_stale = true;
                 for l in [
                     List::Agents,
                     List::Conversations,
@@ -2242,7 +2296,20 @@ impl Model {
                     self.dirty.insert(l);
                 }
             }
-            "welcome" => self.me = s(f, "device"),
+            "welcome" => {
+                self.me = s(f, "device");
+                // An update under way, to an owner or admin; none once it's done.
+                self.server_update = f.get("update").map(ServerUpdate::of);
+            }
+            "core.server" => {
+                self.version = Some(ServerVersion {
+                    loom: s(f, "loom"),
+                    latest: s(f, "latest"),
+                    behind: f.get("behind").and_then(Value::as_bool) == Some(true),
+                });
+            }
+            "core.release" => self.release = Some(s(f, "version")),
+            "instance.update" => self.server_update = Some(ServerUpdate::of(f)),
             "core.data" => self.data(f),
             "core.queued" => {
                 self.queued.push(Queued::of(f));
@@ -2827,6 +2894,30 @@ impl Model {
                 self.notices.push(s(e, "message"));
             }
             self.plugins_stale = true;
+        } else if id.starts_with("app.updates") {
+            if let Some(e) = f.get("error") {
+                self.notices.push(s(e, "message"));
+                return;
+            }
+            if let Some(v) = f.get("value") {
+                let yes = |k: &str| v.get(k).and_then(Value::as_bool) == Some(true);
+                self.updates = Some(Updates {
+                    auto: yes("auto"),
+                    may: yes("may"),
+                    owner: yes("owner"),
+                    can: yes("can"),
+                    why: s(v, "why"),
+                });
+                if let Some(u) = v.get("update").filter(|u| !s(u, "state").is_empty()) {
+                    self.server_update = Some(ServerUpdate::of(u));
+                }
+            }
+        } else if id.starts_with("app.update_now") {
+            match (f.get("error"), f.get("value")) {
+                (Some(e), _) => self.notices.push(s(e, "message")),
+                (None, Some(v)) => self.server_update = Some(ServerUpdate::of(v)),
+                _ => {}
+            }
         } else if id.starts_with("app.scripts_") {
             if let Some(e) = f.get("error") {
                 self.notices.push(s(e, "message"));
@@ -4182,6 +4273,25 @@ impl Model {
         Ok(json!({"t": "cmd", "id": id, "name": name, "args": cmd_args}))
     }
 
+    /// Asks how the instance's updates stand.
+    pub fn load_updates(&mut self) -> Value {
+        let id = self.id("app.updates");
+        json!({"t": "cmd", "id": id, "name": "instance.updates", "args": {}})
+    }
+
+    /// Lets the instance update itself, or stops it: the owner's alone.
+    pub fn set_auto_update(&mut self, on: bool) -> Value {
+        let id = self.id("app.updates_set");
+        json!({"t": "cmd", "id": id, "name": "instance.updates", "args": {"auto": on}})
+    }
+
+    /// Updates the instance to the newest release: once nothing runs, or with `now`,
+    /// stopping what runs.
+    pub fn update_server(&mut self, now: bool) -> Value {
+        let id = self.id("app.update_now");
+        json!({"t": "cmd", "id": id, "name": "instance.update", "args": {"now": now}})
+    }
+
     /// Asks whether the person's scripts are on.
     pub fn load_scripts(&mut self) -> Value {
         self.script_token = None;
@@ -4665,6 +4775,37 @@ mod tests {
             files: Vec::new(),
         });
         m
+    }
+
+    #[test]
+    fn a_server_behind_and_its_update() {
+        let mut m = Model::new();
+        m.take(&json!({"t": "core.server", "loom": "0.2.0", "latest": "0.2.1", "behind": true}));
+        let v = m.version.clone().unwrap();
+        assert!(v.behind && v.loom == "0.2.0" && v.latest == "0.2.1");
+        m.take(&json!({"t": "core.release", "version": "0.2.1"}));
+        assert_eq!(m.release.take().as_deref(), Some("0.2.1"));
+        // How updates stand comes with each connection.
+        m.take(&json!({"t": "synced", "seq": 0}));
+        let asked = m.fetches();
+        let ask = asked
+            .iter()
+            .find(|f| f["name"] == "instance.updates")
+            .unwrap();
+        m.take(&json!({"t": "result", "id": ask["id"], "ok": true, "value": {"version": "0.2.0", "auto": false, "may": true, "owner": true, "can": true, "update": {"state": ""}}}));
+        let u = m.updates.clone().unwrap();
+        assert!(u.may && u.owner && u.can && !u.auto);
+        assert!(m.server_update.is_none(), "no update under way");
+        let go = m.update_server(false);
+        assert_eq!(go["name"], "instance.update");
+        assert_eq!(go["args"]["now"], false);
+        m.take(&json!({"t": "instance.update", "state": "waiting", "version": "0.2.1"}));
+        assert_eq!(m.server_update.clone().unwrap().state, "waiting");
+        // After the restart, welcome has no update under way.
+        m.take(&json!({"t": "welcome", "device": "d_1", "loom": "0.2.1"}));
+        assert!(m.server_update.is_none());
+        let auto = m.set_auto_update(true);
+        assert_eq!(auto["args"]["auto"], true);
     }
 
     #[test]

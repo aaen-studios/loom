@@ -29,6 +29,7 @@ Version 1. This is what an app (always through its core) and an instance say to 
 - [Errors and close codes](#errors-and-close-codes)
 - [Over Noise](#over-noise)
 - [Push](#push)
+- [Updating the instance](#updating-the-instance)
 - [Versions](#versions)
 - [How ACP maps onto loom](#how-acp-maps-onto-loom)
 - [One message's whole trip](#one-messages-whole-trip)
@@ -70,12 +71,13 @@ No login. What an app needs before it logs in.
   "instance": "i_8sk2",
   "key": "<the instance's public key, base64>",
   "protocol": [1],
+  "version": "0.2.0",
   "setup": false,
   "moved": null
 }
 ```
 
-`setup` is `true` until the owner account exists. `key` is checked on every later connection ([PLAN.md: Connecting devices](../PLAN.md#connecting-devices)). `moved` is the [`moved`](#moved) frame once the instance has moved, and null until then.
+`version` is the version of loom the instance runs. `setup` is `true` until the owner account exists. `key` is checked on every later connection ([PLAN.md: Connecting devices](../PLAN.md#connecting-devices)). `moved` is the [`moved`](#moved) frame once the instance has moved, and null until then.
 
 Once the instance has moved, every other route answers 410 with `{"error": {"code": "moved", …}, "moved": <the moved frame>}`. While it's moving, every route but a `GET` answers 503 with `moving`.
 
@@ -293,10 +295,12 @@ The answer to a [`device.call`](#devicecall): `ok`, and `output`, the command's 
 ### `welcome`
 
 ```json
-{ "t": "welcome", "version": 1, "user": "u_1", "device": "d_3", "seq": 1046, "reset": false, "key": "<the instance's public key, base64>", "relay": "<the push relay's key, base64>" }
+{ "t": "welcome", "version": 1, "loom": "0.2.0", "user": "u_1", "device": "d_3", "seq": 1046, "reset": false, "key": "<the instance's public key, base64>", "relay": "<the push relay's key, base64>" }
 ```
 
 - `version`: the one version this connection uses.
+- `loom`: the version of loom the instance runs, as `GET /api/info` gives it. The core compares it with the newest release ([Updating the instance](#updating-the-instance)).
+- `update`: only to an owner or admin, while an update of the instance is under way or has failed: how it stands, as [`instance.update`](#instanceupdate) says it.
 - `relay`: only while the instance pushes through the [push relay](#through-the-push-relay). It's the relay's X25519 public key, which the core seals the phone's APNs token with before `push.register`.
 - `key`: the instance's Ed25519 public key, as `GET /api/info` gives it. The app keeps the first one it sees, checks a [`moved`](#moved) frame's signature with it, and expects the same key at the new place.
 - `seq`: the newest event `seq` the person has right now. Catch-up runs from `after` up to this.
@@ -378,6 +382,17 @@ An agent's browser opened or closed, was taken over or handed back, or is asking
 ### `browser.frame`
 
 A picture of the page, to each session watching that agent's browser: `agent`, `data` (a JPEG, base64), `width` and `height` (the page's pixels, which `browser.input`'s `x` and `y` are in).
+
+### `instance.update`
+
+How an update of the instance stands, to every owner and admin connected, each time it changes ([Updating the instance](#updating-the-instance)). It isn't an event, so it isn't kept: a device that connects later gets it in `welcome`'s `update`.
+
+```json
+{ "t": "instance.update", "state": "waiting", "version": "0.2.1" }
+```
+
+- `state`: `downloading` (the manifest is read and checked, and the program fetched and checked), `waiting` (it's staged, and goes in once nothing runs), `restarting` (it's in, and the instance is stopping to start it), `failed` (with `why`), or `latest` (this is the newest already).
+- `version`: the release it's for, once it's known. `why`: why it failed. `now`: it stops what runs rather than waiting. `auto`: the instance started it itself.
 
 ### `error`
 
@@ -481,7 +496,7 @@ An agent runs the commands below as its person's app does, with their rights ([P
 - `list_commands` gives each command an agent can run: `name`, `args` (in words), `does`, and `how`: `runs at once` or `asks your person first`.
 - `run_command` (`name`, `args`, an object) runs one. Its result is the command's `value` as JSON, or its error's message. Which run at once and which ask is in `server/commands.calx`.
 - **At once**: `conversation.create`, `rename`, `branch` and `move`, `messages.list`, `search` and `pinned`, `message.pin`, `agent.create` (always with `permission: "ask"`, and from an isolated agent, `isolated` and its own `network` unless it names a narrower one), `agent.update`, `agent.revisions`, `agent.rollback`, `activity.list`, `memory.list` and `put`, `table.list`, `create`, `write`, `rows` and `delete_rows`, `profile.get` and `put`, `defaults.get`, `rule.list` and `rule.check`, `routine.list`, `put` and `run`, `task.*`, `queue.list`, `edit`, `order` and `drop`, `skill.list`, `get` and `put`, `plugin.list`, `get`, `put` and `revisions`, `mcp.list`, `secret.list`, `acp.list` and `acp.registry`. What changes something is in the activity log as "Ran" and the command's name. A task started by another agent is told so, and an agent can start three running tasks for each agent.
-- **Asks first**, every time, as one of loom's own tools that asks ([How ACP maps onto loom](#how-acp-maps-onto-loom)), titled with what the command does, with its `args` as `detail`: every `.delete` and `.remove`, and `device.revoke` (tool `delete`); `instance.move` (tool `move`); and everything else (tool `other`), among them `mcp.put`, `acp.install`, `acp.settings`, `acp.share` and `acp.members`, `invite.*`, `user.list` and `user.role`, `device.rename`, `link.create`, `instance.phones`, `instance.relay` and `server.offer`, any command not listed, `rule.put`, `defaults.put` (one with a `permission` looser than the agent's own is refused before it asks), and `agent.create` with a `folder` or `agent.update` with a `permission` (`null` included, which follows the default), a `folder`, `isolated` or `network` (one that would give the agent more than the asking agent has, out of a sandbox or a wider network, is refused before it asks). A yes runs it as the device that gave it, so commands only a device may send work. `acp.install` answers once it's installed.
+- **Asks first**, every time, as one of loom's own tools that asks ([How ACP maps onto loom](#how-acp-maps-onto-loom)), titled with what the command does, with its `args` as `detail`: every `.delete` and `.remove`, and `device.revoke` (tool `delete`); `instance.move` (tool `move`); and everything else (tool `other`), among them `mcp.put`, `acp.install`, `acp.settings`, `acp.share` and `acp.members`, `invite.*`, `user.list` and `user.role`, `device.rename`, `link.create`, `instance.phones`, `instance.relay`, `instance.update`, `instance.updates` and `server.offer`, any command not listed, `rule.put`, `defaults.put` (one with a `permission` looser than the agent's own is refused before it asks), and `agent.create` with a `folder` or `agent.update` with a `permission` (`null` included, which follows the default), a `folder`, `isolated` or `network` (one that would give the agent more than the asking agent has, out of a sandbox or a wider network, is refused before it asks). A yes runs it as the device that gave it, so commands only a device may send work. `acp.install` answers once it's installed.
 - **Never**: `account.delete`, `password.reset`, `secret.put` (a secret's value is never an agent's), `plugin.allow`, `plugin.cmd`, `plugin.data.*`, `plugin.message` and `chat.ask` (agents have `message_agent`), `push.*`, `browser.*` (agents have their `browser_` tools), `proposal.*` (agents have `propose_skill` and `propose_note`; keeping one is the person's yes), `queue.steer` and `scripts.*`. An agent can't delete itself, loosen its own permission mode or change where it runs itself (`own-place`), or give another a looser mode, or more of a network, than its own.
 
 ## The agent's browser
@@ -612,7 +627,7 @@ An approval nobody answers stays open while the run does. Cancelling the run ans
 | `agent.created`, `agent.updated` | `agent` (the whole agent, with its `revision`), and for `agent.updated`, `by` (the device that changed it, or the agent's id when an agent did, with a tool) | Made or changed, by a person or by an agent |
 | `defaults.updated` | `defaults` (the whole defaults, as `defaults.get` gives them), `by` (the device that changed them; a yes to an agent's `defaults.put` is done as the device that gave it) | The person's agent defaults changed. Every agent that follows a field follows the new one from its next prompt ([Agent defaults](#agent-defaults)) |
 | `rules.updated` | `rules` (all of the person's, as `rule.list` gives them), `by` (the device that changed them, or the one that said yes to an agent's) | A rule was added, changed or removed. Each agent works under the rules as they are from its next action ([Rules on what's touched](#rules-on-whats-touched)) |
-| `notify` | `agent`, `title`, `body`, and for a routine's reply, `conversation` | An agent sent its person a notification with its `notify` tool, or a routine with notify on finished a run (its name as `title`, the start of the reply as `body`). The apps show it, even while someone's looking |
+| `notify` | `agent`, `title`, `body`, and for a routine's reply, `conversation` | An agent sent its person a notification with its `notify` tool, or a routine with notify on finished a run (its name as `title`, the start of the reply as `body`), or loom itself told the owner of an update it made, with no `agent` ([Updating the instance](#updating-the-instance)). The apps show it, even while someone's looking |
 | `agent.deleted` | `agent` (the id) | Deleted |
 | `routine.updated` | `routine` (the whole routine, as `routine.list` gives it) | Made, changed, or run: `last` says how its newest run is going |
 | `routine.deleted` | `routine` (the id) | Deleted |
@@ -705,6 +720,8 @@ Version 1's commands:
 | `import.run` | `from` (`openbot` or `grokbot`), `path`? (a copy of that app's data folder, such as on a server; left out, where it keeps its data on the instance's computer) | `came` (how many of each kind came now: `agents`, `conversations`, `messages`, `files`, `pins`, `memories`, `routines`, `skills`, `mcp`, `tables` and `rows`), `already` (how many were here from an earlier import, and stayed as they are), `not` (what couldn't come or changed on the way, each in a sentence), `text` (what came, in words), `from` and `where`. The other app's files are only read: its SQLite opened read-only, and its secrets never at all. Each thing is kept with the other app's id, so importing again brings only what's new. Agents come on the agent program named for their provider, or the first one installed, with the permission mode `ask`, `config.model` (a Claude model by its family: `opus`, `sonnet`, `haiku`), the nearest thread colour and their pin; conversations, messages, memories and pins with their own times, and as their events: `agent.created`, `conversation.created` (a thread beside an agent's chat as a branch of it, or as a routine's own), and `message.created` for each conversation's 50 newest, older ones coming with `messages.list`; routines on loom's schedules, with what changed in `not`; skills, MCP servers without their environment and headers, and shared tables and their rows, none of them over one of the person's own of the same name. Recorded in the activity log, kind `import`. `not_found` when the app's data isn't there. Only the owner |
 | `instance.phones` | `on`? (true or false) | `on`, and while they are, `port` and `key` ([Over Noise](#over-noise)). With `on`, turns phones on or off: they reach the instance on the network over Noise, and stay on across a restart. Without it, says how things are. Only the owner, from a device, and only on an instance in the desktop app (or `loom serve --lan`): elsewhere `not_here` |
 | `instance.relay` | `url`? (the push relay's address, such as `https://push.loom.example`; empty turns it off) | `on`, and while it is, `url` and `key` (the relay's X25519 public key, base64). Anyone sees it. With `url`, the owner, from a device, turns the [push relay](#through-the-push-relay) on or off. The instance asks the address for its key at once, and refuses it `unreachable` when it doesn't answer as a relay. Phones that connect after that seal their tokens for that key |
+| `instance.update` | `now`? (`true` stops what runs, rather than waiting for it to end) | `state` (`downloading`, or how one under way stands), and `version` once it's known; then `instance.update` frames to every owner and admin. Owners and admins; `not_here` in a container or the desktop app ([Updating the instance](#updating-the-instance)) |
+| `instance.updates` | `auto`? (`true` lets the instance update itself, the owner's alone) | `version`, `auto`, `may`, `owner`, `can`, `why`?, and to an owner or admin `update` ([Updating the instance](#updating-the-instance)) |
 | `invite.create` | `role`? (`member`, the default, or `admin`), `uses`? (1 to 100, default 1), `days`? (1 to 30, default 7) | `invite`, `code` (for [`POST /api/join/<code>`](#post-apijoincode), shown once), `role`, `uses`, `expires`. Owners and admins, from a device; only the owner makes admins. On an instance in the desktop app, `not_here`: it's its owner's alone |
 | `invite.list` | — | `invites`: each open one's `invite`, `role`, `uses` left, `expires`, `by` and `at`, newest first. Owners and admins |
 | `invite.delete` | `invite` | — |
@@ -760,7 +777,7 @@ commands = ["routine.list"]   # commands the panel may send
 agents = true                 # the panel may message the person's agents
 ```
 
-What it asks for is its `asks`: `tools` when it has a tool server, `agents`, and `cmd:<name>` for each command. A panel never gets the commands that would let it allow itself more, borrow another plugin's permissions, run programs on the instance, or reach the person's devices, secrets and sign-in: `plugin.put`, `plugin.allow`, `plugin.delete`, `plugin.cmd`, `plugin.message`, `instance.move`, `instance.phones`, `instance.relay`, `invite.create`, `invite.delete`, `user.role`, `user.remove`, `account.delete`, `password.reset`, `link.create`, `push.register`, `push.unregister`, `device.revoke`, `device.rename`, `secret.list`, `secret.put`, `secret.delete`, `mcp.put`, `acp.install`, `acp.remove`, `acp.settings`, `acp.share`, `acp.members`, `import.scan` and `import.run`. Until its person allows something, it waits, and the plugin goes without it.
+What it asks for is its `asks`: `tools` when it has a tool server, `agents`, and `cmd:<name>` for each command. A panel never gets the commands that would let it allow itself more, borrow another plugin's permissions, run programs on the instance, or reach the person's devices, secrets and sign-in: `plugin.put`, `plugin.allow`, `plugin.delete`, `plugin.cmd`, `plugin.message`, `instance.move`, `instance.update`, `instance.updates`, `instance.phones`, `instance.relay`, `invite.create`, `invite.delete`, `user.role`, `user.remove`, `account.delete`, `password.reset`, `link.create`, `push.register`, `push.unregister`, `device.revoke`, `device.rename`, `secret.list`, `secret.put`, `secret.delete`, `mcp.put`, `acp.install`, `acp.remove`, `acp.settings`, `acp.share`, `acp.members`, `import.scan` and `import.run`. Until its person allows something, it waits, and the plugin goes without it.
 
 - **A tool server** the person allowed is in every one of their agents' new sessions, as the MCP server `plugin-<id>`. It runs from a folder holding the revision's files, with `LOOM_PLUGIN_DIR` set to that folder.
 - **A panel** talks to the app through one door, `await loom.send(op, args)` (desktop/src/panel.rs). The app sends these on, and refuses everything else, and the instance checks what's allowed:
@@ -794,7 +811,7 @@ What it asks for is its `asks`: `tools` when it has a tool server, `agents`, and
 | `moving` | The instance is moving: nothing changes until it's at the new place |
 | `moved` | `instance.move` on an instance that has moved already |
 | `move_failed` | `instance.move`: the export, sending it, or the new place failed. The message says which, and the instance goes on where it is |
-| `not_here` | `instance.phones` on an instance on a server, which phones reach at its own address, or `push.register` with a sealed token while the push relay is off |
+| `not_here` | `instance.phones` on an instance on a server, which phones reach at its own address, or `push.register` with a sealed token while the push relay is off, or `instance.update` on an instance that doesn't update itself here |
 | `unreachable` | `instance.relay`: the address didn't answer, or isn't a push relay |
 | `internal` | A bug in the instance. It's logged there |
 
@@ -858,6 +875,17 @@ An instance without an APNs key of its own can push through the relay ([PLAN.md]
    The relay refuses a request more than five minutes from its clock or not signed by that key with 401, and one past its limit an hour for that key with 429. It opens the token, sends the notification to APNs with its own key, and passes APNs's answer back: 200, or 410 when the token is gone, which the instance forgets as it does a direct one.
 
 A sealed box is the sender's one-time X25519 public key (32 bytes), a 24-byte nonce, and the message sealed with XChaCha20-Poly1305. Its key is HMAC-SHA256, keyed with the X25519 shared secret, over the sender's public key and then the recipient's, and the associated data is `loom seal 1` ([shared/seal.calx](../shared/seal.calx)). The phone's box key stays in the system's credential store, under the core's keyring service, as `push box`.
+
+## Updating the instance
+
+An instance updates its own program from loom's signed releases ([PLAN.md](../PLAN.md#updates-and-versions), `server/update.calx`), as `loom update` does on its command line.
+
+- **Behind or not.** `welcome` says the instance's version as `loom`. The desktop core that looks for app updates reads the newest release's manifest every six hours, and once its signature checks, tells the app `core.release`, newer than the app or not. The app hands it to each of its servers' cores, and each says `core.server`: the instance's version, the newest one, and whether the instance is `behind` it, by the same rule as `shared/release.calx`'s `newer`. The instance in the desktop app is never behind: it updates with the app.
+- **`instance.update`** (`now`?): an owner or admin (`not_allowed` for anyone else) has the instance fetch the newest release on a thread of its own, check the manifest's signature and the program's SHA-256 as `loom update` does, and put it beside its program as `.new`. It answers at once with how it stands (`state`, as the frame above), and every owner and admin hears the frame as it goes on. Once nothing runs (no turn, a task's or a flow step's included, nothing waiting on the loop to start, no install, move or login being checked, and no browser the person has taken over or is recording in), it renames its program to `.old`, the new one into its place, says `restarting`, closes every socket with 1001 and the listener, and starts again as the new program. With `now: true` it doesn't wait for turns: each is stopped as `cancel` stops it (its open approvals answered no, `by: "cancel"`, and its reply so far kept), and the restart finishes it as one a restart cut short (`run.finished` `failed`, "the instance restarted"), so its task carries on, its flow's step goes again, and its queue goes on. A turn that doesn't stop within 15 seconds is cut short the same way. An update asked for while one is under way joins it.
+- **How it comes back.** Run by systemd (`loom install`'s unit says `LOOM_SERVICE=systemd`, or systemd's `INVOCATION_ID` is set), it exits with 75 and the unit's `Restart=on-failure` starts the new program. Run by hand, it starts the new program with the same arguments and the port it had, then exits, and the new one waits up to 10 seconds for the port. In a container (`LOOM_SERVICE=docker`, which loom's image sets, or `/.dockerenv` or `/run/.containerenv`) and in the desktop app it doesn't update itself: `not_here`, saying how it is updated instead. So is one whose program sits where it can't write, such as a server set up before `loom install` gave the service a copy of its own.
+- **`instance.updates`** (`auto`?): how its updates stand, to anyone: `version`, `auto` (whether it updates itself), `may` (whether this person may update it), `owner`, `can` (whether it can update itself here) and `why` when it can't, and to an owner or admin `update`, how one under way stands. With `auto`, the owner, from a device, turns self-updates on or off (`not_allowed` for anyone else, `not_here` where it can't).
+- **Self-updates.** With them on, the instance looks a minute after it starts and every six hours after. A newer release is staged as above, says `waiting` with `auto: true`, and goes in once nothing has run, and nothing has come from an app, for five minutes. The new program finds what it was to be in the database, checks that the program running is the one it staged, by its SHA-256, and tells the owner once, as a [`notify`](#agents-and-devices) from loom itself (no `agent`, `title` "loom"): "loom updated itself to 0.2.1.", when the owner's first device connects after it, live, or two minutes after it starts, whichever comes first. One that failed is told once for each release, as "loom couldn't update itself to 0.2.1: …".
+- **Tested against a release of its own.** `loom serve --test-release MANIFEST KEY` takes a test's manifest and the public key it's signed with, in hex, in place of loom's releases. It's refused unless `--test-fast-hashes` is given too, which no real instance runs with, so one stray flag can't point an instance at releases loom didn't sign ([tests/protocol/server_update.calx](../tests/protocol/server_update.calx)).
 
 ## Versions
 

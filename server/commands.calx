@@ -25,7 +25,7 @@ struct Command {
     does: str
 }
 
-const COMMANDS: [Command; 86] = [
+const COMMANDS: [Command; 88] = [
     Command { name: "conversation.create", args: "agent, title?", does: "Makes a conversation with an agent." },
     Command { name: "conversation.rename", args: "conversation, title", does: "Renames a conversation." },
     Command { name: "conversation.branch", args: "message, title?", does: "Branches a chat at a message: a new conversation that goes on from there, apart from the chat." },
@@ -110,6 +110,8 @@ const COMMANDS: [Command; 86] = [
     Command { name: "instance.relay", args: "url? (empty turns it off)", does: "Sets the push relay phones are reached through." },
     Command { name: "server.offer", args: "address", does: "Adds another server to the person's app, for them to sign in to." },
     Command { name: "instance.move", args: "to (the new place's address), code (from loom receive)", does: "Moves the whole instance to another computer." },
+    Command { name: "instance.updates", args: "auto? (true lets the instance update itself)", does: "How the instance's updates stand: its version, whether it updates itself, and an update under way." },
+    Command { name: "instance.update", args: "now? (true stops what runs rather than waiting)", does: "Updates the instance to the newest signed release, and restarts it once nothing runs." },
     Command { name: "import.scan", args: "openbot?, grokbot? (folders to look in instead of where each app keeps its data)", does: "What OpenBot and Grok Bot keep on this computer, to import." },
     Command { name: "import.run", args: "from (openbot or grokbot), path? (a folder copied from that app)", does: "Brings agents, chats, memories, routines, skills, MCP servers and tables over from OpenBot or Grok Bot, without their secrets." },
 ]
@@ -171,7 +173,7 @@ fn reading_runs_and_harm_asks() {
     for c in COMMANDS {
         if let Access.Never(_) = access(String(c.name)) { panic("{c.name} is listed but never runs") }
     }
-    assert(catalog().len() == 86)
+    assert(catalog().len() == 88)
     assert(access(String("rule.list")) == Access.Runs and access(String("rule.check")) == Access.Runs)
     assert(access(String("rule.put")) == Access.Asks(String("other")) and access(String("rule.delete")) == Access.Asks(String("delete")))
     assert(access(String("defaults.get")) == Access.Runs and access(String("defaults.put")) == Access.Asks(String("other")))

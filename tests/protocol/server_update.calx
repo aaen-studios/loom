@@ -1,0 +1,316 @@
+module tests.protocol.server_update
+
+// The server updating itself (PLAN.md, "Updates and versions";
+// server/update.calx). The test builds loom, and makes "new" releases of it:
+// copies with the version in the program changed, so each one says it's newer.
+// It serves them as GitHub would, with a manifest signed with a key of its own,
+// which the instance takes from --test-release (refused without
+// --test-fast-hashes, so no real instance is pointed at it by one stray flag).
+//
+// The instance says its version, refuses an update to a member and one signed
+// with another key, waits for a turn to end before it restarts, stops one with
+// `now` and carries its task on after, and with self-updates on, updates itself
+// once nothing runs and tells its owner after. Each restart starts the new
+// program on the same port, as one run by hand does.
+//
+//     calx tests/protocol/server_update.calx
+import std.bytes
+import std.crypto.{Ed25519Key}
+import std.env
+import std.fs
+import std.hash.{sha256}
+import std.http.{Header, get}
+import std.http.server.{Server}
+import std.json.{Json}
+import std.process.{Child, Command, exit}
+import std.thread.{Task, sleep}
+import shared.obj.{Obj, at, bool_at, str_at}
+import server.update
+import tests.kit.{App, Instance, calx, check, json_of}
+
+struct Serving {
+    server: Server
+    dir: String
+}
+
+impl Task for Serving {
+    fn run(own self) {
+        var s = self
+        s.server.serve(s.dir.copy())
+    }
+}
+
+fn sh(program: String, args: List<String>) -> String ! Error {
+    let out = try Command.new(program.copy()).args(args.copy()).output()
+    if not out.status.success() { fail "{program} {args.join(" ")}: {out.error_text()}" }
+    return out.text()
+}
+
+// `data` with every `from` in it written over with `to`, which is as long.
+fn patched(data: List<u8>, from: String, to: String) -> List<u8> ! Error {
+    let a = from.to_bytes()
+    let b = to.to_bytes()
+    if a.len() != b.len() or a.len() == 0 { fail "a version is patched with one as long" }
+    var out = data.copy()
+    var found: usize = 0
+    var k: usize = 0
+    while k + a.len() <= out.len() {
+        var same = true
+        for j in 0usize..a.len() {
+            if out[k + j] != a[j] {
+                same = false
+                break
+            }
+        }
+        if same {
+            for j in 0usize..b.len() {
+                out[k + j] = b[j]
+            }
+            found += 1
+            k += a.len()
+        } else {
+            k += 1
+        }
+    }
+    if found == 0 { fail "the program doesn't hold {from}" }
+    return out
+}
+
+// The version a program says it is.
+fn version_of(exe: String) -> String ! Error {
+    let said = try sh(exe, [String("version"), String("--json")])
+    return str_at(json_of(said.to_bytes()), "version") ?? String()
+}
+
+// Writes a release of `exe` as `version` into `dir`, signed with `key`, served at `base`.
+fn release(dir: String, version: String, exe: String, key: Ed25519Key, base: String) ! Error {
+    let data = try fs.read(exe)
+    let name = "loom-{version}"
+    try fs.write("{dir}/{name}", data.copy())
+    let entry = Obj.new().s("name", String("loom")).s("url", "{base}/{name}").s("sha256", bytes.hex(sha256(data.copy()))).i("size", i64.wrap(u64(data.len()))).done()
+    var files = Obj.new().done()
+    if let Json.Object(m) = mut files { m.insert(update.kind(), entry) }
+    let manifest = "{Obj.new().s("version", version).s("notes", String("Faster.")).j("files", files).done()}"
+    try fs.write_text("{dir}/manifest.json", manifest.copy())
+    try fs.write_text("{dir}/manifest.json.sig", bytes.base64(key.sign(manifest.to_bytes())))
+}
+
+// Reads frames until an instance.update whose state is `state`, and gives it.
+fn until_state(app: mut App, state: str, wait_ms: u32) -> Json ! Error {
+    loop {
+        let f = try app.until("instance.update", "", wait_ms)
+        if str_at(f.copy(), "state") == some(String(state)) { return f }
+        if str_at(f.copy(), "state") == some(String("failed")) and state != "failed" { fail "the update failed: {f}" }
+    }
+}
+
+// Waits for the instance at `base` to say it's `version`, once it has restarted.
+fn wait_version(base: String, version: String) ! Error {
+    for _ in 0..240 {
+        var req = get("http://{base}/api/info", List<Header>(), 2000, 65536)
+        if let ok(r) = req.wait() {
+            if r.status == 200 and str_at(json_of(r.body), "version") == some(version.copy()) { return }
+        }
+        unsafe { sleep(250000000) }
+    }
+    fail "the instance didn't come back as {version} in a minute"
+}
+
+// The welcome an app gets, and the app.
+fn connect(base: String, token: String) -> (App, Json) ! Error {
+    let app = try App.connect(base, token, 0)
+    var welcome = Json.Null
+    for f in app.frames {
+        if str_at(f.copy(), "t") == some(String("welcome")) { welcome = f.copy() }
+    }
+    return (app, welcome)
+}
+
+fn send(app: App, cid: str, conversation: String, text: str) ! Error {
+    try app.send(Obj.new().s("t", String("send")).s("cid", String(cid)).s("conversation", conversation).s("text", String(text)).done())
+}
+
+fn run(root: String, first: mut Child?) ! Error {
+    let exe_name = if env.os() == "windows" { "loom.exe" } else { "loom" }
+    let bin = "{root}/bin"
+    let rel = "{root}/rel"
+    let data = "{root}/data"
+    try fs.make_dir_all(bin.copy())
+    try fs.make_dir_all(rel.copy())
+    try fs.make_dir_all(data.copy())
+    let exe = "{bin}/{exe_name}"
+    println("building loom…")
+    _ = try sh(calx(), [String("build"), String("server/main.calx"), String("-o"), exe.copy()])
+
+    // The versions: this one, and three newer ones, each as long as it.
+    let v1 = try version_of(exe.copy())
+    let lead = v1[..1].copy()
+    if lead != "0" and lead != "1" and lead != "2" and lead != "3" and lead != "4" { fail "this test makes newer versions from one that starts with 0 to 4, not {v1}" }
+    let rest = v1[1..].copy()
+    var programs = List<(String, String)>()
+    for d in ["5", "6", "7"] {
+        let v = "{d}{rest}"
+        let path = "{root}/loom-{d}{if env.os() == "windows" { ".exe" } else { "" }}"
+        try fs.write(path.copy(), try patched(try fs.read(exe.copy()), v1.copy(), v.copy()))
+        if env.os() != "windows" { try fs.set_mode(path.copy(), 0o755) }
+        programs.push((v, path))
+    }
+    let (v2, p2) = programs[0].copy()
+    let (v3, p3) = programs[1].copy()
+    let (v4, p4) = programs[2].copy()
+    try check(try version_of(p2.copy()) == v2, "a copy of loom with another version says it")
+
+    // The releases, served from a folder.
+    var http = try Server.listen(0)
+    http.log = false
+    let base = http.url()[..http.url().len() - 1].copy()
+    _ = unsafe { Thread.spawn(Serving { server: http, dir: root.copy() }) }
+    let key = Ed25519Key.generate()
+    let public = bytes.hex(key.public_key().bytes())
+
+    // The fake agent, and the instance from the built program.
+    let agent = try fs.absolute(String("tests/fake_agent/main.calx"))
+    _ = try sh(exe.copy(), [String("acp"), String("add"), String("fake"), calx(), agent, String("--data"), data.copy(), String("--test-fast-hashes")])
+    let refused = try Command.new(exe.copy()).args([String("serve"), String("--data"), data.copy(), String("--test-release"), "{base}/rel/manifest.json", public.copy()]).output()
+    try check(not refused.status.success() and refused.error_text().contains("--test-release is for loom's own tests"), "serve refuses --test-release without --test-fast-hashes")
+    let cmd = Command.new(exe.copy()).args([String("serve"), String("--data"), data.copy(), String("--port"), String("0"), String("--allow-root"), String("--test-fast-hashes"), String("--test-minute-ms"), String("200"), String("--test-release"), "{base}/rel/manifest.json", public.copy()]).env_remove(String("INVOCATION_ID")).env_remove(String("LOOM_SERVICE")).own_group()
+    let i = try Instance.launch(data.copy(), cmd)
+    let b = i.base.copy()
+    let token = i.token.copy()
+    let member = try i.second_account("ann")
+    let server = i.server
+    first = some(server)
+
+    // --- It says its version ---
+    var req = get("http://{b}/api/info", List<Header>(), 10000, 65536)
+    let info = try req.wait()
+    try check(str_at(json_of(info.body), "version") == some(v1.copy()), "GET /api/info says the instance's version")
+    let (first_app, welcome) = try connect(b.copy(), token.copy())
+    var app = first_app
+    try check(str_at(welcome, "loom") == some(v1.copy()), "and welcome does, as loom")
+
+    // --- Only an owner or admin updates it ---
+    var theirs = try App.connect(b.copy(), member, 0)
+    let no = try theirs.cmd("u_1", "instance.update", Obj.new().done())
+    try check(str_at(at(no, "error"), "code") == some(String("not_allowed")), "a member's instance.update is refused not_allowed")
+    let seen = try theirs.cmd("u_2", "instance.updates", Obj.new().done())
+    try check(bool_at(at(seen.copy(), "value"), "may") == some(false) and at(at(seen, "value"), "update") == Json.Null, "and instance.updates tells them they may not")
+    let auto_no = try theirs.cmd("u_3", "instance.updates", Obj.new().b("auto", true).done())
+    try check(str_at(at(auto_no, "error"), "code") == some(String("not_allowed")), "nor turn self-updates on")
+    theirs.close()
+    let mine = try app.cmd("u_4", "instance.updates", Obj.new().done())
+    let v = at(mine, "value")
+    try check(bool_at(v.copy(), "may") == some(true) and bool_at(v.copy(), "owner") == some(true) and bool_at(v.copy(), "can") == some(true) and bool_at(v.copy(), "auto") == some(false) and str_at(v, "version") == some(v1.copy()), "the owner's instance.updates: its version, and that it can update itself")
+
+    // --- A release signed with another key isn't used ---
+    try release(rel.copy(), v2.copy(), p2.copy(), Ed25519Key.generate(), "{base}/rel")
+    let asked = try app.cmd("u_5", "instance.update", Obj.new().done())
+    try check(str_at(at(asked, "value"), "state") == some(String("downloading")), "instance.update starts downloading")
+    let failed = try until_state(mut app, "failed", 30000)
+    try check((str_at(failed, "why") ?? String()).contains("isn't signed"), "a release signed with another key fails, saying so")
+
+    // --- An update waits for the turn that's running ---
+    try release(rel.copy(), v2.copy(), p2.copy(), key, "{base}/rel")
+    let made = try app.cmd("u_6", "agent.create", Obj.new().s("name", String("Worker")).s("acp_agent", String("fake")).s("instructions", String("You are a test.")).done())
+    let agent_id = str_at(at(at(made, "value"), "agent"), "id") ?? String()
+    let chat = try app.cmd("u_6b", "conversation.create", Obj.new().s("agent", agent_id.copy()).done())
+    try send(app, "m_1", str_at(at(chat, "value"), "conversation") ?? String(), "/sleep 3000\nslept")
+    _ = try app.until("event", "run.started", 120000)
+    _ = try app.cmd("u_7", "instance.update", Obj.new().done())
+    let waiting = try until_state(mut app, "waiting", 60000)
+    try check(str_at(waiting, "version") == some(v2.copy()), "the newer release is downloaded and checked, and waits for the turn")
+    // An app looking at the popup, and asking again, while it waits leaves the program that waits alone.
+    let looked = try app.cmd("u_7b", "instance.updates", Obj.new().done())
+    let asked_again = try app.cmd("u_7c", "instance.update", Obj.new().done())
+    try check(str_at(at(at(looked, "value"), "update"), "state") == some(String("waiting")) and str_at(at(asked_again, "value"), "state") == some(String("waiting")) and fs.exists("{exe}.new"), "asking while it waits joins it, and the new program stays where it waits")
+    let reply = try app.reply()
+    try check("{reply}".contains("slept"), "the turn goes on to its end")
+    _ = try until_state(mut app, "restarting", 30000)
+    try check(true, "and then the instance restarts")
+    app.close()
+    try wait_version(b.copy(), v2.copy())
+    if let c = first {
+        let ended = c.wait_timeout(30000)
+        try check(match ended {
+            some(status) => status.success(),
+            none => false,
+        }, "the old program ends, once the new one is starting")
+    }
+    try check(bytes.hex(sha256(try fs.read(exe.copy()))) == bytes.hex(sha256(try fs.read(p2.copy()))) and fs.exists("{exe}.old"), "the new program took the old one's place, which is kept beside it")
+    let (second_app, welcome2) = try connect(b.copy(), token.copy())
+    var app2 = second_app
+    try check(str_at(welcome2, "loom") == some(v2.copy()), "the app connects again, and welcome says the new version")
+
+    // --- now: true stops what runs, and a task carries on after ---
+    try release(rel.copy(), v3.copy(), p3.copy(), key, "{base}/rel")
+    let mark = app2.frames.len()
+    let task = try app2.cmd("u_8", "task.start", Obj.new().s("agent", agent_id.copy()).s("title", String("Sleep on it")).s("prompt", String("/sleep 60000\nnever")).done())
+    let task_id = str_at(at(at(task, "value"), "task"), "id") ?? String()
+    // Its run may have started before the command's answer came.
+    var cut = String()
+    for k in mark..app2.frames.len() {
+        let f = app2.frames[k].copy()
+        if str_at(f.copy(), "kind") == some(String("run.started")) { cut = str_at(f, "run") ?? String() }
+    }
+    if cut.len() == 0 { cut = str_at(try app2.until("event", "run.started", 120000), "run") ?? String() }
+    _ = try app2.cmd("u_9", "instance.update", Obj.new().b("now", true).done())
+    _ = try until_state(mut app2, "restarting", 60000)
+    try check(true, "with now, a turn that's running doesn't hold the update up")
+    app2.close()
+    try wait_version(b.copy(), v3.copy())
+    var app3 = try App.connect(b.copy(), token.copy(), 0)
+    var cut_failed = false
+    var task_again = false
+    for f in app3.frames {
+        if str_at(f.copy(), "kind") == some(String("run.finished")) and str_at(f.copy(), "run") == some(cut.copy()) and str_at(f.copy(), "status") == some(String("failed")) { cut_failed = true }
+    }
+    try check(cut_failed, "the turn it stopped is finished as one a restart cut short")
+    for _ in 0..20 {
+        for f in app3.frames {
+            if str_at(f.copy(), "kind") != some(String("task.updated")) { continue }
+            let t = at(f, "task")
+            if str_at(t.copy(), "id") == some(task_id.copy()) and str_at(t.copy(), "run") != some(cut.copy()) { task_again = true }
+        }
+        if task_again { break }
+        _ = try app3.until("event", "task.updated", 120000)
+    }
+    try check(task_again, "and its task carries on with a new turn after the restart")
+
+    // --- Self-updates: once nothing runs, and the owner hears of it after ---
+    try release(rel.copy(), v4.copy(), p4.copy(), key, "{base}/rel")
+    let on = try app3.cmd("u_10", "instance.updates", Obj.new().b("auto", true).done())
+    try check(bool_at(at(on, "value"), "auto") == some(true), "the owner turns self-updates on")
+    app3.close()
+    try wait_version(b.copy(), v4.copy())
+    try check(true, "the instance finds the newer release by itself, and updates once it's quiet")
+    var app4 = try App.connect(b.copy(), token.copy(), 0)
+    let told = try app4.until("event", "notify", 30000)
+    try check((str_at(told, "body") ?? String()).contains("updated itself to {v4}"), "and tells its owner, live, once they're back")
+    app4.close()
+}
+
+fn main() ! Error {
+    if update.host(false) == update.Host.Docker {
+        println("server updates: skipped, in a container, where loom doesn't update itself")
+        exit(0)
+    }
+    let root = try fs.temp_dir()
+    var first: Child? = none
+    let failed = match run(root.copy(), mut first) {
+        ok => String(),
+        err(e) => "{e}",
+    }
+    // Every program it started, each restart's too, is in the first one's group.
+    if let c = first { c.kill_tree() }
+    unsafe { sleep(500000000) }
+    match fs.remove_dir_all(root) {
+        ok => {},
+        err(_) => {},
+    }
+    if failed.len() > 0 {
+        eprintln("\n{failed}")
+        exit(1)
+    }
+    println("\nserver updates: all good")
+    exit(0)
+}
