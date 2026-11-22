@@ -17,6 +17,26 @@ struct Agent: Identifiable, Equatable, Sendable {
     var name: String
     var color: String
     var program: String
+    /// The shape its thread takes in the agent list: one of the eight that come with
+    /// loom (Tokens.ThreadShape), "drawn" for its drawing, or "" for the plain thread.
+    var shape = ""
+    /// The one the person drew, as the instance smoothed it, in a box from -1 to 1.
+    var drawing: [CGPoint] = []
+
+    /// The points its thread follows in the list, or nil for the plain thread.
+    var outline: [CGPoint]? {
+        if shape == "drawn" { return drawing.count > 1 ? drawing : nil }
+        return Tokens.ThreadShape.all[shape]
+    }
+}
+
+/// A drawing as the instance keeps it: `[[x, y], ...]`.
+func points(_ j: JSON) -> [CGPoint] {
+    j.array.compactMap { p in
+        let xy = p.array
+        guard xy.count == 2, case .number(let x) = xy[0], case .number(let y) = xy[1] else { return nil }
+        return CGPoint(x: x, y: y)
+    }
 }
 
 struct Conversation: Equatable, Sendable {
@@ -441,7 +461,7 @@ final class Model {
         switch what {
         case .agents:
             agents = items.map {
-                Agent(id: $0["id"].text, name: $0["name"].text, color: $0["color"].text, program: $0["acp_agent"].text)
+                Agent(id: $0["id"].text, name: $0["name"].text, color: $0["color"].text, program: $0["acp_agent"].text, shape: $0["shape"].text, drawing: points($0["drawing"]))
             }
             if let s = selected, agent(s) == nil { select(nil) }
         case .conversations:

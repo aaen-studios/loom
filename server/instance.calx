@@ -26,6 +26,7 @@ import std.url
 import shared.obj.{Obj, at, bool_at, int_at, merge, without, str_at}
 import shared.protocol
 import shared.pushrelay
+import shared.shape
 import server.acp
 import server.acp.{Line, Out}
 import server.announce
@@ -489,6 +490,56 @@ pub fn color_ok(c: String) -> bool {
         if not ((ch >= '0' and ch <= '9') or (ch >= 'a' and ch <= 'f') or (ch >= 'A' and ch <= 'F')) { return false }
     }
     return true
+}
+
+// The shape an agent's thread takes in the sidebar (shared/shape.calx), from
+// `shape` and `drawing` in `args`, over what `old` had: the shape to keep
+// (none leaves it as it is, "" is the plain thread), the drawing to keep (null
+// leaves it), or why they can't be.
+pub fn shape_arg(args: Json, old: Json) -> (String?, Json, String) {
+    var drawing = Json.Null
+    if at(args.copy(), "drawing") != Json.Null {
+        drawing = shape.drawn(at(args.copy(), "drawing")) ?? Json.Null
+        if drawing == Json.Null { return (none, Json.Null, String("drawing is one stroke, as 8 to 4000 points [x, y] that aren't all in one place.")) }
+        // A drawing is the shape unless another is named with it.
+        if let s = str_at(args.copy(), "shape") {
+            if s.len() == 0 or shape.known(s.copy()) { return (some(s), drawing, String()) }
+        }
+        return (some(String("drawn")), drawing, String())
+    }
+    let s = str_at(args.copy(), "shape") else return (none, Json.Null, String())
+    if s.len() == 0 or shape.known(s.copy()) { return (some(s), Json.Null, String()) }
+    if s == "drawn" {
+        if at(old, "drawing") == Json.Null { return (none, Json.Null, String("The agent has no drawing yet: send one as drawing.")) }
+        return (some(s), Json.Null, String())
+    }
+    return (none, Json.Null, "shape is one of {shape.NAMES.join(", ")}, drawn, or \"\" for the plain thread, not {s}.")
+}
+
+// An agent with the shape and drawing shape_arg gave.
+fn with_shape(agent: Json, s: String?, drawing: Json) -> Json {
+    var out = agent.copy()
+    if let name = s {
+        out = if name.len() == 0 { without(out, "shape") } else { merge(out, Obj.new().s("shape", name).done()) }
+    }
+    if drawing != Json.Null { out = merge(out, Obj.new().j("drawing", drawing).done()) }
+    return out
+}
+
+@test
+fn an_agent_s_shape_is_one_of_eight_or_its_drawing() {
+    let (s, d, why) = shape_arg(Obj.new().s("shape", String("yarn")).done(), Json.Null)
+    assert(s == some(String("yarn")) and d == Json.Null and why.len() == 0)
+    let (_, _, bad) = shape_arg(Obj.new().s("shape", String("leaf")).done(), Json.Null)
+    assert(bad.len() > 0)
+    let (_, _, none_yet) = shape_arg(Obj.new().s("shape", String("drawn")).done(), Json.Null)
+    assert(none_yet.len() > 0)
+    var stroke = List<Json>()
+    for i in 0..20 { stroke.push(Json.Array([Json.Int(i64(i)), Json.Int(i64(i % 4))])) }
+    let (drawn, kept, fine) = shape_arg(Obj.new().j("drawing", Json.Array(stroke)).done(), Json.Null)
+    assert(drawn == some(String("drawn")) and kept != Json.Null and fine.len() == 0)
+    let (plain, _, _) = shape_arg(Obj.new().s("shape", String()).done(), Json.Null)
+    assert(with_shape(Obj.new().s("shape", String("bow")).done(), plain, Json.Null) == Obj.new().done())
 }
 
 @test
@@ -8527,12 +8578,15 @@ impl Instance {
             if let c = str_at(args.copy(), "color") {
                 if c.len() > 0 and not color_ok(c.copy()) { return Answer.Refused(String("bad_request"), "color is a thread colour, such as periwinkle or teal, or one of its own as #rrggbb, not {c}.") }
             }
+            let (new_shape, drawing, shape_why) = shape_arg(args.copy(), Json.Null)
+            if shape_why.len() > 0 { return Answer.Refused(String("bad_request"), shape_why) }
             let id = try i.store.new_id("a")
             // Each new agent takes the next of the eight thread colours, unless it names one.
             let count = (try i.store.agents(user.copy())).len()
             let color = str_at(args.copy(), "color") ?? String(COLORS[count % COLORS.len()])
             var agent = Obj.new().s("id", id).s("name", str_at(args.copy(), "name") ?? String("Agent")).s("color", color).s("acp_agent", program).s("instructions", str_at(args.copy(), "instructions") ?? String()).maybe("folder", str_at(args.copy(), "folder")).j("mcp", names_of(at(args.copy(), "mcp"))).maybe("permission", permission).maybe("busy", busy).maybe("backup", backup).b("code_mode", bool_at(args.copy(), "code_mode") ?? true).b("isolated", isolated).j("network", network).i("revision", 1).i("at", now()).done()
             if network == Json.Null { agent = without(agent, "network") }
+            agent = with_shape(agent, new_shape, drawing)
             // What its program offers, as the person's other agents on it learned it.
             let offered = try i.program_options(user.copy(), program.copy())
             if offered != Json.Null { agent = merge(agent, Obj.new().j("options", offered).done()) }
@@ -8557,6 +8611,14 @@ impl Instance {
             for key in keys {
                 if let v = str_at(args.copy(), key) { o.m.insert(String(key), Json.Str(v)) }
             }
+            // The shape its thread takes in the sidebar; a drawing stays when
+            // another shape is picked, so it can be picked again.
+            let (new_shape, drawing, shape_why) = shape_arg(args.copy(), old.copy())
+            if shape_why.len() > 0 { return Answer.Refused(String("bad_request"), shape_why) }
+            if let s = new_shape {
+                if s.len() == 0 { _ = o.m.remove(String("shape")) } else { o.m.insert(String("shape"), Json.Str(s)) }
+            }
+            if drawing != Json.Null { o.m.insert(String("drawing"), drawing) }
             // Its permission mode, and what a message does while it's busy:
             // null (or "") goes back to following the person's defaults.
             if defaults.follows(args.copy(), "permission") {
@@ -9012,6 +9074,9 @@ impl Instance {
             for key in keys {
                 if let v = str_at(old.copy(), key) { changes = changes.s(key, v) }
             }
+            // Its shape as it was: the plain thread when it had none.
+            if at(old.copy(), "drawing") != Json.Null { changes = changes.j("drawing", at(old.copy(), "drawing")) }
+            changes = changes.s("shape", str_at(old.copy(), "shape") ?? String())
             return try i.command(user, device, String("agent.update"), changes.done())
         }
         if name == "agent.pin" {

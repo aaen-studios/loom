@@ -1,6 +1,9 @@
+module scripts.tokens
+
 // Generates loom's design tokens from design/tokens.toml into
 // design/generated/: tokens.rs (GPUI), Tokens.swift (iPhone) and tokens.css
-// (site, docs, plugin panels).
+// (site, docs, plugin panels). The two apps, and the site as shapes.json, also
+// get the eight thread shapes that come with loom, as shared/shape.calx makes them.
 //
 //     calx scripts/tokens.calx            write the generated files
 //     calx scripts/tokens.calx --check    fail if they're out of date
@@ -10,6 +13,61 @@ import std.toml.{Toml, parse}
 import std.fs
 import std.env
 import std.process.{exit}
+import shared.shape
+
+// The eight shapes, for Rust: each its points, then all of them in order.
+fn rust_shapes() -> String {
+    var out = String("\n#[rustfmt::skip]\npub mod thread_shape \{\n")
+    out.push_str("    //! The thread shapes that come with loom, each {shape.POINTS} points along one strand, in a box from -1 to 1, y down.\n")
+    var names = List<String>()
+    var all = List<String>()
+    for name in shape.NAMES {
+        let upper = String(name).to_upper_root()
+        names.push("\"{name}\"")
+        all.push("&{upper}")
+        var pts = List<String>()
+        for q in shape.preset(String(name)) ?? List<(f64, f64)>() {
+            pts.push("({q.0}, {q.1})")
+        }
+        out.push_str("    pub const {upper}: [(f32, f32); {shape.POINTS}] = [{pts.join(", ")}];\n")
+    }
+    out.push_str("    pub const NAMES: [&str; {shape.NAMES.len()}] = [{names.join(", ")}];\n")
+    out.push_str("    pub const ALL: [&[(f32, f32)]; {shape.NAMES.len()}] = [{all.join(", ")}];\n")
+    out.push_str("\}\n")
+    return out
+}
+
+// The same for Swift.
+fn swift_shapes() -> String {
+    var out = "\n    /// The thread shapes that come with loom, each {shape.POINTS} points along one strand, in a box from -1 to 1, y down.\n    enum ThreadShape \{\n"
+    var names = List<String>()
+    var all = List<String>()
+    for name in shape.NAMES {
+        names.push("\"{name}\"")
+        all.push("\"{name}\": {name}")
+        var pts = List<String>()
+        for q in shape.preset(String(name)) ?? List<(f64, f64)>() {
+            pts.push("CGPoint(x: {q.0}, y: {q.1})")
+        }
+        out.push_str("        static let {name}: [CGPoint] = [{pts.join(", ")}]\n")
+    }
+    out.push_str("        static let names = [{names.join(", ")}]\n")
+    out.push_str("        static let all: [String: [CGPoint]] = [{all.join(", ")}]\n    \}\n")
+    return out
+}
+
+// The same as JSON, for the site's copy of the app: each name with its points.
+fn json_shapes() -> String {
+    var all = List<String>()
+    for name in shape.NAMES {
+        var pts = List<String>()
+        for q in shape.preset(String(name)) ?? List<(f64, f64)>() {
+            pts.push("[{q.0}, {q.1}]")
+        }
+        all.push("  \"{name}\": [{pts.join(", ")}]")
+    }
+    return "\{\n{all.join(",\n")}\n\}\n"
+}
 
 struct Leaf {
     parent: String,
@@ -116,6 +174,7 @@ fn rust(leaves: List<Leaf>) -> String {
         }
     }
     if current != "-" { out.push_str("\}\n") }
+    out.push_str(rust_shapes())
     return out
 }
 
@@ -142,6 +201,7 @@ fn swift(leaves: List<Leaf>) -> String {
         }
     }
     if current != "-" { out.push_str("    \}\n") }
+    out.push_str(swift_shapes())
     out.push_str("\}\n")
     return out
 }
@@ -203,6 +263,7 @@ fn main() ! Error {
         (String("design/generated/tokens.rs"), rust(leaves.copy())),
         (String("design/generated/Tokens.swift"), swift(leaves.copy())),
         (String("design/generated/tokens.css"), css(leaves.copy())),
+        (String("design/generated/shapes.json"), json_shapes()),
     ]
     if check {
         var stale = 0

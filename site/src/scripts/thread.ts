@@ -6,9 +6,16 @@
 // Every thread on a page shares one animation loop, which runs only while a thread on screen is
 // moving and the tab is visible. With reduced motion, each keeps its shape and holds still.
 
+import shapes from '../../../design/generated/shapes.json';
+
 export type Mood = 'idle' | 'thinking' | 'writing' | 'tool' | 'waiting' | 'failed';
 
+/** The eight shapes an agent's thread can take in the sidebar (shared/shape.calx). */
+export type Shape = keyof typeof shapes;
+
 const NS = 'http://www.w3.org/2000/svg';
+/** How far a shape's moods bend it, in pixels (thread.rs, SHAPE_ROOM). */
+const SHAPE_ROOM = 1;
 const TAU = Math.PI * 2;
 const PI = Math.PI;
 const EASE = 0.7;
@@ -89,12 +96,27 @@ function bend(mood: Mood, u: number, width: number, room: number, t: number, sin
 	return [0, up * room];
 }
 
+/** A shape's points with one more between each two, on a curve through them (thread.rs, finer). */
+function finer(p: number[][]): number[][] {
+	const out: number[][] = [];
+	for (let i = 0; i < p.length; i++) {
+		out.push(p[i]);
+		if (i + 1 < p.length) {
+			const [p0, p1, p2, p3] = [p[Math.max(i - 1, 0)], p[i], p[i + 1], p[Math.min(i + 2, p.length - 1)]];
+			out.push([(-p0[0] + 9 * p1[0] + 9 * p2[0] - p3[0]) / 16, (-p0[1] + 9 * p1[1] + 9 * p2[1] - p3[1]) / 16]);
+		}
+	}
+	return out;
+}
+
 export interface ThreadOptions {
 	w: number;
 	h: number;
 	/** The thread's colour: sky, mint, apricot, … from the tokens. */
 	color: string;
 	mood?: Mood;
+	/** The shape it takes in the sidebar, or none for the plain thread. */
+	shape?: Shape;
 }
 
 export class Thread {
@@ -109,6 +131,7 @@ export class Thread {
 	private pluckAt = -99;
 	private pluckAmp = 1;
 	private path: SVGPathElement;
+	private outline?: number[][];
 	visible = true;
 
 	constructor(svg: SVGSVGElement, o: ThreadOptions) {
@@ -116,6 +139,7 @@ export class Thread {
 		this.w = o.w;
 		this.h = o.h;
 		this.color = o.color;
+		this.outline = o.shape && shapes[o.shape] ? finer(shapes[o.shape]) : undefined;
 		this.from = this.to = o.mood ?? 'idle';
 		svg.setAttribute('viewBox', `0 0 ${o.w} ${o.h}`);
 		svg.setAttribute('fill', 'none');
@@ -182,6 +206,10 @@ export class Thread {
 		const sincePluck = still ? 99 : clock - this.pluckAt;
 		const pluck =
 			sincePluck < PLUCK ? room * 2 * motion.pluck.amplitude * this.pluckAmp * Math.exp(-motion.pluck.damping * sincePluck) * Math.sin(sincePluck * motion.pluck.frequency) : 0;
+		if (this.outline) {
+			this.drawShape(this.outline, t, k, sinceSnap, failed, pluck * (SHAPE_ROOM / room));
+			return;
+		}
 		let d = '';
 		for (let i = 0; i <= steps; i++) {
 			const u = (end * i) / steps;
@@ -193,6 +221,40 @@ export class Thread {
 		}
 		this.path.setAttribute('d', d);
 		this.path.setAttribute('stroke-width', String(width));
+	}
+
+	/**
+	 * The thread in its shape (thread.rs, strand): fitted into the box by its own width and height,
+	 * each mood pushing it along its line and across it, as a straight thread is pushed along and up.
+	 */
+	private drawShape(pts: number[][], t: number, k: number, sinceSnap: number, failed: number, pluck: number) {
+		const { w, h } = this;
+		const line = stroke.small;
+		let [sx, sy] = [0.1, 0.1];
+		for (const [x, y] of pts) [sx, sy] = [Math.max(sx, Math.abs(x)), Math.max(sy, Math.abs(y))];
+		const pad = 2 * line + SHAPE_ROOM;
+		const scale = Math.min((w - pad) / (2 * sx), (h - pad) / (2 * sy));
+		const base = pts.map(([x, y]) => [w / 2 + x * scale, h / 2 + y * scale]);
+		const along = [0];
+		for (let i = 1; i < base.length; i++) along.push(along[i - 1] + Math.hypot(base[i][0] - base[i - 1][0], base[i][1] - base[i - 1][1]));
+		const length = Math.max(along[along.length - 1], 1);
+		const push = (mood: Mood, u: number): [number, number] => (mood === 'failed' ? [0, 0] : bend(mood, u, length, SHAPE_ROOM, t, sinceSnap));
+		let d = '';
+		for (let i = 0; i < base.length; i++) {
+			const u = along[i] / length;
+			const [a, b] = [base[Math.max(i - 1, 0)], base[Math.min(i + 1, base.length - 1)]];
+			const dist = Math.max(Math.hypot(b[0] - a[0], b[1] - a[1]), 1e-6);
+			const [tx, ty] = [(b[0] - a[0]) / dist, (b[1] - a[1]) / dist];
+			const [fa, fu] = push(this.from, u);
+			const [ta, tu] = push(this.to, u);
+			const al = fa + (ta - fa) * k;
+			const up = fu + (tu - fu) * k + pluck * Math.sin(PI * u);
+			const x = base[i][0] + tx * al + ty * up;
+			const y = base[i][1] + ty * al - tx * up + failed * u * u * SHAPE_ROOM * 1.6;
+			d += `${i ? 'L' : 'M'}${x.toFixed(2)} ${y.toFixed(2)}`;
+		}
+		this.path.setAttribute('d', d);
+		this.path.setAttribute('stroke-width', String(line));
 	}
 }
 
@@ -241,7 +303,7 @@ const loop = (() => {
 
 /**
  * Starts a thread in every `<svg data-thread>` under root: its colour from data-color, its mood
- * from data-mood, and its size from its width and height attributes.
+ * from data-mood, its shape from data-shape, and its size from its width and height attributes.
  */
 export function threadsIn(root: ParentNode = document) {
 	const made: Thread[] = [];
@@ -252,6 +314,7 @@ export function threadsIn(root: ParentNode = document) {
 			h: Number(svg.getAttribute('height')) || 10,
 			color: svg.dataset.color ?? 'grey',
 			mood: (svg.dataset.mood as Mood) ?? 'idle',
+			shape: svg.dataset.shape as Shape | undefined,
 		});
 		threads.set(svg, th);
 		// Hovering what the thread belongs to (its row, its button) plucks it.

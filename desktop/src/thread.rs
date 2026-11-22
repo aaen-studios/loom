@@ -421,6 +421,154 @@ pub fn thread(
     .flex_none()
 }
 
+/// How far a shape's moods bend it, in pixels: less than a straight thread's, so the
+/// shape still reads.
+const SHAPE_ROOM: f32 = 1.0;
+
+/// How tall the sidebar's threads are, so a row with a shape and a row with the
+/// plain thread are the same height.
+pub const STRAND_H: f32 = 22.0;
+
+/// The shape's points with one more between each two, on a curve through them, so
+/// loops stay round when small.
+fn finer(pts: &[(f32, f32)]) -> Vec<(f32, f32)> {
+    let n = pts.len();
+    let mut out = Vec::with_capacity(n * 2);
+    for i in 0..n {
+        out.push(pts[i]);
+        if i + 1 < n {
+            let p0 = pts[i.saturating_sub(1)];
+            let (p1, p2) = (pts[i], pts[i + 1]);
+            let p3 = pts[(i + 2).min(n - 1)];
+            out.push((
+                (-p0.0 + 9.0 * p1.0 + 9.0 * p2.0 - p3.0) / 16.0,
+                (-p0.1 + 9.0 * p1.1 + 9.0 * p2.1 - p3.1) / 16.0,
+            ));
+        }
+    }
+    out
+}
+
+/// Where each point of `base` is in `mood`: pushed along the shape and across it, as
+/// `bend` pushes a straight thread along and up, by the shape's own direction there.
+fn shape_points(
+    base: &[(f32, f32)],
+    from: Mood,
+    to: Mood,
+    k: f32,
+    t: f32,
+    since_snap: f32,
+) -> Vec<(f32, f32)> {
+    let n = base.len();
+    let mut along = vec![0.0f32; n];
+    for i in 1..n {
+        let (a, b) = (base[i - 1], base[i]);
+        along[i] = along[i - 1] + ((b.0 - a.0).powi(2) + (b.1 - a.1).powi(2)).sqrt();
+    }
+    let len = along[n - 1].max(1.0);
+    let room = SHAPE_ROOM;
+    // A failed thread hangs: its far end lowest, whichever way the shape goes there.
+    let failed = weight(Mood::Failed, from, to, k);
+    let push = |mood: Mood, u: f32| {
+        if mood == Mood::Failed {
+            (0.0, 0.0)
+        } else {
+            bend(mood, u, len, room, t, since_snap)
+        }
+    };
+    (0..n)
+        .map(|i| {
+            let u = along[i] / len;
+            let (a, b) = (base[i.saturating_sub(1)], base[(i + 1).min(n - 1)]);
+            let d = ((b.0 - a.0).powi(2) + (b.1 - a.1).powi(2)).sqrt().max(1e-6);
+            let (tx, ty) = ((b.0 - a.0) / d, (b.1 - a.1) / d);
+            let (fa, fu) = push(from, u);
+            let (ta, tu) = push(to, u);
+            let (al, up) = (fa + (ta - fa) * k, fu + (tu - fu) * k);
+            (
+                base[i].0 + tx * al + ty * up,
+                base[i].1 + ty * al - tx * up + failed * u * u * room * 1.6,
+            )
+        })
+        .collect()
+}
+
+/// An agent's thread as the sidebar draws it (PLAN.md, "Its shape"): in its shape,
+/// `pts` in a box from -1 to 1 fitted into `w` by `STRAND_H`, or the plain thread
+/// `h` high in the middle when it has none. Either moves with `mood`.
+pub fn strand(
+    key: impl Into<SharedString>,
+    mood: Mood,
+    tint: Hsla,
+    pts: Option<&[(f32, f32)]>,
+    w: f32,
+    h: f32,
+    snapped: Option<Instant>,
+) -> AnyElement {
+    let key = key.into();
+    let Some(pts) = pts.filter(|p| p.len() > 1) else {
+        return div()
+            .w(px(w))
+            .h(px(STRAND_H))
+            .flex_none()
+            .flex()
+            .items_center()
+            .child(thread(key, mood, tint, w, h, snapped))
+            .into_any_element();
+    };
+    let pts = finer(pts);
+    let stroke = thread_stroke::SMALL;
+    canvas(
+        |_, _, _| {},
+        move |bounds, _, window, _| {
+            let t = now();
+            let (from, to, k, tint) = blend(&key, mood, tint, t);
+            if k < 1.0 {
+                crate::perf::count("want:thread");
+                window.request_animation_frame();
+            }
+            let (bw, bh) = (bounds.size.width.as_f32(), bounds.size.height.as_f32());
+            let cx = bounds.origin.x.as_f32() + bw / 2.0;
+            let cy = bounds.origin.y.as_f32() + bh / 2.0;
+            // As big as the box allows it, by its own width and height, so a wide
+            // shape is as wide as the thread.
+            let (mut sx, mut sy) = (0.0f32, 0.0f32);
+            for (x, y) in &pts {
+                sx = sx.max(x.abs());
+                sy = sy.max(y.abs());
+            }
+            let pad = 2.0 * stroke + SHAPE_ROOM;
+            let scale = ((bw - pad) / (2.0 * sx.max(0.1))).min((bh - pad) / (2.0 * sy.max(0.1)));
+            let base: Vec<(f32, f32)> = pts
+                .iter()
+                .map(|(x, y)| (cx + x * scale, cy + y * scale))
+                .collect();
+            let since_snap = snapped
+                .map(|at| at.elapsed().as_secs_f32())
+                .unwrap_or(f32::MAX);
+            let mut pb = PathBuilder::stroke(px(stroke));
+            for (i, (x, y)) in shape_points(&base, from, to, k, t, since_snap)
+                .into_iter()
+                .enumerate()
+            {
+                let p = point(px(x), px(y));
+                if i == 0 {
+                    pb.move_to(p)
+                } else {
+                    pb.line_to(p)
+                }
+            }
+            if let Ok(path) = pb.build() {
+                window.paint_path(path, tint);
+            }
+        },
+    )
+    .w(px(w))
+    .h(px(STRAND_H))
+    .flex_none()
+    .into_any_element()
+}
+
 /// How the server is: what the connection to the instance is doing, as the dot on its
 /// tile shows it.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -692,6 +840,33 @@ mod tests {
                     }
                     for (_, up) in &pts {
                         assert!(up.abs() <= room * 1.2, "{mood:?} leaves its height");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_shape_stays_one_line_in_its_box_in_every_mood() {
+        // Each of the eight, as the sidebar draws it, 22 pixels across.
+        for pts in crate::tokens::thread_shape::ALL {
+            let base: Vec<(f32, f32)> = super::finer(pts)
+                .iter()
+                .map(|(x, y)| (x * 9.0, y * 9.0))
+                .collect();
+            for mood in MOODS {
+                for t in [0.0, 1.3, 2.7, 4.1] {
+                    let moved = super::shape_points(&base, mood, mood, 1.0, t, f32::MAX);
+                    assert_eq!(moved.len(), base.len());
+                    for w in moved.windows(2) {
+                        let d = ((w[1].0 - w[0].0).powi(2) + (w[1].1 - w[0].1).powi(2)).sqrt();
+                        assert!(d < 4.0, "{mood:?} jumps {d}");
+                    }
+                    for ((x, y), (bx, by)) in moved.iter().zip(&base) {
+                        assert!(
+                            (x - bx).abs() < 3.0 && (y - by).abs() < 3.0,
+                            "{mood:?} bends too far"
+                        );
                     }
                 }
             }

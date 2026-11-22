@@ -1,0 +1,233 @@
+module shared.shape
+
+// The shapes an agent's thread takes in the sidebar (PLAN.md, "Agents"): one of
+// the eight that come with loom, or one the person drew. Each is one strand,
+// as POINTS points spaced evenly along it, fitted to a box from -1 to 1 by its
+// longer side. scripts/tokens.calx writes the eight into the design tokens, and
+// the instance keeps a drawn one on its agent.
+import std.json.{Json}
+import std.math.{PI, cos, sin}
+
+pub const POINTS: usize = 96
+
+// The eight that come with loom, in the order the app offers them.
+pub const NAMES: [str; 8] = ["loop", "coil", "bow", "heart", "star", "knot", "snail", "yarn"]
+
+// What a drawing may have: enough points to be a stroke, and no more than a
+// long one gives.
+const DRAWN_FEWEST: usize = 8
+const DRAWN_MOST: usize = 4000
+
+pub fn known(name: String) -> bool {
+    for n in NAMES {
+        if name == n { return true }
+    }
+    return false
+}
+
+// `f` from `t0` to `t1`, in `n` steps.
+fn curve(f: Fn(f64) -> (f64, f64), t0: f64, t1: f64, n: usize) -> List<(f64, f64)> {
+    var out = List<(f64, f64)>()
+    for i in 0..n + 1 {
+        let t = t0 + (t1 - t0) * f64.nearest(i) / f64.nearest(n)
+        out.push(f(t))
+    }
+    return out
+}
+
+fn line(a: (f64, f64), b: (f64, f64), n: usize) -> List<(f64, f64)> {
+    return curve(|k| (a.0 + (b.0 - a.0) * k, a.1 + (b.1 - a.1) * k), 0.0, 1.0, n)
+}
+
+fn size(p: List<(f64, f64)>) -> f64 {
+    var (x0, x1, y0, y1) = (f64.MAX, -f64.MAX, f64.MAX, -f64.MAX)
+    for q in p {
+        x0 = x0.min(q.0)
+        x1 = x1.max(q.0)
+        y0 = y0.min(q.1)
+        y1 = y1.max(q.1)
+    }
+    return (x1 - x0).max(y1 - y0)
+}
+
+// A loose end: the strand carried on straight past its point `from`, the way
+// it went from `toward`, for `len`.
+fn end(p: List<(f64, f64)>, from: usize, toward: usize, len: f64) -> List<(f64, f64)> {
+    let (a, b) = (p[from], p[toward])
+    let l = ((a.0 - b.0) * (a.0 - b.0) + (a.1 - b.1) * (a.1 - b.1)).sqrt().max(1.0e-9)
+    let (dx, dy) = ((a.0 - b.0) / l, (a.1 - b.1) / l)
+    return curve(|s| (a.0 + dx * s * len, a.1 + dy * s * len), 0.05, 1.0, 20)
+}
+
+// The strand with loose ends of `a` and `b` of its size at its start and end.
+fn tails(p: List<(f64, f64)>, a: f64, b: f64) -> List<(f64, f64)> {
+    let s = size(p.copy())
+    let n = p.len() - 1
+    var out = List<(f64, f64)>()
+    if a > 0.0 {
+        let head = end(p.copy(), 0, 6, a * s)
+        var i = head.len()
+        while i > 0 {
+            i -= 1
+            out.push(head[i])
+        }
+    }
+    for q in p.copy() { out.push(q) }
+    if b > 0.0 {
+        for q in end(p.copy(), n, n - 6, b * s) { out.push(q) }
+    }
+    return out
+}
+
+// One loop of a bow, pointing at `alpha`.
+fn petal(alpha: f64, w: f64) -> List<(f64, f64)> {
+    return curve(|f| (cos(2.0 * f) * cos(f * w + alpha), cos(2.0 * f) * sin(f * w + alpha)), -PI / 4.0, PI / 4.0, 200)
+}
+
+fn join(parts: List<List<(f64, f64)>>) -> List<(f64, f64)> {
+    var out = List<(f64, f64)>()
+    for part in parts {
+        for q in part { out.push(q) }
+    }
+    return out
+}
+
+// Each corner cut twice, so a hand's stroke or a bow's middle is a curve.
+fn smooth(p: List<(f64, f64)>) -> List<(f64, f64)> {
+    var cur = p.copy()
+    for _ in 0..2 {
+        if cur.len() < 3 { return cur }
+        var out = List<(f64, f64)>()
+        out.push(cur[0])
+        for i in 0..cur.len() - 1 {
+            let (a, b) = (cur[i], cur[i + 1])
+            out.push((a.0 * 0.75 + b.0 * 0.25, a.1 * 0.75 + b.1 * 0.25))
+            out.push((a.0 * 0.25 + b.0 * 0.75, a.1 * 0.25 + b.1 * 0.75))
+        }
+        out.push(cur[cur.len() - 1])
+        cur = out
+    }
+    return cur
+}
+
+// POINTS points, as far apart along the strand as each other.
+fn even(p: List<(f64, f64)>) -> List<(f64, f64)> {
+    var at = List<f64>()
+    at.push(0.0)
+    for i in 1..p.len() {
+        let (a, b) = (p[i - 1], p[i])
+        at.push(at[i - 1] + ((b.0 - a.0) * (b.0 - a.0) + (b.1 - a.1) * (b.1 - a.1)).sqrt())
+    }
+    let total = at[at.len() - 1].max(1.0e-9)
+    var out = List<(f64, f64)>()
+    var j: usize = 0
+    for i in 0..POINTS {
+        let want = total * f64.nearest(i) / f64.nearest(POINTS - 1)
+        while j < p.len() - 2 and at[j + 1] < want { j += 1 }
+        let span = (at[j + 1] - at[j]).max(1.0e-9)
+        let k = ((want - at[j]) / span).min(1.0).max(0.0)
+        out.push((p[j].0 + (p[j + 1].0 - p[j].0) * k, p[j].1 + (p[j + 1].1 - p[j].1) * k))
+    }
+    return out
+}
+
+// Centred, its longer side from -1 to 1, to three places.
+fn fit(p: List<(f64, f64)>) -> List<(f64, f64)> {
+    var (x0, x1, y0, y1) = (f64.MAX, -f64.MAX, f64.MAX, -f64.MAX)
+    for q in p.copy() {
+        x0 = x0.min(q.0)
+        x1 = x1.max(q.0)
+        y0 = y0.min(q.1)
+        y1 = y1.max(q.1)
+    }
+    let s = 2.0 / (x1 - x0).max(y1 - y0).max(1.0e-9)
+    let (mx, my) = ((x0 + x1) / 2.0, (y0 + y1) / 2.0)
+    var out = List<(f64, f64)>()
+    for q in p {
+        out.push((((q.0 - mx) * s * 1000.0).rint() / 1000.0, ((q.1 - my) * s * 1000.0).rint() / 1000.0))
+    }
+    return out
+}
+
+fn finish(p: List<(f64, f64)>) -> List<(f64, f64)> {
+    return fit(even(smooth(p)))
+}
+
+// One of the eight, y down, as the screen has it; none for a name that isn't one.
+pub fn preset(name: String) -> List<(f64, f64)>? {
+    let raw = match name {
+        "loop" => curve(|t| (t - 2.4 * sin(t), 2.4 * cos(t)), -PI, PI, 600),
+        "coil" => curve(|t| (t - 2.3 * sin(t), 2.3 * cos(t)), -2.0 * PI, 2.0 * PI, 800),
+        "bow" => join([line((-0.45, 0.95), (0.0, 0.0), 12), petal(-0.35, 1.25), petal(PI + 0.35, 1.25), line((0.0, 0.0), (0.45, 0.95), 12)]),
+        "heart" => tails(curve(|t| (16.0 * sin(t) * sin(t) * sin(t), -(13.0 * cos(t) - 5.0 * cos(2.0 * t) - 2.0 * cos(3.0 * t) - cos(4.0 * t))), PI + 0.04, 3.0 * PI - 0.04, 600), 0.22, 0.22),
+        "star" => curve(|t| (2.0 * cos(t) + 5.0 * cos(2.0 * t / 3.0), 2.0 * sin(t) - 5.0 * sin(2.0 * t / 3.0)), 0.0, 6.0 * PI, 1200),
+        "knot" => tails(curve(|t| (sin(t) + 2.0 * sin(2.0 * t), cos(t) - 2.0 * cos(2.0 * t)), 0.12, 2.0 * PI - 0.12, 600), 0.12, 0.12),
+        "snail" => tails(curve(|f| (f * cos(f), f * sin(f)), 0.4, 4.3 * PI, 600), 0.0, 0.3),
+        "yarn" => tails(curve(|t| (cos(t) * cos(0.27 * t) - 0.45 * sin(t) * sin(0.27 * t), cos(t) * sin(0.27 * t) + 0.45 * sin(t) * cos(0.27 * t)), 0.0, 5.0 * PI, 800), 0.0, 0.35),
+        _ => return none,
+    }
+    return some(finish(raw))
+}
+
+fn num(j: Json) -> f64? {
+    match j {
+        Json.Int(i) => return some(f64.nearest(i)),
+        Json.Float(f) => return if f.is_finite() { some(f) } else { none },
+        _ => return none,
+    }
+}
+
+// A stroke the person drew, as `[[x, y], ...]` in any units, y down: smoothed,
+// spaced and fitted as the eight are. None when it isn't a stroke: too few
+// points or too many, something that isn't a point, or all in one place.
+pub fn drawn(j: Json) -> Json? {
+    let Json.Array(items) = j else return none
+    if items.len() < DRAWN_FEWEST or items.len() > DRAWN_MOST { return none }
+    var p = List<(f64, f64)>()
+    for item in items {
+        let Json.Array(xy) = item else return none
+        if xy.len() != 2 { return none }
+        let x = num(xy[0].copy()) else return none
+        let y = num(xy[1].copy()) else return none
+        p.push((x, y))
+    }
+    if size(p.copy()) < 1.0e-6 { return none }
+    return some(to_json(finish(p)))
+}
+
+pub fn to_json(p: List<(f64, f64)>) -> Json {
+    var out = List<Json>()
+    for q in p {
+        out.push(Json.Array([Json.Float(q.0), Json.Float(q.1)]))
+    }
+    return Json.Array(out)
+}
+
+@test
+fn every_shape_is_one_strand_in_the_box() {
+    for name in NAMES {
+        let p = preset(String(name)) ?? List<(f64, f64)>()
+        assert(p.len() == POINTS)
+        var widest = 0.0
+        for q in p.copy() {
+            assert(q.0 >= -1.0 and q.0 <= 1.0 and q.1 >= -1.0 and q.1 <= 1.0)
+            widest = widest.max(q.0.abs()).max(q.1.abs())
+        }
+        assert(widest > 0.99)
+    }
+    assert(preset(String("leaf")) == none)
+}
+
+@test
+fn a_drawing_is_smoothed_and_spaced() {
+    var stroke = List<Json>()
+    for i in 0..30 {
+        stroke.push(Json.Array([Json.Int(i64(i) * 4), Json.Float(f64(i % 5) * 3.5)]))
+    }
+    let Json.Array(got) = drawn(Json.Array(stroke)) ?? Json.Null else panic("no drawing")
+    assert(got.len() == POINTS)
+    assert(drawn(Json.Array([Json.Int(1), Json.Int(2)])) == none)
+    var dot = List<Json>()
+    for _ in 0..10 { dot.push(Json.Array([Json.Int(3), Json.Int(3)])) }
+    assert(drawn(Json.Array(dot)) == none)
+}
