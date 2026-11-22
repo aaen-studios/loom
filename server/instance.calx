@@ -4518,7 +4518,7 @@ impl Instance {
             }
         }
         if i.next_update_check > 0 and t >= i.next_update_check {
-            i.next_update_check = t + 360 * i.minute_ms
+            i.next_update_check = t + 30 * i.minute_ms
             let state = i.updating.state.copy()
             if state.len() == 0 or state == "latest" or state == "failed" { i.look_for_update(true, String(), false) }
         }
