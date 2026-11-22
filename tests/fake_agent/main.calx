@@ -34,13 +34,16 @@ module tests.fake_agent.main
 //     /env NAME           says NAME=VALUE, its environment variable NAME
 //     /servers            says the MCP servers the session was given, but loom:
 //                         "NAME command ARGS K=V" or "NAME url K=V" each, or "no servers"
+//     /meta               says the _meta its session was given: "meta JSON",
+//                         or "no meta"
 //     /context            says what loom told it this turn about where the person
 //                         is writing from (a "[loom: ...]" text block, which is
 //                         never a step), or "no context"
 //     /mcp TOOL JSON      calls TOOL of loom's own MCP server, the one named "loom"
 //                         in the session's mcpServers, with JSON as its
 //                         arguments, and says "TOOL: RESULT", or "TOOL failed:
-//                         RESULT" for an error. /mcp list says the tools' names
+//                         RESULT" for an error. /mcp list says the tools' names,
+//                         and /mcp hints each one's name and annotations, a line each
 //
 // A turn ends with end_turn after its last step, or with cancelled as soon as
 // session/cancel arrives. Diagnostics go to standard error.
@@ -101,6 +104,7 @@ pub enum Step {
     Env(String)
     Servers
     Config
+    Meta
     Usage(i64, i64)
 }
 
@@ -163,6 +167,8 @@ pub fn script(text: String) -> List<Step> {
             steps.push(Step.Servers)
         } else if word == "/config" {
             steps.push(Step.Config)
+        } else if word == "/meta" {
+            steps.push(Step.Meta)
         } else if word == "/usage" {
             let (used, size) = split_word(rest)
             steps.push(Step.Usage(i64.parse(used) ?? 0, i64.parse(size) ?? 0))
@@ -220,6 +226,8 @@ struct Agent {
     picks_up: String
     // Each session's mcpServers, as session/new, /load or /resume gave them.
     mcp: Map<String, Json>
+    // Each session's _meta, as session/new, /load or /resume gave it.
+    meta: Map<String, Json>
     stamp: String
     // Requests that came in during a turn, answered after it.
     backlog: List<Json>
@@ -499,7 +507,8 @@ impl Agent {
         var m = LinkedMap<String, Json>()
         m.insert("jsonrpc", js(String("2.0")))
         m.insert("id", int(2))
-        m.insert("method", js(if tool == "list" { String("tools/list") } else { String("tools/call") }))
+        let listing = tool == "list" or tool == "hints"
+        m.insert("method", js(if listing { String("tools/list") } else { String("tools/call") }))
         m.insert("params", Json.Object(p))
         if let err(e) = child.write_text("{Json.Object(m)}\n") { return "loom mcp: {e}" }
         let line = child.wait_for_line(String("\"id\":2"), 300000) else return String("loom mcp didn't answer in 5 minutes")
@@ -516,6 +525,15 @@ impl Agent {
                 }
             }
             return "tools: {names.join(", ")}"
+        }
+        if tool == "hints" {
+            var lines = List<String>()
+            if let Json.Array(tools) = result.get(String("tools")) ?? Json.Null {
+                for t in tools {
+                    lines.push("{(t.get(String("name")) ?? Json.Null).as_str() ?? String()} {t.get(String("annotations")) ?? Json.Null}")
+                }
+            }
+            return lines.join("\n")
         }
         var text = String()
         if let Json.Array(content) = result.get(String("content")) ?? Json.Null {
@@ -656,6 +674,11 @@ impl Agent {
                     let values = a.values(session.copy())
                     chunk(session.copy(), "agent_message_chunk", "model={value_of(values.copy(), "model")} effort={value_of(values, "effort")}")
                 },
+                Step.Meta => {
+                    var meta = Json.Null
+                    if let m = a.meta.find(session.copy()) { meta = m.copy() }
+                    chunk(session.copy(), "agent_message_chunk", if meta == Json.Null { String("no meta") } else { "meta {meta}" })
+                },
                 Step.Context => chunk(session.copy(), "agent_message_chunk", if context.len() > 0 { context.copy() } else { String("no context") }),
                 Step.Mcp(tool, args) => chunk(session.copy(), "agent_message_chunk", a.call_loom(session.copy(), tool, args)),
                 Step.Link(path) => {
@@ -737,6 +760,7 @@ impl Agent {
             var r = LinkedMap<String, Json>()
             let new_id = "fake_{a.stamp}_{a.sessions}"
             a.mcp.insert(new_id.copy(), params.get(String("mcpServers")) ?? Json.Null)
+            a.meta.insert(new_id.copy(), params.get(String("_meta")) ?? Json.Null)
             a.config.insert(new_id.copy(), config_default())
             r.insert("configOptions", config_options(config_default()))
             r.insert("sessionId", js(new_id))
@@ -762,6 +786,7 @@ impl Agent {
                 return
             }
             a.mcp.insert(session.copy(), params.get(String("mcpServers")) ?? Json.Null)
+            a.meta.insert(session.copy(), params.get(String("_meta")) ?? Json.Null)
             // session/load plays the conversation back first; session/resume doesn't.
             if name == "session/load" { chunk(session.copy(), "agent_message_chunk", String("(the conversation so far)")) }
             var r = LinkedMap<String, Json>()
@@ -787,7 +812,7 @@ fn main() {
     _ = unsafe { Thread.spawn(reader) }
     let given = env.args()
     let picks_up = if given.len() > 0 { given[0].replace("--", "") } else { String() }
-    var a = Agent { inbox: inbox, sessions: 0, next_id: 0, tools: 0, picks_up: picks_up, mcp: Map<String, Json>(), stamp: bytes.hex(random_bytes(3)), backlog: List<Json>(), config: Map<String, Map<String, String>>() }
+    var a = Agent { inbox: inbox, sessions: 0, next_id: 0, tools: 0, picks_up: picks_up, mcp: Map<String, Json>(), meta: Map<String, Json>(), stamp: bytes.hex(random_bytes(3)), backlog: List<Json>(), config: Map<String, Map<String, String>>() }
     loop {
         if a.backlog.len() > 0 {
             let m = a.backlog.remove(0)

@@ -2183,6 +2183,18 @@ impl Instance {
         let read_only = bool_at(body.copy(), "read_only") ?? false
         let args = at(body, "arguments")
         let agent = try i.store.agent(g.user.copy(), g.agent.copy()) else return some(json_response(200, tool_error(String("You were deleted."))))
+        let mode = defaults.mode_of(agent, try i.store.defaults(g.user.copy()))
+        // A script itself, before it runs: the agent program doesn't ask about
+        // run_code (acp.session_meta), so in `ask`, which asks about
+        // everything, loom does. Any other mode puts each call in it instead.
+        if bool_at(body.copy(), "script") == some(true) {
+            if not acp.asks_before_scripts(mode) { return some(json_response(200, merge(tool_text(String("Allowed by your permission mode.")), Obj.new().i("act", 0).done()))) }
+            let action = Obj.new().s("name", String("code.call")).j("args", Obj.new().s("server", String("loom")).s("tool", String("run_code")).j("arguments", args).i("act", 0).done()).done()
+            return match try i.ask_person(req, g, String("Run a script"), "execute", action) {
+                some(refused) => some(json_response(200, without(refused, "loom_rule"))),
+                none => none,
+            }
+        }
         // As the agent program's own request would be: one that only reads is
         // of kind read, and the rest other.
         let kind = if read_only { "read" } else { "other" }
@@ -2200,7 +2212,6 @@ impl Instance {
             }
             return some(json_response(200, tool_error(v.why)))
         }
-        let mode = defaults.mode_of(agent, try i.store.defaults(g.user.copy()))
         if v.then == "allow" or (v.then != "ask" and acp.allows(mode, String(kind))) {
             let said = if v.then == "allow" { v.why.copy() } else { String("Allowed by your permission mode.") }
             return some(json_response(200, merge(tool_text(said), Obj.new().i("act", act).done())))
@@ -4924,7 +4935,9 @@ impl Instance {
         let shared = try i.share_for(user.copy(), program.copy()) != none
         var command = acp_agent.command.copy()
         var args = acp_agent.args.copy()
-        var settings = acp_agent.env.copy()
+        // With OpenCode's config allowing Code Mode's tools, as loom asks for
+        // each call in a script (acp.program_env).
+        var settings = acp.program_env(acp_agent.env.copy())
         if boxed {
             let b = i.boxes else {
                 fail "Agents of people other than the owner run in their own sandbox, and this instance has none: the owner starts it with --sandboxes podman or --sandboxes docker"
@@ -4951,7 +4964,12 @@ impl Instance {
                     if not names.contains(n.copy()) { names.push(n) }
                 }
             }
-            settings = theirs.done()
+            settings = acp.program_env(theirs.done())
+            if let Json.Object(m) = settings.copy() {
+                for (k, _) in m {
+                    if not names.contains(k.copy()) { names.push(k.copy()) }
+                }
+            }
             let (c, a) = b.wrap(user.copy(), folder.copy(), names, command, args)
             command = c
             args = a
@@ -5054,7 +5072,7 @@ impl Instance {
                 }
                 let method = if p.resume { "session/resume" } else { "session/load" }
                 p.pending.insert(id, Pending.Resume(run_id.copy(), session.copy()))
-                p.to.send(Out.Send(acp.request(id, method, Obj.new().s("sessionId", session).s("cwd", folder).j("mcpServers", i.mcp_servers(user.copy(), agent.copy(), conversation.copy(), p.mcp_http, p.boxed)).done())))
+                p.to.send(Out.Send(acp.request(id, method, Obj.new().s("sessionId", session).s("cwd", folder).j("mcpServers", i.mcp_servers(user.copy(), agent.copy(), conversation.copy(), p.mcp_http, p.boxed)).j("_meta", acp.session_meta()).done())))
                 return
             }
         }
@@ -5079,7 +5097,7 @@ impl Instance {
         }
         p.next_id += 1
         p.pending.insert(p.next_id, Pending.NewSession(run_id.copy()))
-        p.to.send(Out.Send(acp.request(p.next_id, "session/new", Obj.new().s("cwd", folder).j("mcpServers", i.mcp_servers(user, agent, conversation, p.mcp_http, p.boxed)).done())))
+        p.to.send(Out.Send(acp.request(p.next_id, "session/new", Obj.new().s("cwd", folder).j("mcpServers", i.mcp_servers(user, agent, conversation, p.mcp_http, p.boxed)).j("_meta", acp.session_meta()).done())))
     }
 
     // Puts an agent's instructions in its folder, as AGENTS.md and CLAUDE.md,

@@ -5,8 +5,9 @@ module tests.protocol.sandbox
 // `loom` and the fake agent in it. It gets the member's own secrets, never the
 // owner's program settings, has its home in the member's folder, and reaches
 // loom's tools through the gate. A file it links to is read in its sandbox,
-// so one of the instance's own isn't, and removing the member removes the
-// sandbox and the folder.
+// so one of the instance's own isn't. In Code Mode, her scripts run in the
+// sandbox, in the instance's Deno, under the sandbox's limits, and call her MCP
+// server there. Removing the member removes the sandbox and the folder.
 //
 // It needs Linux, and Podman with pasta (the passt package) or Docker, and
 // says which it skipped.
@@ -49,14 +50,92 @@ fn build_image(runtime: String) ! Error {
     try fs.make_dir_all(ctx.copy())
     try sh(calx(), [String("build"), String("server/main.calx"), String("-o"), "{ctx}/loom"])
     try sh(calx(), [String("build"), String("tests/fake_agent/main.calx"), String("-o"), "{ctx}/fake-agent"])
+    try sh(calx(), [String("build"), String("tests/fake_mcp/main.calx"), String("-o"), "{ctx}/fake-mcp"])
     let lines: List<String> = [
         String("FROM docker.io/library/ubuntu:24.04"),
         String("RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates libcurl4t64 && rm -rf /var/lib/apt/lists/*"),
-        String("COPY loom fake-agent /usr/local/bin/"),
+        String("COPY loom fake-agent fake-mcp /usr/local/bin/"),
         String("RUN ldd /usr/local/bin/loom && loom version"),
     ]
     try fs.write_text("{ctx}/Containerfile", "{lines.join("\n")}\n")
     try sh(runtime, [String("build"), String("-q"), String("-f"), "{ctx}/Containerfile", String("-t"), String(IMAGE), ctx])
+}
+
+// The first script waits while the instance fetches Deno.
+const LONG: u32 = 600000
+
+// The agent's next message, which may take `wait_ms` to come.
+fn reply_in(app: mut App, wait_ms: u32) -> Json ! Error {
+    loop {
+        let created = try app.until("event", "message.created", wait_ms)
+        let m = at(created, "message")
+        if str_at(m.copy(), "role") == some(String("agent")) { return m }
+    }
+}
+
+fn script(code: str) -> String {
+    return "/mcp run_code {Obj.new().s("code", String(code)).done()}"
+}
+
+const ECHO: str = #"
+    const r = await mcp.fake.echo({ text: "hi" });
+    let env = "";
+    try { Deno.env.get("FAKE_KEY"); env = "read"; } catch (e) { env = e.name; }
+    return { said: r.said, k: await mcp.fake.key_length(), env };
+    "#
+
+const ADDS: str = #"
+    return await mcp.fake.add({ a: 2, b: 3 });
+    "#
+
+// Run in the sandbox while a script waits: whether Deno, running the script's
+// file, is in the sandbox, and in the same control group as its first process,
+// which the sandbox's limits are on. "same", "other", or "none" when it isn't
+// there. Its own words don't match what it looks for.
+const IN_THE_BOX: str = #"
+for p in /proc/[0-9]*; do
+  if tr '\000' ' ' < "$p/cmdline" 2>/dev/null | grep -q 'run-[0-9]*[.]ts'; then
+    if [ "$(cat "$p/cgroup")" = "$(cat /proc/1/cgroup)" ]; then echo same; else echo other; fi
+    exit 0
+  fi
+done
+echo none
+"#
+
+// Code Mode in a member's sandbox (PLAN.md, "Code Mode"): her loom mcp, in the
+// sandbox, runs her scripts in the instance's Deno, which the sandbox sees in
+// acp/, and starts her MCP server there too, a program only the image has.
+// The script has no environment there either, and Deno runs in the sandbox,
+// under its limits, while a call waits for her yes.
+fn code_mode(runtime: String, ann: mut App, ann_id: String) ! Error {
+    _ = try ann.cmd("q_10", "secret.put", Obj.new().s("name", String("FAKE_KEY")).s("value", String("s3cret")).done())
+    let fake = Obj.new().s("name", String("fake")).s("command", String("/usr/local/bin/fake-mcp")).j("args", Json.Array(List<Json>())).j("env", Obj.new().j("FAKE_KEY", Obj.new().s("secret", String("FAKE_KEY")).done()).done()).done()
+    _ = try ann.cmd("q_11", "mcp.put", fake)
+    let made = try ann.cmd("q_12", "agent.create", Obj.new().s("name", String("Scripted")).s("acp_agent", String("boxed")).s("instructions", String("Scripts.")).s("permission", String("auto")).j("mcp", Json.Array([Json.Str(String("fake"))])).done())
+    let agent = str_at(at(at(made, "value"), "agent"), "id") ?? String()
+    let chat = str_at(at(try ann.cmd("q_13", "conversation.create", Obj.new().s("agent", agent).done()), "value"), "conversation") ?? String()
+
+    try ann.send(Obj.new().s("t", String("send")).s("cid", String("c_1")).s("conversation", chat.copy()).s("text", String("/mcp list")).done())
+    try check(reply_text(try ann.reply()) == "tools: search_tools, run_code", "in Code Mode, her agent's loom mcp offers search_tools and run_code")
+
+    try ann.send(Obj.new().s("t", String("send")).s("cid", String("c_2")).s("conversation", chat.copy()).s("text", script(ECHO)).done())
+    let ran = reply_text(try reply_in(mut ann, LONG))
+    println("      the script gave: {ran}")
+    if ran.contains("Deno couldn't be fetched") or ran.contains("Deno has no build") {
+        println("skip  scripts in the sandbox: {ran}")
+        return
+    }
+    try check(ran == "run_code: Returned:\n{#"{"said":"hi","k":6,"env":"NotCapable"}"#}", "run_code runs her script in her sandbox, with the instance's Deno, calling her MCP server there, whose key the script never sees")
+
+    try ann.send(Obj.new().s("t", String("send")).s("cid", String("c_3")).s("conversation", chat.copy()).s("text", script(ADDS)).done())
+    let asked = try ann.until("event", "approval.needed", LONG)
+    try check(str_at(asked.copy(), "title") == some(String("Use add on the MCP server fake")), "a call her agent's mode doesn't allow asks her, and the script waits")
+    let looked = try Command.new(runtime).args([String("exec"), "loom-{ann_id}", String("sh"), String("-c"), String(IN_THE_BOX)]).output()
+    let where = looked.text().trim().copy()
+    println("      Deno, while it waits: {where} {looked.error_text().trim()}")
+    try check(where == "same", "while it waits, Deno runs the script in her sandbox, under its limits")
+    try ann.send(Obj.new().s("t", String("approve")).s("call", str_at(asked, "call") ?? String()).b("allow", true).done())
+    try check(reply_text(try reply_in(mut ann, LONG)) == "run_code: Returned:\n5", "and her yes lets it go on")
 }
 
 fn run(runtime: String) ! Error {
@@ -113,6 +192,8 @@ fn run(runtime: String) ! Error {
     try ann.send(Obj.new().s("t", String("send")).s("cid", String("m_4")).s("conversation", chat.copy()).s("text", String("/env OWNER_KEY")).done())
     let own_key = reply_text(try ann.reply())
     try check(own_key.contains("OWNER_KEY=her own"), "with a key of her own, she's past no budget, and her key wins")
+
+    try code_mode(runtime.copy(), mut ann, ann_id.copy())
 
     _ = try owner.cmd("q_3", "user.remove", Obj.new().s("user", ann_id.copy()).done())
     let there = try Command.new(runtime).args([String("container"), String("inspect"), "loom-{ann_id}"]).output()
