@@ -29,6 +29,7 @@ import core.link
 import core.relay
 import core.pushbox
 import core.update.{Updater}
+import core.updates.{Hub}
 import shared.release.{newer}
 import core.device.{Device}
 import std.fs
@@ -40,6 +41,11 @@ const FOLLOW_AGAIN_NS: u64 = 2000000000    // how long before asking a new place
 
 // The id the core gives its own conversation.create commands, before the send's cid.
 const MAKING: str = "core.conversation:"
+// The ids of the commands the core sends about its instance's updates.
+const UPDATES: str = "core.updates:"
+const UPDATING: str = "core.update:"
+// How long after its instance said it's restarting the core tries again every second.
+const RESTART_NS: u64 = 120000000000
 
 // What core.get reads from the cache.
 const GETS: [str; 8] = ["conversations", "agents", "devices", "runs", "tools", "approvals", "outbox", "messages"]
@@ -143,6 +149,13 @@ pub struct Conn {
     loom: String          // the instance's own version, as welcome says it
     latest: String        // the newest release's version, from this core's updater or the app ("release")
     pub local: bool       // the instance is the one in this app, which updates with the app
+    may: bool             // this person may update the instance, as instance.updates said
+    can: bool             // the instance can update itself where it runs
+    why: String           // and why not, when it can't
+    update: Json          // its update under way, as instance.update last said it
+    asked: bool           // instance.updates was asked on this connection
+    restarting: Instant?  // when the instance said it was restarting for an update
+    pub hub: Hub?         // what's behind across the app, in the first core (core/updates.calx)
 }
 
 impl Conn {
@@ -205,6 +218,13 @@ impl Conn {
             loom: String(),
             latest: String(),
             local: false,
+            may: false,
+            can: true,
+            why: String(),
+            update: Json.Null,
+            asked: false,
+            restarting: none,
+            hub: none,
         }
     }
 
@@ -356,7 +376,12 @@ impl Conn {
     }
 
     fn retry_later(mut self, why: String) {
-        let ms_base = wait_ms(self.failed)
+        var ms_base = wait_ms(self.failed)
+        // An instance restarting for an update is back in a few seconds: try every second
+        // for two minutes, rather than backing off, so the app is on it again at once.
+        if let since = self.restarting {
+            if unsafe { Instant.now() }.nanos_since(since) < RESTART_NS and ms_base > 1000 { ms_base = 1000 }
+        }
         let ms = ms_base + self.random.below(ms_base / 5 + 1)
         self.failed += 1
         self.retry_at = some(unsafe { Instant.now() })
@@ -533,14 +558,23 @@ impl Conn {
             }
             self.push_relay = str_at(f.copy(), "relay")
             self.loom = str_at(f.copy(), "loom") ?? String()
-            self.tell_server()
+            // An update under way, to an owner or admin; none once it's done.
+            self.update = at(f.copy(), "update")
+            self.asked = false
+            self.restarting = none
             self.state = State.Live
             self.failed = 0
+            self.tell_server()
             self.tell_state(0, String())
             self.offer(str_at(f.copy(), "device") ?? String())
             self.flush()
         } else if t == "synced" {
             self.synced = true
+        } else if t == "instance.update" {
+            // A restart for it is near: the core tries again every second until it's back.
+            if str_at(f.copy(), "state") == some(String("restarting")) { self.restarting = some(unsafe { Instant.now() }) }
+            self.update = f.copy()
+            self.tell_server()
         } else if t == "event" {
             // Before the cache applies it, while the run it ends is still there to read.
             // An agent's own notify is for now, looking or not.
@@ -595,6 +629,10 @@ impl Conn {
             let id = str_at(f.copy(), "id") ?? String()
             if id.starts_with(MAKING) {
                 self.made_conversation(f)
+                return
+            }
+            if id.starts_with(UPDATES) or id.starts_with(UPDATING) {
+                self.update_answer(id.starts_with(UPDATES), f)
                 return
             }
             if let i = self.linking.position(|x| x == id) {
@@ -731,6 +769,31 @@ impl Conn {
         if t == "release" {
             self.latest = str_at(m, "version") ?? String()
             self.tell_server()
+            return true
+        }
+        // Update this core's instance, for the first core's "update everything" or the popup.
+        if t == "server.update" {
+            self.server_update(bool_at(m, "now") ?? false)
+            return true
+        }
+        // Another server's core.server, which the app hands the first core.
+        if t == "server.state" {
+            if let h = mut self.hub { h.server(str_at(m.copy(), "dir") ?? String(), m) }
+            self.tell_updates()
+            return true
+        }
+        if t == "updates.run" {
+            var out = List<Json>()
+            if let h = mut self.hub { out = h.run(str_at(m, "device")) }
+            for frame in out {
+                // This core's own instance is updated here; another's through its core.
+                if str_at(frame.copy(), "t") == some(String("core.relay")) and str_at(frame.copy(), "to") == some(String()) {
+                    self.server_update(false)
+                } else {
+                    self.tell(frame)
+                }
+            }
+            self.tell_updates()
             return true
         }
         if t == "file.upload" or t == "file.get" {
@@ -1108,6 +1171,11 @@ impl Conn {
             said = u.poll()
         }
         if let s = said {
+            // A newer app, downloaded and checked, is one of the updates the icon offers.
+            if let path = str_at(s.copy(), "path") {
+                if let h = mut self.hub { h.app_ready(str_at(s.copy(), "version") ?? String(), path) }
+                self.tell_updates()
+            }
             self.tell(s)
         }
         // The newest release, newer than the app or not: the app hands it to its other
@@ -1121,16 +1189,83 @@ impl Conn {
             self.latest = v
             self.tell_server()
         }
+        // "Update everything" lets the app go once its servers have gone far enough.
+        var restart: Json? = none
+        if let h = mut self.hub { restart = h.poll() }
+        if let r = restart {
+            self.tell(r)
+            self.tell_updates()
+        }
     }
 
     /// Tells the app the instance's version, the newest release's, and whether the
     /// instance is behind it (`shared/release.calx`'s rule), once welcome has said its
-    /// version. The instance in this app updates with the app, so it's never behind.
+    /// version, with whether this person may update it, whether it can update itself
+    /// where it runs (and why not), and its update under way. The instance in this app
+    /// updates with the app, so it's never behind. The first core's hub hears it too.
     fn tell_server(mut self) {
         if self.loom.len() == 0 { return }
         let behind = not self.local and self.latest.len() > 0 and newer(self.latest.copy(), self.loom.copy())
-        let frame = Obj.new().s("t", String("core.server")).maybe("server", self.server.copy()).s("loom", self.loom.copy()).s("latest", self.latest.copy()).b("behind", behind).done()
-        self.tell(frame)
+        // Who may update it, and whether it can, once: an instance that's behind is asked.
+        if behind and not self.asked and self.state == State.Live {
+            let cmd = Obj.new().s("t", String("cmd")).s("id", "{UPDATES}{self.random.below(1000000000)}").s("name", String("instance.updates")).j("args", Obj.new().done()).done()
+            if self.put("{cmd}") { self.asked = true }
+        }
+        var frame = Obj.new().s("t", String("core.server")).maybe("server", self.server.copy()).s("loom", self.loom.copy()).s("latest", self.latest.copy()).b("behind", behind).b("may", self.may).b("can", self.can)
+        if self.why.len() > 0 { frame = frame.s("why", self.why.copy()) }
+        if (str_at(self.update.copy(), "state") ?? String()).len() > 0 { frame = frame.j("update", self.update.copy()) }
+        let said = frame.done()
+        if let h = mut self.hub { h.server(String(), said.copy()) }
+        self.tell(said)
+        self.tell_updates()
+    }
+
+    /// Asks the instance to update itself, `at_once` stopping what runs.
+    fn server_update(mut self, at_once: bool) {
+        let cmd = Obj.new().s("t", String("cmd")).s("id", "{UPDATING}{self.random.below(1000000000)}").s("name", String("instance.update")).j("args", Obj.new().b("now", at_once).done()).done()
+        if self.state == State.Live and self.put("{cmd}") {
+            self.update = Obj.new().s("state", String("downloading")).done()
+        } else {
+            self.update = Obj.new().s("state", String("failed")).s("why", String("The server isn't connected, so it can't be asked to update.")).done()
+        }
+        self.tell_server()
+    }
+
+    /// The answer to the core's instance.updates (`updates`) or instance.update.
+    fn update_answer(mut self, updates: bool, f: Json) {
+        let v = at(f.copy(), "value")
+        let e = at(f, "error")
+        if e != Json.Null {
+            let code = str_at(e.copy(), "code") ?? String()
+            let message = str_at(e, "message") ?? String()
+            if code == "not_allowed" {
+                self.may = false
+            } else if code == "not_here" {
+                self.can = false
+                self.why = message.copy()
+            }
+            if not updates {
+                // Refused, or it failed: nothing is under way, and what's said why.
+                self.update = if code == "not_allowed" or code == "not_here" { Json.Null } else { Obj.new().s("state", String("failed")).s("why", message).done() }
+            }
+        } else if updates {
+            self.may = bool_at(v.copy(), "may") ?? false
+            self.can = bool_at(v.copy(), "can") ?? true
+            self.why = str_at(v.copy(), "why") ?? String()
+            // An update under way; one with no state is none.
+            let u = at(v, "update")
+            if (str_at(u.copy(), "state") ?? String()).len() > 0 { self.update = u }
+        } else {
+            self.update = v
+        }
+        self.tell_server()
+    }
+
+    /// Tells the app what's behind across it, when that changed: the first core alone.
+    fn tell_updates(mut self) {
+        var said: Json? = none
+        if let h = mut self.hub { said = h.changed() }
+        if let s = said { self.tell(s) }
     }
 
     /// Answers the transfers that have ended.

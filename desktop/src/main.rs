@@ -164,6 +164,7 @@ gpui_kit::assets::icon_assets!(
         Smartphone,
         Users,
         Monitor,
+        CircleFadingArrowUp,
         Truck,
         Power,
         LogOut,

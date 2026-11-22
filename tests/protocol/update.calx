@@ -52,6 +52,17 @@ fn ask(u: mut Updater, id: str) -> Json ! Error {
     fail "the updater didn't answer in 6 s"
 }
 
+// Polls a look the updater started by itself until it's over, and gives what it said.
+fn settle(u: mut Updater) -> Json? ! Error {
+    let looks = u.looks
+    for _ in 0..600 {
+        if let said = u.poll() { return some(said) }
+        if u.looks > looks and u.idle() { return none }
+        unsafe { sleep(10000000) }
+    }
+    fail "the updater's look didn't end in 6 s"
+}
+
 fn run() ! Error {
     let root = try fs.temp_dir()
     var server = try Server.listen(0)
@@ -73,6 +84,15 @@ fn run() ! Error {
     var same = Updater.new(String("0.3.0"), String("windows-desktop"), "{base}/good/manifest.json", keep.copy()).with_key(public.copy())
     try check(bool_at(try ask(mut same, "u_2"), "latest") == some(true), "an app with the newest release hears it's up to date")
     try check(same.take_release() == some(String("0.3.0")), "and says the newest release's version even when it isn't newer than the app")
+
+    // --- Looking again, on the timer, while the app stays open ---
+    let fetched = same.fetched
+    same.soon()
+    try check(try settle(mut same) == none and same.fetched == fetched and same.take_release() == none, "a look on the timer at a manifest that didn't change reads nothing more, and says nothing")
+    try release("{root}/good", "0.3.1", "newer loom".to_bytes(), key, "{base}/good")
+    same.soon()
+    let found = try settle(mut same) ?? Json.Null
+    try check(str_at(found, "version") == some(String("0.3.1")) and same.fetched == fetched + 1 and same.take_release() == some(String("0.3.1")), "and once a new release is out, the next look finds it, without the app asking")
 
     let other = Ed25519Key.generate()
     try release("{root}/forged", "9.0.0", "evil".to_bytes(), other, "{base}/forged")

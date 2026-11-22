@@ -1,29 +1,36 @@
 module core.update
 
 // The desktop app's updates (PLAN.md, "Updates and versions"). The core looks
-// at the newest release's manifest a little after it starts and then every six
-// hours, or when the app asks. A newer release's file for this platform is
-// downloaded into the data folder, and the app hears `core.update` only once
-// the manifest's Ed25519 signature is the release key's and the file's SHA-256
-// is the manifest's. The app does the swap.
+// at the newest release's manifest a little after it starts and then about
+// every half hour while the app runs (each wait a little longer or shorter, so
+// every app doesn't ask at once), or when the app asks. A look asks with the
+// last manifest's ETag, so one that didn't change is a 304 and nothing more; a
+// manifest with the same bytes as the last one that checked isn't looked at
+// again either. A newer release's file for this platform is downloaded into
+// the data folder, and the app hears `core.update` only once the manifest's
+// Ed25519 signature is the release key's and the file's SHA-256 is the
+// manifest's. The app does the swap.
 import std.bytes
 import std.fs
 import std.hash.{sha256}
 import std.http.{Header, Request, get}
 import std.json.{Json}
+import std.random.{Random}
 import std.time.{Instant}
 import shared.files.{safe_name}
 import shared.obj.{Obj, at, str_at}
 import shared.release.{RELEASE_KEY, check_manifest, newer}
 
 const FIRST_CHECK_NS: u64 = 10000000000          // 10 s after the start
-const EVERY_NS: u64 = 21600000000000             // then every 6 hours
+const EVERY_NS: u64 = 1800000000000              // then every 30 minutes
+const JITTER_NS: u64 = 600000000000              // give or take up to 5 minutes
 const TIMEOUT_MS: u32 = 600000
 const MAX_DOWNLOAD: usize = 400000000
 
 enum Step {
     Waiting
-    Manifest(Request, Request)    // the manifest, and its signature
+    Manifest(Request)    // the manifest
+    Signature(Request)    // its signature, for the manifest in `body`
     Download(Request)
 }
 
@@ -40,15 +47,29 @@ pub struct Updater {
     found: Json           // the newer release's manifest, while its file comes
     key: String           // the public key releases are signed with, in hex
     release: String?      // the newest release's version, from a checked manifest, until the core takes it
+    etag: String          // the last manifest's ETag, which a look asks with, so one that didn't change is a 304
+    settled: List<u8>     // the last manifest whose look ended well, so the same bytes aren't looked at again
+    body: List<u8>        // the manifest whose signature is coming
+    body_etag: String     // and its ETag
+    pub looks: u64        // looks that fetched the manifest, for tests
+    pub fetched: u64      // looks that fetched a manifest that changed, and its signature, for tests
+    random: Random
 }
 
 fn answer() -> Obj {
     return Obj.new().s("t", String("core.update"))
 }
 
+/// The header that asks for the manifest only if it changed since `etag`.
+fn conditional(etag: String) -> List<Header> {
+    var h = List<Header>()
+    if etag.len() > 0 { h.push(Header { name: String("If-None-Match"), value: etag.copy() }) }
+    return h
+}
+
 impl Updater {
     pub fn new(version: own String, kind: own String, url: own String, dir: own String) -> Updater {
-        return Updater { version: version, kind: kind, url: url, dir: dir, step: Step.Waiting, next: some(unsafe { Instant.now() }), wait: FIRST_CHECK_NS, asked: false, asked_id: none, found: Json.Null, key: String(RELEASE_KEY), release: none }
+        return Updater { version: version, kind: kind, url: url, dir: dir, step: Step.Waiting, next: some(unsafe { Instant.now() }), wait: FIRST_CHECK_NS, asked: false, asked_id: none, found: Json.Null, key: String(RELEASE_KEY), release: none, etag: String(), settled: List<u8>(), body: List<u8>(), body_etag: String(), looks: 0, fetched: 0, random: Random.system() }
     }
 
     /// The updater with another release key, for tests.
@@ -67,21 +88,37 @@ impl Updater {
     pub fn check(mut self, id: own String?) {
         self.asked = true
         self.asked_id = id
+        self.soon()
+    }
+
+    /// Looks at the next poll, as the timer does when it's time: for tests, and the app waking.
+    pub fn soon(mut self) {
         match self.step {
             Step.Waiting => self.next = none,
             _ => {},
         }
     }
 
-    fn look(mut self) {
-        let sig_url = "{self.url}.sig"
-        self.step = Step.Manifest(get(self.url.copy(), List<Header>(), 60000, 1048576), get(sig_url, List<Header>(), 60000, 4096))
+    /// Whether no look is under way, between one and the next.
+    pub fn idle(self) -> bool {
+        return match self.step {
+            Step.Waiting => true,
+            _ => false,
+        }
     }
 
+    fn look(mut self) {
+        self.looks += 1
+        // A look the app asked for reads the manifest whole, so it can say what it found.
+        let etag = if self.asked { String() } else { self.etag.copy() }
+        self.step = Step.Manifest(get(self.url.copy(), conditional(etag), 60000, 1048576))
+    }
+
+    /// Waits for the next look: about EVERY_NS, give or take JITTER_NS / 2.
     fn later(mut self) {
         self.step = Step.Waiting
         self.next = some(unsafe { Instant.now() })
-        self.wait = EVERY_NS
+        self.wait = EVERY_NS - JITTER_NS / 2 + self.random.below(JITTER_NS + 1)
     }
 
     /// What the app hears about an explicit check that found nothing, or failed.
@@ -93,6 +130,9 @@ impl Updater {
 
     fn fail_check(mut self, why: String) -> Json? {
         eprintln("loom: the update check: {why}")
+        // The next look reads the manifest again, whatever its ETag, and goes on from it.
+        self.etag = String()
+        self.settled = List<u8>()
         return self.told(answer().j("error", Obj.new().s("code", String("update")).s("message", why).done()))
     }
 
@@ -106,30 +146,53 @@ impl Updater {
                 self.look()
                 return none
             },
-            Step.Manifest(m, s) => {
-                if not m.done() or not s.done() { return none }
+            Step.Manifest(m) => {
+                if not m.done() { return none }
                 var mr = m
-                var sr = s
                 self.later()
                 let mres = match mr.wait() {
                     ok(r) => r,
                     err(e) => return self.fail_check("{e}"),
                 }
+                // Not changed since the last look, which ended well.
+                if mres.status == 304 and self.settled.len() > 0 { return none }
+                if mres.status != 200 {
+                    let why = "there's no release manifest at {self.url} ({mres.status})"
+                    return self.fail_check(why)
+                }
+                let etag = mres.header(String("ETag")) ?? String()
+                if not self.asked and self.settled.len() > 0 and mres.body == self.settled {
+                    self.etag = etag
+                    return none
+                }
+                self.fetched += 1
+                self.body = mres.body.copy()
+                self.body_etag = etag
+                self.step = Step.Signature(get("{self.url}.sig", List<Header>(), 60000, 4096))
+                return none
+            },
+            Step.Signature(s) => {
+                if not s.done() { return none }
+                var sr = s
+                let manifest_bytes = self.body.copy()
+                let tag = self.body_etag.copy()
+                self.later()
                 let sres = match sr.wait() {
                     ok(r) => r,
                     err(e) => return self.fail_check("{e}"),
                 }
-                if mres.status != 200 or sres.status != 200 {
-                    let why = "there's no release manifest at {self.url} ({mres.status})"
+                if sres.status != 200 {
+                    let why = "there's no signature beside the release manifest at {self.url} ({sres.status})"
                     return self.fail_check(why)
                 }
-                let manifest = check_manifest(mres.body.copy(), String.from_utf8(sres.body.copy()) ?? String(), self.key.copy()) else {
+                let manifest = check_manifest(manifest_bytes.copy(), String.from_utf8(sres.body.copy()) ?? String(), self.key.copy()) else {
                     return self.fail_check(String("the release manifest isn't signed with loom's release key"))
                 }
                 let version = str_at(manifest.copy(), "version") ?? String()
-                // Newer or not, the core compares it with its server's (core.release).
+                // Newer or not, the core compares it with its servers' (core.release).
                 self.release = some(version.copy())
                 if not newer(version.copy(), self.version.copy()) {
+                    self.settle(manifest_bytes, tag)
                     let latest = answer().b("latest", true).s("version", self.version.copy())
                     return self.told(latest)
                 }
@@ -141,8 +204,12 @@ impl Updater {
                 let path = self.path_for(manifest.copy())
                 self.found = manifest.copy()
                 if fs.exists(path.copy()) and matches(path.copy(), file) {
+                    self.settle(manifest_bytes, tag)
                     return some(self.ready(path))
                 }
+                // Settled once the file has come and checks.
+                self.settled = manifest_bytes
+                self.etag = tag
                 self.step = Step.Download(get(url, List<Header>(), TIMEOUT_MS, MAX_DOWNLOAD))
                 return none
             },
@@ -168,6 +235,12 @@ impl Updater {
                 }
             },
         }
+    }
+
+    /// The look at this manifest ended well: the next one with the same bytes, or a 304, is nothing new.
+    fn settle(mut self, manifest: own List<u8>, etag: own String) {
+        self.settled = manifest
+        self.etag = etag
     }
 
     fn path_for(self, manifest: Json) -> String {

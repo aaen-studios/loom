@@ -1,0 +1,221 @@
+module core.updates
+
+// What's behind across the app (PLAN.md, "Updates and versions"): the app
+// itself and every server it's signed in to, which the update icon beside the
+// gear shows. The first core keeps it, since it's the one that updates the app:
+// it hears its own server, and the app hands it each other server's
+// `core.server` as `server.state`. It decides what's behind, who may update
+// what, and what "update everything" does: the servers first, each told
+// through its own core (`core.relay`), and the app last, once each server's
+// update has gone far enough to finish without the app (`core.restart`), since
+// the app restarts through its setup. The app only draws what it says.
+import std.json.{Json}
+import std.time.{Instant}
+import shared.obj.{Obj, at, bool_at, str_at}
+
+/// How long "update everything" waits for the servers before the app goes anyway.
+const SERVERS_WAIT_NS: u64 = 120000000000
+
+/// One server, as its core said it last.
+struct Server {
+    dir: String       // its folder in the app: "" for the first, servers/2 for another
+    loom: String      // the version it runs
+    latest: String    // the newest release
+    behind: bool
+    may: bool         // this person may update it: an owner or admin
+    can: bool         // it can update itself where it runs
+    why: String       // and why not, when it can't
+    state: String     // its update under way: downloading, waiting, restarting, failed; "asked" until it says
+    error: String     // why its update failed
+}
+
+pub struct Hub {
+    version: String     // the app's
+    ready: String       // a newer app, downloaded and checked: its version
+    path: String        // and its setup
+    servers: List<Server>
+    pending: List<String>    // the servers "update everything" waits for, by folder
+    app_after: bool          // and then the app goes
+    since: Instant?          // when it started waiting
+    told: String             // the last core.updates, so only a change is said
+}
+
+/// Whether a server's update has gone far enough to finish on its own: downloaded and
+/// waiting for a turn, restarting, failed, or done.
+fn settled(s: Server) -> bool {
+    return s.state == "waiting" or s.state == "restarting" or s.state == "failed" or (not s.behind and s.state.len() == 0)
+}
+
+/// Whether a server's update is under way, so it isn't asked again.
+fn going(state: String) -> bool {
+    return state == "asked" or state == "downloading" or state == "waiting" or state == "restarting"
+}
+
+impl Hub {
+    pub fn new(version: own String) -> Hub {
+        return Hub { version: version, ready: String(), path: String(), servers: List<Server>(), pending: List<String>(), app_after: false, since: none, told: String() }
+    }
+
+    /// A newer app is ready, from the updater's `core.update`.
+    pub fn app_ready(mut self, version: String, path: String) {
+        self.ready = version.copy()
+        self.path = path.copy()
+    }
+
+    /// A server's `core.server`, from its core: `dir` is its folder. `gone` forgets it.
+    pub fn server(mut self, dir: String, f: Json) {
+        let k = self.servers.position(|s| s.dir == dir)
+        if bool_at(f.copy(), "gone") == some(true) {
+            if let i = k { _ = self.servers.remove(i) }
+            if let i = self.pending.position(|d| d == dir) { _ = self.pending.remove(i) }
+            return
+        }
+        let u = at(f.copy(), "update")
+        var state = str_at(u.copy(), "state") ?? String()
+        // "latest" is an update that found nothing newer: nothing under way.
+        if state == "latest" { state = String() }
+        // Asked, and its core hasn't heard back yet.
+        if let i = k {
+            if self.servers[i].state == "asked" and state.len() == 0 and bool_at(f.copy(), "behind") == some(true) { state = String("asked") }
+        }
+        let s = Server { dir: dir.copy(), loom: str_at(f.copy(), "loom") ?? String(), latest: str_at(f.copy(), "latest") ?? String(), behind: bool_at(f.copy(), "behind") == some(true), may: bool_at(f.copy(), "may") == some(true), can: bool_at(f.copy(), "can") != some(false), why: str_at(f.copy(), "why") ?? String(), state: state, error: str_at(u, "why") ?? String() }
+        match k {
+            some(i) => self.servers[i] = s,
+            none => self.servers.push(s),
+        }
+    }
+
+    /// The devices that are behind, or whose update is under way or failed: what the
+    /// icon and its popup show.
+    pub fn view(self) -> Json {
+        var devices = List<Json>()
+        var any = false
+        if self.ready.len() > 0 {
+            devices.push(Obj.new().s("device", String("app")).s("kind", String("app")).s("version", self.version.copy()).s("latest", self.ready.copy()).b("may", true).b("can", true).s("state", if self.app_after { String("asked") } else { String() }).done())
+            any = true
+        }
+        for s in self.servers {
+            if not s.behind and s.state.len() == 0 { continue }
+            var d = Obj.new().s("device", s.dir.copy()).s("kind", String("server")).s("version", s.loom.copy()).s("latest", s.latest.copy()).b("may", s.may).b("can", s.can).s("state", s.state.copy())
+            if not s.can and s.why.len() > 0 { d = d.s("why", s.why.copy()) }
+            if s.state == "failed" and s.error.len() > 0 { d = d.s("error", s.error.copy()) }
+            devices.push(d.done())
+            if s.may and s.can and not going(s.state.copy()) { any = true }
+        }
+        return Obj.new().s("t", String("core.updates")).j("devices", Json.Array(devices)).b("all", any).done()
+    }
+
+    /// The view, when it changed since it was last said.
+    pub fn changed(mut self) -> Json? {
+        let v = self.view()
+        let text = "{v}"
+        if text == self.told { return none }
+        self.told = text
+        return some(v)
+    }
+
+    /// Updates `device` ("app", or a server's folder), or with none, everything behind
+    /// this person may update. Gives what to tell the app: a `core.relay` for each server,
+    /// for its core to send `instance.update`, and `core.restart` once the app goes.
+    pub fn run(mut self, device: String?) -> List<Json> {
+        var out = List<Json>()
+        let all = device == none
+        let one = device.copy() ?? String()
+        for k in 0..self.servers.len() {
+            let s = self.servers[k].copy()
+            if not all and s.dir != one { continue }
+            if not s.behind or not s.may or not s.can or going(s.state.copy()) { continue }
+            out.push(Obj.new().s("t", String("core.relay")).s("to", s.dir.copy()).j("frame", Obj.new().s("t", String("server.update")).done()).done())
+            self.servers[k].state = String("asked")
+            self.servers[k].error = String()
+            if all and self.ready.len() > 0 and self.pending.position(|d| d == s.dir) == none { self.pending.push(s.dir.copy()) }
+        }
+        if self.ready.len() > 0 and (all or one == "app") {
+            self.app_after = true
+            self.since = some(unsafe { Instant.now() })
+            if let r = self.poll() { out.push(r) }
+        }
+        return out
+    }
+
+    /// Once the servers "update everything" waits for have gone far enough, or two minutes
+    /// have passed, the app goes: `core.restart` with its setup.
+    pub fn poll(mut self) -> Json? {
+        if not self.app_after { return none }
+        var waiting = false
+        for d in self.pending {
+            if let i = self.servers.position(|s| s.dir == d) {
+                if not settled(self.servers[i].copy()) { waiting = true }
+            }
+        }
+        if waiting {
+            if let t = self.since {
+                if unsafe { Instant.now() }.nanos_since(t) < SERVERS_WAIT_NS { return none }
+            }
+        }
+        self.app_after = false
+        self.pending = List<String>()
+        return some(Obj.new().s("t", String("core.restart")).s("version", self.ready.copy()).s("path", self.path.copy()).done())
+    }
+}
+
+@test
+fn a_server_behind_is_listed_and_one_that_isnt_isnt() {
+    var h = Hub.new(String("0.2.0"))
+    h.server(String("servers/2"), Obj.new().s("loom", String("0.2.0")).s("latest", String("0.2.1")).b("behind", true).b("may", true).b("can", true).done())
+    h.server(String("servers/3"), Obj.new().s("loom", String("0.2.1")).s("latest", String("0.2.1")).b("behind", false).b("may", true).b("can", true).done())
+    let v = h.view()
+    assert("{v}".contains("servers/2") and not "{v}".contains("servers/3"))
+    assert(bool_at(v, "all") == some(true))
+}
+
+@test
+fn a_server_that_cant_restart_says_why_and_isnt_updated() {
+    var h = Hub.new(String("0.2.0"))
+    h.server(String("servers/2"), Obj.new().s("loom", String("0.2.0")).s("latest", String("0.2.1")).b("behind", true).b("may", true).b("can", false).s("why", String("This instance runs in a container")).done())
+    let v = h.view()
+    assert("{v}".contains("runs in a container"))
+    assert(bool_at(v, "all") == some(false))
+    assert(h.run(none).len() == 0)
+}
+
+@test
+fn update_everything_does_the_servers_first_and_the_app_last() {
+    var h = Hub.new(String("0.2.0"))
+    h.app_ready(String("0.2.1"), String("C:/update/0.2.1/loom-setup.exe"))
+    h.server(String("servers/2"), Obj.new().s("loom", String("0.2.0")).s("latest", String("0.2.1")).b("behind", true).b("may", true).b("can", true).done())
+    h.server(String("servers/3"), Obj.new().s("loom", String("0.2.0")).s("latest", String("0.2.1")).b("behind", true).b("may", false).b("can", true).done())
+    let out = h.run(none)
+    // Only the server this person may update, and not the app yet.
+    assert(out.len() == 1 and str_at(out[0].copy(), "to") == some(String("servers/2")))
+    assert(h.poll() == none)
+    // Asking again doesn't ask that server twice.
+    assert(h.run(none).len() == 0)
+    // Its update is downloaded and waits for a turn: the app goes.
+    h.server(String("servers/2"), Obj.new().s("loom", String("0.2.0")).s("latest", String("0.2.1")).b("behind", true).b("may", true).b("can", true).j("update", Obj.new().s("state", String("waiting")).done()).done())
+    let r = h.poll() ?? Json.Null
+    assert(str_at(r.copy(), "t") == some(String("core.restart")) and str_at(r, "path") == some(String("C:/update/0.2.1/loom-setup.exe")))
+}
+
+@test
+fn the_app_alone_goes_at_once_and_a_server_alone_leaves_the_app() {
+    var h = Hub.new(String("0.2.0"))
+    h.app_ready(String("0.2.1"), String("setup.exe"))
+    h.server(String("servers/2"), Obj.new().s("loom", String("0.2.0")).s("latest", String("0.2.1")).b("behind", true).b("may", true).b("can", true).done())
+    let server = h.run(some(String("servers/2")))
+    assert(server.len() == 1 and str_at(server[0].copy(), "t") == some(String("core.relay")))
+    let app = h.run(some(String("app")))
+    assert(app.len() == 1 and str_at(app[0].copy(), "t") == some(String("core.restart")))
+}
+
+@test
+fn a_server_that_came_back_new_is_no_longer_listed_and_only_a_change_is_said() {
+    var h = Hub.new(String("0.2.0"))
+    h.server(String("servers/2"), Obj.new().s("loom", String("0.2.0")).s("latest", String("0.2.1")).b("behind", true).b("may", true).b("can", true).done())
+    assert(h.changed() != none and h.changed() == none)
+    h.server(String("servers/2"), Obj.new().s("loom", String("0.2.1")).s("latest", String("0.2.1")).b("behind", false).b("may", true).b("can", true).done())
+    let v = h.changed() ?? Json.Null
+    assert(not "{v}".contains("servers/2") and bool_at(v, "all") == some(false))
+    h.server(String("servers/2"), Obj.new().b("gone", true).done())
+    assert(h.changed() == none)
+}
