@@ -1,10 +1,10 @@
 name: release
 
 # A tag like v0.3.0 makes a release (PLAN.md, "Updates and versions"): the
-# desktop app and its installer, the `loom` server for Linux and Windows, and
-# manifest.json naming each with its SHA-256, signed with the release key
-# (scripts/release.calx). The desktop app and `loom update` take only what
-# that signature covers.
+# desktop app and its installer (desktop/setup), the `loom` server for Linux,
+# Windows and macOS, and manifest.json naming each with its SHA-256, signed
+# with the release key (scripts/release.calx). The desktop app, its installer
+# and `loom update` take only what that signature covers.
 
 on:
   push:
@@ -42,21 +42,36 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: desktop
+          workspaces: |
+            desktop
+            desktop/setup
 
       - name: Build
         working-directory: desktop
         run: cargo build --release
 
-      - name: Installer
-        shell: pwsh
-        working-directory: desktop
+      # loom's own installer and updater (desktop/setup). It carries nothing yet: the
+      # publish job packs loom.exe into it and signs that with the release key.
+      - name: Setup
+        working-directory: desktop/setup
+        run: cargo build --release
+
+      - name: Collect
+        shell: bash
         run: |
-          choco install innosetup --no-progress -y
-          & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" "/DVersion=$env:LOOM_VERSION" "/DExe=target\release\loom.exe" installer.iss
-          New-Item -ItemType Directory -Force ..\dist | Out-Null
-          Copy-Item target\release\loom.exe ..\dist\loom.exe
-          Copy-Item loom-setup.exe ..\dist\loom-setup.exe
+          mkdir -p dist
+          cp desktop/target/release/loom.exe dist/loom.exe
+          cp desktop/setup/target/release/loom-setup.exe dist/loom-setup-stub.exe
+          ls -l dist
+
+      # A dry run packs with a throwaway key, so packing is tried too. Its setup
+      # refuses to install, since it only trusts the release key.
+      - name: Pack (dry run)
+        if: github.ref_type != 'tag'
+        shell: bash
+        env:
+          LOOM_PACK_TEST_SEED: "0000000000000000000000000000000000000000000000000000000000000001"
+        run: calx scripts/release.calx pack dist/loom-setup-stub.exe dist/loom.exe "$LOOM_VERSION" dist/loom-setup-dry.exe
 
       - uses: actions/upload-artifact@v4
         with:
@@ -69,14 +84,20 @@ jobs:
         include:
           - os: ubuntu-latest
             out: loom-linux
+            push: loom-push-linux
           - os: windows-latest
             out: loom-windows.exe
+          - os: ubuntu-24.04-arm
+            out: loom-linux-arm64
+            push: loom-push-linux-arm64
+          - os: macos-latest
+            out: loom-macos
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Calx (Linux)
-        if: runner.os == 'Linux'
+      - name: Install Calx (Linux, macOS)
+        if: runner.os != 'Windows'
         run: |
           curl -fsSL https://calxlang.com/install.sh | sh
           echo "$HOME/.calx/bin" >> "$GITHUB_PATH"
@@ -92,10 +113,16 @@ jobs:
         shell: bash
         run: |
           if [ "$GITHUB_REF_TYPE" = tag ]; then version="${GITHUB_REF_NAME#v}"; else version="0.0.0-dry"; fi
-          sed -i "s/^const VERSION: str = \".*\"/const VERSION: str = \"$version\"/" server/main.calx
+          perl -pi -e "s/^const VERSION: str = \".*\"/const VERSION: str = \"$version\"/" server/main.calx
           grep -q "const VERSION: str = \"$version\"" server/main.calx
           mkdir -p dist
           calx build --release server/main.calx -o "dist/${{ matrix.out }}"
+          # The push relay, for Linux servers (push/README.md).
+          if [ -n "${{ matrix.push }}" ]; then
+            perl -pi -e "s/^const VERSION: str = \".*\"/const VERSION: str = \"$version\"/" push/main.calx
+            grep -q "const VERSION: str = \"$version\"" push/main.calx
+            calx build --release push/main.calx -o "dist/${{ matrix.push }}"
+          fi
 
       - uses: actions/upload-artifact@v4
         with:
@@ -126,6 +153,30 @@ jobs:
           if [ -z "$notes" ]; then notes="loom ${GITHUB_REF_NAME#v}"; fi
           printf '%s\n' "$notes" > notes.md
 
+      # The installer: loom.exe packed into loom-setup's program, under a header the
+      # release key signs, which the setup checks before it installs anything.
+      - name: Pack
+        env:
+          LOOM_RELEASE_KEY: ${{ secrets.LOOM_RELEASE_KEY }}
+        run: |
+          calx scripts/release.calx pack dist/loom-setup-stub.exe dist/loom.exe "${GITHUB_REF_NAME#v}" dist/loom-setup.exe
+          rm -f -- dist/loom-setup-stub.exe
+
+      # The way over from v0.1 (PLAN.md, "What happens to v0.1"): v0.1's own updater
+      # reads latest/download/update.json, and takes a payload signed with its minisign
+      # key, here the CI secret LOOM_V01_KEY (the text of v0.1's ~/.loom/keys/loom.key).
+      # The payload is this release's setup, which v0.1 starts as loom.exe.
+      - name: Bridge from v0.1
+        env:
+          LOOM_V01_KEY_TEXT: ${{ secrets.LOOM_V01_KEY }}
+        run: |
+          if [ -z "$LOOM_V01_KEY_TEXT" ]; then
+            echo "::warning::LOOM_V01_KEY isn't set, so v0.1's updater won't find this release"
+            exit 0
+          fi
+          base="https://github.com/${GITHUB_REPOSITORY}/releases/download/${GITHUB_REF_NAME}"
+          calx scripts/release.calx bridge dist/loom-setup.exe "${GITHUB_REF_NAME#v}" "$base" dist
+
       - name: Sign
         env:
           LOOM_RELEASE_KEY: ${{ secrets.LOOM_RELEASE_KEY }}
@@ -134,7 +185,9 @@ jobs:
           base="https://github.com/${GITHUB_REPOSITORY}/releases/download/${GITHUB_REF_NAME}"
           calx scripts/release.calx sign dist "$version" "$base" notes.md \
             windows-desktop=loom.exe windows-installer=loom-setup.exe \
-            linux-server=loom-linux windows-server=loom-windows.exe
+            linux-server=loom-linux windows-server=loom-windows.exe \
+            linux-arm64-server=loom-linux-arm64 macos-server=loom-macos \
+            linux-push=loom-push-linux linux-arm64-push=loom-push-linux-arm64
           calx scripts/release.calx verify dist
 
       - name: Publish
@@ -143,4 +196,31 @@ jobs:
         run: |
           prerelease=""
           case "$GITHUB_REF_NAME" in *-*) prerelease="--prerelease" ;; esac
+          # The script a server runs to install loom: `curl -fsSL …/latest/download/install.sh | sudo sh`.
+          cp server/install.sh dist/install.sh
           gh release create "$GITHUB_REF_NAME" dist/* --title "loom ${GITHUB_REF_NAME#v}" --notes-file notes.md $prerelease
+
+  # The Docker image, on GitHub's registry: ghcr.io/<owner>/loom, tagged with the
+  # version, and latest for a release that isn't a pre-release.
+  image:
+    if: github.ref_type == 'tag'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build and push
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          image="ghcr.io/$(echo "$GITHUB_REPOSITORY" | tr '[:upper:]' '[:lower:]')"
+          echo "$GH_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+          docker build --build-arg "VERSION=$version" -t "$image:$version" .
+          docker push "$image:$version"
+          case "$GITHUB_REF_NAME" in
+            *-*) ;;
+            *) docker tag "$image:$version" "$image:latest" && docker push "$image:latest" ;;
+          esac

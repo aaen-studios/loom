@@ -1,0 +1,150 @@
+module tests.protocol.plugins
+
+// Plugins (PLAN.md, "Plugins"): a person puts a plugin, its manifest read
+// from plugin.toml, and allows what it asks by putting it. An agent writes
+// one with save_plugin, and what it asks waits for the person's
+// plugin.allow, which an agent can't send. Once its tool server is allowed,
+// it's in every agent's new sessions, run from the plugin's files. A panel
+// keeps data, 1 MB at most, messages agents and sends commands, only as
+// allowed. Each change is a revision, and deleting one from
+// an agent asks the person first.
+//
+//     calx tests/protocol/plugins.calx
+import std.json.{Json}
+import std.process.{exit}
+import shared.obj.{Obj, at, int_at, str_at}
+import tests.kit.{App, Instance, check, reply_text}
+
+const MANIFEST: str = "name = \"Build board\"\nversion = \"0.1.0\"\n[panel]\nentry = \"index.html\"\n[permissions]\ncommands = [\"routine.list\"]\nagents = true\n"
+const TOOLED: str = "name = \"Weather\"\nversion = \"1.0.0\"\n[tools]\ncommand = \"calx\"\nargs = [\"tools.calx\", \"--verbose\"]\n"
+
+fn reply_in(app: mut App, conversation: String) -> String ! Error {
+    loop {
+        let created = try app.until("event", "message.created")
+        let m = at(created, "message")
+        if str_at(m.copy(), "role") == some(String("agent")) and str_at(m.copy(), "conversation") == some(conversation.copy()) { return reply_text(m) }
+    }
+}
+
+fn say(app: mut App, conversation: String, cid: str, text: String) -> String ! Error {
+    try app.send(Obj.new().s("t", String("send")).s("cid", String(cid)).s("conversation", conversation.copy()).s("text", text).done())
+    return try reply_in(mut app, conversation)
+}
+
+fn code(answer: Json) -> String {
+    return str_at(at(answer, "error"), "code") ?? String()
+}
+
+fn run(i: Instance) ! Error {
+    var app = try App.connect(i.base.copy(), i.token.copy(), 0)
+
+    // --- From the person ---
+    let files = Obj.new().s("plugin.toml", String(MANIFEST)).s("index.html", String("<p>builds</p>")).done()
+    let put = try app.cmd("q_1", "plugin.put", Obj.new().s("id", String("build-board")).j("files", files.copy()).done())
+    let p = at(at(put, "value"), "plugin")
+    try check(str_at(p.copy(), "name") == some(String("Build board")) and "{at(p.copy(), "asks")}" == #"["agents","cmd:routine.list"]"# and "{at(p.copy(), "allowed")}" == "{at(p.copy(), "asks")}" and "{at(p.copy(), "waiting")}" == "[]" and int_at(p, "revision") == some(1), "a person's plugin is read from its manifest, and what it asks is allowed")
+    let updated = last(app, "plugin.updated")
+    let got = try app.cmd("q_2", "plugin.get", Obj.new().s("id", String("build-board")).done())
+    try check(str_at(at(updated, "plugin"), "id") == some(String("build-board")) and str_at(at(at(got, "value"), "files"), "index.html") == some(String("<p>builds</p>")), "it comes as an event, and with its files")
+    let bad_id = try app.cmd("q_3", "plugin.put", Obj.new().s("id", String("Bad Id")).j("files", files.copy()).done())
+    let no_manifest = try app.cmd("q_4", "plugin.put", Obj.new().s("id", String("x")).j("files", Obj.new().s("index.html", String("x")).done()).done())
+    let too_much = try app.cmd("q_5", "plugin.put", Obj.new().s("id", String("x")).j("files", Obj.new().s("plugin.toml", String("name = \"x\"\nversion = \"1\"\n[permissions]\ncommands = [\"plugin.allow\"]\n")).done()).done())
+    let escape = try app.cmd("q_6", "plugin.put", Obj.new().s("id", String("x")).j("files", Obj.new().s("plugin.toml", String("name = \"x\"\nversion = \"1\"\n")).s("../../etc/x", String("y")).done()).done())
+    try check(code(bad_id) == "bad_name" and code(no_manifest) == "bad_plugin" and code(too_much) == "bad_plugin" and code(escape) == "bad_plugin", "a bad id, no manifest, a command a panel never gets, and a path out of the plugin are refused")
+
+    // --- A panel's data ---
+    _ = try app.cmd("q_7", "plugin.data.put", Obj.new().s("plugin", String("build-board")).s("key", String("layout")).j("value", Obj.new().s("columns", String("3")).done()).done())
+    let data_event = last(app, "plugin.data")
+    let kept = try app.cmd("q_8", "plugin.data.get", Obj.new().s("plugin", String("build-board")).s("key", String("layout")).done())
+    try check(str_at(at(at(kept, "value"), "value"), "columns") == some(String("3")) and str_at(data_event, "key") == some(String("layout")), "a panel keeps data, and other devices hear it changed")
+    var big = String()
+    while big.len() < 600000 {
+        big.push_str("0123456789")
+    }
+    _ = try app.cmd("q_9a", "plugin.data.put", Obj.new().s("plugin", String("build-board")).s("key", String("big")).s("value", big.copy()).done())
+    let refused = try app.cmd("q_9", "plugin.data.put", Obj.new().s("plugin", String("build-board")).s("key", String("bigger")).s("value", big).done())
+    _ = try app.cmd("q_10", "plugin.data.put", Obj.new().s("plugin", String("build-board")).s("key", String("layout")).j("value", Json.Null).done())
+    let forgotten = try app.cmd("q_11", "plugin.data.get", Obj.new().s("plugin", String("build-board")).s("key", String("layout")).done())
+    try check(code(refused) == "too_large" and at(at(forgotten, "value"), "value") == Json.Null, "1 MB at most, and null forgets a key")
+
+    // --- From an agent ---
+    let made = try app.cmd("q_12", "agent.create", Obj.new().s("name", String("Main")).s("acp_agent", String("fake")).s("instructions", String("Test.")).b("code_mode", false).done())
+    let agent = str_at(at(at(made, "value"), "agent"), "id") ?? String()
+    let c = try app.cmd("q_13", "conversation.create", Obj.new().s("agent", agent.copy()).done())
+    let conversation = str_at(at(c, "value"), "conversation") ?? String()
+    let tooled = Obj.new().s("plugin.toml", String(TOOLED)).s("tools.calx", String("fn main() \{\}")).done()
+    let call = Obj.new().s("id", String("weather")).j("files", tooled).done()
+    let saved = try say(mut app, conversation.copy(), "m_1", "/mcp save_plugin {call}")
+    let waiting = at(at(try app.cmd("q_14", "plugin.get", Obj.new().s("id", String("weather")).done()), "value"), "plugin")
+    try check(saved.contains("waits for your person") and "{at(waiting.copy(), "waiting")}" == #"["tools"]"# and "{at(waiting, "allowed")}" == "[]", "an agent's plugin waits for the person's yes for what it asks")
+    let before = try say(mut app, conversation.copy(), "m_2", String("/servers"))
+    try check(not before.contains("plugin-weather"), "and its tool server isn't run until then")
+    let listed = try say(mut app, conversation.copy(), "m_3", String("/mcp list_plugins"))
+    let read = try say(mut app, conversation.copy(), "m_4", String(#"/mcp read_plugin {"id":"weather"}"#))
+    try check(listed.contains("build-board") and listed.contains("weather") and read.contains("tools.calx"), "agents list plugins and read them")
+
+    let allowed = try app.cmd("q_15", "plugin.allow", Obj.new().s("id", String("weather")).done())
+    try check("{at(at(at(allowed, "value"), "plugin"), "waiting")}" == "[]", "the person allows it")
+    let c2 = try app.cmd("q_16", "conversation.create", Obj.new().s("agent", agent.copy()).done())
+    let fresh = str_at(at(c2, "value"), "conversation") ?? String()
+    let servers = try say(mut app, fresh.copy(), "m_5", String("/servers"))
+    try check(servers.contains("plugin-weather calx") and servers.contains("weather/1/tools.calx --verbose") and servers.contains("LOOM_PLUGIN_DIR="), "then its tool server is in every new session, run from its files")
+
+    // A change from an agent keeps what was allowed and still asked.
+    let again = Obj.new().s("id", String("weather")).j("files", Obj.new().s("plugin.toml", "{TOOLED}[permissions]\nagents = true\n").s("tools.calx", String("fn main() \{\}")).done()).done()
+    _ = try say(mut app, fresh.copy(), "m_6", "/mcp save_plugin {again}")
+    let changed = at(at(try app.cmd("q_17", "plugin.get", Obj.new().s("id", String("weather")).done()), "value"), "plugin")
+    let revisions = try app.cmd("q_18", "plugin.revisions", Obj.new().s("id", String("weather")).done())
+    var count: usize = 0
+    if let Json.Array(rs) = at(at(revisions, "value"), "revisions") { count = rs.len() }
+    try check("{at(changed.copy(), "allowed")}" == #"["tools"]"# and "{at(changed.copy(), "waiting")}" == #"["agents"]"# and int_at(changed, "revision") == some(2) and count == 2, "an agent's change keeps what was allowed, waits for what's new, and is a revision")
+    let self_allow = try say(mut app, fresh.copy(), "m_7", String(#"/mcp plugin.allow {"id":"weather"}"#))
+    try check(self_allow.contains("failed"), "and an agent has no way to allow it")
+
+    // --- A panel's door ---
+    let answered = try app.cmd("q_20", "plugin.message", Obj.new().s("plugin", String("build-board")).s("agent", String("main")).s("text", String("hello from the panel")).done())
+    let talk = last(app, "conversation.created")
+    try check(str_at(at(answered, "value"), "reply") == some(String("hello from the panel")) and str_at(at(talk, "conversation"), "title") == some(String("From Build board")), "a panel allowed agents messages one, and gets its reply, in a conversation of their own")
+    _ = try app.cmd("q_21", "plugin.message", Obj.new().s("plugin", String("build-board")).s("agent", agent.copy()).s("text", String("again")).done())
+    let said = at(last(app, "message.created"), "message")
+    try check(str_at(said.copy(), "conversation") == str_at(at(talk, "conversation"), "id") and str_at(said, "role") == some(String("agent")), "and the next message goes to the same one")
+    let not_asked = try app.cmd("q_22", "plugin.message", Obj.new().s("plugin", String("weather")).s("agent", String("main")).s("text", String("hi")).done())
+    try check(code(not_asked) == "not_allowed", "a plugin not allowed agents can't")
+    let listed_routines = try app.cmd("q_23", "plugin.cmd", Obj.new().s("plugin", String("build-board")).s("name", String("routine.list")).j("args", Obj.new().done()).done())
+    let other = try app.cmd("q_24", "plugin.cmd", Obj.new().s("plugin", String("build-board")).s("name", String("agent.list")).j("args", Obj.new().done()).done())
+    try check(at(at(listed_routines, "value"), "routines") != Json.Null and code(other) == "not_allowed", "a panel sends the commands it's allowed, and only those")
+
+    // Deleting, from an agent, asks first.
+    try app.send(Obj.new().s("t", String("send")).s("cid", String("m_8")).s("conversation", fresh.copy()).s("text", String(#"/mcp delete_plugin {"id":"weather"}"#)).done())
+    let asked = try app.until("event", "approval.needed")
+    try check(str_at(asked.copy(), "title") == some(String("Delete the plugin Weather")), "deleting a plugin asks the person")
+    try app.send(Obj.new().s("t", String("approve")).s("call", str_at(asked, "call") ?? String()).b("allow", true).done())
+    let gone = try app.until("event", "plugin.deleted")
+    _ = try reply_in(mut app, fresh)
+    let after = try app.cmd("q_19", "plugin.get", Obj.new().s("id", String("weather")).done())
+    try check(str_at(gone, "id") == some(String("weather")) and code(after) == "not_found", "and a yes deletes it")
+    app.close()
+}
+
+fn main() ! Error {
+    let inst = try Instance.start()
+    let failure: String? = match run(inst.copy()) {
+        ok => none,
+        err(e) => some("{e}"),
+    }
+    inst.stop()
+    if let f = failure {
+        eprintln("\n{f}")
+        exit(1)
+    }
+    println("\nplugins: all good")
+}
+
+// The newest event of `kind` the app has read.
+fn last(app: App, kind: str) -> Json {
+    var found = Json.Null
+    for f in app.frames {
+        if str_at(f.copy(), "kind") == some(String(kind)) { found = f.copy() }
+    }
+    return found
+}

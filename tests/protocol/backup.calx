@@ -1,0 +1,139 @@
+module tests.protocol.backup
+
+// Backups (PLAN.md, "Moving an instance"): `loom export` writes a running
+// instance to one .tar.zst, and `loom import` makes a new instance from it,
+// in a folder of its own. An instance started there has it all: the same
+// device token works, and the agents, the conversation, the files and the
+// secrets are there, which still open, since the key came too. Importing
+// over an instance is refused. `loom serve --backups DIR` makes one on a
+// schedule, and keeps the newest few.
+//
+//     calx tests/protocol/backup.calx
+import std.fs
+import std.json.{Json}
+import std.process.{exit}
+import std.thread.{sleep}
+import shared.obj.{Obj, at, str_at}
+import tests.kit.{App, Instance, check, remove_scratch, fetch, loom, reply_text, upload}
+
+fn reply_in(app: mut App, conversation: String) -> String ! Error {
+    loop {
+        let created = try app.until("event", "message.created")
+        let m = at(created, "message")
+        if str_at(m.copy(), "role") == some(String("agent")) and str_at(m.copy(), "conversation") == some(conversation.copy()) { return reply_text(m) }
+    }
+}
+
+fn say(app: mut App, conversation: String, cid: str, text: str) -> String ! Error {
+    try app.send(Obj.new().s("t", String("send")).s("cid", String(cid)).s("conversation", conversation.copy()).s("text", String(text)).done())
+    return try reply_in(mut app, conversation)
+}
+
+// Fills the instance, exports it while it runs, and imports it into a new
+// folder. Gives that folder, and the uploaded file's SHA-256.
+fn before(i: Instance) -> (String, String) ! Error {
+    var app = try App.connect(i.base.copy(), i.token.copy(), 0)
+    _ = try app.cmd("q_1", "secret.put", Obj.new().s("name", String("KEY")).s("value", String("s3cret-value")).done())
+    _ = try app.cmd("q_2", "mcp.put", Obj.new().s("name", String("tool")).s("command", String("tool-server")).j("env", Obj.new().j("KEY", Obj.new().s("secret", String("KEY")).done()).done()).done())
+    let made = try app.cmd("q_3", "agent.create", Obj.new().s("name", String("Main")).s("acp_agent", String("fake")).s("instructions", String("Test.")).b("code_mode", false).j("mcp", Json.Array([Json.Str(String("tool"))])).done())
+    let agent = str_at(at(at(made, "value"), "agent"), "id") ?? String()
+    let c = try app.cmd("q_4", "conversation.create", Obj.new().s("agent", agent).done())
+    let conversation = str_at(at(c, "value"), "conversation") ?? String()
+    let said = try say(mut app, conversation, "m_1", "remember the lighthouse")
+    try check(said == "remember the lighthouse", "the instance has an agent and a conversation")
+    let (_, up) = try upload(i.base.copy(), i.token.copy(), "notes.txt", "text/plain", String("kept in the backup").to_bytes())
+    let sha = str_at(up, "file") ?? String()
+    app.close()
+
+    let root = try fs.temp_dir()
+    let file = "{root}/backup.tar.zst"
+    let exported = try loom(i.data.copy(), [String("export"), file.copy(), String("--json")]).output()
+    try check(exported.status.success() and exported.text().contains(#""backup":{"format":1"#) and fs.exists(file.copy()), "loom export writes the running instance to one file")
+    let moved = "{root}/moved"
+    let imported = try loom(moved.copy(), [String("import"), file.copy(), String("--json")]).output()
+    try check(imported.status.success() and imported.text().contains(#""acp_agents":["fake"]"#) and fs.exists("{moved}/loom.db") and fs.exists("{moved}/secret.key"), "loom import makes a new instance from it, and says which ACP agents to install again")
+    try check(not fs.exists("{moved}/acp") and not fs.exists("{moved}/loom.json"), "without the old machine's ACP programs")
+    let again = try loom(moved.copy(), [String("import"), file, String("--json")]).output()
+    try check(not again.status.success() and again.text().contains("holds an instance already"), "and never over an instance that's there")
+    return (moved, sha)
+}
+
+fn after(i: Instance, sha: String) ! Error {
+    var app = try App.connect(i.base.copy(), i.token.copy(), 0)
+    // The instance's events came too, so they replay on connecting.
+    var agent = String()
+    for f in app.frames {
+        if str_at(f.copy(), "kind") == some(String("agent.created")) {
+            let a = at(f.copy(), "agent")
+            if str_at(a.copy(), "name") == some(String("Main")) { agent = str_at(a, "id") ?? String() }
+        }
+    }
+    try check(agent.len() > 0, "the same device token works there, and the agents came")
+    let found = try app.cmd("q_2", "messages.search", Obj.new().s("query", String("lighthouse")).done())
+    try check("{found}".contains("lighthouse"), "and the conversations")
+    let (status, _, body) = try fetch(i.base.copy(), i.token.copy(), "/files/{sha}")
+    try check(status == 200 and String.from_utf8(body) == some(String("kept in the backup")), "and the files")
+    let c = try app.cmd("q_3", "conversation.create", Obj.new().s("agent", agent).done())
+    let conversation = str_at(at(c, "value"), "conversation") ?? String()
+    // A new cid: the sends the instance had seen came with it.
+    let servers = try say(mut app, conversation, "m_2", "/servers")
+    try check(servers.contains("KEY=s3cret-value"), "and the secrets, which still open with the key that came too")
+    app.close()
+}
+
+// After 5 s of backups every 1.5 s, keeping 2: the newest 2 are there, and
+// they're backups import takes. And backups inside the instance's folder are
+// refused.
+fn backed_up(i: Instance, dir: String) ! Error {
+    var kept = List<String>()
+    for name in try fs.list(dir.copy()) {
+        if name.starts_with("loom-") and name.ends_with(".tar.zst") { kept.push(name.copy()) }
+    }
+    kept.sort()
+    try check(kept.len() == 2, "loom serve --backups writes a backup on schedule, and keeps the newest --backups-keep")
+    let into = "{try fs.temp_dir()}/from-scheduled"
+    let imported = try loom(into.copy(), [String("import"), "{dir}/{kept[1]}", String("--json")]).output()
+    try check(imported.status.success() and fs.exists("{into}/loom.db"), "and each is a backup import makes an instance from")
+    let inside = try loom(i.data.copy(), [String("serve"), String("--port"), String("0"), String("--allow-root"), String("--backups"), "{i.data}/backups"]).output()
+    try check(not inside.status.success() and inside.error_text().contains("outside the instance's folder"), "backups inside the instance's folder are refused")
+}
+
+fn main() ! Error {
+    let inst = try Instance.start()
+    let first = inst.data.copy()
+    let (moved, sha) = match before(inst.copy()) {
+        ok(r) => r,
+        err(e) => {
+            inst.copy().stop()
+            eprintln("\n{e}")
+            exit(1)
+        },
+    }
+    // The same instance, from the imported folder.
+    let there = try Instance { server: inst.server, data: moved, base: inst.base, token: inst.token }.restart()
+    var failure: String? = match after(there.copy(), sha) {
+        ok => none,
+        err(e) => some("{e}"),
+    }
+    if failure != none {
+        there.stop()
+    } else {
+        // Backups on a schedule, from the same instance started again.
+        let dir = "{try fs.temp_dir()}/scheduled"
+        let extra: List<String> = [String("--backups"), dir.copy(), String("--backups-keep"), String("2"), String("--test-backup-every-ms"), String("1500")]
+        let scheduled = try there.restart_with(extra, 0)
+        unsafe { sleep(5000000000) }
+        failure = match backed_up(scheduled.copy(), dir) {
+            ok => none,
+            err(e) => some("{e}"),
+        }
+        scheduled.stop()
+    }
+    // The folder it ran in first.
+    remove_scratch(first)
+    if let f = failure {
+        eprintln("\n{f}")
+        exit(1)
+    }
+    println("\nbackup: all good")
+}

@@ -1,0 +1,124 @@
+module tests.protocol.core_move
+
+// The core follows a moved instance (protocol.md, "moved"): it keeps the
+// instance's key from welcome, takes the signed moved frame, waits for the
+// new place to answer with the same key, and connects there with the same
+// token and cursor, moving the token in the credential store.
+//
+//     calx tests/protocol/core_move.calx
+import std.fs
+import std.json.{Json, parse}
+import std.keyring
+import std.process.{Stdio, exit}
+import std.random.{Random}
+import std.time.{Instant}
+import shared.obj.{Obj, at, str_at}
+import core.cache.{Cache}
+import core.conn.{Conn}
+import tests.kit.{App, Instance, check, remove_scratch, loom}
+
+// The app's side of a core: what it sends the core, and what the core tells it.
+struct Core {
+    to_core: Sender<String>
+    from_core: Receiver<String>
+    thread: Thread?
+}
+
+impl Core {
+    fn start(base: String, token: String, service: String, cache: String) -> Core ! Error {
+        let inbox = Receiver<String>()
+        let to_core = inbox.sender()
+        let from_core = Receiver<String>()
+        let conn = Conn.new(some("http://{base}"), some(token.copy()), service.copy(), try Cache.open(cache), inbox, from_core.sender())
+        let t = unsafe { Thread.spawn(conn) }
+        return Core { to_core: to_core, from_core: from_core, thread: some(t) }
+    }
+
+    // Reads what the core says until a frame whose `t` is `t` and, if `field`
+    // isn't empty, whose `field` is `value`. Fails after `ms`.
+    fn until(mut self, t: str, field: str, value: String, ms: u64) -> Json ! Error {
+        let start = unsafe { Instant.now() }
+        loop {
+            let waited = unsafe { Instant.now() }.nanos_since(start) / 1000000
+            if waited >= ms { fail "no {t} {field}={value} came in {ms} ms" }
+            let m = unsafe { self.from_core.wait_for((ms - waited) * 1000000) } else { continue }
+            let f = try parse(m)
+            if (str_at(f.copy(), "t") ?? String()) != t { continue }
+            if field.len() == 0 or (str_at(f.copy(), field) ?? String()) == value { return f }
+        }
+    }
+
+    fn stop(mut self) {
+        self.to_core.send(String(#"{"t":"core.stop"}"#))
+        if let t = self.thread.take() {
+            t.join()
+        }
+    }
+}
+
+// Moves the instance to a loom receive with a core connected. Gives the new
+// place's folder.
+fn moving(i: Instance, core: mut Core) -> (String, String) ! Error {
+    _ = try core.until("core.conn", "state", "live", 30000)
+    let there = "{try fs.temp_dir()}/new"
+    let rx = try loom(there.copy(), [String("receive"), String("--port"), String("0"), String("--json")]).stdout(Stdio.Pipe).spawn()
+    let line = rx.wait_for_line(String("\"code\""), 120000) else {
+        rx.kill()
+        fail "loom receive didn't print a move code"
+    }
+    let said = try parse(line.trim().copy())
+    let listening = str_at(said.copy(), "listening") ?? String()
+    let port = listening[(listening.find_last(":") ?? 0) + 1..].copy()
+    var owner = try App.connect(i.base.copy(), i.token.copy(), 0)
+    let done = try owner.cmd("q_1", "instance.move", Obj.new().s("to", str_at(said.copy(), "listening") ?? String()).s("code", str_at(said, "code") ?? String()).done())
+    try check(at(done, "ok") == Json.Bool(true), "the instance moves with a core connected")
+    owner.close()
+    var r = rx
+    _ = r.wait()
+    let waiting = try core.until("core.conn", "state", "connecting", 10000)
+    try check((str_at(waiting, "why") ?? String()).starts_with("moving to http://"), "the core takes the signed moved frame, and waits for the new place")
+    return (there, port)
+}
+
+fn main() ! Error {
+    let inst = try Instance.start()
+    let first = inst.data.copy()
+    var random = Random.system()
+    let service = "loom-test-move-{random.next_u32()}"
+    var core = try Core.start(inst.base.copy(), inst.token.copy(), service.copy(), "{try fs.temp_dir()}/core.db")
+    let (there, port) = match moving(inst.copy(), mut core) {
+        ok(t) => t,
+        err(e) => {
+            core.stop()
+            inst.copy().stop()
+            eprintln("\n{e}")
+            exit(1)
+        },
+    }
+    // The new place, started: the core finds the same key there, and goes.
+    // On the port loom receive had, as a server's service does.
+    let moved = try Instance { server: inst.server, data: there, base: inst.base, token: inst.token }.restart_with([String("--port"), port], 0)
+    var failure: String? = none
+    match core.until("core.moved", "", String(), 30000) {
+        ok(m) => {
+            match core.until("core.conn", "state", "live", 30000) {
+                ok(_) => println("ok    once the new place answers with the same key, the core moves its token there and connects"),
+                err(e) => failure = some("failed: the core connects at the new place: {e}"),
+            }
+            match keyring.delete(service, str_at(m, "address") ?? String()) {
+                ok(_) => {},
+                err(_) => {},
+            }
+        },
+        err(e) => failure = some("{e}"),
+    }
+    core.stop()
+    moved.stop()
+    // The folder it ran in first.
+    remove_scratch(first)
+    if let f = failure {
+        eprintln("\n{f}")
+        exit(1)
+    }
+    println("\ncore_move: all good")
+}

@@ -1,0 +1,873 @@
+module server.importer
+
+// Reading what another agent app keeps on this computer, for import.run
+// (PLAN.md, "Importing from OpenBot and Grok Bot"). Each reader gives a
+// bundle, the same shape for every app, which the instance writes into the
+// person's data:
+//
+//     { from, where,
+//       agents:        [{id, name, instructions, color, provider, model, effort, pinned}],
+//       conversations: [{id, agent, title, at, chat, branch_of?, branch_at?, routine?,
+//                        messages: [{id, role, text, at, pinned?, files: [{path, name}]}]}],
+//       memories:      [{id, agent, text, at}],
+//       routines:      [{id, agent, name, prompt, schedule, tz, on, catch_up, post, note?}],
+//       skills:        [{name, description, body}],
+//       mcp:           [{name, command, args} or {name, url}, and had_secrets],
+//       tables:        [{name, owner, description, rows: [{id, data}]}],
+//       not:           [what couldn't come, in words] }
+//
+// Every id is the other app's own, so a second import knows what came the first
+// time. Only reading: SQLite is opened read-only, and nothing of the other app's
+// is ever written. Secrets are never read at all: OpenBot's API keys, its vault,
+// its logins and its MCP servers' environment and headers, and Grok Bot's
+// sand-secrets.json and credentials, stay where they are.
+import std.env
+import std.fs
+import std.json.{Json, parse}
+import std.sqlite.{Database, Value}
+import std.time.{Timestamp}
+import std.yaml
+import std.zip.{Zip}
+import shared.obj.{Obj, at, bool_at, int_at, str_at}
+
+// The apps import.run knows, by the name it takes.
+pub const SOURCES: [str; 2] = ["openbot", "grokbot"]
+
+// OpenBot's own skills, which loom has its own ways of doing.
+const BUILT_IN_SKILLS: [str; 3] = ["openbot-data", "openbot-site-hosting", "openbot-skill-creator"]
+
+// What a secret's file looks like, for an attachment path that shouldn't be read.
+const SECRET_WORDS: [str; 7] = ["secret", "credential", "vault", "api-key", "oauth", "token", ".key"]
+
+// The most of one file that comes along with a message.
+pub const FILE_MOST: u64 = 26214400
+
+// The person's own folder.
+pub fn home() -> String {
+    if env.os() == "windows" { return env.variable(String("USERPROFILE")) ?? String() }
+    return env.variable(String("HOME")) ?? String()
+}
+
+// Where apps keep their data: %APPDATA% on Windows, Application Support on a
+// Mac, ~/.config elsewhere.
+fn app_data() -> String {
+    if env.os() == "windows" { return env.variable(String("APPDATA")) ?? "{home()}/AppData/Roaming" }
+    if env.os() == "macos" { return "{home()}/Library/Application Support" }
+    return env.variable(String("XDG_CONFIG_HOME")) ?? "{home()}/.config"
+}
+
+// The app's name, as people know it.
+pub fn title(from: String) -> String {
+    if from == "openbot" { return String("OpenBot") }
+    if from == "grokbot" { return String("Grok Bot") }
+    return from.copy()
+}
+
+// What import.run reads: `from` ("openbot" or "grokbot"), from where it keeps
+// its data on this computer, or from the folder `path` names.
+pub fn read(from: String, path: String) -> Json ! Error {
+    if from == "openbot" { return try openbot(path) }
+    if from == "grokbot" { return try grokbot(path) }
+    fail "loom imports from openbot or grokbot, not {from}."
+}
+
+// What import.scan says of one app: found or not, where, and how much of each kind.
+pub fn scan(from: String, path: String) -> Json {
+    match read(from.copy(), path) {
+        ok(b) => {
+            let counts = counted(b.copy())
+            return Obj.new().s("from", from.copy()).s("name", title(from)).b("found", true).s("where", str_at(b, "where") ?? String()).j("counts", counts.copy()).s("text", summary(counts)).done()
+        },
+        err(e) => return Obj.new().s("from", from.copy()).s("name", title(from)).b("found", false).s("why", "{e}").done(),
+    }
+}
+
+// How much of each kind a bundle holds.
+pub fn counted(b: Json) -> Json {
+    var messages: i64 = 0
+    var files: i64 = 0
+    if let Json.Array(cs) = at(b.copy(), "conversations") {
+        for c in cs {
+            if let Json.Array(ms) = at(c, "messages") {
+                messages += i64.wrap(u64(ms.len()))
+                for m in ms { files += i64.wrap(u64(at(m, "files").len())) }
+            }
+        }
+    }
+    var rows: i64 = 0
+    if let Json.Array(ts) = at(b.copy(), "tables") {
+        for t in ts { rows += i64.wrap(u64(at(t, "rows").len())) }
+    }
+    return Obj.new().i("agents", len_at(b.copy(), "agents")).i("conversations", len_at(b.copy(), "conversations")).i("messages", messages).i("files", files).i("memories", len_at(b.copy(), "memories")).i("routines", len_at(b.copy(), "routines")).i("skills", len_at(b.copy(), "skills")).i("mcp", len_at(b.copy(), "mcp")).i("tables", len_at(b, "tables")).i("rows", rows).done()
+}
+
+fn len_at(j: Json, key: str) -> i64 {
+    return i64.wrap(u64(at(j, key).len()))
+}
+
+// Counts in words, the kinds there are any of: "3 agents, 120 messages, 4 memories".
+pub fn summary(counts: Json) -> String {
+    let kinds: List<(str, str, str)> = [("agents", "agent", "agents"), ("messages", "message", "messages"), ("memories", "memory", "memories"), ("routines", "routine", "routines"), ("skills", "skill", "skills"), ("mcp", "MCP server", "MCP servers"), ("tables", "table", "tables"), ("files", "file", "files")]
+    var parts = List<String>()
+    for (key, one, many) in kinds {
+        let n = int_at(counts.copy(), key) ?? 0
+        if n == 1 { parts.push("1 {one}") } else if n > 1 { parts.push("{n} {many}") }
+    }
+    if parts.len() == 0 { return String("Nothing to bring over") }
+    return parts.join(", ")
+}
+
+// --- OpenBot ---
+
+// OpenBot (github.com/nightly-labs/openbot): an event-sourced SQLite database,
+// openbot.db, whose projection_* tables hold things as they are now, and a
+// workspace folder with each agent's AGENTS.md and the shared tables.
+// `path`, when given, is a copy of OpenBot's data folder (the one holding
+// openbot.db), with its workspace inside as `workspace` or `OpenBot`.
+fn openbot(path: String) -> Json ! Error {
+    let given = path.trim().len() > 0
+    let data = if given { path.trim().copy() } else { "{app_data()}/OpenBot" }
+    let db_path = "{data}/openbot.db"
+    if not fs.is_file(db_path.copy()) { fail "There's no OpenBot data here: {db_path} isn't there." }
+    var workspace = String()
+    if given {
+        for w in ["workspace", "OpenBot"] {
+            if workspace.len() == 0 and fs.is_dir("{data}/{w}") { workspace = "{data}/{w}" }
+        }
+        if workspace.len() == 0 and (fs.is_dir("{data}/Agents") or fs.is_dir("{data}/Bots") or fs.is_dir("{data}/Shared")) { workspace = data.copy() }
+    } else {
+        workspace = "{home()}/OpenBot"
+    }
+    let db = try Database.open_read(db_path)
+    var left = List<String>()
+    left.push(String("API keys, the vault, logins, webhook secrets and MCP servers' environment and headers stay in OpenBot: add the ones you need in loom."))
+
+    // Agents: as they are now, or the newest roster in the event log, or an old bots.json.
+    var agents = List<Json>()
+    var chats = Map<String, String>()    // an agent's chat thread → the agent
+    for r in all_rows(db, "SELECT agent_id, coalesce(thread_id, ''), model, agent_json FROM projection_agents ORDER BY sort_order") {
+        let j = json_of(text(r[3].copy()))
+        let id = text(r[0].copy())
+        agents.push(openbot_agent(j.copy(), id.copy(), text(r[2].copy()), workspace.copy()))
+        let thread = text(r[1].copy())
+        if thread.len() > 0 { chats.insert(thread, id) } else if let t = str_at(j, "threadId") { chats.insert(t, id) }
+    }
+    if agents.len() == 0 {
+        for r in all_rows(db, "SELECT payload_json FROM orchestration_events WHERE event_type LIKE '%agent%' ORDER BY sequence DESC LIMIT 200") {
+            if agents.len() > 0 { break }
+            let p = json_of(text(r[0].copy()))
+            if let Json.Array(list) = at(p, "agents") {
+                for a in list {
+                    let id = str_at(a.copy(), "id") ?? String()
+                    if id.len() == 0 { continue }
+                    if let t = str_at(a.copy(), "threadId") { chats.insert(t, id.copy()) }
+                    agents.push(openbot_agent(a, id, String(), workspace.copy()))
+                }
+            }
+        }
+    }
+    if agents.len() == 0 {
+        let legacy = json_of(read_text("{data}/bots.json"))
+        let list = if let Json.Array(_) = legacy.copy() { legacy } else { at(legacy, "bots") }
+        if let Json.Array(bots) = list {
+            for a in bots {
+                let id = str_at(a.copy(), "id") ?? String()
+                if id.len() > 0 { agents.push(openbot_agent(a, id, String(), workspace.copy())) }
+            }
+        }
+    }
+    // Pinned agents, in the order the sidebar has them.
+    agents = pin(agents, json_of(read_text("{data}/openbot-sidebar-pins-v1.json")))
+
+    // What each thread is beside the chat: a branch, or a routine's.
+    var extra = Map<String, (String, String, String)>()
+    for r in all_rows(db, "SELECT thread_id, coalesce(branch_source_thread_id, ''), coalesce(branch_source_message_id, ''), coalesce(routine_id, '') FROM projection_agent_threads") {
+        extra.insert(text(r[0].copy()), (text(r[1].copy()), text(r[2].copy()), text(r[3].copy())))
+    }
+    var pins = Map<String, i64>()
+    for r in all_rows(db, "SELECT thread_id, message_id, pinned_at FROM projection_pinned_thread_messages") {
+        pins.insert("{text(r[0].copy())}:{text(r[1].copy())}", millis(text(r[2].copy())))
+    }
+    var attached = Map<String, List<Json>>()
+    for r in all_rows(db, "SELECT owner_id, name, path FROM projection_attachments ORDER BY created_at") {
+        let owner = text(r[0].copy())
+        var list = if let l = attached.find(owner.copy()) { l.copy() } else { List<Json>() }
+        list.push(Obj.new().s("path", text(r[2].copy())).s("name", text(r[1].copy())).done())
+        attached.insert(owner, list)
+    }
+
+    // Conversations: each agent's chat first, then the threads beside it.
+    var firsts = List<Json>()
+    var others = List<Json>()
+    var has_chat = List<String>()
+    for r in all_rows(db, "SELECT thread_id, agent_id, title, created_at FROM projection_threads ORDER BY created_at") {
+        let thread = text(r[0].copy())
+        let agent = text(r[1].copy())
+        var messages = List<Json>()
+        for m in rows_with(db, "SELECT message_id, author, created_at, message_json FROM projection_thread_messages WHERE thread_id = ? ORDER BY ordinal", [Value.Text(thread.copy())]) {
+            let id = text(m[0].copy())
+            let key = "{thread}:{id}"
+            let files = if let l = attached.find(key.copy()) { l.copy() } else { List<Json>() }
+            if let msg = openbot_message(json_of(text(m[3].copy())), id, text(m[1].copy()), text(m[2].copy()), files, pins.get(key)) { messages.push(msg) }
+        }
+        let is_chat = if let a = chats.find(thread.copy()) { a == agent } else { false }
+        var c = Obj.new().s("id", thread.copy()).s("agent", agent.copy()).s("title", text(r[2].copy())).i("at", millis(text(r[3].copy()))).b("chat", is_chat)
+        if let e = extra.find(thread.copy()) {
+            let (from_thread, from_message, routine) = e.copy()
+            if from_thread.len() > 0 and from_message.len() > 0 { c = c.s("branch_of", from_thread).s("branch_at", from_message) } else if routine.len() > 0 { c = c.s("routine", routine) }
+        }
+        let done = c.j("messages", Json.Array(messages)).done()
+        if is_chat {
+            has_chat.push(agent)
+            firsts.push(done)
+        } else {
+            others.push(done)
+        }
+    }
+    // An agent with no chat named takes its oldest plain thread as its chat.
+    var rest = List<Json>()
+    for c in others {
+        let agent = str_at(c.copy(), "agent") ?? String()
+        let plain = str_at(c.copy(), "branch_of") == none and str_at(c.copy(), "routine") == none
+        if plain and not has_chat.contains(agent.copy()) {
+            has_chat.push(agent)
+            firsts.push(set(c, "chat", Json.Bool(true)))
+        } else {
+            rest.push(c.copy())
+        }
+    }
+    var conversations = firsts.copy()
+    for c in rest { conversations.push(beside_chat(c, firsts.copy())) }
+
+    var memories = List<Json>()
+    for r in all_rows(db, "SELECT memory_id, agent_id, text, created_at FROM projection_agent_memories ORDER BY created_at") {
+        memories.push(Obj.new().s("id", text(r[0].copy())).s("agent", text(r[1].copy())).s("text", text(r[2].copy())).i("at", millis(text(r[3].copy()))).done())
+    }
+
+    var routines = List<Json>()
+    var routine_rows = all_rows(db, "SELECT r.routine_id, r.agent_id, r.name, r.instruction, r.active, r.timezone, coalesce(t.schedule_json, 'null'), r.missed_policy, r.run_in FROM projection_agent_routines r LEFT JOIN projection_routine_triggers t ON t.routine_id = r.routine_id ORDER BY r.created_at")
+    if routine_rows.len() == 0 { routine_rows = all_rows(db, "SELECT r.routine_id, r.agent_id, r.name, r.instruction, r.active, r.timezone, coalesce(t.schedule_json, 'null'), 'skip', 'chat' FROM projection_agent_routines r LEFT JOIN projection_routine_triggers t ON t.routine_id = r.routine_id") }
+    for r in routine_rows {
+        let name = text(r[2].copy())
+        let (schedule, how) = schedule_of(json_of(text(r[6].copy())))
+        var on = int(r[4].copy()) == 1
+        var note = how
+        if schedule == Json.Null {
+            on = false
+            note = String("It had no schedule, so it came over paused, daily at 09:00.")
+        }
+        let s = if schedule == Json.Null { Obj.new().s("daily", String("09:00")).done() } else { schedule }
+        if note.len() > 0 { left.push("Routine {name}: {note}") }
+        routines.push(Obj.new().s("id", text(r[0].copy())).s("agent", text(r[1].copy())).s("name", name).s("prompt", text(r[3].copy())).j("schedule", s).s("tz", text(r[5].copy())).b("on", on).b("catch_up", text(r[7].copy()) == "run-once").s("post", if text(r[8].copy()) == "thread" { String("thread") } else { String("chat") }).s("note", note).done())
+    }
+
+    var mcp = List<Json>()
+    for r in all_rows(db, "SELECT name, transport, command, args_json, env_json, url, headers_json FROM projection_mcp_servers ORDER BY position") {
+        let name = text(r[0].copy())
+        let secrets = json_of(text(r[4].copy())).len() > 0 or json_of(text(r[6].copy())).len() > 0
+        if text(r[1].copy()) == "http" {
+            mcp.push(Obj.new().s("name", name).s("url", text(r[5].copy())).b("had_secrets", secrets).done())
+        } else {
+            mcp.push(Obj.new().s("name", name).s("command", text(r[2].copy())).j("args", strings(json_of(text(r[3].copy())))).b("had_secrets", secrets).done())
+        }
+    }
+    try db.close()
+
+    // Skills: OpenBot's own, as bundles, and the ones in ~/.agents/skills.
+    var skills = List<Json>()
+    let local = "{data}/local-skills"
+    for dir in listing(local.copy()) {
+        let versions = listing("{local}/{dir}")
+        if versions.len() == 0 { continue }
+        let bundle = "{local}/{dir}/{versions[versions.len() - 1]}/bundle.zip"
+        let bytes_in = match fs.read(bundle) {
+            ok(b) => b,
+            err(_) => continue,
+        }
+        let z = match Zip.open(bytes_in) {
+            ok(z) => z,
+            err(_) => continue,
+        }
+        var best: usize? = none
+        var files_in = 0usize
+        for k in 0usize..z.len() {
+            let n = z.name(k)
+            if n.ends_with("/") { continue }
+            files_in += 1
+            if n == "SKILL.md" or n.ends_with("/SKILL.md") {
+                if let b = best { if n.len() < z.name(b).len() { best = some(k) } } else { best = some(k) }
+            }
+        }
+        let k = best else continue
+        let md = String.from_utf8(match z.read(k) {
+            ok(b) => b,
+            err(_) => continue,
+        }) ?? String()
+        if let s = skill_of(md, dir.copy()) {
+            let name = str_at(s.copy(), "name") ?? String()
+            if built_in(name.copy()) { continue }
+            if files_in > 1 { left.push("Skill {name}: only its SKILL.md came over, not its other files, since a skill in loom is its text.") }
+            skills.push(s)
+        }
+    }
+    let agent_skills = if given { "{data}/.agents/skills" } else { "{home()}/.agents/skills" }
+    for dir in listing(agent_skills.copy()) {
+        let md = read_text("{agent_skills}/{dir}/SKILL.md")
+        if md.len() == 0 { continue }
+        if let s = skill_of(md, dir.copy()) {
+            if not built_in(str_at(s.copy(), "name") ?? String()) { skills.push(s) }
+        }
+    }
+
+    // Shared tables, each its owner agent's.
+    var tables = List<Json>()
+    let shared = "{workspace}/Shared/Data/agent-data.db"
+    if workspace.len() > 0 and fs.is_file(shared.copy()) {
+        let tdb = try Database.open_read(shared)
+        for r in all_rows(tdb, "SELECT table_name, coalesce(owner_agent_id, '') FROM openbot_metadata ORDER BY created_at") {
+            let name = text(r[0].copy())
+            if not table_name(name.copy()) {
+                left.push("Table {name}: its name isn't one loom takes, so it stayed.")
+                continue
+            }
+            var list = List<Json>()
+            var blobs = false
+            let records = match tdb.query_records("SELECT rowid AS loom_source_row, * FROM \"{name}\"") {
+                ok(rs) => rs,
+                err(_) => continue,
+            }
+            for rec in records {
+                var id = String()
+                var fields = LinkedMap<String, Json>()
+                for (k, v) in rec {
+                    if k == "loom_source_row" {
+                        id = text(v.copy())
+                        continue
+                    }
+                    match v {
+                        Value.Blob(_) => blobs = true,
+                        _ => fields.insert(field_name(k.copy()), json_value(v.copy())),
+                    }
+                }
+                list.push(Obj.new().s("id", id).j("data", Json.Object(fields)).done())
+            }
+            if blobs { left.push("Table {name}: fields holding raw bytes stayed.") }
+            tables.push(Obj.new().s("name", name).s("owner", text(r[1].copy())).s("description", String("From OpenBot")).j("rows", Json.Array(list)).done())
+        }
+        try tdb.close()
+    }
+
+    return Obj.new().s("from", String("openbot")).s("where", data).j("agents", Json.Array(agents)).j("conversations", Json.Array(conversations)).j("memories", Json.Array(memories)).j("routines", Json.Array(routines)).j("skills", Json.Array(skills)).j("mcp", Json.Array(mcp)).j("tables", Json.Array(tables)).j("not", strs(left)).done()
+}
+
+// An OpenBot agent (AgentSummary) as a bundle's: its instructions from its
+// workspace's AGENTS.md (or CLAUDE.md), or its title and description, its remit,
+// when the file isn't there.
+fn openbot_agent(j: Json, id: String, model_column: String, workspace: String) -> Json {
+    let name = str_at(j.copy(), "name") ?? String("Agent")
+    var instructions = String()
+    let wp = str_at(j.copy(), "workspacePath") ?? String()
+    var places = List<String>()
+    if wp.len() > 0 { places.push(wp.copy()) }
+    if workspace.len() > 0 {
+        let base = last_part(wp.copy())
+        for kind in ["Agents", "Bots"] {
+            if base.len() > 0 { places.push("{workspace}/{kind}/{base}") }
+            if let handle = str_at(j.copy(), "handle") { places.push("{workspace}/{kind}/{handle}") }
+        }
+    }
+    for p in places {
+        for f in ["AGENTS.md", "CLAUDE.md"] {
+            if instructions.len() == 0 { instructions = read_text("{p}/{f}") }
+        }
+    }
+    if instructions.trim().len() == 0 { instructions = remit(j.copy()) }
+    let color = str_at(j.copy(), "chatColor") ?? str_at(j.copy(), "avatarColor") ?? String()
+    let model = str_at(j.copy(), "model") ?? model_column.copy()
+    return Obj.new().s("id", id).s("name", name).s("instructions", instructions.trim().copy()).s("color", color_of(color) ?? String()).s("provider", str_at(j.copy(), "provider") ?? String()).s("model", model_of(model)).s("effort", str_at(j, "reasoningEffort") ?? String()).b("pinned", false).done()
+}
+
+// An agent's title and description, as instructions.
+fn remit(j: Json) -> String {
+    let t = (str_at(j.copy(), "title") ?? String()).trim().copy()
+    let d = (str_at(j, "description") ?? String()).trim().copy()
+    if t.len() > 0 and d.len() > 0 { return "{t}\n\n{d}" }
+    return if t.len() > 0 { t } else { d }
+}
+
+// A message of OpenBot's as a bundle's, or none for one with nothing to show:
+// a system note, or one with neither text nor files.
+fn openbot_message(j: Json, id: String, author: String, created: String, files: List<Json>, pinned: i64?) -> Json? {
+    let source = str_at(j.copy(), "source") ?? author.copy()
+    if source == "system" { return none }
+    let role = if source == "user" or source == "person" or source == "routine" { "person" } else { "agent" }
+    let words = str_at(j.copy(), "text") ?? String()
+    var all = files.copy()
+    if let Json.Array(list) = at(j.copy(), "attachments") {
+        for a in list {
+            if let p = str_at(a.copy(), "path") {
+                var seen = false
+                for f in all { if str_at(f.copy(), "path") == some(p.copy()) { seen = true } }
+                if not seen { all.push(Obj.new().s("path", p.copy()).s("name", str_at(a, "name") ?? last_part(p)).done()) }
+            }
+        }
+    }
+    if words.trim().len() == 0 and all.len() == 0 { return none }
+    var at_ms = millis(created)
+    if at_ms == 0 { at_ms = millis(str_at(j, "createdAt") ?? String()) }
+    var m = Obj.new().s("id", id).s("role", String(role)).s("text", words).i("at", at_ms).j("files", Json.Array(all))
+    if let p = pinned { m = m.i("pinned", if p > 0 { p } else { at_ms }) }
+    return some(m.done())
+}
+
+// A thread beside its agent's chat that isn't a branch or a routine's: a branch
+// of the chat at its newest message from before the thread began, so it shows
+// under the chat rather than taking its place.
+fn beside_chat(c: Json, chats: List<Json>) -> Json {
+    if str_at(c.copy(), "branch_of") != none or str_at(c.copy(), "routine") != none { return c.copy() }
+    let agent = str_at(c.copy(), "agent") ?? String()
+    let began = int_at(c.copy(), "at") ?? 0
+    for chat in chats {
+        if str_at(chat.copy(), "agent") != some(agent.copy()) { continue }
+        var pick = String()
+        if let Json.Array(ms) = at(chat.copy(), "messages") {
+            for m in ms {
+                if pick.len() == 0 or (int_at(m.copy(), "at") ?? 0) <= began { pick = str_at(m, "id") ?? String() }
+            }
+        }
+        if pick.len() == 0 { return c.copy() }
+        return set(set(c, "branch_of", Json.Str(str_at(chat, "id") ?? String())), "branch_at", Json.Str(pick))
+    }
+    return c.copy()
+}
+
+// An OpenBot schedule as loom's (every N minutes, daily or weekdays at a time),
+// and what changed on the way, or "" when nothing did. Null for none.
+pub fn schedule_of(s: Json) -> (Json, String) {
+    let kind = str_at(s.copy(), "kind") ?? String()
+    let time = hhmm(str_at(s.copy(), "time") ?? String("09:00"))
+    if kind == "daily" { return (Obj.new().s("daily", time).done(), String()) }
+    if kind == "weekdays" { return (Obj.new().s("weekdays", time).done(), String()) }
+    if kind == "hourly" {
+        let minute = int_at(s, "minute") ?? 0
+        return (Obj.new().i("every", 60).done(), if minute == 0 { String() } else { "hourly at :{pad(minute)} became every 60 minutes." })
+    }
+    if kind == "weekly" { return (Obj.new().s("daily", time.copy()).done(), "weekly on {weekday(s)} became daily at {time}: loom has every N minutes, daily and weekdays.") }
+    if kind == "monthly" { return (Obj.new().s("daily", time.copy()).done(), "monthly on day {int_at(s, "day") ?? 1} became daily at {time}: loom has every N minutes, daily and weekdays.") }
+    if kind == "interval" {
+        let amount = int_at(s.copy(), "amount") ?? 60
+        let unit = str_at(s, "unit") ?? String("minutes")
+        let per: i64 = if unit.starts_with("hour") { 60 } else if unit.starts_with("day") { 1440 } else if unit.starts_with("week") { 10080 } else { 1 }
+        let minutes = amount * per
+        if minutes < 5 { return (Obj.new().i("every", 5).done(), "every {minutes} minutes became every 5, loom's shortest.") }
+        if minutes > 10080 { return (Obj.new().i("every", 10080).done(), "every {amount} {unit} became once a week, loom's longest.") }
+        return (Obj.new().i("every", minutes).done(), String())
+    }
+    if s == Json.Null { return (Json.Null, String()) }
+    return (Obj.new().s("daily", time).done(), "a schedule loom doesn't know ({kind}) became daily.")
+}
+
+fn weekday(s: Json) -> String {
+    let names = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"]
+    match at(s.copy(), "weekday") {
+        Json.Int(n) => if n >= 0 and n < 7 { return String(names[usize.wrap(n)]) },
+        Json.Str(w) => return w.copy(),
+        _ => {},
+    }
+    return String("a day")
+}
+
+fn pad(n: i64) -> String {
+    return if n < 10 { "0{n}" } else { "{n}" }
+}
+
+// "9:30", "09:30" or "09:30:00" as HH:MM.
+fn hhmm(t: String) -> String {
+    let parts = t.trim().split(":")
+    if parts.len() < 2 { return String("09:00") }
+    let h = i64.parse(parts[0].copy()) ?? 9
+    let m = i64.parse(parts[1].copy()) ?? 0
+    if h < 0 or h > 23 or m < 0 or m > 59 { return String("09:00") }
+    return "{pad(h)}:{pad(m)}"
+}
+
+// --- Grok Bot ---
+
+// Grok Bot keeps its agents on its own server; this computer has only a cache,
+// sand-client-persistence, of JSON blobs: the roster, a recent window of each
+// agent's chat, and which agents are pinned. Each blob is named by its key in
+// base32, and is told apart here by what it holds. MCP servers are in
+// ~/.grokbot/settings.json. `path`, when given, is a copy of its data folder,
+// with settings.json in it or in its .grokbot.
+fn grokbot(path: String) -> Json ! Error {
+    let given = path.trim().len() > 0
+    let data = if given { path.trim().copy() } else { "{app_data()}/Grok Bot" }
+    let cache = if fs.is_dir("{data}/sand-client-persistence") { "{data}/sand-client-persistence" } else { data.copy() }
+    var blobs = List<String>()
+    for n in listing(cache.copy()) {
+        if n.ends_with(".blob") { blobs.push("{cache}/{n}") }
+    }
+    if blobs.len() == 0 { fail "There's no Grok Bot data here: {cache} has no .blob files." }
+    var left = List<String>()
+    left.push(String("Grok Bot keeps instructions, memory, skills and automations on its own server, not on this computer, so they didn't come: only the agents, their recent chats, pins and MCP servers. Each agent's title and description became its instructions."))
+    left.push(String("Its logins and secrets stay in Grok Bot."))
+
+    var agents = List<Json>()
+    var ids = List<String>()
+    var transcripts = List<Json>()
+    var pinned = Json.Null
+    var groups = List<String>()
+    for b in blobs {
+        let v = at(json_of(read_text(b)), "value")
+        if let Json.Array(list) = at(v.copy(), "rows") {
+            for row in list {
+                let id = str_at(row.copy(), "id") ?? String()
+                if id.len() == 0 or ids.contains(id.copy()) { continue }
+                if bool_at(row.copy(), "isGroup") == some(true) {
+                    groups.push(str_at(row, "name") ?? id)
+                    continue
+                }
+                ids.push(id.copy())
+                agents.push(Obj.new().s("id", id).s("name", str_at(row.copy(), "name") ?? String("Agent")).s("instructions", remit(row.copy())).s("color", color_of(str_at(row.copy(), "avatarColor") ?? String()) ?? String()).s("provider", str_at(row, "harness") ?? String()).s("model", String()).s("effort", String()).b("pinned", false).done())
+            }
+        } else if let Json.Array(_) = at(v.copy(), "entries") {
+            transcripts.push(v)
+        } else if let Json.Array(_) = at(v.copy(), "pinnedAgentIds") {
+            pinned = v
+        }
+    }
+    if groups.len() > 0 { left.push("Group chats ({groups.join(", ")}) didn't come: loom has no group conversations yet.") }
+    agents = pin(agents, at(pinned, "pinnedAgentIds"))
+
+    var conversations = List<Json>()
+    var unknown = 0
+    for t in transcripts {
+        var messages = List<Json>()
+        var agent = String()
+        if let Json.Array(entries) = at(t, "entries") {
+            for e in entries {
+                let author = at(e.copy(), "author")
+                let kind = str_at(author.copy(), "kind") ?? String()
+                let role_given = str_at(e.copy(), "role") ?? String()
+                let person = role_given == "user" or kind == "user" or kind == "human" or kind == "person"
+                if not person and agent.len() == 0 {
+                    if let a = str_at(author, "id") { if ids.contains(a.copy()) { agent = a } }
+                }
+                if role_given == "system" { continue }
+                let words = match at(e.copy(), "content") {
+                    Json.Str(s) => s.copy(),
+                    _ => str_at(e.copy(), "richText") ?? String(),
+                }
+                var files = List<Json>()
+                if let p = str_at(e.copy(), "file_path") { files.push(Obj.new().s("path", p.copy()).s("name", str_at(e.copy(), "file_name") ?? last_part(p)).done()) }
+                if words.trim().len() == 0 and files.len() == 0 { continue }
+                let id = str_at(e.copy(), "id") ?? "seq-{int_at(e.copy(), "seq") ?? 0}"
+                messages.push(Obj.new().s("id", id).s("role", String(if person { "person" } else { "agent" })).s("text", words).i("at", int_at(e, "timestampMs") ?? 0).j("files", Json.Array(files)).done())
+            }
+        }
+        if messages.len() == 0 { continue }
+        if agent.len() == 0 {
+            unknown += 1
+            continue
+        }
+        var name = String()
+        for a in agents { if str_at(a.copy(), "id") == some(agent.copy()) { name = str_at(a, "name") ?? String() } }
+        conversations.push(Obj.new().s("id", "chat:{agent}").s("agent", agent).s("title", name).i("at", int_at(messages[0].copy(), "at") ?? 0).b("chat", true).j("messages", Json.Array(messages)).done())
+    }
+    if unknown > 0 { left.push("{unknown} chat{if unknown == 1 { "" } else { "s" }} had no reply from its agent to tell whose it was, so it stayed.") }
+    if conversations.len() > 0 { left.push(String("Chats are the recent stretch Grok Bot keeps on this computer, not their whole history.")) }
+
+    var mcp = List<Json>()
+    let settings_path = if given { if fs.is_file("{data}/.grokbot/settings.json") { "{data}/.grokbot/settings.json" } else { "{data}/settings.json" } } else { "{home()}/.grokbot/settings.json" }
+    let settings = json_of(read_text(settings_path))
+    match at(settings.copy(), "mcpBoxServers") {
+        Json.Object(servers) => {
+            for (name, s) in servers { mcp.push(grok_mcp(name.copy(), s.copy())) }
+        },
+        Json.Array(servers) => {
+            for s in servers { mcp.push(grok_mcp(str_at(s.copy(), "name") ?? String(), s.copy())) }
+        },
+        _ => {},
+    }
+    if at(settings, "mcpCustomInstructions") != Json.Null { left.push(String("Grok Bot's custom instructions for MCP servers didn't come: put them in an agent's instructions.")) }
+
+    return Obj.new().s("from", String("grokbot")).s("where", data).j("agents", Json.Array(agents)).j("conversations", Json.Array(conversations)).j("memories", Json.Array(List<Json>())).j("routines", Json.Array(List<Json>())).j("skills", Json.Array(List<Json>())).j("mcp", Json.Array(mcp)).j("tables", Json.Array(List<Json>())).j("not", strs(left)).done()
+}
+
+fn grok_mcp(name: String, s: Json) -> Json {
+    let secrets = at(s.copy(), "env").len() > 0 or at(s.copy(), "headers").len() > 0
+    if let u = str_at(s.copy(), "url") { return Obj.new().s("name", name).s("url", u).b("had_secrets", secrets).done() }
+    return Obj.new().s("name", name).s("command", str_at(s.copy(), "command") ?? String()).j("args", strings(at(s, "args"))).b("had_secrets", secrets).done()
+}
+
+// --- Shared ---
+
+// The agents, the ones whose ids are among the strings in `pins` marked pinned,
+// in that order.
+fn pin(agents: List<Json>, pins: Json) -> List<Json> {
+    var order = List<String>()
+    pins.walk(|_, x| {
+        if let s = x.as_str() { if not order.contains(s.copy()) { order.push(s.copy()) } }
+    })
+    var out = List<Json>()
+    for a in agents {
+        let id = str_at(a.copy(), "id") ?? String()
+        var place: i64 = 0
+        for k in 0usize..order.len() {
+            if order[k] == id { place = i64.wrap(u64(k)) + 1 }
+        }
+        out.push(if place > 0 { set(set(a, "pinned", Json.Bool(true)), "pin_order", Json.Int(place)) } else { a.copy() })
+    }
+    return out
+}
+
+// A SKILL.md as a bundle's skill: its front matter's name and description, and
+// the rest as its body. `fallback` names it when the front matter doesn't.
+fn skill_of(md: String, fallback: String) -> Json? {
+    var name = String()
+    var description = String()
+    var body = md.copy()
+    if md.starts_with("---") {
+        let rest = md[3..].copy()
+        if let end = rest.find("\n---") {
+            let front = rest[..end].copy()
+            body = rest[end + 4..].trim().copy()
+            if let ok(y) = yaml.parse(front) {
+                name = (y.get(String("name")) ?? yaml.Yaml.Null).as_str() ?? String()
+                description = (y.get(String("description")) ?? yaml.Yaml.Null).as_str() ?? String()
+            }
+        }
+    }
+    let slug = skill_name(if name.len() > 0 { name } else { fallback.copy() })
+    if slug.len() == 0 { return none }
+    if description.trim().len() == 0 { description = "{slug}, from another app" }
+    return some(Obj.new().s("name", slug).s("description", description.trim().copy()).s("body", body.trim().copy()).done())
+}
+
+// A name as loom's skills and MCP servers take one: lowercase letters, digits and
+// hyphens, up to 64.
+pub fn skill_name(given: String) -> String {
+    var out = String()
+    for ch in given.trim().to_lower_root().runes() {
+        let fits = (ch >= 'a' and ch <= 'z') or (ch >= '0' and ch <= '9')
+        if fits { out.push(ch) } else if out.len() > 0 and not out.ends_with("-") { out.push('-') }
+    }
+    let trimmed = out.trim_suffix("-").copy()
+    return if trimmed.len() > 64 { trimmed[..64].trim_suffix("-").copy() } else { trimmed }
+}
+
+// Whether a shared table may keep the name: 1 to 64 letters, digits, hyphens and underscores.
+fn table_name(name: String) -> bool {
+    if name.len() == 0 or name.len() > 64 { return false }
+    for ch in name.runes() {
+        if not ((ch >= 'a' and ch <= 'z') or (ch >= 'A' and ch <= 'Z') or (ch >= '0' and ch <= '9') or ch == '_' or ch == '-') { return false }
+    }
+    return true
+}
+
+// A column's name as a row's field: anything but letters, digits and underscores
+// becomes an underscore.
+fn field_name(k: String) -> String {
+    var out = String()
+    for ch in k.runes() {
+        if (ch >= 'a' and ch <= 'z') or (ch >= 'A' and ch <= 'Z') or (ch >= '0' and ch <= '9') or ch == '_' { out.push(ch) } else { out.push('_') }
+    }
+    return if out.len() == 0 { String("field") } else if out.len() > 64 { out[..64].copy() } else { out }
+}
+
+// The nearest of loom's eight thread colours to a colour another app gave, as a
+// name ("blue") or as hex ("#5b8def"), or none when it's neither.
+pub fn color_of(given: String) -> String? {
+    let g = given.trim().to_lower_root()
+    if g.len() == 0 { return none }
+    let names: List<(str, str)> = [("periwinkle", "periwinkle"), ("indigo", "periwinkle"), ("blue", "periwinkle"), ("mint", "mint"), ("green", "mint"), ("emerald", "mint"), ("teal", "mint"), ("lime", "mint"), ("apricot", "apricot"), ("orange", "apricot"), ("amber", "apricot"), ("peach", "apricot"), ("pink", "pink"), ("rose", "pink"), ("red", "pink"), ("fuchsia", "pink"), ("magenta", "pink"), ("sky", "sky"), ("cyan", "sky"), ("aqua", "sky"), ("gold", "gold"), ("yellow", "gold"), ("lavender", "lavender"), ("purple", "lavender"), ("violet", "lavender"), ("grey", "grey"), ("gray", "grey"), ("slate", "grey"), ("zinc", "grey"), ("neutral", "grey"), ("stone", "grey"), ("black", "grey"), ("white", "grey")]
+    for (n, c) in names {
+        if g.contains(n) { return some(String(c)) }
+    }
+    let hex = g.trim_prefix("#").copy()
+    if hex.len() != 6 { return none }
+    let r = i64.parse_radix(hex[0..2].copy(), 16) else return none
+    let gr = i64.parse_radix(hex[2..4].copy(), 16) else return none
+    let b = i64.parse_radix(hex[4..6].copy(), 16) else return none
+    // Loom's colours in both themes; the nearest of the sixteen wins.
+    let palette: List<(str, i64, i64, i64)> = [("periwinkle", 0x9e, 0xa8, 0xff), ("mint", 0x74, 0xd6, 0xa6), ("apricot", 0xf2, 0xa7, 0x7a), ("pink", 0xe8, 0x93, 0xc9), ("sky", 0x7c, 0xc8, 0xf0), ("gold", 0xe8, 0xd2, 0x7a), ("lavender", 0xb4, 0x9c, 0xff), ("grey", 0x9a, 0xa0, 0xa6), ("periwinkle", 0x57, 0x63, 0xe0), ("mint", 0x18, 0xa0, 0x6a), ("apricot", 0xe0, 0x7a, 0x3d), ("pink", 0xcf, 0x4f, 0x9d), ("sky", 0x1f, 0x8f, 0xc7), ("gold", 0xb8, 0x96, 0x1a), ("lavender", 0x7d, 0x5f, 0xd6), ("grey", 0x6b, 0x70, 0x78)]
+    var best = String()
+    var least: i64 = -1
+    for (n, pr, pg, pb) in palette {
+        let d = (r - pr) * (r - pr) + (gr - pg) * (gr - pg) + (b - pb) * (b - pb)
+        if least < 0 or d < least {
+            least = d
+            best = String(n)
+        }
+    }
+    return some(best)
+}
+
+// A model as loom's agent programs name it: Claude's by family, others as they are.
+pub fn model_of(model: String) -> String {
+    let m = model.trim().to_lower_root()
+    for family in ["opus", "sonnet", "haiku"] {
+        if m.contains(family) { return String(family) }
+    }
+    return model.trim().copy()
+}
+
+// Whether a file looks like it holds a secret, and so isn't read.
+pub fn secret_file(path: String) -> bool {
+    let p = path.to_lower_root().replace("\\", "/")
+    let name = last_part(p.copy())
+    if name.ends_with(".bin") or name.ends_with(".pem") or name.ends_with(".p8") { return true }
+    for w in SECRET_WORDS {
+        if name.contains(w) { return true }
+    }
+    return p.contains("/agent-api-keys/") or p.contains("/provider-state/")
+}
+
+fn set(j: Json, key: str, value: Json) -> Json {
+    var m = LinkedMap<String, Json>()
+    if let Json.Object(o) = j {
+        for (k, v) in o { m.insert(k.copy(), v.copy()) }
+    }
+    m.insert(String(key), value.copy())
+    return Json.Object(m)
+}
+
+fn strs(list: List<String>) -> Json {
+    var out = List<Json>()
+    for s in list { out.push(Json.Str(s.copy())) }
+    return Json.Array(out)
+}
+
+// The strings in a JSON array.
+fn strings(j: Json) -> Json {
+    var out = List<Json>()
+    if let Json.Array(list) = j {
+        for v in list {
+            if let s = v.as_str() { out.push(Json.Str(s)) }
+        }
+    }
+    return Json.Array(out)
+}
+
+fn last_part(path: String) -> String {
+    let p = path.replace("\\", "/").trim_suffix("/").copy()
+    return if let cut = p.find_last("/") { p[cut + 1..].copy() } else { p }
+}
+
+// A file's text, or "" when it isn't there or isn't text.
+fn read_text(path: String) -> String {
+    return match fs.read_text(path) {
+        ok(some(t)) => t,
+        _ => String(),
+    }
+}
+
+// What's in a folder, or nothing when it isn't there.
+fn listing(dir: String) -> List<String> {
+    return match fs.list(dir) {
+        ok(l) => l,
+        err(_) => List<String>(),
+    }
+}
+
+// Whether `name` is one of OpenBot's own skills.
+fn built_in(name: String) -> bool {
+    for b in BUILT_IN_SKILLS {
+        if name == b { return true }
+    }
+    return false
+}
+
+fn json_of(raw: String) -> Json {
+    return match parse(raw) {
+        ok(j) => j,
+        err(_) => Json.Null,
+    }
+}
+
+// An ISO 8601 time, with or without an offset (UTC without), or Unix ms as
+// digits, as Unix ms; 0 when it's neither.
+fn millis(t: String) -> i64 {
+    let s = t.trim().copy()
+    if s.len() == 0 { return 0 }
+    if let n = i64.parse(s.copy()) { return n }
+    if let ts = Timestamp.parse_iso(s.copy()) { return ts.unix_ms }
+    if let ts = Timestamp.parse_iso("{s}Z") { return ts.unix_ms }
+    return 0
+}
+
+// Rows of a query, or none when it fails, such as on an older OpenBot whose
+// tables or columns differ.
+fn all_rows(db: Database, sql: str) -> List<List<Value>> {
+    return match db.query(String(sql)) {
+        ok(r) => r,
+        err(_) => List<List<Value>>(),
+    }
+}
+
+fn rows_with(db: Database, sql: str, params: List<Value>) -> List<List<Value>> {
+    return match db.query(String(sql), params) {
+        ok(r) => r,
+        err(_) => List<List<Value>>(),
+    }
+}
+
+fn text(v: Value) -> String {
+    match v {
+        Value.Text(s) => return s.copy(),
+        Value.Int(n) => return "{n}",
+        Value.Real(f) => return "{f}",
+        _ => return String(),
+    }
+}
+
+fn int(v: Value) -> i64 {
+    match v {
+        Value.Int(n) => return n,
+        _ => return 0,
+    }
+}
+
+fn json_value(v: Value) -> Json {
+    match v {
+        Value.Int(n) => return Json.Int(n),
+        Value.Real(f) => return Json.Float(f),
+        Value.Text(s) => return Json.Str(s.copy()),
+        _ => return Json.Null,
+    }
+}
+
+@test
+fn schedules_map_to_loom_s() {
+    let (daily, same) = schedule_of(Obj.new().s("kind", String("daily")).s("time", String("7:05")).done())
+    assert("{daily}" == "\{\"daily\":\"07:05\"\}" and same.len() == 0)
+    let (weekly, changed) = schedule_of(Obj.new().s("kind", String("weekly")).i("weekday", 1).s("time", String("08:00")).done())
+    assert("{weekly}" == "\{\"daily\":\"08:00\"\}" and changed.contains("Monday"))
+    let (every, _) = schedule_of(Obj.new().s("kind", String("interval")).i("amount", 2).s("unit", String("hours")).done())
+    assert("{every}" == "\{\"every\":120\}")
+    let (short, why) = schedule_of(Obj.new().s("kind", String("interval")).i("amount", 1).s("unit", String("minutes")).done())
+    assert("{short}" == "\{\"every\":5\}" and why.len() > 0)
+    let (none_given, _) = schedule_of(Json.Null)
+    assert(none_given == Json.Null)
+}
+
+@test
+fn colours_go_to_the_nearest_thread() {
+    assert(color_of(String("blue")) == some(String("periwinkle")))
+    assert(color_of(String("#18a06a")) == some(String("mint")))
+    assert(color_of(String("#ff9a6a")) == some(String("apricot")))
+    assert(color_of(String("")) == none)
+    assert(color_of(String("not a colour")) == none)
+}
+
+@test
+fn names_and_secrets() {
+    assert(skill_name(String("Release Notes!")) == "release-notes")
+    assert(model_of(String("claude-opus-4-6")) == "opus")
+    assert(secret_file(String("C:/Users/x/AppData/Roaming/OpenBot/openbot-vault-v1.json")))
+    assert(secret_file(String("/home/x/.grokbot/credentials.json")))
+    assert(not secret_file(String("/home/x/OpenBot/Agents/main/report.pdf")))
+    assert(millis(String("2026-11-08T13:05:09.250Z")) == 1794143109250)
+    let s = skill_of(String("---\nname: Weekly Report\ndescription: When asked for the week's report\n---\n\n# Steps\n"), String("x")) ?? Json.Null
+    assert(str_at(s.copy(), "name") == some(String("weekly-report")) and str_at(s, "body") == some(String("# Steps")))
+}

@@ -14,6 +14,9 @@ const LIMIT: usize = 1048576
 pub enum Kind {
     Login
     Setup
+    Link      // with the one-time code from another device's QR code
+    Join      // with an invite's code, as a new account
+    Reset     // with a reset link's code, and a new password
     Logout
 }
 
@@ -46,21 +49,25 @@ pub fn address(server: String) -> String {
 }
 
 impl Pending {
-    /// Starts a login or a setup: POSTs `body` to /api/login or /api/setup.
-    pub fn start(kind: Kind, server: own String, id: own String?, payload: Json) -> Pending {
+    /// Starts a login, a setup or a link: POSTs `body` to /api/login, /api/setup or /api/link.
+    /// `base` is where it goes: `server` itself, or the relay to it for a place over Noise.
+    pub fn start(kind: Kind, server: own String, base: String, id: own String?, payload: Json) -> Pending {
         let path = match kind {
-            Kind.Setup => "/api/setup",
-            _ => "/api/login",
+            Kind.Setup => String("/api/setup"),
+            Kind.Link => String("/api/link"),
+            Kind.Join => "/api/join/{str_at(payload.copy(), "code") ?? String()}",
+            Kind.Reset => "/api/reset/{str_at(payload.copy(), "code") ?? String()}",
+            _ => String("/api/login"),
         }
         let headers: List<Header> = [Header { name: String("Content-Type"), value: String("application/json") }]
-        let req = post("{server}{path}", headers, "{payload}".to_bytes(), TIMEOUT_MS, LIMIT)
+        let req = post("{base}{path}", headers, "{payload}".to_bytes(), TIMEOUT_MS, LIMIT)
         return Pending { kind: kind, server: server, id: id, req: req }
     }
 
     /// Starts a logout, which revokes `token` on the instance.
-    pub fn logout(server: own String, token: String) -> Pending {
+    pub fn logout(server: own String, base: String, token: String) -> Pending {
         let headers: List<Header> = [Header { name: String("Authorization"), value: "Bearer {token}" }]
-        let req = post("{server}/api/logout", headers, List<u8>(), TIMEOUT_MS, LIMIT)
+        let req = post("{base}/api/logout", headers, List<u8>(), TIMEOUT_MS, LIMIT)
         return Pending { kind: Kind.Logout, server: server, id: none, req: req }
     }
 

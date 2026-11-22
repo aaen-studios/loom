@@ -1,0 +1,733 @@
+module server.egress
+
+// The way out of a sandbox closed to the network (PLAN.md, "Rules, records and
+// limits"): an agent with an outbound allowlist, or with no network at all,
+// runs in a sandbox of its own made with `--network none`, which has nothing
+// but its own loopback. Inside it, `loom egress` listens on 127.0.0.1:PORT, and
+// carries each connection made to it over its standard input and output, which
+// `podman exec` or `docker exec` joins to the instance. So nothing leaves the
+// sandbox but what the instance's end of the egress lets through:
+//
+// - a request to loom's tools (its target a path, as `loom mcp`'s are), which
+//   goes on to the gate (server/gate.calx), which passes only those routes;
+// - an HTTP proxy's request, CONNECT to a host and port, or a plain http://
+//   address, which goes out only to a host on the agent's list, and never to
+//   the server itself or a network of its own (loopback, link-local, and the
+//   private networks, unless the list names that address).
+//
+// The sandbox's HTTP_PROXY and HTTPS_PROXY name the egress, so the programs that
+// honour them reach the hosts on the list, and the rest reach nothing. The
+// agent's browser, which runs on the instance's own computer, goes through the
+// same check: its end of the egress also listens on the instance's loopback, and
+// the browser is started with that as its proxy.
+//
+// Frames, both ways: a byte saying what it is, the connection's number (u32,
+// big-endian), the length of what follows (u32), and that many bytes.
+// O opens a connection (from the sandbox), D carries its bytes, C closes it.
+import std.bytes
+import std.io.{Stdin, Stdout}
+import std.net.{Conn, Event, Ip, Net, Waker}
+import std.process.{Child, Command, Stdio}
+import std.thread.{Task, sleep}
+import server.store.{now}
+
+// Where the egress listens in the sandbox: loom's tools and the proxy, both.
+pub const PORT: u16 = 3128
+
+const OPEN: u8 = 79
+const DATA: u8 = 68
+const CLOSE: u8 = 67
+
+// The most of a request's head the egress reads before it says no, and how
+// many connections one agent has open at once.
+const HEAD_MOST: usize = 65536
+const CONNECTIONS_MOST: usize = 512
+
+// How long after its egress ends the instance starts it again.
+const RESTART_MS: i64 = 1000
+
+// The longest host name, and the most hosts on a list.
+pub const HOSTS_MOST: usize = 200
+const NAME_MOST: usize = 253
+
+fn frame(out: mut List<u8>, kind: u8, id: u32, data: List<u8>) {
+    out.push(kind)
+    bytes.put_u32_be(mut out, id)
+    bytes.put_u32_be(mut out, u32.wrap(u64(data.len())))
+    out.extend(data)
+}
+
+// --- The allowlist ---
+
+// `text` as an entry of an allowlist: a host name, lowercase, maybe starting
+// with `*.` for every name under it, or an address. none if it's neither.
+pub fn entry(text: String) -> String? {
+    var t = text.trim().to_lower_root()
+    if t.ends_with(".") { t = t[..t.len() - 1].copy() }
+    if t.starts_with("[") and t.ends_with("]") { t = t[1..t.len() - 1].copy() }
+    if t.len() == 0 or t.len() > NAME_MOST { return none }
+    if let ip = Ip.parse(t.copy()) { return some(ip.to_string()) }
+    var name = t.copy()
+    if name.starts_with("*.") { name = name[2..].copy() }
+    if name.len() == 0 { return none }
+    for label in name.split(".") {
+        if label.len() == 0 or label.len() > 63 or label.starts_with("-") or label.ends_with("-") { return none }
+        for r in label.chars() {
+            let ok_char = (r >= 'a' and r <= 'z') or (r >= '0' and r <= '9') or r == '-' or r == '_'
+            if not ok_char { return none }
+        }
+    }
+    return some(t)
+}
+
+// Whether a list lets `host` be reached: it's on it, or under a `*.` entry.
+pub fn allows(hosts: List<String>, host: String) -> bool {
+    let h = entry(host) else return false
+    if h.starts_with("*.") { return false }
+    for e in hosts {
+        if e == h { return true }
+        if e.starts_with("*.") {
+            let under = e[1..].copy()
+            if h.ends_with(under.copy()) and h.len() > under.len() { return true }
+        }
+    }
+    return false
+}
+
+@test
+fn entries_are_host_names_or_addresses() {
+    assert(entry(String(" GitHub.com. ")) == some(String("github.com")))
+    assert(entry(String("*.npmjs.org")) == some(String("*.npmjs.org")))
+    assert(entry(String("[::1]")) == some(String("::1")))
+    assert(entry(String("10.0.0.2")) == some(String("10.0.0.2")))
+    assert(entry(String("exa mple.com")) == none)
+    assert(entry(String("*")) == none)
+    assert(entry(String("http://github.com")) == none)
+    assert(entry(String("a.*.com")) == none)
+}
+
+@test
+fn a_list_allows_its_hosts_and_whats_under_a_star() {
+    let hosts: List<String> = [String("github.com"), String("*.npmjs.org")]
+    assert(allows(hosts.copy(), String("GitHub.com")))
+    assert(not allows(hosts.copy(), String("api.github.com")))
+    assert(allows(hosts.copy(), String("registry.npmjs.org")))
+    assert(not allows(hosts.copy(), String("npmjs.org")))
+    assert(not allows(hosts.copy(), String("evilnpmjs.org")))
+    assert(not allows(List<String>(), String("github.com")))
+}
+
+// Whether a connection that opened to `ip` is refused anyway: the server
+// itself, link-local and multicast, always, and the private networks (the
+// home's, a VPN's such as Tailscale's 100.64/10, and IPv6's fc00::/7) unless
+// the request named that address itself.
+pub fn forbidden(ip: Ip, named: bool) -> bool {
+    if ip.is_loopback() or ip.is_link_local() or ip.is_multicast() { return true }
+    return match ip {
+        Ip.V4(b) => v4_forbidden(b[0], b[1], named),
+        Ip.V6(b, _) => {
+            var zero = true
+            for k in 0usize..10 {
+                if b[k] != 0 { zero = false }
+            }
+            if zero and b[10] == 255 and b[11] == 255 {
+                // An IPv4 address written as IPv6.
+                if b[12] == 127 or (b[12] == 169 and b[13] == 254) { return true }
+                return v4_forbidden(b[12], b[13], named)
+            }
+            if zero and b[10] == 0 and b[11] == 0 and b[12] == 0 and b[13] == 0 and b[14] == 0 and b[15] == 0 { return true }
+            (b[0] & 254) == 252 and not named
+        },
+    }
+}
+
+fn v4_forbidden(a: u8, b: u8, named: bool) -> bool {
+    if a == 0 or a >= 224 { return true }
+    let private = a == 10 or (a == 172 and b >= 16 and b < 32) or (a == 192 and b == 168) or (a == 100 and b >= 64 and b < 128)
+    return private and not named
+}
+
+@test
+fn the_server_and_its_networks_are_never_reached() {
+    assert(forbidden(Ip.parse(String("127.0.0.1")) ?? Ip.V4([1, 1, 1, 1]), true))
+    assert(forbidden(Ip.parse(String("169.254.169.254")) ?? Ip.V4([1, 1, 1, 1]), true))
+    assert(forbidden(Ip.parse(String("::ffff:127.0.0.1")) ?? Ip.V4([1, 1, 1, 1]), true))
+    assert(forbidden(Ip.parse(String("0.0.0.0")) ?? Ip.V4([1, 1, 1, 1]), true))
+    assert(forbidden(Ip.parse(String("192.168.1.5")) ?? Ip.V4([1, 1, 1, 1]), false))
+    assert(not forbidden(Ip.parse(String("192.168.1.5")) ?? Ip.V4([1, 1, 1, 1]), true))
+    assert(forbidden(Ip.parse(String("fd00::1")) ?? Ip.V4([1, 1, 1, 1]), false))
+    assert(not forbidden(Ip.parse(String("140.82.121.4")) ?? Ip.V4([127, 0, 0, 1]), false))
+}
+
+// --- In the sandbox: `loom egress` ---
+
+// Reads the instance's frames from standard input, on a thread of its own,
+// and wakes the egress's poll with each piece. An empty piece is the end.
+struct Input {
+    out: Sender<List<u8>>
+    waker: Waker
+}
+
+impl Task for Input {
+    fn run(own self) {
+        var s = self
+        var stdin = Stdin {}
+        loop {
+            var buf = List<u8>()
+            let n = match stdin.read(mut buf, 65536) {
+                ok(got) => got,
+                err(_) => 0,
+            }
+            s.out.send(buf)
+            s.waker.wake()
+            if n == 0 { return }
+        }
+    }
+}
+
+// `loom egress`: listens on 127.0.0.1:PORT in the sandbox, and carries each
+// connection to the instance over standard input and output, until the
+// instance ends its input.
+pub fn serve_inside() ! Error {
+    let net = try Net.new()
+    var listening = false
+    // An egress before it may hold the port for a moment.
+    for _ in 0..50 {
+        match net.listen(String("127.0.0.1"), PORT) {
+            ok(_) => {
+                listening = true
+                break
+            },
+            err(_) => unsafe { sleep(100000000) },
+        }
+    }
+    if not listening { fail "the egress can't listen on 127.0.0.1:{PORT}" }
+    let waker = try net.waker()
+    var input = Receiver<List<u8>>()
+    let reader = unsafe { Thread.spawn(Input { out: input.sender(), waker: waker }) }
+    var out = Stdout {}
+    var pending = List<u8>()
+    var events = List<Event>()
+    var ended = false
+    while not ended {
+        net.poll(1000, mut events)
+        var frames = List<u8>()
+        for e in events {
+            match e {
+                Accepted(c) => frame(mut frames, OPEN, c.id(), List<u8>()),
+                Received(c) => {
+                    var got = List<u8>()
+                    _ = net.read(c, mut got)
+                    frame(mut frames, DATA, c.id(), got)
+                },
+                Closed(c) => frame(mut frames, CLOSE, c.id(), List<u8>()),
+                _ => {},
+            }
+        }
+        while let piece = input.next() {
+            if piece.len() == 0 { ended = true }
+            pending.extend(piece)
+        }
+        var at: usize = 0
+        while pending.len() - at >= 9 {
+            let len = usize(bytes.u32_be(pending.copy(), at + 5))
+            if pending.len() - at - 9 < len { break }
+            let kind = pending[at]
+            let conn = Conn.from_id(bytes.u32_be(pending.copy(), at + 1))
+            if kind == DATA {
+                net.write(conn, pending[at + 9..at + 9 + len].copy())
+            } else if kind == CLOSE {
+                net.close(conn)
+            }
+            at += 9 + len
+        }
+        if at > 0 { pending = pending[at..].copy() }
+        if frames.len() > 0 {
+            if let err(e) = out.write(frames) { fail "the egress's output: {e}" }
+            if let err(e) = out.flush() { fail "the egress's output: {e}" }
+        }
+    }
+    reader.join()
+}
+
+// --- On the instance: the other end ---
+
+// An agent's end of the egress, while its sandbox is closed to the network.
+pub struct Door {
+    pub port: u16    // where the browser's proxy listens on the instance's loopback
+    pub hosts: Sender<List<String>>    // the agent's list, each time it changes
+    pub stop: Sender<bool>
+    pub thread: Thread
+}
+
+// Starts `box`'s end of the egress, which runs `loom egress` in it with
+// `runtime exec`, passes loom's tools on to the gate at `gate_host`:`gate`,
+// and lets out only what `hosts` lets.
+pub fn open(runtime: String, box: String, gate_host: String, gate: u16, hosts: List<String>) -> Door ! Error {
+    var ready = Receiver<String>()
+    let changes = Receiver<List<String>>()
+    let hosts_to = changes.sender()
+    let stop = Receiver<bool>()
+    let stop_to = stop.sender()
+    let t = unsafe { Thread.spawn(Keeper { runtime: runtime.copy(), box: box.copy(), gate_host: gate_host.copy(), gate: gate, hosts: hosts.copy(), changes: changes, stop: stop, ready: ready.sender() }) }
+    let said = unsafe { ready.wait_for(10000000000) } else { fail "{box}'s egress didn't start" }
+    if said.starts_with("error:") { fail "{box}'s egress can't listen: {said[6..]}" }
+    let port = u16.parse(said) else { fail "{box}'s egress said {said}" }
+    return Door { port: port, hosts: hosts_to, stop: stop_to, thread: t }
+}
+
+impl Door {
+    // Stops it, and the egress in the sandbox with it.
+    pub fn close(own self) {
+        var d = self
+        d.stop.send(true)
+        d.thread.join()
+    }
+}
+
+struct Keeper {
+    runtime: String
+    box: String
+    gate_host: String
+    gate: u16
+    hosts: List<String>
+    changes: Receiver<List<String>>
+    stop: Receiver<bool>
+    ready: Sender<String>
+}
+
+// Where a connection is.
+enum Stage {
+    Reading     // its request's head isn't all here yet
+    Opening     // the connection it asked for is being made
+    Open        // bytes go both ways
+}
+
+// A connection made to the egress: from the sandbox (`chan`, its number there),
+// or from the browser (`conn`).
+struct Client {
+    chan: u32
+    conn: Conn?
+    stage: Stage
+    head: List<u8>      // what came while Reading, or what goes once it's Open
+    up: Conn?           // where it goes
+    connect: bool       // a CONNECT, answered once it's open
+    named: bool         // the host it asked for was an address
+    host: String
+}
+
+// The key a client is kept by: its number in the sandbox, or the browser's
+// connection's, after them.
+fn chan_key(id: u32) -> u64 {
+    return u64(id)
+}
+
+fn conn_key(c: Conn) -> u64 {
+    return 4294967296 + u64(c.id())
+}
+
+// A proxy's answer that ends the connection.
+fn refusal(status: str, why: String) -> List<u8> {
+    let body = "loom: {why}\n"
+    return "HTTP/1.1 {status}\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: {body.len()}\r\nConnection: close\r\n\r\n{body}".to_bytes()
+}
+
+// Host and port from `host:port`, `[v6]:port` or a host alone, with `port`
+// when it names none.
+pub fn host_port(text: String, port: u16) -> (String, u16)? {
+    if text.starts_with("[") {
+        let end = text.find("]") else return none
+        let host = text[1..end].copy()
+        let rest = text[end + 1..].copy()
+        if rest.len() == 0 { return some((host, port)) }
+        if not rest.starts_with(":") { return none }
+        let p = u16.parse(rest[1..].copy()) else return none
+        return some((host, p))
+    }
+    if let cut = text.find_last(":") {
+        let p = u16.parse(text[cut + 1..].copy()) else return none
+        return some((text[..cut].copy(), p))
+    }
+    return some((text.copy(), port))
+}
+
+@test
+fn proxies_name_hosts_and_ports() {
+    assert(host_port(String("github.com:443"), 80) == some((String("github.com"), 443u16)))
+    assert(host_port(String("example.org"), 80) == some((String("example.org"), 80u16)))
+    assert(host_port(String("[2001:db8::1]:8443"), 80) == some((String("2001:db8::1"), 8443u16)))
+    assert(host_port(String("x:notaport"), 80) == none)
+}
+
+// What a request's head asks of the proxy: the host, the port, whether it's
+// a CONNECT, and what goes to the host once the connection opens (for plain
+// http, the head again with the path alone). Or the refusal, if it's not one
+// the proxy takes.
+// What the proxy makes of a request: where it goes, or its refusal.
+enum Asked {
+    Go(String, u16, bool, List<u8>)    // host, port, CONNECT, and what goes to the host once it opens
+    No(List<u8>)
+}
+
+fn proxied(head: List<u8>, end: usize) -> Asked {
+    let text = String.from_utf8(head[..end].copy()) else return Asked.No(refusal("400 Bad Request", String("That isn't an HTTP request.")))
+    let lines = text.split("\r\n")
+    let first = lines[0].copy()
+    let parts = first.split(" ")
+    if parts.len() != 3 { return Asked.No(refusal("400 Bad Request", String("That isn't an HTTP request."))) }
+    let method = parts[0].copy()
+    let target = parts[1].copy()
+    let version = parts[2].copy()
+    let after = head[end + 4..].copy()
+    if method == "CONNECT" {
+        let (host, port) = host_port(target.copy(), 443) else return Asked.No(refusal("400 Bad Request", "CONNECT names a host and a port, not {target}."))
+        return Asked.Go(host, port, true, after)
+    }
+    let lower = target.to_lower_root()
+    if not lower.starts_with("http://") { return Asked.No(refusal("400 Bad Request", String("Through this proxy, a page is an http:// address, or CONNECT for https."))) }
+    let rest = target[7..].copy()
+    var cut = rest.len()
+    for mark in ["/", "?", "#"] {
+        if let k = rest.find(mark) {
+            if k < cut { cut = k }
+        }
+    }
+    var authority = rest[..cut].copy()
+    if let at = authority.find_last("@") { authority = authority[at + 1..].copy() }
+    var path = rest[cut..].copy()
+    if path.len() == 0 or not path.starts_with("/") { path = "/{path}" }
+    let (host, port) = host_port(authority.copy(), 80) else return Asked.No(refusal("400 Bad Request", "{authority} isn't a host."))
+    var out = "{method} {path} {version}\r\n"
+    var k: usize = 1
+    while k < lines.len() {
+        let line = lines[k].copy()
+        let name = line.split(":")[0].trim().to_lower_root()
+        if name != "proxy-connection" and name != "proxy-authorization" { out = "{out}{line}\r\n" }
+        k += 1
+    }
+    out = "{out}\r\n"
+    var bytes_out = out.to_bytes()
+    bytes_out.extend(after)
+    return Asked.Go(host, port, false, bytes_out)
+}
+
+@test
+fn a_plain_request_goes_on_with_its_path_alone() {
+    let head = "GET http://example.org:8080/a?b=1 HTTP/1.1\r\nHost: example.org:8080\r\nProxy-Connection: keep-alive\r\n\r\nbody".to_bytes()
+    let end = bytes.find(head.copy(), "\r\n\r\n".to_bytes()) ?? 0
+    match proxied(head, end) {
+        Asked.Go(host, port, connect, out) => {
+            assert(host == "example.org" and port == 8080 and not connect)
+            assert((String.from_utf8(out) ?? String()) == "GET /a?b=1 HTTP/1.1\r\nHost: example.org:8080\r\n\r\nbody")
+        },
+        Asked.No(_) => panic("refused"),
+    }
+    let tls = "CONNECT github.com:443 HTTP/1.1\r\nHost: github.com:443\r\n\r\n".to_bytes()
+    match proxied(tls.copy(), bytes.find(tls, "\r\n\r\n".to_bytes()) ?? 0) {
+        Asked.Go(host, port, connect, _) => assert(host == "github.com" and port == 443 and connect),
+        Asked.No(_) => panic("refused"),
+    }
+}
+
+impl Keeper {
+    // Sends `data` to a client.
+    fn give(k: Keeper, net: Net, child: mut Child?, c: Client, data: List<u8>) {
+        if data.len() == 0 { return }
+        if let conn = c.conn {
+            net.write(conn, data)
+            return
+        }
+        var f = List<u8>()
+        frame(mut f, DATA, c.chan, data)
+        k.send(mut child, f)
+    }
+
+    // Ends a client, and its connection out.
+    fn end(k: Keeper, net: Net, child: mut Child?, c: Client) {
+        if let up = c.up { net.close(up) }
+        if let conn = c.conn {
+            net.close(conn)
+            return
+        }
+        var f = List<u8>()
+        frame(mut f, CLOSE, c.chan, List<u8>())
+        k.send(mut child, f)
+    }
+
+    fn send(k: Keeper, child: mut Child?, f: List<u8>) {
+        _ = k
+        var gone = false
+        if let ch = child {
+            if let err(_) = ch.write(f) { gone = true }
+        }
+        if gone { child = none }
+    }
+
+    // What a client sent: while Reading, its request's head, which says where
+    // it goes; once Open, bytes for there.
+    fn took(k: Keeper, net: Net, child: mut Child?, c: mut Client, data: List<u8>) -> bool {
+        match c.stage {
+            Stage.Open => {
+                if let up = c.up { net.write(up, data) }
+                return true
+            },
+            Stage.Opening => {
+                c.head.extend(data)
+                return true
+            },
+            Stage.Reading => {},
+        }
+        c.head.extend(data)
+        let line_end = bytes.find(c.head.copy(), "\r\n".to_bytes()) else {
+            if c.head.len() > HEAD_MOST {
+                k.give(net, mut child, c.copy(), refusal("431 Request Header Fields Too Large", String("That request's head is too long.")))
+                return false
+            }
+            return true
+        }
+        let first = String.from_utf8(c.head[..line_end].copy()) ?? String()
+        let words = first.split(" ")
+        let target = if words.len() > 1 { words[1].copy() } else { String() }
+        // Loom's own tools, from `loom mcp` in the sandbox: on to the gate.
+        if target.starts_with("/") {
+            if c.conn != none {
+                k.give(net, mut child, c.copy(), refusal("400 Bad Request", String("The browser's proxy takes only pages to go to.")))
+                return false
+            }
+            match net.connect(k.gate_host.copy(), k.gate) {
+                ok(up) => {
+                    c.up = some(up)
+                    c.stage = Stage.Opening
+                    c.host = String()
+                    return true
+                },
+                err(e) => {
+                    k.give(net, mut child, c.copy(), refusal("502 Bad Gateway", "loom's tools can't be reached: {e}"))
+                    return false
+                },
+            }
+        }
+        let end = bytes.find(c.head.copy(), "\r\n\r\n".to_bytes()) else {
+            if c.head.len() > HEAD_MOST {
+                k.give(net, mut child, c.copy(), refusal("431 Request Header Fields Too Large", String("That request's head is too long.")))
+                return false
+            }
+            return true
+        }
+        let (host, port, connect, rest) = match proxied(c.head.copy(), end) {
+            Asked.Go(h, p, tls, r) => (h, p, tls, r),
+            Asked.No(answer) => {
+                k.give(net, mut child, c.copy(), answer)
+                return false
+            },
+        }
+        let named = entry(host.copy()) ?? String()
+        if not allows(k.hosts.copy(), host.copy()) {
+            let why = if k.hosts.len() == 0 { String("This agent has no network.") } else { "This agent's network lets it reach only {k.hosts.join(", ")}, not {named}." }
+            k.give(net, mut child, c.copy(), refusal("403 Forbidden", why))
+            return false
+        }
+        // An address it names is checked before it's tried; a name, once it's
+        // open and its address is known.
+        if let ip = Ip.parse(named.copy()) {
+            if forbidden(ip, true) {
+                k.give(net, mut child, c.copy(), refusal("403 Forbidden", "{named} is on the server itself, which an agent never reaches through its list."))
+                return false
+            }
+        }
+        match net.connect(host.copy(), port) {
+            ok(up) => {
+                c.up = some(up)
+                c.stage = Stage.Opening
+                c.connect = connect
+                c.named = Ip.parse(named.copy()) != none
+                c.host = named
+                c.head = rest
+                return true
+            },
+            err(e) => {
+                k.give(net, mut child, c.copy(), refusal("502 Bad Gateway", "{host} can't be reached: {e}"))
+                return false
+            },
+        }
+    }
+}
+
+impl Task for Keeper {
+    fn run(own self) {
+        var k = self
+        let net = match Net.new() {
+            ok(n) => n,
+            err(e) => {
+                k.ready.send("error:{e}")
+                return
+            },
+        }
+        match net.listen(String("127.0.0.1"), 0) {
+            ok(p) => k.ready.send("{p}"),
+            err(e) => {
+                k.ready.send("error:{e}")
+                return
+            },
+        }
+        var child: Child? = none
+        var next_start: i64 = 0
+        var clients = Map<u64, Client>()
+        var ups = Map<u32, u64>()    // a connection out -> its client
+        var input = List<u8>()
+        var events = List<Event>()
+        loop {
+            if k.stop.next() != none { break }
+            while let hosts = k.changes.next() { k.hosts = hosts }
+            // The egress in the sandbox: started, and started again once it ends.
+            var ended = false
+            if let ch = child {
+                let got = ch.read(0)
+                input.extend(got)
+                if ch.ended() or ch.try_wait() != none { ended = true }
+            } else if now() >= next_start {
+                next_start = now() + RESTART_MS
+                match Command.new(k.runtime.copy()).args([String("exec"), String("-i"), k.box.copy(), String("loom"), String("egress")]).stdin(Stdio.Pipe).stdout(Stdio.Pipe).stderr(Stdio.Null).spawn() {
+                    ok(ch) => child = some(ch),
+                    err(e) => eprintln("loom: {k.box}'s egress didn't start: {e}"),
+                }
+            }
+            // Its frames.
+            var at: usize = 0
+            while input.len() - at >= 9 {
+                let len = usize(bytes.u32_be(input.copy(), at + 5))
+                if input.len() - at - 9 < len { break }
+                let kind = input[at]
+                let id = bytes.u32_be(input.copy(), at + 1)
+                let data = input[at + 9..at + 9 + len].copy()
+                at += 9 + len
+                let key = chan_key(id)
+                if kind == OPEN {
+                    if clients.len() >= CONNECTIONS_MOST {
+                        var f = List<u8>()
+                        frame(mut f, CLOSE, id, List<u8>())
+                        k.send(mut child, f)
+                        continue
+                    }
+                    clients.insert(key, Client { chan: id, conn: none, stage: Stage.Reading, head: List<u8>(), up: none, connect: false, named: false, host: String() })
+                } else if kind == DATA {
+                    var gone = false
+                    if let c = mut clients.find(key) {
+                        let had = c.up
+                        if not k.took(net, mut child, mut c, data) { gone = true }
+                        if had == none {
+                            if let up = c.up { ups.insert(up.id(), key) }
+                        }
+                    }
+                    if gone {
+                        if let c = clients.remove(key) { k.end(net, mut child, c) }
+                    }
+                } else if kind == CLOSE {
+                    if let c = clients.remove(key) {
+                        if let up = c.up {
+                            _ = ups.remove(up.id())
+                            net.close(up)
+                        }
+                    }
+                }
+            }
+            if at > 0 { input = input[at..].copy() }
+            if ended {
+                // Every connection from the sandbox went with it.
+                var gone = List<u64>()
+                for (key, c) in clients {
+                    if c.conn == none { gone.push(key) }
+                }
+                for key in gone {
+                    if let c = clients.remove(key) {
+                        if let up = c.up {
+                            _ = ups.remove(up.id())
+                            net.close(up)
+                        }
+                    }
+                }
+                if let ch = child { ch.kill() }
+                child = none
+                input = List<u8>()
+            }
+            net.poll(5, mut events)
+            for e in events {
+                match e {
+                    Accepted(c) => {
+                        if clients.len() >= CONNECTIONS_MOST {
+                            net.close(c)
+                            continue
+                        }
+                        clients.insert(conn_key(c), Client { chan: 0, conn: some(c), stage: Stage.Reading, head: List<u8>(), up: none, connect: false, named: false, host: String() })
+                    },
+                    Connected(c) => {
+                        let key = ups.get(c.id()) else continue
+                        var refused = false
+                        if let cl = mut clients.find(key) {
+                            if cl.host.len() > 0 {
+                                if let peer = net.peer(c) {
+                                    if forbidden(peer.ip, cl.named) {
+                                        k.give(net, mut child, cl.copy(), refusal("403 Forbidden", "{cl.host} is at {peer.ip.to_string()}, on the server itself or a network of its own, which an agent never reaches through its list."))
+                                        refused = true
+                                    }
+                                }
+                            }
+                            if not refused {
+                                if cl.connect { k.give(net, mut child, cl.copy(), "HTTP/1.1 200 Connection established\r\n\r\n".to_bytes()) }
+                                if cl.head.len() > 0 { net.write(c, cl.head.copy()) }
+                                cl.head = List<u8>()
+                                cl.stage = Stage.Open
+                            }
+                        }
+                        if refused {
+                            _ = ups.remove(c.id())
+                            if let cl = clients.remove(key) { k.end(net, mut child, cl) }
+                        }
+                    },
+                    Received(c) => {
+                        var got = List<u8>()
+                        _ = net.read(c, mut got)
+                        if let key = ups.get(c.id()) {
+                            if let cl = clients.find(key) { k.give(net, mut child, cl.copy(), got) }
+                            continue
+                        }
+                        let key = conn_key(c)
+                        var gone = false
+                        if let cl = mut clients.find(key) {
+                            let had = cl.up
+                            if not k.took(net, mut child, mut cl, got) { gone = true }
+                            if had == none {
+                                if let up = cl.up { ups.insert(up.id(), key) }
+                            }
+                        }
+                        if gone {
+                            if let cl = clients.remove(key) { k.end(net, mut child, cl) }
+                        }
+                    },
+                    Closed(c) => {
+                        if let key = ups.remove(c.id()) {
+                            if let cl = clients.remove(key) {
+                                if cl.stage != Stage.Open and cl.host.len() > 0 { k.give(net, mut child, cl.copy(), refusal("502 Bad Gateway", "{cl.host} can't be reached.")) }
+                                var done = cl
+                                done.up = none
+                                k.end(net, mut child, done)
+                            }
+                            continue
+                        }
+                        if let cl = clients.remove(conn_key(c)) {
+                            if let up = cl.up {
+                                _ = ups.remove(up.id())
+                                net.close(up)
+                            }
+                        }
+                    },
+                    _ => {},
+                }
+            }
+        }
+        if let ch = child {
+            ch.close_input()
+            ch.kill()
+        }
+    }
+}

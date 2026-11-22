@@ -9,6 +9,9 @@ module core.conn
 // The app's messages come in on `inbox`, and everything for the app goes out
 // on `to_app`, both as JSON text. The C boundary (core/lib.calx) joins them
 // to loom_core_send and on_event; tests use them as they are.
+import std.bytes
+import std.crypto.{Ed25519Key, Ed25519PublicKey}
+import std.http.{Header, Request, get}
 import std.http.websocket.{Message, WebSocket, open}
 import std.http.websocket
 import std.keyring
@@ -17,11 +20,14 @@ import std.random.{Random}
 import std.thread.{Task}
 import std.time.{Instant}
 import shared.obj.{Obj, at, bool_at, int_at, merge, str_at}
-import shared.protocol.{APP_QUIET_MS, APP_WAIT_MS, CLOSE_TOKEN, CLOSE_VERSION, NEWEST}
+import shared.protocol.{APP_QUIET_MS, APP_WAIT_MS, CLOSE_MOVED, CLOSE_TOKEN, CLOSE_VERSION, NEWEST, moved_message}
 import core.cache.{Cache, now}
 import core.files.{Transfer, at_path, kept_at, refused}
 import shared.files.{is_sha}
 import core.login.{Kind, Outcome, Pending, address, request_body}
+import core.link
+import core.relay
+import core.pushbox
 import core.update.{Updater}
 import core.device.{Device}
 import std.fs
@@ -29,6 +35,7 @@ import std.fs
 const FIRST_WAIT_MS: u64 = 500
 const LONGEST_WAIT_MS: u64 = 30000
 const TICK_NS: u64 = 10000000    // the loop wakes this often to read the socket
+const FOLLOW_AGAIN_NS: u64 = 2000000000    // how long before asking a new place that didn't answer again
 
 // The id the core gives its own conversation.create commands, before the send's cid.
 const MAKING: str = "core.conversation:"
@@ -55,7 +62,19 @@ pub fn ws_url(server: String) -> String? {
     return none
 }
 
+/// Whether `server` is an address the core can reach: http://, https://, or a place over Noise.
+pub fn valid_server(server: String) -> bool {
+    return ws_url(server.copy()) != none or relay.place(server) != none
+}
+
 /// What one read of the socket gave.
+// What becomes of the app's push.register (Conn.through_relay).
+enum Sealing {
+    AsIs
+    Sealed(Json)
+    Failed(String)
+}
+
 enum Got {
     Text(String)
     Skip
@@ -92,6 +111,9 @@ pub struct Conn {
     cache: Cache          // what came from the instance, the cursor and the outbox
     lists: List<String>   // the ids of messages.list commands, whose results the cache keeps
     making: List<String>  // the ids of conversation.create commands the core sent for a send
+    linking: List<String> // the ids of link.create commands, whose results get the QR code's text
+    inviting: List<String> // the ids of invite.create commands, whose results get the invite's link
+    resetting: List<String> // the ids of password.reset commands, whose results get the reset link
     synced: bool          // catch-up is over on this connection
     active: bool          // someone is looking at the app
     have: Map<String, usize>    // bytes of each streaming block so far, by "message/block"
@@ -107,7 +129,16 @@ pub struct Conn {
     pub files: String?    // where files that come down are kept; the system's temporary folder without one
     transfers: List<Transfer>
     pub updater: Updater?    // looks for new releases of the app; none in tests and dev builds
+    pub tz: String?          // the system's time zone, an IANA name, as the app found it
     device: Device?       // this device as a tool for agents; none if its key couldn't be kept
+    follow_to: String     // where the instance moved, while the core checks it's the same one there
+    following: Request?   // GET <follow_to>/api/info, for its key
+    follow_at: Instant?   // when it last asked, so it asks again 2 s later while the new place isn't answering
+    relay: Thread?        // the relay to a place over Noise (core/relay.calx), while there's one
+    stop_relay: Sender<bool>?
+    relay_place: String   // the place it goes to
+    relay_url: String     // and where it listens
+    push_relay: String?   // the push relay's key, base64, from welcome, when the instance pushes through one
 }
 
 impl Conn {
@@ -139,6 +170,9 @@ impl Conn {
             cache: cache,
             lists: List<String>(),
             making: List<String>(),
+            linking: List<String>(),
+            inviting: List<String>(),
+            resetting: List<String>(),
             synced: false,
             active: true,
             have: Map<String, usize>(),
@@ -154,8 +188,47 @@ impl Conn {
             files: none,
             transfers: List<Transfer>(),
             updater: none,
+            tz: none,
             device: device,
+            follow_to: String(),
+            following: none,
+            follow_at: none,
+            relay: none,
+            stop_relay: none,
+            relay_place: String(),
+            relay_url: String(),
+            push_relay: none,
         }
+    }
+
+    /// Where to reach `server`: itself, or for a place over Noise, the relay to it,
+    /// which starts the first time. Empty if the relay couldn't start.
+    fn reach(mut self, server: String) -> String {
+        if not relay.is_place(server.copy()) { return server.copy() }
+        if self.relay_place == server and self.relay_url.len() > 0 { return self.relay_url.copy() }
+        self.stop_relaying()
+        let p = relay.place(server.copy()) else { return String() }
+        match relay.start(p) {
+            ok((t, stop, url)) => {
+                self.relay = some(t)
+                self.stop_relay = some(stop)
+                self.relay_place = server.copy()
+                self.relay_url = url.copy()
+                return url
+            },
+            err(e) => {
+                self.tell_error("relay", "{e}")
+                return String()
+            },
+        }
+    }
+
+    fn stop_relaying(mut self) {
+        if let s = mut self.stop_relay { s.send(true) }
+        self.stop_relay = none
+        if let t = self.relay.take() { t.join() }
+        self.relay_place = String()
+        self.relay_url = String()
     }
 
     fn tell(mut self, frame: Json) {
@@ -167,7 +240,7 @@ impl Conn {
     }
 
     fn tell_state(mut self, retry_ms: u64, why: String) {
-        var o = Obj.new().s("t", String("core.conn")).s("state", String(self.state.name()))
+        var o = Obj.new().s("t", String("core.conn")).s("state", String(self.state.name())).maybe("server", self.server.copy())
         if retry_ms > 0 { o = o.i("retry_ms", i64.wrap(retry_ms)) }
         if why.len() > 0 { o = o.s("why", why) }
         self.tell(o.done())
@@ -177,13 +250,13 @@ impl Conn {
     fn begin(mut self) {
         let server = self.server.copy() ?? String()
         if self.token == none and server.len() > 0 {
-            match keyring.get(self.keyring.copy(), server.copy()) {
+            match keyring.get(self.keyring.copy(), relay.keyring_name(server.copy())) {
                 ok(t) => self.token = t,
                 err(e) => self.tell(Obj.new().s("t", String("error")).s("code", String("keyring")).s("message", "{e}").done()),
             }
         }
-        if server.len() > 0 and ws_url(server.copy()) == none {
-            self.tell(Obj.new().s("t", String("error")).s("code", String("bad_config")).s("message", "not an http:// or https:// address: {server}").done())
+        if server.len() > 0 and not valid_server(server.copy()) {
+            self.tell(Obj.new().s("t", String("error")).s("code", String("bad_config")).s("message", "not an http://, https:// or noise:// address: {server}").done())
             self.server = none
         }
         if self.server != none and self.token != none {
@@ -201,7 +274,7 @@ impl Conn {
         self.token = none
         self.retry_at = none
         if let server = self.server.copy() {
-            match keyring.delete(self.keyring.copy(), server) {
+            match keyring.delete(self.keyring.copy(), relay.keyring_name(server)) {
                 ok(_) => {},
                 err(_) => {},    // a store that can't answer has nothing kept to delete
             }
@@ -215,7 +288,9 @@ impl Conn {
         self.synced = false
         // Commands sent on an old socket get no result: the outbox asks again on welcome.
         self.making = List<String>()
-        let url = ws_url(self.server.copy() ?? String()) ?? String()
+        let known = self.server.copy() ?? String()
+        let base = self.reach(known)
+        let url = ws_url(base) ?? String()
         let token = self.token.copy() ?? String()
         if url.len() == 0 or token.len() == 0 {
             self.state = State.SignedOut
@@ -232,7 +307,7 @@ impl Conn {
         // A connection that died without a close, as a sleeping laptop's does, ends
         // after 45 s with nothing from the instance, and the core reconnects.
         let ws = open(url, ping_interval_ms: APP_QUIET_MS, ping_timeout_ms: APP_WAIT_MS)
-        let hello = Obj.new().s("t", String("hello")).s("token", token).j("versions", Json.Array([Json.Int(i64(NEWEST))])).i("after", after).j("device", Obj.new().b("active", self.active).done()).done()
+        let hello = Obj.new().s("t", String("hello")).s("token", token).j("versions", Json.Array([Json.Int(i64(NEWEST))])).i("after", after).j("device", Obj.new().b("active", self.active).maybe("tz", self.tz.copy()).done()).done()
         match ws.send_text("{hello}") {
             ok => {},
             err(_) => {},    // receive says how it ended
@@ -258,6 +333,13 @@ impl Conn {
                 if code == CLOSE_VERSION {
                     self.state = State.UpdateNeeded
                     self.tell_state(0, reason.copy())
+                    return
+                }
+                // The moved frame came first: the core is checking the new place.
+                if code == CLOSE_MOVED and self.follow_to.len() > 0 {
+                    let to = self.follow_to.copy()
+                    self.state = State.Connecting
+                    self.tell_state(0, "moving to {to}")
                     return
                 }
             },
@@ -426,7 +508,21 @@ impl Conn {
             err(_) => return,
         }
         let t = str_at(f.copy(), "t") ?? String()
+        if t == "moved" {
+            self.moved(f)
+            return
+        }
         if t == "welcome" {
+            // The instance's key, kept from the first welcome: a move is checked with it.
+            if let key = str_at(f.copy(), "key") {
+                if self.known("instance_key") == none {
+                    match self.cache.set_meta("instance_key", key) {
+                        ok => {},
+                        err(e) => self.tell_error("cache", "{e}"),
+                    }
+                }
+            }
+            self.push_relay = str_at(f.copy(), "relay")
             self.state = State.Live
             self.failed = 0
             self.tell_state(0, String())
@@ -490,6 +586,21 @@ impl Conn {
                 self.made_conversation(f)
                 return
             }
+            if let i = self.linking.position(|x| x == id) {
+                _ = self.linking.remove(i)
+                self.linked(f)
+                return
+            }
+            if let i = self.inviting.position(|x| x == id) {
+                _ = self.inviting.remove(i)
+                self.invited(f, "join")
+                return
+            }
+            if let i = self.resetting.position(|x| x == id) {
+                _ = self.resetting.remove(i)
+                self.invited(f, "reset")
+                return
+            }
             if let i = self.lists.position(|x| x == id) {
                 _ = self.lists.remove(i)
                 match self.cache.put_messages(at(at(f.copy(), "value"), "messages")) {
@@ -546,7 +657,8 @@ impl Conn {
             if let server = self.server.copy() {
                 if let token = self.token.copy() {
                     if self.pending == none {
-                        self.pending = some(Pending.logout(server, token))
+                        let base = self.reach(server.copy())
+                        self.pending = some(Pending.logout(server, base, token))
                     }
                 }
             }
@@ -608,18 +720,70 @@ impl Conn {
             self.transfer(t == "file.upload", m)
             return true
         }
+        if t == "link" {
+            self.join(m)
+            return true
+        }
+        if t == "invite.join" or t == "reset.use" {
+            self.join_invite(m, t == "reset.use")
+            return true
+        }
+        if t == "cmd" and (str_at(m.copy(), "name") ?? String()) == "password.reset" {
+            if let id = str_at(m.copy(), "id") {
+                self.resetting.push(id)
+            }
+        }
+        if t == "cmd" and (str_at(m.copy(), "name") ?? String()) == "invite.create" {
+            if let id = str_at(m.copy(), "id") {
+                self.inviting.push(id)
+            }
+        }
         if t == "cmd" and (str_at(m.copy(), "name") ?? String()) == "messages.list" {
             if let id = str_at(m.copy(), "id") {
                 self.lists.push(id)
             }
         }
+        if t == "cmd" and (str_at(m.copy(), "name") ?? String()) == "link.create" {
+            if let id = str_at(m.copy(), "id") {
+                self.linking.push(id)
+            }
+        }
+        var frame = text
+        if t == "cmd" and (str_at(m.copy(), "name") ?? String()) == "push.register" {
+            match self.through_relay(m.copy()) {
+                Sealing.AsIs => {},
+                Sealing.Sealed(sealed) => frame = "{sealed}",
+                Sealing.Failed(why) => {
+                    // Never the bare token to an instance that pushes through the relay.
+                    self.tell(Obj.new().s("t", String("error")).s("code", String("keyring")).s("message", why).maybe("for", str_at(m.copy(), "id")).done())
+                    return true
+                },
+            }
+        }
         if self.state == State.Live {
-            if self.put(text) { return true }
+            if self.put(frame) { return true }
         }
         // Not connected. A send waits in the outbox, but anything else would act on what
         // may have changed meanwhile, so the app hears it didn't go.
         self.tell(Obj.new().s("t", String("error")).s("code", String("offline")).maybe("for", str_at(m.copy(), "id")).done())
         return true
+    }
+
+    /// The app's push.register, with its APNs token sealed for the push relay and the
+    /// phone's box key beside it, when the instance pushes through one (PLAN.md, "The push
+    /// relay"). It goes as it is when the instance doesn't, and not at all when the
+    /// phone's box key can't be kept.
+    fn through_relay(self, m: Json) -> Sealing {
+        let key = self.push_relay.copy() else return Sealing.AsIs
+        let args = at(m.copy(), "args")
+        let token = str_at(args.copy(), "token") else return Sealing.AsIs
+        let env = str_at(args, "env") ?? String("production")
+        let box = match pushbox.box_key(self.keyring.copy()) {
+            ok(b) => b,
+            err(e) => return Sealing.Failed("This device can't keep the key notifications are sealed for, so it takes no push through the relay: {e}"),
+        }
+        let sealed = pushbox.register_args(key, token, env, box) else return Sealing.Failed(String("The instance's push relay key isn't one."))
+        return Sealing.Sealed(merge(m, Obj.new().j("args", sealed).done()))
     }
 
     /// A message the person wrote: kept in the outbox with a client id, and sent when the
@@ -699,12 +863,22 @@ impl Conn {
         }
     }
 
+    /// A login's body, with this system's time zone in its `device` when the app didn't
+    /// give one, so the instance knows where the person is from the start.
+    fn with_tz(self, body: own Json) -> Json {
+        let tz = self.tz.copy() else return body
+        let device = at(body.copy(), "device")
+        if str_at(device.copy(), "tz") != none { return body }
+        let given = if device == Json.Null { Obj.new().done() } else { device }
+        return merge(body, Obj.new().j("device", merge(given, Obj.new().s("tz", tz).done())).done())
+    }
+
     /// Starts a login or a setup from the app's message `m`. Its `server`, or the one
     /// already known, is where.
     fn log_in(mut self, kind: Kind, m: Json) {
         let id = str_at(m.copy(), "id")
         let server = address(str_at(m.copy(), "server") ?? (self.server.copy() ?? String()))
-        if ws_url(server.copy()) == none {
+        if not valid_server(server.copy()) {
             self.tell(Obj.new().s("t", String("core.login")).maybe("id", id).j("error", Obj.new().s("code", String("bad_server")).s("message", String("Give the instance's address, starting with https:// or http://.")).done()).done())
             return
         }
@@ -712,7 +886,93 @@ impl Conn {
             self.tell(Obj.new().s("t", String("core.login")).maybe("id", id).j("error", Obj.new().s("code", String("busy")).s("message", String("A login is already on its way.")).done()).done())
             return
         }
-        self.pending = some(Pending.start(kind, server, id, request_body(kind, m)))
+        let base = self.reach(server.copy())
+        self.pending = some(Pending.start(kind, server, base, id, self.with_tz(request_body(kind, m))))
+    }
+
+    /// The instance made a code to add a device: the app gets the result with `qr`, the
+    /// text its QR code draws, which holds the address this core reaches the instance at.
+    fn linked(mut self, f: Json) {
+        let v = at(f.copy(), "value")
+        if str_at(v.copy(), "code") == none {
+            self.to_app.send("{f}")
+            return
+        }
+        // An instance in this desktop app, with phones on: the phone reaches it over
+        // Noise, at this PC's addresses on the network, so the QR code names that place.
+        var server = self.server.copy() ?? String()
+        let noise_on = at(v.copy(), "noise")
+        if bool_at(noise_on.copy(), "on") == some(true) {
+            let port = u16.wrap(int_at(noise_on.copy(), "port") ?? 0)
+            let key = bytes.from_base64(str_at(noise_on, "key") ?? String()) ?? List<u8>()
+            let addresses = relay.own_addresses(port)
+            if key.len() == 32 and addresses.len() > 0 { server = relay.write(relay.Place { key: key, addresses: addresses }) }
+        }
+        let l = link.Link { server: server, code: str_at(v.copy(), "code") ?? String(), instance: str_at(v.copy(), "instance") ?? String(), key: str_at(v.copy(), "key") ?? String() }
+        self.tell(merge(f, Obj.new().j("value", merge(v, Obj.new().s("qr", link.qr(l)).done())).done()))
+    }
+
+    /// The instance made an invite: the app gets the result with `link`, the address to
+    /// pass on, `<the instance's address>/join/<code>`, for an instance on a server.
+    fn invited(mut self, f: Json, kind: str) {
+        let v = at(f.copy(), "value")
+        let server = self.server.copy() ?? String()
+        let code = str_at(v.copy(), "code") else {
+            self.to_app.send("{f}")
+            return
+        }
+        if not (server.starts_with("https://") or server.starts_with("http://")) {
+            self.to_app.send("{f}")
+            return
+        }
+        self.tell(merge(f, Obj.new().j("value", merge(v, Obj.new().s("link", "{server}/{kind}/{code}").done())).done()))
+    }
+
+    /// Someone with an invite link (`link`) makes their account, with the username and
+    /// password they picked, as a login does; or with a reset link, sets a new password
+    /// and logs in with it.
+    fn join_invite(mut self, m: Json, reset: bool) {
+        let id = str_at(m.copy(), "id")
+        let given = (str_at(m.copy(), "link") ?? String()).trim().copy()
+        let marker = if reset { "/reset/" } else { "/join/" }
+        let what = if reset { "a password reset link. It looks like https://loom.example.com/reset/…" } else { "an invite link. It looks like https://loom.example.com/join/…" }
+        var server = String()
+        var code = String()
+        if let at_marker = given.find(marker) {
+            server = address(given[..at_marker].copy())
+            code = given[at_marker + marker.len()..].trim_suffix("/").copy()
+        }
+        if not valid_server(server.copy()) or code.len() == 0 {
+            self.tell(Obj.new().s("t", String("core.login")).maybe("id", id).j("error", Obj.new().s("code", String("bad_link")).s("message", "That isn't {what}").done()).done())
+            return
+        }
+        if self.pending != none {
+            self.tell(Obj.new().s("t", String("core.login")).maybe("id", id).j("error", Obj.new().s("code", String("busy")).s("message", String("A login is already on its way.")).done()).done())
+            return
+        }
+        let body = merge(request_body(Kind.Login, m), Obj.new().s("code", code).done())
+        let base = self.reach(server.copy())
+        self.pending = some(Pending.start(if reset { Kind.Reset } else { Kind.Join }, server, base, id, self.with_tz(body)))
+    }
+
+    /// The app scanned a QR code (its text in `qr`) on a device that isn't signed in: the
+    /// device joins that instance with the code, as a login does with a password.
+    fn join(mut self, m: Json) {
+        let id = str_at(m.copy(), "id")
+        let l = link.read(str_at(m.copy(), "qr") ?? String()) else {
+            self.tell(Obj.new().s("t", String("core.login")).maybe("id", id).j("error", Obj.new().s("code", String("bad_qr")).s("message", String("That isn't a loom code. Show the QR code on a device that's signed in, under Add a device.")).done()).done())
+            return
+        }
+        if self.pending != none {
+            self.tell(Obj.new().s("t", String("core.login")).maybe("id", id).j("error", Obj.new().s("code", String("busy")).s("message", String("A login is already on its way.")).done()).done())
+            return
+        }
+        var body = Obj.new().s("code", l.code.copy())
+        let device = at(m, "device")
+        if device != Json.Null { body = body.j("device", device) }
+        let server = address(l.server.copy())
+        let base = self.reach(server.copy())
+        self.pending = some(Pending.start(Kind.Link, server, base, id, self.with_tz(body.done())))
     }
 
     /// Takes a login, setup or logout that has ended.
@@ -730,7 +990,7 @@ impl Conn {
             Outcome.Token(user, device, token) => {
                 let user_id = user.copy()
                 var reply = Obj.new().s("t", String("core.login")).maybe("id", id).b("ok", true).s("user", user).s("device", device)
-                match keyring.set(self.keyring.copy(), server.copy(), token.copy()) {
+                match keyring.set(self.keyring.copy(), relay.keyring_name(server.copy()), token.copy()) {
                     ok => reply = reply.b("kept", true),
                     // Logged in for this run, but the next start asks again.
                     err(e) => reply = reply.b("kept", false).s("why", "{e}"),
@@ -775,7 +1035,8 @@ impl Conn {
     /// `file` and `thumb`). A file that's down already is answered at once.
     fn transfer(mut self, up: bool, m: Json) {
         let id = str_at(m.copy(), "id")
-        let server = self.server.copy() ?? String()
+        let known = self.server.copy() ?? String()
+        let server = self.reach(known)
         let token = self.token.copy() ?? String()
         if server.len() == 0 or token.len() == 0 {
             self.tell(refused(id, "signed_out", String("Sign in to an instance first.")))
@@ -931,6 +1192,82 @@ impl Conn {
         }
     }
 
+    // --- Following a move (protocol.md, "moved") ---
+
+    /// The instance moved: if it's signed with the instance's key, ask the new place for
+    /// its key before sending it the token.
+    fn moved(mut self, f: Json) {
+        let to = address(str_at(f.copy(), "address") ?? String())
+        let key = self.known("instance_key") ?? String()
+        if not moved_signed(f.copy(), key) or ws_url(to.copy()) == none {
+            self.tell_error("moved_unsigned", String("The instance says it moved, but it isn't signed with its key, so the app stays where it is."))
+            return
+        }
+        self.follow_to = to.copy()
+        self.following = some(get("{to}/api/info", List<Header>(), 30000, 65536))
+    }
+
+    /// Takes the new place's /api/info, once it has come: the same key, and the app goes
+    /// there, keeping its token, cache and cursor. Another key, and it stays.
+    fn poll_follow(mut self) {
+        if self.following == none and self.follow_to.len() > 0 {
+            if let since = self.follow_at {
+                if unsafe { Instant.now() }.nanos_since(since) < FOLLOW_AGAIN_NS { return }
+            }
+            self.follow_at = none
+            self.following = some(get("{self.follow_to}/api/info", List<Header>(), 30000, 65536))
+            return
+        }
+        let ready = match self.following {
+            some(r) => r.done(),
+            none => false,
+        }
+        if not ready { return }
+        let taken = self.following.take() else { return }
+        var r = taken
+        let to = self.follow_to.copy()
+        var info = Json.Null
+        if let ok(res) = r.wait() {
+            if res.status == 200 {
+                if let ok(j) = parse(String.from_utf8(res.body.copy()) ?? String()) { info = j }
+            }
+        }
+        if info == Json.Null {
+            // Not answering yet, as when it has the instance but hasn't started it:
+            // ask again in a moment.
+            self.follow_at = some(unsafe { Instant.now() })
+            return
+        }
+        self.follow_to = String()
+        if str_at(info, "key") != self.known("instance_key") {
+            self.state = State.Offline
+            self.retry_at = none
+            self.tell_error("moved_elsewhere", "The instance says it moved to {to}, but another instance is there, so the app doesn't sign in to it.")
+            return
+        }
+        let old = self.server.copy() ?? String()
+        let token = self.token.copy() ?? String()
+        match keyring.set(self.keyring.copy(), relay.keyring_name(to.copy()), token) {
+            ok => {
+                if old.len() > 0 {
+                    match keyring.delete(self.keyring.copy(), relay.keyring_name(old.copy())) {
+                        ok(_) => {},
+                        err(_) => {},
+                    }
+                }
+            },
+            err(e) => self.tell_error("keyring", "{e}"),
+        }
+        match self.cache.set_meta("server", to.copy()) {
+            ok => {},
+            err(e) => self.tell_error("cache", "{e}"),
+        }
+        self.server = some(to.copy())
+        self.failed = 0
+        self.tell(Obj.new().s("t", String("core.moved")).s("from", old).s("address", to).done())
+        self.connect()
+    }
+
     /// Starts again if it's time.
     fn tick(mut self) {
         if self.state != State.Offline { return }
@@ -952,15 +1289,38 @@ impl Task for Conn {
             c.poll_transfers()
             c.poll_update()
             c.poll_device()
+            c.poll_follow()
             c.tick()
             if let m = unsafe { c.inbox.wait_for(TICK_NS) } {
-                if not c.from_app(m) { return }
-                while let more = c.inbox.next() {
-                    if not c.from_app(more) { return }
+                var going = c.from_app(m)
+                while going {
+                    let more = c.inbox.next() else break
+                    going = c.from_app(more)
                 }
+                if not going { break }
             }
         }
+        c.stop_relaying()
     }
+}
+
+/// Whether the moved frame `f` is signed with `key`, the instance's key (base64).
+pub fn moved_signed(f: Json, key: String) -> bool {
+    let public = Ed25519PublicKey.from_bytes(bytes.from_base64(key) ?? List<u8>()) else return false
+    let message = moved_message(str_at(f.copy(), "instance") ?? String(), str_at(f.copy(), "address") ?? String(), int_at(f.copy(), "at") ?? 0)
+    let signature = bytes.from_hex(str_at(f, "signature") ?? String()) ?? List<u8>()
+    return public.verify(message.to_bytes(), signature)
+}
+
+@test
+fn a_move_is_signed_with_the_instance_key() {
+    let k = Ed25519Key.generate()
+    let key = bytes.base64(k.public_key().bytes())
+    let message = moved_message(String("i_1"), String("https://new.example"), 5)
+    let f = Obj.new().s("t", String("moved")).s("instance", String("i_1")).s("address", String("https://new.example")).i("at", 5).s("signature", bytes.hex(k.sign(message.to_bytes()))).done()
+    assert(moved_signed(f.copy(), key.copy()))
+    assert(not moved_signed(merge(f.copy(), Obj.new().s("address", String("https://evil.example")).done()), key))
+    assert(not moved_signed(f, bytes.base64(Ed25519Key.generate().public_key().bytes())))
 }
 
 @test

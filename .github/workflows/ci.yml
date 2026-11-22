@@ -36,8 +36,99 @@ jobs:
       - name: Calx version
         run: calx version
 
+      # The sandbox test runs members' agents in rootless Podman, with pasta.
+      - name: Podman and pasta (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y passt
+          podman --version
+
       - name: Check and test
         run: calx scripts/check.calx
+
+  # loom install on a fresh server, through install.sh as a person runs it, with a
+  # release served from a folder: the user, the service, and the instance answering.
+  install:
+    name: install (ubuntu-latest)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Calx
+        run: |
+          curl -fsSL https://calxlang.com/install.sh | sh
+          echo "$HOME/.calx/bin" >> "$GITHUB_PATH"
+
+      - name: A release in a folder
+        run: |
+          mkdir -p release
+          calx build server/main.calx -o release/loom-linux
+          sum="$(sha256sum release/loom-linux | cut -d ' ' -f 1)"
+          printf '{"version":"0.0.0-ci","files":{"linux-server":{"name":"loom-linux","url":"file://%s/release/loom-linux","sha256":"%s"}}}' "$PWD" "$sum" > release/manifest.json
+
+      - name: Install
+        run: |
+          sudo env LOOM_RELEASES="file://$PWD/release" sh server/install.sh --json | tee install.json
+          grep -q '"setup_code":"' install.json || { sudo systemctl status loom --no-pager || true; sudo journalctl -u loom --no-pager | tail -60; exit 1; }
+
+      - name: Check
+        run: |
+          # Still running a moment later, or what it said before it stopped.
+          sleep 2
+          if ! systemctl is-active --quiet loom; then
+            systemctl status loom --no-pager || true
+            sudo journalctl -u loom --no-pager | tail -40
+            exit 1
+          fi
+          test "$(systemctl show -p User --value loom)" = loom
+          test "$(ps -o user= -p "$(systemctl show -p MainPID --value loom)")" = loom
+          test "$(stat -c %a /var/lib/loom)" = 700
+          curl -fsS http://127.0.0.1:8790/api/info | grep -q '"setup":true'
+          sudo -u loom /usr/local/bin/loom status --json --data /var/lib/loom | grep -q '"user":"loom"'
+
+      - name: Sandboxes
+        run: |
+          # The service runs members' agents in rootless Podman, as loom, and a
+          # container with pasta starts for loom from the service's session.
+          systemctl show -p ExecStart --value loom | grep -q -- '--sandboxes podman'
+          sudo journalctl -u loom --no-pager | grep -q 'run in sandboxes'
+          grep -q '^loom:' /etc/subuid
+          uid="$(id -u loom)"
+          cd /tmp
+          sudo -u loom env -i HOME=/var/lib/loom PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin XDG_RUNTIME_DIR="/run/user/$uid" podman run --rm --network pasta docker.io/library/alpine:3.20 true
+
+      - name: Install again
+        run: |
+          sudo env LOOM_RELEASES="file://$PWD/release" sh server/install.sh
+          systemctl is-active loom
+
+  # The Docker image, built as the Dockerfile says, and answering with its setup code.
+  docker:
+    name: docker (ubuntu-latest)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build
+        run: docker build -t loom:ci .
+
+      - name: Run
+        run: |
+          docker run -d --name loom -p 127.0.0.1:8790:8790 -v loom-ci:/data loom:ci
+          for i in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:8790/api/info > info.json 2>/dev/null; then break; fi
+            sleep 1
+          done
+          cat info.json
+          grep -q '"setup":true' info.json
+          docker logs loom 2>&1 | grep -q 'setup code:'
+          test "$(docker exec loom id -un)" = node
+          docker exec loom loom status --json --data /data | grep -q '"user":"node"'
+
+      - name: Logs
+        if: failure()
+        run: docker logs loom || true
 
   desktop:
     name: desktop (windows-latest)
@@ -56,7 +147,9 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: desktop
+          workspaces: |
+            desktop
+            desktop/setup
 
       - name: Format
         working-directory: desktop
@@ -65,3 +158,30 @@ jobs:
       - name: Lint
         working-directory: desktop
         run: cargo clippy --locked -- -D warnings
+
+      - name: Test
+        working-directory: desktop
+        run: cargo test --locked
+
+      # loom's installer and updater (desktop/setup): its own checks, then installing,
+      # updating, rolling back and uninstalling in a folder of its own.
+      - name: Setup
+        working-directory: desktop/setup
+        run: |
+          cargo fmt --check
+          cargo clippy --locked --release -- -D warnings
+          cargo test --locked --release
+
+      - name: Setup, end to end
+        run: calx tests/setup/e2e.calx
+
+      # A panel that tries every way out of its sandbox (PLAN.md, "The panel sandbox").
+      - name: Panel break-out test
+        working-directory: desktop
+        shell: bash
+        run: |
+          cargo build --locked
+          status=0
+          timeout 180 ./target/debug/loom.exe --panel-test panel-test.json || status=$?
+          cat panel-test.json || true
+          exit $status

@@ -14,35 +14,51 @@ module tests.fake_agent.main
 //     /ask TITLE          a command (kind execute) that asks permission first,
 //                         and runs or fails by the answer
 //     /read TITLE         the same for a tool that only reads (kind read)
+//     /act KIND JSON      a tool call of KIND (execute, edit, fetch, ...) that asks
+//                         permission first, with JSON as its rawInput, its
+//                         locations from the JSON's "path", and its title from its
+//                         "title" (or KIND); says "allowed" or "denied"
 //     /slow MS            waits MS between chunks from here on
 //     /sleep MS           waits MS, or until the turn is cancelled
 //     /stop REASON        ends the turn with that stopReason (max_tokens, ...)
+//     /tokens N           reports the turn used N tokens (ACP's usage: half input, half output)
 //     /fail MESSAGE       answers session/prompt with an error
 //     /crash              exits with status 3 in the middle of the turn
 //     /files              says what files came with the prompt: "image MIME"
 //                         for an image, "link NAME" for a link to a file that
 //                         exists, "missing NAME" for one that doesn't
 //     /image              sends back a small PNG
+//     /link PATH          sends back a link to the file at PATH (resource_link)
 //     /session            says its session id: "session ID"
+//     /usage USED SIZE    reports its context as USED tokens of a SIZE window (usage_update)
 //     /env NAME           says NAME=VALUE, its environment variable NAME
+//     /net HOST:PORT      says whether HOST:PORT can be reached straight ("direct
+//                         open" or "direct closed"), and through the proxy
+//                         HTTPS_PROXY names with CONNECT ("proxy 200", the
+//                         status it answers, or "proxy none")
 //     /servers            says the MCP servers the session was given, but loom:
 //                         "NAME command ARGS K=V" or "NAME url K=V" each, or "no servers"
+//     /meta               says the _meta its session was given: "meta JSON",
+//                         or "no meta"
 //     /context            says what loom told it this turn about where the person
 //                         is writing from (a "[loom: ...]" text block, which is
 //                         never a step), or "no context"
 //     /mcp TOOL JSON      calls TOOL of loom's own MCP server, the one named "loom"
 //                         in the session's mcpServers, with JSON as its
 //                         arguments, and says "TOOL: RESULT", or "TOOL failed:
-//                         RESULT" for an error. /mcp list says the tools' names
+//                         RESULT" for an error. /mcp list says the tools' names,
+//                         and /mcp hints each one's name and annotations, a line each
 //
 // A turn ends with end_turn after its last step, or with cancelled as soon as
 // session/cancel arrives. Diagnostics go to standard error.
 //
 // With --load it offers session/load, and plays a line back when a session is
 // loaded; with --resume it offers session/resume; with --forget it offers
-// session/load and refuses every one. Without, it offers neither.
+// session/load and refuses every one. Without, it offers neither. With
+// --limited it answers every session/prompt with a usage-limit error, as a
+// program whose usage ran out does; with --broken it doesn't initialize.
 //
-//     calx tests/fake_agent/main.calx [--load | --resume | --forget]
+//     calx tests/fake_agent/main.calx [--load | --resume | --forget | --limited | --broken]
 import std.bytes
 import std.crypto.{random_bytes}
 import std.env
@@ -51,6 +67,7 @@ import std.image.{Color, Image, Kind}
 import std.io
 import std.url
 import std.json.{Json, parse}
+import std.net.{Event, Net}
 import std.process.{Child, Command, Stdio, exit}
 import std.thread.{Task}
 import std.time.{Instant}
@@ -78,18 +95,25 @@ pub enum Step {
     Plan(List<String>)
     Tool(String)
     Ask(String, String)
+    Act(String, String)    // a kind, and the rawInput as JSON
     Slow(u64)
     Sleep(u64)
     Stop(String)
+    Tokens(i64)
     Fail(String)
     Crash
     Files
     Image
+    Link(String)
     Session
     Context
     Mcp(String, String)
     Env(String)
+    Net(String)
     Servers
+    Config
+    Meta
+    Usage(i64, i64)
 }
 
 // The steps a prompt spells out. Blank lines are skipped.
@@ -118,12 +142,17 @@ pub fn script(text: String) -> List<Step> {
             steps.push(Step.Tool(rest))
         } else if word == "/ask" {
             steps.push(Step.Ask(String("execute"), rest))
+        } else if word == "/act" {
+            let (kind, input) = split_word(rest.copy())
+            steps.push(Step.Act(kind, if input.len() > 0 { input } else { String(#"{}"#) }))
         } else if word == "/read" {
             steps.push(Step.Ask(String("read"), rest))
         } else if word == "/slow" {
             steps.push(Step.Slow(u64.parse(rest) ?? 0))
         } else if word == "/sleep" {
             steps.push(Step.Sleep(u64.parse(rest) ?? 0))
+        } else if word == "/tokens" {
+            steps.push(Step.Tokens(i64.parse(rest) ?? 0))
         } else if word == "/stop" {
             steps.push(Step.Stop(if rest.len() == 0 { String("end_turn") } else { rest }))
         } else if word == "/fail" {
@@ -144,15 +173,94 @@ pub fn script(text: String) -> List<Step> {
             steps.push(Step.Session)
         } else if word == "/servers" {
             steps.push(Step.Servers)
+        } else if word == "/config" {
+            steps.push(Step.Config)
+        } else if word == "/meta" {
+            steps.push(Step.Meta)
+        } else if word == "/usage" {
+            let (used, size) = split_word(rest)
+            steps.push(Step.Usage(i64.parse(used) ?? 0, i64.parse(size) ?? 0))
         } else if word == "/env" {
             steps.push(Step.Env(rest))
+        } else if word == "/net" {
+            steps.push(Step.Net(rest))
         } else if word == "/image" {
             steps.push(Step.Image)
+        } else if word == "/link" {
+            steps.push(Step.Link(rest))
         } else {
             steps.push(Step.Say(line.copy()))
         }
     }
     return steps
+}
+
+// Opens a connection to `host`:`port` on `net`, and gives what came back
+// after sending `send`, until the first line break, or none if it closed
+// first or nothing came in 5 seconds. "" when `send` is empty and it opened.
+fn talk(net: Net, host: String, port: u16, send: String) -> String? {
+    let conn = match net.connect(host, port) {
+        ok(c) => c,
+        err(_) => return none,
+    }
+    var events = List<Event>()
+    var got = List<u8>()
+    var open = false
+    let start = unsafe { Instant.now() }
+    while unsafe { Instant.now() }.nanos_since(start) < 5000000000 {
+        net.poll(200, mut events)
+        for e in events {
+            match e {
+                Connected(c) => {
+                    if c == conn {
+                        open = true
+                        if send.len() == 0 {
+                            net.close(conn)
+                            return some(String())
+                        }
+                        net.write(conn, send.to_bytes())
+                    }
+                },
+                Received(c) => if c == conn { _ = net.read(conn, mut got) },
+                Closed(c) => if c == conn {
+                    let text = String.from_utf8(got.copy()) ?? String()
+                    return if text.len() > 0 { some(text) } else { none }
+                },
+                _ => {},
+            }
+        }
+        let text = String.from_utf8(got.copy()) ?? String()
+        if text.contains("\r\n") {
+            net.close(conn)
+            return some(text.split("\r\n")[0].copy())
+        }
+    }
+    if open { net.close(conn) }
+    return none
+}
+
+// What /net says of `target`, host:port: whether it's reached straight, and
+// what the proxy HTTPS_PROXY names says to a CONNECT for it.
+fn reach(target: String) -> String {
+    let net = match Net.new() {
+        ok(n) => n,
+        err(e) => return "net {target}: {e}",
+    }
+    let cut = target.find_last(":") ?? target.len()
+    let host = target[..cut].copy()
+    let port = u16.parse(if cut < target.len() { target[cut + 1..].copy() } else { String("443") }) ?? 443
+    let direct = if talk(net, host.copy(), port, String()) != none { "open" } else { "closed" }
+    var proxied = String("none")
+    if let proxy = env.variable(String("HTTPS_PROXY")) {
+        let address = proxy.trim_prefix("http://").trim_suffix("/").copy()
+        let at = address.find_last(":") ?? address.len()
+        let p_host = address[..at].copy()
+        let p_port = u16.parse(if at < address.len() { address[at + 1..].copy() } else { String("80") }) ?? 80
+        let said = talk(net, p_host, p_port, "CONNECT {target} HTTP/1.1\r\nHost: {target}\r\n\r\n") ?? String("no answer")
+        let words = said.split(" ")
+        proxied = if words.len() > 1 { words[1].copy() } else { said }
+    }
+    return "net {target}: direct {direct}, proxy {proxied}"
 }
 
 // "/tool ls -la" -> ("/tool", "ls -la")
@@ -196,9 +304,53 @@ struct Agent {
     picks_up: String
     // Each session's mcpServers, as session/new, /load or /resume gave them.
     mcp: Map<String, Json>
+    // Each session's _meta, as session/new, /load or /resume gave it.
+    meta: Map<String, Json>
     stamp: String
     // Requests that came in during a turn, answered after it.
     backlog: List<Json>
+    // Each session's config options' values, by option id: "model" and "effort".
+    config: Map<String, Map<String, String>>
+}
+
+// The config options a session offers (ACP's session config options): a model
+// and a reasoning effort, with their values now.
+fn config_options(values: Map<String, String>) -> Json {
+    return Json.Array([config_option(values.copy(), "model", "Model", "model"), config_option(values, "effort", "Effort", "thought_level")])
+}
+
+// The values option `id` offers.
+fn offered(id: String) -> List<String> {
+    if id == "model" { return [String("fake-1"), String("fake-2")] }
+    if id == "effort" { return [String("low"), String("medium"), String("high")] }
+    return List<String>()
+}
+
+fn config_option(values: Map<String, String>, id: str, name: str, category: str) -> Json {
+    var options = List<Json>()
+    for v in offered(String(id)) {
+        var o = LinkedMap<String, Json>()
+        o.insert("value", js(v.copy()))
+        o.insert("name", js("{name} {v}"))
+        options.push(Json.Object(o))
+    }
+    var c = LinkedMap<String, Json>()
+    c.insert("id", js(String(id)))
+    c.insert("name", js(String(name)))
+    c.insert("category", js(String(category)))
+    c.insert("type", js(String("select")))
+    var current = String()
+    if let v = values.find(String(id)) { current = v.copy() }
+    c.insert("currentValue", js(current))
+    c.insert("options", Json.Array(options))
+    return Json.Object(c)
+}
+
+fn config_default() -> Map<String, String> {
+    var m = Map<String, String>()
+    m.insert(String("model"), String("fake-1"))
+    m.insert(String("effort"), String("medium"))
+    return m
 }
 
 fn emit(message: Json) {
@@ -304,13 +456,21 @@ impl Agent {
 
     // Asks the client's permission for a tool call. Gives whether it was
     // allowed, or none if the turn was cancelled first.
-    fn ask(a: mut Agent, session: String, tool: String, tool_kind: String, title: String) -> bool? {
+    fn ask(a: mut Agent, session: String, tool: String, tool_kind: String, title: String, raw: Json) -> bool? {
         a.next_id += 1
         let id = a.next_id
         var call = LinkedMap<String, Json>()
         call.insert("toolCallId", js(tool))
         call.insert("title", js(title))
         call.insert("kind", js(tool_kind))
+        if raw != Json.Null {
+            if let p = raw.get(String("path")) {
+                var place = LinkedMap<String, Json>()
+                place.insert("path", p.copy())
+                call.insert("locations", Json.Array([Json.Object(place)]))
+            }
+            call.insert("rawInput", raw.copy())
+        }
         var options = List<Json>()
         for kind in "allow_once allow_always reject_once reject_always".split(" ") {
             var o = LinkedMap<String, Json>()
@@ -425,7 +585,8 @@ impl Agent {
         var m = LinkedMap<String, Json>()
         m.insert("jsonrpc", js(String("2.0")))
         m.insert("id", int(2))
-        m.insert("method", js(if tool == "list" { String("tools/list") } else { String("tools/call") }))
+        let listing = tool == "list" or tool == "hints"
+        m.insert("method", js(if listing { String("tools/list") } else { String("tools/call") }))
         m.insert("params", Json.Object(p))
         if let err(e) = child.write_text("{Json.Object(m)}\n") { return "loom mcp: {e}" }
         let line = child.wait_for_line(String("\"id\":2"), 300000) else return String("loom mcp didn't answer in 5 minutes")
@@ -442,6 +603,15 @@ impl Agent {
                 }
             }
             return "tools: {names.join(", ")}"
+        }
+        if tool == "hints" {
+            var lines = List<String>()
+            if let Json.Array(tools) = result.get(String("tools")) ?? Json.Null {
+                for t in tools {
+                    lines.push("{(t.get(String("name")) ?? Json.Null).as_str() ?? String()} {t.get(String("annotations")) ?? Json.Null}")
+                }
+            }
+            return lines.join("\n")
         }
         var text = String()
         if let Json.Array(content) = result.get(String("content")) ?? Json.Null {
@@ -486,6 +656,7 @@ impl Agent {
         }
         var slow: u64 = 0
         var reason = String("end_turn")
+        var tokens: i64 = 0
         for step in script(text) {
             match step {
                 Step.Say(s) => {
@@ -516,7 +687,7 @@ impl Agent {
                 },
                 Step.Ask(kind, title) => {
                     let tool = a.tool_call(session.copy(), kind.copy(), title.copy())
-                    match a.ask(session.copy(), tool.copy(), kind.copy(), title.copy()) {
+                    match a.ask(session.copy(), tool.copy(), kind.copy(), title.copy(), Json.Null) {
                         some(true) => {
                             tool_update(session.copy(), tool.copy(), "in_progress", String())
                             tool_update(session.copy(), tool, "completed", "ran: {title}")
@@ -528,11 +699,36 @@ impl Agent {
                         },
                     }
                 },
+                Step.Act(kind, input) => {
+                    let raw = match parse(input.copy()) {
+                        ok(j) => j,
+                        err(_) => Json.Null,
+                    }
+                    let title = (raw.get(String("title")) ?? Json.Null).as_str() ?? kind.copy()
+                    let tool = a.tool_call(session.copy(), kind.copy(), title.copy())
+                    let said = match a.ask(session.copy(), tool.copy(), kind.copy(), title, raw) {
+                        some(true) => {
+                            tool_update(session.copy(), tool, "completed", String("ran"))
+                            "allowed"
+                        },
+                        some(false) => {
+                            tool_update(session.copy(), tool, "failed", String("denied"))
+                            "denied"
+                        },
+                        none => {
+                            tool_update(session.copy(), tool, "failed", String("cancelled"))
+                            reason = String("cancelled")
+                            "cancelled"
+                        },
+                    }
+                    chunk(session.copy(), "agent_message_chunk", String(said))
+                },
                 Step.Slow(ms) => slow = ms,
                 Step.Sleep(ms) => {
                     if a.idle(ms) { reason = String("cancelled") }
                 },
                 Step.Stop(r) => reason = r.copy(),
+                Step.Tokens(n) => tokens = n,
                 Step.Fail(message) => {
                     respond_error(id, -32603, message)
                     return
@@ -544,9 +740,37 @@ impl Agent {
                 Step.Files => chunk(session.copy(), "agent_message_chunk", if got.len() == 0 { String("no files") } else { got.join(", ") }),
                 Step.Session => chunk(session.copy(), "agent_message_chunk", "session {session}"),
                 Step.Env(name) => chunk(session.copy(), "agent_message_chunk", "{name}={env.variable(name.copy()) ?? String()}"),
+                Step.Net(target) => chunk(session.copy(), "agent_message_chunk", reach(target)),
                 Step.Servers => chunk(session.copy(), "agent_message_chunk", a.servers(session.copy())),
+                Step.Usage(used, size) => {
+                    var u = LinkedMap<String, Json>()
+                    u.insert("sessionUpdate", js(String("usage_update")))
+                    u.insert("used", int(used))
+                    u.insert("size", int(size))
+                    update(session.copy(), u)
+                },
+                Step.Config => {
+                    let values = a.values(session.copy())
+                    chunk(session.copy(), "agent_message_chunk", "model={value_of(values.copy(), "model")} effort={value_of(values, "effort")}")
+                },
+                Step.Meta => {
+                    var meta = Json.Null
+                    if let m = a.meta.find(session.copy()) { meta = m.copy() }
+                    chunk(session.copy(), "agent_message_chunk", if meta == Json.Null { String("no meta") } else { "meta {meta}" })
+                },
                 Step.Context => chunk(session.copy(), "agent_message_chunk", if context.len() > 0 { context.copy() } else { String("no context") }),
                 Step.Mcp(tool, args) => chunk(session.copy(), "agent_message_chunk", a.call_loom(session.copy(), tool, args)),
+                Step.Link(path) => {
+                    var content = LinkedMap<String, Json>()
+                    content.insert("type", js(String("resource_link")))
+                    content.insert("uri", js("file://{path}"))
+                    content.insert("name", js(String("linked.txt")))
+                    content.insert("mimeType", js(String("text/plain")))
+                    var u = LinkedMap<String, Json>()
+                    u.insert("sessionUpdate", js(String("agent_message_chunk")))
+                    u.insert("content", Json.Object(content))
+                    update(session.copy(), u)
+                },
                 Step.Image => {
                     var content = LinkedMap<String, Json>()
                     content.insert("type", js(String("image")))
@@ -562,14 +786,30 @@ impl Agent {
         }
         var r = LinkedMap<String, Json>()
         r.insert("stopReason", js(reason))
+        if tokens > 0 {
+            var usage = LinkedMap<String, Json>()
+            usage.insert("inputTokens", int(tokens / 2))
+            usage.insert("outputTokens", int(tokens - tokens / 2))
+            usage.insert("totalTokens", int(tokens))
+            r.insert("usage", Json.Object(usage))
+        }
         respond(id, Json.Object(r))
+    }
+
+    // Session `session`'s config values: its own, or the defaults (a session
+    // picked up after the agent restarted).
+    fn values(a: Agent, session: String) -> Map<String, String> {
+        if let v = a.config.find(session) { return v.copy() }
+        return config_default()
     }
 
     fn handle(a: mut Agent, m: Json) {
         let name = method(m.copy())
         let id = m.get(String("id"))
         let params = m.get(String("params")) ?? Json.Null
-        if name == "initialize" {
+        if name == "initialize" and a.picks_up == "broken" {
+            respond_error(id ?? Json.Null, -32603, String("the fake agent is broken"))
+        } else if name == "initialize" {
             var prompt = LinkedMap<String, Json>()
             prompt.insert("image", Json.Bool(true))
             prompt.insert("audio", Json.Bool(false))
@@ -601,7 +841,24 @@ impl Agent {
             var r = LinkedMap<String, Json>()
             let new_id = "fake_{a.stamp}_{a.sessions}"
             a.mcp.insert(new_id.copy(), params.get(String("mcpServers")) ?? Json.Null)
+            a.meta.insert(new_id.copy(), params.get(String("_meta")) ?? Json.Null)
+            a.config.insert(new_id.copy(), config_default())
+            r.insert("configOptions", config_options(config_default()))
             r.insert("sessionId", js(new_id))
+            respond(id ?? Json.Null, Json.Object(r))
+        } else if name == "session/set_config_option" {
+            let session = (params.get(String("sessionId")) ?? Json.Null).as_str() ?? String()
+            let option = (params.get(String("configId")) ?? Json.Null).as_str() ?? String()
+            let value = (params.get(String("value")) ?? Json.Null).as_str() ?? String()
+            if not offered(option.copy()).contains(value.copy()) {
+                respond_error(id ?? Json.Null, -32602, "no {option} {value}")
+                return
+            }
+            var values = a.values(session.copy())
+            values.insert(option, value)
+            a.config.insert(session, values.copy())
+            var r = LinkedMap<String, Json>()
+            r.insert("configOptions", config_options(values))
             respond(id ?? Json.Null, Json.Object(r))
         } else if name == "session/load" or name == "session/resume" {
             let session = (params.get(String("sessionId")) ?? Json.Null).as_str() ?? String()
@@ -610,9 +867,14 @@ impl Agent {
                 return
             }
             a.mcp.insert(session.copy(), params.get(String("mcpServers")) ?? Json.Null)
+            a.meta.insert(session.copy(), params.get(String("_meta")) ?? Json.Null)
             // session/load plays the conversation back first; session/resume doesn't.
             if name == "session/load" { chunk(session.copy(), "agent_message_chunk", String("(the conversation so far)")) }
-            respond(id ?? Json.Null, Json.Object(LinkedMap<String, Json>()))
+            var r = LinkedMap<String, Json>()
+            r.insert("configOptions", config_options(a.values(session)))
+            respond(id ?? Json.Null, Json.Object(r))
+        } else if name == "session/prompt" and a.picks_up == "limited" {
+            respond_error(id ?? Json.Null, -32000, String("You've hit your usage limit. Try again in 3 hours."))
         } else if name == "session/prompt" {
             a.turn(id ?? Json.Null, params)
         } else if let i = id {
@@ -633,7 +895,7 @@ fn main() {
     _ = unsafe { Thread.spawn(reader) }
     let given = env.args()
     let picks_up = if given.len() > 0 { given[0].replace("--", "") } else { String() }
-    var a = Agent { inbox: inbox, sessions: 0, next_id: 0, tools: 0, picks_up: picks_up, mcp: Map<String, Json>(), stamp: bytes.hex(random_bytes(3)), backlog: List<Json>() }
+    var a = Agent { inbox: inbox, sessions: 0, next_id: 0, tools: 0, picks_up: picks_up, mcp: Map<String, Json>(), meta: Map<String, Json>(), stamp: bytes.hex(random_bytes(3)), backlog: List<Json>(), config: Map<String, Map<String, String>>() }
     loop {
         if a.backlog.len() > 0 {
             let m = a.backlog.remove(0)
@@ -681,4 +943,9 @@ fn path_of(uri: String) -> String {
     let path = url.decode(uri[7..].copy())
     if path.len() > 2 and path.starts_with("/") and path[2..].starts_with(":") { return path[1..].copy() }
     return path
+}
+
+fn value_of(values: Map<String, String>, key: str) -> String {
+    if let v = values.find(String(key)) { return v.copy() }
+    return String()
 }

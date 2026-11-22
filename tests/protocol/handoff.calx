@@ -1,0 +1,87 @@
+module tests.protocol.handoff
+
+// A shared folder and handing files over (PLAN.md, "Sharing and learning"):
+// each session is told the folder all of the person's agents share, and
+// message_agent hands over files from the agent's own folder or that one,
+// which the other agent gets as the person's attachments are. A file anywhere
+// else isn't handed over.
+//
+//     calx tests/protocol/handoff.calx
+import std.fs
+import std.json.{Json}
+import std.process.{exit}
+import shared.obj.{Obj, at, str_at}
+import tests.kit.{App, Instance, check, reply_text}
+
+// The agent's next reply in `conversation`, as text.
+fn reply_in(app: mut App, conversation: String) -> String ! Error {
+    loop {
+        let created = try app.until("event", "message.created")
+        let m = at(created, "message")
+        if str_at(m.copy(), "role") == some(String("agent")) and str_at(m.copy(), "conversation") == some(conversation.copy()) { return reply_text(m) }
+    }
+}
+
+fn say(app: mut App, conversation: String, cid: str, text: String) -> String ! Error {
+    try app.send(Obj.new().s("t", String("send")).s("cid", String(cid)).s("conversation", conversation.copy()).s("text", text).done())
+    return try reply_in(mut app, conversation)
+}
+
+// What an agent says to hand `files` to Helper with the text `text`.
+fn hand(text: str, files: List<String>) -> String {
+    var list = List<Json>()
+    for f in files { list.push(Json.Str(f.copy())) }
+    return "/mcp message_agent {Obj.new().s("agent", String("Helper")).s("text", String(text)).j("files", Json.Array(list)).done()}"
+}
+
+fn run(i: Instance) ! Error {
+    var app = try App.connect(i.base.copy(), i.token.copy(), 0)
+    let made = try app.cmd("q_1", "agent.create", Obj.new().s("name", String("Main")).s("acp_agent", String("fake")).s("instructions", String("You are a test.")).done())
+    let main_id = str_at(at(at(made, "value"), "agent"), "id") ?? String()
+    _ = try app.cmd("q_2", "agent.create", Obj.new().s("name", String("Helper")).s("acp_agent", String("fake")).s("instructions", String("You are a test.")).done())
+    let c = try app.cmd("q_3", "conversation.create", Obj.new().s("agent", main_id.copy()).done())
+    let chat = str_at(at(c, "value"), "conversation") ?? String()
+
+    // --- The shared folder ---
+    let told = try say(mut app, chat.copy(), "m_1", String("/context"))
+    let shared = "{i.data}/shared/u_1"
+    try check(told.contains("share the folder") and told.contains("message_agent") and fs.is_dir(shared.copy()), "a session is told the folder the person's agents share")
+
+    // --- Handing over ---
+    let mine = "{i.data}/agents/{main_id}"
+    try fs.make_dir_all(mine.copy())
+    try fs.write_text("{mine}/notes.txt", String("Ship on Friday."))
+    let handed = try say(mut app, chat.copy(), "m_2", hand("/files", [String("notes.txt")]))
+    try check(handed == "message_agent: link notes.txt", "a file in the agent's own folder is handed over, and the other agent gets it")
+    var got: Json = Json.Null
+    for f in app.frames {
+        let m = at(f.copy(), "message")
+        if str_at(f.copy(), "kind") == some(String("message.created")) and str_at(m.copy(), "from") == some(main_id.copy()) { got = m.copy() }
+    }
+    try check("{at(got, "blocks")}".contains(#""name":"notes.txt""#), "as a file in the message, kept as the person's")
+    try fs.write_text("{shared}/report.md", String("# Report"))
+    let from_shared = try say(mut app, chat.copy(), "m_3", hand("/files", ["{shared}/report.md"]))
+    try check(from_shared == "message_agent: link report.md", "and so is one in the shared folder")
+
+    // --- Anywhere else ---
+    try fs.write_text("{i.data}/outside.txt", String("Not yours."))
+    let climbed = try say(mut app, chat.copy(), "m_4", hand("/files", [String("../../outside.txt")]))
+    let key = try say(mut app, chat.copy(), "m_5", hand("/files", ["{i.data}/secret.key"]))
+    let missing = try say(mut app, chat.copy(), "m_6", hand("/files", [String("nothing.txt")]))
+    try check(climbed.starts_with("message_agent failed") and climbed.contains("isn't a file in your folder or the shared folder") and key.starts_with("message_agent failed") and missing.starts_with("message_agent failed"), "a file outside both, or one that isn't there, isn't handed over")
+    app.close()
+}
+
+fn main() ! Error {
+    let inst = try Instance.start()
+    let failure: String? = match run(inst.copy()) {
+        ok => none,
+        err(e) => some("{e}"),
+    }
+    inst.stop()
+    if let f = failure {
+        eprintln("\n{f}")
+        exit(1)
+    }
+    println("\nhandoff: all good")
+}

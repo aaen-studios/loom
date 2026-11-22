@@ -6,14 +6,18 @@ module core.lib
 //
 // loom_core_start runs the connection (core/conn.calx) on a thread of its
 // own, and a second thread hands what it says to the app's on_event, so a
-// slow app never holds up the socket. loom_core_stop ends both and waits
-// for them, so no on_event comes after it returns.
+// slow app never holds up the socket. It returns at once: the instance in
+// the app, when there is one, starts on the connection's thread first, so
+// the app's window doesn't wait for it. loom_core_stop ends both and waits
+// for them, and for the instance, so no on_event comes after it returns.
 import std.crypto.{PasswordHasher}
+import std.fs
 import std.json.{Json, parse}
 import std.thread.{Task}
 import shared.obj.{Obj, str_at}
 import core.cache.{Cache}
 import core.conn.{Conn}
+import core.pushbox
 import core.update.{Updater}
 import shared.release.{MANIFEST}
 import server.instance.{Config, EventLife, Instance}
@@ -66,14 +70,23 @@ struct Local {
 impl Task for Local {
     fn run(own self) {
         var l = self
-        let config = Config { data: l.data.copy(), port: 0, host: String("127.0.0.1"), hasher: PasswordHasher(), events: EventLife.standard(), registry: String(installer.REGISTRY), minute_ms: 60000 }
-        var i = match Instance.open(config) {
+        // The port it had last time, so the person's scripts find it in the same
+        // place (PLAN.md, "Scripts"), unless something else has taken it since.
+        let port_file = "{l.data}/port"
+        let last = match fs.read_text(port_file.copy()) {
+            ok(some(t)) => u16.parse(t.trim().copy()) ?? 0,
+            _ => 0,
+        }
+        var i = match open_local(l.data.copy(), last) {
             ok(i) => i,
             err(e) => {
                 l.ready.send("error:{e}")
                 return
             },
         }
+        let url = i.url().trim_suffix("/").copy()
+        let port = url[(url.find_last(":") ?? 0) + 1..].copy()
+        if let err(e) = fs.write_text(port_file, port.copy()) { eprintln("loom: the instance's port wasn't kept: {e}") }
         let token = match i.local_token(l.username.copy(), l.kind.copy()) {
             ok(t) => t,
             err(e) => {
@@ -93,13 +106,97 @@ impl Task for Local {
     }
 }
 
+// The instance in the app, on the port it had last time if it's free, or on
+// a new one.
+fn open_local(data: String, last: u16) -> Instance ! Error {
+    if last != 0 {
+        match Instance.open(local_config(data.copy(), last)) {
+            ok(i) => return i,
+            err(_) => {},
+        }
+    }
+    return try Instance.open(local_config(data, 0))
+}
+
+fn local_config(data: String, port: u16) -> Config {
+    return Config { data: data.copy(), port: port, host: String("127.0.0.1"), hasher: PasswordHasher(), events: EventLife.standard(), registry: String(installer.REGISTRY), minute_ms: 60000, apns: String(), version: String("desktop"), lan: true, sandboxes: String(), sandbox_image: String() }
+}
+
 /// What the app holds between calls.
 struct Core {
     to_core: Sender<String>?
     conn: Thread?
     relay: Thread?
-    local: Thread?
-    stop_local: Sender<bool>?
+}
+
+/// The core's own thread: it starts the instance in the app first, when the config asks
+/// for one, then runs the connection, so loom_core_start doesn't wait for the instance
+/// and the app draws its window from the cache meanwhile. What the app sends before the
+/// connection runs waits in its inbox. Once the connection ends, it stops the instance
+/// and waits for it.
+struct Boot {
+    cfg: Json
+    inbox: Receiver<String>
+    to_app: Sender<String>
+}
+
+impl Task for Boot {
+    fn run(own self) {
+        var b = self
+        let cfg = b.cfg.copy()
+        var server = str_at(cfg.copy(), "server")
+        var token = str_at(cfg.copy(), "token")
+        let service = str_at(cfg.copy(), "keyring") ?? String(KEYRING)
+        var path = String(":memory:")
+        let data = str_at(cfg.copy(), "data")
+        if let d = data {
+            path = "{d}/core.db"
+        }
+        var local: Thread? = none
+        var stop_local: Sender<bool>? = none
+        if str_at(cfg.copy(), "mode") == some(String("local")) {
+            match start_local(cfg.copy(), data.copy() ?? String(".")) {
+                ok((t, stop, url, tok)) => {
+                    local = some(t)
+                    stop_local = some(stop)
+                    server = some(url)
+                    token = some(tok)
+                    // Its own cache: the address changes every launch, and the instance elsewhere keeps core.db.
+                    if let d = data {
+                        path = "{d}/local.db"
+                    }
+                },
+                err(e) => b.to_app.send("{Obj.new().s("t", String("error")).s("code", String("local")).s("message", "{e}").done()}"),
+            }
+        }
+        let cache = match Cache.open(path.copy()) {
+            ok(c) => c,
+            err(e) => {
+                // The app still works, from the instance alone, and hears why it can't read offline.
+                b.to_app.send("{Obj.new().s("t", String("error")).s("code", String("cache")).s("message", "can't open {path}: {e}").done()}")
+                Cache.open(String(":memory:"))!
+            },
+        }
+        var conn = Conn.new(server, token, service, cache, b.inbox, b.to_app)
+        conn.tz = str_at(cfg.copy(), "tz")
+        if let d = data {
+            conn.files = some("{d}/files")
+            // Updates, for an app that says its version. An empty `update` turns them off.
+            let feed = str_at(cfg.copy(), "update") ?? String(MANIFEST)
+            if let v = str_at(cfg.copy(), "version") {
+                if feed.len() > 0 {
+                    conn.updater = some(Updater.new(v, str_at(cfg.copy(), "platform") ?? String("windows-desktop"), feed, "{d}/update"))
+                }
+            }
+        }
+        conn.run()
+        if let s = mut stop_local {
+            s.send(true)
+        }
+        if let t = local.take() {
+            t.join()
+        }
+    }
 }
 
 /// Starts the instance in the app, and waits for its address and token.
@@ -143,57 +240,13 @@ fn core_start(config: *const u8, len: usize, on_event: extern "C" fn(*const u8, 
         err(_) => none,
     }
     let cfg = parsed ?? Obj.new().done()
-    var server = str_at(cfg.copy(), "server")
-    var token = str_at(cfg.copy(), "token")
-    let service = str_at(cfg.copy(), "keyring") ?? String(KEYRING)
-    var path = String(":memory:")
-    let data = str_at(cfg.copy(), "data")
-    if let d = data {
-        path = "{d}/core.db"
-    }
-    var local: Thread? = none
-    var stop_local: Sender<bool>? = none
-    if str_at(cfg.copy(), "mode") == some(String("local")) {
-        match start_local(cfg.copy(), data.copy() ?? String(".")) {
-            ok((t, stop, url, tok)) => {
-                local = some(t)
-                stop_local = some(stop)
-                server = some(url)
-                token = some(tok)
-                // Its own cache: the address changes every launch, and the instance elsewhere keeps core.db.
-                if let d = data {
-                    path = "{d}/local.db"
-                }
-            },
-            err(e) => sink.tell("{Obj.new().s("t", String("error")).s("code", String("local")).s("message", "{e}").done()}"),
-        }
-    }
-    let cache = match Cache.open(path.copy()) {
-        ok(c) => c,
-        err(e) => {
-            // The app still works, from the instance alone, and hears why it can't read offline.
-            sink.tell("{Obj.new().s("t", String("error")).s("code", String("cache")).s("message", "can't open {path}: {e}").done()}")
-            Cache.open(String(":memory:"))!
-        },
-    }
     let inbox = Receiver<String>()
     let to_core = inbox.sender()
     let from_core = Receiver<String>()
-    var conn = Conn.new(server, token, service, cache, inbox, from_core.sender())
-    if let d = data {
-        conn.files = some("{d}/files")
-        // Updates, for an app that says its version. An empty `update` turns them off.
-        let feed = str_at(cfg.copy(), "update") ?? String(MANIFEST)
-        if let v = str_at(cfg.copy(), "version") {
-            if feed.len() > 0 {
-                conn.updater = some(Updater.new(v, str_at(cfg.copy(), "platform") ?? String("windows-desktop"), feed, "{d}/update"))
-            }
-        }
-    }
-    let conn_thread = unsafe { Thread.spawn(conn) }
+    let conn_thread = unsafe { Thread.spawn(Boot { cfg: cfg, inbox: inbox, to_app: from_core.sender() }) }
     let relay_thread = unsafe { Thread.spawn(Relay { sink: sink, from_core: from_core }) }
     unsafe {
-        return Box(Core { to_core: some(to_core), conn: some(conn_thread), relay: some(relay_thread), local: local, stop_local: stop_local }).into_ptr().cast<u8>()
+        return Box(Core { to_core: some(to_core), conn: some(conn_thread), relay: some(relay_thread) }).into_ptr().cast<u8>()
     }
 }
 
@@ -223,12 +276,26 @@ fn core_stop(core: *u8) {
     if let t = c.value.relay.take() {
         t.join()
     }
-    if let s = mut c.value.stop_local {
-        s.send(true)
+}
+
+/// Opens a notification the push relay brought (PLAN.md, "The push relay"), for the
+/// iPhone's notification service extension: `sealed` is the notification's `sealed`
+/// field, the `slen` bytes at it, and `keyring` (`klen` bytes) the credential store's
+/// service the core was started with, where the phone's box key is. Hands `on_text`,
+/// with `ctx`, the notification as the instance made it, JSON, and gives true; gives
+/// false, without calling it, when it doesn't open.
+@export_c("loom_push_open")
+fn push_open(keyring: *const u8, klen: usize, sealed: *const u8, slen: usize, on_text: extern "C" fn(*const u8, usize, *u8), ctx: *u8) -> bool {
+    let service = unsafe { text_at(keyring, klen) } ?? String(KEYRING)
+    let given = unsafe { text_at(sealed, slen) } else return false
+    let box = match pushbox.box_key(if service.len() == 0 { String(KEYRING) } else { service }) {
+        ok(b) => b,
+        err(_) => return false,
     }
-    if let t = c.value.local.take() {
-        t.join()
-    }
+    let opened = pushbox.open(box, given) else return false
+    let sink = unsafe { Sink { on_event: on_text, ctx: ctx } }
+    sink.tell("{opened}")
+    return true
 }
 
 /// `loom mcp`, for the desktop app started as `loom.exe mcp` by an agent of the

@@ -18,7 +18,7 @@ import std.json.{Json}
 import std.process.{Command, exit}
 import std.thread.{Task, sleep}
 import std.zip.{Writer}
-import shared.obj.{Obj, at, str_at}
+import shared.obj.{Obj, at, merge, str_at}
 import server.installer
 import tests.kit.{App, Instance, calx, check, reply_text}
 
@@ -68,12 +68,17 @@ fn run(i: Instance) ! Error {
     var app = try App.connect(i.base.copy(), i.token.copy(), 0)
     let list = try app.cmd("q_1", "acp.registry", Obj.new().done())
     let bin = listed(list.copy(), "fake-bin")
+    try check((str_at(bin.copy(), "icon_svg") ?? String()).contains("currentColor") and at(listed(list.copy(), "fake-swapped"), "icon_svg") == Json.Null, "each agent comes with its icon, fetched by the instance, and one that isn't an SVG is left out")
     try check(str_at(bin.copy(), "how") == some(String("binary")) and str_at(bin, "installed") == none and at(listed(list.copy(), "fake-elsewhere"), "how") == Json.Null, "the registry lists its agents, and how each would run here")
+    let kept = try fs.read_text("{i.data}/acp/registry.json") ?? String()
+    try check(kept.contains("fake-bin") and kept.contains("currentColor"), "the instance keeps what it read, icons and all, so a restart answers at once")
 
     let installed = try app.cmd("q_2", "acp.install", Obj.new().s("id", String("fake-bin")).j("env", Obj.new().s("FAKE_SETTING", String("hello")).done()).done())
     let program = at(at(installed, "value"), "program")
     try check((str_at(program.copy(), "command") ?? String()).ends_with("/acp/fake-bin/{exe_name()}") and "{at(program.copy(), "settings")}" == #"["FAKE_SETTING"]"# and str_at(program, "version") == some(String("1.0.0")), "an agent is installed, with its setting, whose value stays on the instance")
-    try check(str_at(listed(try app.cmd("q_3", "acp.registry", Obj.new().done()), "fake-bin"), "installed") == some(String("1.0.0")), "and the registry says it's installed")
+    let again = try app.cmd("q_3", "acp.registry", Obj.new().done())
+    try check(str_at(listed(again.copy(), "fake-bin"), "installed") == some(String("1.0.0")), "and the registry says it's installed")
+    try check(str_at(at(at(again, "value"), "programs"), "fake-bin") == some(String("fake-bin")), "and which of its agents each program on the instance is")
 
     let made = try app.cmd("q_4", "agent.create", Obj.new().s("name", String("Bin")).s("acp_agent", String("fake-bin")).s("instructions", String("Test.")).done())
     let agent = str_at(at(at(made, "value"), "agent"), "id") ?? String()
@@ -123,6 +128,7 @@ fn main() ! Error {
     w.add(exe_name(), try fs.read(built), mode: 0o755)
     let zip = w.finish()
     try fs.write("{root}/fake.zip", zip.copy())
+    try fs.write_text("{root}/fake.svg", String(#"<svg viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg"><path d="M2 2h12v12H2z" fill="currentColor"/></svg>"#))
     var server = try Server.listen(0)
     server.log = false
     let base = server.url()[..server.url().len() - 1].copy()
@@ -130,8 +136,8 @@ fn main() ! Error {
     let here = installer.platform()
     let good = bytes.hex(sha256(zip))
     let agents = Json.Array([
-        entry("fake-bin", "Fake", binary(here.copy(), "{base}/fake.zip", "./{exe_name()}", good)),
-        entry("fake-swapped", "Swapped", binary(here.copy(), "{base}/fake.zip", "./{exe_name()}", bytes.hex(sha256("other".to_bytes())))),
+        merge(entry("fake-bin", "Fake", binary(here.copy(), "{base}/fake.zip", "./{exe_name()}", good)), Obj.new().s("icon", "{base}/fake.svg").done()),
+        merge(entry("fake-swapped", "Swapped", binary(here.copy(), "{base}/fake.zip", "./{exe_name()}", bytes.hex(sha256("other".to_bytes())))), Obj.new().s("icon", "{base}/fake.zip").done()),
         entry("fake-elsewhere", "Elsewhere", binary(String("plan9-mips"), "{base}/fake.zip", String("./x"), good)),
     ])
     try fs.write_text("{root}/registry.json", "{Obj.new().s("version", String("1.0.0")).j("agents", agents).done()}")

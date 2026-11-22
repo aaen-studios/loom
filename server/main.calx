@@ -2,15 +2,21 @@ module server.main
 
 // The `loom` program: the instance, and the commands that look after it.
 //
-//     loom serve [--data DIR] [--port N] [--host ADDR] [--allow-root]
+//     loom serve [--data DIR] [--port N] [--host ADDR] [--backups DIR [--backups-keep N]] [--sandboxes podman|docker [--sandbox-image IMAGE]] [--allow-root]
 //     loom user add NAME [--data DIR]          reads the password from standard input
 //     loom user list [--data DIR]
 //     loom acp add NAME COMMAND [ARG...] [--data DIR]
 //     loom acp list [--data DIR]
+//     loom receive [--data DIR] [--port N] [--host ADDR]
 //     loom status [--data DIR]
+//     loom import openbot|grokbot [PATH]       through the running instance, with a script token
 //     loom files limit MB|off [--data DIR]
+//     loom install [--domain DOMAIN] [--port N] [--no-sandboxes]   as root, on a Linux server
 //     loom update [--check]
+//     loom egress                              in a sandbox closed to the network, started by the instance
 //     loom version
+//
+// Each but serve, mcp and egress takes --json, to answer in JSON.
 //
 // Run from source: calx server/main.calx serve
 import std.bytes
@@ -18,17 +24,23 @@ import std.crypto.{PasswordHasher}
 import std.env
 import std.fs
 import std.hash.{sha256}
-import std.http.{Header, get}
+import std.http.{Header, get, post}
+import std.http.server.{Server}
 import std.io
-import std.json.{Json}
+import std.json.{Json, parse}
 import std.process.{current_exe, exit}
-import shared.obj.{at, str_at}
+import shared.obj.{Obj, at, bool_at, str_at}
 import shared.protocol
 import shared.release.{MANIFEST, RELEASE_KEY, check_manifest, newer}
 import server.instance.{Config, EventLife, Instance}
 import server.mcp
+import server.egress
+import server.backup
+import server.push
 import server.installer
+import server.move
 import server.store.{Store}
+import server.setup
 
 const VERSION: str = "0.2.0-dev"
 
@@ -39,18 +51,50 @@ usage: loom <command>
   serve                     run the instance (--port, default 8790; --host, default 127.0.0.1;
                             --registry, the ACP Registry's address, for a mirror of it). It won't run
                             as root or an elevated Administrator, whose rights its agents would get,
-                            unless given --allow-root
+                            unless given --allow-root. --backups DIR writes a backup there each day, as
+                            export does, and keeps the newest 7 (--backups-keep N). --lan, on a PC, lets
+                            phones reach it on the network over Noise, once the owner turns them on.
+                            --sandboxes podman (or docker) runs the agents of everyone but the owner in a sandbox
+                            each, from loom's image or --sandbox-image IMAGE: without, only the owner's run
   user add NAME             add an account; the password comes on standard input
   user list                 list the accounts
+  user password NAME        give NAME a new password, from standard input, and sign them out everywhere:
+                            the owner's own reset
   acp add NAME COMMAND ...  add an ACP agent program, such as: acp add claude npx -y @agentclientprotocol/claude-agent-acp
   acp list                  list the ACP agent programs
   files limit MB|off        cap the files each person can keep, in megabytes
+  push key FILE KEY_ID TEAM_ID BUNDLE_ID
+                            send push to the iPhone app through APNs, signed with Apple's AuthKey_<id>.p8
+  push off                  send no push
+  export FILE               write the whole instance to FILE, a .tar.zst, while it runs or not: a backup, which
+                            holds the key to its secrets, so keep it as safe
+  import FILE               make a new instance in --data from a backup
+  import openbot [PATH]     bring agents, chats, memories, routines, skills, MCP servers and tables over
+  import grokbot [PATH]     from OpenBot or Grok Bot on this computer, or from PATH, a copy of its data
+                            folder, without their secrets. Through the running instance, as the four below
+  receive                   take a move into --data: prints a one-time move code, listens on --port and
+                            --host, and returns once the instance has come. --data must hold no instance,
+                            or one no one has set up yet
+  ask AGENT TEXT ...        your script asks AGENT, by name, in its chat (or --conversation ID), and
+                            prints its answer once it's done
+  routine run NAME          your script runs one of your routines now
+  approvals                 list what waits for your yes
+  approve CALL yes|no       answer one of them
+                            These four reach the running instance on this computer, at --url (or LOOM_URL,
+                            or 127.0.0.1 at --port), with the script token you made in the app's server
+                            settings: --token, or LOOM_SCRIPTS_TOKEN
   status                    say what the instance holds
+  install                   set loom up on a Linux server, as root: the loom user, a systemd service,
+                            and Caddy for TLS with --domain DOMAIN, or Tailscale without one, and Podman
+                            for the sandboxes of everyone but the owner, unless given --no-sandboxes
   update                    update this program to the newest signed release (--check: only say if there's one)
   version                   print loom's version and the protocol versions it speaks
   mcp                       loom's own tools as an MCP server on standard input and output, which the instance starts for its agents
+  egress                    in a sandbox closed to the network: carries loom's tools and the proxy on 127.0.0.1:3128
+                            to the instance, over standard input and output
 
 Every command but version and mcp takes --data DIR, the instance's folder (default: loom-data).
+Every command but serve and mcp takes --json, to answer in JSON: an object, or {"error": {"code", "message"}} with a non-zero exit.
 "#
 }
 
@@ -69,10 +113,23 @@ struct Args {
     registry: String
     minute_ms: i64
     allow_root: bool
+    json: bool
+    domain: String
+    apns: String    // where APNs is, for a test, or "" for Apple's
+    backups: String
+    backups_keep: usize
+    backup_every_ms: i64
+    lan: bool    // phones may reach it on the network, over Noise
+    sandboxes: String    // what runs everyone else's agents: podman, or "" for nothing
+    sandbox_image: String
+    no_sandboxes: bool    // loom install sets no sandboxes up
+    url: String    // for scripts: the instance's address
+    token: String    // and the person's script token
+    conversation: String
 }
 
 fn read_args(given: List<String>) -> Args ! Error {
-    var a = Args { words: List<String>(), data: String("loom-data"), port: 8790, host: String("127.0.0.1"), fast_hashes: false, keep_events: none, registry: String(installer.REGISTRY), minute_ms: 60000, allow_root: false }
+    var a = Args { words: List<String>(), data: String("loom-data"), port: 8790, host: String("127.0.0.1"), fast_hashes: false, keep_events: none, registry: String(installer.REGISTRY), minute_ms: 60000, allow_root: false, json: false, domain: String(), apns: String(), backups: String(), backups_keep: 7, backup_every_ms: 86400000, lan: false, sandboxes: String(), sandbox_image: String(), no_sandboxes: false, url: String(), token: String(), conversation: String() }
     var i: usize = 0
     while i < given.len() {
         let w = given[i].copy()
@@ -90,10 +147,55 @@ fn read_args(given: List<String>) -> Args ! Error {
             i += 2
             continue
         }
+        // Sandboxes for everyone but the owner, and the image they run.
+        if w == "--sandboxes" or w == "--sandbox-image" {
+            if i + 1 >= given.len() { fail "{w} needs a value" }
+            if w == "--sandboxes" { a.sandboxes = given[i + 1].copy() } else { a.sandbox_image = given[i + 1].copy() }
+            i += 2
+            continue
+        }
+        // Scheduled backups: where, and how many stay.
+        if w == "--backups" or w == "--backups-keep" {
+            if i + 1 >= given.len() { fail "{w} needs a value" }
+            let v = given[i + 1].copy()
+            if w == "--backups" { a.backups = v } else {
+                let keep = usize.parse(v.copy()) else { fail "--backups-keep takes a number, not {v}" }
+                if keep == 0 { fail "--backups-keep takes 1 or more" }
+                a.backups_keep = keep
+            }
+            i += 2
+            continue
+        }
+        // For tests only: a backup this many ms apart, not a day.
+        if w == "--test-backup-every-ms" {
+            if i + 1 >= given.len() { fail "{w} needs a number" }
+            a.backup_every_ms = i64.parse(given[i + 1].copy()) ?? 86400000
+            i += 2
+            continue
+        }
         // For tests only: keeps just the newest N events, of any age.
         if w == "--test-keep-events" {
             if i + 1 >= given.len() { fail "{w} needs a number" }
             a.keep_events = some(i64.parse(given[i + 1].copy()) ?? 0)
+            i += 2
+            continue
+        }
+        if w == "--no-sandboxes" {
+            a.no_sandboxes = true
+            i += 1
+            continue
+        }
+        if w == "--domain" {
+            if i + 1 >= given.len() { fail "{w} needs a domain" }
+            a.domain = given[i + 1].copy()
+            i += 2
+            continue
+        }
+        // For scripts: where the instance is, the script token, and the conversation to ask in.
+        if w == "--url" or w == "--token" or w == "--conversation" {
+            if i + 1 >= given.len() { fail "{w} needs a value" }
+            let v = given[i + 1].copy()
+            if w == "--url" { a.url = v } else if w == "--token" { a.token = v } else { a.conversation = v }
             i += 2
             continue
         }
@@ -107,10 +209,29 @@ fn read_args(given: List<String>) -> Args ! Error {
             i += 2
             continue
         }
+        // JSON instead of words, for programs and agents.
+        if w == "--json" {
+            a.json = true
+            i += 1
+            continue
+        }
         // To serve as root or an elevated Administrator anyway.
+        // An instance on a PC, as the desktop app runs one: phones may reach it over Noise.
+        if w == "--lan" {
+            a.lan = true
+            i += 1
+            continue
+        }
         if w == "--allow-root" {
             a.allow_root = true
             i += 1
+            continue
+        }
+        // For tests only: where APNs is, a fake one, in place of Apple's.
+        if w == "--test-apns" {
+            if i + 1 >= given.len() { fail "{w} needs an address" }
+            a.apns = given[i + 1].copy()
+            i += 2
             continue
         }
         // For tests only: hashes that take microseconds instead of 65 ms.
@@ -163,7 +284,14 @@ fn serve(a: Args) ! Error {
         eprintln(elevated_refusal())
         exit(2)
     }
-    var i = try Instance.open(Config { data: a.data.copy(), port: a.port, host: a.host.copy(), hasher: hasher(a.copy()), events: event_life(a.copy()), registry: a.registry.copy(), minute_ms: a.minute_ms })
+    var i = try Instance.open(Config { data: a.data.copy(), port: a.port, host: a.host.copy(), hasher: hasher(a.copy()), events: event_life(a.copy()), registry: a.registry.copy(), minute_ms: a.minute_ms, apns: a.apns.copy(), version: String(VERSION), lan: a.lan, sandboxes: a.sandboxes.copy(), sandbox_image: a.sandbox_image.copy() })
+    if a.backups.len() > 0 {
+        // Backups inside the instance's folder would go into the next one.
+        let dir = try fs.absolute(a.backups.copy())
+        let data = try fs.absolute(a.data.copy())
+        if dir == data or dir.starts_with("{data}/") or dir.starts_with("{data}\\") { fail "keep --backups outside the instance's folder, {a.data}, or each backup would hold the ones before" }
+        backup.start(backup.Schedule { data: a.data.copy(), dir: dir, every_ms: a.backup_every_ms, keep: a.backups_keep, version: String(VERSION) })
+    }
     println("loom: serving {a.data} at {i.url()}")
     if let code = try i.setup_code() {
         println("loom: no owner yet. Set one up with POST /api/setup and this code:")
@@ -174,72 +302,256 @@ fn serve(a: Args) ! Error {
     println("loom: stopped")
 }
 
+// What a command answers: words for a person, and the same as JSON for a
+// program, which `--json` prints instead (PLAN.md, "Scriptable to the end").
+struct Said {
+    text: String
+    value: Json
+}
+
+fn said(text: own String, value: own Json) -> Said {
+    return Said { text: text, value: value }
+}
+
 fn main() ! Error {
     let a = try read_args(env.args())
     if a.words.len() == 0 {
-        eprint(usage())
+        if a.json { println("{failure("usage", String("Give a command, such as status."))}") } else { eprint(usage()) }
         exit(2)
     }
     let cmd = a.words[0].copy()
+    // These don't answer once: one serves until it's stopped, one speaks MCP, and one
+    // carries a closed sandbox's connections until the instance ends its input.
+    if cmd == "mcp" {
+        try mcp.serve()
+        return
+    }
+    if cmd == "egress" {
+        try egress.serve_inside()
+        return
+    }
+    if cmd == "serve" {
+        try serve(a)
+        return
+    }
+    match run(a.copy()) {
+        ok(s) => if a.json { println("{s.value}") } else if s.text.len() > 0 { println(s.text) },
+        err(e) => {
+            let message = "{e}"
+            let code = if message.starts_with("unknown command") { "unknown_command" } else { "failed" }
+            if a.json { println("{failure(code, message.copy())}") } else if code == "unknown_command" { eprint("{message}\n\n{usage()}") } else { eprintln("loom: {message}") }
+            exit(if code == "unknown_command" { 2 } else { 1 })
+        },
+    }
+}
+
+// A call to the running instance's scripts API, on this computer: POST with
+// `body`, or GET without. The address is --url, or LOOM_URL, or the instance at
+// --port here; the token is --token, or LOOM_SCRIPTS_TOKEN.
+fn script(a: Args, op: str, body: Json?) -> Json ! Error {
+    let token = if a.token.len() > 0 { a.token.copy() } else { env.variable(String("LOOM_SCRIPTS_TOKEN")) ?? String() }
+    if token.len() == 0 { fail "give your script token with --token or LOOM_SCRIPTS_TOKEN: turn scripts on in the app, under the server, to get one" }
+    let base = if a.url.len() > 0 { a.url.copy() } else { env.variable(String("LOOM_URL")) ?? "http://127.0.0.1:{a.port}" }
+    let url = "{base.trim_suffix("/")}/api/scripts/{op}"
+    let auth = Header { name: String("Authorization"), value: "Bearer {token}" }
+    var req = match body {
+        some(b) => post(url, [auth, Header { name: String("Content-Type"), value: String("application/json") }], "{b}".to_bytes(), SCRIPT_WAIT, SCRIPT_ANSWER_MOST),
+        none => get(url, [auth], SCRIPT_WAIT, SCRIPT_ANSWER_MOST),
+    }
+    let got = try req.wait()
+    let reply = match parse(String.from_utf8(got.body) ?? String()) {
+        ok(j) => j,
+        err(_) => Json.Null,
+    }
+    if got.status != 200 { fail str_at(at(reply, "error"), "message") ?? "the instance answered {got.status}" }
+    return reply
+}
+
+// How long a script waits for an agent's answer, and how big it may be.
+const SCRIPT_WAIT: u32 = 3600000
+const SCRIPT_ANSWER_MOST: usize = 16777216
+
+// An error, as --json gives it.
+fn failure(code: str, message: String) -> Json {
+    return Obj.new().j("error", Obj.new().s("code", String(code)).s("message", message).done()).done()
+}
+
+// Runs every command but serve and mcp.
+fn run(a: Args) -> Said ! Error {
+    let cmd = a.words[0].copy()
     let sub = if a.words.len() > 1 { a.words[1].copy() } else { String() }
     if cmd == "version" {
-        println(version_line())
-    } else if cmd == "mcp" {
-        try mcp.serve()
-    } else if cmd == "serve" {
-        try serve(a)
-    } else if cmd == "user" and sub == "add" and a.words.len() == 3 {
+        return said(version_line(), Obj.new().s("version", String(VERSION)).i("protocol_oldest", i64(protocol.OLDEST)).i("protocol_newest", i64(protocol.NEWEST)).done())
+    }
+    // Scripts (PLAN.md, "Scripts"): the person's own, through the running instance.
+    if cmd == "ask" and a.words.len() >= 3 {
+        var words = List<String>()
+        for k in 2usize..a.words.len() { words.push(a.words[k].copy()) }
+        var body = Obj.new().s("agent", a.words[1].copy()).s("text", words.join(" "))
+        if a.conversation.len() > 0 { body = body.s("conversation", a.conversation.copy()) }
+        let v = try script(a.copy(), "ask", some(body.done()))
+        return said(str_at(v.copy(), "reply") ?? String(), v)
+    }
+    if cmd == "routine" and sub == "run" and a.words.len() == 3 {
+        let v = try script(a.copy(), "routine", some(Obj.new().s("routine", a.words[2].copy()).done()))
+        return said(String("Started."), v)
+    }
+    if cmd == "approvals" and a.words.len() == 1 {
+        let v = try script(a.copy(), "approvals", none)
+        var lines = List<String>()
+        if let Json.Array(list) = at(v.copy(), "approvals") {
+            for x in list {
+                let where = if bool_at(x.copy(), "on_a_device") == some(true) { " (answer it on a device)" } else { "" }
+                lines.push("{str_at(x.copy(), "call") ?? String()}  {str_at(x.copy(), "agent_name") ?? String()}: {str_at(x, "title") ?? String()}{where}")
+            }
+        }
+        return said(if lines.len() == 0 { String("Nothing is waiting for you.") } else { lines.join("\n") }, v)
+    }
+    if cmd == "approve" and a.words.len() == 3 {
+        let answer = a.words[2].copy()
+        if answer != "yes" and answer != "no" { fail "approve takes CALL and yes or no, not {answer}" }
+        let v = try script(a.copy(), "approve", some(Obj.new().s("call", a.words[1].copy()).b("allow", answer == "yes").done()))
+        return said(if answer == "yes" { String("Allowed.") } else { String("Denied.") }, v)
+    }
+    if cmd == "user" and sub == "add" and a.words.len() == 3 {
         let store = try open_store(a.copy())
         var lines = io.Lines()
         let password = lines.next() ?? String()
         if password.len() < 8 { fail "a password needs at least 8 characters" }
         let role = if try store.user_count() == 0 { "owner" } else { "member" }
         let u = try store.add_user(a.words[2].copy(), password, role)
-        println("added {u.username} ({u.id}, {role})")
-    } else if cmd == "user" and sub == "list" {
+        try store.log_people("joined", "{u.username} was added from the command line, as {if role == "owner" { "the owner" } else { "a member" }}", String())
+        return said("added {u.username} ({u.id}, {role})", Obj.new().s("id", u.id.copy()).s("username", u.username.copy()).s("role", String(role)).done())
+    }
+    // The owner's own reset (PLAN.md, "Accounts and invites"), or anyone's: a new
+    // password from standard input, and every device of theirs signed out.
+    if cmd == "user" and sub == "password" and a.words.len() == 3 {
+        let store = try open_store(a.copy())
+        let u = try store.find_username(a.words[2].copy()) else { fail "there's no one called {a.words[2]} here" }
+        var lines = io.Lines()
+        let password = lines.next() ?? String()
+        if password.len() < 8 { fail "a password needs at least 8 characters" }
+        try store.set_password(u.id.copy(), password)
+        let gone = try store.revoke_all(u.id.copy())
+        try store.log_people("password", "{u.username} was given a new password from the command line, and signed out everywhere", String())
+        return said("{u.username} has a new password, and is signed out on {gone.len()} devices", Obj.new().s("id", u.id.copy()).s("username", u.username.copy()).i("signed_out", i64.wrap(gone.len())).done())
+    }
+    if cmd == "user" and sub == "list" {
         let store = try open_store(a)
+        var lines = List<String>()
+        var users = List<Json>()
         for u in try store.users() {
-            println("{u.id}  {u.username}  {u.role}")
+            lines.push("{u.id}  {u.username}  {u.role}")
+            users.push(Obj.new().s("id", u.id.copy()).s("username", u.username.copy()).s("role", u.role.copy()).done())
         }
-    } else if cmd == "acp" and sub == "add" and a.words.len() >= 4 {
+        return said(lines.join("\n"), Obj.new().j("users", Json.Array(users)).done())
+    }
+    if cmd == "acp" and sub == "add" and a.words.len() >= 4 {
         let store = try open_store(a.copy())
         var args = List<String>()
+        var given = List<Json>()
         for w in a.words[4..] {
             args.push(w.copy())
+            given.push(Json.Str(w.copy()))
         }
         try store.set_acp_agent(a.words[2].copy(), a.words[3].copy(), args)
-        println("added ACP agent {a.words[2]}")
-    } else if cmd == "acp" and sub == "list" {
+        return said("added ACP agent {a.words[2]}", Obj.new().s("name", a.words[2].copy()).s("command", a.words[3].copy()).j("args", Json.Array(given)).done())
+    }
+    if cmd == "acp" and sub == "list" {
         let store = try open_store(a)
+        var lines = List<String>()
+        var programs = List<Json>()
         for p in try store.acp_agents() {
-            println("{p.name}  {p.command} {p.args.join(" ")}")
+            lines.push("{p.name}  {p.command} {p.args.join(" ")}")
+            var args = List<Json>()
+            for w in p.args {
+                args.push(Json.Str(w.copy()))
+            }
+            programs.push(Obj.new().s("name", p.name.copy()).s("command", p.command.copy()).j("args", Json.Array(args)).done())
         }
-    } else if cmd == "files" and sub == "limit" and a.words.len() == 3 {
+        return said(lines.join("\n"), Obj.new().j("programs", Json.Array(programs)).done())
+    }
+    if cmd == "push" and sub == "key" and a.words.len() == 6 {
+        // The APNs key (Apple's AuthKey_<id>.p8) loom signs push with, kept sealed.
+        let store = try open_store(a.copy())
+        let pem = try fs.read_text(a.words[2].copy()) ?? String()
+        if not push.is_key(pem.copy()) { fail "{a.words[2]} isn't an APNs key, a P-256 key in PKCS#8: Apple gives it as AuthKey_<key id>.p8" }
+        try store.set_apns(Obj.new().s("key", pem).s("key_id", a.words[3].copy()).s("team", a.words[4].copy()).s("topic", a.words[5].copy()).done())
+        return said("push goes to APNs for {a.words[5]}, signed with key {a.words[3]} of team {a.words[4]}", Obj.new().j("push", Obj.new().s("topic", a.words[5].copy()).s("key_id", a.words[3].copy()).s("team", a.words[4].copy()).done()).done())
+    }
+    if cmd == "push" and sub == "off" {
+        let store = try open_store(a.copy())
+        try store.delete_meta("apns")
+        return said(String("no push; phones get notifications while the app is open"), Obj.new().j("push", Json.Null).done())
+    }
+    if cmd == "files" and sub == "limit" and a.words.len() == 3 {
         let store = try open_store(a.copy())
         if a.words[2] == "off" {
             try store.delete_meta("file_limit")
-            println("each person can keep as many files as fit")
-        } else {
-            let mb = i64.parse(a.words[2].copy()) else {
-                fail "the limit is a number of megabytes, or off"
-            }
-            try store.set_meta("file_limit", "{mb * 1000000}")
-            println("each person can keep {mb} MB of files")
+            return said(String("each person can keep as many files as fit"), Obj.new().j("limit_mb", Json.Null).done())
         }
-    } else if cmd == "update" {
-        try update(a.words.contains(String("--check")))
-    } else if cmd == "status" {
-        let store = try open_store(a.copy())
-        println(version_line())
-        println("data: {a.data}")
-        println("accounts: {try store.user_count()}")
-        let programs = try store.acp_agents()
-        println("ACP agents: {programs.len()}")
-        println("runs as: {runs_as()}")
-    } else {
-        eprint("unknown command: {a.words.join(" ")}\n\n{usage()}")
-        exit(2)
+        let mb = i64.parse(a.words[2].copy()) else {
+            fail "the limit is a number of megabytes, or off"
+        }
+        try store.set_meta("file_limit", "{mb * 1000000}")
+        return said("each person can keep {mb} MB of files", Obj.new().i("limit_mb", mb).done())
     }
+    if cmd == "export" and a.words.len() == 2 {
+        let m = try backup.export(a.data.copy(), a.words[1].copy(), String(VERSION))
+        return said("wrote {a.words[1]}: the instance {str_at(m.copy(), "instance") ?? String()}, with the key to its secrets, so keep it as safe as them", Obj.new().s("file", a.words[1].copy()).j("backup", m).done())
+    }
+    // From another agent app (PLAN.md, "Importing from OpenBot and Grok Bot"),
+    // through the running instance, as the person's script.
+    if cmd == "import" and (sub == "openbot" or sub == "grokbot") and a.words.len() <= 3 {
+        var body = Obj.new().s("from", sub.copy())
+        if a.words.len() == 3 { body = body.s("path", try fs.absolute(a.words[2].copy())) }
+        let v = try script(a.copy(), "import", some(body.done()))
+        var lines: List<String> = [str_at(v.copy(), "text") ?? String()]
+        if let Json.Array(left) = at(v.copy(), "not") {
+            for n in left { lines.push("- {n.as_str() ?? String()}") }
+        }
+        return said(lines.join("\n"), v)
+    }
+    if cmd == "import" and a.words.len() == 2 {
+        let m = try backup.restore(a.words[1].copy(), a.data.copy())
+        let programs = at(m.copy(), "acp_agents")
+        return said("made the instance {str_at(m.copy(), "instance") ?? String()} in {a.data}. Install its ACP agents again here: {programs}", Obj.new().s("data", a.data.copy()).j("backup", m).done())
+    }
+    if cmd == "install" {
+        let d = try setup.install(setup.Plan { domain: a.domain.copy(), port: a.port, sandboxes: not a.no_sandboxes })
+        return said(setup.done_text(d.copy()), setup.done_json(d))
+    }
+    if cmd == "receive" and a.words.len() == 1 {
+        // The move code is said first, and the answer once the instance has come.
+        try move.check_empty(a.data.copy())
+        var server = try Server.listen(a.port, a.host.copy())
+        server.log = false
+        let code = move.new_code()
+        let address = "http://{a.host}:{server.port}"
+        if a.json { println("{Obj.new().s("code", code.copy()).s("listening", address.copy()).done()}") } else {
+            println("loom: waiting for a move into {a.data}, at {address}")
+            println("move code: {code}")
+        }
+        io.flush()
+        let m = try move.receive(mut server, a.data.copy(), code)
+        server.shutdown()
+        let programs = at(m.copy(), "acp_agents")
+        return said("received the instance {str_at(m.copy(), "instance") ?? String()} in {a.data}. Install its ACP agents again here: {programs}. Then start it with loom serve", Obj.new().s("data", a.data.copy()).j("received", m).done())
+    }
+    if cmd == "update" {
+        return try update(a.words.contains(String("--check")))
+    }
+    if cmd == "status" {
+        let store = try open_store(a.copy())
+        let accounts = try store.user_count()
+        let programs = try store.acp_agents()
+        let apns = try store.apns()
+        let topic = if let c = apns.copy() { str_at(c, "topic") ?? String() } else { String() }
+        let pushing = if apns != none { "APNs, for {topic}" } else { String("off") }
+        let text = "{version_line()}\ndata: {a.data}\naccounts: {accounts}\nACP agents: {programs.len()}\nruns as: {runs_as()}\npush: {pushing}"
+        return said(text, Obj.new().s("version", String(VERSION)).s("data", a.data.copy()).i("accounts", accounts).i("acp_agents", i64.wrap(programs.len())).s("user", env.user_name() ?? String()).b("elevated", env.is_elevated()).j("push", if apns != none { Obj.new().s("topic", topic).done() } else { Json.Null }).done())
+    }
+    fail "unknown command: {a.words.join(" ")}"
 }
 
 @test
@@ -266,22 +578,22 @@ fn fetch(url: String) -> List<u8> ! Error {
 // it's newer, takes this program's place once its SHA-256 is the manifest's. The old
 // program stays beside it, as .old, until the next update. The instance runs the new one
 // once it's restarted.
-fn update(check_only: bool) ! Error {
+fn update(check_only: bool) -> Said ! Error {
     let text = try fetch(String(MANIFEST))
     let sig = String.from_utf8(try fetch("{MANIFEST}.sig")) ?? String()
     let manifest = check_manifest(text, sig, String(RELEASE_KEY)) else {
         fail "the release manifest isn't signed with loom's release key, so it isn't used"
     }
     let version = str_at(manifest.copy(), "version") ?? String()
+    let answer = Obj.new().s("version", String(VERSION)).s("newest", version.copy())
     if not newer(version.copy(), String(VERSION)) {
-        println("loom {VERSION} is the newest")
-        return
+        return said("loom {VERSION} is the newest", answer.b("updated", false).done())
     }
     if check_only {
-        println("loom {version} is out; this is {VERSION}. `loom update` takes it.")
-        return
+        return said("loom {version} is out; this is {VERSION}. `loom update` takes it.", answer.b("updated", false).done())
     }
-    let kind = "{env.os()}-server"
+    // linux-server and windows-server are x64; Linux on Arm has a build of its own, and macOS's is for Apple silicon.
+    let kind = if env.os() == "linux" and env.native_arch() == "aarch64" { String("linux-arm64-server") } else { "{env.os()}-server" }
     let file = at(manifest.copy(), "files").get(kind.copy()) ?? Json.Null
     let url = str_at(file.copy(), "url") else {
         fail "release {version} has no program for {kind}"
@@ -300,5 +612,5 @@ fn update(check_only: bool) ! Error {
     if fs.exists(old.copy()) { try fs.remove_file(old.copy()) }
     try fs.rename(exe.copy(), old)
     try fs.rename(new, exe)
-    println("updated loom {VERSION} to {version}; restart the instance to run it")
+    return said("updated loom {VERSION} to {version}; restart the instance to run it", answer.b("updated", true).done())
 }

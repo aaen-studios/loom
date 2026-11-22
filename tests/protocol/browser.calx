@@ -1,0 +1,185 @@
+module tests.protocol.browser
+
+// The agent's browser (PLAN.md, "The agent's browser"): the fake agent opens
+// a page through loom's tools, reads its outline, types into a field and
+// submits it, follows a link, goes back and takes a picture. Deleting the
+// agent stops its browser. Without Chrome, Edge or Chromium on the computer,
+// it says it was skipped.
+//
+//     calx tests/protocol/browser.calx
+import std.fs
+import std.process.{exit}
+import shared.obj.{Obj, at, bool_at, int_at, str_at}
+import server.browser
+import tests.kit.{App, Instance, check, reply_text}
+
+fn reply_in(app: mut App, conversation: String, wait_ms: u32 = 30000) -> String ! Error {
+    loop {
+        let created = try app.until("event", "message.created", wait_ms)
+        let m = at(created, "message")
+        if str_at(m.copy(), "role") == some(String("agent")) and str_at(m.copy(), "conversation") == some(conversation.copy()) { return reply_text(m) }
+    }
+}
+
+fn say(app: mut App, conversation: String, cid: str, text: String) -> String ! Error {
+    try app.send(Obj.new().s("t", String("send")).s("cid", String(cid)).s("conversation", conversation.copy()).s("text", text).done())
+    return try reply_in(mut app, conversation)
+}
+
+// check, saying what came when it fails.
+fn see(passed: bool, what: str, got: String) ! Error {
+    if not passed { fail "failed: {what}, from:\n{got}" }
+    println("ok    {what}")
+}
+
+// The ref of the first line of an outline that has `part` in it.
+fn ref_of(outline: String, part: str) -> String {
+    for line in outline.lines() {
+        if line.contains(part) {
+            if let start = line.find("[ref=") {
+                let rest = line[start + 5..].copy()
+                if let end = rest.find("]") { return rest[..end].copy() }
+            }
+        }
+    }
+    return String()
+}
+
+// A file's address, as a browser opens it.
+fn file_url(path: String) -> String {
+    let p = path.replace("\\", "/")
+    return if p.starts_with("/") { "file://{p}" } else { "file:///{p}" }
+}
+
+fn run(i: Instance) ! Error {
+    let pages = try fs.temp_dir()
+    try fs.write_text("{pages}/shop.html", String(#"
+        <!doctype html><title>Shop</title><h1>Welcome</h1>
+        <form onsubmit="document.title = 'Sent ' + this.q.value; return false"><input name="q" aria-label="Search"><button>Go</button></form>
+        <a href="second.html">Next page</a>
+        "#))
+    try fs.write_text("{pages}/second.html", String("<!doctype html><title>Second</title><h1>Second page</h1>"))
+
+    var app = try App.connect(i.base.copy(), i.token.copy(), 0)
+    let made = try app.cmd("q_1", "agent.create", Obj.new().s("name", String("Browser")).s("acp_agent", String("fake")).s("instructions", String("You are a test.")).done())
+    let agent = str_at(at(at(made, "value"), "agent"), "id") ?? String()
+    let c = try app.cmd("q_2", "conversation.create", Obj.new().s("agent", agent.copy()).done())
+    let conversation = str_at(at(c, "value"), "conversation") ?? String()
+
+    // The browser starts on this first call. On a Linux runner whose AppArmor stops
+    // Chrome making its sandbox, it starts twice, which can take well past 30 s.
+    try app.send(Obj.new().s("t", String("send")).s("cid", String("m_1")).s("conversation", conversation.copy()).s("text", "/mcp browser_open \{\"url\":\"{file_url("{pages}/shop.html")}\"\}").done())
+    let opened = try reply_in(mut app, conversation.copy(), 120000)
+    try see(opened.starts_with("browser_open: Page: Shop") and opened.contains("heading \"Welcome\"") and opened.contains("textbox \"Search\""), "browser_open gives the page's outline", opened.copy())
+    let field = ref_of(opened.copy(), "textbox \"Search\"")
+    try check(field.len() > 0, "with a ref for the field")
+
+    let typed = try say(mut app, conversation.copy(), "m_2", "/mcp browser_type \{\"ref\":\"{field}\",\"text\":\"socks\",\"submit\":true\}")
+    try see(typed.contains("Page: Sent socks"), "browser_type types into the field and submits it", typed.copy())
+
+    let link = ref_of(typed, "link \"Next page\"")
+    let clicked = try say(mut app, conversation.copy(), "m_3", "/mcp browser_click \{\"ref\":\"{link}\"\}")
+    try see(clicked.contains("Page: Second") and clicked.contains("heading \"Second page\""), "browser_click follows a link", clicked.copy())
+
+    let stale = try say(mut app, conversation.copy(), "m_4", "/mcp browser_click \{\"ref\":\"e999\"\}")
+    try check(stale.starts_with("browser_click failed: There's no e999"), "a ref that isn't on the page is refused")
+
+    let back = try say(mut app, conversation.copy(), "m_5", String("/mcp browser_back"))
+    try see(back.contains("Page: ") and back.contains("heading \"Welcome\""), "browser_back goes back", back.copy())
+
+    let shot = try say(mut app, conversation.copy(), "m_6", String("/mcp browser_screenshot"))
+    try see(shot.starts_with("browser_screenshot: [image image/jpeg] Page: "), "browser_screenshot gives a picture", shot.copy())
+
+    // --- html_preview ---
+    let card = String(#"<!doctype html><title>Card</title><h1>Hello</h1><script>console.log("drawn", 2); console.error("oops"); missing();</script>"#)
+    let previewed = try say(mut app, conversation.copy(), "m_p1", "/mcp html_preview {Obj.new().s("html", card.copy()).i("width", 640).i("height", 480).done()}")
+    try see(previewed.starts_with("html_preview: [image image/jpeg] The page, at 640 × 480. Its console said:") and previewed.contains("log: drawn 2") and previewed.contains("error: oops") and previewed.contains("missing is not defined"), "html_preview gives a picture of the page and what its console said", previewed.copy())
+    let whole = try say(mut app, conversation.copy(), "m_p2", "/mcp html_preview {Obj.new().s("html", String(#"<!doctype html><div style="height:3000px">tall</div>"#)).i("width", 400).b("full_page", true).done()}")
+    try see(whole.contains("The page, at 400 × 30") and whole.contains("the whole page. Its console said nothing."), "and of the whole page, past the window", whole.copy())
+    let kept = try say(mut app, conversation.copy(), "m_p3", String("/mcp browser_snapshot"))
+    try see(kept.contains("heading \"Welcome\""), "while the agent's own page stays as it was", kept.copy())
+    let blank = try say(mut app, conversation.copy(), "m_p4", String(#"/mcp html_preview {"html":""}"#))
+    try check(blank.starts_with("html_preview failed: html is empty"), "an empty page is refused")
+
+    let refused = try say(mut app, conversation.copy(), "m_7", String(#"/mcp browser_open {"url":"javascript:alert(1)"}"#))
+    try check(refused.starts_with("browser_open failed"), "it opens only pages")
+
+    // --- Secrets ---
+    _ = try app.cmd("q_s1", "secret.put", Obj.new().s("name", String("SHOP_PASS")).s("value", String("hunter2-wool")).done())
+    let page = try say(mut app, conversation.copy(), "m_s1", String("/mcp browser_snapshot"))
+    let search = ref_of(page, "textbox \"Search\"")
+    try app.send(Obj.new().s("t", String("send")).s("cid", String("m_s2")).s("conversation", conversation.copy()).s("text", "/mcp browser_fill_secret \{\"ref\":\"{search}\",\"secret\":\"SHOP_PASS\"\}").done())
+    let asked = try app.until("event", "approval.needed")
+    try see((str_at(asked.copy(), "title") ?? String()) == "Fill your secret SHOP_PASS on a file on this computer", "a secret's first time on a site waits for the person's yes", "{asked}")
+    try app.send(Obj.new().s("t", String("approve")).s("call", str_at(asked, "call") ?? String()).b("allow", true).done())
+    let filled = try reply_in(mut app, conversation.copy())
+    try see(filled == "browser_fill_secret: Filled in SHOP_PASS.", "then browser_fill_secret fills it in", filled.copy())
+    let shown = try say(mut app, conversation.copy(), "m_s3", String("/mcp browser_snapshot"))
+    try see(shown.contains("[secret SHOP_PASS]") and not shown.contains("hunter2"), "and the agent never reads it, on the page either", shown.copy())
+    let again = try say(mut app, conversation.copy(), "m_s4", "/mcp browser_fill_secret \{\"ref\":\"{search}\",\"secret\":\"SHOP_PASS\"\}")
+    try see(again == "browser_fill_secret: Filled in SHOP_PASS.", "the same site again needs no new yes", again.copy())
+    let missing = try say(mut app, conversation.copy(), "m_s5", "/mcp browser_fill_secret \{\"ref\":\"{search}\",\"secret\":\"NOPE\"\}")
+    try check(missing.starts_with("browser_fill_secret failed: Your person has no secret NOPE"), "a secret they don't have is refused")
+
+    try app.send(Obj.new().s("t", String("send")).s("cid", String("m_s6")).s("conversation", conversation.copy()).s("text", "/mcp browser_ask_secret \{\"ref\":\"{search}\",\"why\":\"Your one-time code\"\}").done())
+    loop {
+        let state = try app.until("browser.state", "")
+        if str_at(state, "secret") == some(String("Your one-time code")) { break }
+    }
+    try check(true, "browser_ask_secret asks the person, with browser.state")
+    _ = try app.cmd("q_s2", "browser.secret", Obj.new().s("agent", agent.copy()).s("value", String("424242")).done())
+    let typed_secret = try reply_in(mut app, conversation.copy())
+    try see(typed_secret == "browser_ask_secret: Filled in what your person typed.", "browser.secret fills what they typed", typed_secret.copy())
+    let after = try say(mut app, conversation.copy(), "m_s7", String("/mcp browser_snapshot"))
+    try see(not after.contains("424242"), "and the agent never reads it either", after.copy())
+
+    // --- Watching, and taking over ---
+    let watched = try app.cmd("q_w1", "browser.watch", Obj.new().s("agent", agent.copy()).b("on", true).done())
+    try check(bool_at(at(watched, "value"), "open") == some(true), "browser.watch says the browser is open")
+    let frame = try app.until("browser.frame", "")
+    let data = str_at(frame.copy(), "data") ?? String()
+    try check(str_at(frame.copy(), "agent") == some(agent.copy()) and data.starts_with("/9j/") and (int_at(frame, "width") ?? 0) > 0, "and frames of the page come, as JPEGs")
+    let early = try app.cmd("q_w2", "browser.input", Obj.new().s("agent", agent.copy()).s("kind", String("key")).s("key", String("Tab")).done())
+    try check(bool_at(early, "ok") == some(false), "the person's input waits for them to take over")
+
+    try app.send(Obj.new().s("t", String("send")).s("cid", String("m_8")).s("conversation", conversation.copy()).s("text", String(#"/mcp browser_ask_person {"why":"Type the code from your phone."}"#)).done())
+    loop {
+        let state = try app.until("browser.state", "")
+        if str_at(state, "asked") == some(String("Type the code from your phone.")) { break }
+    }
+    try check(true, "browser_ask_person asks the person, with browser.state")
+    let took = try app.cmd("q_w3", "browser.take", Obj.new().s("agent", agent.copy()).done())
+    try check(bool_at(at(took, "value"), "person") == some(true), "browser.take gives them the browser")
+    let tab = try app.cmd("q_i1", "browser.input", Obj.new().s("agent", agent.copy()).s("kind", String("key")).s("key", String("Tab")).done())
+    let typed_in = try app.cmd("q_i2", "browser.input", Obj.new().s("agent", agent.copy()).s("kind", String("text")).s("text", String("boots")).done())
+    let enter = try app.cmd("q_i3", "browser.input", Obj.new().s("agent", agent.copy()).s("kind", String("key")).s("key", String("Enter")).done())
+    try check(bool_at(tab, "ok") == some(true) and bool_at(typed_in, "ok") == some(true) and bool_at(enter, "ok") == some(true), "browser.input takes their keys and text")
+    _ = try app.cmd("q_w4", "browser.give", Obj.new().s("agent", agent.copy()).done())
+    let handed = try reply_in(mut app, conversation.copy())
+    try see(handed.starts_with("browser_ask_person: Your person handed the browser back after 3 clicks and keys") and handed.contains("boots ("), "browser.give answers the agent, with what they did and the page", handed.copy())
+    _ = try app.cmd("q_w5", "browser.watch", Obj.new().s("agent", agent.copy()).b("on", false).done())
+
+    let profile = "{i.data}/browsers"
+    try check(fs.is_dir(profile.copy()), "the browser's profile is in the instance's data")
+    _ = try app.cmd("q_3", "agent.delete", Obj.new().s("agent", agent).done())
+    app.close()
+    try fs.remove_dir_all(pages)
+}
+
+fn main() ! Error {
+    if browser.find() == none {
+        println("browser: skipped, there's no Chrome, Edge or Chromium here")
+        return
+    }
+    let inst = try Instance.start()
+    let failure: String? = match run(inst.copy()) {
+        ok => none,
+        err(e) => some("{e}"),
+    }
+    inst.stop()
+    if let f = failure {
+        eprintln("\n{f}")
+        exit(1)
+    }
+    println("\nbrowser: all good")
+}

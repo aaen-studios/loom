@@ -1,0 +1,183 @@
+module server.commands
+
+// What an agent may do with loom's commands (PLAN.md, "Agents can do anything the app can"):
+// run_command runs any of them with the person's rights, as their app does.
+// Reading and everyday changes go at once. What deletes, removes people,
+// installs code, reaches outside, or opens or moves the instance asks the
+// person every time. A few stay the person's alone: their account, their
+// password, their secrets' values, what a plugin is allowed, and a device's
+// own push token.
+import std.json.{Json}
+import shared.obj.{Obj}
+
+// Whether an agent runs a command at once, asks its person first, or can't.
+pub enum Access {
+    Runs,
+    // The kind the ask shows as: delete, move or other.
+    Asks(String),
+    Never(String),
+}
+
+// A command an agent can run: its name, its args, and what it does.
+struct Command {
+    name: str
+    args: str
+    does: str
+}
+
+const COMMANDS: [Command; 86] = [
+    Command { name: "conversation.create", args: "agent, title?", does: "Makes a conversation with an agent." },
+    Command { name: "conversation.rename", args: "conversation, title", does: "Renames a conversation." },
+    Command { name: "conversation.branch", args: "message, title?", does: "Branches a chat at a message: a new conversation that goes on from there, apart from the chat." },
+    Command { name: "conversation.move", args: "conversation, program", does: "Moves a chat to another agent program, which starts with loom's summary of it." },
+    Command { name: "conversation.delete", args: "conversation", does: "Deletes a conversation and its messages." },
+    Command { name: "messages.list", args: "conversation, before? (a message id), limit? (up to 100)", does: "A conversation's messages, newest last." },
+    Command { name: "messages.search", args: "query, agent?, after?, before? (Unix ms), limit?", does: "Finds words in every chat, and in file names." },
+    Command { name: "message.pin", args: "message, pinned? (false unpins it)", does: "Pins a message in its conversation, for every device to see." },
+    Command { name: "messages.pinned", args: "conversation", does: "The pinned messages in a conversation, the newest pin first." },
+    Command { name: "agent.create", args: "name, acp_agent? (left out: the default brain), backup? (the program that takes over when its own runs out; left out: the default's), instructions, mcp? (names of MCP servers), color?, isolated? (true runs it in a sandbox), network? (hosts it may reach, [] for none; null for everything)", does: "Makes an agent. It starts out asking first, and an isolated agent's are isolated, with no more network than its own." },
+    Command { name: "agent.update", args: #"agent, and what changes: name, instructions, mcp, color, folder, permission (ask, auto or allow), busy (queue or steer), backup (a program, or none), config ({option: value}), code_mode (false for plain tools), isolated (true runs it in a sandbox), network (hosts it may reach, [] for none, null for everything); null follows the default"#, does: "Changes an agent. A looser permission mode, or where it runs, asks the person." },
+    Command { name: "agent.revisions", args: "agent", does: "Every revision of an agent's instructions." },
+    Command { name: "agent.rollback", args: "agent, revision", does: "Puts an agent back as it was at a revision." },
+    Command { name: "agent.delete", args: "agent", does: "Deletes an agent." },
+    Command { name: "activity.list", args: "agent?, before?, limit?", does: "What agents ran, were allowed, and changed." },
+    Command { name: "activity.export", args: "agent?", does: "The activity log as CSV, oldest first." },
+    Command { name: "memory.list", args: "agent?, query?, limit?", does: "Notes, an agent's and the shared ones." },
+    Command { name: "memory.put", args: "text, agent? (left out: shared), site? (the site it is for, shown to the agent there)", does: "Keeps a note." },
+    Command { name: "memory.delete", args: "id", does: "Deletes a note." },
+    Command { name: "table.list", args: "", does: "The person's shared tables: name, description, owner and how many rows." },
+    Command { name: "table.create", args: "table, description?", does: "Makes a shared table, owned by whoever made it." },
+    Command { name: "table.write", args: "table, rows (objects of fields, with id to change a row)", does: "Writes rows into a shared table, and gives their ids." },
+    Command { name: "table.rows", args: "table, where? (fields and the values they equal), order_by?, desc?, limit?, offset?", does: "Reads rows of a shared table, those other agents wrote than its owner marked untrusted." },
+    Command { name: "table.delete_rows", args: "table, ids", does: "Deletes rows of a shared table: the caller's own, or any of a table it owns." },
+    Command { name: "table.drop", args: "table", does: "Drops a shared table and every row in it." },
+    Command { name: "profile.get", args: "", does: "The person's profile, which every agent starts with." },
+    Command { name: "profile.put", args: "text", does: "Writes the person's whole profile anew." },
+    Command { name: "defaults.get", args: "", does: "The agent defaults every agent follows unless it sets its own: brain, backup, config (per program), permission, instructions and busy." },
+    Command { name: "defaults.put", args: #"what changes: brain, backup, config ({program: {option: value or null}}), permission (ask, auto or allow), instructions, busy (queue or steer)"#, does: "Changes the agent defaults, for every agent that follows them." },
+    Command { name: "rule.list", args: "agent? (its own and every agent's; all of them without)", does: "The rules on what's touched, each with what it says in words." },
+    Command { name: "rule.put", args: "then (allow, ask or deny), and site, path, command, tool (server.tool), effect (read or write) or started_by (person, owner, admin, member, agent, routine, webhook, script or plugin), agent? (left out: every agent), note?; or id and what changes", does: "Adds or changes a rule on what agents touch." },
+    Command { name: "rule.delete", args: "id", does: "Removes a rule." },
+    Command { name: "rule.check", args: "agent?, site?, path?, command?, tool?, effect?, started_by?, kind?", does: "What an action would get: allowed, asked or denied, and which rule or the permission mode decided." },
+    Command { name: "routine.list", args: "", does: "Routines, with when each runs next and how it last went." },
+    Command { name: "routine.put", args: #"name, agent, prompt, schedule ({every: minutes}, {daily: HH:MM} or {weekdays: HH:MM}), tz?, notify?, on?, catch_up?, webhook?, flow? (steps of name, agent, prompt and after: the steps each waits for); or id and what changes"#, does: "Makes or changes a routine." },
+    Command { name: "routine.run", args: "id", does: "Runs a routine now." },
+    Command { name: "routine.stop", args: "id", does: "Stops the flow a routine has running: its steps that have not started never do." },
+    Command { name: "flow.list", args: "", does: "The routine flows running, with how far each has got." },
+    Command { name: "routine.delete", args: "id", does: "Deletes a routine." },
+    Command { name: "task.list", args: "", does: "Tasks, newest first." },
+    Command { name: "task.start", args: "agent, prompt, title?", does: "Starts a long job for an agent, in a conversation of its own." },
+    Command { name: "task.pause", args: "id", does: "Pauses a running task." },
+    Command { name: "task.resume", args: "id", does: "Carries a paused task on." },
+    Command { name: "task.cancel", args: "id", does: "Cancels a task." },
+    Command { name: "task.retry", args: "id", does: "Tries a failed or cancelled task again." },
+    Command { name: "queue.list", args: "conversation", does: "What waits for an agent in a conversation." },
+    Command { name: "queue.edit", args: "id, text", does: "Changes a waiting message." },
+    Command { name: "queue.order", args: "conversation, ids", does: "Puts what waits in that order." },
+    Command { name: "queue.drop", args: "id", does: "Drops a waiting message." },
+    Command { name: "skill.list", args: "bodies?", does: "Skills, by name." },
+    Command { name: "skill.get", args: "name", does: "A skill, with its text." },
+    Command { name: "skill.put", args: "name, description, body", does: "Makes or changes a skill." },
+    Command { name: "skill.delete", args: "name", does: "Deletes a skill." },
+    Command { name: "plugin.list", args: "", does: "Plugins, with what each asks for." },
+    Command { name: "plugin.get", args: "id", does: "A plugin, with its files." },
+    Command { name: "plugin.put", args: #"id, files ({path: text}, plugin.toml among them)"#, does: "Makes or changes a plugin. What it asks for waits for the person." },
+    Command { name: "plugin.revisions", args: "id", does: "A plugin's revisions." },
+    Command { name: "plugin.delete", args: "id", does: "Deletes a plugin and its panel's data." },
+    Command { name: "mcp.list", args: "", does: "The person's MCP servers." },
+    Command { name: "mcp.put", args: "name, command with args? and env?, or url with headers?", does: "Adds or changes an MCP server, which agents that pick it run." },
+    Command { name: "mcp.delete", args: "name", does: "Removes an MCP server." },
+    Command { name: "secret.list", args: "", does: "The names of the person's secrets, never their values." },
+    Command { name: "secret.delete", args: "name", does: "Deletes a secret." },
+    Command { name: "acp.list", args: "", does: "The agent programs installed, with their settings' names." },
+    Command { name: "acp.registry", args: "again?", does: "What the ACP Registry has to install." },
+    Command { name: "acp.install", args: #"id, env? ({NAME: value})"#, does: "Installs an agent program from the ACP Registry." },
+    Command { name: "acp.settings", args: #"name, env ({NAME: value}, or null to remove one)"#, does: "Changes an agent program's settings." },
+    Command { name: "acp.share", args: "name, tokens, per? (day or month), members? (ids, or null for everyone)", does: "Shares an agent program's settings with everyone or some people, with a budget each." },
+    Command { name: "acp.members", args: "name, members (ids, or null for everyone)", does: "Gives an agent program to everyone or only some people." },
+    Command { name: "acp.remove", args: "name", does: "Removes an agent program." },
+    Command { name: "user.list", args: "", does: "Everyone with an account here." },
+    Command { name: "user.role", args: "user, role (member or admin)", does: "Makes someone an admin or a member." },
+    Command { name: "user.remove", args: "user", does: "Removes someone, with everything of theirs." },
+    Command { name: "people.log", args: "before?, limit? (up to 200)", does: "What happened to people here, newest first: who joined, was invited, changed role, was removed or reset a password." },
+    Command { name: "invite.list", args: "", does: "Invites still open." },
+    Command { name: "invite.create", args: "role?, uses?, days?", does: "Makes an invite link for someone to join." },
+    Command { name: "invite.delete", args: "invite", does: "Takes back an invite." },
+    Command { name: "device.rename", args: "device, name", does: "Renames one of the person's devices." },
+    Command { name: "device.revoke", args: "device", does: "Signs one of the person's devices out, for good." },
+    Command { name: "link.create", args: "", does: "A one-time code for a phone to join the account." },
+    Command { name: "instance.phones", args: "on?", does: "Lets phones reach the instance on this computer, or stops them." },
+    Command { name: "instance.relay", args: "url? (empty turns it off)", does: "Sets the push relay phones are reached through." },
+    Command { name: "server.offer", args: "address", does: "Adds another server to the person's app, for them to sign in to." },
+    Command { name: "instance.move", args: "to (the new place's address), code (from loom receive)", does: "Moves the whole instance to another computer." },
+    Command { name: "import.scan", args: "openbot?, grokbot? (folders to look in instead of where each app keeps its data)", does: "What OpenBot and Grok Bot keep on this computer, to import." },
+    Command { name: "import.run", args: "from (openbot or grokbot), path? (a folder copied from that app)", does: "Brings agents, chats, memories, routines, skills, MCP servers and tables over from OpenBot or Grok Bot, without their secrets." },
+]
+
+// Whether an agent may run `name`, and how.
+pub fn access(name: String) -> Access {
+    if name == "account.delete" or name == "password.reset" { return Access.Never(String("That's your person's own to do, in the app.")) }
+    if name == "secret.put" { return Access.Never(String("A secret's value is never an agent's: ask your person to keep it in the app, or use browser_ask_secret.")) }
+    if name == "plugin.allow" { return Access.Never(String("Only your person allows what a plugin asks for, in the app.")) }
+    if name == "plugin.message" or name == "chat.ask" { return Access.Never(String("Use message_agent.")) }
+    if name.starts_with("push.") or name.starts_with("plugin.data.") or name == "plugin.cmd" { return Access.Never(String("That's for an app or a plugin's panel, not an agent.")) }
+    if name.starts_with("browser.") { return Access.Never(String("Use your browser_ tools.")) }
+    if name == "queue.steer" { return Access.Never(String("Steering is your person's: it stops the turn that's running.")) }
+    if name.starts_with("scripts.") { return Access.Never(String("Scripts are your person's own: they turn them on in the app.")) }
+    let runs = ["conversation.create", "conversation.rename", "conversation.branch", "conversation.move", "messages.list", "messages.search", "messages.pinned", "message.pin", "agent.create", "agent.update", "agent.revisions", "agent.rollback", "activity.list", "memory.list", "memory.put", "table.list", "table.create", "table.write", "table.rows", "table.delete_rows", "profile.get", "profile.put", "defaults.get", "rule.list", "rule.check", "routine.list", "routine.put", "routine.run", "routine.stop", "flow.list", "task.list", "task.start", "task.pause", "task.resume", "task.cancel", "task.retry", "queue.list", "queue.edit", "queue.order", "queue.drop", "skill.list", "skill.get", "skill.put", "plugin.list", "plugin.get", "plugin.put", "plugin.revisions", "mcp.list", "secret.list", "acp.list", "acp.registry"]
+    if name.starts_with("proposal.") { return Access.Never(String("Proposals are your person's to keep or drop, in the app. Use propose_skill or propose_note to make one.")) }
+    for r in runs {
+        if name == r { return Access.Runs }
+    }
+    if name.ends_with(".delete") or name.ends_with(".remove") or name == "device.revoke" or name == "table.drop" { return Access.Asks(String("delete")) }
+    if name == "instance.move" { return Access.Asks(String("move")) }
+    // Anything else, and anything new, asks first.
+    return Access.Asks(String("other"))
+}
+
+// Every command an agent can run, for list_commands: name, args, what it
+// does, and whether it runs at once or asks the person.
+pub fn catalog() -> List<Json> {
+    var out = List<Json>()
+    for c in COMMANDS {
+        let how = if access(String(c.name)) == Access.Runs { "runs at once" } else { "asks your person first" }
+        out.push(Obj.new().s("name", String(c.name)).s("args", String(c.args)).s("does", String(c.does)).s("how", String(how)).done())
+    }
+    return out
+}
+
+// What `name` does, in a few words, for the ask the person sees: the first
+// sentence of what list_commands says.
+pub fn does(name: String) -> String {
+    for c in COMMANDS {
+        if name == c.name { return String(c.does).split(". ")[0].trim_suffix(".").copy() }
+    }
+    return "Run {name}"
+}
+
+@test
+fn reading_runs_and_harm_asks() {
+    assert(access(String("task.list")) == Access.Runs)
+    assert(access(String("agent.delete")) == Access.Asks(String("delete")))
+    assert(access(String("user.remove")) == Access.Asks(String("delete")))
+    assert(access(String("user.list")) == Access.Asks(String("other")))
+    assert(access(String("people.log")) == Access.Asks(String("other")))
+    assert(access(String("acp.install")) == Access.Asks(String("other")))
+    assert(access(String("instance.move")) == Access.Asks(String("move")))
+    assert(access(String("something.new")) == Access.Asks(String("other")))
+    for never in ["secret.put", "plugin.allow", "plugin.message", "account.delete", "browser.open", "browser.record", "queue.steer", "proposal.keep", "proposal.ask"] {
+        if let Access.Never(_) = access(String(never)) {} else { panic("an agent could run {never}") }
+    }
+    for c in COMMANDS {
+        if let Access.Never(_) = access(String(c.name)) { panic("{c.name} is listed but never runs") }
+    }
+    assert(catalog().len() == 86)
+    assert(access(String("rule.list")) == Access.Runs and access(String("rule.check")) == Access.Runs)
+    assert(access(String("rule.put")) == Access.Asks(String("other")) and access(String("rule.delete")) == Access.Asks(String("delete")))
+    assert(access(String("defaults.get")) == Access.Runs and access(String("defaults.put")) == Access.Asks(String("other")))
+    assert(access(String("import.run")) == Access.Asks(String("other")))
+    assert(access(String("table.write")) == Access.Runs and access(String("table.delete_rows")) == Access.Runs)
+    assert(access(String("table.drop")) == Access.Asks(String("delete")))
+    assert(does(String("mcp.delete")) == "Removes an MCP server")
+    assert(does(String("agent.update")) == "Changes an agent")
+}

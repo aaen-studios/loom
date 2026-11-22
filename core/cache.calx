@@ -139,8 +139,10 @@ impl Cache {
             let id = str_at(e, "conversation") ?? String()
             _ = try self.db.execute(String("DELETE FROM conversations WHERE id = ?"), [t(id.copy())])
             _ = try self.db.execute(String("DELETE FROM messages WHERE conversation = ?"), [t(id.copy())])
-        } else if kind == "message.created" {
+        } else if kind == "message.created" or kind == "message.updated" {
             try self.put_message(at(e, "message"))
+        } else if kind == "message.deleted" {
+            _ = try self.db.execute(String("DELETE FROM messages WHERE id = ?"), [t(str_at(e, "message") ?? String())])
         } else if kind == "run.started" {
             let id = str_at(e.copy(), "run") ?? String()
             let conversation = str_at(e.copy(), "conversation") ?? String()
@@ -321,8 +323,9 @@ impl Cache {
     }
 
     /// The newest conversation with `agent`: the one the app shows as that agent's chat.
+    /// A task's conversation is the task's, not the chat.
     pub fn conversation_for(self, agent: String) -> String? ! Error {
-        let row = try self.db.query_one(String("SELECT id FROM conversations WHERE json_extract(json, '$.agent') = ? ORDER BY last DESC, rowid DESC LIMIT 1"), [t(agent.copy())])
+        let row = try self.db.query_one(String("SELECT id FROM conversations WHERE json_extract(json, '$.agent') = ? AND json_extract(json, '$.task') IS NULL AND json_extract(json, '$.side') IS NULL AND json_extract(json, '$.branch_of') IS NULL AND json_extract(json, '$.routine') IS NULL ORDER BY last DESC, rowid DESC LIMIT 1"), [t(agent.copy())])
         let r = row else return none
         return some(text(r[0].copy()))
     }
@@ -361,6 +364,20 @@ fn applies_events_with_the_cursor() ! Error {
     assert(cs.len() == 1 and str_at(cs[0].copy(), "title") == some(String("CI")) and str_at(cs[0].copy(), "agent") == some(String("a_1")))
     let (ms, more) = try c.messages(String("c_1"), none, 50)
     assert(ms.len() == 1 and not more)
+    // A routine run that ended quietly takes its message back.
+    _ = try c.apply(ev(4, "message.deleted", Obj.new().s("conversation", String("c_1")).s("message", String("msg_1")).done()))
+    let (left, _) = try c.messages(String("c_1"), none, 50)
+    assert(left.len() == 0)
+}
+
+@test
+fn a_routines_thread_isnt_the_agents_chat() ! Error {
+    let c = try Cache.open(String(":memory:"))
+    let chat = Obj.new().s("id", String("c_chat")).s("agent", String("a_1")).s("title", String("Chat")).i("at", 10).done()
+    let thread = Obj.new().s("id", String("c_thread")).s("agent", String("a_1")).s("title", String("News")).s("routine", String("rt_1")).i("at", 20).done()
+    _ = try c.apply(ev(1, "conversation.created", Obj.new().j("conversation", chat).done()))
+    _ = try c.apply(ev(2, "conversation.created", Obj.new().j("conversation", thread).done()))
+    assert(try c.conversation_for(String("a_1")) == some(String("c_chat")))
 }
 
 @test

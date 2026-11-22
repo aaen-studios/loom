@@ -8,7 +8,13 @@ A self-hostable agent app. You chat with your own AI agents from your PC and pho
 
 ## Status
 
-**Being rewritten, Phase 0.** Nothing runs yet. [PLAN.md](PLAN.md) is the plan, and [protocol/protocol.md](protocol/protocol.md) is the wire protocol. Work is tracked on the [Acta board](https://acta.aaenz.no/aaen-studios/loom).
+**Being rewritten.** The server, the core and the Windows app work: agents on ACP, approvals, devices as tools, memory, routines and webhooks, plugins and panels, push, backups, moving an instance, phones reaching an instance on a PC over Noise, and invites. The Mac and iPhone apps are next. [PLAN.md](PLAN.md) is the plan, and [protocol/protocol.md](protocol/protocol.md) is the wire protocol. Work is tracked on the [Acta board](https://acta.aaenz.no/aaen-studios/loom).
+
+## Running it
+
+- **On a Linux server**, as root: `curl -fsSL https://github.com/aaen-studios/loom/releases/latest/download/install.sh | sh`. It makes a `loom` user and a systemd service, and puts Caddy in front for TLS with `--domain`, or Tailscale without one. It prints the one-time setup code.
+- **In Docker**: `docker run -d --name loom -p 127.0.0.1:8790:8790 -v loom-data:/data ghcr.io/aaen-studios/loom`, then `docker logs loom` for the setup code. Put a proxy with TLS in front of it.
+- **With no server**: the desktop app runs an instance itself ("Run one on this computer").
 
 The previous loom (v0.1: a Rust engine with its own model loop, a React UI, Tauri) is at the [`v0.1`](https://github.com/aaen-studios/loom/tree/v0.1) tag.
 

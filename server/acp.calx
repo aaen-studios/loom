@@ -6,10 +6,11 @@ module server.acp
 // and what the loop sends goes to the thread as Outs.
 //
 // ACP is JSON-RPC 2.0 with one message a line (https://agentclientprotocol.com).
-import std.json.{Json}
+import std.json.{Json, parse}
 import std.process.{Child, Command, Stdio}
 import std.thread.{Task}
-import shared.obj.{Obj}
+import shared.obj.{Obj, at, str_at}
+import shared.tools
 
 // A line an agent program wrote, or its end.
 pub struct Line {
@@ -109,6 +110,79 @@ pub fn initialize_params() -> Json {
     return Obj.new().i("protocolVersion", 1).j("clientCapabilities", caps).j("clientInfo", info).done()
 }
 
+// --- Code Mode's tools, which the agent program doesn't ask about ---
+//
+// Loom asks for each call in a script, by the agent's permission mode, and
+// before a script in `ask` (PLAN.md, "Permissions"), so an agent program
+// asking before search_tools or run_code would ask twice. Codex reads their
+// MCP annotations (shared/tools.calx). Claude's adapter takes allowedTools
+// in session/new's _meta, as Claude Code names MCP tools: mcp__loom__run_code.
+// OpenCode takes a permission rule for each, named loom_run_code, in the
+// config in OPENCODE_CONFIG_CONTENT. Each program leaves the others' alone.
+
+// session/new's, session/load's and session/resume's _meta.
+pub fn session_meta() -> Json {
+    var allowed = List<Json>()
+    for t in tools.CODE_TOOLS.split(" ") {
+        allowed.push(Json.Str("mcp__loom__{t}"))
+    }
+    let options = Obj.new().j("allowedTools", Json.Array(allowed)).done()
+    return Obj.new().j("claudeCode", Obj.new().j("options", options).done()).done()
+}
+
+const OPENCODE_CONFIG: str = "OPENCODE_CONFIG_CONTENT"
+
+// An agent program's environment (a JSON object), with OpenCode's config
+// allowing Code Mode's tools: added to the config the settings give, where
+// they give one, which keeps any rule of its own for them.
+pub fn program_env(env: Json) -> Json {
+    var vars = LinkedMap<String, Json>()
+    if let Json.Object(m) = env { vars = m.copy() }
+    var config = LinkedMap<String, Json>()
+    if let given = str_at(Json.Object(vars.copy()), OPENCODE_CONFIG) {
+        match parse(given) {
+            ok(Json.Object(m)) => config = m.copy(),
+            _ => return Json.Object(vars),    // not one loom can add to: as it is
+        }
+    }
+    var rules = LinkedMap<String, Json>()
+    match at(Json.Object(config.copy()), "permission") {
+        Json.Object(m) => rules = m.copy(),
+        Json.Str(all) => rules.insert(String("*"), Json.Str(all.copy())),
+        _ => {},
+    }
+    for t in tools.CODE_TOOLS.split(" ") {
+        let name = "loom_{t}"
+        if not rules.contains(name.copy()) { rules.insert(name, Json.Str(String("allow"))) }
+    }
+    config.insert(String("permission"), Json.Object(rules))
+    vars.insert(String(OPENCODE_CONFIG), Json.Str("{Json.Object(config)}"))
+    return Json.Object(vars)
+}
+
+@test
+fn code_tools_are_allowed_in_each_program() {
+    let meta = "{session_meta()}"
+    assert(meta == #"{"claudeCode":{"options":{"allowedTools":["mcp__loom__search_tools","mcp__loom__run_code"]}}}"#)
+    let fresh = program_env(Obj.new().s("KEY", String("k")).done())
+    assert(str_at(fresh.copy(), "KEY") == some(String("k")))
+    assert(str_at(fresh, OPENCODE_CONFIG) == some(String(#"{"permission":{"loom_search_tools":"allow","loom_run_code":"allow"}}"#)))
+    // The person's own config keeps its rules, its own for run_code among them,
+    // and a rule for everything stays first, as OpenCode's last match wins.
+    let theirs = program_env(Obj.new().s(OPENCODE_CONFIG, String(#"{"model":"m","permission":{"loom_run_code":"ask"}}"#)).done())
+    assert(str_at(theirs, OPENCODE_CONFIG) == some(String(#"{"model":"m","permission":{"loom_run_code":"ask","loom_search_tools":"allow"}}"#)))
+    let all = program_env(Obj.new().s(OPENCODE_CONFIG, String(#"{"permission":"ask"}"#)).done())
+    assert(str_at(all, OPENCODE_CONFIG) == some(String(#"{"permission":{"*":"ask","loom_search_tools":"allow","loom_run_code":"allow"}}"#)))
+    let broken = program_env(Obj.new().s(OPENCODE_CONFIG, String("not json")).done())
+    assert(str_at(broken, OPENCODE_CONFIG) == some(String("not json")))
+}
+
+// Whether a permission mode asks before a script runs: only `ask`, which asks
+// about everything. In any other, each call in the script is put to the mode.
+pub fn asks_before_scripts(mode: String) -> bool {
+    return mode == "ask"
+}
+
 // A run's end, from session/prompt's stopReason, as loom's run.finished
 // status names it.
 pub fn status_of(stop_reason: String) -> String {
@@ -160,6 +234,100 @@ pub fn pick_option(options: Json, allow: bool, always: bool) -> String? {
         }
     }
     return fallback
+}
+
+// --- Session config options: an agent's model, reasoning effort and the like ---
+
+// A select option's values, from a flat list or from its groups.
+fn values_of(option: Json) -> List<Json> {
+    var out = List<Json>()
+    if let Json.Array(list) = option.get(String("options")) ?? Json.Null {
+        for o in list {
+            if let Json.Array(grouped) = o.get(String("options")) ?? Json.Null {
+                for g in grouped { out.push(g.copy()) }
+            } else {
+                out.push(o.copy())
+            }
+        }
+    }
+    return out
+}
+
+fn str_of(j: Json, key: str) -> String? {
+    return (j.get(String(key)) ?? Json.Null).as_str()
+}
+
+// What a session's configOptions offer, as loom keeps it with the agent:
+// each select option's `id`, `name`, `category`, `value` (what a new session
+// starts on) and `options`, flat, each with `value`, `name` and maybe
+// `description`. Options of other types are left out.
+pub fn offered(config: Json) -> Json {
+    var out = List<Json>()
+    if let Json.Array(list) = config {
+        for c in list {
+            if (str_of(c.copy(), "type") ?? String("select")) != "select" { continue }
+            var values = List<Json>()
+            for v in values_of(c.copy()) {
+                values.push(Obj.new().s("value", str_of(v.copy(), "value") ?? String()).s("name", str_of(v.copy(), "name") ?? String()).maybe("description", str_of(v, "description")).done())
+            }
+            out.push(Obj.new().s("id", str_of(c.copy(), "id") ?? String()).s("name", str_of(c.copy(), "name") ?? String()).s("category", str_of(c.copy(), "category") ?? String()).s("value", str_of(c, "currentValue") ?? String()).j("options", Json.Array(values)).done())
+        }
+    }
+    return Json.Array(out)
+}
+
+// Whether option `id` of a session's configOptions offers `value`.
+pub fn offers(config: Json, id: String, value: String) -> bool {
+    if let Json.Array(list) = config {
+        for c in list {
+            if str_of(c.copy(), "id") != some(id.copy()) { continue }
+            for v in values_of(c) {
+                if str_of(v, "value") == some(value.copy()) { return true }
+            }
+        }
+    }
+    return false
+}
+
+// Option `id`'s value now, in a session's configOptions.
+pub fn current(config: Json, id: String) -> String? {
+    if let Json.Array(list) = config {
+        for c in list {
+            if str_of(c.copy(), "id") == some(id.copy()) { return str_of(c, "currentValue") }
+        }
+    }
+    return none
+}
+
+// What to set in a session so it runs as the agent's `config` (option id ->
+// value) says: each option the session offers that value for, and isn't on
+// it yet, as (id, value). Values it doesn't offer are let be.
+pub fn config_todo(config: Json, wanted: Json) -> List<(String, String)> {
+    var out = List<(String, String)>()
+    if let Json.Object(m) = wanted {
+        for (id, v) in m {
+            let value = v.as_str() else continue
+            if offers(config.copy(), id.copy(), value.copy()) and current(config.copy(), id.copy()) != some(value.copy()) { out.push((id.copy(), value)) }
+        }
+    }
+    return out
+}
+
+@test
+fn config_options_are_set_to_what_the_agent_says() {
+    let model = Obj.new().s("id", String("model")).s("name", String("Model")).s("category", String("model")).s("type", String("select")).s("currentValue", String("a")).j("options", Json.Array([Obj.new().s("value", String("a")).s("name", String("A")).done(), Obj.new().s("group", String("more")).s("name", String("More")).j("options", Json.Array([Obj.new().s("value", String("b")).s("name", String("B")).done()])).done()])).done()
+    let config = Json.Array([model])
+    assert(offers(config.copy(), String("model"), String("b")))
+    assert(not offers(config.copy(), String("model"), String("c")))
+    assert(current(config.copy(), String("model")) == some(String("a")))
+    let todo = config_todo(config.copy(), Obj.new().s("model", String("b")).s("effort", String("high")).done())
+    assert(todo.len() == 1)
+    assert(todo[0].1 == "b")
+    assert(config_todo(config.copy(), Obj.new().s("model", String("a")).done()).len() == 0)
+    assert(config_todo(config.copy(), Obj.new().s("model", String("zzz")).done()).len() == 0)
+    let shown = "{offered(config)}"
+    assert(shown.contains(#""value":"b""#))
+    assert(shown.contains(#""value":"a","options""#))
 }
 
 @test

@@ -1,0 +1,173 @@
+module tests.protocol.tasks
+
+// Tasks (PLAN.md, "Work that waits its turn"): a long job runs in a
+// conversation of its own, so the agent's chat stays free. The person pauses,
+// resumes, cancels and retries it, an agent starts one with start_task, and
+// one that was running when the instance stopped carries on after it starts.
+//
+//     calx tests/protocol/tasks.calx
+import std.json.{Json}
+import std.process.{exit}
+import shared.obj.{Obj, at, int_at, str_at}
+import tests.kit.{App, Instance, check, reply_text}
+
+// The task as the first task.updated for `id` with `status` says, from the
+// frames read since `mark` on.
+fn wait_task(app: mut App, mark: usize, id: String, status: str) -> Json ! Error {
+    var n = mark
+    loop {
+        while n < app.frames.len() {
+            let f = app.frames[n].copy()
+            n += 1
+            if str_at(f.copy(), "kind") != some(String("task.updated")) { continue }
+            let task = at(f, "task")
+            if str_at(task.copy(), "id") == some(id.copy()) and str_at(task.copy(), "status") == some(String(status)) { return task }
+        }
+        _ = try app.until("event", "task.updated")
+    }
+}
+
+fn start(app: mut App, id: str, agent: String, title: str, prompt: str) -> String ! Error {
+    let made = try app.cmd(id, "task.start", Obj.new().s("agent", agent).s("title", String(title)).s("prompt", String(prompt)).done())
+    return str_at(at(at(made, "value"), "task"), "id") ?? String()
+}
+
+fn task_cmd(app: mut App, id: str, name: str, task: String) -> Json ! Error {
+    return try app.cmd(id, name, Obj.new().s("id", task).done())
+}
+
+fn run(i: Instance) -> (i64, String, String) ! Error {
+    var app = try App.connect(i.base.copy(), i.token.copy(), 0)
+    let made = try app.cmd("t_1", "agent.create", Obj.new().s("name", String("Worker")).s("acp_agent", String("fake")).s("instructions", String("You are a test.")).done())
+    let agent = str_at(at(at(made, "value"), "agent"), "id") ?? String()
+    let c = try app.cmd("t_2", "conversation.create", Obj.new().s("agent", agent.copy()).done())
+    let chat = str_at(at(c, "value"), "conversation") ?? String()
+
+    // --- A task runs to the end, in a conversation of its own ---
+    var mark = app.frames.len()
+    let first = try start(mut app, "t_3", agent.copy(), "Count the socks", "/sleep 800\nall the socks counted")
+    let running = try wait_task(mut app, mark, first.copy(), "running")
+    let conversation = str_at(running.copy(), "conversation") ?? String()
+    try check(conversation.len() > 0 and conversation != chat and str_at(running, "run") != none, "task.start starts a task, running in a conversation of its own")
+    var marked = false
+    for f in app.frames {
+        if str_at(f.copy(), "kind") == some(String("conversation.created")) and str_at(at(f, "conversation"), "task") == some(first.copy()) { marked = true }
+    }
+    try check(marked, "and its conversation says which task it is")
+    let done = try wait_task(mut app, mark, first.copy(), "done")
+    try check(str_at(done, "result") == some(String("all the socks counted")), "it ends done, with what the agent said")
+
+    // --- The chat stays free while a task runs ---
+    mark = app.frames.len()
+    let long = try start(mut app, "t_4", agent.copy(), "Sleep on it", "/sleep 20000\nnever")
+    _ = try wait_task(mut app, mark, long.copy(), "running")
+    try app.send(Obj.new().s("t", String("send")).s("cid", String("m_1")).s("conversation", chat.copy()).s("text", String("hello")).done())
+    let ack = try app.until("ack", "")
+    try check(str_at(ack, "run") != none, "a message in the chat starts at once, beside a running task")
+
+    // --- Pause and resume ---
+    mark = app.frames.len()
+    _ = try task_cmd(mut app, "t_5", "task.pause", long.copy())
+    _ = try wait_task(mut app, mark, long.copy(), "paused")
+    try check(true, "task.pause stops it, paused")
+    let refused = try task_cmd(mut app, "t_6", "task.retry", long.copy())
+    try check(str_at(at(refused, "error"), "code") == some(String("not_now")), "a paused task isn't retried, it's resumed")
+    mark = app.frames.len()
+    _ = try task_cmd(mut app, "t_7", "task.resume", long.copy())
+    _ = try wait_task(mut app, mark, long.copy(), "running")
+    _ = try wait_task(mut app, mark, long.copy(), "done")
+    try check(true, "task.resume carries it on, to the end")
+
+    // --- Cancel and retry ---
+    mark = app.frames.len()
+    let doomed = try start(mut app, "t_8", agent.copy(), "Too long", "/sleep 20000\nnever")
+    _ = try wait_task(mut app, mark, doomed.copy(), "running")
+    _ = try task_cmd(mut app, "t_9", "task.cancel", doomed.copy())
+    _ = try wait_task(mut app, mark, doomed.copy(), "cancelled")
+    try check(true, "task.cancel cancels it")
+    mark = app.frames.len()
+    _ = try task_cmd(mut app, "t_10", "task.retry", doomed.copy())
+    let again = try wait_task(mut app, mark, doomed.copy(), "running")
+    try check(int_at(again, "attempts") == some(2), "task.retry tries it again, as its second attempt")
+    _ = try wait_task(mut app, mark, doomed.copy(), "done")
+
+    mark = app.frames.len()
+    let broken = try start(mut app, "t_11", agent.copy(), "Breaks", "/fail the socks ran out")
+    let failed = try wait_task(mut app, mark, broken.copy(), "failed")
+    try check((str_at(failed, "error") ?? String()).contains("the socks ran out"), "a task whose run fails is failed, with why")
+    mark = app.frames.len()
+    _ = try task_cmd(mut app, "t_12", "task.retry", broken.copy())
+    let retried = try wait_task(mut app, mark, broken.copy(), "running")
+    try check(str_at(retried, "error") == none, "and tried again, it's running, with the error gone")
+    _ = try wait_task(mut app, mark, broken.copy(), "done")
+
+    // --- An agent starts one ---
+    mark = app.frames.len()
+    try app.send(Obj.new().s("t", String("send")).s("cid", String("m_2")).s("conversation", chat.copy()).s("text", String(#"/mcp start_task {"title":"On my own","prompt":"done by myself"}"#)).done())
+    var said = String()
+    while not said.contains("start_task") {
+        said = reply_text(try app.reply())
+    }
+    try check(said.contains("Started, as task"), "an agent starts a task with start_task")
+    var by_agent = String()
+    for f in app.frames {
+        if str_at(f.copy(), "kind") == some(String("task.updated")) and str_at(at(f.copy(), "task"), "by") == some(agent.copy()) {
+            by_agent = str_at(at(f, "task"), "id") ?? String()
+        }
+    }
+    if by_agent.len() == 0 { by_agent = str_at(at(try app.until("event", "task.updated"), "task"), "id") ?? String() }
+    let theirs = try wait_task(mut app, mark, by_agent.copy(), "done")
+    try check(str_at(theirs, "result") == some(String("done by myself")), "and works on it")
+
+    let listed = try app.cmd("t_13", "task.list", Obj.new().done())
+    try check(at(at(listed, "value"), "tasks").len() == 5, "task.list lists every task")
+    // --- A restart in the middle of one ---
+    mark = app.frames.len()
+    let cut = try start(mut app, "t_14", agent, "Cut short", "/sleep 20000\nnever")
+    let cut_run = str_at(try wait_task(mut app, mark, cut.copy(), "running"), "run") ?? String()
+    let seq = app.seq
+    app.close()
+    return (seq, cut, cut_run)
+}
+
+fn after_restart(i: Instance, seq: i64, cut: String, cut_run: String) ! Error {
+    var app = try App.connect(i.base.copy(), i.token.copy(), seq)
+    // The run the restart cut short failed, as the catch-up says; the task
+    // carries on with a new one.
+    var status = String()
+    for f in app.frames {
+        if str_at(f.copy(), "kind") == some(String("run.finished")) and str_at(f.copy(), "run") == some(cut_run.copy()) { status = str_at(f, "status") ?? String() }
+    }
+    try check(status == "failed", "a restart fails the task's run")
+    let mark: usize = 0
+    let again = try wait_task(mut app, mark, cut.copy(), "running")
+    try check(str_at(again, "run") != some(cut_run.copy()), "and the task carries on after it, with a new run")
+    _ = try wait_task(mut app, mark, cut, "done")
+    app.close()
+}
+
+fn main() ! Error {
+    let inst = try Instance.start()
+    var failure: String? = none
+    var left: (i64, String, String) = (0, String(), String())
+    match run(inst.copy()) {
+        ok(l) => left = l,
+        err(e) => failure = some("{e}"),
+    }
+    if failure != none {
+        inst.stop()
+    } else {
+        let (seq, cut, cut_run) = left
+        let back = try inst.restart()
+        match after_restart(back.copy(), seq, cut, cut_run) {
+            ok => {},
+            err(e) => failure = some("{e}"),
+        }
+        back.stop()
+    }
+    if let f = failure {
+        eprintln("\n{f}")
+        exit(1)
+    }
+    println("\ntasks: all good")
+}

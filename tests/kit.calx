@@ -106,10 +106,39 @@ impl Instance {
         return Instance { server: server, data: self.data, base: base, token: self.token }
     }
 
+    /// Stops the instance, and removes the folder the kit made for its data, with
+    /// everything in it. A folder anywhere else is left as it is.
     pub fn stop(own self) {
         var s = self.server
         s.kill()
         _ = s.wait()
+        remove_scratch(self.data)
+    }
+}
+
+/// Removes the folder of the system's temporary folder that `data` is in, when it's one
+/// `fs.temp_dir` made (a `calx-` folder there), as a test's instance folders are. Anything
+/// else, and a folder something still holds open, is left as it is.
+pub fn remove_scratch(data: String) {
+    let probe = match fs.temp_dir() {
+        ok(p) => p,
+        err(_) => return,
+    }
+    let probe_name = probe.replace("\\", "/")
+    let cut = probe_name.find_last("/") ?? 0
+    let root = probe_name[..cut].copy()
+    match fs.remove_dir(probe) {
+        ok => {},
+        err(_) => {},
+    }
+    let path = data.replace("\\", "/")
+    if cut == 0 or not path.starts_with("{root}/calx-") { return }
+    let rest = path[root.len() + 1..].copy()
+    let name = rest[..(rest.find("/") ?? rest.len())].copy()
+    if name.len() <= 5 { return }
+    match fs.remove_dir_all("{root}/{name}") {
+        ok => {},
+        err(_) => {},
     }
 }
 
@@ -174,11 +203,12 @@ impl App {
     }
 
     /// Reads frames until one whose `t` is `t` (and, for events, whose kind is `kind`),
-    /// and gives it. Every frame read is kept in `frames`.
-    pub fn until(a: mut App, t: str, kind: str) -> Json ! Error {
+    /// and gives it. Every frame read is kept in `frames`. Each frame may take
+    /// `wait_ms` to come.
+    pub fn until(a: mut App, t: str, kind: str, wait_ms: u32 = 30000) -> Json ! Error {
         loop {
-            let m = try a.ws.receive(30000) else {
-                fail "no {t} {kind} came in 30 s"
+            let m = try a.ws.receive(wait_ms) else {
+                fail "no {t} {kind} came in {wait_ms / 1000} s"
             }
             let text = match m {
                 Message.Text(s) => s,

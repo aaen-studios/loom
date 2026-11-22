@@ -1,0 +1,446 @@
+module core.relay
+
+// The phone's side of Noise (protocol/protocol.md, "Over Noise"): how a core
+// reaches an instance in a desktop app. Such a place is written
+//
+//     noise://<the instance's Noise key, hex>@192.168.1.20:47420,100.101.1.2:47420
+//
+// with the PC's addresses in the order to try them: the Wi-Fi first, then
+// Tailscale. The relay listens on 127.0.0.1, on a thread of its own, and the
+// rest of the core talks to it as to any instance: each /ws it opens there
+// becomes a Noise socket to the PC, and its HTTP requests go through one more,
+// so nothing else in the core knows the difference.
+import std.bytes
+import std.crypto.{NoiseHandshake, NoiseTransport, X25519PublicKey}
+import std.http.server.{Request, Response, Server, ServerSocket}
+import std.http.websocket
+import std.http.websocket.{WebSocket}
+import std.net.{Ip, interfaces}
+import std.net.mdns.{find}
+import std.time.{Instant}
+import std.thread.{Task}
+import shared.noise
+import shared.noise.{Joiner, Opened}
+import shared.obj.{Obj, at, int_at, str_at}
+import shared.protocol
+
+const SCHEME: str = "noise://"
+
+// How long an address gets to answer before the next is tried.
+const OPEN_MS: u32 = 5000
+
+/// A place reached over Noise: the instance's Noise key and the addresses to try.
+pub struct Place {
+    pub key: List<u8>
+    pub addresses: List<String>    // host:port
+}
+
+/// Whether `server` is a place reached over Noise.
+pub fn is_place(server: String) -> bool {
+    return server.starts_with(SCHEME)
+}
+
+/// The place `server` names, or none if it isn't one.
+pub fn place(server: String) -> Place? {
+    if not is_place(server.copy()) { return none }
+    let rest = server[SCHEME.len()..].copy()
+    let at_sign = rest.find("@") else return none
+    let key = bytes.from_hex(rest[..at_sign].copy()) else return none
+    if key.len() != 32 { return none }
+    var addresses = List<String>()
+    for a in rest[at_sign + 1..].split(",") {
+        let t = a.trim().trim_suffix("/").copy()
+        if t.len() > 0 { addresses.push(t) }
+    }
+    if addresses.len() == 0 { return none }
+    return some(Place { key: key, addresses: addresses })
+}
+
+/// The place's address, as `place` reads it.
+pub fn write(p: Place) -> String {
+    return "{SCHEME}{bytes.hex(p.key.copy())}@{p.addresses.join(",")}"
+}
+
+/// This machine's addresses a phone may reach it at on `port`, in the order to
+/// try them: the local network's first (10/8, 172.16/12, 192.168/16), then
+/// Tailscale's (100.64/10), from the interfaces that are up.
+pub fn own_addresses(port: u16) -> List<String> {
+    let found = match interfaces() {
+        ok(list) => list,
+        err(_) => return List<String>(),
+    }
+    var local = List<String>()
+    var tailnet = List<String>()
+    for i in found {
+        if not i.up or i.loopback or virtual(i.name.copy()) { continue }
+        for ip in i.addresses {
+            if let Ip.V4(b) = ip {
+                let text = "{b[0]}.{b[1]}.{b[2]}.{b[3]}:{port}"
+                let private = b[0] == 10u8 or (b[0] == 172u8 and b[1] >= 16u8 and b[1] <= 31u8) or (b[0] == 192u8 and b[1] == 168u8)
+                let tailscale = b[0] == 100u8 and b[1] >= 64u8 and b[1] <= 127u8
+                if private and not local.contains(text.copy()) { local.push(text) } else if tailscale and not tailnet.contains(text.copy()) { tailnet.push(text) }
+            }
+        }
+    }
+    local.extend(tailnet)
+    return local
+}
+
+// How often the relay may look for the PC with mDNS, when none of its addresses answer.
+const LOOK_EVERY_MS: u64 = 30000
+
+// When the relay last looked for the PC with mDNS.
+struct Looked {
+    at: Instant?
+}
+
+impl Looked {
+    // Whether it may look again, and if so, that it is.
+    fn may(mut self) -> bool {
+        let now = unsafe { Instant.now() }
+        if let last = self.at {
+            if now.nanos_since(last) / 1000000 < LOOK_EVERY_MS { return false }
+        }
+        self.at = some(now)
+        return true
+    }
+}
+
+/// The addresses the instance with the Noise key `key` says it's at on the local
+/// network, with mDNS (server/announce.calx), in the order to try them. Looking
+/// takes 3 seconds.
+pub fn look_up(key: List<u8>) -> List<String> {
+    let found = match find(String("_loom._tcp")) {
+        ok(f) => f,
+        err(_) => return List<String>(),
+    }
+    let wanted = bytes.hex(key)
+    var out = List<String>()
+    for s in found {
+        if s.property("key") != some(wanted.copy()) { continue }
+        for a in ranked(s.addresses.copy(), s.port) {
+            if not out.contains(a.copy()) { out.push(a.copy()) }
+        }
+    }
+    return out
+}
+
+/// IPv4 addresses on `port` in the order a phone tries them: the home network's
+/// usual 192.168/16 and 10/8 first, then 172.16/12, where virtual machines' and
+/// containers' networks often are, then Tailscale's 100.64/10. Others are left out.
+fn ranked(ips: List<Ip>, port: u16) -> List<String> {
+    var tiers: List<List<String>> = [List<String>(), List<String>(), List<String>(), List<String>()]
+    for ip in ips {
+        if let Ip.V4(b) = ip {
+            let text = "{b[0]}.{b[1]}.{b[2]}.{b[3]}:{port}"
+            let tier: usize = if b[0] == 192u8 and b[1] == 168u8 { 0 } else if b[0] == 10u8 { 1 } else if b[0] == 172u8 and b[1] >= 16u8 and b[1] <= 31u8 { 2 } else if b[0] == 100u8 and b[1] >= 64u8 and b[1] <= 127u8 { 3 } else { 9 }
+            if tier < 4 { tiers[tier].push(text) }
+        }
+    }
+    var out = List<String>()
+    for t in tiers {
+        out.extend(t.copy())
+    }
+    return out
+}
+
+/// Whether an interface named `name` is a network inside this machine, for
+/// virtual machines and containers, which no phone reaches: Hyper-V's and
+/// WSL's switches on Windows, Docker's, Podman's and libvirt's bridges.
+fn virtual(name: String) -> bool {
+    let n = name.to_lower_root()
+    let inside: List<str> = ["vethernet", "docker", "br-", "veth", "virbr", "vmnet", "vboxnet", "podman", "cni", "lxc", "lxd"]
+    for prefix in inside {
+        if n.starts_with(prefix) { return true }
+    }
+    return n.contains("virtualbox") or n.contains("vmware") or n.contains("hyper-v")
+}
+
+/// What the credential store keeps a place's token under: its key alone, so a
+/// PC that's found at new addresses keeps it.
+pub fn keyring_name(server: String) -> String {
+    if let p = place(server.copy()) { return "{SCHEME}{bytes.hex(p.key)}" }
+    return server.copy()
+}
+
+// A Noise socket to the PC.
+struct Tunnel {
+    ws: WebSocket?
+    hs: NoiseHandshake?        // until the handshake is done
+    t: NoiseTransport?
+    j: Joiner
+    tried: usize               // the address it's on
+    queued: List<List<u8>>     // messages waiting for the handshake
+    local: ServerSocket?       // the core's /ws it carries, for a session's
+    calls: Map<i64, Request>   // the core's HTTP requests it carries, by id
+}
+
+struct Relay {
+    place: Place
+    ready: Sender<String>
+    stop: Receiver<bool>
+}
+
+/// Starts the relay to `p`: its thread, what stops it, and its http:// address.
+pub fn start(p: Place) -> (Thread, Sender<bool>, String) ! Error {
+    var ready = Receiver<String>()
+    let stop = Receiver<bool>()
+    let stop_to = stop.sender()
+    let t = unsafe { Thread.spawn(Relay { place: p.copy(), ready: ready.sender(), stop: stop }) }
+    let said = unsafe { ready.wait_for(10000000000) } else { fail "the relay didn't start" }
+    if said.starts_with("error:") { fail "the relay didn't start: {said[6..]}" }
+    return (t, stop_to, said)
+}
+
+impl Task for Relay {
+    fn run(own self) {
+        var r = self
+        let key = X25519PublicKey.from_bytes(r.place.key.copy()) else {
+            r.ready.send(String("error:the place's key isn't 32 bytes"))
+            return
+        }
+        var server = match Server.listen(0, String("127.0.0.1")) {
+            ok(s) => s,
+            err(e) => {
+                r.ready.send("error:{e}")
+                return
+            },
+        }
+        server.log = false
+        server.max_message = protocol.MAX_FRAME
+        server.ping_interval_ms = 0
+        r.ready.send("http://127.0.0.1:{server.port}")
+        var reaching = r.place.copy()
+        var looked = Looked { at: none }
+        var sessions = Map<u32, Tunnel>()
+        var http: Tunnel? = none
+        var next_id: i64 = 1
+        loop {
+            if r.stop.next() != none { break }
+            match server.next_event(10) {
+                some(Request(req)) => {
+                    if req.path == "/ws" and req.method == "GET" {
+                        match server.upgrade(req.copy()) {
+                            ok(s) => {
+                                var t = open(reaching, key, 0)
+                                t.local = some(s)
+                                sessions.insert(s.id(), t)
+                            },
+                            err(_) => {},
+                        }
+                    } else {
+                        if http == none { http = some(open(reaching, key, 0)) }
+                        if let t = mut http {
+                            let id = next_id
+                            next_id += 1
+                            var headers = Obj.new()
+                            for name in ["Authorization", "Content-Type"] {
+                                if let v = req.header(String(name)) { headers = headers.s(name, v) }
+                            }
+                            put(mut t, noise.with_head(noise.REQUEST, Obj.new().i("id", id).s("method", req.method.copy()).s("path", req.target.copy()).j("headers", headers.done()).done(), req.body.copy()))
+                            t.calls.insert(id, req)
+                        }
+                    }
+                },
+                some(Message(s, Text(text))) => {
+                    if let t = mut sessions.find(s.id()) { put(mut t, noise.frame(text)) }
+                },
+                some(Closed(s, _, _)) => {
+                    if let t = sessions.remove(s.id()) {
+                        var gone = t
+                        if let ws = gone.ws.take() { ws.close() }
+                    }
+                },
+                _ => {},
+            }
+            for t in mut sessions.values() {
+                pump(mut server, mut t, mut reaching, key, mut looked)
+            }
+            var http_ended = false
+            if let t = mut http {
+                pump(mut server, mut t, mut reaching, key, mut looked)
+                http_ended = t.ws == none
+            }
+            // One that ended answered what it carried, and the next request opens another.
+            if http_ended { http = none }
+        }
+        for t in mut sessions.values() {
+            if let ws = t.ws.take() { ws.close() }
+        }
+        if let t = mut http {
+            if let ws = t.ws.take() { ws.close() }
+        }
+        server.shutdown()
+    }
+}
+
+// A Noise socket to the address `n` of `p`, with the handshake's first message on its way.
+fn open(p: Place, key: X25519PublicKey, n: usize) -> Tunnel {
+    var t = Tunnel { ws: none, hs: none, t: none, j: Joiner.new(), tried: n, queued: List<List<u8>>(), local: none, calls: Map<i64, Request>() }
+    dial(mut t, p, key)
+    return t
+}
+
+fn dial(t: mut Tunnel, p: Place, key: X25519PublicKey) {
+    var h = noise.initiator(key)
+    let ws = websocket.open("ws://{p.addresses[t.tried]}{noise.PATH}", [], OPEN_MS, noise.LONGEST)
+    match h.write_message([]) {
+        ok(first) => match ws.send_binary(first) {
+            ok => {},
+            err(_) => {},    // pump hears how it ended
+        },
+        err(_) => {},
+    }
+    t.ws = some(ws)
+    t.hs = some(h)
+}
+
+// Sends a message to the PC, or keeps it until the handshake is done.
+fn put(t: mut Tunnel, message: List<u8>) {
+    if let tr = mut t.t {
+        if let ws = t.ws {
+            for piece in noise.seal(mut tr, message) {
+                match ws.send_binary(piece) {
+                    ok => {},
+                    err(_) => {},
+                }
+            }
+        }
+        return
+    }
+    t.queued.push(message.copy())
+}
+
+// What came from the PC since the last turn.
+fn pump(server: mut Server, t: mut Tunnel, p: mut Place, key: X25519PublicKey, looked: mut Looked) {
+    var came = List<List<u8>>()
+    var ended: websocket.Error? = none
+    if let ws = t.ws {
+        loop {
+            match ws.receive(0) {
+                ok(some(websocket.Message.Binary(b))) => came.push(b),
+                ok(some(_)) => {},
+                ok(none) => break,
+                err(e) => {
+                    ended = some(e)
+                    break
+                },
+            }
+        }
+    }
+    for b in came {
+        if let h = t.hs.take() {
+            var hs = h
+            match hs.read_message(b.copy()) {
+                ok(_) => {
+                    t.t = some(hs.transport())
+                    let waiting = t.queued.copy()
+                    t.queued = List<List<u8>>()
+                    for m in waiting { put(mut t, m.copy()) }
+                },
+                err(_) => {
+                    end(mut server, mut t, 4005u16, String("the Noise handshake failed"))
+                    return
+                },
+            }
+            continue
+        }
+        var tr = t.t.take() else { continue }
+        let opened = t.j.take(mut tr, b.copy())
+        t.t = some(tr)
+        match opened {
+            Opened.Bad => {
+                end(mut server, mut t, 4005u16, String("a Noise message didn't open"))
+                return
+            },
+            Opened.More => {},
+            Opened.Whole(m) => took(mut server, mut t, m),
+        }
+    }
+    let e = ended else { return }
+    // An address that didn't answer: the next one, if there is one. Past the
+    // last, the PC may have new addresses: it says them with mDNS on the local network.
+    let unreached = match e {
+        websocket.Error.Closed(_, _) => false,
+        _ => true,
+    }
+    if t.hs != none and unreached {
+        if t.tried + 1 >= p.addresses.len() and looked.may() {
+            for a in look_up(p.key.copy()) {
+                if not p.addresses.contains(a.copy()) { p.addresses.push(a.copy()) }
+            }
+        }
+        if t.tried + 1 < p.addresses.len() {
+            if let ws = t.ws.take() { ws.close() }
+            t.tried += 1
+            dial(mut t, p, key)
+            return
+        }
+    }
+    match e {
+        websocket.Error.Closed(code, reason) => end(mut server, mut t, code, reason),
+        _ => end(mut server, mut t, 1011u16, "can't reach the instance: {e}"),
+    }
+}
+
+// A whole message from the PC: a frame for the core's /ws, or an answer to one of its requests.
+fn took(server: mut Server, t: mut Tunnel, m: List<u8>) {
+    if m.len() == 0 { return }
+    if m[0] == noise.FRAME {
+        if let s = t.local {
+            _ = server.send_text(s, String.from_utf8(m[1..].copy()) ?? String())
+        }
+        return
+    }
+    if m[0] != noise.RESPONSE { return }
+    let (head, body) = noise.head_of(m) else return
+    let id = int_at(head.copy(), "id") ?? 0
+    let req = t.calls.remove(id) else return
+    let headers = at(head.copy(), "headers")
+    var res = Response.new(u16.wrap(int_at(head, "status") ?? 502), str_at(headers.copy(), "Content-Type") ?? String("application/octet-stream"), body)
+    for name in ["Content-Disposition", "Retry-After"] {
+        if let v = str_at(headers.copy(), name) { res = res.with_header(String(name), v) }
+    }
+    server.respond(req, res)
+}
+
+// The Noise socket ended: the core's /ws closes as it did, and its requests get 502.
+fn end(server: mut Server, t: mut Tunnel, code: u16, reason: String) {
+    if let ws = t.ws.take() { ws.close() }
+    if let s = t.local {
+        server.close_socket(s, code, reason.copy())
+    }
+    for (_, req) in t.calls {
+        let body = Obj.new().j("error", Obj.new().s("code", String("unreachable")).s("message", reason.copy()).done()).done()
+        server.respond(req, Response.json("{body}", 502))
+    }
+    t.calls = Map<i64, Request>()
+}
+
+@test
+fn reads_and_writes_a_place() {
+    let key = String("0707070707070707070707070707070707070707070707070707070707070707")
+    let text = "noise://{key}@192.168.1.20:47420, 100.101.1.2:47420"
+    let p = place(text) else panic("it didn't read")
+    assert(p.addresses.len() == 2 and p.addresses[1] == "100.101.1.2:47420")
+    let back = write(p)
+    assert(back == "noise://{key}@192.168.1.20:47420,100.101.1.2:47420")
+    assert(keyring_name(back) == "noise://{key}")
+    assert(place(String("noise://abcd@1.2.3.4:5")) == none)
+    assert(place(String("https://loom.example.com")) == none)
+    assert(keyring_name(String("https://loom.example.com")) == "https://loom.example.com")
+}
+
+@test
+fn networks_inside_the_machine_are_left_out() {
+    assert(virtual(String("vEthernet (WSL (Hyper-V firewall))")))
+    assert(virtual(String("docker0")) and virtual(String("br-3f2a")) and virtual(String("virbr0")))
+    assert(not virtual(String("Wi-Fi")) and not virtual(String("wlan0")) and not virtual(String("Tailscale")) and not virtual(String("tailscale0")) and not virtual(String("Ethernet")))
+}
+
+@test
+fn addresses_are_tried_home_network_first() {
+    let ips: List<Ip> = [Ip.V4([100u8, 101u8, 1u8, 2u8]), Ip.V4([172u8, 29u8, 64u8, 1u8]), Ip.V4([8u8, 8u8, 8u8, 8u8]), Ip.V4([192u8, 168u8, 1u8, 20u8]), Ip.V4([10u8, 0u8, 0u8, 5u8])]
+    let got = ranked(ips, 47420)
+    assert(got.join(",") == "192.168.1.20:47420,10.0.0.5:47420,172.29.64.1:47420,100.101.1.2:47420")
+}

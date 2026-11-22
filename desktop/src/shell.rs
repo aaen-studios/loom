@@ -68,6 +68,11 @@ impl Tray {
         })
     }
 
+    /// Ticks "Start at login" as it is, after Settings changed it.
+    pub fn set_login(&self, on: bool) {
+        self.login.set_checked(on);
+    }
+
     /// What happened in the tray since the last look.
     pub fn actions(&self) -> Vec<TrayAction> {
         let mut out = Vec::new();
@@ -96,18 +101,102 @@ impl Tray {
     }
 }
 
+/// Starts the system's own dictation, which types what's said into the field that has
+/// the focus: Windows voice typing, which Win+H opens. False where there's none to start.
+#[cfg(windows)]
+pub fn dictate() -> bool {
+    use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
+        SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP, VK_LWIN,
+    };
+    let key = |vk: u16, up: bool| INPUT {
+        r#type: INPUT_KEYBOARD,
+        Anonymous: INPUT_0 {
+            ki: KEYBDINPUT {
+                wVk: vk,
+                wScan: 0,
+                dwFlags: if up { KEYEVENTF_KEYUP } else { 0 },
+                time: 0,
+                dwExtraInfo: 0,
+            },
+        },
+    };
+    let h = u16::from(b'H');
+    let keys = [
+        key(VK_LWIN, false),
+        key(h, false),
+        key(h, true),
+        key(VK_LWIN, true),
+    ];
+    // SAFETY: `keys` is an array of initialised INPUTs that outlives the call, and its
+    // length and element size are passed as SendInput expects.
+    let sent = unsafe {
+        SendInput(
+            keys.len() as u32,
+            keys.as_ptr(),
+            std::mem::size_of::<INPUT>() as i32,
+        )
+    };
+    sent == keys.len() as u32
+}
+
+#[cfg(not(windows))]
+pub fn dictate() -> bool {
+    false
+}
+
+/// What a notification is about: the server's folder ("" for the one on screen first),
+/// the agent and the conversation, which a click on it opens.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct About {
+    pub server: String,
+    pub agent: String,
+    pub conversation: String,
+}
+
+/// The notifications clicked since the app last looked, in the order they were.
+static CLICKED: std::sync::Mutex<Vec<About>> = std::sync::Mutex::new(Vec::new());
+
+/// The notifications clicked since the last call.
+pub fn clicked() -> Vec<About> {
+    CLICKED
+        .lock()
+        .map(|mut c| std::mem::take(&mut *c))
+        .unwrap_or_default()
+}
+
+/// A system notification, with its sound or without. A click on it, while the app
+/// runs, opens what it's about.
+#[cfg(windows)]
+pub fn notify(title: &str, body: &str, about: Option<About>, sound: bool) {
+    let toast = tauri_winrt_notification::Toast::new(app_id())
+        .title(title)
+        .text1(body)
+        .sound(sound.then_some(tauri_winrt_notification::Sound::Default))
+        .on_activated(move |_| {
+            if let (Some(a), Ok(mut c)) = (about.clone(), CLICKED.lock()) {
+                c.push(a);
+            }
+            Ok(())
+        });
+    if let Err(e) = toast.show() {
+        eprintln!("loom: the notification didn't show: {e}");
+    }
+}
+
 /// A system notification.
-pub fn notify(title: &str, body: &str) {
+#[cfg(not(windows))]
+pub fn notify(title: &str, body: &str, _about: Option<About>, sound: bool) {
     let mut n = notify_rust::Notification::new();
     n.summary(title).body(body);
-    #[cfg(windows)]
-    n.app_id(app_id());
+    if sound {
+        n.sound_name("message-new-instant");
+    }
     if let Err(e) = n.show() {
         eprintln!("loom: the notification didn't show: {e}");
     }
 }
 
-/// The id the installer gives loom's Start menu shortcut (installer.iss), which Windows
+/// The id loom-setup gives loom's Start menu shortcut (desktop/setup), which Windows
 /// shows notifications under.
 #[cfg(windows)]
 const APP_ID: &str = "AaenStudios.Loom";
@@ -128,61 +217,173 @@ fn app_id() -> &'static str {
     }
 }
 
-/// The program as it was before an update, kept beside it until the next start.
-fn old_exe() -> Option<std::path::PathBuf> {
-    Some(std::env::current_exe().ok()?.with_extension("old.exe"))
+/// The app icon in loom's theme: loom.exe carries the light one first and the dark
+/// one second (build.rs). The window's and the taskbar's icon change at once; loom's
+/// Start menu and desktop shortcuts are pointed at the matching one, which Explorer
+/// shows from then on, on a thread of their own.
+#[cfg(windows)]
+pub fn follow_theme(hwnd: isize, dark: bool) {
+    use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
+    use windows_sys::Win32::UI::WindowsAndMessaging::*;
+    let id: usize = if dark { 2 } else { 1 };
+    // SAFETY: icons from this program's own resources, shared so they're never freed,
+    // given to its own window.
+    unsafe {
+        let inst = GetModuleHandleW(std::ptr::null());
+        for (which, side) in [
+            (ICON_BIG, GetSystemMetrics(SM_CXICON)),
+            (ICON_SMALL, GetSystemMetrics(SM_CXSMICON)),
+        ] {
+            let icon = LoadImageW(inst, id as _, IMAGE_ICON, side, side, LR_SHARED);
+            if !icon.is_null() && hwnd != 0 {
+                SendMessageW(hwnd as _, WM_SETICON, which as usize, icon as isize);
+            }
+        }
+    }
+    std::thread::spawn(move || {
+        let Ok(exe) = std::env::current_exe() else {
+            return;
+        };
+        let mut links = Vec::new();
+        if let Ok(d) = std::env::var("APPDATA") {
+            links.push(
+                std::path::Path::new(&d).join(r"Microsoft\Windows\Start Menu\Programs\loom.lnk"),
+            );
+        }
+        if let Ok(d) = std::env::var("USERPROFILE") {
+            links.push(std::path::Path::new(&d).join(r"Desktop\Loom.lnk"));
+            links.push(std::path::Path::new(&d).join(r"Desktop\loom.lnk"));
+        }
+        for lnk in links {
+            if lnk.exists() {
+                if let Err(e) = point_icon(&lnk, &exe, if dark { 1 } else { 0 }) {
+                    eprintln!("loom: {} keeps its icon: {e}", lnk.display());
+                }
+            }
+        }
+    });
 }
 
-/// Puts the update at `new` in this program's place and starts it, for the app to quit
-/// after. The old program is kept as loom.old.exe, and put back if the swap fails.
-pub fn apply_update(new: &std::path::Path) -> std::io::Result<()> {
-    let exe = std::env::current_exe()?;
-    let old = old_exe().unwrap_or_else(|| exe.with_extension("old.exe"));
-    let _ = std::fs::remove_file(&old);
-    // Windows lets a running program be renamed, not replaced.
-    std::fs::rename(&exe, &old)?;
-    if let Err(e) = std::fs::copy(new, &exe) {
-        let _ = std::fs::rename(&old, &exe);
-        return Err(e);
+#[cfg(not(windows))]
+pub fn follow_theme(_hwnd: isize, _dark: bool) {}
+
+/// Points the shortcut at `lnk`, if it opens `exe`, at `exe`'s icon number `index`,
+/// keeping everything else it has, such as its AppUserModelID.
+#[cfg(windows)]
+fn point_icon(
+    lnk: &std::path::Path,
+    exe: &std::path::Path,
+    index: i32,
+) -> windows::core::Result<()> {
+    use windows::core::{Interface, HSTRING};
+    use windows::Win32::System::Com::*;
+    use windows::Win32::UI::Shell::{
+        IShellLinkW, SHChangeNotify, ShellLink, SHCNE_UPDATEITEM, SHCNF_PATHW,
+    };
+    // The same file, however each path is spelt: a shortcut keeps the long path, and a
+    // program's own can have short 8.3 names in it, as C:\Users\RUNNER~1 does.
+    let same = |a: &[u16], b: &std::path::Path| {
+        let end = a.iter().position(|&c| c == 0).unwrap_or(a.len());
+        let a = std::path::PathBuf::from(String::from_utf16_lossy(&a[..end]));
+        match (std::fs::canonicalize(&a), std::fs::canonicalize(b)) {
+            (Ok(x), Ok(y)) => x == y,
+            _ => a
+                .to_string_lossy()
+                .eq_ignore_ascii_case(&b.to_string_lossy()),
+        }
+    };
+    // SAFETY: COM on this thread, for a shell link that's loaded, read, changed only
+    // if it's loom's and its icon differs, saved and released.
+    unsafe {
+        let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+        let link: IShellLinkW = CoCreateInstance(&ShellLink, None, CLSCTX_INPROC_SERVER)?;
+        let file: IPersistFile = link.cast()?;
+        let path = HSTRING::from(lnk.as_os_str());
+        file.Load(&path, STGM_READWRITE)?;
+        let mut target = [0u16; 1024];
+        link.GetPath(&mut target, std::ptr::null_mut(), 0)?;
+        if !same(&target, exe) {
+            return Ok(());
+        }
+        let mut icon = [0u16; 1024];
+        let mut now = -1;
+        link.GetIconLocation(&mut icon, &mut now)?;
+        if now == index && same(&icon, exe) {
+            return Ok(());
+        }
+        link.SetIconLocation(&HSTRING::from(exe.as_os_str()), index)?;
+        file.Save(&path, true)?;
+        use std::os::windows::ffi::OsStrExt;
+        let wide: Vec<u16> = lnk.as_os_str().encode_wide().chain(Some(0)).collect();
+        SHChangeNotify(
+            SHCNE_UPDATEITEM,
+            SHCNF_PATHW,
+            Some(wide.as_ptr() as _),
+            None,
+        );
     }
-    std::process::Command::new(&exe)
-        .arg("--updated")
-        .arg(std::process::id().to_string())
-        .spawn()?;
     Ok(())
 }
 
-/// After an update: waits for the old program to end, so two never run at once, and
-/// removes it.
-pub fn after_update() {
-    let mut args = std::env::args().skip_while(|a| a != "--updated").skip(1);
-    if let Some(pid) = args.next().and_then(|p| p.parse::<u32>().ok()) {
-        wait_for_exit(pid);
+/// Hands the update at `setup`, the new release's loom-setup.exe that the core
+/// downloaded and checked against the signed manifest, to that setup, for the app to
+/// quit after. The setup waits for this program to end, checks its own signature,
+/// swaps loom.exe, starts the new one (in the tray when `background`) and puts the old
+/// one back if the new one doesn't start (desktop/setup).
+pub fn apply_update(setup: &std::path::Path, background: bool) -> std::io::Result<()> {
+    let mut started = std::process::Command::new(setup);
+    started
+        .arg("--update")
+        .arg("--pid")
+        .arg(std::process::id().to_string());
+    if background {
+        started.arg("--background");
     }
-    if let Some(old) = old_exe() {
-        let _ = std::fs::remove_file(old);
-    }
+    started.spawn()?;
+    Ok(())
 }
 
+/// Whether closing the window keeps loom in the tray, rather than quitting it.
+static KEEP_IN_TRAY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+
+pub fn keep_in_tray(on: bool) {
+    KEEP_IN_TRAY.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
+pub fn keeps_in_tray() -> bool {
+    KEEP_IN_TRAY.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Keeps the computer from sleeping, while `on`. Called from the window's thread.
 #[cfg(windows)]
-fn wait_for_exit(pid: u32) {
-    use windows_sys::Win32::Foundation::CloseHandle;
-    use windows_sys::Win32::System::Threading::{
-        OpenProcess, WaitForSingleObject, PROCESS_SYNCHRONIZE,
+pub fn keep_awake(on: bool) {
+    use windows_sys::Win32::System::Power::{
+        SetThreadExecutionState, ES_CONTINUOUS, ES_SYSTEM_REQUIRED,
     };
-    // SAFETY: the handle is checked, waited on for at most 15 s, and closed.
+    // SAFETY: it only sets this thread's execution state.
     unsafe {
-        let h = OpenProcess(PROCESS_SYNCHRONIZE, 0, pid);
-        if !h.is_null() {
-            WaitForSingleObject(h, 15000);
-            CloseHandle(h);
-        }
+        SetThreadExecutionState(if on {
+            ES_CONTINUOUS | ES_SYSTEM_REQUIRED
+        } else {
+            ES_CONTINUOUS
+        });
     }
 }
 
 #[cfg(not(windows))]
-fn wait_for_exit(_pid: u32) {
-    std::thread::sleep(std::time::Duration::from_secs(2));
+pub fn keep_awake(_on: bool) {}
+
+/// Whether the window is on screen, rather than hidden in the tray.
+#[cfg(windows)]
+pub fn window_shown(hwnd: isize) -> bool {
+    use windows_sys::Win32::UI::WindowsAndMessaging::IsWindowVisible;
+    // SAFETY: IsWindowVisible only reads the window's state, and takes any handle.
+    unsafe { IsWindowVisible(hwnd as _) != 0 }
+}
+
+#[cfg(not(windows))]
+pub fn window_shown(_hwnd: isize) -> bool {
+    true
 }
 
 fn launcher() -> Option<auto_launch::AutoLaunch> {
@@ -302,5 +503,79 @@ mod tests {
         assert_eq!(&jpeg[..3], &[0xFF, 0xD8, 0xFF]);
         let shot = image::load_from_memory(&jpeg).expect("a JPEG");
         assert!(shot.width().max(shot.height()) <= super::SHOT_SIDE);
+    }
+
+    /// loom.exe's icons, light then dark (build.rs), as this test program carries them too.
+    #[cfg(windows)]
+    #[test]
+    fn carries_the_light_and_the_dark_icon() {
+        use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
+        use windows_sys::Win32::UI::WindowsAndMessaging::{LoadImageW, IMAGE_ICON, LR_SHARED};
+        for id in [1usize, 2] {
+            // SAFETY: an icon from this program's own resources, shared, never freed.
+            let icon = unsafe {
+                LoadImageW(
+                    GetModuleHandleW(std::ptr::null()),
+                    id as _,
+                    IMAGE_ICON,
+                    32,
+                    32,
+                    LR_SHARED,
+                )
+            };
+            assert!(!icon.is_null(), "no icon {id}");
+        }
+    }
+
+    /// A shortcut to loom is pointed at the icon for the theme and keeps the rest; one
+    /// to another program is left alone.
+    #[cfg(windows)]
+    #[test]
+    fn points_loom_s_shortcut_at_the_theme_s_icon() {
+        use windows::core::{Interface, HSTRING};
+        use windows::Win32::System::Com::*;
+        use windows::Win32::UI::Shell::{IShellLinkW, ShellLink};
+        let dir = std::env::temp_dir().join(format!("loom-icon-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let exe = dir.join("loom.exe");
+        let other = dir.join("other.exe");
+        std::fs::write(&exe, b"MZ").unwrap();
+        std::fs::write(&other, b"MZ").unwrap();
+        let make = |lnk: &std::path::Path, target: &std::path::Path| unsafe {
+            let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+            let link: IShellLinkW =
+                CoCreateInstance(&ShellLink, None, CLSCTX_INPROC_SERVER).unwrap();
+            link.SetPath(&HSTRING::from(target.as_os_str())).unwrap();
+            link.SetIconLocation(&HSTRING::from(target.as_os_str()), 0)
+                .unwrap();
+            link.SetDescription(&HSTRING::from("kept")).unwrap();
+            let file: IPersistFile = link.cast().unwrap();
+            file.Save(&HSTRING::from(lnk.as_os_str()), true).unwrap();
+        };
+        let read = |lnk: &std::path::Path| unsafe {
+            let link: IShellLinkW =
+                CoCreateInstance(&ShellLink, None, CLSCTX_INPROC_SERVER).unwrap();
+            let file: IPersistFile = link.cast().unwrap();
+            file.Load(&HSTRING::from(lnk.as_os_str()), STGM_READ)
+                .unwrap();
+            let mut icon = [0u16; 1024];
+            let mut index = -1;
+            link.GetIconLocation(&mut icon, &mut index).unwrap();
+            let mut said = [0u16; 1024];
+            link.GetDescription(&mut said).unwrap();
+            let end = said.iter().position(|&c| c == 0).unwrap_or(0);
+            (index, String::from_utf16_lossy(&said[..end]))
+        };
+        let ours = dir.join("loom.lnk");
+        let theirs = dir.join("other.lnk");
+        make(&ours, &exe);
+        make(&theirs, &other);
+        super::point_icon(&ours, &exe, 1).unwrap();
+        super::point_icon(&theirs, &exe, 1).unwrap();
+        assert_eq!(read(&ours), (1, "kept".to_string()));
+        assert_eq!(read(&theirs).0, 0);
+        super::point_icon(&ours, &exe, 0).unwrap();
+        assert_eq!(read(&ours).0, 0);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -1,0 +1,331 @@
+module push.main
+
+// `loom-push`, the opt-in push relay (PLAN.md, "The push relay"): it only sends
+// notifications, for instances whose owners have no APNs key of their own.
+//
+//     loom-push serve [--data DIR] [--port N] [--host ADDR] [--per-hour N]
+//     loom-push key FILE.p8 --key-id ID --team TEAM --topic TOPIC [--data DIR]
+//     loom-push version
+//
+// Its folder holds `seal.key`, the X25519 key phones seal their APNs tokens
+// with (shared/seal.calx), made on the first start, and `apns.json`, its own
+// APNs key, which `key` sets. It keeps nothing else: no accounts, no tokens,
+// no logs of what it sends, only a count of each instance key's notifications
+// this hour, in memory, for the rate limit.
+//
+// GET /v1/key gives its X25519 public key. POST /v1/push takes a notification
+// signed with an instance's Ed25519 key (shared/pushrelay.calx), opens the
+// phone's sealed token, sends it to APNs, and forgets it. It answers 200 once
+// APNs has it, 410 when APNs says the token is gone, 401 for a bad signature or
+// a request more than five minutes out, 429 past the rate limit, and 502 when
+// APNs didn't take it.
+//
+// Run from source: calx push/main.calx serve
+import std.bytes.{base64, from_base64}
+import std.crypto.{Ed25519PublicKey, X25519Key}
+import std.env
+import std.fs
+import std.http.{Header, Request, Version, post}
+import std.http.server.{Response, Server}
+import std.http.server
+import std.io
+import std.json.{Json, parse}
+import std.process.{exit}
+import std.signal
+import std.time.{Timestamp}
+import shared.obj.{Obj, at, str_at}
+import shared.pushrelay
+import shared.seal
+import server.push.{APPLE, APPLE_SANDBOX, is_key, jwt}
+
+const VERSION: str = "0.1.0"
+const HOUR_MS: i64 = 3600000
+const TOKEN_MS: i64 = 3000000    // a provider token is made anew every 50 minutes
+const APNS_MS: u32 = 15000
+
+fn now() -> i64 {
+    return unsafe { Timestamp.now() }.unix_ms
+}
+
+struct Args {
+    words: List<String>
+    data: String
+    port: u16
+    host: String
+    per_hour: i64
+    apns: String    // where APNs is, for a test, or "" for Apple's
+    key_id: String
+    team: String
+    topic: String
+}
+
+fn read_args(given: List<String>) -> Args ! Error {
+    var a = Args { words: List<String>(), data: String("loom-push-data"), port: 8791, host: String("127.0.0.1"), per_hour: 600, apns: String(), key_id: String(), team: String(), topic: String() }
+    var i: usize = 0
+    while i < given.len() {
+        let w = given[i].copy()
+        if w.starts_with("--") {
+            if i + 1 >= given.len() { fail "{w} needs a value" }
+            let v = given[i + 1].copy()
+            if w == "--data" { a.data = v } else if w == "--host" { a.host = v } else if w == "--apns" { a.apns = v } else if w == "--key-id" { a.key_id = v } else if w == "--team" { a.team = v } else if w == "--topic" { a.topic = v } else if w == "--port" {
+                let port = u16.parse(v.copy()) else { fail "--port takes a number, not {v}" }
+                a.port = port
+            } else if w == "--per-hour" {
+                let n = i64.parse(v.copy()) else { fail "--per-hour takes a number, not {v}" }
+                a.per_hour = n
+            } else {
+                fail "unknown option {w}"
+            }
+            i += 2
+            continue
+        }
+        a.words.push(w)
+        i += 1
+    }
+    return a
+}
+
+// The relay's X25519 key, made on the first start.
+fn seal_key(data: String) -> X25519Key ! Error {
+    let path = "{data}/seal.key"
+    if fs.exists(path.copy()) {
+        let k = X25519Key.from_bytes(try fs.read(path.copy())) else { fail "{path} isn't a 32-byte key" }
+        return k
+    }
+    try fs.make_dir_all(data)
+    let k = X25519Key.generate()
+    let part = "{path}.part"
+    try fs.write(part.copy(), k.bytes())
+    if env.os() != "windows" { try fs.set_mode(part.copy(), 0o600) }
+    try fs.rename(part, path)
+    return k
+}
+
+// A notification on its way to APNs, and the request it answers.
+struct Sending {
+    id: i64
+    req: Request
+}
+
+// An instance key's notifications this hour.
+struct Count {
+    since: i64
+    n: i64
+}
+
+struct Relay {
+    server: Server
+    key: X25519Key
+    apns: Json    // the APNs key, key_id, team and topic
+    apns_at: String
+    per_hour: i64
+    counts: Map<String, Count>
+    sending: List<Sending>
+    asked: Map<i64, server.Request>
+    next: i64
+    signed: String
+    signed_at: i64
+}
+
+fn refuse(status: u16, code: str, message: str) -> Response {
+    return Response.json("{Obj.new().j("error", Obj.new().s("code", String(code)).s("message", String(message)).done()).done()}", status)
+}
+
+impl Relay {
+    fn run(mut self) {
+        loop {
+            match self.server.next_event(10) {
+                some(Request(req)) => self.handle(req),
+                none => {
+                    if signal.take() != none { break }
+                },
+                _ => {},
+            }
+            self.answer()
+        }
+        self.server.shutdown()
+    }
+
+    fn handle(mut self, req: own server.Request) {
+        if req.path == pushrelay.KEY_PATH and req.method == "GET" {
+            self.server.respond(req, Response.json("{Obj.new().s("key", base64(self.key.public_key().bytes())).done()}", 200))
+            return
+        }
+        if req.path != pushrelay.PUSH_PATH or req.method != "POST" {
+            self.server.respond(req, refuse(404, "not_found", "The relay has /v1/key and /v1/push, nothing else."))
+            return
+        }
+        // Who asks: an instance, by its key and its signature, now.
+        let instance = req.header(String(pushrelay.INSTANCE)) ?? String()
+        let time = i64.parse(req.header(String(pushrelay.TIME)) ?? String()) ?? 0
+        let sig = from_base64(req.header(String(pushrelay.SIGNATURE)) ?? String()) ?? List<u8>()
+        let signer = Ed25519PublicKey.from_bytes(from_base64(instance.copy()) ?? List<u8>())
+        let t = now()
+        if time < t - pushrelay.SKEW_MS or time > t + pushrelay.SKEW_MS {
+            self.server.respond(req, refuse(401, "stale", "The request's time is more than five minutes from the relay's."))
+            return
+        }
+        let k = signer else {
+            self.server.respond(req, refuse(401, "bad_signature", "X-Loom-Instance isn't an Ed25519 key."))
+            return
+        }
+        if not k.verify(pushrelay.signed_text(time, req.body.copy()), sig) {
+            self.server.respond(req, refuse(401, "bad_signature", "The signature isn't the instance key's."))
+            return
+        }
+        // How many it has sent this hour.
+        var c = self.counts.remove(instance.copy()) ?? Count { since: t, n: 0 }
+        if t - c.since >= HOUR_MS { c = Count { since: t, n: 0 } }
+        if c.n >= self.per_hour {
+            self.counts.insert(instance, c)
+            self.server.respond(req, refuse(429, "too_many", "This instance has sent as many notifications this hour as the relay takes."))
+            return
+        }
+        c.n += 1
+        self.counts.insert(instance, c)
+        // The phone's token, opened with the relay's key, and the notification.
+        let body = match parse(String.from_utf8(req.body.copy()) ?? String()) {
+            ok(j) => j,
+            err(_) => Json.Null,
+        }
+        let opened = seal.open(self.key.copy(), from_base64(str_at(body.copy(), "token") ?? String()) ?? List<u8>()) ?? List<u8>()
+        let phone = match parse(String.from_utf8(opened) ?? String()) {
+            ok(j) => j,
+            err(_) => Json.Null,
+        }
+        let token = str_at(phone.copy(), "token") ?? String()
+        if token.len() < 32 or token.len() > 200 {
+            self.server.respond(req, refuse(400, "bad_token", "The token wasn't sealed for this relay."))
+            return
+        }
+        let bearer = self.bearer() else {
+            self.server.respond(req, refuse(503, "no_apns_key", "The relay has no APNs key set up."))
+            return
+        }
+        let development = str_at(phone, "env") == some(String("development"))
+        let base = if self.apns_at.len() > 0 { self.apns_at.copy() } else if development { String(APPLE_SANDBOX) } else { String(APPLE) }
+        var headers: List<Header> = [
+            Header { name: String("authorization"), value: "bearer {bearer}" },
+            Header { name: String("apns-topic"), value: str_at(self.apns.copy(), "topic") ?? String() },
+            Header { name: String("apns-push-type"), value: String("alert") },
+            Header { name: String("apns-priority"), value: String("10") },
+            Header { name: String("content-type"), value: String("application/json") },
+        ]
+        let collapse = str_at(body.copy(), "collapse") ?? String()
+        if collapse.len() > 0 and collapse.len() <= 64 { headers.push(Header { name: String("apns-collapse-id"), value: collapse }) }
+        let sent = post("{base}/3/device/{token}", headers, "{at(body, "payload")}".to_bytes(), APNS_MS, 65536, version: Version.Http2)
+        self.next += 1
+        self.sending.push(Sending { id: self.next, req: sent })
+        self.asked.insert(self.next, req)
+    }
+
+    // The answers APNs has given, passed back.
+    fn answer(mut self) {
+        var waiting = List<Sending>()
+        for s in self.sending {
+            if not s.req.done() {
+                waiting.push(s)
+                continue
+            }
+            var r = s.req
+            let res = match r.wait() {
+                ok(got) => {
+                    if got.status == 200 {
+                        Response.json("{Obj.new().done()}", 200)
+                    } else {
+                        let said = match parse(String.from_utf8(got.body.copy()) ?? String()) {
+                            ok(j) => j,
+                            err(_) => Json.Null,
+                        }
+                        let reason = str_at(said, "reason") ?? String()
+                        if got.status == 410 or reason == "BadDeviceToken" or reason == "DeviceTokenNotForTopic" or reason == "Unregistered" {
+                            refuse(410, "gone", "APNs says the phone doesn't take push with this token any more.")
+                        } else {
+                            if got.status == 403 { self.signed = String() }
+                            Response.json("{Obj.new().j("error", Obj.new().s("code", String("apns")).s("message", "APNs answered {got.status} {reason}").done()).done()}", 502)
+                        }
+                    }
+                },
+                err(e) => Response.json("{Obj.new().j("error", Obj.new().s("code", String("apns")).s("message", "APNs didn't answer: {e}").done()).done()}", 502),
+            }
+            if let from = self.asked.remove(s.id) { self.server.respond(from, res) }
+        }
+        self.sending = waiting
+    }
+
+    // The provider token, made anew every 50 minutes.
+    fn bearer(mut self) -> String? {
+        if self.apns == Json.Null { return none }
+        let t = now()
+        if self.signed.len() > 0 and t - self.signed_at < TOKEN_MS { return some(self.signed.copy()) }
+        let made = jwt(self.apns.copy(), t / 1000) else return none
+        self.signed = made.copy()
+        self.signed_at = t
+        return some(made)
+    }
+}
+
+fn serve(a: Args) ! Error {
+    let key = try seal_key(a.data.copy())
+    let apns_path = "{a.data}/apns.json"
+    let apns = if fs.exists(apns_path.copy()) { try parse(try fs.read_text(apns_path) ?? String()) } else { Json.Null }
+    if apns == Json.Null { eprintln("loom-push: no APNs key yet: set one with `loom-push key FILE.p8 ...`") }
+    signal.handle()
+    var s = try Server.listen(a.port, a.host.copy())
+    s.log = false
+    try s.wake_on_signal()
+    println("loom-push: serving on http://{a.host}:{s.port}/, key {base64(key.public_key().bytes())}")
+    io.flush()
+    var r = Relay { server: s, key: key, apns: apns, apns_at: a.apns.copy(), per_hour: a.per_hour, counts: Map<String, Count>(), sending: List<Sending>(), asked: Map<i64, server.Request>(), next: 0, signed: String(), signed_at: 0 }
+    r.run()
+}
+
+// Sets the relay's APNs key, kept in its folder, readable only by it.
+fn set_key(a: Args) ! Error {
+    if a.words.len() != 2 { fail "loom-push key FILE.p8 --key-id ID --team TEAM --topic TOPIC" }
+    let pem = try fs.read_text(a.words[1].copy()) ?? String()
+    if not is_key(pem.copy()) { fail "{a.words[1]} isn't an APNs key: a .p8 file from Apple's developer site" }
+    if a.key_id.len() == 0 or a.team.len() == 0 or a.topic.len() == 0 { fail "give --key-id, --team and --topic (the app's bundle id)" }
+    try fs.make_dir_all(a.data.copy())
+    let path = "{a.data}/apns.json"
+    let part = "{path}.part"
+    try fs.write_text(part.copy(), "{Obj.new().s("key", pem).s("key_id", a.key_id.copy()).s("team", a.team.copy()).s("topic", a.topic.copy()).done()}")
+    if env.os() != "windows" { try fs.set_mode(part.copy(), 0o600) }
+    try fs.rename(part, path)
+    println("loom-push: the APNs key is set; restart the relay to use it")
+}
+
+fn run(a: Args, cmd: String) ! Error {
+    if cmd == "serve" {
+        try serve(a)
+    } else {
+        try set_key(a)
+    }
+}
+
+fn main() {
+    let given = env.args()
+    let a = match read_args(given) {
+        ok(a) => a,
+        err(e) => {
+            eprintln("loom-push: {e}")
+            exit(2)
+        },
+    }
+    let cmd = if a.words.len() > 0 { a.words[0].copy() } else { String() }
+    if cmd == "version" {
+        println("loom-push {VERSION}")
+        return
+    }
+    if cmd != "serve" and cmd != "key" {
+        eprintln("usage: loom-push serve [--data DIR] [--port N] [--host ADDR] [--per-hour N]\n       loom-push key FILE.p8 --key-id ID --team TEAM --topic TOPIC [--data DIR]")
+        exit(2)
+    }
+    match run(a, cmd) {
+        ok => {},
+        err(e) => {
+            eprintln("loom-push: {e}")
+            exit(1)
+        },
+    }
+}

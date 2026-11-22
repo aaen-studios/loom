@@ -8,7 +8,13 @@
 mod app;
 mod core;
 mod model;
+mod motion;
+mod panel;
+mod panel_test;
+mod perf;
+mod prefs;
 mod shell;
+mod smooth;
 mod thread;
 #[path = "../../design/generated/tokens.rs"]
 #[allow(dead_code)]
@@ -30,7 +36,7 @@ const FONTS: [&[u8]; 5] = [
 ];
 
 /// GPUI Kit's widgets in loom's colours, so inputs and Markdown match the rest.
-fn theme(cx: &mut App, dark: bool) {
+pub fn theme(cx: &mut App, dark: bool) {
     Theme::change(
         if dark {
             ThemeMode::Dark
@@ -42,8 +48,8 @@ fn theme(cx: &mut App, dark: bool) {
     );
     let p = Palette::new(dark);
     let t = Theme::global_mut(cx);
-    t.font_family = tokens::font::UI.into();
-    t.mono_font_family = tokens::font::MONO.into();
+    t.font_family = prefs::ui_font().into();
+    t.mono_font_family = prefs::mono_font().into();
     t.font_size = px(tokens::size::BODY);
     t.mono_font_size = px(tokens::size::SMALL);
     t.radius = px(tokens::radius::INPUT);
@@ -82,25 +88,31 @@ pub const VERSION: &str = match option_env!("LOOM_VERSION") {
 };
 
 fn main() {
+    perf::start();
     // Started by an agent of the instance in this app, for loom's own tools.
     if std::env::args().nth(1).as_deref() == Some("mcp") {
         std::process::exit(core::mcp());
     }
-    shell::after_update();
+    // The panel break-out test, which CI runs.
+    if std::env::args().nth(1).as_deref() == Some("--panel-test") {
+        let out = std::env::args()
+            .nth(2)
+            .unwrap_or_else(|| String::from("panel-test.json"));
+        panel_test::run(out.into());
+        return;
+    }
     gpui_kit::application().with_assets(AppAssets).run(|cx| {
         gpui_kit::init(cx);
         let fonts: Vec<Cow<'static, [u8]>> = FONTS.iter().map(|f| Cow::Borrowed(*f)).collect();
         if let Err(e) = cx.text_system().add_fonts(fonts) {
             eprintln!("loom: the fonts didn't load: {e}");
         }
-        let dark = match std::env::var("LOOM_THEME").as_deref() {
-            Ok("dark") => true,
-            Ok("light") => false,
-            _ => !matches!(
-                cx.window_appearance(),
-                WindowAppearance::Light | WindowAppearance::VibrantLight
-            ),
-        };
+        let kept = prefs::Prefs::load(&app::data_dir());
+        prefs::use_fonts(&kept);
+        let dark = kept.dark(!matches!(
+            cx.window_appearance(),
+            WindowAppearance::Light | WindowAppearance::VibrantLight
+        ));
         theme(cx, dark);
         let bounds = Bounds::centered(None, size(px(1120.), px(760.)), cx);
         gpui_kit::open_window(
@@ -112,6 +124,8 @@ fn main() {
                     ..TitleBar::title_bar_options()
                 }),
                 app_owns_titlebar_drag: true,
+                // A build for measuring opens behind what the person is doing.
+                focus: !cfg!(feature = "perf"),
                 ..Default::default()
             },
             cx,
@@ -123,15 +137,101 @@ fn main() {
 }
 
 // The icons loom uses beyond GPUI Kit's own, from the same Lucide set.
-gpui_kit::assets::icon_assets!(ExtraIcons, [Paperclip, FileText]);
+gpui_kit::assets::icon_assets!(
+    ExtraIcons,
+    [
+        Paperclip,
+        FileText,
+        Settings,
+        ArrowLeft,
+        ArrowRight,
+        Dices,
+        Pencil,
+        Activity,
+        Brain,
+        RotateCcw,
+        Trash,
+        Hand,
+        ShieldCheck,
+        Zap,
+        Check,
+        CircleUserRound,
+        Clock,
+        BookOpen,
+        Bot,
+        Plug,
+        Puzzle,
+        Smartphone,
+        Users,
+        Monitor,
+        Truck,
+        Power,
+        LogOut,
+        Globe,
+        X,
+        ListTodo,
+        Pause,
+        Play,
+        Pin,
+        PinOff,
+        MessageCircleQuestionMark,
+        GitBranch,
+        AppWindow,
+        Sheet,
+        SquareTerminal,
+        SlidersHorizontal,
+        Minus,
+        Square,
+        Copy,
+        Laptop,
+        Server,
+        Download,
+        KeyRound,
+        Import,
+        Table2,
+        Folder,
+        ExternalLink,
+        Bell,
+        Palette,
+        MessageSquare,
+        ArrowRightLeft,
+        Lightbulb
+    ]
+);
 
-/// GPUI Kit's assets, and loom's extra icons.
+/// loom's mark, the knot, beside the wordmark (design/logo/README.md).
+const KNOT: &str = "logo/knot.svg";
+
+/// GPUI Kit's assets, loom's extra icons, its mark, and the SVGs that come while it runs.
 struct AppAssets;
+
+/// SVGs that come while loom runs, by asset path, such as each brain's icon from the ACP
+/// Registry, which the instance fetches.
+static RUNTIME_SVGS: std::sync::LazyLock<
+    std::sync::RwLock<std::collections::HashMap<String, Vec<u8>>>,
+> = std::sync::LazyLock::new(Default::default);
+
+/// Keeps `svg` as the asset at `path`, unless it's there already, and gives the path.
+pub fn runtime_svg(path: &str, svg: &str) -> SharedString {
+    if let Ok(mut m) = RUNTIME_SVGS.write() {
+        m.entry(path.to_string())
+            .or_insert_with(|| svg.as_bytes().to_vec());
+    }
+    SharedString::from(path.to_string())
+}
 
 impl AssetSource for AppAssets {
     fn load(&self, path: &str) -> Result<Option<Cow<'static, [u8]>>> {
+        if path == KNOT {
+            return Ok(Some(Cow::Borrowed(include_bytes!(
+                "../../design/logo/knot.svg"
+            ))));
+        }
         if let Some(bytes) = ExtraIcons.load(path)? {
             return Ok(Some(bytes));
+        }
+        if let Some(bytes) = RUNTIME_SVGS.read().ok().and_then(|m| m.get(path).cloned()) {
+            return Ok(Some(Cow::Owned(bytes)));
         }
         gpui_kit::assets::Assets.load(path)
     }
@@ -139,6 +239,9 @@ impl AssetSource for AppAssets {
     fn list(&self, path: &str) -> Result<Vec<SharedString>> {
         let mut paths = gpui_kit::assets::Assets.list(path)?;
         paths.extend(ExtraIcons.list(path)?);
+        if KNOT.starts_with(path) {
+            paths.push(KNOT.into());
+        }
         paths.sort();
         paths.dedup();
         Ok(paths)

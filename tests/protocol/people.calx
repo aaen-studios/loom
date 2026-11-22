@@ -1,0 +1,330 @@
+module tests.protocol.people
+
+// Inviting and managing people (PLAN.md, "Accounts and invites"). The owner
+// makes an invite, and someone joins with it at POST /api/join/<code>,
+// picking a username and password, once for a one-use invite. A wrong code,
+// a taken username and a weak password are refused. A member can't invite or
+// manage anyone. The owner makes the member an admin, who then invites
+// members but not admins. Removing someone ends their sessions and their
+// token, and a person can delete their own account, but the owner can't.
+//
+//     calx tests/protocol/people.calx
+import std.http.{Header, post}
+import std.fs
+import std.json.{Json, parse}
+import std.keyring
+import std.random.{Random}
+import std.time.{Instant}
+import std.process.{exit}
+import shared.obj.{Obj, at, bool_at, int_at, str_at}
+import core.cache.{Cache}
+import core.conn.{Conn}
+import tests.kit.{App, Instance, check, device, json_of, loom, post_json}
+
+fn code_of(answer: Json) -> String {
+    return str_at(at(answer, "error"), "code") ?? String()
+}
+
+fn join(base: String, code: String, username: str, password: str) -> (u32, Json) ! Error {
+    let headers: List<Header> = [Header { name: String("Content-Type"), value: String("application/json") }]
+    var req = post("http://{base}/api/join/{code}", headers, "{Obj.new().s("username", String(username)).s("password", String(password)).j("device", device("Laptop")).done()}".to_bytes(), 30000, 1048576)
+    let r = try req.wait()
+    return (r.status, json_of(r.body))
+}
+
+fn refused(r: Json) -> String {
+    if bool_at(r.copy(), "ok") == some(true) { return String() }
+    return code_of(r)
+}
+
+// Whether the instance closes `app`'s socket as signed out.
+// The people log's entries, oldest first, as "by: text".
+fn entries(log: Json) -> List<String> {
+    var out = List<String>()
+    if let Json.Array(list) = at(log, "entries") {
+        for e in list { out.push("{str_at(e.copy(), "by") ?? String()}: {str_at(e, "text") ?? String()}") }
+    }
+    out.reverse()
+    return out
+}
+
+fn signed_out(app: mut App) -> bool {
+    loop {
+        match app.until("never", "") {
+            ok(_) => {},
+            err(e) => return "{e}".contains("4001"),
+        }
+    }
+}
+
+// The agent programs a person has (PLAN.md, "Agents and keys"): the owner
+// gives each to everyone, or only to some people, and shares its settings
+// with everyone or some of them.
+fn programs(owner: mut App, ann: mut App, ann_id: String, ann_chat: String) ! Error {
+    var owner_id = String()
+    if let Json.Array(list) = at(at(try owner.cmd("p_0", "user.list", Obj.new().done()), "value"), "users") {
+        for p in list {
+            if str_at(p.copy(), "role") == some(String("owner")) { owner_id = str_at(p, "user") ?? String() }
+        }
+    }
+    let to_none = try owner.cmd("p_1", "acp.members", Obj.new().s("name", String("fake")).j("members", Json.Array(List<Json>())).done())
+    try check("{at(at(to_none, "value"), "program")}".contains("\"members\":[]"), "the owner gives a program to no one but themselves")
+    try check(not "{try ann.cmd("p_1", "acp.list", Obj.new().done())}".contains("\"fake\""), "then a member's acp.list leaves it out")
+    try check(refused(try ann.cmd("p_2", "agent.create", Obj.new().s("name", String("Another")).s("acp_agent", String("fake")).done())) == "not_allowed", "and she can't make an agent on it")
+    try ann.send(Obj.new().s("t", String("send")).s("cid", String("p_3")).s("conversation", ann_chat).s("text", String("hello")).done())
+    let finished = "{try ann.until("event", "run.finished")}"
+    try check(finished.contains("\"failed\"") and finished.contains("hasn't given you the agent program fake"), "her agent already on it doesn't run, and says why")
+    try check(refused(try ann.cmd("p_4", "acp.members", Obj.new().s("name", String("fake")).j("members", Json.Null).done())) == "not_allowed", "a member can't give herself a program")
+    let me = Json.Array([Json.Str(owner_id)])
+    try check(refused(try owner.cmd("p_2", "acp.members", Obj.new().s("name", String("fake")).j("members", me).done())) == "bad_request", "the owner has every program already")
+
+    let her = Json.Array([Json.Str(ann_id.copy())])
+    _ = try owner.cmd("p_3", "acp.members", Obj.new().s("name", String("fake")).j("members", her.copy()).done())
+    try check("{try ann.cmd("p_5", "acp.list", Obj.new().done())}".contains("\"fake\""), "given it, she has it")
+    let shared = try owner.cmd("p_4", "acp.share", Obj.new().s("name", String("fake")).i("tokens", 1000).j("members", her).done())
+    try check("{at(at(at(shared, "value"), "program"), "share")}".contains(ann_id.copy()), "the owner shares its settings with her only")
+    let again = try owner.cmd("p_5", "acp.share", Obj.new().s("name", String("fake")).i("tokens", 2000).done())
+    try check("{at(at(at(again, "value"), "program"), "share")}".contains(ann_id), "a new budget keeps who it's for")
+    let everyone = try owner.cmd("p_6", "acp.members", Obj.new().s("name", String("fake")).j("members", Json.Null).done())
+    try check(at(at(at(everyone, "value"), "program"), "members") == Json.Null, "and gives the program back to everyone")
+}
+
+fn run() ! Error {
+    let inst = try Instance.start()
+    var owner = try App.connect(inst.base.copy(), inst.token.copy(), 0)
+
+    try check(refused(try owner.cmd("q_1", "invite.create", Obj.new().s("role", String("owner")).done())) == "bad_request", "an invite can't make an owner")
+    let made = try owner.cmd("q_2", "invite.create", Obj.new().done())
+    let v = at(made, "value")
+    let code = str_at(v.copy(), "code") ?? String()
+    try check(code.len() == 32 and str_at(v.copy(), "role") == some(String("member")) and int_at(v.copy(), "uses") == some(1), "the owner makes a one-use member invite")
+
+    let (bad, bad_body) = try join(inst.base.copy(), String("0123456789abcdef0123456789abcdef"), "ann", "a good password")
+    try check(bad == 403 and code_of(bad_body) == "bad_code", "a wrong invite code is refused")
+    let (taken, taken_body) = try join(inst.base.copy(), code.copy(), "elliot", "a good password")
+    try check(taken == 409 and code_of(taken_body) == "username_taken", "a username someone has is refused")
+    let (weak, weak_body) = try join(inst.base.copy(), code.copy(), "ann", "short")
+    try check(weak == 400 and code_of(weak_body) == "weak_password", "a weak password is refused")
+    let (ok_status, joined) = try join(inst.base.copy(), code.copy(), "ann", "a good password")
+    let ann_token = str_at(joined, "token") ?? String()
+    try check(ok_status == 200 and ann_token.len() > 0, "ann joins with the invite")
+    let heard = try owner.until("event", "user.joined")
+    try check(str_at(at(heard, "data"), "username") == some(String("ann")) or "{heard}".contains("\"ann\""), "the owner hears who joined")
+    let (again, again_body) = try join(inst.base.copy(), code.copy(), "bob", "a good password")
+    try check(again == 410 and code_of(again_body) == "used_up", "a one-use invite works once")
+
+    var ann = try App.connect(inst.base.copy(), ann_token.copy(), 0)
+    try check(refused(try ann.cmd("q_1", "invite.create", Obj.new().done())) == "not_allowed", "a member can't invite")
+    try check(refused(try ann.cmd("q_2", "user.list", Obj.new().done())) == "not_allowed", "or list people")
+    // Her agents don't run as the instance's own user, which would reach everyone's data.
+    let made_agent = try ann.cmd("q_a1", "agent.create", Obj.new().s("name", String("Hers")).s("acp_agent", String("fake")).done())
+    let ann_agent = str_at(at(at(made_agent, "value"), "agent"), "id") ?? String()
+    let ann_chat = str_at(at(try ann.cmd("q_a2", "conversation.create", Obj.new().s("agent", ann_agent).done()), "value"), "conversation") ?? String()
+    try ann.send(Obj.new().s("t", String("send")).s("cid", String("m_1")).s("conversation", ann_chat.copy()).s("text", String("hello")).done())
+    let finished = "{try ann.until("event", "run.finished")}"
+    try check(finished.contains("\"failed\"") and finished.contains("sandbox"), "a member's agent doesn't run outside a sandbox")
+
+    let people = at(at(try owner.cmd("q_3", "user.list", Obj.new().done()), "value"), "users")
+    let ann_id = match people {
+        Json.Array(list) => {
+            var found = String()
+            for p in list {
+                if str_at(p.copy(), "username") == some(String("ann")) { found = str_at(p, "user") ?? String() }
+            }
+            found
+        },
+        _ => String(),
+    }
+    try check(ann_id.len() > 0, "the owner lists people")
+    try programs(mut owner, mut ann, ann_id.copy(), ann_chat.copy())
+    try check(refused(try owner.cmd("q_4", "user.role", Obj.new().s("user", ann_id.copy()).s("role", String("admin")).done())) == "", "the owner makes ann an admin")
+    try check(refused(try ann.cmd("q_3", "invite.create", Obj.new().s("role", String("admin")).done())) == "not_allowed", "an admin can't make admins")
+    let ann_invite = try ann.cmd("q_4", "invite.create", Obj.new().i("uses", 2).done())
+    try check(refused(ann_invite.copy()) == "", "an admin invites members")
+    let bob_code = str_at(at(ann_invite, "value"), "code") ?? String()
+    let listed = "{try owner.cmd("q_5", "invite.list", Obj.new().done())}"
+    try check(listed.contains("\"uses\":2"), "invite.list shows the invite")
+
+    let (_, bob_joined) = try join(inst.base.copy(), bob_code, "bob", "bob's password")
+    var bob = try App.connect(inst.base.copy(), str_at(bob_joined, "token") ?? String(), 0)
+    try check(refused(try bob.cmd("q_0", "people.log", Obj.new().done())) == "not_allowed", "a member can't read the people log")
+    try check(refused(try bob.cmd("q_1", "account.delete", Obj.new().done())) == "", "bob deletes his own account")
+    try check(signed_out(mut bob), "and his session ends")
+    try check(refused(try owner.cmd("q_6", "account.delete", Obj.new().done())) == "not_allowed", "the owner can't delete the owner's account")
+
+    try check(refused(try owner.cmd("q_7", "user.remove", Obj.new().s("user", ann_id.copy()).done())) == "", "the owner removes ann")
+    try check(signed_out(mut ann), "her session ends")
+    let gone = match App.connect(inst.base.copy(), ann_token, 0) {
+        ok(a) => {
+            a.close()
+            false
+        },
+        err(_) => true,
+    }
+    try check(gone, "and her token is gone")
+    let after = "{try owner.cmd("q_8", "user.list", Obj.new().done())}"
+    try check(not after.contains("\"ann\"") and not after.contains("\"bob\""), "neither is listed")
+
+    // The people log keeps all that, oldest last, with who did it, past their going.
+    let log = at(try owner.cmd("q_9", "people.log", Obj.new().done()), "value")
+    let want = [
+        "elliot: elliot set up the instance, as its owner",
+        "elliot: Made an invite for a member, for 7 days",
+        "ann: ann joined as a member, with an invite from elliot",
+        "elliot: Gave fake to no one",
+        "elliot: Gave fake to ann",
+        "elliot: Shared fake's settings with ann, 1000 tokens a day each",
+        "elliot: Shared fake's settings with ann, 2000 tokens a day each",
+        "elliot: Gave fake to everyone",
+        "elliot: Made ann an admin",
+        "ann: Made an invite for 2 members, for 7 days",
+        "bob: bob joined as a member, with an invite from ann",
+        ": bob deleted their account",
+        "elliot: Removed ann, an admin, with everything of theirs",
+    ]
+    let got = entries(log)
+    var wanted = List<String>()
+    for w in want { wanted.push(String(w)) }
+    if got != wanted { eprintln("the people log:\n{got.join("\n")}") }
+    try check(got == wanted, "the people log says who joined, was invited, made an admin, left and was removed, and by whom")
+    var logged = false
+    for f in owner.frames {
+        if str_at(f.copy(), "kind") == some(String("people.logged")) { logged = true }
+    }
+    try check(logged, "the owner hears of each as it happens")
+    let first_page = at(try owner.cmd("q_10", "people.log", Obj.new().i("limit", 2).done()), "value")
+    let Json.Array(page) = at(first_page, "entries") else fail "people.log gave no entries"
+    let oldest = int_at(page[1].copy(), "id") ?? 0
+    let rest = entries(at(try owner.cmd("q_11", "people.log", Obj.new().i("before", oldest).done()), "value"))
+    try check(page.len() == 2 and rest.len() == 11 and rest[10] == "bob: bob joined as a member, with an invite from ann", "it comes a page at a time")
+    owner.close()
+
+    // Through real cores: the owner's gets the link to pass on, and a new one joins from it.
+    var random = Random.system()
+    let service = "loom-test-people-{random.next_u32()}"
+    let dir = try fs.temp_dir()
+    var owners = try Core.start(some("http://{inst.base}"), some(inst.token.copy()), service.copy(), "{dir}/owner.db")
+    var newcomer = try Core.start(none, none, service.copy(), "{dir}/new.db")
+    var failure: String? = none
+    match cores(mut owners, mut newcomer, inst.base.copy()) {
+        ok => {},
+        err(e) => failure = some("{e}"),
+    }
+    owners.stop()
+    newcomer.stop()
+    match keyring.delete(service, "http://{inst.base}") {
+        ok(_) => {},
+        err(_) => {},
+    }
+    if failure == none {
+        // The owner's own reset, from the command line, signs them out everywhere.
+        let done = try loom(inst.data.copy(), [String("user"), String("password"), String("elliot")]).input_text(String("the owner's new one\n")).output()
+        try check(done.status.success(), "loom user password gives the owner a new password")
+        let (status, login) = try post_json(inst.base.copy(), "/api/login", Obj.new().s("username", String("elliot")).s("password", String("the owner's new one")).j("device", device("Laptop")).done())
+        try check(status == 200, "which logs in")
+        var laptop = try App.connect(inst.base.copy(), str_at(login, "token") ?? String(), 0)
+        let later = entries(at(try laptop.cmd("q_1", "people.log", Obj.new().i("limit", 4).done()), "value"))
+        laptop.close()
+        if later.len() != 4 { eprintln("the people log:\n{later.join("\n")}") }
+        try check(later.contains(String("elliot: Made a reset link for cora")) and later.contains(String("cora: cora set a new password with a reset link, and was signed out everywhere else")) and later[3] == ": elliot was given a new password from the command line, and signed out everywhere", "so do a reset link, its use and a new password from the command line")
+        let old_gone = match App.connect(inst.base.copy(), inst.token.copy(), 0) {
+            ok(a) => {
+                a.close()
+                false
+            },
+            err(_) => true,
+        }
+        try check(old_gone, "and the owner's old devices are signed out")
+    }
+    inst.stop()
+    if let f = failure { fail "{f}" }
+}
+
+fn cores(owners: mut Core, newcomer: mut Core, base: String) ! Error {
+    try owners.until_state("live")
+    owners.send(Obj.new().s("t", String("cmd")).s("id", String("q_1")).s("name", String("invite.create")).j("args", Obj.new().done()).done())
+    let made = try owners.until("result")
+    let link = str_at(at(made, "value"), "link") ?? String()
+    try check(link.starts_with("http://{base}/join/"), "the owner's core gives the invite's link")
+    newcomer.send(Obj.new().s("t", String("invite.join")).s("id", String("l_1")).s("link", link).s("username", String("cora")).s("password", String("cora's password")).j("device", device("Laptop")).done())
+    let joined = try newcomer.until("core.login")
+    try check(bool_at(joined, "ok") == some(true), "a new core joins from the link")
+    try newcomer.until_state("live")
+    try check(true, "and connects")
+    newcomer.send(Obj.new().s("t", String("invite.join")).s("id", String("l_2")).s("link", String("https://example.com/nothing")).done())
+    let bad = try newcomer.until("core.login")
+    try check(code_of(bad) == "bad_link", "a link that isn't an invite is refused")
+
+    // A forgotten password: the owner makes a reset link, and cora sets a new one with it.
+    let cora = str_at(joined, "user") ?? String()
+    owners.send(Obj.new().s("t", String("cmd")).s("id", String("q_2")).s("name", String("password.reset")).j("args", Obj.new().s("user", cora).done()).done())
+    let reset = str_at(at(try owners.until("result"), "value"), "link") ?? String()
+    try check(reset.starts_with("http://{base}/reset/"), "the owner's core gives a reset link")
+    newcomer.send(Obj.new().s("t", String("reset.use")).s("id", String("l_3")).s("link", reset.copy()).s("password", String("cora's new password")).j("device", device("Phone")).done())
+    let again = try newcomer.until("core.login")
+    try check(bool_at(again, "ok") == some(true), "cora sets a new password with it, and is signed in")
+    let (old, _) = try post_json(base.copy(), "/api/login", Obj.new().s("username", String("cora")).s("password", String("cora's password")).j("device", device("Laptop")).done())
+    let (new_one, _) = try post_json(base.copy(), "/api/login", Obj.new().s("username", String("cora")).s("password", String("cora's new password")).j("device", device("Laptop")).done())
+    try check(old == 401 and new_one == 200, "the old password no longer works, and the new one does")
+    newcomer.send(Obj.new().s("t", String("reset.use")).s("id", String("l_4")).s("link", reset).s("password", String("another password")).done())
+    let used = try newcomer.until("core.login")
+    try check(code_of(used) == "bad_code", "a reset link works once")
+}
+
+// The app's side of a real core.
+struct Core {
+    to_core: Sender<String>
+    from_core: Receiver<String>
+    thread: Thread?
+}
+
+impl Core {
+    fn start(server: String?, token: String?, service: String, cache: String) -> Core ! Error {
+        let inbox = Receiver<String>()
+        let to_core = inbox.sender()
+        let from_core = Receiver<String>()
+        let conn = Conn.new(server.copy(), token.copy(), service.copy(), try Cache.open(cache), inbox, from_core.sender())
+        let t = unsafe { Thread.spawn(conn) }
+        return Core { to_core: to_core, from_core: from_core, thread: some(t) }
+    }
+
+    fn send(mut self, frame: Json) {
+        self.to_core.send("{frame}")
+    }
+
+    // What the core says, until a frame whose `t` is `t`, for up to 30 s.
+    fn until(mut self, t: str) -> Json ! Error {
+        let start = unsafe { Instant.now() }
+        loop {
+            let waited = unsafe { Instant.now() }.nanos_since(start) / 1000000
+            if waited >= 30000 { fail "no {t} came in 30 s" }
+            let m = unsafe { self.from_core.wait_for((30000 - waited) * 1000000) } else { continue }
+            let f = try parse(m)
+            if str_at(f.copy(), "t") == some(String(t)) { return f }
+        }
+    }
+
+    fn until_state(mut self, state: str) ! Error {
+        loop {
+            let f = try self.until("core.conn")
+            if str_at(f.copy(), "state") == some(String(state)) { return }
+        }
+    }
+
+    fn stop(mut self) {
+        self.to_core.send(String(#"{"t":"core.stop"}"#))
+        if let t = self.thread.take() {
+            t.join()
+        }
+    }
+}
+
+fn main() {
+    match run() {
+        ok => println("\npeople: all good"),
+        err(e) => {
+            eprintln("\npeople: {e}")
+            exit(1)
+        },
+    }
+}

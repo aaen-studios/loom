@@ -1,0 +1,266 @@
+module tests.protocol.sandbox
+
+// Sandboxes (PLAN.md, "Sandboxes: where members' agents run"), with Podman and with Docker, each that's here. A
+// member's agent runs in their own container, made from a small image with
+// `loom` and the fake agent in it. It gets the member's own secrets, never the
+// owner's program settings, has its home in the member's folder, and reaches
+// loom's tools through the gate. A file it links to is read in its sandbox,
+// so one of the instance's own isn't. In Code Mode, her scripts run in the
+// sandbox, in the instance's Deno, under the sandbox's limits, and call her MCP
+// server there. Removing the member removes the sandbox and the folder.
+//
+// It needs Linux, and Podman with pasta (the passt package) or Docker, and
+// says which it skipped.
+//
+//     calx tests/protocol/sandbox.calx
+import std.env
+import std.fs
+import std.json.{Json}
+import std.process.{Command, exit}
+import shared.obj.{Obj, at, int_at, str_at}
+import tests.kit.{App, Instance, calx, check, loom, reply_text}
+
+const IMAGE: str = "localhost/loom-sandbox-test"
+
+fn has(program: str) -> bool {
+    return match Command.new(String(program)).arg(String("--version")).output() {
+        ok(out) => out.status.success(),
+        err(_) => false,
+    }
+}
+
+fn sh(program: String, args: List<String>) ! Error {
+    let out = try Command.new(program.copy()).args(args.copy()).output()
+    if not out.status.success() { fail "{program} {args.join(" ")} didn't work: {out.error_text()}" }
+}
+
+fn file_blocks(message: Json) -> usize {
+    var n: usize = 0
+    if let Json.Array(blocks) = at(message, "blocks") {
+        for b in blocks {
+            if str_at(b.copy(), "kind") == some(String("file")) { n += 1 }
+        }
+    }
+    return n
+}
+
+// The image: loom and the fake agent, built here, on the system's own Ubuntu.
+fn build_image(runtime: String) ! Error {
+    let ctx = "{try fs.temp_dir()}/image"
+    try fs.make_dir_all(ctx.copy())
+    try sh(calx(), [String("build"), String("server/main.calx"), String("-o"), "{ctx}/loom"])
+    try sh(calx(), [String("build"), String("tests/fake_agent/main.calx"), String("-o"), "{ctx}/fake-agent"])
+    try sh(calx(), [String("build"), String("tests/fake_mcp/main.calx"), String("-o"), "{ctx}/fake-mcp"])
+    let lines: List<String> = [
+        String("FROM docker.io/library/ubuntu:24.04"),
+        String("RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates libcurl4t64 && rm -rf /var/lib/apt/lists/*"),
+        String("COPY loom fake-agent fake-mcp /usr/local/bin/"),
+        String("RUN ldd /usr/local/bin/loom && loom version"),
+    ]
+    try fs.write_text("{ctx}/Containerfile", "{lines.join("\n")}\n")
+    try sh(runtime, [String("build"), String("-q"), String("-f"), "{ctx}/Containerfile", String("-t"), String(IMAGE), ctx])
+}
+
+// The first script waits while the instance fetches Deno.
+const LONG: u32 = 600000
+
+// The agent's next message, which may take `wait_ms` to come.
+fn reply_in(app: mut App, wait_ms: u32) -> Json ! Error {
+    loop {
+        let created = try app.until("event", "message.created", wait_ms)
+        let m = at(created, "message")
+        if str_at(m.copy(), "role") == some(String("agent")) { return m }
+    }
+}
+
+fn script(code: str) -> String {
+    return "/mcp run_code {Obj.new().s("code", String(code)).done()}"
+}
+
+const ECHO: str = #"
+    const r = await mcp.fake.echo({ text: "hi" });
+    let env = "";
+    try { Deno.env.get("FAKE_KEY"); env = "read"; } catch (e) { env = e.name; }
+    return { said: r.said, k: await mcp.fake.key_length(), env };
+    "#
+
+const ADDS: str = #"
+    return await mcp.fake.add({ a: 2, b: 3 });
+    "#
+
+// Run in the sandbox while a script waits: whether Deno, running the script's
+// file, is in the sandbox, and in the same control group as its first process,
+// which the sandbox's limits are on. "same", "other", or "none" when it isn't
+// there. Its own words don't match what it looks for.
+const IN_THE_BOX: str = #"
+for p in /proc/[0-9]*; do
+  if tr '\000' ' ' < "$p/cmdline" 2>/dev/null | grep -q 'run-[0-9]*[.]ts'; then
+    if [ "$(cat "$p/cgroup")" = "$(cat /proc/1/cgroup)" ]; then echo same; else echo other; fi
+    exit 0
+  fi
+done
+echo none
+"#
+
+// Code Mode in a member's sandbox (PLAN.md, "Code Mode"): her loom mcp, in the
+// sandbox, runs her scripts in the instance's Deno, which the sandbox sees in
+// acp/, and starts her MCP server there too, a program only the image has.
+// The script has no environment there either, and Deno runs in the sandbox,
+// under its limits, while a call waits for her yes.
+fn code_mode(runtime: String, ann: mut App, ann_id: String) ! Error {
+    _ = try ann.cmd("q_10", "secret.put", Obj.new().s("name", String("FAKE_KEY")).s("value", String("s3cret")).done())
+    let fake = Obj.new().s("name", String("fake")).s("command", String("/usr/local/bin/fake-mcp")).j("args", Json.Array(List<Json>())).j("env", Obj.new().j("FAKE_KEY", Obj.new().s("secret", String("FAKE_KEY")).done()).done()).done()
+    _ = try ann.cmd("q_11", "mcp.put", fake)
+    let made = try ann.cmd("q_12", "agent.create", Obj.new().s("name", String("Scripted")).s("acp_agent", String("boxed")).s("instructions", String("Scripts.")).s("permission", String("auto")).j("mcp", Json.Array([Json.Str(String("fake"))])).done())
+    let agent = str_at(at(at(made, "value"), "agent"), "id") ?? String()
+    let chat = str_at(at(try ann.cmd("q_13", "conversation.create", Obj.new().s("agent", agent).done()), "value"), "conversation") ?? String()
+
+    try ann.send(Obj.new().s("t", String("send")).s("cid", String("c_1")).s("conversation", chat.copy()).s("text", String("/mcp list")).done())
+    try check(reply_text(try ann.reply()) == "tools: search_tools, run_code", "in Code Mode, her agent's loom mcp offers search_tools and run_code")
+
+    try ann.send(Obj.new().s("t", String("send")).s("cid", String("c_2")).s("conversation", chat.copy()).s("text", script(ECHO)).done())
+    let ran = reply_text(try reply_in(mut ann, LONG))
+    println("      the script gave: {ran}")
+    if ran.contains("Deno couldn't be fetched") or ran.contains("Deno has no build") {
+        println("skip  scripts in the sandbox: {ran}")
+        return
+    }
+    try check(ran == "run_code: Returned:\n{#"{"said":"hi","k":6,"env":"NotCapable"}"#}", "run_code runs her script in her sandbox, with the instance's Deno, calling her MCP server there, whose key the script never sees")
+
+    try ann.send(Obj.new().s("t", String("send")).s("cid", String("c_3")).s("conversation", chat.copy()).s("text", script(ADDS)).done())
+    let asked = try ann.until("event", "approval.needed", LONG)
+    try check(str_at(asked.copy(), "title") == some(String("Use add on the MCP server fake")), "a call her agent's mode doesn't allow asks her, and the script waits")
+    let looked = try Command.new(runtime).args([String("exec"), "loom-{ann_id}", String("sh"), String("-c"), String(IN_THE_BOX)]).output()
+    let where = looked.text().trim().copy()
+    println("      Deno, while it waits: {where} {looked.error_text().trim()}")
+    try check(where == "same", "while it waits, Deno runs the script in her sandbox, under its limits")
+    try ann.send(Obj.new().s("t", String("approve")).s("call", str_at(asked, "call") ?? String()).b("allow", true).done())
+    try check(reply_text(try reply_in(mut ann, LONG)) == "run_code: Returned:\n5", "and her yes lets it go on")
+}
+
+fn run(runtime: String) ! Error {
+    println("\n{runtime}:")
+    try build_image(runtime.copy())
+    try check(true, "the sandbox image builds")
+    let inst = try Instance.start_with([String("--sandboxes"), runtime.copy(), String("--sandbox-image"), String(IMAGE)])
+    let data = try fs.absolute(inst.data.copy())
+    // A program that's only in the image, for the member.
+    let added = try loom(inst.data.copy(), [String("acp"), String("add"), String("boxed"), String("/usr/local/bin/fake-agent")]).output()
+    if not added.status.success() { fail "loom acp add failed: {added.error_text()}" }
+    var owner = try App.connect(inst.base.copy(), inst.token.copy(), 0)
+    _ = try owner.cmd("q_1", "acp.settings", Obj.new().s("name", String("boxed")).j("env", Obj.new().s("OWNER_KEY", String("the owner's own")).done()).done())
+
+    let ann_token = try inst.second_account("ann")
+    var ann = try App.connect(inst.base.copy(), ann_token, 0)
+    _ = try ann.cmd("q_1", "secret.put", Obj.new().s("name", String("MY_KEY")).s("value", String("hers")).done())
+    let made = try ann.cmd("q_2", "agent.create", Obj.new().s("name", String("Hers")).s("acp_agent", String("boxed")).s("instructions", String("Ann's agent.")).b("code_mode", false).s("folder", data.copy()).done())
+    let agent = str_at(at(at(made, "value"), "agent"), "id") ?? String()
+    let chat = str_at(at(try ann.cmd("q_3", "conversation.create", Obj.new().s("agent", agent.copy()).done()), "value"), "conversation") ?? String()
+
+    var ann_id = String()
+    if let Json.Array(people) = at(at(try owner.cmd("q_2", "user.list", Obj.new().done()), "value"), "users") {
+        for p in people {
+            if str_at(p.copy(), "username") == some(String("ann")) { ann_id = str_at(p, "user") ?? String() }
+        }
+    }
+    let home = "{data}/sandboxes/{ann_id}"
+    let steps = "/env MY_KEY\n/env OWNER_KEY\n/env HOME\n/mcp list\n/link {data}/loom.db\n/link {home}/agents/{agent}/AGENTS.md"
+    try ann.send(Obj.new().s("t", String("send")).s("cid", String("m_1")).s("conversation", chat).s("text", steps).done())
+    let reply = try ann.reply()
+    let said = reply_text(reply.copy())
+    println("      the agent said: {said}")
+    try check(said.contains("MY_KEY=hers"), "a member's agent gets her own secrets")
+    try check(not said.contains("the owner's own"), "but not the owner's settings for the program")
+    try check(said.contains("HOME={home}"), "its home is her folder, whatever folder the agent names")
+    try check(said.contains("remember"), "loom's tools reach it through the gate")
+    try check(file_blocks(reply) == 1, "a file it links to is read in its sandbox: its AGENTS.md, but not the instance's database")
+    try check(fs.exists("{home}/agents/{agent}/AGENTS.md") and not fs.exists("{data}/AGENTS.md"), "its instructions are in her folder, not the one it named")
+
+    // Budgets: the owner shares the program's settings, 100 tokens a day each.
+    let shared = try owner.cmd("q_4", "acp.share", Obj.new().s("name", String("boxed")).i("tokens", 100).s("per", String("day")).done())
+    try check(int_at(at(at(at(shared, "value"), "program"), "share"), "tokens") == some(100), "the owner shares a program's settings, with a budget")
+    try ann.send(Obj.new().s("t", String("send")).s("cid", String("m_2")).s("conversation", chat.copy()).s("text", String("/env OWNER_KEY\n/tokens 150")).done())
+    let on_shared = reply_text(try ann.reply())
+    try check(on_shared.contains("OWNER_KEY=the owner's own"), "a member's agent then gets the shared settings")
+    _ = try ann.until("event", "run.finished")
+    let listed = "{try ann.cmd("q_4", "acp.list", Obj.new().done())}"
+    try check(listed.contains("\"left\":0"), "acp.list says what's left of her budget")
+    try ann.send(Obj.new().s("t", String("send")).s("cid", String("m_3")).s("conversation", chat.copy()).s("text", String("hello")).done())
+    let over = try ann.until("event", "run.finished")
+    try check(str_at(over, "status") == some(String("limit")), "past it, her runs stop at the limit")
+    _ = try ann.cmd("q_5", "secret.put", Obj.new().s("name", String("OWNER_KEY")).s("value", String("her own")).done())
+    try ann.send(Obj.new().s("t", String("send")).s("cid", String("m_4")).s("conversation", chat.copy()).s("text", String("/env OWNER_KEY")).done())
+    let own_key = reply_text(try ann.reply())
+    try check(own_key.contains("OWNER_KEY=her own"), "with a key of her own, she's past no budget, and her key wins")
+
+    try code_mode(runtime.copy(), mut ann, ann_id.copy())
+
+    // An agent closed to the network (PLAN.md, "Rules, records and limits"):
+    // one of hers with a list runs in a sandbox of its own, with no network but
+    // its egress, which lets out only what the list lets, and loom's tools.
+    let listed_made = try ann.cmd("q_20", "agent.create", Obj.new().s("name", String("Listed")).s("acp_agent", String("boxed")).s("instructions", String("")).b("code_mode", false).j("network", Json.Array([Json.Str(String("github.com"))])).done())
+    let closed_agent = str_at(at(at(listed_made, "value"), "agent"), "id") ?? String()
+    let listed_chat = str_at(at(try ann.cmd("q_21", "conversation.create", Obj.new().s("agent", closed_agent.copy()).done()), "value"), "conversation") ?? String()
+    try ann.send(Obj.new().s("t", String("send")).s("cid", String("m_5")).s("conversation", listed_chat.copy()).s("text", String("/net github.com:443\n/net example.org:443\n/env HOME\n/mcp list")).done())
+    let closed_said = reply_text(try ann.reply())
+    println("      the agent said: {closed_said}")
+    try check(closed_said.contains("net github.com:443: direct closed") and not closed_said.contains("github.com:443: direct closed, proxy 403"), "an agent with a list reaches nothing straight, and its list through the egress")
+    try check(closed_said.contains("net example.org:443: direct closed, proxy 403"), "and nothing else, through it either")
+    try check(closed_said.contains("HOME={home}") and closed_said.contains("remember"), "it has her folder, and loom's tools through the egress")
+    let own_box = try Command.new(runtime.copy()).args([String("inspect"), String("--format"), String(#"{{.HostConfig.NetworkMode}}"#), "loom-{ann_id}-{closed_agent}"]).output()
+    try check(own_box.status.success() and own_box.text().trim() == "none", "in a sandbox of its own, with no network")
+    _ = try ann.until("event", "run.finished")
+    _ = try ann.cmd("q_22", "agent.update", Obj.new().s("agent", closed_agent.copy()).j("network", Json.Array(List<Json>())).done())
+    try ann.send(Obj.new().s("t", String("send")).s("cid", String("m_6")).s("conversation", listed_chat.copy()).s("text", String("/net github.com:443")).done())
+    let nothing = reply_text(try ann.reply())
+    try check(nothing.contains("direct closed, proxy 403"), "with an empty list, nothing gets out, from its next connection")
+    _ = try ann.until("event", "run.finished")
+    _ = try ann.cmd("q_23", "agent.update", Obj.new().s("agent", closed_agent.copy()).j("network", Json.Null).done())
+    let dropped = try Command.new(runtime.copy()).args([String("container"), String("inspect"), "loom-{ann_id}-{closed_agent}"]).output()
+    try check(not dropped.status.success(), "opening its network back up takes its own sandbox away")
+
+    // The owner's agents can be isolated too, and run in a sandbox of the
+    // owner's, on the program's settings, which are the owner's own.
+    var owner_id = String()
+    if let Json.Array(people) = at(at(try owner.cmd("q_5", "user.list", Obj.new().done()), "value"), "users") {
+        for p in people {
+            if str_at(p.copy(), "username") == some(String("elliot")) { owner_id = str_at(p, "user") ?? String() }
+        }
+    }
+    let isolated_made = try owner.cmd("q_6", "agent.create", Obj.new().s("name", String("Isolated")).s("acp_agent", String("boxed")).s("instructions", String("")).b("code_mode", false).b("isolated", true).done())
+    let isolated = str_at(at(at(isolated_made, "value"), "agent"), "id") ?? String()
+    let isolated_chat = str_at(at(try owner.cmd("q_7", "conversation.create", Obj.new().s("agent", isolated.copy()).done()), "value"), "conversation") ?? String()
+    try owner.send(Obj.new().s("t", String("send")).s("cid", String("m_1")).s("conversation", isolated_chat).s("text", String("/env HOME\n/env OWNER_KEY\n/mcp list")).done())
+    let owner_said = reply_text(try owner.reply())
+    println("      the owner's agent said: {owner_said}")
+    try check(owner_said.contains("HOME={data}/sandboxes/{owner_id}"), "the owner's isolated agent runs in a sandbox, in the owner's folder there")
+    try check(owner_said.contains("OWNER_KEY=the owner's own") and owner_said.contains("remember"), "on the owner's own settings, with loom's tools")
+    let owner_box = try Command.new(runtime.copy()).args([String("container"), String("inspect"), "loom-{owner_id}"]).output()
+    try check(owner_box.status.success(), "in the owner's sandbox")
+
+    _ = try owner.cmd("q_3", "user.remove", Obj.new().s("user", ann_id.copy()).done())
+    let there = try Command.new(runtime).args([String("container"), String("inspect"), "loom-{ann_id}"]).output()
+    try check(not there.status.success(), "removing her removes her sandbox")
+    try check(not fs.exists(home), "and her folder")
+    owner.close()
+    inst.stop()
+}
+
+fn main() {
+    var ran = 0
+    for runtime in ["podman", "docker"] {
+        let usable = env.os() == "linux" and has(runtime) and (runtime != "podman" or has("pasta"))
+        if not usable {
+            println("sandbox: skipped {runtime}: it needs Linux, and Podman with pasta, or Docker")
+            continue
+        }
+        match run(String(runtime)) {
+            ok => ran += 1,
+            err(e) => {
+                eprintln("\nsandbox, with {runtime}: {e}")
+                exit(1)
+            },
+        }
+    }
+    if ran > 0 { println("\nsandbox: all good") }
+}

@@ -36,7 +36,10 @@ fn main() {
     // The exe's icon, which the taskbar, the window and Explorer show.
     if env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {
         let mut res = winresource::WindowsResource::new();
-        res.set_icon(&root.join("design/logo/app.ico").to_string_lossy());
+        // The light app icon first, which Explorer shows, and the dark one second, for
+        // a dark theme (shell::follow_theme).
+        res.set_icon(&root.join("design/logo/app-light.ico").to_string_lossy());
+        res.set_icon_with_id(&root.join("design/logo/app.ico").to_string_lossy(), "2");
         res.set("ProductName", "loom");
         res.set("FileDescription", "loom");
         res.compile().expect("the Windows resources didn't build");

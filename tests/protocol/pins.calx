@@ -1,0 +1,105 @@
+module tests.protocol.pins
+
+// Pinned messages (PLAN.md, "Pinned messages"): a person or an agent pins a
+// message in its conversation, every device hears it as message.updated, the
+// message keeps when and by whom, and messages.pinned lists a conversation's
+// pins, the newest first. Unpinning takes it off. agent.pin pins an agent to
+// the top of the list, which isn't a revision of it.
+//
+//     calx tests/protocol/pins.calx
+import std.json.{Json}
+import std.process.{exit}
+import shared.obj.{Obj, at, int_at, str_at}
+import tests.kit.{App, Instance, check, reply_text}
+
+fn reply_in(app: mut App, conversation: String) -> Json ! Error {
+    loop {
+        let created = try app.until("event", "message.created")
+        let m = at(created, "message")
+        if str_at(m.copy(), "role") == some(String("agent")) and str_at(m.copy(), "conversation") == some(conversation.copy()) { return m }
+    }
+}
+
+fn say(app: mut App, conversation: String, cid: str, text: String) -> Json ! Error {
+    try app.send(Obj.new().s("t", String("send")).s("cid", String(cid)).s("conversation", conversation.copy()).s("text", text).done())
+    return try reply_in(mut app, conversation)
+}
+
+// The newest event of `kind` among what the app has read.
+fn last(app: App, kind: str) -> Json {
+    var found = Json.Null
+    for f in app.frames {
+        if str_at(f.copy(), "kind") == some(String(kind)) { found = f.copy() }
+    }
+    return found
+}
+
+// The ids of the messages in a messages.pinned answer, in order.
+fn pinned_ids(answer: Json) -> List<String> {
+    var out = List<String>()
+    if let Json.Array(ms) = at(at(answer, "value"), "messages") {
+        for m in ms {
+            out.push(str_at(m, "id") ?? String())
+        }
+    }
+    return out
+}
+
+fn run(i: Instance) ! Error {
+    var app = try App.connect(i.base.copy(), i.token.copy(), 0)
+    let made = try app.cmd("q_1", "agent.create", Obj.new().s("name", String("Main")).s("acp_agent", String("fake")).s("instructions", String("You are a test.")).done())
+    let agent = str_at(at(at(made, "value"), "agent"), "id") ?? String()
+    let c = try app.cmd("q_2", "conversation.create", Obj.new().s("agent", agent).done())
+    let chat = str_at(at(c, "value"), "conversation") ?? String()
+
+    let first = try say(mut app, chat.copy(), "m_1", String("the first"))
+    let second = try say(mut app, chat.copy(), "m_2", String("the second"))
+    let first_id = str_at(first, "id") ?? String()
+    let second_id = str_at(second, "id") ?? String()
+
+    let pinned = try app.cmd("q_3", "message.pin", Obj.new().s("message", first_id.copy()).done())
+    let updated = last(app, "message.updated")
+    let mark = at(at(updated.copy(), "message"), "pinned")
+    try check(str_at(at(at(pinned, "value"), "message"), "id") == some(first_id.copy()) and str_at(updated, "conversation") == some(chat.copy()) and (str_at(mark, "by") ?? String()).starts_with("d_"), "pinning a message tells every device, with who pinned it")
+    _ = try app.cmd("q_4", "message.pin", Obj.new().s("message", second_id.copy()).done())
+    let both = pinned_ids(try app.cmd("q_5", "messages.pinned", Obj.new().s("conversation", chat.copy()).done()))
+    try check(both.len() == 2 and both[0] == second_id and both[1] == first_id, "messages.pinned lists the pins, the newest first")
+    let listed = "{try app.cmd("q_6", "messages.list", Obj.new().s("conversation", chat.copy()).done())}"
+    try check(listed.contains("\"pinned\""), "and the messages carry their pin")
+
+    _ = try app.cmd("q_7", "message.pin", Obj.new().s("message", first_id.copy()).b("pinned", false).done())
+    let left = pinned_ids(try app.cmd("q_8", "messages.pinned", Obj.new().s("conversation", chat.copy()).done()))
+    try check(left.len() == 1 and left[0] == second_id, "unpinning takes it off")
+    let missing = try app.cmd("q_9", "message.pin", Obj.new().s("message", String("msg_nothing")).done())
+    try check(str_at(at(missing, "error"), "code") == some(String("not_found")), "a message that isn't there can't be pinned")
+
+    let by_agent = try say(mut app, chat.copy(), "m_3", "/mcp run_command {Obj.new().s("name", String("message.pin")).j("args", Obj.new().s("message", first_id.copy()).done()).done()}")
+    let now = pinned_ids(try app.cmd("q_10", "messages.pinned", Obj.new().s("conversation", chat).done()))
+    try check(reply_text(by_agent).starts_with("run_command:") and now.len() == 2 and now[0] == first_id, "an agent pins one too, at once")
+
+    // --- Pinned agents ---
+    let main_id = str_at(at(at(made, "value"), "agent"), "id") ?? String()
+    let pin = try app.cmd("q_11", "agent.pin", Obj.new().s("agent", main_id.copy()).done())
+    let kept = at(at(pin, "value"), "agent")
+    let heard = at(last(app, "agent.updated"), "agent")
+    try check(int_at(kept.copy(), "pinned") != none and int_at(heard, "pinned") == int_at(kept.copy(), "pinned") and int_at(kept.copy(), "revision") == some(1), "pinning an agent keeps when, tells every device, and isn't a revision")
+    let renamed = try app.cmd("q_12", "agent.update", Obj.new().s("agent", main_id.copy()).s("name", String("Renamed")).done())
+    try check(int_at(at(at(renamed, "value"), "agent"), "pinned") == int_at(kept, "pinned"), "it stays pinned when the agent changes")
+    let unpinned = try app.cmd("q_13", "agent.pin", Obj.new().s("agent", main_id).b("pinned", false).done())
+    try check(int_at(at(at(unpinned, "value"), "agent"), "pinned") == none, "and unpinning takes it off")
+    app.close()
+}
+
+fn main() ! Error {
+    let inst = try Instance.start()
+    let failure: String? = match run(inst.copy()) {
+        ok => none,
+        err(e) => some("{e}"),
+    }
+    inst.stop()
+    if let f = failure {
+        eprintln("\n{f}")
+        exit(1)
+    }
+    println("\npins: all good")
+}

@@ -1,0 +1,84 @@
+module tests.protocol.pages
+
+// Pages in the chat (PLAN.md, "Pages in the chat"): html_render puts a page of
+// HTML the agent made in its reply, as a file block the apps open beside the
+// chat, kept as the person's file. html_preview, which needs a browser, is in
+// browser.calx.
+//
+//     calx tests/protocol/pages.calx
+import std.json.{Json}
+import std.process.{exit}
+import shared.obj.{Obj, at, str_at}
+import tests.kit.{App, Instance, check, fetch, reply_text}
+
+fn reply_in(app: mut App, conversation: String) -> Json ! Error {
+    loop {
+        let created = try app.until("event", "message.created")
+        let m = at(created, "message")
+        if str_at(m.copy(), "role") == some(String("agent")) and str_at(m.copy(), "conversation") == some(conversation.copy()) { return m }
+    }
+}
+
+fn say(app: mut App, conversation: String, cid: str, text: String) -> Json ! Error {
+    try app.send(Obj.new().s("t", String("send")).s("cid", String(cid)).s("conversation", conversation.copy()).s("text", text).done())
+    return try reply_in(mut app, conversation)
+}
+
+// The message's file blocks.
+fn files_in(m: Json) -> List<Json> {
+    var out = List<Json>()
+    if let Json.Array(blocks) = at(m, "blocks") {
+        for b in blocks {
+            if str_at(b.copy(), "kind") == some(String("file")) { out.push(b.copy()) }
+        }
+    }
+    return out
+}
+
+fn run(i: Instance) ! Error {
+    var app = try App.connect(i.base.copy(), i.token.copy(), 0)
+    let made = try app.cmd("q_1", "agent.create", Obj.new().s("name", String("Maker")).s("acp_agent", String("fake")).s("instructions", String("You are a test.")).done())
+    let agent = str_at(at(at(made, "value"), "agent"), "id") ?? String()
+    let c = try app.cmd("q_2", "conversation.create", Obj.new().s("agent", agent).done())
+    let chat = str_at(at(c, "value"), "conversation") ?? String()
+
+    let page = String(#"<!doctype html><title>Sales</title><h1>Sales this week</h1><script>document.body.append("drawn")</script>"#)
+    let rendered = try say(mut app, chat.copy(), "m_1", "/mcp html_render {Obj.new().s("html", page.copy()).s("title", String("Sales: this week")).done()}")
+    let shown = files_in(rendered.copy())
+    try check(reply_text(rendered.copy()).starts_with("html_render: It's in the chat, as Sales: this week") and shown.len() == 1, "html_render puts the page in the agent's reply")
+    let f = shown[0].copy()
+    try check(str_at(f.copy(), "mime") == some(String("text/html")) and (str_at(f.copy(), "name") ?? String()).ends_with(".html"), "as a file block of text/html")
+    let (status, mime, body) = try fetch(i.base.copy(), i.token.copy(), "/files/{str_at(f, "file") ?? String()}")
+    try check(status == 200 and mime.starts_with("text/html") and body == page.to_bytes(), "kept as the person's file, as it was given")
+
+    let empty = reply_text(try say(mut app, chat.copy(), "m_2", String(#"/mcp html_render {"html":"  ","title":"Nothing"}"#)))
+    try check(empty.starts_with("html_render failed: html is empty"), "an empty page is refused")
+    let activity = try app.cmd("q_3", "activity.list", Obj.new().s("agent", agent.copy()).done())
+    try check("{activity}".contains("Showed you the page Sales: this week"), "the activity log says so")
+
+    // Each chat's session has a tool token of its own, so a call finds the
+    // run it came from while the agent has another waiting in a second chat.
+    let c2 = try app.cmd("q_4", "conversation.create", Obj.new().s("agent", agent.copy()).done())
+    let other = str_at(at(c2, "value"), "conversation") ?? String()
+    let mine_page = "/sleep 1500\n/mcp html_render {Obj.new().s("html", String("<p>Mine</p>")).s("title", String("Mine")).done()}"
+    try app.send(Obj.new().s("t", String("send")).s("cid", String("m_3")).s("conversation", chat.copy()).s("text", mine_page).done())
+    try app.send(Obj.new().s("t", String("send")).s("cid", String("m_4")).s("conversation", other.copy()).s("text", String("hello there")).done())
+    let mine = try reply_in(mut app, chat.copy())
+    let theirs = try reply_in(mut app, other)
+    try check(files_in(mine).len() == 1 and files_in(theirs).len() == 0, "with the agent in two chats, the page goes in the chat that made it")
+    app.close()
+}
+
+fn main() ! Error {
+    let inst = try Instance.start()
+    let failure: String? = match run(inst.copy()) {
+        ok => none,
+        err(e) => some("{e}"),
+    }
+    inst.stop()
+    if let f = failure {
+        eprintln("\n{f}")
+        exit(1)
+    }
+    println("\npages: all good")
+}

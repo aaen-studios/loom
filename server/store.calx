@@ -18,9 +18,35 @@ import std.env.{os}
 import std.fs
 import std.hash.{sha256}
 import std.json.{Json, parse}
+import std.regex.{Regex}
 import std.sqlite.{Database, Value}
 import std.time.{Timestamp}
-import shared.obj.{Obj, merge}
+import shared.obj.{Obj, int_at, merge, str_at, without}
+import server.defaults.{blank, filled}
+
+// A search snippet as words, without the Markdown it was written in: a link
+// as its text, no code ticks, bold or strike marks, list and heading marks,
+// and on one line. The marks around matched words (U+0002 and U+0003) stay
+// where they are, since only the Markdown around them goes.
+pub fn plain_snippet(snippet: String) -> String {
+    var s = snippet.copy()
+    let steps = [
+        (#"!?\[([^\]]*)\]\([^)]*\)"#, #"${1}"#),
+        (#"(^|\n)[ \t]*(#+|[-*+]|>|\d+\.)[ \t]+"#, #"${1}"#),
+        (#"\*\*|__|~~|`+"#, ""),
+        (#"\s*\n\s*"#, " "),
+    ]
+    for (pattern, with) in steps {
+        match Regex.new(String(pattern)) {
+            ok(found) => {
+                var re = found
+                s = re.replace_all(s.copy(), String(with))
+            },
+            err(_) => {},
+        }
+    }
+    return s
+}
 
 const SCHEMA: str = #"
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -35,6 +61,15 @@ CREATE TABLE IF NOT EXISTS devices (
 CREATE TABLE IF NOT EXISTS acp_agents (name TEXT PRIMARY KEY, command TEXT NOT NULL, args TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS acp_settings (
     name TEXT PRIMARY KEY, source TEXT NOT NULL, version TEXT NOT NULL, env TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS acp_shares (
+    name TEXT PRIMARY KEY, tokens INTEGER NOT NULL, per TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS acp_people (
+    name TEXT NOT NULL, kind TEXT NOT NULL, users TEXT NOT NULL, PRIMARY KEY (name, kind));
+CREATE TABLE IF NOT EXISTS usage (
+    user TEXT NOT NULL REFERENCES users(id), program TEXT NOT NULL, run TEXT NOT NULL,
+    input INTEGER NOT NULL, output INTEGER NOT NULL, total INTEGER NOT NULL,
+    shared INTEGER NOT NULL, at INTEGER NOT NULL);
+CREATE INDEX IF NOT EXISTS usage_by_user ON usage (user, program, at);
 CREATE TABLE IF NOT EXISTS agents (
     id TEXT PRIMARY KEY, user TEXT NOT NULL REFERENCES users(id), json TEXT NOT NULL,
     deleted INTEGER NOT NULL DEFAULT 0);
@@ -43,7 +78,9 @@ CREATE TABLE IF NOT EXISTS agent_revisions (
     json TEXT NOT NULL, by TEXT NOT NULL, at INTEGER NOT NULL, PRIMARY KEY (agent, revision));
 CREATE TABLE IF NOT EXISTS activity (
     id INTEGER PRIMARY KEY, user TEXT NOT NULL REFERENCES users(id), agent TEXT NOT NULL,
-    kind TEXT NOT NULL, text TEXT NOT NULL, by TEXT NOT NULL, at INTEGER NOT NULL);
+    kind TEXT NOT NULL, text TEXT NOT NULL, by TEXT NOT NULL, at INTEGER NOT NULL,
+    status TEXT NOT NULL DEFAULT '', input TEXT NOT NULL DEFAULT '', why TEXT NOT NULL DEFAULT '',
+    ended INTEGER NOT NULL DEFAULT 0);
 CREATE TABLE IF NOT EXISTS secrets (
     user TEXT NOT NULL REFERENCES users(id), name TEXT NOT NULL, nonce TEXT NOT NULL,
     sealed TEXT NOT NULL, at INTEGER NOT NULL, PRIMARY KEY (user, name));
@@ -63,6 +100,23 @@ CREATE INDEX IF NOT EXISTS messages_by_conversation ON messages (user, conversat
 CREATE TABLE IF NOT EXISTS runs (
     id TEXT PRIMARY KEY, user TEXT NOT NULL REFERENCES users(id), conversation TEXT NOT NULL,
     status TEXT NOT NULL, at INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS branches (
+    conversation TEXT PRIMARY KEY, user TEXT NOT NULL REFERENCES users(id), from_conversation TEXT NOT NULL,
+    from_message TEXT NOT NULL, handed INTEGER NOT NULL DEFAULT 0);
+CREATE TABLE IF NOT EXISTS conversation_programs (
+    conversation TEXT PRIMARY KEY, user TEXT NOT NULL REFERENCES users(id), program TEXT NOT NULL,
+    summary_from TEXT NOT NULL DEFAULT '');
+CREATE TABLE IF NOT EXISTS routine_threads (
+    conversation TEXT PRIMARY KEY, user TEXT NOT NULL REFERENCES users(id), routine TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS sides (
+    user TEXT NOT NULL REFERENCES users(id), agent TEXT NOT NULL, conversation TEXT NOT NULL,
+    PRIMARY KEY (user, agent));
+CREATE TABLE IF NOT EXISTS tasks (
+    id TEXT PRIMARY KEY, user TEXT NOT NULL REFERENCES users(id), agent TEXT NOT NULL,
+    conversation TEXT NOT NULL, status TEXT NOT NULL, json TEXT NOT NULL, at INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS queue (
+    id TEXT PRIMARY KEY, user TEXT NOT NULL REFERENCES users(id), conversation TEXT NOT NULL,
+    pos INTEGER NOT NULL, json TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS sent (
     device TEXT NOT NULL, cid TEXT NOT NULL, message TEXT NOT NULL, run TEXT NOT NULL,
     PRIMARY KEY (device, cid));
@@ -78,19 +132,71 @@ CREATE TABLE IF NOT EXISTS files (
 CREATE TABLE IF NOT EXISTS profiles (
     user TEXT NOT NULL REFERENCES users(id), revision INTEGER NOT NULL, text TEXT NOT NULL,
     by TEXT NOT NULL, at INTEGER NOT NULL, PRIMARY KEY (user, revision));
+CREATE TABLE IF NOT EXISTS defaults (
+    user TEXT PRIMARY KEY REFERENCES users(id), json TEXT NOT NULL, revision INTEGER NOT NULL,
+    by TEXT NOT NULL, at INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS rules (
+    id TEXT PRIMARY KEY, user TEXT NOT NULL REFERENCES users(id), agent TEXT NOT NULL,
+    json TEXT NOT NULL, at INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS routines (
     id TEXT PRIMARY KEY, user TEXT NOT NULL REFERENCES users(id), json TEXT NOT NULL,
     next INTEGER NOT NULL);
 CREATE INDEX IF NOT EXISTS routines_by_next ON routines (next);
+CREATE TABLE IF NOT EXISTS flows (
+    id TEXT PRIMARY KEY, user TEXT NOT NULL REFERENCES users(id), json TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS link_codes (
+    hash TEXT PRIMARY KEY, user TEXT NOT NULL REFERENCES users(id), by TEXT NOT NULL,
+    expires INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS invites (
+    id TEXT PRIMARY KEY, hash TEXT NOT NULL UNIQUE, role TEXT NOT NULL, uses INTEGER NOT NULL,
+    expires INTEGER NOT NULL, by TEXT NOT NULL, at INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS people_log (
+    id INTEGER PRIMARY KEY, kind TEXT NOT NULL, text TEXT NOT NULL, by TEXT NOT NULL,
+    at INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS resets (
+    hash TEXT PRIMARY KEY, user TEXT NOT NULL REFERENCES users(id), by TEXT NOT NULL,
+    expires INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS push_tokens (
+    device TEXT PRIMARY KEY REFERENCES devices(id), user TEXT NOT NULL REFERENCES users(id),
+    token TEXT NOT NULL, env TEXT NOT NULL, at INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS plugins (
+    user TEXT NOT NULL REFERENCES users(id), id TEXT NOT NULL, json TEXT NOT NULL,
+    files TEXT NOT NULL, PRIMARY KEY (user, id));
+CREATE TABLE IF NOT EXISTS plugin_revisions (
+    user TEXT NOT NULL REFERENCES users(id), id TEXT NOT NULL, revision INTEGER NOT NULL,
+    json TEXT NOT NULL, files TEXT NOT NULL, PRIMARY KEY (user, id, revision));
+CREATE TABLE IF NOT EXISTS plugin_data (
+    user TEXT NOT NULL REFERENCES users(id), plugin TEXT NOT NULL, key TEXT NOT NULL,
+    value TEXT NOT NULL, at INTEGER NOT NULL, PRIMARY KEY (user, plugin, key));
 CREATE TABLE IF NOT EXISTS memories (
     id INTEGER PRIMARY KEY, user TEXT NOT NULL REFERENCES users(id), agent TEXT NOT NULL,
-    text TEXT NOT NULL, by TEXT NOT NULL, at INTEGER NOT NULL);
+    text TEXT NOT NULL, by TEXT NOT NULL, at INTEGER NOT NULL, site TEXT NOT NULL DEFAULT '');
+CREATE TABLE IF NOT EXISTS recordings (
+    id TEXT PRIMARY KEY, user TEXT NOT NULL REFERENCES users(id), agent TEXT NOT NULL,
+    steps TEXT NOT NULL, proposal TEXT NOT NULL DEFAULT '', at INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS proposals (
+    id TEXT PRIMARY KEY, user TEXT NOT NULL REFERENCES users(id), agent TEXT NOT NULL,
+    kind TEXT NOT NULL, data TEXT NOT NULL, why TEXT NOT NULL, recording TEXT NOT NULL,
+    status TEXT NOT NULL, at INTEGER NOT NULL, decided INTEGER NOT NULL DEFAULT 0,
+    by TEXT NOT NULL DEFAULT '');
 CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5 (
     text, user UNINDEXED, agent UNINDEXED,
     tokenize = 'unicode61 remove_diacritics 2');
 CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5 (
     text, user UNINDEXED, agent UNINDEXED, at UNINDEXED,
     tokenize = 'unicode61 remove_diacritics 2');
+CREATE TABLE IF NOT EXISTS shared_tables (
+    user TEXT NOT NULL REFERENCES users(id), name TEXT NOT NULL, description TEXT NOT NULL,
+    owner TEXT NOT NULL, at INTEGER NOT NULL, PRIMARY KEY (user, name));
+CREATE TABLE IF NOT EXISTS shared_rows (
+    id INTEGER PRIMARY KEY, user TEXT NOT NULL REFERENCES users(id), tbl TEXT NOT NULL,
+    data TEXT NOT NULL, by TEXT NOT NULL, at INTEGER NOT NULL, updated INTEGER NOT NULL);
+CREATE INDEX IF NOT EXISTS shared_rows_by_table ON shared_rows (user, tbl);
+CREATE TABLE IF NOT EXISTS script_tokens (
+    user TEXT PRIMARY KEY REFERENCES users(id), hash TEXT NOT NULL UNIQUE, at INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS imported (
+    user TEXT NOT NULL REFERENCES users(id), source TEXT NOT NULL, kind TEXT NOT NULL,
+    id TEXT NOT NULL, loom TEXT NOT NULL, at INTEGER NOT NULL, PRIMARY KEY (user, source, kind, id));
 "#
 
 /// What search marks a matched word with, before and after.
@@ -159,11 +265,44 @@ fn text(v: Value) -> String {
     }
 }
 
+// A JSON object's string field, or "".
+fn field(j: Json, key: str) -> String {
+    return (j.get(String(key)) ?? Json.Null).as_str() ?? String()
+}
+
+// A conversation from its row: id, agent, title, at, and the task it is, if any.
+fn conversation_of(r: List<Value>) -> Json {
+    var o = Obj.new().s("id", text(r[0].copy())).s("agent", text(r[1].copy())).s("title", text(r[2].copy())).i("at", int(r[3].copy()))
+    let task = text(r[4].copy())
+    if task.len() > 0 { o = o.s("task", task) }
+    // Where side questions about the agent's chat are asked: no chat of its own.
+    if text(r[5].copy()).len() > 0 { o = o.b("side", true) }
+    // A branch of a chat: the chat, and the message it branches at.
+    let from = text(r[6].copy())
+    if from.len() > 0 { o = o.s("branch_of", from).s("branch_at", text(r[7].copy())) }
+    // A routine's thread of its own: the routine.
+    let routine = text(r[8].copy())
+    if routine.len() > 0 { o = o.s("routine", routine) }
+    // A chat moved to another program than its agent's, by hand or to its backup.
+    let program = text(r[9].copy())
+    if program.len() > 0 { o = o.s("program", program) }
+    return o.done()
+}
+
 fn int(v: Value) -> i64 {
     match v {
         Value.Int(n) => return n,
         _ => return 0,
     }
+}
+
+// A shared table's row, from id, data, by, at and updated.
+fn row_of(r: List<Value>) -> Json {
+    let data = match parse(text(r[1].copy())) {
+        ok(j) => j,
+        err(_) => Obj.new().done(),
+    }
+    return Obj.new().i("id", int(r[0].copy())).s("by", text(r[2].copy())).i("at", int(r[3].copy())).i("updated", int(r[4].copy())).j("data", data).done()
 }
 
 fn t(s: String) -> Value {
@@ -190,6 +329,11 @@ fn token_hash(token: String) -> String {
 }
 
 impl Store {
+    // Closes the database, so its files can be moved or removed.
+    pub fn close(own self) ! Error {
+        try self.db.close()
+    }
+
     // Opens (or makes) the database at `path`. `hasher` hashes passwords;
     // tests pass a cheap one.
     pub fn open(path: String, hasher: PasswordHasher) -> Store ! Error {
@@ -199,6 +343,20 @@ impl Store {
         try db.execute_script(String("PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON;"))
         try db.execute_script(String(SCHEMA))
         let s = Store { db: db, hasher: hasher, sealer: sealer }
+        // An activity log from before actions were recorded gets their columns.
+        var recorded = false
+        for r in try s.db.query(String("PRAGMA table_info(activity)")) {
+            if text(r[1].copy()) == "status" { recorded = true }
+        }
+        if not recorded {
+            try s.db.execute_script(String("ALTER TABLE activity ADD COLUMN status TEXT NOT NULL DEFAULT ''; ALTER TABLE activity ADD COLUMN input TEXT NOT NULL DEFAULT ''; ALTER TABLE activity ADD COLUMN why TEXT NOT NULL DEFAULT ''; ALTER TABLE activity ADD COLUMN ended INTEGER NOT NULL DEFAULT 0;"))
+        }
+        // Notes from before a note could be tied to a site get the column.
+        var sited = false
+        for r in try s.db.query(String("PRAGMA table_info(memories)")) {
+            if text(r[1].copy()) == "site" { sited = true }
+        }
+        if not sited { try s.db.execute_script(String("ALTER TABLE memories ADD COLUMN site TEXT NOT NULL DEFAULT '';")) }
         // Settings kept before they were sealed are sealed once.
         for r in try s.db.query(String("SELECT name, env FROM acp_settings")) {
             let env = text(r[1].copy())
@@ -309,6 +467,10 @@ impl Store {
         _ = try self.db.execute(String("UPDATE users SET password = ? WHERE id = ?"), [t(hash), t(user)])
     }
 
+    pub fn set_password(self, user: String, password: String) ! Error {
+        try self.set_password_hash(user, self.hasher.hash(password))
+    }
+
     pub fn find_username(self, username: String) -> User? ! Error {
         let row = try self.db.query_one(String("SELECT id, username, role FROM users WHERE username = ?"), [t(username)])
         let r = row else return none
@@ -383,7 +545,50 @@ impl Store {
     }
 
     pub fn revoke_device(self, id: String) ! Error {
-        _ = try self.db.execute(String("UPDATE devices SET revoked = 1 WHERE id = ?"), [t(id)])
+        _ = try self.db.execute(String("UPDATE devices SET revoked = 1 WHERE id = ?"), [t(id.copy())])
+        // A device signed out gets no more push.
+        _ = try self.db.execute(String("DELETE FROM push_tokens WHERE device = ?"), [t(id)])
+    }
+
+    // --- Push (PLAN.md, "Notifications and push") ---
+
+    // Keeps device `device`'s APNs token, `env` production or development,
+    // in place of any it had. A phone that takes push through the relay keeps its
+    // sealed token, base64, with `env` `relay:` and its X25519 key, base64.
+    pub fn set_push_token(self, user: String, device: String, token: String, env: String, time: i64) ! Error {
+        _ = try self.db.execute(String("INSERT OR REPLACE INTO push_tokens (device, user, token, env, at) VALUES (?, ?, ?, ?, ?)"), [t(device), t(user), t(token), t(env), Value.Int(time)])
+    }
+
+    pub fn delete_push_token(self, device: String) ! Error {
+        _ = try self.db.execute(String("DELETE FROM push_tokens WHERE device = ?"), [t(device)])
+    }
+
+    // Forgets `device`'s token if it's still `token`, which APNs says is
+    // gone; one the phone has handed over since stays.
+    pub fn drop_push_token(self, device: String, token: String) ! Error {
+        _ = try self.db.execute(String("DELETE FROM push_tokens WHERE device = ? AND token = ?"), [t(device), t(token)])
+    }
+
+    // `user`'s devices that take push: each one's id, token and env.
+    pub fn push_tokens(self, user: String) -> List<(String, String, String)> ! Error {
+        var out = List<(String, String, String)>()
+        for r in try self.db.query(String("SELECT device, token, env FROM push_tokens WHERE user = ? ORDER BY at"), [t(user)]) {
+            out.push((text(r[0].copy()), text(r[1].copy()), text(r[2].copy())))
+        }
+        return out
+    }
+
+    // The APNs key loom signs push with, and what goes with it (the key's id,
+    // the team and the app's bundle id), or none until the owner sets it up.
+    // The key is kept sealed.
+    pub fn apns(self) -> Json? ! Error {
+        let kept = try self.meta(String("apns")) ?? String()
+        if kept.len() == 0 { return none }
+        return some(try parse(try self.unseal(kept, String("loom apns"))))
+    }
+
+    pub fn set_apns(self, config: Json) ! Error {
+        try self.set_meta(String("apns"), self.seal("{config}", String("loom apns")))
     }
 
     // --- ACP agent programs ---
@@ -420,7 +625,38 @@ impl Store {
 
     pub fn delete_acp_agent(self, name: String) ! Error {
         _ = try self.db.execute(String("DELETE FROM acp_agents WHERE name = ?"), [t(name.copy())])
+        _ = try self.db.execute(String("DELETE FROM acp_shares WHERE name = ?"), [t(name.copy())])
+        _ = try self.db.execute(String("DELETE FROM acp_people WHERE name = ?"), [t(name.copy())])
         _ = try self.db.execute(String("DELETE FROM acp_settings WHERE name = ?"), [t(name)])
+    }
+
+    // Who an agent program is for: `kind` "use" is who may run agents on it,
+    // and "keys" who gets the settings the owner shares. none is everyone.
+    pub fn set_acp_people(self, name: String, kind: str, users: List<String>?) ! Error {
+        let list = users else {
+            _ = try self.db.execute(String("DELETE FROM acp_people WHERE name = ? AND kind = ?"), [t(name), t(String(kind))])
+            return
+        }
+        var ids = List<Json>()
+        for u in list {
+            ids.push(Json.Str(u.copy()))
+        }
+        _ = try self.db.execute(String("INSERT INTO acp_people (name, kind, users) VALUES (?, ?, ?) ON CONFLICT (name, kind) DO UPDATE SET users = excluded.users"), [t(name), t(String(kind)), t("{Json.Array(ids)}")])
+    }
+
+    // Who an agent program is for, as set_acp_people keeps it: none is everyone.
+    // People since removed are left out.
+    pub fn acp_people(self, name: String, kind: str) -> List<String>? ! Error {
+        let row = try self.db.query_one(String("SELECT users FROM acp_people WHERE name = ? AND kind = ?"), [t(name), t(String(kind))])
+        let r = row else return none
+        var out = List<String>()
+        if let Json.Array(items) = try parse(text(r[0].copy())) {
+            for u in items {
+                let id = u.as_str() ?? String()
+                if try self.role(id.copy()) != none { out.push(id) }
+            }
+        }
+        return some(out)
     }
 
     // A person's role, "owner" or "member", or none for no such person.
@@ -428,6 +664,57 @@ impl Store {
         let row = try self.db.query_one(String("SELECT role FROM users WHERE id = ?"), [t(user)])
         let r = row else return none
         return some(text(r[0].copy()))
+    }
+
+    // An agent program's settings shared with everyone but the owner: `tokens` a
+    // person may use with them each `per` (day or month). `tokens` 0 stops it.
+    pub fn set_share(self, name: String, tokens: i64, per: String) ! Error {
+        if tokens <= 0 {
+            _ = try self.db.execute(String("DELETE FROM acp_shares WHERE name = ?"), [t(name)])
+            return
+        }
+        _ = try self.db.execute(String("INSERT INTO acp_shares (name, tokens, per) VALUES (?, ?, ?) ON CONFLICT (name) DO UPDATE SET tokens = excluded.tokens, per = excluded.per"), [t(name), Value.Int(tokens), t(per)])
+    }
+
+    pub fn share(self, name: String) -> (i64, String)? ! Error {
+        let row = try self.db.query_one(String("SELECT tokens, per FROM acp_shares WHERE name = ?"), [t(name)])
+        let r = row else return none
+        return some((int(r[0].copy()), text(r[1].copy())))
+    }
+
+    // The tokens a turn used, as its agent program reported them, and whether on
+    // settings the owner shared.
+    pub fn add_usage(self, user: String, program: String, run: String, input: i64, output: i64, total: i64, shared: bool) ! Error {
+        _ = try self.db.execute(String("INSERT INTO usage (user, program, run, input, output, total, shared, at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)"), [t(user), t(program), t(run), Value.Int(input), Value.Int(output), Value.Int(total), Value.Int(if shared { 1 } else { 0 }), Value.Int(now())])
+    }
+
+    // What an agent has, counted: its own `memories`, the person's `skills`
+    // (every agent has them), the shared `tables` it owns, its `routines`, and
+    // the `tokens_today` and `tokens_month` its runs used since `day` and
+    // `month`.
+    pub fn agent_counts(self, user: String, agent: String, day: i64, month: i64) -> Json ! Error {
+        let used = "SELECT COALESCE(SUM(u.total), 0) FROM usage u JOIN runs r ON r.id = u.run JOIN conversations c ON c.id = r.conversation WHERE u.user = ? AND c.agent = ? AND u.at >= ?"
+        let memories = try self.count("SELECT COUNT(*) FROM memories WHERE user = ? AND agent = ?", [t(user.copy()), t(agent.copy())])
+        let skills = try self.count("SELECT COUNT(*) FROM skills WHERE user = ?", [t(user.copy())])
+        let tables = try self.count("SELECT COUNT(*) FROM shared_tables WHERE user = ? AND owner = ?", [t(user.copy()), t(agent.copy())])
+        let routines = try self.count("SELECT COUNT(*) FROM routines WHERE user = ? AND json_extract(json, '$.agent') = ?", [t(user.copy()), t(agent.copy())])
+        let today = try self.count(used, [t(user.copy()), t(agent.copy()), Value.Int(day)])
+        let this_month = try self.count(used, [t(user), t(agent), Value.Int(month)])
+        return Obj.new().i("memories", memories).i("skills", skills).i("tables", tables).i("routines", routines).i("tokens_today", today).i("tokens_month", this_month).done()
+    }
+
+    // The one number a query gives.
+    fn count(self, sql: str, args: List<Value>) -> i64 ! Error {
+        let row = try self.db.query_one(String(sql), args)
+        let r = row else return 0
+        return int(r[0].copy())
+    }
+
+    // The tokens `user` used on `program`'s shared settings since `since`.
+    pub fn shared_used(self, user: String, program: String, since: i64) -> i64 ! Error {
+        let row = try self.db.query_one(String("SELECT COALESCE(SUM(total), 0) FROM usage WHERE user = ? AND program = ? AND shared = 1 AND at >= ?"), [t(user), t(program), Value.Int(since)])
+        let r = row else return 0
+        return int(r[0].copy())
     }
 
     pub fn acp_agents(self) -> List<AcpAgent> ! Error {
@@ -449,6 +736,13 @@ impl Store {
         let revision = (agent.get(String("revision")) ?? Json.Null).as_i64() ?? 0
         _ = try self.db.execute(String("INSERT INTO agents (id, user, json) VALUES (?, ?, ?) ON CONFLICT (id) DO UPDATE SET json = excluded.json"), [t(id.copy()), t(user.copy()), t("{agent}")])
         _ = try self.db.execute(String("INSERT INTO agent_revisions (agent, user, revision, json, by, at) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT (agent, revision) DO UPDATE SET json = excluded.json, by = excluded.by, at = excluded.at"), [t(id), t(user), Value.Int(revision), t("{agent}"), t(by), Value.Int(now())])
+    }
+
+    // Stores an agent without a revision of it: for what loom learns about
+    // it, such as the options its program offers, rather than a change made.
+    pub fn put_agent_json(self, user: String, agent: Json) ! Error {
+        let id = (agent.get(String("id")) ?? Json.Null).as_str() ?? String()
+        _ = try self.db.execute(String("UPDATE agents SET json = ? WHERE id = ? AND user = ?"), [t("{agent}"), t(id), t(user)])
     }
 
     // An agent's revisions, newest first: `revision`, `by`, `at`, and the
@@ -476,32 +770,39 @@ impl Store {
     }
 
     pub fn delete_agent(self, user: String, id: String) ! Error {
-        _ = try self.db.execute(String("UPDATE agents SET deleted = 1 WHERE id = ? AND user = ?"), [t(id), t(user)])
+        _ = try self.db.execute(String("UPDATE agents SET deleted = 1 WHERE id = ? AND user = ?"), [t(id.copy()), t(user.copy())])
+        // Its own rules go with it.
+        _ = try self.db.execute(String("DELETE FROM rules WHERE agent = ? AND user = ?"), [t(id), t(user)])
     }
 
     pub fn add_conversation(self, user: String, agent: String, title: String) -> Json ! Error {
+        return try self.add_conversation_at(user, agent, title, now())
+    }
+
+    // A conversation made at `at`, such as one brought over from another app.
+    pub fn add_conversation_at(self, user: String, agent: String, title: String, at: i64) -> Json ! Error {
         let id = try self.new_id("c")
-        let at = now()
         _ = try self.db.execute(String("INSERT INTO conversations (id, user, agent, title, at) VALUES (?, ?, ?, ?, ?)"), [t(id.copy()), t(user), t(agent.copy()), t(title.copy()), Value.Int(at)])
         return Obj.new().s("id", id).s("agent", agent).s("title", title).i("at", at).done()
     }
 
     pub fn conversation(self, user: String, id: String) -> Json? ! Error {
-        let row = try self.db.query_one(String("SELECT id, agent, title, at FROM conversations WHERE id = ? AND user = ? AND deleted = 0"), [t(id), t(user)])
+        let row = try self.db.query_one(String("SELECT c.id, c.agent, c.title, c.at, k.id, s.agent, b.from_conversation, b.from_message, rt.routine, cp.program FROM conversations c LEFT JOIN tasks k ON k.conversation = c.id LEFT JOIN sides s ON s.conversation = c.id LEFT JOIN branches b ON b.conversation = c.id LEFT JOIN routine_threads rt ON rt.conversation = c.id LEFT JOIN conversation_programs cp ON cp.conversation = c.id WHERE c.id = ? AND c.user = ? AND c.deleted = 0"), [t(id), t(user)])
         let r = row else return none
-        return some(Obj.new().s("id", text(r[0].copy())).s("agent", text(r[1].copy())).s("title", text(r[2].copy())).i("at", int(r[3].copy())).done())
+        return some(conversation_of(r))
     }
 
-    // `agent`'s conversation with the newest message, as the apps show its chat.
+    // `agent`'s conversation with the newest message, as the apps show its
+    // chat. A task's conversation is the task's, not the chat.
     pub fn newest_conversation(self, user: String, agent: String) -> Json? ! Error {
-        let r = try self.db.query_one(String("SELECT c.id, c.agent, c.title, c.at FROM conversations c LEFT JOIN messages m ON m.conversation = c.id AND m.user = c.user WHERE c.user = ? AND c.agent = ? AND c.deleted = 0 GROUP BY c.id ORDER BY max(coalesce(m.at, c.at)) DESC, c.rowid DESC LIMIT 1"), [t(user), t(agent)]) else return none
-        return some(Obj.new().s("id", text(r[0].copy())).s("agent", text(r[1].copy())).s("title", text(r[2].copy())).i("at", int(r[3].copy())).done())
+        let r = try self.db.query_one(String("SELECT c.id, c.agent, c.title, c.at, NULL, NULL, NULL, NULL, NULL, (SELECT program FROM conversation_programs WHERE conversation = c.id) FROM conversations c LEFT JOIN messages m ON m.conversation = c.id AND m.user = c.user WHERE c.user = ? AND c.agent = ? AND c.deleted = 0 AND c.id NOT IN (SELECT conversation FROM tasks) AND c.id NOT IN (SELECT conversation FROM sides) AND c.id NOT IN (SELECT conversation FROM branches) AND c.id NOT IN (SELECT conversation FROM routine_threads) GROUP BY c.id ORDER BY max(coalesce(m.at, c.at)) DESC, c.rowid DESC LIMIT 1"), [t(user), t(agent)]) else return none
+        return some(conversation_of(r))
     }
 
     pub fn conversations(self, user: String) -> List<Json> ! Error {
         var out = List<Json>()
-        for r in try self.db.query(String("SELECT id, agent, title, at FROM conversations WHERE user = ? AND deleted = 0 ORDER BY at"), [t(user)]) {
-            out.push(Obj.new().s("id", text(r[0].copy())).s("agent", text(r[1].copy())).s("title", text(r[2].copy())).i("at", int(r[3].copy())).done())
+        for r in try self.db.query(String("SELECT c.id, c.agent, c.title, c.at, k.id, s.agent, b.from_conversation, b.from_message, rt.routine, cp.program FROM conversations c LEFT JOIN tasks k ON k.conversation = c.id LEFT JOIN sides s ON s.conversation = c.id LEFT JOIN branches b ON b.conversation = c.id LEFT JOIN routine_threads rt ON rt.conversation = c.id LEFT JOIN conversation_programs cp ON cp.conversation = c.id WHERE c.user = ? AND c.deleted = 0 ORDER BY c.at"), [t(user)]) {
+            out.push(conversation_of(r))
         }
         return out
     }
@@ -511,7 +812,311 @@ impl Store {
     }
 
     pub fn delete_conversation(self, user: String, id: String) ! Error {
+        _ = try self.db.execute(String("DELETE FROM queue WHERE conversation = ? AND user = ?"), [t(id.copy()), t(user.copy())])
+        _ = try self.db.execute(String("DELETE FROM tasks WHERE conversation = ? AND user = ?"), [t(id.copy()), t(user.copy())])
+        _ = try self.db.execute(String("DELETE FROM sides WHERE conversation = ? AND user = ?"), [t(id.copy()), t(user.copy())])
+        _ = try self.db.execute(String("DELETE FROM branches WHERE conversation = ? AND user = ?"), [t(id.copy()), t(user.copy())])
+        _ = try self.db.execute(String("DELETE FROM routine_threads WHERE conversation = ? AND user = ?"), [t(id.copy()), t(user.copy())])
+        _ = try self.db.execute(String("DELETE FROM conversation_programs WHERE conversation = ? AND user = ?"), [t(id.copy()), t(user.copy())])
         _ = try self.db.execute(String("UPDATE conversations SET deleted = 1 WHERE id = ? AND user = ?"), [t(id), t(user)])
+    }
+
+    // --- Routine threads (PLAN.md, "Routines say when there's nothing to say") ---
+
+    // Marks `conversation` as routine `routine`'s thread of its own, which is
+    // never its agent's chat.
+    pub fn mark_routine_thread(self, user: String, conversation: String, routine: String) ! Error {
+        _ = try self.db.execute(String("INSERT INTO routine_threads (conversation, user, routine) VALUES (?, ?, ?)"), [t(conversation), t(user), t(routine)])
+    }
+
+    // Routine `routine`'s thread, the newest if it has had more than one.
+    pub fn routine_thread(self, user: String, routine: String) -> String? ! Error {
+        let r = try self.db.query_one(String("SELECT rt.conversation FROM routine_threads rt JOIN conversations c ON c.id = rt.conversation WHERE rt.user = ? AND rt.routine = ? AND c.deleted = 0 ORDER BY c.rowid DESC LIMIT 1"), [t(user), t(routine)]) else return none
+        return some(text(r[0].copy()))
+    }
+
+    // --- Branches (PLAN.md, "Branching a chat") ---
+
+    pub fn add_branch(self, user: String, conversation: String, from_conversation: String, from_message: String) ! Error {
+        _ = try self.db.execute(String("INSERT INTO branches (conversation, user, from_conversation, from_message) VALUES (?, ?, ?, ?)"), [t(conversation), t(user), t(from_conversation), t(from_message)])
+    }
+
+    // The chat and the message a branch starts from, while its agent hasn't been
+    // handed what came before; and from then on, none.
+    pub fn branch_to_hand(self, user: String, conversation: String) -> (String, String)? ! Error {
+        let r = try self.db.query_one(String("SELECT from_conversation, from_message FROM branches WHERE conversation = ? AND user = ? AND handed = 0"), [t(conversation), t(user)]) else return none
+        return some((text(r[0].copy()), text(r[1].copy())))
+    }
+
+    pub fn branch_handed(self, conversation: String) ! Error {
+        _ = try self.db.execute(String("UPDATE branches SET handed = 1 WHERE conversation = ?"), [t(conversation)])
+    }
+
+    // --- Moved chats (PLAN.md, "A backup brain") ---
+
+    // Puts `conversation` on the agent program `program`, in place of its
+    // agent's. With `from`, the program it was on, its next turn starts with
+    // loom's summary of it; with "", it doesn't.
+    pub fn set_conversation_program(self, user: String, conversation: String, program: String, from: String) ! Error {
+        _ = try self.db.execute(String("INSERT INTO conversation_programs (conversation, user, program, summary_from) VALUES (?, ?, ?, ?) ON CONFLICT (conversation) DO UPDATE SET program = excluded.program, summary_from = excluded.summary_from"), [t(conversation), t(user), t(program), t(from)])
+    }
+
+    // The program `conversation` was moved to, if it was.
+    pub fn conversation_program(self, user: String, conversation: String) -> String? ! Error {
+        let r = try self.db.query_one(String("SELECT program FROM conversation_programs WHERE conversation = ? AND user = ?"), [t(conversation), t(user)]) else return none
+        return some(text(r[0].copy()))
+    }
+
+    // The program `conversation` moved from by hand, while its next turn is to
+    // start with loom's summary of it; none once it has.
+    pub fn summary_to_hand(self, user: String, conversation: String) -> String? ! Error {
+        let r = try self.db.query_one(String("SELECT summary_from FROM conversation_programs WHERE conversation = ? AND user = ? AND summary_from != ''"), [t(conversation), t(user)]) else return none
+        return some(text(r[0].copy()))
+    }
+
+    pub fn summary_handed(self, conversation: String) ! Error {
+        _ = try self.db.execute(String("UPDATE conversation_programs SET summary_from = '' WHERE conversation = ?"), [t(conversation)])
+    }
+
+    // --- Scripts (PLAN.md, "Scripts") ---
+
+    // A person's script token, kept as its SHA-256: a new one replaces the last.
+    pub fn set_script_token(self, user: String, hash: String) ! Error {
+        _ = try self.db.execute(String("INSERT INTO script_tokens (user, hash, at) VALUES (?, ?, ?) ON CONFLICT (user) DO UPDATE SET hash = excluded.hash, at = excluded.at"), [t(user), t(hash), Value.Int(now())])
+    }
+
+    pub fn drop_script_token(self, user: String) ! Error {
+        _ = try self.db.execute(String("DELETE FROM script_tokens WHERE user = ?"), [t(user)])
+    }
+
+    // When the person's scripts were turned on, or none while they're off.
+    pub fn scripts_since(self, user: String) -> i64? ! Error {
+        let r = try self.db.query_one(String("SELECT at FROM script_tokens WHERE user = ?"), [t(user)]) else return none
+        return some(int(r[0].copy()))
+    }
+
+    // Whose script token has this SHA-256.
+    pub fn script_token_user(self, hash: String) -> String? ! Error {
+        let r = try self.db.query_one(String("SELECT user FROM script_tokens WHERE hash = ?"), [t(hash)]) else return none
+        return some(text(r[0].copy()))
+    }
+
+    // --- Imports (PLAN.md, "Importing from OpenBot and Grok Bot") ---
+
+    // What the thing another app calls `id`, of `kind` (agent, message, ...),
+    // became in loom when it was brought over from `source`, if it was.
+    pub fn imported(self, user: String, source: String, kind: str, id: String) -> String? ! Error {
+        let r = try self.db.query_one(String("SELECT loom FROM imported WHERE user = ? AND source = ? AND kind = ? AND id = ?"), [t(user), t(source), t(String(kind)), t(id)]) else return none
+        return some(text(r[0].copy()))
+    }
+
+    pub fn mark_imported(self, user: String, source: String, kind: str, id: String, loom: String) ! Error {
+        _ = try self.db.execute(String("INSERT INTO imported (user, source, kind, id, loom, at) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT (user, source, kind, id) DO UPDATE SET loom = excluded.loom"), [t(user), t(source), t(String(kind)), t(id), t(loom), Value.Int(now())])
+    }
+
+    // --- Shared tables (PLAN.md, "Shared tables") ---
+
+    // The person's tables: name, description, owner (an agent's id, or empty
+    // for the person), at, and how many rows each has.
+    pub fn shared_tables(self, user: String) -> List<Json> ! Error {
+        var out = List<Json>()
+        for r in try self.db.query(String("SELECT t.name, t.description, t.owner, t.at, (SELECT count(*) FROM shared_rows r WHERE r.user = t.user AND r.tbl = t.name) FROM shared_tables t WHERE t.user = ? ORDER BY t.name"), [t(user)]) {
+            out.push(Obj.new().s("name", text(r[0].copy())).s("description", text(r[1].copy())).s("owner", text(r[2].copy())).i("at", int(r[3].copy())).i("rows", int(r[4].copy())).done())
+        }
+        return out
+    }
+
+    pub fn shared_table(self, user: String, name: String) -> Json? ! Error {
+        let r = try self.db.query_one(String("SELECT t.name, t.description, t.owner, t.at, (SELECT count(*) FROM shared_rows r WHERE r.user = t.user AND r.tbl = t.name) FROM shared_tables t WHERE t.user = ? AND t.name = ?"), [t(user), t(name)]) else return none
+        return some(Obj.new().s("name", text(r[0].copy())).s("description", text(r[1].copy())).s("owner", text(r[2].copy())).i("at", int(r[3].copy())).i("rows", int(r[4].copy())).done())
+    }
+
+    pub fn add_shared_table(self, user: String, name: String, description: String, owner: String) ! Error {
+        _ = try self.db.execute(String("INSERT INTO shared_tables (user, name, description, owner, at) VALUES (?, ?, ?, ?, ?)"), [t(user), t(name), t(description), t(owner), Value.Int(now())])
+    }
+
+    pub fn drop_shared_table(self, user: String, name: String) ! Error {
+        _ = try self.db.execute(String("DELETE FROM shared_rows WHERE user = ? AND tbl = ?"), [t(user.copy()), t(name.copy())])
+        _ = try self.db.execute(String("DELETE FROM shared_tables WHERE user = ? AND name = ?"), [t(user), t(name)])
+    }
+
+    // How many rows the person's tables hold in all.
+    pub fn shared_row_count(self, user: String) -> i64 ! Error {
+        let r = try self.db.query_one(String("SELECT count(*) FROM shared_rows WHERE user = ?"), [t(user)]) else return 0
+        return int(r[0].copy())
+    }
+
+    // A row of `tbl`: id, by (an agent's id, or empty for the person), at,
+    // updated, and its data.
+    pub fn shared_row(self, user: String, tbl: String, id: i64) -> Json? ! Error {
+        let r = try self.db.query_one(String("SELECT id, data, by, at, updated FROM shared_rows WHERE user = ? AND tbl = ? AND id = ?"), [t(user), t(tbl), Value.Int(id)]) else return none
+        return some(row_of(r))
+    }
+
+    pub fn add_shared_row(self, user: String, tbl: String, data: String, by: String) -> i64 ! Error {
+        let at = now()
+        _ = try self.db.execute(String("INSERT INTO shared_rows (user, tbl, data, by, at, updated) VALUES (?, ?, ?, ?, ?, ?)"), [t(user), t(tbl), t(data), t(by), Value.Int(at), Value.Int(at)])
+        let r = try self.db.query_one(String("SELECT last_insert_rowid()"), List<Value>()) else return 0
+        return int(r[0].copy())
+    }
+
+    pub fn put_shared_row(self, user: String, id: i64, data: String, by: String) ! Error {
+        _ = try self.db.execute(String("UPDATE shared_rows SET data = ?, by = ?, updated = ? WHERE user = ? AND id = ?"), [t(data), t(by), Value.Int(now()), t(user), Value.Int(id)])
+    }
+
+    pub fn delete_shared_row(self, user: String, id: i64) ! Error {
+        _ = try self.db.execute(String("DELETE FROM shared_rows WHERE user = ? AND id = ?"), [t(user), Value.Int(id)])
+    }
+
+    // Rows of `tbl` whose fields equal what `filters` says, in the order of
+    // the field `order` (or their ids, for "id"), `limit` of them from `offset`.
+    pub fn shared_rows(self, user: String, tbl: String, filters: List<(String, Json)>, order: String, desc: bool, limit: i64, offset: i64) -> List<Json> ! Error {
+        var sql = String("SELECT id, data, by, at, updated FROM shared_rows WHERE user = ? AND tbl = ?")
+        var params: List<Value> = [t(user), t(tbl)]
+        for (name, value) in filters {
+            let path = "$.{name}"
+            match value {
+                Json.Null => {
+                    sql.push_str(" AND json_extract(data, ?) IS NULL")
+                    params.push(t(path))
+                },
+                Json.Bool(b) => {
+                    sql.push_str(" AND json_extract(data, ?) = ?")
+                    params.push(t(path))
+                    params.push(Value.Int(if b { 1 } else { 0 }))
+                },
+                Json.Int(n) => {
+                    sql.push_str(" AND json_extract(data, ?) = ?")
+                    params.push(t(path))
+                    params.push(Value.Int(n))
+                },
+                Json.Float(f) => {
+                    sql.push_str(" AND json_extract(data, ?) = ?")
+                    params.push(t(path))
+                    params.push(Value.Real(f))
+                },
+                Json.Str(s) => {
+                    sql.push_str(" AND json_extract(data, ?) = ?")
+                    params.push(t(path))
+                    params.push(t(s.copy()))
+                },
+                _ => {},
+            }
+        }
+        let dir = if desc { " DESC" } else { "" }
+        if order == "id" {
+            sql.push_str(" ORDER BY id{dir}")
+        } else {
+            sql.push_str(" ORDER BY json_extract(data, ?){dir}, id{dir}")
+            params.push(t("$.{order}"))
+        }
+        sql.push_str(" LIMIT ? OFFSET ?")
+        params.push(Value.Int(limit))
+        params.push(Value.Int(offset))
+        var out = List<Json>()
+        for r in try self.db.query(sql, params) { out.push(row_of(r)) }
+        return out
+    }
+
+    // --- Side questions (PLAN.md, "Side questions") ---
+
+    // The conversation where `agent` answers side questions, if it has one yet.
+    pub fn side_conversation(self, user: String, agent: String) -> String? ! Error {
+        let r = try self.db.query_one(String("SELECT s.conversation FROM sides s JOIN conversations c ON c.id = s.conversation WHERE s.user = ? AND s.agent = ? AND c.deleted = 0"), [t(user), t(agent)]) else return none
+        return some(text(r[0].copy()))
+    }
+
+    pub fn put_side(self, user: String, agent: String, conversation: String) ! Error {
+        _ = try self.db.execute(String("INSERT INTO sides (user, agent, conversation) VALUES (?, ?, ?) ON CONFLICT (user, agent) DO UPDATE SET conversation = excluded.conversation"), [t(user), t(agent), t(conversation)])
+    }
+
+    // --- Tasks (PLAN.md, "Work that waits its turn") ---
+
+    // Keeps a task as it is now: its `id`, `agent`, `conversation` and `status`, and the rest.
+    pub fn put_task(self, user: String, task: Json) ! Error {
+        _ = try self.db.execute(String("INSERT INTO tasks (id, user, agent, conversation, status, json, at) VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT (id) DO UPDATE SET status = excluded.status, json = excluded.json"), [t(field(task.copy(), "id")), t(user), t(field(task.copy(), "agent")), t(field(task.copy(), "conversation")), t(field(task.copy(), "status")), t("{task}"), Value.Int(now())])
+    }
+
+    pub fn task(self, user: String, id: String) -> Json? ! Error {
+        let r = try self.db.query_one(String("SELECT json FROM tasks WHERE id = ? AND user = ?"), [t(id), t(user)]) else return none
+        let ok(j) = parse(text(r[0].copy())) else return none
+        return some(j)
+    }
+
+    // The task a conversation is, if it's one.
+    pub fn task_in(self, user: String, conversation: String) -> Json? ! Error {
+        let r = try self.db.query_one(String("SELECT json FROM tasks WHERE conversation = ? AND user = ?"), [t(conversation), t(user)]) else return none
+        let ok(j) = parse(text(r[0].copy())) else return none
+        return some(j)
+    }
+
+    // A person's tasks, newest first, but not those of agents that were deleted.
+    pub fn tasks(self, user: String) -> List<Json> ! Error {
+        var out = List<Json>()
+        for r in try self.db.query(String("SELECT k.json FROM tasks k JOIN agents a ON a.id = k.agent AND a.deleted = 0 WHERE k.user = ? ORDER BY k.at DESC, k.rowid DESC"), [t(user)]) {
+            if let ok(j) = parse(text(r[0].copy())) { out.push(j) }
+        }
+        return out
+    }
+
+    // Every task that was running, as (user, task), for after a restart.
+    pub fn running_tasks(self) -> List<(String, Json)> ! Error {
+        var out = List<(String, Json)>()
+        for r in try self.db.query(String("SELECT k.user, k.json FROM tasks k JOIN agents a ON a.id = k.agent AND a.deleted = 0 WHERE k.status = 'running' ORDER BY k.at")) {
+            if let ok(j) = parse(text(r[1].copy())) { out.push((text(r[0].copy()), j)) }
+        }
+        return out
+    }
+
+    // --- The queue (PLAN.md, "Work that waits its turn") ---
+
+    // What waits in a conversation for its agent to finish, first first: each
+    // the item as put, with its `id`, `text`, `files`, `from` and `at`.
+    pub fn queued(self, user: String, conversation: String) -> List<Json> ! Error {
+        var out = List<Json>()
+        for r in try self.db.query(String("SELECT json FROM queue WHERE user = ? AND conversation = ? ORDER BY pos"), [t(user), t(conversation)]) {
+            if let ok(j) = parse(text(r[0].copy())) { out.push(j) }
+        }
+        return out
+    }
+
+    // Puts an item at the end of a conversation's queue, or first. One that's
+    // there already keeps its place, unless it goes first.
+    pub fn put_queued(self, user: String, conversation: String, item: Json, first: bool) ! Error {
+        let id = (item.get(String("id")) ?? Json.Null).as_str() ?? String()
+        if not first and try self.db.query_one(String("SELECT pos FROM queue WHERE user = ? AND id = ?"), [t(user.copy()), t(id.copy())]) != none {
+            _ = try self.db.execute(String("UPDATE queue SET json = ? WHERE user = ? AND id = ?"), [t("{item}"), t(user), t(id)])
+            return
+        }
+        let edge = try self.db.query_one(String(if first { "SELECT COALESCE(MIN(pos), 0) - 1 FROM queue WHERE user = ? AND conversation = ?" } else { "SELECT COALESCE(MAX(pos), 0) + 1 FROM queue WHERE user = ? AND conversation = ?" }), [t(user.copy()), t(conversation.copy())])
+        let pos = if let r = edge { int(r[0].copy()) } else { 0 }
+        _ = try self.db.execute(String("INSERT INTO queue (id, user, conversation, pos, json) VALUES (?, ?, ?, ?, ?) ON CONFLICT (id) DO UPDATE SET pos = excluded.pos, json = excluded.json"), [t(id), t(user), t(conversation), Value.Int(pos), t("{item}")])
+    }
+
+    // One queued item, and the conversation it waits in.
+    pub fn queued_item(self, user: String, id: String) -> (String, Json)? ! Error {
+        let row = try self.db.query_one(String("SELECT conversation, json FROM queue WHERE user = ? AND id = ?"), [t(user), t(id)]) else return none
+        let ok(item) = parse(text(row[1].copy())) else return none
+        return some((text(row[0].copy()), item))
+    }
+
+    pub fn drop_queued(self, user: String, id: String) -> bool ! Error {
+        return try self.db.execute(String("DELETE FROM queue WHERE user = ? AND id = ?"), [t(user), t(id)]) > 0
+    }
+
+    // Puts a conversation's queue in the order of `ids`, the ones it names
+    // first and the rest after, as they were.
+    pub fn order_queued(self, user: String, conversation: String, ids: List<String>) ! Error {
+        var order = ids.copy()
+        for item in try self.queued(user.copy(), conversation.copy()) {
+            let id = (item.get(String("id")) ?? Json.Null).as_str() ?? String()
+            if not order.contains(id.copy()) { order.push(id) }
+        }
+        try self.begin()
+        for (k, id) in order.enumerate() {
+            _ = try self.db.execute(String("UPDATE queue SET pos = ? WHERE user = ? AND conversation = ? AND id = ?"), [Value.Int(i64.wrap(u64(k))), t(user.copy()), t(conversation.copy()), t(id.copy())])
+        }
+        try self.commit()
     }
 
     pub fn put_message(self, user: String, message: Json) ! Error {
@@ -524,6 +1129,15 @@ impl Store {
 
     // Puts a message's words in the search index: its text, and its files' names.
     // A message's row there has the message's rowid, so storing it again replaces it.
+    // Deletes `user`'s message `id`, and its words from the search. False if
+    // there was no such message.
+    pub fn delete_message(self, user: String, id: String) -> bool ! Error {
+        let row = try self.db.query_one(String("SELECT rowid FROM messages WHERE id = ? AND user = ?"), [t(id), t(user)]) else return false
+        _ = try self.db.execute(String("DELETE FROM messages_fts WHERE rowid = ?"), [row[0].copy()])
+        _ = try self.db.execute(String("DELETE FROM messages WHERE rowid = ?"), [row[0].copy()])
+        return true
+    }
+
     fn index_message(self, user: String, message: Json) ! Error {
         let id = (message.get(String("id")) ?? Json.Null).as_str() ?? String()
         let row = try self.db.query_one(String("SELECT rowid, conversation, at FROM messages WHERE id = ?"), [t(id)]) else return
@@ -575,7 +1189,7 @@ impl Store {
         sql.push_str(" ORDER BY rank LIMIT ?")
         args.push(Value.Int(i64.wrap(u64(limit))))
         for r in try self.db.query(sql, args) {
-            out.push((try parse(text(r[0].copy())), text(r[1].copy())))
+            out.push((try parse(text(r[0].copy())), plain_snippet(text(r[1].copy()))))
         }
         return out
     }
@@ -606,6 +1220,80 @@ impl Store {
 
     pub fn delete_skill(self, user: String, name: String) -> bool ! Error {
         return try self.db.execute(String("DELETE FROM skills WHERE user = ? AND name = ?"), [t(user), t(name)]) > 0
+    }
+
+    // --- Plugins (PLAN.md, "Plugins") ---
+
+    // Keeps `user`'s plugin, as JSON (its `id`, what its manifest says,
+    // `allowed`, `revision`, `by` and `at`), and its files, a revision too.
+    pub fn put_plugin(self, user: String, plugin: Json, files: Json) ! Error {
+        let id = (plugin.get(String("id")) ?? Json.Null).as_str() ?? String()
+        let revision = (plugin.get(String("revision")) ?? Json.Null).as_i64() ?? 0
+        _ = try self.db.execute(String("INSERT INTO plugins (user, id, json, files) VALUES (?, ?, ?, ?) ON CONFLICT (user, id) DO UPDATE SET json = excluded.json, files = excluded.files"), [t(user.copy()), t(id.copy()), t("{plugin}"), t("{files}")])
+        _ = try self.db.execute(String("INSERT INTO plugin_revisions (user, id, revision, json, files) VALUES (?, ?, ?, ?, ?) ON CONFLICT (user, id, revision) DO UPDATE SET json = excluded.json, files = excluded.files"), [t(user), t(id), Value.Int(revision), t("{plugin}"), t("{files}")])
+    }
+
+    // Changes what's allowed of a plugin, without a new revision.
+    pub fn set_plugin(self, user: String, plugin: Json) ! Error {
+        let id = (plugin.get(String("id")) ?? Json.Null).as_str() ?? String()
+        _ = try self.db.execute(String("UPDATE plugins SET json = ? WHERE user = ? AND id = ?"), [t("{plugin}"), t(user), t(id)])
+    }
+
+    pub fn plugin(self, user: String, id: String) -> Json? ! Error {
+        let r = try self.db.query_one(String("SELECT json FROM plugins WHERE user = ? AND id = ?"), [t(user), t(id)]) else return none
+        return some(try parse(text(r[0].copy())))
+    }
+
+    // A plugin's files, {path: text}.
+    pub fn plugin_files(self, user: String, id: String) -> Json? ! Error {
+        let r = try self.db.query_one(String("SELECT files FROM plugins WHERE user = ? AND id = ?"), [t(user), t(id)]) else return none
+        return some(try parse(text(r[0].copy())))
+    }
+
+    pub fn plugins(self, user: String) -> List<Json> ! Error {
+        var out = List<Json>()
+        for r in try self.db.query(String("SELECT json FROM plugins WHERE user = ? ORDER BY id"), [t(user)]) {
+            out.push(try parse(text(r[0].copy())))
+        }
+        return out
+    }
+
+    // A plugin's revisions, newest first: each as it was, without its files.
+    pub fn plugin_revisions(self, user: String, id: String) -> List<Json> ! Error {
+        var out = List<Json>()
+        for r in try self.db.query(String("SELECT json FROM plugin_revisions WHERE user = ? AND id = ? ORDER BY revision DESC"), [t(user), t(id)]) {
+            out.push(try parse(text(r[0].copy())))
+        }
+        return out
+    }
+
+    // Deletes a plugin, its revisions and its panel's data.
+    pub fn delete_plugin(self, user: String, id: String) -> bool ! Error {
+        let gone = try self.db.execute(String("DELETE FROM plugins WHERE user = ? AND id = ?"), [t(user.copy()), t(id.copy())]) > 0
+        _ = try self.db.execute(String("DELETE FROM plugin_revisions WHERE user = ? AND id = ?"), [t(user.copy()), t(id.copy())])
+        _ = try self.db.execute(String("DELETE FROM plugin_data WHERE user = ? AND plugin = ?"), [t(user), t(id)])
+        return gone
+    }
+
+    // What a plugin's panel kept under `key`, or none.
+    pub fn plugin_data(self, user: String, plugin: String, key: String) -> Json? ! Error {
+        let r = try self.db.query_one(String("SELECT value FROM plugin_data WHERE user = ? AND plugin = ? AND key = ?"), [t(user), t(plugin), t(key)]) else return none
+        return some(try parse(text(r[0].copy())))
+    }
+
+    // Keeps `value` under `key` for a plugin's panel; null forgets it.
+    pub fn put_plugin_data(self, user: String, plugin: String, key: String, value: Json) ! Error {
+        if value == Json.Null {
+            _ = try self.db.execute(String("DELETE FROM plugin_data WHERE user = ? AND plugin = ? AND key = ?"), [t(user), t(plugin), t(key)])
+            return
+        }
+        _ = try self.db.execute(String("INSERT INTO plugin_data (user, plugin, key, value, at) VALUES (?, ?, ?, ?, ?) ON CONFLICT (user, plugin, key) DO UPDATE SET value = excluded.value, at = excluded.at"), [t(user), t(plugin), t(key), t("{value}"), Value.Int(now())])
+    }
+
+    // How many bytes a plugin's panel keeps, in all.
+    pub fn plugin_data_size(self, user: String, plugin: String) -> i64 ! Error {
+        let r = try self.db.query_one(String("SELECT COALESCE(SUM(LENGTH(key) + LENGTH(value)), 0) FROM plugin_data WHERE user = ? AND plugin = ?"), [t(user), t(plugin)]) else return 0
+        return int(r[0].copy())
     }
 
     // --- MCP servers (PLAN.md, "Agents") ---
@@ -666,8 +1354,23 @@ impl Store {
     // Keeps a note for `agent`, or for all of the person's agents when
     // `agent` is "". Gives its id.
     pub fn remember(self, user: String, agent: String, what: String, by: String) -> i64 ! Error {
+        return try self.remember_at(user, agent, what, by, now())
+    }
+
+    // The same, kept at `at`, such as a note brought over from another app.
+    pub fn remember_at(self, user: String, agent: String, what: String, by: String, at: i64) -> i64 ! Error {
+        return try self.remember_note(user, agent, what, by, at, String())
+    }
+
+    // A note tied to a site (site_of gives it), which the agent is shown when
+    // its browser visits that site. "" ties it to none.
+    pub fn remember_on(self, user: String, agent: String, what: String, by: String, site: String) -> i64 ! Error {
+        return try self.remember_note(user, agent, what, by, now(), site)
+    }
+
+    fn remember_note(self, user: String, agent: String, what: String, by: String, at: i64, site: String) -> i64 ! Error {
         try self.begin()
-        _ = try self.db.execute(String("INSERT INTO memories (user, agent, text, by, at) VALUES (?, ?, ?, ?, ?)"), [t(user.copy()), t(agent.copy()), t(what.copy()), t(by), Value.Int(now())])
+        _ = try self.db.execute(String("INSERT INTO memories (user, agent, text, by, at, site) VALUES (?, ?, ?, ?, ?, ?)"), [t(user.copy()), t(agent.copy()), t(what.copy()), t(by), Value.Int(at), t(site)])
         let id = self.db.last_insert_id()
         _ = try self.db.execute(String("INSERT INTO memories_fts (rowid, text, user, agent) VALUES (?, ?, ?, ?)"), [Value.Int(id), t(what), t(user), t(agent)])
         try self.commit()
@@ -683,10 +1386,10 @@ impl Store {
         var sql = String()
         var args = List<Value>()
         if let fts = fts_any(query) {
-            sql = String("SELECT m.id, m.agent, m.text, m.by, m.at FROM memories_fts f JOIN memories m ON m.id = f.rowid WHERE memories_fts MATCH ? AND m.user = ?")
+            sql = String("SELECT m.id, m.agent, m.text, m.by, m.at, m.site FROM memories_fts f JOIN memories m ON m.id = f.rowid WHERE memories_fts MATCH ? AND m.user = ?")
             args = [t(fts), t(user)]
         } else {
-            sql = String("SELECT m.id, m.agent, m.text, m.by, m.at FROM memories m WHERE m.user = ?")
+            sql = String("SELECT m.id, m.agent, m.text, m.by, m.at, m.site FROM memories m WHERE m.user = ?")
             args = [t(user)]
         }
         if let a = agent {
@@ -697,9 +1400,89 @@ impl Store {
         args.push(Value.Int(i64.wrap(u64(limit))))
         for r in try self.db.query(sql, args) {
             let owner = text(r[1].copy())
-            out.push(Obj.new().i("id", int(r[0].copy())).s("agent", owner.copy()).b("shared", owner.len() == 0).s("text", text(r[2].copy())).s("by", text(r[3].copy())).i("at", int(r[4].copy())).done())
+            out.push(Obj.new().i("id", int(r[0].copy())).s("agent", owner.copy()).b("shared", owner.len() == 0).s("text", text(r[2].copy())).s("by", text(r[3].copy())).i("at", int(r[4].copy())).s("site", text(r[5].copy())).done())
         }
         return out
+    }
+
+    // The notes `agent` reads that are tied to `host`'s site, or a site it's
+    // under (mail.example.com is under example.com), newest first: each
+    // `id`, `text`, `site` and `shared`.
+    pub fn site_notes(self, user: String, agent: String, host: String) -> List<Json> ! Error {
+        var out = List<Json>()
+        let here = site_of(host)
+        if here.len() == 0 { return out }
+        for r in try self.db.query(String("SELECT id, agent, text, site FROM memories WHERE user = ? AND (agent = ? OR agent = '') AND site != '' ORDER BY id DESC"), [t(user), t(agent)]) {
+            let site = text(r[3].copy())
+            if not site_covers(site.copy(), here.copy()) { continue }
+            out.push(Obj.new().i("id", int(r[0].copy())).s("text", text(r[2].copy())).s("site", site).b("shared", text(r[1].copy()).len() == 0).done())
+            if out.len() >= SITE_NOTES_MOST { break }
+        }
+        return out
+    }
+
+    // --- Teaching a task, and proposals (PLAN.md, "Sharing and learning") ---
+
+    // Keeps the steps the person recorded in `agent`'s browser. Gives its id.
+    pub fn add_recording(self, user: String, agent: String, steps: Json) -> String ! Error {
+        let id = try self.new_id("rec")
+        _ = try self.db.execute(String("INSERT INTO recordings (id, user, agent, steps, at) VALUES (?, ?, ?, ?, ?)"), [t(id.copy()), t(user), t(agent), t("{steps}"), Value.Int(now())])
+        return id
+    }
+
+    // A recording: `id`, `agent`, `steps`, `proposal` (the skill written from
+    // it, once one is) and `at`.
+    pub fn recording(self, user: String, id: String) -> Json? ! Error {
+        let r = try self.db.query_one(String("SELECT id, agent, steps, proposal, at FROM recordings WHERE user = ? AND id = ?"), [t(user), t(id)]) else return none
+        return some(recording_of(r))
+    }
+
+    // `agent`'s newest recording that no skill has been written from yet.
+    pub fn unwritten_recording(self, user: String, agent: String) -> String? ! Error {
+        let r = try self.db.query_one(String("SELECT id FROM recordings WHERE user = ? AND agent = ? AND proposal = '' ORDER BY at DESC, rowid DESC LIMIT 1"), [t(user), t(agent)]) else return none
+        return some(text(r[0].copy()))
+    }
+
+    pub fn recording_written(self, user: String, id: String, proposal: String) ! Error {
+        _ = try self.db.execute(String("UPDATE recordings SET proposal = ? WHERE user = ? AND id = ?"), [t(proposal), t(user), t(id)])
+    }
+
+    // Keeps an agent's proposal, waiting for the person: `kind` is skill or
+    // note, and `data` its skill (name, description, body) or note (text,
+    // site, shared). Gives it as proposal() does.
+    pub fn add_proposal(self, user: String, agent: String, kind: str, data: Json, why: String, recording: String) -> Json ! Error {
+        let id = try self.new_id("prop")
+        _ = try self.db.execute(String("INSERT INTO proposals (id, user, agent, kind, data, why, recording, status, at) VALUES (?, ?, ?, ?, ?, ?, ?, 'waiting', ?)"), [t(id.copy()), t(user.copy()), t(agent), t(String(kind)), t("{data}"), t(why), t(recording), Value.Int(now())])
+        return try self.proposal(user, id) ?? Json.Null
+    }
+
+    // A proposal: `id`, `agent`, `kind`, `skill` or `note`, `why`, `status`
+    // (waiting, kept or dropped), `at`, and once decided, `decided` and `by`;
+    // and for a skill written from a recording, `recording` and its `steps`.
+    pub fn proposal(self, user: String, id: String) -> Json? ! Error {
+        let r = try self.db.query_one(String("SELECT p.id, p.agent, p.kind, p.data, p.why, p.recording, p.status, p.at, p.decided, p.by, coalesce(r.steps, '') FROM proposals p LEFT JOIN recordings r ON r.id = p.recording AND r.user = p.user WHERE p.user = ? AND p.id = ?"), [t(user), t(id)]) else return none
+        return some(proposal_of(r))
+    }
+
+    // The person's proposals with `status`, or every one with "", newest first.
+    pub fn proposals(self, user: String, status: String, limit: usize) -> List<Json> ! Error {
+        var out = List<Json>()
+        var sql = String("SELECT p.id, p.agent, p.kind, p.data, p.why, p.recording, p.status, p.at, p.decided, p.by, coalesce(r.steps, '') FROM proposals p LEFT JOIN recordings r ON r.id = p.recording AND r.user = p.user WHERE p.user = ?")
+        var args: List<Value> = [t(user)]
+        if status.len() > 0 {
+            sql.push_str(" AND p.status = ?")
+            args.push(t(status))
+        }
+        sql.push_str(" ORDER BY p.at DESC, p.rowid DESC LIMIT ?")
+        args.push(Value.Int(i64.wrap(u64(limit))))
+        for r in try self.db.query(sql, args) { out.push(proposal_of(r)) }
+        return out
+    }
+
+    // Keeps or drops a waiting proposal, as `by` said, with what was kept in
+    // place of what was proposed. False when it isn't waiting.
+    pub fn decide_proposal(self, user: String, id: String, status: str, data: Json, by: String) -> bool ! Error {
+        return try self.db.execute(String("UPDATE proposals SET status = ?, data = ?, decided = ?, by = ? WHERE user = ? AND id = ? AND status = 'waiting'"), [t(String(status)), t("{data}"), Value.Int(now()), t(by), t(user), t(id)]) > 0
     }
 
     // Forgets note `id` of the person's, if `agent` (when given) may: its
@@ -732,6 +1515,60 @@ impl Store {
         let at = now()
         _ = try self.db.execute(String("INSERT INTO profiles (user, revision, text, by, at) VALUES (?, ?, ?, ?, ?)"), [t(user), Value.Int(revision + 1), t(what.copy()), t(by.copy()), Value.Int(at)])
         return Obj.new().s("text", what).i("revision", revision + 1).s("by", by).i("at", at).done()
+    }
+
+    // --- The person's agent defaults (PLAN.md, "Agent defaults") ---
+
+    // What every agent of the person's follows unless it sets its own, as
+    // kept: its fields, `revision`, `by` and `at`. Blank until they're put.
+    pub fn defaults(self, user: String) -> Json ! Error {
+        let r = try self.db.query_one(String("SELECT json, revision, by, at FROM defaults WHERE user = ?"), [t(user)]) else return blank()
+        let kept = try parse(text(r[0].copy()))
+        return filled(merge(kept, Obj.new().i("revision", int(r[1].copy())).s("by", text(r[2].copy())).i("at", int(r[3].copy())).done()))
+    }
+
+    // Keeps the person's defaults anew, by a device or an agent, as the next revision.
+    pub fn put_defaults(self, user: String, fields: Json, by: String) -> Json ! Error {
+        let revision = (int_at(try self.defaults(user.copy()), "revision") ?? 0) + 1
+        let at = now()
+        let kept = filled(fields)
+        let stored = without(without(without(kept.copy(), "revision"), "by"), "at")
+        _ = try self.db.execute(String("INSERT INTO defaults (user, json, revision, by, at) VALUES (?, ?, ?, ?, ?) ON CONFLICT (user) DO UPDATE SET json = excluded.json, revision = excluded.revision, by = excluded.by, at = excluded.at"), [t(user), t("{stored}"), Value.Int(revision), t(by.copy()), Value.Int(at)])
+        return merge(kept, Obj.new().i("revision", revision).s("by", by).i("at", at).done())
+    }
+
+    // --- Rules on what's touched (PLAN.md, "Rules, records and limits") ---
+
+    // The person's rules, oldest first, each with its `id` and `agent` ("" for
+    // every agent). One whose JSON can't be read comes as a rule that can't be
+    // read, which denies everything, rather than being left out.
+    pub fn rules(self, user: String) -> List<Json> ! Error {
+        var out = List<Json>()
+        for r in try self.db.query(String("SELECT id, agent, json, at FROM rules WHERE user = ? ORDER BY rowid"), [t(user)]) {
+            let kept = match parse(text(r[2].copy())) {
+                ok(j) => j,
+                err(_) => Obj.new().s("unreadable", String("its JSON")).done(),
+            }
+            out.push(merge(kept, Obj.new().s("id", text(r[0].copy())).s("agent", text(r[1].copy())).i("at", int(r[3].copy())).done()))
+        }
+        return out
+    }
+
+    // Keeps a rule, new or changed: `rule` has its `id` and `agent`.
+    pub fn put_rule(self, user: String, rule: Json) ! Error {
+        let id = str_at(rule.copy(), "id") ?? String()
+        let agent = str_at(rule.copy(), "agent") ?? String()
+        let at = int_at(rule.copy(), "at") ?? now()
+        let stored = without(without(without(rule, "id"), "agent"), "at")
+        _ = try self.db.execute(String("INSERT INTO rules (id, user, agent, json, at) VALUES (?, ?, ?, ?, ?) ON CONFLICT (id) DO UPDATE SET agent = excluded.agent, json = excluded.json"), [t(id), t(user), t(agent), t("{stored}"), Value.Int(at)])
+    }
+
+    // Removes one of the person's rules. Gives whether there was one.
+    pub fn delete_rule(self, user: String, id: String) -> bool ! Error {
+        let had = try self.db.query_one(String("SELECT id FROM rules WHERE id = ? AND user = ?"), [t(id.copy()), t(user.copy())])
+        if had == none { return false }
+        _ = try self.db.execute(String("DELETE FROM rules WHERE id = ? AND user = ?"), [t(id), t(user)])
+        return true
     }
 
     // --- Routines (PLAN.md, "Routines") ---
@@ -803,6 +1640,182 @@ impl Store {
         return try self.db.execute(String("DELETE FROM routines WHERE id = ? AND user = ?"), [t(id), t(user)]) > 0
     }
 
+    // --- Routine flows that are running (PLAN.md, "Routine flows") ---
+
+    // Keeps a running flow, as flows.kept gives it, across a restart.
+    pub fn keep_flow(self, id: String, user: String, flow: Json) ! Error {
+        _ = try self.db.execute(String("INSERT INTO flows (id, user, json) VALUES (?, ?, ?) ON CONFLICT (id) DO UPDATE SET json = excluded.json"), [t(id), t(user), t("{flow}")])
+    }
+
+    // A flow that finished, and isn't kept any more.
+    pub fn drop_flow(self, id: String) ! Error {
+        _ = try self.db.execute(String("DELETE FROM flows WHERE id = ?"), [t(id)])
+    }
+
+    // Every flow kept, oldest first, to pick up after a restart.
+    pub fn kept_flows(self) -> List<Json> ! Error {
+        var out = List<Json>()
+        for r in try self.db.query(String("SELECT json FROM flows ORDER BY rowid")) { out.push(try parse(text(r[0].copy()))) }
+        return out
+    }
+
+    // --- Codes that add a device by QR code (PLAN.md, "Connecting devices") ---
+
+    // Keeps a one-time code, as its SHA-256 `hash`, for `user`, made on device
+    // `by`, until `expires` (Unix ms). Codes already past their time go.
+    pub fn add_link_code(self, hash: String, user: String, by: String, expires: i64, time: i64) ! Error {
+        _ = try self.db.execute(String("DELETE FROM link_codes WHERE expires <= ?"), [Value.Int(time)])
+        _ = try self.db.execute(String("INSERT INTO link_codes (hash, user, by, expires) VALUES (?, ?, ?, ?)"), [t(hash), t(user), t(by), Value.Int(expires)])
+    }
+
+    // Takes the code whose SHA-256 is `hash`, once: whose it is and when it
+    // expires, or none for a code there isn't. Taken, it's gone.
+    pub fn take_link_code(self, hash: String) -> (String, i64)? ! Error {
+        let r = try self.db.query_one(String("SELECT user, expires FROM link_codes WHERE hash = ?"), [t(hash.copy())]) else return none
+        _ = try self.db.execute(String("DELETE FROM link_codes WHERE hash = ?"), [t(hash)])
+        return some((text(r[0].copy()), int(r[1].copy())))
+    }
+
+    // --- Invites (PLAN.md, "Accounts and invites") ---
+
+    // An invite whose code's SHA-256 is `hash`, giving `role`, for `uses`
+    // accounts until `expires` (Unix ms), made by `by`. Gives its id.
+    pub fn add_invite(self, hash: String, role: String, uses: i64, expires: i64, by: String) -> String ! Error {
+        _ = try self.db.execute(String("DELETE FROM invites WHERE expires <= ? OR uses <= 0"), [Value.Int(now())])
+        let id = try self.new_id("inv")
+        _ = try self.db.execute(String("INSERT INTO invites (id, hash, role, uses, expires, by, at) VALUES (?, ?, ?, ?, ?, ?, ?)"), [t(id.copy()), t(hash), t(role), Value.Int(uses), Value.Int(expires), t(by), Value.Int(now())])
+        return id
+    }
+
+    // The invites still open, newest first, as invite.list gives them.
+    pub fn invites(self) -> List<Json> ! Error {
+        var out = List<Json>()
+        for r in try self.db.query(String("SELECT id, role, uses, expires, by, at FROM invites WHERE expires > ? AND uses > 0 ORDER BY at DESC"), [Value.Int(now())]) {
+            out.push(Obj.new().s("invite", text(r[0].copy())).s("role", text(r[1].copy())).i("uses", int(r[2].copy())).i("expires", int(r[3].copy())).s("by", text(r[4].copy())).i("at", int(r[5].copy())).done())
+        }
+        return out
+    }
+
+    // The invite whose code's SHA-256 is `hash`: its id, role, uses left and
+    // when it expires, or none for no such invite.
+    pub fn invite(self, hash: String) -> (String, String, i64, i64)? ! Error {
+        let r = try self.db.query_one(String("SELECT id, role, uses, expires FROM invites WHERE hash = ?"), [t(hash)]) else return none
+        return some((text(r[0].copy()), text(r[1].copy()), int(r[2].copy()), int(r[3].copy())))
+    }
+
+    // Who made the invite `id`, if it's still kept.
+    pub fn invite_by(self, id: String) -> String? ! Error {
+        let r = try self.db.query_one(String("SELECT by FROM invites WHERE id = ?"), [t(id)]) else return none
+        return some(text(r[0].copy()))
+    }
+
+    // Takes one use of the invite `id`. False if it had none left.
+    pub fn use_invite(self, id: String) -> bool ! Error {
+        return try self.db.execute(String("UPDATE invites SET uses = uses - 1 WHERE id = ? AND uses > 0"), [t(id)]) > 0
+    }
+
+    pub fn delete_invite(self, id: String) -> bool ! Error {
+        return try self.db.execute(String("DELETE FROM invites WHERE id = ?"), [t(id)]) > 0
+    }
+
+    // --- Password resets (PLAN.md, "Accounts and invites") ---
+
+    // Keeps a reset code, as its SHA-256 `hash`, for `user`, made by `by`, until
+    // `expires`. Any older code of theirs, and codes past their time, go.
+    pub fn add_reset(self, hash: String, user: String, by: String, expires: i64) ! Error {
+        _ = try self.db.execute(String("DELETE FROM resets WHERE expires <= ? OR user = ?"), [Value.Int(now()), t(user.copy())])
+        _ = try self.db.execute(String("INSERT INTO resets (hash, user, by, expires) VALUES (?, ?, ?, ?)"), [t(hash), t(user), t(by), Value.Int(expires)])
+    }
+
+    // Whose the reset code with SHA-256 `hash` is, and when it expires.
+    pub fn reset(self, hash: String) -> (String, i64)? ! Error {
+        let r = try self.db.query_one(String("SELECT user, expires FROM resets WHERE hash = ?"), [t(hash)]) else return none
+        return some((text(r[0].copy()), int(r[1].copy())))
+    }
+
+    // Takes the reset code, once. False if it was taken already.
+    pub fn take_reset(self, hash: String) -> bool ! Error {
+        return try self.db.execute(String("DELETE FROM resets WHERE hash = ?"), [t(hash)]) > 0
+    }
+
+    // Signs `user` out everywhere: every device of theirs, whose ids it gives.
+    pub fn revoke_all(self, user: String) -> List<String> ! Error {
+        var out = List<String>()
+        for r in try self.db.query(String("SELECT id FROM devices WHERE user = ? AND revoked = 0"), [t(user)]) {
+            let id = text(r[0].copy())
+            try self.revoke_device(id.copy())
+            out.push(id)
+        }
+        return out
+    }
+
+    // --- The people log (PLAN.md, "Accounts and invites") ---
+
+    // Keeps what happened to people here: `kind` (joined, invited, role,
+    // removed, left, reset, password), what in words, and the username of who
+    // did it ("" for the command line). Names, not ids, so it outlives them.
+    pub fn log_people(self, kind: str, what: String, by: String) ! Error {
+        _ = try self.db.execute(String("INSERT INTO people_log (kind, text, by, at) VALUES (?, ?, ?, ?)"), [t(String(kind)), t(what), t(by), Value.Int(now())])
+    }
+
+    // The people log, newest first: up to `limit` entries before entry `before`.
+    pub fn people_log(self, before: i64?, limit: usize) -> List<Json> ! Error {
+        var out = List<Json>()
+        for r in try self.db.query(String("SELECT id, kind, text, by, at FROM people_log WHERE id < ? ORDER BY id DESC LIMIT ?"), [Value.Int(before ?? i64.MAX), Value.Int(i64.wrap(u64(limit)))]) {
+            out.push(Obj.new().i("id", int(r[0].copy())).s("kind", text(r[1].copy())).s("text", text(r[2].copy())).s("by", text(r[3].copy())).i("at", int(r[4].copy())).done())
+        }
+        return out
+    }
+
+    // The username of `user`, if they're here.
+    pub fn username(self, user: String) -> String? ! Error {
+        let r = try self.db.query_one(String("SELECT username FROM users WHERE id = ?"), [t(user)]) else return none
+        return some(text(r[0].copy()))
+    }
+
+    // --- People ---
+
+    // Everyone's account, oldest first, as user.list gives it.
+    pub fn people(self) -> List<Json> ! Error {
+        var out = List<Json>()
+        for r in try self.db.query(String("SELECT id, username, role, at FROM users ORDER BY at")) {
+            out.push(Obj.new().s("user", text(r[0].copy())).s("username", text(r[1].copy())).s("role", text(r[2].copy())).i("at", int(r[3].copy())).done())
+        }
+        return out
+    }
+
+    pub fn set_role(self, user: String, role: String) ! Error {
+        _ = try self.db.execute(String("UPDATE users SET role = ? WHERE id = ?"), [t(role), t(user)])
+    }
+
+    // Everything of `user`'s in the database, and the account: what's left
+    // are the files on disk other people may share, and folders the instance
+    // removes itself. Gives the ids of their agents, for their folders.
+    pub fn remove_user(self, user: String) -> List<String> ! Error {
+        var agents = List<String>()
+        for r in try self.db.query(String("SELECT id FROM agents WHERE user = ?"), [t(user.copy())]) {
+            agents.push(text(r[0].copy()))
+        }
+        try self.begin()
+        match self.remove_rows(user) {
+            ok => try self.commit(),
+            err(e) => {
+                self.rollback()
+                fail "{e}"
+            },
+        }
+        return agents
+    }
+
+    fn remove_rows(self, user: String) ! Error {
+        _ = try self.db.execute(String("DELETE FROM sent WHERE device IN (SELECT id FROM devices WHERE user = ?)"), [t(user.copy())])
+        for table in ["push_tokens", "link_codes", "resets", "agent_revisions", "agents", "activity", "secrets", "mcp_servers", "skills", "messages", "conversations", "runs", "queue", "tasks", "sides", "branches", "routine_threads", "events", "acp_sessions", "files", "profiles", "defaults", "rules", "routines", "flows", "plugin_data", "plugin_revisions", "plugins", "usage", "memories", "memories_fts", "messages_fts", "shared_rows", "shared_tables", "script_tokens", "imported", "recordings", "proposals", "devices"] {
+            _ = try self.db.execute("DELETE FROM {table} WHERE user = ?", [t(user.copy())])
+        }
+        _ = try self.db.execute(String("DELETE FROM invites WHERE by = ?"), [t(user.copy())])
+        _ = try self.db.execute(String("DELETE FROM users WHERE id = ?"), [t(user)])
+    }
+
     // --- The activity log (PLAN.md, "Machines and devices") ---
 
     // Notes what `agent` did, or what was done to it: `kind` is tool,
@@ -812,17 +1825,44 @@ impl Store {
         _ = try self.db.execute(String("INSERT INTO activity (user, agent, kind, text, by, at) VALUES (?, ?, ?, ?, ?, ?)"), [t(user), t(agent), t(String(kind)), t(what), t(by), Value.Int(now())])
     }
 
+    // Notes an action before it happens (PLAN.md, "Every action is recorded
+    // before it happens"): `input` is what it was given, with secrets already
+    // shown only as their length. Its status is "started" until `settle`
+    // marks it done, failed or refused. Gives the entry's id.
+    pub fn record(self, user: String, agent: String, kind: str, what: String, input: String, by: String) -> i64 ! Error {
+        _ = try self.db.execute(String("INSERT INTO activity (user, agent, kind, text, by, at, status, input) VALUES (?, ?, ?, ?, ?, ?, 'started', ?)"), [t(user), t(agent), t(String(kind)), t(what), t(by), Value.Int(now()), t(input)])
+        return self.db.last_insert_id()
+    }
+
+    // Marks the action `id` done, failed or refused, with why for the last two:
+    // a refusal's why starts with the rule that refused it.
+    pub fn settle(self, id: i64, status: str, why: String) ! Error {
+        _ = try self.db.execute(String("UPDATE activity SET status = ?, why = ?, ended = ? WHERE id = ? AND status = 'started'"), [t(String(status)), t(why), Value.Int(now()), Value.Int(id)])
+    }
+
+    // Actions a restart cut short are marked failed, once.
+    pub fn settle_cut_short(self) ! Error {
+        _ = try self.db.execute(String("UPDATE activity SET status = 'failed', why = 'The instance stopped before it finished.', ended = ? WHERE status = 'started'"), [Value.Int(now())])
+    }
+
     // `user`'s activity, newest first: all of it, or one agent's, from
     // before the entry `before`.
     pub fn activity(self, user: String, agent: String?, before: i64?, limit: usize) -> List<Json> ! Error {
         var out = List<Json>()
         let below = before ?? i64.MAX
         let rows = match agent {
-            some(a) => try self.db.query(String("SELECT id, agent, kind, text, by, at FROM activity WHERE user = ? AND agent = ? AND id < ? ORDER BY id DESC LIMIT ?"), [t(user), t(a), Value.Int(below), Value.Int(i64.wrap(u64(limit)))]),
-            none => try self.db.query(String("SELECT id, agent, kind, text, by, at FROM activity WHERE user = ? AND id < ? ORDER BY id DESC LIMIT ?"), [t(user), Value.Int(below), Value.Int(i64.wrap(u64(limit)))]),
+            some(a) => try self.db.query(String("SELECT id, agent, kind, text, by, at, status, input, why, ended FROM activity WHERE user = ? AND agent = ? AND id < ? ORDER BY id DESC LIMIT ?"), [t(user), t(a), Value.Int(below), Value.Int(i64.wrap(u64(limit)))]),
+            none => try self.db.query(String("SELECT id, agent, kind, text, by, at, status, input, why, ended FROM activity WHERE user = ? AND id < ? ORDER BY id DESC LIMIT ?"), [t(user), Value.Int(below), Value.Int(i64.wrap(u64(limit)))]),
         }
         for r in rows {
-            out.push(Obj.new().i("id", int(r[0].copy())).s("agent", text(r[1].copy())).s("kind", text(r[2].copy())).s("text", text(r[3].copy())).s("by", text(r[4].copy())).i("at", int(r[5].copy())).done())
+            var e = Obj.new().i("id", int(r[0].copy())).s("agent", text(r[1].copy())).s("kind", text(r[2].copy())).s("text", text(r[3].copy())).s("by", text(r[4].copy())).i("at", int(r[5].copy()))
+            let status = text(r[6].copy())
+            if status.len() > 0 {
+                e = e.s("status", status).s("input", text(r[7].copy())).s("why", text(r[8].copy()))
+                let ended = int(r[9].copy())
+                if ended > 0 { e = e.i("ended", ended) }
+            }
+            out.push(e.done())
         }
         return out
     }
@@ -876,6 +1916,22 @@ impl Store {
             out.push(try parse(text(rows[i][0].copy())))
         }
         return (out, more)
+    }
+
+    // A message of `user`'s, by id.
+    pub fn message(self, user: String, id: String) -> Json? ! Error {
+        let row = try self.db.query_one(String("SELECT json FROM messages WHERE id = ? AND user = ?"), [t(id), t(user)]) else return none
+        return some(try parse(text(row[0].copy())))
+    }
+
+    // The pinned messages in a conversation, the newest pin first (and of two in
+    // the same millisecond, the later message).
+    pub fn pinned(self, user: String, conversation: String) -> List<Json> ! Error {
+        var out = List<Json>()
+        for r in try self.db.query(String("SELECT json FROM messages WHERE user = ? AND conversation = ? AND json_extract(json, '$.pinned') IS NOT NULL ORDER BY json_extract(json, '$.pinned.at') DESC, rowid DESC"), [t(user), t(conversation)]) {
+            out.push(try parse(text(r[0].copy())))
+        }
+        return out
     }
 
     pub fn add_run(self, user: String, id: String, conversation: String) ! Error {
@@ -954,6 +2010,61 @@ impl Store {
 
 // A recall as FTS5 reads it: any of the words, each in quotes and a prefix,
 // best match first. None when it has no words.
+// How many site notes an agent is shown on a visit.
+const SITE_NOTES_MOST: usize = 20
+
+// A site, as a note is tied to it: an address's or a host's host and port,
+// lowercase, without who's logged in or a leading www. So
+// "https://www.Example.com/login" is example.com. "" for a file or nothing.
+pub fn site_of(given: String) -> String {
+    var s = given.trim().to_lower_root()
+    if let k = s.find("://") { s = s[k + 3..].copy() }
+    for end in ["/", "?", "#"] {
+        if let k = s.find(end) { s = s[..k].copy() }
+    }
+    if let k = s.find_last("@") { s = s[k + 1..].copy() }
+    if s.starts_with("www.") { s = s[4..].copy() }
+    return s
+}
+
+// Whether a note tied to `site` is for a page on `here`: the same site, or one
+// under it. Both as site_of gives them.
+pub fn site_covers(site: String, here: String) -> bool {
+    if site.len() == 0 or here.len() == 0 { return false }
+    return here == site or here.ends_with(".{site}")
+}
+
+// A recording from id, agent, steps, proposal and at.
+fn recording_of(r: List<Value>) -> Json {
+    let steps = match parse(text(r[2].copy())) {
+        ok(j) => j,
+        err(_) => Json.Array(List<Json>()),
+    }
+    return Obj.new().s("id", text(r[0].copy())).s("agent", text(r[1].copy())).j("steps", steps).s("proposal", text(r[3].copy())).i("at", int(r[4].copy())).done()
+}
+
+// A proposal from id, agent, kind, data, why, recording, status, at, decided,
+// by and its recording's steps.
+fn proposal_of(r: List<Value>) -> Json {
+    let kind = text(r[2].copy())
+    let data = match parse(text(r[3].copy())) {
+        ok(j) => j,
+        err(_) => Obj.new().done(),
+    }
+    var o = Obj.new().s("id", text(r[0].copy())).s("agent", text(r[1].copy())).s("kind", kind.copy()).j(if kind == "skill" { "skill" } else { "note" }, data).s("why", text(r[4].copy())).s("status", text(r[6].copy())).i("at", int(r[7].copy()))
+    let decided = int(r[8].copy())
+    if decided > 0 { o = o.i("decided", decided).s("by", text(r[9].copy())) }
+    let recording = text(r[5].copy())
+    if recording.len() > 0 {
+        let steps = match parse(text(r[10].copy())) {
+            ok(j) => j,
+            err(_) => Json.Array(List<Json>()),
+        }
+        o = o.s("recording", recording).j("steps", steps)
+    }
+    return o.done()
+}
+
 fn fts_any(query: String) -> String? {
     var parts = List<String>()
     for w in query.split_whitespace() {
@@ -979,6 +2090,29 @@ fn fts_query(query: String) -> String? {
 
 fn test_store() -> Store {
     return Store.open(String(":memory:"), PasswordHasher { memory_kib: 64, iterations: 1, parallelism: 1 })!
+}
+
+@test
+fn an_old_activity_log_gets_the_record_columns() {
+    let dir = fs.temp_dir()!
+    let path = "{dir}/loom.db"
+    let old = Database.open(path.copy())!
+    old.execute_script(String("CREATE TABLE activity (id INTEGER PRIMARY KEY, user TEXT NOT NULL, agent TEXT NOT NULL, kind TEXT NOT NULL, text TEXT NOT NULL, by TEXT NOT NULL, at INTEGER NOT NULL); INSERT INTO activity (user, agent, kind, text, by, at) VALUES ('u_1', 'a_1', 'notify', 'Notified you: Build', 'a_1', 1);"))!
+    old.close()!
+    let entries = record_in(path)
+    assert(entries.len() == 2 and "{entries[0]}".contains(#""status":"done""#) and not "{entries[1]}".contains("status"))
+    fs.remove_dir_all(dir)!
+}
+
+// Opens the store at `path`, records an action and settles it, and gives
+// the log. The store is closed once it's given.
+fn record_in(path: String) -> List<Json> {
+    let s = Store.open(path, PasswordHasher { memory_kib: 64, iterations: 1, parallelism: 1 })!
+    let id = s.record(String("u_1"), String("a_1"), "tool", String("remember"), String("args"), String("a_1"))!
+    s.settle(id, "done", String())!
+    let entries = s.activity(String("u_1"), none, none, 10)!
+    s.close()!
+    return entries
 }
 
 @test
@@ -1132,6 +2266,24 @@ fn acp_sessions_are_kept_per_conversation_and_program() {
 }
 
 @test
+fn a_moved_chat_keeps_its_program_and_hands_its_summary_once() {
+    let s = test_store()
+    let a = s.add_user(String("a"), String("password1"), "owner")!
+    let c = s.add_conversation(a.id.copy(), String("a_1"), String("Chat"))!
+    let id = field(c, "id")
+    assert(s.conversation_program(a.id.copy(), id.copy())! == none)
+    assert(field(s.conversation(a.id.copy(), id.copy())! ?? Json.Null, "program").len() == 0)
+    s.set_conversation_program(a.id.copy(), id.copy(), String("codex"), String("claude"))!
+    assert(s.conversation_program(a.id.copy(), id.copy())! == some(String("codex")))
+    assert(field(s.conversation(a.id.copy(), id.copy())! ?? Json.Null, "program") == "codex")
+    assert(s.summary_to_hand(a.id.copy(), id.copy())! == some(String("claude")))
+    s.summary_handed(id.copy())!
+    assert(s.summary_to_hand(a.id.copy(), id.copy())! == none)
+    s.delete_conversation(a.id.copy(), id.copy())!
+    assert(s.conversation_program(a.id.copy(), id)! == none)
+}
+
+@test
 fn memory_is_kept_per_agent_and_shared() {
     let s = test_store()
     let a = s.add_user(String("ann"), String("pw"), "owner")!
@@ -1149,6 +2301,77 @@ fn memory_is_kept_per_agent_and_shared() {
     assert(not s.forget(a.id.copy(), id, some(String("a_2")))!)
     assert(s.forget(a.id.copy(), id, some(String("a_1")))!)
     assert(s.memories(a.id.copy(), some(String("a_1")), String("1Password"), 10)!.len() == 0)
+}
+
+@test
+fn rules_are_kept_per_person_and_go_with_their_agent() {
+    let s = test_store()
+    let a = s.add_user(String("ann"), String("pw"), "owner")!
+    let b = s.add_user(String("bob"), String("pw"), "member")!
+    s.put_rule(a.id.copy(), Obj.new().s("id", String("r_1")).s("agent", String()).s("then", String("deny")).s("command", String("rm")).i("at", 5).done())!
+    s.put_rule(a.id.copy(), Obj.new().s("id", String("r_2")).s("agent", String("a_1")).s("then", String("ask")).s("site", String("github.com")).done())!
+    s.put_rule(a.id.copy(), Obj.new().s("id", String("r_1")).s("agent", String()).s("then", String("ask")).s("command", String("rm")).i("at", 5).done())!
+    let kept = s.rules(a.id.copy())!
+    assert(kept.len() == 2 and "{kept[0]}".contains(#""then":"ask""#) and str_at(kept[1].copy(), "agent") == some(String("a_1")))
+    assert(s.rules(b.id.copy())!.len() == 0)
+    assert(not s.delete_rule(b.id.copy(), String("r_1"))!)
+    s.delete_agent(a.id.copy(), String("a_1"))!
+    assert(s.rules(a.id.copy())!.len() == 1)
+    assert(s.delete_rule(a.id.copy(), String("r_1"))! and s.rules(a.id.copy())!.len() == 0)
+}
+
+@test
+fn notes_can_be_tied_to_a_site() {
+    assert(site_of(String("https://www.Example.com/login?next=/")) == "example.com")
+    assert(site_of(String("me@Shop.example.com:8443")) == "shop.example.com:8443")
+    assert(site_of(String("file:///C:/x.html")) == "")
+    assert(site_covers(String("example.com"), String("mail.example.com")) and not site_covers(String("example.com"), String("badexample.com")))
+    let s = test_store()
+    let a = s.add_user(String("ann"), String("pw"), "owner")!
+    _ = s.remember_on(a.id.copy(), String("a_1"), String("Log in with the work account."), String("a_1"), String("example.com"))!
+    _ = s.remember_on(a.id.copy(), String(""), String("Prices are in NOK."), String("d_1"), String("shop.example.com"))!
+    _ = s.remember_on(a.id.copy(), String("a_2"), String("Not a_1's."), String("a_2"), String("example.com"))!
+    _ = s.remember(a.id.copy(), String("a_1"), String("Not tied to a site."), String("a_1"))!
+    let notes = s.site_notes(a.id.copy(), String("a_1"), String("shop.example.com"))!
+    assert(notes.len() == 2 and "{notes[0]}".contains("NOK") and "{notes[1]}".contains("work account"))
+    assert(s.site_notes(a.id.copy(), String("a_1"), String("example.org"))!.len() == 0)
+    assert("{s.memories(a.id.copy(), some(String("a_1")), String("NOK"), 10)!}".contains("\"site\":\"shop.example.com\""))
+}
+
+@test
+fn proposals_wait_for_the_person() {
+    let s = test_store()
+    let a = s.add_user(String("ann"), String("pw"), "owner")!
+    let steps = parse(#"[{"kind":"page","url":"https://example.com"}]"#)!
+    let rec = s.add_recording(a.id.copy(), String("a_1"), steps)!
+    assert(s.unwritten_recording(a.id.copy(), String("a_1"))! == some(rec.copy()))
+    let skill = Obj.new().s("name", String("order-socks")).s("description", String("Ordering socks.")).s("body", String("1. Open the shop.")).done()
+    let p = s.add_proposal(a.id.copy(), String("a_1"), "skill", skill.copy(), String("You showed me."), rec.copy())!
+    let id = field(p.copy(), "id")
+    s.recording_written(a.id.copy(), rec.copy(), id.copy())!
+    assert(s.unwritten_recording(a.id.copy(), String("a_1"))! == none)
+    assert(field(p.copy(), "status") == "waiting" and "{p}".contains(#""steps":[{"kind":"page""#))
+    _ = s.add_proposal(a.id.copy(), String("a_1"), "note", Obj.new().s("text", String("Ann likes wool.")).done(), String("From Tuesday's chat."), String())!
+    assert(s.proposals(a.id.copy(), String("waiting"), 50)!.len() == 2)
+    assert(s.decide_proposal(a.id.copy(), id.copy(), "kept", skill.copy(), String("d_1"))!)
+    assert(not s.decide_proposal(a.id.copy(), id.copy(), "dropped", skill, String("d_1"))!)
+    assert(s.proposals(a.id.copy(), String("waiting"), 50)!.len() == 1)
+    assert(field(s.proposal(a.id.copy(), id)! ?? Json.Null, "by") == "d_1")
+}
+
+@test
+fn agent_defaults_are_kept_per_person() {
+    let s = test_store()
+    let a = s.add_user(String("ann"), String("pw"), "owner")!
+    let b = s.add_user(String("bob"), String("pw"), "member")!
+    let blank_now = s.defaults(a.id.copy())!
+    assert(int_at(blank_now.copy(), "revision") == some(0) and "{blank_now}".contains(#""permission":"ask""#))
+    _ = s.put_defaults(a.id.copy(), Obj.new().s("permission", String("auto")).s("busy", String("steer")).done(), String("d_1"))!
+    let kept = s.put_defaults(a.id.copy(), merge(s.defaults(a.id.copy())!, Obj.new().s("instructions", String("Be brief.")).done()), String("a_1"))!
+    assert(int_at(kept.copy(), "revision") == some(2))
+    let now_kept = s.defaults(a.id.copy())!
+    assert("{now_kept}".contains(#""permission":"auto""#) and "{now_kept}".contains(#""busy":"steer""#) and "{now_kept}".contains("Be brief.") and "{now_kept}".contains(#""by":"a_1""#))
+    assert("{s.defaults(b.id.copy())!}".contains(#""busy":"queue""#))
 }
 
 @test
@@ -1175,4 +2398,13 @@ fn settings_and_hook_secrets_are_kept_sealed() {
         err(_) => false,
     }
     assert(not opens)
+}
+
+@test
+fn snippets_lose_their_markdown() {
+    let mark = |w: str| "\u{2}{w}\u{3}"
+    assert(plain_snippet("- `{mark("report")}.csv`, last month's **numbers**") == "{mark("report")}.csv, last month's numbers")
+    assert(plain_snippet("see [the {mark("guide")}](https://example.com/x) and ~~old~~") == "see the {mark("guide")} and old")
+    assert(plain_snippet("# Title\n> quoted {mark("word")}\n1. first") == "Title quoted {mark("word")} first")
+    assert(plain_snippet(String("snake_case stays, and so does a * b")) == "snake_case stays, and so does a * b")
 }

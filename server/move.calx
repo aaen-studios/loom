@@ -1,0 +1,299 @@
+module server.move
+
+// Moving an instance (PLAN.md, "Moving an instance"). The new place runs
+// `loom receive`, which prints a one-time move code. The old instance, told
+// the new place's address and the code (`instance.move`), writes its export
+// (server/backup.calx) and sends it there in chunks, on a thread of its own.
+//
+// The code is 32 random bytes. Two keys come from it with HMAC-SHA-256: one
+// seals each chunk with XChaCha20-Poly1305, so what's sent, secrets and all,
+// is encrypted whatever the connection is; and one is the bearer token the
+// new place takes the chunks with. Chunk n is sealed with "loom move chunk n"
+// as its associated data, and the last request, which says how many chunks
+// there were, is sealed too, so none can be left out, sent twice or
+// reordered without the new place noticing. The new place restores the
+// archive only once all of it opened.
+import std.bytes
+import std.crypto.{XChaCha20Poly1305, compare_digest, random_bytes}
+import std.fs
+import std.hash.{hmac_sha256}
+import std.http.{Header, post}
+import std.http.server.{Response, Server}
+import std.json.{Json, parse}
+import std.sqlite.{Database, Value}
+import std.thread.{Task}
+import shared.obj.{Obj, int_at, str_at}
+import server.backup
+
+// What a chunk holds of the archive, before it's sealed.
+pub const CHUNK: usize = 4000000
+
+const PREFIX: str = "loom-move-"
+
+// --- The code ---
+
+// A new one-time move code: "loom-move-" and 64 hex digits.
+pub fn new_code() -> String {
+    return "{PREFIX}{bytes.hex(random_bytes(32))}"
+}
+
+fn secret(code: String) -> List<u8>? {
+    if not code.starts_with(PREFIX) { return none }
+    let raw = bytes.from_hex(code.trim()[PREFIX.len()..].copy()) else return none
+    if raw.len() != 32 { return none }
+    return some(raw)
+}
+
+// Whether `code` is a move code's shape.
+pub fn valid_code(code: String) -> bool {
+    return secret(code) != none
+}
+
+fn sealer(code: String) -> XChaCha20Poly1305 ! Error {
+    let s = secret(code) else { fail "that isn't a move code: loom receive prints one, starting {PREFIX}" }
+    return XChaCha20Poly1305.new(hmac_sha256(s, "loom move key".to_bytes()))
+}
+
+fn token(code: String) -> String {
+    let s = secret(code) ?? List<u8>()
+    return bytes.hex(hmac_sha256(s, "loom move token".to_bytes()))
+}
+
+fn chunk_aad(n: i64) -> List<u8> {
+    return "loom move chunk {n}".to_bytes()
+}
+
+const DONE_AAD: str = "loom move done"
+
+// `plain` sealed under `s`: a new 24-byte nonce, then the sealed bytes.
+fn seal(s: XChaCha20Poly1305, plain: List<u8>, aad: List<u8>) -> List<u8> {
+    let nonce = random_bytes(24)
+    let sealed = s.encrypt(nonce.copy(), plain, aad)
+    var out = nonce
+    out.extend(sealed)
+    return out
+}
+
+fn open(s: XChaCha20Poly1305, body: List<u8>, aad: List<u8>) -> List<u8>? {
+    if body.len() < 24 { return none }
+    return s.decrypt(body[..24].copy(), body[24..].copy(), aad)
+}
+
+// --- Sending, from the old instance ---
+
+// A move to send: the instance in `data`, to the new place at `to` (its
+// http:// or https:// address), with the code it printed.
+pub struct Job {
+    pub data: String
+    pub to: String
+    pub code: String
+    pub version: String
+}
+
+// How a move went: the new place's instance id, or why it didn't happen.
+pub struct Done {
+    pub ok: bool
+    pub instance: String
+    pub message: String
+}
+
+struct Mover {
+    jobs: Receiver<Job>
+    done: Sender<Done>
+}
+
+impl Task for Mover {
+    fn run(own self) {
+        var m = self
+        while let job = m.jobs.wait() {
+            let d = match send(job) {
+                ok(id) => Done { ok: true, instance: id, message: String() },
+                err(e) => Done { ok: false, instance: String(), message: "{e}" },
+            }
+            m.done.send(d)
+        }
+    }
+}
+
+// Starts the thread that sends moves, and gives the ends to talk to it by.
+pub fn start() -> (Sender<Job>, Receiver<Done>) {
+    let jobs = Receiver<Job>()
+    let to = jobs.sender()
+    let done = Receiver<Done>()
+    let back = done.sender()
+    _ = unsafe { Thread.spawn(Mover { jobs: jobs, done: back }) }
+    return (to, done)
+}
+
+fn bearer(code: String, kind: str) -> List<Header> {
+    return [Header { name: String("Authorization"), value: "Bearer {token(code)}" }, Header { name: String("Content-Type"), value: String(kind) }]
+}
+
+// Exports the instance, sends it, and gives the new place's instance id.
+fn send(j: Job) -> String ! Error {
+    let s = try sealer(j.code.copy())
+    let to = j.to.trim_suffix("/").copy()
+    let file = "{try fs.temp_dir()}/loom-move-{bytes.hex(random_bytes(8))}.tar.zst"
+    _ = try backup.export(j.data.copy(), file.copy(), j.version.copy())
+    let id = match send_file(s, to, j.code.copy(), file.copy()) {
+        ok(id) => id,
+        err(e) => {
+            if fs.exists(file.copy()) { try fs.remove_file(file) }
+            fail "{e}"
+        },
+    }
+    if fs.exists(file.copy()) { try fs.remove_file(file) }
+    return id
+}
+
+fn send_file(s: XChaCha20Poly1305, to: String, code: String, file: String) -> String ! Error {
+    var f = try fs.open_read(file)
+    var n: i64 = 0
+    loop {
+        var chunk = List<u8>()
+        while chunk.len() < CHUNK {
+            let want = CHUNK - chunk.len()
+            let got = try f.read(mut chunk, want)
+            if got == 0 { break }
+        }
+        if chunk.len() == 0 { break }
+        var req = post("{to}/api/move/chunk?n={n}", bearer(code.copy(), "application/octet-stream"), seal(s, chunk, chunk_aad(n)), 600000, 65536)
+        let r = try req.wait()
+        if r.status != 200 { fail "the new place refused part {n} of the move ({r.status}): {String.from_utf8(r.body.copy()) ?? String()}" }
+        n += 1
+    }
+    try f.close()
+    let last = "{Obj.new().i("chunks", n).done()}".to_bytes()
+    var req = post("{to}/api/move/done", bearer(code, "application/octet-stream"), seal(s, last, DONE_AAD.to_bytes()), 600000, 65536)
+    let r = try req.wait()
+    let answer = match parse(String.from_utf8(r.body.copy()) ?? String()) {
+        ok(a) => a,
+        err(_) => Json.Null,
+    }
+    if r.status != 200 { fail "the new place didn't take the move ({r.status}): {str_at(answer, "message") ?? String()}" }
+    return str_at(answer, "instance") ?? String()
+}
+
+// --- Receiving, at the new place ---
+
+// Whether the instance in `data` may be replaced by a move: there's none, or
+// one that no one has set up yet, as `loom install` leaves it.
+pub fn check_empty(data: String) ! Error {
+    let db = "{data}/loom.db"
+    if not fs.exists(db.copy()) { return }
+    let d = try Database.open(db)
+    let row = try d.query_one(String("SELECT count(*) FROM users"), List<Value>())
+    try d.close()
+    var users: i64 = 0
+    if let r = row {
+        if let Value.Int(c) = r[0].copy() { users = c }
+    }
+    if users > 0 { fail "{data} holds an instance with people in it already: a move goes to a new place, or one no one has set up" }
+}
+
+// What an instance that no one set up has, which a move replaces.
+const EMPTY: [str; 4] = ["loom.db", "loom.db-wal", "loom.db-shm", "secret.key"]
+
+// Takes one move with `code` on `server`, into `data`, and gives the moved
+// instance's loom.json. It returns once a move has come whole, and fails if
+// one comes and can't be restored.
+pub fn receive(server: mut Server, data: String, code: String) -> Json ! Error {
+    let s = try sealer(code.copy())
+    let expect = "Bearer {token(code)}"
+    let file = "{try fs.temp_dir()}/loom-receive-{bytes.hex(random_bytes(8))}.tar.zst"
+    var next: i64 = 0
+    loop {
+        let req = server.next(-1) else { continue }
+        if req.method != "POST" or not req.path.starts_with("/api/move/") {
+            server.respond(req, refusal(404, "not_found", String("This is loom receive: it takes a move, at /api/move/.")))
+            continue
+        }
+        if not compare_digest((req.header(String("Authorization")) ?? String()).to_bytes(), expect.to_bytes()) {
+            server.respond(req, refusal(401, "bad_code", String("That isn't this move's code.")))
+            continue
+        }
+        if req.path == "/api/move/chunk" {
+            let n = i64.parse(query_value(req.query.copy(), "n")) ?? -1
+            if n != next {
+                server.respond(req, refusal(409, "out_of_order", "Part {next} comes next, not {n}."))
+                continue
+            }
+            let plain = open(s, req.body.copy(), chunk_aad(n)) else {
+                server.respond(req, refusal(400, "bad_chunk", "Part {n} doesn't open with this move's code."))
+                continue
+            }
+            if n == 0 and fs.exists(file.copy()) { try fs.remove_file(file.copy()) }
+            try fs.append(file.copy(), plain)
+            next += 1
+            server.respond(req, Response.json(String("\{\}")))
+            continue
+        }
+        if req.path == "/api/move/done" {
+            let plain = open(s, req.body.copy(), DONE_AAD.to_bytes()) else {
+                server.respond(req, refusal(400, "bad_chunk", String("The end of the move doesn't open with this move's code.")))
+                continue
+            }
+            let told = match parse(String.from_utf8(plain) ?? String()) {
+                ok(j) => j,
+                err(_) => Json.Null,
+            }
+            if int_at(told, "chunks") != some(next) or next == 0 {
+                server.respond(req, refusal(400, "incomplete", "The move says it had parts the new place didn't get: {next} came."))
+                continue
+            }
+            match restore(file.copy(), data.copy()) {
+                ok(m) => {
+                    server.respond(req, Response.json("{Obj.new().s("instance", str_at(m.copy(), "instance") ?? String()).done()}"))
+                    if fs.exists(file.copy()) { try fs.remove_file(file) }
+                    return m
+                },
+                err(e) => {
+                    server.respond(req, refusal(500, "restore_failed", "{e}"))
+                    if fs.exists(file.copy()) { try fs.remove_file(file) }
+                    fail "the move came, but couldn't be restored: {e}"
+                },
+            }
+        }
+        server.respond(req, refusal(404, "not_found", String("This is loom receive: it takes a move, at /api/move/.")))
+    }
+}
+
+// Replaces an instance no one set up, if there's one, with the archive.
+fn restore(file: String, data: String) -> Json ! Error {
+    try check_empty(data.copy())
+    for name in EMPTY {
+        let path = "{data}/{name}"
+        if fs.exists(path.copy()) { try fs.remove_file(path) }
+    }
+    return try backup.restore(file, data)
+}
+
+fn refusal(status: u16, code: str, message: String) -> Response {
+    return Response.json("{Obj.new().j("error", Obj.new().s("code", String(code)).s("message", message.copy()).done()).s("message", message).done()}", status)
+}
+
+// The value of `name` in a query string, such as "n=3".
+fn query_value(query: String, name: str) -> String {
+    for part in query.split("&") {
+        if part.starts_with("{name}=") { return part[name.len() + 1..].copy() }
+    }
+    return String()
+}
+
+@test
+fn codes_open_only_what_they_sealed() {
+    let code = new_code()
+    assert(valid_code(code.copy()) and not valid_code(String("loom-move-12")) and not valid_code(String("hello")))
+    let s = sealer(code.copy())!
+    let sealed = seal(s, "part".to_bytes(), chunk_aad(3))
+    assert(open(s, sealed.copy(), chunk_aad(3)) == some("part".to_bytes()))
+    assert(open(s, sealed, chunk_aad(4)) == none)
+    let other = sealer(new_code())!
+    assert(open(other, seal(s, "part".to_bytes(), chunk_aad(0)), chunk_aad(0)) == none)
+    assert(token(code.copy()) != token(new_code()) and token(code.copy()) == token(code))
+}
+
+@test
+fn reads_the_query() {
+    assert(query_value(String("a=1&n=12"), "n") == "12" and query_value(String("a=1"), "n") == "")
+}

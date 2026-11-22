@@ -8,14 +8,17 @@ module tests.protocol.local
 // Run it from the repository's root:
 //
 //     calx tests/protocol/local.calx
+import std.bytes
 import std.fs
 import std.json.{Json, parse}
 import std.process.{exit}
 import std.time.{Instant}
-import shared.obj.{Obj, at, str_at}
+import shared.obj.{Obj, at, int_at, str_at}
 import core.cache.{Cache}
 import core.conn.{Conn}
 import core.lib.{start_local}
+import core.link
+import core.relay
 
 fn check(passed: bool, what: str) ! Error {
     if not passed { fail "failed: {what}" }
@@ -75,6 +78,24 @@ fn run() ! Error {
     app.send(Obj.new().s("t", String("cmd")).s("id", String("q_1")).s("name", String("acp.list")).done())
     _ = try app.until("result", "id", String("q_1"), 5000)
     try check(true, "and the instance answers it")
+    // With phones on, the QR code names this computer over Noise: the instance's
+    // Noise key and its addresses on the network, Wi-Fi first and Tailscale next.
+    app.send(Obj.new().s("t", String("cmd")).s("id", String("q_2")).s("name", String("instance.phones")).j("args", Obj.new().b("on", true).done()).done())
+    let on = at(try app.until("result", "id", String("q_2"), 10000), "value")
+    let port = u16.wrap(int_at(on.copy(), "port") ?? 0)
+    app.send(Obj.new().s("t", String("cmd")).s("id", String("q_3")).s("name", String("link.create")).done())
+    let made = at(try app.until("result", "id", String("q_3"), 10000), "value")
+    let scanned = link.read(str_at(made, "qr") ?? String()) else { fail "the QR code doesn't read" }
+    let mine = relay.own_addresses(port)
+    println("      this computer's addresses: {mine.join(", ")}")
+    if mine.len() == 0 {
+        try check(scanned.server.starts_with("http://127.0.0.1:"), "with no address on a network, the QR code has the instance's own")
+    } else {
+        let place = relay.place(scanned.server.copy()) else { fail "the QR code's server isn't a Noise place: {scanned.server}" }
+        try check(place.addresses == mine and bytes.base64(place.key) == (str_at(on, "key") ?? String()), "with phones on, the QR code names this computer over Noise, at its addresses")
+    }
+    app.send(Obj.new().s("t", String("cmd")).s("id", String("q_4")).s("name", String("instance.phones")).j("args", Obj.new().b("on", false).done()).done())
+    _ = try app.until("result", "id", String("q_4"), 10000)
     app.stop()
     stop1.send(true)
     t1.join()

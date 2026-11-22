@@ -1,0 +1,62 @@
+module core.link
+
+// What goes in the QR code that adds a device (PLAN.md, "Connecting
+// devices"): a connected device's core makes it from the instance's answer to
+// `link.create`, and the new device's core reads it back. It's a URL,
+//
+//     loom://link?a=<the instance's address>&c=<one-time code>&i=<instance id>&k=<its key>
+//
+// so a phone's own camera can hand it to the app too.
+import std.url.{form_decode, form_encode}
+
+const PREFIX: str = "loom://link?"
+
+/// What a QR code holds.
+pub struct Link {
+    pub server: String      // the instance's http:// or https:// address
+    pub code: String        // the one-time code, for POST /api/link
+    pub instance: String    // the instance's id
+    pub key: String         // its public key, base64
+}
+
+/// The text of the QR code for `l`.
+pub fn qr(l: Link) -> String {
+    let pairs: List<(String, String)> = [(String("a"), l.server.copy()), (String("c"), l.code.copy()), (String("i"), l.instance.copy()), (String("k"), l.key.copy())]
+    return "{PREFIX}{form_encode(pairs)}"
+}
+
+/// What the QR code's `text` holds, or none when it isn't loom's.
+pub fn read(text: String) -> Link? {
+    let t = text.trim().copy()
+    if not t.starts_with(PREFIX) { return none }
+    var l = Link { server: String(), code: String(), instance: String(), key: String() }
+    for (k, v) in form_decode(t[PREFIX.len()..].copy()) {
+        if k == "a" {
+            l.server = v.copy()
+        } else if k == "c" {
+            l.code = v.copy()
+        } else if k == "i" {
+            l.instance = v.copy()
+        } else if k == "k" {
+            l.key = v.copy()
+        }
+    }
+    if l.code.len() == 0 or not (l.server.starts_with("https://") or l.server.starts_with("http://") or l.server.starts_with("noise://")) { return none }
+    return some(l)
+}
+
+@test
+fn reads_what_it_writes() {
+    let l = Link { server: String("https://loom.example.com"), code: String("0f3a"), instance: String("i_8sk2"), key: String("ab+/c=") }
+    let text = qr(l)
+    assert(text.starts_with("loom://link?a=https%3A%2F%2Floom.example.com&c=0f3a"))
+    let back = read(text) else panic("it didn't read back")
+    assert(back.server == "https://loom.example.com" and back.code == "0f3a" and back.instance == "i_8sk2" and back.key == "ab+/c=")
+}
+
+@test
+fn refuses_what_isnt_loom() {
+    assert(read(String("https://example.com")) == none)
+    assert(read(String("loom://link?a=ftp%3A%2F%2Fx&c=1")) == none)
+    assert(read(String("loom://link?a=https%3A%2F%2Fx")) == none)
+}

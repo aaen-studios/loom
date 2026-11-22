@@ -38,19 +38,42 @@ pub mod space {
 }
 
 pub mod radius {
-    pub const WINDOW: f32 = 12.0;
-    pub const INPUT: f32 = 10.0;
-    pub const ROW: f32 = 10.0;
-    pub const CHIP: f32 = 14.0;
-    pub const BUTTON: f32 = 16.0;
-    pub const CARD: f32 = 16.0;
-    pub const BUBBLE: f32 = 20.0;
-    pub const COMPOSER: f32 = 26.0;
+    pub const WINDOW: f32 = 10.0;
+    pub const INPUT: f32 = 8.0;
+    pub const ROW: f32 = 6.0;
+    pub const CHIP: f32 = 6.0;
+    pub const BUTTON: f32 = 8.0;
+    pub const CARD: f32 = 10.0;
+    pub const BUBBLE: f32 = 14.0;
+    pub const COMPOSER: f32 = 16.0;
 }
 
 pub mod layout {
     pub const SIDEBAR: f32 = 260.0;
     pub const TITLEBAR: f32 = 48.0;
+    pub const SETTINGS: f32 = 600.0;
+    pub const PAGE: f32 = 520.0;
+    pub const NAV: f32 = 210.0;
+    pub const MENU: f32 = 230.0;
+    pub const MENU_WIDE: f32 = 240.0;
+    pub const FIELD_LABEL: f32 = 120.0;
+}
+
+pub mod control {
+    pub const BUTTON: f32 = 34.0;
+    pub const BUTTON_SMALL: f32 = 30.0;
+    pub const BUTTON_WIDE: f32 = 46.0;
+    pub const SEGMENT: f32 = 26.0;
+    pub const CHIP: f32 = 28.0;
+    pub const ICON: f32 = 28.0;
+    pub const ICON_SMALL: f32 = 26.0;
+    pub const ICON_COMPOSER: f32 = 32.0;
+    pub const ICON_LARGE: f32 = 34.0;
+    pub const LEAD: f32 = 30.0;
+    pub const SERVER: f32 = 46.0;
+    pub const CHOICE: f32 = 50.0;
+    pub const ROW: f32 = 54.0;
+    pub const ROW_TALL: f32 = 68.0;
 }
 
 pub mod phone_size {
@@ -78,7 +101,7 @@ pub mod color_dark {
     pub const LINE_STRONG: u32 = 0x2e2e33;
     pub const INK: u32 = 0xededee;
     pub const INK_2: u32 = 0xb4b4ba;
-    pub const INK_3: u32 = 0x7c7c85;
+    pub const INK_3: u32 = 0x86868f;
     pub const BUTTON: u32 = 0xededee;
     pub const BUTTON_INK: u32 = 0x0b0b0c;
     pub const BUBBLE: u32 = 0x1c1c1f;
@@ -97,7 +120,7 @@ pub mod color_light {
     pub const LINE_STRONG: u32 = 0xdcdce0;
     pub const INK: u32 = 0x111113;
     pub const INK_2: u32 = 0x4a4a52;
-    pub const INK_3: u32 = 0x8a8a93;
+    pub const INK_3: u32 = 0x707079;
     pub const BUTTON: u32 = 0x111113;
     pub const BUTTON_INK: u32 = 0xffffff;
     pub const BUBBLE: u32 = 0xf1f1f3;

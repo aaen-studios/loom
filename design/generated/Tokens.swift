@@ -47,19 +47,42 @@ enum Tokens {
     }
 
     enum Radius {
-        static let window: CGFloat = 12
-        static let input: CGFloat = 10
-        static let row: CGFloat = 10
-        static let chip: CGFloat = 14
-        static let button: CGFloat = 16
-        static let card: CGFloat = 16
-        static let bubble: CGFloat = 20
-        static let composer: CGFloat = 26
+        static let window: CGFloat = 10
+        static let input: CGFloat = 8
+        static let row: CGFloat = 6
+        static let chip: CGFloat = 6
+        static let button: CGFloat = 8
+        static let card: CGFloat = 10
+        static let bubble: CGFloat = 14
+        static let composer: CGFloat = 16
     }
 
     enum Layout {
         static let sidebar: CGFloat = 260
         static let titlebar: CGFloat = 48
+        static let settings: CGFloat = 600
+        static let page: CGFloat = 520
+        static let nav: CGFloat = 210
+        static let menu: CGFloat = 230
+        static let menuWide: CGFloat = 240
+        static let fieldLabel: CGFloat = 120
+    }
+
+    enum Control {
+        static let button: CGFloat = 34
+        static let buttonSmall: CGFloat = 30
+        static let buttonWide: CGFloat = 46
+        static let segment: CGFloat = 26
+        static let chip: CGFloat = 28
+        static let icon: CGFloat = 28
+        static let iconSmall: CGFloat = 26
+        static let iconComposer: CGFloat = 32
+        static let iconLarge: CGFloat = 34
+        static let lead: CGFloat = 30
+        static let server: CGFloat = 46
+        static let choice: CGFloat = 50
+        static let row: CGFloat = 54
+        static let rowTall: CGFloat = 68
     }
 
     enum PhoneSize {
@@ -87,7 +110,7 @@ enum Tokens {
         static let lineStrong: UInt32 = 0x2e2e33
         static let ink: UInt32 = 0xededee
         static let ink2: UInt32 = 0xb4b4ba
-        static let ink3: UInt32 = 0x7c7c85
+        static let ink3: UInt32 = 0x86868f
         static let button: UInt32 = 0xededee
         static let buttonInk: UInt32 = 0x0b0b0c
         static let bubble: UInt32 = 0x1c1c1f
@@ -106,7 +129,7 @@ enum Tokens {
         static let lineStrong: UInt32 = 0xdcdce0
         static let ink: UInt32 = 0x111113
         static let ink2: UInt32 = 0x4a4a52
-        static let ink3: UInt32 = 0x8a8a93
+        static let ink3: UInt32 = 0x707079
         static let button: UInt32 = 0x111113
         static let buttonInk: UInt32 = 0xffffff
         static let bubble: UInt32 = 0xf1f1f3

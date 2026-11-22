@@ -1,0 +1,195 @@
+module tests.protocol.push
+
+// Push (PLAN.md, "Notifications and push"): a phone hands the instance its
+// APNs token with push.register, only for itself, and the owner sets up the
+// APNs key with `loom push key`, kept sealed, which `loom status` reports.
+// Then, to a fake APNs: an agent's reply comes to the phone when the person
+// is on none of their devices, a question with Allow and Deny and a notify
+// come to each phone that isn't connected, each with a provider token
+// signed with the key, and a token APNs says is gone gets no more.
+//
+//     calx tests/protocol/push.calx
+import std.bytes.{from_base64_url}
+import std.crypto.{P256Key}
+import std.fs
+import std.http.server.{Response, Server}
+import std.json.{Json, parse}
+import std.process.{exit}
+import std.text.utf8.{decode_lossy_unicode}
+import std.thread.{Task, sleep}
+import shared.obj.{Obj, at, bool_at, str_at}
+import server.store.{now}
+import tests.kit.{App, Instance, check, device, loom, post_json}
+
+const TOKEN: str = "a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90"
+const GONE: str = "ffeeddccbbaa99887766554433221100ffeeddccbbaa99887766554433221100"
+
+// APNs, as far as loom sees it: each request is told to the test, and
+// answered 200, or 410 Unregistered for the GONE token.
+struct FakeApns {
+    server: Server
+    seen: Sender<String>
+}
+
+impl Task for FakeApns {
+    fn run(own self) {
+        var f = self
+        while let req = f.server.next(-1) {
+            let body = match parse(req.text() ?? String()) {
+                ok(j) => j,
+                err(_) => Json.Null,
+            }
+            let o = Obj.new().s("path", req.path.copy()).s("auth", req.header(String("authorization")) ?? String()).s("topic", req.header(String("apns-topic")) ?? String()).s("type", req.header(String("apns-push-type")) ?? String()).s("collapse", req.header(String("apns-collapse-id")) ?? String()).j("body", body).done()
+            f.seen.send("{o}")
+            if req.path.ends_with(GONE) {
+                f.server.respond(req, Response.json(String(#"{"reason":"Unregistered"}"#), 410))
+            } else {
+                f.server.respond(req, Response.json(String(), 200))
+            }
+        }
+    }
+}
+
+// The next request APNs got.
+fn pushed(seen: mut Receiver<String>) -> Json ! Error {
+    let until = now() + 20000
+    loop {
+        if let text = seen.next() { return try parse(text) }
+        if now() > until { fail "no push came to APNs in 20 s" }
+        unsafe { sleep(20000000) }
+    }
+}
+
+fn alert(p: Json, key: str) -> String {
+    return str_at(at(at(at(p, "body"), "aps"), "alert"), key) ?? String()
+}
+
+fn loom_at(p: Json, key: str) -> String {
+    return str_at(at(at(p, "body"), "loom"), key) ?? String()
+}
+
+// Whether the provider token is one APNs takes from `key`: ES256, naming the
+// key's id and the team, and signed with it.
+fn signed_by(auth: String, key: P256Key) -> bool {
+    if not auth.starts_with("bearer ") { return false }
+    let parts = auth[7..].split(".")
+    if parts.len() != 3 { return false }
+    let head_bytes = from_base64_url(parts[0].copy()) else return false
+    let claim_bytes = from_base64_url(parts[1].copy()) else return false
+    let sig = from_base64_url(parts[2].copy()) else return false
+    let head = decode_lossy_unicode(head_bytes.copy(), 0, head_bytes.len())
+    let claims = decode_lossy_unicode(claim_bytes.copy(), 0, claim_bytes.len())
+    return head.contains(#""alg":"ES256""#) and head.contains(#""kid":"TESTKEY123""#) and claims.contains(#""iss":"TEAM123456""#) and key.public_key().verify("{parts[0]}.{parts[1]}".to_bytes(), sig)
+}
+
+fn set_up(i: Instance) ! Error {
+    var app = try App.connect(i.base.copy(), i.token.copy(), 0)
+    let taken = try app.cmd("q_1", "push.register", Obj.new().s("token", String(TOKEN)).s("env", String("development")).done())
+    try check(bool_at(taken, "ok") == some(true), "a device registers its APNs token")
+    let short = try app.cmd("q_2", "push.register", Obj.new().s("token", String("abc")).done())
+    let env = try app.cmd("q_3", "push.register", Obj.new().s("token", String(TOKEN)).s("env", String("staging")).done())
+    try check(str_at(at(short, "error"), "code") == some(String("bad_request")) and str_at(at(env, "error"), "code") == some(String("bad_request")), "a token that isn't one, or an env that isn't, is refused")
+    let off = try app.cmd("q_4", "push.unregister", Obj.new().done())
+    try check(bool_at(off, "ok") == some(true), "and it can stop taking push")
+    app.close()
+
+    // The owner's APNs key, from the command line.
+    let before = try loom(i.data.copy(), [String("status")]).output()
+    try check(before.text().contains("push: off"), "with no APNs key, there's no push")
+    let not_key = "{i.data}/not-a-key.txt"
+    try fs.write_text(not_key.copy(), String("-----BEGIN PRIVATE KEY-----\nMIGTAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBHkwdwIBAQQg\n-----END PRIVATE KEY-----\n"))
+    let refused = try loom(i.data.copy(), [String("push"), String("key"), not_key, String("K"), String("T"), String("B")]).output()
+    let still = try loom(i.data.copy(), [String("status")]).output()
+    try check(not refused.status.success() and still.text().contains("push: off"), "a file that isn't a P-256 key is refused")
+}
+
+fn sending(i: Instance, seen: mut Receiver<String>) ! Error {
+    let key = P256Key.generate()
+    let key_file = "{i.data}/AuthKey_TESTKEY123.p8"
+    try fs.write_text(key_file.copy(), key.pem())
+    let set = try loom(i.data.copy(), [String("push"), String("key"), key_file, String("TESTKEY123"), String("TEAM123456"), String("no.aaenz.loom")]).output()
+    let after = try loom(i.data.copy(), [String("status")]).output()
+    try check(set.status.success() and after.text().contains("push: APNs, for no.aaenz.loom"), "loom push key sets it up")
+    var kept = List<u8>()
+    for name in ["loom.db", "loom.db-wal"] {
+        if fs.exists("{i.data}/{name}") { kept.extend(try fs.read("{i.data}/{name}")) }
+    }
+    try check(not decode_lossy_unicode(kept.copy(), 0, kept.len()).contains("BEGIN PRIVATE KEY"), "and the database keeps the key only sealed")
+
+    // Two phones: one APNs takes, and one whose app was removed.
+    let (_, login) = try post_json(i.base.copy(), "/api/login", Obj.new().s("username", String("elliot")).s("password", String("correct horse")).j("device", device("iPhone")).done())
+    let (_, old_login) = try post_json(i.base.copy(), "/api/login", Obj.new().s("username", String("elliot")).s("password", String("correct horse")).j("device", device("Old iPhone")).done())
+    var old = try App.connect(i.base.copy(), str_at(old_login, "token") ?? String(), 0)
+    _ = try old.cmd("q_1", "push.register", Obj.new().s("token", String(GONE)).done())
+    old.close()
+    let phone_token = str_at(login, "token") ?? String()
+    var phone = try App.connect(i.base.copy(), phone_token.copy(), 0)
+    _ = try phone.cmd("q_1", "push.register", Obj.new().s("token", String(TOKEN)).done())
+    let made = try phone.cmd("q_2", "agent.create", Obj.new().s("name", String("Main")).s("acp_agent", String("fake")).s("instructions", String("Test.")).done())
+    let agent = str_at(at(at(made, "value"), "agent"), "id") ?? String()
+    let c = try phone.cmd("q_3", "conversation.create", Obj.new().s("agent", agent).done())
+    let conversation = str_at(at(c, "value"), "conversation") ?? String()
+
+    // The person asks from the phone and puts it away before the reply.
+    try phone.send(Obj.new().s("t", String("send")).s("cid", String("m_1")).s("conversation", conversation.copy()).s("text", String("/sleep 1500\nAll done.")).done())
+    _ = try phone.until("event", "run.started")
+    phone.close()
+    let first = try pushed(mut seen)
+    let second = try pushed(mut seen)
+    let (reply, gone) = if (str_at(first.copy(), "path") ?? String()).ends_with(TOKEN) { (first, second) } else { (second, first) }
+    try check(str_at(reply.copy(), "path") == some("/3/device/{TOKEN}") and (str_at(gone, "path") ?? String()).ends_with(GONE), "a reply comes to each phone when the person is on none of their devices")
+    try check(alert(reply.copy(), "title") == "Main" and alert(reply.copy(), "body") == "All done." and loom_at(reply.copy(), "kind") == "reply" and loom_at(reply.copy(), "conversation") == conversation and str_at(at(at(reply.copy(), "body"), "aps"), "thread-id") == some(conversation.copy()), "with the agent's name and its words, and which conversation it's in")
+    try check(str_at(reply.copy(), "topic") == some(String("no.aaenz.loom")) and str_at(reply.copy(), "type") == some(String("alert")) and signed_by(str_at(reply, "auth") ?? String(), key), "as an alert for the app, with a provider token signed with the key")
+
+    // At the desk, with the phone away: a question comes to the phone too.
+    var desk = try App.connect(i.base.copy(), i.token.copy(), 0)
+    try desk.send(Obj.new().s("t", String("send")).s("cid", String("m_2")).s("conversation", conversation.copy()).s("text", String("/ask rm -rf build\nok")).done())
+    let needed = try desk.until("event", "approval.needed")
+    let call = str_at(needed, "call") ?? String()
+    let asked = try pushed(mut seen)
+    try check(str_at(asked.copy(), "path") == some("/3/device/{TOKEN}") and alert(asked.copy(), "title") == "Main asks first" and alert(asked.copy(), "body") == "rm -rf build", "a question comes to the phone that isn't connected, and not to the one APNs called gone")
+    try check(str_at(at(at(asked.copy(), "body"), "aps"), "category") == some(String("approval")) and loom_at(asked.copy(), "call") == call and str_at(asked, "collapse") == some(call.copy()), "with Allow and Deny, and the call to answer")
+    try desk.send(Obj.new().s("t", String("approve")).s("call", call).b("allow", true).b("always", false).done())
+    _ = try desk.until("event", "run.finished")
+
+    // The reply came while the desk was open, so it wasn't pushed; a notify is.
+    try desk.send(Obj.new().s("t", String("send")).s("cid", String("m_3")).s("conversation", conversation.copy()).s("text", String(#"/mcp notify {"title":"Build","body":"It failed."}"#)).done())
+    let note = try pushed(mut seen)
+    try check(str_at(note.copy(), "path") == some("/3/device/{TOKEN}") and alert(note.copy(), "title") == "Build" and alert(note.copy(), "subtitle") == "Main" and alert(note.copy(), "body") == "It failed." and loom_at(note, "kind") == "notify", "a reply seen at the desk isn't pushed, and an agent's notify is")
+    _ = try desk.until("event", "run.finished")
+
+    // With the phone open, it gets the notify over its connection, not as push.
+    var back = try App.connect(i.base.copy(), phone_token, 0)
+    try desk.send(Obj.new().s("t", String("send")).s("cid", String("m_4")).s("conversation", conversation).s("text", String(#"/mcp notify {"title":"Again","body":"Still failing."}"#)).done())
+    _ = try back.until("event", "notify")
+    _ = try desk.until("event", "run.finished")
+    unsafe { sleep(500000000) }
+    try check(seen.next() == none, "a phone that's connected gets no push")
+    back.close()
+    desk.close()
+}
+
+fn main() ! Error {
+    var server = try Server.listen(0)
+    server.log = false
+    let base = server.url()[..server.url().len() - 1].copy()
+    var seen = Receiver<String>()
+    _ = unsafe { Thread.spawn(FakeApns { server: server, seen: seen.sender() }) }
+    let inst = try Instance.start_with([String("--test-apns"), base])
+    var failure: String? = match set_up(inst.copy()) {
+        ok => none,
+        err(e) => some("{e}"),
+    }
+    if failure == none {
+        failure = match sending(inst.copy(), mut seen) {
+            ok => none,
+            err(e) => some("{e}"),
+        }
+    }
+    inst.stop()
+    if let f = failure {
+        eprintln("\n{f}")
+        exit(1)
+    }
+    println("\npush: all good")
+}

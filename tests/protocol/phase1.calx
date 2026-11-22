@@ -156,6 +156,12 @@ fn run(server: Child, data: String) ! Error {
     try check(added.status.success(), "a second account comes from the command line")
     let said = try loom(data.copy(), [String("status")]).output()
     try check(said.status.success() and said.text().contains("runs as: "), "loom status says which user it runs as")
+    let status_out = try loom(data.copy(), [String("status"), String("--json")]).output()
+    let as_json = try parse(status_out.text())
+    let users_out = try loom(data.copy(), [String("user"), String("list"), String("--json")]).output()
+    let users = try parse(users_out.text())
+    let wrong = try loom(data.copy(), [String("nothing"), String("--json")]).output()
+    try check(int_at(as_json, "accounts") == some(2) and "{at(users, "users")}".contains("\"username\":\"bob\"") and not wrong.status.success() and str_at(at(try parse(wrong.text()), "error"), "code") == some(String("unknown_command")), "with --json, the command line answers in JSON, errors too")
     if env.is_elevated() {
         let refused = try loom(data.copy(), [String("serve"), String("--port"), String("0")]).output()
         try check(not refused.status.success() and refused.error_text().contains("--allow-root"), "loom serve won't run elevated without --allow-root")
@@ -216,6 +222,10 @@ fn run(server: Child, data: String) ! Error {
     try check(count == 2 and back.seq == before, "and makes no message and no event")
 
     // --- An approval ---
+    // What a turn used, as its program reports it.
+    try back.send(Obj.new().s("t", String("send")).s("cid", String("m_tokens")).s("conversation", conversation.copy()).s("text", String("/tokens 41\ncounted")).done())
+    let counted = try back.until("event", "run.finished")
+    try check(int_at(at(counted, "usage"), "total") == some(41) and int_at(at(counted, "usage"), "input") == some(20), "run.finished says the tokens the turn used")
     try back.send(Obj.new().s("t", String("send")).s("cid", String("m_2")).s("conversation", conversation.copy()).s("text", String("/ask rm -rf build\ndone")).done())
     let needed = try back.until("event", "approval.needed")
     let call = str_at(needed.copy(), "call") ?? String()

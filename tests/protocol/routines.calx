@@ -5,7 +5,8 @@ module tests.protocol.routines
 // prompt in the agent's chat (its newest conversation, or a new one when it
 // has none), tells it the routine sent it, and
 // notifies the person with the reply. Paused, it waits; run by hand, it runs
-// once. An agent makes routines with the schedule tool, lists them, and
+// once. A daily or weekday routine runs next at its time, in its time zone,
+// on the real clock. An agent makes routines with the schedule tool, lists them, and
 // deletes one only once the person says yes.
 //
 //     calx tests/protocol/routines.calx
@@ -57,7 +58,20 @@ fn run(i: Instance) -> i64 ! Error {
     let bad = try app.cmd("q_2", "routine.put", Obj.new().s("name", String("Pulse")).s("agent", String("Main")).s("prompt", String("hi")).j("schedule", Obj.new().i("every", 1).done()).done())
     try check(bool_at(bad.copy(), "ok") == some(false) and str_at(at(bad, "error"), "code") == some(String("bad_request")), "a routine more often than every 5 minutes is refused")
 
-    let put = try app.cmd("q_3", "routine.put", Obj.new().s("name", String("Pulse")).s("agent", String("Main")).s("prompt", String("/context\npulse")).j("schedule", Obj.new().i("every", 5).done()).b("notify", true).done())
+    // At a time of day, on the real clock, in the routine's time zone.
+    let daily = at(at(try app.cmd("q_d1", "routine.put", Obj.new().s("name", String("Brief")).s("agent", String("Main")).s("prompt", String("brief")).j("schedule", Obj.new().s("daily", String("08:00")).done()).done()), "value"), "routine")
+    let daily_gap = (int_at(daily.copy(), "next") ?? 0) - (int_at(daily.copy(), "at") ?? 0)
+    try check(str_at(daily.copy(), "when") == some(String("daily at 08:00")) and daily_gap > 0 and daily_gap <= 25 * 3600000, "a daily routine runs next at its time, within a day")
+    let weekly = at(at(try app.cmd("q_d2", "routine.put", Obj.new().s("name", String("Standup")).s("agent", String("Main")).s("prompt", String("standup")).s("tz", String("America/New_York")).j("schedule", Obj.new().s("weekdays", String("09:30")).done()).done()), "value"), "routine")
+    let weekly_gap = (int_at(weekly.copy(), "next") ?? 0) - (int_at(weekly.copy(), "at") ?? 0)
+    try check(str_at(weekly.copy(), "when") == some(String("on weekdays at 09:30")) and str_at(weekly.copy(), "tz") == some(String("America/New_York")) and weekly_gap > 0 and weekly_gap <= 4 * 86400000, "one on weekdays takes the time zone it's given")
+    let no_zone = try app.cmd("q_d3", "routine.put", Obj.new().s("name", String("X")).s("agent", String("Main")).s("prompt", String("x")).s("tz", String("Mars/Base")).j("schedule", Obj.new().s("daily", String("08:00")).done()).done())
+    let no_time = try app.cmd("q_d4", "routine.put", Obj.new().s("name", String("X")).s("agent", String("Main")).s("prompt", String("x")).j("schedule", Obj.new().s("daily", String("25:00")).done()).done())
+    try check(bool_at(no_zone, "ok") == some(false) and bool_at(no_time, "ok") == some(false), "a time zone loom doesn't know, or a time that isn't one, is refused")
+    _ = try app.cmd("q_d5", "routine.delete", Obj.new().s("id", str_at(daily, "id") ?? String()).done())
+    _ = try app.cmd("q_d6", "routine.delete", Obj.new().s("id", str_at(weekly, "id") ?? String()).done())
+
+    let put = try app.cmd("q_3", "routine.put", Obj.new().s("name", String("Pulse")).s("agent", String("Main")).s("prompt", String("pulse\n/context")).j("schedule", Obj.new().i("every", 5).done()).b("notify", true).done())
     let r = at(at(put, "value"), "routine")
     let id = str_at(r.copy(), "id") ?? String()
     try check(str_at(r.copy(), "agent") == some(agent.copy()) and str_at(r.copy(), "when") == some(String("every 5 minutes")) and str_at(r.copy(), "tz") == some(String("Europe/Oslo")) and (int_at(r, "next") ?? 0) > 0, "a routine is made, for the agent named, in the device's time zone")

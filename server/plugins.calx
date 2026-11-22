@@ -1,0 +1,225 @@
+module server.plugins
+
+// Plugins (PLAN.md, "Plugins"): a plugin is text files, one of them
+// `plugin.toml`, its manifest. It gives the plugin's name and version, and
+// what it has and asks for:
+//
+//     name = "Build board"
+//     version = "0.1.0"
+//     description = "Shows how the builds are doing."
+//
+//     [panel]
+//     entry = "index.html"          # a small web app in its own web view
+//
+//     [tools]
+//     command = "calx"              # an MCP server the instance runs for every agent
+//     args = ["tools.calx"]         # an arg naming one of its files is that file
+//
+//     [permissions]
+//     commands = ["routine.list"]   # loom commands its panel may send
+//     agents = true                 # its panel may message the person's agents
+//
+// What it asks for, as `asks`: `tools` when it has a tool server, `agents`,
+// and `cmd:<name>` for each command. Its person allows them, and until they
+// have, what's asked and not allowed waits.
+import std.json.{Json}
+import std.toml
+import std.toml.{Toml}
+import shared.obj.{Obj}
+
+pub const MOST_FILES: usize = 200
+pub const MOST_BYTES: usize = 2000000
+
+// Commands a panel never gets, whatever it asks. Its commands go out as its
+// person's device, so these would let it allow itself more (a plugin put
+// from a device has what it asks, and plugin.cmd and plugin.message would
+// borrow another plugin's yes), run programs on the instance, or reach
+// the person's devices, secrets and sign-in.
+const NEVER: [str; 30] = ["plugin.put", "plugin.allow", "plugin.delete", "plugin.cmd", "plugin.message", "instance.move", "instance.phones", "invite.create", "invite.delete", "user.role", "user.remove", "account.delete", "password.reset", "link.create", "push.register", "push.unregister", "device.revoke", "device.rename", "secret.list", "secret.put", "secret.delete", "mcp.put", "acp.install", "acp.remove", "acp.settings", "acp.share", "acp.members", "instance.relay", "import.scan", "import.run"]
+
+// Whether `id` is a plugin's id: lowercase letters, digits and hyphens, up
+// to 64, starting with a letter, as `build-board`.
+pub fn valid_id(id: String) -> bool {
+    if id.len() == 0 or id.len() > 64 { return false }
+    var first = true
+    for r in id.runes() {
+        let letter = r >= 'a' and r <= 'z'
+        if first and not letter { return false }
+        if not (letter or (r >= '0' and r <= '9') or r == '-') { return false }
+        first = false
+    }
+    return true
+}
+
+// Whether `path` is a path within a plugin: parts of letters, digits, `.`,
+// `-` and `_`, joined by `/`, none of them `.` or `..`.
+pub fn valid_path(path: String) -> bool {
+    if path.len() == 0 or path.len() > 200 { return false }
+    for part in path.split("/") {
+        if part.len() == 0 or part == "." or part == ".." { return false }
+        for r in part.runes() {
+            if not ((r >= 'a' and r <= 'z') or (r >= 'A' and r <= 'Z') or (r >= '0' and r <= '9') or r == '.' or r == '-' or r == '_') { return false }
+        }
+    }
+    return true
+}
+
+fn text_at(doc: Toml, key: str) -> String? {
+    let v = doc.get(String(key)) else return none
+    return v.as_str()
+}
+
+// The manifest `files` has, as JSON: `name`, `version`, `description`,
+// `panel` (`entry`) or null, `tools` (`command`, `args`) or null, and
+// `asks`. Fails with what's wrong, for whoever wrote it.
+pub fn manifest(files: Json) -> Json ! Error {
+    var count: usize = 0
+    var bytes: usize = 0
+    let Json.Object(m) = files.copy() else { fail "files is an object of paths and their text" }
+    for (path, body) in m {
+        count += 1
+        if not valid_path(path.copy()) { fail "{path} isn't a path a plugin can have: parts of letters, digits, '.', '-' and '_', joined by '/'" }
+        let text = body.as_str() else { fail "{path} isn't text" }
+        bytes += text.len() + path.len()
+    }
+    if count > MOST_FILES { fail "a plugin has {MOST_FILES} files at most" }
+    if bytes > MOST_BYTES { fail "a plugin is {MOST_BYTES / 1000000} MB at most" }
+    let text = files.get(String("plugin.toml")) else { fail "a plugin needs plugin.toml, its manifest" }
+    let doc = match toml.parse(text.as_str() ?? String()) {
+        ok(d) => d,
+        err(e) => fail "plugin.toml isn't TOML: {e}",
+    }
+    let name = text_at(doc.copy(), "name") ?? String()
+    if name.trim().len() == 0 or name.len() > 64 { fail "plugin.toml needs a name, up to 64 characters" }
+    let version = text_at(doc.copy(), "version") ?? String()
+    if version.len() == 0 or version.len() > 32 { fail "plugin.toml needs a version, such as \"0.1.0\"" }
+    var asks = List<Json>()
+    var panel = Json.Null
+    if let p = doc.get(String("panel")) {
+        let entry = text_at(p, "entry") ?? String("index.html")
+        if files.get(entry.copy()) == none { fail "the panel's entry, {entry}, isn't one of the plugin's files" }
+        panel = Obj.new().s("entry", entry).done()
+    }
+    var tools = Json.Null
+    if let t = doc.get(String("tools")) {
+        let command = text_at(t.copy(), "command") ?? String()
+        if command.len() == 0 { fail "[tools] needs a command: the program that runs its MCP server" }
+        var args = List<Json>()
+        if let list = t.get(String("args")) {
+            var n: usize = 0
+            while n < list.len() {
+                let a = list.at(n) else break
+                args.push(Json.Str(a.as_str() ?? String()))
+                n += 1
+            }
+        }
+        tools = Obj.new().s("command", command).j("args", Json.Array(args)).done()
+        asks.push(Json.Str(String("tools")))
+    }
+    if let perms = doc.get(String("permissions")) {
+        if let agents = perms.get(String("agents")) {
+            if agents.as_bool() == some(true) { asks.push(Json.Str(String("agents"))) }
+        }
+        if let list = perms.get(String("commands")) {
+            var n: usize = 0
+            while n < list.len() {
+                let c = list.at(n) else break
+                let command = c.as_str() ?? String()
+                if command.len() == 0 or command.contains(" ") { fail "[permissions] commands are loom's command names, such as \"routine.list\"" }
+                for never in NEVER {
+                    if command == never { fail "a panel can't be given {command}" }
+                }
+                asks.push(Json.Str("cmd:{command}"))
+                n += 1
+            }
+        }
+    }
+    return Obj.new().s("name", name).s("version", version).s("description", text_at(doc, "description") ?? String()).j("panel", panel).j("tools", tools).j("asks", Json.Array(asks)).done()
+}
+
+// What of `asks` isn't in `allowed`.
+pub fn waiting(asks: Json, allowed: Json) -> Json {
+    var out = List<Json>()
+    if let Json.Array(a) = asks {
+        for x in a {
+            var given = false
+            if let Json.Array(g) = allowed.copy() {
+                for y in g {
+                    if y == x { given = true }
+                }
+            }
+            if not given { out.push(x.copy()) }
+        }
+    }
+    return Json.Array(out)
+}
+
+// Whether a plugin, `p`, has `what` allowed: "agents", or "cmd:<name>" for
+// a command that isn't one a panel never gets.
+pub fn allows(p: Json, what: String) -> bool {
+    if what.starts_with("cmd:") {
+        for never in NEVER {
+            if what.trim_prefix("cmd:") == never { return false }
+        }
+    }
+    if let Json.Array(g) = p.get(String("allowed")) ?? Json.Null {
+        for y in g {
+            if y.as_str() == some(what.copy()) { return true }
+        }
+    }
+    return false
+}
+
+// What of `allowed` is still in `asks`: what stays allowed after a change.
+pub fn kept(allowed: Json, asks: Json) -> Json {
+    var out = List<Json>()
+    if let Json.Array(g) = allowed {
+        for y in g {
+            if let Json.Array(a) = asks.copy() {
+                for x in a {
+                    if x == y { out.push(y.copy()) }
+                }
+            }
+        }
+    }
+    return Json.Array(out)
+}
+
+@test
+fn ids_and_paths() {
+    assert(valid_id(String("build-board")) and not valid_id(String("Build")) and not valid_id(String("1x")) and not valid_id(String("")))
+    assert(valid_path(String("index.html")) and valid_path(String("lib/app.js")))
+    assert(not valid_path(String("../x")) and not valid_path(String("/etc/passwd")) and not valid_path(String("a//b")) and not valid_path(String("a\\b")))
+}
+
+@test
+fn reads_a_manifest() {
+    let toml_text = "name = \"Build board\"\nversion = \"0.1.0\"\n[panel]\nentry = \"index.html\"\n[tools]\ncommand = \"calx\"\nargs = [\"tools.calx\"]\n[permissions]\ncommands = [\"routine.list\"]\nagents = true\n"
+    let files = Obj.new().s("plugin.toml", toml_text).s("index.html", String("<p>hi</p>")).s("tools.calx", String("fn main() \{\}")).done()
+    let m = manifest(files)!
+    assert("{m}".contains(#""asks":["tools","agents","cmd:routine.list"]"#))
+    assert("{m}".contains(#""panel":{"entry":"index.html"}"#) and "{m}".contains(#""args":["tools.calx"]"#))
+}
+
+@test
+fn refuses_what_isnt_a_plugin() {
+    assert(refused(Obj.new().s("index.html", String("x")).done()))
+    assert(refused(Obj.new().s("plugin.toml", String("name = \"x\"\nversion = \"1\"\n[panel]\nentry = \"missing.html\"\n")).done()))
+    assert(refused(Obj.new().s("plugin.toml", String("name = \"x\"\nversion = \"1\"\n[permissions]\ncommands = [\"plugin.allow\"]\n")).done()))
+    assert(refused(Obj.new().s("plugin.toml", String("name = \"x\"\nversion = \"1\"\n")).s("../x", String("y")).done()))
+}
+
+@test
+fn knows_what_waits() {
+    let asks = Json.Array([Json.Str(String("tools")), Json.Str(String("agents"))])
+    let allowed = Json.Array([Json.Str(String("agents")), Json.Str(String("cmd:x"))])
+    assert("{waiting(asks.copy(), allowed.copy())}" == #"["tools"]"#)
+    assert("{kept(allowed, asks)}" == #"["agents"]"#)
+}
+
+fn refused(files: Json) -> bool {
+    return match manifest(files) {
+        ok(_) => false,
+        err(_) => true,
+    }
+}

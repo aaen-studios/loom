@@ -10,16 +10,18 @@ import std.bytes
 import std.env
 import std.fs
 import std.hash.{sha256}
-import std.http.{Header, get}
+import std.http.{Header, Request, get}
 import std.json.{Json, parse}
 import std.process
 import std.tar.{Tar}
 import std.thread.{Task}
 import std.zip.{Zip}
-import shared.obj.{Obj, at, str_at}
+import shared.obj.{Obj, at, merge, str_at}
 
 pub const REGISTRY: str = "https://cdn.agentclientprotocol.com/registry/v1/latest/registry.json"
 const REGISTRY_LIMIT: usize = 8000000
+const ICON_LIMIT: usize = 65536
+const ICON_WAIT_MS: u32 = 10000
 const ARCHIVE_LIMIT: usize = 1000000000
 const WAIT_MS: u32 = 600000
 
@@ -59,7 +61,7 @@ impl Task for Worker {
 
 fn work(w: Work) -> Json ! Error {
     return match w {
-        Work.Registry(address) => try fetch_json(address),
+        Work.Registry(address) => try fetch_registry(address),
         Work.Install(how, folder) => try install(how, folder),
     }
 }
@@ -190,6 +192,58 @@ fn fetch(address: String, limit: usize) -> List<u8> ! Error {
     let r = try req.wait()
     if r.status != 200 { fail "{address} answered {r.status}" }
     return r.body.copy()
+}
+
+// The registry, with each agent's icon in `icon_svg`: small SVGs in currentColor,
+// fetched here once with the registry, so the apps draw them in their own ink without
+// reaching the internet. One that can't be fetched, or isn't an SVG, is left out.
+fn fetch_registry(address: String) -> Json ! Error {
+    let registry = try fetch_json(address)
+    var listed = List<Json>()
+    if let Json.Array(list) = at(registry.copy(), "agents") {
+        listed = list.copy()
+    }
+    // Every icon is asked for first, so they all come at once rather than one
+    // after another.
+    var asked = List<Request?>()
+    for a in listed {
+        asked.push(match str_at(a.copy(), "icon") {
+            some(icon) => ask_icon(icon),
+            none => none,
+        })
+    }
+    var agents = List<Json>()
+    var n: usize = 0
+    for a in listed {
+        var entry = a.copy()
+        if let given = asked[n] {
+            var req = given
+            if let svg = icon_svg(mut req) {
+                entry = merge(entry, Obj.new().s("icon_svg", svg).done())
+            }
+        }
+        agents.push(entry)
+        n += 1
+    }
+    return merge(registry, Obj.new().j("agents", Json.Array(agents)).done())
+}
+
+// Starts fetching an icon at `address`, if it's served over http.
+fn ask_icon(address: String) -> Request? {
+    if not address.starts_with("https://") and not address.starts_with("http://") { return none }
+    return some(get(address, [Header { name: String("User-Agent"), value: String("loom") }], ICON_WAIT_MS, ICON_LIMIT))
+}
+
+// The icon a request brought, if it's a small SVG.
+fn icon_svg(req: mut Request) -> String? {
+    let r = match req.wait() {
+        ok(r) => r,
+        err(_) => return none,
+    }
+    if r.status != 200 { return none }
+    let text = String.from_utf8(r.body.copy()) else return none
+    if not text.contains("<svg") { return none }
+    return some(text)
 }
 
 fn fetch_json(address: String) -> Json ! Error {

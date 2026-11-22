@@ -89,7 +89,7 @@ fn rust_number(v: Toml) -> String {
 }
 
 fn px(parent: String) -> bool {
-    return parent == "size" or parent == "space" or parent == "radius" or parent == "layout" or parent == "thread.stroke"
+    return parent == "size" or parent == "space" or parent == "radius" or parent == "layout" or parent == "control" or parent == "thread.stroke"
 }
 
 fn header(comment: String) -> String {

@@ -1,0 +1,184 @@
+module tests.setup.e2e
+
+// loom's Windows installer (desktop/setup), from end to end, in a folder of its own:
+// LOCALAPPDATA and APPDATA point into it and LOOM_SETUP_SANDBOX keeps its registry keys
+// apart, so nothing of the computer's own loom is touched.
+//
+// It builds loom-setup with a test key, packs "releases" with that key, and checks:
+// a silent install puts loom.exe, uninstall.exe, the shortcut and the Settings entry in
+// place; an update whose new loom can't start puts the old one back; one that starts
+// stays, with the old one cleared away; a setup signed with another key installs
+// nothing; and a silent uninstall takes it all off again. The "loom.exe" of each
+// release is loom-setup's own program (which runs, and waits in its window), or for the
+// broken one, bytes that aren't a program. Last, v0.1's updater hands over to the setup
+// as loom.exe, and v0.1 is taken off without running its own uninstaller.
+//
+//     calx tests/setup/e2e.calx
+//
+// CI runs it on Windows. Elsewhere it says it was skipped.
+import std.bytes
+import std.env
+import std.fs
+import std.hash.{sha256}
+import std.process.{Command, Stdio}
+import std.thread.{sleep}
+import tests.kit.{calx, check}
+
+// A seed for the test key, and its public key, which the setup is built to trust.
+const SEED: str = "7c3e0f1a9b2d4c6e8f00112233445566778899aabbccddeeff0011223344556a"
+const PUBLIC: str = "0dad0838bd1cb4258694e4fb757c3d080491d0b63c6566df20e91baad2a4897f"
+// v0.1's Settings entry and starting at login, under the sandbox's keys.
+const V01_PATH: str = "HKCU\\Software\\loom-setup-sandbox\\Uninstall\\Loom"
+const RUN_PATH: str = "HKCU\\Software\\loom-setup-sandbox\\Run"
+const KEY_PATH: str = "HKCU\\Software\\loom-setup-sandbox\\Uninstall\\\{6F7B4E2A-3C1D-4B8E-9A5F-2D7C8E1B4A90\}"
+
+fn hash(path: String) -> String {
+    return match fs.read(path) {
+        ok(d) => bytes.hex(sha256(d)),
+        err(_) => String(),
+    }
+}
+
+fn wait_ms(ms: u64) {
+    unsafe { sleep(ms * 1000000) }
+}
+
+/// A command run in the sandbox.
+fn boxed(program: String, home: String) -> Command {
+    return Command.new(program).env(String("LOCALAPPDATA"), "{home}\\Local").env(String("APPDATA"), "{home}\\Roaming").env(String("USERPROFILE"), home.copy()).env(String("LOOM_SETUP_SANDBOX"), String("1")).env(String("LOOM_SETUP_NO_FOCUS"), String("1"))
+}
+
+/// A value under a key in the registry, or "" without one.
+fn reg_value(key: own String, name: own String) -> String {
+    let out = match Command.new(String("reg")).args([String("query"), key, String("/v"), name]).output() {
+        ok(o) => o,
+        err(_) => return String(),
+    }
+    if not out.status.success() { return String() }
+    let text = String.from_utf8(out.stdout.copy()) ?? String()
+    let at = text.find("REG_SZ") else return String()
+    return text[at + 6..].trim().copy()
+}
+
+fn reg_add(key: own String, name: own String, value: own String) ! Error {
+    try Command.new(String("reg")).args([String("add"), key, String("/v"), name, String("/d"), value, String("/f")]).stdout(Stdio.Null).run()
+}
+
+/// The version the sandbox's Settings entry says, or "" without one.
+fn installed_version() -> String {
+    return reg_value(String(KEY_PATH), String("DisplayVersion"))
+}
+
+fn pack(stub: own String, program: own String, version: str, out: own String) ! Error {
+    try Command.new(calx()).args([String("scripts/release.calx"), String("pack"), stub, program, String(version), out]).env(String("LOOM_PACK_TEST_SEED"), String(SEED)).stdout(Stdio.Null).stderr(Stdio.Null).run()
+}
+
+fn main() ! Error {
+    if env.os() != "windows" {
+        println("skipped: loom-setup is for Windows")
+        return
+    }
+    let root = try fs.temp_dir()
+    let home = "{root}\\home"
+    try fs.make_dir_all("{home}\\Local")
+    try fs.make_dir_all("{home}\\Roaming")
+    let dir = "{home}\\Local\\Programs\\loom"
+
+    println("building loom-setup with the test key...")
+    try Command.new(String("cargo")).args([String("build"), String("--release"), String("--quiet")]).dir(String("desktop/setup")).env(String("LOOM_SETUP_TEST_KEY"), String(PUBLIC)).env(String("CARGO_TARGET_DIR"), "{root}\\target").run()
+    let stub = "{root}\\target\\release\\loom-setup.exe"
+    // Three "loom.exe"s: the setup's own program, the same with a byte more (so it's
+    // another file, and still a program), and bytes that aren't a program at all.
+    let a = "{root}\\loom-a.exe"
+    let b = "{root}\\loom-b.exe"
+    let broken = "{root}\\loom-broken.exe"
+    var prog = try fs.read(stub.copy())
+    try fs.write(a.copy(), prog.copy())
+    prog.push(0)
+    try fs.write(b.copy(), prog)
+    try fs.write_text(broken.copy(), String("not a program"))
+    let setup_a = "{root}\\setup-a.exe"
+    let setup_b = "{root}\\setup-b.exe"
+    let setup_broken = "{root}\\setup-broken.exe"
+    try pack(stub.copy(), a.copy(), "0.2.0", setup_a.copy())
+    try pack(stub.copy(), b.copy(), "0.2.2", setup_b.copy())
+    try pack(stub.copy(), broken.copy(), "0.2.1", setup_broken.copy())
+
+    // Installing.
+    let s = try boxed(setup_a.copy(), home.copy()).arg(String("--silent")).status()
+    try check(s.success(), "a silent install succeeds")
+    try check(hash("{dir}\\loom.exe") == hash(a.copy()), "loom.exe is the one the setup carried")
+    try check(fs.exists("{dir}\\uninstall.exe"), "uninstall.exe is beside it")
+    try check(fs.exists("{home}\\Roaming\\Microsoft\\Windows\\Start Menu\\Programs\\loom.lnk"), "the Start menu has its shortcut")
+    try check(installed_version() == "0.2.0", "Settings > Apps lists loom 0.2.0")
+
+    // An update whose loom can't start: the old one goes back.
+    let s2 = try boxed(setup_broken.copy(), home.copy()).args([String("--update"), String("--background")]).status()
+    try check(s2.success(), "the setup ends after a failed update")
+    try check(hash("{dir}\\loom.exe") == hash(a.copy()), "a loom that can't start is replaced by the one before")
+    try check(installed_version() == "0.2.0", "and Settings still says 0.2.0")
+
+    // An update that starts: it stays, and the old one is cleared once it has.
+    let s3 = try boxed(setup_b.copy(), home.copy()).args([String("--update"), String("--background")]).status()
+    try check(s3.success(), "an update succeeds")
+    try check(hash("{dir}\\loom.exe") == hash(b.copy()), "loom.exe is the new one")
+    try check(not fs.exists("{dir}\\loom.old.exe"), "the one before is cleared away")
+    try check(installed_version() == "0.2.2", "Settings says 0.2.2")
+
+    // A setup signed with another key installs nothing.
+    let other = "{root}\\setup-other.exe"
+    try Command.new(calx()).args([String("scripts/release.calx"), String("pack"), stub.copy(), a.copy(), String("9.9.9"), other.copy()]).env(String("LOOM_PACK_TEST_SEED"), String("1111111111111111111111111111111111111111111111111111111111111111")).stdout(Stdio.Null).stderr(Stdio.Null).run()
+    let s4 = try boxed(other, home.copy()).arg(String("--silent")).status()
+    try check(not s4.success(), "a setup signed with another key is refused")
+    try check(hash("{dir}\\loom.exe") == hash(b.copy()) and installed_version() == "0.2.2", "and nothing changed")
+
+    // Uninstalling, which also closes the loom the update started.
+    let s5 = try boxed("{dir}\\uninstall.exe", home.copy()).args([String("--uninstall"), String("--silent")]).status()
+    try check(s5.success(), "a silent uninstall starts")
+    var gone = false
+    for _ in 0..100 {
+        if not fs.exists("{dir}\\loom.exe") and installed_version() == "" {
+            gone = true
+            break
+        }
+        wait_ms(100)
+    }
+    try check(gone, "the program and the Settings entry are gone")
+    try check(not fs.exists("{home}\\Roaming\\Microsoft\\Windows\\Start Menu\\Programs\\loom.lnk"), "and the shortcut")
+
+    // v0.1 handing over: it installed into the same folder, with its own Settings entry,
+    // an uninstall script, an icon, a desktop shortcut and starting at login. Its updater
+    // puts the setup there as loom.exe and starts it, with no arguments.
+    try fs.make_dir_all(dir.copy())
+    try fs.make_dir_all("{home}\\Local\\Loom")
+    try fs.make_dir_all("{home}\\Desktop")
+    try fs.write_text("{dir}\\loom.ico", String("icon"))
+    try fs.write_text("{home}\\Local\\Loom\\uninstall.cmd", String("@echo off\r\nexit /b 0\r\n"))
+    try fs.write_text("{home}\\Desktop\\Loom.lnk", String())
+    try reg_add(String(V01_PATH), String("DisplayVersion"), String("0.1.0"))
+    try reg_add(String(V01_PATH), String("InstallLocation"), dir.copy())
+    try reg_add(String(V01_PATH), String("UninstallString"), "cmd /C \"{home}\\Local\\Loom\\uninstall.cmd\"")
+    try reg_add(String(RUN_PATH), String("Loom"), "{dir}\\loom.exe")
+    try fs.write("{dir}\\loom.exe", try fs.read(setup_b.copy()))
+    let s6 = try boxed("{dir}\\loom.exe", home.copy()).status()
+    try check(s6.success(), "v0.1's handover runs")
+    wait_ms(5000)
+    try check(hash("{dir}\\loom.exe") == hash(b.copy()), "loom.exe is the new loom")
+    try check(installed_version() == "0.2.2" and fs.exists("{dir}\\uninstall.exe"), "installed as usual, with its Settings entry")
+    try check(not fs.exists("{dir}\\loom.old.exe"), "the setup that v0.1 started is gone")
+    try check(not fs.exists("{dir}\\loom.ico") and not fs.exists("{home}\\Local\\Loom\\uninstall.cmd"), "v0.1's icon and uninstall script are gone")
+    try check(reg_value(String(V01_PATH), String("DisplayVersion")) == "", "and its Settings entry")
+    try check((try fs.read("{home}\\Desktop\\Loom.lnk")).len() > 0, "its desktop shortcut now opens the new loom")
+    try check(reg_value(String(RUN_PATH), String("Loom")).contains("--background"), "and starting at login starts the new loom")
+    let s7 = try boxed("{dir}\\uninstall.exe", home.copy()).args([String("--uninstall"), String("--silent")]).status()
+    try check(s7.success(), "and it uninstalls")
+    wait_ms(4000)
+
+    match Command.new(String("reg")).args([String("delete"), String("HKCU\\Software\\loom-setup-sandbox"), String("/f")]).output() {
+        ok(_) => {},
+        err(_) => {},
+    }
+    wait_ms(4000)
+    try fs.remove_dir_all(root)
+    println("loom-setup: all passed")
+}

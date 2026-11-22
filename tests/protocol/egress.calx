@@ -1,0 +1,171 @@
+module tests.protocol.egress
+
+// A sandbox's way out when it's closed to the network (PLAN.md, "Rules,
+// records and limits"; server/egress.calx), on any computer: `loom egress`
+// runs as the sandbox would run it, through a stand-in for the container
+// runtime (tests/fake_runtime), and the instance's end of it lets out only
+// what the agent's list lets. loom's tools go on to the gate; a host that
+// isn't on the list, or that's on the server itself, is refused; a new list
+// holds at once; and the browser's way out is held to the same list.
+//
+// It listens on 127.0.0.1:3128 as the sandbox's egress does, so that port has
+// to be free here.
+//
+//     calx tests/protocol/egress.calx
+import std.env
+import std.fs
+import std.net.{Conn, Event, Net}
+import std.process.{Command, exit}
+import std.thread.{sleep}
+import server.egress
+import tests.kit.{calx, check}
+
+fn sh(program: String, args: List<String>) ! Error {
+    let out = try Command.new(program.copy()).args(args.copy()).output()
+    if not out.status.success() { fail "{program} {args.join(" ")} didn't work: {out.error_text()}" }
+}
+
+// A connection of the test's: to the egress, or one the fake gate accepted.
+struct Talk {
+    conn: Conn
+    got: List<u8>
+}
+
+// Sends `request` to 127.0.0.1:`port`, answering as the gate meanwhile, and
+// gives the answer's first line and its body, or "" if none came.
+fn ask(net: Net, gate: u16, port: u16, request: String) -> String {
+    _ = gate
+    let conn = match net.connect(String("127.0.0.1"), port) {
+        ok(c) => c,
+        err(_) => return String(),
+    }
+    net.write(conn, request.to_bytes())
+    var mine = Talk { conn: conn, got: List<u8>() }
+    var gated = List<Talk>()
+    var events = List<Event>()
+    for _ in 0..100 {
+        net.poll(100, mut events)
+        var closed = false
+        for e in events {
+            match e {
+                Accepted(c) => gated.push(Talk { conn: c, got: List<u8>() }),
+                Received(c) => {
+                    if c == mine.conn {
+                        _ = net.read(c, mut mine.got)
+                    } else {
+                        for t in mut gated {
+                            if t.conn == c {
+                                _ = net.read(c, mut t.got)
+                                if (String.from_utf8(t.got.copy()) ?? String()).contains("\r\n\r\n") {
+                                    net.write(c, "HTTP/1.1 200 OK\r\nContent-Length: 9\r\nConnection: close\r\n\r\nthe gate\n".to_bytes())
+                                    net.close(c)
+                                }
+                            }
+                        }
+                    }
+                },
+                Closed(c) => if c == mine.conn { closed = true },
+                _ => {},
+            }
+        }
+        let text = String.from_utf8(mine.got.copy()) ?? String()
+        // A CONNECT that's let through stays open once it's answered.
+        if closed or text.starts_with("HTTP/1.1 200 Connection established") { break }
+    }
+    net.close(mine.conn)
+    let text = String.from_utf8(mine.got) ?? String()
+    let (head, body) = text.split_once("\r\n\r\n") ?? (text.copy(), String())
+    return "{head.split("\r\n")[0]} {body.trim()}".trim().copy()
+}
+
+// Whether something listens on 127.0.0.1:`port`.
+fn listening(net: Net, port: u16) -> bool {
+    let conn = match net.connect(String("127.0.0.1"), port) {
+        ok(c) => c,
+        err(_) => return false,
+    }
+    var events = List<Event>()
+    for _ in 0..20 {
+        net.poll(100, mut events)
+        for e in events {
+            match e {
+                Connected(c) => if c == conn {
+                    net.close(conn)
+                    return true
+                },
+                Closed(c) => if c == conn { return false },
+                _ => {},
+            }
+        }
+    }
+    net.close(conn)
+    return false
+}
+
+fn run() ! Error {
+    let dir = try fs.absolute(try fs.temp_dir())
+    let exe = if env.os() == "windows" { ".exe" } else { "" }
+    try sh(calx(), [String("build"), String("server/main.calx"), String("-o"), "{dir}/loom{exe}"])
+    try sh(calx(), [String("build"), String("tests/fake_runtime/main.calx"), String("-o"), "{dir}/fake-runtime{exe}"])
+    let net = try Net.new()
+    let gate = try net.listen(String("127.0.0.1"), 0)
+    var door = try egress.open("{dir}/fake-runtime{exe}", String("loom-u_1-a_1"), String("127.0.0.1"), gate, [String("github.com"), String("127.0.0.1")])
+    var up = false
+    for _ in 0..300 {
+        if listening(net, egress.PORT) {
+            up = true
+            break
+        }
+        unsafe { sleep(100000000) }
+    }
+    try check(up, "loom egress listens in the sandbox once the instance starts it")
+
+    let tools = ask(net, gate, egress.PORT, String("GET /api/mcp/tools HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n"))
+    try check(tools.contains("200") and tools.contains("the gate"), "loom's tools go on to the gate")
+    let other = ask(net, gate, egress.PORT, String("CONNECT example.org:443 HTTP/1.1\r\nHost: example.org:443\r\n\r\n"))
+    try check(other.contains("403") and other.contains("only github.com, 127.0.0.1"), "a host that isn't on the list is refused, saying what is")
+    let plain = ask(net, gate, egress.PORT, String("GET http://example.org/ HTTP/1.1\r\nHost: example.org\r\n\r\n"))
+    try check(plain.contains("403"), "and so is a plain http page there")
+    let local = ask(net, gate, egress.PORT, "CONNECT 127.0.0.1:{gate} HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n")
+    try check(local.contains("403") and local.contains("on the server itself"), "a host on the list that's on the server itself is refused anyway")
+
+    door.hosts.send(List<String>())
+    unsafe { sleep(200000000) }
+    let none_at_all = ask(net, gate, egress.PORT, String("CONNECT github.com:443 HTTP/1.1\r\nHost: github.com:443\r\n\r\n"))
+    try check(none_at_all.contains("403") and none_at_all.contains("no network"), "a new list holds at once: with none, nothing gets out")
+
+    door.hosts.send([String("github.com")])
+    unsafe { sleep(200000000) }
+    let listed = ask(net, gate, egress.PORT, String("CONNECT github.com:443 HTTP/1.1\r\nHost: github.com:443\r\n\r\n"))
+    if listed.contains("502") {
+        println("skip  a host on the list is reached: github.com can't be reached from here")
+    } else {
+        try check(listed.contains("200 Connection established"), "a host on the list is reached")
+    }
+
+    let browser_tools = ask(net, gate, door.port, String("GET /api/mcp/tools HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n"))
+    try check(browser_tools.contains("400"), "the browser's way out doesn't reach loom's tools")
+    let browser_other = ask(net, gate, door.port, String("CONNECT example.org:443 HTTP/1.1\r\nHost: example.org:443\r\n\r\n"))
+    try check(browser_other.contains("403"), "and is held to the same list")
+
+    door.close()
+    var gone = false
+    for _ in 0..50 {
+        if not listening(net, egress.PORT) {
+            gone = true
+            break
+        }
+        unsafe { sleep(100000000) }
+    }
+    try check(gone, "closing the instance's end ends the egress in the sandbox")
+}
+
+fn main() {
+    match run() {
+        ok => println("\negress: all good"),
+        err(e) => {
+            eprintln("\negress: {e}")
+            exit(1)
+        },
+    }
+}

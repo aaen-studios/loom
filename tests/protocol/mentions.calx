@@ -1,0 +1,63 @@
+module tests.protocol.mentions
+
+// Files a reply names (PLAN.md, "Sharing and learning"): a path in `code` that
+// is in the agent's folder or the shared one comes with the message as a
+// mention, for the app to show as a chip, and agent.file keeps it as the
+// person's file to open. A path anywhere else, or one that isn't there, isn't.
+//
+//     calx tests/protocol/mentions.calx
+import std.fs
+import std.json.{Json}
+import std.process.{exit}
+import shared.obj.{Obj, at, str_at}
+import tests.kit.{App, Instance, check}
+
+// The agent's next reply in `conversation`.
+fn reply_in(app: mut App, conversation: String) -> Json ! Error {
+    loop {
+        let created = try app.until("event", "message.created")
+        let m = at(created, "message")
+        if str_at(m.copy(), "role") == some(String("agent")) and str_at(m.copy(), "conversation") == some(conversation.copy()) { return m }
+    }
+}
+
+fn run(i: Instance) ! Error {
+    var app = try App.connect(i.base.copy(), i.token.copy(), 0)
+    let made = try app.cmd("q_1", "agent.create", Obj.new().s("name", String("Main")).s("acp_agent", String("fake")).s("instructions", String("You are a test.")).done())
+    let agent = str_at(at(at(made, "value"), "agent"), "id") ?? String()
+    let c = try app.cmd("q_2", "conversation.create", Obj.new().s("agent", agent.copy()).done())
+    let chat = str_at(at(c, "value"), "conversation") ?? String()
+    let mine = "{i.data}/agents/{agent}"
+    try fs.make_dir_all("{mine}/notes")
+    try fs.write_text("{mine}/notes/hours.md", String("# Hours"))
+    try fs.write_text("{i.data}/outside.md", String("Not yours."))
+
+    // --- A reply that names files ---
+    try app.send(Obj.new().s("t", String("send")).s("cid", String("m_1")).s("conversation", chat.copy()).s("text", String("It's in `notes/hours.md`, not `gone.md` or `../../outside.md`.")).done())
+    let reply = try reply_in(mut app, chat.copy())
+    let mentions = "{at(reply, "mentions")}"
+    try check(mentions.contains(#""path":"notes/hours.md","name":"hours.md","size":7"#), "a file the reply names in its folder comes with it")
+    try check(not mentions.contains("gone.md") and not mentions.contains("outside"), "and one that isn't there, or is outside its folders, doesn't")
+
+    // --- Opening one ---
+    let opened = try app.cmd("q_3", "agent.file", Obj.new().s("agent", agent.copy()).s("path", String("notes/hours.md")).done())
+    let file = at(at(opened, "value"), "file")
+    try check(str_at(file.copy(), "name") == some(String("hours.md")) and (str_at(file, "file") ?? String()).len() == 64, "agent.file keeps it as the person's file to open")
+    let outside = try app.cmd("q_4", "agent.file", Obj.new().s("agent", agent.copy()).s("path", String("../../outside.md")).done())
+    try check(str_at(at(outside, "error"), "code") == some(String("not_found")), "and refuses one outside the agent's folders")
+    app.close()
+}
+
+fn main() ! Error {
+    let inst = try Instance.start()
+    let failure: String? = match run(inst.copy()) {
+        ok => none,
+        err(e) => some("{e}"),
+    }
+    inst.stop()
+    if let f = failure {
+        eprintln("\n{f}")
+        exit(1)
+    }
+    println("\nmentions: all good")
+}

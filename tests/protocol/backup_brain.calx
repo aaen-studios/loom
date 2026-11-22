@@ -1,0 +1,142 @@
+module tests.protocol.backup_brain
+
+// A backup brain (PLAN.md, "A backup brain"): an agent's turn moves to its
+// backup program when its own runs out of usage or doesn't start, and the
+// reply says so in one line; and a chat moved to another program by hand
+// starts there with loom's summary of it. The fake agent stands in for every
+// program: added again with --limited (each prompt hits a usage limit) and
+// --broken (it doesn't initialize).
+//
+//     calx tests/protocol/backup_brain.calx
+import std.json.{Json}
+import std.process.{exit}
+import shared.obj.{Obj, at, str_at}
+import tests.kit.{App, Instance, check, reply_text}
+
+// The agent's next reply in `conversation`.
+fn reply_in(app: mut App, conversation: String) -> Json ! Error {
+    loop {
+        let created = try app.until("event", "message.created")
+        let m = at(created, "message")
+        if str_at(m.copy(), "role") == some(String("agent")) and str_at(m.copy(), "conversation") == some(conversation.copy()) { return m }
+    }
+}
+
+fn say(app: mut App, conversation: String, cid: str, text: str) -> Json ! Error {
+    try app.send(Obj.new().s("t", String("send")).s("cid", String(cid)).s("conversation", conversation.copy()).s("text", String(text)).done())
+    return try reply_in(mut app, conversation)
+}
+
+// The first block's kind and text: a notice, when another program answered.
+fn first_block(m: Json) -> (String, String) {
+    if let Json.Array(blocks) = at(m, "blocks") {
+        if blocks.len() > 0 { return (str_at(blocks[0].copy(), "kind") ?? String(), str_at(blocks[0].copy(), "text") ?? String()) }
+    }
+    return (String(), String())
+}
+
+fn agent(app: mut App, id: str, args: Json) -> String ! Error {
+    let made = try app.cmd(id, "agent.create", args)
+    return str_at(at(at(made, "value"), "agent"), "id") ?? String()
+}
+
+fn chat(app: mut App, id: str, agent_id: String) -> String ! Error {
+    let c = try app.cmd(id, "conversation.create", Obj.new().s("agent", agent_id).done())
+    return str_at(at(c, "value"), "conversation") ?? String()
+}
+
+fn code(r: Json) -> String {
+    return str_at(at(r, "error"), "code") ?? String()
+}
+
+// The program a conversation.updated event last put `conversation` on.
+fn moved_to(app: App, conversation: String) -> String {
+    var program = String()
+    for f in app.frames {
+        if str_at(f.copy(), "kind") != some(String("conversation.updated")) { continue }
+        let c = at(f.copy(), "conversation")
+        if str_at(c.copy(), "id") == some(conversation.copy()) {
+            if let p = str_at(c, "program") { program = p }
+        }
+    }
+    return program
+}
+
+fn run(i: Instance) ! Error {
+    try i.add_fake(String("limited"), String("--limited"))
+    try i.add_fake(String("broken"), String("--broken"))
+    try i.add_fake(String("spare"), String("--resume"))
+    var app = try App.connect(i.base.copy(), i.token.copy(), 0)
+
+    // --- The backup, in the defaults and on an agent ---
+    let nope = try app.cmd("q_1", "defaults.put", Obj.new().s("backup", String("nope")).done())
+    try check(code(nope) == "not_found", "a backup has to be an installed program")
+    let put = try app.cmd("q_2", "defaults.put", Obj.new().s("backup", String("fake")).done())
+    try check(str_at(at(at(put, "value"), "defaults"), "backup") == some(String("fake")), "defaults.put sets the backup every agent follows")
+    let refused = try app.cmd("q_3", "agent.create", Obj.new().s("name", String("X")).s("acp_agent", String("fake")).s("backup", String("nope")).s("instructions", String("")).done())
+    try check(code(refused) == "not_found", "so does an agent's own")
+
+    // --- Usage runs out: the default's backup takes the turn ---
+    let main_id = try agent(mut app, "q_4", Obj.new().s("name", String("Main")).s("acp_agent", String("limited")).s("instructions", String("You are a test.")).done())
+    let main_chat = try chat(mut app, "q_5", main_id.copy())
+    let first = try say(mut app, main_chat.copy(), "m_1", "Remember the word giraffe.")
+    let finished = try app.until("event", "run.finished")
+    let (kind, line) = first_block(first.copy())
+    try check(kind == "notice" and line == "limited ran out of usage, so fake answers this chat now.", "the reply says in one line that the backup took over")
+    try check(reply_text(first) == "Remember the word giraffe." and str_at(finished, "status") == some(String("done")), "and the backup answers the turn")
+    try check(moved_to(app, main_chat.copy()) == "fake", "the chat moves to the backup, with conversation.updated")
+    let next = try say(mut app, main_chat.copy(), "m_2", "/context")
+    let (next_kind, _) = first_block(next.copy())
+    try check(next_kind == "text" and not reply_text(next).contains("comes to you from"), "and stays there, without saying it again")
+
+    // --- Moved by hand: the new program starts with loom's summary ---
+    let same = try app.cmd("q_6", "conversation.move", Obj.new().s("conversation", main_chat.copy()).s("program", String("fake")).done())
+    try check(str_at(at(at(same, "value"), "conversation"), "program") == some(String("fake")), "moving a chat to the program it's on changes nothing")
+    let gone = try app.cmd("q_7", "conversation.move", Obj.new().s("conversation", main_chat.copy()).s("program", String("nope")).done())
+    try check(code(gone) == "not_found", "a chat moves only to an installed program")
+    try app.send(Obj.new().s("t", String("send")).s("cid", String("m_3")).s("conversation", main_chat.copy()).s("text", String("/sleep 20000")).done())
+    let started = try app.until("event", "run.started")
+    let busy = try app.cmd("q_8", "conversation.move", Obj.new().s("conversation", main_chat.copy()).s("program", String("spare")).done())
+    try check(code(busy) == "busy", "a chat doesn't move while its agent is answering")
+    try app.send(Obj.new().s("t", String("cancel")).s("run", str_at(started, "run") ?? String()).done())
+    _ = try reply_in(mut app, main_chat.copy())
+    let moved = try app.cmd("q_9", "conversation.move", Obj.new().s("conversation", main_chat.copy()).s("program", String("spare")).done())
+    try check(str_at(at(at(moved, "value"), "conversation"), "program") == some(String("spare")) and moved_to(app, main_chat.copy()) == "spare", "conversation.move puts it on another program")
+    let handed = try say(mut app, main_chat.copy(), "m_4", "/context")
+    let (hand_kind, hand_line) = first_block(handed.copy())
+    try check(hand_kind == "notice" and hand_line == "Moved from fake to spare, with a summary of the chat so far.", "its first reply there says it moved")
+    let told = reply_text(handed)
+    try check(told.contains("[loom: This chat comes to you from fake") and told.contains("Remember the word giraffe.") and told.contains("What your person asked"), "and the new program starts with loom's summary of the chat")
+    let again = try say(mut app, main_chat.copy(), "m_5", "/context")
+    let (again_kind, _) = first_block(again.copy())
+    try check(not reply_text(again).contains("comes to you from") and again_kind == "text", "the summary is handed over once")
+
+    // --- No backup: the turn fails as before ---
+    let solo_id = try agent(mut app, "q_10", Obj.new().s("name", String("Solo")).s("acp_agent", String("limited")).s("backup", String("none")).s("instructions", String("You are a test.")).done())
+    let solo_chat = try chat(mut app, "q_11", solo_id)
+    _ = try say(mut app, solo_chat.copy(), "m_6", "hello")
+    let failed = try app.until("event", "run.finished")
+    try check(str_at(failed.copy(), "status") == some(String("failed")) and (str_at(failed, "error") ?? String()).contains("usage limit"), "an agent whose backup is none fails the turn, saying why")
+
+    // --- It doesn't start: its own backup takes the turn ---
+    let fragile_id = try agent(mut app, "q_12", Obj.new().s("name", String("Fragile")).s("acp_agent", String("broken")).s("backup", String("spare")).s("instructions", String("You are a test.")).done())
+    let fragile_chat = try chat(mut app, "q_13", fragile_id)
+    let rescued = try say(mut app, fragile_chat.copy(), "m_7", "Still here.")
+    let (r_kind, r_line) = first_block(rescued.copy())
+    try check(r_kind == "notice" and r_line == "broken didn't start, so spare answers this chat now." and reply_text(rescued) == "Still here.", "a program that doesn't start hands the turn to the agent's own backup")
+    app.close()
+}
+
+fn main() ! Error {
+    let inst = try Instance.start()
+    let failure: String? = match run(inst.copy()) {
+        ok => none,
+        err(e) => some("{e}"),
+    }
+    inst.stop()
+    if let f = failure {
+        eprintln("\n{f}")
+        exit(1)
+    }
+    println("\nbackup_brain: all good")
+}
