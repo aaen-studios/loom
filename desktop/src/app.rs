@@ -6666,7 +6666,6 @@ ACTA_KEY=secret:ACTA_KEY",
                     .child(self.field("Name", Input::new(&self.name_in)))
                     .children(picks)
                     .child(self.field("Colour", swatches))
-                    .child(group("Knows"))
                     .child(self.field("Instructions", Textarea::new(&self.instructions_in)))
                     .child(
                         div()
@@ -6696,6 +6695,9 @@ ACTA_KEY=secret:ACTA_KEY",
                                 }),
                             )),
                     )
+                    // Name and instructions are what Save keeps; what it knows comes
+                    // after, under its own heading.
+                    .child(group("Knows"))
                     .child(
                         div()
                             .flex()
@@ -11407,6 +11409,12 @@ fn approval(p: Palette, a: &Approval, this: WeakEntity<Loom>) -> Div {
 /// What an approval would run, from the tool's input: its command if it has one.
 fn command_of(detail: &str) -> String {
     match serde_json::from_str::<Value>(detail) {
+        // A script before it runs, in Code Mode: the script itself, as it was written.
+        Ok(v) if v.pointer("/arguments/code").is_some_and(Value::is_string) => v
+            .pointer("/arguments/code")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string(),
         Ok(v) => match v.get("command") {
             Some(Value::String(c)) => c.clone(),
             Some(Value::Array(parts)) => parts
@@ -11535,6 +11543,19 @@ fn when_sent(ms: i64, now: chrono::DateTime<chrono::Local>) -> String {
         t.format("%-d %b %H:%M").to_string()
     } else {
         t.format("%-d %b %Y %H:%M").to_string()
+    }
+}
+
+#[cfg(test)]
+mod command_tests {
+    use super::command_of;
+
+    #[test]
+    fn a_question_shows_what_would_run() {
+        assert_eq!(command_of(r#"{"command":["git","push"]}"#), "git push");
+        let script = r#"{"server":"loom","tool":"run_code","arguments":{"code":"const a = 1;\nreturn a;"},"act":0}"#;
+        assert_eq!(command_of(script), "const a = 1;\nreturn a;");
+        assert_eq!(command_of("plain words"), "plain words");
     }
 }
 
