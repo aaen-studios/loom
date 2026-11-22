@@ -12,6 +12,7 @@ mod motion;
 mod panel;
 mod panel_test;
 mod perf;
+mod place;
 mod prefs;
 mod shell;
 mod smooth;
