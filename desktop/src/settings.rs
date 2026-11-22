@@ -1,0 +1,437 @@
+//! The settings that belong to this device (`crate::prefs`): their pages in the popup,
+//! and putting a change into effect at once.
+
+use super::*;
+
+/// One of the person's pages in the popup: its id, icon, name and screen.
+pub(super) type Page = (&'static str, Ico, &'static str, Screen);
+
+/// The person's pages in the popup, under their headings.
+pub(super) fn settings_groups() -> Vec<(Option<&'static str>, Vec<Page>)> {
+    vec![
+        (
+            Some("You"),
+            vec![
+                (
+                    "pop-profile",
+                    Ico::CircleUserRound,
+                    "About you",
+                    Screen::Profile,
+                ),
+                (
+                    "pop-appearance",
+                    Ico::Palette,
+                    "Appearance",
+                    Screen::Appearance,
+                ),
+                ("pop-chat", Ico::MessageSquare, "Chat", Screen::ChatPrefs),
+                (
+                    "pop-app",
+                    Ico::Bell,
+                    "App & notifications",
+                    Screen::AppPrefs,
+                ),
+            ],
+        ),
+        (
+            Some("Agents"),
+            vec![
+                ("pop-programs", Ico::Brain, "Brains", Screen::Programs),
+                ("pop-skills", Ico::BookOpen, "Skills", Screen::Skills),
+                ("pop-mcp", Ico::Plug, "MCP servers", Screen::Mcp),
+                ("pop-plugins", Ico::Puzzle, "Plugins", Screen::Plugins),
+            ],
+        ),
+        (
+            Some("Work"),
+            vec![
+                ("pop-routines", Ico::Clock, "Routines", Screen::Routines),
+                ("pop-tasks", Ico::ListTodo, "Tasks", Screen::Tasks),
+            ],
+        ),
+        (
+            None,
+            vec![("pop-import", Ico::Import, "Import", Screen::Import)],
+        ),
+    ]
+}
+
+/// What each of the person's pages has on it, for search to find besides its name.
+fn page_words(screen: Screen) -> &'static str {
+    match screen {
+        Screen::Profile => "profile you name instructions what agents know",
+        Screen::Appearance => "theme dark light mode system colours colors text size font bigger smaller",
+        Screen::ChatPrefs => {
+            "tool calls tools hidden folded thoughts thinking send enter ctrl composer replies messages"
+        }
+        Screen::AppPrefs => {
+            "start login startup tray close background awake sleep notifications sound preview updates version restart"
+        }
+        Screen::Programs => "brains models agent programs claude codex gemini opencode acp registry install tokens limits",
+        Screen::Skills => "skills how to",
+        Screen::Mcp => "mcp servers tools keys connectors",
+        Screen::Plugins => "plugins panels",
+        Screen::Routines => "routines schedule every day cron webhook",
+        Screen::Tasks => "tasks jobs long work",
+        Screen::Import => "import openbot grok bring over",
+        _ => "",
+    }
+}
+
+/// The person's pages that `query` finds, by their name or what's on them.
+pub(super) fn settings_found(query: &str) -> Vec<Page> {
+    let q = query.trim().to_lowercase();
+    settings_groups()
+        .into_iter()
+        .flat_map(|(_, pages)| pages)
+        .filter(|(_, _, label, screen)| {
+            q.split_whitespace().all(|word| {
+                label.to_lowercase().contains(word) || page_words(*screen).contains(word)
+            })
+        })
+        .collect()
+}
+
+/// Whether the system is dark.
+pub(super) fn system_dark(window: &Window) -> bool {
+    !matches!(
+        window.appearance(),
+        WindowAppearance::Light | WindowAppearance::VibrantLight
+    )
+}
+
+impl Loom {
+    /// Changes the prefs with `change`, keeps them, and puts them into effect.
+    pub(super) fn set_prefs(
+        &mut self,
+        change: impl FnOnce(&mut Prefs),
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        change(&mut self.prefs);
+        self.prefs.save(&data_dir());
+        self.apply_theme(window, cx);
+        let ctrl_enter = self.prefs.ctrl_enter;
+        self.composer
+            .update(cx, |s, cx| s.set_submit_on_enter(!ctrl_enter, cx));
+        shell::keep_in_tray(self.prefs.tray);
+        self.refresh_rows(cx);
+        self.scroller.update(cx, |s, cx| s.remeasure(cx));
+        cx.notify();
+    }
+
+    /// The colours, as the prefs and the system have them.
+    pub(super) fn apply_theme(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let dark = self.prefs.dark(system_dark(window));
+        if dark != self.p.dark {
+            self.p = Palette::new(dark);
+            crate::theme(cx, dark);
+            cx.notify();
+        }
+    }
+
+    /// What the prefs ask of the system while loom runs: keeping the computer awake
+    /// while an agent works, and updating on its own while the person is away.
+    pub(super) fn tick_prefs(&mut self, cx: &mut Context<Self>) {
+        let working =
+            !self.model.runs.is_empty() || self.away.iter().any(|a| !a.model.runs.is_empty());
+        let awake = self.prefs.awake && working;
+        if awake != self.awake {
+            self.awake = awake;
+            shell::keep_awake(awake);
+        }
+        if self.prefs.auto_update && !working && !shell::window_shown(self.hwnd) {
+            if let Some((_, path)) = self.model.update.clone() {
+                // Once: if the swap fails, the sidebar still offers it.
+                self.prefs.auto_update = false;
+                match shell::apply_update(std::path::Path::new(&path), true) {
+                    Ok(()) => cx.quit(),
+                    Err(e) => self
+                        .model
+                        .notices
+                        .push(format!("loom couldn't update itself: {e}")),
+                }
+            }
+        }
+    }
+
+    /// A choice of a few for the prefs, side by side.
+    fn pref_choice<T: Copy + PartialEq + 'static>(
+        &self,
+        id: &'static str,
+        now: T,
+        choices: &[(T, &'static str)],
+        set: fn(&mut Prefs, T),
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let mut items = Vec::new();
+        for &(value, label) in choices {
+            items.push(
+                self.segment(format!("{id}-{label}"), label, now == value)
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.set_prefs(|p| set(p, value), window, cx);
+                    })),
+            );
+        }
+        self.segments(items).into_any_element()
+    }
+
+    /// A row with a switch for one of the prefs.
+    fn pref_switch(
+        &self,
+        id: &'static str,
+        title: &str,
+        sub: &str,
+        on: bool,
+        set: fn(&mut Prefs, bool),
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let toggle = self
+            .switch(id, on)
+            .on_click(cx.listener(move |this, _, window, cx| {
+                this.set_prefs(|p| set(p, !on), window, cx);
+            }));
+        self.row(
+            None,
+            title.to_string(),
+            (!sub.is_empty()).then(|| sub.to_string()),
+            Some(toggle.into_any_element()),
+        )
+        .into_any_element()
+    }
+
+    /// Appearance: the theme, and how big the chat's words are.
+    pub(super) fn appearance_page(&mut self, cx: &mut Context<Self>) -> Div {
+        let theme = self.pref_choice(
+            "theme",
+            self.prefs.theme,
+            &[
+                (Theme::System, "System"),
+                (Theme::Light, "Light"),
+                (Theme::Dark, "Dark"),
+            ],
+            |p, v| p.theme = v,
+            cx,
+        );
+        let text = self.pref_choice(
+            "text",
+            self.prefs.text,
+            &[
+                (Text::Small, "Small"),
+                (Text::Normal, "Default"),
+                (Text::Large, "Large"),
+            ],
+            |p, v| p.text = v,
+            cx,
+        );
+        let groups = vec![self.group(
+            None,
+            vec![
+                self.row(
+                    None,
+                    "Theme",
+                    Some("System follows Windows".into()),
+                    Some(theme),
+                )
+                .into_any_element(),
+                self.row(
+                    None,
+                    "Chat text",
+                    Some("How big messages are".into()),
+                    Some(text),
+                )
+                .into_any_element(),
+            ],
+        )];
+        self.settings_page("appearance-page", "Appearance", None, groups)
+    }
+
+    /// Chat: how much of an agent's work its replies show, and how the composer sends.
+    pub(super) fn chat_prefs_page(&mut self, cx: &mut Context<Self>) -> Div {
+        let tools = self.pref_choice(
+            "tools",
+            self.prefs.tools,
+            &[
+                (Tools::Hidden, "Hidden"),
+                (Tools::Folded, "Folded"),
+                (Tools::All, "Every call"),
+            ],
+            |p, v| p.tools = v,
+            cx,
+        );
+        let tools_sub = match self.prefs.tools {
+            Tools::Hidden => "Only one that failed shows",
+            Tools::Folded => "One line for each run, to open",
+            Tools::All => "Each on its own line",
+        };
+        let replies = vec![
+            self.row(None, "Tool calls", Some(tools_sub.into()), Some(tools))
+                .into_any_element(),
+            self.pref_switch(
+                "pref-thoughts",
+                "Show thoughts open",
+                "Rather than folded under Thought",
+                self.prefs.thoughts_open,
+                |p, v| p.thoughts_open = v,
+                cx,
+            ),
+        ];
+        let composer = vec![self.pref_switch(
+            "pref-ctrl-enter",
+            "Send with Ctrl+Enter",
+            "Enter makes a new line",
+            self.prefs.ctrl_enter,
+            |p, v| p.ctrl_enter = v,
+            cx,
+        )];
+        let groups = vec![
+            self.group(Some("Replies"), replies),
+            self.group(Some("Composer"), composer),
+        ];
+        self.settings_page("chat-prefs-page", "Chat", None, groups)
+    }
+
+    /// App & notifications: how loom runs on this computer, and how it tells the person.
+    pub(super) fn app_prefs_page(&mut self, cx: &mut Context<Self>) -> Div {
+        let p = self.p;
+        let login = self.starts_at_login;
+        let login_toggle =
+            self.switch("pref-login", login)
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    shell::set_start_at_login(!login);
+                    this.starts_at_login = shell::starts_at_login();
+                    if let Some(t) = &this.tray {
+                        t.set_login(this.starts_at_login);
+                    }
+                    cx.notify();
+                }));
+        let computer = vec![
+            self.row(
+                None,
+                "Start at login",
+                Some("In the tray, out of the way".into()),
+                Some(login_toggle.into_any_element()),
+            )
+            .into_any_element(),
+            self.pref_switch(
+                "pref-tray",
+                "Keep running when closed",
+                "In the tray, so routines and replies go on",
+                self.prefs.tray,
+                |p, v| p.tray = v,
+                cx,
+            ),
+            self.pref_switch(
+                "pref-awake",
+                "Keep the computer awake",
+                "While an agent is working",
+                self.prefs.awake,
+                |p, v| p.awake = v,
+                cx,
+            ),
+        ];
+        let mut notify = vec![self.pref_switch(
+            "pref-notify",
+            "Notifications",
+            "When an agent says something while you're away",
+            self.prefs.notify,
+            |p, v| p.notify = v,
+            cx,
+        )];
+        if self.prefs.notify {
+            notify.push(self.pref_switch(
+                "pref-preview",
+                "Show what was said",
+                "Otherwise only who it's from",
+                self.prefs.preview,
+                |p, v| p.preview = v,
+                cx,
+            ));
+            notify.push(self.pref_switch(
+                "pref-sound",
+                "Play a sound",
+                "",
+                self.prefs.sound,
+                |p, v| p.sound = v,
+                cx,
+            ));
+        }
+        let check = self
+            .button("pref-check-update", "Check now", false)
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.update_said = Some("Looking…".into());
+                this.send(serde_json::json!({"t": "update.check", "id": "app.update"}));
+                cx.notify();
+            }));
+        let status = self
+            .update_said
+            .clone()
+            .or_else(|| {
+                self.model
+                    .update
+                    .as_ref()
+                    .map(|(v, _)| format!("loom {v} is ready to restart into"))
+            })
+            .unwrap_or_else(|| "loom looks for a new version every few hours".into());
+        let mut updates = vec![self
+            .row(
+                None,
+                format!("loom {}", crate::VERSION),
+                Some(status),
+                Some(check.into_any_element()),
+            )
+            .into_any_element()];
+        updates.push(self.pref_switch(
+            "pref-auto-update",
+            "Update on its own",
+            "While loom is in the tray and no agent is working",
+            self.prefs.auto_update,
+            |p, v| p.auto_update = v,
+            cx,
+        ));
+        let _ = p;
+        let groups = vec![
+            self.group(Some("This computer"), computer),
+            self.group(Some("Notifications"), notify),
+            self.group(Some("Updates"), updates),
+        ];
+        self.settings_page("app-prefs-page", "App & notifications", None, groups)
+    }
+
+    /// A notification from the core, as the prefs let it show.
+    pub(super) fn notify(&self, title: &str, body: &str, about: shell::About) {
+        notify_as(&self.prefs, title, body, about);
+    }
+}
+
+/// A notification from a core, as `prefs` let it show.
+pub(super) fn notify_as(prefs: &Prefs, title: &str, body: &str, about: shell::About) {
+    if !prefs.notify {
+        return;
+    }
+    let body = if prefs.preview {
+        body
+    } else {
+        "Sent you a message"
+    };
+    shell::notify(title, body, Some(about), prefs.sound);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{settings_found, Screen};
+
+    #[test]
+    fn search_finds_a_page_by_what_is_on_it() {
+        let screens = |q: &str| -> Vec<Screen> {
+            settings_found(q)
+                .into_iter()
+                .map(|(_, _, _, s)| s)
+                .collect()
+        };
+        assert!(screens("dark") == vec![Screen::Appearance]);
+        assert!(screens("Tool calls") == vec![Screen::ChatPrefs]);
+        assert!(screens("brains") == vec![Screen::Programs]);
+        assert!(screens("zzz").is_empty());
+    }
+}

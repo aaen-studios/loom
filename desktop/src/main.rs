@@ -11,6 +11,7 @@ mod model;
 mod motion;
 mod panel;
 mod panel_test;
+mod prefs;
 mod shell;
 mod smooth;
 mod thread;
@@ -34,7 +35,7 @@ const FONTS: [&[u8]; 5] = [
 ];
 
 /// GPUI Kit's widgets in loom's colours, so inputs and Markdown match the rest.
-fn theme(cx: &mut App, dark: bool) {
+pub fn theme(cx: &mut App, dark: bool) {
     Theme::change(
         if dark {
             ThemeMode::Dark
@@ -105,14 +106,10 @@ fn main() {
         if let Err(e) = cx.text_system().add_fonts(fonts) {
             eprintln!("loom: the fonts didn't load: {e}");
         }
-        let dark = match std::env::var("LOOM_THEME").as_deref() {
-            Ok("dark") => true,
-            Ok("light") => false,
-            _ => !matches!(
-                cx.window_appearance(),
-                WindowAppearance::Light | WindowAppearance::VibrantLight
-            ),
-        };
+        let dark = prefs::Prefs::load(&app::data_dir()).dark(!matches!(
+            cx.window_appearance(),
+            WindowAppearance::Light | WindowAppearance::VibrantLight
+        ));
         theme(cx, dark);
         let bounds = Bounds::centered(None, size(px(1120.), px(760.)), cx);
         gpui_kit::open_window(
@@ -188,7 +185,9 @@ gpui_kit::assets::icon_assets!(
         Table2,
         Folder,
         ExternalLink,
-        Bell
+        Bell,
+        Palette,
+        MessageSquare
     ]
 );
 
