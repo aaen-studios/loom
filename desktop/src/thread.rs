@@ -26,8 +26,19 @@ pub fn now() -> f32 {
     START.get_or_init(Instant::now).elapsed().as_secs_f32()
 }
 
-/// The thread colour named `name`, for the theme.
+/// The thread colour named `name`, for the theme. An agent's own colour, `#rrggbb`,
+/// keeps its hue and is made light or dark enough to read on the theme, as loom's
+/// own are.
 pub fn color(name: &str, dark: bool) -> Hsla {
+    if let Some(c) = hex(name) {
+        let mut c: Hsla = rgb(c).into();
+        c.l = if dark {
+            c.l.clamp(0.62, 0.8)
+        } else {
+            c.l.clamp(0.3, 0.52)
+        };
+        return c;
+    }
     let c = if dark {
         match name {
             "mint" => thread_color_dark::MINT,
@@ -37,6 +48,10 @@ pub fn color(name: &str, dark: bool) -> Hsla {
             "gold" => thread_color_dark::GOLD,
             "lavender" => thread_color_dark::LAVENDER,
             "grey" => thread_color_dark::GREY,
+            "coral" => thread_color_dark::CORAL,
+            "moss" => thread_color_dark::MOSS,
+            "teal" => thread_color_dark::TEAL,
+            "plum" => thread_color_dark::PLUM,
             _ => thread_color_dark::PERIWINKLE,
         }
     } else {
@@ -48,10 +63,31 @@ pub fn color(name: &str, dark: bool) -> Hsla {
             "gold" => thread_color_light::GOLD,
             "lavender" => thread_color_light::LAVENDER,
             "grey" => thread_color_light::GREY,
+            "coral" => thread_color_light::CORAL,
+            "moss" => thread_color_light::MOSS,
+            "teal" => thread_color_light::TEAL,
+            "plum" => thread_color_light::PLUM,
             _ => thread_color_light::PERIWINKLE,
         }
     };
     rgb(c).into()
+}
+
+/// An agent's own colour, `#rrggbb`, as a number, or none when `s` isn't one.
+pub fn hex(s: &str) -> Option<u32> {
+    let digits = s.strip_prefix('#')?;
+    if digits.len() != 6 || !digits.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return None;
+    }
+    u32::from_str_radix(digits, 16).ok()
+}
+
+/// The colour of `hue` (0 to 1) as an agent's own, `#rrggbb`: full enough to be
+/// a colour in either theme, which `color` then makes light or dark.
+pub fn hue_hex(hue: f32) -> String {
+    let c: Rgba = hsla(hue.rem_euclid(1.0), 0.68, 0.5, 1.0).into();
+    let byte = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() as u8;
+    format!("#{:02x}{:02x}{:02x}", byte(c.r), byte(c.g), byte(c.b))
 }
 
 /// Whether a thread in this state moves, so the window keeps drawing frames. A thread
@@ -516,7 +552,7 @@ fn weave_layer(
 
 #[cfg(test)]
 mod tests {
-    use super::bend;
+    use super::{bend, color, hex, hue_hex};
     use crate::model::Mood;
 
     const MOODS: [Mood; 6] = [
@@ -586,5 +622,20 @@ mod tests {
         assert!(pts[0].1.abs() < 0.01 && pts[pts.len() - 1].1.abs() < 0.01);
         let idle = points(Mood::Idle, 26.0, 11.0, 0.5);
         assert!(idle.windows(2).all(|w| w[1].0 > w[0].0));
+    }
+
+    #[test]
+    fn an_agent_s_own_colour_reads_in_both_themes() {
+        assert_eq!(hex("#5B8def"), Some(0x5b8def));
+        assert_eq!(hex("teal"), None);
+        assert_eq!(hex("#5b8de"), None);
+        // A pale yellow is made dark enough on light, and a deep one light enough on dark.
+        assert!(color("#fff5b0", false).l <= 0.52);
+        assert!(color("#3a3000", true).l >= 0.62);
+        // Every hue the picker gives is an agent's own colour.
+        for i in 0..36 {
+            assert!(hex(&hue_hex(i as f32 / 36.0)).is_some());
+        }
+        assert_eq!(hue_hex(0.0), "#d62929");
     }
 }

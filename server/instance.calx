@@ -456,8 +456,28 @@ struct Auth {
 const RATE_TRIES: usize = 10
 const RATE_WINDOW_MS: i64 = 900000
 
-// The agents' thread colours, as design/tokens.toml names them.
+// The thread colours new agents take in turn, as design/tokens.toml names them.
 const COLORS: [str; 8] = ["periwinkle", "mint", "apricot", "pink", "sky", "gold", "lavender", "grey"]
+
+// Every colour an agent's thread can have: one of these, or its own as "#rrggbb".
+const THREAD_COLORS: [str; 12] = ["periwinkle", "mint", "apricot", "pink", "sky", "gold", "lavender", "grey", "coral", "moss", "teal", "plum"]
+
+pub fn color_ok(c: String) -> bool {
+    for name in THREAD_COLORS {
+        if c == name { return true }
+    }
+    if c.len() != 7 or not c.starts_with("#") { return false }
+    for ch in c[1..].runes() {
+        if not ((ch >= '0' and ch <= '9') or (ch >= 'a' and ch <= 'f') or (ch >= 'A' and ch <= 'F')) { return false }
+    }
+    return true
+}
+
+@test
+fn a_thread_colour_is_one_of_loom_s_or_its_own() {
+    assert(color_ok(String("teal")) and color_ok(String("#5B8def")))
+    assert(not color_ok(String("blue")) and not color_ok(String("#5b8de")) and not color_ok(String("#5b8deg")) and not color_ok(String("5b8def0")))
+}
 
 // The address a request came from, without its port.
 fn client_address(client: String) -> String {
@@ -8075,6 +8095,9 @@ impl Instance {
             if network_why.len() > 0 { return Answer.Refused(String("bad_request"), network_why) }
             if network != Json.Null and not isolated { return Answer.Refused(String("bad_request"), String("An agent's network is kept in its sandbox: make it isolated too.")) }
             if (asked_isolated == some(true) or network != Json.Null) and i.boxes == none { return Answer.Refused(String("not_here"), no_sandboxes()) }
+            if let c = str_at(args.copy(), "color") {
+                if c.len() > 0 and not color_ok(c.copy()) { return Answer.Refused(String("bad_request"), "color is a thread colour, such as periwinkle or teal, or one of its own as #rrggbb, not {c}.") }
+            }
             let id = try i.store.new_id("a")
             // Each new agent takes the next of the eight thread colours, unless it names one.
             let count = (try i.store.agents(user.copy())).len()
@@ -8094,6 +8117,9 @@ impl Instance {
                 for (k, v) in m {
                     o.m.insert(k.copy(), v.copy())
                 }
+            }
+            if let c = str_at(args.copy(), "color") {
+                if c.len() > 0 and not color_ok(c.copy()) { return Answer.Refused(String("bad_request"), "color is a thread colour, such as periwinkle or teal, or one of its own as #rrggbb, not {c}.") }
             }
             let keys: List<str> = ["name", "acp_agent", "instructions", "folder", "color"]
             for key in keys {
