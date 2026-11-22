@@ -163,6 +163,9 @@ pub struct Loom {
     p: Palette,
     screen: Screen,
     menu: Option<Menu>,
+    /// Where the agent menu opens when an agent was right-clicked in the sidebar, in
+    /// the window; under the header's name otherwise.
+    menu_at: Option<Point<Pixels>>,
     /// The menu item that can't be undone and waits for its second click, until the
     /// menu closes.
     armed: Option<&'static str>,
@@ -190,8 +193,9 @@ pub struct Loom {
     update_over: (bool, bool),
     update_left: Option<Instant>,
     rows: Rc<Vec<Row>>,
-    /// How each row's bubble joins the person's next to it (`model::person_joins`).
-    joins: Rc<Vec<model::Joined>>,
+    /// How each row sits among those around it: its bubble joined to the next, a time
+    /// line above it, its agent's name (`model::flow`).
+    flow: Rc<Vec<model::Flow>>,
     scroller: Entity<MessageScrollerState>,
     composer: Entity<TextareaState>,
     server_in: Entity<InputState>,
@@ -876,6 +880,7 @@ ACTA_KEY=secret:ACTA_KEY",
             p: Palette::new(dark),
             screen: Screen::Chat,
             menu: None,
+            menu_at: None,
             armed: None,
             fresh_armed: false,
             custom_color: false,
@@ -890,7 +895,7 @@ ACTA_KEY=secret:ACTA_KEY",
             update_over: (false, false),
             update_left: None,
             rows: Rc::new(Vec::new()),
-            joins: Rc::new(Vec::new()),
+            flow: Rc::new(Vec::new()),
             scroller,
             composer,
             server_in,
@@ -1899,7 +1904,7 @@ ACTA_KEY=secret:ACTA_KEY",
                 Row::Approval(_) => None,
             })
             .collect();
-        self.joins = Rc::new(model::person_joins(&messages));
+        self.flow = Rc::new(model::flow(&messages, day_number));
         self.rows = Rc::new(rows);
         self.scroller.update(cx, |s, cx| {
             if same_start && new_len >= old_len {
@@ -1914,6 +1919,15 @@ ACTA_KEY=secret:ACTA_KEY",
                 s.scroll_to_end(cx);
             }
         });
+    }
+
+    /// A right-click on an agent in the sidebar: its chat, with its menu open at the
+    /// pointer, the same menu as the header's.
+    fn agent_menu_at(&mut self, agent: String, at: Point<Pixels>, cx: &mut Context<Self>) {
+        self.select(agent, cx);
+        self.menu = Some(Menu::Agent);
+        self.menu_at = Some(at);
+        cx.notify();
     }
 
     fn select(&mut self, agent: String, cx: &mut Context<Self>) {
@@ -4475,6 +4489,12 @@ ACTA_KEY=secret:ACTA_KEY",
                     .when(!selected, move |d| {
                         d.soft_hover(transparent_black(), p.hover, None)
                     })
+                    .on_mouse_down(MouseButton::Right, {
+                        let id = id.clone();
+                        cx.listener(move |this, e: &MouseDownEvent, _, cx| {
+                            this.agent_menu_at(id.clone(), e.position, cx)
+                        })
+                    })
                     .on_click(cx.listener(move |this, _, _, cx| this.select(id.clone(), cx)))
                     .child(thread(
                         format!("side-{}", a.id),
@@ -4766,6 +4786,12 @@ ACTA_KEY=secret:ACTA_KEY",
                         d.soft_hover(transparent_black(), p.hover, None)
                     })
                     .tooltip(tip_text(a.name.clone()))
+                    .on_mouse_down(MouseButton::Right, {
+                        let id = id.clone();
+                        cx.listener(move |this, e: &MouseDownEvent, _, cx| {
+                            this.agent_menu_at(id.clone(), e.position, cx)
+                        })
+                    })
                     .on_click(cx.listener(move |this, _, _, cx| this.select(id.clone(), cx)))
                     .child(thread(
                         format!("side-{}", a.id),
@@ -5230,6 +5256,7 @@ ACTA_KEY=secret:ACTA_KEY",
                 .soft_hover(transparent_black(), p.hover, None)
                 .when(self.menu == Some(Menu::Agent), |d| d.bg(p.hover))
                 .on_click(cx.listener(|this, _, _, cx| {
+                    this.menu_at = None;
                     this.menu = if this.menu == Some(Menu::Agent) {
                         None
                     } else {
@@ -5596,14 +5623,17 @@ ACTA_KEY=secret:ACTA_KEY",
         let p = self.p;
         if self.menu != Some(Menu::Agent) {
             self.armed = None;
+            self.menu_at = None;
         }
         let menu = self.menu?;
+        let under_header = self.menu_at.is_none();
         // It takes the pointer, so a click on an item reaches it and not the sheet under
         // it, which would close the menu first.
         let panel = div()
             .occlude()
-            .absolute()
-            .top(px(layout::TITLEBAR - 4.0))
+            .when(under_header, |d| {
+                d.absolute().top(px(layout::TITLEBAR - 4.0))
+            })
             .w(px(layout::MENU))
             .p(px(space::XS))
             .flex()
@@ -5625,7 +5655,7 @@ ACTA_KEY=secret:ACTA_KEY",
             .is_some_and(|a| a.pinned.is_some());
         Some(match menu {
             Menu::Agent => panel
-                .left(px(space::S))
+                .when(under_header, |d| d.left(px(space::S)))
                 .child(
                     self.menu_item(
                         "pin-agent",
@@ -5798,7 +5828,7 @@ ACTA_KEY=secret:ACTA_KEY",
             return div().flex_1();
         }
         let rows = self.rows.clone();
-        let joins = self.joins.clone();
+        let flow = self.flow.clone();
         let agent = self
             .model
             .selected
@@ -5902,7 +5932,24 @@ ACTA_KEY=secret:ACTA_KEY",
                         .text_color(tint)
                         .child("NEW"),
                 );
-            let joined = joins.get(ix).copied().unwrap_or_default();
+            let here = flow.get(ix).copied().unwrap_or_default();
+            let joined = here.joined;
+            // Across the chat where it paused, or on a new day: when it went on.
+            let time_line = match row {
+                Row::Message(m) if here.line => Some(
+                    div()
+                        .w_full()
+                        .max_w(px(column))
+                        .flex()
+                        .justify_center()
+                        .pt(px(if ix == 0 { space::S } else { space::L }))
+                        .pb(px(space::XS))
+                        .text_size(px(size::CAPTION))
+                        .text_color(p.ink_3)
+                        .child(line_of(m.at, chrono::Local::now())),
+                ),
+                _ => None,
+            };
             let inner = match row {
                 Row::Message(m) if m.role == "person" => person(
                     p,
@@ -5919,6 +5966,7 @@ ACTA_KEY=secret:ACTA_KEY",
                     &name,
                     tint,
                     if m.live { mood } else { Mood::Idle },
+                    here.head,
                     &open,
                     &tools,
                     &files,
@@ -5943,10 +5991,10 @@ ACTA_KEY=secret:ACTA_KEY",
                 _ => Vec::new(),
             };
             let branch_at = pin.as_ref().map(|(id, _)| id.clone());
-            // Its time, just outside its left edge while the pointer is over it: the
-            // chat has no time separators. A reply says its time beside its name already.
+            // Its time, just outside its left edge while the pointer is over it. Time
+            // lines show only where the chat paused.
             let when = match row {
-                Row::Message(m) if !m.live && !m.queued && m.role == "person" => {
+                Row::Message(m) if !m.live && !m.queued => {
                     Some(when_sent(m.at, chrono::Local::now())).filter(|w| !w.is_empty())
                 }
                 _ => None,
@@ -5985,6 +6033,7 @@ ACTA_KEY=secret:ACTA_KEY",
                 .items_center()
                 .px(px(space::XL))
                 .when(is_new, |d| d.child(divider))
+                .children(time_line)
                 .child(
                     div()
                         .w_full()
@@ -5993,24 +6042,18 @@ ACTA_KEY=secret:ACTA_KEY",
                         .max_w(px(column + 2.0 * HOVER_REACH))
                         .mx(px(-HOVER_REACH))
                         .px(px(HOVER_REACH))
-                        // Messages stand apart, but bubbles that join sit close, as
-                        // they do in a reply. The list's own gap under each row is
-                        // taken off (`with_row_style`), so it's here instead.
-                        .pt(px(if joined.above { 0.0 } else { space::S }))
-                        .pb(px(if joined.below {
-                            space::XS
-                        } else if ix + 1 == rows.len() {
-                            space::S
-                        } else {
-                            space::S + space::XXL
-                        }))
+                        // Messages stand a little apart, and bubbles that join sit
+                        // close, as they do in a reply. The list's own gap under each
+                        // row is taken off (`with_row_style`), so it's here instead.
+                        .pt(px(if joined.above { 0.0 } else { space::XS }))
+                        .pb(px(if joined.below { space::XS } else { space::S }))
                         .relative()
                         .group("row")
                         .when_some(when, |d, when| {
                             d.child(
                                 div()
                                     .absolute()
-                                    .top(px(if joined.above { 0.0 } else { space::S } + 4.0))
+                                    .top(px(if joined.above { 0.0 } else { space::XS } + 4.0))
                                     .right(relative(1.0))
                                     .mr(px(-HOVER_REACH))
                                     .pr(px(space::M))
@@ -6029,7 +6072,7 @@ ACTA_KEY=secret:ACTA_KEY",
                                 div()
                                     .id(SharedString::from(format!("branch-row-{id}")))
                                     .absolute()
-                                    .top(px(space::S + 28.0))
+                                    .top(px(space::XS + 28.0))
                                     .right(px(HOVER_REACH - 30.0))
                                     .size(px(24.0))
                                     .flex()
@@ -6060,7 +6103,7 @@ ACTA_KEY=secret:ACTA_KEY",
                                 div()
                                     .id(SharedString::from(format!("pin-row-{id}")))
                                     .absolute()
-                                    .top(px(space::S))
+                                    .top(px(space::XS))
                                     .right(px(HOVER_REACH - 30.0))
                                     .size(px(24.0))
                                     .flex()
@@ -12846,37 +12889,24 @@ fn reply(
     name: &str,
     tint: Hsla,
     mood: Mood,
+    head: bool,
     open: &HashSet<String>,
     tools: &[model::Tool],
     files: &HashMap<String, String>,
     show: Show,
     this: WeakEntity<Loom>,
 ) -> Div {
-    let when = if m.live {
-        "now".to_string()
-    } else {
-        time_of(m.at)
-    };
     let mut body = div().flex().flex_col().gap(px(space::S)).flex_1().min_w_0();
-    body = body.child(
-        div()
-            .flex()
-            .items_center()
-            .gap(px(space::S))
-            .child(
-                div()
-                    .text_size(px(size::SMALL))
-                    .font_weight(FontWeight::MEDIUM)
-                    .text_color(p.ink)
-                    .child(name.to_string()),
-            )
-            .child(
-                div()
-                    .text_size(px(size::CAPTION))
-                    .text_color(p.ink_3)
-                    .child(when),
-            ),
-    );
+    // Its agent's name, over the first reply after a time line (`model::flow`).
+    if head {
+        body = body.child(
+            div()
+                .text_size(px(size::SMALL))
+                .font_weight(FontWeight::MEDIUM)
+                .text_color(p.ink)
+                .child(name.to_string()),
+        );
+    }
     // What shows in the reply, and how it reads: its answer, and its steps folded
     // under one line (`model::parts`).
     let shows = model::Shows {
@@ -12941,7 +12971,7 @@ fn reply(
         .w_full()
         .flex()
         .gap(px(space::M))
-        .child(div().pt(px(4.0)).child(thread(
+        .child(div().pt(px(if head { 4.0 } else { 10.0 })).child(thread(
             format!("msg-{}", m.id),
             mood,
             tint,
@@ -13095,6 +13125,25 @@ fn command_of(detail: &str) -> String {
 }
 
 /// The day of `ms`, as the activity page heads its entries: "Today", "Yesterday", or a date.
+/// The day `ms` falls on in the person's time zone, as a number of days.
+fn day_number(ms: i64) -> i64 {
+    use chrono::TimeZone;
+    match chrono::Local.timestamp_millis_opt(ms) {
+        chrono::LocalResult::Single(t) => i64::from(chrono::Datelike::num_days_from_ce(&t)),
+        _ => 0,
+    }
+}
+
+/// A time line's words: "Today 14:05", "Yesterday 09:30", "21 Nov 14:05".
+fn line_of(ms: i64, now: chrono::DateTime<chrono::Local>) -> String {
+    let when = when_sent(ms, now);
+    if day_number(ms) == day_number(now.timestamp_millis()) {
+        format!("Today {when}")
+    } else {
+        when
+    }
+}
+
 fn day_of(ms: i64) -> String {
     use chrono::TimeZone;
     let chrono::LocalResult::Single(t) = chrono::Local.timestamp_millis_opt(ms) else {
@@ -13454,7 +13503,17 @@ impl Render for Loom {
         let railed = self.railed(ww);
         let header = self.header(cx);
         // Drawn last, over the sheet that takes the pointer while it's open.
-        let menu = self.menu_panel(cx).map(deferred);
+        // From a right-click in the sidebar, it opens at the pointer instead.
+        let menu = self.menu_panel(cx).map(|m| match self.menu_at {
+            Some(at) => deferred(
+                anchored()
+                    .position(at)
+                    .snap_to_window_with_margin(px(space::S))
+                    .child(m),
+            )
+            .into_any_element(),
+            None => deferred(m).into_any_element(),
+        });
         let menu_scrim = self.menu_scrim(cx);
         let popup = self.popup_view(window, cx);
         let toast = self.toast(window, cx);
