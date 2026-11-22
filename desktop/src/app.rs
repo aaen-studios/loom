@@ -96,6 +96,7 @@ enum Screen {
     Tasks,
     Programs,
     ThisDevice,
+    Hosts,
     AddPhone,
     Mcp,
     Plugins,
@@ -198,6 +199,8 @@ pub struct Loom {
     /// network is shown as a list, which starts empty, reaching nothing.
     host_in: Entity<InputState>,
     listing_hosts: bool,
+    /// One of the person's own hosts to add, by what ssh is given, on the Hosts page.
+    ssh_host_in: Entity<InputState>,
     skill_name_in: Entity<InputState>,
     skill_desc_in: Entity<InputState>,
     skill_body_in: Entity<TextareaState>,
@@ -480,6 +483,23 @@ impl Loom {
                 if let InputEvent::PressEnter { .. } = event {
                     let typed = state.read(cx).value().to_string();
                     if let Some(f) = this.model.add_host(&typed) {
+                        this.send(f);
+                    }
+                    state.update(cx, |s, cx| s.set_value("", window, cx));
+                    cx.notify();
+                }
+            },
+        )
+        .detach();
+        // One of the person's hosts: Enter adds it.
+        let ssh_host_in = input(window, cx, "vps, or root@vps", false);
+        cx.subscribe_in(
+            &ssh_host_in,
+            window,
+            |this: &mut Loom, state, event: &InputEvent, window, cx| {
+                if let InputEvent::PressEnter { .. } = event {
+                    let typed = state.read(cx).value().to_string();
+                    if let Some(f) = this.model.add_ssh_host(&typed, "ssh") {
                         this.send(f);
                     }
                     state.update(cx, |s, cx| s.set_value("", window, cx));
@@ -835,6 +855,7 @@ ACTA_KEY=secret:ACTA_KEY",
             name_in,
             host_in,
             listing_hosts: false,
+            ssh_host_in,
             skill_name_in,
             skill_desc_in,
             skill_body_in,
@@ -1099,6 +1120,12 @@ ACTA_KEY=secret:ACTA_KEY",
             }
             Screen::ThisDevice => {
                 let f = self.model.device_get();
+                self.send(f);
+            }
+            Screen::Hosts => {
+                let f = self.model.device_get();
+                self.send(f);
+                let f = self.model.scan_hosts();
                 self.send(f);
             }
             Screen::People => {
@@ -2091,6 +2118,7 @@ ACTA_KEY=secret:ACTA_KEY",
             if !self.local() {
                 pages.push(("pop-people", Ico::Users, "People", Screen::People));
                 pages.push(("pop-device", Ico::Monitor, "This PC", Screen::ThisDevice));
+                pages.push(("pop-hosts", Ico::Server, "Hosts", Screen::Hosts));
             }
             return pages;
         }
@@ -2272,6 +2300,7 @@ ACTA_KEY=secret:ACTA_KEY",
             Screen::Tasks => self.tasks_page(cx),
             Screen::Programs => self.programs_page(cx),
             Screen::ThisDevice => self.device_page(cx),
+            Screen::Hosts => self.hosts_page(cx),
             Screen::Move => self.move_page(cx),
             Screen::People => self.people_page(cx),
             Screen::AddPhone => self.add_phone_page(cx),
@@ -9447,6 +9476,118 @@ ACTA_KEY=secret:ACTA_KEY",
         self.settings_page("device-page", "This PC", None, groups)
     }
 
+    /// The Hosts page: the person's own servers, which this computer reaches with ssh,
+    /// each with what agents may do there, and the ones found in the ssh config and on
+    /// the tailnet, to add. The core keeps them and runs the commands.
+    fn hosts_page(&mut self, cx: &mut Context<Self>) -> Div {
+        let p = self.p;
+        let mut rows = Vec::new();
+        for h in self.model.hosts.clone() {
+            let mut choices = Vec::new();
+            for (choice, label) in [("off", "Off"), ("ask", "Ask"), ("allow", "Allow")] {
+                let name = h.name.clone();
+                choices.push(
+                    self.segment(format!("host-{}-{choice}", h.name), label, h.mode == choice)
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            let f = this.model.set_ssh_host(&name, choice);
+                            this.send(f);
+                            cx.notify();
+                        })),
+                );
+            }
+            let name = h.name.clone();
+            let remove = self
+                .small_button(format!("host-{}-remove", h.name), "Remove", false)
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    let f = this.model.remove_ssh_host(&name);
+                    this.send(f);
+                    cx.notify();
+                }));
+            let via = if h.via == "tailscale" {
+                "Tailscale"
+            } else {
+                "SSH"
+            };
+            rows.push(
+                self.row(
+                    Some(self.tile(Ico::Server)),
+                    h.name.clone(),
+                    Some(format!("{} · {via}", h.target)),
+                    Some(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(space::S))
+                            .child(self.segments(choices))
+                            .child(remove)
+                            .into_any_element(),
+                    ),
+                )
+                .into_any_element(),
+            );
+            if h.mode == "allow" {
+                rows.push(self.note_row(
+                    format!("Agents can run any command on {} without asking", h.name),
+                    p.bad,
+                ));
+            }
+        }
+        let add = div()
+            .flex()
+            .gap(px(space::S))
+            .child(div().flex_1().child(Input::new(&self.ssh_host_in)))
+            .child(self.button("host-add", "Add", false).on_click(cx.listener(
+                |this, _, window, cx| {
+                    let typed = this.ssh_host_in.read(cx).value().to_string();
+                    if let Some(f) = this.model.add_ssh_host(&typed, "ssh") {
+                        this.send(f);
+                    }
+                    this.ssh_host_in
+                        .update(cx, |s, cx| s.set_value("", window, cx));
+                    cx.notify();
+                },
+            )));
+        rows.push(
+            div()
+                .px(px(space::L))
+                .py(px(space::S + 2.0))
+                .child(add)
+                .into_any_element(),
+        );
+        let mut groups = vec![self.group(Some("Hosts"), rows)];
+        if !self.model.hosts_found.is_empty() {
+            let mut found = Vec::new();
+            for h in self.model.hosts_found.clone() {
+                let (target, via) = (h.target.clone(), h.via.clone());
+                let from = if h.via == "tailscale" {
+                    "On your tailnet"
+                } else {
+                    "In your ssh config"
+                };
+                found.push(
+                    self.row(
+                        Some(self.tile(Ico::Server)),
+                        h.name.clone(),
+                        Some(from.into()),
+                        Some(
+                            self.small_button(format!("found-{}", h.name), "Add", false)
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    if let Some(f) = this.model.add_ssh_host(&target, &via) {
+                                        this.send(f);
+                                    }
+                                    cx.notify();
+                                }))
+                                .into_any_element(),
+                        ),
+                    )
+                    .into_any_element(),
+                );
+            }
+            groups.push(self.group(Some("Found"), found));
+        }
+        self.settings_page("hosts-page", "Hosts", None, groups)
+    }
+
     /// Adding a server to the app: its address, the account, and for a new server, its
     /// setup code. It signs in beside the server on screen, and comes on screen once it's in.
     fn add_server_page(&mut self, cx: &mut Context<Self>) -> Div {
@@ -13244,6 +13385,7 @@ fn is_server(s: Screen) -> bool {
             | Screen::AddPhone
             | Screen::People
             | Screen::ThisDevice
+            | Screen::Hosts
             | Screen::Move
             | Screen::AddServer
     )

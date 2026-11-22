@@ -313,6 +313,12 @@ A device that offers tools to agents also sends, after `welcome` and whenever th
 { "t": "device", "key": "3d4017c3…", "tools": { "run_command": "ask", "read_file": "allow", "list_files": "off", "open": "off" } }
 ```
 
+With them, its `hosts`: the person's servers it reaches with ssh ([Devices as tools](#devices-as-tools)), each with its `name`, `target`, `via` (`ssh` or `tailscale`) and its `tools`, where only `run_command` counts. The instance keeps at most 50, and only names and targets of letters, digits and `.-_@:` not starting with `-` or `@`:
+
+```json
+{ "t": "device", "key": "3d4017c3…", "tools": { … }, "hosts": [ { "name": "vps", "target": "root@vps", "via": "ssh", "tools": { "run_command": "ask" } } ] }
+```
+
 ### `device.result`
 
 The answer to a [`device.call`](#devicecall): `ok`, and `output`, the command's output (with its exit status) or the file, or why it wasn't done.
@@ -398,7 +404,7 @@ A command that changes something also makes events, so every other device sees t
 
 ### `device.call`
 
-A call to one of this device's tools, from an agent's `use_device`. `request` is the call as text: `call`, `device` (this device's id), `tool`, `args`, `agent` and `at` (Unix ms). It's what an approval signs, and what the device runs. `approval` is there when the person said yes to a tool that asks.
+A call to one of this device's tools, from an agent's `use_device`. `request` is the call as text: `call`, `device` (this device's id), `host` (for a command on one of the person's hosts this device reaches), `tool`, `args`, `agent` and `at` (Unix ms). It's what an approval signs, and what the device runs. `approval` is there when the person said yes to a tool that asks.
 
 ```json
 { "t": "device.call", "call": "tc_9", "request": "{\"call\":\"tc_9\",\"device\":\"d_1\",\"tool\":\"run_command\",\"args\":{\"command\":\"echo hi\"},\"agent\":\"a_1\",\"at\":1795262400000}", "approval": { "key": "3d4017c3…", "signature": "9a0f…" } }
@@ -457,6 +463,7 @@ The person's devices are tools for their agents while their apps run ([PLAN.md](
 - **The tools:** `run_command` (`command`, in PowerShell on Windows and zsh on a Mac, up to 2 minutes), `read_file` (`path`), `list_files` (`path`, folders with a `/`), `open` (`target`, a file or a link, with its usual program), `screenshot` (the main screen, as a JPEG up to 1568 pixels on its longest side), `read_clipboard` (its text) and `write_clipboard` (`text`). Output past 20,000 bytes is cut.
 - **A screenshot** comes back in `device.result` as `image` (base64) and `mime`. The agent's tool call gets it as an MCP `image`, and the chat keeps it as a file block in `tool.finished`'s `output`.
 - Each call goes in the activity log as kind `device`, by the device that did it.
+- **The person's hosts** ([PLAN.md](../PLAN.md#your-hosts)) are devices too, each kept with the device that reaches it, which says so in its `device` frame's `hosts`. `list_devices` gives each as `{"id": "d_1/vps", "name": "vps", "kind": "host", "via": "ssh", "target": "root@vps", "through": "Desk PC", "device": "d_1", "tools": {"run_command": "ask"}}`. `use_device` on a host takes only `run_command`. Its `device.call` goes to the device that reaches it, with `host` in the request beside `device`, so the yes signs which host as well. That device acts by the host's own `off`, `ask` or `allow`, and runs `ssh -o BatchMode=yes -o ConnectTimeout=15 <target> -- <command>`, with no input, up to 2 minutes. Its output and exit status come back as a command's do, and ssh's own failure (exit status 255) says why it couldn't connect.
 
 ## Agent defaults
 

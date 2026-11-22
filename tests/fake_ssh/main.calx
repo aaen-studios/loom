@@ -1,0 +1,45 @@
+module tests.fake_ssh.main
+
+// A stand-in for `ssh` and `tailscale`, for testing the person's hosts
+// (PLAN.md, "Your hosts") without reaching a real server.
+//
+//     calx tests/fake_ssh/main.calx -o BatchMode=yes -o ConnectTimeout=15 TARGET -- COMMAND
+//         says "TARGET ran: COMMAND" and exits 0; for the target `down`, says
+//         ssh couldn't connect and exits 255. Says which options it was given
+//         when the command is `options`.
+//     calx tests/fake_ssh/main.calx status --json
+//         says what `tailscale status --json` would: this machine, and the
+//         peers box (Linux) and phone (iOS).
+import std.env
+import std.process.{exit}
+
+const TAILNET: str = #"{"Self":{"DNSName":"desk.tail1.ts.net.","OS":"windows"},"Peer":{"k1":{"DNSName":"box.tail1.ts.net.","HostName":"box","OS":"linux"},"k2":{"DNSName":"phone.tail1.ts.net.","HostName":"phone","OS":"iOS"}}}"#
+
+fn main() {
+    let a = env.args()
+    if a.len() > 0 and a[0] == "status" {
+        println(TAILNET)
+        return
+    }
+    var options = List<String>()
+    var i: usize = 0
+    while i < a.len() and a[i] == "-o" and i + 1 < a.len() {
+        options.push(a[i + 1].copy())
+        i += 2
+    }
+    if i + 1 >= a.len() or a[i + 1] != "--" {
+        eprintln("usage: ssh [-o option]... target -- command")
+        exit(2)
+    }
+    let target = a[i].copy()
+    let command = a[i + 2..].join(" ")
+    if target == "down" {
+        eprintln("ssh: connect to host down port 22: Connection refused")
+        exit(255)
+    }
+    if command == "options" {
+        println(options.join(" "))
+        return
+    }
+    println("{target} ran: {command}")
+}

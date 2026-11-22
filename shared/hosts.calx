@@ -1,0 +1,26 @@
+module shared.hosts
+
+// What a host's name or ssh target may be (PLAN.md, "Your hosts"), which the
+// device that reaches it and the instance both check.
+
+// The longest name or target kept.
+const LONGEST: usize = 100
+
+/// Whether `target` can be given to ssh as the host to reach: letters, digits,
+/// and `.`, `-`, `_`, `@` and `:` (for user@host), not starting with `-` or
+/// `@`, so it's never taken for one of ssh's options.
+pub fn good_target(target: String) -> bool {
+    if target.len() == 0 or target.len() > LONGEST or target.starts_with("-") or target.starts_with("@") { return false }
+    for r in target.runes() {
+        let c = "{r}"
+        let fine = (c >= "a" and c <= "z") or (c >= "A" and c <= "Z") or (c >= "0" and c <= "9") or c == "." or c == "-" or c == "_" or c == "@" or c == ":"
+        if not fine { return false }
+    }
+    return true
+}
+
+@test
+fn targets_are_only_hosts() {
+    assert(good_target(String("vps")) and good_target(String("root@vps.example.com")) and good_target(String("box-2:22")))
+    assert(not good_target(String("-oProxyCommand=x")) and not good_target(String("a b")) and not good_target(String("a;b")) and not good_target(String("")) and not good_target(String("@vps")))
+}

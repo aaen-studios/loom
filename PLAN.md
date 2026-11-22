@@ -469,6 +469,15 @@ Commands and files run in the core (std.process and std.fs). Screenshots (`xcap`
 
 In a desktop instance, the instance's machine and your PC are the same machine, so device tools are for your other devices: the phone, and other computers.
 
+### Your hosts
+
+Servers you own, such as a VPS or a box at home, are devices too, so an agent reaches them through loom instead of finding your `~/.ssh/config` and running ssh as root by itself.
+
+- **Kept with the computer that reaches them.** The keys are on your PC, so a host belongs to that PC's app: an SSH alias from `~/.ssh/config`, a Tailscale machine's name, or `user@name`. The app offers the ones it finds in the ssh config and on the tailnet (`tailscale status --json`), and you add one with a click or by typing it.
+- **Like This PC.** Each host is off, ask each time (the start) or allowed, set on that PC. Agents see it in `list_devices` as a host beside the PC that reaches it, and run commands there with `use_device`, which asks you first in the chat as This PC does. The PC signs your yes and checks it before it runs the command, so the instance can't say yes for you.
+- **Run on your PC.** The core runs `ssh` there (std.process), with `BatchMode` so it never waits for a password or a new host key nobody could answer, and the command after `--`. A host's name and target are only letters, digits and `.-_@:`, never starting with `-`, so neither is taken for one of ssh's options. The app only draws the Hosts page beside This PC in the server's settings.
+- **Commands only.** A host runs commands, which is what an agent needs to set a server up. Files and the rest go through commands.
+
 ## Memory
 
 - `remember`, `recall` and `forget` keep and search notes in SQLite with full-text search (FTS5), per person and per agent. A note can be shared by all the person's agents, and tied to a site, so the agent is shown it when its browser is there ([Teach a task](#sharing-and-learning)). `recall` finds any of its words, best match first. The person reads, adds and deletes them on the agent's **Memory** page.
