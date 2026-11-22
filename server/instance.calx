@@ -36,6 +36,7 @@ import server.commands
 import server.files
 import server.files.{Thumb}
 import shared.files.{is_sha, safe_name}
+import shared.hosts.{good_target}
 import server.hashing
 import server.importer
 import server.hashing.{Done, Job}
@@ -122,6 +123,7 @@ struct Session {
     live: bool
     key: String    // the device's public key, as it says it
     tools: Json    // what it offers as a tool, and how: {run_command: "ask", ...}
+    hosts: Json    // the person's hosts it reaches with ssh: [{name, target, via, tools}], checked
 }
 
 // A call to one of the person's devices, until its result comes.
@@ -448,6 +450,32 @@ fn tool_error(text: String) -> Json {
 // is taken off before the agent gets the result.
 fn rule_refusal(rule: str, text: String) -> Json {
     return merge(tool_error(text), Obj.new().s("loom_rule", String(rule)).done())
+}
+
+// The hosts a device says it reaches (the `device` frame's `hosts`), as the
+// instance keeps them: each with a name and target ssh can take, its `via`,
+// and its `run_command` off, ask or allow, at most 50, once each.
+fn hosts_given(given: Json) -> Json {
+    var out = List<Json>()
+    var names = List<String>()
+    if let Json.Array(hs) = given {
+        for h in hs {
+            let name = str_at(h.copy(), "name") ?? String()
+            let target = str_at(h.copy(), "target") ?? name.copy()
+            if not good_target(name.copy()) or not good_target(target.copy()) or names.contains(name.copy()) or out.len() >= 50 { continue }
+            let mode = (at(at(h.copy(), "tools"), "run_command")).as_str() ?? String("off")
+            let via = str_at(h, "via") ?? String("ssh")
+            names.push(name.copy())
+            out.push(Obj.new().s("name", name).s("target", target).s("via", if via == "tailscale" { via } else { String("ssh") }).j("tools", Obj.new().s("run_command", if mode == "ask" or mode == "allow" { mode } else { String("off") }).done()).done())
+        }
+    }
+    return Json.Array(out)
+}
+
+@test
+fn hosts_a_device_gives_are_checked() {
+    let given = parse(String(#"[{"name":"vps","target":"root@vps","via":"ssh","tools":{"run_command":"ask"}},{"name":"-oProxyCommand=x","tools":{"run_command":"allow"}},{"name":"vps","tools":{}},{"name":"box","via":"carrier pigeon","tools":{"run_command":"yes"}}]"#))!
+    assert("{hosts_given(given)}" == #"[{"name":"vps","target":"root@vps","via":"ssh","tools":{"run_command":"ask"}},{"name":"box","target":"box","via":"ssh","tools":{"run_command":"off"}}]"#)
 }
 
 // A tool's result when one of the person's rules denied it (PLAN.md, "Rules,
@@ -1423,7 +1451,7 @@ impl Instance {
                     if req.path == "/ws" and req.method == "GET" {
                         // upgrade answers the request itself.
                         match i.server.upgrade(req.copy()) {
-                            ok(s) => i.sessions.insert(s.id(), Session { socket: s, user: String(), device: String(), live: false, key: String(), tools: Json.Null }),
+                            ok(s) => i.sessions.insert(s.id(), Session { socket: s, user: String(), device: String(), live: false, key: String(), tools: Json.Null, hosts: Json.Null }),
                             err(e) => eprintln("loom: /ws from {req.client}: {e}"),
                         }
                         continue
@@ -5354,7 +5382,8 @@ impl Instance {
             if let tz = str_at(f.copy(), "tz") { try i.store.update_device_tz(device, tz) }
             if let session = mut i.sessions.find(s.id()) {
                 if let key = str_at(f.copy(), "key") { session.key = key }
-                if let Json.Object(_) = at(f.copy(), "tools") { session.tools = at(f, "tools") }
+                if let Json.Object(_) = at(f.copy(), "tools") { session.tools = at(f.copy(), "tools") }
+                if let Json.Array(_) = at(f.copy(), "hosts") { session.hosts = hosts_given(at(f, "hosts")) }
             }
         } else if t == "device.result" {
             try i.device_result(user, device, f)
@@ -5420,7 +5449,7 @@ impl Instance {
             }
         }
         _ = i.server.send_text(s, "{Obj.new().s("t", String("synced")).i("seq", last).done()}")
-        i.sessions.insert(s.id(), Session { socket: s, user: user.copy(), device: device.id, live: true, key: String(), tools: Json.Null })
+        i.sessions.insert(s.id(), Session { socket: s, user: user.copy(), device: device.id, live: true, key: String(), tools: Json.Null, hosts: Json.Null })
         // The owner's first device after an update the instance made by itself hears of
         // it live, so it notifies.
         if i.told_update != Json.Null and try i.store.role(user) == some(String("owner")) { try i.tell_owner_update() }
@@ -6738,7 +6767,15 @@ impl Instance {
             if s.live and s.user == user and s.tools != Json.Null and not seen.contains(s.device.copy()) {
                 seen.push(s.device.copy())
                 if let d = try i.store.device(user.copy(), s.device.copy()) {
-                    out.push(Obj.new().s("id", d.id).s("name", d.name).s("kind", d.kind).j("tools", s.tools.copy()).done())
+                    out.push(Obj.new().s("id", d.id.copy()).s("name", d.name.copy()).s("kind", d.kind).j("tools", s.tools.copy()).done())
+                    // Its hosts, each a device of its own that it reaches with
+                    // ssh (PLAN.md, "Your hosts").
+                    if let Json.Array(hs) = s.hosts.copy() {
+                        for h in hs {
+                            let name = str_at(h.copy(), "name") ?? String()
+                            out.push(Obj.new().s("id", "{d.id}/{name}").s("name", name).s("kind", String("host")).s("via", str_at(h.copy(), "via") ?? String("ssh")).s("target", str_at(h.copy(), "target") ?? String()).s("through", d.name.copy()).s("device", d.id.copy()).j("tools", at(h, "tools")).done())
+                        }
+                    }
                 }
             }
         }
@@ -6756,15 +6793,21 @@ impl Instance {
             if str_at(d.copy(), "id") == some(key.trim()) or (str_at(d.copy(), "name") ?? String()).to_lower_root() == key.trim().to_lower_root() { target = d.copy() }
         }
         if target == Json.Null { return some(tool_error("{key} isn't connected, or offers no tools. list_devices gives the devices that do.")) }
-        let device = str_at(target.copy(), "id") ?? String()
+        // A host goes to the device that reaches it, with the host named in
+        // the request, which that device signs and runs through ssh.
+        let host = if str_at(target.copy(), "kind") == some(String("host")) { str_at(target.copy(), "name") ?? String() } else { String() }
+        if host.len() > 0 and tool_name != "run_command" { return some(tool_error("{host} is a host: it only runs commands (run_command).")) }
+        let device = if host.len() > 0 { str_at(target.copy(), "device") ?? String() } else { str_at(target.copy(), "id") ?? String() }
         let device_name = str_at(target.copy(), "name") ?? String()
         let mode = (at(target, "tools").get(tool_name.copy()) ?? Json.Null).as_str() ?? String("off")
-        if mode != "ask" and mode != "allow" { return some(rule_refusal("device-tool-off", "{tool_name} is off on {device_name}. Your person can turn it on in that device's app.")) }
+        if mode != "ask" and mode != "allow" { return some(rule_refusal("device-tool-off", if host.len() > 0 { "Commands are off on {host}. Your person can turn them on in their app's settings, under Hosts." } else { "{tool_name} is off on {device_name}. Your person can turn it on in that device's app." })) }
         let tool_args = at(args, "args")
         let run_id = i.calling_run(g.copy())
         if mode == "ask" and run_id.len() == 0 { return some(rule_refusal("needs-a-chat", String("That needs your person's yes, and they can only give it during a chat with you."))) }
         let call = try i.store.new_id("tc")
-        let request = "{Obj.new().s("call", call.copy()).s("device", device.copy()).s("tool", tool_name.copy()).j("args", tool_args.copy()).s("agent", g.agent.copy()).i("at", now()).done()}"
+        var asked = Obj.new().s("call", call.copy()).s("device", device.copy())
+        if host.len() > 0 { asked = asked.s("host", host.copy()) }
+        let request = "{asked.s("tool", tool_name.copy()).j("args", tool_args.copy()).s("agent", g.agent.copy()).i("at", now()).done()}"
         let what = str_at(tool_args.copy(), "command") ?? str_at(tool_args.copy(), "path") ?? str_at(tool_args.copy(), "target") ?? cut_short(str_at(tool_args, "text") ?? String(), 80)
         let (kind, title) = if tool_name == "run_command" {
             (String("execute"), "Run on {device_name}: {what}")

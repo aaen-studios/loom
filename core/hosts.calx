@@ -1,0 +1,144 @@
+module core.hosts
+
+// The person's own hosts as devices (PLAN.md, "Your hosts"): servers this
+// computer reaches with SSH, by an alias from `~/.ssh/config` or a Tailscale
+// machine's name. A host is kept with the device that reaches it, since the
+// keys are on that computer, and its commands run here, through `ssh`, once the
+// person allowed them: off, ask each time, or allowed, for each host.
+import std.env
+import std.fs
+import std.json.{Json, parse}
+import std.process.{Command}
+import shared.obj.{Obj, at, str_at}
+import shared.hosts.{good_target}
+
+pub struct Host {
+    pub name: String    // what the person and agents call it: the alias, or the machine's name
+    pub target: String    // what `ssh` is given: an alias, a name, or user@name
+    pub via: String    // "ssh" (from ~/.ssh/config or typed) or "tailscale"
+    pub mode: String    // off, ask or allow
+}
+
+impl Host {
+    pub fn json(self) -> Json {
+        return Obj.new().s("name", self.name.copy()).s("target", self.target.copy()).s("via", self.via.copy()).s("mode", self.mode.copy()).done()
+    }
+}
+
+/// The name a target goes by: the host, without the user.
+pub fn name_of(target: String) -> String {
+    if let cut = target.find_last("@") { return target[cut + 1..].copy() }
+    return target.copy()
+}
+
+/// The host from a frame or the cache: `target`, `via`, and `mode` (ask if
+/// left out), or none for one that can't be.
+pub fn host_from(j: Json) -> Host? {
+    let target = (str_at(j.copy(), "target") ?? String()).trim().copy()
+    if not good_target(target.copy()) { return none }
+    let via = str_at(j.copy(), "via") ?? String("ssh")
+    let mode = str_at(j.copy(), "mode") ?? String("ask")
+    let name = str_at(j, "name") ?? name_of(target.copy())
+    if not good_target(name.copy()) { return none }
+    return some(Host { name: name, target: target, via: if via == "tailscale" { via } else { String("ssh") }, mode: if mode == "off" or mode == "allow" { mode } else { String("ask") } })
+}
+
+/// The command that runs `command` on `target` with `ssh`, which `program`
+/// names with its first arguments (just `ssh`, but for tests). It never asks
+/// for a password or a new host key, which nobody could answer, and `--` keeps
+/// the command from being read as ssh's own options.
+pub fn ssh_command(program: List<String>, target: String, command: String) -> Command {
+    var c = Command.new(program[0].copy())
+    for a in program[1..] {
+        c = c.arg(a.copy())
+    }
+    return c.arg(String("-o")).arg(String("BatchMode=yes")).arg(String("-o")).arg(String("ConnectTimeout=15")).arg(target).arg(String("--")).arg(command)
+}
+
+/// The person's `~/.ssh/config`: in their home folder, `USERPROFILE` on
+/// Windows and `HOME` elsewhere.
+pub fn ssh_config_path() -> String {
+    let home = if env.os() == "windows" { env.variable(String("USERPROFILE")) ?? env.variable(String("HOME")) } else { env.variable(String("HOME")) }
+    return "{home ?? String(".")}/.ssh/config"
+}
+
+/// The hosts an ssh config names: each `Host` line's names, but patterns
+/// (with `*`, `?` or `!`), in the order they come, once each.
+pub fn ssh_hosts(text: String) -> List<String> {
+    var out = List<String>()
+    for raw in text.lines() {
+        let line = raw.trim().copy()
+        if line.len() == 0 or line.starts_with("#") { continue }
+        // `Host a b`, or `Host=a b`, the keyword in any case.
+        if line.len() < 5 or line[..4].to_lower_root() != "host" { continue }
+        let after = line[4..].copy()
+        if not (after.starts_with(" ") or after.starts_with("\t") or after.starts_with("=")) { continue }
+        let rest = after.trim_start().copy()
+        let names = if rest.starts_with("=") { rest[1..].copy() } else { rest }
+        for n in names.split_whitespace() {
+            let name = n.replace("\"", "")
+            if name.contains("*") or name.contains("?") or name.starts_with("!") { continue }
+            if good_target(name.copy()) and not out.contains(name.copy()) { out.push(name) }
+        }
+    }
+    return out
+}
+
+/// The Tailscale program: `tailscale` on PATH, or where its app puts it.
+pub fn tailscale_program() -> String {
+    let places: List<str> = if env.os() == "windows" { ["C:/Program Files/Tailscale/tailscale.exe"] } else if env.os() == "macos" { ["/Applications/Tailscale.app/Contents/MacOS/Tailscale"] } else { List<str>() }
+    for p in places {
+        if fs.exists(String(p)) { return String(p) }
+    }
+    return String("tailscale")
+}
+
+/// The machines `tailscale status --json` names on the tailnet, but this one:
+/// each machine's name, the first part of its MagicDNS name. Phones are left
+/// out, since they don't take SSH.
+pub fn tailnet_hosts(text: String) -> List<String> {
+    var out = List<String>()
+    let status = match parse(text) {
+        ok(j) => j,
+        err(_) => return out,
+    }
+    let peers_json = at(status, "Peer")
+    let Json.Object(peers) = peers_json else return out
+    for (_, p) in peers {
+        let os = (str_at(p.copy(), "OS") ?? String()).to_lower_root()
+        if os == "ios" or os == "android" { continue }
+        let dns = str_at(p.copy(), "DNSName") ?? String()
+        let first = if let dot = dns.find(".") { dns[..dot].copy() } else { dns.copy() }
+        let name = if first.len() > 0 { first } else { (str_at(p, "HostName") ?? String()).to_lower_root() }
+        if good_target(name.copy()) and not out.contains(name.copy()) { out.push(name) }
+    }
+    return out
+}
+
+@test
+fn a_name_is_its_host() {
+    assert(name_of(String("root@vps")) == "vps" and name_of(String("vps")) == "vps")
+}
+
+@test
+fn reads_hosts_from_an_ssh_config() {
+    let config = String("# mine\nHost vps\n    HostName 203.0.113.4\n    User root\nHost=pi nas\nhost *.lan !bad\nMatch all\nHostKeyAlias x\n  Host \"quoted\" vps\n")
+    assert(ssh_hosts(config).join(" ") == "vps pi nas quoted")
+}
+
+@test
+fn reads_machines_from_tailscale() {
+    let status = String(#"{"Self":{"DNSName":"desk.tail1.ts.net."},"Peer":{"k1":{"DNSName":"box.tail1.ts.net.","HostName":"Box","OS":"linux"},"k2":{"DNSName":"phone.tail1.ts.net.","OS":"iOS"},"k3":{"DNSName":"","HostName":"Mac","OS":"macOS"}}}"#)
+    let names = tailnet_hosts(status)
+    assert(names.len() == 2 and names.contains(String("box")) and names.contains(String("mac")))
+    assert(tailnet_hosts(String("not json")).len() == 0)
+}
+
+@test
+fn hosts_come_from_frames_checked() {
+    let h = host_from(Obj.new().s("target", String("root@vps")).done()) ?? Host { name: String(), target: String(), via: String(), mode: String() }
+    assert(h.name == "vps" and h.target == "root@vps" and h.via == "ssh" and h.mode == "ask")
+    assert(host_from(Obj.new().s("target", String("-oProxyCommand=calc")).done()) == none)
+    let t = host_from(Obj.new().s("target", String("box")).s("via", String("tailscale")).s("mode", String("allow")).done()) ?? Host { name: String(), target: String(), via: String(), mode: String() }
+    assert(t.via == "tailscale" and t.mode == "allow")
+}
