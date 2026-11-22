@@ -13,7 +13,9 @@ module server.browser
 // same browser as the one with a window, drawing pages the same, only without
 // the window: so a server with no display needs no virtual one. What a bare
 // Linux server lacks is the browser itself and fonts, which `missing` names
-// and `loom install` installs (server/setup.calx).
+// and `loom install` installs (server/setup.calx). On one set up without them,
+// the browser's first start fetches Chrome for Testing's headless shell and
+// Noto fonts into the instance's data, without root (server/chrome.calx).
 //
 // The browser's profile, its cookies and logins among them, is in the
 // instance's data, not in the agent's folder, so the agent can't read it. A
@@ -28,6 +30,7 @@ import std.process.{Child, Command, Stdio, which}
 import std.thread.{Task, sleep}
 import shared.obj.{Obj, at, bool_at, int_at, merge, str_at}
 import server.store.{now}
+import server.chrome
 
 // How long a browser with nothing to do stays open, in minutes, when no
 // turn's end has closed it: an agent that's stopped browsing to think or run
@@ -71,6 +74,7 @@ pub enum Back {
 
 struct Worker {
     key: String
+    data: String    // the instance's data, absolute
     profile: String
     guarded: bool
     proxy: u16    // the agent's egress on the instance's loopback, when its network is closed, or 0
@@ -141,13 +145,14 @@ impl Task for Worker {
 }
 
 // Starts the thread for the agent `key` names, whose browser keeps its profile
-// in `profile`. What it has to say comes to `back`. The thread ends once it's
+// in `profile`, in the instance's `data`, where a browser and fonts it fetches
+// for itself go (server/chrome.calx). What it has to say comes to `back`. The thread ends once it's
 // sent Stop, with its browser stopped. `reopen` is the page it was on when it
 // last closed, or "", which its first call that isn't browser_open opens again.
-pub fn start(key: String, profile: String, guarded: bool, proxy: u16, reopen: String, back: Sender<Back>) -> (Sender<In>, Thread) {
+pub fn start(key: String, data: String, profile: String, guarded: bool, proxy: u16, reopen: String, back: Sender<Back>) -> (Sender<In>, Thread) {
     let inbox = Receiver<In>()
     let to = inbox.sender()
-    let t = unsafe { Thread.spawn(Worker { key: key.copy(), profile: profile.copy(), guarded: guarded, proxy: proxy, inbox: inbox, back: back.copy(), child: none, page: none, port: String(), next_id: 0, refs: Map<String, i64>(), hidden: List<(String, String)>(), watched: false, casting: false, recording: false, steps: List<Json>(), last_url: String(), was_on: String(), reopen: reopen.copy(), told_fonts: false }) }
+    let t = unsafe { Thread.spawn(Worker { key: key.copy(), data: data.copy(), profile: profile.copy(), guarded: guarded, proxy: proxy, inbox: inbox, back: back.copy(), child: none, page: none, port: String(), next_id: 0, refs: Map<String, i64>(), hidden: List<(String, String)>(), watched: false, casting: false, recording: false, steps: List<Json>(), last_url: String(), was_on: String(), reopen: reopen.copy(), told_fonts: false }) }
     return (to, t)
 }
 
@@ -214,20 +219,24 @@ pub fn missing() -> List<String> {
         },
         none => gaps.push(String("a browser")),
     }
-    gaps.extend(font_gaps(fonts()))
+    gaps.extend(font_gaps(fonts(String())))
     return gaps
 }
 
 // The fonts the browser can draw with, by family, a line each, and the lines
 // after "lang=zh" and "emoji" headers the ones for Chinese and emoji: as
 // fontconfig, which Chrome on Linux uses, lists them. Without fc-list, the
-// font files in the usual folders, by name.
-fn fonts() -> List<String> {
+// font files in the usual folders, by name. With the instance's `data`, the
+// fonts it fetched for itself count too; "" for only the system's.
+fn fonts(data: String) -> List<String> {
     var lines = List<String>()
+    let conf = if data.len() > 0 { chrome.font_config(data.copy()) } else { none }
     if which(String("fc-list")) != none {
         for (header, pattern) in [("all", ":"), ("lang=zh", ":lang=zh"), ("emoji", ":charset=1f600")] {
             lines.push("# {header}")
-            if let ok(out) = Command.new(String("fc-list")).arg(String(pattern)).arg(String("family")).timeout(20000).output() {
+            var list = Command.new(String("fc-list")).arg(String(pattern)).arg(String("family")).timeout(20000)
+            if let c = conf.copy() { list = list.env(String("FONTCONFIG_FILE"), c) }
+            if let ok(out) = list.output() {
                 for line in out.text().lines() {
                     if line.trim().len() > 0 { lines.push(line.trim().copy()) }
                 }
@@ -240,6 +249,7 @@ fn fonts() -> List<String> {
         dirs.push("{home}/.fonts")
         dirs.push("{home}/.local/share/fonts")
     }
+    if conf != none { dirs.push("{chrome.home(data)}/fonts") }
     for dir in dirs {
         if not fs.is_dir(dir.copy()) { continue }
         if let ok(found) = fs.walk(dir) {
@@ -579,9 +589,13 @@ impl Worker {
 
     // Starts the browser, and opens the DevTools connection to its page.
     fn open_browser(w: mut Worker) ! Error {
-        let exe = find() else {
-            if env.os() == "linux" { fail "There's no Chrome or Chromium on the server the instance runs on. {missing_text(missing())} Or set LOOM_BROWSER to the browser to use." }
-            fail "There's no Chrome, Edge or Chromium on the computer the instance runs on. Your person can install one, or set LOOM_BROWSER to the one to use."
+        let exe = try w.program()
+        // Fonts the server lacks are fetched before the browser starts, which reads them only then.
+        if env.os() == "linux" and not w.told_fonts {
+            let gaps = font_gaps(fonts(w.data.copy()))
+            if gaps.len() > 0 {
+                if let err(e) = chrome.fetch_fonts(w.data.copy(), gaps) { eprintln("loom: fetching fonts for the agents' browser: {e}") }
+            }
         }
         try fs.make_dir_all(w.profile.copy())
         let port = match w.launch(exe.copy(), true) {
@@ -626,6 +640,32 @@ impl Worker {
         w.cast()
     }
 
+    // The browser to start: the computer's own, or on a Linux server without one,
+    // the one the instance fetched for itself, fetched now if it hasn't been, or
+    // again once it's old.
+    fn program(w: Worker) -> String ! Error {
+        if let exe = find() { return exe }
+        if env.os() != "linux" { fail "There's no Chrome, Edge or Chromium on the computer the instance runs on. Your person can install one, or set LOOM_BROWSER to the one to use. Don't open pages on their devices instead unless they ask you to." }
+        var exe = String()
+        if let (had, old) = chrome.fetched(w.data.copy()) {
+            exe = had.copy()
+            if old {
+                match chrome.fetch_browser(w.data.copy()) {
+                    ok(newer) => exe = newer,
+                    err(e) => eprintln("loom: the agents' browser is four weeks old, and a newer one didn't fetch: {e}"),
+                }
+            }
+        } else {
+            exe = match chrome.fetch_browser(w.data.copy()) {
+                ok(got) => got,
+                err(e) => fail "There's no Chrome or Chromium on the server the instance runs on, and it couldn't fetch one for itself: {e}. {missing_text(missing())} Or set LOOM_BROWSER to the browser to use. Don't open pages on your person's devices instead unless they ask you to.",
+            }
+        }
+        let lacking = chrome.libraries_missing(exe.copy())
+        if lacking.len() > 0 { fail "The browser the instance fetched for itself needs libraries this server lacks: {lacking.join(", ")}. {missing_text([String("the libraries a browser needs")])} Don't open pages on your person's devices instead unless they ask you to." }
+        return exe
+    }
+
     // Sends a DevTools call without waiting for its answer, and gives its id.
     fn send(w: mut Worker, method: str, params: Json) -> i64 ! Error {
         w.next_id += 1
@@ -656,7 +696,10 @@ impl Worker {
             args.extend(["--proxy-server=http://127.0.0.1:{w.proxy}", String("--proxy-bypass-list=<-loopback>"), String("--disable-quic"), String("--force-webrtc-ip-handling-policy=disable_non_proxied_udp")])
         }
         args.push(String("about:blank"))
-        let child = try Command.new(exe).args(args).stdin(Stdio.Null).stdout(Stdio.Pipe).stderr(Stdio.Stdout).own_group().spawn()
+        var command = Command.new(exe).args(args).stdin(Stdio.Null).stdout(Stdio.Pipe).stderr(Stdio.Stdout).own_group()
+        // With the fonts the instance fetched for itself, as well as the system's.
+        if let conf = chrome.font_config(w.data.copy()) { command = command.env(String("FONTCONFIG_FILE"), conf) }
+        let child = try command.spawn()
         // The browser writes the port it took, and its own address, once it listens.
         var said = List<String>()
         let until = now() + LAUNCH_MS
@@ -817,7 +860,7 @@ impl Worker {
             try w.open_browser()
             if env.os() == "linux" and not w.told_fonts {
                 w.told_fonts = true
-                let gaps = font_gaps(fonts())
+                let gaps = font_gaps(fonts(w.data.copy()))
                 if gaps.len() > 0 { eprintln("loom: {missing_text(gaps)}") }
                 // Without any font, a picture of a page has no words in it, though its outline does.
                 if gaps.len() > 0 and gaps[0] == "fonts" { note = "[loom: {missing_text(gaps)} Until then, pictures of pages show no text: read pages with browser_snapshot.]" }

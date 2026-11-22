@@ -1,0 +1,54 @@
+module tests.setup.browser_fetch
+
+// The browser a Linux server without one fetches for itself (server/chrome.calx):
+// Chrome for Testing's headless shell and Noto fonts, into a data folder, with
+// no root. It then draws a page in Chinese, Japanese, Korean and emoji with
+// them. It downloads about 200 MB, so CI runs it on Linux only.
+//
+//     calx tests/setup/browser_fetch.calx
+import std.env
+import std.fs
+import std.process.{Command, exit}
+import server.chrome
+import tests.kit.{check}
+
+fn run(data: String) ! Error {
+    let exe = try chrome.fetch_browser(data.copy())
+    try check(fs.is_file(exe.copy()) and exe.starts_with("{data}/browser/chrome-"), "the headless shell is fetched into the data folder")
+    try check(((try fs.metadata(exe.copy())).mode & 0o111) != 0, "and it can be run")
+    let (again, old) = chrome.fetched(data.copy()) ?? (String(), true)
+    try check(again == exe and not old, "and is found again, new")
+    let same = try chrome.fetch_browser(data.copy())
+    try check(same == exe, "fetching it again keeps the same build")
+    try check(chrome.libraries_missing(exe.copy()).len() == 0, "a runner with a desktop's libraries lacks none")
+
+    let conf = try chrome.fetch_fonts(data.copy(), [String("fonts"), String("fonts for Chinese, Japanese and Korean"), String("an emoji font")])
+    try check(chrome.font_config(data.copy()) == some(conf.copy()) and fs.is_file("{data}/browser/fonts/NotoSansCJK-Regular.ttc"), "the fonts are fetched, with a fontconfig file for them")
+    let listed = try Command.new(String("fc-list")).arg(String(":lang=ja")).arg(String("family")).env(String("FONTCONFIG_FILE"), conf.copy()).timeout(60000).output()
+    try check(listed.text().contains("Noto Sans CJK"), "and fontconfig finds them")
+
+    let page = "{data}/page.html"
+    try fs.write_text(page.copy(), "<html><body style=\"font-size:40px\"><p>Hello 你好 こんにちは 안녕 😀</p></body></html>")
+    let shot = "{data}/shot.png"
+    _ = try Command.new(exe).args(["--headless", "--no-sandbox", "--disable-gpu", "--screenshot={shot}", String("--window-size=800,300"), "file://{page}"]).env(String("FONTCONFIG_FILE"), conf).timeout(120000).output()
+    try check(fs.is_file(shot.copy()) and (try fs.metadata(shot)).size > 2000, "it draws a page with them")
+}
+
+fn main() ! Error {
+    if env.os() != "linux" {
+        println("browser_fetch: Linux only")
+        return
+    }
+    // A new folder of its own, which it removes at the end.
+    let data = try fs.temp_dir()
+    let failure: String? = match run(data.copy()) {
+        ok => none,
+        err(e) => some("{e}"),
+    }
+    if let err(e) = fs.remove_dir_all(data) { eprintln("{e}") }
+    if let f = failure {
+        eprintln("\n{f}")
+        exit(1)
+    }
+    println("\nbrowser_fetch: all good")
+}

@@ -1,0 +1,267 @@
+module server.chrome
+
+// A browser and fonts loom fetches for itself (PLAN.md, "The agent's browser"),
+// for a Linux server that has neither and wasn't set up with `loom install`,
+// which installs them as packages. The service runs as the loom user, without
+// root, so it fetches them into its own data, in browser/:
+//
+// - Chrome for Testing's headless shell, the build of Chrome that Google makes
+//   for running headless, from its last known good Stable, for x86-64 and arm64.
+//   It's fetched again once it's four weeks old, so it doesn't fall behind on
+//   fixes.
+// - Noto fonts, for Latin, Greek and Cyrillic, Chinese, Japanese and Korean,
+//   and emoji, with a fontconfig file that adds them to the system's own, which
+//   the browser is started with.
+//
+// What the headless shell still needs from the system is libraries that a
+// server with no desktop may lack (NSS, GTK's ATK, ALSA and the like); those
+// come only as packages, so `libraries_missing` names them and the person runs
+// `sudo loom install`.
+import std.env
+import std.fs
+import std.http.{Header, get}
+import std.json.{Json, parse}
+import std.process.{Command, which}
+import std.thread.{sleep}
+import std.zip.{Zip}
+import shared.obj.{at, str_at}
+import server.store.{now}
+
+/// Where the Chrome for Testing builds are listed, with where each downloads from.
+pub const INDEX: str = "https://googlechromelabs.github.io/chrome-for-testing/last-known-good-versions-with-downloads.json"
+/// How old a fetched browser may get, in ms, before it's fetched again.
+const REFRESH_MS: i64 = 28 * 24 * 3600 * 1000
+// What one download may take, and be.
+const DOWNLOAD_MS: i64 = 900000
+const BROWSER_MOST: usize = 600000000
+const FONT_MOST: usize = 60000000
+
+/// The fonts fetched for each gap browser.font_gaps names, by name and address.
+pub fn font_files(gap: String) -> List<(String, String)> {
+    let base = "https://raw.githubusercontent.com/notofonts/notofonts.github.io/main/fonts"
+    if gap == "fonts" {
+        return [
+            (String("NotoSans-Regular.ttf"), "{base}/NotoSans/hinted/ttf/NotoSans-Regular.ttf"),
+            (String("NotoSans-Bold.ttf"), "{base}/NotoSans/hinted/ttf/NotoSans-Bold.ttf"),
+            (String("NotoSans-Italic.ttf"), "{base}/NotoSans/hinted/ttf/NotoSans-Italic.ttf"),
+            (String("NotoSerif-Regular.ttf"), "{base}/NotoSerif/hinted/ttf/NotoSerif-Regular.ttf"),
+            (String("NotoSerif-Bold.ttf"), "{base}/NotoSerif/hinted/ttf/NotoSerif-Bold.ttf"),
+            (String("NotoSansMono-Regular.ttf"), "{base}/NotoSansMono/hinted/ttf/NotoSansMono-Regular.ttf"),
+        ]
+    }
+    if gap.contains("Chinese") {
+        return [
+            (String("NotoSansCJK-Regular.ttc"), String("https://raw.githubusercontent.com/notofonts/noto-cjk/main/Sans/OTC/NotoSansCJK-Regular.ttc")),
+            (String("NotoSansCJK-Bold.ttc"), String("https://raw.githubusercontent.com/notofonts/noto-cjk/main/Sans/OTC/NotoSansCJK-Bold.ttc")),
+        ]
+    }
+    if gap.contains("emoji") {
+        return [(String("NotoColorEmoji-Regular.ttf"), String("https://raw.githubusercontent.com/google/fonts/main/ofl/notocoloremoji/NotoColorEmoji-Regular.ttf"))]
+    }
+    return List<(String, String)>()
+}
+
+/// The folder in `data` that what's fetched is kept in.
+pub fn home(data: String) -> String {
+    return "{data}/browser"
+}
+
+/// The fontconfig file that adds the fetched fonts, once there are any, or none.
+pub fn font_config(data: String) -> String? {
+    let p = "{home(data)}/fonts.conf"
+    return if fs.is_file(p.copy()) { some(p) } else { none }
+}
+
+/// Chrome for Testing's name for this computer, or none where it has no build.
+pub fn platform(os: String, arch: String) -> String? {
+    if os != "linux" { return none }
+    if arch == "x86_64" { return some(String("linux64")) }
+    if arch == "aarch64" { return some(String("linux-arm64")) }
+    return none
+}
+
+/// The headless shell's version and address for `platform`, from the index's text.
+pub fn pick(index: String, build: String) -> (String, String) ! Error {
+    let j = try parse(index)
+    let stable = at(at(j, "channels"), "Stable")
+    let version = str_at(stable.copy(), "version") ?? String()
+    if let Json.Array(list) = at(at(stable, "downloads"), "chrome-headless-shell") {
+        for d in list {
+            if str_at(d.copy(), "platform") == some(build.copy()) {
+                if let url = str_at(d, "url") {
+                    if version.len() > 0 { return (version, url) }
+                }
+            }
+        }
+    }
+    fail "Chrome for Testing lists no headless shell for {build}"
+}
+
+/// The program in a fetched build's folder.
+fn program_in(dir: String, build: String) -> String {
+    return "{dir}/chrome-headless-shell-{build}/chrome-headless-shell"
+}
+
+/// The browser fetched before, if there is one, and whether it's old enough to
+/// fetch again.
+pub fn fetched(data: String) -> (String, bool)? {
+    let p = platform(env.os(), env.native_arch()) else return none
+    let root = home(data)
+    let names = match fs.list(root.copy()) {
+        ok(n) => n,
+        err(_) => return none,
+    }
+    var newest: String? = none
+    for n in names {
+        if not n.starts_with("chrome-") { continue }
+        if fs.is_file(program_in("{root}/{n}", p.copy())) { newest = some(n.copy()) }
+    }
+    let name = newest else return none
+    let dir = "{root}/{name}"
+    var checked: i64 = 0
+    if let ok(some(t)) = fs.read_text("{dir}/checked") { checked = i64.parse(t.trim().copy()) ?? 0 }
+    return some((program_in(dir, p), now() - checked > REFRESH_MS))
+}
+
+/// Fetches the headless shell into `data`, unless another browser's thread
+/// fetched it meanwhile, and gives its program. Another one fetching waits for
+/// this one.
+pub fn fetch_browser(data: String) -> String ! Error {
+    let p = platform(env.os(), env.native_arch()) else fail "Chrome for Testing has no build for this computer ({env.os()} on {env.native_arch()})"
+    let root = home(data)
+    try fs.make_dir_all(root.copy())
+    let lock = try locked("{root}/fetching.lock")
+    let (program, failed) = match fetch_locked(root.copy(), p) {
+        ok(x) => (x, String()),
+        err(e) => (String(), "{e}"),
+    }
+    if let err(e) = lock.release() { eprintln("loom: {e}") }
+    if failed.len() > 0 { fail "{failed}" }
+    return program
+}
+
+fn fetch_locked(root: String, p: String) -> String ! Error {
+    var index_req = get(String(INDEX), List<Header>(), 30000, 4000000)
+    let index = try index_req.wait()
+    if index.status != 200 { fail "Chrome for Testing's list didn't download ({index.status})" }
+    let (version, url) = try pick(String.from_utf8(index.body) ?? String(), p.copy())
+    let dir = "{root}/chrome-{version}"
+    if not fs.is_file(program_in(dir.copy(), p.copy())) {
+        eprintln("loom: fetching Chrome for Testing's headless shell {version} for the agents' browser")
+        var req = get(url, List<Header>(), u32.wrap(DOWNLOAD_MS), BROWSER_MOST)
+        let got = try req.wait()
+        if got.status != 200 { fail "Chrome's headless shell didn't download ({got.status})" }
+        let part = "{root}/part"
+        if fs.exists(part.copy()) { try fs.remove_dir_all(part.copy()) }
+        let zip = try Zip.open(got.body)
+        try zip.extract(part.copy())
+        try fs.rename(part, dir.copy())
+    }
+    try fs.write_text("{dir}/checked", "{now()}")
+    // Builds before this one aren't used again.
+    for n in try fs.list(root.copy()) {
+        let old = "{root}/{n}"
+        if n.starts_with("chrome-") and old != dir and fs.is_dir(old.copy()) {
+            if let err(e) = fs.remove_dir_all(old) { eprintln("loom: {e}") }
+        }
+    }
+    return program_in(dir, p)
+}
+
+/// Fetches the fonts for `gaps` into `data`, and writes the fontconfig file that
+/// adds them to the system's. Gives the config file.
+pub fn fetch_fonts(data: String, gaps: List<String>) -> String ! Error {
+    let root = home(data)
+    let dir = "{root}/fonts"
+    try fs.make_dir_all(dir.copy())
+    let lock = try locked("{root}/fetching.lock")
+    var failed: String? = none
+    for gap in gaps {
+        for (name, url) in font_files(gap.copy()) {
+            let to = "{dir}/{name}"
+            if fs.is_file(to.copy()) { continue }
+            var req = get(url, List<Header>(), u32.wrap(DOWNLOAD_MS), FONT_MOST)
+            match req.wait() {
+                ok(got) => {
+                    if got.status != 200 {
+                        failed = some("{name} didn't download ({got.status})")
+                        continue
+                    }
+                    if let err(e) = fs.write("{to}.part", got.body) {
+                        failed = some("{e}")
+                        continue
+                    }
+                    if let err(e) = fs.rename("{to}.part", to) { failed = some("{e}") }
+                },
+                err(e) => failed = some("{name} didn't download: {e}"),
+            }
+        }
+    }
+    let conf = "{root}/fonts.conf"
+    if let err(e) = fs.write_text(conf.copy(), font_config_text(dir, "{root}/font-cache")) { failed = some("{e}") }
+    if let err(e) = lock.release() { eprintln("loom: {e}") }
+    if let why = failed { fail "{why}" }
+    return conf
+}
+
+/// A fontconfig file that has the system's fonts, where it has any, and those
+/// in `fonts`, with its cache in `cache`, which the loom user can write.
+pub fn font_config_text(fonts: String, cache: String) -> String {
+    return "<?xml version=\"1.0\"?>\n<!DOCTYPE fontconfig SYSTEM \"urn:fontconfig:fonts.dtd\">\n<fontconfig>\n  <include ignore_missing=\"yes\">/etc/fonts/fonts.conf</include>\n  <dir>{fonts}</dir>\n  <cachedir>{cache}</cachedir>\n</fontconfig>\n"
+}
+
+/// The libraries `program` needs that this computer lacks, by name, from ldd.
+pub fn libraries_missing(program: String) -> List<String> {
+    if which(String("ldd")) == none { return List<String>() }
+    return match Command.new(String("ldd")).arg(program).timeout(20000).output() {
+        ok(out) => not_found(out.text()),
+        err(_) => List<String>(),
+    }
+}
+
+/// The libraries ldd's output says aren't found.
+pub fn not_found(ldd: String) -> List<String> {
+    var names = List<String>()
+    for line in ldd.lines() {
+        if not line.contains("not found") { continue }
+        let name = line.trim().split(" ")[0].copy()
+        if name.len() > 0 and not names.contains(name.copy()) { names.push(name) }
+    }
+    return names
+}
+
+// The lock on `path`, once no other thread or loom holds it.
+fn locked(path: String) -> fs.FileLock ! Error {
+    let until = now() + DOWNLOAD_MS
+    loop {
+        if let l = try fs.try_lock(path.copy(), List<u8>()) { return l }
+        if now() > until { fail "Another fetch of the agents' browser didn't finish." }
+        unsafe { sleep(1000000000) }
+    }
+}
+
+@test
+fn chrome_for_testing_has_a_shell_for_linux_servers() {
+    assert(platform(String("linux"), String("x86_64")) == some(String("linux64")))
+    assert(platform(String("linux"), String("aarch64")) == some(String("linux-arm64")))
+    assert(platform(String("windows"), String("x86_64")) == none)
+    let index = #"{"channels":{"Stable":{"version":"158.0.8127.36","downloads":{"chrome":[{"platform":"linux64","url":"https://x/chrome-linux64.zip"}],"chrome-headless-shell":[{"platform":"linux-arm64","url":"https://x/arm.zip"},{"platform":"linux64","url":"https://x/chrome-headless-shell-linux64.zip"}]}}}}"#
+    let (version, url) = pick(String(index), String("linux64"))!
+    assert(version == "158.0.8127.36" and url == "https://x/chrome-headless-shell-linux64.zip")
+    assert(match pick(String(index), String("mac-arm64")) { ok(_) => false, err(_) => true })
+}
+
+@test
+fn fonts_come_for_each_gap() {
+    assert(font_files(String("fonts")).len() == 6)
+    assert(font_files(String("fonts for Chinese, Japanese and Korean"))[0].0 == "NotoSansCJK-Regular.ttc")
+    assert(font_files(String("an emoji font"))[0].1.ends_with("NotoColorEmoji-Regular.ttf"))
+    let conf = font_config_text(String("/var/lib/loom/browser/fonts"), String("/var/lib/loom/browser/font-cache"))
+    assert(conf.contains("<dir>/var/lib/loom/browser/fonts</dir>") and conf.contains("ignore_missing=\"yes\">/etc/fonts/fonts.conf"))
+}
+
+@test
+fn ldd_names_what_is_missing() {
+    let out = "\tlinux-vdso.so.1 (0x00007ffd)\n\tlibnss3.so => not found\n\tlibatk-1.0.so.0 => not found\n\tlibc.so.6 => /lib/x86_64-linux-gnu/libc.so.6 (0x00007f)\n\tlibnss3.so => not found\n"
+    assert(not_found(String(out)) == [String("libnss3.so"), String("libatk-1.0.so.0")])
+}
