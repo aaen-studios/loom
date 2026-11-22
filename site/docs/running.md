@@ -18,7 +18,7 @@ The script downloads the newest `loom` for the machine (x64 or Arm) and checks i
 - puts Caddy in front for TLS when you give `--domain`, or, without one, serves it on your tailnet if Tailscale is installed ([Tailscale](tailscale.md));
 - prints the address and the one-time **setup code**.
 
-In the desktop app, give the address as the **Instance**, pick a username and password, and put the code in **Setup code (only the first time)**. That account is the owner.
+In the desktop app, choose **I have a server** and give its address. Pick a username and password, then choose **New server? Add its setup code** and put the code in. That account is the owner.
 
 Run the script again to update loom, or use `loom update`, which checks the release's signature before it swaps the program.
 
@@ -43,10 +43,10 @@ In Docker, only the owner's agents run: the sandboxes everyone else's agents run
 
 ## On your PC, with no server
 
-In the desktop app, choose **Run one on this computer**. The instance runs inside the app, as you, and finds the agent programs already on the computer. It listens only on this computer until you let your phone reach it ([Phones](phones.md)).
+In the desktop app, choose **Let's begin**. The instance runs inside the app, as you, and finds the agent programs already on the computer. Then the app makes your first agent with you: its brain, a name and a colour. The instance listens only on this computer until you let your phone reach it ([Phones](phones.md)).
 
 ## Backups and moving
 
 - `loom export FILE` writes the whole instance, secrets and all, to a `.tar.zst` file while it runs. Keep it as safe as the instance. `loom import FILE` makes a new instance from one.
 - `loom serve --backups DIR` writes one every day and keeps the newest seven.
-- To move an instance to another machine, run `loom receive` there. It prints a move code. Then, in the app, open **Move**, and give the new place's address and the move code. Everything goes, encrypted, and your apps follow by themselves.
+- To move an instance to another machine, run `loom receive` there. It prints a move code. Then, in the app, open **Move** in the server popup (click the server's name at the bottom of the sidebar), and give the new place's address and the move code. Everything goes, encrypted, and your apps follow by themselves.
