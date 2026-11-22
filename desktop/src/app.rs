@@ -7096,7 +7096,9 @@ ACTA_KEY=secret:ACTA_KEY",
                     .child(a.name.clone()),
             )
             .when_some(composer, |d, c| {
-                d.child(div().w_full().max_w(px(self.prefs.column())).child(c))
+                // An empty chat keeps its composer at the normal width, whatever the
+                // chat width is.
+                d.child(div().w_full().max_w(px(space::COLUMN)).child(c))
             })
             .child(chips)
     }
