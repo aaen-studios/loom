@@ -165,10 +165,10 @@ pub fn running_sha() -> String {
     }
 }
 
-/// Comes back as the new program, once the old one has stopped serving: systemd starts
+/// Comes back as the new program at `exe`, once the old one has stopped serving: systemd starts
 /// it, and by hand it starts it with the same arguments, on the port this one had (so
 /// one started with --port 0 keeps its address), then this one ends.
-pub fn come_back(h: Host, port: u16) -> never {
+pub fn come_back(h: Host, exe: String, port: u16) -> never {
     match h {
         Host.Systemd => {
             println("loom: updated, so systemd starts the new program")
@@ -177,7 +177,8 @@ pub fn come_back(h: Host, port: u16) -> never {
         _ => {},
     }
     // The new one waits for the port, which this one has let go of.
-    match Command.new(current_exe()).args(same_port(env.args(), port)).env(String("LOOM_RESTARTED"), String("1")).spawn() {
+    // Not current_exe(): on Linux that follows the running program to its new name, exe.old.
+    match Command.new(exe).args(same_port(env.args(), port)).env(String("LOOM_RESTARTED"), String("1")).spawn() {
         ok(_) => {
             println("loom: updated, and the new program is starting")
             exit(0)

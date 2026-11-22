@@ -4788,7 +4788,10 @@ mod tests {
         // How updates stand comes with each connection.
         m.take(&json!({"t": "synced", "seq": 0}));
         let asked = m.fetches();
-        let ask = asked.iter().find(|f| f["name"] == "instance.updates").unwrap();
+        let ask = asked
+            .iter()
+            .find(|f| f["name"] == "instance.updates")
+            .unwrap();
         m.take(&json!({"t": "result", "id": ask["id"], "ok": true, "value": {"version": "0.2.0", "auto": false, "may": true, "owner": true, "can": true, "update": {"state": ""}}}));
         let u = m.updates.clone().unwrap();
         assert!(u.may && u.owner && u.can && !u.auto);

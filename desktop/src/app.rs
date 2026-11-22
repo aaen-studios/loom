@@ -2356,11 +2356,12 @@ ACTA_KEY=secret:ACTA_KEY",
             }
         };
         match self.model.server_update.as_ref() {
-            Some(u) if u.state == "downloading" => {
-                (format!("{ours} · getting the newest…"), None)
-            }
+            Some(u) if u.state == "downloading" => (format!("{ours} · getting the newest…"), None),
             Some(u) if u.state == "waiting" => (
-                format!("{ours} · {} is ready, and goes in once nothing runs", next(u)),
+                format!(
+                    "{ours} · {} is ready, and goes in once nothing runs",
+                    next(u)
+                ),
                 may.then_some(("Now", true)),
             ),
             Some(u) if u.state == "restarting" => {
@@ -2386,13 +2387,13 @@ ACTA_KEY=secret:ACTA_KEY",
         }
         let u = self.model.updates.clone().filter(|u| u.owner)?;
         let on = u.auto;
-        let toggle = self
-            .switch("self-update-switch", on)
-            .on_click(cx.listener(move |this, _, _, cx| {
-                let f = this.model.set_auto_update(!on);
-                this.send(f);
-                cx.notify();
-            }));
+        let toggle =
+            self.switch("self-update-switch", on)
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    let f = this.model.set_auto_update(!on);
+                    this.send(f);
+                    cx.notify();
+                }));
         let sub = if u.can {
             "Takes each new release once nothing runs, and tells you after".to_string()
         } else {

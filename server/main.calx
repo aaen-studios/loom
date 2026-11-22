@@ -292,12 +292,13 @@ fn elevated_refusal() -> String {
 }
 
 fn serve(a: Args) ! Error {
-    if env.is_elevated() and not a.allow_root {
-        eprintln(elevated_refusal())
-        exit(2)
-    }
+    // A mistake in the arguments is said first, before anything about how it runs.
     if a.release.len() > 0 and not a.fast_hashes {
         eprintln("loom: --test-release is for loom's own tests, which give --test-fast-hashes too: it points the instance at releases loom didn't sign")
+        exit(2)
+    }
+    if env.is_elevated() and not a.allow_root {
+        eprintln(elevated_refusal())
         exit(2)
     }
     let source = if a.release.len() > 0 { update.Source { manifest: a.release.copy(), key: a.release_key.copy() } } else { update.Source.official() }
@@ -320,7 +321,7 @@ fn serve(a: Args) ! Error {
     // An update swapped the program in while the loop stopped: the new one runs now.
     if i.restart_wanted() {
         io.flush()
-        update.come_back(update.host(false), i.port())
+        update.come_back(update.host(false), i.program(), i.port())
     }
     println("loom: stopped")
 }
