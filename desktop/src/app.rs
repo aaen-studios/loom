@@ -4699,21 +4699,26 @@ ACTA_KEY=secret:ACTA_KEY",
                     let here = name == on;
                     let program = name.clone();
                     list = list.child(
-                        self.menu_item(format!("move-to-{name}"), Ico::Brain, &name, false)
-                            .when(here, |d| {
-                                d.child(
-                                    div()
-                                        .text_color(p.ink_2)
-                                        .child(Icon::new(Ico::Check).small()),
-                                )
-                            })
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                if let Some(f) = this.model.move_chat(&program) {
-                                    this.send(f);
-                                }
-                                this.menu = None;
-                                cx.notify();
-                            })),
+                        self.menu_item(
+                            format!("move-to-{name}"),
+                            Ico::Brain,
+                            &program_title(&name),
+                            false,
+                        )
+                        .when(here, |d| {
+                            d.child(
+                                div()
+                                    .text_color(p.ink_2)
+                                    .child(Icon::new(Ico::Check).small()),
+                            )
+                        })
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            if let Some(f) = this.model.move_chat(&program) {
+                                this.send(f);
+                            }
+                            this.menu = None;
+                            cx.notify();
+                        })),
                     );
                 }
                 list
@@ -6320,14 +6325,14 @@ ACTA_KEY=secret:ACTA_KEY",
             let default_backup = if self.model.defaults.backup.is_empty() {
                 "Default: None".to_string()
             } else {
-                format!("Default: {}", self.model.defaults.backup)
+                format!("Default: {}", program_title(&self.model.defaults.backup))
             };
             let mut choices: Vec<(String, String, Option<String>)> = vec![
                 ("default".into(), default_backup, None),
                 ("none".into(), "None".into(), Some("none".into())),
             ];
             for name in self.model.programs.iter().filter(|n| **n != a.program) {
-                choices.push((name.clone(), name.clone(), Some(name.clone())));
+                choices.push((name.clone(), program_title(name), Some(name.clone())));
             }
             let mut backups = div().flex().flex_wrap().gap(px(space::S));
             for (id, label, choice) in choices {
@@ -9591,8 +9596,12 @@ ACTA_KEY=secret:ACTA_KEY",
             let mut items = Vec::new();
             for name in programs.clone() {
                 items.push(
-                    self.segment(format!("default-brain-{name}"), &name, d.brain == name)
-                        .on_click(put(serde_json::json!({"brain": name}))),
+                    self.segment(
+                        format!("default-brain-{name}"),
+                        &program_title(&name),
+                        d.brain == name,
+                    )
+                    .on_click(put(serde_json::json!({"brain": name}))),
                 );
             }
             self.segments(items).into_any_element()
@@ -9605,8 +9614,12 @@ ACTA_KEY=secret:ACTA_KEY",
                 .on_click(put(serde_json::json!({"backup": null})))];
             for name in programs.clone() {
                 items.push(
-                    self.segment(format!("default-backup-{name}"), &name, d.backup == name)
-                        .on_click(put(serde_json::json!({"backup": name}))),
+                    self.segment(
+                        format!("default-backup-{name}"),
+                        &program_title(&name),
+                        d.backup == name,
+                    )
+                    .on_click(put(serde_json::json!({"backup": name}))),
                 );
             }
             self.segments(items).into_any_element()
@@ -9674,7 +9687,11 @@ ACTA_KEY=secret:ACTA_KEY",
                         )),
                     );
                 }
-                picks.push(self.text_row(&format!("{name} · {}", o.name), None, row));
+                picks.push(self.text_row(
+                    &format!("{} · {}", program_title(&name), o.name),
+                    None,
+                    row,
+                ));
             }
         }
         let models = self.group(
