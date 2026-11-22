@@ -7243,7 +7243,8 @@ impl Instance {
                 try i.event(r.user.copy(), "message.deleted", Obj.new().s("conversation", r.conversation.copy()).s("message", r.answering.copy()).done())
             }
         } else {
-            var o = Obj.new().s("id", r.message.copy()).s("conversation", r.conversation.copy()).s("role", String("agent")).s("agent", r.agent.copy()).s("run", r.id.copy()).i("at", now()).j("blocks", Json.Array(blocks))
+            // How the turn ended goes with it, so an app reads a stopped one as it was.
+            var o = Obj.new().s("id", r.message.copy()).s("conversation", r.conversation.copy()).s("role", String("agent")).s("agent", r.agent.copy()).s("run", r.id.copy()).i("at", now()).s("status", status.copy()).j("blocks", Json.Array(blocks))
             // Files it names that are there, for the app to show as chips.
             let mentions = i.mentions(r.user.copy(), r.agent.copy(), said.copy())
             if mentions.len() > 0 { o = o.j("mentions", Json.Array(mentions)) }
