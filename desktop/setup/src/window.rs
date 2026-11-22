@@ -125,7 +125,9 @@ pub fn run(screen: Box<dyn Screen>, hidden: bool, dark: bool) {
         SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
         let inst = GetModuleHandleW(std::ptr::null());
         let class = wide("loom-setup");
-        let icon = LoadIconW(inst, 1 as _);
+        // The light icon, or the dark one in a dark theme (build.rs).
+        let id: usize = if dark { 2 } else { 1 };
+        let icon = LoadIconW(inst, id as _);
         let wc = WNDCLASSW {
             style: CS_HREDRAW | CS_VREDRAW,
             lpfnWndProc: Some(proc),

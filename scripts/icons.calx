@@ -9,10 +9,12 @@ module scripts.icons
 //   tinted one is the same mark in gray, which iOS colours.
 // - design/logo/app.icns: the Mac's, the app icon inset on Apple's grid (824 of
 //   1024 px, leaving room for the shadow macOS adds), from 16 to 1024 px.
+// - design/logo/png/app-light-<size>.png and design/logo/app-light.ico: the light app
+//   icon, a white tile with the mark in ink, which Windows shows unless loom is dark.
 //
 //     calx scripts/icons.calx
 import std.fs
-import std.image.{Color, Filter, Image, Kind}
+import std.image.{Color, Filter, Image, Kind, encode_ico}
 
 const PNG: str = "design/logo/png"
 const IOS: str = "design/logo/ios/AppIcon.appiconset"
@@ -84,6 +86,27 @@ fn gray(img: Image) -> Image {
             out.set(x, y, Color.rgba(v, v, v, c.a))
         }
     }
+    return out
+}
+
+// The light app icon: the app icon's rounded square in white, a touch grayer at the
+// bottom as the dark one is lighter at the top, with a hairline edge so it holds on a
+// white desktop, and the mark in ink where the app icon has it.
+fn light_app(app: Image, ink_mark: Image) -> Image {
+    let n = app.width()
+    let edge = n / 256 + 1    // the hairline: 5 px at 1024
+    var out = Image.new(n, n, Kind.Rgba, Color.rgba(0u8, 0u8, 0u8, 0u8))
+    for y in 0..n {
+        let fill = u8.wrap(255 - y * 10 / n)    // 255 at the top to 246 at the bottom
+        for x in 0..n {
+            let a = app.get(x, y).a
+            if a == 0u8 { continue }
+            let near = x < edge or y < edge or x + edge >= n or y + edge >= n or app.get(x - edge, y).a < 255u8 or app.get(x + edge, y).a < 255u8 or app.get(x, y - edge).a < 255u8 or app.get(x, y + edge).a < 255u8
+            let v = if near { mix(0u8, fill, 22) } else { fill }
+            out.set(x, y, Color.rgba(v, v, v, a))
+        }
+    }
+    out.overlay(mark_where_app_has_it(app.copy(), ink_mark), 0, 0)
     return out
 }
 
@@ -167,4 +190,15 @@ fn main() ! Error {
     mac.overlay(app.resize(824, 824, Filter.Lanczos), 100, 100)
     try fs.write(String("design/logo/app.icns"), icns(mac))
     println("made design/logo/app.icns")
+
+    // The light app icon, which Windows shows unless loom is dark.
+    let light = light_app(app.copy(), try Image.open("{PNG}/light-1024.png"))
+    var ico = List<Image>()
+    for size in [16usize, 24, 32, 48, 64, 128, 256, 512, 1024] {
+        let sized = if size == 1024 { light.copy() } else { light.resize(size, size, Filter.Lanczos) }
+        try sized.save("{PNG}/app-light-{size}.png")
+        if size <= 256 { ico.push(sized) }
+    }
+    try fs.write(String("design/logo/app-light.ico"), encode_ico(ico))
+    println("made {PNG}/app-light-*.png and design/logo/app-light.ico")
 }

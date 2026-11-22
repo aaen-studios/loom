@@ -736,8 +736,10 @@ ACTA_KEY=secret:ACTA_KEY",
         })
         .detach();
 
-        // Closing the window keeps loom in the tray, so routines and replies go on.
         let hwnd = shell::hwnd(window);
+        // The window, taskbar and shortcuts show the icon in loom's theme.
+        shell::follow_theme(hwnd, dark);
+        // Closing the window keeps loom in the tray, so routines and replies go on.
         // Unless the person turned that off, in Settings: then it quits.
         shell::keep_in_tray(prefs.tray);
         window.on_window_should_close(cx, move |_, cx| {

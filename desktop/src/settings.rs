@@ -148,6 +148,7 @@ impl Loom {
         if dark != self.p.dark {
             self.p = Palette::new(dark);
             crate::theme(cx, dark);
+            shell::follow_theme(self.hwnd, dark);
             cx.notify();
         }
     }
