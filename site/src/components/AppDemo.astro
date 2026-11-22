@@ -2,19 +2,24 @@
 // A live copy of loom's desktop app, for the first screen: the sidebar with the agents' threads, an
 // agent's chat with a reply that thinks, uses a tool, writes and asks before it deploys. Its sizes,
 // colours and words are the app's (desktop/src/app.rs, design/tokens.toml); the script that plays
-// it is src/scripts/demo.ts. The approval's buttons answer it.
+// it is src/scripts/demo.ts. The approval's buttons answer it, a reply's steps open, and the
+// sidebar collapses to the rail, as the app's do.
+import { brains } from '../lib/registry.mjs';
+
 const agents = [
 	{ name: 'Juniper', color: 'sky', on: true },
 	{ name: 'Moss', color: 'mint' },
 	{ name: 'Biscuit', color: 'apricot' },
 	{ name: 'Pip', color: 'lavender' },
 ];
+// The brain chip: the program's icon from the ACP Registry, and what the agent is set to on it.
+const [claude] = await brains(['claude-acp']);
 ---
 
 <div class="app" data-demo role="region" aria-label="loom's desktop app, with an agent at work">
-	<aside class="side" aria-hidden="true">
+	<aside class="side">
 		<div class="side-top">
-			<span class="brand">
+			<span class="brand" aria-hidden="true">
 				<svg width="20" height="20" viewBox="0 0 32 32" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round">
 					<mask id="demo-knot" maskUnits="userSpaceOnUse" x="0" y="0" width="32" height="32">
 						<rect width="32" height="32" fill="white"></rect>
@@ -25,26 +30,28 @@ const agents = [
 				</svg>
 				loom
 			</span>
-			<span class="icon-btn small"><svg class="i" viewBox="0 0 24 24"><path d="M5 12h14M12 5v14"></path></svg></span>
+			<span class="side-tools">
+				<span class="icon-btn small new" aria-hidden="true"><svg class="i" viewBox="0 0 24 24"><path d="M5 12h14M12 5v14"></path></svg></span>
+				<button type="button" class="icon-btn small bar" data-bar aria-label="Collapse the sidebar">
+					<svg class="i shut" viewBox="0 0 24 24"><rect width="18" height="18" x="3" y="3" rx="2"></rect><path d="M9 3v18m7 12-3-3 3-3"></path></svg>
+					<svg class="i open" viewBox="0 0 24 24"><rect width="18" height="18" x="3" y="3" rx="2"></rect><path d="M9 3v18m5-12 3 3-3 3"></path></svg>
+				</button>
+			</span>
 		</div>
-		<div class="search">
-			<svg class="i" viewBox="0 0 24 24"><circle cx="11" cy="11" r="8"></circle><path d="m21 21-4.3-4.3"></path></svg>
-			<span>Search</span>
-		</div>
-		<div class="list">
+		<div class="list" aria-hidden="true">
 			{
 				agents.map((a) => (
 					<div class:list={['agent', { on: a.on }]} data-agent={a.name}>
-						<svg data-thread data-color={a.color} width="26" height="10"></svg>
+						<svg data-thread data-color={a.color} width="26" height="10" />
 						<span class="agent-text">
 							<span class="agent-name">{a.name}</span>
-							<span class="agent-preview"></span>
+							<span class="agent-preview" />
 						</span>
 					</div>
 				))
 			}
 		</div>
-		<div class="side-foot">
+		<div class="side-foot" aria-hidden="true">
 			<span class="server">
 				<svg data-yarn="This computer" width="32" height="32"></svg>
 				<span class="server-text">
@@ -70,9 +77,16 @@ const agents = [
 					<span>Juniper</span>
 					<svg class="i chev" viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"></path></svg>
 				</span>
-				<span class="picker">
-					Asks when it's risky
-					<svg class="i chev" viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"></path></svg>
+				<span class="chips">
+					<span class="chip brain">
+						{claude?.icon && <span class="brain-icon" style={`--icon: url(${claude.icon})`} />}
+						Opus 5.5 · Medium
+						<svg class="i chev" viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"></path></svg>
+					</span>
+					<span class="chip">
+						Asks when it's risky
+						<svg class="i chev" viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"></path></svg>
+					</span>
 				</span>
 			</div>
 			<div class="winctl">
@@ -84,13 +98,21 @@ const agents = [
 
 		<div class="chat">
 			<div class="msgs" aria-live="off">
+				<div class="time-line">Today 09:02</div>
 				<div class="row you">
 					<div class="bubble">What's on my plate today?</div>
 				</div>
 				<div class="row reply">
-					<svg data-thread data-color="sky" width="14" height="10" class="reply-thread"></svg>
+					<svg data-thread data-color="sky" width="14" height="10" class="reply-thread head"></svg>
 					<div class="body">
-						<div class="who"><b>Juniper</b><span>09:02</span></div>
+						<div class="who">Juniper</div>
+						<div class="fold" data-fold>
+							<button type="button" class="fold-line" aria-expanded="false"><span class="chevron">›</span><span class="words">2 steps</span></button>
+							<div class="steps" hidden>
+								<div class="tool-line done"><span class="prompt">›_</span><span class="title">Read ~/notes/today.md</span><span class="mark">✓</span></div>
+								<div class="tool-line done"><span class="prompt">›_</span><span class="title">Fetch github.com/acme/shop/pulls</span><span class="mark">✓</span></div>
+							</div>
+						</div>
 						<div class="said">
 							<p>Two things. The notes for 2.4 are due at 15:00, and Biscuit is waiting on your review of the billing fix. Both are at the top of your list.</p>
 						</div>
@@ -99,7 +121,7 @@ const agents = [
 			</div>
 		</div>
 
-		<div class="composer-wrap">
+		<div class="composer-wrap" aria-hidden="true">
 			<div class="composer">
 				<span class="icon-btn c"><svg class="i" viewBox="0 0 24 24"><path d="M5 12h14M12 5v14"></path></svg></span>
 				<span class="field"><span class="typed"></span><span class="placeholder">Reply to Juniper</span></span>
@@ -124,11 +146,19 @@ const agents = [
 	<div class="row reply fresh">
 		<svg data-thread data-color="sky" width="14" height="10" class="reply-thread"></svg>
 		<div class="body">
-			<div class="who"><b>Juniper</b><span>now</span></div>
-			<div class="waiting-words"></div>
+			<div class="fold" data-fold>
+				<button type="button" class="fold-line" aria-expanded="false"><span class="chevron">›</span><span class="words"></span></button>
+				<div class="steps" hidden></div>
+			</div>
 			<div class="said"></div>
 		</div>
 	</div>
+</template>
+<template id="demo-said">
+	<div class="said"></div>
+</template>
+<template id="demo-tool">
+	<div class="tool-line"><span class="prompt">›_</span><span class="title"></span><span class="mark">…</span></div>
 </template>
 <template id="demo-approval">
 	<div class="row approval fresh">
@@ -137,6 +167,7 @@ const agents = [
 			<div class="card-cmd"></div>
 			<div class="card-buttons">
 				<button type="button" class="b primary" data-answer="allow">Allow once</button>
+				<button type="button" class="b" data-answer="always">Always allow</button>
 				<button type="button" class="b" data-answer="deny">Deny</button>
 			</div>
 		</div>
@@ -189,22 +220,31 @@ const agents = [
 	.icon-btn:hover {
 		background: var(--hover);
 	}
+	button {
+		font: inherit;
+		color: inherit;
+		background: none;
+		border: 0;
+		padding: 0;
+	}
 
-	/* The sidebar. */
+	/* The sidebar, and the rail it collapses to, its width easing between the two. */
 	.side {
 		display: flex;
 		flex-direction: column;
 		width: var(--layout-sidebar);
 		flex: none;
+		overflow: hidden;
 		background: var(--side);
 		border-right: 1px solid var(--line);
+		transition: width 0.22s cubic-bezier(0.2, 0.7, 0.3, 1);
 	}
 	.side-top {
 		display: flex;
 		align-items: center;
 		justify-content: space-between;
 		height: var(--layout-titlebar);
-		padding: 0 16px;
+		padding: 0 12px 0 16px;
 		flex: none;
 	}
 	.brand {
@@ -212,23 +252,29 @@ const agents = [
 		align-items: center;
 		gap: 6px;
 		font-weight: var(--weight-semibold);
+		white-space: nowrap;
+	}
+	.side-tools {
+		display: flex;
+		gap: 2px;
 	}
 	.icon-btn.small {
 		width: var(--control-icon-small);
 		height: var(--control-icon-small);
 	}
-	.search {
-		display: flex;
-		align-items: center;
-		gap: 6px;
-		height: 32px;
-		margin: 0 12px 8px;
-		padding: 0 10px;
-		border: 1px solid var(--line-strong);
-		border-radius: var(--radius-input);
-		background: var(--bg);
+	.bar {
 		color: var(--ink-3);
-		flex: none;
+		cursor: pointer;
+	}
+	.bar:hover {
+		color: var(--ink);
+	}
+	.bar .open,
+	.app.railed .bar .shut {
+		display: none;
+	}
+	.app.railed .bar .open {
+		display: block;
 	}
 	.list {
 		display: grid;
@@ -305,6 +351,7 @@ const agents = [
 	.server-text {
 		display: grid;
 		line-height: 1.45;
+		white-space: nowrap;
 	}
 	.server-name {
 		font-size: var(--size-small);
@@ -317,11 +364,45 @@ const agents = [
 	.gear {
 		width: var(--control-icon-large);
 		height: var(--control-icon-large);
+		flex: none;
 		color: var(--ink-3);
 	}
 	.gear .i {
 		width: 16px;
 		height: 16px;
+	}
+
+	/* The rail: the control that opens the sidebar, each agent as its thread, and at the foot
+	   the gear over the server's yarn. */
+	.app.railed .side {
+		width: var(--layout-rail);
+	}
+	.app.railed .side-top {
+		justify-content: center;
+		padding: 0;
+	}
+	.app.railed :is(.brand, .new, .agent-text, .server-text) {
+		display: none;
+	}
+	.app.railed .list {
+		justify-items: center;
+		padding: 4px 0 0;
+	}
+	.app.railed .agent {
+		width: 40px;
+		height: 40px;
+		padding: 0;
+		justify-content: center;
+	}
+	.app.railed .side-foot {
+		flex-direction: column-reverse;
+		padding: 0 0 8px;
+	}
+	.app.railed .server {
+		flex: none;
+		width: var(--control-server);
+		padding: 0;
+		justify-content: center;
 	}
 
 	/* The title bar, with the agent's header in it, over the chat only. */
@@ -342,20 +423,22 @@ const agents = [
 		display: flex;
 		align-items: center;
 		justify-content: space-between;
+		gap: 8px;
 		flex: 1;
 		min-width: 0;
 		padding: 0 16px;
 	}
 	.agent-btn,
-	.picker {
+	.chip {
 		display: inline-flex;
 		align-items: center;
 		border-radius: var(--radius-row);
 		padding: 4px 8px;
+		white-space: nowrap;
 		transition: background-color 0.12s;
 	}
 	.agent-btn:hover,
-	.picker:hover {
+	.chip:hover {
 		background: var(--hover);
 	}
 	.agent-btn {
@@ -366,10 +449,28 @@ const agents = [
 		width: 26px;
 		height: 10px;
 	}
-	.picker {
+	.chips {
+		display: flex;
+		align-items: center;
+		gap: 16px;
+		min-width: 0;
+	}
+	.chip {
 		gap: 4px;
 		font-size: var(--size-caption);
 		color: var(--ink-2);
+	}
+	.chip.brain {
+		gap: 6px;
+	}
+	/* The program's icon from the ACP Registry, drawn in the chip's ink, as the app draws it. */
+	.brain-icon {
+		width: 12px;
+		height: 12px;
+		flex: none;
+		background: currentColor;
+		-webkit-mask: var(--icon) center / contain no-repeat;
+		mask: var(--icon) center / contain no-repeat;
 	}
 	.winctl {
 		display: flex;
@@ -412,8 +513,15 @@ const agents = [
 		margin: 0 auto;
 		padding-bottom: 8px;
 	}
+	/* Across the chat where it paused, or on a new day: when it went on. */
+	.time-line {
+		padding: 8px 0 4px;
+		text-align: center;
+		font-size: var(--size-caption);
+		color: var(--ink-3);
+	}
 	.row {
-		padding: 8px 0;
+		padding: 4px 0 8px;
 	}
 	.row.fresh {
 		animation: rise 0.28s cubic-bezier(0.2, 0.7, 0.3, 1) both;
@@ -443,11 +551,15 @@ const agents = [
 		display: flex;
 		gap: 12px;
 	}
+	/* Beside the agent's name over the first reply after a time line, and lower beside the rest. */
 	.reply-thread {
 		width: 14px;
 		height: 10px;
 		flex: none;
-		margin-top: 8px;
+		margin-top: 16px;
+	}
+	.reply-thread.head {
+		margin-top: 4px;
 	}
 	.body {
 		display: flex;
@@ -457,25 +569,95 @@ const agents = [
 		flex: 1;
 	}
 	.who {
-		display: flex;
-		align-items: baseline;
-		gap: 8px;
-		line-height: 1.4;
-		margin-top: 2px;
-	}
-	.who b {
 		font-size: var(--size-small);
 		font-weight: var(--weight-medium);
+		line-height: 1.4;
 	}
-	.who span {
-		font-size: var(--size-caption);
+	/* The turn's steps under one quiet line: while it runs, the step it's on, and once it's
+	   done, how many there were, which opens to show them. */
+	.fold {
+		display: flex;
+		flex-direction: column;
+		gap: 8px;
+		min-width: 0;
+	}
+	.fold:not(:has(.words:not(:empty))) {
+		display: none;
+	}
+	.fold-line {
+		display: flex;
+		align-items: center;
+		gap: 8px;
+		min-width: 0;
+		font-size: var(--size-small);
+		line-height: 1.5;
+		color: var(--ink-3);
+		text-align: left;
+		cursor: pointer;
+		transition: color 0.12s;
+	}
+	.fold-line:hover {
+		color: var(--ink);
+	}
+	.fold-line .words {
+		min-width: 0;
+		white-space: nowrap;
+		overflow: hidden;
+		text-overflow: ellipsis;
+	}
+	.fold.bare .chevron {
+		display: none;
+	}
+	.fold.bare .fold-line {
+		cursor: default;
+	}
+	.fold.bare .fold-line:hover {
 		color: var(--ink-3);
 	}
+	.steps {
+		display: flex;
+		flex-direction: column;
+		gap: 4px;
+		padding-left: 12px;
+		border-left: 1px solid var(--line-strong);
+	}
+	.steps[hidden] {
+		display: none;
+	}
+	.tool-line {
+		display: flex;
+		align-items: center;
+		gap: 8px;
+		font-size: var(--size-small);
+		line-height: 1.5;
+		min-width: 0;
+	}
+	.tool-line .prompt {
+		color: var(--ink-3);
+	}
+	.tool-line .title {
+		font-family: var(--mono);
+		color: var(--ink-2);
+		white-space: nowrap;
+		overflow: hidden;
+		text-overflow: ellipsis;
+	}
+	.tool-line .mark {
+		color: var(--ink-3);
+	}
+	.tool-line.done .mark {
+		color: var(--ok);
+	}
+	.tool-line.denied .mark {
+		color: var(--bad);
+	}
+	/* The answer: a bubble with a breath of the agent's colour, its corner by the thread
+	   squared off as a speech bubble's tail. */
 	.said {
 		align-self: flex-start;
 		max-width: 94%;
 		padding: 10px 16px;
-		border-radius: 6px var(--radius-bubble) var(--radius-bubble) var(--radius-bubble);
+		border-radius: var(--radius-bubble-joined) var(--radius-bubble) var(--radius-bubble) var(--radius-bubble);
 		background: color-mix(in srgb, var(--bubble) 93%, var(--tint));
 		line-height: var(--line-reply);
 	}
@@ -492,13 +674,6 @@ const agents = [
 	}
 	.said :global(p + p) {
 		margin-top: 12px;
-	}
-	.waiting-words {
-		font-size: var(--size-small);
-		color: var(--ink-3);
-	}
-	.waiting-words:empty {
-		display: none;
 	}
 
 	/* An approval: its own row after the messages, lined up with the reply's text. */
@@ -528,6 +703,7 @@ const agents = [
 	}
 	.card-buttons {
 		display: flex;
+		flex-wrap: wrap;
 		gap: 8px;
 	}
 	.b {
@@ -537,7 +713,6 @@ const agents = [
 		border: 1px solid var(--line-strong);
 		background: transparent;
 		color: var(--ink);
-		font: inherit;
 		font-size: var(--size-small);
 		font-weight: var(--weight-medium);
 		cursor: pointer;
@@ -641,9 +816,8 @@ const agents = [
 		display: none;
 	}
 
-	/* A narrower window: the sidebar goes, as the app's would leave the chat first. */
+	/* A narrower window: the sidebar is a rail beside the chat (demo.ts), as the app's is. */
 	@media (max-width: 860px) {
-		.side,
 		.winctl {
 			display: none;
 		}
@@ -652,6 +826,10 @@ const agents = [
 		}
 	}
 	@media (max-width: 560px) {
+		.side,
+		.chip.brain {
+			display: none;
+		}
 		.app {
 			height: 560px;
 			border-radius: 12px;
