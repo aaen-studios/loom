@@ -335,7 +335,7 @@ impl Loom {
                     .child(self.field_row(label, Input::new(&self.rule_in)))
                     .child(
                         div()
-                            .pl(px(space::L + FIELD_LABEL + space::M))
+                            .pl(px(space::L + layout::FIELD_LABEL + space::M))
                             .pr(px(space::L))
                             .pb(px(space::S + 2.0))
                             .mt(px(-space::XS))

@@ -60,6 +60,29 @@ enum Tokens {
     enum Layout {
         static let sidebar: CGFloat = 260
         static let titlebar: CGFloat = 48
+        static let settings: CGFloat = 600
+        static let page: CGFloat = 520
+        static let nav: CGFloat = 210
+        static let menu: CGFloat = 230
+        static let menuWide: CGFloat = 240
+        static let fieldLabel: CGFloat = 120
+    }
+
+    enum Control {
+        static let button: CGFloat = 34
+        static let buttonSmall: CGFloat = 30
+        static let buttonWide: CGFloat = 46
+        static let segment: CGFloat = 26
+        static let chip: CGFloat = 28
+        static let icon: CGFloat = 28
+        static let iconSmall: CGFloat = 26
+        static let iconComposer: CGFloat = 32
+        static let iconLarge: CGFloat = 34
+        static let lead: CGFloat = 30
+        static let server: CGFloat = 46
+        static let choice: CGFloat = 50
+        static let row: CGFloat = 54
+        static let rowTall: CGFloat = 68
     }
 
     enum ColorDark {

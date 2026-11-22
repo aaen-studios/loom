@@ -51,6 +51,29 @@ composer = 16
 [layout]
 sidebar = 260
 titlebar = 48
+settings = 600       # the settings page's column
+page = 520           # a narrow page's column, such as an agent's edit page
+nav = 210            # a popup's nav down its left
+menu = 230           # a menu under the header
+menu-wide = 240      # the composer's plus menu
+field-label = 120    # a label beside its field
+
+# How big the controls are.
+[control]
+button = 34          # a button
+button-small = 30    # a small button, such as an approval's yes and no
+button-wide = 46     # a button across the page, such as Sign in
+segment = 26         # one choice of a segmented control
+chip = 28            # a chip, such as an agent to pick
+icon = 28            # an icon button, such as close or back
+icon-small = 26      # an icon button in a row, such as the queue's tools
+icon-composer = 32   # the composer's plus, mic and send
+icon-large = 34      # the settings gear, or a colour to pick
+lead = 30            # the icon or initial at a row's start
+server = 46          # the server's row atop the sidebar
+choice = 50          # a big choice, such as where the server runs
+row = 54             # a settings row, at least
+row-tall = 68        # a settings row with a picture, at least
 
 # The app is near-monochrome. The only colour is the agents' threads.
 [color.dark]
