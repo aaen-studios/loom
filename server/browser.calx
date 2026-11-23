@@ -1163,6 +1163,8 @@ impl Worker {
                 err(e) => error("{e}"),
             }
             if let err(e) = w.call("Target.closeTarget", Obj.new().s("targetId", target).done()) { eprintln("loom: the browser: {e}") }
+            // The agent's page in front again, so it draws, and sends frames to whoever watches.
+            if let err(e) = w.call("Page.bringToFront", Obj.new().done()) { eprintln("loom: the browser: {e}") }
             return drawn
         }
         return error("The browser has no {name}.")
@@ -1190,6 +1192,9 @@ impl Worker {
             shot_args = shot_args.b("captureBeyondViewport", true).j("clip", Obj.new().i("x", 0).i("y", 0).i("width", width).j("height", Json.Float(tall)).i("scale", 1).done())
             size = "{width} × {i64.saturate(tall)}, the whole page"
         }
+        // A tab in the background draws no frames, or only now and then, and a picture
+        // waits for one: seconds, or past CALL_MS. In front, it draws at once.
+        _ = try t.call(String("Page.bringToFront"), Obj.new().done())
         let shot = try t.call(String("Page.captureScreenshot"), shot_args.done())
         t.sock.close()
         let image = Obj.new().s("type", String("image")).s("data", str_at(shot, "data") ?? String()).s("mimeType", String("image/jpeg")).done()
