@@ -2148,20 +2148,12 @@ ACTA_KEY=secret:ACTA_KEY",
                 ClipboardEntry::Image(image) => {
                     // Most Windows programs copy a bitmap, which agents don't take: it goes
                     // as a PNG.
-                    let (ext, bytes) = match image.format {
-                        ImageFormat::Jpeg => ("jpg", image.bytes.clone()),
-                        ImageFormat::Webp => ("webp", image.bytes.clone()),
-                        ImageFormat::Gif => ("gif", image.bytes.clone()),
-                        ImageFormat::Png => ("png", image.bytes.clone()),
-                        _ => match shell::to_png(&image.bytes) {
-                            Some(png) => ("png", png),
-                            None => {
-                                self.model
-                                    .notices
-                                    .push("That image's kind can't be sent.".into());
-                                return true;
-                            }
-                        },
+                    let format = image.format;
+                    let ext = match format {
+                        ImageFormat::Jpeg => "jpg",
+                        ImageFormat::Webp => "webp",
+                        ImageFormat::Gif => "gif",
+                        _ => "png",
                     };
                     // A short name, as it reads in the message, in a folder of its own so
                     // another paste can have it too.
@@ -2171,15 +2163,34 @@ ACTA_KEY=secret:ACTA_KEY",
                         .join(at.to_string());
                     let name = model::free_name("image", ext, &self.model.attachments);
                     let path = dir.join(name);
-                    let written =
-                        std::fs::create_dir_all(&dir).and_then(|_| std::fs::write(&path, &bytes));
-                    match written {
-                        Ok(()) => self.attach(&[path], cx),
-                        Err(e) => self
-                            .model
-                            .notices
-                            .push(format!("The image couldn't be kept: {e}")),
-                    }
+                    // Making a big screenshot a PNG, and writing it, take a while: off this
+                    // thread, and attached once it's done.
+                    let raw = image.bytes.clone();
+                    let task = cx.background_executor().spawn(async move {
+                        let bytes = match format {
+                            ImageFormat::Jpeg
+                            | ImageFormat::Webp
+                            | ImageFormat::Gif
+                            | ImageFormat::Png => raw,
+                            _ => shell::to_png(&raw)
+                                .ok_or_else(|| "That image's kind can't be sent.".to_string())?,
+                        };
+                        std::fs::create_dir_all(&dir)
+                            .and_then(|_| std::fs::write(&path, &bytes))
+                            .map_err(|e| format!("The image couldn't be kept: {e}"))?;
+                        Ok::<_, String>(path)
+                    });
+                    cx.spawn(async move |this, cx| {
+                        let done = task.await;
+                        let _ = this.update(cx, |loom, cx| match done {
+                            Ok(path) => loom.attach(&[path], cx),
+                            Err(e) => {
+                                loom.model.notices.push(e);
+                                cx.notify();
+                            }
+                        });
+                    })
+                    .detach();
                     return true;
                 }
                 _ => {}
