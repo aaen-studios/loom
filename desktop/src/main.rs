@@ -132,11 +132,7 @@ fn main() {
             WindowAppearance::Light | WindowAppearance::VibrantLight
         ));
         theme(cx, dark);
-        let mut bounds = Bounds::centered(None, size(px(1120.), px(760.)), cx);
-        // A build for measuring opens off screen, so it doesn't get in the way.
-        if cfg!(feature = "perf") {
-            bounds.origin = point(px(-10000.), px(-10000.));
-        }
+        let bounds = Bounds::centered(None, size(px(1120.), px(760.)), cx);
         gpui_kit::open_window(
             WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
@@ -148,8 +144,11 @@ fn main() {
                     ..TitleBar::title_bar_options()
                 }),
                 app_owns_titlebar_drag: true,
-                // A build for measuring opens behind what the person is doing.
+                // A build for measuring opens hidden, and shows itself off screen
+                // behind what the person is doing (app.rs): GPUI centers a window
+                // whose place is off every screen.
                 focus: !cfg!(feature = "perf"),
+                show: !cfg!(feature = "perf"),
                 ..Default::default()
             },
             cx,

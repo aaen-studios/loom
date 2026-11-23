@@ -712,14 +712,20 @@ fn screens() -> Vec<crate::place::Rect> {
 
 /// Puts the window where it was, kept on the screens there are now. Shown, it opens
 /// there at once (maximized if it was); hidden, as when loom starts in the tray, it
-/// waits there and opens that way when it's first shown. Set twice, so a screen with
-/// another scale than the one the window opened on doesn't change its size.
+/// waits there and opens that way when it's first shown, hidden before it's moved so
+/// it never shows there for a moment. Set twice, so a screen with another scale than
+/// the one the window opened on doesn't change its size.
 #[cfg(windows)]
 pub fn put_window(hwnd: isize, place: crate::place::Place, shown: bool) {
     use windows_sys::Win32::Foundation::{POINT, RECT};
     use windows_sys::Win32::UI::WindowsAndMessaging::{
-        SetWindowPlacement, SW_HIDE, SW_SHOWMAXIMIZED, SW_SHOWNOACTIVATE, WINDOWPLACEMENT,
+        SetWindowPlacement, ShowWindow, SW_HIDE, SW_SHOWMAXIMIZED, SW_SHOWNOACTIVATE,
+        WINDOWPLACEMENT,
     };
+    if !shown {
+        // SAFETY: hwnd is the app's own window.
+        unsafe { ShowWindow(hwnd as _, SW_HIDE) };
+    }
     let place = place.fit(&screens());
     let r = place.normal;
     let p = WINDOWPLACEMENT {
@@ -754,6 +760,36 @@ pub fn put_window(hwnd: isize, place: crate::place::Place, shown: bool) {
 
 #[cfg(not(windows))]
 pub fn put_window(_hwnd: isize, _place: crate::place::Place, _shown: bool) {}
+
+/// Keeps a build for measuring, which opens hidden (main.rs), out of the way: its
+/// window can never be the one in front, and shown, it's far off every screen, `w`
+/// by `h`.
+#[cfg(windows)]
+pub fn out_of_the_way(hwnd: isize, w: i32, h: i32, shown: bool) {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        GetWindowLongPtrW, SetWindowLongPtrW, SetWindowPos, GWL_EXSTYLE, SWP_NOACTIVATE,
+        SWP_NOZORDER, SWP_SHOWWINDOW, WS_EX_NOACTIVATE,
+    };
+    // SAFETY: hwnd is the app's own window.
+    unsafe {
+        let ex = GetWindowLongPtrW(hwnd as _, GWL_EXSTYLE);
+        SetWindowLongPtrW(hwnd as _, GWL_EXSTYLE, ex | WS_EX_NOACTIVATE as isize);
+        if shown {
+            SetWindowPos(
+                hwnd as _,
+                std::ptr::null_mut(),
+                -10000,
+                -10000,
+                w,
+                h,
+                SWP_NOACTIVATE | SWP_NOZORDER | SWP_SHOWWINDOW,
+            );
+        }
+    }
+}
+
+#[cfg(not(windows))]
+pub fn out_of_the_way(_hwnd: isize, _w: i32, _h: i32, _shown: bool) {}
 
 /// The window's native handle, for `show_window`.
 pub fn hwnd(window: &gpui_kit::Window) -> isize {
@@ -949,34 +985,69 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// A window put in its place, hidden as when loom starts in the tray, reads back in
-    /// that place, maximized too, and is never shown or given the focus.
+    /// A window put in its place to wait hidden, as when loom starts in the tray, is
+    /// hidden before it moves, reads back in that place, maximized too, and is never
+    /// given the focus. It starts shown, as GPUI opens the window before loom started at
+    /// login sends it to the tray, but far off screen.
     #[cfg(windows)]
     #[test]
     fn a_window_keeps_the_place_it_is_put_in() {
         use crate::place::{Place, Rect};
+        use std::cell::RefCell;
+        use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
+        use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
         use windows_sys::Win32::UI::WindowsAndMessaging::{
-            CreateWindowExW, DestroyWindow, IsWindowVisible, WS_OVERLAPPEDWINDOW,
+            CreateWindowExW, DefWindowProcW, DestroyWindow, IsWindowVisible, RegisterClassW,
+            ShowWindow, SWP_NOMOVE, SW_SHOWNOACTIVATE, WINDOWPOS, WM_WINDOWPOSCHANGED, WNDCLASSW,
+            WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_OVERLAPPEDWINDOW,
         };
-        let class: Vec<u16> = "STATIC\0".encode_utf16().collect();
-        // SAFETY: a plain hidden window of a system class, destroyed at the end.
+        thread_local! {
+            // Each move the window made: whether it was visible, and its left edge.
+            static MOVES: RefCell<Vec<(bool, i32)>> = const { RefCell::new(Vec::new()) };
+        }
+        unsafe extern "system" fn record(h: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LRESULT {
+            // SAFETY: WM_WINDOWPOSCHANGED's lparam is a WINDOWPOS, for this call.
+            unsafe {
+                if msg == WM_WINDOWPOSCHANGED {
+                    let pos = &*(l as *const WINDOWPOS);
+                    if pos.flags & SWP_NOMOVE == 0 {
+                        let seen = IsWindowVisible(h) != 0;
+                        MOVES.with(|m| m.borrow_mut().push((seen, pos.x)));
+                    }
+                }
+                DefWindowProcW(h, msg, w, l)
+            }
+        }
+        let class: Vec<u16> = "loom-place-test\0".encode_utf16().collect();
+        // SAFETY: a window class of this test's own, and a window of it that never takes
+        // the focus or a taskbar button, destroyed at the end.
         let hwnd = unsafe {
-            CreateWindowExW(
-                0,
+            let module = GetModuleHandleW(std::ptr::null());
+            let mut wc: WNDCLASSW = std::mem::zeroed();
+            wc.lpfnWndProc = Some(record);
+            wc.hInstance = module;
+            wc.lpszClassName = class.as_ptr();
+            RegisterClassW(&wc);
+            let hwnd = CreateWindowExW(
+                WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
                 class.as_ptr(),
                 class.as_ptr(),
                 WS_OVERLAPPEDWINDOW,
-                0,
-                0,
+                -10000,
+                -10000,
                 400,
                 300,
                 std::ptr::null_mut(),
                 std::ptr::null_mut(),
-                std::ptr::null_mut(),
+                module,
                 std::ptr::null(),
-            )
+            );
+            ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+            hwnd
         } as isize;
         assert_ne!(hwnd, 0);
+        // SAFETY: the window made above.
+        assert_ne!(unsafe { IsWindowVisible(hwnd as _) }, 0);
         // On the main screen wherever it is: its work area always holds this.
         let main = super::screens()[0];
         let normal = Rect {
@@ -999,6 +1070,13 @@ mod tests {
             // SAFETY: the window made above.
             assert_eq!(unsafe { IsWindowVisible(hwnd as _) }, 0);
         }
+        // It came onto the screen, and was hidden each time it did.
+        let moves = MOVES.with(|m| m.borrow().clone());
+        assert!(moves.iter().any(|&(_, x)| x > -5000), "{moves:?}");
+        assert!(
+            moves.iter().all(|&(seen, x)| !seen || x <= -5000),
+            "{moves:?}"
+        );
         super::MAXIMIZE_WHEN_SHOWN.store(false, std::sync::atomic::Ordering::Relaxed);
         // SAFETY: the window made above.
         unsafe { DestroyWindow(hwnd as _) };

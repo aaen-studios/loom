@@ -1015,10 +1015,16 @@ ACTA_KEY=secret:ACTA_KEY",
 
         let hwnd = shell::hwnd(window);
         // The window opens where it was closed, and keeps its place as it moves and
-        // resizes (place.rs). Started in the tray, it waits there hidden.
+        // resizes (place.rs). Started in the tray, it waits there hidden. A build for
+        // measuring stays off screen, and takes its place only while it waits hidden.
         let background = std::env::args().any(|a| a == "--background");
         let place = crate::place::Place::load(&data_dir());
-        if let Some(p) = place {
+        if cfg!(feature = "perf") {
+            let scale = window.scale_factor();
+            let (w, h) = ((1120.0 * scale) as i32, (760.0 * scale) as i32);
+            shell::out_of_the_way(hwnd, w, h, !background);
+        }
+        if let Some(p) = place.filter(|_| background || !cfg!(feature = "perf")) {
             shell::put_window(hwnd, p, !background);
         }
         // Kept once the window stops moving, not at each step of a drag.
@@ -2634,6 +2640,8 @@ ACTA_KEY=secret:ACTA_KEY",
             let id = SharedString::from(format!("server-{dir}"));
             let mut button = div()
                 .id(id)
+                .role(Role::Button)
+                .aria_label(SharedString::from(name.to_string()))
                 .relative()
                 .flex()
                 .items_center()
@@ -4700,6 +4708,8 @@ ACTA_KEY=secret:ACTA_KEY",
         let p = self.p;
         div()
             .id(id.into())
+            .role(Role::Button)
+            .aria_label(label.to_string())
             .px(px(space::L))
             .h(px(control::BUTTON))
             .flex()
@@ -5166,6 +5176,8 @@ ACTA_KEY=secret:ACTA_KEY",
             list = list.child(
                 div()
                     .id(SharedString::from(format!("agent-{}", a.id)))
+                    .role(Role::Button)
+                    .aria_label(a.name.clone())
                     .flex()
                     .items_center()
                     .gap(px(space::M))
@@ -5411,6 +5423,12 @@ ACTA_KEY=secret:ACTA_KEY",
         .small();
         div()
             .id(if rail { "bar-open" } else { "bar-collapse" })
+            .role(Role::Button)
+            .aria_label(if rail {
+                "Open sidebar"
+            } else {
+                "Collapse sidebar"
+            })
             .occlude()
             .size(px(control::ICON_SMALL))
             .flex_none()
@@ -5448,6 +5466,8 @@ ACTA_KEY=secret:ACTA_KEY",
         let p = self.p;
         div()
             .id(id)
+            .role(Role::Button)
+            .aria_label("New agent")
             .occlude()
             .size(px(size))
             .flex_none()
@@ -5467,6 +5487,8 @@ ACTA_KEY=secret:ACTA_KEY",
         let p = self.p;
         div()
             .id("settings")
+            .role(Role::Button)
+            .aria_label("Settings")
             .size(px(control::ICON_LARGE))
             .flex_none()
             .flex()
@@ -5512,6 +5534,8 @@ ACTA_KEY=secret:ACTA_KEY",
             list = list.child(
                 div()
                     .id(SharedString::from(format!("rail-{}", a.id)))
+                    .role(Role::Button)
+                    .aria_label(a.name.clone())
                     .relative()
                     .size(px(RAIL_ROW))
                     .flex_none()
@@ -5930,6 +5954,8 @@ ACTA_KEY=secret:ACTA_KEY",
         let tint = thread::color(&agent.color, p.dark);
         let globe = div()
             .id("browser-toggle")
+            .role(Role::Button)
+            .aria_label("Browser")
             .occlude()
             .flex()
             .items_center()
@@ -5966,6 +5992,8 @@ ACTA_KEY=secret:ACTA_KEY",
         let pins_open = self.side == Some(Screen::Pins);
         let pins = div()
             .id("pins-toggle")
+            .role(Role::Button)
+            .aria_label(format!("Pins: {pinned}"))
             .occlude()
             .flex()
             .items_center()
@@ -5998,6 +6026,8 @@ ACTA_KEY=secret:ACTA_KEY",
         bar.child(
             div()
                 .id("agent-menu")
+                .role(Role::Button)
+                .aria_label(agent.name.clone())
                 .occlude()
                 .flex()
                 .items_center()
@@ -6052,6 +6082,8 @@ ACTA_KEY=secret:ACTA_KEY",
                 .child(
                     div()
                         .id("permission-menu")
+                        .role(Role::Button)
+                        .aria_label(format!("Permission: {permission}"))
                         .occlude()
                         .px(px(space::S))
                         .py(px(space::XS))
@@ -6093,6 +6125,8 @@ ACTA_KEY=secret:ACTA_KEY",
         let p = self.p;
         div()
             .id(id.into())
+            .role(Role::MenuItem)
+            .aria_label(title.to_string())
             .flex()
             .items_center()
             .gap(px(space::M))
@@ -6282,6 +6316,8 @@ ACTA_KEY=secret:ACTA_KEY",
         Some(
             div()
                 .id("brain-chip")
+                .role(Role::Button)
+                .aria_label(format!("Brain: {picked}"))
                 .relative()
                 .occlude()
                 .px(px(space::S))
@@ -7030,9 +7066,15 @@ ACTA_KEY=secret:ACTA_KEY",
                 v
             }
         };
+        // While a screen reader listens, it's drawn at every frame: a frame that uses
+        // the list as it was leaves its messages out of what the screen reader is told.
+        let listening = window.is_a11y_active();
         view.update(cx, |v, cx| {
-            if !v.inputs.as_ref().is_some_and(|o| o.same(&inputs)) {
+            let changed = !v.inputs.as_ref().is_some_and(|o| o.same(&inputs));
+            if changed {
                 v.inputs = Some(inputs);
+            }
+            if changed || listening {
                 cx.notify();
             }
         });
@@ -7201,6 +7243,8 @@ ACTA_KEY=secret:ACTA_KEY",
                                 .child(
                                     div()
                                         .id("plus")
+                                        .role(Role::Button)
+                                        .aria_label("Attach, skills and routines")
                                         .size(px(control::ICON_COMPOSER))
                                         .flex()
                                         .items_center()
@@ -7242,6 +7286,8 @@ ACTA_KEY=secret:ACTA_KEY",
                             d.child(
                                 div()
                                     .id("dictate")
+                                    .role(Role::Button)
+                                    .aria_label("Voice typing")
                                     .size(px(control::ICON_COMPOSER))
                                     .flex_none()
                                     .flex()
@@ -7268,6 +7314,8 @@ ACTA_KEY=secret:ACTA_KEY",
                         .child(
                             div()
                                 .id("send")
+                                .role(Role::Button)
+                                .aria_label(if busy { "Stop" } else { "Send" })
                                 .size(px(control::ICON_COMPOSER))
                                 .flex_none()
                                 .flex()
@@ -8143,6 +8191,8 @@ ACTA_KEY=secret:ACTA_KEY",
         let p = self.p;
         div()
             .id(id.into())
+            .role(Role::Button)
+            .aria_label(label.to_string())
             .h(px(control::CHIP))
             .px(px(space::M))
             .flex()
@@ -16074,7 +16124,23 @@ fn chat_list(
                 });
             }
         });
+        // To a screen reader, a message is an item in the chat, named by who said
+        // what.
+        let (row_id, said) = match row {
+            Row::Message(m) => {
+                let who = if m.role == "person" {
+                    "You"
+                } else {
+                    name.as_str()
+                };
+                let words = model::spoken(&model::copy_text(m, &tools));
+                (format!("msg-{}", m.id), Some(format!("{who}: {words}")))
+            }
+            Row::Approval(_) => (format!("row-{ix}"), None),
+        };
         div()
+            .id(SharedString::from(row_id))
+            .when_some(said, |d, said| d.role(Role::ListItem).aria_label(said))
             .w_full()
             .flex()
             .flex_col()
@@ -16120,6 +16186,8 @@ fn chat_list(
                         d.child(
                             div()
                                 .id(SharedString::from(format!("branch-row-{id}")))
+                                .role(Role::Button)
+                                .aria_label("Branch from here")
                                 .absolute()
                                 .top(px(space::XS + 28.0))
                                 .right(px(HOVER_REACH - 30.0))
@@ -16147,6 +16215,8 @@ fn chat_list(
                         d.child(
                             div()
                                 .id(SharedString::from(format!("pin-row-{id}")))
+                                .role(Role::Button)
+                                .aria_label(if pinned { "Unpin" } else { "Pin" })
                                 .absolute()
                                 .top(px(space::XS))
                                 .right(px(HOVER_REACH - 30.0))
