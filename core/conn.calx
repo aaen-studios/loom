@@ -547,18 +547,18 @@ impl Conn {
     /// A frame from the instance. What changes the cache is applied before the app hears
     /// of it, so a crash between the two loses nothing.
     fn frame(mut self, text: own String) {
-        let f = match parse(text.copy()) {
+        let f = match parse(text) {
             ok(j) => j,
             err(_) => return,
         }
-        let t = str_at(f.copy(), "t") ?? String()
+        let t = str_at(f, "t") ?? String()
         if t == "moved" {
             self.moved(f)
             return
         }
         if t == "welcome" {
             // The instance's key, kept from the first welcome: a move is checked with it.
-            if let key = str_at(f.copy(), "key") {
+            if let key = str_at(f, "key") {
                 if self.known("instance_key") == none {
                     match self.cache.set_meta("instance_key", key) {
                         ok => {},
@@ -566,17 +566,17 @@ impl Conn {
                     }
                 }
             }
-            self.push_relay = str_at(f.copy(), "relay")
-            self.loom = str_at(f.copy(), "loom") ?? String()
+            self.push_relay = str_at(f, "relay")
+            self.loom = str_at(f, "loom") ?? String()
             // An update under way, to an owner or admin; none once it's done.
-            self.update = at(f.copy(), "update")
+            self.update = at(f, "update")
             self.asked = false
             self.restarting = none
             self.state = State.Live
             self.failed = 0
             self.tell_server()
             self.tell_state(0, String())
-            let me = str_at(f.copy(), "device") ?? String()
+            let me = str_at(f, "device") ?? String()
             self.me = me.copy()
             self.offer(me)
             self.flush()
@@ -584,20 +584,20 @@ impl Conn {
             self.synced = true
         } else if t == "instance.update" {
             // A restart for it is near: the core tries again every second until it's back.
-            if str_at(f.copy(), "state") == some(String("restarting")) { self.restarting = some(unsafe { Instant.now() }) }
+            if str_at(f, "state") == some(String("restarting")) { self.restarting = some(unsafe { Instant.now() }) }
             self.update = f.copy()
             self.tell_server()
         } else if t == "event" {
             // Before the cache applies it, while the run it ends is still there to read.
             // An agent's own notify is for now, looking or not.
-            if self.synced and (not self.active or str_at(f.copy(), "kind") == some(String("notify"))) {
-                self.notify(f.copy())
+            if self.synced and (not self.active or str_at(f, "kind") == some(String("notify"))) {
+                self.notify(f)
             }
             var ended = String()
             if str_at(f, "kind") == some(String("run.finished")) {
                 if let ok(some(r)) = self.cache.run(str_at(f, "run") ?? String()) { ended = str_at(r, "message") ?? String() }
             }
-            match self.cache.apply(f.copy()) {
+            match self.cache.apply(f) {
                 ok(applied) => if not applied { return },
                 err(e) => {
                     // Not applied, so not in the cursor either: the next hello gets it again.
@@ -607,8 +607,8 @@ impl Conn {
             }
             // A server an agent offered, that the person said yes to on this device:
             // the app adds it, signed in with its link code when it came with one.
-            if (str_at(f.copy(), "kind") ?? String()) == "server.offered" and self.me.len() > 0 and str_at(f.copy(), "by") == some(self.me.copy()) {
-                self.tell(Obj.new().s("t", String("core.offer")).s("address", address(str_at(f.copy(), "address") ?? String())).maybe("code", str_at(f.copy(), "link_code")).maybe("username", str_at(f.copy(), "username")).done())
+            if (str_at(f, "kind") ?? String()) == "server.offered" and self.me.len() > 0 and str_at(f, "by") == some(self.me.copy()) {
+                self.tell(Obj.new().s("t", String("core.offer")).s("address", address(str_at(f, "address") ?? String())).maybe("code", str_at(f, "link_code")).maybe("username", str_at(f, "username")).done())
             }
             if (str_at(f, "kind") ?? String()) == "message.created" {
                 self.forget_streaming(str_at(at(f, "message"), "id") ?? String())
@@ -617,7 +617,7 @@ impl Conn {
             // when its run ends.
             if ended.len() > 0 { self.forget_streaming(ended) }
         } else if t == "snapshot" {
-            match self.cache.replace(f.copy()) {
+            match self.cache.replace(f) {
                 ok => {},
                 err(e) => self.tell_error("cache", "{e}"),
             }
@@ -628,16 +628,16 @@ impl Conn {
             self.delta(f, text)
             return
         } else if t == "ack" {
-            match self.cache.sent(str_at(f.copy(), "cid") ?? String()) {
+            match self.cache.sent(str_at(f, "cid") ?? String()) {
                 ok => {},
                 err(e) => self.tell_error("cache", "{e}"),
             }
         } else if t == "error" {
             // A command that failed gets no result, so its id goes.
-            if let id = str_at(f.copy(), "id") { self.forget_command(id) }
+            if let id = str_at(f, "id") { self.forget_command(id) }
             // A send the instance can't take, ever: it leaves the outbox.
-            if (str_at(f.copy(), "code") ?? String()) == "unknown_conversation" {
-                if let cid = str_at(f.copy(), "ref") {
+            if (str_at(f, "code") ?? String()) == "unknown_conversation" {
+                if let cid = str_at(f, "ref") {
                     match self.cache.sent(cid) {
                         ok => {},
                         err(e) => self.tell_error("cache", "{e}"),
@@ -645,7 +645,7 @@ impl Conn {
                 }
             }
         } else if t == "result" {
-            let id = str_at(f.copy(), "id") ?? String()
+            let id = str_at(f, "id") ?? String()
             if id.starts_with(MAKING) {
                 self.made_conversation(f)
                 return

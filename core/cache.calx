@@ -12,35 +12,58 @@ import std.json.{Json, parse}
 import std.sqlite.{Database, Value}
 import std.time.{Timestamp}
 import shared.obj.{Obj, at, int_at, merge, str_at}
+import shared.checkpoint
+import std.fs
 
 const SCHEMA: str = #"
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS agents (id TEXT PRIMARY KEY, json TEXT NOT NULL);
-CREATE TABLE IF NOT EXISTS conversations (id TEXT PRIMARY KEY, json TEXT NOT NULL, last INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS conversations (
+    id TEXT PRIMARY KEY, json TEXT NOT NULL, last INTEGER NOT NULL, agent TEXT, chat INTEGER NOT NULL DEFAULT 0);
 CREATE TABLE IF NOT EXISTS messages (
     id TEXT PRIMARY KEY, conversation TEXT NOT NULL, at INTEGER NOT NULL, json TEXT NOT NULL);
 CREATE INDEX IF NOT EXISTS messages_by_conversation ON messages (conversation, at);
 CREATE TABLE IF NOT EXISTS devices (id TEXT PRIMARY KEY, json TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS runs (id TEXT PRIMARY KEY, conversation TEXT NOT NULL, json TEXT NOT NULL);
-CREATE TABLE IF NOT EXISTS tools (call TEXT PRIMARY KEY, run TEXT NOT NULL, json TEXT NOT NULL);
-CREATE INDEX IF NOT EXISTS tools_by_run ON tools (run);
+CREATE TABLE IF NOT EXISTS calls (call TEXT PRIMARY KEY, run TEXT NOT NULL, title TEXT, status TEXT);
+CREATE INDEX IF NOT EXISTS calls_by_run ON calls (run);
 CREATE TABLE IF NOT EXISTS approvals (call TEXT PRIMARY KEY, run TEXT NOT NULL, json TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS outbox (
     cid TEXT PRIMARY KEY, conversation TEXT NOT NULL, json TEXT NOT NULL, at INTEGER NOT NULL);
 "#
 
 // Everything that came from the instance, which a reset or another login clears.
-const TABLES: [str; 7] = ["agents", "conversations", "messages", "devices", "runs", "tools", "approvals"]
+const TABLES: [str; 7] = ["agents", "conversations", "messages", "devices", "runs", "calls", "approvals"]
 
 // What each list the app reads is, in order.
 const AGENTS: str = "SELECT json FROM agents ORDER BY rowid"
 const CONVERSATIONS: str = "SELECT json FROM conversations ORDER BY last DESC, rowid DESC"
 const DEVICES: str = "SELECT json FROM devices ORDER BY rowid"
 const RUNS: str = "SELECT json FROM runs ORDER BY rowid"
-// Only what a tool block shows, each call's call, run, title and status: a call's input
-// and output can be many KB, and the apps ask again at every tool event.
-const TOOLS_FOR: str = "SELECT json_object('call', call, 'run', run, 'title', json_extract(json, '$.title'), 'status', json_extract(json, '$.status')) FROM tools WHERE call IN (SELECT value FROM json_each(?)) OR run IN (SELECT value FROM json_each(?)) ORDER BY rowid"
-const TOOLS: str = "SELECT json_object('call', call, 'run', run, 'title', json_extract(json, '$.title'), 'status', json_extract(json, '$.status')) FROM tools ORDER BY rowid"
+// What a tool block shows of each call: its call, run, title and status, which is all
+// the cache keeps of it. A call's input and output can be many KB, no app reads them
+// from here, and the apps ask again at every tool event.
+const TOOLS_FOR: str = "SELECT json_object('call', call, 'run', run, 'title', title, 'status', status) FROM calls WHERE call IN (SELECT value FROM json_each(?)) OR run IN (SELECT value FROM json_each(?)) ORDER BY rowid"
+const TOOLS: str = "SELECT json_object('call', call, 'run', run, 'title', title, 'status', status) FROM calls ORDER BY rowid"
+
+// A cache from before calls and the conversations' agent column: what it had is moved over.
+const FROM_TOOLS: str = #"
+BEGIN;
+INSERT OR IGNORE INTO calls (call, run, title, status)
+    SELECT call, run, json_extract(json, '$.title'), json_extract(json, '$.status') FROM tools ORDER BY rowid;
+DROP TABLE tools;
+COMMIT;
+"#
+const AGENT_COLUMN: str = #"
+BEGIN;
+ALTER TABLE conversations ADD COLUMN agent TEXT;
+ALTER TABLE conversations ADD COLUMN chat INTEGER NOT NULL DEFAULT 0;
+UPDATE conversations SET agent = json_extract(json, '$.agent'),
+    chat = (json_extract(json, '$.task') IS NULL AND json_extract(json, '$.side') IS NULL AND json_extract(json, '$.branch_of') IS NULL AND json_extract(json, '$.routine') IS NULL);
+COMMIT;
+"#
+// Each agent's chat, newest first, for `conversation_for` at a send.
+const CHATS_BY_AGENT: str = "CREATE INDEX IF NOT EXISTS chats_by_agent ON conversations (agent, last DESC) WHERE chat = 1;"
 const APPROVALS: str = "SELECT json FROM approvals ORDER BY rowid"
 const OUTBOX: str = "SELECT json FROM outbox ORDER BY at, rowid"
 
@@ -72,23 +95,54 @@ fn t(s: own String) -> Value {
     return Value.Text(s)
 }
 
+fn maybe(s: own String?) -> Value {
+    if let v = s { return Value.Text(v) }
+    return Value.Null
+}
+
+// Whether a conversation is its agent's chat, rather than a task's, a side
+// question's, a branch's or a routine's: 1 or 0.
+fn chat_of(c: Json) -> i64 {
+    for key in ["task", "side", "branch_of", "routine"] {
+        if at(c, key) != Json.Null { return 0 }
+    }
+    return 1
+}
+
 pub struct Cache {
     db: Database
+    stop_checkpoints: Sender<bool>?    // the thread that checkpoints it, which stops when this goes
 }
 
 impl Cache {
     /// Opens (or makes) the cache at `path`, or one in memory for `:memory:`.
     pub fn open(path: String) -> Cache ! Error {
-        let db = try Database.open(path)
+        let db = try Database.open(path.copy())
         try db.execute_script(String("PRAGMA journal_mode = WAL;"))
+        var stop: Sender<bool>? = none
+        if path != ":memory:" {
+            // The core's thread doesn't checkpoint by itself: a commit that took the log
+            // past 1000 pages held up the app's reads for up to 50 ms. A thread of its own
+            // does it (shared/checkpoint.calx), and the log goes back to 64 MB after a burst.
+            try db.execute_script(String("PRAGMA wal_autocheckpoint = 0; PRAGMA journal_size_limit = 67108864;"))
+            let (_, s) = checkpoint.start(path)
+            stop = some(s)
+        }
         try db.execute_script(String(SCHEMA))
-        return Cache { db: db }
+        if try db.query_one(String("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'tools'"), List<Value>()) != none {
+            try db.execute_script(String(FROM_TOOLS))
+        }
+        if try db.query_one(String("SELECT 1 FROM pragma_table_info('conversations') WHERE name = 'agent'"), List<Value>()) == none {
+            try db.execute_script(String(AGENT_COLUMN))
+        }
+        try db.execute_script(String(CHATS_BY_AGENT))
+        return Cache { db: db, stop_checkpoints: stop }
     }
 
     pub fn meta(self, key: str) -> String? ! Error {
         let row = try self.db.query_one(String("SELECT value FROM meta WHERE key = ?"), [t(String(key))])
         let r = row else return none
-        return some(text(r[0].copy()))
+        return some(text(r[0]))
     }
 
     pub fn set_meta(self, key: str, value: String) ! Error {
@@ -178,14 +232,15 @@ impl Cache {
     }
 
     fn change(self, e: Json) ! Error {
-        let kind = str_at(e.copy(), "kind") ?? String()
+        let kind = str_at(e, "kind") ?? String()
         if kind == "conversation.created" {
             try self.put_conversation(at(e, "conversation"))
         } else if kind == "conversation.updated" {
             let c = at(e, "conversation")
-            let id = str_at(c.copy(), "id") ?? String()
+            let id = str_at(c, "id") ?? String()
             if let old = try self.one("SELECT json FROM conversations WHERE id = ?", id.copy()) {
-                _ = try self.db.execute(String("UPDATE conversations SET json = ? WHERE id = ?"), [t("{merge(old, c)}"), t(id)])
+                let merged = merge(old, c)
+                _ = try self.db.execute(String("UPDATE conversations SET json = ?, agent = ?, chat = ? WHERE id = ?"), [t("{merged}"), maybe(str_at(merged, "agent")), Value.Int(chat_of(merged)), t(id)])
             }
         } else if kind == "conversation.deleted" {
             let id = str_at(e, "conversation") ?? String()
@@ -196,25 +251,24 @@ impl Cache {
         } else if kind == "message.deleted" {
             _ = try self.db.execute(String("DELETE FROM messages WHERE id = ?"), [t(str_at(e, "message") ?? String())])
         } else if kind == "run.started" {
-            let id = str_at(e.copy(), "run") ?? String()
-            let conversation = str_at(e.copy(), "conversation") ?? String()
+            let id = str_at(e, "run") ?? String()
+            let conversation = str_at(e, "conversation") ?? String()
             _ = try self.db.execute(String("INSERT OR REPLACE INTO runs (id, conversation, json) VALUES (?, ?, ?)"), [t(id), t(conversation), t("{e}")])
         } else if kind == "run.finished" {
             let id = str_at(e, "run") ?? String()
             _ = try self.db.execute(String("DELETE FROM runs WHERE id = ?"), [t(id.copy())])
             _ = try self.db.execute(String("DELETE FROM approvals WHERE run = ?"), [t(id)])
         } else if kind == "tool.started" {
-            let call = str_at(e.copy(), "call") ?? String()
-            let run = str_at(e.copy(), "run") ?? String()
-            _ = try self.db.execute(String("INSERT OR REPLACE INTO tools (call, run, json) VALUES (?, ?, ?)"), [t(call), t(run), t("{e}")])
+            let call = str_at(e, "call") ?? String()
+            let run = str_at(e, "run") ?? String()
+            _ = try self.db.execute(String("INSERT OR REPLACE INTO calls (call, run, title, status) VALUES (?, ?, ?, ?)"), [t(call), t(run), maybe(str_at(e, "title")), maybe(str_at(e, "status"))])
         } else if kind == "tool.updated" or kind == "tool.finished" {
-            let call = str_at(e.copy(), "call") ?? String()
-            if let old = try self.one("SELECT json FROM tools WHERE call = ?", call.copy()) {
-                _ = try self.db.execute(String("UPDATE tools SET json = ? WHERE call = ?"), [t("{merge(old, e)}"), t(call)])
-            }
+            // Only what changed, set in place: no stored JSON read, merged and written back.
+            let call = str_at(e, "call") ?? String()
+            _ = try self.db.execute(String("UPDATE calls SET title = coalesce(?, title), status = coalesce(?, status) WHERE call = ?"), [maybe(str_at(e, "title")), maybe(str_at(e, "status")), t(call)])
         } else if kind == "approval.needed" {
-            let call = str_at(e.copy(), "call") ?? String()
-            let run = str_at(e.copy(), "run") ?? String()
+            let call = str_at(e, "call") ?? String()
+            let run = str_at(e, "run") ?? String()
             _ = try self.db.execute(String("INSERT OR REPLACE INTO approvals (call, run, json) VALUES (?, ?, ?)"), [t(call), t(run), t("{e}")])
         } else if kind == "approval.answered" {
             _ = try self.db.execute(String("DELETE FROM approvals WHERE call = ?"), [t(str_at(e, "call") ?? String())])
@@ -224,10 +278,10 @@ impl Cache {
             _ = try self.db.execute(String("DELETE FROM agents WHERE id = ?"), [t(str_at(e, "agent") ?? String())])
         } else if kind == "device.added" {
             let d = at(e, "device")
-            _ = try self.db.execute(String("INSERT OR REPLACE INTO devices (id, json) VALUES (?, ?)"), [t(str_at(d.copy(), "id") ?? String()), t("{d}")])
+            _ = try self.db.execute(String("INSERT OR REPLACE INTO devices (id, json) VALUES (?, ?)"), [t(str_at(d, "id") ?? String()), t("{d}")])
         } else if kind == "device.updated" {
             let d = at(e, "device")
-            let id = str_at(d.copy(), "id") ?? String()
+            let id = str_at(d, "id") ?? String()
             if let old = try self.one("SELECT json FROM devices WHERE id = ?", id.copy()) {
                 _ = try self.db.execute(String("UPDATE devices SET json = ? WHERE id = ?"), [t("{merge(old, d)}"), t(id)])
             }
@@ -280,19 +334,19 @@ impl Cache {
     }
 
     fn put_agent(self, a: Json) ! Error {
-        _ = try self.db.execute(String("INSERT INTO agents (id, json) VALUES (?, ?) ON CONFLICT (id) DO UPDATE SET json = excluded.json"), [t(str_at(a.copy(), "id") ?? String()), t("{a}")])
+        _ = try self.db.execute(String("INSERT INTO agents (id, json) VALUES (?, ?) ON CONFLICT (id) DO UPDATE SET json = excluded.json"), [t(str_at(a, "id") ?? String()), t("{a}")])
     }
 
     fn put_conversation(self, c: Json) ! Error {
-        let id = str_at(c.copy(), "id") ?? String()
-        let when = int_at(c.copy(), "at") ?? 0
-        _ = try self.db.execute(String("INSERT INTO conversations (id, json, last) VALUES (?, ?, ?) ON CONFLICT (id) DO UPDATE SET json = excluded.json"), [t(id), t("{c}"), Value.Int(when)])
+        let id = str_at(c, "id") ?? String()
+        let when = int_at(c, "at") ?? 0
+        _ = try self.db.execute(String("INSERT INTO conversations (id, json, last, agent, chat) VALUES (?, ?, ?, ?, ?) ON CONFLICT (id) DO UPDATE SET json = excluded.json, agent = excluded.agent, chat = excluded.chat"), [t(id), t("{c}"), Value.Int(when), maybe(str_at(c, "agent")), Value.Int(chat_of(c))])
     }
 
     fn put_message(self, m: Json) ! Error {
-        let id = str_at(m.copy(), "id") ?? String()
-        let conversation = str_at(m.copy(), "conversation") ?? String()
-        let when = int_at(m.copy(), "at") ?? 0
+        let id = str_at(m, "id") ?? String()
+        let conversation = str_at(m, "conversation") ?? String()
+        let when = int_at(m, "at") ?? 0
         _ = try self.db.execute(String("INSERT OR REPLACE INTO messages (id, conversation, at, json) VALUES (?, ?, ?, ?)"), [t(id), t(conversation.copy()), Value.Int(when), t("{m}")])
         _ = try self.db.execute(String("UPDATE conversations SET last = max(last, ?) WHERE id = ?"), [Value.Int(when), t(conversation)])
     }
@@ -300,13 +354,13 @@ impl Cache {
     fn one(self, sql: str, id: String) -> Json? ! Error {
         let row = try self.db.query_one(String(sql), [t(id.copy())])
         let r = row else return none
-        return some(try parse(text(r[0].copy())))
+        return some(try parse(text(r[0])))
     }
 
     fn texts(self, sql: str, params: List<Value>) -> List<String> ! Error {
         var out = List<String>()
         for r in try self.db.query(String(sql), params) {
-            out.push(text(r[0].copy()))
+            out.push(text(r[0]))
         }
         return out
     }
@@ -398,8 +452,8 @@ impl Cache {
 
     /// Keeps a send until the instance acks it.
     pub fn queue(self, frame: Json) ! Error {
-        let cid = str_at(frame.copy(), "cid") ?? String()
-        let conversation = str_at(frame.copy(), "conversation") ?? String()
+        let cid = str_at(frame, "cid") ?? String()
+        let conversation = str_at(frame, "conversation") ?? String()
         _ = try self.db.execute(String("INSERT OR REPLACE INTO outbox (cid, conversation, json, at) VALUES (?, ?, ?, ?)"), [t(cid), t(conversation), t("{frame}"), Value.Int(now())])
     }
 
@@ -415,9 +469,9 @@ impl Cache {
     /// The newest conversation with `agent`: the one the app shows as that agent's chat.
     /// A task's conversation is the task's, not the chat.
     pub fn conversation_for(self, agent: String) -> String? ! Error {
-        let row = try self.db.query_one(String("SELECT id FROM conversations WHERE json_extract(json, '$.agent') = ? AND json_extract(json, '$.task') IS NULL AND json_extract(json, '$.side') IS NULL AND json_extract(json, '$.branch_of') IS NULL AND json_extract(json, '$.routine') IS NULL ORDER BY last DESC, rowid DESC LIMIT 1"), [t(agent.copy())])
+        let row = try self.db.query_one(String("SELECT id FROM conversations WHERE agent = ? AND chat = 1 ORDER BY last DESC, rowid DESC LIMIT 1"), [t(agent.copy())])
         let r = row else return none
-        return some(text(r[0].copy()))
+        return some(text(r[0]))
     }
 
     /// The send waiting with the client id `cid`.
@@ -571,4 +625,35 @@ fn tools_come_for_the_calls_and_runs_asked() ! Error {
         panic("not an array")
     }
     assert(try c.tools_text(String("null"), String("[]")) == "[]")
+}
+
+@test
+fn a_cache_from_before_keeps_its_calls_and_chats() ! Error {
+    // The layout before tools kept only their title and status, and before each
+    // conversation had its agent as a column.
+    let dir = try fs.temp_dir()
+    let path = "{dir}/cache.db"
+    let old = try Database.open(path.copy())
+    try old.execute_script(String(#"
+CREATE TABLE conversations (id TEXT PRIMARY KEY, json TEXT NOT NULL, last INTEGER NOT NULL);
+CREATE TABLE tools (call TEXT PRIMARY KEY, run TEXT NOT NULL, json TEXT NOT NULL);
+INSERT INTO conversations VALUES ('c_chat', '{"id":"c_chat","agent":"a_1","at":10}', 10);
+INSERT INTO conversations VALUES ('c_task', '{"id":"c_task","agent":"a_1","task":"t_1","at":20}', 20);
+INSERT INTO tools VALUES ('tc_1', 'r_1', '{"call":"tc_1","run":"r_1","title":"ls","status":"done","input":{"command":"ls"}}');
+"#))
+    try old.close()
+    {
+        let c = try Cache.open(path.copy())
+        assert(try c.conversation_for(String("a_1")) == some(String("c_chat")))
+        assert(try c.tools_text(String(#"["tc_1"]"#), String("[]")) == #"[{"call":"tc_1","run":"r_1","title":"ls","status":"done"}]"#)
+        // A tool that updates sets only what it says.
+        _ = try c.apply(ev(1, "tool.started", Obj.new().s("call", String("tc_2")).s("run", String("r_1")).s("title", String("grep")).done()))
+        _ = try c.apply(ev(2, "tool.finished", Obj.new().s("call", String("tc_2")).s("status", String("failed")).done()))
+        assert(try c.tools_text(String(#"["tc_2"]"#), String("[]")) == #"[{"call":"tc_2","run":"r_1","title":"grep","status":"failed"}]"#)
+    }
+    // Windows keeps the folder while the checkpoint thread still has the file open.
+    match fs.remove_dir_all(dir) {
+        ok => {},
+        err(_) => {},
+    }
 }

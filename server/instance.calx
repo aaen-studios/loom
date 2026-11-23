@@ -59,7 +59,7 @@ import server.egress
 import server.sandbox
 import server.stage
 import server.update
-import server.checkpoint
+import shared.checkpoint
 import server.searcher
 import server.store.{AcpAgent, Device, Store, User, now, secret_key, site_of}
 import shared.tools
@@ -319,7 +319,7 @@ pub struct Instance {
     boxes: sandbox.Sandboxes?    // where the agents of everyone but the owner run (server/sandbox.calx)
     gate: Thread?    // the sandboxes' way to loom's tools (server/gate.calx)
     stop_gate: Sender<bool>?
-    checkpointer: Thread?    // checkpoints the database off the loop (server/checkpoint.calx)
+    checkpointer: Thread?    // checkpoints the database off the loop (shared/checkpoint.calx)
     stop_checkpoints: Sender<bool>
     search_to: Sender<searcher.Job>    // searches, run off the loop (server/searcher.calx)
     search_done: Receiver<searcher.Done>

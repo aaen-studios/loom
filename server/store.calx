@@ -352,7 +352,7 @@ impl Store {
     // Opens (or makes) the database at `path`. `hasher` hashes passwords;
     // tests pass a cheap one.
     // This connection stops checkpointing by itself: the instance's loop has
-    // server/checkpoint.calx do it on another thread.
+    // shared/checkpoint.calx do it on another thread.
     pub fn checkpoint_elsewhere(self) ! Error {
         try self.db.execute_script(String("PRAGMA wal_autocheckpoint = 0;"))
     }
