@@ -325,6 +325,10 @@ fn core_stop(core: *u8) {
     if let to = mut c.value.to_core {
         to.send(String(#"{"t":"core.stop"}"#))
     }
+    // Woken as each send wakes it, the loop takes the stop at once, not at its next timer,
+    // which kept quitting waiting up to a minute.
+    while let w = c.value.wakers.next() { c.value.waker = some(w) }
+    if let w = c.value.waker { w.wake() }
     c.value.to_core = none
     if let t = c.value.conn.take() {
         t.join()
