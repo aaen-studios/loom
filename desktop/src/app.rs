@@ -421,11 +421,17 @@ pub struct Loom {
     page_image: Option<(u64, Arc<RenderImage>)>,
     /// Frames drawn before, let go of at the next render.
     old_pages: Vec<Arc<RenderImage>>,
+    /// Each attached picture's preview for the composer, small, by the attachment's id:
+    /// none while it's made. One that couldn't be made isn't here, and the picture
+    /// itself is shown.
+    previews: HashMap<String, Option<Arc<RenderImage>>>,
     page_decoding: bool,
     /// The newest frame a decode was started for.
     page_tried: u64,
     /// What the composer says while it's empty, as last set.
     composer_placeholder: String,
+    /// Counts the search box's changes, so only the last one, once typing pauses, asks.
+    search_gen: u64,
     /// The chat's list, as a view of its own (`ChatList`).
     chat_view: Option<Entity<ChatList>>,
     /// Where the page is drawn, for turning a click on it into the page's own pixels.
@@ -874,11 +880,26 @@ ACTA_KEY=secret:ACTA_KEY",
             window,
             |this: &mut Loom, state, event: &InputEvent, _, cx| {
                 if let InputEvent::Change = event {
+                    // It asks once typing pauses, not at each letter: the instance ranks
+                    // every match of a short prefix, which takes it tens of milliseconds.
                     let query = state.read(cx).value().to_string();
-                    if let Some(frame) = this.model.search(&query) {
-                        this.send(frame);
-                    }
-                    cx.notify();
+                    this.search_gen += 1;
+                    let gen = this.search_gen;
+                    cx.spawn(async move |this, cx| {
+                        cx.background_executor()
+                            .timer(Duration::from_millis(150))
+                            .await;
+                        let _ = this.update(cx, |loom, cx| {
+                            if loom.search_gen != gen {
+                                return;
+                            }
+                            if let Some(frame) = loom.model.search(&query) {
+                                loom.send(frame);
+                            }
+                            cx.notify();
+                        });
+                    })
+                    .detach();
                 }
             },
         )
@@ -1111,9 +1132,11 @@ ACTA_KEY=secret:ACTA_KEY",
             keys: cx.focus_handle(),
             page_image: None,
             old_pages: Vec::new(),
+            previews: HashMap::new(),
             page_decoding: false,
             page_tried: 0,
             composer_placeholder: String::new(),
+            search_gen: 0,
             chat_view: None,
             page_bounds: Rc::new(std::cell::Cell::new(None)),
             browser_docked: false,
@@ -2045,6 +2068,10 @@ ACTA_KEY=secret:ACTA_KEY",
             if path.is_file() {
                 let frame = self.model.attach(&path.to_string_lossy());
                 self.send(frame);
+                if let Some(a) = self.model.attachments.last().filter(|a| a.image()) {
+                    let (id, path) = (a.id.clone(), a.path.clone());
+                    self.make_preview(id, path, cx);
+                }
                 // Its name goes in the words where the cursor is, as a link to it once
                 // it's sent (`model::link_files`).
                 if let Some(a) = self.model.attachments.last() {
@@ -2054,6 +2081,34 @@ ACTA_KEY=secret:ACTA_KEY",
             }
         }
         cx.notify();
+    }
+
+    /// A small copy of an attached picture, for its chip in the composer: a photo drawn
+    /// as itself there took about 48 MB of memory, and as much on the GPU, at 64 pixels.
+    fn make_preview(&mut self, id: String, path: String, cx: &mut Context<Self>) {
+        self.previews.insert(id.clone(), None);
+        let task = cx.background_executor().spawn(async move {
+            let mut small = image::open(&path).ok()?.thumbnail(128, 128).to_rgba8();
+            for px in small.pixels_mut() {
+                px.0.swap(0, 2);
+            }
+            Some(Arc::new(RenderImage::new(vec![image::Frame::new(small)])))
+        });
+        cx.spawn(async move |this, cx| {
+            let made = task.await;
+            let _ = this.update(cx, |loom, cx| {
+                match made {
+                    Some(r) if loom.previews.contains_key(&id) => {
+                        loom.previews.insert(id, Some(r));
+                    }
+                    _ => {
+                        loom.previews.remove(&id);
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     pub fn unattach(&mut self, id: &str, cx: &mut Context<Self>) {
@@ -6766,6 +6821,18 @@ ACTA_KEY=secret:ACTA_KEY",
             self.composer
                 .update(cx, |s, cx| s.set_placeholder(placeholder, window, cx));
         }
+        // Previews of pictures that aren't attached any more leave the GPU.
+        let gone: Vec<String> = self
+            .previews
+            .keys()
+            .filter(|k| !self.model.attachments.iter().any(|a| &a.id == *k))
+            .cloned()
+            .collect();
+        for k in gone {
+            if let Some(Some(r)) = self.previews.remove(&k) {
+                let _ = window.drop_image(r);
+            }
+        }
         let mut attached = div().flex().flex_wrap().gap(px(space::S));
         for a in self.model.attachments.clone() {
             let id = a.id.clone();
@@ -6788,12 +6855,18 @@ ACTA_KEY=secret:ACTA_KEY",
                         .border_color(p.line)
                         .bg(p.bubble)
                         .when(going_up, |d| d.opacity(0.6))
-                        .child(
-                            img(std::path::PathBuf::from(&a.path))
+                        .child(match self.previews.get(&a.id) {
+                            Some(Some(small)) => img(ImageSource::Render(small.clone()))
+                                .size_full()
+                                .object_fit(ObjectFit::Cover)
+                                .into_any_element(),
+                            Some(None) => div().into_any_element(),
+                            None => img(std::path::PathBuf::from(&a.path))
                                 .image_cache(&kept_images(cx).0)
                                 .size_full()
-                                .object_fit(ObjectFit::Cover),
-                        )
+                                .object_fit(ObjectFit::Cover)
+                                .into_any_element(),
+                        })
                         .child(
                             div()
                                 .id(SharedString::from(format!("unattach-{}", a.id)))
