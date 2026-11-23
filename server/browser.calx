@@ -28,7 +28,7 @@ import std.http.{Header, get}
 import std.http.websocket.{Message, WebSocket, connect}
 import std.json.{Json, parse}
 import std.net.{Waker as LoopWaker}
-import std.process.{Child, Command, Stdio, which}
+import std.process.{Child, Command, ProcessError, Stdio, which}
 import std.thread.{Task, sleep}
 import shared.obj.{Obj, at, bool_at, int_at, merge, str_at}
 import shared.protocol
@@ -195,6 +195,9 @@ impl Task for Worker {
                 },
                 some(In.Stop) => {
                     w.close()
+                    // One stopped before it ever started still waits for the browser
+                    // before it, so an instance that stops leaves neither running.
+                    if let t = w.before.take() { t.join() }
                     w.back.send(Back.Stopped(w.n))
                     return
                 },
@@ -838,7 +841,15 @@ impl Worker {
         var command = Command.new(exe).args(args).stdin(Stdio.Null).stdout(Stdio.Pipe).stderr(Stdio.Stdout).own_group()
         // With the fonts the instance fetched for itself, as well as the system's.
         if let conf = chrome.font_config(w.data.copy()) { command = command.env(String("FONTCONFIG_FILE"), conf) }
-        let child = try command.spawn()
+        // It ends with the instance however the instance ends, killed or crashed too,
+        // and every process it started with it. The instance in the desktop app is in
+        // a library, which can't start one so on Linux and macOS: there it ends when
+        // the instance stops it, and one a crashed app left once it starts again.
+        let child = match command.copy().ends_with_this().spawn() {
+            ok(c) => c,
+            err(ProcessError.BadArgument(_)) => try command.spawn(),
+            err(e) => fail "{e}",
+        }
         // The browser writes the port it took, and its own address, once it listens.
         var said = List<String>()
         let until = now() + LAUNCH_MS

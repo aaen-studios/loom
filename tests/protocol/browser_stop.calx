@@ -2,13 +2,11 @@ module tests.protocol.browser_stop
 
 // An instance's browsers end with it (PLAN.md, "The agent's browser"): with
 // agents' browsers open, an instance asked to stop ends them, and every
-// process they started, before it ends itself. One that's killed takes them
-// with it on Windows, and on Linux, where they run on, one started again on
-// the same data stops them. Each is looked for by its profile, in the
-// instance's data, on the command lines of what runs. The instance is the
-// built program, asked to stop as a service is: under calx run on Linux, the
-// signal ends calx run, which kills the program before it can (CLX-445).
-// Without Chrome, Edge or Chromium on the computer, it says it was skipped.
+// process they started, before it ends itself, as the built program and under
+// calx run, as the tests' kit runs it. One that's killed takes them with it.
+// Each is looked for by its profile, in the instance's data, on the command
+// lines of what runs. Without Chrome, Edge or Chromium on the computer, it says
+// it was skipped.
 //
 //     calx tests/protocol/browser_stop.calx
 import std.env
@@ -19,7 +17,7 @@ import shared.obj.{Obj, at, str_at}
 import server.browser
 import server.store.{now}
 import shared.client.{Session, reply_text}
-import tests.kit.{Instance, calx, check}
+import tests.kit.{Instance, calx, check, end, loom}
 
 fn sh(program: String, args: List<String>) -> String ! Error {
     let out = try Command.new(program.copy()).args(args.copy()).output()
@@ -104,7 +102,7 @@ fn run(root: String, server: mut Child?) ! Error {
     println("building loom…")
     _ = try sh(calx(), [String("build"), String("server/main.calx"), String("-o"), exe.copy()])
     let agent = try fs.absolute(String("tests/fake_agent/main.calx"))
-    _ = try sh(exe.copy(), [String("acp"), String("add"), String("fake"), calx(), agent, String("--data"), data.copy(), String("--test-fast-hashes")])
+    _ = try sh(exe.copy(), [String("acp"), String("add"), String("fake"), calx(), agent.copy(), String("--data"), data.copy(), String("--test-fast-hashes")])
 
     // --- Asked to stop ---
     let cmd = Command.new(exe.copy()).args([String("serve"), String("--data"), data.copy(), String("--port"), String("0"), String("--allow-root"), String("--test-fast-hashes")]).env_remove(String("INVOCATION_ID")).env_remove(String("LOOM_SERVICE")).own_group()
@@ -123,7 +121,7 @@ fn run(root: String, server: mut Child?) ! Error {
     let left = try until_none(data.copy(), 5000)
     try see(left.len() == 0, "and no browser of its is left, nor anything one started", left)
 
-    // --- Killed, and started again ---
+    // --- Killed ---
     let (killed, base) = try serve(exe.copy(), data.copy())
     server = some(killed)
     let c = try open_one(base, token.copy(), 3)
@@ -134,18 +132,29 @@ fn run(root: String, server: mut Child?) ! Error {
         _ = s.wait_timeout(10000)
     }
     c.close()
-    // On Windows the job every program it started is in ends them with it. On
-    // Linux a browser in a group of its own runs on, till the next start.
-    if env.os() == "windows" {
-        let orphans = try until_none(data.copy(), 5000)
-        try see(orphans.len() == 0, "a killed instance takes its browsers with it", orphans)
-    }
-    let (again, _) = try serve(exe.copy(), data.copy())
-    server = some(again)
-    let after = try until_none(data.copy(), 5000)
-    try see(after.len() == 0, "an instance started again on the same data stops any browser a killed one left", after)
-    if let s = server { s.stop() }
-    if let s = server { _ = s.wait_timeout(30000) }
+    let orphans = try until_none(data.copy(), 5000)
+    try see(orphans.len() == 0, "a killed instance takes its browsers with it, and what they started", orphans)
+    // The rest of its group, its agents among it.
+    if let s = server { s.kill_tree() }
+    server = none
+
+    // --- Under calx run, asked to stop ---
+    let kit_data = "{root}/kit"
+    try fs.make_dir_all(kit_data.copy())
+    let added = try loom(kit_data.copy(), [String("acp"), String("add"), String("fake"), calx(), agent]).output()
+    if not added.status.success() { fail "loom acp add failed: {added.error_text()}" }
+    let run_cmd = loom(kit_data.copy(), [String("serve"), String("--port"), String("0"), String("--allow-root")]).env_remove(String("INVOCATION_ID")).env_remove(String("LOOM_SERVICE"))
+    let kit = try Instance.launch(kit_data.copy(), run_cmd)
+    let (kit_base, kit_token) = (kit.base.copy(), kit.token.copy())
+    server = some(kit.server)
+    let d = try open_one(kit_base, kit_token, 4)
+    try see((try browsers(kit_data.copy())).len() > 0, "under calx run, its agent's browser runs", List<String>())
+    let asked = if let s = server { end(s) } else { false }
+    server = none
+    try check(asked, "the instance under calx run asked to stop ends")
+    d.close()
+    let still = try until_none(kit_data.copy(), 5000)
+    try see(still.len() == 0, "and no browser of its is left, nor anything one started", still)
 }
 
 // check, saying what still runs when it fails.

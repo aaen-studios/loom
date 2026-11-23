@@ -14,6 +14,7 @@ import shared.client.{json_of, post_json}
 import shared.obj.{Obj, str_at}
 
 const WAIT: u64 = 120000    // the first start builds the server and the agent
+const STOP_MS: u64 = 30000    // how long an instance asked to stop may take to
 
 pub fn calx() -> String {
     return env.variable(String("CALX")) ?? String("calx")
@@ -56,21 +57,21 @@ impl Instance {
     /// An instance `cmd` serves on `data`, a `loom serve` the test put together, with its
     /// owner set up.
     pub fn launch(data: own String, cmd: own Command) -> Instance ! Error {
-        let server = try cmd.stdout(Stdio.Pipe).spawn()
+        let server = try cmd.own_group().stdout(Stdio.Pipe).spawn()
         let serving = server.wait_for_line(String("loom: serving"), WAIT) else {
-            server.kill()
+            server.kill_tree()
             fail "the server didn't start"
         }
         let address = serving[serving.find("http://") ?? 0..].trim().copy()
         let base = if address.ends_with("/") { address[7..address.len() - 1].copy() } else { address[7..].copy() }
         let code_line = server.wait_for_line(String("setup code:"), 10000) else {
-            server.kill()
+            server.kill_tree()
             fail "the server didn't print a setup code"
         }
         let code = code_line[12..].trim().copy()
         let (status, owner) = try post_json(base.copy(), "/api/setup", Obj.new().s("code", code).s("username", String("elliot")).s("password", String("correct horse")).j("device", device("Desk PC")).done())
         if status != 200 {
-            server.kill()
+            server.kill_tree()
             fail "setup failed: {owner}"
         }
         return Instance { server: server, data: data, base: base, token: str_at(owner, "token") ?? String() }
@@ -91,23 +92,24 @@ impl Instance {
         if not added.status.success() { fail "loom acp add failed: {added.error_text()}" }
     }
 
-    /// Stops the instance and starts it again on the same data, as after a
-    /// restart. The token still works; the address is a new one.
+    /// Kills the instance, as a crash would, and starts it again on the same data.
+    /// The token still works; the address is a new one.
     pub fn restart(own self) -> Instance ! Error {
         return try self.restart_with(List<String>(), 0)
     }
 
     /// The same, with `extra` options for `loom serve`, after `off_ms` stopped.
     pub fn restart_with(own self, extra: List<String>, off_ms: i64) -> Instance ! Error {
+        // With all it started, its agents among it, which a killed instance leaves.
         var old = self.server
-        old.kill()
+        old.kill_tree()
         _ = old.wait()
         if off_ms > 0 { unsafe { sleep(u64.wrap(off_ms) * 1000000) } }
         var args: List<String> = [String("serve"), String("--port"), String("0"), String("--allow-root")]
         args.extend(extra)
-        let server = try loom(self.data.copy(), args).stdout(Stdio.Pipe).spawn()
+        let server = try loom(self.data.copy(), args).own_group().stdout(Stdio.Pipe).spawn()
         let serving = server.wait_for_line(String("loom: serving"), WAIT) else {
-            server.kill()
+            server.kill_tree()
             fail "the server didn't start again"
         }
         let address = serving[serving.find("http://") ?? 0..].trim().copy()
@@ -118,11 +120,21 @@ impl Instance {
     /// Stops the instance, and removes the folder the kit made for its data, with
     /// everything in it. A folder anywhere else is left as it is.
     pub fn stop(own self) {
-        var s = self.server
-        s.kill()
-        _ = s.wait()
+        _ = end(self.server)
         remove_scratch(self.data)
     }
+}
+
+/// Asks `server`, an instance started in a group of its own, to stop, as a
+/// service is, so it closes its browsers and agents first, and waits for it. One
+/// that hasn't ended after `STOP_MS` is killed, with all it started. Whether it
+/// ended when asked.
+pub fn end(server: Child) -> bool {
+    server.stop()
+    if server.wait_timeout(STOP_MS) != none { return true }
+    server.kill_tree()
+    _ = server.wait_timeout(10000)
+    return false
 }
 
 /// Removes the folder of the system's temporary folder that `data` is in, when it's one
