@@ -62,6 +62,18 @@ pub fn outline_of<'a>(shape: &str, drawing: &'a [(f32, f32)]) -> Option<&'a [(f3
     Some(thread_shape::ALL[i])
 }
 
+/// Pinned agents first; within each, where the person dragged them, then the ones not
+/// placed yet, as they were made. Nothing else moves an agent.
+fn sort_agents(agents: &mut [Agent]) {
+    agents.sort_by_key(|a| {
+        (
+            a.pinned.is_none(),
+            a.order.unwrap_or(i64::MAX),
+            a.pinned.unwrap_or(0),
+        )
+    });
+}
+
 /// A drawing as the instance keeps it: `[[x, y], ...]`.
 fn drawing_of(a: &Value) -> Vec<(f32, f32)> {
     a.get("drawing")
@@ -111,6 +123,9 @@ pub struct Agent {
     pub default_mode: String,
     /// When it was pinned to the top of the list, if it is.
     pub pinned: Option<i64>,
+    /// Its place in the list, where the person dragged it; None for one that hasn't
+    /// been placed, which goes after those that have, in the order they were made.
+    pub order: Option<i64>,
     /// Whether it reaches tools through scripts, search_tools and run_code (Code
     /// Mode, the default), rather than each tool plainly.
     pub code_mode: bool,
@@ -4047,6 +4062,7 @@ impl Model {
                         options: config_options(a),
                         config: config_values(a),
                         pinned: a.get("pinned").and_then(Value::as_i64),
+                        order: a.get("order").and_then(Value::as_i64),
                         code_mode: a.get("code_mode").and_then(Value::as_bool).unwrap_or(true),
                         isolated: a.get("isolated").and_then(Value::as_bool).unwrap_or(false),
                         network: a.get("network").and_then(Value::as_array).map(|hs| {
@@ -4057,9 +4073,7 @@ impl Model {
                         }),
                     })
                     .collect();
-                // Pinned agents first, in the order they were pinned; the rest as they were.
-                self.agents
-                    .sort_by_key(|a| (a.pinned.is_none(), a.pinned.unwrap_or(0)));
+                sort_agents(&mut self.agents);
                 if let Some(made) = self.made_agent.take() {
                     if self.agent(&made).is_some() {
                         self.select(Some(made));
@@ -5393,6 +5407,25 @@ impl Model {
             return "An agent".into();
         }
         "You".into()
+    }
+
+    /// Puts the agent `id`, dragged in the sidebar, in the place of `onto`, and gives
+    /// the instance the new order. Pinned agents stay above the rest.
+    pub fn move_agent(&mut self, id: &str, onto: &str) -> Option<Value> {
+        let from = self.agents.iter().position(|a| a.id == id)?;
+        let to = self.agents.iter().position(|a| a.id == onto)?;
+        if from == to {
+            return None;
+        }
+        let moved = self.agents.remove(from);
+        self.agents.insert(to, moved);
+        for (k, a) in self.agents.iter_mut().enumerate() {
+            a.order = Some(k as i64);
+        }
+        sort_agents(&mut self.agents);
+        let cmd = self.id("app.order");
+        let ids: Vec<&str> = self.agents.iter().map(|a| a.id.as_str()).collect();
+        Some(json!({"t": "cmd", "id": cmd, "name": "agent.order", "args": {"agents": ids}}))
     }
 
     /// Pins the open agent to the top of the list, or takes its pin off.
@@ -7284,6 +7317,25 @@ mod tests {
         let f = m.pin_agent(true).unwrap();
         assert_eq!(f["name"], "agent.pin");
         assert_eq!(f["args"]["agent"], "a_1");
+    }
+
+    #[test]
+    fn agents_stay_where_they_were_dragged() {
+        let mut m = Model::new();
+        m.take(&json!({"t": "core.data", "what": "agents", "items": [
+            {"id": "a_1", "name": "One", "order": 2},
+            {"id": "a_2", "name": "Two", "order": 0},
+            {"id": "a_3", "name": "Three"},
+            {"id": "a_4", "name": "Four", "order": 1}
+        ]}));
+        let order = |m: &Model| m.agents.iter().map(|a| a.id.clone()).collect::<Vec<_>>();
+        assert_eq!(order(&m), ["a_2", "a_4", "a_1", "a_3"]);
+        // The last one dragged onto the first takes its place.
+        let f = m.move_agent("a_3", "a_2").unwrap();
+        assert_eq!(order(&m), ["a_3", "a_2", "a_4", "a_1"]);
+        assert_eq!(f["name"], "agent.order");
+        assert_eq!(f["args"]["agents"], json!(["a_3", "a_2", "a_4", "a_1"]));
+        assert!(m.move_agent("a_3", "a_3").is_none());
     }
 
     #[test]

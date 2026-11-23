@@ -9097,6 +9097,27 @@ impl Instance {
             try i.event(user, "agent.updated", Obj.new().j("agent", agent.copy()).s("by", device).done())
             return Answer.Value(Obj.new().j("agent", agent).done())
         }
+        if name == "agent.order" {
+            // The order the person dragged their agents into: each keeps its
+            // place as `order`. Like a pin, where an agent sits isn't a change
+            // to it: no revision.
+            let Json.Array(ids) = at(args.copy(), "agents") else return Answer.Refused(String("bad_request"), String("agents is the agents' ids, in order."))
+            var agents = List<Json>()
+            for id in ids.copy() {
+                let Json.Str(s) = id else return Answer.Refused(String("bad_request"), String("agents is the agents' ids, in order."))
+                let old = try i.store.agent(user.copy(), s.copy()) else return Answer.Refused(String("not_found"), "There's no agent {s}.")
+                agents.push(old)
+            }
+            var placed = List<Json>()
+            for (k, old) in agents.enumerate() {
+                if int_at(old.copy(), "order") == some(i64.wrap(k)) { continue }
+                let agent = merge(old, Obj.new().i("order", i64.wrap(k)).done())
+                try i.store.put_agent_json(user.copy(), agent.copy())
+                try i.event(user.copy(), "agent.updated", Obj.new().j("agent", agent.copy()).s("by", device.copy()).done())
+                placed.push(agent)
+            }
+            return Answer.Value(Obj.new().j("agents", Json.Array(ids)).i("moved", i64.wrap(placed.len())).done())
+        }
         if name == "agent.delete" {
             let id = str_at(args, "agent") ?? String()
             if try i.store.agent(user.copy(), id.copy()) == none { return Answer.Refused(String("not_found"), "There's no agent {id}.") }

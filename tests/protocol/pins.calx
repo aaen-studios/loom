@@ -4,7 +4,8 @@ module tests.protocol.pins
 // message in its conversation, every device hears it as message.updated, the
 // message keeps when and by whom, and messages.pinned lists a conversation's
 // pins, the newest first. Unpinning takes it off. agent.pin pins an agent to
-// the top of the list, which isn't a revision of it.
+// the top of the list, and agent.order puts agents in the order the person
+// dragged them into; neither is a revision of it.
 //
 //     calx tests/protocol/pins.calx
 import std.json.{Json}
@@ -88,6 +89,15 @@ fn run(i: Instance) ! Error {
     try check(int_at(at(at(renamed, "value"), "agent"), "pinned") == int_at(kept, "pinned"), "it stays pinned when the agent changes")
     let unpinned = try app.cmd("q_13", "agent.pin", Obj.new().s("agent", main_id).b("pinned", false).done())
     try check(int_at(at(at(unpinned, "value"), "agent"), "pinned") == none, "and unpinning takes it off")
+
+    // --- The order the person drags their agents into ---
+    let other = str_at(at(at(try app.cmd("q_14", "agent.create", Obj.new().s("name", String("Other")).s("acp_agent", String("fake")).s("instructions", String("You are a test.")).done()), "value"), "agent"), "id") ?? String()
+    let ordered = try app.cmd("q_15", "agent.order", Obj.new().j("agents", Json.Array([Json.Str(other.copy()), Json.Str(main_id.copy())])).done())
+    let main_now = at(last(app, "agent.updated"), "agent")
+    try check(int_at(at(ordered, "value"), "moved") == some(2) and str_at(main_now.copy(), "id") == some(main_id.copy()) and int_at(main_now.copy(), "order") == some(1) and int_at(main_now, "revision") == some(2), "agent.order keeps each agent's place, tells every device, and isn't a revision")
+    let again = try app.cmd("q_16", "agent.order", Obj.new().j("agents", Json.Array([Json.Str(other.copy()), Json.Str(main_id.copy())])).done())
+    let unknown = try app.cmd("q_17", "agent.order", Obj.new().j("agents", Json.Array([Json.Str(String("a_nothing"))])).done())
+    try check(int_at(at(again, "value"), "moved") == some(0) and str_at(at(unknown, "error"), "code") == some(String("not_found")), "the same order moves nothing, and an agent that isn't there can't be placed")
     app.close()
 }
 

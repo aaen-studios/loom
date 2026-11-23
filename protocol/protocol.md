@@ -801,6 +801,7 @@ Version 1's commands:
 | `agent.summary` | `agent` | What its settings panel counts: `memories` (its own notes), `skills` (the person's, which every agent has), `tables` (the shared tables it owns), `files` and `bytes` (in its folder, but for the skills loom writes there; 20,000 files at most), `routines`, and `tokens_today` and `tokens_month` (what its runs used, from the start of the day and month in UTC) |
 | `agent.rollback` | `agent`, `revision` | `agent`: a new revision with that one's name, ACP agent, instructions, folder, colour and shape. The permission mode stays as it is |
 | `agent.pin` | `agent`, `pinned`? (`false` takes the pin off) | `agent`, with `pinned`: when it was pinned. Pinned agents go at the top of the list, in that order. Not a revision; `agent.updated` tells every device |
+| `agent.order` | `agents` (the agents' ids, in the order the person dragged them into) | `agents`, and `moved`: how many changed place. Each keeps its place as `order`, and the apps list agents by it, pinned ones first; one with no `order` yet comes after, in the order it was made. Nothing else moves an agent in the list. Not a revision; `agent.updated` tells every device of each that moved. `not_found` for an agent that isn't there |
 | `agent.delete` | `agent` | —. A sandbox of its own, for an agent closed to the network, goes with it, and its egress |
 | `device.rename` | `device`, `name` | — |
 | `device.revoke` | `device` | — |
