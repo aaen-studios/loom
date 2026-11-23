@@ -1679,6 +1679,9 @@ impl Instance {
                         ok(none) => {},
                         err(e) => {
                             eprintln("loom: {req.method} {req.path}: {e}")
+                            // Requests aren't held: one that failed part way leaves no
+                            // transaction open to keep the write lock from a `loom` command.
+                            i.store.abandon()
                             i.server.respond(req, http_error(500, "internal", String("Something went wrong in the instance.")))
                         },
                     }
@@ -4169,44 +4172,16 @@ impl Instance {
                     already += 1
                 }
                 conversations.insert(source_id, conversation.copy())
-                var got = List<Json>()
-                try i.store.begin()
-                if let Json.Array(ms) = at(c, "messages") {
-                    for m in ms {
-                        let message_source = str_at(m.copy(), "id") ?? String()
-                        if try i.store.imported(user.copy(), from.copy(), "message", message_source.copy()) != none { continue }
-                        var blocks = List<Json>()
-                        let words = str_at(m.copy(), "text") ?? String()
-                        if words.trim().len() > 0 { blocks.push(Obj.new().s("kind", String("text")).s("text", words).done()) }
-                        if let Json.Array(fs_list) = at(m.copy(), "files") {
-                            for f in fs_list {
-                                match try i.import_file(user.copy(), f) {
-                                    some(block) => {
-                                        blocks.push(block)
-                                        tally(mut came, "files")
-                                    },
-                                    none => missing_files += 1,
-                                }
-                            }
-                        }
-                        if blocks.len() == 0 { continue }
-                        let id = try i.store.new_id("msg")
-                        let role = str_at(m.copy(), "role") ?? String("agent")
-                        var message = Obj.new().s("id", id.copy()).s("conversation", conversation.copy()).s("role", role.copy())
-                        message = if role == "person" { message.s("from", by.copy()) } else { message.s("agent", agent.copy()) }
-                        message = message.i("at", int_at(m.copy(), "at") ?? now()).j("blocks", Json.Array(blocks))
-                        if let p = int_at(m, "pinned") {
-                            message = message.j("pinned", Obj.new().i("at", p).s("by", by.copy()).done())
-                            tally(mut came, "pins")
-                        }
-                        let done = message.done()
-                        try i.store.put_message(user.copy(), done.copy())
-                        try i.store.mark_imported(user.copy(), from.copy(), "message", message_source, id)
-                        got.push(done)
-                        tally(mut came, "messages")
-                    }
+                let began = try i.store.begin()
+                let (got, missing) = match i.bring_messages(user.copy(), from.copy(), by.copy(), agent, conversation.copy(), at(c, "messages"), mut came) {
+                    ok(brought) => brought,
+                    err(e) => {
+                        i.store.rollback(began)
+                        fail e
+                    },
                 }
-                try i.store.commit()
+                try i.store.commit(began)
+                missing_files += missing
                 newest.insert(conversation, got)
             }
         }
@@ -4280,28 +4255,15 @@ impl Instance {
                     already += 1
                 }
                 let owner = (try i.store.shared_table(user.copy(), table.copy())).map(|x| str_at(x, "owner") ?? String()) ?? String()
-                var full = false
-                var big: i64 = 0
-                try i.store.begin()
-                if let Json.Array(rs) = at(t, "rows") {
-                    for r in rs {
-                        let key = "{table}:{str_at(r.copy(), "id") ?? String()}"
-                        if try i.store.imported(user.copy(), from.copy(), "row", key.copy()) != none { continue }
-                        let data = "{at(r, "data")}"
-                        if data.len() > tables.ROW_MOST {
-                            big += 1
-                            continue
-                        }
-                        if try i.store.shared_row_count(user.copy()) >= tables.ROWS_MOST {
-                            full = true
-                            break
-                        }
-                        let id = try i.store.add_shared_row(user.copy(), table.copy(), data, owner.copy())
-                        try i.store.mark_imported(user.copy(), from.copy(), "row", key, "{id}")
-                        tally(mut came, "rows")
-                    }
+                let began = try i.store.begin()
+                let (full, big) = match i.bring_rows(user.copy(), from.copy(), table.copy(), owner, at(t, "rows"), mut came) {
+                    ok(brought) => brought,
+                    err(e) => {
+                        i.store.rollback(began)
+                        fail e
+                    },
                 }
-                try i.store.commit()
+                try i.store.commit(began)
                 if big > 0 { left.push("Table {table}: {big} row{if big == 1 { " was" } else { "s were" }} over {tables.ROW_MOST} bytes, loom's most.") }
                 if full { left.push("Table {table}: you have {tables.ROWS_MOST} rows, as many as you can, so the rest stayed.") }
                 try i.event(user.copy(), "table.changed", Obj.new().s("table", table).s("by", device.copy()).done())
@@ -4401,6 +4363,70 @@ impl Instance {
             }
         }
         return some(programs[0].name.copy())
+    }
+
+    // An imported conversation's messages, `ms`, put in `conversation`, which the caller
+    // keeps in one transaction: the messages made, and how many files they named
+    // didn't come.
+    fn bring_messages(i: mut Instance, user: String, from: String, by: String, agent: String, conversation: String, ms: Json, came: mut Map<String, i64>) -> (List<Json>, i64) ! Error {
+        var got = List<Json>()
+        var missing_files: i64 = 0
+        let Json.Array(list) = ms else return (got, missing_files)
+        for m in list {
+            let message_source = str_at(m.copy(), "id") ?? String()
+            if try i.store.imported(user.copy(), from.copy(), "message", message_source.copy()) != none { continue }
+            var blocks = List<Json>()
+            let words = str_at(m.copy(), "text") ?? String()
+            if words.trim().len() > 0 { blocks.push(Obj.new().s("kind", String("text")).s("text", words).done()) }
+            if let Json.Array(fs_list) = at(m.copy(), "files") {
+                for f in fs_list {
+                    match try i.import_file(user.copy(), f) {
+                        some(block) => {
+                            blocks.push(block)
+                            tally(mut came, "files")
+                        },
+                        none => missing_files += 1,
+                    }
+                }
+            }
+            if blocks.len() == 0 { continue }
+            let id = try i.store.new_id("msg")
+            let role = str_at(m.copy(), "role") ?? String("agent")
+            var message = Obj.new().s("id", id.copy()).s("conversation", conversation.copy()).s("role", role.copy())
+            message = if role == "person" { message.s("from", by.copy()) } else { message.s("agent", agent.copy()) }
+            message = message.i("at", int_at(m.copy(), "at") ?? now()).j("blocks", Json.Array(blocks))
+            if let p = int_at(m, "pinned") {
+                message = message.j("pinned", Obj.new().i("at", p).s("by", by.copy()).done())
+                tally(mut came, "pins")
+            }
+            let done = message.done()
+            try i.store.put_message(user.copy(), done.copy())
+            try i.store.mark_imported(user.copy(), from.copy(), "message", message_source, id)
+            got.push(done)
+            tally(mut came, "messages")
+        }
+        return (got, missing_files)
+    }
+
+    // An imported table's rows, `rs`, put in `table`, which the caller keeps in one
+    // transaction: whether the person's rows ran out, and how many were too big.
+    fn bring_rows(i: Instance, user: String, from: String, table: String, owner: String, rs: Json, came: mut Map<String, i64>) -> (bool, i64) ! Error {
+        var big: i64 = 0
+        let Json.Array(list) = rs else return (false, big)
+        for r in list {
+            let key = "{table}:{str_at(r.copy(), "id") ?? String()}"
+            if try i.store.imported(user.copy(), from.copy(), "row", key.copy()) != none { continue }
+            let data = "{at(r, "data")}"
+            if data.len() > tables.ROW_MOST {
+                big += 1
+                continue
+            }
+            if try i.store.shared_row_count(user.copy()) >= tables.ROWS_MOST { return (true, big) }
+            let id = try i.store.add_shared_row(user.copy(), table.copy(), data, owner.copy())
+            try i.store.mark_imported(user.copy(), from.copy(), "row", key, "{id}")
+            tally(mut came, "rows")
+        }
+        return (false, big)
     }
 
     // A file a message named, kept as the person's and given as a file block:

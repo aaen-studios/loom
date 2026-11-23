@@ -14,6 +14,7 @@ import std.time.{Timestamp}
 import shared.obj.{Obj, at, int_at, merge, str_at}
 import shared.checkpoint
 import std.fs
+import std.thread.{Task, sleep}
 
 const SCHEMA: str = #"
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -109,6 +110,21 @@ fn chat_of(c: Json) -> i64 {
     return 1
 }
 
+/// Takes the lock that makes a core the only one using the data folder `data`: its
+/// cache, and the instance in the app. Two looms running at once, as when one was
+/// started again while the other waited in the tray, both wrote every event to the
+/// same cache. It waits up to `wait_ms` for a core that's stopping, as when the app
+/// starts another core for the folder before the old one has gone; none if the lock
+/// is still held then. `release` lets it go.
+pub fn own_folder(data: String, wait_ms: i64) -> fs.FileLock? ! Error {
+    let until = now() + wait_ms
+    loop {
+        if let l = try fs.try_lock("{data}/core.lock", List<u8>()) { return some(l) }
+        if now() >= until { return none }
+        unsafe { sleep(50000000) }
+    }
+}
+
 pub struct Cache {
     db: Database
     stop_checkpoints: Sender<bool>?    // the thread that checkpoints it, which stops when this goes
@@ -166,31 +182,62 @@ impl Cache {
         _ = try self.db.execute(String("DELETE FROM meta WHERE key = 'cursor'"))
     }
 
-    // One step of changes that land together or not at all: a savepoint, which is a
-    // transaction of its own outside `hold`, and part of the held one inside it.
-    fn step(self) ! Error {
-        _ = try self.db.execute(String("SAVEPOINT step"))
+    // One step of changes that land together or not at all: a transaction of its own
+    // outside `hold`, and a savepoint in the held one inside it. Gives whether it began
+    // the transaction, for `step_done` and `undo`.
+    //
+    // A transaction that may read before it writes takes the write lock as it begins
+    // (BEGIN IMMEDIATE). One that took it at its first write, after reading, failed at
+    // once with "database is locked" whenever another connection had written since,
+    // or was writing, whatever the busy timeout: SQLite can't wait there without
+    // risking a deadlock. Taken first, it waits for the other connection as long as
+    // the busy timeout.
+    fn step(self) -> bool ! Error {
+        if self.db.in_transaction() {
+            _ = try self.db.execute(String("SAVEPOINT step"))
+            return false
+        }
+        _ = try self.db.execute(String("BEGIN IMMEDIATE"))
+        return true
     }
 
-    fn step_done(self) ! Error {
-        _ = try self.db.execute(String("RELEASE step"))
+    fn step_done(self, began: bool) ! Error {
+        if not began {
+            _ = try self.db.execute(String("RELEASE step"))
+            return
+        }
+        match self.db.commit() {
+            ok => {},
+            err(e) => {
+                self.undo(true)
+                fail e
+            },
+        }
     }
 
-    fn undo(self) {
+    fn undo(self, began: bool) {
+        if began {
+            match self.db.rollback() {
+                ok => {},
+                err(_) => {},    // the transaction ends with the connection anyway
+            }
+            return
+        }
         match self.db.execute(String("ROLLBACK TO step")) {
             ok(_) => {},
             err(_) => {},
         }
         match self.db.execute(String("RELEASE step")) {
             ok(_) => {},
-            err(_) => {},    // the transaction ends with the connection anyway
+            err(_) => {},
         }
     }
 
     /// Keeps what's applied from here on in one transaction until `let_go`, so a burst
-    /// of events, such as catching up, is written once rather than once an event.
+    /// of events, such as catching up, is written once rather than once an event. It
+    /// takes the write lock at once, as `step` does.
     pub fn hold(self) ! Error {
-        if not self.db.in_transaction() { try self.db.begin() }
+        if not self.db.in_transaction() { _ = try self.db.execute(String("BEGIN IMMEDIATE")) }
     }
 
     /// Truncates the log once the checkpoint thread says it grew long, outside a
@@ -220,23 +267,34 @@ impl Cache {
     /// the cursor was applied already, and is skipped. Gives whether it was applied.
     pub fn apply(self, event: Json) -> bool ! Error {
         let seq = int_at(event, "seq") ?? 0
-        if seq <= try self.cursor() { return false }
-        try self.step()
+        let began = try self.step()
+        // The cursor is read in the step, so it's the one the step moves.
+        let ahead = match self.cursor() {
+            ok(c) => seq > c,
+            err(e) => {
+                self.undo(began)
+                fail e
+            },
+        }
+        if not ahead {
+            try self.step_done(began)
+            return false
+        }
         match self.change(event) {
             ok => {},
             err(e) => {
-                self.undo()
+                self.undo(began)
                 fail e
             },
         }
         match self.set_meta("cursor", "{seq}") {
             ok => {},
             err(e) => {
-                self.undo()
+                self.undo(began)
                 fail e
             },
         }
-        try self.step_done()
+        try self.step_done(began)
         return true
     }
 
@@ -302,15 +360,15 @@ impl Cache {
     /// Replaces everything with a snapshot, after a welcome with reset, and moves the
     /// cursor to its seq.
     pub fn replace(self, snapshot: Json) ! Error {
-        try self.step()
+        let began = try self.step()
         match self.fill(snapshot) {
             ok => {},
             err(e) => {
-                self.undo()
+                self.undo(began)
                 fail e
             },
         }
-        try self.step_done()
+        try self.step_done(began)
     }
 
     fn fill(self, s: Json) ! Error {
@@ -661,6 +719,67 @@ INSERT INTO tools VALUES ('tc_1', 'r_1', '{"call":"tc_1","run":"r_1","title":"ls
         assert(try c.tools_text(String(#"["tc_2"]"#), String("[]")) == #"[{"call":"tc_2","run":"r_1","title":"grep","status":"failed"}]"#)
     }
     // Windows keeps the folder while the checkpoint thread still has the file open.
+    match fs.remove_dir_all(dir) {
+        ok => {},
+        err(_) => {},
+    }
+}
+
+@test
+fn one_core_owns_a_folder_at_a_time() ! Error {
+    let dir = try fs.temp_dir()
+    let first = try own_folder(dir.copy(), 0) else { fail "the folder wasn't free" }
+    assert(try own_folder(dir.copy(), 100) == none)
+    try first.release()
+    let again = try own_folder(dir.copy(), 0) else { fail "the folder wasn't let go" }
+    try again.release()
+    try fs.remove_dir_all(dir)
+}
+
+// Applies an event to the cache at `path` from a connection of its own, as a
+// second core on the same file would, and says how it went.
+struct OtherCore {
+    path: String
+    said: Sender<String>
+}
+
+impl Task for OtherCore {
+    fn run(own self) {
+        let c = match Cache.open(self.path.copy()) {
+            ok(c) => c,
+            err(e) => {
+                self.said.send("{e}")
+                return
+            },
+        }
+        match c.apply(ev(1, "agent.created", Obj.new().j("agent", Obj.new().s("id", String("a_other")).done()).done())) {
+            ok(_) => self.said.send(String("ok")),
+            err(e) => self.said.send("{e}"),
+        }
+    }
+}
+
+@test
+fn a_held_burst_waits_for_another_connection_rather_than_failing() ! Error {
+    // A connection that had read in its transaction couldn't write once another had
+    // written since: "database is locked", at once, whatever the busy timeout.
+    let dir = try fs.temp_dir()
+    let path = "{dir}/core.db"
+    {
+        let c = try Cache.open(path.copy())
+        try c.hold()
+        _ = try c.cursor()
+        var said = Receiver<String>()
+        let other = unsafe { Thread.spawn(OtherCore { path: path.copy(), said: said.sender() }) }
+        unsafe { sleep(300000000) }
+        _ = try c.apply(ev(2, "agent.created", Obj.new().j("agent", Obj.new().s("id", String("a_2")).done()).done()))
+        try c.let_go()
+        other.join()
+        assert((said.wait() ?? String()) == "ok")
+        // The other found the cursor past its event once it had the lock, so the cursor
+        // never goes back.
+        assert(try c.cursor() == 2)
+    }
     match fs.remove_dir_all(dir) {
         ok => {},
         err(_) => {},

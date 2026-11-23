@@ -16,7 +16,7 @@ import std.json.{Json, parse}
 import std.http.websocket.{Waker}
 import std.thread.{Task}
 import shared.obj.{Obj, bool_at, str_at}
-import core.cache.{Cache}
+import core.cache.{Cache, own_folder}
 import core.conn.{Conn}
 import core.pushbox
 import core.update.{Updater}
@@ -29,6 +29,11 @@ import server.update.{Source as ServerSource}
 
 /// The credential store's service the device token is kept under, by the instance's address.
 const KEYRING: str = "loom"
+
+/// How long a core waits for the one before it on the same folder to stop, in ms: the
+/// app starts the first server's core again before the old one, and the instance in the
+/// app with it, has stopped.
+const OWN_WAIT_MS: i64 = 15000
 
 /// Where the core tells the app what happened: the app's function, and the context it gave.
 struct Sink {
@@ -159,12 +164,24 @@ impl Task for Boot {
         let service = str_at(cfg.copy(), "keyring") ?? String(KEYRING)
         var path = String(":memory:")
         let data = str_at(cfg.copy(), "data")
+        // One core to a folder (core/cache.calx, `own_folder`). Another loom that has it
+        // keeps it: this one reads from the instance alone, and starts no instance here.
+        var owner: fs.FileLock? = none
+        var taken = false
         if let d = data {
-            path = "{d}/core.db"
+            match own_folder(d.copy(), OWN_WAIT_MS) {
+                ok(some(l)) => owner = some(l),
+                ok(none) => {
+                    taken = true
+                    b.to_app.send("{Obj.new().s("t", String("error")).s("code", String("in_use")).s("message", "Another loom is running with {d}, so this one keeps nothing offline. Quit one of them.").done()}")
+                },
+                err(e) => eprintln("loom: locking {d}: {e}"),
+            }
+            if not taken { path = "{d}/core.db" }
         }
         var local: Thread? = none
         var stop_local: Sender<bool>? = none
-        if str_at(cfg.copy(), "mode") == some(String("local")) {
+        if not taken and str_at(cfg.copy(), "mode") == some(String("local")) {
             match start_local(cfg.copy(), data.copy() ?? String(".")) {
                 ok((t, stop, url, tok)) => {
                     local = some(t)
@@ -200,7 +217,7 @@ impl Task for Boot {
             // Updates, for an app that says its version. An empty `update` turns them off.
             let feed = str_at(cfg.copy(), "update") ?? String(MANIFEST)
             if let v = str_at(cfg.copy(), "version") {
-                if feed.len() > 0 {
+                if feed.len() > 0 and not taken {
                     let updater = Updater.new(v, str_at(cfg.copy(), "platform") ?? String("windows-desktop"), feed, "{d}/update")
                     // A test's releases, in a build from source, are signed with a key of their own.
                     conn.updater = some(if let k = str_at(cfg.copy(), "update_key") { updater.with_key(k) } else { updater })
@@ -213,6 +230,13 @@ impl Task for Boot {
         }
         if let t = local.take() {
             t.join()
+        }
+        // The folder is free for the next core, as when the app starts the first one again.
+        if let l = owner.take() {
+            match l.release() {
+                ok => {},
+                err(e) => eprintln("loom: letting go of the data folder: {e}"),
+            }
         }
     }
 }
