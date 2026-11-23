@@ -22,6 +22,7 @@ import std.http.{Header, get, post}
 import std.io
 import std.json.{Json, parse}
 import std.process.{Child}
+import std.thread.{Task}
 import std.time.{Instant}
 import shared.obj.{Obj, at, int_at, str_at}
 import shared.tools
@@ -133,6 +134,40 @@ struct Code {
     folder: String    // the session's scripts, their prelude and Deno's cache, made at the first
 }
 
+// Starts one of the person's MCP servers and lists its tools.
+struct Starter {
+    at: usize
+    spec: Json
+    back: Sender<Started>
+}
+
+struct Started {
+    at: usize
+    name: String
+    server: Server?
+    tools: List<Json>
+    trouble: String
+}
+
+impl Task for Starter {
+    fn run(own self) {
+        let n = self.at
+        var back = self.back
+        let name = str_at(self.spec.copy(), "name") ?? String()
+        let done = match mcpclient.start(self.spec) {
+            ok(s) => {
+                var server = s
+                match server.tools() {
+                    ok(listed) => Started { at: n, name: name, server: some(server), tools: listed, trouble: String() },
+                    err(e) => Started { at: n, name: name.copy(), server: some(server), tools: List<Json>(), trouble: "{name}: {e}" },
+                }
+            },
+            err(e) => Started { at: n, name: name.copy(), server: none, tools: List<Json>(), trouble: "{name} didn't start: {e}" },
+        }
+        back.send(done)
+    }
+}
+
 impl Code {
     // Every tool a script can call: loom's own, and each server's, which are
     // started the first time.
@@ -154,20 +189,27 @@ impl Code {
                 Json.Null
             },
         }
+        // The servers start side by side, each on a thread of its own, and are
+        // taken in the order they were given.
         if let Json.Array(specs) = at(given, "servers") {
+            var back = Receiver<Started>()
+            var n: usize = 0
             for spec in specs {
-                let name = str_at(spec.copy(), "name") ?? String()
-                match mcpclient.start(spec.copy()) {
-                    ok(s) => {
-                        var server = s
-                        match server.tools() {
-                            ok(listed) => self.tools.extend(codemode.tools_of(name.copy(), listed)),
-                            err(e) => self.trouble.push("{name}: {e}"),
-                        }
-                        self.servers.insert(name, server)
-                    },
-                    err(e) => self.trouble.push("{name} didn't start: {e}"),
-                }
+                _ = unsafe { Thread.spawn(Starter { at: n, spec: spec.copy(), back: back.sender() }) }
+                n += 1
+            }
+            var got = Map<usize, Started>()
+            while let s = back.wait() {
+                got.insert(s.at, s)
+                if got.len() == n { break }
+            }
+            for k in 0..n {
+                let s = got.remove(k) else { continue }
+                let name = s.name
+                let started = s.server
+                if s.trouble.len() > 0 { self.trouble.push(s.trouble) }
+                self.tools.extend(codemode.tools_of(name.copy(), s.tools))
+                if let server = started { self.servers.insert(name, server) }
             }
         }
     }
