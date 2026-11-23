@@ -90,6 +90,14 @@ pub fn hovered(key: &SharedString) -> bool {
     HOVERED.with(|h| h.borrow().get(key).copied().unwrap_or(false))
 }
 
+/// `d`, keeping whether the pointer is anywhere over it under `key`, for `hovered`.
+pub fn tracks_hover(d: Stateful<Div>, key: SharedString) -> Stateful<Div> {
+    d.on_hover(move |on, window, _| {
+        set_hovered(key.clone(), *on);
+        window.refresh();
+    })
+}
+
 fn set_hovered(key: SharedString, on: bool) {
     HOVERED.with(|h| {
         h.borrow_mut().insert(key, on);
@@ -197,10 +205,7 @@ impl SoftHover for Stateful<Div> {
         if let Some((from, to)) = ink {
             d = d.text_color(mix(from, to, k));
         }
-        d.on_hover(move |on, window, _| {
-            set_hovered(key.clone(), *on);
-            window.refresh();
-        })
+        tracks_hover(d, key)
     }
 }
 
