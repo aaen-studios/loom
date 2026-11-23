@@ -258,6 +258,41 @@ fn run(server: Child, data: String) ! Error {
     let listed_now = try back.cmd("q_shell", "messages.list", Obj.new().s("conversation", conversation.copy()).done())
     try check(not "{at(at(listed_now, "value"), "messages")}".contains("Look into the spoons."), "a prompt the agent program gives itself is never a message")
 
+    // --- A subagent's calls and words sit inside the call that started it ---
+    try back.send(Obj.new().s("t", String("send")).s("cid", String("m_sub")).s("conversation", conversation.copy()).s("text", String("/subagent Explore the notes; /tool Read notes.md; Three notes.; /tool Grep spoons\nDone exploring.")).done())
+    let task_call = try back.until("event", "tool.started")
+    let task_id = str_at(task_call.copy(), "call") ?? String()
+    let child_call = try back.until("event", "tool.started")
+    try check(str_at(task_call, "parent") == none and str_at(child_call, "parent") == some(task_id.copy()), "a subagent's tool call names the call that started it")
+    var sub = try back.until("event", "message.created")
+    while str_at(at(sub.copy(), "message"), "role") != some(String("agent")) { sub = try back.until("event", "message.created") }
+    var sub_delta = false
+    for f in back.frames {
+        if str_at(f.copy(), "t") == some(String("delta")) and str_at(f.copy(), "text") == some(String("Three ")) and str_at(f, "parent") == some(task_id.copy()) { sub_delta = true }
+    }
+    try check(sub_delta, "and so do its words, while they're written")
+    var laid = List<String>()
+    if let Json.Array(blocks) = at(at(sub, "message"), "blocks") {
+        for b in blocks {
+            let mark = if str_at(b.copy(), "parent") == some(task_id.copy()) { "^" } else { "" }
+            laid.push("{str_at(b, "kind") ?? String()}{mark}")
+        }
+    }
+    try check(laid.join(" ") == "tool tool^ text^ tool^ text", "the reply keeps them inside it, and its own words outside")
+    _ = try back.until("event", "run.finished")
+
+    // --- A call titled as it finishes, and a question for a call never started ---
+    try back.send(Obj.new().s("t", String("send")).s("cid", String("m_named")).s("conversation", conversation.copy()).s("text", String("/named Save the notes\n/askonly rm -rf cache\nok")).done())
+    let finished_named = try back.until("event", "tool.finished")
+    try check(str_at(finished_named, "title") == some(String("Save the notes")), "an update that titles a call as it finishes it keeps the title")
+    let unstarted = try back.until("event", "tool.started")
+    let unstarted_ask = try back.until("event", "approval.needed")
+    try check(str_at(unstarted.copy(), "call") == str_at(unstarted_ask.copy(), "call") and str_at(unstarted.copy(), "title") == some(String("rm -rf cache")) and int_at(unstarted, "block") == some(1), "a permission request for a call never started starts it, so it shows with its question")
+    try back.send(Obj.new().s("t", String("approve")).s("call", str_at(unstarted_ask, "call") ?? String()).b("allow", true).b("always", false).done())
+    let unstarted_done = try back.until("event", "tool.finished")
+    try check(str_at(unstarted_done, "status") == some(String("done")), "and it finishes as any call does")
+    _ = try back.until("event", "run.finished")
+
     // --- An approval ---
     // What a turn used, as its program reports it.
     try back.send(Obj.new().s("t", String("send")).s("cid", String("m_tokens")).s("conversation", conversation.copy()).s("text", String("/tokens 41\ncounted")).done())

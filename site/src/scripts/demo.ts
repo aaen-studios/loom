@@ -2,7 +2,8 @@
 // sent, the agent thinks, uses a tool, writes, asks before it deploys and waits for the yes, then
 // finishes. While the turn runs, one quiet line under the reply says the step it's on; once it's
 // done, its last words are the answer and the steps before them fold under one line that opens
-// (desktop/src/model.rs, parts). The moods, what the sidebar says after an agent's name on its
+// (desktop/src/model.rs, parts), and a subagent's call in the earlier reply opens to show what
+// its subagent did inside it (model.rs, inside). The moods, what the sidebar says after an agent's name on its
 // one line ("Thinking", the tool's title, "Wants to …"), or under the pointer on a pinned agent's
 // tile, and the wording are the app's. Clicking
 // Allow once, Always allow or Deny answers the approval; left alone, it's allowed after a moment.
@@ -57,6 +58,15 @@ export function play(app: HTMLElement) {
 	const msgs = app.querySelector<HTMLElement>('.msgs')!;
 	const history = [...msgs.children];
 	for (const reply of msgs.querySelectorAll<HTMLElement>('.reply')) foldOf(reply);
+	// A subagent's call opens to show what its subagent did inside it.
+	for (const line of msgs.querySelectorAll<HTMLButtonElement>('.sub-line')) {
+		const inside = line.nextElementSibling as HTMLElement;
+		line.addEventListener('click', () => {
+			inside.hidden = !inside.hidden;
+			line.setAttribute('aria-expanded', String(!inside.hidden));
+			line.querySelector('.chevron')!.textContent = inside.hidden ? '›' : '⌄';
+		});
+	}
 	const typed = app.querySelector<HTMLElement>('.typed')!;
 	const tpl = (id: string) => (document.getElementById(id) as HTMLTemplateElement).content.firstElementChild!.cloneNode(true) as HTMLElement;
 	// A row says what its agent is on after its name; a pinned agent's tile, under the pointer.

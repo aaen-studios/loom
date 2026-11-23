@@ -131,7 +131,13 @@ const [claude] = await brains(['claude-acp']);
 							<button type="button" class="fold-line" aria-expanded="false"><span class="chevron">›</span><span class="words">2 steps</span></button>
 							<div class="steps" hidden>
 								<div class="tool-line done"><span class="prompt">›_</span><span class="title">Read ~/notes/today.md</span><span class="mark">✓</span></div>
-								<div class="tool-line done"><span class="prompt">›_</span><span class="title">Fetch github.com/acme/shop/pulls</span><span class="mark">✓</span></div>
+								<div class="sub">
+									<button type="button" class="tool-line done sub-line" aria-expanded="false"><span class="prompt">›_</span><span class="title">Check the open pull requests</span><span class="mark">✓</span><span class="count">2 steps</span><span class="chevron">›</span></button>
+									<div class="inside" hidden>
+										<div class="tool-line done"><span class="prompt">›_</span><span class="title">Fetch github.com/acme/shop/pulls</span><span class="mark">✓</span></div>
+										<div class="on-the-way"><p>One waits on a review: the billing fix.</p></div>
+									</div>
+								</div>
 							</div>
 						</div>
 						<div class="said">
@@ -790,6 +796,33 @@ const [claude] = await brains(['claude-acp']);
 	}
 	.tool-line.denied .mark {
 		color: var(--bad);
+	}
+	/* A subagent's call: how many steps it took, and what its subagent did inside it,
+	   opened with a click. */
+	.sub {
+		display: flex;
+		flex-direction: column;
+		gap: 4px;
+		min-width: 0;
+	}
+	.sub-line {
+		text-align: left;
+		cursor: pointer;
+	}
+	.sub-line .count,
+	.sub-line .chevron {
+		flex: none;
+		color: var(--ink-3);
+	}
+	.inside {
+		display: flex;
+		flex-direction: column;
+		gap: 4px;
+		padding-left: 12px;
+		border-left: 1px solid var(--line-strong);
+	}
+	.inside[hidden] {
+		display: none;
 	}
 	/* Words the agent wrote on its way to the answer, among the steps: smaller and quieter
 	   than the answer, so they don't read as a message in the chat. */

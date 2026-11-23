@@ -19,6 +19,16 @@ module tests.fake_agent.main
 //                         rawInput and its "command" as the title, then completed
 //     /selfprompt         a user_message_chunk, "Look into the spoons.", as a prompt
 //                         the program gives itself or a subagent
+//     /subagent TITLE; STEP; STEP ...
+//                         a subagent, as Claude's adapter plays one: a Task call
+//                         (kind think) titled TITLE, then each STEP (/tool TITLE,
+//                         /think TEXT, or text to say) tagged with the Task call's
+//                         id in _meta.claudeCode.parentToolUseId, then the Task
+//                         call completed
+//     /named TITLE        a tool call titled "Terminal" whose one update both
+//                         titles it TITLE and completes it
+//     /askonly TITLE      asks permission for a command it never sent a tool_call
+//                         for, then completes or fails it by the answer
 //     /act KIND JSON      a tool call of KIND (execute, edit, fetch, ...) that asks
 //                         permission first, with JSON as its rawInput, its
 //                         locations from the JSON's "path", and its title from its
@@ -103,6 +113,9 @@ pub enum Step {
     Act(String, String)    // a kind, and the rawInput as JSON
     Shell(String)    // the rawInput as JSON
     SelfPrompt
+    Subagent(String, List<String>)    // its title, and its steps
+    Named(String)
+    AskOnly(String)
     Slow(u64)
     Sleep(u64)
     Stop(String)
@@ -154,6 +167,18 @@ pub fn script(text: String) -> List<Step> {
             steps.push(Step.Act(kind, if input.len() > 0 { input } else { String(#"{}"#) }))
         } else if word == "/selfprompt" {
             steps.push(Step.SelfPrompt)
+        } else if word == "/subagent" {
+            var title = String()
+            var inner = List<String>()
+            for part in rest.split(";") {
+                let t = part.trim()
+                if title.len() == 0 { title = t.copy() } else if t.len() > 0 { inner.push(t.copy()) }
+            }
+            steps.push(Step.Subagent(title, inner))
+        } else if word == "/named" {
+            steps.push(Step.Named(rest))
+        } else if word == "/askonly" {
+            steps.push(Step.AskOnly(rest))
         } else if word == "/shell" {
             steps.push(Step.Shell(rest))
         } else if word == "/read" {
@@ -400,16 +425,26 @@ fn update(session: String, u: LinkedMap<String, Json>) {
 }
 
 fn chunk(session: String, kind: str, text: String) {
-    var content = LinkedMap<String, Json>()
-    content.insert("type", js(String("text")))
-    content.insert("text", js(text))
-    var u = LinkedMap<String, Json>()
-    u.insert("sessionUpdate", js(String(kind)))
-    u.insert("content", Json.Object(content))
-    update(session, u)
+    update(session, chunk_of(kind, text))
+}
+
+// A subagent's update, tagged as Claude's adapter tags one: the id of the Task
+// call that started it, in _meta.claudeCode.parentToolUseId.
+fn inside(u: own LinkedMap<String, Json>, parent: String) -> LinkedMap<String, Json> {
+    var claude = LinkedMap<String, Json>()
+    claude.insert("parentToolUseId", js(parent))
+    var meta = LinkedMap<String, Json>()
+    meta.insert("claudeCode", Json.Object(claude))
+    var out = u
+    out.insert("_meta", Json.Object(meta))
+    return out
 }
 
 fn tool_update(session: String, id: String, status: str, output: String) {
+    update(session, tool_update_of(id, status, output))
+}
+
+fn tool_update_of(id: String, status: str, output: String) -> LinkedMap<String, Json> {
     var u = LinkedMap<String, Json>()
     u.insert("sessionUpdate", js(String("tool_call_update")))
     u.insert("toolCallId", js(id))
@@ -423,21 +458,58 @@ fn tool_update(session: String, id: String, status: str, output: String) {
         block.insert("content", Json.Object(text))
         u.insert("content", Json.Array([Json.Object(block)]))
     }
-    update(session, u)
+    return u
+}
+
+fn tool_call_of(id: String, kind: String, title: String) -> LinkedMap<String, Json> {
+    var u = LinkedMap<String, Json>()
+    u.insert("sessionUpdate", js(String("tool_call")))
+    u.insert("toolCallId", js(id))
+    u.insert("title", js(title))
+    u.insert("kind", js(kind))
+    u.insert("status", js(String("pending")))
+    return u
+}
+
+fn chunk_of(kind: str, text: String) -> LinkedMap<String, Json> {
+    var content = LinkedMap<String, Json>()
+    content.insert("type", js(String("text")))
+    content.insert("text", js(text))
+    var u = LinkedMap<String, Json>()
+    u.insert("sessionUpdate", js(String(kind)))
+    u.insert("content", Json.Object(content))
+    return u
 }
 
 impl Agent {
     fn tool_call(a: mut Agent, session: String, kind: String, title: String) -> String {
-        a.tools += 1
-        let id = "tool_{a.tools}"
-        var u = LinkedMap<String, Json>()
-        u.insert("sessionUpdate", js(String("tool_call")))
-        u.insert("toolCallId", js(id.copy()))
-        u.insert("title", js(title))
-        u.insert("kind", js(kind))
-        u.insert("status", js(String("pending")))
-        update(session, u)
+        let id = a.new_tool()
+        update(session, tool_call_of(id.copy(), kind, title))
         return id
+    }
+
+    // A new toolCallId.
+    fn new_tool(a: mut Agent) -> String {
+        a.tools += 1
+        return "tool_{a.tools}"
+    }
+
+    // A subagent's steps (/subagent), each tagged with `parent`, its Task call's id.
+    fn subagent(a: mut Agent, session: String, parent: String, inner: List<String>) {
+        for line in inner {
+            let (word, rest) = split_word(line.copy())
+            if word == "/tool" {
+                let id = a.new_tool()
+                update(session.copy(), inside(tool_call_of(id.copy(), String("execute"), rest.copy()), parent.copy()))
+                update(session.copy(), inside(tool_update_of(id, "completed", "ran: {rest}"), parent.copy()))
+            } else if word == "/think" {
+                update(session.copy(), inside(chunk_of("agent_thought_chunk", rest), parent.copy()))
+            } else {
+                for c in chunks(line.copy()) {
+                    update(session.copy(), inside(chunk_of("agent_message_chunk", c), parent.copy()))
+                }
+            }
+        }
     }
 
     // The next message, waiting at most `ms`. none if nothing came in time.
@@ -697,6 +769,29 @@ impl Agent {
                     tool_update(session.copy(), tool, "completed", "ran: {title}")
                 },
                 Step.SelfPrompt => chunk(session.copy(), "user_message_chunk", String("Look into the spoons.")),
+                Step.Subagent(title, inner) => {
+                    let task = a.tool_call(session.copy(), String("think"), title)
+                    tool_update(session.copy(), task.copy(), "in_progress", String())
+                    a.subagent(session.copy(), task.copy(), inner)
+                    tool_update(session.copy(), task, "completed", String("The subagent is done."))
+                },
+                Step.Named(title) => {
+                    let tool = a.tool_call(session.copy(), String("execute"), String("Terminal"))
+                    var u = tool_update_of(tool, "completed", String("ran"))
+                    u.insert("title", js(title))
+                    update(session.copy(), u)
+                },
+                Step.AskOnly(title) => {
+                    let tool = a.new_tool()
+                    match a.ask(session.copy(), tool.copy(), String("execute"), title.copy(), Json.Null) {
+                        some(true) => tool_update(session.copy(), tool, "completed", "ran: {title}"),
+                        some(false) => tool_update(session.copy(), tool, "failed", String("denied")),
+                        none => {
+                            tool_update(session.copy(), tool, "failed", String("cancelled"))
+                            reason = String("cancelled")
+                        },
+                    }
+                },
                 Step.Shell(input) => {
                     let raw = match parse(input.copy()) {
                         ok(j) => j,
@@ -955,6 +1050,16 @@ fn reads_every_step() {
     assert(steps[5] == Step.Sleep(10))
     assert(steps[6] == Step.Stop(String("max_tokens")))
     assert(steps[8] == Step.Crash)
+}
+
+@test
+fn reads_a_subagents_steps() {
+    let steps = script(String("/subagent Explore the notes; /tool Read notes.md ; Three notes. ;\n/named Save it\n/askonly rm x"))
+    assert(steps.len() == 3)
+    let inner: List<String> = [String("/tool Read notes.md"), String("Three notes.")]
+    assert(steps[0] == Step.Subagent(String("Explore the notes"), inner))
+    assert(steps[1] == Step.Named(String("Save it")))
+    assert(steps[2] == Step.AskOnly(String("rm x")))
 }
 
 @test

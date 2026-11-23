@@ -58,6 +58,36 @@ fn an_allowed_tool_runs() ! Error {
 }
 
 @test
+fn a_subagents_steps_name_its_call() ! Error {
+    let c = try start()
+    try prompt(c, "/subagent Explore; /tool Read notes.md; Found it.\\ndone")
+    let task = try expect(c, "\"sessionUpdate\":\"tool_call\"")
+    assert(task.contains("\"title\":\"Explore\"") and task.contains("\"kind\":\"think\"") and not task.contains("parentToolUseId"))
+    let child = try expect(c, "\"title\":\"Read notes.md\"")
+    assert(child.contains("\"parentToolUseId\":\"tool_1\""), "got {child}")
+    let said = try expect(c, "\"text\":\"Found \"")
+    assert(said.contains("\"parentToolUseId\":\"tool_1\""))
+    let finished = try expect(c, "The subagent is done.")
+    assert(finished.contains("\"toolCallId\":\"tool_1\"") and not finished.contains("parentToolUseId"))
+    _ = try expect(c, "\"stopReason\":\"end_turn\"")
+    c.kill()
+}
+
+@test
+fn a_permission_can_come_without_a_tool_call() ! Error {
+    let c = try start()
+    try prompt(c, "/named Save it\\n/askonly rm build")
+    let named = try expect(c, "\"title\":\"Save it\"")
+    assert(named.contains("\"status\":\"completed\""))
+    let ask = try expect(c, "session/request_permission")
+    assert(ask.contains("\"toolCallId\":\"tool_2\""))
+    try answer(c, ask, "allow_once")
+    _ = try expect(c, "\"text\":\"ran: rm build\"")
+    _ = try expect(c, "\"stopReason\":\"end_turn\"")
+    c.kill()
+}
+
+@test
 fn a_denied_tool_fails() ! Error {
     let c = try start()
     try prompt(c, "/ask rm build")
