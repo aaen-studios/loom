@@ -2163,7 +2163,7 @@ pub struct Model {
     pub synced: bool,
     pub login_error: Option<String>,
     pub logging_in: bool,
-    pub agents: Vec<Agent>,
+    pub agents: Rc<Vec<Agent>>,
     pub conversations: Vec<Conversation>,
     pub runs: Vec<Run>,
     pub tools: Rc<Tools>,
@@ -4129,8 +4129,9 @@ impl Model {
                                 .collect()
                         }),
                     })
-                    .collect();
-                sort_agents(&mut self.agents);
+                    .collect::<Vec<_>>()
+                    .into();
+                sort_agents(Rc::<Vec<Agent>>::make_mut(&mut self.agents));
                 if let Some(made) = self.made_agent.take() {
                     if self.agent(&made).is_some() {
                         self.select(Some(made));
@@ -4698,7 +4699,10 @@ impl Model {
     /// Turns Code Mode on or off for the agent being edited, from its next session.
     pub fn set_code_mode(&mut self, on: bool) -> Option<Value> {
         let agent = self.editing.clone()?;
-        if let Some(a) = self.agents.iter_mut().find(|a| a.id == agent) {
+        if let Some(a) = Rc::make_mut(&mut self.agents)
+            .iter_mut()
+            .find(|a| a.id == agent)
+        {
             a.code_mode = on;
         }
         let id = self.id("app.code_mode");
@@ -4711,7 +4715,10 @@ impl Model {
     /// network of the instance's computer, so its own list goes.
     pub fn set_isolated(&mut self, on: bool) -> Option<Value> {
         let agent = self.editing.clone()?;
-        if let Some(a) = self.agents.iter_mut().find(|a| a.id == agent) {
+        if let Some(a) = Rc::make_mut(&mut self.agents)
+            .iter_mut()
+            .find(|a| a.id == agent)
+        {
             a.isolated = on;
             if !on {
                 a.network = None;
@@ -4730,7 +4737,10 @@ impl Model {
     /// everything, or the hosts on a list, none when it's empty.
     pub fn set_network(&mut self, hosts: Option<Vec<String>>) -> Option<Value> {
         let agent = self.editing.clone()?;
-        if let Some(a) = self.agents.iter_mut().find(|a| a.id == agent) {
+        if let Some(a) = Rc::make_mut(&mut self.agents)
+            .iter_mut()
+            .find(|a| a.id == agent)
+        {
             a.network = hosts.clone();
         }
         let id = self.id("app.place");
@@ -4762,7 +4772,10 @@ impl Model {
 
     pub fn set_color(&mut self, color: &str) -> Option<Value> {
         let agent = self.editing.clone()?;
-        if let Some(a) = self.agents.iter_mut().find(|a| a.id == agent) {
+        if let Some(a) = Rc::make_mut(&mut self.agents)
+            .iter_mut()
+            .find(|a| a.id == agent)
+        {
             a.color = color.to_string();
         }
         let id = self.id("app.color");
@@ -4775,7 +4788,10 @@ impl Model {
     /// or "" for the plain thread.
     pub fn set_shape(&mut self, shape: &str) -> Option<Value> {
         let agent = self.editing.clone()?;
-        if let Some(a) = self.agents.iter_mut().find(|a| a.id == agent) {
+        if let Some(a) = Rc::make_mut(&mut self.agents)
+            .iter_mut()
+            .find(|a| a.id == agent)
+        {
             a.shape = shape.to_string();
         }
         let id = self.id("app.shape");
@@ -5498,12 +5514,12 @@ impl Model {
         if from == to {
             return None;
         }
-        let moved = self.agents.remove(from);
-        self.agents.insert(to, moved);
-        for (k, a) in self.agents.iter_mut().enumerate() {
+        let moved = Rc::make_mut(&mut self.agents).remove(from);
+        Rc::make_mut(&mut self.agents).insert(to, moved);
+        for (k, a) in Rc::make_mut(&mut self.agents).iter_mut().enumerate() {
             a.order = Some(k as i64);
         }
-        sort_agents(&mut self.agents);
+        sort_agents(Rc::<Vec<Agent>>::make_mut(&mut self.agents));
         let cmd = self.id("app.order");
         let ids: Vec<&str> = self.agents.iter().map(|a| a.id.as_str()).collect();
         Some(json!({"t": "cmd", "id": cmd, "name": "agent.order", "args": {"agents": ids}}))
@@ -5520,7 +5536,9 @@ impl Model {
 
     /// Sets an agent's permission mode, or with None, has it follow the default.
     pub fn set_permission(&mut self, agent: &str, permission: Option<&str>) -> Option<Value> {
-        let a = self.agents.iter_mut().find(|a| a.id == agent)?;
+        let a = Rc::make_mut(&mut self.agents)
+            .iter_mut()
+            .find(|a| a.id == agent)?;
         a.permission = permission.unwrap_or_default().to_string();
         let id = self.id("app.permission");
         Some(
@@ -5531,7 +5549,9 @@ impl Model {
     /// Sets what a message to an agent while it's busy does, queue or steer, or with
     /// None, has it follow the default.
     pub fn set_busy(&mut self, agent: &str, busy: Option<&str>) -> Option<Value> {
-        let a = self.agents.iter_mut().find(|a| a.id == agent)?;
+        let a = Rc::make_mut(&mut self.agents)
+            .iter_mut()
+            .find(|a| a.id == agent)?;
         a.busy = busy.unwrap_or_default().to_string();
         let id = self.id("app.busy");
         Some(
@@ -5542,7 +5562,9 @@ impl Model {
     /// Sets an agent's backup program: a program, "none" for none, or with None, the
     /// person's default.
     pub fn set_backup(&mut self, agent: &str, backup: Option<&str>) -> Option<Value> {
-        let a = self.agents.iter_mut().find(|a| a.id == agent)?;
+        let a = Rc::make_mut(&mut self.agents)
+            .iter_mut()
+            .find(|a| a.id == agent)?;
         a.backup = backup.unwrap_or_default().to_string();
         let id = self.id("app.backup");
         Some(
@@ -5574,7 +5596,9 @@ impl Model {
 
     /// Has one of an agent's options, such as its model, follow the default again.
     pub fn follow_config(&mut self, agent: &str, option: &str) -> Option<Value> {
-        let a = self.agents.iter_mut().find(|a| a.id == agent)?;
+        let a = Rc::make_mut(&mut self.agents)
+            .iter_mut()
+            .find(|a| a.id == agent)?;
         a.config.retain(|(k, _)| k != option);
         let id = self.id("app.config");
         Some(
@@ -5585,7 +5609,9 @@ impl Model {
     /// Picks a value of one of an agent's options, such as its model. It shows
     /// at once; the instance sets each session to it before its next prompt.
     pub fn set_config(&mut self, agent: &str, option: &str, value: &str) -> Option<Value> {
-        let a = self.agents.iter_mut().find(|a| a.id == agent)?;
+        let a = Rc::make_mut(&mut self.agents)
+            .iter_mut()
+            .find(|a| a.id == agent)?;
         a.config.retain(|(k, _)| k != option);
         a.config.push((option.to_string(), value.to_string()));
         let id = self.id("app.config");

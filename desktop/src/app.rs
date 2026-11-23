@@ -3409,7 +3409,8 @@ ACTA_KEY=secret:ACTA_KEY",
     ) -> Div {
         let p = self.p;
         let mut chips = div().flex().flex_wrap().gap(px(space::XS));
-        for a in self.model.agents.clone() {
+        let agents = self.model.agents.clone();
+        for a in agents.iter() {
             let id = a.id.clone();
             let on = picked == Some(a.id.as_str());
             let tint = thread::color(&a.color, p.dark);
@@ -4888,11 +4889,12 @@ ACTA_KEY=secret:ACTA_KEY",
         let p = self.p;
         let searching = !self.model.query.trim().is_empty();
         let mut list = div().flex().flex_col().gap(px(2.0)).px(px(space::S));
-        for a in self.model.agents.clone() {
+        let agents = self.model.agents.clone();
+        for a in agents.iter() {
             let selected = self.model.selected.as_deref() == Some(a.id.as_str())
                 && self.screen == Screen::Chat;
             let mood = self.model.mood(&a.id);
-            let preview = self.model.preview(&a);
+            let preview = self.model.preview(a);
             // A reply that came while its chat wasn't open: the row is bold until it is.
             let unread = self.model.unread.contains(&a.id);
             let id = a.id.clone();
@@ -4918,7 +4920,7 @@ ACTA_KEY=secret:ACTA_KEY",
                         })
                     })
                     .on_click(cx.listener(move |this, _, _, cx| this.select(id.clone(), cx)))
-                    .on_drag(AgentDrag::of(&a, p), AgentDrag::ghost)
+                    .on_drag(AgentDrag::of(a, p), AgentDrag::ghost)
                     .drag_over::<AgentDrag>(move |s, _, _, _| s.bg(p.hover))
                     .on_drop(self.drop_agent(&a.id, cx))
                     .child(thread::strand(
@@ -5216,7 +5218,8 @@ ACTA_KEY=secret:ACTA_KEY",
             .items_center()
             .gap(px(2.0))
             .py(px(space::XS));
-        for a in self.model.agents.clone() {
+        let agents = self.model.agents.clone();
+        for a in agents.iter() {
             let selected = self.model.selected.as_deref() == Some(a.id.as_str())
                 && self.screen == Screen::Chat;
             let unread = self.model.unread.contains(&a.id);
@@ -5245,7 +5248,7 @@ ACTA_KEY=secret:ACTA_KEY",
                         })
                     })
                     .on_click(cx.listener(move |this, _, _, cx| this.select(id.clone(), cx)))
-                    .on_drag(AgentDrag::of(&a, p), AgentDrag::ghost)
+                    .on_drag(AgentDrag::of(a, p), AgentDrag::ghost)
                     .drag_over::<AgentDrag>(move |s, _, _, _| s.bg(p.hover))
                     .on_drop(self.drop_agent(&a.id, cx))
                     .child(thread::strand(
@@ -10581,7 +10584,8 @@ ACTA_KEY=secret:ACTA_KEY",
                     cx.notify();
                 }));
             let mut pick = div().flex().flex_wrap().gap(px(space::XS));
-            for a in self.model.agents.clone() {
+            let agents = self.model.agents.clone();
+            for a in agents.iter() {
                 let id = a.id.clone();
                 let on = picked.as_deref() == Some(a.id.as_str());
                 pick = pick.child(
