@@ -1766,6 +1766,9 @@ fn lay_out(m: &Message, shown: &[usize]) -> Vec<Part> {
     out
 }
 
+/// The most characters of a reply's first line its "working" line takes.
+const WORKING_MOST: usize = 160;
+
 /// The step a running turn is on, in a line: the first line of what it last said, the
 /// tool it last called, or that it's thinking.
 fn working_words(m: &Message, tools: &Tools) -> String {
@@ -1773,7 +1776,12 @@ fn working_words(m: &Message, tools: &Tools) -> String {
         match b.kind.as_str() {
             "text" => {
                 if let Some(line) = b.text.lines().map(str::trim).find(|l| !l.is_empty()) {
-                    return line.to_string();
+                    // More than the line can show is cut here: the whole of a long one
+                    // would be shaped again at every frame, only to be truncated.
+                    return match line.char_indices().nth(WORKING_MOST) {
+                        Some((end, _)) => format!("{}…", &line[..end]),
+                        None => line.to_string(),
+                    };
                 }
             }
             "tool" => return format!("{}…", tool_title(b.call.as_ref(), tools)),
@@ -2140,6 +2148,8 @@ pub struct Model {
     /// leaves the browser to close when the agent's turn ends.
     pub watch_follows: bool,
     pub frame: Option<PageFrame>,
+    /// A frame came since the window was last drawn.
+    pub page_moved: bool,
     rewatch: bool,
     /// Each conversation's queue, by conversation id.
     pub queues: HashMap<String, Vec<QueueItem>>,
@@ -3013,12 +3023,12 @@ impl Model {
             "browser.frame" => {
                 let agent = s(f, "agent");
                 if self.watching.as_deref() != Some(agent.as_str()) {
-                    return true;
+                    return false;
                 }
                 use base64::Engine as _;
-                let Ok(jpeg) = base64::engine::general_purpose::STANDARD.decode(s(f, "data"))
-                else {
-                    return true;
+                let data = f.get("data").and_then(Value::as_str).unwrap_or_default();
+                let Ok(jpeg) = base64::engine::general_purpose::STANDARD.decode(data) else {
+                    return false;
                 };
                 let seq = self.frame.as_ref().map_or(0, |p| p.seq) + 1;
                 let size = |k: &str| f.get(k).and_then(Value::as_f64).unwrap_or(0.0) as f32;
@@ -3028,6 +3038,9 @@ impl Model {
                     height: size("height"),
                     seq,
                 });
+                // Only the page is drawn again: the chat's rows are as they were.
+                self.page_moved = true;
+                return false;
             }
             "error" => {
                 let code = s(f, "code");

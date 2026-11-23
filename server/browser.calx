@@ -48,6 +48,8 @@ const LOAD_MS: i64 = 15000
 const LAUNCH_MS: i64 = 60000
 // How much of a page's outline goes to the agent.
 const OUTLINE_MOST: usize = 40000
+const FRAME_GAP_MS: i64 = 80    // the least time between the frames the page sends
+const NAVIGATION_LOOK_MS: i64 = 120    // how long after an act a new page may still be asked for
 
 // A tool call for the browser: browser_open's name is "open", and so on.
 pub struct Op {
@@ -94,6 +96,10 @@ struct Worker {
     was_on: String    // the page the last call left it on
     reopen: String    // the page to open again when the browser starts, where it was before it closed
     told_fonts: bool    // whether the agent's been told the computer has no fonts
+    ack: i64       // the last frame's session, to answer
+    ack_at: i64    // when to answer it, or 0
+    navigating: bool    // a new page has been asked for since the act began
+    loaded: bool        // and has loaded
 }
 
 impl Task for Worker {
@@ -152,7 +158,7 @@ impl Task for Worker {
 pub fn start(key: String, data: String, profile: String, guarded: bool, proxy: u16, reopen: String, back: Sender<Back>) -> (Sender<In>, Thread) {
     let inbox = Receiver<In>()
     let to = inbox.sender()
-    let t = unsafe { Thread.spawn(Worker { key: key.copy(), data: data.copy(), profile: profile.copy(), guarded: guarded, proxy: proxy, inbox: inbox, back: back.copy(), child: none, page: none, port: String(), next_id: 0, refs: Map<String, i64>(), hidden: List<(String, String)>(), watched: false, casting: false, recording: false, steps: List<Json>(), last_url: String(), was_on: String(), reopen: reopen.copy(), told_fonts: false }) }
+    let t = unsafe { Thread.spawn(Worker { key: key.copy(), data: data.copy(), profile: profile.copy(), guarded: guarded, proxy: proxy, inbox: inbox, back: back.copy(), child: none, page: none, port: String(), next_id: 0, refs: Map<String, i64>(), hidden: List<(String, String)>(), watched: false, casting: false, recording: false, steps: List<Json>(), last_url: String(), was_on: String(), reopen: reopen.copy(), told_fonts: false, ack: 0, ack_at: 0, navigating: false, loaded: false }) }
     return (to, t)
 }
 
@@ -327,7 +333,9 @@ pub fn stop_leftovers(root: String) {
                 let port = lines[0].trim().copy()
                 let path = lines[1].trim().copy()
                 if path.starts_with("/devtools/browser/") {
-                    if let ok(ws) = connect("ws://127.0.0.1:{port}{path}", List<Header>(), 2000) {
+                    // On this computer's own loopback a browser that's there
+                    // answers at once; a closed port would run out the whole wait.
+                    if let ok(ws) = connect("ws://127.0.0.1:{port}{path}", List<Header>(), 300) {
                         if let ok = ws.send_text("{Obj.new().i("id", 1).s("method", String("Browser.close")).j("params", Obj.new().done()).done()}") {
                             match ws.receive(2000) {
                                 ok(_) => {},
@@ -373,10 +381,15 @@ impl Worker {
         if let c = w.child {
             c.kill_tree()
             _ = c.wait_timeout(5000)
+            // Chrome leaves its port file behind; one found at the next start
+            // costs a connect that times out.
+            let port_file = "{w.profile}/DevToolsActivePort"
+            if fs.exists(port_file.copy()) { if let err(_) = fs.remove_file(port_file) {} }
         }
         w.child = none
         w.refs.clear()
         w.casting = false
+        w.ack_at = 0
         // A browser that went by itself opens where it was on the next call.
         if w.was_on.len() > 0 { w.reopen = w.was_on.copy() }
         // A recording ends with its browser, keeping what it had.
@@ -395,6 +408,7 @@ impl Worker {
             while let _ = c.read_line(0) {}
         }
         loop {
+            w.ack_frame()
             let m = match w.receive(0) {
                 ok(some(m)) => m,
                 _ => return,
@@ -405,13 +419,28 @@ impl Worker {
         }
     }
 
+    // Answers the last frame once its time has come, so the page sends the next.
+    fn ack_frame(w: mut Worker) {
+        if w.ack_at == 0 or now() < w.ack_at { return }
+        w.ack_at = 0
+        let session = w.ack
+        if let err(e) = w.send("Page.screencastFrameAck", Obj.new().i("sessionId", session).done()) { eprintln("loom: the browser: {e}") }
+    }
+
     // An event from the page. A frame goes to the loop, and the page is told
     // it came, so it sends the next.
     fn event(w: mut Worker, e: Json) {
-        if str_at(e.copy(), "method") != some(String("Page.screencastFrame")) { return }
+        let method = str_at(e.copy(), "method") ?? String()
+        // What settle waits on: a new page asked for or loading, and loaded.
+        if method == "Page.frameRequestedNavigation" or method == "Page.frameStartedLoading" { w.navigating = true }
+        if method == "Page.loadEventFired" { w.loaded = true }
+        if method != "Page.screencastFrame" { return }
         let params = at(e, "params")
-        let session = int_at(params.copy(), "sessionId") ?? 0
-        if let err(_) = w.send("Page.screencastFrameAck", Obj.new().i("sessionId", session).done()) { return }
+        // The page sends the next frame once this one is answered, so answering
+        // a little later keeps them to about twelve a second: a page that moves
+        // all the time would otherwise send a hundred, each 100 KB or more.
+        w.ack = int_at(params.copy(), "sessionId") ?? 0
+        w.ack_at = now() + FRAME_GAP_MS
         let meta = at(params.copy(), "metadata")
         let width = i64.round(at(meta.copy(), "deviceWidth").as_f64() ?? 0.0)
         let height = i64.round(at(meta, "deviceHeight").as_f64() ?? 0.0)
@@ -427,6 +456,7 @@ impl Worker {
         } else if not w.watched and w.casting {
             if let err(e) = w.call("Page.stopScreencast", Obj.new().done()) { eprintln("loom: the browser: {e}") }
             w.casting = false
+            w.ack_at = 0
         }
     }
 
@@ -630,6 +660,7 @@ impl Worker {
         let agent = (str_at(version, "userAgent") ?? String()).replace("HeadlessChrome", "Chrome")
         _ = try w.call("Emulation.setUserAgentOverride", Obj.new().s("userAgent", agent).done())
         _ = try w.call("Page.setDownloadBehavior", Obj.new().s("behavior", String("deny")).done())
+        _ = try w.call("Page.enable", Obj.new().done())
         if w.guarded {
             var blocked = List<Json>()
             for p in guarded_patterns() { blocked.push(Json.Str(p.copy())) }
@@ -734,6 +765,7 @@ impl Worker {
         let id = try w.send(method, params)
         let until = now() + CALL_MS
         loop {
+            w.ack_frame()
             let left = until - now()
             if left <= 0 { fail "The browser didn't answer {method} in time." }
             let m = try w.receive(u32.wrap(left)) else continue
@@ -751,15 +783,46 @@ impl Worker {
 
     // Waits for the page to finish loading, after something that may have
     // started a new one.
+    //
+    // The page says when a new one is asked for, so an act that started none
+    // is done after a short look, and one that did is done once it has loaded.
+    // Until a new page has been asked for, the old one says it's complete, so
+    // readyState is asked only once one has, or once the old wait has passed.
     fn settle(w: mut Worker) {
-        unsafe { sleep(300000000) }
-        let until = now() + LOAD_MS
-        while now() < until {
-            match w.call("Runtime.evaluate", Obj.new().s("expression", String("document.readyState")).b("returnByValue", true).done()) {
-                ok(r) => if str_at(at(r, "result"), "value") == some(String("complete")) { return },
-                err(_) => {},
+        let started = now()
+        while not w.navigating and now() - started < NAVIGATION_LOOK_MS {
+            w.pump(started + NAVIGATION_LOOK_MS - now())
+        }
+        if w.navigating {
+            let until = now() + LOAD_MS
+            var asked: i64 = 0
+            while now() < until and not w.loaded {
+                w.pump(100)
+                if w.loaded { break }
+                if now() - started < 300 or now() - asked < 100 { continue }
+                asked = now()
+                match w.call("Runtime.evaluate", Obj.new().s("expression", String("document.readyState")).b("returnByValue", true).done()) {
+                    ok(r) => if str_at(at(r, "result"), "value") == some(String("complete")) { break },
+                    err(_) => {},
+                }
             }
-            unsafe { sleep(200000000) }
+        }
+        w.navigating = false
+        w.loaded = false
+    }
+
+    // Takes the page's events for up to `ms` milliseconds.
+    fn pump(w: mut Worker, ms: i64) {
+        if ms <= 0 { return }
+        w.ack_frame()
+        let m = match w.receive(u32.wrap(ms)) {
+            ok(some(m)) => m,
+            _ => return,
+        }
+        if let Message.Text(t) = m {
+            if let ok(e) = parse(t) {
+                if e.get(String("method")) != none { w.event(e) }
+            }
         }
     }
 
@@ -855,6 +918,9 @@ impl Worker {
     // after it closed opens the page it was on first, unless the call opens
     // another, and the result says so.
     fn op(w: mut Worker, name: String, args: Json) -> Json ! Error {
+        // What the page did before this call isn't what settle waits on.
+        w.navigating = false
+        w.loaded = false
         var note = String()
         if w.page == none {
             try w.open_browser()
@@ -1236,7 +1302,7 @@ pub fn refused(url: String, guarded: bool) -> String? {
 pub fn outline_of(nodes: List<Json>, refs: mut Map<String, i64>) -> String {
     var index = Map<String, usize>()
     for (k, n) in nodes.enumerate() {
-        if let id = str_at(n.copy(), "nodeId") { index.insert(id, k) }
+        if let id = str_at(n, "nodeId") { index.insert(id, k) }
     }
     var lines = List<String>()
     if nodes.len() > 0 { walk(nodes, index, 0, 0, String(), mut lines, mut refs) }
@@ -1249,10 +1315,9 @@ const PLAIN: str = " generic none presentation group LayoutTable LayoutTableRow 
 const SAID: str = " InlineTextBox LineBreak "
 
 fn walk(nodes: List<Json>, index: Map<String, usize>, k: usize, depth: usize, parent_name: String, lines: mut List<String>, refs: mut Map<String, i64>) {
-    let n = nodes[k].copy()
-    let role = str_at(at(n.copy(), "role"), "value") ?? String()
-    let name = (str_at(at(n.copy(), "name"), "value") ?? String()).trim().copy()
-    let ignored = bool_at(n.copy(), "ignored") ?? false
+    let role = str_at(at(nodes[k], "role"), "value") ?? String()
+    let name = (str_at(at(nodes[k], "name"), "value") ?? String()).trim().copy()
+    let ignored = bool_at(nodes[k], "ignored") ?? false
     var shown = not ignored and role != "RootWebArea" and not SAID.contains(" {role} ")
     if shown and PLAIN.contains(" {role} ") and name.len() == 0 { shown = false }
     if shown and role == "StaticText" and (name.len() == 0 or name == parent_name) { shown = false }
@@ -1265,11 +1330,11 @@ fn walk(nodes: List<Json>, index: Map<String, usize>, k: usize, depth: usize, pa
         } else {
             line.push_str(role.copy())
             if name.len() > 0 { line.push_str(" \"{short(name.copy(), 200)}\"") }
-            if let value = str_at(at(n.copy(), "value"), "value") {
+            if let value = str_at(at(nodes[k], "value"), "value") {
                 if value.len() > 0 { line.push_str(": {short(value, 200)}") }
             }
-            line.push_str(states(at(n.copy(), "properties")))
-            if let backend = int_at(n.copy(), "backendDOMNodeId") {
+            line.push_str(states(at(nodes[k], "properties")))
+            if let backend = int_at(nodes[k], "backendDOMNodeId") {
                 let r = "e{refs.len() + 1}"
                 line.push_str(" [ref={r}]")
                 refs.insert(r, backend)
@@ -1279,7 +1344,7 @@ fn walk(nodes: List<Json>, index: Map<String, usize>, k: usize, depth: usize, pa
         inner = depth + 1
         named = name.copy()
     }
-    if let Json.Array(children) = at(n, "childIds") {
+    if let Json.Array(children) = at(nodes[k], "childIds") {
         for c in children {
             if let id = c.as_str() {
                 if let child = index.get(id) { walk(nodes, index, child, inner, named.copy(), mut lines, mut refs) }

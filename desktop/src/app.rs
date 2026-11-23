@@ -419,6 +419,13 @@ pub struct Loom {
     keys: FocusHandle,
     /// The watched browser's page, decoded, and the frame it's from.
     page_image: Option<(u64, Arc<RenderImage>)>,
+    /// Frames drawn before, let go of at the next render.
+    old_pages: Vec<Arc<RenderImage>>,
+    page_decoding: bool,
+    /// The newest frame a decode was started for.
+    page_tried: u64,
+    /// What the composer says while it's empty, as last set.
+    composer_placeholder: String,
     /// Where the page is drawn, for turning a click on it into the page's own pixels.
     page_bounds: Rc<std::cell::Cell<Option<Bounds<Pixels>>>>,
     /// Whether the watched browser fills the panel beside the chat. Otherwise it's
@@ -954,6 +961,10 @@ ACTA_KEY=secret:ACTA_KEY",
                     loom.route_updates(cx);
                     loom.fetch();
                     loom.open_fetched(cx);
+                    // A frame is decoded off this thread, and drawn once it is.
+                    if std::mem::take(&mut loom.model.page_moved) {
+                        loom.decode_frame(cx);
+                    }
                     if changed {
                         loom.refresh_rows(cx);
                         cx.notify();
@@ -1097,6 +1108,10 @@ ACTA_KEY=secret:ACTA_KEY",
             launched: None,
             keys: cx.focus_handle(),
             page_image: None,
+            old_pages: Vec::new(),
+            page_decoding: false,
+            page_tried: 0,
+            composer_placeholder: String::new(),
             page_bounds: Rc::new(std::cell::Cell::new(None)),
             browser_docked: false,
             browser_shut: None,
@@ -2196,7 +2211,16 @@ ACTA_KEY=secret:ACTA_KEY",
                 Row::Approval(_) => None,
             })
             .collect();
-        self.flow = Rc::new(model::flow(&messages, day_number));
+        // A zone's offset changes only on a quarter hour, so each quarter hour's day is
+        // looked up once: Windows asks the system for the zone at every lookup.
+        let days = std::cell::RefCell::new(HashMap::<i64, i64>::new());
+        let day = |ms: i64| {
+            *days
+                .borrow_mut()
+                .entry(ms.div_euclid(900_000))
+                .or_insert_with(|| day_number(ms))
+        };
+        self.flow = Rc::new(model::flow(&messages, day));
         self.rows = Rc::new(rows);
         self.scroller.update(cx, |s, cx| {
             if same_start && new_len >= old_len {
@@ -3654,25 +3678,52 @@ ACTA_KEY=secret:ACTA_KEY",
         }
     }
 
-    /// Decodes the watched browser's newest frame, once per frame.
-    fn decode_page(&mut self, window: &mut Window) {
-        if let Some(f) = &self.model.frame {
-            if self.page_image.as_ref().map(|(seq, _)| *seq) != Some(f.seq) {
-                if let Ok(decoded) =
-                    image::load_from_memory_with_format(&f.jpeg, image::ImageFormat::Jpeg)
-                {
-                    let mut rgba = decoded.to_rgba8();
-                    for px in rgba.pixels_mut() {
-                        px.0.swap(0, 2);
-                    }
-                    let render = Arc::new(RenderImage::new(vec![image::Frame::new(rgba)]));
-                    if let Some((_, old)) = self.page_image.replace((f.seq, render)) {
-                        let _ = window.drop_image(old);
-                    }
-                }
+    /// Decodes the watched browser's newest frame off the UI thread, one at a time:
+    /// frames that come while one decodes are skipped for the newest.
+    fn decode_frame(&mut self, cx: &mut Context<Self>) {
+        let Some(f) = &self.model.frame else {
+            return;
+        };
+        if self.page_decoding || self.page_tried == f.seq {
+            return;
+        }
+        let (seq, jpeg) = (f.seq, f.jpeg.clone());
+        self.page_decoding = true;
+        self.page_tried = seq;
+        let task = cx.background_executor().spawn(async move {
+            let decoded =
+                image::load_from_memory_with_format(&jpeg, image::ImageFormat::Jpeg).ok()?;
+            let mut rgba = decoded.to_rgba8();
+            for px in rgba.pixels_mut() {
+                px.0.swap(0, 2);
             }
-        } else if let Some((_, old)) = self.page_image.take() {
+            Some(Arc::new(RenderImage::new(vec![image::Frame::new(rgba)])))
+        });
+        cx.spawn(async move |this, cx| {
+            let render = task.await;
+            let _ = this.update(cx, |loom, cx| {
+                loom.page_decoding = false;
+                if let Some(render) = render {
+                    if let Some((_, old)) = loom.page_image.replace((seq, render)) {
+                        loom.old_pages.push(old);
+                    }
+                    cx.notify();
+                }
+                loom.decode_frame(cx);
+            });
+        })
+        .detach();
+    }
+
+    /// Lets go of the frames drawn before, and of the page once nothing's watched.
+    fn decode_page(&mut self, window: &mut Window) {
+        for old in self.old_pages.drain(..) {
             let _ = window.drop_image(old);
+        }
+        if self.model.frame.is_none() {
+            if let Some((_, old)) = self.page_image.take() {
+                let _ = window.drop_image(old);
+            }
         }
     }
 
@@ -6888,8 +6939,12 @@ ACTA_KEY=secret:ACTA_KEY",
         } else {
             format!("Reply to {who}")
         };
-        self.composer
-            .update(cx, |s, cx| s.set_placeholder(placeholder, window, cx));
+        // Set only when it changes: setting it marks the composer to be drawn again.
+        if self.composer_placeholder != placeholder {
+            self.composer_placeholder = placeholder.clone();
+            self.composer
+                .update(cx, |s, cx| s.set_placeholder(placeholder, window, cx));
+        }
         let mut attached = div().flex().flex_wrap().gap(px(space::S));
         for a in self.model.attachments.clone() {
             let id = a.id.clone();

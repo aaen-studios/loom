@@ -426,7 +426,7 @@ An agent's browser opened or closed, was taken over or handed back, or is asking
 
 ### `browser.frame`
 
-A picture of the page, to each session watching that agent's browser: `agent`, `data` (a JPEG, base64), `width` and `height` (the page's pixels, which `browser.input`'s `x` and `y` are in).
+A picture of the page, to each session watching that agent's browser: `agent`, `data` (a JPEG, base64), `width` and `height` (the page's pixels, which `browser.input`'s `x` and `y` are in). They come as the page changes, at most about twelve a second.
 
 ### `instance.update`
 
