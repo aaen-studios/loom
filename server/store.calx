@@ -84,8 +84,6 @@ CREATE TABLE IF NOT EXISTS activity (
     ended INTEGER NOT NULL DEFAULT 0);
 CREATE INDEX IF NOT EXISTS activity_by_agent ON activity (user, agent, id);
 CREATE INDEX IF NOT EXISTS activity_by_user ON activity (user, id);
--- Only what is still going, which start marks failed after a restart: activity is kept.
-CREATE INDEX IF NOT EXISTS activity_started ON activity (id) WHERE status = 'started';
 CREATE TABLE IF NOT EXISTS secrets (
     user TEXT NOT NULL REFERENCES users(id), name TEXT NOT NULL, nonce TEXT NOT NULL,
     sealed TEXT NOT NULL, at INTEGER NOT NULL, PRIMARY KEY (user, name));
@@ -386,6 +384,9 @@ impl Store {
         if not recorded {
             try s.db.execute_script(String("ALTER TABLE activity ADD COLUMN status TEXT NOT NULL DEFAULT ''; ALTER TABLE activity ADD COLUMN input TEXT NOT NULL DEFAULT ''; ALTER TABLE activity ADD COLUMN why TEXT NOT NULL DEFAULT ''; ALTER TABLE activity ADD COLUMN ended INTEGER NOT NULL DEFAULT 0;"))
         }
+        // Only what is still going, which start marks failed after a restart: activity is
+        // kept for good, so it adds up.
+        try s.db.execute_script(String("CREATE INDEX IF NOT EXISTS activity_started ON activity (id) WHERE status = 'started';"))
         // Notes from before a note could be tied to a site get the column.
         var sited = false
         for r in try s.db.query(String("PRAGMA table_info(memories)")) {
