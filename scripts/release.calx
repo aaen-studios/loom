@@ -16,8 +16,8 @@ module scripts.release
 //     calx scripts/release.calx sign DIR VERSION BASE_URL NOTES_FILE KIND=FILE ...
 //         writes DIR/manifest.json and DIR/manifest.json.sig for the files in
 //         DIR, each under its kind (windows-desktop, windows-installer,
-//         linux-server, linux-arm64-server, windows-server, macos-server), with the
-//         seed from LOOM_RELEASE_KEY.
+//         macos-desktop, linux-server, linux-arm64-server, windows-server,
+//         macos-server), with the seed from LOOM_RELEASE_KEY.
 //     calx scripts/release.calx verify DIR
 //         checks DIR's manifest against the public key, and each file's hash.
 //     calx scripts/release.calx pack SETUP LOOM_EXE VERSION OUT

@@ -1,0 +1,264 @@
+module tests.setup.mac
+
+// The Mac app's updates from end to end (desktop/src/swap.rs), in a folder of its own,
+// with a loom.app that scripts/mac.calx made from a build whose version is 0.0.1-dev
+// (LOOM_VERSION=0.0.1-dev cargo build --release). A build from source reads the
+// manifest's address from LOOM_UPDATE and the key from LOOM_UPDATE_KEY, so the test's
+// releases, served from a folder and signed with a test key, are the ones it looks at.
+//
+// The app goes where an installed one does, and starts in the menu bar with its data in
+// the test's folder and updates put in on their own (prefs.json, auto_update). Then:
+//
+// 1. a release whose loom can't start: the new loom puts itself in place, starts, ends
+//    with an error, and the old loom goes back and starts again;
+// 2. a release that starts: it stays, running, and the old bundle is cleared away.
+//
+// Each release's loom is the same program with its version changed, signed again; the
+// broken one is that program behind a script that ends with an error unless it's asked
+// to put itself in place.
+//
+//     calx tests/setup/mac.calx APP
+//
+// CI runs it on macOS. Elsewhere it says it was skipped.
+import std.bytes
+import std.crypto.{Ed25519Key}
+import std.env
+import std.fs
+import std.hash.{sha256}
+import std.json.{Json}
+import std.process.{Command, Stdio, exit}
+import std.thread.{sleep}
+import shared.obj.{Obj}
+import tests.kit.{calx, check}
+
+// A seed for the test key the releases are signed with.
+const SEED: str = "5e7f0a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7"
+const OLD: str = "0.0.1-dev"
+const BROKEN: str = "0.0.2-dev"
+const NEW: str = "0.0.3-dev"
+// How long each step may take: the first look is 10 s after a start, then the download,
+// the swap, and ten seconds of watching the new loom.
+const STEP_MS: u64 = 120000
+
+fn wait_ms(ms: u64) {
+    unsafe { sleep(ms * 1000000) }
+}
+
+/// `data` with every `from` replaced by `to`, which is as long.
+fn replaced(data: own List<u8>, from: str, to: str) -> List<u8> ! Error {
+    let a = String(from).to_bytes()
+    let b = String(to).to_bytes()
+    var out = data
+    var found = 0
+    var k = 0usize
+    while k + a.len() <= out.len() {
+        var same = true
+        for j in 0usize..a.len() {
+            if out[k + j] != a[j] {
+                same = false
+                break
+            }
+        }
+        if same {
+            for j in 0usize..b.len() {
+                out[k + j] = b[j]
+            }
+            found += 1
+            k += a.len()
+        } else {
+            k += 1
+        }
+    }
+    if found == 0 { fail "the program doesn't hold {from}" }
+    return out
+}
+
+/// The version an app's Info.plist says.
+fn version_of(app: String) -> String {
+    let text = match fs.read_text("{app}/Contents/Info.plist") {
+        ok(some(t)) => t,
+        _ => return String(),
+    }
+    let key = text.find("<key>CFBundleShortVersionString</key>") else return String()
+    let rest = text[key..].copy()
+    let start = (rest.find("<string>") ?? 0) + 8
+    let end = rest.find("</string>") ?? start
+    return rest[start..end].copy()
+}
+
+/// Whether a loom from the bundle at `app` is running.
+fn running(app: String) -> bool {
+    return match Command.new(String("pgrep")).args([String("-f"), "{app}/Contents/MacOS/loom"]).output() {
+        ok(o) => o.status.success(),
+        err(_) => false,
+    }
+}
+
+/// What the app's update.log says so far.
+fn log_of(data: String) -> String {
+    return match fs.read_text("{data}/update.log") {
+        ok(some(t)) => t,
+        _ => String(),
+    }
+}
+
+/// Waits for update.log to say `text`, up to STEP_MS.
+fn wait_for_log(data: String, text: String) -> bool {
+    for _ in 0..STEP_MS / 500 {
+        if log_of(data.copy()).contains(text.copy()) { return true }
+        wait_ms(500)
+    }
+    return false
+}
+
+/// A release of loom `version` in `dir`, its disk image `dmg`, signed with `key`, served at `base`.
+fn release(dir: String, version: str, image: String, key: Ed25519Key, base: String) ! Error {
+    let data = try fs.read(image)
+    try fs.write("{dir}/loom-mac.dmg", data.copy())
+    let entry = Obj.new().s("name", String("loom-mac.dmg")).s("url", "{base}/loom-mac.dmg").s("sha256", bytes.hex(sha256(data.copy()))).i("size", i64.wrap(u64(data.len()))).done()
+    var files = Obj.new().done()
+    if let Json.Object(m) = mut files { m.insert(String("macos-desktop"), entry) }
+    let manifest = "{Obj.new().s("version", String(version)).s("notes", String("Faster.")).j("files", files).done()}"
+    try fs.write_text("{dir}/manifest.json", manifest.copy())
+    try fs.write_text("{dir}/manifest.json.sig", bytes.base64(key.sign(manifest.to_bytes())))
+}
+
+/// A loom.app of `version` in `out`, from `program`, made as a release's is, and its disk image.
+fn bundle(program: String, version: str, out: String) -> String ! Error {
+    try fs.make_dir_all(out.copy())
+    try Command.new(calx()).args([String("scripts/mac.calx"), String("app"), program.copy(), String(version), out.copy()]).stdout(Stdio.Null).run()
+    return "{out}/loom.app"
+}
+
+fn dmg(app: String, out: String) ! Error {
+    try Command.new(calx()).args([String("scripts/mac.calx"), String("dmg"), app.copy(), out.copy()]).stdout(Stdio.Null).run()
+}
+
+/// Ends every loom from the bundle at `app`.
+fn stop(app: String) {
+    match Command.new(String("pkill")).args([String("-f"), "{app}/Contents/MacOS/loom"]).output() {
+        ok(_) => {},
+        err(_) => {},
+    }
+    for _ in 0..50 {
+        if not running(app.copy()) { return }
+        wait_ms(200)
+    }
+}
+
+fn run(root: String, given: String) ! Error {
+    let key = Ed25519Key.from_seed(bytes.from_hex(String(SEED)) ?? List<u8>()) else {
+        fail "the test seed isn't a seed"
+    }
+    let public = bytes.hex(key.public_key().bytes())
+    try check(version_of(given.copy()) == OLD, "the app given is loom 0.0.1-dev")
+
+    // Where an installed loom goes, and its data folder, updating itself while in the menu bar.
+    let apps = "{root}/Applications"
+    let app = "{apps}/loom.app"
+    let data = "{root}/data"
+    try fs.make_dir_all(apps.copy())
+    try fs.make_dir_all(data.copy())
+    try Command.new(String("ditto")).args([given.copy(), app.copy()]).run()
+    try fs.write_text("{data}/prefs.json", String(#"{"auto_update":true}"#))
+
+    // The newer looms: the same program with its version changed, and one behind a
+    // script that ends with an error unless it's putting itself in place.
+    let program = try fs.read("{given}/Contents/MacOS/loom")
+    let new_program = "{root}/loom-new"
+    try fs.write(new_program.copy(), try replaced(program.copy(), OLD, NEW))
+    try fs.set_mode(new_program.copy(), 0o755)
+    let new_app = try bundle(new_program, NEW, "{root}/new")
+    let broken_program = "{root}/loom-broken"
+    try fs.write(broken_program.copy(), try replaced(program, OLD, BROKEN))
+    try fs.set_mode(broken_program.copy(), 0o755)
+    let broken_app = try bundle(broken_program, BROKEN, "{root}/broken")
+    let real = "{broken_app}/Contents/MacOS/loom-real"
+    try fs.rename("{broken_app}/Contents/MacOS/loom", real.copy())
+    try fs.write_text("{broken_app}/Contents/MacOS/loom", String(#"
+        #!/bin/sh
+        if [ "$1" = "--swap" ]; then exec "$(dirname "$0")/loom-real" "$@"; fi
+        exit 3
+        "#))
+    try fs.set_mode("{broken_app}/Contents/MacOS/loom", 0o755)
+    try dmg(new_app, "{root}/new.dmg")
+    try dmg(broken_app, "{root}/broken.dmg")
+
+    // The releases, served from a folder.
+    let served = "{root}/release"
+    try fs.make_dir_all(served.copy())
+    // Its first line says where: "Serving HTTP on 127.0.0.1 port N (http://127.0.0.1:N/) ...".
+    var server = try Command.new(calx()).args([String("serve"), served.copy(), String("--port"), String("0")]).stdout(Stdio.Pipe).stderr(Stdio.Null).spawn()
+    let line = server.wait_for_line(String("http://"), 30000) else {
+        server.kill()
+        fail "calx serve didn't say where it is"
+    }
+    let from = line[line.find("http://") ?? 0..].copy()
+    var base = from[..from.find(")") ?? from.len()].trim().copy()
+    while base.ends_with("/") { base = base[..base.len() - 1].copy() }
+    try release(served.copy(), BROKEN, "{root}/broken.dmg", key, base.copy())
+
+    // The old loom, in the menu bar, as at login. What it says goes in app.log, which a
+    // failure prints.
+    try Command.new(String("open")).args([String("-n"), String("--stderr"), "{root}/app.log", String("--env"), "LOOM_DATA={data}", String("--env"), "LOOM_UPDATE={base}/manifest.json", String("--env"), "LOOM_UPDATE_KEY={public}", app.copy(), String("--args"), String("--background")]).run()
+    let said = wait_for_log(data.copy(), String("so the old loom goes back"))
+    try check(said, "a new loom that ends with an error is put back")
+    // The old loom starts again from its place.
+    var back = false
+    for _ in 0..40 {
+        if running(app.copy()) and version_of(app.copy()) == OLD {
+            back = true
+            break
+        }
+        wait_ms(500)
+    }
+    try check(back, "the old loom is in its place again, running")
+
+    // A release that starts: the old loom, started again, finds it and puts it in.
+    let key2 = Ed25519Key.from_seed(bytes.from_hex(String(SEED)) ?? List<u8>()) else {
+        fail "the test seed isn't a seed"
+    }
+    try release(served.copy(), NEW, "{root}/new.dmg", key2, base.copy())
+    let started = wait_for_log(data.copy(), "loom {NEW} started")
+    try check(started, "the new loom puts itself in place and starts")
+    try check(version_of(app.copy()) == NEW, "the app in its place is loom 0.0.3-dev")
+    try check(running(app.copy()), "and it's running")
+    try check(not fs.exists("{data}/update/{NEW}/previous.app"), "the old bundle is cleared away")
+    // Nothing of the disk images is left mounted.
+    let mounted = try Command.new(String("hdiutil")).arg(String("info")).read()
+    try check(not mounted.contains(root.copy()), "no disk image is left mounted")
+
+    stop(app.copy())
+    server.kill()
+    _ = server.wait()
+}
+
+fn main() ! Error {
+    if env.os() != "macos" {
+        println("skipped: the Mac app's updates are for macOS")
+        return
+    }
+    let args = env.args()
+    if args.len() != 1 {
+        eprintln("usage: calx tests/setup/mac.calx APP")
+        exit(2)
+    }
+    let given = try fs.absolute(args[0].copy())
+    let root = try fs.temp_dir()
+    match run(root.copy(), given) {
+        ok => {},
+        err(e) => {
+            stop("{root}/Applications/loom.app")
+            eprintln("update.log:\n{log_of("{root}/data")}")
+            let said = match fs.read_text("{root}/app.log") {
+                ok(some(t)) => t,
+                _ => String(),
+            }
+            eprintln("what loom said:\n{said}")
+            try fs.remove_dir_all(root)
+            fail "{e}"
+        },
+    }
+    try fs.remove_dir_all(root)
+    println("the Mac app updates itself, and puts the old one back when the new one can't start")
+}

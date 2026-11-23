@@ -198,3 +198,47 @@ jobs:
           timeout 180 ./target/debug/loom.exe --panel-test panel-test.json || status=$?
           cat panel-test.json || true
           exit $status
+
+  # The Mac app: its checks, loom.app and its disk image made as a release's are, and
+  # its updates from end to end (tests/setup/mac.calx).
+  desktop-macos:
+    name: desktop (macos-latest)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Calx
+        run: |
+          curl -fsSL https://calxlang.com/install.sh | sh
+          echo "$HOME/.calx/bin" >> "$GITHUB_PATH"
+
+      - name: Rust
+        run: rustup update stable && rustup default stable && rustup component add clippy rustfmt
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: desktop
+
+      - name: Format
+        working-directory: desktop
+        run: cargo fmt --check
+
+      - name: Lint
+        working-directory: desktop
+        run: cargo clippy --locked -- -D warnings
+
+      - name: Test
+        working-directory: desktop
+        run: cargo test --locked
+
+      - name: loom.app and loom-mac.dmg
+        env:
+          LOOM_VERSION: 0.0.1-dev
+        run: |
+          (cd desktop && cargo build --locked --release)
+          calx scripts/mac.calx app desktop/target/release/loom "$LOOM_VERSION" build/mac
+          calx scripts/mac.calx dmg build/mac/loom.app build/mac/loom-mac.dmg
+          ls -l build/mac
+
+      - name: Updates, end to end
+        run: calx tests/setup/mac.calx build/mac/loom.app
