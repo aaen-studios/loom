@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 use gpui_kit::assets::IconName as Ico;
 use gpui_kit::component::input::{Input, InputEvent, InputState, Paste, Textarea, TextareaState};
 use gpui_kit::component::message_scroller::{MessageScroller, MessageScrollerState};
-use gpui_kit::component::text::TextView;
+use gpui_kit::component::text::{TextView, TextViewState};
 use gpui_kit::component::{Icon, IconName, Sizable as _, TitleBar};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
@@ -13361,11 +13361,11 @@ fn person(
                 .text_size(px(size::BODY * scale))
                 .text_color(p.ink)
                 .when(m.queued, |d| d.opacity(0.6))
-                .child(
-                    TextView::markdown(SharedString::from(format!("m-{}-{room}", m.id)), words)
-                        .selectable(true)
-                        .on_link_click(on_link),
-                ),
+                .child(KeptText::new(
+                    SharedString::from(format!("m-{}-{room}", m.id)),
+                    words,
+                    move |v| v.selectable(true).on_link_click(on_link),
+                )),
         )
     })
     .when(m.queued, |d| {
@@ -13750,6 +13750,79 @@ fn tool_line(p: Palette, b: &model::Block, tools: &model::Tools) -> Div {
         .child(div().text_color(color).child(mark))
 }
 
+/// How many message texts stay parsed while out of view.
+const KEPT_TEXTS: usize = 300;
+
+thread_local! {
+    /// Each message text's parsed state, by its key, with when it was last drawn. A
+    /// TextView's own state goes once its row isn't drawn, so a row scrolled back into
+    /// view was parsed again from the start, and a long one drew empty first.
+    static TEXTS: std::cell::RefCell<(HashMap<SharedString, (Entity<TextViewState>, u64)>, u64)> =
+        std::cell::RefCell::new((HashMap::new(), 0));
+}
+
+/// A message's text, drawn from the state kept for `key`.
+#[derive(IntoElement)]
+struct KeptText {
+    key: SharedString,
+    text: SharedString,
+    style: Box<dyn FnOnce(TextView) -> TextView>,
+}
+
+impl KeptText {
+    fn new(
+        key: SharedString,
+        text: impl Into<SharedString>,
+        style: impl FnOnce(TextView) -> TextView + 'static,
+    ) -> Self {
+        KeptText {
+            key,
+            text: text.into(),
+            style: Box::new(style),
+        }
+    }
+}
+
+impl RenderOnce for KeptText {
+    fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
+        let kept = TEXTS.with(|t| {
+            let mut t = t.borrow_mut();
+            t.1 += 1;
+            let now = t.1;
+            t.0.get_mut(&self.key).map(|(state, used)| {
+                *used = now;
+                state.clone()
+            })
+        });
+        let state = match kept {
+            Some(state) => {
+                state.update(cx, |s, cx| s.set_text(&self.text, cx));
+                state
+            }
+            None => {
+                let text = self.text.clone();
+                let state = cx.new(|cx| TextViewState::markdown(&text, cx));
+                TEXTS.with(|t| {
+                    let mut t = t.borrow_mut();
+                    let now = t.1;
+                    t.0.insert(self.key.clone(), (state.clone(), now));
+                    // The least recently drawn go, a batch at a time.
+                    if t.0.len() > KEPT_TEXTS + KEPT_TEXTS / 4 {
+                        let mut by_use: Vec<(u64, SharedString)> =
+                            t.0.iter().map(|(k, (_, u))| (*u, k.clone())).collect();
+                        by_use.sort_unstable();
+                        for (_, k) in by_use.into_iter().take(KEPT_TEXTS / 4) {
+                            t.0.remove(&k);
+                        }
+                    }
+                });
+                state
+            }
+        };
+        (self.style)(TextView::new(&state))
+    }
+}
+
 /// What drawing one reply's parts needs (`model::parts`).
 struct ReplyDraw<'a> {
     p: Palette,
@@ -13800,13 +13873,11 @@ impl ReplyDraw<'_> {
                 .text_size(px(size::REPLY * show.text_scale))
                 .line_height(relative(line::REPLY))
                 .text_color(p.ink)
-                .child(
-                    TextView::markdown(
-                        SharedString::from(format!("r-{}-{}", self.key(i), show.room)),
-                        self.m.blocks[i].text.clone(),
-                    )
-                    .selectable(true),
-                );
+                .child(KeptText::new(
+                    SharedString::from(format!("r-{}-{}", self.key(i), show.room)),
+                    self.m.blocks[i].text.clone(),
+                    |v| v.selectable(true),
+                ));
             group = group.child(if show.bubbles {
                 // A bubble with a breath of the agent's colour, its corner by the
                 // thread squared off as a speech bubble's tail, and smaller where it
