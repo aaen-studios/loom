@@ -18,7 +18,7 @@ module server.mcp
 // message_agent call waits for the other agent's reply.
 import std.env
 import std.fs
-import std.http.{Header, get, post}
+import std.http.{Header, Request, get, post}
 import std.io
 import std.json.{Json, parse}
 import std.process.{Child}
@@ -70,15 +70,30 @@ impl Link {
 
     fn fetch(self, path: str, wait: u32) -> Json ! Error {
         var req = get("{self.base}{path}", self.headers(), wait, MAX_ANSWER)
-        let r = try req.wait()
-        let text = String.from_utf8(r.body) ?? String()
-        if r.status != 200 { fail "the instance answered {r.status}: {text}" }
-        return try parse(text)
+        return try answer_of(mut req)
     }
 
-    fn tools(self) -> Json ! Error {
-        return try self.fetch("/api/mcp/tools", 30000)
+    fn ask_tools(self) -> Request {
+        return get("{self.base}/api/mcp/tools", self.headers(), 30000, MAX_ANSWER)
     }
+}
+
+fn answer_of(req: mut Request) -> Json ! Error {
+    let r = try req.wait()
+    let text = String.from_utf8(r.body) ?? String()
+    if r.status != 200 { fail "the instance answered {r.status}: {text}" }
+    return try parse(text)
+}
+
+// loom's own tools. The session asks for them as it starts, which also opens
+// its connection to the instance (the first costs a few ms), and the first to
+// want them takes that answer.
+fn own_tools(link: Link, c: mut Code) -> Json ! Error {
+    var req = c.warm.take() else { var fresh = link.ask_tools(); return try answer_of(mut fresh) }
+    return try answer_of(mut req)
+}
+
+impl Link {
 
     // A POST to the instance, whose answer is a tool result.
     fn send(self, path: str, body: Json) -> Json {
@@ -131,6 +146,7 @@ struct Code {
     servers: Map<String, Server>
     trouble: List<String>    // servers that didn't start, and why
     runs: i64
+    warm: Request?    // loom's own tools, asked for as the session starts
     folder: String    // the session's scripts, their prelude and Deno's cache, made at the first
 }
 
@@ -174,7 +190,7 @@ impl Code {
     fn load(self: mut Code, link: Link) {
         if self.loaded { return }
         self.loaded = true
-        match link.tools() {
+        match own_tools(link, mut self) {
             ok(t) => {
                 var listed = List<Json>()
                 if let Json.Array(l) = at(t, "tools") { listed = l.copy() }
@@ -378,7 +394,7 @@ fn handle(link: Link, c: mut Code, m: Json) {
             reply(id, Obj.new().j("tools", Json.Array(tools.code_mode_tools())).done())
             return
         }
-        match link.tools() {
+        match own_tools(link, mut c) {
             ok(t) => reply(id, t),
             err(e) => reply_error(id, -32603, "loom's instance didn't answer: {e}"),
         }
@@ -404,7 +420,7 @@ pub fn serve() ! Error {
     let base = env.variable(String("LOOM_URL")) else { fail "LOOM_URL isn't set: loom mcp is started by loom's instance" }
     let token = env.variable(String("LOOM_MCP_TOKEN")) else { fail "LOOM_MCP_TOKEN isn't set: loom mcp is started by loom's instance" }
     let link = Link { base: base, token: token }
-    var c = Code { on: env.variable(String("LOOM_CODE_MODE")) == some(String("1")), deno: String(), loaded: false, tools: List<Tool>(), servers: Map<String, Server>(), trouble: List<String>(), runs: 0, folder: String() }
+    var c = Code { on: env.variable(String("LOOM_CODE_MODE")) == some(String("1")), deno: String(), loaded: false, tools: List<Tool>(), servers: Map<String, Server>(), trouble: List<String>(), runs: 0, folder: String(), warm: some(link.ask_tools()) }
     var input = io.Lines()
     while let line = input.next() {
         if line.trim().len() == 0 { continue }
