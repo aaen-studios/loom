@@ -230,6 +230,18 @@ struct Proc {
     stopped: bool    // whether it was told to stop, so it's let go of
 }
 
+impl Proc {
+    // Lets go of what was kept about an ACP session that's been replaced or whose
+    // conversation was deleted.
+    fn forget(self: mut Proc, session: String) {
+        _ = self.told.remove(session.copy())
+        _ = self.told.remove("{session}#shared")
+        _ = self.told.remove("{session}#every")
+        _ = self.profiled.remove(session.copy())
+        _ = self.configs.remove(session)
+    }
+}
+
 pub struct Instance {
     store: Store
     server: Server
@@ -313,7 +325,8 @@ pub struct Instance {
     watchers: Map<u32, String>    // a session -> the browser it watches, by its key
     followers: List<u32>    // the sessions among them that only follow, which keep no browser open
     browser_to: Sender<browser.Back>
-    stopped_browsers: List<Thread>    // browsers told to stop, joined at shutdown
+    stopped_browsers: Map<u64, Thread>    // browsers told to stop, by number, each joined once it says it stopped
+    next_browser: u64    // the next browser thread's number
     fills: Map<String, Fill>    // browser_fill_secret calls on their browser
     turns_ended: List<(String, String, String)>    // a person, a conversation and how its turn ended, for the queue
     next_browser_sweep: i64
@@ -339,6 +352,7 @@ pub struct Instance {
 struct Browser {
     to: Sender<browser.In>
     thread: Thread
+    n: u64    // its thread's number
     busy: i64    // calls sent that haven't come back
     used: i64    // when the last one did
     open: bool    // whether the browser itself is running
@@ -1117,7 +1131,7 @@ impl Instance {
         }
         let browser_done = Receiver<browser.Back>()
         let browser_to = browser_done.sender()
-        var i = Instance { release: config.release.copy(), host: update.host(config.in_app), exe: current_exe(), update_to: update_to, update_back: update_back, updating: no_update(), next_update_check: 0, last_busy: now(), restart_stops: List<String>(), restart: false, told_update: Json.Null, told_update_at: 0, browsers: LinkedMap<String, Browser>(), watchers: Map<u32, String>(), followers: List<u32>(), browser_pages: Map<String, String>(), browsers_to_check: List<String>(), browser_done: browser_done, browser_to: browser_to, stopped_browsers: List<Thread>(), fills: Map<String, Fill>(), turns_ended: List<(String, String, String)>(), next_browser_sweep: 0, task_stops: Map<String, String>(), resumes: List<(String, String)>(), push_to: push_to, push_gone: push_gone, move_to: move_to, move_done: move_done, lan: config.lan, bridge: none, stop_bridge: none, lan_port: 0, announcer: none, stop_announcer: none, to_close: List<ServerSocket>(), boxes: none, gate: none, stop_gate: none, doors: LinkedMap<String, egress.Door>(), moving: String(), move_waiters: List<Waiter>(), moved: moved, version: config.version.copy(), store: store, server: server, data: config.data.copy(), sessions: Map<u32, Session>(), runs: LinkedMap<String, Run>(), procs: LinkedMap<String, Proc>(), approvals: LinkedMap<String, Approval>(), lines: lines, lines_to: to, hash_to: hash_to, hash_done: hash_done, next_job: 0, auths: Map<i64, Auth>(), dummy_hash: dummy, skills_written: Map<String, String>(), open_secrets: Map<String, List<(String, String)>>(), failures: LinkedMap<String, List<i64>>(), thumbs: files.start(), events: config.events, next_prune: 0, grants: Map<String, Grant>(), calls: Map<String, Request>(), context: Map<String, (i64, i64)>(), registry_at: config.registry.copy(), registry: Json.Null, registry_time: 0, registry_fetching: false, install_to: install_to, install_done: install_done, mcp_test_to: mcp_test_to, mcp_test_done: mcp_test_done, mcp_tests: Map<i64, Waiter>(), fetching: List<Waiter>(), installs: Map<i64, Install>(), deno_job: 0, deno_waiters: List<Request>(), code_acts: Map<i64, String>(), leftovers: List<String>(), next_sweep: 0, device_calls: Map<String, DeviceCall>(), setups: Map<String, Setup>(), minute_ms: config.minute_ms, next_due: 0, routine_runs: Map<String, RoutineRun>(), routine_marks: Map<String, (String, String)>(), run_chains: Map<String, List<String>>(), panel_calls: Map<String, Waiter>(), script_calls: Map<String, Request>(), running_flows: LinkedMap<String, flows.Flow>(), flow_steps: Map<String, (String, usize)>(), advancing: List<String>(), flow_results: List<(String, usize, bool, String)>(), flows_due: List<String>(), slow_calls: Map<String, String>(), acting: 0, call_actions: Map<String, i64>(), tool_actions: Map<String, i64>(), sealer: try secret_key(config.data.copy()) }
+        var i = Instance { release: config.release.copy(), host: update.host(config.in_app), exe: current_exe(), update_to: update_to, update_back: update_back, updating: no_update(), next_update_check: 0, last_busy: now(), restart_stops: List<String>(), restart: false, told_update: Json.Null, told_update_at: 0, browsers: LinkedMap<String, Browser>(), watchers: Map<u32, String>(), followers: List<u32>(), browser_pages: Map<String, String>(), browsers_to_check: List<String>(), browser_done: browser_done, browser_to: browser_to, stopped_browsers: Map<u64, Thread>(), next_browser: 0, fills: Map<String, Fill>(), turns_ended: List<(String, String, String)>(), next_browser_sweep: 0, task_stops: Map<String, String>(), resumes: List<(String, String)>(), push_to: push_to, push_gone: push_gone, move_to: move_to, move_done: move_done, lan: config.lan, bridge: none, stop_bridge: none, lan_port: 0, announcer: none, stop_announcer: none, to_close: List<ServerSocket>(), boxes: none, gate: none, stop_gate: none, doors: LinkedMap<String, egress.Door>(), moving: String(), move_waiters: List<Waiter>(), moved: moved, version: config.version.copy(), store: store, server: server, data: config.data.copy(), sessions: Map<u32, Session>(), runs: LinkedMap<String, Run>(), procs: LinkedMap<String, Proc>(), approvals: LinkedMap<String, Approval>(), lines: lines, lines_to: to, hash_to: hash_to, hash_done: hash_done, next_job: 0, auths: Map<i64, Auth>(), dummy_hash: dummy, skills_written: Map<String, String>(), open_secrets: Map<String, List<(String, String)>>(), failures: LinkedMap<String, List<i64>>(), thumbs: files.start(), events: config.events, next_prune: 0, grants: Map<String, Grant>(), calls: Map<String, Request>(), context: Map<String, (i64, i64)>(), registry_at: config.registry.copy(), registry: Json.Null, registry_time: 0, registry_fetching: false, install_to: install_to, install_done: install_done, mcp_test_to: mcp_test_to, mcp_test_done: mcp_test_done, mcp_tests: Map<i64, Waiter>(), fetching: List<Waiter>(), installs: Map<i64, Install>(), deno_job: 0, deno_waiters: List<Request>(), code_acts: Map<i64, String>(), leftovers: List<String>(), next_sweep: 0, device_calls: Map<String, DeviceCall>(), setups: Map<String, Setup>(), minute_ms: config.minute_ms, next_due: 0, routine_runs: Map<String, RoutineRun>(), routine_marks: Map<String, (String, String)>(), run_chains: Map<String, List<String>>(), panel_calls: Map<String, Waiter>(), script_calls: Map<String, Request>(), running_flows: LinkedMap<String, flows.Flow>(), flow_steps: Map<String, (String, usize)>(), advancing: List<String>(), flow_results: List<(String, usize, bool, String)>(), flows_due: List<String>(), slow_calls: Map<String, String>(), acting: 0, call_actions: Map<String, i64>(), tool_actions: Map<String, i64>(), sealer: try secret_key(config.data.copy()) }
         if config.sandboxes.len() > 0 and not i.lan { try i.sandboxes_on(config.sandboxes.copy(), config.sandbox_image.copy()) }
         // An action the last run of the instance left started, it never finished.
         try i.store.settle_cut_short()
@@ -1730,6 +1744,9 @@ impl Instance {
                         i.answer_call(call, result)
                     },
                     browser.Back.Frame(key, data, width, height) => i.browser_frame(key, data, width, height),
+                    browser.Back.Stopped(n) => {
+                        if let t = i.stopped_browsers.remove(n) { t.join() }
+                    },
                     browser.Back.Open(key, open) => {
                         if let b = mut i.browsers.find(key.copy()) {
                             b.open = open
@@ -1800,7 +1817,11 @@ impl Instance {
         var keys = List<String>()
         for (k, _) in i.browsers { keys.push(k.copy()) }
         for k in keys { i.close_browser(k) }
-        while let t = i.stopped_browsers.pop() { t.join() }
+        var stopped = List<u64>()
+        for (n, _) in i.stopped_browsers { stopped.push(n) }
+        for n in stopped {
+            if let t = i.stopped_browsers.remove(n) { t.join() }
+        }
         i.close_doors(String(), none)
         if let s = mut i.stop_gate { s.send(true) }
         if let t = i.gate.take() { t.join() }
@@ -1870,8 +1891,10 @@ impl Instance {
                 }
             }
             let reopen = if let p = i.browser_pages.find(key.copy()) { p.copy() } else { String() }
-            let (to, thread) = browser.start(key.copy(), try fs.absolute(i.data.copy()), profile, i.isolated(g.user.copy(), agent), proxy, reopen, i.browser_to.copy())
-            i.browsers.insert(key.copy(), Browser { to: to, thread: thread, busy: 0, used: now(), open: false, person: false, asked: String(), asks: List<String>(), held: List<browser.Op>(), actions: 0, secret_ask: Json.Null, site: String(), recording: false, steps: 0, record_by: String(), told: String() })
+            i.next_browser += 1
+            let n = i.next_browser
+            let (to, thread) = browser.start(n, key.copy(), try fs.absolute(i.data.copy()), profile, i.isolated(g.user.copy(), agent), proxy, reopen, i.browser_to.copy())
+            i.browsers.insert(key.copy(), Browser { to: to, thread: thread, n: n, busy: 0, used: now(), open: false, person: false, asked: String(), asks: List<String>(), held: List<browser.Op>(), actions: 0, secret_ask: Json.Null, site: String(), recording: false, steps: 0, record_by: String(), told: String() })
             i.watch_changed(key.copy())
         }
         let call = try i.store.new_id("bc")
@@ -1972,7 +1995,7 @@ impl Instance {
         i.answer_call(a.call.copy(), tool_error(String("The browser closed.")))
     }
 
-    // Stops a browser. Its thread ends once it has, and is joined at shutdown.
+    // Stops a browser. Its thread ends once it has, and is joined when it says so.
     // Calls waiting on it are told it closed.
     fn close_browser(i: mut Instance, key: String) {
         let b = i.browsers.remove(key.copy()) else return
@@ -1984,7 +2007,7 @@ impl Instance {
         for call in waiting {
             i.answer_call(call, tool_error(String("The browser closed.")))
         }
-        i.stopped_browsers.push(b.thread)
+        i.stopped_browsers.insert(b.n, b.thread)
         i.browser_state(key)
     }
 
@@ -2341,11 +2364,18 @@ impl Instance {
         i.next_sweep = now() + 1000
     }
 
-    // Removes old events, when it's time to look again.
+    // Removes old events and old failed logins, when it's time to look again.
     fn prune(i: mut Instance) {
         let t = now()
         if t < i.next_prune { return }
         i.next_prune = t + i.events.every_ms
+        // Failed logins older than the window no longer count, so their names and
+        // addresses go, or scanners would add to them for good.
+        var stale = List<String>()
+        for (k, times) in i.failures {
+            if times.len() == 0 or times[times.len() - 1] < t - RATE_WINDOW_MS { stale.push(k.copy()) }
+        }
+        for k in stale { _ = i.failures.remove(k) }
         match i.store.prune_events(t - i.events.age_ms, i.events.keep) {
             ok(gone) => if gone > 0 { println("loom: pruned {gone} old events") },
             err(e) => eprintln("loom: pruning events: {e}"),
@@ -6629,6 +6659,8 @@ impl Instance {
             }
             if kept != some(known.copy()) {
                 _ = p.sessions.remove(conversation.copy())
+                p.forget(known.copy())
+                _ = i.context.remove(known.copy())
                 known = String()
             }
         }
@@ -6642,6 +6674,7 @@ impl Instance {
             if full or i.tools_changed(user.copy(), agent.copy(), conversation.copy(), known.copy()) {
                 _ = i.context.remove(known.copy())
                 _ = p.sessions.remove(conversation.copy())
+                p.forget(known.copy())
                 if let err(e) = i.carry_over(user.copy(), agent.copy(), run_id.copy(), full) { eprintln("loom: carrying a chat over to a fresh session: {e}") }
                 i.new_session(mut p, run_id)
                 return
@@ -7757,6 +7790,11 @@ impl Instance {
             try i.run_asked_tool(user, a)
             return
         }
+        // A device call the person said no to was never sent, so no answer comes for it.
+        if not allow {
+            _ = i.device_calls.remove(a.call.copy())
+            _ = i.setups.remove(a.call.copy())
+        }
         var result = rule_refusal("person-said-no", String("Your person said no."))
         if allow {
             result = match try i.command(user.copy(), by.copy(), name, at(a.action.copy(), "args")) {
@@ -8044,6 +8082,8 @@ impl Instance {
         }
         for call in open {
             _ = i.approvals.remove(call.copy())
+            _ = i.device_calls.remove(call.copy())
+            _ = i.setups.remove(call.copy())
             i.answer_call(call.copy(), tool_error(String("The run ended before your person answered.")))
             try i.event(r.user.copy(), "approval.answered", Obj.new().s("call", call).b("allow", false).b("always", false).s("by", String("cancel")).done())
         }
@@ -8614,6 +8654,18 @@ impl Instance {
                 try i.event(user, "conversation.updated", Obj.new().j("conversation", Obj.new().s("id", id).s("title", title).done()).done())
             } else {
                 try i.store.delete_conversation(user.copy(), id.copy())
+                var keys = List<String>()
+                for (k, p) in i.procs {
+                    if p.user == user { keys.push(k.copy()) }
+                }
+                for k in keys {
+                    if let p = mut i.procs.find(k) {
+                        if let s = p.sessions.remove(id.copy()) {
+                            p.forget(s.copy())
+                            _ = i.context.remove(s)
+                        }
+                    }
+                }
                 try i.event(user, "conversation.deleted", Obj.new().s("conversation", id).done())
             }
             return Answer.Value(empty)
