@@ -6,6 +6,8 @@ module server.acp
 // and what the loop sends goes to the thread as Outs.
 //
 // ACP is JSON-RPC 2.0 with one message a line (https://agentclientprotocol.com).
+import std.bytes
+import std.fs
 import std.json.{Json, parse}
 import std.net.{Waker as LoopWaker}
 import std.process.{Child, Command, Stdio, Waker}
@@ -20,9 +22,20 @@ pub struct Line {
     pub exit: i32?    // set once, when the program has ended
 }
 
+// An image sent to an agent, which its thread reads and puts in base64 as the
+// prompt goes out, rather than the instance's loop, which answers no one
+// meanwhile: ~26 ms for a 5 MB picture.
+pub struct Image {
+    pub at: usize       // its place in the prompt
+    pub path: String    // the file
+    pub mime: String
+    pub instead: Json   // what goes in its place if it can't be read: a link to the file
+}
+
 // What the loop asks of an agent's thread.
 pub enum Out {
     Send(String)
+    Prompt(i64, String, List<Json>, List<Image>)    // session/prompt: its id, the session, the prompt's blocks, and the images to read into them
     Stop
 }
 
@@ -57,6 +70,12 @@ impl Task for Worker {
                 match out {
                     Out.Send(text) => {
                         match w.child.write_text("{text}\n") {
+                            ok => {},
+                            err(e) => eprintln("loom: can't write to agent {w.agent}: {e}"),
+                        }
+                    },
+                    Out.Prompt(id, session, blocks, images) => {
+                        match w.child.write_text("{prompt(id, session, blocks, images)}\n") {
                             ok => {},
                             err(e) => eprintln("loom: can't write to agent {w.agent}: {e}"),
                         }
@@ -108,6 +127,23 @@ pub fn request(id: i64, method: str, params: Json) -> String {
     return "{Obj.new().s("jsonrpc", String("2.0")).i("id", id).s("method", String(method)).j("params", params).done()}"
 }
 
+// session/prompt with `id` for `session`: `blocks`, with each of `images` read
+// into its place, in base64, or what's instead if it can't be.
+pub fn prompt(id: i64, session: String, blocks: own List<Json>, images: List<Image>) -> String {
+    var all = blocks
+    for image in images {
+        if image.at >= all.len() { continue }
+        all[image.at] = match fs.read(image.path.copy()) {
+            ok(data) => Obj.new().s("type", String("image")).s("mimeType", image.mime.copy()).s("data", bytes.base64(data)).done(),
+            err(e) => {
+                eprintln("loom: reading {image.path} for an agent: {e}")
+                image.instead.copy()
+            },
+        }
+    }
+    return request(id, "session/prompt", Obj.new().s("sessionId", session).j("prompt", Json.Array(all)).done())
+}
+
 pub fn notify(method: str, params: Json) -> String {
     return "{Obj.new().s("jsonrpc", String("2.0")).s("method", String(method)).j("params", params).done()}"
 }
@@ -123,8 +159,8 @@ pub fn respond_error(id: Json, code: i64, message: String) -> String {
 
 // What loom tells an agent about itself when it starts one.
 pub fn initialize_params() -> Json {
-    let fs = Obj.new().b("readTextFile", false).b("writeTextFile", false).done()
-    let caps = Obj.new().j("fs", fs).b("terminal", false).done()
+    let files = Obj.new().b("readTextFile", false).b("writeTextFile", false).done()
+    let caps = Obj.new().j("fs", files).b("terminal", false).done()
     let info = Obj.new().s("name", String("loom")).s("version", String("0.2.0-dev")).done()
     return Obj.new().i("protocolVersion", 1).j("clientCapabilities", caps).j("clientInfo", info).done()
 }
@@ -503,4 +539,17 @@ fn picks_the_option_that_fits() {
     assert(pick_option(options.copy(), true, true) == some(String("id_allow_once")))
     assert(pick_option(options.copy(), false, true) == some(String("id_reject_once")))
     assert(pick_option(Json.Array(List<Json>()), true, false) == none)
+}
+
+@test
+fn a_prompts_images_are_read_into_it_on_the_agents_thread() {
+    let dir = fs.temp_dir()!
+    let png: List<u8> = [137, 80, 78, 71]
+    fs.write("{dir}/pic", png.copy())!
+    let blocks: List<Json> = [Obj.new().s("type", String("text")).s("text", String("look")).done(), Json.Null, Json.Null]
+    let link = Obj.new().s("type", String("resource_link")).s("uri", String("file:///gone")).done()
+    let images: List<Image> = [Image { at: 1, path: "{dir}/pic", mime: String("image/png"), instead: Json.Null }, Image { at: 2, path: "{dir}/gone", mime: String("image/png"), instead: link }]
+    let text = prompt(7, String("s_1"), blocks, images)
+    assert(text == #"{"jsonrpc":"2.0","id":7,"method":"session/prompt","params":{"sessionId":"s_1","prompt":[{"type":"text","text":"look"},{"type":"image","mimeType":"image/png","data":"iVBORw=="},{"type":"resource_link","uri":"file:///gone"}]}}"#)
+    fs.remove_dir_all(dir)!
 }

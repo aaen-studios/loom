@@ -19,7 +19,7 @@ import std.random.{Random}
 import std.time.{Instant}
 import shared.obj.{Obj, at, bool_at, int_at, str_at}
 import core.cache.{Cache}
-import core.conn.{Conn}
+import core.conn.{Conn, ToApp}
 
 const WAIT: u64 = 120000    // the first start builds the server
 
@@ -42,7 +42,7 @@ fn check(passed: bool, what: str) ! Error {
 // otherwise waits for the socket, its requests and its timers.
 struct App {
     to_core: Sender<String>
-    from_core: Receiver<String>
+    from_core: Receiver<ToApp>
     wakers: Receiver<Waker>
     waker: Waker?
     thread: Thread?
@@ -54,7 +54,7 @@ impl App {
     fn start(base: String, token: own String?, service: String, cache: String) -> App ! Error {
         let inbox = Receiver<String>()
         let to_core = inbox.sender()
-        let from_core = Receiver<String>()
+        let from_core = Receiver<ToApp>()
         let wakers = Receiver<Waker>()
         var conn = Conn.new(some("http://{base}"), token, service.copy(), try Cache.open(cache.copy()), inbox, from_core.sender())
         conn.wakers_to = some(wakers.sender())
@@ -79,7 +79,8 @@ impl App {
         loop {
             let waited = unsafe { Instant.now() }.nanos_since(start) / 1000000
             if waited >= ms { fail "no {t} {field}={value} came in {ms} ms" }
-            let m = unsafe { self.from_core.wait_for((ms - waited) * 1000000) } else { continue }
+            let got = unsafe { self.from_core.wait_for((ms - waited) * 1000000) } else { continue }
+            let m = got.text() else { continue }
             let f = try parse(m)
             if (str_at(f.copy(), "t") ?? String()) != t { continue }
             if field.len() == 0 or (str_at(f.copy(), field) ?? String()) == value { return f }
@@ -136,7 +137,8 @@ fn run(server: mut Child, data: String) ! Error {
     var heard = 0
     var synced = Json.Null
     while synced == Json.Null {
-        let m = unsafe { app.from_core.wait_for(5000 * 1000000) } else { fail "no synced came in 5 s" }
+        let got = unsafe { app.from_core.wait_for(5000 * 1000000) } else { fail "no synced came in 5 s" }
+        let m = got.text() else { continue }
         let f = try parse(m)
         let t = str_at(f.copy(), "t") ?? String()
         if t == "event" { heard += 1 }
@@ -233,7 +235,8 @@ fn run(server: mut Child, data: String) ! Error {
     let routine_run = str_at(at(try app.until("result", "id", "q_r2", 5000), "value"), "run") ?? String()
     var told_quiet = false
     loop {
-        let m = unsafe { app.from_core.wait_for(20000 * 1000000) } else { fail "the routine's run didn't finish" }
+        let got = unsafe { app.from_core.wait_for(20000 * 1000000) } else { fail "the routine's run didn't finish" }
+        let m = got.text() else { continue }
         let f = try parse(m)
         let t = str_at(f.copy(), "t") ?? String()
         if t == "core.notify" { told_quiet = true }

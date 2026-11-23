@@ -24,14 +24,14 @@ import std.sqlite.{Database, Value}
 import std.time.{Instant, Timestamp}
 import shared.obj.{Obj, at, bool_at, int_at, str_at}
 import core.cache.{Cache}
-import core.conn.{Conn}
+import core.conn.{Conn, ToApp}
 import shared.client.{Session, json_of, post_json}
 import tests.kit.{Instance, calx, check, device, fetch, loom, remove_scratch}
 
 // The app's side of a core: what it sends the core, and what the core says.
 struct Core {
     to_core: Sender<String>
-    from_core: Receiver<String>
+    from_core: Receiver<ToApp>
     thread: Thread?
 }
 
@@ -40,7 +40,7 @@ impl Core {
     fn start(base: String, token: own String?, cache: String) -> Core ! Error {
         let inbox = Receiver<String>()
         let to_core = inbox.sender()
-        let from_core = Receiver<String>()
+        let from_core = Receiver<ToApp>()
         var random = Random.system()
         let conn = Conn.new(some("http://{base}"), token, "loom-test-{random.next_u32()}", try Cache.open(cache), inbox, from_core.sender())
         let t = unsafe { Thread.spawn(conn) }
@@ -58,7 +58,8 @@ impl Core {
         loop {
             let waited = unsafe { Instant.now() }.nanos_since(start) / 1000000
             if waited >= 30000 { fail "the core said no {t} {field}={value} in 30 s" }
-            let m = unsafe { self.from_core.wait_for((30000 - waited) * 1000000) } else { continue }
+            let got = unsafe { self.from_core.wait_for((30000 - waited) * 1000000) } else { continue }
+            let m = got.text() else { continue }
             let f = try parse(m)
             if (str_at(f.copy(), "t") ?? String()) != t { continue }
             if field.len() == 0 or (str_at(f.copy(), field) ?? String()) == value { return f }

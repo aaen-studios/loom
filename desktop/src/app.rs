@@ -980,7 +980,15 @@ ACTA_KEY=secret:ACTA_KEY",
                             loom.link_server(offer, cx);
                         }
                     }
+                    // The newest picture of the watched browser, as the instance sent it,
+                    // decoded off this thread and drawn once it is.
+                    if let Some(page) = loom.core.newest_page() {
+                        loom.model.take_page(&page.head, page.jpeg);
+                    }
                     if got.is_empty() {
+                        if std::mem::take(&mut loom.model.page_moved) {
+                            loom.decode_frame(cx);
+                        }
                         return;
                     }
                     let mut changed = false;
@@ -1690,6 +1698,9 @@ ACTA_KEY=secret:ACTA_KEY",
                     _ => {}
                 }
                 changed |= a.model.take(&v);
+            }
+            if let Some(page) = a.core.newest_page() {
+                a.model.take_page(&page.head, page.jpeg);
             }
             for f in a.model.fetches() {
                 a.core.send(&f.to_string());
@@ -3926,6 +3937,17 @@ ACTA_KEY=secret:ACTA_KEY",
         .detach();
     }
 
+    /// The watched page is drawn `width` wide: the instance hears it in the screen's
+    /// pixels, so its frames come no bigger. By the width alone, at the browser's
+    /// shape, so the page's own height, which comes with its first frame, asks nothing
+    /// again.
+    fn page_shown(&mut self, width: f32, window: &Window) {
+        let w = width * window.scale_factor();
+        if let Some(f) = self.model.show_page_at(w, w * 800.0 / 1280.0) {
+            self.send(f);
+        }
+    }
+
     /// Lets go of the frames drawn before, and of the page once nothing's watched.
     fn decode_page(&mut self, window: &mut Window) {
         for old in self.old_pages.drain(..) {
@@ -3958,6 +3980,7 @@ ACTA_KEY=secret:ACTA_KEY",
             .map_or((1280.0, 800.0), |f| (f.width.max(1.0), f.height.max(1.0)));
         let w = MINI_W;
         let h = mini_page_height(fw, fh);
+        self.page_shown(w, window);
         let page = match self.page_image.clone() {
             Some((_, image)) => img(ImageSource::Render(image))
                 .size_full()
@@ -4190,6 +4213,7 @@ ACTA_KEY=secret:ACTA_KEY",
             .as_ref()
             .map_or((1280.0, 800.0), |f| (f.width.max(1.0), f.height.max(1.0)));
         let height = inner * fh / fw;
+        self.page_shown(inner, window);
         let bounds = self.page_bounds.clone();
         let page = match self.page_image.clone() {
             Some((_, image)) => img(ImageSource::Render(image))

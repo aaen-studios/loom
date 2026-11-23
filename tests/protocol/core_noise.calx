@@ -18,7 +18,7 @@ import std.random.{Random}
 import std.time.{Instant}
 import shared.obj.{Obj, at, bool_at, int_at, str_at}
 import core.cache.{Cache}
-import core.conn.{Conn}
+import core.conn.{Conn, ToApp}
 import core.link
 import core.relay
 import shared.client.{Session}
@@ -27,7 +27,7 @@ import tests.kit.{Instance, check, fetch}
 // The app's side of a core with no instance yet.
 struct Core {
     to_core: Sender<String>
-    from_core: Receiver<String>
+    from_core: Receiver<ToApp>
     thread: Thread?
 }
 
@@ -35,7 +35,7 @@ impl Core {
     fn start(service: String, cache: String, files: String) -> Core ! Error {
         let inbox = Receiver<String>()
         let to_core = inbox.sender()
-        let from_core = Receiver<String>()
+        let from_core = Receiver<ToApp>()
         var conn = Conn.new(none, none, service.copy(), try Cache.open(cache), inbox, from_core.sender())
         conn.files = some(files.copy())
         let t = unsafe { Thread.spawn(conn) }
@@ -52,7 +52,8 @@ impl Core {
         loop {
             let waited = unsafe { Instant.now() }.nanos_since(start) / 1000000
             if waited >= ms { fail "no {t} came in {ms} ms" }
-            let m = unsafe { self.from_core.wait_for((ms - waited) * 1000000) } else { continue }
+            let got = unsafe { self.from_core.wait_for((ms - waited) * 1000000) } else { continue }
+            let m = got.text() else { continue }
             let f = try parse(m)
             if str_at(f.copy(), "t") == some(String(t)) { return f }
         }

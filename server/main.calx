@@ -738,7 +738,7 @@ fn run(a: Args) -> Said ! Error {
 
 @test
 fn version_names_the_protocol() {
-    assert(version_line().contains("protocol 1-1"))
+    assert(version_line().contains("protocol 1-2"))
 }
 
 @test

@@ -18,14 +18,14 @@ import std.random.{Random}
 import std.time.{Instant}
 import shared.obj.{Obj, at, str_at}
 import core.cache.{Cache}
-import core.conn.{Conn}
+import core.conn.{Conn, ToApp}
 import shared.client.{Session, post_json, reply_text}
 import tests.kit.{Instance, calx, check, device}
 
 // The app's side of a core: what it sends the core, and what the core says.
 struct Core {
     to_core: Sender<String>
-    from_core: Receiver<String>
+    from_core: Receiver<ToApp>
     wakers: Receiver<Waker>    // as in the app, each send wakes the core's loop
     waker: Waker?
     thread: Thread?
@@ -35,7 +35,7 @@ impl Core {
     fn start(base: String, token: String, cache: String, config: String) -> Core ! Error {
         let inbox = Receiver<String>()
         let to_core = inbox.sender()
-        let from_core = Receiver<String>()
+        let from_core = Receiver<ToApp>()
         var random = Random.system()
         var conn = Conn.new(some("http://{base}"), some(token.copy()), "loom-test-{random.next_u32()}", try Cache.open(cache), inbox, from_core.sender())
         let fake: List<String> = [calx(), try fs.absolute(String("tests/fake_ssh/main.calx"))]
@@ -63,7 +63,8 @@ impl Core {
         loop {
             let waited = unsafe { Instant.now() }.nanos_since(start) / 1000000
             if waited >= 60000 { fail "the core said no {t} {field}={value} in 60 s" }
-            let m = unsafe { self.from_core.wait_for((60000 - waited) * 1000000) } else { continue }
+            let got = unsafe { self.from_core.wait_for((60000 - waited) * 1000000) } else { continue }
+            let m = got.text() else { continue }
             let f = try parse(m)
             if (str_at(f.copy(), "t") ?? String()) != t { continue }
             if field.len() == 0 or (str_at(f.copy(), field) ?? String()) == value { return f }

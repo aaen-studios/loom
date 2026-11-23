@@ -243,12 +243,12 @@ fn handle(server: Server, p: mut Peer, message: List<u8>, instance: u16, w: Wake
 // and the answers to its requests.
 fn relay(server: mut Server, p: mut Peer) {
     var ended: (u16, String)? = none
-    var frames = List<String>()
+    var frames = List<List<u8>>()
     if let ws = p.inner {
         loop {
             match ws.receive(0) {
-                ok(some(websocket.Message.Text(text))) => frames.push(text),
-                ok(some(_)) => {},
+                ok(some(websocket.Message.Text(text))) => frames.push(noise.frame(text)),
+                ok(some(websocket.Message.Binary(b))) => frames.push(noise.binary(b)),
                 ok(none) => break,
                 err(e) => {
                     ended = match e {
@@ -260,8 +260,8 @@ fn relay(server: mut Server, p: mut Peer) {
             }
         }
     }
-    for text in frames {
-        say(server, mut p, noise.frame(text.copy()))
+    for m in frames {
+        say(server, mut p, m)
     }
     if let (code, reason) = ended {
         p.inner = none

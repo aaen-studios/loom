@@ -21,6 +21,7 @@ module server.browser
 // instance's data, not in the agent's folder, so the agent can't read it. A
 // guarded browser, a sandboxed person's, opens only http and https pages, and
 // loads nothing from the instance's computer or the network it's on.
+import std.bytes
 import std.env
 import std.fs
 import std.http.{Header, get}
@@ -30,6 +31,7 @@ import std.net.{Waker as LoopWaker}
 import std.process.{Child, Command, Stdio, which}
 import std.thread.{Task, sleep}
 import shared.obj.{Obj, at, bool_at, int_at, merge, str_at}
+import shared.protocol
 import server.store.{now}
 import server.chrome
 
@@ -53,6 +55,12 @@ const CLOSE_MS: u64 = 5000
 const OUTLINE_MOST: usize = 40000
 const FRAME_GAP_MS: i64 = 80    // the least time between the frames the page sends
 const NAVIGATION_LOOK_MS: i64 = 120    // how long after an act a new page may still be asked for
+// The page's size in its own pixels, as the browser's window is, and so the
+// biggest a frame of it is.
+pub const PAGE_WIDTH: i64 = 1280
+pub const PAGE_HEIGHT: i64 = 800
+// The smallest a frame is asked for, however small an app shows it.
+const FRAME_LEAST: i64 = 64
 
 // A tool call for the browser: browser_open's name is "open", and so on.
 pub struct Op {
@@ -61,9 +69,32 @@ pub struct Op {
     pub args: Json
 }
 
+// Who watches a browser, as the loop tells its thread: frames come only while
+// someone does, no bigger than the biggest any of them shows the page at, in
+// the forms their apps take.
+pub struct Watching {
+    pub on: bool
+    pub width: i64     // the most a frame is wide, in pixels
+    pub height: i64    // and high
+    pub text: bool     // an app of protocol version 1 watches: JSON text, the JPEG in base64
+    pub binary: bool   // a newer one does: a binary message (shared/protocol.calx)
+}
+
+// Nobody watching.
+pub fn unwatched() -> Watching {
+    return Watching { on: false, width: PAGE_WIDTH, height: PAGE_HEIGHT, text: false, binary: false }
+}
+
+// The size a frame is asked for when an app shows the page `width` × `height`
+// pixels: the page's own size when it doesn't say (0), and never more than it.
+pub fn frame_size(width: i64, height: i64) -> (i64, i64) {
+    if width <= 0 or height <= 0 { return (PAGE_WIDTH, PAGE_HEIGHT) }
+    return (width.max(FRAME_LEAST).min(PAGE_WIDTH), height.max(FRAME_LEAST).min(PAGE_HEIGHT))
+}
+
 pub enum In {
     Do(Op)
-    Watch(bool)    // whether someone's watching: frames come only while they are
+    Watch(Watching)    // who watches it now
     Input(Json)    // the person's click, wheel, key or text, while they've taken over
     Record(bool)    // start or stop keeping what the person does, as steps
     Stop
@@ -72,7 +103,7 @@ pub enum In {
 // What a browser's thread tells the loop. Each names the agent by its key.
 pub enum Back {
     Done(String, String, Json)    // a call, and its MCP result
-    Frame(String, String, i64, i64)    // the page as a JPEG, in base64, and its width and height
+    Frame(String, String, List<u8>)    // a picture of the page, as browser.frame's text for protocol version 1 and as its binary message for later ones, each empty when no one takes it so
     Open(String, bool)    // whether its browser is open now
     Steps(String, Json, bool)    // what the person's done while recording, as steps, and whether the recording's ended
     Stopped(u64)    // the thread numbered so is ending, with its browser stopped, for the loop to join
@@ -107,8 +138,10 @@ struct Worker {
     next_id: i64
     refs: Map<String, i64>    // e1, e2, ... -> the node each is, from the last outline
     hidden: List<(String, String)>    // secrets filled into this browser, and their names, kept out of what the agent reads
-    watched: bool
+    watch: Watching
     casting: bool    // whether the page sends frames
+    cast_width: i64     // the most they're wide, as the page was asked
+    cast_height: i64    // and high
     recording: bool    // whether what the person does is kept as steps
     steps: List<Json>    // what they've done since they started recording
     last_url: String    // the page the last step was on
@@ -153,7 +186,7 @@ impl Task for Worker {
                 },
                 some(In.Record(on)) => w.record(on),
                 some(In.Watch(on)) => {
-                    w.watched = on
+                    w.watch = on
                     w.cast()
                 },
                 some(In.Input(e)) => {
@@ -178,7 +211,7 @@ impl Task for Worker {
 pub fn start(n: u64, key: String, data: String, profile: String, guarded: bool, proxy: u16, reopen: String, back: BackTo) -> (Sender<In>, Thread) {
     let inbox = Receiver<In>()
     let to = inbox.sender()
-    let t = unsafe { Thread.spawn(Worker { n: n, key: key.copy(), data: data.copy(), profile: profile.copy(), guarded: guarded, proxy: proxy, inbox: inbox, back: back.copy(), child: none, page: none, port: String(), next_id: 0, refs: Map<String, i64>(), hidden: List<(String, String)>(), watched: false, casting: false, recording: false, steps: List<Json>(), last_url: String(), was_on: String(), reopen: reopen.copy(), told_fonts: false, ack: 0, ack_at: 0, navigating: false, loaded: false }) }
+    let t = unsafe { Thread.spawn(Worker { n: n, key: key.copy(), data: data.copy(), profile: profile.copy(), guarded: guarded, proxy: proxy, inbox: inbox, back: back.copy(), child: none, page: none, port: String(), next_id: 0, refs: Map<String, i64>(), hidden: List<(String, String)>(), watch: unwatched(), casting: false, cast_width: 0, cast_height: 0, recording: false, steps: List<Json>(), last_url: String(), was_on: String(), reopen: reopen.copy(), told_fonts: false, ack: 0, ack_at: 0, navigating: false, loaded: false }) }
     return (to, t)
 }
 
@@ -484,22 +517,43 @@ impl Worker {
         // all the time would otherwise send a hundred, each 100 KB or more.
         w.ack = int_at(params.copy(), "sessionId") ?? 0
         w.ack_at = now() + FRAME_GAP_MS
+        // The page's size, which the person's clicks are in, whatever size the picture is.
         let meta = at(params.copy(), "metadata")
         let width = i64.round(at(meta.copy(), "deviceWidth").as_f64() ?? 0.0)
         let height = i64.round(at(meta, "deviceHeight").as_f64() ?? 0.0)
-        w.back.send(Back.Frame(w.key.copy(), str_at(params, "data") ?? String(), width, height))
+        let data = str_at(params, "data") ?? String()
+        let (_, agent) = w.key.split_once("/") ?? (String(), String())
+        // Made here, not on the instance's loop: the text, with the JPEG as the
+        // page sent it, in base64, and the binary message, with it as it is.
+        var as_text = String()
+        if w.watch.text { as_text = #"{"t":"browser.frame","agent":#{Json.Str(agent.copy())},"data":"#{data}","width":#{width},"height":#{height}}"# }
+        var as_binary = List<u8>()
+        if w.watch.binary {
+            if let jpeg = bytes.from_base64(data) {
+                as_binary = protocol.binary(#"{"t":"browser.frame","agent":#{Json.Str(agent)},"width":#{width},"height":#{height}}"#, jpeg)
+            }
+        }
+        w.back.send(Back.Frame(w.key.copy(), as_text, as_binary))
     }
 
-    // Starts or stops the page's frames, as whether someone watches says.
+    // Starts or stops the page's frames, as whether someone watches says, and
+    // starts them again at the size they're shown at when it changes.
     fn cast(w: mut Worker) {
         if w.page == none { return }
-        if w.watched and not w.casting {
-            let params = Obj.new().s("format", String("jpeg")).i("quality", 60).i("maxWidth", 1280).i("maxHeight", 800).done()
-            if let ok(_) = w.call("Page.startScreencast", params) { w.casting = true }
-        } else if not w.watched and w.casting {
+        let on = w.watch.on
+        if w.casting and (not on or w.cast_width != w.watch.width or w.cast_height != w.watch.height) {
             if let err(e) = w.call("Page.stopScreencast", Obj.new().done()) { eprintln("loom: the browser: {e}") }
             w.casting = false
             w.ack_at = 0
+        }
+        if on and not w.casting {
+            // Chrome scales each frame down to fit, so a small window gets a small JPEG.
+            let params = Obj.new().s("format", String("jpeg")).i("quality", 60).i("maxWidth", w.watch.width).i("maxHeight", w.watch.height).done()
+            if let ok(_) = w.call("Page.startScreencast", params) {
+                w.casting = true
+                w.cast_width = w.watch.width
+                w.cast_height = w.watch.height
+            }
         }
     }
 
@@ -1502,6 +1556,14 @@ fn only_pages_are_opened_again() {
     let r = noted(text(String("Page: Shop")), String("[loom: again]"))
     assert("{r}" == #"{"content":[{"type":"text","text":"[loom: again]"},{"type":"text","text":"Page: Shop"}]}"#)
     assert(noted(text(String("x")), String()) == text(String("x")))
+}
+
+@test
+fn frames_are_asked_for_at_the_size_they_are_shown() {
+    assert(frame_size(0, 0) == (PAGE_WIDTH, PAGE_HEIGHT))
+    assert(frame_size(420, 263) == (420i64, 263i64))
+    assert(frame_size(2560, 1600) == (PAGE_WIDTH, PAGE_HEIGHT))
+    assert(frame_size(10, 6) == (FRAME_LEAST, FRAME_LEAST))
 }
 
 @test

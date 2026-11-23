@@ -1,0 +1,241 @@
+module tests.bench.frames
+
+// Times the agent's browser as an app watches it: how big each frame is, how
+// long after the person's input the frame that shows it comes, what reading one
+// costs the app's side, and the server's CPU while frames come. The fake agent
+// opens a page of text with a box that follows the pointer; the person takes the
+// browser over and moves the pointer once every 250 ms, for each way an app
+// watches: one of protocol version 1 (JSON text, the JPEG in base64, at the
+// page's size), and one of version 2 (binary) at the size the desktop's panel
+// shows it and at its small window's.
+//
+//     calx run --release tests/bench/frames.calx -- [MOVES] [SERVER]
+//
+// MOVES (40 by default) is how many times the pointer moves for each. SERVER is
+// a loom built before, to time instead of this tree's (built with --release): a
+// build from before version 2 times only the version 1 app. Each way's first
+// frame is kept as a JPEG in a folder of its own, which it names.
+import std.bytes
+import std.env
+import std.fs
+import std.image.{Image}
+import std.json.{Json, parse}
+import std.process.{Child, Command, Stdio, exit}
+import std.thread.{sleep}
+import std.time.{Instant}
+import shared.obj.{Obj, at, str_at}
+import shared.protocol
+import shared.client.{Session, get_json, post_json, reply_text}
+import tests.kit.{calx, device, remove_scratch}
+
+const WAIT: u64 = 600000
+const GAP_MS: f64 = 250.0
+
+fn ms(a: Instant, b: Instant) -> f64 {
+    return f64.nearest(b.nanos_since(a)) / 1000000.0
+}
+
+fn cpu_ms(c: Child) -> f64 {
+    let u = unsafe { c.usage() }
+    return f64.nearest(u.cpu_ns) / 1000000.0
+}
+
+fn arg_or(args: List<String>, n: usize, default: usize) -> usize {
+    if n < args.len() { return usize.parse(args[n].copy()) ?? default }
+    return default
+}
+
+fn file_url(path: String) -> String {
+    let p = path.replace("\\", "/")
+    return if p.starts_with("/") { "file://{p}" } else { "file:///{p}" }
+}
+
+// The middle value of `xs` (µs), and the one 90% of the way up, in ms.
+fn spread(xs: List<i64>) -> (f64, f64) {
+    if xs.len() == 0 { return (0.0, 0.0) }
+    var s = xs.copy()
+    s.sort()
+    return (f64.nearest(s[s.len() / 2]) / 1000.0, f64.nearest(s[(s.len() * 9) / 10]) / 1000.0)
+}
+
+fn mean(xs: List<f64>) -> f64 {
+    if xs.len() == 0 { return 0.0 }
+    var t = 0.0
+    for x in xs { t += x }
+    return t / f64.nearest(xs.len())
+}
+
+// A page of words, as a page an agent reads, with a box that follows the pointer.
+fn page() -> String {
+    var words = String()
+    for n in 0..24 {
+        words.push_str("<p>Paragraph {n}: the agent reads this page while the person watches it in the panel beside the chat, where each frame is drawn as it comes. Prices, dates, a table of results and a form to fill in, as a shop's or a bank's page has them.</p>")
+    }
+    return #"<!doctype html><title>Bench</title><style>body{font:16px system-ui;margin:24px;max-width:1100px}#box{position:fixed;width:80px;height:80px;background:#3b7;border-radius:12px}</style><div id=box></div><h1>A page to watch</h1>#{words}<script>addEventListener('mousemove',e=>{box.style.left=e.clientX+'px';box.style.top=e.clientY+'px';document.title=e.clientX+','+e.clientY})</script>"#
+}
+
+// Reads frames until a browser.frame, giving its size on the wire, or none after `wait_ms`.
+fn next_frame(s: mut Session, wait_ms: u32) -> usize? {
+    let f = match s.until("browser.frame", "", wait_ms) {
+        ok(f) => f,
+        err(_) => return none,
+    }
+    let head = "{f}".len()
+    return some(if s.binary { head + 1 + s.body.len() } else { head })
+}
+
+fn way(server: Child, base: String, token: String, agent: String, name: str, versions: Json, width: i64, moves: usize, keep: String) ! Error {
+    var s = try Session.connect_speaking(base, token, 0, versions)
+    var args = Obj.new().s("agent", agent.copy()).b("on", true)
+    if width > 0 { args = args.i("width", width).i("height", width * 800 / 1280) }
+    _ = try s.cmd("q_w", "browser.watch", args.done())
+    // The first frame comes as watching starts.
+    let first = next_frame(mut s, 10000) else { fail "{name}: no frame came" }
+    let head = s.frames[s.frames.len() - 1].copy()
+    let jpeg = if s.binary { s.body.copy() } else { bytes.from_base64(str_at(head.copy(), "data") ?? String()) ?? List<u8>() }
+    try fs.write(keep.copy(), jpeg.copy())
+    let pixels = try Image.decode(jpeg.copy())
+    // What the app's side does with each: v1 parses the JSON and decodes the base64,
+    // v2 finds the head's end.
+    let text = "{head}"
+    let message = protocol.binary("{Obj.new().s("t", String("browser.frame")).done()}", jpeg.copy())
+    let r0 = unsafe { Instant.now() }
+    for _ in 0..50 {
+        if s.binary {
+            _ = protocol.binary_parts(message.copy())
+        } else {
+            let j = try parse(text.copy())
+            _ = bytes.from_base64(str_at(j, "data") ?? String())
+        }
+    }
+    let r1 = unsafe { Instant.now() }
+    for _ in 0..20 { _ = try Image.decode(jpeg.copy()) }
+    let r2 = unsafe { Instant.now() }
+    unsafe { sleep(500000000) }
+    while let _ = next_frame(mut s, 50) {}
+
+    var sizes = List<f64>()
+    var waits = List<i64>()
+    var missed: usize = 0
+    let c0 = cpu_ms(server)
+    let t0 = unsafe { Instant.now() }
+    for k in 0..moves {
+        let x = 100 + i64.wrap(k % 10) * 100
+        let y = 120 + i64.wrap((k / 10) % 5) * 100
+        let sent = unsafe { Instant.now() }
+        try s.send(Obj.new().s("t", String("cmd")).s("id", "q_m{k}").s("name", String("browser.input")).j("args", Obj.new().s("agent", agent.copy()).s("kind", String("move")).i("x", x).i("y", y).done()).done())
+        if let size = next_frame(mut s, 2000) {
+            waits.push(i64.round(ms(sent, unsafe { Instant.now() }) * 1000.0))
+            sizes.push(f64.nearest(size))
+        } else {
+            missed += 1
+        }
+        // The rest of the gap, taking whatever else comes.
+        loop {
+            let gone = ms(sent, unsafe { Instant.now() })
+            if gone >= GAP_MS { break }
+            if let size = next_frame(mut s, u32.wrap(i64.round(GAP_MS - gone).max(1))) { sizes.push(f64.nearest(size)) }
+        }
+    }
+    let t1 = unsafe { Instant.now() }
+    let c1 = cpu_ms(server)
+    _ = try s.cmd("q_u", "browser.watch", Obj.new().s("agent", agent).b("on", false).done())
+    s.close()
+    let (p50, p90) = spread(waits.copy())
+    println("{name}")
+    println("    first frame {pixels.width()} x {pixels.height()}, {first} bytes on the wire, JPEG {jpeg.len()} bytes ({keep})")
+    println("    frames {sizes.len()}, {mean(sizes) / 1024.0:.1} KiB each on average")
+    println("    input to frame: median {p50:.1} ms, p90 {p90:.1} ms ({missed} moves showed no frame)")
+    println("    reading a frame: {ms(r0, r1) / 50.0 * 1000.0:.0} us; decoding its JPEG (std.image): {ms(r1, r2) / 20.0:.2} ms")
+    println("    server CPU {(c1 - c0) / (ms(t0, t1) / 1000.0):.1} ms a second")
+}
+
+fn run(server: Child, base: String, token: String, moves: usize, scratch: String, newer: bool) ! Error {
+    try fs.write_text("{scratch}/page.html", page())
+    var app = try Session.connect_speaking(base.copy(), token.copy(), 0, Json.Array([Json.Int(1)]))
+    let made = try app.cmd("q_1", "agent.create", Obj.new().s("name", String("Browser")).s("acp_agent", String("fake")).s("instructions", String("")).done())
+    let agent = str_at(at(at(made, "value"), "agent"), "id") ?? String()
+    let c = try app.cmd("q_2", "conversation.create", Obj.new().s("agent", agent.copy()).done())
+    let conversation = str_at(at(c, "value"), "conversation") ?? String()
+    // Watched, so it stays open after the turn.
+    _ = try app.cmd("q_3", "browser.watch", Obj.new().s("agent", agent.copy()).b("on", true).done())
+    try app.send(Obj.new().s("t", String("send")).s("cid", String("m_1")).s("conversation", conversation.copy()).s("text", "/mcp browser_open \{\"url\":\"{file_url("{scratch}/page.html")}\"\}").done())
+    loop {
+        let created = try app.until("event", "message.created", 120000)
+        let m = at(created, "message")
+        if str_at(m.copy(), "role") == some(String("agent")) {
+            let said = reply_text(m)
+            if not said.contains("Page: Bench") { fail "the page didn't open: {said}" }
+            break
+        }
+    }
+    _ = try app.cmd("q_4", "browser.take", Obj.new().s("agent", agent.copy()).done())
+    _ = try app.cmd("q_5", "browser.watch", Obj.new().s("agent", agent.copy()).b("on", false).done())
+
+    try way(server, base.copy(), token.copy(), agent.copy(), "version 1, JSON and base64, the page's size", Json.Array([Json.Int(1)]), 0, moves, "{scratch}/v1.jpg")
+    if newer {
+        // The docked panel at its usual width on a 150% screen, and the small window.
+        try way(server, base.copy(), token.copy(), agent.copy(), "version 2, binary, the panel's size (480 px wide at 150%)", protocol.versions(), 720, moves, "{scratch}/v2-panel.jpg")
+        try way(server, base.copy(), token.copy(), agent.copy(), "version 2, binary, the small window's size (280 px wide at 150%)", protocol.versions(), 420, moves, "{scratch}/v2-mini.jpg")
+    }
+    _ = try app.cmd("q_6", "browser.give", Obj.new().s("agent", agent.copy()).done())
+    try app.send(Obj.new().s("t", String("send")).s("cid", String("m_2")).s("conversation", conversation).s("text", String("/mcp browser_close")).done())
+    _ = try app.reply()
+    app.close()
+}
+
+fn main() ! Error {
+    let args = env.args()
+    let moves = arg_or(args.copy(), 0, 40)
+    let data = try fs.temp_dir()
+    var bin = if env.os() == "windows" { "{data}/loom-bench.exe" } else { "{data}/loom-bench" }
+    if args.len() > 1 {
+        bin = args[1].copy()
+    } else {
+        println("building the server (--release)")
+        let built = try Command.new(calx()).arg(String("build")).arg(String("--release")).arg(String("server/main.calx")).arg(String("-o")).arg(bin.copy()).output()
+        if not built.status.success() {
+            eprintln(built.error_text())
+            exit(1)
+        }
+    }
+    let agent = try fs.absolute(String("tests/fake_agent/main.calx"))
+    let home = "{data}/instance"
+    let added = try Command.new(bin.copy()).arg(String("acp")).arg(String("add")).arg(String("fake")).arg(calx()).arg(agent).arg(String("--data")).arg(home.copy()).arg(String("--test-fast-hashes")).output()
+    if not added.status.success() { fail "loom acp add failed: {added.error_text()}" }
+    let server = try Command.new(bin.copy()).arg(String("serve")).arg(String("--port")).arg(String("0")).arg(String("--allow-root")).arg(String("--data")).arg(home.copy()).arg(String("--test-fast-hashes")).stdout(Stdio.Pipe).own_group().spawn()
+    let serving = server.wait_for_line(String("loom: serving"), WAIT) else {
+        server.kill()
+        fail "the server didn't start"
+    }
+    let address = serving[serving.find("http://") ?? 0..].trim().copy()
+    let base = if address.ends_with("/") { address[7..address.len() - 1].copy() } else { address[7..].copy() }
+    let code_line = server.wait_for_line(String("setup code:"), 10000) else {
+        server.kill()
+        fail "the server didn't print a setup code"
+    }
+    let code = code_line[12..].trim().copy()
+    let (status, owner) = try post_json(base.copy(), "/api/setup", Obj.new().s("code", code).s("username", String("bench")).s("password", String("correct horse")).j("device", device("Bench")).done())
+    if status != 200 {
+        server.kill()
+        fail "setup failed: {owner}"
+    }
+    // A build from before version 2 says only [1].
+    let (_, info) = try get_json(base.copy(), "/api/version")
+    let newer = "{at(info, "protocol")}".contains("2")
+    let kept = try fs.temp_dir()
+    println("frames kept in {kept}")
+    let failure: String? = match run(server, base, str_at(owner, "token") ?? String(), moves, kept, newer) {
+        ok => none,
+        err(e) => some("{e}"),
+    }
+    // Stopped as a service is, so it stops its browser too.
+    server.stop()
+    _ = server.wait_timeout(20000)
+    server.kill_tree()
+    remove_scratch(home)
+    if let f = failure {
+        eprintln("\n{f}")
+        exit(1)
+    }
+}

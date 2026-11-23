@@ -126,15 +126,22 @@ pub struct Session {
     ws: WebSocket
     pub seq: i64
     pub frames: List<Json>
+    pub body: List<u8>    // the bytes after the head of the last binary message, as a browser.frame's JPEG
+    pub binary: bool      // whether the last frame came as a binary message
 }
 
 impl Session {
     /// Opens the WebSocket at `address` and says hello with `token` and `after`.
     /// Gives the session once it's synced.
     pub fn connect(address: String, token: String, after: i64) -> Session ! Error {
+        return try Session.connect_speaking(address, token, after, protocol.versions())
+    }
+
+    /// The same, speaking only `versions` (a JSON list), as an older app would.
+    pub fn connect_speaking(address: String, token: String, after: i64, versions: Json) -> Session ! Error {
         let ws = try connect(ws_url(address))
-        var s = Session { ws: ws, seq: after, frames: List<Json>() }
-        try s.send(Obj.new().s("t", String("hello")).s("token", token).j("versions", Json.Array([Json.Int(i64(protocol.NEWEST))])).i("after", after).done())
+        var s = Session { ws: ws, seq: after, frames: List<Json>(), body: List<u8>(), binary: false }
+        try s.send(Obj.new().s("t", String("hello")).s("token", token).j("versions", versions).i("after", after).done())
         _ = try s.until("synced", "")
         return s
     }
@@ -151,11 +158,21 @@ impl Session {
             let m = try s.ws.receive(wait_ms) else {
                 fail "no {t} {kind} came in {wait_ms / 1000} s"
             }
-            let text = match m {
-                Message.Text(x) => x,
-                Message.Binary(_) => fail "a binary frame came",
+            // A binary message, a browser.frame from version 2, reads as its head,
+            // with what follows it in `body`.
+            var f = Json.Null
+            match m {
+                Message.Text(x) => {
+                    f = try parse(x)
+                    s.binary = false
+                },
+                Message.Binary(b) => {
+                    let (head, body) = protocol.binary_parts(b) else { fail "a binary message without a head came" }
+                    f = head
+                    s.body = body
+                    s.binary = true
+                },
             }
-            let f = try parse(text)
             if let seq = int_at(f.copy(), "seq") {
                 if (str_at(f.copy(), "t") ?? String()) == "event" {
                     if seq != s.seq + 1 { fail "event {seq} came after {s.seq}" }

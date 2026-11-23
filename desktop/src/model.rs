@@ -2387,6 +2387,9 @@ pub struct Model {
     /// Whether it only follows the agent's browsing, in the small window, which
     /// leaves the browser to close when the agent's turn ends.
     pub watch_follows: bool,
+    /// The size the window shows the page at, in the screen's pixels, as the
+    /// instance was last told: its frames come no bigger.
+    pub watch_size: Option<(u32, u32)>,
     pub frame: Option<PageFrame>,
     /// A frame came since the window was last drawn.
     pub page_moved: bool,
@@ -2817,8 +2820,7 @@ impl Model {
         // After a reconnect the instance has forgotten what this device watched.
         if std::mem::take(&mut self.rewatch) {
             if let Some(agent) = self.watching.clone() {
-                let id = self.id("browser.watch");
-                out.push(json!({"t": "cmd", "id": id, "name": "browser.watch", "args": {"agent": agent, "on": true, "follow": self.watch_follows}}));
+                out.push(self.watch_frame(&agent));
             }
         }
         let dirty: Vec<List> = self.dirty.drain().collect();
@@ -3336,25 +3338,16 @@ impl Model {
             "result" => self.result(f),
             "browser.state" => self.browser_state(f),
             "browser.frame" => {
-                let agent = s(f, "agent");
-                if self.watching.as_deref() != Some(agent.as_str()) {
+                // From an instance of protocol version 1, the JPEG in base64; later
+                // ones send it as a binary message (`take_page`).
+                if self.watching.as_deref() != Some(s(f, "agent").as_str()) {
                     return false;
                 }
                 use base64::Engine as _;
                 let data = f.get("data").and_then(Value::as_str).unwrap_or_default();
-                let Ok(jpeg) = base64::engine::general_purpose::STANDARD.decode(data) else {
-                    return false;
-                };
-                let seq = self.frame.as_ref().map_or(0, |p| p.seq) + 1;
-                let size = |k: &str| f.get(k).and_then(Value::as_f64).unwrap_or(0.0) as f32;
-                self.frame = Some(PageFrame {
-                    jpeg,
-                    width: size("width"),
-                    height: size("height"),
-                    seq,
-                });
-                // Only the page is drawn again: the chat's rows are as they were.
-                self.page_moved = true;
+                if let Ok(jpeg) = base64::engine::general_purpose::STANDARD.decode(data) {
+                    self.take_page(f, jpeg);
+                }
                 return false;
             }
             "error" => {
@@ -3659,23 +3652,65 @@ impl Model {
         if self.watching == agent && (agent.is_none() || self.watch_follows == follow) {
             return None;
         }
-        let id = self.id("browser.watch");
-        let frame = match (&agent, &self.watching) {
-            (Some(a), _) => {
-                json!({"t": "cmd", "id": id, "name": "browser.watch", "args": {"agent": a, "on": true, "follow": follow}})
-            }
-            (None, Some(old)) => {
-                json!({"t": "cmd", "id": id, "name": "browser.watch", "args": {"agent": old, "on": false}})
-            }
-            (None, None) => return None,
-        };
         // The same browser, from following to watching or back, keeps its frame.
         if self.watching != agent {
             self.frame = None;
         }
-        self.watching = agent;
         self.watch_follows = follow;
+        let frame = if let Some(a) = agent.clone() {
+            self.watch_frame(&a)
+        } else {
+            let old = self.watching.clone()?;
+            let id = self.id("browser.watch");
+            json!({"t": "cmd", "id": id, "name": "browser.watch", "args": {"agent": old, "on": false}})
+        };
+        self.watching = agent;
         Some(frame)
+    }
+
+    /// browser.watch for `agent`, as this device watches it: following or not, and
+    /// at the size the window shows it, once that's known.
+    fn watch_frame(&mut self, agent: &str) -> Value {
+        let id = self.id("browser.watch");
+        let mut args = json!({"agent": agent, "on": true, "follow": self.watch_follows});
+        if let Some((w, h)) = self.watch_size {
+            args["width"] = json!(w);
+            args["height"] = json!(h);
+        }
+        json!({"t": "cmd", "id": id, "name": "browser.watch", "args": args})
+    }
+
+    /// The window shows the watched page `width` × `height` pixels of the screen: the
+    /// instance is told when that changes, so its frames are no bigger than that.
+    /// Rounded up to 32 pixels, so a panel being dragged wider asks again only now
+    /// and then.
+    pub fn show_page_at(&mut self, width: f32, height: f32) -> Option<Value> {
+        let up = |v: f32| ((v.max(1.0) / 32.0).ceil() as u32) * 32;
+        let size = (up(width), up(height));
+        if self.watch_size == Some(size) {
+            return None;
+        }
+        self.watch_size = Some(size);
+        let agent = self.watching.clone()?;
+        Some(self.watch_frame(&agent))
+    }
+
+    /// A picture of the watched browser's page: `head` says whose, and the page's
+    /// size, which the person's clicks are in, whatever the picture's own size.
+    pub fn take_page(&mut self, head: &Value, jpeg: Vec<u8>) {
+        if self.watching.as_deref() != Some(s(head, "agent").as_str()) {
+            return;
+        }
+        let seq = self.frame.as_ref().map_or(0, |p| p.seq) + 1;
+        let size = |k: &str| head.get(k).and_then(Value::as_f64).unwrap_or(0.0) as f32;
+        self.frame = Some(PageFrame {
+            jpeg,
+            width: size("width"),
+            height: size("height"),
+            seq,
+        });
+        // Only the page is drawn again: the chat's rows are as they were.
+        self.page_moved = true;
     }
 
     /// What the person typed for the selected agent's browser_ask_secret, or
@@ -7402,6 +7437,38 @@ mod tests {
         let off = m.watch(None, true).unwrap();
         assert_eq!(off["args"]["on"], false);
         assert!(m.watch(None, false).is_none());
+    }
+
+    #[test]
+    fn the_instance_hears_the_size_the_page_is_shown_at() {
+        let mut m = Model::new();
+        // Before anything's watched, the size is kept for the watch to come.
+        assert!(m.show_page_at(420.0, 262.5).is_none());
+        let watched = m.watch(Some("a_1".into()), true).unwrap();
+        assert_eq!(watched["args"]["width"], 448);
+        assert_eq!(watched["args"]["height"], 288);
+        // Opened in the panel, wider: asked again; the same size again asks nothing.
+        let wider = m.show_page_at(720.0, 450.0).unwrap();
+        assert_eq!(wider["name"], "browser.watch");
+        assert_eq!(wider["args"]["width"], 736);
+        assert_eq!(wider["args"]["follow"], true);
+        assert!(m.show_page_at(730.0, 456.0).is_none());
+        // A frame as a binary message's head and JPEG, for the browser watched alone.
+        m.take_page(
+            &json!({"agent": "a_2", "width": 1264, "height": 705}),
+            vec![1],
+        );
+        assert!(m.frame.is_none());
+        m.take_page(
+            &json!({"agent": "a_1", "width": 1264, "height": 705}),
+            vec![0xFF, 0xD8],
+        );
+        let f = m.frame.as_ref().unwrap();
+        assert!(f.jpeg == [0xFF, 0xD8] && f.width == 1264.0 && f.height == 705.0);
+        assert!(m.page_moved);
+        // An instance of protocol version 1 sends it in base64.
+        assert!(!m.take(&json!({"t": "browser.frame", "agent": "a_1", "data": "/9j/", "width": 1264, "height": 705})));
+        assert_eq!(m.frame.as_ref().unwrap().jpeg, [0xFF, 0xD8, 0xFF]);
     }
 
     #[test]

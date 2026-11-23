@@ -2,7 +2,7 @@
 
 Calx: the apps' core, built with the server as one static library that the desktop and iPhone apps link. It keeps the WebSocket to the instance, logs in, keeps the SQLite cache and the outbox, and catches up through the event log.
 
-Only JSON crosses its C boundary:
+Only JSON crosses its C boundary, but for a picture of an agent's browser, which `on_event` gets as the instance sent it, its JSON head, a newline and the JPEG ([protocol.md](../protocol/protocol.md#browserframe)), so it's never put in base64 on the way:
 
 ```c
 uint8_t *loom_core_start(const uint8_t *config_json, size_t len, loom_event_fn on_event, uint8_t *ctx);

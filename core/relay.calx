@@ -411,12 +411,18 @@ fn pump(server: mut Server, t: mut Tunnel, p: mut Place, key: X25519PublicKey, l
     }
 }
 
-// A whole message from the PC: a frame for the core's /ws, or an answer to one of its requests.
+// A whole message from the PC: a frame or a binary message for the core's /ws, or an answer to one of its requests.
 fn took(server: mut Server, t: mut Tunnel, m: List<u8>) {
     if m.len() == 0 { return }
     if m[0] == noise.FRAME {
         if let s = t.local {
             _ = server.send_text(s, String.from_utf8(m[1..].copy()) ?? String())
+        }
+        return
+    }
+    if m[0] == noise.BINARY {
+        if let s = t.local {
+            _ = server.send_binary(s, m[1..].copy())
         }
         return
     }

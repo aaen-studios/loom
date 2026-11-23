@@ -2,11 +2,48 @@ module shared.protocol
 
 // What protocol/protocol.md fixes for every side: the versions, the frame
 // size and the close codes. The frames themselves come with the server.
+import std.json.{Json, parse}
 
-// The versions this build speaks, newest first. An instance speaks its newest
-// version and the one before.
-pub const NEWEST: i32 = 1
+// The versions this build speaks. An instance speaks its newest version and
+// the one before.
+pub const NEWEST: i32 = 2
 pub const OLDEST: i32 = 1
+
+// From this version on, a browser.frame comes as a binary message (`binary`),
+// and before it as JSON text with its JPEG in base64.
+pub const BINARY_FRAMES: i32 = 2
+
+// The versions this build speaks, oldest first, as hello and GET /api/info list them.
+pub fn versions() -> Json {
+    var out = List<Json>()
+    var v = OLDEST
+    while v <= NEWEST {
+        out.push(Json.Int(i64(v)))
+        v += 1
+    }
+    return Json.Array(out)
+}
+
+// A binary message (protocol.md, "browser.frame"): its head, a JSON object
+// with `t` as a text frame has it, a newline, and the bytes it carries.
+pub fn binary(head: String, body: List<u8>) -> List<u8> {
+    var out = "{head}\n".to_bytes()
+    out.extend(body)
+    return out
+}
+
+// A binary message's head and the bytes after it, or none if it has no head.
+pub fn binary_parts(m: List<u8>) -> (Json, List<u8>)? {
+    var nl: usize = 0
+    while nl < m.len() and m[nl] != 10 { nl += 1 }
+    if nl >= m.len() { return none }
+    let text = String.from_utf8(m[..nl].copy()) else return none
+    let head = match parse(text) {
+        ok(j) => j,
+        err(_) => return none,
+    }
+    return some((head, m[nl + 1..].copy()))
+}
 
 // A frame bigger than this closes the socket with 1009.
 pub const MAX_FRAME: usize = 1048576
@@ -46,7 +83,21 @@ pub fn pick_version(offered: List<i32>) -> i32? {
 @test
 fn picks_the_newest_in_common() {
     let offered: List<i32> = [3, 1, 2]
-    assert(pick_version(offered) == some(1))
+    assert(pick_version(offered) == some(2))
+    let older: List<i32> = [1]
+    assert(pick_version(older) == some(1))
+    assert("{versions()}" == "[1,2]")
+}
+
+@test
+fn a_binary_message_is_its_head_a_newline_and_its_bytes() {
+    let jpeg: List<u8> = [255, 216, 10, 0, 255, 217]
+    let m = binary(String(#"{"t":"browser.frame","agent":"a_1"}"#), jpeg.copy())
+    let (head, body) = binary_parts(m) ?? (Json.Null, List<u8>())
+    assert("{head}" == #"{"t":"browser.frame","agent":"a_1"}"#)
+    assert(body == jpeg)
+    let headless: List<u8> = [1, 2, 3]
+    assert(binary_parts(headless) == none)
 }
 
 @test

@@ -139,6 +139,8 @@ struct Session {
     key: String    // the device's public key, as it says it
     tools: Json    // what it offers as a tool, and how: {run_command: "ask", ...}
     hosts: Json    // the person's hosts it reaches with ssh: [{name, target, via, tools}], checked
+    version: i32    // the protocol version it speaks, from hello
+    shown: (i64, i64)    // the size it shows the browser it watches at, in pixels, as browser.watch says, or 0 × 0
 }
 
 // A call to one of the person's devices, until its result comes.
@@ -1800,7 +1802,7 @@ impl Instance {
                     if req.path == "/ws" and req.method == "GET" {
                         // upgrade answers the request itself.
                         match i.server.upgrade(req.copy()) {
-                            ok(s) => i.sessions.insert(s.id(), Session { socket: s, user: String(), device: String(), live: false, key: String(), tools: Json.Null, hosts: Json.Null }),
+                            ok(s) => i.sessions.insert(s.id(), Session { socket: s, user: String(), device: String(), live: false, key: String(), tools: Json.Null, hosts: Json.Null, version: protocol.OLDEST, shown: (0, 0) }),
                             err(e) => eprintln("loom: /ws from {req.client}: {e}"),
                         }
                         continue
@@ -1927,7 +1929,7 @@ impl Instance {
                         }
                         i.answer_call(call, result)
                     },
-                    browser.Back.Frame(key, data, width, height) => i.browser_frame(key, data, width, height),
+                    browser.Back.Frame(key, text, binary) => i.browser_frame(key, text, binary),
                     browser.Back.Stopped(n) => {
                         if let t = i.stopped_browsers.remove(n) { t.join() }
                     },
@@ -2238,12 +2240,11 @@ impl Instance {
         for k in idle { i.close_browser(k) }
     }
 
-    // The sessions of `key`'s person, or only those watching its browser.
-    fn browser_send(i: Instance, key: String, frame: String, watching: bool) {
+    // To the sessions of `key`'s person.
+    fn browser_send(i: Instance, key: String, frame: String) {
         let (user, _) = key.split_once("/") ?? (String(), String())
-        for (id, s) in i.sessions {
+        for (_, s) in i.sessions {
             if not s.live or s.user != user { continue }
-            if watching and i.watched_by(id) != key { continue }
             _ = i.server.send_text(s.socket, frame)
         }
     }
@@ -2261,24 +2262,41 @@ impl Instance {
 
     // browser.state, to each of the person's devices, as it changes.
     fn browser_state(i: Instance, key: String) {
-        i.browser_send(key.copy(), "{i.browser_status(key.copy()).s("t", String("browser.state")).done()}", false)
+        i.browser_send(key.copy(), "{i.browser_status(key.copy()).s("t", String("browser.state")).done()}")
     }
 
-    // A frame of the page, to the devices watching it.
-    fn browser_frame(i: Instance, key: String, data: String, width: i64, height: i64) {
-        let (_, agent) = key.split_once("/") ?? (String(), String())
-        // Built as text: base64 needs no escaping, and the frame is 100 KB or more.
-        let frame = #"{"t":"browser.frame","agent":#{Json.Str(agent)},"data":"#{data}","width":#{width},"height":#{height}}"#
-        i.browser_send(key, frame, true)
-    }
-
-    // Tells a browser whether anyone watches it now.
-    fn watch_changed(i: mut Instance, key: String) {
-        var watched = false
-        for (_, k) in i.watchers {
-            if k == key { watched = true }
+    // A frame of the page, to the devices watching it: as a binary message to an
+    // app of protocol version 2 on, and as JSON text to one of version 1. The
+    // browser's thread made both, so the loop only sends them.
+    fn browser_frame(i: Instance, key: String, text: String, binary: List<u8>) {
+        let (user, _) = key.split_once("/") ?? (String(), String())
+        for (id, s) in i.sessions {
+            if not s.live or s.user != user or i.watched_by(id) != key { continue }
+            if s.version >= protocol.BINARY_FRAMES {
+                if binary.len() > 0 { _ = i.server.send_binary(s.socket, binary) }
+            } else if text.len() > 0 {
+                _ = i.server.send_text(s.socket, text)
+            }
         }
-        if let b = mut i.browsers.find(key) { b.to.send(browser.In.Watch(watched)) }
+    }
+
+    // Tells a browser who watches it now: the biggest any of them shows it at,
+    // and in which forms they take its frames.
+    fn watch_changed(i: mut Instance, key: String) {
+        var w = browser.unwatched()
+        w.width = 0
+        w.height = 0
+        for (session, k) in i.watchers {
+            if k != key { continue }
+            let s = i.sessions.find(session) else continue
+            let (width, height) = browser.frame_size(s.shown.0, s.shown.1)
+            w.on = true
+            w.width = w.width.max(width)
+            w.height = w.height.max(height)
+            if s.version >= protocol.BINARY_FRAMES { w.binary = true } else { w.text = true }
+        }
+        if not w.on { w = browser.unwatched() }
+        if let b = mut i.browsers.find(key) { b.to.send(browser.In.Watch(w)) }
     }
 
     // A session that's gone watches nothing. A browser no one watches now
@@ -2311,12 +2329,14 @@ impl Instance {
                 }
                 // Following it, as an app's small window does while the agent browses,
                 // keeps it open no longer than the agent's turn.
-                let follow = bool_at(args, "follow") ?? false
+                let follow = bool_at(args.copy(), "follow") ?? false
                 let had = i.followers.position(|x| x == s.id())
                 if follow and had == none { i.followers.push(s.id()) }
                 if not follow {
                     if let k = had { _ = i.followers.remove(k) }
                 }
+                // The size the app shows the page at: frames come no bigger.
+                if let session = mut i.sessions.find(s.id()) { session.shown = (int_at(args.copy(), "width") ?? 0, int_at(args, "height") ?? 0) }
                 i.watchers.insert(s.id(), key.copy())
                 i.watch_changed(key.copy())
             } else if i.watched_by(s.id()) == key {
@@ -2785,13 +2805,12 @@ impl Instance {
     fn http(i: mut Instance, req: Request) -> Response? ! Error {
         if req.path == "/api/info" and req.method == "GET" {
             let users = try i.store.user_count()
-            let versions = Json.Array([Json.Int(i64(protocol.NEWEST))])
-            return some(json_response(200, Obj.new().s("instance", try i.store.meta("instance") ?? String()).s("key", try i.public_key()).j("protocol", versions).s("version", i.version.copy()).b("setup", users == 0).j("moved", i.moved.copy()).done()))
+            return some(json_response(200, Obj.new().s("instance", try i.store.meta("instance") ?? String()).s("key", try i.public_key()).j("protocol", protocol.versions()).s("version", i.version.copy()).b("setup", users == 0).j("moved", i.moved.copy()).done()))
         }
         // What answers here, for a script or an agent checking a server: no token needed.
         if req.path == "/api/version" and req.method == "GET" {
             let users = try i.store.user_count()
-            return some(json_response(200, Obj.new().s("name", String("loom")).s("version", i.version.copy()).j("protocol", Json.Array([Json.Int(i64(protocol.NEWEST))])).b("set_up", users > 0).done()))
+            return some(json_response(200, Obj.new().s("name", String("loom")).s("version", i.version.copy()).j("protocol", protocol.versions()).b("set_up", users > 0).done()))
         }
         // Once moved, the rest is at the new place; while moving, nothing changes here.
         if i.moved != Json.Null {
@@ -6459,7 +6478,7 @@ impl Instance {
         } else if t == "hello" {
             i.server.close_socket(s, protocol.CLOSE_PROTOCOL, String("hello was sent already"))
         } else {
-            _ = i.server.send_text(s, error_frame("unknown_frame", "Version 1 has no frame {t}.", none))
+            _ = i.server.send_text(s, error_frame("unknown_frame", "This version has no frame {t}.", none))
         }
     }
 
@@ -6539,7 +6558,7 @@ impl Instance {
             }
         }
         _ = i.server.send_text(s, "{Obj.new().s("t", String("synced")).i("seq", last).j("runs", Json.Array(going)).done()}")
-        i.sessions.insert(s.id(), Session { socket: s, user: user.copy(), device: device.id, live: true, key: String(), tools: Json.Null, hosts: Json.Null })
+        i.sessions.insert(s.id(), Session { socket: s, user: user.copy(), device: device.id, live: true, key: String(), tools: Json.Null, hosts: Json.Null, version: version, shown: (0, 0) })
         // The owner's first device after an update the instance made by itself hears of
         // it live, so it notifies.
         if i.told_update != Json.Null and try i.store.role(user) == some(String("owner")) { try i.tell_owner_update() }
@@ -7418,26 +7437,31 @@ impl Instance {
         if text.len() > 0 {
             prompt.push(Obj.new().s("type", String("text")).s("text", text).done())
         }
+        // An image the program can look at, when it takes images and the image isn't
+        // too big, is read and put in base64 by the program's thread, as the prompt
+        // goes out; any other file is a link to a copy in its folder.
+        var images = List<acp.Image>()
         for f in sent {
-            prompt.push(i.prompt_file(p.images, user.copy(), agent.copy(), f))
-        }
-        p.pending.insert(id, Pending.Prompt(run_id.copy()))
-        p.to.send(Out.Send(acp.request(id, "session/prompt", Obj.new().s("sessionId", session).j("prompt", Json.Array(prompt)).done())))
-    }
-
-    // A file sent to an agent, as ACP's content: an image the program can look at, when it
-    // takes images and the image isn't too big, and otherwise a link to a copy in its folder.
-    fn prompt_file(i: Instance, images: bool, user: String, agent: String, f: Json) -> Json {
-        let sha = str_at(f.copy(), "file") ?? String()
-        let name = str_at(f.copy(), "name") ?? String("file")
-        let mime = str_at(f.copy(), "mime") ?? String("application/octet-stream")
-        let size = int_at(f.copy(), "size") ?? 0
-        if images and files.agent_image(mime.copy()) and size <= files.INLINE_IMAGE {
-            match fs.read("{i.data}/files/{sha}") {
-                ok(data) => return Obj.new().s("type", String("image")).s("mimeType", mime).s("data", bytes.base64(data)).done(),
-                err(e) => eprintln("loom: reading {sha} for an agent: {e}"),
+            let mime = str_at(f.copy(), "mime") ?? String("application/octet-stream")
+            if p.images and files.agent_image(mime.copy()) and (int_at(f.copy(), "size") ?? 0) <= files.INLINE_IMAGE {
+                let sha = str_at(f.copy(), "file") ?? String()
+                let path = match fs.absolute("{i.data}/files/{sha}") {
+                    ok(a) => a,
+                    err(_) => "{i.data}/files/{sha}",
+                }
+                images.push(acp.Image { at: prompt.len(), path: path.copy(), mime: mime, instead: file_link(path, f) })
+                prompt.push(Json.Null)
+            } else {
+                prompt.push(i.prompt_file(user.copy(), agent.copy(), f))
             }
         }
+        p.pending.insert(id, Pending.Prompt(run_id.copy()))
+        p.to.send(Out.Prompt(id, session.copy(), prompt, images))
+    }
+
+    // A file sent to an agent, as ACP's content: a link to a copy in its folder.
+    fn prompt_file(i: Instance, user: String, agent: String, f: Json) -> Json {
+        let sha = str_at(f.copy(), "file") ?? String()
         let place = i.place(user.copy(), i.agent_or_id(user.copy(), agent.copy()))
         let path = match i.agent_copy(place, i.folder_of(user.copy(), agent), f) {
             ok(p) => p,
@@ -7449,7 +7473,7 @@ impl Instance {
                 }
             },
         }
-        return Obj.new().s("type", String("resource_link")).s("uri", file_uri(path)).s("name", name).s("mimeType", mime).i("size", size).done()
+        return file_link(path, f)
     }
 
     fn agent_line(i: mut Instance, line: Line) ! Error {
@@ -10128,6 +10152,11 @@ fn file_uri(path: String) -> String {
     let forward = path.replace("\\", "/")
     let rooted = if forward.starts_with("/") { forward } else { "/{forward}" }
     return "file://{url.encode(rooted, "/:")}"
+}
+
+// The file `f` of a message, at `path`, as ACP's link to it.
+fn file_link(path: String, f: Json) -> Json {
+    return Obj.new().s("type", String("resource_link")).s("uri", file_uri(path)).s("name", str_at(f.copy(), "name") ?? String("file")).s("mimeType", str_at(f.copy(), "mime") ?? String("application/octet-stream")).i("size", int_at(f, "size") ?? 0).done()
 }
 
 // A tool's output, from ACP's content, as loom's blocks, kept short.

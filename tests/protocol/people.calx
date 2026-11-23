@@ -18,7 +18,7 @@ import std.time.{Instant}
 import std.process.{exit}
 import shared.obj.{Obj, at, bool_at, int_at, str_at}
 import core.cache.{Cache}
-import core.conn.{Conn}
+import core.conn.{Conn, ToApp}
 import shared.client.{Session, json_of, post_json}
 import tests.kit.{Instance, check, device, loom}
 
@@ -275,7 +275,7 @@ fn cores(owners: mut Core, newcomer: mut Core, base: String) ! Error {
 // The app's side of a real core.
 struct Core {
     to_core: Sender<String>
-    from_core: Receiver<String>
+    from_core: Receiver<ToApp>
     thread: Thread?
 }
 
@@ -283,7 +283,7 @@ impl Core {
     fn start(server: String?, token: String?, service: String, cache: String) -> Core ! Error {
         let inbox = Receiver<String>()
         let to_core = inbox.sender()
-        let from_core = Receiver<String>()
+        let from_core = Receiver<ToApp>()
         let conn = Conn.new(server.copy(), token.copy(), service.copy(), try Cache.open(cache), inbox, from_core.sender())
         let t = unsafe { Thread.spawn(conn) }
         return Core { to_core: to_core, from_core: from_core, thread: some(t) }
@@ -299,7 +299,8 @@ impl Core {
         loop {
             let waited = unsafe { Instant.now() }.nanos_since(start) / 1000000
             if waited >= 30000 { fail "no {t} came in 30 s" }
-            let m = unsafe { self.from_core.wait_for((30000 - waited) * 1000000) } else { continue }
+            let got = unsafe { self.from_core.wait_for((30000 - waited) * 1000000) } else { continue }
+            let m = got.text() else { continue }
             let f = try parse(m)
             if str_at(f.copy(), "t") == some(String(t)) { return f }
         }

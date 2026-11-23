@@ -17,7 +17,7 @@ import shared.obj.{Obj, at, bool_at, str_at}
 import shared.client.{Session, ws_url}
 import shared.protocol.{MAX_FRAME, NEWEST}
 import core.cache.{Cache}
-import core.conn.{Conn}
+import core.conn.{Conn, ToApp}
 import tests.kit.{Instance, check}
 
 const CONVERSATIONS: usize = 24
@@ -53,7 +53,7 @@ fn ids(messages: Json) -> List<String> {
 // The app's side of a core: what it sends, and what the core tells it.
 struct App {
     to_core: Sender<String>
-    from_core: Receiver<String>
+    from_core: Receiver<ToApp>
     thread: Thread?
 }
 
@@ -61,7 +61,7 @@ impl App {
     fn start(base: String, token: String) -> App ! Error {
         let inbox = Receiver<String>()
         let to_core = inbox.sender()
-        let from_core = Receiver<String>()
+        let from_core = Receiver<ToApp>()
         let conn = Conn.new(some("http://{base}"), some(token.copy()), String("loom-test-snapshot"), try Cache.open(String(":memory:")), inbox, from_core.sender())
         let t = unsafe { Thread.spawn(conn) }
         return App { to_core: to_core, from_core: from_core, thread: some(t) }
@@ -74,7 +74,8 @@ impl App {
         loop {
             let waited = unsafe { Instant.now() }.nanos_since(start) / 1000000
             if waited >= ms { fail "no {t} {field}={value} came in {ms} ms" }
-            let m = unsafe { self.from_core.wait_for((ms - waited) * 1000000) } else { continue }
+            let got = unsafe { self.from_core.wait_for((ms - waited) * 1000000) } else { continue }
+            let m = got.text() else { continue }
             let f = try parse(m)
             if (str_at(f.copy(), "t") ?? String()) != t { continue }
             if field.len() == 0 or (str_at(f.copy(), field) ?? String()) == value { return f }
