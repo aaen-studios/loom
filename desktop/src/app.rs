@@ -7192,6 +7192,7 @@ ACTA_KEY=secret:ACTA_KEY",
             thoughts: self.prefs.thoughts,
             text_scale: self.prefs.text_scale(),
             bubbles: self.prefs.bubbles,
+            vibrant: self.prefs.vibrant,
             newest: false,
             room: self.chat_room(window),
         };
@@ -13948,11 +13949,26 @@ ACTA_KEY=secret:ACTA_KEY",
     }
 }
 
+/// The person's bubble in an agent's chat: the bubble grey with a breath of the agent's
+/// colour, a little more in the dark. With Vibrant bubbles it's the agent's colour itself,
+/// as saturated as it is, made light in the light theme and deep in the dark, so the
+/// words read on it whichever colour it is (`motion::ink_on` makes sure).
+fn person_bubble(p: Palette, tint: Hsla, vibrant: bool) -> Hsla {
+    if vibrant {
+        return Hsla {
+            l: if p.dark { 0.28 } else { 0.8 },
+            ..tint
+        };
+    }
+    motion::mix(p.bubble, tint, if p.dark { 0.12 } else { 0.07 })
+}
+
 #[allow(clippy::too_many_arguments)]
 fn person(
     p: Palette,
     m: &Message,
     tint: Hsla,
+    vibrant: bool,
     files: &HashMap<String, String>,
     scale: f32,
     room: i32,
@@ -14018,14 +14034,15 @@ fn person(
         None => cx.open_url(url),
     };
     // Its corners on the right smaller where it joins the person's messages either side.
-    // What the person wrote has a breath of the agent's colour, a little more in the dark;
-    // what a routine or another agent sent is plain grey.
+    // What the person wrote takes the agent's colour; what a routine or another agent
+    // sent is plain grey.
     let c = model::corners(true, joined);
     let bg = if m.from_agent.is_some() {
         p.bubble
     } else {
-        motion::mix(p.bubble, tint, if p.dark { 0.12 } else { 0.07 })
+        person_bubble(p, tint, vibrant)
     };
+    let ink = motion::ink_on(bg, p.ink, p.bg);
     out.when(!text.trim().is_empty(), |d| {
         d.child(
             div()
@@ -14038,7 +14055,7 @@ fn person(
                 .rounded_bl(px(c.bl))
                 .bg(bg)
                 .text_size(px(size::BODY * scale))
-                .text_color(p.ink)
+                .text_color(ink)
                 .when(m.queued, |d| d.opacity(0.6))
                 .child(KeptText::new(
                     SharedString::from(format!("m-{}-{room}", m.id)),
@@ -14313,6 +14330,7 @@ struct Show {
     thoughts: Thoughts,
     text_scale: f32,
     bubbles: bool,
+    vibrant: bool,
     /// Whether this is the chat's newest message, whose choices still answer.
     newest: bool,
     /// How wide the chat's column is, to the pixel (`Loom::chat_room`), in the text's
@@ -14799,7 +14817,7 @@ impl ReplyDraw<'_> {
                     |v| v.selectable(true),
                 ));
             group = group.child(if show.bubbles {
-                // A grey bubble, when the person picks bubbles over plain text, its
+                // A grey bubble, never the agent's colour, which is the person's: its
                 // corner by the thread squared off as a speech bubble's tail, and
                 // smaller where it joins the next.
                 let c = model::corners(false, model::Joined::at(k, run.len()));
@@ -15524,6 +15542,46 @@ fn when_sent(ms: i64, now: chrono::DateTime<chrono::Local>) -> String {
     }
 }
 
+#[cfg(test)]
+mod bubble_tests {
+    use super::{person_bubble, Palette};
+    use crate::{motion, thread};
+
+    #[test]
+    fn the_persons_words_read_on_their_bubble_in_every_colour() {
+        let names = [
+            "periwinkle",
+            "mint",
+            "apricot",
+            "pink",
+            "sky",
+            "gold",
+            "lavender",
+            "grey",
+            "coral",
+            "moss",
+            "teal",
+            "plum",
+            "#ffee00",
+            "#000080",
+        ];
+        let contrast = |a, b| {
+            let (x, y) = (motion::luminance(a), motion::luminance(b));
+            (x.max(y) + 0.05) / (x.min(y) + 0.05)
+        };
+        for dark in [false, true] {
+            let p = Palette::new(dark);
+            for name in names {
+                for vibrant in [false, true] {
+                    let bg = person_bubble(p, thread::color(name, dark), vibrant);
+                    let ink = motion::ink_on(bg, p.ink, p.bg);
+                    let c = contrast(bg, ink);
+                    assert!(c >= 4.5, "{name}, dark {dark}, vibrant {vibrant}: {c}");
+                }
+            }
+        }
+    }
+}
 #[cfg(test)]
 mod command_tests {
     use super::command_of;
@@ -16690,7 +16748,8 @@ mod row_tests {
                 tools: Tools::Folded,
                 thoughts: Thoughts::Hidden,
                 text_scale: 1.0,
-                bubbles: false,
+                bubbles: true,
+                vibrant: false,
                 newest: false,
                 room: 720,
             },
@@ -17259,6 +17318,7 @@ fn chat_row(i: &RowInputs, this: WeakEntity<Loom>) -> Stateful<Div> {
             p,
             m,
             tint,
+            show.vibrant,
             files,
             show.text_scale,
             show.room,

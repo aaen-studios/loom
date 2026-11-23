@@ -51,21 +51,39 @@ enum P {
     nonisolated(unsafe) private static var threads: [String: Color] = [:]    // drawn on the main thread only
 
     /// The person's bubble in an agent's chat: the bubble grey with a breath of the
-    /// agent's thread colour, 7% in light and 12% in dark, as the desktop's `person()`.
+    /// agent's thread colour, 7% in light and 12% in dark. With Vibrant bubbles it's the
+    /// thread colour itself, as saturated as it is, at a lightness of 80% in light and 28%
+    /// in dark, where the words read on every colour, as the desktop's `person_bubble`.
     /// Kept per colour, as `thread` is.
-    static func personBubble(_ name: String) -> Color {
-        if let kept = personBubbles[name] { return kept }
+    static func personBubble(_ name: String, vibrant: Bool = false) -> Color {
+        let key = vibrant ? "vibrant:\(name)" : name
+        if let kept = personBubbles[key] { return kept }
         let tint = UIColor(thread(name))
         let light = UIColor(loom: L.bubble), dark = UIColor(loom: D.bubble)
         let c = Color(UIColor { traits in
             let isDark = traits.userInterfaceStyle == .dark
-            return mix(isDark ? dark : light, tint.resolvedColor(with: traits), isDark ? 0.12 : 0.07)
+            let t = tint.resolvedColor(with: traits)
+            if vibrant { return lightness(t, isDark ? 0.28 : 0.8) }
+            return mix(isDark ? dark : light, t, isDark ? 0.12 : 0.07)
         })
-        personBubbles[name] = c
+        personBubbles[key] = c
         return c
     }
 
     nonisolated(unsafe) private static var personBubbles: [String: Color] = [:]    // drawn on the main thread only
+
+    /// `c` with its HSL lightness set to `l`, keeping its hue and saturation.
+    private static func lightness(_ c: UIColor, _ l: CGFloat) -> UIColor {
+        var (h, sv, v, a): (CGFloat, CGFloat, CGFloat, CGFloat) = (0, 0, 0, 0)
+        c.getHue(&h, saturation: &sv, brightness: &v, alpha: &a)
+        // HSB to HSL's saturation, then back to HSB at the new lightness.
+        let l0 = v * (1 - sv / 2)
+        let room0 = min(l0, 1 - l0)
+        let s = room0 > 0 ? (v - l0) / room0 : 0
+        let v1 = l + s * min(l, 1 - l)
+        let sv1 = v1 > 0 ? 2 * (1 - l / v1) : 0
+        return UIColor(hue: h, saturation: sv1, brightness: v1, alpha: a)
+    }
 
     /// `a` moved `k` of the way to `b`, channel by channel in sRGB.
     private static func mix(_ a: UIColor, _ b: UIColor, _ k: CGFloat) -> UIColor {

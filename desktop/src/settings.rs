@@ -75,7 +75,7 @@ fn page_words(screen: Screen) -> &'static str {
         Screen::Profile => "profile you name instructions what agents know",
         Screen::Appearance => "theme dark light mode system colours colors text size font fonts geist code monospace bigger smaller",
         Screen::ChatPrefs => {
-            "tool calls tools hidden folded thoughts thinking send enter ctrl composer replies messages bubbles plain style search sidebar find width wide narrow comfortable full column"
+            "tool calls tools hidden folded thoughts thinking send enter ctrl composer replies messages bubbles plain style vibrant colour color search sidebar find width wide narrow comfortable full column"
         }
         Screen::AppPrefs => {
             "start login startup tray close background awake sleep notifications sound preview updates version restart"
@@ -357,20 +357,23 @@ impl Loom {
         let style = self.pref_choice(
             "style",
             self.prefs.bubbles,
-            &[(false, "Plain"), (true, "Bubbles")],
+            &[(true, "Bubbles"), (false, "Plain")],
             |p, v| p.bubbles = v,
             cx,
         );
-        let replies = vec![
+        let messages = vec![
             self.row(None, "Chat width", None, Some(width))
                 .into_any_element(),
-            self.row(
-                None,
-                "Message style",
-                Some("How agents' replies look".into()),
-                Some(style),
-            )
-            .into_any_element(),
+            self.row(None, "Agent replies", None, Some(style))
+                .into_any_element(),
+            self.pref_switch(
+                "pref-vibrant",
+                "Vibrant bubbles",
+                "",
+                self.prefs.vibrant,
+                |p, v| p.vibrant = v,
+                cx,
+            ),
             self.row(None, "Tool calls", Some(tools_sub.into()), Some(tools))
                 .into_any_element(),
             self.row(None, "Thoughts", None, Some(thoughts))
@@ -393,7 +396,7 @@ impl Loom {
             cx,
         )];
         let groups = vec![
-            self.group(Some("Replies"), replies),
+            self.group(Some("Messages"), messages),
             self.group(Some("Composer"), composer),
             self.group(Some("Sidebar"), sidebar),
         ];
