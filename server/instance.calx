@@ -60,6 +60,7 @@ import server.sandbox
 import server.stage
 import server.update
 import server.checkpoint
+import server.searcher
 import server.store.{AcpAgent, Device, Store, User, now, secret_key, site_of}
 import shared.tools
 
@@ -320,6 +321,10 @@ pub struct Instance {
     stop_gate: Sender<bool>?
     checkpointer: Thread?    // checkpoints the database off the loop (server/checkpoint.calx)
     stop_checkpoints: Sender<bool>
+    search_to: Sender<searcher.Job>    // searches, run off the loop (server/searcher.calx)
+    search_done: Receiver<searcher.Done>
+    searches: Map<String, Waiter>    // each search under way, by its key, and who it answers
+    next_search: u64
     doors: LinkedMap<String, egress.Door>    // "user/agent" -> the egress of an agent closed to the network (server/egress.calx)
     moving: String    // where the instance is moving to, while it is
     move_waiters: List<Waiter>    // instance.move commands waiting on the move
@@ -1137,9 +1142,11 @@ impl Instance {
         if let text = try store.meta("moved") {
             if let ok(m) = parse(text) { moved = m }
         }
+        let search_done = Receiver<searcher.Done>()
+        let search_to = searcher.start("{config.data}/loom.db", search_done.sender(), waker)
         let browser_done = Receiver<browser.Back>()
         let browser_to = browser_done.sender()
-        var i = Instance { release: config.release.copy(), host: update.host(config.in_app), exe: current_exe(), update_to: update_to, update_back: update_back, updating: no_update(), next_update_check: 0, last_busy: now(), restart_stops: List<String>(), restart: false, told_update: Json.Null, told_update_at: 0, browsers: LinkedMap<String, Browser>(), watchers: Map<u32, String>(), followers: List<u32>(), browser_pages: Map<String, String>(), browsers_to_check: List<String>(), browser_done: browser_done, browser_to: browser_to, stopped_browsers: Map<u64, Thread>(), next_browser: 0, fills: Map<String, Fill>(), turns_ended: List<(String, String, String)>(), next_browser_sweep: 0, task_stops: Map<String, String>(), resumes: List<(String, String)>(), push_to: push_to, push_gone: push_gone, move_to: move_to, move_done: move_done, lan: config.lan, bridge: none, stop_bridge: none, lan_port: 0, announcer: none, stop_announcer: none, to_close: List<ServerSocket>(), boxes: none, gate: none, stop_gate: none, checkpointer: some(checkpointer), stop_checkpoints: stop_checkpoints, doors: LinkedMap<String, egress.Door>(), moving: String(), move_waiters: List<Waiter>(), moved: moved, version: config.version.copy(), store: store, server: server, waker: waker, data: config.data.copy(), sessions: Map<u32, Session>(), runs: LinkedMap<String, Run>(), procs: LinkedMap<String, Proc>(), approvals: LinkedMap<String, Approval>(), lines: lines, lines_to: to, hash_to: hash_to, hash_done: hash_done, next_job: 0, auths: Map<i64, Auth>(), dummy_hash: dummy, skills_written: Map<String, String>(), open_secrets: Map<String, List<(String, String)>>(), failures: LinkedMap<String, List<i64>>(), thumbs: files.start(), events: config.events, next_prune: 0, grants: Map<String, Grant>(), calls: Map<String, Request>(), context: Map<String, (i64, i64)>(), registry_at: config.registry.copy(), registry: Json.Null, registry_time: 0, registry_fetching: false, install_to: install_to, install_done: install_done, mcp_test_to: mcp_test_to, mcp_test_done: mcp_test_done, mcp_tests: Map<i64, Waiter>(), fetching: List<Waiter>(), installs: Map<i64, Install>(), deno_job: 0, deno_waiters: List<Request>(), code_acts: Map<i64, String>(), leftovers: List<String>(), next_sweep: 0, device_calls: Map<String, DeviceCall>(), setups: Map<String, Setup>(), minute_ms: config.minute_ms, next_due: 0, routine_runs: Map<String, RoutineRun>(), routine_marks: Map<String, (String, String)>(), run_chains: Map<String, List<String>>(), panel_calls: Map<String, Waiter>(), script_calls: Map<String, Request>(), running_flows: LinkedMap<String, flows.Flow>(), flow_steps: Map<String, (String, usize)>(), advancing: List<String>(), flow_results: List<(String, usize, bool, String)>(), flows_due: List<String>(), slow_calls: Map<String, String>(), acting: 0, call_actions: Map<String, i64>(), tool_actions: Map<String, i64>(), sealer: try secret_key(config.data.copy()) }
+        var i = Instance { release: config.release.copy(), host: update.host(config.in_app), exe: current_exe(), update_to: update_to, update_back: update_back, updating: no_update(), next_update_check: 0, last_busy: now(), restart_stops: List<String>(), restart: false, told_update: Json.Null, told_update_at: 0, browsers: LinkedMap<String, Browser>(), watchers: Map<u32, String>(), followers: List<u32>(), browser_pages: Map<String, String>(), browsers_to_check: List<String>(), browser_done: browser_done, browser_to: browser_to, stopped_browsers: Map<u64, Thread>(), next_browser: 0, fills: Map<String, Fill>(), turns_ended: List<(String, String, String)>(), next_browser_sweep: 0, task_stops: Map<String, String>(), resumes: List<(String, String)>(), push_to: push_to, push_gone: push_gone, move_to: move_to, move_done: move_done, lan: config.lan, bridge: none, stop_bridge: none, lan_port: 0, announcer: none, stop_announcer: none, to_close: List<ServerSocket>(), boxes: none, gate: none, stop_gate: none, checkpointer: some(checkpointer), stop_checkpoints: stop_checkpoints, search_to: search_to, search_done: search_done, searches: Map<String, Waiter>(), next_search: 0, doors: LinkedMap<String, egress.Door>(), moving: String(), move_waiters: List<Waiter>(), moved: moved, version: config.version.copy(), store: store, server: server, waker: waker, data: config.data.copy(), sessions: Map<u32, Session>(), runs: LinkedMap<String, Run>(), procs: LinkedMap<String, Proc>(), approvals: LinkedMap<String, Approval>(), lines: lines, lines_to: to, hash_to: hash_to, hash_done: hash_done, next_job: 0, auths: Map<i64, Auth>(), dummy_hash: dummy, skills_written: Map<String, String>(), open_secrets: Map<String, List<(String, String)>>(), failures: LinkedMap<String, List<i64>>(), thumbs: files.start(), events: config.events, next_prune: 0, grants: Map<String, Grant>(), calls: Map<String, Request>(), context: Map<String, (i64, i64)>(), registry_at: config.registry.copy(), registry: Json.Null, registry_time: 0, registry_fetching: false, install_to: install_to, install_done: install_done, mcp_test_to: mcp_test_to, mcp_test_done: mcp_test_done, mcp_tests: Map<i64, Waiter>(), fetching: List<Waiter>(), installs: Map<i64, Install>(), deno_job: 0, deno_waiters: List<Request>(), code_acts: Map<i64, String>(), leftovers: List<String>(), next_sweep: 0, device_calls: Map<String, DeviceCall>(), setups: Map<String, Setup>(), minute_ms: config.minute_ms, next_due: 0, routine_runs: Map<String, RoutineRun>(), routine_marks: Map<String, (String, String)>(), run_chains: Map<String, List<String>>(), panel_calls: Map<String, Waiter>(), script_calls: Map<String, Request>(), running_flows: LinkedMap<String, flows.Flow>(), flow_steps: Map<String, (String, usize)>(), advancing: List<String>(), flow_results: List<(String, usize, bool, String)>(), flows_due: List<String>(), slow_calls: Map<String, String>(), acting: 0, call_actions: Map<String, i64>(), tool_actions: Map<String, i64>(), sealer: try secret_key(config.data.copy()) }
         if config.sandboxes.len() > 0 and not i.lan { try i.sandboxes_on(config.sandboxes.copy(), config.sandbox_image.copy()) }
         // An action the last run of the instance left started, it never finished.
         try i.store.settle_cut_short()
@@ -1723,6 +1730,11 @@ impl Instance {
                 match i.store.drop_push_token(g.device, g.token) {
                     ok => {},
                     err(e) => eprintln("loom: push: {e}"),
+                }
+            }
+            while let d = i.search_done.next() {
+                if let w = i.searches.remove(d.key.copy()) {
+                    i.answer_cmd(w, if d.error.len() == 0 { Answer.Value(d.answer) } else { Answer.Refused(String("search"), d.error) })
                 }
             }
             while let back = i.browser_done.next() {
@@ -3145,7 +3157,11 @@ impl Instance {
                 let found = try i.find_agent(g.user.copy(), key.copy()) else return some(tool_error("There's no agent {key}."))
                 a = a.s("agent", str_at(found, "id") ?? String())
             }
-            return some(answer_text(try i.command(g.user, g.agent, String("messages.search"), a.done())))
+            // Off the loop, as the app's search is: the call is answered when it's done.
+            let call = try i.store.new_id("sc")
+            i.hold_call(call.copy(), req)
+            i.search(Waiter { socket: none, id: call }, g.user.copy(), a.done())
+            return none
         }
         if name == "create_agent" {
             // A new agent always starts out asking: only the person changes that.
@@ -8237,9 +8253,22 @@ impl Instance {
             }
             return
         }
+        if name == "messages.search" {
+            i.search(Waiter { socket: some(s), id: id }, user.copy(), args)
+            return
+        }
         let result = try i.command(user, device, name.copy(), args)
         i.answer_cmd(Waiter { socket: some(s), id: id }, result)
         i.close_gone()
+    }
+
+    // Starts a search off the loop (server/searcher.calx): `w` gets its answer when
+    // it comes.
+    fn search(i: mut Instance, w: own Waiter, user: own String, args: own Json) {
+        i.next_search += 1
+        let key = "s{i.next_search}"
+        i.searches.insert(key.copy(), w)
+        i.search_to.send(searcher.Job { key: key, user: user, args: args })
     }
 
     // The sockets of people just removed, closed.
@@ -9373,13 +9402,7 @@ impl Instance {
         }
         if name == "messages.search" {
             // Full-text search over every conversation (PLAN.md, "Search").
-            let limit = int_at(args.copy(), "limit") ?? 30
-            let n: i64 = if limit < 1 { 1 } else if limit > 100 { 100 } else { limit }
-            var results = List<Json>()
-            for (message, snippet) in try i.store.search(user, str_at(args.copy(), "query") ?? String(), str_at(args.copy(), "agent"), int_at(args.copy(), "after"), int_at(args, "before"), usize.try_from(n) ?? 30) {
-                results.push(Obj.new().j("message", message).s("snippet", snippet).done())
-            }
-            return Answer.Value(Obj.new().j("results", Json.Array(results)).done())
+            return Answer.Value(try i.store.search_answer(user, args))
         }
         return Answer.Refused(String("unknown_command"), "Version 1 has no command {name}.")
     }

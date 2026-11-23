@@ -1,0 +1,65 @@
+module server.searcher
+
+// Full-text search (PLAN.md, "Search") on a thread of its own, with a connection to
+// the database of its own. Ranking every match of a short prefix takes the database
+// tens of milliseconds, which on the instance's loop held up every person while
+// someone typed.
+import std.json.{Json}
+import std.net.{Waker as LoopWaker}
+import std.sqlite.{Database}
+import std.thread.{Task}
+import server.store.{search_answer_in}
+
+/// A search: `key` comes back with its answer, for the loop to know whose it is.
+pub struct Job {
+    pub key: String
+    pub user: String
+    pub args: Json
+}
+
+/// A search's answer, as `messages.search` gives it, or why it failed.
+pub struct Done {
+    pub key: String
+    pub answer: Json
+    pub error: String
+}
+
+struct Worker {
+    path: String
+    jobs: Receiver<Job>
+    back: Sender<Done>
+    wake: LoopWaker
+}
+
+impl Task for Worker {
+    fn run(own self) {
+        var w = self
+        let db = match Database.open(w.path.copy()) {
+            ok(d) => d,
+            err(e) => {
+                eprintln("loom: searching {w.path}: {e}")
+                return
+            },
+        }
+        // A cache of its own, smaller than the loop's: a search reads the index and the
+        // messages it finds.
+        if let err(e) = db.execute_script(String("PRAGMA cache_size = -16384;")) { eprintln("loom: searching {w.path}: {e}") }
+        while let job = w.jobs.wait() {
+            let done = match search_answer_in(db, job.user, job.args) {
+                ok(answer) => Done { key: job.key, answer: answer, error: String() },
+                err(e) => Done { key: job.key, answer: Json.Null, error: "{e}" },
+            }
+            w.back.send(done)
+            w.wake.wake()
+        }
+    }
+}
+
+/// Starts searching the database at `path`. Answers come to `back`, and each wakes the
+/// loop with `wake`.
+pub fn start(path: String, back: Sender<Done>, wake: LoopWaker) -> Sender<Job> {
+    let jobs = Receiver<Job>()
+    let to = jobs.sender()
+    _ = unsafe { Thread.spawn(Worker { path: path.copy(), jobs: jobs, back: back.copy(), wake: wake }) }
+    return to
+}

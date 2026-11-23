@@ -1263,28 +1263,12 @@ impl Store {
     // `agent`, only that agent's; with `after` or `before`, only from that time on, or
     // before it (Unix ms).
     pub fn search(self, user: String, query: String, agent: String?, after: i64?, before: i64?, limit: usize) -> List<(Json, String)> ! Error {
-        var out = List<(Json, String)>()
-        let fts = fts_query(query) else return out
-        var sql = String("SELECT m.json, snippet(messages_fts, 0, char(2), char(3), '…', 16) FROM messages_fts f JOIN messages m ON m.rowid = f.rowid JOIN conversations c ON c.id = m.conversation AND c.deleted = 0 WHERE messages_fts MATCH ? AND f.user = ?")
-        var args: List<Value> = [t(fts), t(user)]
-        if let a = agent {
-            sql.push_str(" AND f.agent = ?")
-            args.push(t(a))
-        }
-        if let a = after {
-            sql.push_str(" AND m.at >= ?")
-            args.push(Value.Int(a))
-        }
-        if let b = before {
-            sql.push_str(" AND m.at < ?")
-            args.push(Value.Int(b))
-        }
-        sql.push_str(" ORDER BY rank LIMIT ?")
-        args.push(Value.Int(i64.wrap(u64(limit))))
-        for r in try self.db.query(sql, args) {
-            out.push((try parse(text(r[0].copy())), plain_snippet(text(r[1].copy()))))
-        }
-        return out
+        return try search_in(self.db, user, query, agent, after, before, limit)
+    }
+
+    // `messages.search`'s answer for `args` (protocol/protocol.md).
+    pub fn search_answer(self, user: String, args: Json) -> Json ! Error {
+        return try search_answer_in(self.db, user, args)
     }
 
     // --- Skills (PLAN.md, "Agents") ---
@@ -2247,6 +2231,49 @@ fn fts_query(query: String) -> String? {
     let n = parts.len()
     parts[n - 1].push_str("*")
     return some(parts.join(" "))
+}
+
+// `user`'s messages that have every word of `query`, the last one as a prefix, best
+// first: each message, and the words around the match with each matched word
+// between MARK_START and MARK_END. Only in conversations that aren't deleted; with
+// `agent`, only that agent's; with `after` or `before`, only from that time on, or
+// before it (Unix ms). On any connection to the database, so server/searcher.calx
+// runs it off the loop.
+pub fn search_in(db: Database, user: String, query: String, agent: String?, after: i64?, before: i64?, limit: usize) -> List<(Json, String)> ! Error {
+    var out = List<(Json, String)>()
+    let fts = fts_query(query) else return out
+    var sql = String("SELECT m.json, snippet(messages_fts, 0, char(2), char(3), '…', 16) FROM messages_fts f JOIN messages m ON m.rowid = f.rowid JOIN conversations c ON c.id = m.conversation AND c.deleted = 0 WHERE messages_fts MATCH ? AND f.user = ?")
+    var args: List<Value> = [t(fts), t(user)]
+    if let a = agent {
+        sql.push_str(" AND f.agent = ?")
+        args.push(t(a))
+    }
+    if let a = after {
+        sql.push_str(" AND m.at >= ?")
+        args.push(Value.Int(a))
+    }
+    if let b = before {
+        sql.push_str(" AND m.at < ?")
+        args.push(Value.Int(b))
+    }
+    sql.push_str(" ORDER BY rank LIMIT ?")
+    args.push(Value.Int(i64.wrap(u64(limit))))
+    for r in try db.query(sql, args) {
+        out.push((try parse(text(r[0].copy())), plain_snippet(text(r[1].copy()))))
+    }
+    return out
+}
+
+// `messages.search`'s answer for `args`: `results`, each a `message` and its `snippet`,
+// 30 unless `limit` says otherwise, from 1 to 100.
+pub fn search_answer_in(db: Database, user: String, args: Json) -> Json ! Error {
+    let limit = int_at(args.copy(), "limit") ?? 30
+    let n: i64 = if limit < 1 { 1 } else if limit > 100 { 100 } else { limit }
+    var results = List<Json>()
+    for (message, snippet) in try search_in(db, user, str_at(args.copy(), "query") ?? String(), str_at(args.copy(), "agent"), int_at(args.copy(), "after"), int_at(args, "before"), usize.try_from(n) ?? 30) {
+        results.push(Obj.new().j("message", message).s("snippet", snippet).done())
+    }
+    return Obj.new().j("results", Json.Array(results)).done()
 }
 
 fn test_store() -> Store {
