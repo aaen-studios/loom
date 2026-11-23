@@ -190,6 +190,12 @@ pub trait SoftHover: Sized {
     }
 }
 
+/// The key a soft hover keeps the pointer's being on the element with `id` under, for
+/// `hovered`.
+pub fn hover_key(id: impl Into<ElementId>) -> SharedString {
+    format!("{:?}", Some(id.into())).into()
+}
+
 impl SoftHover for Stateful<Div> {
     fn soft(mut self, bg: Option<(Hsla, Hsla)>, ink: Option<(Hsla, Hsla)>) -> Self {
         let key: SharedString = format!("{:?}", self.interactivity().element_id).into();
@@ -211,8 +217,15 @@ impl SoftHover for Stateful<Div> {
 
 #[cfg(test)]
 mod tests {
-    use super::{arrive, level, mix, moving, SLIDE};
-    use gpui_kit::{hsla, transparent_black, Hsla, SharedString};
+    use super::{arrive, hover_key, level, mix, moving, SLIDE};
+    use gpui_kit::{div, hsla, transparent_black, Hsla, InteractiveElement, SharedString};
+
+    #[test]
+    fn a_hover_key_is_the_one_a_soft_hover_keeps() {
+        let mut d = div().id("bar-open");
+        let kept = format!("{:?}", d.interactivity().element_id);
+        assert_eq!(hover_key("bar-open"), SharedString::from(kept));
+    }
 
     #[test]
     fn fading_in_from_nothing_never_greys() {
