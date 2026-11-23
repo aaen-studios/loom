@@ -586,23 +586,33 @@ const [claude] = await brains(['claude-acp']);
 		display: flex;
 		justify-content: flex-end;
 	}
+	/* What the person wrote: a bubble with a breath of the agent's colour. */
 	.bubble {
 		max-width: 520px;
 		padding: 10px 16px;
 		border-radius: var(--radius-bubble);
-		background: var(--bubble);
+		background: color-mix(in srgb, var(--bubble) 93%, var(--tint));
 		overflow-wrap: anywhere;
+	}
+	@media (prefers-color-scheme: dark) {
+		:root:not([data-theme='light']) .bubble {
+			background: color-mix(in srgb, var(--bubble) 88%, var(--tint));
+		}
+	}
+	:root[data-theme='dark'] .bubble {
+		background: color-mix(in srgb, var(--bubble) 88%, var(--tint));
 	}
 	.reply {
 		display: flex;
 		gap: 12px;
 	}
-	/* Beside the agent's name over the first reply after a time line, and lower beside the rest. */
+	/* Beside the agent's name over the first reply after a time line, and level with the first
+	   line of words beside the rest. */
 	.reply-thread {
 		width: 14px;
 		height: 10px;
 		flex: none;
-		margin-top: 16px;
+		margin-top: calc((var(--size-body) * var(--line-reply) - 10px) / 2);
 	}
 	.reply-thread.head {
 		margin-top: 4px;
@@ -697,23 +707,9 @@ const [claude] = await brains(['claude-acp']);
 	.tool-line.denied .mark {
 		color: var(--bad);
 	}
-	/* The answer: a bubble with a breath of the agent's colour, its corner by the thread
-	   squared off as a speech bubble's tail. */
+	/* The answer: plain text in the column. */
 	.said {
-		align-self: flex-start;
-		max-width: 94%;
-		padding: 10px 16px;
-		border-radius: var(--radius-bubble-joined) var(--radius-bubble) var(--radius-bubble) var(--radius-bubble);
-		background: color-mix(in srgb, var(--bubble) 93%, var(--tint));
 		line-height: var(--line-reply);
-	}
-	@media (prefers-color-scheme: dark) {
-		:root:not([data-theme='light']) .said {
-			background: color-mix(in srgb, var(--bubble) 88%, var(--tint));
-		}
-	}
-	:root[data-theme='dark'] .said {
-		background: color-mix(in srgb, var(--bubble) 88%, var(--tint));
 	}
 	.said:empty {
 		display: none;
@@ -887,9 +883,6 @@ const [claude] = await brains(['claude-acp']);
 		}
 		.header {
 			padding: 0 8px;
-		}
-		.said {
-			max-width: 100%;
 		}
 		.bubble {
 			max-width: 85%;
