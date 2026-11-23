@@ -7,10 +7,10 @@
 import { brains } from '../lib/registry.mjs';
 
 const agents = [
-	{ name: 'Juniper', color: 'sky', shape: 'yarn', on: true, pinned: true },
-	{ name: 'Moss', color: 'mint', shape: 'heart', pinned: true },
 	{ name: 'Biscuit', color: 'apricot', shape: 'star', pinned: true },
-	{ name: 'Pip', color: 'lavender' },
+	{ name: 'Pip', color: 'lavender', pinned: true },
+	{ name: 'Juniper', color: 'sky', shape: 'yarn', on: true },
+	{ name: 'Moss', color: 'mint', shape: 'heart' },
 	{ name: 'Otto', color: 'coral', shape: 'snail' },
 ];
 const pinned = agents.filter((a) => a.pinned);
