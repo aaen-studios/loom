@@ -109,6 +109,19 @@ function finer(p: number[][]): number[][] {
 	return out;
 }
 
+/** A coordinate as the path takes it: a tenth of a pixel is finer than the eye sees at this size. */
+const at = (x: number) => Math.round(x * 10) / 10;
+
+/** A shape fitted into its box: what doesn't change from frame to frame. */
+interface Fitted {
+	w: number;
+	h: number;
+	base: number[][];
+	along: number[];
+	length: number;
+	tangent: number[][];
+}
+
 export interface ThreadOptions {
 	w: number;
 	h: number;
@@ -132,7 +145,11 @@ export class Thread {
 	private pluckAmp = 1;
 	private path: SVGPathElement;
 	private outline?: number[][];
+	private fitted?: Fitted;
+	private width = '';
 	visible = true;
+	/** Drawn while it moves, and once more when it comes to rest or back into view. */
+	stale = true;
 
 	constructor(svg: SVGSVGElement, o: ThreadOptions) {
 		this.svg = svg;
@@ -217,10 +234,38 @@ export class Thread {
 			const [bx, by] = bend(this.to, u, w, room, t, sinceSnap);
 			const dx = ax + (bx - ax) * k;
 			const up = ay + (by - ay) * k + pluck * Math.sin(PI * u);
-			d += `${i ? 'L' : 'M'}${(u * w + dx).toFixed(2)} ${(h / 2 - up).toFixed(2)}`;
+			d += `${i ? 'L' : 'M'}${at(u * w + dx)} ${at(h / 2 - up)}`;
 		}
 		this.path.setAttribute('d', d);
-		this.path.setAttribute('stroke-width', String(width));
+		this.stroke(width);
+	}
+
+	/** The stroke's width, set only when it changes: each set restyles the path. */
+	private stroke(width: number) {
+		const s = String(width);
+		if (s === this.width) return;
+		this.width = s;
+		this.path.setAttribute('stroke-width', s);
+	}
+
+	/** The shape fitted into the box, made again only when the box changes size. */
+	private fit(pts: number[][]): Fitted {
+		const { w, h } = this;
+		if (this.fitted && this.fitted.w === w && this.fitted.h === h) return this.fitted;
+		let [sx, sy] = [0.1, 0.1];
+		for (const [x, y] of pts) [sx, sy] = [Math.max(sx, Math.abs(x)), Math.max(sy, Math.abs(y))];
+		const pad = 2 * stroke.small + SHAPE_ROOM;
+		const scale = Math.min((w - pad) / (2 * sx), (h - pad) / (2 * sy));
+		const base = pts.map(([x, y]) => [w / 2 + x * scale, h / 2 + y * scale]);
+		const along = [0];
+		for (let i = 1; i < base.length; i++) along.push(along[i - 1] + Math.hypot(base[i][0] - base[i - 1][0], base[i][1] - base[i - 1][1]));
+		const tangent = base.map((_, i) => {
+			const [a, b] = [base[Math.max(i - 1, 0)], base[Math.min(i + 1, base.length - 1)]];
+			const dist = Math.max(Math.hypot(b[0] - a[0], b[1] - a[1]), 1e-6);
+			return [(b[0] - a[0]) / dist, (b[1] - a[1]) / dist];
+		});
+		this.fitted = { w, h, base, along, length: Math.max(along[along.length - 1], 1), tangent };
+		return this.fitted;
 	}
 
 	/**
@@ -228,33 +273,22 @@ export class Thread {
 	 * each mood pushing it along its line and across it, as a straight thread is pushed along and up.
 	 */
 	private drawShape(pts: number[][], t: number, k: number, sinceSnap: number, failed: number, pluck: number) {
-		const { w, h } = this;
-		const line = stroke.small;
-		let [sx, sy] = [0.1, 0.1];
-		for (const [x, y] of pts) [sx, sy] = [Math.max(sx, Math.abs(x)), Math.max(sy, Math.abs(y))];
-		const pad = 2 * line + SHAPE_ROOM;
-		const scale = Math.min((w - pad) / (2 * sx), (h - pad) / (2 * sy));
-		const base = pts.map(([x, y]) => [w / 2 + x * scale, h / 2 + y * scale]);
-		const along = [0];
-		for (let i = 1; i < base.length; i++) along.push(along[i - 1] + Math.hypot(base[i][0] - base[i - 1][0], base[i][1] - base[i - 1][1]));
-		const length = Math.max(along[along.length - 1], 1);
+		const { base, along, length, tangent } = this.fit(pts);
 		const push = (mood: Mood, u: number): [number, number] => (mood === 'failed' ? [0, 0] : bend(mood, u, length, SHAPE_ROOM, t, sinceSnap));
 		let d = '';
 		for (let i = 0; i < base.length; i++) {
 			const u = along[i] / length;
-			const [a, b] = [base[Math.max(i - 1, 0)], base[Math.min(i + 1, base.length - 1)]];
-			const dist = Math.max(Math.hypot(b[0] - a[0], b[1] - a[1]), 1e-6);
-			const [tx, ty] = [(b[0] - a[0]) / dist, (b[1] - a[1]) / dist];
+			const [tx, ty] = tangent[i];
 			const [fa, fu] = push(this.from, u);
 			const [ta, tu] = push(this.to, u);
 			const al = fa + (ta - fa) * k;
 			const up = fu + (tu - fu) * k + pluck * Math.sin(PI * u);
 			const x = base[i][0] + tx * al + ty * up;
 			const y = base[i][1] + ty * al - tx * up + failed * u * u * SHAPE_ROOM * 1.6;
-			d += `${i ? 'L' : 'M'}${x.toFixed(2)} ${y.toFixed(2)}`;
+			d += `${i ? 'L' : 'M'}${at(x)} ${at(y)}`;
 		}
 		this.path.setAttribute('d', d);
-		this.path.setAttribute('stroke-width', String(line));
+		this.stroke(stroke.small);
 	}
 }
 
@@ -265,7 +299,13 @@ const loop = (() => {
 	const seen =
 		typeof IntersectionObserver === 'function'
 			? new IntersectionObserver((entries) => {
-					for (const e of entries) for (const th of threads) if (th.svg === e.target) th.visible = e.isIntersecting;
+					for (const e of entries)
+						for (const th of threads)
+							if (th.svg === e.target) {
+								th.visible = e.isIntersecting;
+								// Back in view, it's drawn as it is now.
+								th.stale = true;
+							}
 					kick();
 				})
 			: undefined;
@@ -280,15 +320,23 @@ const loop = (() => {
 				continue;
 			}
 			if (!th.visible) continue;
-			th.draw(c);
-			if (th.moving) more = true;
+			// Only the threads that move are drawn, and each once more as it comes to rest:
+			// a still one drawn again looks the same.
+			const moving = th.moving;
+			if (moving || th.stale) th.draw(c);
+			th.stale = moving;
+			if (moving) more = true;
 		}
 		if (more && !reduced?.matches && !document.hidden) raf = requestAnimationFrame(frame);
 	}
 	function kick() {
 		if (!raf) raf = requestAnimationFrame(frame);
 	}
-	reduced?.addEventListener('change', kick);
+	reduced?.addEventListener('change', () => {
+		// Still or moving, each is drawn again in its new way.
+		for (const th of threads) th.stale = true;
+		kick();
+	});
 	document.addEventListener('visibilitychange', kick);
 	return {
 		add(th: Thread) {

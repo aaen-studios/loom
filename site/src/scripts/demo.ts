@@ -296,6 +296,7 @@ export function play(app: HTMLElement) {
 	const reduced = matchMedia('(prefers-reduced-motion: reduce)');
 	const start = () => (reduced.matches ? still() : loop());
 	reduced.addEventListener('change', start);
-	new IntersectionObserver(([e]) => (onScreen = e.isIntersecting)).observe(app);
+	// The newest entry: a scroll before the first callback brings both in one batch.
+	new IntersectionObserver((entries) => (onScreen = entries[entries.length - 1].isIntersecting)).observe(app);
 	start();
 }

@@ -940,7 +940,8 @@ const faq = {
 		else {
 			let seen = false;
 			let wake = () => {};
-			new IntersectionObserver(([e]) => {
+			new IntersectionObserver((entries) => {
+				const e = entries[entries.length - 1];
 				seen = e.isIntersecting;
 				if (seen) wake();
 			}).observe(rules);
