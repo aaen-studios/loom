@@ -7,8 +7,9 @@ module core.conn
 // wakes or the network changes.
 //
 // The app's messages come in on `inbox`, and everything for the app goes out
-// on `to_app`, both as JSON text. The C boundary (core/lib.calx) joins them
-// to loom_core_send and on_event; tests use them as they are.
+// on `to_app`, both as JSON text, but for a browser's frames, which go to the
+// app as the instance sent them. The C boundary (core/lib.calx) joins them to
+// loom_core_send and on_event; tests use them as they are.
 import std.bytes
 import std.crypto.{Ed25519Key, Ed25519PublicKey}
 import std.http.{Header, Request, get}
@@ -21,7 +22,7 @@ import std.random.{Random}
 import std.thread.{Task}
 import std.time.{Instant}
 import shared.obj.{Obj, at, bool_at, int_at, merge, str_at}
-import shared.protocol.{APP_QUIET_MS, APP_WAIT_MS, CLOSE_MOVED, CLOSE_TOKEN, CLOSE_VERSION, NEWEST, moved_message}
+import shared.protocol.{APP_QUIET_MS, APP_WAIT_MS, CLOSE_MOVED, CLOSE_TOKEN, CLOSE_VERSION, moved_message, versions}
 import core.cache.{CALLS_KEPT_MS, Cache, now}
 import core.files.{Transfer, at_path, kept_at, refused}
 import shared.files.{is_sha}
@@ -94,9 +95,27 @@ enum Sealing {
 
 enum Got {
     Text(String)
-    Skip
+    Binary(List<u8>)
     Nothing
     Ended(websocket.Error)
+}
+
+/// What the core says to the app: JSON text, or a binary message as the instance
+/// sent it, which the core keeps nothing of: a browser.frame, its JSON head, a
+/// newline and the JPEG (protocol.md, "browser.frame").
+pub enum ToApp {
+    Text(String)
+    Binary(List<u8>)
+}
+
+impl ToApp {
+    /// Its JSON text, or none for a binary message.
+    pub fn text(own self) -> String? {
+        return match self {
+            ToApp.Text(t) => some(t),
+            ToApp.Binary(_) => none,
+        }
+    }
 }
 
 /// Where the connection is.
@@ -143,7 +162,7 @@ pub struct Conn {
     wait: u64             // how long after retry_at to try again
     pending: Pending?     // a login, setup or logout on its way
     inbox: Receiver<String>
-    to_app: Sender<String>
+    to_app: Sender<ToApp>
     random: Random
     pub files: String?    // where files that come down are kept; the system's temporary folder without one
     transfers: List<Transfer>
@@ -181,7 +200,7 @@ impl Conn {
     /// what comes in `cache`. Its token is `token`, or the one kept for the server under
     /// the credential store's service `service`; with neither, it waits for the app's
     /// login. It starts when it's run.
-    pub fn new(server: String?, token: own String?, service: own String, cache: own Cache, inbox: own Receiver<String>, to_app: own Sender<String>) -> Conn {
+    pub fn new(server: String?, token: own String?, service: own String, cache: own Cache, inbox: own Receiver<String>, to_app: own Sender<ToApp>) -> Conn {
         var s: String? = none
         if let given = server {
             s = some(address(given.copy()))
@@ -285,7 +304,7 @@ impl Conn {
     }
 
     fn tell(mut self, frame: Json) {
-        self.to_app.send("{frame}")
+        self.to_app.send(ToApp.Text("{frame}"))
     }
 
     fn tell_error(mut self, code: str, message: String) {
@@ -365,7 +384,7 @@ impl Conn {
         // A connection that died without a close, as a sleeping laptop's does, ends
         // after 45 s with nothing from the instance, and the core reconnects.
         let ws = open(url, ping_interval_ms: APP_QUIET_MS, ping_timeout_ms: APP_WAIT_MS)
-        let hello = Obj.new().s("t", String("hello")).s("token", token).j("versions", Json.Array([Json.Int(i64(NEWEST))])).i("after", after).j("device", Obj.new().b("active", self.active).maybe("tz", self.tz.copy()).done()).done()
+        let hello = Obj.new().s("t", String("hello")).s("token", token).j("versions", versions()).i("after", after).j("device", Obj.new().b("active", self.active).maybe("tz", self.tz.copy()).done()).done()
         match ws.send_text("{hello}") {
             ok => {},
             err(_) => {},    // receive says how it ended
@@ -514,7 +533,7 @@ impl Conn {
         }
         if pos + piece.len() <= have { return }
         self.have.insert(key, pos + piece.len())
-        self.to_app.send(text)
+        self.to_app.send(ToApp.Text(text))
     }
 
     /// Tells the app what's worth a system notification, while no one is looking at it:
@@ -754,7 +773,7 @@ impl Conn {
                 }
             }
         }
-        self.to_app.send(text)
+        self.to_app.send(ToApp.Text(text))
     }
 
     /// Asks the instance for `conversation`'s messages older than the cache's oldest,
@@ -841,7 +860,7 @@ impl Conn {
             let got = match self.ws {
                 some(ws) => match ws.receive(wait) {
                     ok(some(Message.Text(text))) => Got.Text(text),
-                    ok(some(Message.Binary(_))) => Got.Skip,
+                    ok(some(Message.Binary(b))) => Got.Binary(b),
                     ok(none) => Got.Nothing,
                     err(e) => Got.Ended(e),
                 },
@@ -858,7 +877,8 @@ impl Conn {
                     }
                     self.frame(text)
                 },
-                Got.Skip => {},
+                // A browser's frame, to the app as it came: nothing in it is kept.
+                Got.Binary(b) => self.to_app.send(ToApp.Binary(b)),
                 Got.Nothing => break,
                 Got.Ended(e) => {
                     _ = self.let_go()
@@ -1139,7 +1159,7 @@ impl Conn {
             // messages is hundreds of KB, and parsing it only to write it again is waste.
             ok((items, more)) => {
                 let named = if let i = id { #","id":#{Json.Str(i)}"# } else { String() }
-                self.to_app.send(#"{"t":"core.data"#{named},"what":#{Json.Str(what)},"items":#{items},"more":#{more}}"#)
+                self.to_app.send(ToApp.Text(#"{"t":"core.data"#{named},"what":#{Json.Str(what)},"items":#{items},"more":#{more}}"#))
             },
             err(e) => self.tell(Obj.new().s("t", String("core.data")).maybe("id", id).j("error", Obj.new().s("code", String("cache")).s("message", "{e}").done()).done()),
         }
@@ -1205,7 +1225,7 @@ impl Conn {
     fn linked(mut self, f: Json) {
         let v = at(f.copy(), "value")
         if str_at(v.copy(), "code") == none {
-            self.to_app.send("{f}")
+            self.to_app.send(ToApp.Text("{f}"))
             return
         }
         // An instance in this desktop app, with phones on: the phone reaches it over
@@ -1228,11 +1248,11 @@ impl Conn {
         let v = at(f.copy(), "value")
         let server = self.server.copy() ?? String()
         let code = str_at(v.copy(), "code") else {
-            self.to_app.send("{f}")
+            self.to_app.send(ToApp.Text("{f}"))
             return
         }
         if not (server.starts_with("https://") or server.starts_with("http://")) {
-            self.to_app.send("{f}")
+            self.to_app.send(ToApp.Text("{f}"))
             return
         }
         self.tell(merge(f, Obj.new().j("value", merge(v, Obj.new().s("link", "{server}/{kind}/{code}").done())).done()))

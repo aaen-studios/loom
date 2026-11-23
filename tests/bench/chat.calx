@@ -19,7 +19,7 @@ import std.thread.{sleep}
 import std.time.{Instant}
 import shared.obj.{Obj, at, str_at}
 import core.cache.{Cache}
-import core.conn.{Conn}
+import core.conn.{Conn, ToApp}
 import shared.client.{Session, post_json}
 import tests.kit.{calx, device, remove_scratch}
 
@@ -127,7 +127,7 @@ fn run(server: Child, base: String, token: String, deltas: usize, turns: usize) 
     let cache_dir = try fs.temp_dir()
     let inbox = Receiver<String>()
     var to_core = inbox.sender()
-    var from_core = Receiver<String>()
+    var from_core = Receiver<ToApp>()
     var conn = Conn.new(some("http://{base}"), some(token.copy()), String("loom-bench"), try Cache.open("{cache_dir}/core.db"), inbox, from_core.sender())
     // As the app has it: its sends wake the core.
     var wakers = Receiver<Waker>()
@@ -137,8 +137,9 @@ fn run(server: Child, base: String, token: String, deltas: usize, turns: usize) 
     var events: usize = 0
     var told: usize = 0
     loop {
-        let m = unsafe { from_core.wait_for(120000000000) } else { fail "the core didn't sync in 2 minutes" }
+        let said = unsafe { from_core.wait_for(120000000000) } else { fail "the core didn't sync in 2 minutes" }
         told += 1
+        let m = said.text() else { continue }
         if m.starts_with(#"{"t":"event""#) { events += 1 }
         if m.starts_with(#"{"t":"synced""#) { break }
     }

@@ -24,7 +24,7 @@ import std.thread.{Task, sleep}
 import std.time.{Instant}
 import shared.obj.{Obj, at, bool_at, str_at}
 import core.cache.{Cache}
-import core.conn.{Conn}
+import core.conn.{Conn, ToApp}
 import core.updates.{Hub}
 import server.update
 import shared.client.{json_of}
@@ -94,7 +94,7 @@ fn release(dir: String, version: String, exe: String, key: Ed25519Key, base: Str
 // The app's side of a core with the hub: what it sends, and what the core says.
 struct Core {
     to_core: Sender<String>
-    from_core: Receiver<String>
+    from_core: Receiver<ToApp>
     thread: Thread?
 }
 
@@ -102,7 +102,7 @@ impl Core {
     fn start(base: String, token: String, cache: String) -> Core ! Error {
         let inbox = Receiver<String>()
         let to_core = inbox.sender()
-        let from_core = Receiver<String>()
+        let from_core = Receiver<ToApp>()
         var random = Random.system()
         var conn = Conn.new(some("http://{base}"), some(token.copy()), "loom-test-{random.next_u32()}", try Cache.open(cache), inbox, from_core.sender())
         conn.hub = some(Hub.new(String("0.0.1")))
@@ -120,7 +120,8 @@ impl Core {
         loop {
             let waited = unsafe { Instant.now() }.nanos_since(start) / 1000000
             if waited >= ms { fail "no {t} that was wanted came in {ms} ms" }
-            let m = unsafe { self.from_core.wait_for((ms - waited) * 1000000) } else { continue }
+            let got = unsafe { self.from_core.wait_for((ms - waited) * 1000000) } else { continue }
+            let m = got.text() else { continue }
             let f = try parse(m)
             if str_at(f.copy(), "t") != some(String(t)) { continue }
             if wanted(f.copy()) { return f }

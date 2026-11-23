@@ -8,6 +8,7 @@ module shared.noise
 // on the last, then up to PIECE bytes. A message is a kind byte, then:
 //
 //     f  a protocol frame, as /ws carries it, UTF-8 JSON
+//     b  a binary message of the session, as /ws carries it: a browser.frame from protocol version 2
 //     q  an HTTP request:  {"id":1,"method":"POST","path":"/api/link","headers":{…}} \n body
 //     r  its response:     {"id":1,"status":200,"headers":{…}} \n body
 //
@@ -27,6 +28,7 @@ pub const PIECE: usize = 65518
 pub const LONGEST: usize = 67174400
 
 pub const FRAME: u8 = 102       // 'f'
+pub const BINARY: u8 = 98       // 'b'
 pub const REQUEST: u8 = 113     // 'q'
 pub const RESPONSE: u8 = 114    // 'r'
 
@@ -106,6 +108,13 @@ impl Joiner {
 pub fn frame(text: String) -> List<u8> {
     var out: List<u8> = [FRAME]
     out.extend(text.to_bytes())
+    return out
+}
+
+// A binary message of the session, as a message.
+pub fn binary(m: List<u8>) -> List<u8> {
+    var out: List<u8> = [BINARY]
+    out.extend(m)
     return out
 }
 

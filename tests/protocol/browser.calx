@@ -13,6 +13,7 @@ module tests.protocol.browser
 import std.bytes
 import std.fs
 import std.image.{Image}
+import std.json.{Json}
 import std.process.{exit}
 import shared.obj.{Obj, at, bool_at, int_at, str_at}
 import server.browser
@@ -158,19 +159,35 @@ fn run(i: Instance) ! Error {
     try see(not after.contains("424242"), "and the agent never reads it either", after.copy())
 
     // --- Watching, and taking over ---
-    let watched = try app.cmd("q_w1", "browser.watch", Obj.new().s("agent", agent.copy()).b("on", true).done())
+    // The app shows the page 640 pixels wide, so the frames are no wider.
+    let watched = try app.cmd("q_w1", "browser.watch", Obj.new().s("agent", agent.copy()).b("on", true).i("width", 640).i("height", 400).done())
     try check(bool_at(at(watched, "value"), "open") == some(true), "browser.watch says the browser is open")
     let frame = try app.until("browser.frame", "")
-    let data = str_at(frame.copy(), "data") ?? String()
-    try check(str_at(frame.copy(), "agent") == some(agent.copy()) and data.starts_with("/9j/") and (int_at(frame.copy(), "width") ?? 0) > 0, "and frames of the page come, as JPEGs")
-    // Whole, and as big as the page they say: Chrome on Linux writes a scan for each
-    // color, which a decoder that reads only the first draws green (LOO-252).
-    let jpeg = bytes.from_base64(data) ?? List<u8>()
+    let jpeg = app.body.copy()
+    try check(app.binary and str_at(frame.copy(), "agent") == some(agent.copy()) and str_at(frame.copy(), "data") == none and jpeg.len() > 2 and jpeg[0] == 255 and jpeg[1] == 216, "and frames of the page come, as JPEGs in binary messages")
+    // Whole, the page's shape, and no bigger than shown: Chrome on Linux writes a scan
+    // for each color, which a decoder that reads only the first draws green (LOO-252).
     let pixels = match Image.decode(jpeg) {
         ok(im) => im,
         err(e) => fail "failed: a frame that isn't a picture: {e}",
     }
-    try check(i64.wrap(pixels.width()) == (int_at(frame.copy(), "width") ?? 0) and i64.wrap(pixels.height()) == (int_at(frame, "height") ?? 0), "each a whole picture of the page, its size")
+    let page_w = int_at(frame.copy(), "width") ?? 0
+    let page_h = int_at(frame, "height") ?? 0
+    let (w, h) = (i64.wrap(pixels.width()), i64.wrap(pixels.height()))
+    try see(page_w > 640 and page_w <= browser.PAGE_WIDTH and page_h <= browser.PAGE_HEIGHT and w <= 640 and h <= 400 and w >= 600 and (w * page_h - h * page_w).abs() <= page_w + page_h, "each a whole picture of the page, as big as it's shown, its own size beside it", "{w} × {h} of {page_w} × {page_h}")
+    // An app a version behind gets them as JSON, the JPEG in base64; and, as it says
+    // no size, as big as the page, for both apps while both watch.
+    var old = try Session.connect_speaking(i.base.copy(), i.token.copy(), 0, Json.Array([Json.Int(1)]))
+    _ = try old.cmd("q_o1", "browser.watch", Obj.new().s("agent", agent.copy()).b("on", true).done())
+    let text_frame = try old.until("browser.frame", "")
+    let old_jpeg = bytes.from_base64(str_at(text_frame.copy(), "data") ?? String()) ?? List<u8>()
+    let full = match Image.decode(old_jpeg) {
+        ok(im) => im,
+        err(e) => fail "failed: a version 1 frame that isn't a picture: {e}",
+    }
+    try see(not old.binary and i64.wrap(full.width()) == (int_at(text_frame.copy(), "width") ?? 0) and i64.wrap(full.height()) == (int_at(text_frame, "height") ?? 0), "an app of protocol version 1 gets them as JSON, as big as the page", "{full.width()} × {full.height()}")
+    _ = try old.cmd("q_o2", "browser.watch", Obj.new().s("agent", agent.copy()).b("on", false).done())
+    old.close()
     let early = try app.cmd("q_w2", "browser.input", Obj.new().s("agent", agent.copy()).s("kind", String("key")).s("key", String("Tab")).done())
     try check(bool_at(early, "ok") == some(false), "the person's input waits for them to take over")
 

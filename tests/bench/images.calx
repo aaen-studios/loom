@@ -1,0 +1,141 @@
+module tests.bench.images
+
+// Times how long the instance's loop answers no one while a picture goes to an
+// agent. Another device asks for something small (profile.get) just after each
+// message goes, and the time to its answer is the time the loop held it: once
+// after a message with a picture of nearly 5 MB, the most that goes to an agent
+// inline, and once after one with only words.
+//
+//     calx run --release tests/bench/images.calx -- [SENDS] [SERVER]
+//
+// SENDS (20 by default) is how many messages of each kind. SERVER is a loom
+// built before, to time instead of this tree's (built with --release).
+import std.crypto.{random_bytes}
+import std.env
+import std.fs
+import std.json.{Json}
+import std.process.{Child, Command, Stdio, exit}
+import std.time.{Instant}
+import shared.obj.{Obj, at, str_at}
+import shared.client.{Session, post_json, reply_text}
+import tests.kit.{calx, device, remove_scratch, upload}
+
+const WAIT: u64 = 600000
+
+fn us(a: Instant, b: Instant) -> i64 {
+    return i64.wrap(b.nanos_since(a) / 1000)
+}
+
+fn cpu_ms(c: Child) -> f64 {
+    let u = unsafe { c.usage() }
+    return f64.nearest(u.cpu_ns) / 1000000.0
+}
+
+fn arg_or(args: List<String>, n: usize, default: usize) -> usize {
+    if n < args.len() { return usize.parse(args[n].copy()) ?? default }
+    return default
+}
+
+// The middle value and the most, in ms.
+fn spread(xs: List<i64>) -> (f64, f64) {
+    if xs.len() == 0 { return (0.0, 0.0) }
+    var s = xs.copy()
+    s.sort()
+    return (f64.nearest(s[s.len() / 2]) / 1000.0, f64.nearest(s[s.len() - 1]) / 1000.0)
+}
+
+// Sends `text` with `files`, asks profile.get on `probe` at once, and gives how
+// long its answer took, in µs, once the turn is over.
+fn held(app: mut Session, probe: mut Session, conversation: String, n: usize, text: str, files: Json) -> i64 ! Error {
+    try app.send(Obj.new().s("t", String("send")).s("cid", "m_{n}").s("conversation", conversation).s("text", String(text)).j("files", files).done())
+    let asked = unsafe { Instant.now() }
+    _ = try probe.cmd("q_p", "profile.get", Obj.new().done())
+    let answered = unsafe { Instant.now() }
+    let said = reply_text(try app.reply())
+    if files != Json.Array(List<Json>()) and not said.contains("image image/png") { fail "the agent didn't get the picture: {said}" }
+    _ = try app.until("event", "run.finished")
+    return us(asked, answered)
+}
+
+fn run(server: Child, base: String, token: String, sends: usize) ! Error {
+    var app = try Session.connect(base.copy(), token.copy(), 0)
+    var probe = try Session.connect(base.copy(), token.copy(), 0)
+    let made = try app.cmd("q_1", "agent.create", Obj.new().s("name", String("Eyes")).s("acp_agent", String("fake")).s("instructions", String("")).done())
+    let agent = str_at(at(at(made, "value"), "agent"), "id") ?? String()
+    let c = try app.cmd("q_2", "conversation.create", Obj.new().s("agent", agent).done())
+    let conversation = str_at(at(c, "value"), "conversation") ?? String()
+    // A first turn starts the agent's program, which isn't what's measured.
+    _ = try held(mut app, mut probe, conversation.copy(), 0, "warm", Json.Array(List<Json>()))
+    // A PNG's first bytes, so it's taken as one, and what can't be squeezed after them.
+    var png: List<u8> = [137, 80, 78, 71, 13, 10, 26, 10]
+    png.extend(random_bytes(4900000))
+    let (status, up) = try upload(base.copy(), token.copy(), "photo.png", "image/png", png)
+    if status != 200 { fail "the upload failed: {up}" }
+    let picture = Json.Array([Json.Str(str_at(up, "file") ?? String())])
+
+    var with_words = List<i64>()
+    var with_picture = List<i64>()
+    let c0 = cpu_ms(server)
+    for n in 0..sends {
+        with_words.push(try held(mut app, mut probe, conversation.copy(), 1 + n * 2, "/files", Json.Array(List<Json>())))
+        with_picture.push(try held(mut app, mut probe, conversation.copy(), 2 + n * 2, "/files", picture.copy()))
+    }
+    let c1 = cpu_ms(server)
+    let (w50, wmost) = spread(with_words)
+    let (p50, pmost) = spread(with_picture)
+    println("a message with words:            another device answered in {w50:.2} ms (median), {wmost:.2} ms at most")
+    println("a message with a 4.9 MB picture: another device answered in {p50:.2} ms (median), {pmost:.2} ms at most")
+    println("server CPU {(c1 - c0) / f64.nearest(sends * 2):.1} ms a turn")
+    probe.close()
+    app.close()
+}
+
+fn main() ! Error {
+    let args = env.args()
+    let sends = arg_or(args.copy(), 0, 20)
+    let data = try fs.temp_dir()
+    var bin = if env.os() == "windows" { "{data}/loom-bench.exe" } else { "{data}/loom-bench" }
+    if args.len() > 1 {
+        bin = args[1].copy()
+    } else {
+        println("building the server (--release)")
+        let built = try Command.new(calx()).arg(String("build")).arg(String("--release")).arg(String("server/main.calx")).arg(String("-o")).arg(bin.copy()).output()
+        if not built.status.success() {
+            eprintln(built.error_text())
+            exit(1)
+        }
+    }
+    let agent = try fs.absolute(String("tests/fake_agent/main.calx"))
+    let home = "{data}/instance"
+    let added = try Command.new(bin.copy()).arg(String("acp")).arg(String("add")).arg(String("fake")).arg(calx()).arg(agent).arg(String("--data")).arg(home.copy()).arg(String("--test-fast-hashes")).output()
+    if not added.status.success() { fail "loom acp add failed: {added.error_text()}" }
+    let server = try Command.new(bin.copy()).arg(String("serve")).arg(String("--port")).arg(String("0")).arg(String("--allow-root")).arg(String("--data")).arg(home.copy()).arg(String("--test-fast-hashes")).stdout(Stdio.Pipe).own_group().spawn()
+    let serving = server.wait_for_line(String("loom: serving"), WAIT) else {
+        server.kill()
+        fail "the server didn't start"
+    }
+    let address = serving[serving.find("http://") ?? 0..].trim().copy()
+    let base = if address.ends_with("/") { address[7..address.len() - 1].copy() } else { address[7..].copy() }
+    let code_line = server.wait_for_line(String("setup code:"), 10000) else {
+        server.kill()
+        fail "the server didn't print a setup code"
+    }
+    let code = code_line[12..].trim().copy()
+    let (status, owner) = try post_json(base.copy(), "/api/setup", Obj.new().s("code", code).s("username", String("bench")).s("password", String("correct horse")).j("device", device("Bench")).done())
+    if status != 200 {
+        server.kill()
+        fail "setup failed: {owner}"
+    }
+    let failure: String? = match run(server, base, str_at(owner, "token") ?? String(), sends) {
+        ok => none,
+        err(e) => some("{e}"),
+    }
+    server.stop()
+    _ = server.wait_timeout(20000)
+    server.kill_tree()
+    remove_scratch(home)
+    if let f = failure {
+        eprintln("\n{f}")
+        exit(1)
+    }
+}

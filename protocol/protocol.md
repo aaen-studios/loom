@@ -1,6 +1,6 @@
 # The loom protocol
 
-Version 1. This is what an app (always through its core) and an instance say to each other. It's the contract between `core/` and `server/`, and its types live once, in `shared/`, which both import.
+Version 2, and version 1, which an instance still speaks ([Versions](#versions)). This is what an app (always through its core) and an instance say to each other. It's the contract between `core/` and `server/`, and its types live once, in `shared/`, which both import.
 
 [PLAN.md](../PLAN.md) says why things are the way they are. This file says exactly what goes over the wire.
 
@@ -40,7 +40,7 @@ Version 1. This is what an app (always through its core) and an instance say to 
 - **HTTP/1.1** for what isn't a live session: setup, login, invites, files and webhooks.
 - **One WebSocket** (RFC 6455) per device for everything live, at `/ws`.
 - **TLS** comes from whatever is in front of the instance (Caddy, a Cloudflare tunnel). The instance itself listens on 127.0.0.1. A desktop instance's own app connects over loopback without TLS. Phones reaching a desktop instance use a Noise handshake, over one WebSocket that carries their HTTP requests too ([Over Noise](#over-noise)).
-- **One JSON object per WebSocket text frame**, UTF-8. Binary frames aren't used in version 1; files go over HTTP.
+- **One JSON object per WebSocket text frame**, UTF-8. Files go over HTTP. The one binary message is a [`browser.frame`](#browserframe), from the instance, from version 2 on: its head, a JSON object as a text frame would be, a newline, and the picture. An app sends none.
 - **Frame size:** at most 1 MiB. A bigger frame closes the socket with 1009.
 
 ## Conventions
@@ -70,7 +70,7 @@ No login. What an app needs before it logs in.
 {
   "instance": "i_8sk2",
   "key": "<the instance's public key, base64>",
-  "protocol": [1],
+  "protocol": [1, 2],
   "version": "0.2.0",
   "setup": false,
   "moved": null
@@ -86,7 +86,7 @@ Once the instance has moved, every other route answers 410 with `{"error": {"cod
 No login. Whether loom answers at an address, for a script or an agent setting a server up, before there's anything to log in to.
 
 ```json
-{ "name": "loom", "version": "0.2.0", "protocol": [1], "set_up": false }
+{ "name": "loom", "version": "0.2.0", "protocol": [1, 2], "set_up": false }
 ```
 
 `set_up` is `true` once the owner account exists (the opposite of `/api/info`'s `setup`). It answers the same once the instance has moved.
@@ -250,7 +250,7 @@ The app may send frames as soon as it has `welcome`. It doesn't wait for `synced
 ### `hello`
 
 ```json
-{ "t": "hello", "token": "<device token>", "versions": [1], "after": 1041, "device": { "tz": "Europe/Oslo", "active": true } }
+{ "t": "hello", "token": "<device token>", "versions": [1, 2], "after": 1041, "device": { "tz": "Europe/Oslo", "active": true } }
 ```
 
 - `versions`: the protocol versions the app speaks.
@@ -341,7 +341,7 @@ How a [`device.call`](#devicecall) that takes several steps is going, before its
 ### `welcome`
 
 ```json
-{ "t": "welcome", "version": 1, "loom": "0.2.0", "user": "u_1", "device": "d_3", "seq": 1046, "reset": false, "key": "<the instance's public key, base64>", "relay": "<the push relay's key, base64>" }
+{ "t": "welcome", "version": 2, "loom": "0.2.0", "user": "u_1", "device": "d_3", "seq": 1046, "reset": false, "key": "<the instance's public key, base64>", "relay": "<the push relay's key, base64>" }
 ```
 
 - `version`: the one version this connection uses.
@@ -433,7 +433,9 @@ An agent's browser opened or closed, was taken over or handed back, or is asking
 
 ### `browser.frame`
 
-A picture of the page, to each session watching that agent's browser: `agent`, `data` (a JPEG, base64), `width` and `height` (the page's pixels, which `browser.input`'s `x` and `y` are in). They come as the page changes, at most about twelve a second. The JPEG is as the browser wrote it: Chrome on Linux writes a scan for each of its three colors, which an app's decoder has to read as well as a JPEG in one scan.
+A picture of the page, to each session watching that agent's browser: `agent`, and `width` and `height`, the page's pixels, which `browser.input`'s `x` and `y` are in, whatever the picture's own size. They come as the page changes, at most about twelve a second, each no bigger than the biggest any session watching it shows it at (`browser.watch`'s `width` and `height`), and never bigger than the page.
+
+From version 2 it's a binary message: the head, `{"t":"browser.frame","agent":"a_1","width":1264,"height":705}`, a newline, then the JPEG's bytes. In version 1 it's a text frame with the JPEG in base64 as `data`. The JPEG is as the browser wrote it: Chrome on Linux writes a scan for each of its three colors, which an app's decoder has to read as well as a JPEG in one scan.
 
 ### `instance.update`
 
@@ -578,7 +580,7 @@ Each agent has a browser of its own ([PLAN.md](../PLAN.md#the-agents-browser)): 
 - **The outline** that `browser_snapshot` gives, and `browser_open`, `browser_click`, `browser_press`, `browser_back` and a submitting `browser_type` give after they act, is the page's accessibility tree: a line for each part that means something, indented under what it's in, as `- role "name": value [states] [ref=e12]`, after a first line `Page: <title> (<address>)`. Parts that only hold others are left out unless they're named. A ref lasts until the next outline. It's cut at 40,000 bytes.
 - **A screenshot** is an MCP `image`, a JPEG of the 1280 × 800 page, with the page's line.
 - **What it opens:** `http`, `https`, `file` and `about` pages. An agent in a sandbox (a member's, or one marked isolated) opens only `http` and `https`, and its browser loads nothing from the instance's computer (`localhost`, `127.*`, `[::1]` and every IPv6 address written as one) or a private network (`10.*`, `172.16–31.*`, `192.168.*`, `169.254.*`, `0.*`). Downloads are refused. One closed to the network reaches only the hosts on its list, through its egress ([Sandboxes](#sandboxes)), and `browser_open` refuses another at once.
-- **Watching it.** `browser.watch` (`agent`, `on`? true unless false, `follow`? false) has this session watch that agent's browser, or stop; a session watches one at a time, and stops when it closes. A watch keeps the browser open after the agent's turn; one with `follow`, as an app's small window that shows while the agent browses, doesn't. Watching again with another `follow` changes it. It answers with the browser's state, as `browser.state` has it. While anyone watches, the instance sends each watching session `browser.frame`s as the page changes, a JPEG of it each, under 1 MiB. It doesn't open a browser that isn't.
+- **Watching it.** `browser.watch` (`agent`, `on`? true unless false, `follow`? false, `width`? and `height`?) has this session watch that agent's browser, or stop; a session watches one at a time, and stops when it closes. A watch keeps the browser open after the agent's turn; one with `follow`, as an app's small window that shows while the agent browses, doesn't. `width` and `height` are the size the app shows the page at, in the screen's pixels; left out, the page's own. Watching again with another `follow` or size changes it. It answers with the browser's state, as `browser.state` has it. While anyone watches, the instance sends each watching session `browser.frame`s as the page changes, a JPEG of it each, under 1 MiB, the browser drawing them at the biggest size any of them shows it at (the screencast's `maxWidth` and `maxHeight`), so a small window gets small ones. It doesn't open a browser that isn't.
 - **Taking over.** `browser.take` (`agent`) gives the person the browser, if it's open: the agent's browser calls wait meanwhile, in order. `browser.input` (`agent`, `kind`, and for each kind: `click` and `move` with `x` and `y`, the page's own pixels as the frames are; `wheel` with `x`, `y` and `dy`; `key` with `key`, as `browser_press` takes it; `text` with `text`) is a click, a scroll, a key or text typed, refused with `not_yours` unless they've taken over. `browser.give` (`agent`) hands it back: the calls that waited go on, and each `browser_ask_person` gets its answer. `not_open` is a browser that isn't open, and `not_found` an agent that isn't theirs.
 - **`browser_ask_person`** (`why`) asks the person to take over, for a login, a code or a CAPTCHA, with a `notify` (so a phone gets it too) and `browser.state`'s `asked`. Its result comes once they hand the browser back: how many clicks and keys they gave, and the page's outline. It needs the browser open.
 - **Secrets go in unseen.** `browser_fill_secret` (`ref`, `secret`, `submit`?) types one of the person's secrets (`secret.put`) into a field. The first time a secret goes to a site (its host and port, or a file on the instance's computer), it asks the person in the agent's chat, as the tools that delete do (`approval.needed`, titled "Fill your secret NAME on HOST"), and a yes keeps that site for that secret. `browser_ask_secret` (`ref`, `why`, `submit`?) asks the person to type something in once: a `notify`, and `browser.state`'s `secret`. `browser.secret` (`agent`, `value`) types it into the field, or with `value` empty says no. Either way the agent's result says it's in, never what it was, and every outline after names a filled secret `[secret NAME]` (or `[secret what your person typed]`) wherever the page shows it. A screenshot shows the page as it is.
@@ -921,6 +923,7 @@ A phone reaches an instance in the desktop app ([PLAN.md: Reaching an instance i
 | Kind | Holds | Means |
 |---|---|---|
 | `f` | A frame's JSON, as `/ws` carries it | A frame of the WebSocket session, both ways. The first one the phone sends opens its session, so `hello` goes first, as on `/ws` |
+| `b` | A binary message, as `/ws` carries it | A [`browser.frame`](#browserframe) of a session of version 2, from the instance |
 | `q` | `{"id":1,"method":"POST","path":"/api/link","headers":{"Content-Type":"application/json"}}`, a newline, the body | An HTTP request from the phone to one of the instance's routes, `GET` or `POST` but not `/ws`, with the device token in `Authorization` as over HTTP. `id` is the phone's own |
 | `r` | `{"id":1,"status":200,"headers":{"Content-Type":"…"}}`, a newline, the body | The instance's answer to request `id`, with its `Content-Type` and any `Content-Disposition`. Requests are answered as they finish, not in order |
 
@@ -974,6 +977,7 @@ An instance updates its own program from loom's signed releases ([PLAN.md](../PL
 - **An instance speaks its newest version and the one before**, so an app one release behind still works.
 - **Fields are added without a new version**, since unknown fields are ignored. A new version is only for a change an older app would get wrong.
 - `GET /api/info`'s `protocol` lists the versions too, so an app can say "this instance needs an update" before it logs in.
+- **Version 2** sends [`browser.frame`](#browserframe) as a binary message, the JPEG as it is, rather than as JSON with it in base64, a third bigger. Nothing else changed: an instance sends a session of version 1 the frame as before.
 
 ## How ACP maps onto loom
 
@@ -989,7 +993,7 @@ Inside the instance, each agent runs as an ACP agent program ([PLAN.md](../PLAN.
 | A fresh session for a full one | when the agent's last `usage_update` (`used` of `size` tokens) says its session is 80% full or more, the conversation's next run starts a new session, whose prompt begins with a text block, `[loom: Your chat with your person goes on from an earlier session, which grew too long, so this one starts fresh. … The newest of it, newest last: … For anything older, search_messages finds it.]`, with the chat before the run's message. The activity log has it, as `session` ([PLAN.md](../PLAN.md#agents-run-on-acp)) |
 | The instructions every agent follows, in that prompt | a text block, `[loom: Instructions your person gives every agent of theirs. Follow them, as you do your own.` and the defaults' `instructions` `]`, after the shared folder's. It comes when the session hasn't had them as they are now: in the first prompt, and after they change. When they're cleared, a block says they were taken back |
 | The person's profile, in that prompt | a text block, `[loom: About the person, as they and their agents keep it. update_profile changes it.` and the profile's text `]`, after the one above. It comes when the session hasn't had this revision yet: in the first prompt, and after the person or an agent changes it |
-| The person's files, in that prompt | an `image` block for an image of up to 5 MB, when the program says it takes images (`promptCapabilities.image`); otherwise a `resource_link` to a copy in the agent's folder, under `files/`, with its name |
+| The person's files, in that prompt | an `image` block for an image of up to 5 MB, when the program says it takes images (`promptCapabilities.image`), read and put in base64 on the program's own thread as the prompt goes out, not on the instance's loop; otherwise a `resource_link` to a copy in the agent's folder, under `files/`, with its name |
 | `session/update`, `agent_message_chunk` | `delta` with `kind: "text"` |
 | `session/update`, `agent_thought_chunk` | `delta` with `kind: "thought"` |
 | `session/update`, `agent_message_chunk` with an `image`, a `resource` with a `blob`, or a `resource_link` to a `file://` on the instance's machine | a `file` block: the file is kept as the person's, as if they'd uploaded it |
@@ -1115,7 +1119,7 @@ The core replaces what the deltas built with the finished message, stores `seq` 
 
 ## Later versions
 
-Fields and frames that come with later phases. Where they only add, they come within version 1.
+Fields and frames that come with later phases. Where they only add, they come within the version they're in.
 
 - **Device tools** (Phase 3): the instance sends `{"t":"device.call", …}` with the request, and the signed approval when there is one, and the device answers `{"t":"device.result", …}`. Each device offers its tools in `hello`.
 - **Noise** (Phase 6): done, within version 1 ([Over Noise](#over-noise)).

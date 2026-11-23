@@ -17,7 +17,7 @@ import std.net.{Waker}
 import std.thread.{Task}
 import shared.obj.{Obj, bool_at, str_at}
 import core.cache.{Cache, own_folder}
-import core.conn.{Conn}
+import core.conn.{Conn, ToApp}
 import core.pushbox
 import core.update.{Updater}
 import core.updates.{Hub}
@@ -47,19 +47,27 @@ impl Sink {
     fn tell(self, message: String) {
         unsafe { (self.on_event)(message.as_ptr(), message.len(), self.ctx) }
     }
+
+    fn tell_bytes(self, message: List<u8>) {
+        unsafe { (self.on_event)(message.as_ptr(), message.len(), self.ctx) }
+    }
 }
 
-/// Hands each message for the app to on_event, until the connection's thread ends.
+/// Hands each message for the app to on_event, until the connection's thread ends:
+/// JSON, or a browser's frame as its JSON head, a newline and the JPEG.
 struct Relay {
     sink: Sink
-    from_core: Receiver<String>
+    from_core: Receiver<ToApp>
 }
 
 impl Task for Relay {
     fn run(own self) {
         var r = self
         while let m = r.from_core.wait() {
-            r.sink.tell(m)
+            match m {
+                ToApp.Text(t) => r.sink.tell(t),
+                ToApp.Binary(b) => r.sink.tell_bytes(b),
+            }
         }
     }
 }
@@ -151,7 +159,7 @@ struct Core {
 struct Boot {
     cfg: Json
     inbox: Receiver<String>
-    to_app: Sender<String>
+    to_app: Sender<ToApp>
     wakers_to: Sender<Waker>
 }
 
@@ -173,7 +181,7 @@ impl Task for Boot {
                 ok(some(l)) => owner = some(l),
                 ok(none) => {
                     taken = true
-                    b.to_app.send("{Obj.new().s("t", String("error")).s("code", String("in_use")).s("message", "Another loom is running with {d}, so this one keeps nothing offline. Quit one of them.").done()}")
+                    b.to_app.send(ToApp.Text("{Obj.new().s("t", String("error")).s("code", String("in_use")).s("message", "Another loom is running with {d}, so this one keeps nothing offline. Quit one of them.").done()}"))
                 },
                 err(e) => eprintln("loom: locking {d}: {e}"),
             }
@@ -193,14 +201,14 @@ impl Task for Boot {
                         path = "{d}/local.db"
                     }
                 },
-                err(e) => b.to_app.send("{Obj.new().s("t", String("error")).s("code", String("local")).s("message", "{e}").done()}"),
+                err(e) => b.to_app.send(ToApp.Text("{Obj.new().s("t", String("error")).s("code", String("local")).s("message", "{e}").done()}")),
             }
         }
         let cache = match Cache.open(path.copy()) {
             ok(c) => c,
             err(e) => {
                 // The app still works, from the instance alone, and hears why it can't read offline.
-                b.to_app.send("{Obj.new().s("t", String("error")).s("code", String("cache")).s("message", "can't open {path}: {e}").done()}")
+                b.to_app.send(ToApp.Text("{Obj.new().s("t", String("error")).s("code", String("cache")).s("message", "can't open {path}: {e}").done()}"))
                 Cache.open(String(":memory:"))!
             },
         }
@@ -284,7 +292,7 @@ fn core_start(config: *const u8, len: usize, on_event: extern "C" fn(*const u8, 
     let cfg = parsed ?? Obj.new().done()
     let inbox = Receiver<String>()
     let to_core = inbox.sender()
-    let from_core = Receiver<String>()
+    let from_core = Receiver<ToApp>()
     let wakers = Receiver<Waker>()
     let conn_thread = unsafe { Thread.spawn(Boot { cfg: cfg, inbox: inbox, to_app: from_core.sender(), wakers_to: wakers.sender() }) }
     let relay_thread = unsafe { Thread.spawn(Relay { sink: sink, from_core: from_core }) }
