@@ -137,10 +137,17 @@ struct Message: Identifiable, Equatable, Sendable {
     var live = false
     /// Written here and waiting in the outbox.
     var queued = false
-    /// For a message another agent or a routine sent, who.
+    /// For a message another agent sent, who.
     var from: String?
+    /// How a reply's turn ended: `done`, or `cancelled`, `failed` or `limit` for one cut
+    /// short.
+    var status = ""
 
     var isPerson: Bool { role == "person" }
+
+    /// A turn that didn't end by itself, which keeps everything it had in view, since
+    /// there's no answer to fold its steps under.
+    var cutShort: Bool { !live && ["cancelled", "failed", "limit"].contains(status) }
 
     /// What it says, its text blocks one after another, to copy or select.
     var text: String {
@@ -153,6 +160,138 @@ struct Tool: Equatable, Sendable {
     var run: String
     var title: String
     var status: String?
+    /// Its block in the reply, as tool.started says: where a reply still being written
+    /// draws it among its words.
+    var block: Int?
+}
+
+/// A reply still being written: its run's tool calls among the blocks the deltas built,
+/// as desktop/src/model.rs's `place_tools` does. A delta for a block past the end fills
+/// the gap with empty blocks, so each call goes in its gap, at the block tool.started
+/// named, and words written after it come after it. A call with no block, from an older
+/// instance, or whose place has something else, goes on the end.
+func placeTools(_ blocks: inout [Block], _ tools: [Tool]) {
+    var have = Set(blocks.compactMap(\.call))
+    for t in tools where have.insert(t.call).inserted {
+        var b = Block.text("tool", "")
+        b.call = t.call
+        guard let i = t.block, i >= 0 else {
+            blocks.append(b)
+            continue
+        }
+        while blocks.count <= i { blocks.append(.text("", "")) }
+        let gap = blocks[i]
+        if gap.call == nil && gap.file == nil && gap.text.isEmpty {
+            blocks[i] = b
+        } else {
+            blocks.append(b)
+        }
+    }
+}
+
+/// One piece of a reply as it's drawn, its blocks named by their place in the message,
+/// as desktop/src/model.rs's `Part`.
+enum Part: Equatable, Sendable {
+    /// Words, with nothing else between them.
+    case words([Int])
+    /// A run of tool calls.
+    case tools([Int])
+    /// Anything else on its own: a thought, a plan, a notice or a file.
+    case block(Int)
+    /// The turn's steps, folded under one quiet line that opens to show them. While the
+    /// turn runs (`working`), the line is the step it's on, and it's there even with no
+    /// steps yet. Once it's done, it says how many.
+    case fold(words: String, working: Bool, parts: [Part])
+}
+
+/// How a reply reads: one answer at the end (PLAN.md, "One answer at the end"), as
+/// desktop/src/model.rs's `parts` lays it out with every step shown. Its last words are
+/// the answer; what it said on the way, its thoughts and its tool calls are steps,
+/// folded under one line, which while it works is the latest step. Files, plans, notices
+/// and words that ask the person something stay in view. A turn cut short keeps all it
+/// had in view, and so does a person's message.
+func parts(_ m: Message, tools: [Tool]) -> [Part] {
+    let n = m.blocks.count
+    func said(_ i: Int) -> Bool {
+        m.blocks[i].kind == "text" && !m.blocks[i].text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+    func drawn(_ i: Int) -> Bool {
+        let b = m.blocks[i]
+        switch b.kind {
+        case "text": return said(i)
+        case "thought", "plan": return !b.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !b.plan.isEmpty
+        case "tool", "notice": return true
+        case "file": return b.file != nil
+        default: return false
+        }
+    }
+    let all = (0..<n).filter(drawn)
+    if m.role != "agent" || m.cutShort { return layOut(m, all) }
+    let answer = m.live ? nil : (0..<n).reversed().first(where: said)
+    // While the turn runs, words that ask only stay once more has come after them, so
+    // words still coming don't show and then fold away.
+    func stays(_ i: Int) -> Bool {
+        switch m.blocks[i].kind {
+        case "text": return i == answer || (asks(m.blocks[i].text) && (!m.live || i + 1 < n))
+        case "thought", "tool": return false
+        default: return true
+        }
+    }
+    let kept = all.filter(stays)
+    let steps = all.filter { !stays($0) }
+    if m.live {
+        return layOut(m, kept) + [.fold(words: workingWords(m, tools: tools), working: true, parts: layOut(m, steps))]
+    }
+    var out: [Part] = []
+    if !steps.isEmpty {
+        out.append(.fold(words: steps.count == 1 ? "1 step" : "\(steps.count) steps", working: false, parts: layOut(m, steps)))
+    }
+    return out + layOut(m, kept)
+}
+
+/// Words that ask the person something, which stay in view though they came mid-turn.
+private func asks(_ text: String) -> Bool {
+    text.trimmingCharacters(in: .whitespacesAndNewlines).hasSuffix("?")
+}
+
+/// The blocks `shown`, in order, with words next to each other as one group and tool
+/// calls next to each other as one run.
+private func layOut(_ m: Message, _ shown: [Int]) -> [Part] {
+    var out: [Part] = []
+    for i in shown {
+        let kind = m.blocks[i].kind
+        switch (kind, out.last) {
+        case ("text", .words(let run)?):
+            out[out.count - 1] = .words(run + [i])
+        case ("tool", .tools(let run)?):
+            out[out.count - 1] = .tools(run + [i])
+        case ("text", _): out.append(.words([i]))
+        case ("tool", _): out.append(.tools([i]))
+        default: out.append(.block(i))
+        }
+    }
+    return out
+}
+
+/// The step a running turn is on, in a line: the first line of what it last said, the
+/// tool it last called, or that it's thinking.
+private func workingWords(_ m: Message, tools: [Tool]) -> String {
+    for b in m.blocks.reversed() {
+        switch b.kind {
+        case "text":
+            if let line = b.text.split(separator: "\n").lazy.map({ $0.trimmingCharacters(in: .whitespaces) }).first(where: { !$0.isEmpty }) {
+                return line.count > 160 ? "\(line.prefix(160))…" : line
+            }
+        case "tool":
+            let title = tools.first { $0.call == b.call }?.title ?? ""
+            return "\(title.isEmpty ? "Using a tool" : title)…"
+        case "thought":
+            return "Thinking…"
+        default:
+            break
+        }
+    }
+    return "Thinking…"
 }
 
 struct Approval: Identifiable, Equatable, Sendable {
@@ -169,6 +308,15 @@ struct Run: Equatable, Sendable {
     var conversation: String
     var agent: String
     var message: String
+    /// A routine's quiet run, or a step of its flow: the chat shows only what its agent
+    /// posts, never the run itself.
+    var quiet = false
+}
+
+/// A routine's prompt that an instance kept in the chat before routines ran quietly
+/// (PLAN.md, "Routines"): stored, but not shown.
+func routinePrompt(_ m: JSON) -> Bool {
+    m["role"].text == "person" && m["from"].text.hasPrefix("rt_")
 }
 
 struct Device: Identifiable, Equatable, Sendable {
@@ -280,16 +428,11 @@ final class Model {
     var shown: [Message] {
         var out = messages
         let conversation = self.conversation
-        for r in runs where r.conversation == conversation {
+        // A routine's quiet run shows only what its agent posts, which comes as messages.
+        for r in runs where !r.quiet && r.conversation == conversation {
             if out.contains(where: { $0.id == r.message }) { continue }
             var blocks = live[r.message] ?? []
-            for t in tools where t.run == r.id {
-                if !blocks.contains(where: { $0.call == t.call }) {
-                    var b = Block.text("tool", "")
-                    b.call = t.call
-                    blocks.append(b)
-                }
-            }
+            placeTools(&blocks, tools.filter { $0.run == r.id })
             out.append(Message(id: r.message, role: "agent", at: .max, blocks: blocks, live: true))
         }
         return out
@@ -310,8 +453,11 @@ final class Model {
 
     /// What an agent's thread shows at `now`.
     func mood(_ agent: String, at now: Date = .now) -> Mood {
-        let mine = runs.filter { $0.agent == agent }
-        if mine.contains(where: { r in approvals.contains { $0.run == r.id } }) { return .waiting }
+        let all = runs.filter { $0.agent == agent }
+        // A question waits for the person whoever's run asked, a routine's quiet one too.
+        if all.contains(where: { r in approvals.contains { $0.run == r.id } }) { return .waiting }
+        // Otherwise a routine's quiet run isn't shown as working.
+        let mine = all.filter { !$0.quiet }
         if mine.contains(where: { r in tools.contains { $0.run == r.id && $0.status == nil } }) { return .tool }
         if !mine.isEmpty {
             if let at = lastDelta[agent], now.timeIntervalSince(at) < 0.7 { return .writing }
@@ -323,11 +469,12 @@ final class Model {
 
     /// What the agents list says under an agent's name.
     func preview(_ agent: Agent) -> String {
-        guard let r = runs.first(where: { $0.agent == agent.id }) else {
-            return mood(agent.id) == .failed ? "Couldn't finish" : agent.program
-        }
-        if let a = approvals.first(where: { $0.run == r.id }) {
+        // A question from any of its runs, a routine's quiet one too.
+        if let a = approvals.first(where: { a in runs.contains { $0.agent == agent.id && $0.id == a.run } }) {
             return "Wants to \(a.title.prefix(1).lowercased())\(a.title.dropFirst())"
+        }
+        guard let r = runs.first(where: { $0.agent == agent.id && !$0.quiet }) else {
+            return mood(agent.id) == .failed ? "Couldn't finish" : agent.program
         }
         if let t = tools.last(where: { $0.run == r.id && $0.status == nil }) {
             return t.title
@@ -335,10 +482,11 @@ final class Model {
         return "Thinking"
     }
 
-    /// Whether the selected chat's agent is answering.
+    /// Whether the selected chat's agent is answering, so the button stops it. A
+    /// routine's quiet run isn't shown, so it isn't stopped from here.
     var busy: Bool {
         let conversation = self.conversation
-        return runs.contains { $0.conversation == conversation }
+        return runs.contains { !$0.quiet && $0.conversation == conversation }
     }
 
     var uploading: Bool { attachments.contains { $0.file == nil && $0.error == nil } }
@@ -434,7 +582,8 @@ final class Model {
                 if let r = runs.first(where: { $0.id == f["run"].text }) {
                     if f["status"].text == "failed" {
                         failed[r.agent] = .now
-                    } else {
+                    } else if !r.quiet {
+                        // A routine's quiet run never showed working, so it doesn't snap.
                         finished[r.agent] = .now
                     }
                 }
@@ -472,7 +621,7 @@ final class Model {
         live[message] = blocks
         // Written a few times a second at most, not at each delta: every view that shows
         // the agent's thread reads it, and each write draws them all again.
-        if let r = runs.first(where: { $0.message == message }) {
+        if let r = runs.first(where: { $0.message == message }), !r.quiet {
             let now = Date.now
             if lastDelta[r.agent].map({ now.timeIntervalSince($0) > 0.25 }) ?? true {
                 lastDelta[r.agent] = now
@@ -495,11 +644,11 @@ final class Model {
             if conversation != before { dirty.insert(.messages) }
         case .runs:
             runs = items.map {
-                Run(id: $0["run"].text, conversation: $0["conversation"].text, agent: $0["agent"].text, message: $0["message"].text)
+                Run(id: $0["run"].text, conversation: $0["conversation"].text, agent: $0["agent"].text, message: $0["message"].text, quiet: !$0["routine"].text.isEmpty)
             }
         case .tools:
             tools = items.map {
-                Tool(call: $0["call"].text, run: $0["run"].text, title: $0["title"].text, status: $0["status"].string)
+                Tool(call: $0["call"].text, run: $0["run"].text, title: $0["title"].text, status: $0["status"].string, block: $0["block"].int)
             }
         case .approvals:
             approvals = items.map { a in
@@ -521,8 +670,8 @@ final class Model {
             devices = items.map { Device(id: $0["id"].text, name: $0["name"].text, kind: $0["kind"].text) }
         case .messages:
             moreMessages = f["more"].bool ?? false
-            messages = items.map { m in
-                Message(id: m["id"].text, role: m["role"].text, at: m["at"].int ?? 0, blocks: m["blocks"].array.map(Block.of), from: from(m["from"].text))
+            messages = items.filter { !routinePrompt($0) }.map { m in
+                Message(id: m["id"].text, role: m["role"].text, at: m["at"].int ?? 0, blocks: m["blocks"].array.map(Block.of), from: from(m["from"].text), status: m["status"].text)
             }
             placeQueued()
             // The tool calls these messages name.
@@ -530,11 +679,10 @@ final class Model {
         }
     }
 
-    /// Who sent a person message other than the person: another agent, or a routine.
+    /// Who sent a person message other than the person: another agent. (A routine's
+    /// prompt isn't shown.)
     private func from(_ id: String) -> String? {
-        if id.hasPrefix("a_") { return agent(id)?.name ?? "Another agent" }
-        if id.hasPrefix("rt_") { return "A routine" }
-        return nil
+        id.hasPrefix("a_") ? agent(id)?.name ?? "Another agent" : nil
     }
 
     /// The queued messages for the shown chat go after its stored ones.
@@ -664,7 +812,7 @@ final class Model {
     }
 
     func cancel() -> JSON? {
-        guard let conversation, let run = runs.first(where: { $0.conversation == conversation }) else { return nil }
+        guard let conversation, let run = runs.first(where: { !$0.quiet && $0.conversation == conversation }) else { return nil }
         return ["t": "cancel", "run": JSON(run.id)]
     }
 

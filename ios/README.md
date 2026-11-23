@@ -37,7 +37,7 @@ To run against an instance, set `LOOM_SERVER` in the scheme's environment, or ty
 
 - **Sign in**: the instance's address, a username and a password (`login`), or **Scan a code**, VisionKit's scanner reading the QR code the desktop app shows under Add a phone (`link`, with the code's text). The simulator has no camera, so there the text can be pasted.
 - **Agents**: each agent as one ongoing chat, with its thread and what it's doing, as the desktop's sidebar shows them.
-- **A chat**: messages with Markdown and code blocks, the reply streaming in as it's written, thoughts folded and tool calls on one quiet line, questions with Allow and Deny, and the composer, with photos (sent as JPEG) and files.
+- **A chat**: as the desktop draws it ([PLAN.md, "One answer at the end"](../PLAN.md#one-answer-at-the-end)). The person's bubbles take a breath of the agent's colour; what another agent sent stays grey. A reply is plain text with Markdown and code blocks, one answer at the end, its steps (thoughts, tool calls in their places, and what it said on the way, smaller and quieter) folded under one line that shows the step it's on while it works. A routine's quiet run isn't drawn, and its old prompts aren't shown; what it posts is. Pictures are sized from their file's header before they load, to fit the column and 360 × 400. Then questions with Allow and Deny, and the composer, with photos (sent as JPEG) and files.
 - **Settings**: the account, the instance, the person's devices, notifications, and signing out.
 
 For a screenshot of each screen, launch it with `-sample`, and `-signedOut`, `-open <agent id>` or `-settings`: `xcrun simctl launch booted no.aaenz.loom -sample -open a_1`.

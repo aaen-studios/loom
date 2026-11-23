@@ -29,7 +29,7 @@ struct ChatView: View {
                     ForEach(messages) { m in
                         Group {
                             if m.isPerson {
-                                PersonMessage(message: m)
+                                PersonMessage(message: m, agent: agent)
                             } else {
                                 Reply(message: m, agent: agent, openThoughts: $openThoughts)
                             }
@@ -170,10 +170,12 @@ private struct SelectableText: UIViewRepresentable {
 
 // MARK: - Messages
 
-/// What the person wrote: a bubble on the right, with its files above it.
+/// What the person wrote: a bubble on the right in a breath of the agent's colour, with
+/// its files above it. What another agent sent is plain grey.
 struct PersonMessage: View {
     @Environment(Session.self) private var session
     var message: Message
+    var agent: Agent?
 
     var body: some View {
         let text = message.blocks.filter { $0.kind == "text" }.map(\.text).joined(separator: "\n")
@@ -191,7 +193,7 @@ struct PersonMessage: View {
                     .fixedSize(horizontal: false, vertical: true)
                     .padding(.horizontal, Tokens.Space.l)
                     .padding(.vertical, Tokens.Space.s + 3)
-                    .background(P.bubble, in: RoundedRectangle(cornerRadius: Tokens.Radius.bubble, style: .continuous))
+                    .background(message.from == nil ? P.personBubble(agent?.color ?? "") : P.bubble, in: RoundedRectangle(cornerRadius: Tokens.Radius.bubble, style: .continuous))
                     .opacity(message.queued ? 0.6 : 1)
             }
             if message.queued {
@@ -228,21 +230,54 @@ struct Reply: View {
                 Text(agent?.name ?? "Agent").font(Fonts.ui(Tokens.PhoneSize.small, .medium)).foregroundStyle(P.ink)
                 Text(message.live ? "now" : When.time(message.at)).font(Fonts.caption).foregroundStyle(P.ink3)
             }
-            ForEach(Array(message.blocks.enumerated()), id: \.offset) { i, b in
-                block(b, key: "\(message.id)/\(i)")
-            }
-            if message.live && message.blocks.allSatisfy({ $0.text.isEmpty && $0.call == nil }) {
-                Text("Thinking…").font(Fonts.small).foregroundStyle(P.ink3)
+            let laid = parts(message, tools: model.tools)
+            ForEach(Array(laid.enumerated()), id: \.offset) { _, part in
+                self.part(part, onTheWay: false)
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     @ViewBuilder
+    private func part(_ part: Part, onTheWay: Bool) -> some View {
+        switch part {
+        case .words(let run):
+            ForEach(run, id: \.self) { i in
+                let b = message.blocks[i]
+                // Only the last block grows while a reply is written.
+                let live = message.live && i == message.blocks.count - 1
+                if onTheWay {
+                    // What it said on its way to the answer: smaller and quieter, never a
+                    // bubble, so it doesn't read as a message.
+                    MarkdownView(b.text, font: Fonts.small, ink: P.ink2, live: live)
+                } else {
+                    MarkdownView(b.text, live: live)
+                }
+            }
+        case .tools(let run):
+            VStack(alignment: .leading, spacing: Tokens.Space.xs + 2) {
+                ForEach(run, id: \.self) { i in
+                    ToolLine(tool: session.model.tool(message.blocks[i].call))
+                }
+            }
+        case .block(let i):
+            block(message.blocks[i], key: "\(message.id)/\(i)")
+        case .fold(let words, let working, let steps):
+            Steps(words: words, working: working, open: openThoughts.contains(foldKey), canOpen: !steps.isEmpty) {
+                if openThoughts.contains(foldKey) { openThoughts.remove(foldKey) } else { openThoughts.insert(foldKey) }
+            } steps: {
+                ForEach(Array(steps.enumerated()), id: \.offset) { _, step in
+                    AnyView(self.part(step, onTheWay: true))
+                }
+            }
+        }
+    }
+
+    private var foldKey: String { "steps/\(message.id)" }
+
+    @ViewBuilder
     private func block(_ b: Block, key: String) -> some View {
         switch b.kind {
-        case "text" where !b.text.isEmpty:
-            MarkdownView(b.text, live: message.live)
         case "thought" where !b.text.isEmpty:
             Thought(text: b.text, open: openThoughts.contains(key)) {
                 if openThoughts.contains(key) { openThoughts.remove(key) } else { openThoughts.insert(key) }
@@ -268,6 +303,47 @@ struct Reply: View {
         default:
             EmptyView()
         }
+    }
+}
+
+/// A turn's steps under one quiet line: the step it's on while it works, how many once
+/// it's done. Tapped, it opens to show them in the order they came.
+struct Steps<Content: View>: View {
+    var words: String
+    var working: Bool
+    var open: Bool
+    var canOpen: Bool
+    var toggle: () -> Void
+    @ViewBuilder var steps: Content
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: Tokens.Space.s) {
+            Button(action: toggle) {
+                HStack(spacing: 4) {
+                    if canOpen {
+                        Image(systemName: "chevron.right")
+                            .font(.system(size: 9, weight: .semibold))
+                            .rotationEffect(.degrees(open && canOpen ? 90 : 0))
+                    }
+                    Text(working && !words.hasSuffix("…") ? words + "…" : words)
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                }
+                .font(Fonts.small)
+                .foregroundStyle(P.ink3)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .disabled(!canOpen)
+            if open && canOpen {
+                VStack(alignment: .leading, spacing: Tokens.Space.s) {
+                    steps
+                }
+                .padding(.leading, Tokens.Space.m)
+                .overlay(alignment: .leading) { Rectangle().fill(P.lineStrong).frame(width: 1) }
+            }
+        }
+        .animation(.easeOut(duration: 0.15), value: open)
     }
 }
 
@@ -341,24 +417,33 @@ struct FileView: View {
     /// Its thumbnail, read and decoded off the main thread.
     @State private var thumb: UIImage?
 
+    /// The most room a picture takes, and the place it keeps while its size isn't known.
+    static let most = CGSize(width: 360, height: 400)
+    static let unknown = CGSize(width: 240, height: 160)
+
     var body: some View {
         let path = file.isImage ? session.model.files["\(file.file).thumb"] : nil
         Button {
             session.send(session.model.open(file))
         } label: {
             if file.isImage {
-                if let path, let image = thumb ?? Pictures.kept(path) {
-                    Image(uiImage: image)
-                        .resizable()
-                        .scaledToFit()
-                        .frame(maxWidth: 240, maxHeight: 240)
-                        .clipShape(RoundedRectangle(cornerRadius: Tokens.Radius.bubble, style: .continuous))
-                } else {
-                    RoundedRectangle(cornerRadius: Tokens.Radius.bubble, style: .continuous)
-                        .fill(P.bubble)
-                        .frame(width: 200, height: 140)
-                        .overlay { Image(systemName: "photo").foregroundStyle(P.ink3) }
+                let image = path.flatMap { thumb ?? Pictures.kept($0) }
+                // Its own place in the message, sized from its file's header before it's
+                // decoded: scaled down to fit the column and 360 × 400, its shape kept,
+                // and never up, as on the desktop. Until its size is known, 240 × 160.
+                let pixels = path.flatMap { Pictures.size($0) } ?? image.map { CGSize(width: $0.size.width * $0.scale, height: $0.size.height * $0.scale) }
+                let size = pixels.map { Pictures.fit($0, in: FileView.most) } ?? FileView.unknown
+                Group {
+                    if let image {
+                        Image(uiImage: image)
+                            .resizable()
+                    } else {
+                        P.bubble.overlay { Image(systemName: "photo").foregroundStyle(P.ink3) }
+                    }
                 }
+                .aspectRatio(size.width / size.height, contentMode: .fit)
+                .frame(maxWidth: size.width)
+                .clipShape(RoundedRectangle(cornerRadius: Tokens.Radius.bubble, style: .continuous))
             } else {
                 HStack(spacing: Tokens.Space.m) {
                     Image(systemName: "doc.text").foregroundStyle(P.ink3)

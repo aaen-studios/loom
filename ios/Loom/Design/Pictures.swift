@@ -28,6 +28,34 @@ enum Pictures {
         return image
     }
 
+    /// A picture's size in pixels, turned the way it shows, from its file's header alone,
+    /// kept by path: a file's path is its SHA-256, so what's there doesn't change shape.
+    /// Nil if the header can't be read.
+    @MainActor
+    static func size(_ path: String) -> CGSize? {
+        if let kept = sizes[path] { return kept }
+        var out: CGSize?
+        if let source = CGImageSourceCreateWithURL(URL(fileURLWithPath: path) as CFURL, nil),
+           let p = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any],
+           let w = p[kCGImagePropertyPixelWidth] as? Int, let h = p[kCGImagePropertyPixelHeight] as? Int {
+            // EXIF orientations 5 to 8 turn it a quarter.
+            let turned = ((p[kCGImagePropertyOrientation] as? Int) ?? 1) >= 5
+            out = turned ? CGSize(width: h, height: w) : CGSize(width: w, height: h)
+        }
+        sizes[path] = .some(out)
+        return out
+    }
+
+    @MainActor private static var sizes: [String: CGSize?] = [:]
+
+    /// The size to draw a picture of `size` at, at most `most`: scaled down to fit both,
+    /// its shape kept, and never up, as the desktop's `fit`.
+    static func fit(_ size: CGSize, in most: CGSize) -> CGSize {
+        let w = max(size.width, 1), h = max(size.height, 1)
+        let k = min(most.width / w, most.height / h, 1)
+        return CGSize(width: max((w * k).rounded(), 1), height: max((h * k).rounded(), 1))
+    }
+
     /// A photo's data as a JPEG at `url`, turned the way it was taken and without its
     /// location or other metadata. Run it off the main thread: a 12 MP photo takes tens
     /// of milliseconds.
