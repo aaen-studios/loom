@@ -253,6 +253,23 @@ pub fn names_tool(call: Json) -> bool {
     return str_at(call.copy(), "title") != none or str_at(at(call, "rawInput"), "description") != none
 }
 
+// The subagent call an update came from, as Claude's adapter tags a subagent's
+// tool calls, words and permission requests: the toolCallId of the Task or
+// Agent call that started it, in `_meta.claudeCode.parentToolUseId`. None for
+// the agent's own.
+pub fn parent_of(update: Json) -> String? {
+    let id = str_at(at(at(update, "_meta"), "claudeCode"), "parentToolUseId") ?? String()
+    return if id.len() > 0 { some(id) } else { none }
+}
+
+@test
+fn a_subagents_update_names_the_call_that_started_it() {
+    let meta = Obj.new().j("claudeCode", Obj.new().s("parentToolUseId", String("toolu_1")).done()).done()
+    assert(parent_of(Obj.new().s("sessionUpdate", String("tool_call")).j("_meta", meta).done()) == some(String("toolu_1")))
+    assert(parent_of(Obj.new().s("sessionUpdate", String("tool_call")).done()) == none)
+    assert(parent_of(Obj.new().j("_meta", Obj.new().j("claudeCode", Obj.new().s("parentToolUseId", String()).done()).done()).done()) == none)
+}
+
 // The first line of `text` with words on it, trimmed, cut at TITLE_MOST bytes,
 // with "…" when there's more after it.
 fn first_line(text: String) -> String {

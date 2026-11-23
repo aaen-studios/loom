@@ -13181,7 +13181,7 @@ ACTA_KEY=secret:ACTA_KEY",
             let words: String = m
                 .blocks
                 .iter()
-                .filter(|b| b.kind == "text")
+                .filter(|b| b.kind == "text" && b.parent.is_none())
                 .map(|b| b.text.as_str())
                 .collect::<Vec<_>>()
                 .join(" ");
@@ -14210,8 +14210,8 @@ impl ReplyDraw<'_> {
         match self.show.tools {
             Tools::All | Tools::Hidden => {
                 let mut list = div().flex().flex_col().gap(px(space::XS));
-                for b in &blocks {
-                    list = list.child(tool_line(p, b, tools));
+                for &i in run {
+                    list = list.child(self.tool_entry(i));
                 }
                 list.into_any_element()
             }
@@ -14261,14 +14261,75 @@ impl ReplyDraw<'_> {
                         .pl(px(space::M))
                         .border_l_1()
                         .border_color(p.line_strong);
-                    for b in &blocks {
-                        list = list.child(tool_line(p, b, tools));
+                    for &i in run {
+                        list = list.child(self.tool_entry(i));
                     }
                     out = out.child(list);
                 }
                 out.into_any_element()
             }
         }
+    }
+
+    /// One tool call. A subagent's call holds what its subagent did: its line says how
+    /// many steps, and opens with a click to show them inside it.
+    fn tool_entry(&self, i: usize) -> AnyElement {
+        let p = self.p;
+        let b = &self.m.blocks[i];
+        let shows = model::Shows {
+            tools: true,
+            thoughts: self.show.thoughts != Thoughts::Hidden,
+        };
+        let (parts, n) = model::inside(self.m, i, shows);
+        if n == 0 {
+            return tool_line(p, b, self.tools).into_any_element();
+        }
+        let key = format!("sub/{}", self.key(i));
+        let opened = self.open.contains(&key);
+        let this = self.this.clone();
+        let k = key.clone();
+        let line = tool_line(p, b, self.tools)
+            .id(SharedString::from(format!("u-{}", self.key(i))))
+            .cursor_pointer()
+            .child(div().flex_none().text_color(p.ink_3).child(if n == 1 {
+                "1 step".to_string()
+            } else {
+                format!("{n} steps")
+            }))
+            .child(
+                div()
+                    .flex_none()
+                    .text_color(p.ink_3)
+                    .child(if opened { "⌄" } else { "›" }),
+            )
+            .on_click(move |_, _, cx| {
+                let _ = this.update(cx, |loom, cx| loom.toggle_thought(k.clone(), cx));
+            });
+        let mut out = div().flex().flex_col().gap(px(space::XS)).child(line);
+        if opened {
+            let mut list = div()
+                .flex()
+                .flex_col()
+                .gap(px(space::XS))
+                .pl(px(space::M))
+                .border_l_1()
+                .border_color(p.line_strong);
+            for part in &parts {
+                list = list.child(match part {
+                    model::Part::Bubbles(run) => self.said_on_the_way(run),
+                    model::Part::Tools(run) => {
+                        let mut calls = div().flex().flex_col().gap(px(space::XS));
+                        for &j in run {
+                            calls = calls.child(self.tool_entry(j));
+                        }
+                        calls.into_any_element()
+                    }
+                    _ => self.part(part),
+                });
+            }
+            out = out.child(list);
+        }
+        out.into_any_element()
     }
 
     /// The turn's steps under one quiet line, which opens to show them: while it runs,

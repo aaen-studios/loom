@@ -1231,6 +1231,9 @@ pub struct Block {
     pub call: Option<String>,
     pub file: Option<FileRef>,
     pub card: Option<Card>,
+    /// The subagent call a tool call, words or a thought sit inside: the call of the
+    /// Task or Agent call that made them, drawn in it rather than in the reply.
+    pub parent: Option<String>,
 }
 
 impl Block {
@@ -1241,6 +1244,7 @@ impl Block {
             call: None,
             file: None,
             card: None,
+            parent: None,
         }
     }
 
@@ -1266,6 +1270,7 @@ impl Block {
             } else {
                 None
             },
+            parent: b.get("parent").and_then(Value::as_str).map(str::to_string),
             kind,
         }
     }
@@ -1757,28 +1762,35 @@ fn asks(text: &str) -> bool {
 /// had in view, and so does a person's message.
 pub fn parts(m: &Message, tools: &Tools, shows: Shows) -> Vec<Part> {
     let n = m.blocks.len();
-    let said = |i: usize| m.blocks[i].kind == "text" && !m.blocks[i].text.trim().is_empty();
+    // A subagent's calls and words are drawn inside the call that started it, not here.
+    let nested = inside_a_call(m);
+    let said =
+        |i: usize| m.blocks[i].kind == "text" && !nested[i] && !m.blocks[i].text.trim().is_empty();
     // Whether a block has anything to draw, as the prefs have it.
-    let drawn = |i: usize| match m.blocks[i].kind.as_str() {
-        "text" => said(i),
-        "thought" => shows.thoughts && !m.blocks[i].text.trim().is_empty(),
-        "tool" => shows.tools,
-        "plan" => !m.blocks[i].text.trim().is_empty(),
-        "file" => m.blocks[i].file.is_some(),
-        "card" => m.blocks[i].card.is_some(),
-        "notice" => true,
-        _ => false,
+    let drawn = |i: usize| {
+        !nested[i]
+            && match m.blocks[i].kind.as_str() {
+                "text" => said(i),
+                "thought" => shows.thoughts && !m.blocks[i].text.trim().is_empty(),
+                "tool" => shows.tools,
+                "plan" => !m.blocks[i].text.trim().is_empty(),
+                "file" => m.blocks[i].file.is_some(),
+                "card" => m.blocks[i].card.is_some(),
+                "notice" => true,
+                _ => false,
+            }
     };
     let all: Vec<usize> = (0..n).filter(|&i| drawn(i)).collect();
     let quiet = |out: Vec<Part>| {
         if !out.is_empty() || m.live {
             return out;
         }
-        let used = m.blocks.iter().filter(|b| b.kind == "tool").count();
+        let top = |&(i, b): &(usize, &Block)| b.kind == "tool" && !nested[i];
+        let used = m.blocks.iter().enumerate().filter(top).count();
         match used {
             0 => out,
             1 => {
-                let b = m.blocks.iter().find(|b| b.kind == "tool");
+                let b = m.blocks.iter().enumerate().find(top).map(|(_, b)| b);
                 vec![Part::Quiet(format!(
                     "Used {}",
                     tool_title(b.and_then(|b| b.call.as_ref()), tools)
@@ -1829,6 +1841,48 @@ pub fn parts(m: &Message, tools: &Tools, shows: Shows) -> Vec<Part> {
     quiet(out)
 }
 
+/// Which of a reply's blocks sit inside a subagent call of the same reply: their
+/// parent is the call of one of its tool blocks. A block whose parent isn't there is
+/// drawn in the reply, as any other.
+fn inside_a_call(m: &Message) -> Vec<bool> {
+    let calls: HashSet<&str> = m
+        .blocks
+        .iter()
+        .filter(|b| b.kind == "tool")
+        .filter_map(|b| b.call.as_deref())
+        .collect();
+    m.blocks
+        .iter()
+        .map(|b| b.parent.as_deref().is_some_and(|p| calls.contains(p)))
+        .collect()
+}
+
+/// What sits inside the subagent call at block `i`: the calls, words and thoughts its
+/// subagent made, in order, laid out as a reply's are, with how many there are. Nothing
+/// for a call that started no subagent.
+pub fn inside(m: &Message, i: usize, shows: Shows) -> (Vec<Part>, usize) {
+    let Some(call) = m.blocks.get(i).and_then(|b| b.call.as_deref()) else {
+        return (Vec::new(), 0);
+    };
+    let shown: Vec<usize> = m
+        .blocks
+        .iter()
+        .enumerate()
+        .filter(|(_, b)| b.parent.as_deref() == Some(call))
+        .filter(|(_, b)| match b.kind.as_str() {
+            "tool" => true,
+            "thought" => shows.thoughts && !b.text.trim().is_empty(),
+            "text" | "plan" => !b.text.trim().is_empty(),
+            "file" => b.file.is_some(),
+            "card" => b.card.is_some(),
+            _ => false,
+        })
+        .map(|(j, _)| j)
+        .collect();
+    let n = shown.len();
+    (lay_out(m, &shown), n)
+}
+
 /// The blocks `shown`, in order, with words next to each other as one group of
 /// bubbles and tool calls next to each other as one run.
 fn lay_out(m: &Message, shown: &[usize]) -> Vec<Part> {
@@ -1850,7 +1904,15 @@ const WORKING_MOST: usize = 160;
 /// The step a running turn is on, in a line: the first line of what it last said, the
 /// tool it last called, or that it's thinking.
 fn working_words(m: &Message, tools: &Tools) -> String {
-    for b in m.blocks.iter().rev() {
+    // While a subagent works, the line is its call, not what it says or does inside.
+    let nested = inside_a_call(m);
+    for (_, b) in m
+        .blocks
+        .iter()
+        .enumerate()
+        .rev()
+        .filter(|(i, _)| !nested[*i])
+    {
         match b.kind.as_str() {
             "text" => {
                 if let Some(line) = b.text.lines().map(str::trim).find(|l| !l.is_empty()) {
@@ -2021,6 +2083,7 @@ fn place_tools<'a>(blocks: &mut Vec<Block>, tools: impl Iterator<Item = &'a Tool
         }
         let mut b = Block::text("tool", String::new());
         b.call = Some(t.call.clone());
+        b.parent = t.parent.clone();
         match t.block {
             Some(i) => {
                 while blocks.len() <= i {
@@ -2051,6 +2114,8 @@ pub struct Tool {
     /// Its block in the reply, as tool.started says: where a reply still being written
     /// draws it among its words.
     pub block: Option<usize>,
+    /// The subagent call it sits inside, as tool.started says.
+    pub parent: Option<String>,
 }
 
 /// The tool calls, in order, and found by call: a reply's tool blocks look theirs up
@@ -3353,6 +3418,10 @@ impl Model {
         let pos = f.get("pos").and_then(Value::as_u64).unwrap_or(0) as usize;
         let text = s(f, "text");
         let b = &mut blocks[block];
+        // A subagent's words, which go inside the call that started it.
+        if let Some(parent) = f.get("parent").and_then(Value::as_str) {
+            b.parent = Some(parent.to_string());
+        }
         if pos <= b.text.len() {
             b.text.truncate(pos);
             b.text.push_str(&text);
@@ -4339,7 +4408,7 @@ impl Model {
                 }
             }
             List::Runs => {
-                self.runs = items
+                let runs: Vec<Run> = items
                     .iter()
                     .map(|r| Run {
                         id: s(r, "run"),
@@ -4349,6 +4418,13 @@ impl Model {
                         quiet: !s(r, "routine").is_empty(),
                     })
                     .collect();
+                // A run new here may have started calls already: the calls asked for with
+                // the runs before it, in the same burst as its run.started, left them out,
+                // and a call that waits on an approval sends nothing more to ask again.
+                if runs.iter().any(|r| !self.runs.iter().any(|o| o.id == r.id)) {
+                    self.dirty.insert(List::Tools);
+                }
+                self.runs = runs;
             }
             List::Tools => {
                 let list: Vec<Tool> = items
@@ -4359,6 +4435,7 @@ impl Model {
                         title: s(t, "title"),
                         status: t.get("status").and_then(Value::as_str).map(str::to_string),
                         block: t.get("block").and_then(Value::as_u64).map(|b| b as usize),
+                        parent: t.get("parent").and_then(Value::as_str).map(str::to_string),
                     })
                     .collect();
                 // A tool call in another chat asks again too: the chat keeps what it
@@ -6098,6 +6175,7 @@ mod tests {
             title: title.into(),
             status: Some("done".into()),
             block: None,
+            parent: None,
         };
         Tools::new(vec![tool("tc_1", "Search the web"), tool("tc_2", "ls")])
     }
@@ -6546,6 +6624,7 @@ mod tests {
             title: "Search the web".into(),
             status: Some("running".into()),
             block: None,
+            parent: None,
         }]));
         let now = |m: &Model| {
             let shown = m.shown();
@@ -6575,6 +6654,121 @@ mod tests {
         // Stopped, it keeps both, as one group.
         m.messages = vec![m.message_of(&kept("cancelled"))];
         assert_eq!(now(&m), vec![Part::Bubbles(vec![0, 2])]);
+    }
+
+    #[test]
+    fn a_new_run_asks_for_its_calls_again() {
+        // run.started and a call's tool.started can come in one burst: the calls are then
+        // asked for with the runs from before, and a call waiting on an approval sends
+        // nothing more, so a run new here asks again.
+        let mut m = Model::new();
+        let runs = |ids: &[&str]| {
+            let items: Vec<Value> = ids
+                .iter()
+                .map(|id| json!({"run": id, "conversation": "c_1", "agent": "a_1", "message": "msg_1"}))
+                .collect();
+            json!({"t": "core.data", "what": "runs", "items": items})
+        };
+        m.take(&runs(&["run_1"]));
+        assert!(m.dirty.contains(&List::Tools));
+        m.dirty.clear();
+        m.take(&runs(&["run_1"]));
+        assert!(!m.dirty.contains(&List::Tools));
+        m.take(&runs(&[]));
+        assert!(!m.dirty.contains(&List::Tools));
+    }
+
+    #[test]
+    fn a_subagents_calls_and_words_sit_inside_the_call_that_started_it() {
+        // Claude's adapter tags a subagent's calls and words with its Task call: they
+        // go inside that call, and the reply's answer is the agent's own words.
+        let mut m = Model::new();
+        m.conversations = vec![Conversation {
+            id: "c_1".into(),
+            agent: "a_1".into(),
+            task: None,
+            side: false,
+            branch_of: None,
+            branch_at: None,
+            routine: None,
+            program: None,
+            title: String::new(),
+        }];
+        m.select(Some("a_1".into()));
+        m.runs = vec![Run {
+            id: "run_1".into(),
+            conversation: "c_1".into(),
+            agent: "a_1".into(),
+            message: "msg_1".into(),
+            quiet: false,
+        }];
+        let tool = |call: &str, title: &str, block: usize, parent: Option<&str>| Tool {
+            call: call.into(),
+            run: "run_1".into(),
+            title: title.into(),
+            status: None,
+            block: Some(block),
+            parent: parent.map(str::to_string),
+        };
+        m.tools = Rc::new(Tools::new(vec![
+            tool("tc_1", "Explore the notes", 0, None),
+            tool("tc_2", "Read notes.md", 1, Some("tc_1")),
+        ]));
+        m.take(&json!({"t": "delta", "run": "run_1", "message": "msg_1", "block": 2, "kind": "text", "pos": 0, "text": "Three notes.", "parent": "tc_1"}));
+        let shown = m.shown();
+        // While the subagent works, the turn's line is its call, not its words.
+        assert_eq!(
+            parts(&shown[0], &m.tools, EVERYTHING),
+            vec![fold("Explore the notes…", true, vec![Part::Tools(vec![0])])]
+        );
+        assert_eq!(
+            inside(&shown[0], 0, EVERYTHING),
+            (vec![Part::Tools(vec![1]), Part::Bubbles(vec![2])], 2)
+        );
+        // Kept, its words aren't the answer, and only the agent's own call is a step.
+        let kept = json!({"id": "msg_1", "conversation": "c_1", "role": "agent", "agent": "a_1", "run": "run_1", "at": 2, "status": "done", "blocks": [
+            {"kind": "tool", "call": "tc_1"},
+            {"kind": "tool", "call": "tc_2", "parent": "tc_1"},
+            {"kind": "text", "text": "Three notes.", "parent": "tc_1"},
+            {"kind": "text", "text": "Done exploring."}]});
+        m.take(&json!({"t": "event", "kind": "message.created", "conversation": "c_1", "message": kept}));
+        let shown = m.shown();
+        assert_eq!(
+            parts(&shown[0], &m.tools, EVERYTHING),
+            vec![
+                fold("1 step", false, vec![Part::Tools(vec![0])]),
+                Part::Bubbles(vec![3]),
+            ]
+        );
+        assert_eq!(
+            inside(&shown[0], 0, EVERYTHING),
+            (vec![Part::Tools(vec![1]), Part::Bubbles(vec![2])], 2)
+        );
+        assert_eq!(inside(&shown[0], 1, EVERYTHING), (vec![], 0));
+        assert_eq!(copy_text(&shown[0], &m.tools), "Done exploring.");
+        // With tool calls hidden, a reply that only had a subagent says its one call.
+        let only = Message {
+            blocks: shown[0].blocks[..3].to_vec(),
+            ..shown[0].clone()
+        };
+        let hidden = Shows {
+            tools: false,
+            thoughts: false,
+        };
+        assert_eq!(
+            parts(&only, &m.tools, hidden),
+            vec![Part::Quiet("Used Explore the notes".into())]
+        );
+        // A block whose parent isn't in the reply is drawn in it, as any other.
+        let mut lost = shown[0].clone();
+        lost.blocks[3].parent = Some("tc_9".into());
+        assert_eq!(
+            parts(&lost, &m.tools, EVERYTHING),
+            vec![
+                fold("1 step", false, vec![Part::Tools(vec![0])]),
+                Part::Bubbles(vec![3]),
+            ]
+        );
     }
 
     #[test]
@@ -6612,6 +6806,7 @@ mod tests {
             title: title.into(),
             status: Some("done".into()),
             block: Some(block),
+            parent: None,
         };
         m.tools = Rc::new(Tools::new(vec![
             tool("tc_1", "Read the food log", 0),

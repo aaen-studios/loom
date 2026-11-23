@@ -1748,7 +1748,8 @@ fn summary(message: Json) -> String {
     var out = String()
     if let Json.Array(blocks) = at(message, "blocks") {
         for b in blocks {
-            if (str_at(b.copy(), "kind") ?? String()) == "text" {
+            // A subagent's words sit inside the call that started it, not in the reply.
+            if (str_at(b.copy(), "kind") ?? String()) == "text" and str_at(b.copy(), "parent") == none {
                 out.push_str(str_at(b, "text") ?? String())
             }
         }

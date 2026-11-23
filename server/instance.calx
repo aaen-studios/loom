@@ -158,10 +158,19 @@ struct Block {
     entries: Json
     file: Json    // a file block's `file`, `name`, `mime` and `size`
     card: Json    // a card block's card (server/cards.calx)
+    parent: String    // the subagent call (tc_) a tool, text or thought block sits inside, or ""
 }
 
 fn new_block(kind: str) -> Block {
-    return Block { kind: String(kind), text: String(), call: String(), entries: Json.Null, file: Json.Null, card: Json.Null }
+    return Block { kind: String(kind), text: String(), call: String(), entries: Json.Null, file: Json.Null, card: Json.Null, parent: String() }
+}
+
+// A tool block for `call`, inside the subagent call `parent` when that isn't "".
+fn tool_block(call: own String, parent: own String) -> Block {
+    var b = new_block("tool")
+    b.call = call
+    b.parent = parent
+    return b
 }
 
 // Where a reply's tool block for `call` is, counted from 0 as deltas count, so
@@ -174,6 +183,26 @@ fn tool_place(blocks: List<Block>, call: String) -> i64 {
         n += 1
     }
     return n
+}
+
+// The subagent call (tc_) an ACP update came from, found by the toolCallId its
+// program tags it with (acp.parent_of) among the run's calls, or "" for the
+// agent's own, or a parent the run never heard of.
+fn parent_call(calls: LinkedMap<String, String>, u: Json) -> String {
+    let id = acp.parent_of(u) else return String()
+    if let c = calls.find(id) { return c.copy() }
+    return String()
+}
+
+// tool.started for an ACP tool call, from a tool_call or a permission request's
+// toolCall: its place in the reply, the subagent call it sits inside, and its title.
+fn acp_started(run: String, call: String, blocks: List<Block>, u: Json) -> Json {
+    var parent = String()
+    for b in blocks {
+        if b.kind == "tool" and b.call == call { parent = b.parent.copy() }
+    }
+    let inside = if parent.len() > 0 { some(parent) } else { none }
+    return Obj.new().s("run", run).s("call", call.copy()).i("block", tool_place(blocks, call)).maybe("parent", inside).s("tool", acp.tool_kind(str_at(u.copy(), "kind") ?? String())).s("title", acp.tool_title(u.copy())).j("input", cut_input(at(u.copy(), "rawInput"))).j("locations", at(u, "locations")).done()
 }
 
 struct Run {
@@ -4004,7 +4033,7 @@ impl Instance {
             var said = String()
             if let Json.Array(blocks) = at(m.copy(), "blocks") {
                 for b in blocks {
-                    if str_at(b.copy(), "kind") == some(String("text")) { said.push_str(str_at(b, "text") ?? String()) }
+                    if str_at(b.copy(), "kind") == some(String("text")) and str_at(b.copy(), "parent") == none { said.push_str(str_at(b, "text") ?? String()) }
                 }
             }
             if said.trim().len() == 0 { continue }
@@ -4031,7 +4060,7 @@ impl Instance {
         var said = String()
         if let Json.Array(blocks) = at(m, "blocks") {
             for b in blocks {
-                if str_at(b.copy(), "kind") == some(String("text")) { said.push_str(str_at(b, "text") ?? String()) }
+                if str_at(b.copy(), "kind") == some(String("text")) and str_at(b.copy(), "parent") == none { said.push_str(str_at(b, "text") ?? String()) }
             }
         }
         let first_line = said.trim().split("\n")[0].copy()
@@ -6382,7 +6411,8 @@ impl Instance {
             var b: i64 = 0
             for block in r.blocks {
                 if block.kind == "text" or block.kind == "thought" {
-                    _ = i.server.send_text(s, "{Obj.new().s("t", String("delta")).s("run", r.id.copy()).s("message", r.message.copy()).i("block", b).s("kind", block.kind.copy()).i("pos", 0).s("text", block.text.copy()).done()}")
+                    let inside = if block.parent.len() > 0 { some(block.parent.copy()) } else { none }
+                    _ = i.server.send_text(s, "{Obj.new().s("t", String("delta")).s("run", r.id.copy()).s("message", r.message.copy()).i("block", b).s("kind", block.kind.copy()).i("pos", 0).s("text", block.text.copy()).maybe("parent", inside).done()}")
                 } else if block.kind == "card" {
                     _ = i.server.send_text(s, "{Obj.new().s("t", String("card")).s("run", r.id.copy()).s("message", r.message.copy()).i("block", b).j("card", block.card.copy()).done()}")
                 }
@@ -7572,17 +7602,22 @@ impl Instance {
             if (str_at(content, "type") ?? String()) == "text" {
                 let piece = str_at(content, "text") ?? String()
                 let block_kind = if kind == "agent_message_chunk" { String("text") } else { String("thought") }
+                // A subagent's words go inside the call that started it, never in the reply.
+                let parent = parent_call(r.tools, u.copy())
                 var n = r.blocks.len()
-                if n == 0 or r.blocks[n - 1].kind != block_kind {
-                    r.blocks.push(new_block(""))
-                    r.blocks[n].kind = block_kind.copy()
+                if n == 0 or r.blocks[n - 1].kind != block_kind or r.blocks[n - 1].parent != parent {
+                    var b = new_block("")
+                    b.kind = block_kind.copy()
+                    b.parent = parent.copy()
+                    r.blocks.push(b)
                     n += 1
                 }
                 let pos = r.blocks[n - 1].text.len()
                 r.blocks[n - 1].text.push_str(piece.copy())
                 // A frame a word, so it's written as text, and only for someone looking.
                 if i.looking(r.user.copy()) {
-                    let delta = #"{"t":"delta","run":#{Json.Str(r.id.copy())},"message":#{Json.Str(r.message.copy())},"block":#{n - 1},"kind":"#{block_kind}","pos":#{pos},"text":#{Json.Str(piece)}}"#
+                    let inside = if parent.len() > 0 { #","parent":#{Json.Str(parent)}"# } else { String() }
+                    let delta = #"{"t":"delta","run":#{Json.Str(r.id.copy())},"message":#{Json.Str(r.message.copy())},"block":#{n - 1},"kind":"#{block_kind}","pos":#{pos},"text":#{Json.Str(piece)}#{inside}}"#
                     i.publish_text(r.user.copy(), delta)
                 }
             } else if kind == "agent_message_chunk" {
@@ -7606,23 +7641,24 @@ impl Instance {
             var call = if let c = r.tools.find(acp_call.copy()) { c.copy() } else { String() }
             if call.len() == 0 {
                 call = try i.store.new_id("tc")
+                let parent = parent_call(r.tools, u.copy())
                 r.tools.insert(acp_call, call.copy())
-                var b = new_block("tool")
-                b.call = call.copy()
-                r.blocks.push(b)
+                r.blocks.push(tool_block(call.copy(), parent))
             }
-            try i.event(r.user.copy(), "tool.started", Obj.new().s("run", r.id.copy()).s("call", call.copy()).i("block", tool_place(r.blocks, call.copy())).s("tool", acp.tool_kind(str_at(u.copy(), "kind") ?? String())).s("title", acp.tool_title(u.copy())).j("input", cut_input(at(u.copy(), "rawInput"))).j("locations", at(u.copy(), "locations")).done())
+            try i.event(r.user.copy(), "tool.started", acp_started(r.id.copy(), call.copy(), r.blocks, u.copy()))
             i.record_tool(r.user.copy(), r.agent.copy(), call.copy(), u.copy())
             let status = str_at(u.copy(), "status") ?? String()
             if status == "completed" or status == "failed" {
-                try i.tool_finished(r, call, status, at(u, "content"))
+                try i.tool_finished(r, call, status, at(u, "content"), none)
             }
         } else if kind == "tool_call_update" {
             let call = if let c = r.tools.find(str_at(u.copy(), "toolCallId") ?? String()) { c.copy() } else { String() }
             if call.len() == 0 { return }
             let status = str_at(u.copy(), "status") ?? String()
             if status == "completed" or status == "failed" {
-                try i.tool_finished(r, call, status, at(u, "content"))
+                // An update that names the call as it finishes it keeps the name.
+                let title = if acp.names_tool(u.copy()) { some(acp.tool_title(u.copy())) } else { none }
+                try i.tool_finished(r, call, status, at(u, "content"), title)
             } else {
                 var fields = Obj.new().s("call", call)
                 if acp.names_tool(u.copy()) { fields = fields.s("title", acp.tool_title(u.copy())) }
@@ -7703,7 +7739,7 @@ impl Instance {
         if act > 0 { i.tool_actions.insert(call.copy(), act) }
     }
 
-    fn tool_finished(i: Instance, r: Run, call: String, status: String, content: Json) ! Error {
+    fn tool_finished(i: Instance, r: Run, call: String, status: String, content: Json, title: String?) ! Error {
         var s = if status == "completed" { String("done") } else { String("failed") }
         if r.denied.contains(call.copy()) { s = String("denied") }
         if let act = i.tool_actions.find(call.copy()) {
@@ -7718,7 +7754,7 @@ impl Instance {
             }
             if s == "denied" { i.settle(act, String("refused"), String("person-said-no: Your person said no.")) } else { i.settle(act, s.copy(), if s == "done" { String() } else { said }) }
         }
-        try i.event(r.user.copy(), "tool.finished", Obj.new().s("call", call).s("status", s).j("output", output_blocks(content)).done())
+        try i.event(r.user.copy(), "tool.finished", Obj.new().s("call", call).s("status", s).maybe("title", title).j("output", output_blocks(content)).done())
     }
 
     // A request for permission: answered by the agent's permission mode, or
@@ -7745,13 +7781,17 @@ impl Instance {
             return
         }
         if call.len() == 0 {
+            // A request for a call its program never said it was starting: the call
+            // starts here, from the request's toolCall, so it shows live with its question.
             call = try i.store.new_id("tc")
+            var started = Json.Null
             if let r = mut i.runs.find(run_id.copy()) {
+                let parent = parent_call(r.tools, tool_call.copy())
                 r.tools.insert(acp_call, call.copy())
-                var b = new_block("tool")
-                b.call = call.copy()
-                r.blocks.push(b)
+                r.blocks.push(tool_block(call.copy(), parent))
+                started = acp_started(run_id.copy(), call.copy(), r.blocks, tool_call.copy())
             }
+            if started != Json.Null { try i.event(user.copy(), "tool.started", started) }
         }
         i.record_tool(user.copy(), agent_id.copy(), call.copy(), tool_call.copy())
         let options = at(params, "options")
@@ -8518,8 +8558,11 @@ impl Instance {
         var blocks = List<Json>()
         var said = String()
         for b in r.blocks {
+            // A subagent's calls and words keep the call they sit inside, and its
+            // words aren't the reply's.
+            let inside = if b.parent.len() > 0 { some(b.parent.copy()) } else { none }
             if b.kind == "tool" {
-                blocks.push(Obj.new().s("kind", b.kind.copy()).s("call", b.call.copy()).done())
+                blocks.push(Obj.new().s("kind", b.kind.copy()).s("call", b.call.copy()).maybe("parent", inside).done())
             } else if b.kind == "plan" {
                 blocks.push(Obj.new().s("kind", b.kind.copy()).j("entries", b.entries.copy()).done())
             } else if b.kind == "file" {
@@ -8527,8 +8570,8 @@ impl Instance {
             } else if b.kind == "card" {
                 blocks.push(Obj.new().s("kind", b.kind.copy()).j("card", b.card.copy()).done())
             } else {
-                blocks.push(Obj.new().s("kind", b.kind.copy()).s("text", b.text.copy()).done())
-                if b.kind == "text" { said.push_str(b.text.copy()) }
+                blocks.push(Obj.new().s("kind", b.kind.copy()).s("text", b.text.copy()).maybe("parent", inside).done())
+                if b.kind == "text" and b.parent.len() == 0 { said.push_str(b.text.copy()) }
             }
         }
         // A routine's quiet run, or a step of its flow, leaves nothing in the chat

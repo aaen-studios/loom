@@ -111,6 +111,9 @@ struct Block: Equatable, Sendable {
     var call: String?
     var file: FileRef?
     var plan: [PlanEntry] = []
+    /// The subagent call a tool call, words or a thought sit inside (protocol.md,
+    /// "Messages and streaming"): the phone leaves them out of the reply.
+    var parent: String?
 
     static func text(_ kind: String, _ text: String) -> Block {
         Block(kind: kind, text: text, call: nil, file: nil)
@@ -123,9 +126,18 @@ struct Block: Equatable, Sendable {
             text: b["text"].text,
             call: b["call"].string,
             file: kind == "file" ? FileRef(b) : nil,
-            plan: b["entries"].array.map { PlanEntry(content: $0["content"].text, status: $0["status"].text) }
+            plan: b["entries"].array.map { PlanEntry(content: $0["content"].text, status: $0["status"].text) },
+            parent: b["parent"].string
         )
     }
+}
+
+/// Which of a reply's blocks sit inside a subagent call of the same reply, as
+/// desktop/src/model.rs's `inside_a_call`: their parent is the call of one of its tool
+/// blocks.
+func insideACall(_ m: Message) -> [Bool] {
+    let calls = Set(m.blocks.filter { $0.kind == "tool" }.compactMap(\.call))
+    return m.blocks.map { b in b.parent.map { calls.contains($0) } ?? false }
 }
 
 struct Message: Identifiable, Equatable, Sendable {
@@ -151,7 +163,7 @@ struct Message: Identifiable, Equatable, Sendable {
 
     /// What it says, its text blocks one after another, to copy or select.
     var text: String {
-        blocks.filter { $0.kind == "text" && !$0.text.isEmpty }.map(\.text).joined(separator: "\n\n")
+        blocks.filter { $0.kind == "text" && $0.parent == nil && !$0.text.isEmpty }.map(\.text).joined(separator: "\n\n")
     }
 }
 
@@ -163,6 +175,8 @@ struct Tool: Equatable, Sendable {
     /// Its block in the reply, as tool.started says: where a reply still being written
     /// draws it among its words.
     var block: Int?
+    /// The subagent call it sits inside, as tool.started says.
+    var parent: String? = nil
 }
 
 /// A reply still being written: its run's tool calls among the blocks the deltas built,
@@ -175,6 +189,7 @@ func placeTools(_ blocks: inout [Block], _ tools: [Tool]) {
     for t in tools where have.insert(t.call).inserted {
         var b = Block.text("tool", "")
         b.call = t.call
+        b.parent = t.parent
         guard let i = t.block, i >= 0 else {
             blocks.append(b)
             continue
@@ -212,11 +227,14 @@ enum Part: Equatable, Sendable {
 /// had in view, and so does a person's message.
 func parts(_ m: Message, tools: [Tool]) -> [Part] {
     let n = m.blocks.count
+    // A subagent's calls and words aren't the reply's: the phone leaves them out.
+    let nested = insideACall(m)
     func said(_ i: Int) -> Bool {
-        m.blocks[i].kind == "text" && !m.blocks[i].text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        m.blocks[i].kind == "text" && !nested[i] && !m.blocks[i].text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
     func drawn(_ i: Int) -> Bool {
         let b = m.blocks[i]
+        if nested[i] { return false }
         switch b.kind {
         case "text": return said(i)
         case "thought", "plan": return !b.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !b.plan.isEmpty
@@ -276,7 +294,9 @@ private func layOut(_ m: Message, _ shown: [Int]) -> [Part] {
 /// The step a running turn is on, in a line: the first line of what it last said, the
 /// tool it last called, or that it's thinking.
 private func workingWords(_ m: Message, tools: [Tool]) -> String {
-    for b in m.blocks.reversed() {
+    // While a subagent works, the line is its call, not what it says or does inside.
+    let nested = insideACall(m)
+    for (i, b) in m.blocks.enumerated().reversed() where !nested[i] {
         switch b.kind {
         case "text":
             if let line = b.text.split(separator: "\n").lazy.map({ $0.trimmingCharacters(in: .whitespaces) }).first(where: { !$0.isEmpty }) {
@@ -612,6 +632,8 @@ final class Model {
         // counts UTF-8 bytes.
         let pos = f["pos"].int ?? 0
         let have = blocks[block].text.utf8.count
+        // A subagent's words, which aren't the reply's.
+        if let parent = f["parent"].string { blocks[block].parent = parent }
         if pos <= have {
             if pos < have {
                 blocks[block].text = String(decoding: Array(blocks[block].text.utf8.prefix(pos)), as: UTF8.self)
@@ -648,7 +670,7 @@ final class Model {
             }
         case .tools:
             tools = items.map {
-                Tool(call: $0["call"].text, run: $0["run"].text, title: $0["title"].text, status: $0["status"].string, block: $0["block"].int)
+                Tool(call: $0["call"].text, run: $0["run"].text, title: $0["title"].text, status: $0["status"].string, block: $0["block"].int, parent: $0["parent"].string)
             }
         case .approvals:
             approvals = items.map { a in
