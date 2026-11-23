@@ -94,7 +94,6 @@ fn own_tools(link: Link, c: mut Code) -> Json ! Error {
 }
 
 impl Link {
-
     // A POST to the instance, whose answer is a tool result.
     fn send(self, path: str, body: Json) -> Json {
         var req = post("{self.base}{path}", self.headers(), "{body}".to_bytes(), CALL_WAIT, MAX_ANSWER)
