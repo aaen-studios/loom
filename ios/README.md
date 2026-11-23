@@ -19,11 +19,20 @@ open ios/Loom.xcodeproj
 
 The app icon is the one [`scripts/icons.calx`](../scripts/icons.calx) makes, [`design/logo/ios/AppIcon.appiconset`](../design/logo/ios/AppIcon.appiconset), light, dark and tinted. Xcode's asset compiler doesn't follow links, so the script copies it into `build/ios/Icons.xcassets` each time, `--sample` too, and the project takes it from there.
 
-**The core doesn't build for iOS yet.** The Calx nightly's runtime includes `sys/random.h` and `libproc.h`, which the iOS SDKs don't have, so `calx build --target aarch64-ios-sim` stops there. The runtime on iOS ([CLX-408](https://acta.aaenz.no/aaen-studios/clx#CLX-408)) and std.net and std.http on iOS ([CLX-410](https://acta.aaenz.no/aaen-studios/clx#CLX-410)) are in review. Until they're in a nightly, only `--sample` builds, and the app can't reach an instance.
+The core builds for iOS with Calx's iOS targets ([CLX-408](https://acta.aaenz.no/aaen-studios/clx#CLX-408), [CLX-410](https://acta.aaenz.no/aaen-studios/clx#CLX-410)): nightly 202611231257 or newer.
 
 A build without the core (`--sample`, or `xcodegen` run by hand) runs on [`SampleCore`](Loom/Core/SampleCore.swift): sample agents and chats, a reply that streams, and a question to answer, in the frames the core sends. SwiftUI previews use it too. With the core linked, `-sample` at launch runs on it as well.
 
 To run against an instance, set `LOOM_SERVER` in the scheme's environment, or type its address on the sign-in screen.
+
+## Testing it against an instance
+
+```sh
+calx scripts/ios.calx --sim
+calx tests/ios/live.calx
+```
+
+[`tests/ios/live.calx`](../tests/ios/live.calx) starts an instance with the fake agent ([tests/README.md](../tests/README.md)), builds the app, and runs it in the simulator, headless: it joins with the QR code's text, a reply streams in, it answers a question, and it follows the instance when it moves. Each step is checked on the instance, and each screen is a screenshot in `build/ios/live/`. With no one to tap, a debug build takes these from its launch arguments, each doing what its screen's button does: `-link <qr>` joins, `-say <text>` sends to the agent `-open` opened, and `-allow` answers its questions yes (`fromLaunch` in [`Session.swift`](Loom/App/Session.swift)).
 
 ## Files
 
@@ -40,6 +49,8 @@ To run against an instance, set `LOOM_SERVER` in the scheme's environment, or ty
 - **A chat**: as the desktop draws it ([PLAN.md, "One answer at the end"](../PLAN.md#one-answer-at-the-end)). The person's bubbles take a breath of the agent's colour; what another agent sent stays grey. A reply is plain text with Markdown and code blocks, one answer at the end, its steps (thoughts, tool calls in their places, and what it said on the way, smaller and quieter) folded under one line that shows the step it's on while it works. A routine's quiet run isn't drawn, and its old prompts aren't shown; what it posts is. Pictures are sized from their file's header before they load, to fit the column and 360 × 400. Then questions with Allow and Deny, and the composer, with photos (sent as JPEG) and files.
 - **Settings**: the account, the instance, the person's devices, notifications, and signing out.
 
+When the instance moves, the core follows it and the app says so: "Your instance moved to …". A move the core won't follow (`moved_unsigned`, `moved_elsewhere`) shows the core's reason, and the app stays where it was.
+
 For a screenshot of each screen, launch it with `-sample`, and `-signedOut`, `-open <agent id>` or `-settings`: `xcrun simctl launch booted no.aaenz.loom -sample -open a_1`.
 
 ## Push
@@ -49,4 +60,4 @@ Notifications show while the app runs, from the core's `core.notify`. Push to th
 - **Permission**: Settings → Notifications asks, and on a yes the app registers with APNs.
 - **The token**: `Session.registered(pushToken:)` keeps it, and sends the core `push.register` with `token` and `env` on each `welcome`, since the core sends a command only while it's connected. The core seals it for the push relay when `welcome` has a `relay`.
 - **Allow and Deny**: an `approval.needed` notification has both, answered as `approve` without opening the app.
-- **Still to come**: the `aps-environment` entitlement, which needs the app signed with Elliot's Apple team, and the notification service extension for the push relay's encrypted notifications (Phase 10).
+- **Still to come** ([LOO-253](https://acta.aaenz.no/aaen-studios/loom#LOO-253)): the `aps-environment` entitlement and signing with Elliot's Apple team, the notification service extension that opens the push relay's sealed notifications with `loom_push_open`, and TestFlight. Until then the app gets no APNs token, so notifications show only while it runs.

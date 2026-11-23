@@ -1,6 +1,6 @@
 # Phones
 
-> The loom app for iPhone is still being built. This page says how it will work.
+> Loom isn't on TestFlight or the App Store yet. To use it on your iPhone now, [build it yourself](iphone.md).
 
 Add your phone from a device that's already signed in: **Add a phone**, in the server popup (click the server's name at the bottom of the sidebar), shows a QR code, and the loom app on the phone scans it. The phone gets a sign-in of its own, which you can take away from the same page.
 
@@ -19,7 +19,7 @@ Turn the switch off to stop phones reaching it again.
 
 ## Notifications
 
-While the loom app is open, it shows notifications as they come. To reach a phone while the app is closed, the instance needs Apple's push service, and Apple takes only pushes signed with the key of the account that built the app. So an instance does one of these:
+While the loom app is open, it shows notifications as they come. Notifications while it's closed aren't in the app yet. For those, the instance needs Apple's push service, and Apple takes only pushes signed with the key of the account that built the app. So an instance does one of these:
 
 - **It has that key itself.** `loom push key AuthKey_….p8 KEY_ID TEAM_ID BUNDLE_ID` sets it up, if you build the app with your own Apple account.
 - **It uses a push relay.** On **Add a phone**, under **Notifications on iPhone**, the owner gives the relay's address beside **Push relay** and chooses **Use**. **Stop** turns it off. Phones that connect after that use it. The relay never reads a notification:

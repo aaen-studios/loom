@@ -8,6 +8,7 @@ Loom is an app for agents that work for you: they answer, remember, run routines
 - [Agents and keys](agents.md): agent programs, API keys, making an agent, agent defaults, MCP servers and secrets.
 - [People](people.md): inviting others to your instance, and managing them.
 - [Phones](phones.md): adding your phone.
+- [Building the iPhone app](iphone.md): on a Mac, for the simulator or your own phone.
 - [Tailscale](tailscale.md): reaching loom from anywhere without opening it to the internet.
 
 ## Using loom

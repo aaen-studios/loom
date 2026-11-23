@@ -1,0 +1,202 @@
+module tests.ios.live
+
+// The iPhone app on the real core against a real instance, in the simulator,
+// headless: it starts an instance with the fake agent, takes a debug build of
+// the app through joining, a streamed reply and a question with its launch
+// arguments (ios/Loom/App/Session.swift, `fromLaunch`), and moves the
+// instance while the app is connected. What the app does is checked on the
+// instance, from the owner's own session, and each screen is kept as a
+// screenshot.
+//
+//     calx scripts/ios.calx --sim
+//     calx tests/ios/live.calx
+//
+// Run it from the repository's root, on a Mac with Xcode. The screenshots go
+// in build/ios/live/. LOOM_SIMULATOR names the simulator, an iPhone 17 Pro
+// otherwise. The simulator is shut down at the end.
+import std.env
+import std.fs
+import std.json.{Json, parse}
+import std.process.{Command, Output, Stdio, exit}
+import std.thread.{sleep}
+import std.url.{form_encode}
+import shared.client.{Session, reply_text}
+import shared.obj.{Obj, at, bool_at, str_at}
+import tests.kit.{Instance, check, loom, remove_scratch}
+
+const SHOTS: str = "build/ios/live"
+const APP: str = "no.aaenz.loom"
+const BUILT: str = "build/ios/dd/Build/Products/Debug-iphonesimulator/Loom.app"
+
+fn wait_ms(ms: u64) {
+    unsafe { sleep(ms * 1000000) }
+}
+
+fn simctl(args: List<String>) -> Output ! Error {
+    return try Command.new(String("xcrun")).arg(String("simctl")).args(args).output()
+}
+
+// The simulator, and the app on it.
+struct Phone {
+    name: String
+}
+
+impl Phone {
+    // Starts the app afresh with `args`.
+    fn launch(self, args: List<String>) ! Error {
+        _ = try simctl([String("terminate"), self.name.copy(), String(APP)])
+        var all: List<String> = [String("launch"), self.name.copy(), String(APP)]
+        all.extend(args)
+        let out = try simctl(all)
+        if not out.status.success() { fail "the app didn't start: {out.error_text()}" }
+    }
+
+    fn shot(self, name: String) ! Error {
+        let out = try simctl([String("io"), self.name.copy(), String("screenshot"), "{SHOTS}/{name}.png"])
+        if not out.status.success() { fail "no screenshot: {out.error_text()}" }
+    }
+}
+
+// The QR code's text for a phone to join the instance at `base` (host:port),
+// as the core makes it from `link.create`'s answer (core/link.calx).
+fn qr(base: String, made: Json) -> String {
+    let v = at(made, "value")
+    let pairs: List<(String, String)> = [(String("a"), "http://{base}"), (String("c"), str_at(v.copy(), "code") ?? String()), (String("i"), str_at(v.copy(), "instance") ?? String()), (String("k"), str_at(v, "key") ?? String())]
+    return "loom://link?{form_encode(pairs)}"
+}
+
+// The next message.created whose message has `role`.
+fn created(s: mut Session, role: str) -> Json ! Error {
+    loop {
+        let m = at(try s.until("event", "message.created", 60000), "message")
+        if str_at(m.copy(), "role") == some(String(role)) { return m }
+    }
+}
+
+// Moves the instance to a `loom receive` in a new folder, and starts it there,
+// on the port the receive had, as a server's service does.
+fn move_it(inst: mut Instance) ! Error {
+    let there = "{try fs.temp_dir()}/new"
+    let rx = try loom(there.copy(), [String("receive"), String("--port"), String("0"), String("--json")]).stdout(Stdio.Pipe).spawn()
+    let line = rx.wait_for_line(String("\"code\""), 120000) else {
+        rx.kill()
+        fail "loom receive didn't print a move code"
+    }
+    let said = try parse(line.trim().copy())
+    let listening = str_at(said.copy(), "listening") ?? String()
+    let port = listening[(listening.find_last(":") ?? 0) + 1..].copy()
+    var owner = try Session.connect(inst.base.copy(), inst.token.copy(), 0)
+    let done = try owner.cmd("q_move", "instance.move", Obj.new().s("to", listening).s("code", str_at(said, "code") ?? String()).done())
+    try check(at(done, "ok") == Json.Bool(true), "the instance moves while the app is connected")
+    owner.close()
+    var r = rx
+    _ = r.wait()
+    let first = inst.data.copy()
+    let old = inst.copy()
+    inst = try Instance { server: old.server, data: there, base: old.base, token: old.token }.restart_with([String("--port"), port], 0)
+    remove_scratch(first)
+}
+
+fn run(inst: mut Instance, phone: Phone) ! Error {
+    var owner = try Session.connect(inst.base.copy(), inst.token.copy(), 0)
+    let made = try owner.cmd("q_agent", "agent.create", Obj.new().s("name", String("Fake")).s("acp_agent", String("fake")).s("color", String("periwinkle")).done())
+    let agent = str_at(at(at(made, "value"), "agent"), "id") ?? String()
+    try check(agent.starts_with("a_"), "the owner makes the agent Fake")
+    let link = try owner.cmd("q_link", "link.create", Obj.new().done())
+    try check(at(link.copy(), "ok") == Json.Bool(true), "the owner's device makes a code to add a phone")
+
+    // Joining with the code, as the desktop app's Add a phone shows it.
+    try phone.launch([String("-link"), qr(inst.base.copy(), link)])
+    let added = try owner.until("event", "device.added", 60000)
+    try check(str_at(at(added, "device"), "kind") == some(String("ios")), "the app joins with the QR code's text, as an iPhone")
+    wait_ms(3000)
+    try phone.shot(String("1-agents"))
+
+    // A reply that streams in.
+    let words = "One two three four five six seven eight nine ten eleven twelve."
+    try phone.launch([String("-open"), agent.copy(), String("-say"), "/slow 300\n{words}"])
+    let asked = try created(mut owner, "person")
+    try check(reply_text(asked).ends_with(words), "the app sends the agent a message")
+    _ = try owner.until("delta", "", 60000)
+    wait_ms(1500)
+    try phone.shot(String("2-streaming"))
+    let reply = try created(mut owner, "agent")
+    try check(reply_text(reply) == words, "the agent's reply streams to the app, whole")
+    _ = try owner.until("event", "run.finished", 60000)
+    wait_ms(1500)
+    try phone.shot(String("3-reply"))
+
+    // A question, answered on the phone.
+    try phone.launch([String("-open"), agent.copy(), String("-say"), String("/ask rm -rf build\nRemoved it.")])
+    let needed = try owner.until("event", "approval.needed", 60000)
+    wait_ms(2000)
+    try phone.shot(String("4-asks"))
+    try phone.launch([String("-open"), agent.copy(), String("-allow")])
+    let answered = try owner.until("event", "approval.answered", 60000)
+    try check(str_at(answered.copy(), "call") == str_at(needed, "call") and bool_at(answered, "allow") == some(true), "the app answers the question yes")
+    let after = try created(mut owner, "agent")
+    try check(reply_text(after).ends_with("Removed it."), "and the agent goes on")
+    _ = try owner.until("event", "run.finished", 60000)
+    wait_ms(1500)
+    try phone.shot(String("5-allowed"))
+    owner.close()
+
+    // The instance moves while the app is connected: it follows, says so, and
+    // what it sends next goes to the new place.
+    try move_it(mut inst)
+    for i in 0..20 {
+        wait_ms(500)
+        try phone.shot("6-moved-{i}")
+    }
+    var there = try Session.connect(inst.base.copy(), inst.token.copy(), 0)
+    try phone.launch([String("-open"), agent, String("-say"), String("Here after the move.")])
+    let moved = try created(mut there, "person")
+    try check(reply_text(moved) == "Here after the move.", "the app follows the instance to its new place")
+    _ = try there.until("event", "run.finished", 60000)
+    wait_ms(1500)
+    try phone.shot(String("7-after-the-move"))
+    there.close()
+}
+
+fn main() ! Error {
+    if not fs.is_file(String("ios/Loom.xcodeproj/project.pbxproj")) or not fs.exists(String("build/ios/LoomCore.xcframework")) {
+        eprintln("make the project with the core first: calx scripts/ios.calx --sim")
+        exit(2)
+    }
+    let simulator = env.variable(String("LOOM_SIMULATOR")) ?? String("iPhone 17 Pro")
+    println("building the app for {simulator}")
+    var x = Command.new(String("xcodebuild")).args([String("build"), String("-quiet"), String("-project"), String("ios/Loom.xcodeproj"), String("-scheme"), String("Loom")])
+    x = x.args([String("-configuration"), String("Debug"), String("-destination"), "platform=iOS Simulator,name={simulator}", String("-derivedDataPath"), String("build/ios/dd")])
+    let built = try x.output()
+    if not built.status.success() {
+        eprintln("{built.text()}{built.error_text()}")
+        exit(1)
+    }
+    if fs.exists(String(SHOTS)) { try fs.remove_dir_all(String(SHOTS)) }
+    try fs.make_dir_all(String(SHOTS))
+
+    // A fresh app, which knows no instance yet. Booting one that's booted fails, and
+    // so does removing an app that isn't there, which is as well.
+    let phone = Phone { name: simulator.copy() }
+    _ = try simctl([String("boot"), simulator.copy()])
+    _ = try simctl([String("uninstall"), simulator.copy(), String(APP)])
+    let installed = try simctl([String("install"), simulator.copy(), String(BUILT)])
+    if not installed.status.success() {
+        eprintln("the app didn't install: {installed.error_text()}")
+        exit(1)
+    }
+
+    var inst = try Instance.start()
+    let failure: String? = match run(mut inst, phone) {
+        ok => none,
+        err(e) => some("{e}"),
+    }
+    _ = try simctl([String("terminate"), simulator.copy(), String(APP)])
+    _ = try simctl([String("shutdown"), simulator])
+    inst.stop()
+    if let f = failure {
+        eprintln("\n{f}")
+        exit(1)
+    }
+    println("\nios live: all good, with screenshots in {SHOTS}/")
+}
