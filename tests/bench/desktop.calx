@@ -8,6 +8,7 @@ module tests.bench.desktop
 //     calx tests/bench/desktop.calx prepare DATA [TURNS]
 //     calx tests/bench/desktop.calx stream DATA [WORDS] [MS]
 //     calx tests/bench/desktop.calx say DATA TEXT
+//     calx tests/bench/desktop.calx pages DATA [N]
 //
 // prepare makes DATA an instance on this computer, as the app's first start would,
 // with the fake agent, one agent and TURNS (300 by default) turns in its chat, each
@@ -15,6 +16,8 @@ module tests.bench.desktop
 // set itself to start at login. stream sends one more message while the app runs on
 // DATA, whose reply streams WORDS words (2000), a word every MS ms (10). say sends
 // TEXT, with \n for a new line, such as "/sleep 15000" for an agent that works a while.
+// pages gives the app running on DATA N routines and N skills (500), and its agent
+// N tool calls for its activity, for measuring the pages that list them.
 import std.env
 import std.fs
 import std.json.{Json}
@@ -98,6 +101,29 @@ fn say(data: String, text: String) ! Error {
     app.close()
 }
 
+fn pages(data: String, n: usize) ! Error {
+    let port = (try fs.read_text("{data}/instance/port") ?? String()).trim().copy()
+    let token = try fs.read_text("{data}/bench-token") ?? String()
+    var app = try Session.connect("127.0.0.1:{port}", token, 0)
+    for k in 0..n {
+        let routine = Obj.new().s("name", "Routine {k}").s("agent", String("Fake")).s("prompt", String("Say how the day went.")).j("schedule", Obj.new().i("every", i64.wrap(60 + k)).done()).done()
+        let made = try app.cmd("bench-routine", "routine.put", routine)
+        if (str_at(made.copy(), "error") ?? String()).len() > 0 { fail "routine.put failed: {made}" }
+        let skill = Obj.new().s("name", "skill-{k}").s("description", "When the job is number {k}").s("body", String("Do it well.")).done()
+        let kept = try app.cmd("bench-skill", "skill.put", skill)
+        if (str_at(kept.copy(), "error") ?? String()).len() > 0 { fail "skill.put failed: {kept}" }
+        if k % 50 == 0 { app.frames = List<Json>() }
+    }
+    app.close()
+    var text = String()
+    for k in 0..n {
+        text.push_str("/tool step {k}\n")
+    }
+    text.push_str("done")
+    try say(data, text)
+    println("{n} routines, skills and tool calls")
+}
+
 fn stream(data: String, words: usize, every: usize) ! Error {
     var text = "/slow {every}\n"
     for n in 0..words {
@@ -111,7 +137,7 @@ fn stream(data: String, words: usize, every: usize) ! Error {
 fn main() ! Error {
     let args = env.args()
     if args.len() < 2 {
-        eprintln("usage: calx tests/bench/desktop.calx prepare DATA [TURNS] | stream DATA [WORDS] [MS] | say DATA TEXT")
+        eprintln("usage: calx tests/bench/desktop.calx prepare DATA [TURNS] | stream DATA [WORDS] [MS] | say DATA TEXT | pages DATA [N]")
         exit(2)
     }
     let data = args[1].copy()
@@ -121,6 +147,8 @@ fn main() ! Error {
         try stream(data, arg_or(args.copy(), 2, 2000), arg_or(args, 3, 10))
     } else if args[0] == "say" and args.len() > 2 {
         try say(data, args[2].replace("\\n", "\n"))
+    } else if args[0] == "pages" {
+        try pages(data, arg_or(args, 2, 500))
     } else {
         eprintln("unknown command {args[0]}")
         exit(2)

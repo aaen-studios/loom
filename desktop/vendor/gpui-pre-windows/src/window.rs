@@ -32,6 +32,90 @@ use crate::direct_manipulation::DirectManipulationHandler;
 use crate::*;
 use gpui::*;
 
+/// loom: whether a window has anything new to draw, so the vsync thread asks it to paint
+/// only then (`platform.rs`). GPUI says so through `frame_waker` and `schedule_frame`.
+pub(crate) struct FrameDemand {
+    wanted: std::sync::atomic::AtomicBool,
+    /// Until when, in `FrameDemand::now` milliseconds, it's asked to paint at every
+    /// vblank anyway: while a touchpad gesture runs, since Direct Manipulation is
+    /// pumped from each paint.
+    pump_until: std::sync::atomic::AtomicU64,
+    /// When the vsync thread last asked it to paint.
+    asked: std::sync::atomic::AtomicU64,
+}
+
+impl FrameDemand {
+    /// How often a window with nothing new is asked to paint all the same, in case a
+    /// frame GPUI put off was never asked for again.
+    const FALLBACK_MS: u64 = 250;
+
+    pub(crate) fn new() -> Arc<FrameDemand> {
+        Arc::new(FrameDemand {
+            wanted: AtomicBool::new(true),
+            pump_until: std::sync::atomic::AtomicU64::new(0),
+            asked: std::sync::atomic::AtomicU64::new(0),
+        })
+    }
+
+    /// Milliseconds since the first time this was asked.
+    pub(crate) fn now() -> u64 {
+        static START: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
+        START.get_or_init(Instant::now).elapsed().as_millis() as u64
+    }
+
+    /// Something new to draw: the next vblank asks the window to paint.
+    pub(crate) fn want(&self) {
+        self.wanted
+            .store(true, std::sync::atomic::Ordering::Release);
+    }
+
+    /// Asked to paint at every vblank for `ms` from now, or for good with `u64::MAX`
+    /// until `pump_for` is called again.
+    pub(crate) fn pump_for(&self, ms: u64) {
+        let until = if ms == u64::MAX {
+            u64::MAX
+        } else {
+            Self::now() + ms
+        };
+        self.pump_until
+            .store(until, std::sync::atomic::Ordering::Release);
+        self.want();
+    }
+
+    /// Keeps a gesture's pumping going for `ms` more, unless it's on for good.
+    pub(crate) fn pump_more(&self, ms: u64) {
+        use std::sync::atomic::Ordering;
+        let until = Self::now() + ms;
+        let mut was = self.pump_until.load(Ordering::Acquire);
+        while was != u64::MAX && was < until {
+            match self.pump_until.compare_exchange_weak(
+                was,
+                until,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => break,
+                Err(now) => was = now,
+            }
+        }
+    }
+
+    /// For the vsync thread: whether to ask the window to paint at this vblank. It's
+    /// asked when GPUI wants a frame, while a gesture is pumped, and every
+    /// `FALLBACK_MS` regardless.
+    pub(crate) fn take(&self) -> bool {
+        use std::sync::atomic::Ordering;
+        let now = Self::now();
+        let wanted = self.wanted.swap(false, Ordering::AcqRel)
+            || now < self.pump_until.load(Ordering::Acquire)
+            || now.saturating_sub(self.asked.load(Ordering::Relaxed)) >= Self::FALLBACK_MS;
+        if wanted {
+            self.asked.store(now, Ordering::Relaxed);
+        }
+        wanted
+    }
+}
+
 pub(crate) struct WindowsWindow(pub Rc<WindowsWindowInner>);
 
 impl std::ops::Deref for WindowsWindow {
@@ -55,6 +139,9 @@ pub struct WindowsWindowState {
 
     pub callbacks: Callbacks,
     pub frame_signal: Arc<PlatformFrameSignal>,
+    /// loom: shared with the vsync thread, which asks the window to paint only when
+    /// this says it has something new to draw.
+    pub(crate) frame_demand: Arc<FrameDemand>,
     pub input_handler: Cell<Option<PlatformInputHandler>>,
     pub ime_enabled: Cell<bool>,
     pub pending_surrogate: Cell<Option<u16>>,
@@ -156,8 +243,10 @@ impl WindowsWindowState {
         let fullscreen = None;
         let initial_placement = None;
 
-        let direct_manipulation = DirectManipulationHandler::new(hwnd, scale_factor)
-            .context("initializing Direct Manipulation")?;
+        let frame_demand = FrameDemand::new();
+        let direct_manipulation =
+            DirectManipulationHandler::new(hwnd, scale_factor, frame_demand.clone())
+                .context("initializing Direct Manipulation")?;
 
         Ok(Self {
             origin: Cell::new(origin),
@@ -171,6 +260,7 @@ impl WindowsWindowState {
             min_size,
             callbacks,
             frame_signal: Arc::new(PlatformFrameSignal::new()),
+            frame_demand,
             input_handler: Cell::new(input_handler),
             ime_enabled: Cell::new(true),
             pending_surrogate: Cell::new(pending_surrogate),
@@ -1041,6 +1131,18 @@ impl PlatformWindow for WindowsWindow {
             .borrow_mut()
             .draw(scene, self.state.background_appearance.get())
             .log_err();
+    }
+
+    // loom: GPUI calls the waker when the window gets something new to draw, and
+    // `schedule_frame` when it only needs a frame presented. Either way the vsync
+    // thread asks it to paint at the next vblank, and not before.
+    fn frame_waker(&self) -> Option<Rc<dyn Fn()>> {
+        let demand = self.state.frame_demand.clone();
+        Some(Rc::new(move || demand.want()))
+    }
+
+    fn schedule_frame(&self) {
+        self.state.frame_demand.want();
     }
 
     #[cfg(feature = "test-support")]
