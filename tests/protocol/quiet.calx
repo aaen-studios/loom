@@ -8,7 +8,10 @@ module tests.protocol.quiet
 // failure with why, which the person sees and is told, and five in a row
 // turn the routine off with a notice. pause_routine pauses it and tells the
 // person. A prompt still naming OpenBot's tools reaches them as loom's.
-// Outside a routine run, they're refused. routine.runs keeps each run.
+// Outside a routine run, they're refused. routine.runs keeps each run. A post
+// keeps its routine's name. A run while the person's turn goes on waits for
+// it, and for what they queued behind it; one while the routine's last run
+// still goes is skipped, and kept so.
 //
 //     calx tests/protocol/quiet.calx
 import std.json.{Json}
@@ -41,6 +44,30 @@ fn run_once(app: mut Session, q: str, id: String) -> (Json, List<Json>) ! Error 
             return (r, app.frames[from..].copy())
         }
     }
+}
+
+// The routine `id` once its last run is `status`, from the frames that came
+// since `since` or those still to come.
+fn last_is(app: mut Session, since: usize, id: String, status: str) -> Json ! Error {
+    var n = since
+    loop {
+        while n < app.frames.len() {
+            let f = app.frames[n].copy()
+            n += 1
+            if str_at(f.copy(), "kind") != some(String("routine.updated")) { continue }
+            let r = at(f, "routine")
+            if str_at(r.copy(), "id") == some(id.copy()) and str_at(at(r.copy(), "last"), "status") == some(String(status)) { return r }
+        }
+        _ = try app.until("event", "routine.updated")
+    }
+}
+
+// Routine `id`'s newest run, as routine.runs gives it.
+fn newest_run(app: mut Session, q: str, id: String) -> Json ! Error {
+    if let Json.Array(runs) = at(at(try app.cmd(q, "routine.runs", Obj.new().s("id", id).done()), "value"), "runs") {
+        if runs.len() > 0 { return runs[0].copy() }
+    }
+    fail "routine.runs has none"
 }
 
 fn kinds(frames: List<Json>, kind: str) -> List<Json> {
@@ -89,7 +116,8 @@ fn run(i: Instance) ! Error {
     try check(str_at(at(n.copy(), "last"), "status") == some(String("done")) and shown(n_frames.copy()) == [String("agent: 26.4 is out.")], "a post is the only message the run leaves")
     var posted = Json.Null
     for f in kinds(n_frames, "message.created") { posted = at(f.copy(), "message") }
-    try check(str_at(posted.copy(), "routine") == some(news.copy()) and str_at(posted.copy(), "conversation") == some(conversation.copy()) and str_at(posted, "agent") != none, "in the agent's chat, as its message, marked with the routine")
+    try check(str_at(posted.copy(), "routine") == some(news.copy()) and str_at(posted.copy(), "conversation") == some(conversation.copy()) and str_at(posted.copy(), "agent") != none, "in the agent's chat, as its message, marked with the routine")
+    try check(str_at(posted, "routine_name") == some(String("News")), "and with the routine's name as it was then")
     try check(notified.len() == 1 and str_at(notified[0].copy(), "title") == some(String("News")) and str_at(notified[0].copy(), "body") == some(String("26.4 is out.")) and str_at(notified[0].copy(), "conversation") == some(conversation.copy()), "and its person is notified with it")
     let runs = at(at(try app.cmd("q_8", "routine.runs", Obj.new().s("id", news.copy()).done()), "value"), "runs")
     var last_run = Json.Null
@@ -125,6 +153,36 @@ fn run(i: Instance) ! Error {
     let paused = kinds(p_frames, "notify")
     try check(bool_at(p.copy(), "on") == some(false) and str_at(at(p, "last"), "status") == some(String("quiet")), "pause_routine pauses its own routine")
     try check(paused.len() >= 1 and str_at(paused[0].copy(), "title") == some(String("Main paused Sale")) and str_at(paused[0].copy(), "body") == some(String("the sale is over")), "and tells the person why")
+
+    // A routine run while the person's turn goes on in the chat waits for it to
+    // end, and for what the person queued behind it, then runs.
+    let later = try put(mut app, "q_19", "Later", "/mcp routine_post \{\"text\": \"after you\"\}")
+    try app.send(Obj.new().s("t", String("send")).s("cid", String("c_2")).s("conversation", conversation.copy()).s("text", String("/sleep 1500\nfirst")).done())
+    _ = try app.until("event", "run.started")
+    let since = app.frames.len()
+    try app.send(Obj.new().s("t", String("send")).s("cid", String("c_3")).s("conversation", conversation.copy()).s("text", String("second")).done())
+    let waited = at(try app.cmd("q_20", "routine.run", Obj.new().s("id", later.copy()).done()), "value")
+    let waiting_run = str_at(waited.copy(), "run") ?? String()
+    try check(bool_at(waited, "waiting") == some(true) and waiting_run.len() > 0, "routine.run in a busy chat says the run waits")
+    let w = try newest_run(mut app, "q_21", later.copy())
+    try check(str_at(w.copy(), "run") == some(waiting_run.copy()) and str_at(w, "status") == some(String("waiting")), "and its runs say so")
+    let done = try last_is(mut app, since, later.copy(), "done")
+    try check(str_at(at(done, "last"), "run") == some(waiting_run.copy()), "once the chat is free, that run goes")
+    let order = shown(app.frames[since..].copy())
+    let second_at = order.position(|x| x == "person: second") ?? 99
+    let posted_at = order.position(|x| x == "agent: after you") ?? 0
+    if second_at > posted_at { eprintln("the chat went: {order}") }
+    try check(second_at < posted_at, "after the message the person queued")
+
+    // A run while the routine's run before still goes is skipped, and kept in its runs with why.
+    let slow = try put(mut app, "q_22", "Slow", "/sleep 1500")
+    let slow_since = app.frames.len()
+    _ = try app.cmd("q_23", "routine.run", Obj.new().s("id", slow.copy()).done())
+    let again = try app.cmd("q_24", "routine.run", Obj.new().s("id", slow.copy()).done())
+    try check(str_at(at(again, "error"), "code") == some(String("busy")), "a routine run again while its run goes on is refused")
+    let skipped = try newest_run(mut app, "q_25", slow.copy())
+    try check(str_at(skipped.copy(), "status") == some(String("skipped")) and str_at(skipped, "error") == some(String("It was still running from the time before.")), "and its runs keep that time as skipped, with why")
+    _ = try last_is(mut app, slow_since, slow, "quiet")
 
     // Outside a routine run, they're refused.
     try app.send(Obj.new().s("t", String("send")).s("cid", String("c_1")).s("conversation", conversation.copy()).s("text", String("/mcp routine_quiet \{\}\n/mcp routine_post \{\"text\": \"hi\"\}")).done())

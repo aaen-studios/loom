@@ -24,6 +24,7 @@ import std.thread.{Task, sleep}
 import std.time.{Timestamp}
 import shared.obj.{Obj, int_at, merge, str_at, without}
 import server.defaults.{blank, filled}
+import server.routines.{RESTARTED_WAITING}
 import shared.checkpoint
 
 // A search snippet as words, without the Markdown it was written in: a link
@@ -1898,9 +1899,11 @@ impl Store {
         return out
     }
 
-    // Routine runs a crash or a restart cut short are failed, saying so.
+    // Routine runs a crash or a restart cut short are failed, saying so, and
+    // those that waited for their chat are skipped.
     pub fn fail_running_routine_runs(self) ! Error {
         _ = try self.db.execute(String("UPDATE routine_runs SET json = json_set(json, '$.status', 'failed', '$.error', 'The instance restarted.') WHERE json_extract(json, '$.status') = 'running'"))
+        _ = try self.db.execute(String("UPDATE routine_runs SET json = json_set(json, '$.status', 'skipped', '$.error', ?) WHERE json_extract(json, '$.status') = 'waiting'"), [t(String(RESTARTED_WAITING))])
     }
 
     // --- Routine flows that are running (PLAN.md, "Routine flows") ---
@@ -2683,6 +2686,7 @@ fn a_routines_runs_are_kept_newest_first_and_go_with_it() {
     for n in 1i64..4 {
         s.put_routine_run(a.id.copy(), String("rt_1"), Obj.new().s("run", "run_{n}").i("at", n).s("status", String("running")).done())!
     }
+    s.put_routine_run(a.id.copy(), String("rt_2"), Obj.new().s("run", String("run_9")).i("at", 9).s("status", String("waiting")).done())!
     s.put_routine_run(a.id.copy(), String("rt_1"), Obj.new().s("run", String("run_3")).i("at", 3).s("status", String("quiet")).done())!
     let runs = s.routine_runs(a.id.copy(), String("rt_1"), none, 10)!
     assert(runs.len() == 3 and "{runs[0]}".contains("run_3") and "{runs[0]}".contains("quiet") and "{runs[2]}".contains("run_1"))
@@ -2692,6 +2696,9 @@ fn a_routines_runs_are_kept_newest_first_and_go_with_it() {
     // A restart fails the ones it cut short.
     s.fail_running_routine_runs()!
     assert("{s.routine_run(a.id.copy(), String("rt_1"), String("run_2"))!}".contains("The instance restarted."))
+    // And skips one that waited for its chat.
+    let waited = s.routine_run(a.id.copy(), String("rt_2"), String("run_9"))! ?? Json.Null
+    assert(str_at(waited.copy(), "status") == some(String("skipped")) and str_at(waited, "error") == some(String(RESTARTED_WAITING)))
     s.put_routine(a.id.copy(), Obj.new().s("id", String("rt_1")).done())!
     assert(s.delete_routine(a.id.copy(), String("rt_1"))! and s.routine_runs(a.id.copy(), String("rt_1"), none, 10)!.len() == 0)
 }

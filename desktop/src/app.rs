@@ -10417,6 +10417,7 @@ ACTA_KEY=secret:ACTA_KEY",
             let last = match r.last_status.as_str() {
                 "" | "done" | "quiet" => String::new(),
                 "running" => " · running now".into(),
+                "waiting" => " · waiting for the chat".into(),
                 "skipped" => format!(" · skipped at {}", time_of(r.last_at)),
                 _ => format!(" · failed at {}: {}", time_of(r.last_at), r.last_error),
             };
@@ -14468,6 +14469,16 @@ fn reply(
                 .font_weight(FontWeight::MEDIUM)
                 .text_color(p.ink)
                 .child(name.to_string()),
+        );
+    }
+    // A routine's post: which routine it's from, as a person's message from another agent
+    // says who sent it.
+    if let Some(from) = m.routine_line() {
+        body = body.child(
+            div()
+                .text_size(px(size::CAPTION))
+                .text_color(p.ink_3)
+                .child(from),
         );
     }
     // What shows in the reply, and how it reads: its answer, and its steps folded

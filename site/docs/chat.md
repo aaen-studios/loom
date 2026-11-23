@@ -42,9 +42,11 @@ To have every message steer at once, set **A message while it answers** on the a
 
 ## Routines in the chat
 
-A routine runs out of sight: its prompt and the agent's answer stay out of the chat. The agent posts in the chat only when there's something to tell you, and with **Notify me** on, the post comes as a notification too. A run that fails shows the agent's answer, so you see why.
+A routine runs out of sight: its prompt and the agent's answer stay out of the chat. The agent posts in the chat only when there's something to tell you, with "From the routine" and the routine's name over the post, and with **Notify me** on, the post comes as a notification too. A run that fails shows the agent's answer, so you see why.
 
-Each routine's **Runs**, on its page under **Routines**, say how every run ended (posted, nothing new, or failed) and what the agent posted or answered.
+A routine due while the agent is answering you waits until it's done, and until the messages you queued have gone. If the chat is still busy after 10 minutes, or the routine's next time comes first, that run is skipped.
+
+Each routine's **Runs**, on its page under **Routines**, say how every run ended (posted, nothing new, failed, or skipped and why) and what the agent posted or answered.
 
 ## A backup program
 

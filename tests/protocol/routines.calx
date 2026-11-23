@@ -9,7 +9,8 @@ module tests.protocol.routines
 // and what its agent answered. Paused, it waits; run by hand, it runs
 // once. A daily or weekday routine runs next at its time, in its time zone,
 // on the real clock. An agent makes routines with the schedule tool, lists them, and
-// deletes one only once the person says yes.
+// deletes one only once the person says yes. A run in a busy chat waits, gives
+// way to the next, and is skipped after 10 minutes (a second here).
 //
 //     calx tests/protocol/routines.calx
 import std.json.{Json}
@@ -151,6 +152,23 @@ fn run(i: Instance) -> i64 ! Error {
     let logged = "{at(try app.cmd("q_10", "activity.list", Obj.new().s("agent", agent).done()), "value")}"
     try check(logged.contains("Made the routine Pulse") and logged.contains("Ran the routine Pulse") and logged.contains("Deleted the routine Hourly"), "the activity log has the routines")
 
+    // A run that waits for its busy chat gives way to the routine's next run, and
+    // is skipped once it has waited 10 minutes, a second here.
+    let later = str_at(at(at(try app.cmd("q_w1", "routine.put", Obj.new().s("name", String("Later")).s("agent", String("Main")).s("prompt", String("later")).j("schedule", Obj.new().i("every", 600).done()).b("on", false).done()), "value"), "routine"), "id") ?? String()
+    try app.send(Obj.new().s("t", String("send")).s("cid", String("m_4")).s("conversation", chat.copy()).s("text", String("/sleep 3000\nawake")).done())
+    _ = try app.until("event", "run.started")
+    let first_wait = at(try app.cmd("q_w2", "routine.run", Obj.new().s("id", later.copy()).done()), "value")
+    let second_wait = at(try app.cmd("q_w3", "routine.run", Obj.new().s("id", later.copy()).done()), "value")
+    try check(bool_at(first_wait.copy(), "waiting") == some(true) and bool_at(second_wait.copy(), "waiting") == some(true), "run while the person's turn goes on, it waits")
+    let gave_way = try run_of(mut app, "q_w4", later.copy(), str_at(first_wait, "run") ?? String())
+    try check(str_at(gave_way.copy(), "status") == some(String("skipped")) and str_at(gave_way, "error") == some(String("It was run again before its chat was free.")), "a run that waited gives way to the next")
+    let gave_up = try last_is(mut app, later.copy(), "skipped")
+    try check(str_at(at(gave_up, "last"), "error") == some(String("Its chat was busy for 10 minutes.")), "and one that waits too long is skipped")
+    let kept = try run_of(mut app, "q_w5", later.copy(), str_at(second_wait, "run") ?? String())
+    try check(str_at(kept.copy(), "status") == some(String("skipped")) and str_at(kept, "error") == some(String("Its chat was busy for 10 minutes.")), "and kept in its runs with why")
+    try check((try reply_in(mut app, chat.copy())) == "awake", "while the person's turn goes on as it was")
+    _ = try app.cmd("q_w6", "routine.delete", Obj.new().s("id", later).done())
+
     // Two more, for while the instance is off: one catches up, one doesn't.
     _ = try app.cmd("q_12", "routine.put", Obj.new().s("name", String("Quiet")).s("agent", String("Main")).s("prompt", String("quiet")).j("schedule", Obj.new().i("every", 5).done()).b("catch_up", false).done())
     _ = try app.cmd("q_13", "routine.put", Obj.new().s("name", String("Loud")).s("agent", String("Main")).s("prompt", String("loud")).j("schedule", Obj.new().i("every", 5).done()).done())
@@ -168,6 +186,7 @@ fn after_restart(i: Instance, seq: i64) ! Error {
         if str_at(f.copy(), "kind") == some(String("routine.updated")) { seen.push(at(f.copy(), "routine")) }
     }
     var quiet = String()
+    var quiet_id = String()
     var loud = String()
     var loud_done = false
     var n: usize = 0
@@ -176,13 +195,23 @@ fn after_restart(i: Instance, seq: i64) ! Error {
         n += 1
         let status = str_at(at(r.copy(), "last"), "status") ?? String()
         if str_at(r.copy(), "name") == some(String("Quiet")) {
-            if quiet.len() == 0 { quiet = status }
+            if quiet.len() == 0 {
+                quiet = status
+                quiet_id = str_at(r, "id") ?? String()
+            }
         } else if str_at(r, "name") == some(String("Loud")) {
             if loud.len() == 0 { loud = status.copy() }
             if status == "quiet" { loud_done = true }
         }
     }
     try check(quiet == "skipped" and loud == "running", "missed while the instance was off, one routine runs once and one waits, as each says")
+    var missed = false
+    if let Json.Array(runs) = at(at(try app.cmd("q_m1", "routine.runs", Obj.new().s("id", quiet_id).done()), "value"), "runs") {
+        for x in runs {
+            if str_at(x.copy(), "status") == some(String("skipped")) and str_at(x, "error") == some(String("It was missed while the instance was off.")) { missed = true }
+        }
+    }
+    try check(missed, "the one that waits keeps the time it missed in its runs, with why")
     app.close()
 }
 
