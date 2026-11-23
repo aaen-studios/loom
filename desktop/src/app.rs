@@ -424,6 +424,8 @@ pub struct Loom {
     page_decoding: bool,
     /// The newest frame a decode was started for.
     page_tried: u64,
+    /// What the composer says while it's empty, as last set.
+    composer_placeholder: String,
     /// Where the page is drawn, for turning a click on it into the page's own pixels.
     page_bounds: Rc<std::cell::Cell<Option<Bounds<Pixels>>>>,
     /// Whether the watched browser fills the panel beside the chat. Otherwise it's
@@ -1109,6 +1111,7 @@ ACTA_KEY=secret:ACTA_KEY",
             old_pages: Vec::new(),
             page_decoding: false,
             page_tried: 0,
+            composer_placeholder: String::new(),
             page_bounds: Rc::new(std::cell::Cell::new(None)),
             browser_docked: false,
             browser_shut: None,
@@ -2208,7 +2211,16 @@ ACTA_KEY=secret:ACTA_KEY",
                 Row::Approval(_) => None,
             })
             .collect();
-        self.flow = Rc::new(model::flow(&messages, day_number));
+        // A zone's offset changes only on a quarter hour, so each quarter hour's day is
+        // looked up once: Windows asks the system for the zone at every lookup.
+        let days = std::cell::RefCell::new(HashMap::<i64, i64>::new());
+        let day = |ms: i64| {
+            *days
+                .borrow_mut()
+                .entry(ms.div_euclid(900_000))
+                .or_insert_with(|| day_number(ms))
+        };
+        self.flow = Rc::new(model::flow(&messages, day));
         self.rows = Rc::new(rows);
         self.scroller.update(cx, |s, cx| {
             if same_start && new_len >= old_len {
@@ -6927,8 +6939,12 @@ ACTA_KEY=secret:ACTA_KEY",
         } else {
             format!("Reply to {who}")
         };
-        self.composer
-            .update(cx, |s, cx| s.set_placeholder(placeholder, window, cx));
+        // Set only when it changes: setting it marks the composer to be drawn again.
+        if self.composer_placeholder != placeholder {
+            self.composer_placeholder = placeholder.clone();
+            self.composer
+                .update(cx, |s, cx| s.set_placeholder(placeholder, window, cx));
+        }
         let mut attached = div().flex().flex_wrap().gap(px(space::S));
         for a in self.model.attachments.clone() {
             let id = a.id.clone();

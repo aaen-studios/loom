@@ -1766,6 +1766,9 @@ fn lay_out(m: &Message, shown: &[usize]) -> Vec<Part> {
     out
 }
 
+/// The most characters of a reply's first line its "working" line takes.
+const WORKING_MOST: usize = 160;
+
 /// The step a running turn is on, in a line: the first line of what it last said, the
 /// tool it last called, or that it's thinking.
 fn working_words(m: &Message, tools: &Tools) -> String {
@@ -1773,7 +1776,12 @@ fn working_words(m: &Message, tools: &Tools) -> String {
         match b.kind.as_str() {
             "text" => {
                 if let Some(line) = b.text.lines().map(str::trim).find(|l| !l.is_empty()) {
-                    return line.to_string();
+                    // More than the line can show is cut here: the whole of a long one
+                    // would be shaped again at every frame, only to be truncated.
+                    return match line.char_indices().nth(WORKING_MOST) {
+                        Some((end, _)) => format!("{}…", &line[..end]),
+                        None => line.to_string(),
+                    };
                 }
             }
             "tool" => return format!("{}…", tool_title(b.call.as_ref(), tools)),
