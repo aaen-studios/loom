@@ -47,6 +47,8 @@ const LOAD_MS: i64 = 15000
 // How long the browser may take to start: a cold start on a slow machine, as a
 // CI runner, can take well past 20 s.
 const LAUNCH_MS: i64 = 60000
+// How long a browser asked to close may take to, before it's ended.
+const CLOSE_MS: u64 = 5000
 // How much of a page's outline goes to the agent.
 const OUTLINE_MOST: usize = 40000
 const FRAME_GAP_MS: i64 = 80    // the least time between the frames the page sends
@@ -361,7 +363,20 @@ pub fn stop_leftovers(root: String) {
                             }
                         }
                         ws.close()
-                        eprintln("loom: stopped a browser left running from before, in {file}")
+                        // It's gone once nothing listens there: till then its profile
+                        // is its, and the agent's next browser would hand its pages to it.
+                        let until = now() + i64.wrap(CLOSE_MS)
+                        var gone = false
+                        while not gone and now() < until {
+                            match connect("ws://127.0.0.1:{port}{path}", List<Header>(), 300) {
+                                ok(still) => {
+                                    still.close()
+                                    unsafe { sleep(100000000) }
+                                },
+                                err(_) => gone = true,
+                            }
+                        }
+                        if gone { eprintln("loom: stopped a browser left running from before, in {file}") } else { eprintln("loom: a browser left running from before, in {file}, didn't close when asked") }
                     }
                 }
             }
@@ -392,10 +407,20 @@ impl Worker {
         return false
     }
 
-    // Stops the browser and what it started.
+    // Stops the browser and what it started. It's asked to close first, so it
+    // writes its profile, the logins the person made in it among it, and then
+    // it and every process it started are ended, whether it has or not.
     fn close(w: mut Worker) {
         let was = w.child != none
-        if let p = w.page.take() { p.close() }
+        if let p = w.page.take() {
+            if let c = w.child {
+                if c.try_wait() == none {
+                    w.next_id += 1
+                    if let ok = p.send_text("{Obj.new().i("id", w.next_id).s("method", String("Browser.close")).j("params", Obj.new().done()).done()}") { _ = c.wait_timeout(CLOSE_MS) }
+                }
+            }
+            p.close()
+        }
         if let c = w.child {
             c.kill_tree()
             _ = c.wait_timeout(5000)

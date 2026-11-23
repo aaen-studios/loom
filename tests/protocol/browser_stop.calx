@@ -1,0 +1,195 @@
+module tests.protocol.browser_stop
+
+// An instance's browsers end with it (PLAN.md, "The agent's browser"): with
+// agents' browsers open, an instance asked to stop ends them, and every
+// process they started, before it ends itself. One that's killed takes them
+// with it on Windows, and on Linux, where they run on, one started again on
+// the same data stops them. Each is looked for by its profile, in the
+// instance's data, on the command lines of what runs. The instance is the
+// built program, asked to stop as a service is: under calx run on Linux, the
+// signal ends calx run, which kills the program before it can (CLX-445).
+// Without Chrome, Edge or Chromium on the computer, it says it was skipped.
+//
+//     calx tests/protocol/browser_stop.calx
+import std.env
+import std.fs
+import std.process.{Child, Command, Stdio, exit}
+import std.thread.{sleep}
+import shared.obj.{Obj, at, str_at}
+import server.browser
+import server.store.{now}
+import shared.client.{Session, reply_text}
+import tests.kit.{Instance, calx, check}
+
+fn sh(program: String, args: List<String>) -> String ! Error {
+    let out = try Command.new(program.copy()).args(args.copy()).output()
+    if not out.status.success() { fail "{program} {args.join(" ")}: {out.error_text()}" }
+    return out.text()
+}
+
+// The processes running with a profile in `data`, a line each: a browser's
+// own and every one it started, which are given its profile too.
+fn browsers(data: String) -> List<String> ! Error {
+    // The name of the test's own folder, a calx- one in the temporary folder.
+    let name = data.replace("\\", "/")
+    let root = name[..(name.find_last("/") ?? 0)].copy()
+    let mark = root[(root.find_last("/") ?? 0) + 1..].to_lower_root()
+    let out = if env.os() == "windows" {
+        try sh(String("powershell"), [String("-NoProfile"), String("-NonInteractive"), String("-Command"), String(#"Get-CimInstance Win32_Process | ForEach-Object { [string]$_.ProcessId + ' ' + $_.CommandLine }"#)])
+    } else {
+        try sh(String("ps"), [String("-e"), String("-ww"), String("-o"), String("pid=,args=")])
+    }
+    var found = List<String>()
+    for line in out.lines() {
+        let l = line.to_lower_root()
+        if l.contains("--user-data-dir") and l.contains(mark.copy()) and not l.contains("get-ciminstance") {
+            let t = line.trim()
+            found.push(if t.len() > 160 { t[..160].copy() } else { t.copy() })
+        }
+    }
+    return found
+}
+
+// Waits up to `ms` for no browser of `data` to be running, and gives what still is.
+fn until_none(data: String, ms: i64) -> List<String> ! Error {
+    let until = now() + ms
+    loop {
+        let left = try browsers(data.copy())
+        if left.len() == 0 or now() > until { return left }
+        unsafe { sleep(250000000) }
+    }
+}
+
+// `serve` on `data` from the built program, in a group of its own so it can be
+// asked to stop. Gives the program and its address.
+fn serve(exe: String, data: String) -> (Child, String) ! Error {
+    let server = try Command.new(exe).args([String("serve"), String("--data"), data.copy(), String("--port"), String("0"), String("--allow-root"), String("--test-fast-hashes")]).env_remove(String("INVOCATION_ID")).env_remove(String("LOOM_SERVICE")).stdout(Stdio.Pipe).own_group().spawn()
+    let serving = server.wait_for_line(String("loom: serving"), 60000) else {
+        server.kill_tree()
+        fail "the server didn't start"
+    }
+    let address = serving[serving.find("http://") ?? 0..].trim().copy()
+    let base = if address.ends_with("/") { address[7..address.len() - 1].copy() } else { address[7..].copy() }
+    return (server, base)
+}
+
+fn reply_in(app: mut Session, conversation: String, wait_ms: u32) -> String ! Error {
+    loop {
+        let created = try app.until("event", "message.created", wait_ms)
+        let m = at(created, "message")
+        if str_at(m.copy(), "role") == some(String("agent")) and str_at(m.copy(), "conversation") == some(conversation.copy()) { return reply_text(m) }
+    }
+}
+
+// Opens an agent's browser, watched so it stays open after the turn, and gives
+// the session that watches it, to keep while the instance stops.
+fn open_one(base: String, token: String, n: i64) -> Session ! Error {
+    var app = try Session.connect(base, token, 0)
+    let made = try app.cmd("q_1", "agent.create", Obj.new().s("name", "Browser {n}").s("acp_agent", String("fake")).s("instructions", String("You are a test.")).done())
+    let agent = str_at(at(at(made, "value"), "agent"), "id") ?? String()
+    let c = try app.cmd("q_2", "conversation.create", Obj.new().s("agent", agent.copy()).done())
+    let conversation = str_at(at(c, "value"), "conversation") ?? String()
+    _ = try app.cmd("q_3", "browser.watch", Obj.new().s("agent", agent).b("on", true).done())
+    try app.send(Obj.new().s("t", String("send")).s("cid", "m_{n}").s("conversation", conversation.copy()).s("text", String(#"/mcp browser_open {"url":"about:blank"}"#)).done())
+    let opened = try reply_in(mut app, conversation, 120000)
+    if not opened.starts_with("browser_open: Page: ") { fail "failed: the browser didn't open: {opened}" }
+    return app
+}
+
+fn run(root: String, server: mut Child?) ! Error {
+    let exe = "{root}/bin/loom{if env.os() == "windows" { ".exe" } else { "" }}"
+    let data = "{root}/data"
+    try fs.make_dir_all("{root}/bin")
+    try fs.make_dir_all(data.copy())
+    println("building loom…")
+    _ = try sh(calx(), [String("build"), String("server/main.calx"), String("-o"), exe.copy()])
+    let agent = try fs.absolute(String("tests/fake_agent/main.calx"))
+    _ = try sh(exe.copy(), [String("acp"), String("add"), String("fake"), calx(), agent, String("--data"), data.copy(), String("--test-fast-hashes")])
+
+    // --- Asked to stop ---
+    let cmd = Command.new(exe.copy()).args([String("serve"), String("--data"), data.copy(), String("--port"), String("0"), String("--allow-root"), String("--test-fast-hashes")]).env_remove(String("INVOCATION_ID")).env_remove(String("LOOM_SERVICE")).own_group()
+    let first = try Instance.launch(data.copy(), cmd)
+    let token = first.token.copy()
+    server = some(first.server)
+    let a = try open_one(first.base.copy(), token.copy(), 1)
+    let b = try open_one(first.base.copy(), token.copy(), 2)
+    let running = try browsers(data.copy())
+    try see(running.len() >= 2, "two agents' browsers run, with what they started", running)
+    if let s = server { s.stop() }
+    let ended = if let s = server { s.wait_timeout(30000) } else { none }
+    try check(ended != none, "the instance asked to stop ends")
+    a.close()
+    b.close()
+    let left = try until_none(data.copy(), 5000)
+    try see(left.len() == 0, "and no browser of its is left, nor anything one started", left)
+
+    // --- Killed, and started again ---
+    let (killed, base) = try serve(exe.copy(), data.copy())
+    server = some(killed)
+    let c = try open_one(base, token.copy(), 3)
+    try see((try browsers(data.copy())).len() > 0, "started again, its agent's browser runs", List<String>())
+    // Only the instance's own program, as a crash or the OOM killer ends it.
+    if let s = server {
+        s.kill()
+        _ = s.wait_timeout(10000)
+    }
+    c.close()
+    // On Windows the job every program it started is in ends them with it. On
+    // Linux a browser in a group of its own runs on, till the next start.
+    if env.os() == "windows" {
+        let orphans = try until_none(data.copy(), 5000)
+        try see(orphans.len() == 0, "a killed instance takes its browsers with it", orphans)
+    }
+    let (again, _) = try serve(exe.copy(), data.copy())
+    server = some(again)
+    let after = try until_none(data.copy(), 5000)
+    try see(after.len() == 0, "an instance started again on the same data stops any browser a killed one left", after)
+    if let s = server { s.stop() }
+    if let s = server { _ = s.wait_timeout(30000) }
+}
+
+// check, saying what still runs when it fails.
+fn see(passed: bool, what: str, running: List<String>) ! Error {
+    if not passed { fail "failed: {what}, with these running:\n{running.join("\n")}" }
+    println("ok    {what}")
+}
+
+fn main() ! Error {
+    if browser.find() == none {
+        println("browser stop: skipped, there's no Chrome, Edge or Chromium here")
+        return
+    }
+    let root = try fs.temp_dir()
+    var server: Child? = none
+    let failed = match run(root.copy(), mut server) {
+        ok => String(),
+        err(e) => "{e}",
+    }
+    if let s = server {
+        s.kill_tree()
+        _ = s.wait_timeout(10000)
+    }
+    // A failure on Linux may leave browsers a killed instance left: one more
+    // start on the data stops them, before the data goes.
+    let data = "{root}/data"
+    let stray = match browsers(data.copy()) {
+        ok(b) => b.len(),
+        err(_) => 0,
+    }
+    if failed.len() > 0 and env.os() != "windows" and stray > 0 {
+        if let ok((last, _)) = serve("{root}/bin/loom", data.copy()) {
+            last.stop()
+            if last.wait_timeout(30000) == none { last.kill_tree() }
+        }
+    }
+    unsafe { sleep(500000000) }
+    match fs.remove_dir_all(root) {
+        ok => {},
+        err(_) => {},
+    }
+    if failed.len() > 0 {
+        eprintln("\n{failed}")
+        exit(1)
+    }
+    println("\nbrowser stop: all good")
+}
