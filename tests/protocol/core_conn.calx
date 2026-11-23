@@ -260,9 +260,18 @@ fn run(server: mut Child, data: String) ! Error {
 
     // --- Started again, from the credential store ---
     if kept {
+        // A run the cache kept going, whose run.finished it never got.
+        {
+            let stale = try Cache.open(cache.copy())
+            try stale.keep_runs(Json.Array([Obj.new().s("run", String("run_gone")).s("conversation", conversation.copy()).s("agent", String("a_gone")).done()]))
+        }
         var next = try App.start(base.copy(), none, service.copy(), cache.copy())
         _ = try next.until("core.conn", "state", "live", 10000)
         try check(true, "a new start finds the token in the credential store and connects")
+        _ = try next.until("synced", "", "", 5000)
+        next.send(Obj.new().s("t", String("core.get")).s("id", String("g_runs")).s("what", String("runs")).done())
+        let runs = try next.until("core.data", "id", "g_runs", 5000)
+        try check("{at(runs, "items")}" == "[]", "a run the cache missed the end of is gone once it's synced")
 
         // --- A wrong password, and logging out ---
         next.send(Obj.new().s("t", String("login")).s("id", String("l_3")).s("username", String("elliot")).s("password", String("not it")).done())

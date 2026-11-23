@@ -6103,9 +6103,13 @@ impl Instance {
             }
             if n < EVENTS_PAGE { break }
         }
-        // Replies still being written, from position 0.
+        // Replies still being written, from position 0. Synced names their runs too, so
+        // an app whose cache missed a run.started or a run.finished shows exactly the
+        // turns still going.
+        var going = List<Json>()
         for (_, r) in i.runs {
             if r.user != user { continue }
+            going.push(Obj.new().s("run", r.id.copy()).s("conversation", r.conversation.copy()).s("agent", r.agent.copy()).s("message", r.message.copy()).s("answering", r.answering.copy()).done())
             var b: i64 = 0
             for block in r.blocks {
                 if block.kind == "text" or block.kind == "thought" {
@@ -6116,7 +6120,7 @@ impl Instance {
                 b += 1
             }
         }
-        _ = i.server.send_text(s, "{Obj.new().s("t", String("synced")).i("seq", last).done()}")
+        _ = i.server.send_text(s, "{Obj.new().s("t", String("synced")).i("seq", last).j("runs", Json.Array(going)).done()}")
         i.sessions.insert(s.id(), Session { socket: s, user: user.copy(), device: device.id, live: true, key: String(), tools: Json.Null, hosts: Json.Null })
         // The owner's first device after an update the instance made by itself hears of
         // it live, so it notifies.
@@ -7020,7 +7024,22 @@ impl Instance {
                 if name == "session/update" {
                     try i.update(at(m, "params"))
                 } else if name == "session/request_permission" {
-                    try i.permission(mut p, id ?? Json.Null, at(m, "params"))
+                    let rpc = id ?? Json.Null
+                    match i.permission(mut p, rpc.copy(), at(m, "params")) {
+                        ok => {},
+                        err(e) => {
+                            // Unanswered, the program would wait on it for good, and its
+                            // turn would never end: it's told no, and a question asked
+                            // already goes.
+                            eprintln("loom: agent {line.agent}'s permission request: {e}")
+                            var asked = List<String>()
+                            for (call, a) in i.approvals {
+                                if a.rpc == rpc and a.proc == p.key { asked.push(call.copy()) }
+                            }
+                            for call in asked { _ = i.approvals.remove(call) }
+                            p.to.send(Out.Send(acp.respond(rpc, Obj.new().j("outcome", Obj.new().s("outcome", String("cancelled")).done()).done())))
+                        },
+                    }
                 } else if let rid = id {
                     p.to.send(Out.Send(acp.respond_error(rid, -32601, "loom doesn't offer {name}")))
                 }
@@ -7258,11 +7277,23 @@ impl Instance {
     }
 
     // A session/update: streamed text and thoughts become deltas, tool calls
-    // tool.* events, and a plan the plan block.
+    // tool.* events, and a plan the plan block. The run goes back in `runs` whatever
+    // happens, so an update that fails, as a write the database refused, can't lose
+    // it: a lost run's prompt result would find nothing to finish, and its turn would
+    // never end.
     fn update(i: mut Instance, params: Json) ! Error {
-        let run_id = i.run_for_session(str_at(params, "sessionId") ?? String()) else return
+        let run_id = i.run_for_session(str_at(params.copy(), "sessionId") ?? String()) else return
         var r = i.runs.remove(run_id.copy()) else return
-        let u = at(params, "update")
+        match i.update_run(mut r, at(params, "update")) {
+            ok => i.runs.insert(run_id, r),
+            err(e) => {
+                i.runs.insert(run_id, r)
+                fail e
+            },
+        }
+    }
+
+    fn update_run(i: mut Instance, r: mut Run, u: Json) ! Error {
         let kind = str_at(u, "sessionUpdate") ?? String()
         if kind == "agent_message_chunk" or kind == "agent_thought_chunk" {
             let content = at(u, "content")
@@ -7310,10 +7341,7 @@ impl Instance {
             }
         } else if kind == "tool_call_update" {
             let call = if let c = r.tools.find(str_at(u.copy(), "toolCallId") ?? String()) { c.copy() } else { String() }
-            if call.len() == 0 {
-                i.runs.insert(run_id, r)
-                return
-            }
+            if call.len() == 0 { return }
             let status = str_at(u.copy(), "status") ?? String()
             if status == "completed" or status == "failed" {
                 try i.tool_finished(r, call, status, at(u, "content"))
@@ -7337,7 +7365,6 @@ impl Instance {
                 r.blocks.push(b)
             }
         }
-        i.runs.insert(run_id, r)
     }
 
     // A file in what an agent wrote, kept as the person's: an image block's bytes, an
@@ -7426,34 +7453,44 @@ impl Instance {
             p.to.send(Out.Send(acp.respond(rpc, Obj.new().j("outcome", Obj.new().s("outcome", String("cancelled")).done()).done())))
             return
         }
-        var r = i.runs.remove(run_id.copy()) else return
+        // Read first and changed in place, so a write that fails here can't lose the run.
         let tool_call = at(params.copy(), "toolCall")
         let acp_call = str_at(tool_call.copy(), "toolCallId") ?? String()
-        var call = if let c = r.tools.find(acp_call.copy()) { c.copy() } else { String() }
+        var call = String()
+        var user = String()
+        var agent_id = String()
+        var conversation_id = String()
+        if let r = i.runs.find(run_id.copy()) {
+            if let c = r.tools.find(acp_call.copy()) { call = c.copy() }
+            user = r.user.copy()
+            agent_id = r.agent.copy()
+            conversation_id = r.conversation.copy()
+        } else {
+            return
+        }
         if call.len() == 0 {
             call = try i.store.new_id("tc")
-            r.tools.insert(acp_call, call.copy())
-            var b = new_block("tool")
-            b.call = call.copy()
-            r.blocks.push(b)
+            if let r = mut i.runs.find(run_id.copy()) {
+                r.tools.insert(acp_call, call.copy())
+                var b = new_block("tool")
+                b.call = call.copy()
+                r.blocks.push(b)
+            }
         }
-        i.record_tool(r.user.copy(), r.agent.copy(), call.copy(), tool_call.copy())
+        i.record_tool(user.copy(), agent_id.copy(), call.copy(), tool_call.copy())
         let options = at(params, "options")
         // A side question's answer uses no tools that ask.
-        let conversation = try i.store.conversation(r.user.copy(), r.conversation.copy()) ?? Json.Null
+        let conversation = try i.store.conversation(user.copy(), conversation_id) ?? Json.Null
         if bool_at(conversation, "side") == some(true) {
             let option = acp.pick_option(options, false, false) ?? String("reject_once")
             p.to.send(Out.Send(acp.respond(rpc, Obj.new().j("outcome", Obj.new().s("outcome", String("selected")).s("optionId", option).done()).done())))
-            r.denied.push(call)
-            i.runs.insert(run_id, r)
+            if let r = mut i.runs.find(run_id.copy()) { r.denied.push(call) }
             return
         }
-        let agent = try i.store.agent(r.user.copy(), r.agent.copy()) ?? Json.Null
-        let mode = defaults.mode_of(agent.copy(), try i.store.defaults(r.user.copy()))
+        let agent = try i.store.agent(user.copy(), agent_id) ?? Json.Null
+        let mode = defaults.mode_of(agent.copy(), try i.store.defaults(user.copy()))
         let kind = acp.tool_kind(str_at(tool_call.copy(), "kind") ?? String())
-        let user = r.user.copy()
-        let run = r.id.copy()
-        i.runs.insert(run_id, r)
+        let run = run_id.copy()
         let title = str_at(tool_call.copy(), "title") ?? String()
         // The person's rules on what it touches come first: deny, then ask, then allow.
         let v = try i.judge(user.copy(), p.agent.copy(), run.copy(), rules.of_tool_call(tool_call.copy(), kind.copy(), i.agent_folder(user.copy(), agent)))
@@ -8135,9 +8172,51 @@ impl Instance {
         }
     }
 
-    // Ends a run: its reply is stored and sent whole, then run.finished.
+    // Ends a run: its reply is stored and sent whole, then run.finished. The run is
+    // gone from `runs` from the start, so run.finished goes even when keeping its
+    // reply or telling what waited on it fails: otherwise every app would show
+    // the agent working until the instance restarted.
     fn finish(i: mut Instance, run_id: String, status: String, error: String?) ! Error {
         let r = i.runs.remove(run_id.copy()) else return
+        match i.wind_up(r, status.copy(), error.copy()) {
+            ok(ends) => if not ends { return },
+            err(e) => {
+                eprintln("loom: ending run {run_id}: {e}")
+                // One an update stopped is the restart's to end, as it would have been.
+                if let k = i.restart_stops.position(|x| x == r.id) {
+                    _ = i.restart_stops.remove(k)
+                    return
+                }
+                match i.store.finish_run(r.id.copy(), status.copy()) {
+                    ok => {},
+                    err(e2) => eprintln("loom: ending run {run_id}: {e2}"),
+                }
+            },
+        }
+        var finished = Obj.new().s("run", r.id.copy()).s("status", status.copy()).maybe("error", error)
+        if r.usage != Json.Null { finished = finished.j("usage", r.usage.copy()) }
+        try i.event(r.user.copy(), "run.finished", finished.done())
+        // A flow's step that waited for this agent to be free in its chat goes now.
+        var flows_waiting = List<String>()
+        for (id, f) in i.running_flows {
+            if f.user == r.user { flows_waiting.push(id.copy()) }
+        }
+        for id in flows_waiting {
+            if not i.flows_due.contains(id.copy()) { i.flows_due.push(id.copy()) }
+        }
+        // What waited for this turn goes next, from the loop: the agent's
+        // program may be in the middle of being handled here.
+        i.turns_ended.push((r.user.copy(), r.conversation.copy(), status.copy()))
+        // And the agent's browser closes, once nothing else uses it.
+        i.check_browser("{r.user}/{r.agent}")
+    }
+
+    // What ending run `r` does before its run.finished: its questions are answered no,
+    // its reply is kept and sent, and its task, its asker, its flow's step or its
+    // routine hear how it went. Gives false for a run an update stopped to restart,
+    // which the restart ends instead.
+    fn wind_up(i: mut Instance, r: Run, status: String, error: String?) -> bool ! Error {
+        let run_id = r.id.copy()
         _ = i.run_chains.remove(run_id.copy())
         // An agent tool call the turn ended without settling: the record says so.
         for (_, call) in r.tools {
@@ -8193,7 +8272,7 @@ impl Instance {
         // so, its task carries on, its flow's step goes again and its queue goes on.
         if let k = i.restart_stops.position(|x| x == r.id) {
             _ = i.restart_stops.remove(k)
-            return
+            return false
         }
         try i.store.finish_run(r.id.copy(), status.copy())
         // A task's run ends it, fails it, or stops it: cancelled when the
@@ -8246,22 +8325,7 @@ impl Instance {
             let body = if status == "failed" { "It couldn't answer: {error.copy() ?? String("it stopped")}" } else if said.trim().len() == 0 { String("Done.") } else { cut_short(said, 300) }
             i.push_reply(r.user.copy(), r.agent.copy(), r.conversation.copy(), r.message.copy(), body)
         }
-        var finished = Obj.new().s("run", r.id.copy()).s("status", status.copy()).maybe("error", error)
-        if r.usage != Json.Null { finished = finished.j("usage", r.usage.copy()) }
-        try i.event(r.user.copy(), "run.finished", finished.done())
-        // A flow's step that waited for this agent to be free in its chat goes now.
-        var flows_waiting = List<String>()
-        for (id, f) in i.running_flows {
-            if f.user == r.user { flows_waiting.push(id.copy()) }
-        }
-        for id in flows_waiting {
-            if not i.flows_due.contains(id.copy()) { i.flows_due.push(id.copy()) }
-        }
-        // What waited for this turn goes next, from the loop: the agent's
-        // program may be in the middle of being handled here.
-        i.turns_ended.push((r.user.copy(), r.conversation.copy(), status.copy()))
-        // And the agent's browser closes, once nothing else uses it.
-        i.check_browser("{r.user}/{r.agent}")
+        return true
     }
 
     // --- Commands ---
