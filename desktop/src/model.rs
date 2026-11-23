@@ -3117,6 +3117,9 @@ impl Model {
                         } else {
                             self.finished.insert(r.agent.clone(), at);
                         }
+                        // What streamed, for a reply that never comes as message.created,
+                        // such as a quiet routine's.
+                        self.live.remove(&r.message);
                     }
                     self.dirty.insert(List::Tools);
                     self.dirty.insert(List::Approvals);
