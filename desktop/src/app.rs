@@ -1052,7 +1052,20 @@ ACTA_KEY=secret:ACTA_KEY",
         .detach();
         let data = data_dir();
         shell::first_start(&data);
-        let tray = shell::Tray::new(shell::starts_at_login());
+        // The tray icon takes 5–25 ms to make, so a window being opened gets it once its
+        // first frame is up. Started at login, there's no window to show, only the tray.
+        let tray = if background {
+            shell::Tray::new(shell::starts_at_login())
+        } else {
+            let weak = cx.weak_entity();
+            window.on_next_frame(move |_, cx| {
+                weak.update(cx, |this, _| {
+                    this.tray = shell::Tray::new(shell::starts_at_login());
+                })
+                .ok();
+            });
+            None
+        };
         if background {
             // Started at login: straight to the tray.
             cx.defer(move |_| shell::show_window(hwnd, false));

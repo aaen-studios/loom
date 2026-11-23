@@ -23,6 +23,7 @@ import std.sqlite.{Database, Value}
 import std.time.{Timestamp}
 import shared.obj.{Obj, int_at, merge, str_at, without}
 import server.defaults.{blank, filled}
+import shared.checkpoint
 
 // A search snippet as words, without the Markdown it was written in: a link
 // as its text, no code ticks, bold or strike marks, list and heading marks,
@@ -107,6 +108,8 @@ CREATE INDEX IF NOT EXISTS messages_pinned ON messages (user, conversation, json
 CREATE TABLE IF NOT EXISTS runs (
     id TEXT PRIMARY KEY, user TEXT NOT NULL REFERENCES users(id), conversation TEXT NOT NULL,
     status TEXT NOT NULL, at INTEGER NOT NULL);
+-- Only the runs still going, which start looks for: runs are kept, so they add up.
+CREATE INDEX IF NOT EXISTS runs_running ON runs (id) WHERE status = 'running';
 CREATE TABLE IF NOT EXISTS branches (
     conversation TEXT PRIMARY KEY, user TEXT NOT NULL REFERENCES users(id), from_conversation TEXT NOT NULL,
     from_message TEXT NOT NULL, handed INTEGER NOT NULL DEFAULT 0);
@@ -352,9 +355,15 @@ impl Store {
     // Opens (or makes) the database at `path`. `hasher` hashes passwords;
     // tests pass a cheap one.
     // This connection stops checkpointing by itself: the instance's loop has
-    // server/checkpoint.calx do it on another thread.
+    // shared/checkpoint.calx do it on another thread.
     pub fn checkpoint_elsewhere(self) ! Error {
         try self.db.execute_script(String("PRAGMA wal_autocheckpoint = 0;"))
+    }
+
+    // Truncates the log once the checkpoint thread says it grew long, between the
+    // loop's transactions (shared/checkpoint.calx, `truncate`).
+    pub fn truncate_log(self, big: mut Receiver<bool>) ! Error {
+        try checkpoint.truncate(self.db, mut big)
     }
 
     pub fn open(path: String, hasher: PasswordHasher) -> Store ! Error {
@@ -375,6 +384,9 @@ impl Store {
         if not recorded {
             try s.db.execute_script(String("ALTER TABLE activity ADD COLUMN status TEXT NOT NULL DEFAULT ''; ALTER TABLE activity ADD COLUMN input TEXT NOT NULL DEFAULT ''; ALTER TABLE activity ADD COLUMN why TEXT NOT NULL DEFAULT ''; ALTER TABLE activity ADD COLUMN ended INTEGER NOT NULL DEFAULT 0;"))
         }
+        // Only what is still going, which start marks failed after a restart: activity is
+        // kept for good, so it adds up.
+        try s.db.execute_script(String("CREATE INDEX IF NOT EXISTS activity_started ON activity (id) WHERE status = 'started';"))
         // Notes from before a note could be tied to a site get the column.
         var sited = false
         for r in try s.db.query(String("PRAGMA table_info(memories)")) {

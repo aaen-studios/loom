@@ -1,0 +1,86 @@
+module shared.checkpoint
+
+// A database checkpointed on a thread of its own, with a connection of its own:
+// the instance's (server/store.calx, `Store.checkpoint_elsewhere`) and the
+// core's cache (core/cache.calx). SQLite's own checkpoint runs inside whichever
+// commit takes the write-ahead log past 1000 pages: on the instance's loop that
+// held up every person for 20-50 ms every ten turns or so, and on the core's it
+// held up the app's reads for up to 50 ms. A passive checkpoint never waits on
+// the other connection's writes, and that connection never waits on it. The log
+// is truncated by the connection that writes, after a long burst (`truncate`).
+import std.sqlite.{Database, Value}
+import std.thread.{Task}
+import std.time.{Instant}
+
+// How often it checkpoints, in nanoseconds: often enough that each one copies little.
+const EVERY_NS: u64 = 2000000000
+// The log's length, in pages, past which it's truncated: about 64 MB of 4 KB pages.
+const TRUNCATE_PAST: i64 = 16384
+
+fn int(v: Value) -> i64 {
+    match v {
+        Value.Int(n) => return n,
+        _ => return 0,
+    }
+}
+
+struct Worker {
+    path: String
+    stop: Receiver<bool>
+    big: Sender<bool>    // told when the log has grown past TRUNCATE_PAST
+}
+
+impl Task for Worker {
+    fn run(own self) {
+        var w = self
+        let db = match Database.open(w.path.copy()) {
+            ok(d) => d,
+            err(e) => {
+                eprintln("loom: checkpointing {w.path}: {e}")
+                return
+            },
+        }
+        loop {
+            let from = unsafe { Instant.now() }
+            if let _ = unsafe { w.stop.wait_for(EVERY_NS) } { return }
+            // Nothing came, but it came back early: whoever could stop it is gone.
+            if unsafe { Instant.now() }.nanos_since(from) < EVERY_NS / 2 { return }
+            let rows = match db.query(String("PRAGMA wal_checkpoint(PASSIVE)")) {
+                ok(r) => r,
+                err(e) => {
+                    eprintln("loom: checkpointing {w.path}: {e}")
+                    continue
+                },
+            }
+            // A passive checkpoint never starts the log over while writes keep coming, so
+            // under a long burst it only grows (8.5 GB after 50k turns at ~430 a second,
+            // and a start that read all of it back). Past ~64 MB the connection that
+            // writes is told to truncate it between its transactions (`truncate`): from
+            // here, a truncate waiting on that connection's open read would hold up its
+            // next write until one of them gave up, and that write would fail.
+            if rows.len() > 0 and rows[0].len() > 1 and int(rows[0][1]) > TRUNCATE_PAST {
+                w.big.send(true)
+            }
+        }
+    }
+}
+
+/// Starts checkpointing the database at `path`. Sending to the Sender it gives back, or
+/// letting go of it, stops it. The Receiver hears when the log has grown long: then
+/// the connection that writes runs `truncate`.
+pub fn start(path: String) -> (Thread, Sender<bool>, Receiver<bool>) {
+    let stop = Receiver<bool>()
+    let to = stop.sender()
+    let big = Receiver<bool>()
+    let t = unsafe { Thread.spawn(Worker { path: path.copy(), stop: stop, big: big.sender() }) }
+    return (t, to, big)
+}
+
+/// Truncates `db`'s log if `big` says it grew long, from the connection that writes
+/// to it, outside a transaction. It waits for other connections' reads to end.
+pub fn truncate(db: Database, big: mut Receiver<bool>) ! Error {
+    if big.next() == none { return }
+    while big.next() != none {}
+    if db.in_transaction() { return }
+    _ = try db.query(String("PRAGMA wal_checkpoint(TRUNCATE)"))
+}
