@@ -696,13 +696,13 @@ const [claude] = await brains(['claude-acp']);
 		display: flex;
 		gap: 12px;
 	}
-	/* Beside the agent's name over the first reply after a time line, and level with the first
-	   line of words beside the rest. */
+	/* Beside the agent's name over the first reply after a time line, and level with the
+	   bubble's first line beside the rest. */
 	.reply-thread {
 		width: 14px;
 		height: 10px;
 		flex: none;
-		margin-top: calc((var(--size-body) * var(--line-reply) - 10px) / 2);
+		margin-top: 16px;
 	}
 	.reply-thread.head {
 		margin-top: 4px;
@@ -832,8 +832,14 @@ const [claude] = await brains(['claude-acp']);
 		color: var(--ink-2);
 		overflow-wrap: anywhere;
 	}
-	/* The answer: plain text in the column. */
+	/* The answer: a grey bubble, never the agent's colour, which is the person's. Its corner
+	   by the thread is squared off as a speech bubble's tail. */
 	.said {
+		align-self: flex-start;
+		max-width: 94%;
+		padding: 10px 16px;
+		border-radius: var(--radius-bubble-joined) var(--radius-bubble) var(--radius-bubble) var(--radius-bubble);
+		background: var(--bubble);
 		line-height: var(--line-reply);
 	}
 	.said:empty {
@@ -1011,6 +1017,9 @@ const [claude] = await brains(['claude-acp']);
 		}
 		.bubble {
 			max-width: 85%;
+		}
+		.said {
+			max-width: 100%;
 		}
 		.approval {
 			padding-left: 0;

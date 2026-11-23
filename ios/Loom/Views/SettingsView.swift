@@ -1,12 +1,14 @@
 import SwiftUI
 import UserNotifications
 
-/// The account, the instance, notifications, and signing out.
+/// The account, the instance, how the chat looks, notifications, and signing out.
 struct SettingsView: View {
     @Environment(Session.self) private var session
     @Environment(\.dismiss) private var dismiss
     @AppStorage("loom.server") private var server = ""
     @AppStorage("loom.username") private var username = ""
+    @AppStorage(Prefs.replies) private var replies = Prefs.bubbles
+    @AppStorage(Prefs.vibrant) private var vibrant = false
     @State private var notifications: UNAuthorizationStatus = .notDetermined
     @State private var confirmSignOut = false
 
@@ -34,6 +36,18 @@ struct SettingsView: View {
                                 }
                             }
                         }
+                    }
+                }
+                Section("Chat") {
+                    Picker(selection: $replies) {
+                        Text("Bubbles").tag(Prefs.bubbles)
+                        Text("Plain").tag(Prefs.plain)
+                    } label: {
+                        Text("Agent replies").font(Fonts.body).foregroundStyle(P.ink)
+                    }
+                    .tint(P.ink3)
+                    Toggle(isOn: $vibrant) {
+                        Text("Vibrant bubbles").font(Fonts.body).foregroundStyle(P.ink)
                     }
                 }
                 Section {

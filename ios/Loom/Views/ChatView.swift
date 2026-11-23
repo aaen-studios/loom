@@ -179,10 +179,12 @@ private struct SelectableText: UIViewRepresentable {
 
 // MARK: - Messages
 
-/// What the person wrote: a bubble on the right in a breath of the agent's colour, with
-/// its files above it. What another agent sent is plain grey.
+/// What the person wrote: a bubble on the right in the agent's colour, a breath of it or
+/// more with Vibrant bubbles, with its files above it. What another agent sent is plain
+/// grey.
 struct PersonMessage: View {
     @Environment(Session.self) private var session
+    @AppStorage(Prefs.vibrant) private var vibrant = false
     var message: Message
     var agent: Agent?
 
@@ -202,7 +204,7 @@ struct PersonMessage: View {
                     .fixedSize(horizontal: false, vertical: true)
                     .padding(.horizontal, Tokens.Space.l)
                     .padding(.vertical, Tokens.Space.s + 3)
-                    .background(message.from == nil ? P.personBubble(agent?.color ?? "") : P.bubble, in: RoundedRectangle(cornerRadius: Tokens.Radius.bubble, style: .continuous))
+                    .background(message.from == nil ? P.personBubble(agent?.color ?? "", vibrant: vibrant) : P.bubble, in: RoundedRectangle(cornerRadius: Tokens.Radius.bubble, style: .continuous))
                     .opacity(message.queued ? 0.6 : 1)
             }
             if message.queued {
@@ -215,9 +217,10 @@ struct PersonMessage: View {
 }
 
 /// An agent's reply: its name and thread, then its blocks, with thoughts folded and tool
-/// calls quiet.
+/// calls quiet, and its answer in a grey bubble, or plain if the person picked that.
 struct Reply: View {
     @Environment(Session.self) private var session
+    @AppStorage(Prefs.replies) private var replies = Prefs.bubbles
     var message: Message
     var agent: Agent?
     @Binding var openThoughts: Set<String>
@@ -259,6 +262,13 @@ struct Reply: View {
                     // What it said on its way to the answer: smaller and quieter, never a
                     // bubble, so it doesn't read as a message.
                     MarkdownView(b.text, font: Fonts.small, ink: P.ink2, live: live)
+                } else if replies == Prefs.bubbles {
+                    // Grey, never the agent's colour, which is the person's: its corner by
+                    // the thread small, as a speech bubble's tail.
+                    MarkdownView(b.text, live: live)
+                        .padding(.horizontal, Tokens.Space.l)
+                        .padding(.vertical, Tokens.Space.s + 3)
+                        .background(P.bubble, in: UnevenRoundedRectangle(topLeadingRadius: Tokens.Radius.bubbleJoined, bottomLeadingRadius: Tokens.Radius.bubble, bottomTrailingRadius: Tokens.Radius.bubble, topTrailingRadius: Tokens.Radius.bubble, style: .continuous))
                 } else {
                     MarkdownView(b.text, live: live)
                 }

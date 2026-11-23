@@ -221,7 +221,7 @@ pub fn mix(a: Hsla, b: Hsla, k: f32) -> Hsla {
 }
 
 /// How light a colour looks (WCAG's relative luminance, 0 to 1).
-fn luminance(c: Hsla) -> f32 {
+pub fn luminance(c: Hsla) -> f32 {
     let c = c.to_rgb();
     let lin = |v: f32| {
         if v <= 0.04045 {

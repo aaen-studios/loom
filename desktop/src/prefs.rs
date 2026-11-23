@@ -68,6 +68,9 @@ pub struct Prefs {
     /// Whether an agent's replies show as grey bubbles, rather than plain text in the
     /// column.
     pub bubbles: bool,
+    /// Whether the person's bubbles are filled more strongly with the agent's colour,
+    /// rather than a breath of it.
+    pub vibrant: bool,
     /// Whether Enter makes a new line and Ctrl+Enter sends, rather than Enter sending.
     pub ctrl_enter: bool,
     /// Whether closing the window keeps loom running in the tray.
@@ -99,7 +102,8 @@ impl Default for Prefs {
             system_mono: false,
             tools: Tools::Hidden,
             thoughts: Thoughts::Hidden,
-            bubbles: false,
+            bubbles: true,
+            vibrant: false,
             ctrl_enter: false,
             tray: true,
             notify: true,
@@ -165,9 +169,15 @@ impl Prefs {
                 ("open", _) | ("", Some(true)) => Thoughts::Open,
                 _ => d.thoughts,
             },
-            // Kept under a new name when replies became plain: the old `bubbles` was
-            // true in every file, for a tinted bubble that is now the person's.
-            bubbles: b("reply_bubbles", d.bubbles),
+            // Kept under a new name each time the default changed, since every file kept
+            // the old one: `bubbles` (true, for the tinted bubble replies had) and then
+            // `reply_bubbles` (false, while replies were plain by default).
+            bubbles: match s("replies") {
+                "plain" => false,
+                "bubbles" => true,
+                _ => d.bubbles,
+            },
+            vibrant: b("vibrant_bubbles", d.vibrant),
             ctrl_enter: b("ctrl_enter", d.ctrl_enter),
             tray: b("tray", d.tray),
             notify: b("notify", d.notify),
@@ -230,7 +240,11 @@ impl Prefs {
         );
         m.insert("system_font".into(), json!(self.system_font));
         m.insert("system_mono".into(), json!(self.system_mono));
-        m.insert("reply_bubbles".into(), json!(self.bubbles));
+        m.insert(
+            "replies".into(),
+            json!(if self.bubbles { "bubbles" } else { "plain" }),
+        );
+        m.insert("vibrant_bubbles".into(), json!(self.vibrant));
         m.insert("ctrl_enter".into(), json!(self.ctrl_enter));
         m.insert("tray".into(), json!(self.tray));
         m.insert("notify".into(), json!(self.notify));
@@ -394,22 +408,35 @@ mod tests {
     fn search_is_hidden_until_the_person_shows_it() {
         assert!(!Prefs::default().search);
         // A prefs file kept before search could be hidden still loads, with it hidden.
-        let older = serde_json::json!({"theme": "dark", "reply_bubbles": true, "tray": false});
+        let older = serde_json::json!({"theme": "dark", "replies": "plain", "tray": false});
         let p = Prefs::from_json(&older);
-        assert!(!p.search && p.theme == Theme::Dark && p.bubbles && !p.tray);
+        assert!(!p.search && p.theme == Theme::Dark && !p.bubbles && !p.tray);
         let shown = Prefs::from_json(&serde_json::json!({"search": true}));
         assert!(shown.search);
         assert_eq!(Prefs::from_json(&shown.to_json()), shown);
     }
 
     #[test]
-    fn replies_are_plain_until_the_person_picks_bubbles() {
-        assert!(!Prefs::default().bubbles);
-        // Every file kept before had `bubbles` on, for the tinted bubble replies had then.
-        let older = Prefs::from_json(&serde_json::json!({"bubbles": true}));
-        assert!(!older.bubbles);
+    fn replies_are_grey_bubbles_until_the_person_picks_plain() {
+        assert!(Prefs::default().bubbles);
+        // Every file kept while replies were plain by default has `reply_bubbles` off,
+        // and every one before that `bubbles` on: both come to the grey bubble.
+        let plain_then = Prefs::from_json(&serde_json::json!({"reply_bubbles": false}));
+        assert!(plain_then.bubbles);
+        let older = Prefs::from_json(&serde_json::json!({"bubbles": false}));
+        assert!(older.bubbles);
         let picked = Prefs {
-            bubbles: true,
+            bubbles: false,
+            ..Prefs::default()
+        };
+        assert_eq!(Prefs::from_json(&picked.to_json()), picked);
+    }
+
+    #[test]
+    fn the_persons_bubbles_take_a_breath_of_colour_until_they_pick_vibrant() {
+        assert!(!Prefs::default().vibrant);
+        let picked = Prefs {
+            vibrant: true,
             ..Prefs::default()
         };
         assert_eq!(Prefs::from_json(&picked.to_json()), picked);
