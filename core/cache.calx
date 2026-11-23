@@ -32,6 +32,22 @@ CREATE TABLE IF NOT EXISTS outbox (
 // Everything that came from the instance, which a reset or another login clears.
 const TABLES: [str; 7] = ["agents", "conversations", "messages", "devices", "runs", "tools", "approvals"]
 
+// What each list the app reads is, in order.
+const AGENTS: str = "SELECT json FROM agents ORDER BY rowid"
+const CONVERSATIONS: str = "SELECT json FROM conversations ORDER BY last DESC, rowid DESC"
+const DEVICES: str = "SELECT json FROM devices ORDER BY rowid"
+const RUNS: str = "SELECT json FROM runs ORDER BY rowid"
+// Only what a tool block shows, each call's call, run, title and status: a call's input
+// and output can be many KB, and the apps ask again at every tool event.
+const TOOLS: str = "SELECT json_object('call', call, 'run', run, 'title', json_extract(json, '$.title'), 'status', json_extract(json, '$.status')) FROM tools ORDER BY rowid"
+const APPROVALS: str = "SELECT json FROM approvals ORDER BY rowid"
+const OUTBOX: str = "SELECT json FROM outbox ORDER BY at, rowid"
+
+// A JSON array of `items`, each JSON already.
+fn array(items: List<String>) -> String {
+    return "[{items.join(",")}]"
+}
+
 pub fn now() -> i64 {
     return unsafe { Timestamp.now() }.unix_ms
 }
@@ -286,10 +302,18 @@ impl Cache {
         return some(try parse(text(r[0].copy())))
     }
 
+    fn texts(self, sql: str, params: List<Value>) -> List<String> ! Error {
+        var out = List<String>()
+        for r in try self.db.query(String(sql), params) {
+            out.push(text(r[0].copy()))
+        }
+        return out
+    }
+
     fn all(self, sql: str, params: List<Value>) -> List<Json> ! Error {
         var out = List<Json>()
-        for r in try self.db.query(String(sql), params) {
-            out.push(try parse(text(r[0].copy())))
+        for s in try self.texts(sql, params) {
+            out.push(try parse(s))
         }
         return out
     }
@@ -297,48 +321,69 @@ impl Cache {
     // --- Reading ---
 
     pub fn agents(self) -> List<Json> ! Error {
-        return try self.all("SELECT json FROM agents ORDER BY rowid", List<Value>())
+        return try self.all(AGENTS, List<Value>())
     }
 
     /// The conversations, the one with the newest message first.
     pub fn conversations(self) -> List<Json> ! Error {
-        return try self.all("SELECT json FROM conversations ORDER BY last DESC, rowid DESC", List<Value>())
+        return try self.all(CONVERSATIONS, List<Value>())
     }
 
     pub fn devices(self) -> List<Json> ! Error {
-        return try self.all("SELECT json FROM devices ORDER BY rowid", List<Value>())
+        return try self.all(DEVICES, List<Value>())
     }
 
     /// The runs still going, as their run.started events.
     pub fn runs(self) -> List<Json> ! Error {
-        return try self.all("SELECT json FROM runs ORDER BY rowid", List<Value>())
+        return try self.all(RUNS, List<Value>())
     }
 
     /// The tool calls, so a reply's tool blocks can show what ran. They stay after their run.
-    /// Only what a block shows comes, each call's call, run, title and status: a call's
-    /// input and output can be many KB, and the apps ask again at every tool event.
     pub fn tools(self) -> List<Json> ! Error {
-        return try self.all("SELECT json_object('call', call, 'run', run, 'title', json_extract(json, '$.title'), 'status', json_extract(json, '$.status')) FROM tools ORDER BY rowid", List<Value>())
+        return try self.all(TOOLS, List<Value>())
     }
 
     /// The questions nobody has answered, as their approval.needed events.
     pub fn approvals(self) -> List<Json> ! Error {
-        return try self.all("SELECT json FROM approvals ORDER BY rowid", List<Value>())
+        return try self.all(APPROVALS, List<Value>())
     }
 
-    /// Up to `limit` of a conversation's messages before the message `before` (or the
-    /// newest), oldest first, and whether there are older ones in the cache.
-    pub fn messages(self, conversation: String, before: String?, limit: i64) -> (List<Json>, bool) ! Error {
+    /// A list the app asks for, `what` as in `core.get`, as a JSON array's text, made
+    /// from the rows' JSON as it's kept, with nothing parsed. None for messages, which
+    /// `messages_text` gives, or a list there isn't.
+    pub fn list_text(self, what: String) -> String? ! Error {
+        let sql = if what == "agents" { AGENTS } else if what == "conversations" { CONVERSATIONS } else if what == "devices" { DEVICES } else if what == "runs" { RUNS } else if what == "tools" { TOOLS } else if what == "approvals" { APPROVALS } else if what == "outbox" { OUTBOX } else { return none }
+        return some(array(try self.texts(sql, List<Value>())))
+    }
+
+    fn page(self, conversation: String, before: String?, limit: i64) -> (List<String>, bool) ! Error {
         var cut = i64.MAX
         if let b = before {
             let row = try self.db.query_one(String("SELECT at FROM messages WHERE id = ?"), [t(b.copy())])
             if let r = row { cut = int(r[0].copy()) }
         }
-        var newest = try self.all("SELECT json FROM messages WHERE conversation = ? AND at < ? ORDER BY at DESC, rowid DESC LIMIT ?", [t(conversation.copy()), Value.Int(cut), Value.Int(limit + 1)])
+        var newest = try self.texts("SELECT json FROM messages WHERE conversation = ? AND at < ? ORDER BY at DESC, rowid DESC LIMIT ?", [t(conversation.copy()), Value.Int(cut), Value.Int(limit + 1)])
         let more = i64.wrap(u64(newest.len())) > limit
         if more { _ = newest.pop() }
         newest.reverse()
         return (newest, more)
+    }
+
+    /// Up to `limit` of a conversation's messages before the message `before` (or the
+    /// newest), oldest first, and whether there are older ones in the cache.
+    pub fn messages(self, conversation: String, before: String?, limit: i64) -> (List<Json>, bool) ! Error {
+        let (texts, more) = try self.page(conversation, before, limit)
+        var out = List<Json>()
+        for s in texts {
+            out.push(try parse(s))
+        }
+        return (out, more)
+    }
+
+    /// `messages` as a JSON array's text, with nothing parsed.
+    pub fn messages_text(self, conversation: String, before: String?, limit: i64) -> (String, bool) ! Error {
+        let (texts, more) = try self.page(conversation, before, limit)
+        return (array(texts), more)
     }
 
     // --- The outbox ---
@@ -374,7 +419,7 @@ impl Cache {
 
     /// The sends waiting, oldest first.
     pub fn outbox(self) -> List<Json> ! Error {
-        return try self.all("SELECT json FROM outbox ORDER BY at, rowid", List<Value>())
+        return try self.all(OUTBOX, List<Value>())
     }
 
     /// The instance acked a send, or refused it for good: it leaves the outbox.
@@ -484,4 +529,23 @@ fn a_held_burst_is_saved_together() ! Error {
     // Nothing held: each event is its own transaction, as before.
     _ = try c.apply(ev(7, "agent.deleted", Obj.new().s("agent", String("a_2")).done()))
     assert(try c.cursor() == 7 and (try c.agents()).len() == 1)
+}
+
+@test
+fn lists_come_as_text_too() ! Error {
+    let c = try Cache.open(String(":memory:"))
+    _ = try c.apply(ev(1, "agent.created", Obj.new().j("agent", Obj.new().s("id", String("a_1")).done()).done()))
+    _ = try c.apply(ev(2, "agent.created", Obj.new().j("agent", Obj.new().s("id", String("a_2")).done()).done()))
+    let agents = try parse(try c.list_text(String("agents")) ?? String())
+    assert(agents == Json.Array(try c.agents()))
+    assert(try c.list_text(String("tools")) == some(String("[]")))
+    assert(try c.list_text(String("messages")) == none)
+    var ms = List<Json>()
+    for i in 1..4 {
+        ms.push(Obj.new().s("id", "msg_{i}").s("conversation", String("c_1")).i("at", i64(i)).done())
+    }
+    try c.put_messages(Json.Array(ms))
+    let (page, more) = try c.messages_text(String("c_1"), none, 2)
+    let (parsed, _) = try c.messages(String("c_1"), none, 2)
+    assert(more and try parse(page) == Json.Array(parsed))
 }

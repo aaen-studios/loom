@@ -942,8 +942,8 @@ impl Conn {
     /// devices, runs, tools, approvals, outbox or messages (with `conversation`, and
     /// `before` and `limit` if it likes).
     fn get(mut self, m: Json) {
-        let id = str_at(m.copy(), "id")
-        let what = str_at(m.copy(), "what") ?? String()
+        let id = str_at(m, "id")
+        let what = str_at(m, "what") ?? String()
         var known = false
         for g in GETS {
             if what == g { known = true }
@@ -953,21 +953,21 @@ impl Conn {
             return
         }
         match self.read_cache(what.copy(), m) {
-            ok((list, more)) => self.tell(Obj.new().s("t", String("core.data")).maybe("id", id).s("what", what).j("items", Json.Array(list)).b("more", more).done()),
+            // Written as text around the rows' JSON as the cache keeps it: a page of
+            // messages is hundreds of KB, and parsing it only to write it again is waste.
+            ok((items, more)) => {
+                let named = if let i = id { #","id":#{Json.Str(i)}"# } else { String() }
+                self.to_app.send(#"{"t":"core.data"#{named},"what":#{Json.Str(what)},"items":#{items},"more":#{more}}"#)
+            },
             err(e) => self.tell(Obj.new().s("t", String("core.data")).maybe("id", id).j("error", Obj.new().s("code", String("cache")).s("message", "{e}").done()).done()),
         }
     }
 
-    fn read_cache(self, what: String, m: Json) -> (List<Json>, bool) ! Error {
-        if what == "conversations" { return (try self.cache.conversations(), false) }
-        if what == "agents" { return (try self.cache.agents(), false) }
-        if what == "devices" { return (try self.cache.devices(), false) }
-        if what == "runs" { return (try self.cache.runs(), false) }
-        if what == "tools" { return (try self.cache.tools(), false) }
-        if what == "approvals" { return (try self.cache.approvals(), false) }
-        if what == "outbox" { return (try self.cache.outbox(), false) }
-        let limit = int_at(m.copy(), "limit") ?? 50
-        return try self.cache.messages(str_at(m.copy(), "conversation") ?? String(), str_at(m, "before"), if limit < 1 or limit > 500 { 50 } else { limit })
+    // A list from the cache as a JSON array's text, and whether there's more of it.
+    fn read_cache(self, what: String, m: Json) -> (String, bool) ! Error {
+        if let list = try self.cache.list_text(what) { return (list, false) }
+        let limit = int_at(m, "limit") ?? 50
+        return try self.cache.messages_text(str_at(m, "conversation") ?? String(), str_at(m, "before"), if limit < 1 or limit > 500 { 50 } else { limit })
     }
 
     /// A value the cache keeps, or none if it has none or can't be read.
