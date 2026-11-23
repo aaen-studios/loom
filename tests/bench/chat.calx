@@ -146,7 +146,10 @@ fn run(server: Child, base: String, token: String, deltas: usize, turns: usize) 
     let c8 = cpu_ms(server)
     unsafe { sleep(5000000000) }
     let c9 = cpu_ms(server)
-    println("idle       server CPU {(c9 - c8) / 5.0:.1} ms a second, memory {mem_mb(server):.1} MB")
+    // The first seconds still checkpoint what the turns wrote; the next are the loop alone.
+    unsafe { sleep(5000000000) }
+    let c10 = cpu_ms(server)
+    println("idle       server CPU {(c9 - c8) / 5.0:.1} ms a second, then {(c10 - c9) / 5.0:.1}, memory {mem_mb(server):.1} MB")
 }
 
 fn main() ! Error {

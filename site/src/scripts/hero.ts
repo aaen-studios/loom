@@ -8,6 +8,8 @@ import { now } from './thread';
 
 const TAU = Math.PI * 2;
 const COLORS = ['periwinkle', 'mint', 'apricot', 'pink', 'sky', 'gold', 'lavender'];
+// How long they take to come in and apart, in seconds: drawn at full speed until then.
+const INTRO = 2.6;
 
 const clamp = (x: number, a = 0, b = 1) => Math.min(b, Math.max(a, x));
 const easeOut = (x: number) => 1 - Math.pow(1 - clamp(x), 3);
@@ -56,6 +58,7 @@ export function startHero(mark: HTMLElement, canvas: HTMLCanvasElement) {
 	const reduced = matchMedia('(prefers-reduced-motion: reduce)');
 	const start = now();
 	const n = COLORS.length;
+	let edges = new Float64Array(0);
 
 	const frame = () => {
 		const t = reduced.matches ? 30 : now() - start;
@@ -65,16 +68,25 @@ export function startHero(mark: HTMLElement, canvas: HTMLCanvasElement) {
 		const step = 3;
 		const count = Math.ceil((W + 40) / step);
 		const firstLane = ((0 - (n - 1) / 2) / n) * 0.9;
-		const loose = (k: number, u: number) => {
-			const lane = ((k - (n - 1) / 2) / n) * 0.9;
-			const amp = 0.55 + 0.25 * Math.sin(k * 1.7);
-			const wave = 0.9 + 0.35 * Math.cos(k * 0.9);
+		// Calmer at the edges, so the threads come in from nowhere: the same for every thread.
+		if (edges.length !== count + 1) {
+			edges = new Float64Array(count + 1);
+			for (let i = 0; i <= count; i++) edges[i] = Math.pow(Math.max(0, Math.sin((Math.PI * i) / count)), 0.6);
+		}
+		// Each thread's own lane, height, wavelength and place along its wave this frame.
+		const lanes = new Float64Array(n);
+		const amps = new Float64Array(n);
+		const waves = new Float64Array(n);
+		const phases = new Float64Array(n);
+		for (let k = 0; k < n; k++) {
+			lanes[k] = ((k - (n - 1) / 2) / n) * 0.9;
+			amps[k] = 0.55 + 0.25 * Math.sin(k * 1.7);
+			waves[k] = TAU * (0.9 + 0.35 * Math.cos(k * 0.9));
 			// Slow, so seven of them moving at once never pull the eye from the page.
 			const speed = 0.045 + 0.02 * Math.abs(Math.sin(k * 2.3));
-			// Calmer at the edges, so the threads come in from nowhere.
-			const edge = Math.pow(Math.max(0, Math.sin(Math.PI * u)), 0.6);
-			return lane + amp * edge * Math.sin(TAU * (u * wave - t * speed) + k * 1.37);
-		};
+			phases[k] = k * 1.37 - TAU * t * speed;
+		}
+		const loose = (k: number, i: number) => lanes[k] + amps[k] * edges[i] * Math.sin((waves[k] * i) / count + phases[k]);
 		ctx.setTransform(1, 0, 0, 1, 0, 0);
 		ctx.clearRect(0, 0, canvas.width, canvas.height);
 		ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
@@ -88,10 +100,9 @@ export function startHero(mark: HTMLElement, canvas: HTMLCanvasElement) {
 			const last = Math.round(count * shown);
 			ctx.beginPath();
 			for (let i = 0; i <= last; i++) {
-				const u = i / count;
-				const own = loose(k, u);
-				const first = loose(0, u) - firstLane;
-				const v = (own + (first - own) * g) * (1 - g * 0.85);
+				const own = loose(k, i);
+				// Once they've come apart, the cord they came in as no longer counts.
+				const v = g === 0 ? own : (own + (loose(0, i) - firstLane - own) * g) * (1 - g * 0.85);
 				const x = -20 + i * step;
 				const y = mid - Math.tanh(v) * half;
 				if (i) ctx.lineTo(x, y);
@@ -105,9 +116,16 @@ export function startHero(mark: HTMLElement, canvas: HTMLCanvasElement) {
 	// Draw while it's on screen and the page is showing; once with reduced motion.
 	let visible = true;
 	let raf = 0;
+	let drawn = -1;
 	const tick = () => {
 		raf = 0;
-		frame();
+		// Once they've come in and apart they only drift, a fraction of a pixel a frame: 30
+		// frames a second is as smooth to the eye and half the work.
+		const at = now();
+		if (reduced.matches || at - start < INTRO || at - drawn >= 1 / 30 - 0.004) {
+			frame();
+			drawn = at;
+		}
 		if (!reduced.matches && visible && !document.hidden) raf = requestAnimationFrame(tick);
 	};
 	const kick = () => {
@@ -120,8 +138,9 @@ export function startHero(mark: HTMLElement, canvas: HTMLCanvasElement) {
 	new ResizeObserver(() => {
 		if (layout()) kick();
 	}).observe(mark);
-	new IntersectionObserver(([e]) => {
-		visible = e.isIntersecting;
+	new IntersectionObserver((entries) => {
+		// The newest: a scroll before the first callback brings both in one batch.
+		visible = entries[entries.length - 1].isIntersecting;
 		kick();
 	}).observe(canvas);
 	document.addEventListener('visibilitychange', kick);

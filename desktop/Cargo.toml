@@ -48,3 +48,9 @@ winresource = "0.1.34"
 
 [target."cfg(not(windows))".dependencies]
 notify-rust = "4.19.0"
+
+# GPUI's Windows platform, as 0.3.12 with one change in src/platform.rs (marked "loom:"):
+# its vsync thread doesn't tell a hidden or minimised window to paint at every vblank, and
+# looks five times a second while no window is on screen. vendor/README.md says more.
+[patch.crates-io]
+gpui-pre-windows = { path = "vendor/gpui-pre-windows" }

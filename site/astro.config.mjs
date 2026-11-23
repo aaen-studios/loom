@@ -13,6 +13,9 @@ export default defineConfig({
 	// /download/ rather than /download, as the web server sends every page.
 	trailingSlash: 'always',
 	devToolbar: { enabled: false },
+	// The CSS in each page, not a stylesheet it waits for: a round trip less before the first paint
+	// on a phone (about 210 ms on slow 4G).
+	build: { inlineStylesheets: 'always' },
 	// Every page, with when it was last built: the site is built again whenever what's on it changes.
 	integrations: [
 		sitemap({
