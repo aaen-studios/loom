@@ -170,6 +170,7 @@ struct Tunnel {
     t: NoiseTransport?
     j: Joiner
     tried: usize               // the address it's on
+    tries: usize               // how many it has tried before this one
     queued: List<List<u8>>     // messages waiting for the handshake
     local: ServerSocket?       // the core's /ws it carries, for a session's
     calls: Map<i64, Request>   // the core's HTTP requests it carries, by id
@@ -215,6 +216,7 @@ impl Task for Relay {
         var sessions = Map<u32, Tunnel>()
         var http: Tunnel? = none
         var next_id: i64 = 1
+        var good: usize = 0    // the address that answered last
         loop {
             if r.stop.next() != none { break }
             match server.next_event(10) {
@@ -222,14 +224,14 @@ impl Task for Relay {
                     if req.path == "/ws" and req.method == "GET" {
                         match server.upgrade(req.copy()) {
                             ok(s) => {
-                                var t = open(reaching, key, 0)
+                                var t = open(reaching, key, if good < reaching.addresses.len() { good } else { 0 })
                                 t.local = some(s)
                                 sessions.insert(s.id(), t)
                             },
                             err(_) => {},
                         }
                     } else {
-                        if http == none { http = some(open(reaching, key, 0)) }
+                        if http == none { http = some(open(reaching, key, if good < reaching.addresses.len() { good } else { 0 })) }
                         if let t = mut http {
                             let id = next_id
                             next_id += 1
@@ -254,11 +256,11 @@ impl Task for Relay {
                 _ => {},
             }
             for t in mut sessions.values() {
-                pump(mut server, mut t, mut reaching, key, mut looked)
+                pump(mut server, mut t, mut reaching, key, mut looked, mut good)
             }
             var http_ended = false
             if let t = mut http {
-                pump(mut server, mut t, mut reaching, key, mut looked)
+                pump(mut server, mut t, mut reaching, key, mut looked, mut good)
                 http_ended = t.ws == none
             }
             // One that ended answered what it carried, and the next request opens another.
@@ -276,7 +278,7 @@ impl Task for Relay {
 
 // A Noise socket to the address `n` of `p`, with the handshake's first message on its way.
 fn open(p: Place, key: X25519PublicKey, n: usize) -> Tunnel {
-    var t = Tunnel { ws: none, hs: none, t: none, j: Joiner.new(), tried: n, queued: List<List<u8>>(), local: none, calls: Map<i64, Request>() }
+    var t = Tunnel { ws: none, hs: none, t: none, j: Joiner.new(), tried: n, tries: 0, queued: List<List<u8>>(), local: none, calls: Map<i64, Request>() }
     dial(mut t, p, key)
     return t
 }
@@ -312,7 +314,7 @@ fn put(t: mut Tunnel, message: List<u8>) {
 }
 
 // What came from the PC since the last turn.
-fn pump(server: mut Server, t: mut Tunnel, p: mut Place, key: X25519PublicKey, looked: mut Looked) {
+fn pump(server: mut Server, t: mut Tunnel, p: mut Place, key: X25519PublicKey, looked: mut Looked, good: mut usize) {
     var came = List<List<u8>>()
     var ended: websocket.Error? = none
     if let ws = t.ws {
@@ -334,6 +336,9 @@ fn pump(server: mut Server, t: mut Tunnel, p: mut Place, key: X25519PublicKey, l
             match hs.read_message(b.copy()) {
                 ok(_) => {
                     t.t = some(hs.transport())
+                    // New tunnels start at the address that answered: away from home, the
+                    // home network's would make each wait out its whole timeout first.
+                    good = t.tried
                     let waiting = t.queued.copy()
                     t.queued = List<List<u8>>()
                     for m in waiting { put(mut t, m.copy()) }
@@ -365,14 +370,15 @@ fn pump(server: mut Server, t: mut Tunnel, p: mut Place, key: X25519PublicKey, l
         _ => true,
     }
     if t.hs != none and unreached {
-        if t.tried + 1 >= p.addresses.len() and looked.may() {
+        if t.tries + 1 >= p.addresses.len() and looked.may() {
             for a in look_up(p.key.copy()) {
                 if not p.addresses.contains(a.copy()) { p.addresses.push(a.copy()) }
             }
         }
-        if t.tried + 1 < p.addresses.len() {
+        if t.tries + 1 < p.addresses.len() {
             if let ws = t.ws.take() { ws.close() }
-            t.tried += 1
+            t.tries += 1
+            t.tried = (t.tried + 1) % p.addresses.len()
             dial(mut t, p, key)
             return
         }
