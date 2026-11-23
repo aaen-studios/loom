@@ -6,11 +6,11 @@ use std::time::Duration;
 
 use gpui_kit::*;
 
-/// How much of what's left each frame takes: at 125 frames a second a notch is mostly
-/// there in 80 ms and done in about 200.
+/// How much of what's left each 8 ms takes: a notch is mostly there in 80 ms and done
+/// in about 200, at any frame rate.
 const TAKE: f32 = 0.2;
 
-/// The time between steps.
+/// The time `TAKE` is for.
 pub const FRAME: Duration = Duration::from_millis(8);
 
 /// The wheel's scrolling still to play out.
@@ -48,13 +48,16 @@ impl Smooth {
         true
     }
 
-    /// The next step to scroll, in pixels, or none once it's played out.
-    pub fn step(&mut self) -> Option<ScrollEvent> {
+    /// The next step to scroll, in pixels, for `since` since the last one, or none once
+    /// it's played out.
+    pub fn step(&mut self, since: Duration) -> Option<ScrollEvent> {
+        let frames = (since.as_secs_f32() / FRAME.as_secs_f32()).clamp(0.25, 8.0);
+        let part = 1.0 - (1.0 - TAKE).powf(frames);
         let take = |v: f32| {
             if v.abs() <= 1.0 {
                 v
             } else {
-                v.signum() * (v.abs() * TAKE).max(1.0)
+                v.signum() * (v.abs() * part).max(1.0)
             }
         };
         let (dx, dy) = (take(self.left.0), take(self.left.1));
@@ -87,7 +90,7 @@ mod tests {
 
     fn played(s: &mut Smooth) -> Vec<f32> {
         let mut steps = Vec::new();
-        while let Some(e) = s.step() {
+        while let Some(e) = s.step(super::FRAME) {
             let ScrollDelta::Pixels(d) = e.delta else {
                 panic!("steps are in pixels")
             };
@@ -114,7 +117,7 @@ mod tests {
     fn a_notch_the_other_way_drops_the_rest() {
         let mut s = Smooth::default();
         s.catch(&notch(-3.0), 20.0);
-        s.step();
+        s.step(super::FRAME);
         s.catch(&notch(1.0), 20.0);
         let total: f32 = played(&mut s).iter().sum();
         assert!((total - 20.0).abs() < 0.001, "only the new notch, {total}");
@@ -133,6 +136,6 @@ mod tests {
             ..notch(-1.0)
         };
         assert!(!s.catch(&touch, 20.0));
-        assert!(s.step().is_none());
+        assert!(s.step(super::FRAME).is_none());
     }
 }

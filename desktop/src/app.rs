@@ -203,7 +203,7 @@ enum Plus {
 }
 
 /// One row of the chat's list.
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 enum Row {
     Message(Message),
     Approval(Approval),
@@ -221,7 +221,7 @@ pub struct Loom {
     /// What the last update check said.
     update_said: Option<String>,
     core: Core,
-    events: std::sync::mpsc::Receiver<String>,
+    events: std::sync::mpsc::Receiver<Value>,
     /// Its folder ("" for the first server).
     here: String,
     /// The other servers the app is signed in to, each with its own core.
@@ -432,6 +432,11 @@ pub struct Loom {
     composer_placeholder: String,
     /// Counts the search box's changes, so only the last one, once typing pauses, asks.
     search_gen: u64,
+    /// Counts the window's moves and resizes, so its place is kept once it stops.
+    place_gen: u64,
+    /// The core's frames changed what the chat shows: its rows are made again once,
+    /// before the next frame, however many frames came.
+    rows_dirty: bool,
     /// The chat's list, as a view of its own (`ChatList`).
     chat_view: Option<Entity<ChatList>>,
     /// Where the page is drawn, for turning a click on it into the page's own pixels.
@@ -487,7 +492,7 @@ struct Away {
     /// Its folder under the app's: "" for the first server, `servers/2` for another.
     dir: String,
     core: Core,
-    events: std::sync::mpsc::Receiver<String>,
+    events: std::sync::mpsc::Receiver<Value>,
     model: Model,
 }
 
@@ -916,7 +921,7 @@ ACTA_KEY=secret:ACTA_KEY",
                 let woke = last.elapsed() > Duration::from_secs(10);
                 last = Instant::now();
                 let alive = this.update(cx, |loom, cx| {
-                    let got: Vec<String> =
+                    let got: Vec<Value> =
                         std::iter::from_fn(|| loom.events.try_recv().ok()).collect();
                     if woke {
                         loom.send(serde_json::json!({"t": "app.wake"}));
@@ -957,28 +962,26 @@ ACTA_KEY=secret:ACTA_KEY",
                         return;
                     }
                     let mut changed = false;
-                    for e in got {
-                        if let Ok(v) = serde_json::from_str::<Value>(&e) {
-                            if v.get("t").and_then(Value::as_str) == Some("core.device_ask") {
-                                loom.device_ask(&v, cx);
-                                continue;
-                            }
-                            if v.get("t").and_then(Value::as_str) == Some("core.notify") {
-                                let s = |k: &str| {
-                                    v.get(k)
-                                        .and_then(Value::as_str)
-                                        .unwrap_or_default()
-                                        .to_string()
-                                };
-                                let about = shell::About {
-                                    server: loom.here.clone(),
-                                    agent: s("agent"),
-                                    conversation: s("conversation"),
-                                };
-                                loom.notify(&s("title"), &s("body"), about);
-                            }
-                            changed |= crate::perf::step("take", || loom.model.take(&v));
+                    for v in got {
+                        if v.get("t").and_then(Value::as_str) == Some("core.device_ask") {
+                            loom.device_ask(&v, cx);
+                            continue;
                         }
+                        if v.get("t").and_then(Value::as_str) == Some("core.notify") {
+                            let s = |k: &str| {
+                                v.get(k)
+                                    .and_then(Value::as_str)
+                                    .unwrap_or_default()
+                                    .to_string()
+                            };
+                            let about = shell::About {
+                                server: loom.here.clone(),
+                                agent: s("agent"),
+                                conversation: s("conversation"),
+                            };
+                            loom.notify(&s("title"), &s("body"), about);
+                        }
+                        changed |= crate::perf::step("take", || loom.model.take(&v));
                     }
                     loom.spread_release();
                     loom.route_updates(cx);
@@ -989,7 +992,7 @@ ACTA_KEY=secret:ACTA_KEY",
                         loom.decode_frame(cx);
                     }
                     if changed {
-                        loom.refresh_rows(cx);
+                        loom.rows_dirty = true;
                         cx.notify();
                     }
                 });
@@ -1008,8 +1011,23 @@ ACTA_KEY=secret:ACTA_KEY",
         if let Some(p) = place {
             shell::put_window(hwnd, p, !background);
         }
-        cx.observe_window_bounds(window, |this: &mut Loom, _, _| this.keep_place())
+        // Kept once the window stops moving, not at each step of a drag.
+        cx.observe_window_bounds(window, |this: &mut Loom, _, cx| {
+            this.place_gen += 1;
+            let gen = this.place_gen;
+            cx.spawn(async move |this, cx| {
+                cx.background_executor()
+                    .timer(Duration::from_millis(400))
+                    .await;
+                let _ = this.update(cx, |loom, _| {
+                    if loom.place_gen == gen {
+                        loom.keep_place();
+                    }
+                });
+            })
             .detach();
+        })
+        .detach();
         // The window, taskbar and shortcuts show the icon in loom's theme.
         shell::follow_theme(hwnd, dark);
         // Closing the window keeps loom in the tray, so routines and replies go on.
@@ -1137,6 +1155,8 @@ ACTA_KEY=secret:ACTA_KEY",
             page_tried: 0,
             composer_placeholder: String::new(),
             search_gen: 0,
+            place_gen: 0,
+            rows_dirty: false,
             chat_view: None,
             page_bounds: Rc::new(std::cell::Cell::new(None)),
             browser_docked: false,
@@ -1595,11 +1615,8 @@ ACTA_KEY=secret:ACTA_KEY",
         let mut changed = false;
         let prefs = self.prefs.clone();
         for a in &mut self.away {
-            let got: Vec<String> = std::iter::from_fn(|| a.events.try_recv().ok()).collect();
-            for e in got {
-                let Ok(v) = serde_json::from_str::<Value>(&e) else {
-                    continue;
-                };
+            let got: Vec<Value> = std::iter::from_fn(|| a.events.try_recv().ok()).collect();
+            for v in got {
                 match v.get("t").and_then(Value::as_str) {
                     // This PC's tools answer the server on screen alone.
                     Some("core.device_ask") => {
@@ -2265,6 +2282,12 @@ ACTA_KEY=secret:ACTA_KEY",
     fn rebuild_rows(&mut self, cx: &mut Context<Self>) {
         let mut rows: Vec<Row> = self.model.shown().into_iter().map(Row::Message).collect();
         rows.extend(self.model.shown_approvals().into_iter().map(Row::Approval));
+        // What another chat's frames change leaves this one's rows as they were: the
+        // list keeps them, so its cached drawing stays good. Compared from the end,
+        // where a reply that's streaming differs at once.
+        if rows.len() == self.rows.len() && rows.iter().rev().eq(self.rows.iter().rev()) {
+            return;
+        }
         let old = self.rows.clone();
         let same_start = rows.len() >= old.len()
             && old.iter().zip(rows.iter()).all(|(a, b)| match (a, b) {
@@ -11580,24 +11603,12 @@ ACTA_KEY=secret:ACTA_KEY",
                             return;
                         }
                         this.smooth.running = true;
-                        cx.spawn_in(window, async move |this, cx| loop {
-                            cx.background_executor().timer(crate::smooth::FRAME).await;
-                            let step = this
-                                .update(cx, |this, _| {
-                                    let step = this.smooth.step();
-                                    this.smooth.running = step.is_some();
-                                    step
-                                })
-                                .ok()
-                                .flatten();
-                            let Some(step) = step else {
-                                break;
-                            };
-                            let _ = cx.update(|window, cx| {
-                                window.dispatch_event(PlatformInput::Scroll(step), cx);
-                            });
-                        })
-                        .detach();
+                        // One step a frame the window shows, not on a timer of its own, so
+                        // each frame moves as far as the time it took says.
+                        let weak = cx.entity().downgrade();
+                        let first = Instant::now() - crate::smooth::FRAME;
+                        window
+                            .on_next_frame(move |window, cx| smooth_step(weak, first, window, cx));
                     });
                 });
             },
@@ -14550,6 +14561,9 @@ impl Render for Loom {
         // Before anything is drawn from it: which server is on screen.
         self.settle_server(cx);
         self.finish_weaving(window, cx);
+        if std::mem::take(&mut self.rows_dirty) {
+            self.refresh_rows(cx);
+        }
         if let Some(address) = self.fill_server.take() {
             self.server_in
                 .update(cx, |s, cx| s.set_value(address, window, cx));
@@ -14623,17 +14637,9 @@ impl Render for Loom {
                 .checked_duration_since(Instant::now())
                 .is_some()
             || self.opened().elapsed().as_secs_f32() < 1.5
-            // An agent's page beside the chat, whose thread fidgets at its top.
-            || matches!(
-                self.side,
-                Some(
-                    Screen::EditAgent
-                        | Screen::Activity
-                        | Screen::Memory
-                        | Screen::Pins
-                        | Screen::Aside
-                )
-            ) && self.screen == Screen::Chat
+            // The agent's edit panel beside the chat, whose thread fidgets at its top.
+            // The other panels have no thread, so they draw only when something changes.
+            || self.side == Some(Screen::EditAgent) && self.screen == Screen::Chat
             // Someone typing to an agent, whose thread thinks along: only on the empty
             // chat's hero, where that thread is drawn.
             || self.screen == Screen::Chat
@@ -15145,7 +15151,7 @@ fn local_mode() -> bool {
 /// app, and only it can be the instance on this computer.
 /// The first server's core, started before the window is made, so it boots (and an
 /// instance in the app opens) while GPUI starts, rather than after.
-static FIRST_CORE: std::sync::Mutex<Option<(Core, std::sync::mpsc::Receiver<String>)>> =
+static FIRST_CORE: std::sync::Mutex<Option<(Core, std::sync::mpsc::Receiver<Value>)>> =
     std::sync::Mutex::new(None);
 
 pub fn start_first_core() {
@@ -15439,6 +15445,25 @@ impl Render for ChatList {
         };
         chat_list(i, self.scroller.clone(), self.this.clone()).into_any_element()
     }
+}
+
+/// Plays the wheel's next step, sized by the time since `last`, and the one after on
+/// the next frame, until it's played out (crate::smooth).
+fn smooth_step(this: WeakEntity<Loom>, last: Instant, window: &mut Window, cx: &mut App) {
+    let now = Instant::now();
+    let step = this
+        .update(cx, |this, _| {
+            let step = this.smooth.step(now - last);
+            this.smooth.running = step.is_some();
+            step
+        })
+        .ok()
+        .flatten();
+    let Some(step) = step else {
+        return;
+    };
+    window.dispatch_event(PlatformInput::Scroll(step), cx);
+    window.on_next_frame(move |window, cx| smooth_step(this, now, window, cx));
 }
 
 /// The chat's messages, as its list draws them.
