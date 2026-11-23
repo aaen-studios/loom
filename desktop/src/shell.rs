@@ -604,11 +604,13 @@ pub fn show_window(hwnd: isize, show: bool) {
     };
     // A build for measuring shows its window behind what the person is doing (main.rs).
     let measuring = cfg!(feature = "perf");
+    // Shown, it no longer waits to be maximized, whichever way it's shown.
+    let maximize = show && MAXIMIZE_WHEN_SHOWN.swap(false, Ordering::Relaxed);
     let how = if !show {
         SW_HIDE
     } else if measuring {
         SW_SHOWNA
-    } else if MAXIMIZE_WHEN_SHOWN.swap(false, Ordering::Relaxed) {
+    } else if maximize {
         SW_SHOWMAXIMIZED
     // SAFETY: IsIconic only reads the window's state.
     } else if unsafe { IsIconic(hwnd as _) } != 0 {
@@ -629,11 +631,13 @@ pub fn show_window(hwnd: isize, show: bool) {
 pub fn show_window(_hwnd: isize, _show: bool) {}
 
 /// Where the window is now, as Windows keeps it: its normal rectangle and whether
-/// it's maximized, also while it's minimized or hidden in the tray.
+/// it's maximized, also while it's minimized or hidden in the tray. Hidden since it
+/// was put in a maximized place (`put_window`), it counts as maximized, though Windows
+/// only maximizes it once it's shown, so a move while it waits doesn't lose that.
 #[cfg(windows)]
 pub fn window_place(hwnd: isize) -> Option<crate::place::Place> {
     use windows_sys::Win32::UI::WindowsAndMessaging::{
-        GetWindowPlacement, SW_SHOWMAXIMIZED, SW_SHOWMINIMIZED, WINDOWPLACEMENT,
+        GetWindowPlacement, IsWindowVisible, SW_SHOWMAXIMIZED, SW_SHOWMINIMIZED, WINDOWPLACEMENT,
         WPF_RESTORETOMAXIMIZED,
     };
     // SAFETY: a WINDOWPLACEMENT with its length set, for the app's own window.
@@ -647,6 +651,9 @@ pub fn window_place(hwnd: isize) -> Option<crate::place::Place> {
     };
     let r = p.rcNormalPosition;
     let show = p.showCmd as i32;
+    // SAFETY: IsWindowVisible only reads the window's state.
+    let waiting = unsafe { IsWindowVisible(hwnd as _) } == 0
+        && MAXIMIZE_WHEN_SHOWN.load(std::sync::atomic::Ordering::Relaxed);
     Some(crate::place::Place {
         normal: crate::place::Rect {
             left: r.left,
@@ -654,7 +661,8 @@ pub fn window_place(hwnd: isize) -> Option<crate::place::Place> {
             right: r.right,
             bottom: r.bottom,
         },
-        maximized: show == SW_SHOWMAXIMIZED
+        maximized: waiting
+            || show == SW_SHOWMAXIMIZED
             || (show == SW_SHOWMINIMIZED && p.flags & WPF_RESTORETOMAXIMIZED != 0),
     })
 }
@@ -998,7 +1006,8 @@ mod tests {
         use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
         use windows_sys::Win32::UI::WindowsAndMessaging::{
             CreateWindowExW, DefWindowProcW, DestroyWindow, IsWindowVisible, RegisterClassW,
-            ShowWindow, SWP_NOMOVE, SW_SHOWNOACTIVATE, WINDOWPOS, WM_WINDOWPOSCHANGED, WNDCLASSW,
+            SetWindowPos, ShowWindow, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER,
+            SW_HIDE, SW_SHOWNOACTIVATE, WINDOWPOS, WM_WINDOWPOSCHANGED, WNDCLASSW,
             WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_OVERLAPPEDWINDOW,
         };
         thread_local! {
@@ -1061,8 +1070,9 @@ mod tests {
             super::put_window(hwnd, place, false);
             let back = super::window_place(hwnd).expect("a placement");
             assert_eq!(back.normal, normal);
-            // Hidden, it's maximized only once it's shown.
-            assert!(!back.maximized);
+            // Hidden, Windows maximizes it only once it's shown, but it reads as it
+            // will open.
+            assert_eq!(back.maximized, maximized);
             assert_eq!(
                 super::MAXIMIZE_WHEN_SHOWN.load(std::sync::atomic::Ordering::Relaxed),
                 maximized
@@ -1070,6 +1080,27 @@ mod tests {
             // SAFETY: the window made above.
             assert_eq!(unsafe { IsWindowVisible(hwnd as _) }, 0);
         }
+        // Moved while it waits hidden, as by a display change, it still reads maximized,
+        // so the place kept then opens it maximized next time. Off screen again, then
+        // shown there, not maximized, it reads as it is.
+        // SAFETY: the window made above.
+        unsafe {
+            SetWindowPos(
+                hwnd as _,
+                std::ptr::null_mut(),
+                -10000,
+                -10000,
+                0,
+                0,
+                SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
+            )
+        };
+        assert!(super::window_place(hwnd).expect("a placement").maximized);
+        // SAFETY: the window made above.
+        unsafe { ShowWindow(hwnd as _, SW_SHOWNOACTIVATE) };
+        assert!(!super::window_place(hwnd).expect("a placement").maximized);
+        // SAFETY: the window made above.
+        unsafe { ShowWindow(hwnd as _, SW_HIDE) };
         // It came onto the screen, and was hidden each time it did.
         let moves = MOVES.with(|m| m.borrow().clone());
         assert!(moves.iter().any(|&(_, x)| x > -5000), "{moves:?}");

@@ -54,7 +54,12 @@ impl Place {
         Place::from_json(&serde_json::from_str(&text).ok()?)
     }
 
+    /// Kept for next time, except by a build for measuring, whose window is off every
+    /// screen: it leaves the place the app opens at alone.
     pub fn save(self, dir: &str) {
+        if cfg!(feature = "perf") {
+            return;
+        }
         let _ = std::fs::write(file(dir), self.to_json().to_string());
     }
 
