@@ -1,0 +1,132 @@
+// Packs the Mac app (PLAN.md, "Updates and versions"), on a Mac.
+//
+//     calx scripts/mac.calx app LOOM VERSION OUT_DIR
+//         makes OUT_DIR/loom.app from the program LOOM (desktop/target/release/loom):
+//         its Info.plist with VERSION and the bundle identifier the app uses
+//         (desktop/src/shell.rs, BUNDLE_ID), the icon (design/logo/app.icns), and an
+//         ad-hoc signature (`codesign -s -`), since loom has no Developer ID yet.
+//     calx scripts/mac.calx dmg APP OUT
+//         makes the disk image OUT, loom-mac.dmg on a release, holding APP and a link
+//         to /Applications to drag it onto. hdiutil sometimes finds its disk busy on a
+//         CI runner, so it tries a few times.
+//
+// Run it from the repository's root. The release takes loom-mac.dmg, which people
+// download and the app updates itself from (desktop/src/swap.rs).
+import std.env
+import std.fs
+import std.process.{Command, exit}
+import std.thread
+
+const BUNDLE_ID: str = "no.aaenz.loom.desktop"
+const ICON: str = "design/logo/app.icns"
+
+fn usage() -> String {
+    return String("usage: calx scripts/mac.calx app LOOM VERSION OUT_DIR | dmg APP OUT\n")
+}
+
+/// Info.plist for loom `version`.
+fn info_plist(version: String) -> String {
+    let text = #"
+        <?xml version="1.0" encoding="UTF-8"?>
+        <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+        <plist version="1.0">
+        <dict>
+            <key>CFBundleDevelopmentRegion</key>
+            <string>en</string>
+            <key>CFBundleDisplayName</key>
+            <string>loom</string>
+            <key>CFBundleExecutable</key>
+            <string>loom</string>
+            <key>CFBundleIconFile</key>
+            <string>loom</string>
+            <key>CFBundleIdentifier</key>
+            <string>#{BUNDLE_ID}</string>
+            <key>CFBundleInfoDictionaryVersion</key>
+            <string>6.0</string>
+            <key>CFBundleName</key>
+            <string>loom</string>
+            <key>CFBundlePackageType</key>
+            <string>APPL</string>
+            <key>CFBundleShortVersionString</key>
+            <string>#{version}</string>
+            <key>CFBundleVersion</key>
+            <string>#{version}</string>
+            <key>LSApplicationCategoryType</key>
+            <string>public.app-category.productivity</string>
+            <key>LSMinimumSystemVersion</key>
+            <string>11.0</string>
+            <key>NSHighResolutionCapable</key>
+            <true/>
+            <key>NSSupportsAutomaticGraphicsSwitching</key>
+            <true/>
+        </dict>
+        </plist>
+        "#
+    return "{text}\n"
+}
+
+fn app(args: List<String>) ! Error {
+    if args.len() != 4 { fail "{usage()}" }
+    let program = args[1].copy()
+    let version = args[2].copy()
+    let bundle = "{args[3]}/loom.app"
+    if fs.exists(bundle.copy()) { fail "{bundle} is there already" }
+    try fs.make_dir_all("{bundle}/Contents/MacOS")
+    try fs.make_dir_all("{bundle}/Contents/Resources")
+    try fs.write_text("{bundle}/Contents/Info.plist", info_plist(version.copy()))
+    try fs.write_text("{bundle}/Contents/PkgInfo", String("APPL????"))
+    try fs.copy(program, "{bundle}/Contents/MacOS/loom")
+    try fs.set_mode("{bundle}/Contents/MacOS/loom", 0o755)
+    try fs.copy(String(ICON), "{bundle}/Contents/Resources/loom.icns")
+    try Command.new(String("codesign")).args([String("--force"), String("--sign"), String("-"), String("--timestamp=none"), bundle.copy()]).run()
+    try Command.new(String("codesign")).args([String("--verify"), String("--strict"), bundle.copy()]).run()
+    println("made {bundle}, loom {version}, signed ad hoc")
+}
+
+fn dmg(args: List<String>) ! Error {
+    if args.len() != 3 { fail "{usage()}" }
+    let bundle = args[1].copy()
+    let out = args[2].copy()
+    if not fs.is_dir("{bundle}/Contents/MacOS") { fail "{bundle} isn't an app" }
+    // What the disk image shows: the app, and Applications to drag it onto.
+    let root = try fs.temp_dir()
+    try Command.new(String("ditto")).args([bundle.copy(), "{root}/loom.app"]).run()
+    try fs.make_link(String("/Applications"), "{root}/Applications")
+    let create = Command.new(String("hdiutil")).args([String("create"), String("-volname"), String("loom"), String("-srcfolder"), root.copy(), String("-fs"), String("HFS+"), String("-format"), String("UDZO"), String("-ov"), out.copy()])
+    var tries = 0
+    loop {
+        tries += 1
+        match create.output() {
+            ok(o) => {
+                if o.status.success() { break }
+                eprintln("hdiutil create, try {tries}: {String.from_utf8(o.stderr.copy()) ?? String()}")
+            },
+            err(e) => eprintln("hdiutil create, try {tries}: {e}"),
+        }
+        if tries == 5 {
+            try fs.remove_dir_all(root)
+            fail "hdiutil couldn't make {out}"
+        }
+        unsafe { thread.sleep(3000000000) }
+    }
+    try fs.remove_dir_all(root)
+    let size = try fs.metadata(out.copy())
+    println("made {out}: {size.size} bytes")
+}
+
+fn main() ! Error {
+    let args = env.args()
+    if args.len() < 1 {
+        eprint(usage())
+        exit(2)
+    }
+    let cmd = args[0].copy()
+    if cmd == "app" {
+        try app(args)
+    } else if cmd == "dmg" {
+        try dmg(args)
+    } else {
+        eprint(usage())
+        exit(2)
+    }
+}

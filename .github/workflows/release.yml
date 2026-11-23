@@ -1,10 +1,11 @@
 name: release
 
 # A tag like v0.3.0 makes a release (PLAN.md, "Updates and versions"): the
-# desktop app and its installer (desktop/setup), the `loom` server for Linux,
-# Windows and macOS, and manifest.json naming each with its SHA-256, signed
-# with the release key (scripts/release.calx). The desktop app, its installer
-# and `loom update` take only what that signature covers.
+# Windows app and its installer (desktop/setup), the Mac app in its disk image
+# (scripts/mac.calx), the `loom` server for Linux, Windows and macOS, and
+# manifest.json naming each with its SHA-256, signed with the release key
+# (scripts/release.calx). The desktop apps, the installer and `loom update`
+# take only what that signature covers.
 
 on:
   push:
@@ -78,6 +79,46 @@ jobs:
           name: desktop
           path: dist/
 
+  # The Mac app, for Apple silicon: loom.app, signed ad hoc since loom has no Developer
+  # ID yet, in loom-mac.dmg, which people download and the app updates itself from.
+  desktop-macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Version
+        run: |
+          if [ "$GITHUB_REF_TYPE" = tag ]; then v="${GITHUB_REF_NAME#v}"; else v="0.0.0-dry"; fi
+          echo "LOOM_VERSION=$v" >> "$GITHUB_ENV"
+
+      - name: Install Calx
+        run: |
+          curl -fsSL https://calxlang.com/install.sh | sh
+          echo "$HOME/.calx/bin" >> "$GITHUB_PATH"
+
+      - name: Rust
+        run: rustup update stable && rustup default stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: desktop
+
+      - name: Build
+        working-directory: desktop
+        run: cargo build --release
+
+      - name: Pack
+        run: |
+          mkdir -p dist
+          calx scripts/mac.calx app desktop/target/release/loom "$LOOM_VERSION" build/mac
+          calx scripts/mac.calx dmg build/mac/loom.app dist/loom-mac.dmg
+          ls -l dist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: desktop-macos
+          path: dist/
+
   server:
     strategy:
       matrix:
@@ -135,7 +176,7 @@ jobs:
           path: dist/
 
   publish:
-    needs: [desktop, server]
+    needs: [desktop, desktop-macos, server]
     if: github.ref_type == 'tag'
     runs-on: ubuntu-latest
     steps:
@@ -189,7 +230,7 @@ jobs:
           version="${GITHUB_REF_NAME#v}"
           base="https://github.com/${GITHUB_REPOSITORY}/releases/download/${GITHUB_REF_NAME}"
           calx scripts/release.calx sign dist "$version" "$base" notes.md \
-            windows-desktop=loom.exe windows-installer=loom-setup.exe \
+            windows-desktop=loom.exe windows-installer=loom-setup.exe macos-desktop=loom-mac.dmg \
             linux-server=loom-linux windows-server=loom-windows.exe \
             linux-arm64-server=loom-linux-arm64 macos-server=loom-macos \
             linux-push=loom-push-linux linux-arm64-push=loom-push-linux-arm64

@@ -1,6 +1,6 @@
-//! What the app reaches in the system: the tray, notifications, starting at login,
-//! and keeping the window in the tray when it's closed (PLAN.md, "An instance in the
-//! desktop app": "It keeps running").
+//! What the app reaches in the system: the tray (the menu bar on a Mac), notifications,
+//! starting at login, and keeping the window in the tray when it's closed (PLAN.md, "An
+//! instance in the desktop app": "It keeps running").
 
 use tray_icon::menu::{CheckMenuItem, Menu, MenuEvent, MenuItem, PredefinedMenuItem};
 use tray_icon::{MouseButton, TrayIcon, TrayIconBuilder, TrayIconEvent};
@@ -25,8 +25,12 @@ pub struct Tray {
 }
 
 fn icon() -> Option<tray_icon::Icon> {
-    // The mark in light ink, for the taskbar's dark default.
+    // The mark in light ink, for the taskbar's dark default. On a Mac it's a template
+    // image, which the menu bar draws in its own ink, so only its shape counts.
+    #[cfg(not(target_os = "macos"))]
     let bytes: &[u8] = include_bytes!("../../design/logo/png/dark-32.png");
+    #[cfg(target_os = "macos")]
+    let bytes: &[u8] = include_bytes!("../../design/logo/png/dark-64.png");
     let mut reader = png::Decoder::new(std::io::Cursor::new(bytes))
         .read_info()
         .ok()?;
@@ -54,12 +58,18 @@ impl Tray {
             &quit,
         ])
         .ok()?;
+        // On Windows a click opens the window and the menu is the right button's; a Mac's
+        // menu bar opens the menu on a click.
         let mut b = TrayIconBuilder::new()
             .with_tooltip("loom")
             .with_menu(Box::new(menu))
-            .with_menu_on_left_click(false);
+            .with_menu_on_left_click(cfg!(target_os = "macos"));
         if let Some(i) = icon() {
-            b = b.with_icon(i);
+            #[cfg(target_os = "macos")]
+            let with = b.with_icon_templated(i);
+            #[cfg(not(target_os = "macos"))]
+            let with = b.with_icon(i);
+            b = with;
         }
         let icon = b.build().ok()?;
         // What happens in the tray waits here, and wakes the window's task to look.
@@ -210,8 +220,87 @@ pub fn notify(title: &str, body: &str, about: Option<About>, sound: bool) {
     }
 }
 
+/// The notifications waiting for the window's task to post, which on a Mac goes through
+/// GPUI's own (UNUserNotificationCenter), on the main thread.
+#[cfg(target_os = "macos")]
+static TO_POST: std::sync::Mutex<Vec<Note>> = std::sync::Mutex::new(Vec::new());
+
+/// A notification waiting: its title, its body, what it's about and whether it sounds.
+#[cfg(target_os = "macos")]
+type Note = (String, String, Option<About>, bool);
+
+/// A system notification, with the person's alert sound or without. A click on it opens
+/// what it's about. It goes out from the window's task (`post_notifications`).
+#[cfg(target_os = "macos")]
+pub fn notify(title: &str, body: &str, about: Option<About>, sound: bool) {
+    if let Ok(mut n) = TO_POST.lock() {
+        n.push((title.to_string(), body.to_string(), about, sound));
+    }
+    crate::wake::wake();
+}
+
+/// A notification's tag, which comes back when it's clicked: a count, so a newer one
+/// doesn't replace it, and what it's about.
+#[cfg(any(target_os = "macos", test))]
+fn tag_of(n: u64, about: &About) -> String {
+    format!(
+        "{n}\u{1f}{}\u{1f}{}\u{1f}{}",
+        about.server, about.agent, about.conversation
+    )
+}
+
+/// What a clicked notification's tag says it's about.
+#[cfg(any(target_os = "macos", test))]
+fn about_of(tag: &str) -> Option<About> {
+    let mut parts = tag.split('\u{1f}').skip(1);
+    Some(About {
+        server: parts.next()?.to_string(),
+        agent: parts.next()?.to_string(),
+        conversation: parts.next()?.to_string(),
+    })
+}
+
+/// Posts the notifications waiting, from the window's task.
+#[cfg(target_os = "macos")]
+pub fn post_notifications(cx: &gpui_kit::App) {
+    static COUNT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let waiting = TO_POST
+        .lock()
+        .map(|mut n| std::mem::take(&mut *n))
+        .unwrap_or_default();
+    for (title, body, about, sound) in waiting {
+        let n = COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        cx.show_system_notification(gpui_kit::SystemNotification {
+            tag: tag_of(n, &about.unwrap_or_default()).into(),
+            title: title.into(),
+            body: body.into(),
+            actions: Vec::new(),
+        });
+        if sound {
+            crate::mac::beep();
+        }
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn post_notifications(_cx: &gpui_kit::App) {}
+
+/// Hears each click on loom's notifications, for `clicked`.
+#[cfg(target_os = "macos")]
+pub fn hear_notifications(cx: &gpui_kit::App) {
+    cx.on_system_notification_response(|r, _| {
+        if let (Some(a), Ok(mut c)) = (about_of(&r.tag), CLICKED.lock()) {
+            c.push(a);
+        }
+        crate::wake::wake();
+    });
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn hear_notifications(_cx: &gpui_kit::App) {}
+
 /// A system notification.
-#[cfg(not(windows))]
+#[cfg(all(not(windows), not(target_os = "macos")))]
 pub fn notify(title: &str, body: &str, _about: Option<About>, sound: bool) {
     let mut n = notify_rust::Notification::new();
     n.summary(title).body(body);
@@ -357,6 +446,7 @@ fn point_icon(
 /// quit after. The setup waits for this program to end, checks its own signature,
 /// swaps loom.exe, starts the new one (in the tray when `background`) and puts the old
 /// one back if the new one doesn't start (desktop/setup).
+#[cfg(not(target_os = "macos"))]
 pub fn apply_update(setup: &std::path::Path, background: bool) -> std::io::Result<()> {
     let mut started = std::process::Command::new(setup);
     started
@@ -368,6 +458,31 @@ pub fn apply_update(setup: &std::path::Path, background: bool) -> std::io::Resul
     }
     started.spawn()?;
     Ok(())
+}
+
+/// Hands the update at `dmg`, the new release's disk image that the core downloaded and
+/// checked against the signed manifest, to the new loom in it, for the app to quit
+/// after: the new loom puts itself in this one's place, starts, and puts this one back
+/// if it doesn't (swap.rs).
+#[cfg(target_os = "macos")]
+pub fn apply_update(dmg: &std::path::Path, background: bool) -> std::io::Result<()> {
+    let bundle = crate::mac::bundle()
+        .ok_or_else(|| std::io::Error::other("this loom isn't in an app to swap"))?;
+    if let Some(why) = crate::mac::cant_update(&bundle) {
+        return Err(std::io::Error::other(why));
+    }
+    let staged = crate::swap::stage(dmg)?;
+    crate::swap::hand_over(&staged, &bundle, background)
+}
+
+/// Why this app can't update itself where it runs, for the update icon to say, or none
+/// when it can. Only a Mac's app can be somewhere it can't, such as its disk image.
+pub fn cant_update() -> Option<&'static str> {
+    #[cfg(target_os = "macos")]
+    if let Some(bundle) = crate::mac::bundle() {
+        return crate::mac::cant_update(&bundle);
+    }
+    None
 }
 
 /// Whether closing the window keeps loom in the tray, rather than quitting it.
@@ -397,7 +512,12 @@ pub fn keep_awake(on: bool) {
     }
 }
 
-#[cfg(not(windows))]
+#[cfg(target_os = "macos")]
+pub fn keep_awake(on: bool) {
+    crate::mac::keep_awake(on);
+}
+
+#[cfg(all(not(windows), not(target_os = "macos")))]
 pub fn keep_awake(_on: bool) {}
 
 /// Whether the window is on screen, rather than hidden in the tray.
@@ -408,16 +528,31 @@ pub fn window_shown(hwnd: isize) -> bool {
     unsafe { IsWindowVisible(hwnd as _) != 0 }
 }
 
-#[cfg(not(windows))]
+#[cfg(target_os = "macos")]
+pub fn window_shown(hwnd: isize) -> bool {
+    crate::mac::window_shown(hwnd)
+}
+
+#[cfg(all(not(windows), not(target_os = "macos")))]
 pub fn window_shown(_hwnd: isize) -> bool {
     true
 }
 
 /// The name of loom's entry in HKCU's Run key, which the setup removes on uninstall.
+#[cfg(not(target_os = "macos"))]
 const LOGIN_NAME: &str = "loom";
 
+/// The label of loom's LaunchAgent on a Mac, `~/Library/LaunchAgents/<it>.plist`: the
+/// app's bundle identifier, so System Settings shows it under loom in Login Items.
+#[cfg(target_os = "macos")]
+const LOGIN_NAME: &str = BUNDLE_ID;
+
+/// The Mac app's bundle identifier (scripts/mac.calx writes it into Info.plist).
+#[cfg(target_os = "macos")]
+pub const BUNDLE_ID: &str = "no.aaenz.loom.desktop";
+
 /// Where the setup installs loom.exe: %LOCALAPPDATA%\Programs\loom (desktop/setup).
-/// macOS has no installed app yet, so there's none there.
+#[cfg(not(target_os = "macos"))]
 fn installed_exe() -> Option<std::path::PathBuf> {
     if !cfg!(windows) {
         return None;
@@ -425,6 +560,34 @@ fn installed_exe() -> Option<std::path::PathBuf> {
     std::env::var_os("LOCALAPPDATA")
         .filter(|d| !d.is_empty())
         .map(|d| std::path::Path::new(&d).join(r"Programs\loom\loom.exe"))
+}
+
+/// Where a Mac's loom is installed: dragged from its disk image into Applications, or
+/// into the person's own ~/Applications. The one this program is, when it's either, and
+/// otherwise the first that's there.
+#[cfg(target_os = "macos")]
+fn installed_exe() -> Option<std::path::PathBuf> {
+    let inside = "loom.app/Contents/MacOS/loom";
+    let mut places = vec![std::path::Path::new("/Applications").join(inside)];
+    if let Some(home) = std::env::var_os("HOME").filter(|h| !h.is_empty()) {
+        places.push(
+            std::path::Path::new(&home)
+                .join("Applications")
+                .join(inside),
+        );
+    }
+    let exe = std::env::current_exe().ok();
+    if let Some(here) = places
+        .iter()
+        .find(|p| exe.as_deref().is_some_and(|e| same_program(e, p)))
+    {
+        return Some(here.clone());
+    }
+    places
+        .iter()
+        .find(|p| p.is_file())
+        .or(places.first())
+        .cloned()
 }
 
 /// The program "Start at login" starts: the installed loom when there is one, so a dev
@@ -530,13 +693,26 @@ fn launcher() -> Option<auto_launch::AutoLaunch> {
         .set_args(&["--background"])
         // Under HKCU, as everything the setup writes, even when run as administrator.
         .set_windows_enable_mode(auto_launch::WindowsEnableMode::CurrentUser)
+        // A LaunchAgent in ~/Library/LaunchAgents, which needs no permission to ask for
+        // and shows under loom in Login Items.
+        .set_macos_launch_mode(auto_launch::MacOSLaunchMode::LaunchAgent)
+        .set_bundle_identifiers(&[LOGIN_NAME])
         .build()
         .ok()
 }
 
-/// Whether loom starts when the person logs in: on Windows, whether the Run entry
-/// starts the program "Start at login" would put there, so an entry left by another
-/// build shows as off, and ticking it points it here.
+/// The program loom's LaunchAgent starts: the first of its ProgramArguments.
+#[cfg(any(target_os = "macos", test))]
+fn agent_program(plist: &str) -> Option<&str> {
+    let args = &plist[plist.find("<key>ProgramArguments</key>")?..];
+    let start = args.find("<string>")? + "<string>".len();
+    let end = args[start..].find("</string>")? + start;
+    Some(&args[start..end])
+}
+
+/// Whether loom starts when the person logs in: whether the Run entry (on a Mac, the
+/// LaunchAgent) starts the program "Start at login" would put there, so an entry left by
+/// another build shows as off, and ticking it points it here.
 pub fn starts_at_login() -> bool {
     let enabled = launcher()
         .and_then(|l| l.is_enabled().ok())
@@ -549,6 +725,21 @@ pub fn starts_at_login() -> bool {
             }
             _ => false,
         };
+    #[cfg(target_os = "macos")]
+    let enabled = enabled && {
+        let plist = std::env::var_os("HOME")
+            .map(|h| {
+                std::path::Path::new(&h)
+                    .join("Library/LaunchAgents")
+                    .join(format!("{LOGIN_NAME}.plist"))
+            })
+            .and_then(|p| std::fs::read_to_string(p).ok())
+            .unwrap_or_default();
+        match (agent_program(&plist), login_exe()) {
+            (Some(program), Some(exe)) => same_program(std::path::Path::new(program), &exe),
+            _ => false,
+        }
+    };
     enabled
 }
 
@@ -627,7 +818,12 @@ pub fn show_window(hwnd: isize, show: bool) {
     }
 }
 
-#[cfg(not(windows))]
+#[cfg(target_os = "macos")]
+pub fn show_window(hwnd: isize, show: bool) {
+    crate::mac::show_window(hwnd, show);
+}
+
+#[cfg(all(not(windows), not(target_os = "macos")))]
 pub fn show_window(_hwnd: isize, _show: bool) {}
 
 /// Where the window is now, as Windows keeps it: its normal rectangle and whether
@@ -667,7 +863,12 @@ pub fn window_place(hwnd: isize) -> Option<crate::place::Place> {
     })
 }
 
-#[cfg(not(windows))]
+#[cfg(target_os = "macos")]
+pub fn window_place(hwnd: isize) -> Option<crate::place::Place> {
+    crate::mac::window_place(hwnd)
+}
+
+#[cfg(all(not(windows), not(target_os = "macos")))]
 pub fn window_place(_hwnd: isize) -> Option<crate::place::Place> {
     None
 }
@@ -766,7 +967,12 @@ pub fn put_window(hwnd: isize, place: crate::place::Place, shown: bool) {
     );
 }
 
-#[cfg(not(windows))]
+#[cfg(target_os = "macos")]
+pub fn put_window(hwnd: isize, place: crate::place::Place, shown: bool) {
+    crate::mac::put_window(hwnd, place, shown);
+}
+
+#[cfg(all(not(windows), not(target_os = "macos")))]
 pub fn put_window(_hwnd: isize, _place: crate::place::Place, _shown: bool) {}
 
 /// Keeps a build for measuring, which opens hidden (main.rs), out of the way: its
@@ -799,12 +1005,15 @@ pub fn out_of_the_way(hwnd: isize, w: i32, h: i32, shown: bool) {
 #[cfg(not(windows))]
 pub fn out_of_the_way(_hwnd: isize, _w: i32, _h: i32, _shown: bool) {}
 
-/// The window's native handle, for `show_window`.
+/// The window's native handle, for `show_window`: its HWND on Windows, and its NSView on
+/// a Mac.
 pub fn hwnd(window: &gpui_kit::Window) -> isize {
     use raw_window_handle::{HasWindowHandle, RawWindowHandle};
     match HasWindowHandle::window_handle(window).map(|h| h.as_raw()) {
         #[cfg(windows)]
         Ok(RawWindowHandle::Win32(h)) => h.hwnd.get(),
+        #[cfg(target_os = "macos")]
+        Ok(RawWindowHandle::AppKit(h)) => h.ns_view.as_ptr() as isize,
         _ => 0,
     }
 }
@@ -886,8 +1095,14 @@ mod tests {
             r"C:\Users\x\Downloads\loom.exe",
             Some(installed)
         ));
-        // Where nothing is installed, as on macOS.
+        // Where nothing is installed.
         assert!(!on("0.3.0", false, false, here, None));
+        // A Mac's: in Applications, and not run from its disk image.
+        let app = Path::new("/Applications/loom.app/Contents/MacOS/loom");
+        let on_mac =
+            |exe: &str| super::turns_itself_on("0.3.0", false, false, Path::new(exe), Some(app));
+        assert!(on_mac("/Applications/loom.app/Contents/MacOS/loom"));
+        assert!(!on_mac("/Volumes/loom/loom.app/Contents/MacOS/loom"));
     }
 
     /// The program a Run entry starts, quoted as the setup writes it or not, as the
@@ -906,6 +1121,31 @@ mod tests {
             super::run_program("/Applications/loom"),
             "/Applications/loom"
         );
+    }
+
+    /// A Mac notification's tag carries what it's about back from a click.
+    #[test]
+    fn a_notification_s_tag_says_what_it_is_about() {
+        let about = super::About {
+            server: "servers/2".into(),
+            agent: "a_1".into(),
+            conversation: "c_9".into(),
+        };
+        let tag = super::tag_of(7, &about);
+        assert_ne!(tag, super::tag_of(8, &about));
+        assert_eq!(super::about_of(&tag), Some(about));
+        assert_eq!(super::about_of("nothing"), None);
+    }
+
+    /// The program a Mac's LaunchAgent starts, as auto-launch writes it.
+    #[test]
+    fn reads_the_program_a_launch_agent_starts() {
+        let plist = "<plist version=\"1.0\">\n  <dict>\n  <key>Label</key>\n  <string>no.aaenz.loom.desktop</string>\n  <key>AssociatedBundleIdentifiers</key>\n  <array><string>no.aaenz.loom.desktop</string></array>\n  <key>ProgramArguments</key>\n  <array><string>/Applications/loom.app/Contents/MacOS/loom</string><string>--background</string></array>\n  </dict>\n</plist>";
+        assert_eq!(
+            super::agent_program(plist),
+            Some("/Applications/loom.app/Contents/MacOS/loom")
+        );
+        assert_eq!(super::agent_program(""), None);
     }
 
     // Needs a screen, so CI leaves it out: `cargo test -- --ignored` runs it.

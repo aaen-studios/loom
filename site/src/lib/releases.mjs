@@ -92,3 +92,13 @@ export function sizeOf(release, name) {
 	const a = release?.assets.find((x) => x.name === name);
 	return a ? megabytes(a.size) : undefined;
 }
+
+/**
+ * Whether the newest release has a file of this name, so a link to it works: the Mac app's
+ * download shows once a release carries it. A build without releases, offline, shows it.
+ * @param {Release | undefined} release
+ * @param {string} name
+ */
+export function carries(release, name) {
+	return !release || release.assets.some((x) => x.name === name);
+}

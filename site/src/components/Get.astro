@@ -1,8 +1,10 @@
 ---
-// The two ways to get loom, side by side: the Windows app and a server. On Windows the app's
-// download comes first; elsewhere, where there's no app yet, the server does.
-import { latest, sizeOf } from '../lib/releases.mjs';
-import { LATEST } from '../lib/site.mjs';
+// The ways to get loom, side by side: the Windows app, the Mac app and a server. Which comes first
+// follows the visitor's system (html[data-os], set in Base.astro): on Windows the Windows app, on a
+// Mac the Mac app, and elsewhere, as on a phone, the server, with both apps quiet beside it. The Mac
+// app shows once the newest release has its disk image.
+import { carries, latest, sizeOf } from '../lib/releases.mjs';
+import { LATEST, MAC_APP, WINDOWS_APP } from '../lib/site.mjs';
 
 interface Props {
 	/** Without the line under the buttons. */
@@ -10,19 +12,30 @@ interface Props {
 }
 const { compact = false } = Astro.props;
 const release = await latest();
-const size = sizeOf(release, 'loom-setup.exe');
-const meta = [release && `loom ${release.version}`, size].filter(Boolean).join(' · ');
+const mac = carries(release, MAC_APP);
+const line = (...parts: (string | undefined)[]) => [release && `loom ${release.version}`, ...parts].filter(Boolean).join(' · ');
+const windowsMeta = line(sizeOf(release, WINDOWS_APP));
+const macMeta = line(sizeOf(release, MAC_APP), 'Apple silicon');
 ---
 
 <div class="get">
 	<div class="buttons">
-		<a class="btn btn-primary get-app" href={`${LATEST}/loom-setup.exe`} download>
+		<a class="btn btn-primary get-windows" href={`${LATEST}/${WINDOWS_APP}`} download>
 			<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 4v11M7 10.5l5 5 5-5M5 19.5h14"></path></svg>
 			Download for Windows
 		</a>
+		{
+			mac && (
+				<a class="btn btn-quiet get-mac" href={`${LATEST}/${MAC_APP}`} download>
+					<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 4v11M7 10.5l5 5 5-5M5 19.5h14"></path></svg>
+					Download for Mac
+				</a>
+			)
+		}
 		<a class="btn btn-quiet get-server" href="/download/#server">Run it on a server</a>
 	</div>
-	{!compact && meta && <p class="meta">{meta}</p>}
+	{!compact && windowsMeta && <p class="meta meta-windows">{windowsMeta}</p>}
+	{!compact && mac && macMeta && <p class="meta meta-mac">{macMeta}</p>}
 </div>
 
 <style>
@@ -41,14 +54,32 @@ const meta = [release && `loom ${release.version}`, size].filter(Boolean).join('
 		font-size: 13px;
 		color: var(--ink-3);
 	}
-	/* Not on Windows: the server first, and the app's download quiet beside it. */
+	/* Windows, and before the system is known: the Windows app first. */
+	.meta-mac {
+		display: none;
+	}
+	/* On a Mac: the Mac app first, the rest quiet. */
+	:global(html[data-os='mac']) .get-mac {
+		order: -1;
+		background: var(--button);
+		color: var(--button-ink);
+		border-color: transparent;
+	}
+	:global(html[data-os='mac']) .meta-mac {
+		display: block;
+	}
+	:global(html[data-os='mac']) .meta-windows {
+		display: none;
+	}
+	/* Anywhere else: the server first, and both apps quiet beside it. */
 	:global(html[data-os='other']) .get-server {
 		order: -1;
 		background: var(--button);
 		color: var(--button-ink);
 		border-color: transparent;
 	}
-	:global(html[data-os='other']) .get-app {
+	:global(html[data-os='mac']) .get-windows,
+	:global(html[data-os='other']) .get-windows {
 		background: transparent;
 		color: var(--ink);
 		border-color: var(--line-strong);
@@ -65,11 +96,3 @@ const meta = [release && `loom ${release.version}`, size].filter(Boolean).join('
 		}
 	}
 </style>
-
-<script is:inline>
-	(() => {
-		const ua = navigator.userAgentData?.platform ?? navigator.platform ?? '';
-		const mobile = /Android|iPhone|iPad/i.test(navigator.userAgent);
-		document.documentElement.dataset.os = /Win/i.test(ua) && !mobile ? 'windows' : 'other';
-	})();
-</script>

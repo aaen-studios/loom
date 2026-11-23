@@ -500,7 +500,14 @@ pub fn data_dir() -> String {
         if let Ok(dir) = std::env::var("LOOM_DATA") {
             return dir;
         }
-        let base = std::env::var("APPDATA").unwrap_or_else(|_| ".".into());
+        // %APPDATA%\Loom on Windows, ~/Library/Application Support/Loom on a Mac.
+        let base = if cfg!(target_os = "macos") {
+            std::env::var("HOME")
+                .map(|h| format!("{h}/Library/Application Support"))
+                .unwrap_or_else(|_| ".".into())
+        } else {
+            std::env::var("APPDATA").unwrap_or_else(|_| ".".into())
+        };
         let dir = std::path::Path::new(&base).join("Loom");
         let _ = std::fs::create_dir_all(&dir);
         dir.to_string_lossy().into_owned()
@@ -971,6 +978,7 @@ ACTA_KEY=secret:ACTA_KEY",
                         crate::perf::once("shown for another start");
                     }
                     loom.tick_prefs(cx);
+                    shell::post_notifications(cx);
                     loom.notification_clicks(cx);
                     loom.take_notice(cx);
                     if let Some(csv) = loom.model.exported.take() {
@@ -5369,7 +5377,8 @@ ACTA_KEY=secret:ACTA_KEY",
                     .flex()
                     .items_center()
                     .justify_between()
-                    .pl(px(space::L))
+                    // On a Mac, after the traffic lights.
+                    .pl(px(LIGHTS_END.max(space::L)))
                     .pr(px(space::M))
                     // The knot, and the wordmark beside it (design/logo/README.md).
                     .child(
@@ -5832,12 +5841,26 @@ ACTA_KEY=secret:ACTA_KEY",
             .flex()
             .flex_col()
             .items_center()
+            // A Mac's traffic lights take the top, so the knot goes under them.
+            .when(cfg!(target_os = "macos"), |d| {
+                d.child(
+                    div()
+                        .id("rail-lights")
+                        .window_control_area(WindowControlArea::Drag)
+                        .w_full()
+                        .h(px(layout::TITLEBAR)),
+                )
+            })
             .child(
                 div()
                     .id("rail-top")
                     .window_control_area(WindowControlArea::Drag)
                     .w_full()
-                    .h(px(layout::TITLEBAR))
+                    .h(px(if cfg!(target_os = "macos") {
+                        RAIL_ROW
+                    } else {
+                        layout::TITLEBAR
+                    }))
                     .flex()
                     .items_center()
                     .justify_center()
@@ -10638,6 +10661,20 @@ ACTA_KEY=secret:ACTA_KEY",
         }
         self.panel = None;
         if self.panel_opening.is_some() {
+            return;
+        }
+        // A Mac's web view doesn't keep a panel from the network yet: the panel break-out
+        // test gets out there (LOO-268). Until it doesn't, panels and pages don't open on
+        // a Mac. `loom --panel-test` still runs there, to check.
+        if cfg!(target_os = "macos") {
+            self.model
+                .notices
+                .push("Panels and pages don't open in the Mac app yet.".into());
+            if key.starts_with("page:") {
+                self.model.page = None;
+            } else {
+                self.model.close_panel();
+            }
             return;
         }
         // Making a web view runs a message loop of its own until WebView2 is ready, and
@@ -16033,7 +16070,13 @@ impl Render for Loom {
             cx.notify();
         }
         let railed = self.railed(ww);
-        let header = self.header(cx);
+        // Beside the rail, a Mac's traffic lights reach past it, so the header starts
+        // where the knot does in the whole sidebar, after them.
+        let header = self
+            .header(cx)
+            .when(railed && cfg!(target_os = "macos"), |d| {
+                d.pl(px(LIGHTS_END - layout::RAIL))
+            });
         // Drawn last, over the sheet that takes the pointer while it's open.
         // From a right-click in the sidebar, it opens at the pointer instead.
         let menu = self.menu_panel(cx).map(|m| match self.menu_at {
@@ -16521,16 +16564,25 @@ fn core_config(dir: &str, server: Option<&str>) -> String {
         }
     }
     // What the core fetches for an update: the release's installer, which swaps loom.exe
-    // in once the app has quit, and can put the old one back (desktop/setup).
-    config["platform"] = "windows-installer".into();
+    // in once the app has quit, and can put the old one back (desktop/setup); on a Mac,
+    // the release's disk image, whose loom puts itself in place (swap.rs).
+    config["platform"] = if cfg!(target_os = "macos") {
+        "macos-desktop"
+    } else {
+        "windows-installer"
+    }
+    .into();
+    // Where this app can't update itself, as from its disk image, the update icon says why.
+    if let Some(why) = shell::cant_update() {
+        config["app_why"] = why.into();
+    }
     if local_mode() {
         config["mode"] = "local".into();
         if let Some(mcp) = mcp_program(&folder) {
             config["mcp"] = mcp.into();
         }
-        config["username"] = std::env::var("USERNAME")
-            .unwrap_or_else(|_| "me".into())
-            .into();
+        let user = if cfg!(windows) { "USERNAME" } else { "USER" };
+        config["username"] = std::env::var(user).unwrap_or_else(|_| "me".into()).into();
         config["kind"] = if cfg!(target_os = "macos") {
             "macos"
         } else {
@@ -16606,6 +16658,18 @@ const SIDE_HEAD: f32 = 48.0;
 /// The narrowest the panel beside the chat drags to, and the least it leaves the chat.
 const SIDE_LEAST: f32 = 320.0;
 pub(crate) const CHAT_LEAST: f32 = 420.0;
+
+/// Where a Mac draws the window's traffic lights: the close button's top left in the
+/// title bar (main.rs), the three, each 14 px, in the middle of its height.
+pub(crate) const LIGHTS: (f32, f32) = (16.0, 17.0);
+/// Where what's beside the traffic lights starts, past the three (23 px apart) and a
+/// gap: the knot in the sidebar's top. Windows draws its buttons at the other end, so
+/// nothing moves there.
+const LIGHTS_END: f32 = if cfg!(target_os = "macos") {
+    LIGHTS.0 + 60.0 + space::M
+} else {
+    0.0
+};
 
 /// An agent's square on the rail, and the + over them.
 const RAIL_ROW: f32 = 40.0;

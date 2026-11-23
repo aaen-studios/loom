@@ -12,6 +12,10 @@ export const GUIDES = `${GITHUB}/tree/main/site/docs`;
 /** The newest release's files: each stays the newest without the site being built again. */
 export const LATEST = `${GITHUB}/releases/latest/download`;
 
+/** The desktop apps' downloads in a release: Windows' installer and the Mac's disk image. */
+export const WINDOWS_APP = 'loom-setup.exe';
+export const MAC_APP = 'loom-mac.dmg';
+
 /** What a server runs to install loom. The web server sends it on to the newest release's script. */
 export const INSTALL = `curl -fsSL ${ORIGIN}/install.sh | sudo sh`;
 

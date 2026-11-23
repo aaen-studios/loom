@@ -9,13 +9,13 @@ The guides are in [`docs/`](docs/): running loom, agents and keys, people, phone
 | Page | What it is |
 |---|---|
 | `/` | The wordmark with the agents' threads behind it, the downloads, a live copy of the desktop app, and what loom does |
-| `/download/` | The Windows app, and the server for Linux, Docker, or as one program for Linux, macOS and Windows |
+| `/download/` | The Windows and Mac apps, and the server for Linux, Docker, or as one program for Linux, macOS and Windows |
 | `/changelog/` | Every release's notes, from GitHub's releases |
 | `/changelog.xml` | The same as an Atom feed |
 | `/llms.txt` | What loom is, for AI assistants and search |
 | `/404.html` | A page that isn't there |
 
-The Mac and iPhone apps go on the download page once they ship.
+The iPhone app goes on the download page once it ships. The Mac app shows once the newest release has `loom-mac.dmg`, and comes first for a visitor on a Mac.
 
 ## How it's made
 

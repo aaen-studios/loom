@@ -219,7 +219,9 @@ impl Task for Boot {
         conn.local = str_at(cfg.copy(), "mode") == some(String("local"))
         // The first core gathers what's behind across the app, for the update icon.
         if bool_at(cfg.copy(), "hub") == some(true) {
-            conn.hub = some(Hub.new(str_at(cfg.copy(), "version") ?? String()))
+            let hub = Hub.new(str_at(cfg.copy(), "version") ?? String())
+            // An app that can't swap itself where it runs, as a Mac's from its disk image, says why.
+            conn.hub = some(if let why = str_at(cfg.copy(), "app_why") { hub.cant_update(why) } else { hub })
         }
         if let d = data {
             conn.files = some("{d}/files")
@@ -323,6 +325,10 @@ fn core_stop(core: *u8) {
     if let to = mut c.value.to_core {
         to.send(String(#"{"t":"core.stop"}"#))
     }
+    // Woken as each send wakes it, the loop takes the stop at once, not at its next timer,
+    // which kept quitting waiting up to a minute.
+    while let w = c.value.wakers.next() { c.value.waker = some(w) }
+    if let w = c.value.waker { w.wake() }
     c.value.to_core = none
     if let t = c.value.conn.take() {
         t.join()

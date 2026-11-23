@@ -20,6 +20,7 @@ const [claude] = await brains(['claude-acp']);
 ---
 
 <div class="app" data-demo role="region" aria-label="loom's desktop app, with an agent at work">
+	<span class="lights" aria-hidden="true"><i></i><i></i><i></i></span>
 	<aside class="side">
 		<div class="side-top">
 			<span class="brand" aria-hidden="true">
@@ -205,6 +206,7 @@ const [claude] = await brains(['claude-acp']);
 	/* The window, as the app is: 1120 wide by default, every size from the tokens. */
 	.app {
 		--tint: var(--thread-sky);
+		position: relative;
 		display: flex;
 		height: 640px;
 		max-width: 1120px;
@@ -631,6 +633,47 @@ const [claude] = await brains(['claude-acp']);
 	.winctl .close:hover {
 		background: var(--bad);
 		color: #fff;
+	}
+
+	/* On a Mac (html[data-os], set in Base.astro), the Mac app's window: its traffic lights
+	   where the app puts them (desktop/src/app.rs, LIGHTS), the knot after them, or under them
+	   on the rail, and no buttons at the title bar's end. */
+	.lights {
+		display: none;
+		position: absolute;
+		top: 17px;
+		left: 16px;
+		gap: 9px;
+		z-index: 1;
+	}
+	.lights i {
+		width: 14px;
+		height: 14px;
+		border-radius: 50%;
+		background: #ff5f57;
+		box-shadow: inset 0 0 0 0.5px rgb(0 0 0 / 0.15);
+	}
+	.lights i:nth-child(2) {
+		background: #febc2e;
+	}
+	.lights i:nth-child(3) {
+		background: #28c840;
+	}
+	:global(html[data-os='mac']) .lights {
+		display: flex;
+	}
+	:global(html[data-os='mac']) .side-top {
+		padding-left: 88px;
+	}
+	:global(html[data-os='mac']) .winctl {
+		display: none;
+	}
+	:global(html[data-os='mac']) .app.railed .side-top {
+		height: calc(var(--layout-titlebar) + 40px);
+		padding: var(--layout-titlebar) 0 0;
+	}
+	:global(html[data-os='mac']) .app.railed .header {
+		padding-left: 32px;
 	}
 
 	/* The chat: a column 740 wide at most, newest at the bottom. */
