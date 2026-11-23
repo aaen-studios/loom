@@ -1572,6 +1572,22 @@ impl Instance {
         try i.run(some(stop))
     }
 
+    // One frame's writes, or one burst of agent lines', go in one transaction: a turn
+    // writes a dozen times, and each write on its own is a commit.
+    fn hold(i: Instance) {
+        match i.store.hold() {
+            ok => {},
+            err(e) => eprintln("loom: database: {e}"),
+        }
+    }
+
+    fn let_go(i: Instance) {
+        match i.store.let_go() {
+            ok => {},
+            err(e) => eprintln("loom: database: {e}"),
+        }
+    }
+
     fn run(i: mut Instance, until: own Receiver<bool>?) ! Error {
         var stop = until
         loop {
@@ -1600,6 +1616,7 @@ impl Instance {
                     }
                 },
                 some(Message(s, Text(text))) => {
+                    i.hold()
                     match i.frame(s, text) {
                         ok => {},
                         err(e) => {
@@ -1607,6 +1624,7 @@ impl Instance {
                             _ = i.server.send_text(s, error_frame("internal", String("Something went wrong in the instance."), none))
                         },
                     }
+                    i.let_go()
                 },
                 some(Message(s, Binary(_))) => i.server.close_socket(s, protocol.CLOSE_PROTOCOL, String("binary frames aren't used")),
                 some(Closed(s, _, _)) => {
@@ -1628,12 +1646,18 @@ impl Instance {
             // While an update stops what runs, nothing new starts: the restart picks it all up.
             let holding = i.holding()
             if now() >= i.next_due and not holding { i.due() }
+            var held = false
             while let line = i.lines.next() {
+                if not held {
+                    i.hold()
+                    held = true
+                }
                 match i.agent_line(line) {
                     ok => {},
                     err(e) => eprintln("loom: agent: {e}"),
                 }
             }
+            if held { i.let_go() }
             while let d = i.install_done.next() {
                 match i.installed(d) {
                     ok => {},

@@ -97,6 +97,8 @@ CREATE TABLE IF NOT EXISTS messages (
     id TEXT PRIMARY KEY, user TEXT NOT NULL REFERENCES users(id), conversation TEXT NOT NULL,
     json TEXT NOT NULL, at INTEGER NOT NULL);
 CREATE INDEX IF NOT EXISTS messages_by_conversation ON messages (user, conversation, at);
+-- A page of a chat goes by rowid, which this index ends in, so it needs no sort.
+CREATE INDEX IF NOT EXISTS messages_in_order ON messages (user, conversation);
 CREATE TABLE IF NOT EXISTS runs (
     id TEXT PRIMARY KEY, user TEXT NOT NULL REFERENCES users(id), conversation TEXT NOT NULL,
     status TEXT NOT NULL, at INTEGER NOT NULL);
@@ -111,9 +113,11 @@ CREATE TABLE IF NOT EXISTS routine_threads (
 CREATE TABLE IF NOT EXISTS sides (
     user TEXT NOT NULL REFERENCES users(id), agent TEXT NOT NULL, conversation TEXT NOT NULL,
     PRIMARY KEY (user, agent));
+CREATE INDEX IF NOT EXISTS sides_by_conversation ON sides (conversation);
 CREATE TABLE IF NOT EXISTS tasks (
     id TEXT PRIMARY KEY, user TEXT NOT NULL REFERENCES users(id), agent TEXT NOT NULL,
     conversation TEXT NOT NULL, status TEXT NOT NULL, json TEXT NOT NULL, at INTEGER NOT NULL);
+CREATE INDEX IF NOT EXISTS tasks_by_conversation ON tasks (conversation);
 CREATE TABLE IF NOT EXISTS queue (
     id TEXT PRIMARY KEY, user TEXT NOT NULL REFERENCES users(id), conversation TEXT NOT NULL,
     pos INTEGER NOT NULL, json TEXT NOT NULL);
@@ -430,20 +434,46 @@ impl Store {
         _ = try self.db.execute(String("DELETE FROM meta WHERE key = ?"), [t(String(key))])
     }
 
+    // Work that lands together or not at all: a savepoint, which is a transaction of its
+    // own, or part of the one `hold` keeps.
     pub fn begin(self) ! Error {
-        try self.db.begin()
+        _ = try self.db.execute(String("SAVEPOINT work"))
     }
 
     pub fn commit(self) ! Error {
-        try self.db.commit()
+        _ = try self.db.execute(String("RELEASE work"))
     }
 
     pub fn rollback(self) {
         if self.db.in_transaction() {
-            match self.db.rollback() {
-                ok => {},
+            match self.db.execute(String("ROLLBACK TO work")) {
+                ok(_) => match self.db.execute(String("RELEASE work")) {
+                    ok(_) => {},
+                    err(e) => eprintln("loom: rollback failed: {e}"),
+                },
                 err(e) => eprintln("loom: rollback failed: {e}"),
             }
+        }
+    }
+
+    // Keeps every write from here on in one transaction until `let_go`, so the writes
+    // of one frame, or of one burst of agent lines, are saved once rather than each on
+    // its own.
+    pub fn hold(self) ! Error {
+        if not self.db.in_transaction() { try self.db.begin() }
+    }
+
+    pub fn let_go(self) ! Error {
+        if not self.db.in_transaction() { return }
+        match self.db.commit() {
+            ok => {},
+            err(e) => {
+                match self.db.rollback() {
+                    ok => {},
+                    err(_) => {},
+                }
+                fail e
+            },
         }
     }
 
