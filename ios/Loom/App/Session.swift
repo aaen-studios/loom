@@ -90,8 +90,40 @@ final class Session {
                 model.take(f)
             }
         }
+        #if DEBUG
+        fromLaunch()
+        #endif
         flush()
     }
+
+    #if DEBUG
+    @ObservationIgnored private var launchDone: Set<String> = []
+
+    /// What a debug build's launch arguments ask for, so tests/ios/live.calx can take the
+    /// app through signing in, a reply and a question with no one to tap: `-link <qr>`
+    /// joins with the code once the core is signed out, `-say <text>` sends it to the
+    /// agent `-open` opened once it's synced, and `-allow` answers that chat's questions
+    /// yes. Each does what its screen's button does.
+    private func fromLaunch() {
+        let args = ProcessInfo.processInfo.arguments
+        func value(_ flag: String) -> String? {
+            guard let i = args.firstIndex(of: flag), i + 1 < args.count else { return nil }
+            return args[i + 1]
+        }
+        if model.conn == .signedOut, let qr = value("-link"), launchDone.insert("-link").inserted {
+            send(model.link(qr: qr, device: Session.device))
+        }
+        guard model.synced, let agent = value("-open"), model.selected == agent else { return }
+        if let text = value("-say"), launchDone.insert("-say").inserted {
+            send(model.send(text))
+        }
+        if args.contains("-allow") {
+            for a in model.shownApprovals where launchDone.insert(a.call).inserted {
+                send(model.approve(a.call, allow: true))
+            }
+        }
+    }
+    #endif
 
     // MARK: The system
 

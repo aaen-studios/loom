@@ -60,7 +60,9 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
     }
 
     nonisolated func userNotificationCenter(_ center: UNUserNotificationCenter, didReceive response: UNNotificationResponse) async {
-        let call = response.notification.request.content.userInfo["call"] as? String
+        // One the core showed has `call` itself; a push has it under `loom`.
+        let info = response.notification.request.content.userInfo
+        let call = info["call"] as? String ?? (info["loom"] as? [String: Any])?["call"] as? String
         let action = response.actionIdentifier
         await MainActor.run {
             guard let session, let call else { return }

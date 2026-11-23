@@ -24,7 +24,7 @@ struct ThreadView: View {
 
     /// How far up the thread is at `u` (0 to 1 along it), as a fraction of the room it
     /// has, for a thread `width` points long.
-    static func lift(_ mood: Mood, u: Double, width: Double, t: Double, sinceSnap: Double) -> Double {
+    nonisolated static func lift(_ mood: Mood, u: Double, width: Double, t: Double, sinceSnap: Double) -> Double {
         let x = u * width
         let tau = Double.pi * 2
         switch mood {

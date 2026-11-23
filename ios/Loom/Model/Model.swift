@@ -572,9 +572,14 @@ final class Model {
             delta(f)
         case "event":
             event(f)
+        case "core.moved":
+            // The instance moved, and the core followed it there (protocol.md, "moved").
+            notice = "Your instance moved to \(f["address"].text). The app is connected there now."
         case "result":
             if !f["error"].isNull { notice = f["error"]["message"].string }
         case "error":
+            // A move the core won't follow (`moved_unsigned`, `moved_elsewhere`) says why
+            // here too, and the app stays where it is.
             let code = f["code"].text
             if code != "offline" { notice = f["message"].string ?? code }
         default:

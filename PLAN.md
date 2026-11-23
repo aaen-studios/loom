@@ -689,9 +689,9 @@ Checked against the Calx board on 2026-11-20: every card below is done, so Phase
 | Killing everything a process started (a process group on Linux and macOS, a job object on Windows) | **Done**: `Child.stop` and `Child.kill_tree` | [CLX-376](https://acta.aaenz.no/aaen-studios/clx#CLX-376) | Stopping a runaway agent and all it started, on a server and on a PC | 3 |
 | Ed25519 signing in std.crypto | **Done** | [CLX-379](https://acta.aaenz.no/aaen-studios/clx#CLX-379) | Device keys and signed approvals for device tools, the instance's key, signed releases | 3 |
 | Named time zones in std.time | **Done**: `TimeZone`, with the IANA tz database built in | [CLX-404](https://acta.aaenz.no/aaen-studios/clx#CLX-404) | Routines daily or on weekdays at a time, in each person's zone | 4 |
-| An iOS target, for devices and the simulator, as a static library Xcode links | Being built, on the Mac | [CLX-408](https://acta.aaenz.no/aaen-studios/clx#CLX-408) | The iPhone app. Started early, during Phases 3–4 (below) | 5 |
+| An iOS target, for devices and the simulator, as a static library Xcode links | **Done**: `aarch64-ios` and `aarch64-ios-sim`, which the iPhone app links | [CLX-408](https://acta.aaenz.no/aaen-studios/clx#CLX-408) | The iPhone app. Started early, during Phases 3–4 (below) | 5 |
 | Cross-compiling: building for another system or processor | **Done**: `calx build --target`, iOS from a Mac | [CLX-409](https://acta.aaenz.no/aaen-studios/clx#CLX-409) | iOS builds from a Mac, Linux arm64 and other release builds | 5 |
-| std.net and std.http on iOS: kqueue, and URLSession since iOS has no libcurl | WinHTTP on Windows, libcurl on Linux and macOS | [CLX-410](https://acta.aaenz.no/aaen-studios/clx#CLX-410) | The core on iPhone | 5 |
+| std.net and std.http on iOS: kqueue, and URLSession since iOS has no libcurl | **Done** | [CLX-410](https://acta.aaenz.no/aaen-studios/clx#CLX-410) | The core on iPhone | 5 |
 | ES256 (ECDSA P-256) signing | **Done** | [CLX-406](https://acta.aaenz.no/aaen-studios/clx#CLX-406) | APNs tokens | 5 |
 | HTTP/2 in std.http | **Done** | [CLX-383](https://acta.aaenz.no/aaen-studios/clx#CLX-383) | APNs, which speaks only HTTP/2 | 5 |
 | A library's panic reports to the host instead of ending the app | **Done** | [CLX-407](https://acta.aaenz.no/aaen-studios/clx#CLX-407) | A bug in the core shouldn't close the app | 5 |
