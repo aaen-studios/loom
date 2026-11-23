@@ -2092,13 +2092,18 @@ impl Store {
     // Stores an event for `user`: `fields` with `t`, `seq`, `kind` and `at`
     // added. Gives the event frame, ready to send.
     pub fn append(self, user: String, kind: str, fields: Json) -> Json ! Error {
+        return try parse(try self.append_text(user, kind, fields))
+    }
+
+    // As append, giving the frame as the text stored, so it's written once.
+    pub fn append_text(self, user: String, kind: str, fields: Json) -> String ! Error {
         let row = try self.db.query_one(String("SELECT coalesce(max(seq), 0) FROM events WHERE user = ?"), [t(user.copy())])
         let seq = int((row ?? List<Value>())[0].copy()) + 1
         let at = now()
         let head = Obj.new().s("t", String("event")).i("seq", seq).s("kind", String(kind)).i("at", at).done()
-        let event = merge(head, fields)
-        _ = try self.db.execute(String("INSERT INTO events (user, seq, json, at) VALUES (?, ?, ?, ?)"), [t(user), Value.Int(seq), t("{event}"), Value.Int(at)])
-        return event
+        let frame = "{merge(head, fields)}"
+        _ = try self.db.execute(String("INSERT INTO events (user, seq, json, at) VALUES (?, ?, ?, ?)"), [t(user), Value.Int(seq), t(frame.copy()), Value.Int(at)])
+        return frame
     }
 
     // The newest seq `user` has, or 0.

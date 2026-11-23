@@ -72,9 +72,11 @@ pub enum Back {
     Frame(String, String, i64, i64)    // the page as a JPEG, in base64, and its width and height
     Open(String, bool)    // whether its browser is open now
     Steps(String, Json, bool)    // what the person's done while recording, as steps, and whether the recording's ended
+    Stopped(u64)    // the thread numbered so is ending, with its browser stopped, for the loop to join
 }
 
 struct Worker {
+    n: u64    // which thread it is, for Stopped
     key: String
     data: String    // the instance's data, absolute
     profile: String
@@ -142,6 +144,7 @@ impl Task for Worker {
                 },
                 some(In.Stop) => {
                     w.close()
+                    w.back.send(Back.Stopped(w.n))
                     return
                 },
                 none => w.drain(),
@@ -153,12 +156,12 @@ impl Task for Worker {
 // Starts the thread for the agent `key` names, whose browser keeps its profile
 // in `profile`, in the instance's `data`, where a browser and fonts it fetches
 // for itself go (server/chrome.calx). What it has to say comes to `back`. The thread ends once it's
-// sent Stop, with its browser stopped. `reopen` is the page it was on when it
+// sent Stop, with its browser stopped, and said Stopped with `n`. `reopen` is the page it was on when it
 // last closed, or "", which its first call that isn't browser_open opens again.
-pub fn start(key: String, data: String, profile: String, guarded: bool, proxy: u16, reopen: String, back: Sender<Back>) -> (Sender<In>, Thread) {
+pub fn start(n: u64, key: String, data: String, profile: String, guarded: bool, proxy: u16, reopen: String, back: Sender<Back>) -> (Sender<In>, Thread) {
     let inbox = Receiver<In>()
     let to = inbox.sender()
-    let t = unsafe { Thread.spawn(Worker { key: key.copy(), data: data.copy(), profile: profile.copy(), guarded: guarded, proxy: proxy, inbox: inbox, back: back.copy(), child: none, page: none, port: String(), next_id: 0, refs: Map<String, i64>(), hidden: List<(String, String)>(), watched: false, casting: false, recording: false, steps: List<Json>(), last_url: String(), was_on: String(), reopen: reopen.copy(), told_fonts: false, ack: 0, ack_at: 0, navigating: false, loaded: false }) }
+    let t = unsafe { Thread.spawn(Worker { n: n, key: key.copy(), data: data.copy(), profile: profile.copy(), guarded: guarded, proxy: proxy, inbox: inbox, back: back.copy(), child: none, page: none, port: String(), next_id: 0, refs: Map<String, i64>(), hidden: List<(String, String)>(), watched: false, casting: false, recording: false, steps: List<Json>(), last_url: String(), was_on: String(), reopen: reopen.copy(), told_fonts: false, ack: 0, ack_at: 0, navigating: false, loaded: false }) }
     return (to, t)
 }
 

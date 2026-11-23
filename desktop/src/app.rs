@@ -2148,20 +2148,12 @@ ACTA_KEY=secret:ACTA_KEY",
                 ClipboardEntry::Image(image) => {
                     // Most Windows programs copy a bitmap, which agents don't take: it goes
                     // as a PNG.
-                    let (ext, bytes) = match image.format {
-                        ImageFormat::Jpeg => ("jpg", image.bytes.clone()),
-                        ImageFormat::Webp => ("webp", image.bytes.clone()),
-                        ImageFormat::Gif => ("gif", image.bytes.clone()),
-                        ImageFormat::Png => ("png", image.bytes.clone()),
-                        _ => match shell::to_png(&image.bytes) {
-                            Some(png) => ("png", png),
-                            None => {
-                                self.model
-                                    .notices
-                                    .push("That image's kind can't be sent.".into());
-                                return true;
-                            }
-                        },
+                    let format = image.format;
+                    let ext = match format {
+                        ImageFormat::Jpeg => "jpg",
+                        ImageFormat::Webp => "webp",
+                        ImageFormat::Gif => "gif",
+                        _ => "png",
                     };
                     // A short name, as it reads in the message, in a folder of its own so
                     // another paste can have it too.
@@ -2171,15 +2163,34 @@ ACTA_KEY=secret:ACTA_KEY",
                         .join(at.to_string());
                     let name = model::free_name("image", ext, &self.model.attachments);
                     let path = dir.join(name);
-                    let written =
-                        std::fs::create_dir_all(&dir).and_then(|_| std::fs::write(&path, &bytes));
-                    match written {
-                        Ok(()) => self.attach(&[path], cx),
-                        Err(e) => self
-                            .model
-                            .notices
-                            .push(format!("The image couldn't be kept: {e}")),
-                    }
+                    // Making a big screenshot a PNG, and writing it, take a while: off this
+                    // thread, and attached once it's done.
+                    let raw = image.bytes.clone();
+                    let task = cx.background_executor().spawn(async move {
+                        let bytes = match format {
+                            ImageFormat::Jpeg
+                            | ImageFormat::Webp
+                            | ImageFormat::Gif
+                            | ImageFormat::Png => raw,
+                            _ => shell::to_png(&raw)
+                                .ok_or_else(|| "That image's kind can't be sent.".to_string())?,
+                        };
+                        std::fs::create_dir_all(&dir)
+                            .and_then(|_| std::fs::write(&path, &bytes))
+                            .map_err(|e| format!("The image couldn't be kept: {e}"))?;
+                        Ok::<_, String>(path)
+                    });
+                    cx.spawn(async move |this, cx| {
+                        let done = task.await;
+                        let _ = this.update(cx, |loom, cx| match done {
+                            Ok(path) => loom.attach(&[path], cx),
+                            Err(e) => {
+                                loom.model.notices.push(e);
+                                cx.notify();
+                            }
+                        });
+                    })
+                    .detach();
                     return true;
                 }
                 _ => {}
@@ -3398,7 +3409,8 @@ ACTA_KEY=secret:ACTA_KEY",
     ) -> Div {
         let p = self.p;
         let mut chips = div().flex().flex_wrap().gap(px(space::XS));
-        for a in self.model.agents.clone() {
+        let agents = self.model.agents.clone();
+        for a in agents.iter() {
             let id = a.id.clone();
             let on = picked == Some(a.id.as_str());
             let tint = thread::color(&a.color, p.dark);
@@ -4877,11 +4889,12 @@ ACTA_KEY=secret:ACTA_KEY",
         let p = self.p;
         let searching = !self.model.query.trim().is_empty();
         let mut list = div().flex().flex_col().gap(px(2.0)).px(px(space::S));
-        for a in self.model.agents.clone() {
+        let agents = self.model.agents.clone();
+        for a in agents.iter() {
             let selected = self.model.selected.as_deref() == Some(a.id.as_str())
                 && self.screen == Screen::Chat;
             let mood = self.model.mood(&a.id);
-            let preview = self.model.preview(&a);
+            let preview = self.model.preview(a);
             // A reply that came while its chat wasn't open: the row is bold until it is.
             let unread = self.model.unread.contains(&a.id);
             let id = a.id.clone();
@@ -4907,7 +4920,7 @@ ACTA_KEY=secret:ACTA_KEY",
                         })
                     })
                     .on_click(cx.listener(move |this, _, _, cx| this.select(id.clone(), cx)))
-                    .on_drag(AgentDrag::of(&a, p), AgentDrag::ghost)
+                    .on_drag(AgentDrag::of(a, p), AgentDrag::ghost)
                     .drag_over::<AgentDrag>(move |s, _, _, _| s.bg(p.hover))
                     .on_drop(self.drop_agent(&a.id, cx))
                     .child(thread::strand(
@@ -5205,7 +5218,8 @@ ACTA_KEY=secret:ACTA_KEY",
             .items_center()
             .gap(px(2.0))
             .py(px(space::XS));
-        for a in self.model.agents.clone() {
+        let agents = self.model.agents.clone();
+        for a in agents.iter() {
             let selected = self.model.selected.as_deref() == Some(a.id.as_str())
                 && self.screen == Screen::Chat;
             let unread = self.model.unread.contains(&a.id);
@@ -5234,7 +5248,7 @@ ACTA_KEY=secret:ACTA_KEY",
                         })
                     })
                     .on_click(cx.listener(move |this, _, _, cx| this.select(id.clone(), cx)))
-                    .on_drag(AgentDrag::of(&a, p), AgentDrag::ghost)
+                    .on_drag(AgentDrag::of(a, p), AgentDrag::ghost)
                     .drag_over::<AgentDrag>(move |s, _, _, _| s.bg(p.hover))
                     .on_drop(self.drop_agent(&a.id, cx))
                     .child(thread::strand(
@@ -6296,6 +6310,7 @@ ACTA_KEY=secret:ACTA_KEY",
         };
         let picture = match path {
             Some(path) => img(std::path::PathBuf::from(path))
+                .image_cache(&kept_images(cx).1)
                 .max_w(px((w - 160.0).max(100.0)))
                 .max_h(px((h - 140.0).max(100.0)))
                 .rounded(px(radius::ROW))
@@ -6709,6 +6724,7 @@ ACTA_KEY=secret:ACTA_KEY",
         let view = match &self.chat_view {
             Some(v) => v.clone(),
             None => {
+                kept_images(cx);
                 let scroller = self.scroller.clone();
                 let this = this.clone();
                 let v = cx.new(|_| ChatList {
@@ -6774,6 +6790,7 @@ ACTA_KEY=secret:ACTA_KEY",
                         .when(going_up, |d| d.opacity(0.6))
                         .child(
                             img(std::path::PathBuf::from(&a.path))
+                                .image_cache(&kept_images(cx).0)
                                 .size_full()
                                 .object_fit(ObjectFit::Cover),
                         )
@@ -10570,7 +10587,8 @@ ACTA_KEY=secret:ACTA_KEY",
                     cx.notify();
                 }));
             let mut pick = div().flex().flex_wrap().gap(px(space::XS));
-            for a in self.model.agents.clone() {
+            let agents = self.model.agents.clone();
+            for a in agents.iter() {
                 let id = a.id.clone();
                 let on = picked.as_deref() == Some(a.id.as_str());
                 pick = pick.child(
@@ -13243,6 +13261,7 @@ fn file_view(
         };
         let picture = match files.get(&format!("{}.thumb", f.file)) {
             Some(path) => img(std::path::PathBuf::from(path))
+                .when_some(chat_images(), |i, c| i.image_cache(&c))
                 .max_w(px(320.0))
                 .max_h(px(240.0))
                 .rounded(px(radius::BUBBLE))
@@ -13567,6 +13586,90 @@ thread_local! {
     /// view was parsed again from the start, and a long one drew empty first.
     static TEXTS: std::cell::RefCell<(KeptStates, u64)> =
         std::cell::RefCell::new((HashMap::new(), 0));
+    /// The pictures the chat and the composer show, and the one the viewer shows
+    /// (`kept_images`).
+    static IMAGES: std::cell::RefCell<Option<(Entity<KeptImages>, Entity<KeptImages>)>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Pictures kept decoded: the `most` drawn last. GPUI's own cache keeps every picture
+/// it has loaded, in memory and on the GPU, until the app ends; one that leaves this
+/// one loads again if it's drawn again.
+struct KeptImages {
+    most: usize,
+    tick: u64,
+    items: HashMap<u64, (ImageCacheItem, u64)>,
+}
+
+impl KeptImages {
+    fn new(most: usize, cx: &mut App) -> Entity<Self> {
+        let e = cx.new(|_| KeptImages {
+            most,
+            tick: 0,
+            items: HashMap::new(),
+        });
+        cx.observe_release(&e, |c, cx| {
+            for (_, (item, _)) in c.items.drain() {
+                if let Some(Ok(image)) = item.get() {
+                    cx.drop_image(image, None);
+                }
+            }
+        })
+        .detach();
+        e
+    }
+}
+
+impl ImageCache for KeptImages {
+    fn load(
+        &mut self,
+        resource: &Resource,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Option<Result<Arc<RenderImage>, ImageCacheError>> {
+        use std::hash::{Hash as _, Hasher as _};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        resource.hash(&mut h);
+        let key = h.finish();
+        self.tick += 1;
+        let tick = self.tick;
+        if let std::collections::hash_map::Entry::Vacant(v) = self.items.entry(key) {
+            v.insert((ImageCacheItem::new(resource, cx), tick));
+            if self.items.len() > self.most {
+                let oldest = self
+                    .items
+                    .iter()
+                    .filter(|(k, _)| **k != key)
+                    .min_by_key(|(_, (_, t))| *t)
+                    .map(|(k, _)| *k);
+                if let Some(Ok(image)) = oldest
+                    .and_then(|k| self.items.remove(&k))
+                    .and_then(|(item, _)| item.get())
+                {
+                    cx.drop_image(image, Some(window));
+                }
+            }
+        }
+        let entry = self.items.get_mut(&key)?;
+        entry.1 = tick;
+        entry.0.use_image(window)
+    }
+}
+
+/// The chat's pictures (up to 40 thumbnails, about 25 MB) and the viewer's (the last 3),
+/// made the first time.
+fn kept_images(cx: &mut App) -> (Entity<KeptImages>, Entity<KeptImages>) {
+    if let Some(both) = IMAGES.with(|c| c.borrow().clone()) {
+        return both;
+    }
+    let both = (KeptImages::new(40, cx), KeptImages::new(3, cx));
+    IMAGES.with(|c| *c.borrow_mut() = Some(both.clone()));
+    both
+}
+
+/// The chat's pictures, once `kept_images` has made them.
+fn chat_images() -> Option<Entity<KeptImages>> {
+    IMAGES.with(|c| c.borrow().as_ref().map(|(chat, _)| chat.clone()))
 }
 
 /// A message's text, drawn from the state kept for `key`.
