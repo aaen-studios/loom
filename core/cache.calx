@@ -112,6 +112,7 @@ fn chat_of(c: Json) -> i64 {
 pub struct Cache {
     db: Database
     stop_checkpoints: Sender<bool>?    // the thread that checkpoints it, which stops when this goes
+    big: Receiver<bool>?    // that thread saying the log grew long
 }
 
 impl Cache {
@@ -120,13 +121,15 @@ impl Cache {
         let db = try Database.open(path.copy())
         try db.execute_script(String("PRAGMA journal_mode = WAL;"))
         var stop: Sender<bool>? = none
+        var big: Receiver<bool>? = none
         if path != ":memory:" {
             // The core's thread doesn't checkpoint by itself: a commit that took the log
             // past 1000 pages held up the app's reads for up to 50 ms. A thread of its own
             // does it (shared/checkpoint.calx), and the log goes back to 64 MB after a burst.
             try db.execute_script(String("PRAGMA wal_autocheckpoint = 0; PRAGMA journal_size_limit = 67108864;"))
-            let (_, s) = checkpoint.start(path)
+            let (_, s, b) = checkpoint.start(path)
             stop = some(s)
+            big = some(b)
         }
         try db.execute_script(String(SCHEMA))
         if try db.query_one(String("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'tools'"), List<Value>()) != none {
@@ -136,7 +139,7 @@ impl Cache {
             try db.execute_script(String(AGENT_COLUMN))
         }
         try db.execute_script(String(CHATS_BY_AGENT))
-        return Cache { db: db, stop_checkpoints: stop }
+        return Cache { db: db, stop_checkpoints: stop, big: big }
     }
 
     pub fn meta(self, key: str) -> String? ! Error {
@@ -188,6 +191,12 @@ impl Cache {
     /// of events, such as catching up, is written once rather than once an event.
     pub fn hold(self) ! Error {
         if not self.db.in_transaction() { try self.db.begin() }
+    }
+
+    /// Truncates the log once the checkpoint thread says it grew long, outside a
+    /// transaction (shared/checkpoint.calx, `truncate`).
+    pub fn truncate_if_big(mut self) ! Error {
+        if let b = mut self.big { try checkpoint.truncate(self.db, mut b) }
     }
 
     /// Saves what was applied since `hold`.

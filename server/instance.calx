@@ -321,6 +321,7 @@ pub struct Instance {
     stop_gate: Sender<bool>?
     checkpointer: Thread?    // checkpoints the database off the loop (shared/checkpoint.calx)
     stop_checkpoints: Sender<bool>
+    wal_big: Receiver<bool>    // the checkpoint thread saying the log grew long
     search_to: Sender<searcher.Job>    // searches, run off the loop (server/searcher.calx)
     search_done: Receiver<searcher.Done>
     searches: Map<String, Waiter>    // each search under way, by its key, and who it answers
@@ -418,6 +419,10 @@ const SIDE_QUESTION_MOST: usize = 4000
 const SIDE_MESSAGES: usize = 40
 // How many events catching a device up reads at a time.
 const EVENTS_PAGE: usize = 500
+// A device further behind than this many events gets a snapshot, and then the newest
+// SNAPSHOT_REPLAY events over it, rather than every event it missed.
+const SNAPSHOT_PAST: i64 = 10000
+const SNAPSHOT_REPLAY: i64 = 5000
 const FIRES_A_PASS: i64 = 5    // routines fired in one pass of the loop, at most
 const SIDE_TRANSCRIPT_MOST: usize = 24000
 
@@ -1101,7 +1106,7 @@ impl Instance {
         try fs.make_dir_all("{config.data}/files")
         let store = try Store.open("{config.data}/loom.db", config.hasher)
         try store.checkpoint_elsewhere()
-        let (checkpointer, stop_checkpoints) = checkpoint.start("{config.data}/loom.db")
+        let (checkpointer, stop_checkpoints, wal_big) = checkpoint.start("{config.data}/loom.db")
         if try store.meta("instance") == none {
             try store.set_meta("instance", "i_{bytes.hex(random_bytes(4))}")
             try store.set_meta("key", bytes.hex(random_bytes(32)))
@@ -1150,7 +1155,7 @@ impl Instance {
         let search_to = searcher.start("{config.data}/loom.db", search_done.sender(), waker)
         let browser_done = Receiver<browser.Back>()
         let browser_to = browser_done.sender()
-        var i = Instance { release: config.release.copy(), host: update.host(config.in_app), exe: current_exe(), update_to: update_to, update_back: update_back, updating: no_update(), next_update_check: 0, last_busy: now(), restart_stops: List<String>(), restart: false, told_update: Json.Null, told_update_at: 0, browsers: LinkedMap<String, Browser>(), watchers: Map<u32, String>(), followers: List<u32>(), browser_pages: Map<String, String>(), browsers_to_check: List<String>(), browser_done: browser_done, browser_to: browser_to, stopped_browsers: Map<u64, Thread>(), next_browser: 0, fills: Map<String, Fill>(), turns_ended: List<(String, String, String)>(), next_browser_sweep: 0, task_stops: Map<String, String>(), resumes: List<(String, String)>(), push_to: push_to, push_gone: push_gone, move_to: move_to, move_done: move_done, lan: config.lan, bridge: none, stop_bridge: none, lan_port: 0, announcer: none, stop_announcer: none, to_close: List<ServerSocket>(), boxes: none, gate: none, stop_gate: none, checkpointer: some(checkpointer), stop_checkpoints: stop_checkpoints, search_to: search_to, search_done: search_done, searches: Map<String, Waiter>(), next_search: 0, disk_used: Map<String, (i64, i64)>(), doors: LinkedMap<String, egress.Door>(), moving: String(), move_waiters: List<Waiter>(), moved: moved, version: config.version.copy(), store: store, server: server, waker: waker, data: config.data.copy(), sessions: Map<u32, Session>(), runs: LinkedMap<String, Run>(), procs: LinkedMap<String, Proc>(), approvals: LinkedMap<String, Approval>(), lines: lines, lines_to: to, hash_to: hash_to, hash_done: hash_done, next_job: 0, auths: Map<i64, Auth>(), dummy_hash: dummy, skills_written: Map<String, String>(), open_secrets: Map<String, List<(String, String)>>(), failures: LinkedMap<String, List<i64>>(), thumbs: files.start(), events: config.events, next_prune: 0, grants: Map<String, Grant>(), calls: Map<String, Request>(), context: Map<String, (i64, i64)>(), registry_at: config.registry.copy(), registry: Json.Null, registry_time: 0, registry_fetching: false, install_to: install_to, install_done: install_done, mcp_test_to: mcp_test_to, mcp_test_done: mcp_test_done, mcp_tests: Map<i64, Waiter>(), fetching: List<Waiter>(), installs: Map<i64, Install>(), deno_job: 0, deno_waiters: List<Request>(), code_acts: Map<i64, String>(), leftovers: List<String>(), next_sweep: 0, device_calls: Map<String, DeviceCall>(), setups: Map<String, Setup>(), minute_ms: config.minute_ms, next_due: 0, routine_runs: Map<String, RoutineRun>(), routine_marks: Map<String, (String, String)>(), run_chains: Map<String, List<String>>(), panel_calls: Map<String, Waiter>(), script_calls: Map<String, Request>(), running_flows: LinkedMap<String, flows.Flow>(), flow_steps: Map<String, (String, usize)>(), advancing: List<String>(), flow_results: List<(String, usize, bool, String)>(), flows_due: List<String>(), slow_calls: Map<String, String>(), acting: 0, call_actions: Map<String, i64>(), tool_actions: Map<String, i64>(), sealer: try secret_key(config.data.copy()) }
+        var i = Instance { release: config.release.copy(), host: update.host(config.in_app), exe: current_exe(), update_to: update_to, update_back: update_back, updating: no_update(), next_update_check: 0, last_busy: now(), restart_stops: List<String>(), restart: false, told_update: Json.Null, told_update_at: 0, browsers: LinkedMap<String, Browser>(), watchers: Map<u32, String>(), followers: List<u32>(), browser_pages: Map<String, String>(), browsers_to_check: List<String>(), browser_done: browser_done, browser_to: browser_to, stopped_browsers: Map<u64, Thread>(), next_browser: 0, fills: Map<String, Fill>(), turns_ended: List<(String, String, String)>(), next_browser_sweep: 0, task_stops: Map<String, String>(), resumes: List<(String, String)>(), push_to: push_to, push_gone: push_gone, move_to: move_to, move_done: move_done, lan: config.lan, bridge: none, stop_bridge: none, lan_port: 0, announcer: none, stop_announcer: none, to_close: List<ServerSocket>(), boxes: none, gate: none, stop_gate: none, checkpointer: some(checkpointer), stop_checkpoints: stop_checkpoints, wal_big: wal_big, search_to: search_to, search_done: search_done, searches: Map<String, Waiter>(), next_search: 0, disk_used: Map<String, (i64, i64)>(), doors: LinkedMap<String, egress.Door>(), moving: String(), move_waiters: List<Waiter>(), moved: moved, version: config.version.copy(), store: store, server: server, waker: waker, data: config.data.copy(), sessions: Map<u32, Session>(), runs: LinkedMap<String, Run>(), procs: LinkedMap<String, Proc>(), approvals: LinkedMap<String, Approval>(), lines: lines, lines_to: to, hash_to: hash_to, hash_done: hash_done, next_job: 0, auths: Map<i64, Auth>(), dummy_hash: dummy, skills_written: Map<String, String>(), open_secrets: Map<String, List<(String, String)>>(), failures: LinkedMap<String, List<i64>>(), thumbs: files.start(), events: config.events, next_prune: 0, grants: Map<String, Grant>(), calls: Map<String, Request>(), context: Map<String, (i64, i64)>(), registry_at: config.registry.copy(), registry: Json.Null, registry_time: 0, registry_fetching: false, install_to: install_to, install_done: install_done, mcp_test_to: mcp_test_to, mcp_test_done: mcp_test_done, mcp_tests: Map<i64, Waiter>(), fetching: List<Waiter>(), installs: Map<i64, Install>(), deno_job: 0, deno_waiters: List<Request>(), code_acts: Map<i64, String>(), leftovers: List<String>(), next_sweep: 0, device_calls: Map<String, DeviceCall>(), setups: Map<String, Setup>(), minute_ms: config.minute_ms, next_due: 0, routine_runs: Map<String, RoutineRun>(), routine_marks: Map<String, (String, String)>(), run_chains: Map<String, List<String>>(), panel_calls: Map<String, Waiter>(), script_calls: Map<String, Request>(), running_flows: LinkedMap<String, flows.Flow>(), flow_steps: Map<String, (String, usize)>(), advancing: List<String>(), flow_results: List<(String, usize, bool, String)>(), flows_due: List<String>(), slow_calls: Map<String, String>(), acting: 0, call_actions: Map<String, i64>(), tool_actions: Map<String, i64>(), sealer: try secret_key(config.data.copy()) }
         if config.sandboxes.len() > 0 and not i.lan { try i.sandboxes_on(config.sandboxes.copy(), config.sandbox_image.copy()) }
         // An action the last run of the instance left started, it never finished.
         try i.store.settle_cut_short()
@@ -1715,6 +1720,7 @@ impl Instance {
                 }
             }
             if held { i.let_go() }
+            if let err(e) = i.store.truncate_log(mut i.wal_big) { eprintln("loom: database: {e}") }
             while let d = i.install_done.next() {
                 match i.installed(d) {
                     ok => {},
@@ -6063,27 +6069,32 @@ impl Instance {
         let first = try i.store.first_seq(user.copy())
         // A cursor from before the oldest event left, including a new device's 0
         // once events have been pruned, or one ahead of the newest (the
-        // instance was restored from an older backup), gets a snapshot.
-        let reset = after > last or (first > 1 and after < first - 1)
+        // instance was restored from an older backup), gets a snapshot. So does one
+        // more than SNAPSHOT_PAST behind, a new device's 0 on a busy account too:
+        // replaying a month of events sent 240k frames and held the loop for 4-8 s.
+        let reset = after > last or (first > 1 and after < first - 1) or last - after > SNAPSHOT_PAST
+        // The snapshot is dated a little back, and the newest events since come after
+        // it and are applied over it: the runs still going, the questions still open
+        // and the newest tool calls, which a snapshot doesn't carry, come with them.
+        var since = last - SNAPSHOT_REPLAY
+        if since < first - 1 { since = first - 1 }
+        if since < 0 { since = 0 }
         // The instance's own version, and to an owner or admin, an update under way.
         var welcome = Obj.new().s("t", String("welcome")).i("version", i64(version)).s("loom", i.version.copy()).s("user", user.copy()).s("device", device.id.copy()).i("seq", last).b("reset", reset).s("key", try i.public_key()).maybe("relay", try i.relay_key())
         if i.updating.state.len() > 0 and i.updating.state != "latest" and try i.may_update(user.copy()) { welcome = welcome.j("update", i.update_json()) }
         _ = i.server.send_text(s, "{welcome.done()}")
-        if reset {
-            _ = i.server.send_text(s, "{try i.snapshot(user.copy(), last)}")
-        } else {
-            // A page at a time, so a device far behind doesn't hold its whole backlog in
-            // memory twice over.
-            var from = after
-            loop {
-                let page = try i.store.events_after(user.copy(), from, EVENTS_PAGE)
-                let n = page.len()
-                for (seq, e) in page {
-                    _ = i.server.send_text(s, e)
-                    from = seq
-                }
-                if n < EVENTS_PAGE { break }
+        if reset { _ = i.server.send_text(s, "{try i.snapshot(user.copy(), since)}") }
+        // A page at a time, so a device far behind doesn't hold its whole backlog in
+        // memory twice over.
+        var from = if reset { since } else { after }
+        loop {
+            let page = try i.store.events_after(user.copy(), from, EVENTS_PAGE)
+            let n = page.len()
+            for (seq, e) in page {
+                _ = i.server.send_text(s, e)
+                from = seq
             }
+            if n < EVENTS_PAGE { break }
         }
         // Replies still being written, from position 0.
         for (_, r) in i.runs {

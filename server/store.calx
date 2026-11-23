@@ -23,6 +23,7 @@ import std.sqlite.{Database, Value}
 import std.time.{Timestamp}
 import shared.obj.{Obj, int_at, merge, str_at, without}
 import server.defaults.{blank, filled}
+import shared.checkpoint
 
 // A search snippet as words, without the Markdown it was written in: a link
 // as its text, no code ticks, bold or strike marks, list and heading marks,
@@ -83,6 +84,8 @@ CREATE TABLE IF NOT EXISTS activity (
     ended INTEGER NOT NULL DEFAULT 0);
 CREATE INDEX IF NOT EXISTS activity_by_agent ON activity (user, agent, id);
 CREATE INDEX IF NOT EXISTS activity_by_user ON activity (user, id);
+-- Only what is still going, which start marks failed after a restart: activity is kept.
+CREATE INDEX IF NOT EXISTS activity_started ON activity (id) WHERE status = 'started';
 CREATE TABLE IF NOT EXISTS secrets (
     user TEXT NOT NULL REFERENCES users(id), name TEXT NOT NULL, nonce TEXT NOT NULL,
     sealed TEXT NOT NULL, at INTEGER NOT NULL, PRIMARY KEY (user, name));
@@ -107,6 +110,8 @@ CREATE INDEX IF NOT EXISTS messages_pinned ON messages (user, conversation, json
 CREATE TABLE IF NOT EXISTS runs (
     id TEXT PRIMARY KEY, user TEXT NOT NULL REFERENCES users(id), conversation TEXT NOT NULL,
     status TEXT NOT NULL, at INTEGER NOT NULL);
+-- Only the runs still going, which start looks for: runs are kept, so they add up.
+CREATE INDEX IF NOT EXISTS runs_running ON runs (id) WHERE status = 'running';
 CREATE TABLE IF NOT EXISTS branches (
     conversation TEXT PRIMARY KEY, user TEXT NOT NULL REFERENCES users(id), from_conversation TEXT NOT NULL,
     from_message TEXT NOT NULL, handed INTEGER NOT NULL DEFAULT 0);
@@ -355,6 +360,12 @@ impl Store {
     // shared/checkpoint.calx do it on another thread.
     pub fn checkpoint_elsewhere(self) ! Error {
         try self.db.execute_script(String("PRAGMA wal_autocheckpoint = 0;"))
+    }
+
+    // Truncates the log once the checkpoint thread says it grew long, between the
+    // loop's transactions (shared/checkpoint.calx, `truncate`).
+    pub fn truncate_log(self, big: mut Receiver<bool>) ! Error {
+        try checkpoint.truncate(self.db, mut big)
     }
 
     pub fn open(path: String, hasher: PasswordHasher) -> Store ! Error {

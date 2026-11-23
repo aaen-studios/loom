@@ -743,6 +743,7 @@ impl Conn {
             }
         }
         if held { self.let_go() }
+        if let err(e) = self.cache.truncate_if_big() { self.tell_error("cache", "{e}") }
     }
 
     fn let_go(mut self) {

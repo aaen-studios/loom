@@ -349,17 +349,17 @@ How a [`device.call`](#devicecall) that takes several steps is going, before its
 - `relay`: only while the instance pushes through the [push relay](#through-the-push-relay). It's the relay's X25519 public key, which the core seals the phone's APNs token with before `push.register`.
 - `key`: the instance's Ed25519 public key, as `GET /api/info` gives it. The app keeps the first one it sees, checks a [`moved`](#moved) frame's signature with it, and expects the same key at the new place.
 - `seq`: the newest event `seq` the person has right now. Catch-up runs from `after` up to this.
-- `reset`: `true` when the app's cursor is too old (its events were pruned, which includes a new device's `0` once any have been) or ahead of the instance's (the instance was restored from an older backup). The app clears its cache, and a [`snapshot`](#snapshot) follows instead of the missed events.
+- `reset`: `true` when the app's cursor is too old (its events were pruned, which includes a new device's `0` once any have been), more than 10,000 events behind (a new device's `0` on a busy account too), or ahead of the instance's (the instance was restored from an older backup). The app clears its cache, and a [`snapshot`](#snapshot) follows instead of the missed events.
 
 ### `snapshot`
 
-Only after a `welcome` with `reset: true`. Everything the app needs to start again from `seq`: the conversations, the agents and the newest messages of each conversation. Older messages are fetched with the `messages.list` command.
+Only after a `welcome` with `reset: true`. Everything the app needs to start again: the conversations, the agents and the newest messages of each conversation, as they are now. Older messages are fetched with the `messages.list` command.
 
 ```json
 { "t": "snapshot", "seq": 1046, "agents": [ … ], "conversations": [ … ], "messages": [ … ] }
 ```
 
-Events after `seq` follow as usual.
+Its `seq` is up to 5,000 events before the `welcome`'s, or the oldest kept, and the events after it follow as usual, applied over the snapshot. They bring what a snapshot doesn't carry: the runs still going, the questions still open and the newest tool calls. Each applies over the newer state as it would have when it came, so the cache ends as the instance is.
 
 ### `event`
 
@@ -595,7 +595,7 @@ The person teaches an agent a task by doing it in the agent's browser, and agent
 - **An event is stored before it's sent.** An app that has `seq` N has everything up to N.
 - **The app stores the `seq`** of the last event it applied, in the same transaction as the change it made to its cache. That's its cursor, and it sends it as `after` on the next `hello`.
 - **Every device of a person** sees the same events in the same order, including events about what that device did itself.
-- **Old events are pruned** after 30 days, keeping at least each person's newest 10,000. The instance looks once an hour. A device further behind than that gets `reset: true` and a snapshot.
+- **Old events are pruned** after 30 days, keeping at least each person's newest 10,000. The instance looks once an hour. A device further behind than that, or more than 10,000 events behind, gets `reset: true` and a snapshot.
 - **What isn't an event:** deltas, `ack`, `result`, `error`, `welcome` and `synced`. None of them change state that a cache keeps.
 
 ## Messages and streaming

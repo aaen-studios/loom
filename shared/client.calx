@@ -160,6 +160,9 @@ impl Session {
                 if (str_at(f.copy(), "t") ?? String()) == "event" {
                     if seq != s.seq + 1 { fail "event {seq} came after {s.seq}" }
                     s.seq = seq
+                } else if (str_at(f.copy(), "t") ?? String()) == "snapshot" {
+                    // The events after the snapshot's own seq follow it.
+                    s.seq = seq
                 }
             }
             s.frames.push(f.copy())
