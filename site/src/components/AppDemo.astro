@@ -322,8 +322,11 @@ const [claude] = await brains(['claude-acp']);
 	.app.railed .bar:focus-visible .knot {
 		opacity: 0;
 	}
+	/* One column the sidebar's width: a long status after a name cuts off with an
+	   ellipsis instead of widening the list and pushing the tiles right. */
 	.list {
 		display: grid;
+		grid-template-columns: minmax(0, 1fr);
 		align-content: start;
 		gap: 2px;
 		flex: 1;
@@ -332,6 +335,7 @@ const [claude] = await brains(['claude-acp']);
 	.agent {
 		display: flex;
 		align-items: center;
+		min-width: 0;
 		gap: 12px;
 		padding: 8px 12px;
 		border-radius: var(--radius-row);
