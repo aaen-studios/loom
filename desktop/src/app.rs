@@ -3286,6 +3286,53 @@ ACTA_KEY=secret:ACTA_KEY",
                 .into_any_element(),
             );
         }
+        // A status token, apart from scripts: it only reads the status, for a dashboard.
+        if let Some(made) = self.model.status_token {
+            let mut control = div().flex().items_center().gap(px(space::S));
+            if made {
+                control = control.child(self.small_button("status-off", "Revoke", false).on_click(
+                    cx.listener(|this, _, _, cx| {
+                        let f = this.model.set_status_token(false);
+                        this.send(f);
+                        cx.notify();
+                    }),
+                ));
+            }
+            control = control.child(
+                self.small_button("status-new", if made { "New token" } else { "Make" }, false)
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        let f = this.model.set_status_token(true);
+                        this.send(f);
+                        cx.notify();
+                    })),
+            );
+            rows.push(
+                self.row(
+                    None,
+                    "Status token",
+                    Some("Only reads your agents and routines".into()),
+                    Some(control.into_any_element()),
+                )
+                .into_any_element(),
+            );
+        }
+        if let Some(token) = self.model.new_status_token.clone() {
+            let copied = token.clone();
+            let copy =
+                self.small_button("status-token", "Copy", false)
+                    .on_click(move |_, _, cx| {
+                        cx.write_to_clipboard(ClipboardItem::new_string(copied.clone()));
+                    });
+            rows.push(
+                self.row(
+                    None,
+                    token,
+                    Some("Your status token, shown this once".into()),
+                    Some(copy.into_any_element()),
+                )
+                .into_any_element(),
+            );
+        }
         self.group(None, rows)
     }
 

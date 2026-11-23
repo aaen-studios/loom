@@ -108,7 +108,8 @@ CREATE INDEX IF NOT EXISTS messages_in_order ON messages (user, conversation);
 CREATE INDEX IF NOT EXISTS messages_pinned ON messages (user, conversation, json_extract(json, '$.pinned.at')) WHERE json_extract(json, '$.pinned') IS NOT NULL;
 CREATE TABLE IF NOT EXISTS runs (
     id TEXT PRIMARY KEY, user TEXT NOT NULL REFERENCES users(id), conversation TEXT NOT NULL,
-    status TEXT NOT NULL, at INTEGER NOT NULL);
+    status TEXT NOT NULL, at INTEGER NOT NULL, routine TEXT NOT NULL DEFAULT '',
+    outcome TEXT NOT NULL DEFAULT '');
 -- Only the runs still going, which start looks for: runs are kept, so they add up.
 CREATE INDEX IF NOT EXISTS runs_running ON runs (id) WHERE status = 'running';
 CREATE TABLE IF NOT EXISTS branches (
@@ -212,6 +213,8 @@ CREATE TABLE IF NOT EXISTS shared_rows (
     data TEXT NOT NULL, by TEXT NOT NULL, at INTEGER NOT NULL, updated INTEGER NOT NULL);
 CREATE INDEX IF NOT EXISTS shared_rows_by_table ON shared_rows (user, tbl);
 CREATE TABLE IF NOT EXISTS script_tokens (
+    user TEXT PRIMARY KEY REFERENCES users(id), hash TEXT NOT NULL UNIQUE, at INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS status_tokens (
     user TEXT PRIMARY KEY REFERENCES users(id), hash TEXT NOT NULL UNIQUE, at INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS imported (
     user TEXT NOT NULL REFERENCES users(id), source TEXT NOT NULL, kind TEXT NOT NULL,
@@ -401,6 +404,15 @@ impl Store {
             if text(r[1].copy()) == "tools" { tooled = true }
         }
         if not tooled { try s.db.execute_script(String("ALTER TABLE acp_sessions ADD COLUMN tools TEXT NOT NULL DEFAULT '';")) }
+        // Runs from before a run kept the routine that started it, and how that
+        // routine said it went, get the columns, empty for none or not known.
+        var routined = false
+        for r in try s.db.query(String("PRAGMA table_info(runs)")) {
+            if text(r[1].copy()) == "routine" { routined = true }
+        }
+        if not routined { try s.db.execute_script(String("ALTER TABLE runs ADD COLUMN routine TEXT NOT NULL DEFAULT ''; ALTER TABLE runs ADD COLUMN outcome TEXT NOT NULL DEFAULT '';")) }
+        // A person's routine runs by when they started, which the status reads for the last 24 hours.
+        try s.db.execute_script(String("CREATE INDEX IF NOT EXISTS runs_by_routine ON runs (user, at) WHERE routine != '';"))
         // Settings kept before they were sealed are sealed once.
         for r in try s.db.query(String("SELECT name, env FROM acp_settings")) {
             let env = text(r[1].copy())
@@ -1028,6 +1040,39 @@ impl Store {
     pub fn script_token_user(self, hash: String) -> String? ! Error {
         let r = try self.db.query_one(String("SELECT user FROM script_tokens WHERE hash = ?"), [t(hash)]) else return none
         return some(text(r[0].copy()))
+    }
+
+    // A person's status token, kept as its SHA-256: it only reads their status
+    // (GET /api/scripts/status), and a new one replaces the last.
+    pub fn set_status_token(self, user: String, hash: String) ! Error {
+        _ = try self.db.execute(String("INSERT INTO status_tokens (user, hash, at) VALUES (?, ?, ?) ON CONFLICT (user) DO UPDATE SET hash = excluded.hash, at = excluded.at"), [t(user), t(hash), Value.Int(now())])
+    }
+
+    pub fn drop_status_token(self, user: String) ! Error {
+        _ = try self.db.execute(String("DELETE FROM status_tokens WHERE user = ?"), [t(user)])
+    }
+
+    // When the person's status token was made, or none while there's none.
+    pub fn status_since(self, user: String) -> i64? ! Error {
+        let r = try self.db.query_one(String("SELECT at FROM status_tokens WHERE user = ?"), [t(user)]) else return none
+        return some(int(r[0].copy()))
+    }
+
+    // Whose status token has this SHA-256.
+    pub fn status_token_user(self, hash: String) -> String? ! Error {
+        let r = try self.db.query_one(String("SELECT user FROM status_tokens WHERE hash = ?"), [t(hash)]) else return none
+        return some(text(r[0].copy()))
+    }
+
+    // `user`'s routine runs that started at or after `since` (Unix ms), oldest
+    // first, at most `most` of the newest: when, how it went (as the routine
+    // says once it ended, else the run's status), and the routine's id.
+    pub fn routine_runs_since(self, user: String, since: i64, most: i64) -> List<(i64, String, String)> ! Error {
+        var out = List<(i64, String, String)>()
+        for r in try self.db.query(String("SELECT at, status, routine FROM (SELECT at, CASE WHEN outcome != '' THEN outcome ELSE status END AS status, routine, rowid AS n FROM runs WHERE user = ? AND routine != '' AND at >= ? ORDER BY at DESC, rowid DESC LIMIT ?) ORDER BY at, n"), [t(user), Value.Int(since), Value.Int(most)]) {
+            out.push((int(r[0].copy()), text(r[1].copy()), text(r[2].copy())))
+        }
+        return out
     }
 
     // A script token that one script makes for itself from the data folder, as
@@ -2018,7 +2063,7 @@ impl Store {
 
     fn remove_rows(self, user: String) ! Error {
         _ = try self.db.execute(String("DELETE FROM sent WHERE device IN (SELECT id FROM devices WHERE user = ?)"), [t(user.copy())])
-        for table in ["push_tokens", "link_codes", "script_grants", "resets", "agent_revisions", "agents", "activity", "secrets", "mcp_servers", "skills", "messages", "conversations", "runs", "queue", "tasks", "sides", "branches", "routine_threads", "events", "acp_sessions", "files", "profiles", "defaults", "rules", "routines", "flows", "plugin_data", "plugin_revisions", "plugins", "usage", "memories", "memories_fts", "messages_fts", "shared_rows", "shared_tables", "script_tokens", "imported", "recordings", "proposals", "devices"] {
+        for table in ["push_tokens", "link_codes", "script_grants", "resets", "agent_revisions", "agents", "activity", "secrets", "mcp_servers", "skills", "messages", "conversations", "runs", "queue", "tasks", "sides", "branches", "routine_threads", "events", "acp_sessions", "files", "profiles", "defaults", "rules", "routines", "flows", "plugin_data", "plugin_revisions", "plugins", "usage", "memories", "memories_fts", "messages_fts", "shared_rows", "shared_tables", "script_tokens", "status_tokens", "imported", "recordings", "proposals", "devices"] {
             _ = try self.db.execute("DELETE FROM {table} WHERE user = ?", [t(user.copy())])
         }
         _ = try self.db.execute(String("DELETE FROM invites WHERE by = ?"), [t(user.copy())])
@@ -2171,6 +2216,16 @@ impl Store {
 
     pub fn finish_run(self, id: String, status: String) ! Error {
         _ = try self.db.execute(String("UPDATE runs SET status = ? WHERE id = ?"), [t(status), t(id)])
+    }
+
+    // Marks run `id` as one routine `routine` started.
+    pub fn mark_run_routine(self, id: String, routine: String) ! Error {
+        _ = try self.db.execute(String("UPDATE runs SET routine = ? WHERE id = ?"), [t(routine), t(id)])
+    }
+
+    // How routine run `id` went, as its routine keeps it: done, quiet, failed, ...
+    pub fn routine_run_went(self, id: String, outcome: String) ! Error {
+        _ = try self.db.execute(String("UPDATE runs SET outcome = ? WHERE id = ?"), [t(outcome), t(id)])
     }
 
     // Runs a crash or a restart left unfinished, as (user, run, conversation).
@@ -2387,6 +2442,26 @@ fn an_old_activity_log_gets_the_record_columns() {
     old.close()!
     let entries = record_in(path)
     assert(entries.len() == 2 and "{entries[0]}".contains(#""status":"done""#) and not "{entries[1]}".contains("status"))
+    fs.remove_dir_all(dir)!
+}
+
+@test
+fn old_runs_get_the_routine_columns_and_the_status_reads_routine_runs_only() {
+    let dir = fs.temp_dir()!
+    let path = "{dir}/loom.db"
+    let old = Database.open(path.copy())!
+    old.execute_script(String("CREATE TABLE runs (id TEXT PRIMARY KEY, user TEXT NOT NULL, conversation TEXT NOT NULL, status TEXT NOT NULL, at INTEGER NOT NULL); INSERT INTO runs VALUES ('run_old', 'u_1', 'c_1', 'done', 5); INSERT INTO runs VALUES ('run_chat', 'u_1', 'c_1', 'done', 6); INSERT INTO runs VALUES ('run_long_ago', 'u_1', 'c_1', 'done', 1); INSERT INTO runs VALUES ('run_theirs', 'u_2', 'c_2', 'done', 7);"))!
+    old.close()!
+    let s = Store.open(path, PasswordHasher { memory_kib: 64, iterations: 1, parallelism: 1 })!
+    for id in ["run_old", "run_long_ago", "run_theirs"] {
+        s.mark_run_routine(String(id), String("rt_1"))!
+    }
+    assert(s.routine_runs_since(String("u_1"), 2, 10)! == [(5, String("done"), String("rt_1"))])
+    // How the routine said it went, over how the turn ended.
+    s.routine_run_went(String("run_old"), String("failed"))!
+    assert(s.routine_runs_since(String("u_1"), 2, 10)! == [(5, String("failed"), String("rt_1"))])
+    assert(s.routine_runs_since(String("u_1"), 0, 1)!.len() == 1)
+    s.close()!
     fs.remove_dir_all(dir)!
 }
 

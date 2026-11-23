@@ -2224,6 +2224,10 @@ pub struct Model {
     /// instance listens on, once asked; and a new script token, shown once.
     pub scripts: Option<(bool, u64)>,
     pub script_token: Option<String>,
+    /// Whether the person has a status token, which only reads their agents' and
+    /// routines' status (`GET /api/scripts/status`), once asked; and a new one, shown once.
+    pub status_token: Option<bool>,
+    pub new_status_token: Option<String>,
     /// What's typed in search, and what the newest search found.
     pub query: String,
     pub hits: Vec<Hit>,
@@ -3616,10 +3620,26 @@ impl Model {
                 (None, Some(v)) => self.server_update = Some(ServerUpdate::of(v)),
                 _ => {}
             }
+        } else if id.starts_with("app.status_") {
+            if let Some(e) = f.get("error") {
+                self.notices.push(s(e, "message"));
+                return;
+            }
+            self.new_status_token = f
+                .pointer("/value/token")
+                .and_then(Value::as_str)
+                .map(String::from);
+            self.status_token = Some(id.starts_with("app.status_on"));
         } else if id.starts_with("app.scripts_") {
             if let Some(e) = f.get("error") {
                 self.notices.push(s(e, "message"));
                 return;
+            }
+            if id.starts_with("app.scripts_get") {
+                self.status_token = Some(
+                    f.pointer("/value/status_since")
+                        .is_some_and(|v| !v.is_null()),
+                );
             }
             let port = f
                 .pointer("/value/port")
@@ -5167,6 +5187,7 @@ impl Model {
     /// Asks whether the person's scripts are on.
     pub fn load_scripts(&mut self) -> Value {
         self.script_token = None;
+        self.new_status_token = None;
         let id = self.id("app.scripts_get");
         json!({"t": "cmd", "id": id, "name": "scripts.get", "args": {}})
     }
@@ -5178,6 +5199,17 @@ impl Model {
             (self.id("app.scripts_on"), "scripts.on")
         } else {
             (self.id("app.scripts_off"), "scripts.off")
+        };
+        json!({"t": "cmd", "id": id, "name": name, "args": {}})
+    }
+
+    /// Makes a status token, which ends the last, or with `on` false, ends it.
+    pub fn set_status_token(&mut self, on: bool) -> Value {
+        self.new_status_token = None;
+        let (id, name) = if on {
+            (self.id("app.status_on"), "scripts.status_on")
+        } else {
+            (self.id("app.status_off"), "scripts.status_off")
         };
         json!({"t": "cmd", "id": id, "name": name, "args": {}})
     }
@@ -6836,6 +6868,30 @@ mod tests {
         assert_eq!(f["name"], "scripts.off");
         m.take(&json!({"t": "result", "id": f["id"], "ok": true, "value": {}}));
         assert_eq!(m.scripts, Some((false, 0)));
+    }
+
+    #[test]
+    fn a_status_token_is_made_apart_from_scripts_and_shown_once() {
+        let mut m = Model::new();
+        let f = m.load_scripts();
+        m.take(&json!({"t": "result", "id": f["id"], "ok": true, "value": {"on": false, "since": null, "port": 8790, "status_since": null}}));
+        assert_eq!(m.status_token, Some(false));
+        let f = m.set_status_token(true);
+        assert_eq!(f["name"], "scripts.status_on");
+        m.take(&json!({"t": "result", "id": f["id"], "ok": true, "value": {"token": "loom-status-ab", "port": 8790}}));
+        assert_eq!(m.status_token, Some(true));
+        assert_eq!(m.new_status_token.as_deref(), Some("loom-status-ab"));
+        assert_eq!(m.scripts, Some((false, 8790)), "scripts stay off");
+        // Coming back to the page, there's one, and it isn't shown again.
+        let f = m.load_scripts();
+        assert!(m.new_status_token.is_none());
+        m.take(&json!({"t": "result", "id": f["id"], "ok": true, "value": {"on": false, "since": null, "port": 8790, "status_since": 5}}));
+        assert_eq!(m.status_token, Some(true));
+        let f = m.set_status_token(false);
+        assert_eq!(f["name"], "scripts.status_off");
+        m.take(&json!({"t": "result", "id": f["id"], "ok": true, "value": {}}));
+        assert_eq!(m.status_token, Some(false));
+        assert!(m.new_status_token.is_none());
     }
 
     #[test]
