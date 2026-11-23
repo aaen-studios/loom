@@ -317,6 +317,10 @@ impl Conn {
         self.synced = false
         // Commands sent on an old socket get no result: the outbox asks again on welcome.
         self.making = List<String>()
+        self.lists = List<String>()
+        self.linking = List<String>()
+        self.inviting = List<String>()
+        self.resetting = List<String>()
         let known = self.server.copy() ?? String()
         let base = self.reach(known)
         let url = ws_url(base) ?? String()
@@ -625,6 +629,8 @@ impl Conn {
                 err(e) => self.tell_error("cache", "{e}"),
             }
         } else if t == "error" {
+            // A command that failed gets no result, so its id goes.
+            if let id = str_at(f.copy(), "id") { self.forget_command(id) }
             // A send the instance can't take, ever: it leaves the outbox.
             if (str_at(f.copy(), "code") ?? String()) == "unknown_conversation" {
                 if let cid = str_at(f.copy(), "ref") {
@@ -668,6 +674,15 @@ impl Conn {
             }
         }
         self.to_app.send(text)
+    }
+
+    // Forgets a command that will get no result.
+    fn forget_command(mut self, id: String) {
+        if let i = self.making.position(|x| x == id) { _ = self.making.remove(i) }
+        if let i = self.lists.position(|x| x == id) { _ = self.lists.remove(i) }
+        if let i = self.linking.position(|x| x == id) { _ = self.linking.remove(i) }
+        if let i = self.inviting.position(|x| x == id) { _ = self.inviting.remove(i) }
+        if let i = self.resetting.position(|x| x == id) { _ = self.resetting.remove(i) }
     }
 
     // Forgets how far each of message `id`'s streaming blocks had come.
