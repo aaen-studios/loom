@@ -4408,7 +4408,7 @@ impl Model {
                 }
             }
             List::Runs => {
-                self.runs = items
+                let runs: Vec<Run> = items
                     .iter()
                     .map(|r| Run {
                         id: s(r, "run"),
@@ -4418,6 +4418,13 @@ impl Model {
                         quiet: !s(r, "routine").is_empty(),
                     })
                     .collect();
+                // A run new here may have started calls already: the calls asked for with
+                // the runs before it, in the same burst as its run.started, left them out,
+                // and a call that waits on an approval sends nothing more to ask again.
+                if runs.iter().any(|r| !self.runs.iter().any(|o| o.id == r.id)) {
+                    self.dirty.insert(List::Tools);
+                }
+                self.runs = runs;
             }
             List::Tools => {
                 let list: Vec<Tool> = items
@@ -6647,6 +6654,28 @@ mod tests {
         // Stopped, it keeps both, as one group.
         m.messages = vec![m.message_of(&kept("cancelled"))];
         assert_eq!(now(&m), vec![Part::Bubbles(vec![0, 2])]);
+    }
+
+    #[test]
+    fn a_new_run_asks_for_its_calls_again() {
+        // run.started and a call's tool.started can come in one burst: the calls are then
+        // asked for with the runs from before, and a call waiting on an approval sends
+        // nothing more, so a run new here asks again.
+        let mut m = Model::new();
+        let runs = |ids: &[&str]| {
+            let items: Vec<Value> = ids
+                .iter()
+                .map(|id| json!({"run": id, "conversation": "c_1", "agent": "a_1", "message": "msg_1"}))
+                .collect();
+            json!({"t": "core.data", "what": "runs", "items": items})
+        };
+        m.take(&runs(&["run_1"]));
+        assert!(m.dirty.contains(&List::Tools));
+        m.dirty.clear();
+        m.take(&runs(&["run_1"]));
+        assert!(!m.dirty.contains(&List::Tools));
+        m.take(&runs(&[]));
+        assert!(!m.dirty.contains(&List::Tools));
     }
 
     #[test]
