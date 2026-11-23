@@ -133,7 +133,7 @@ fn main() {
         ));
         theme(cx, dark);
         let bounds = Bounds::centered(None, size(px(1120.), px(760.)), cx);
-        gpui_kit::open_window(
+        let (window, _) = gpui_kit::open_window(
             WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
                 // As narrow as the rail beside the chat at its narrowest: below the
@@ -155,6 +155,14 @@ fn main() {
             |window, cx| cx.new(|cx| Loom::new(window, cx)),
         )
         .expect("failed to open the window");
+        // The window is put in its place as it's made (app.rs), when GPUI can't yet
+        // hear that it moved or resized, so it would go on laying out for the size it
+        // had: a build for measuring, made hidden at Windows' default size, then drew
+        // its chat and composer off the bottom of the window until it was next resized.
+        // Now it reads its size again.
+        window
+            .update(cx, |_, window, cx| window.bounds_changed(cx))
+            .ok();
         if !cfg!(feature = "perf") {
             cx.activate(true);
         }
