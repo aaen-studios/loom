@@ -1,0 +1,265 @@
+module tests.protocol.mcp_sign_in
+
+// Signing in to MCP servers that ask for it (PLAN.md, "Signing in to MCP
+// servers"), against the fake MCP server and its authorization servers
+// (tests/fake_oauth). Test says a server needs a sign-in. mcp.sign_in finds
+// where through its metadata, signs loom up as a client there, and gives the
+// address the person's browser opens, with a PKCE challenge and the server as
+// resource; the test follows it as the browser would, and sends what came
+// back to the redirect with mcp.signed_in, which only a sign-in loom started
+// takes, once. The server then gets the token, which is renewed when the
+// server answers 401 and before it ends. Sign out tells the authorization
+// server, and a server that doesn't let apps sign up takes the person's own
+// client id and secret. An agent whose server needs a sign-in is told so, and
+// its person gets a card with Sign in, and an agent can't sign in itself. No
+// token is in what the app got, the activity log or the database.
+//
+//     calx tests/protocol/mcp_sign_in.calx
+import std.bytes
+import std.fs
+import std.http.{Header, get}
+import std.json.{Json, parse}
+import std.process.{Child, Command, Stdio, exit}
+import std.thread.{sleep}
+import shared.obj.{Obj, at, int_at, str_at}
+import shared.client.{Session, reply_text}
+import tests.kit.{Instance, calx, check}
+
+// Where a test's browser comes back to; nothing listens there, since the test
+// reads the address off the fake's consent page.
+const REDIRECT: str = "http://127.0.0.1:9/callback"
+
+fn fetch_text(address: String) -> String ! Error {
+    var req = get(address, List<Header>(), 30000, 1048576)
+    let r = try req.wait()
+    return String.from_utf8(r.body) ?? String()
+}
+
+fn stats(fake: String) -> Json ! Error {
+    return try parse(try fetch_text("{fake}/test/stats"))
+}
+
+fn count(fake: String, key: str) -> i64 ! Error {
+    return int_at(try stats(fake), key) ?? -1
+}
+
+// What the browser brings back: the consent page's link, to the redirect.
+fn consent(address: String) -> String ! Error {
+    let page = try fetch_text(address)
+    let at_link = page.find("href=\"") else { fail "the sign-in page has no link: {page}" }
+    let rest = page[at_link + 6..].copy()
+    let end = rest.find("\"") ?? rest.len()
+    return rest[..end].copy()
+}
+
+fn query_of(link: String) -> String {
+    let q = link.find("?") ?? link.len()
+    return if q < link.len() { link[q + 1..].copy() } else { String() }
+}
+
+fn ok_of(r: Json) -> bool {
+    return at(r, "ok") == Json.Bool(true)
+}
+
+fn code_of(r: Json) -> String {
+    return str_at(at(r, "error"), "code") ?? String()
+}
+
+fn message_of(r: Json) -> String {
+    return str_at(at(r, "error"), "message") ?? String()
+}
+
+fn server_in(list: Json, name: str) -> Json {
+    if let Json.Array(servers) = at(at(list, "value"), "servers") {
+        for s in servers {
+            if str_at(s.copy(), "name") == some(String(name)) { return s.copy() }
+        }
+    }
+    return Json.Null
+}
+
+fn reply_in(app: mut Session, conversation: String) -> String ! Error {
+    loop {
+        let created = try app.until("event", "message.created", 120000)
+        let m = at(created, "message")
+        if str_at(m.copy(), "role") == some(String("agent")) and str_at(m.copy(), "conversation") == some(conversation.copy()) { return reply_text(m) }
+    }
+}
+
+fn say(app: mut Session, conversation: String, cid: String, text: String) -> String ! Error {
+    try app.send(Obj.new().s("t", String("send")).s("cid", cid).s("conversation", conversation.copy()).s("text", text).done())
+    return try reply_in(mut app, conversation)
+}
+
+// Signs in to `name` as the app and the person's browser would, and gives
+// mcp.signed_in's result.
+fn sign_in(app: mut Session, name: str, ids: (str, str)) -> Json ! Error {
+    let (first, second) = ids
+    let began = try app.cmd(first, "mcp.sign_in", Obj.new().s("name", String(name)).s("redirect", String(REDIRECT)).done())
+    if not ok_of(began.copy()) { fail "mcp.sign_in {name} failed: {began}" }
+    let link = try consent(str_at(at(began, "value"), "url") ?? String())
+    return try app.cmd(second, "mcp.signed_in", Obj.new().s("query", query_of(link)).done())
+}
+
+fn wait_ms(ms: u64) {
+    unsafe { sleep(ms * 1000000) }
+}
+
+fn run(i: Instance, fake: String) ! Error {
+    var app = try Session.connect(i.base.copy(), i.token.copy(), 0)
+    _ = try app.cmd("q_1", "mcp.put", Obj.new().s("name", String("acta")).s("url", "{fake}/mcp").done())
+
+    // --- Before signing in ---
+    let before = try app.cmd("q_2", "mcp.test", Obj.new().s("name", String("acta")).done())
+    try check(code_of(before.copy()) == "sign_in_needed" and message_of(before) == "acta needs you to sign in.", "Test says a server that answers 401 needs a sign-in")
+    try check(str_at(server_in(try app.cmd("q_3", "mcp.list", Obj.new().done()), "acta"), "sign_in") == some(String("needed")), "and mcp.list says so")
+
+    // --- Signing in ---
+    let began = try app.cmd("q_4", "mcp.sign_in", Obj.new().s("name", String("acta")).s("redirect", String(REDIRECT)).done())
+    let address = str_at(at(began, "value"), "url") ?? String()
+    try check(address.starts_with("{fake}/authorize?") and address.contains("code_challenge_method=S256") and address.contains("resource=http%3A%2F%2F127.0.0.1") and address.contains("state="), "mcp.sign_in finds where through the server's metadata and gives the sign-in address, with a PKCE challenge and the server as resource")
+    try check(try count(fake.copy(), "registered") == 1, "loom signed itself up as a client there")
+    let link = try consent(address)
+    try check(link.starts_with("{REDIRECT}?code="), "the browser comes back to the redirect with a code")
+    let forged = try app.cmd("q_5", "mcp.signed_in", Obj.new().s("query", String("code=abc&state=not-loom-s")).done())
+    try check(code_of(forged) == "sign_in_failed", "a code for a state loom didn't make isn't taken")
+    let wrong_iss = query_of(link.copy()).replace("iss=", "iss=http%3A%2F%2Fevil.example%2F")
+    let spoofed = try app.cmd("q_6", "mcp.signed_in", Obj.new().s("query", wrong_iss).done())
+    try check(code_of(spoofed) == "sign_in_failed", "nor one from another issuer than the server's (RFC 9207)")
+    // That one's state was used; a new sign-in brings a new one.
+    let done = try sign_in(mut app, "acta", ("q_7", "q_8"))
+    try check(ok_of(done.copy()) and str_at(at(done, "value"), "signed_in_as") == some(String("ada@example.com")), "what came back is swapped for tokens, with the verifier the fake checks against its challenge")
+    try check(try count(fake.copy(), "registered") == 1, "and the client loom signed up as is used again")
+    let again = try app.cmd("q_9", "mcp.signed_in", Obj.new().s("query", query_of(link)).done())
+    try check(code_of(again) == "sign_in_failed", "a sign-in's state is taken once")
+    let listed = server_in(try app.cmd("q_10", "mcp.list", Obj.new().done()), "acta")
+    try check(str_at(listed.copy(), "sign_in") == some(String("signed_in")) and str_at(listed.copy(), "signed_in_as") == some(String("ada@example.com")) and (int_at(listed, "signed_in_at") ?? 0) > 0, "mcp.list says it's signed in, as whom and since when")
+    let tested = try app.cmd("q_11", "mcp.test", Obj.new().s("name", String("acta")).done())
+    try check(ok_of(tested.copy()) and "{at(at(tested.copy(), "value"), "tools")}" == "[\"whoami\"]" and at(at(tested, "value"), "signed_in") == Json.Bool(true), "Test reaches the server with the token, and says it's signed in")
+
+    // --- Renewing ---
+    _ = try fetch_text("{fake}/test/expire")
+    let renewed = try app.cmd("q_12", "mcp.test", Obj.new().s("name", String("acta")).done())
+    try check(ok_of(renewed) and try count(fake.copy(), "refreshed") == 1, "a 401 to a token that's over has it renewed with the refresh token, and the server asked again")
+    _ = try fetch_text("{fake}/test/life?s=4")
+    _ = try fetch_text("{fake}/test/expire")
+    _ = try app.cmd("q_13", "mcp.test", Obj.new().s("name", String("acta")).done())
+    let short = try count(fake.copy(), "refreshed")
+    var waited = 0
+    while try count(fake.copy(), "refreshed") <= short and waited < 100 {
+        wait_ms(100)
+        waited += 1
+    }
+    try check(try count(fake.copy(), "refreshed") > short, "a token that ends soon is renewed before it does")
+    _ = try fetch_text("{fake}/test/life?s=3600")
+    wait_ms(2500)
+    let refused_before = try count(fake.copy(), "unauthorized")
+    let fresh = try app.cmd("q_14", "mcp.test", Obj.new().s("name", String("acta")).done())
+    try check(ok_of(fresh) and try count(fake.copy(), "unauthorized") == refused_before, "so the next use has a live one")
+
+    // --- An agent uses it ---
+    let made = try app.cmd("q_15", "agent.create", Obj.new().s("name", String("Signer")).s("acp_agent", String("fake")).s("instructions", String("Test.")).j("mcp", Json.Array([Json.Str(String("acta"))])).done())
+    let agent = str_at(at(at(made, "value"), "agent"), "id") ?? String()
+    let c1 = try app.cmd("q_16", "conversation.create", Obj.new().s("agent", agent.copy()).done())
+    let chat = str_at(at(c1, "value"), "conversation") ?? String()
+    let found = try say(mut app, chat, String("m_1"), String(#"/mcp search_tools {"query":"whoami"}"#))
+    try check(found.contains("mcp.acta.whoami("), "an agent in Code Mode gets the server's tools with the sign-in")
+
+    // --- Signing out ---
+    let out = try app.cmd("q_17", "mcp.sign_out", Obj.new().s("name", String("acta")).done())
+    var revoked = false
+    var tries = 0
+    while not revoked and tries < 100 {
+        revoked = try count(fake.copy(), "revoked") == 1
+        if not revoked { wait_ms(100) }
+        tries += 1
+    }
+    try check(ok_of(out) and revoked, "sign out lets the authorization server know")
+    try check(str_at(server_in(try app.cmd("q_18", "mcp.list", Obj.new().done()), "acta"), "sign_in") == some(String("needed")), "and the server needs a sign-in again")
+    try check(code_of(try app.cmd("q_19", "mcp.test", Obj.new().s("name", String("acta")).done())) == "sign_in_needed", "which Test says")
+
+    // --- An agent that finds it needs a sign-in ---
+    let c2 = try app.cmd("q_20", "conversation.create", Obj.new().s("agent", agent.copy()).done())
+    let chat2 = str_at(at(c2, "value"), "conversation") ?? String()
+    let missing = try say(mut app, chat2.copy(), String("m_2"), String(#"/mcp search_tools {"query":"whoami"}"#))
+    try check(missing.contains("acta needs your person to sign in") and missing.contains("don't sign in yourself"), "an agent whose server needs a sign-in is told so, and not to try itself")
+    var card = Json.Null
+    for f in app.frames {
+        if str_at(f.copy(), "t") == some(String("card")) and str_at(at(f.copy(), "card"), "type") == some(String("sign_in")) { card = at(f, "card") }
+    }
+    try check(str_at(card.copy(), "server") == some(String("acta")) and str_at(card, "title") == some(String("acta needs you to sign in")), "and its person gets a card in the reply to sign in with")
+    let tried = try say(mut app, chat2.copy(), String("m_3"), "/mcp run_command {Obj.new().s("name", String("mcp.sign_in")).j("args", Obj.new().s("name", String("acta")).s("redirect", String(REDIRECT)).done()).done()}")
+    try check(tried.contains("Only your person signs in"), "an agent can't sign in itself")
+    // Signed in again, the same agent's tools work in its next script or search.
+    let back_in = try sign_in(mut app, "acta", ("q_21", "q_22"))
+    try check(ok_of(back_in), "signing in again works")
+    let found_again = try say(mut app, chat2, String("m_4"), String(#"/mcp search_tools {"query":"whoami"}"#))
+    try check(found_again.contains("mcp.acta.whoami("), "and the waiting agent's tools come once its person has")
+
+    // --- A server that doesn't let apps sign up ---
+    _ = try app.cmd("q_23", "mcp.put", Obj.new().s("name", String("fixed")).s("url", "{fake}/mcp2").done())
+    let no_client = try app.cmd("q_24", "mcp.sign_in", Obj.new().s("name", String("fixed")).s("redirect", String(REDIRECT)).done())
+    try check(code_of(no_client.copy()) == "sign_in_failed" and message_of(no_client).contains("client ID"), "a server whose authorization server lets no app sign up asks for a client ID")
+    _ = try app.cmd("q_25", "mcp.put", Obj.new().s("name", String("fixed")).s("url", "{fake}/mcp2").s("client_id", String("fixed-client")).s("client_secret", String("fixed-secret")).done())
+    let shown = server_in(try app.cmd("q_26", "mcp.list", Obj.new().done()), "fixed")
+    try check(str_at(shown.copy(), "client_id") == some(String("fixed-client")) and at(shown.copy(), "client_secret_set") == Json.Bool(true) and not "{shown}".contains("fixed-secret"), "the person's own client is kept, and its secret isn't shown")
+    let fixed = try sign_in(mut app, "fixed", ("q_27", "q_28"))
+    try check(ok_of(fixed), "and signs in with it, its secret sent as HTTP Basic, after finding the metadata at its well-known places")
+    try check(ok_of(try app.cmd("q_29", "mcp.test", Obj.new().s("name", String("fixed")).done())), "so Test works")
+
+    // --- No token is anywhere it shouldn't be ---
+    let activity = try app.cmd("q_30", "activity.list", Obj.new().done())
+    var seen = "{activity}"
+    for f in app.frames {
+        seen = "{seen}\n{f}"
+    }
+    var database = List<u8>()
+    for name in ["loom.db", "loom.db-wal"] {
+        let path = "{i.data}/{name}"
+        if fs.exists(path.copy()) { database.extend(try fs.read(path)) }
+    }
+    var leaked = List<String>()
+    if let Json.Array(issued) = at(try stats(fake.copy()), "issued") {
+        for t in issued {
+            let token = t.as_str() ?? String()
+            if seen.contains(token.copy()) or bytes.find(database.copy(), token.to_bytes()) != none { leaked.push(token) }
+        }
+        try check(issued.len() >= 8 and leaked.len() == 0, "no token is in what the app was sent, the activity log or the database")
+    }
+    app.close()
+}
+
+fn start_fake() -> (Child, String) ! Error {
+    let path = try fs.absolute(String("tests/fake_oauth/main.calx"))
+    let child = try Command.new(calx()).arg(path).stdout(Stdio.Pipe).spawn()
+    let line = child.wait_for_line(String("fake oauth: "), 120000) else {
+        child.kill()
+        fail "the fake OAuth server didn't start"
+    }
+    return (child, line[line.find("http://") ?? 0..].trim().copy())
+}
+
+fn main() ! Error {
+    let (fake_child, fake) = try start_fake()
+    var fake_server = fake_child
+    let inst = match Instance.start() {
+        ok(x) => x,
+        err(e) => {
+            fake_server.kill()
+            _ = fake_server.wait()
+            fail "{e}"
+        },
+    }
+    let failure: String? = match run(inst.copy(), fake) {
+        ok => none,
+        err(e) => some("{e}"),
+    }
+    inst.stop()
+    fake_server.kill()
+    _ = fake_server.wait()
+    if let f = failure {
+        eprintln("\n{f}")
+        exit(1)
+    }
+    println("\nmcp_sign_in: all good")
+}

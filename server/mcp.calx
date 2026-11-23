@@ -24,7 +24,7 @@ import std.json.{Json, parse}
 import std.process.{Child}
 import std.thread.{Task}
 import std.time.{Instant}
-import shared.obj.{Obj, at, int_at, str_at}
+import shared.obj.{Obj, at, int_at, merge, str_at}
 import shared.tools
 import server.codemode
 import server.codemode.{Tool}
@@ -144,6 +144,7 @@ struct Code {
     tools: List<Tool>
     servers: Map<String, Server>
     trouble: List<String>    // servers that didn't start, and why
+    signing: List<String>    // servers that wait for their person to sign in
     runs: i64
     warm: Request?    // loom's own tools, asked for as the session starts
     folder: String    // the session's prelude and Deno's cache, made at the first
@@ -190,7 +191,10 @@ impl Code {
     // Every tool a script can call: loom's own, and each server's, which are
     // started the first time.
     fn load(self: mut Code, link: Link) {
-        if self.loaded { return }
+        if self.loaded {
+            if self.signing.len() > 0 { self.signed_since(link) }
+            return
+        }
         self.loaded = true
         match own_tools(link, mut self) {
             ok(t) => {
@@ -225,11 +229,82 @@ impl Code {
                 let s = got.remove(k) else { continue }
                 let name = s.name
                 let started = s.server
+                // A server that wants a sign-in gets a renewed token, when
+                // there's one to be had, or its person a card for it.
+                if mcpclient.asks_sign_in(s.trouble.copy()) {
+                    if let r = self.signed_start(link, name.copy(), specs[k].copy()) {
+                        let (server, listed) = r
+                        self.tools.extend(codemode.tools_of(name.copy(), listed))
+                        self.servers.insert(name, server)
+                    }
+                    continue
+                }
                 if s.trouble.len() > 0 { self.trouble.push(s.trouble) }
                 self.tools.extend(codemode.tools_of(name.copy(), s.tools))
                 if let server = started { self.servers.insert(name, server) }
             }
         }
+    }
+
+    // After a 401 (PLAN.md, "Signing in to MCP servers"): the instance
+    // renews the person's sign-in and the server starts again with it, or the
+    // person is shown Sign in, and the server waits for them.
+    fn signed_start(self: mut Code, link: Link, name: String, spec: Json) -> (Server, List<Json>)? {
+        if let header = renewed(link, name.copy()) {
+            match start_listed(with_auth(spec, header)) {
+                ok(got) => return some(got),
+                err(e) => {
+                    if not mcpclient.asks_sign_in("{e}") {
+                        self.trouble.push("{name} didn't start: {e}")
+                        return none
+                    }
+                },
+            }
+        }
+        self.wait_for_sign_in(link, name)
+        return none
+    }
+
+    fn wait_for_sign_in(self: mut Code, link: Link, name: String) {
+        _ = link.send("/api/mcp/sign_in", Obj.new().s("server", name.copy()).done())
+        if not self.signing.contains(name.copy()) { self.signing.push(name.copy()) }
+    }
+
+    // Servers that waited for a sign-in, started once the person has.
+    fn signed_since(self: mut Code, link: Link) {
+        let given = match link.fetch("/api/mcp/servers", 30000) {
+            ok(g) => g,
+            err(_) => return,
+        }
+        let Json.Array(specs) = at(given, "servers") else return
+        for spec in specs {
+            let name = str_at(spec.copy(), "name") ?? String()
+            if not self.signing.contains(name.copy()) or auth_of(spec.copy()).len() == 0 { continue }
+            if let ok(got) = start_listed(spec.copy()) {
+                let (server, listed) = got
+                var kept = List<Tool>()
+                for t in self.tools {
+                    if t.server != name { kept.push(t.copy()) }
+                }
+                self.tools = kept
+                self.tools.extend(codemode.tools_of(name.copy(), listed))
+                self.servers.insert(name.copy(), server)
+                var left = List<String>()
+                for w in self.signing {
+                    if w != name { left.push(w.copy()) }
+                }
+                self.signing = left
+            }
+        }
+    }
+
+    // What search_tools says of the servers that didn't start.
+    fn not_reached(self) -> List<String> {
+        var out = self.trouble.copy()
+        for name in self.signing {
+            out.push(sign_in_text(name.copy()))
+        }
+        return out
     }
 
     fn search(self: mut Code, link: Link, args: Json) -> Json {
@@ -238,7 +313,7 @@ impl Code {
         self.load(link)
         let limit = int_at(args.copy(), "limit") ?? 10
         let most: usize = if limit < 1 { 1 } else if limit > 30 { 30 } else { usize.wrap(limit) }
-        return said(codemode.search(self.tools.copy(), str_at(args, "query") ?? String(), most, self.trouble.copy()))
+        return said(codemode.search(self.tools.copy(), str_at(args, "query") ?? String(), most, self.not_reached()))
     }
 
     // Where Deno is, asking the instance, which fetches it the first time.
@@ -394,6 +469,7 @@ impl Code {
     // A script's call to the tool at `path`: its value, or why it failed.
     fn call(self: mut Code, link: Link, path: String, args: Json) -> Json ! Error {
         let t = codemode.find(self.tools, path.copy()) else { fail "There's no tool {path}. search_tools finds them." }
+        if self.signing.contains(t.server.copy()) { fail "{sign_in_text(t.server.copy())}" }
         if t.server == "loom" {
             let result = link.call(t.name.copy(), args)
             if is_error(result.copy()) { fail "{codemode.error_of(result)}" }
@@ -408,13 +484,33 @@ impl Code {
         // What came of it, for the activity log.
         var why = String()
         var value = Json.Null
-        match server.call(t.name.copy(), args) {
-            ok(result) => {
-                if is_error(result.copy()) { why = codemode.error_of(result) } else { value = codemode.value_of(result) }
-            },
-            err(e) => why = "{e}",
+        var (result, failure) = outcome(mut server, t.name.copy(), args.copy())
+        // A 401: the token is renewed and the call made again, once, or the
+        // person is asked to sign in.
+        var signing = mcpclient.asks_sign_in(failure.copy())
+        if signing {
+            if let header = renewed(link, t.server.copy()) {
+                server.bearer(header[7..].copy())
+                let (again, failed_again) = outcome(mut server, t.name.copy(), args)
+                result = again
+                failure = failed_again
+                signing = mcpclient.asks_sign_in(failure.copy())
+            }
         }
-        self.servers.insert(t.server.copy(), server)
+        if failure.len() > 0 {
+            why = failure
+        } else if is_error(result.copy()) {
+            why = codemode.error_of(result)
+        } else {
+            value = codemode.value_of(result)
+        }
+        if signing {
+            why = sign_in_text(t.server.copy())
+            server.stop()
+            self.wait_for_sign_in(link, t.server.copy())
+        } else {
+            self.servers.insert(t.server.copy(), server)
+        }
         if act > 0 { _ = link.send("/api/mcp/done", Obj.new().i("act", act).b("ok", why.len() == 0).s("why", why.copy()).done()) }
         if why.len() > 0 { fail "{why}" }
         return value
@@ -434,6 +530,67 @@ impl Code {
         if self.folder.len() > 0 {
             if let err(e) = fs.remove_dir_all(self.folder) { eprintln("loom mcp: {e}") }
         }
+    }
+}
+
+// What an agent is told of a server that waits for its person to sign in.
+fn sign_in_text(name: String) -> String {
+    return "{name} needs your person to sign in. Loom has shown them Sign in in the chat: don't sign in yourself, in your browser or any other way. Its tools work once they have."
+}
+
+// The Authorization header a server's spec gives, or "".
+fn auth_of(spec: Json) -> String {
+    if let Json.Array(headers) = at(spec, "headers") {
+        for h in headers {
+            if (str_at(h.copy(), "name") ?? String()).to_lower_root() == "authorization" { return str_at(h, "value") ?? String() }
+        }
+    }
+    return String()
+}
+
+// The spec with `header` as its Authorization.
+fn with_auth(spec: Json, header: String) -> Json {
+    var headers = List<Json>()
+    if let Json.Array(given) = at(spec.copy(), "headers") {
+        for h in given {
+            if (str_at(h.copy(), "name") ?? String()).to_lower_root() != "authorization" { headers.push(h.copy()) }
+        }
+    }
+    headers.push(Obj.new().s("name", String("Authorization")).s("value", header).done())
+    return merge(spec, Obj.new().j("headers", Json.Array(headers)).done())
+}
+
+// The instance's renewal of the person's sign-in to `name`: the new
+// Authorization header, or none when they must sign in again.
+fn renewed(link: Link, name: String) -> String? {
+    let got = link.send("/api/mcp/token", Obj.new().s("server", name).done())
+    if let Json.Array(headers) = at(got, "headers") {
+        for h in headers {
+            if let v = str_at(h, "value") {
+                if v.starts_with("Bearer ") { return some(v) }
+            }
+        }
+    }
+    return none
+}
+
+// A call to one of a server's tools: its result, or why it failed.
+fn outcome(server: mut Server, name: String, args: Json) -> (Json, String) {
+    return match server.call(name, args) {
+        ok(r) => (r, String()),
+        err(e) => (Json.Null, "{e}"),
+    }
+}
+
+// Starts the server `spec` gives and lists its tools.
+fn start_listed(spec: Json) -> (Server, List<Json>) ! Error {
+    var server = try mcpclient.start(spec)
+    match server.tools() {
+        ok(listed) => return (server, listed),
+        err(e) => {
+            server.stop()
+            fail "{e}"
+        },
     }
 }
 
@@ -479,7 +636,7 @@ pub fn serve() ! Error {
     let base = env.variable(String("LOOM_URL")) else { fail "LOOM_URL isn't set: loom mcp is started by loom's instance" }
     let token = env.variable(String("LOOM_MCP_TOKEN")) else { fail "LOOM_MCP_TOKEN isn't set: loom mcp is started by loom's instance" }
     let link = Link { base: base, token: token }
-    var c = Code { on: env.variable(String("LOOM_CODE_MODE")) == some(String("1")), deno: String(), loaded: false, tools: List<Tool>(), servers: Map<String, Server>(), trouble: List<String>(), runs: 0, folder: String(), warm: some(link.ask_tools()), spare: none, spare_at: none, done: none }
+    var c = Code { on: env.variable(String("LOOM_CODE_MODE")) == some(String("1")), deno: String(), loaded: false, tools: List<Tool>(), servers: Map<String, Server>(), trouble: List<String>(), signing: List<String>(), runs: 0, folder: String(), warm: some(link.ask_tools()), spare: none, spare_at: none, done: none }
     var input = io.Lines()
     while let line = input.next() {
         if line.trim().len() == 0 { continue }

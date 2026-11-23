@@ -60,6 +60,16 @@ Set up MCP servers once, on the **MCP servers** page, and pick which each agent 
 
 In Code Mode, loom connects to the agent's MCP servers for it, and the agent reaches their tools through its scripts. With Code Mode off, the agent connects to them itself.
 
+**Test** on a server starts it as an agent would and says the tools it offers, or why it didn't start.
+
+### Servers you sign in to
+
+Hosted servers such as Acta, Cloudflare and Vercel ask you to sign in instead of taking a key. Add one by its address. When it needs a sign-in, its row on the MCP servers page shows **Sign in**, which opens the server's sign-in page in your own browser. Once you've signed in, the row says whom you're signed in as, with **Sign out**, and Test says it's signed in.
+
+Loom keeps the sign-in on your instance, sealed like your secrets, renews it before it runs out, and sends it to the server for every agent that has it. An agent never signs in for you: when a server needs you to, the agent is told so and you get a card in the chat with **Sign in**.
+
+A few servers don't let apps sign up by themselves. For those, get a client ID (and secret) from the server and put them in the server's **Client ID** and **Client secret** fields. The secret can be one of your keys, as `secret:KEY`.
+
 ## Sharing keys with the people you invite
 
 The people you invite run their agents in sandboxes of their own ([People](people.md)), with their own secrets as their agent programs' settings. To let them use yours, open the program on **Brains** and **Share** its settings, with a number of tokens each person may use a day or a month. Loom counts what each turn uses, as the program reports it. Someone past their budget waits for the next day or month, or adds their own key as a secret with the setting's name, which then wins.

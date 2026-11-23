@@ -406,12 +406,14 @@ pub fn mode_name(mode: &str) -> &'static str {
     }
 }
 
-/// What testing an MCP server found: it's starting, the tools it offers, or why
-/// it didn't start.
+/// What testing an MCP server found: it's starting, the tools it offers (and whether
+/// it's signed in, as whom when the sign-in said), that it needs a sign-in, or why it
+/// didn't start.
 #[derive(Clone, Debug, PartialEq)]
 pub enum McpTest {
     Testing,
-    Works(Vec<String>),
+    Works(Vec<String>, Option<String>),
+    NeedsSignIn,
     Failed(String),
 }
 
@@ -420,20 +422,39 @@ impl McpTest {
     pub fn said(&self) -> String {
         match self {
             McpTest::Testing => "Testing…".into(),
-            McpTest::Works(tools) if tools.is_empty() => "Started, with no tools".into(),
-            McpTest::Works(tools) => {
-                let shown: Vec<&str> = tools.iter().take(6).map(String::as_str).collect();
-                let more = if tools.len() > 6 { ", …" } else { "" };
-                let count = if tools.len() == 1 {
-                    "1 tool".to_string()
+            McpTest::Works(tools, signed) => {
+                let listed = if tools.is_empty() {
+                    "Started, with no tools".to_string()
                 } else {
-                    format!("{} tools", tools.len())
+                    let shown: Vec<&str> = tools.iter().take(6).map(String::as_str).collect();
+                    let more = if tools.len() > 6 { ", …" } else { "" };
+                    let count = if tools.len() == 1 {
+                        "1 tool".to_string()
+                    } else {
+                        format!("{} tools", tools.len())
+                    };
+                    format!("{count}: {}{more}", shown.join(", "))
                 };
-                format!("{count}: {}{more}", shown.join(", "))
+                match signed {
+                    None => listed,
+                    Some(who) if who.is_empty() => format!("Signed in · {listed}"),
+                    Some(who) => format!("Signed in as {who} · {listed}"),
+                }
             }
+            McpTest::NeedsSignIn => "Needs you to sign in".into(),
             McpTest::Failed(why) => why.clone(),
         }
     }
+}
+
+/// Whether an MCP server over HTTP signs in, as the instance knows it: it hasn't asked,
+/// it needs the person to, or they did (as whom, when the sign-in said).
+#[derive(Clone, Debug, PartialEq, Default)]
+pub enum SignIn {
+    #[default]
+    No,
+    Needed,
+    SignedIn(String),
 }
 
 /// One of the person's MCP servers.
@@ -445,6 +466,11 @@ pub struct McpServer {
     pub url: String,
     /// Its env or headers: each name, and its text or the secret it names.
     pub settings: Vec<(String, Setting)>,
+    pub sign_in: SignIn,
+    /// A client of the person's own, for a server whose sign-in lets no app sign up
+    /// by itself, and its secret when it names one of their keys.
+    pub client_id: String,
+    pub client_secret: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -479,11 +505,23 @@ impl McpServer {
                     .collect()
             })
             .unwrap_or_default();
+        let sign_in = match v.get("sign_in").and_then(Value::as_str) {
+            Some("signed_in") => SignIn::SignedIn(s(v, "signed_in_as")),
+            Some("needed") => SignIn::Needed,
+            _ => SignIn::No,
+        };
+        let client_secret = v
+            .pointer("/client_secret/secret")
+            .and_then(Value::as_str)
+            .map(|n| format!("secret:{n}"));
         McpServer {
             name: s(v, "name"),
             command,
             url: s(v, "url"),
             settings,
+            sign_in,
+            client_id: s(v, "client_id"),
+            client_secret,
         }
     }
 
@@ -526,6 +564,28 @@ pub fn server_args(name: &str, line: &str, settings: &str) -> Value {
     let command = words.next().unwrap_or_default();
     let args: Vec<&str> = words.collect();
     json!({"name": name.trim(), "command": command, "args": args, "env": pairs})
+}
+
+/// `mcp.put`'s arguments with a client of the person's own, for a server over HTTP:
+/// its id, and its secret as text or `secret:KEY`. A secret left empty stays as it was.
+pub fn with_client(mut args: Value, client_id: &str, client_secret: &str) -> Value {
+    let (id, secret) = (client_id.trim(), client_secret.trim());
+    if args.get("url").is_none() || id.is_empty() {
+        return args;
+    }
+    args["client_id"] = json!(id);
+    if !secret.is_empty() {
+        args["client_secret"] = match secret.strip_prefix("secret:") {
+            Some(n) => json!({"secret": n.trim()}),
+            None => json!(secret),
+        };
+    }
+    args
+}
+
+/// The frame that sends the instance what the browser brought back from a sign-in.
+pub fn signed_in_frame(query: &str) -> Value {
+    json!({"t": "cmd", "id": "app.mcp_signed_in", "name": "mcp.signed_in", "args": {"query": query}})
 }
 
 /// One of the person's hosts, a server this device reaches with ssh: its name, what ssh
@@ -1332,6 +1392,12 @@ pub enum CardBody {
         value: f32,
     },
     Facts(Vec<(String, String)>),
+    /// One of the person's MCP servers needs them to sign in (loom's own card, never
+    /// an agent's): its name, for Sign in, and whether they have since.
+    SignIn {
+        server: String,
+        signed: bool,
+    },
 }
 
 impl Card {
@@ -1354,6 +1420,10 @@ impl Card {
                     .map(|i| (s(i, "text"), i.get("done") == Some(&Value::Bool(true))))
                     .collect(),
             ),
+            "sign_in" => CardBody::SignIn {
+                server: s(v, "server"),
+                signed: false,
+            },
             "facts" => CardBody::Facts(
                 items?
                     .iter()
@@ -2622,6 +2692,10 @@ pub struct Model {
     mcp_stale: bool,
     /// The last test of each MCP server, by its name.
     pub mcp_tests: HashMap<String, McpTest>,
+    /// MCP servers whose sign-in is under way, while the person's browser is away.
+    pub mcp_signing: std::collections::HashSet<String>,
+    /// Addresses to open in the person's browser: a sign-in page.
+    pub to_browse: Vec<String>,
     /// The Import page: what each other app has on the instance's computer, once it has
     /// said, the app being imported from while it is, and how the last import went.
     pub import_sources: Vec<ImportSource>,
@@ -3612,6 +3686,10 @@ impl Model {
         let Some(card) = f.get("card").and_then(Card::of) else {
             return;
         };
+        // Whether the person signed in since, for a sign-in card.
+        if matches!(card.body, CardBody::SignIn { .. }) {
+            self.mcp_stale = true;
+        }
         let message = s(f, "message");
         let block = f.get("block").and_then(Value::as_u64).unwrap_or(0) as usize;
         let blocks = self.live.entry(message).or_default();
@@ -3786,6 +3864,10 @@ impl Model {
         }
         if let Some(name) = id.strip_prefix("app.mcp_test:") {
             let found = match f.get("error") {
+                Some(e) if s(e, "code") == "sign_in_needed" => {
+                    self.mcp_stale = true;
+                    McpTest::NeedsSignIn
+                }
                 Some(e) => McpTest::Failed(s(e, "message")),
                 None => McpTest::Works(
                     f.pointer("/value/tools")
@@ -3797,9 +3879,46 @@ impl Model {
                                 .collect()
                         })
                         .unwrap_or_default(),
+                    (f.pointer("/value/signed_in") == Some(&Value::Bool(true))).then(|| {
+                        f.pointer("/value/signed_in_as")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default()
+                            .to_string()
+                    }),
                 ),
             };
             self.mcp_tests.insert(name.to_string(), found);
+            return;
+        }
+        // The address the person's browser opens to sign in to an MCP server.
+        if let Some(name) = id.strip_prefix("app.mcp_sign_in:") {
+            match f.get("error") {
+                Some(e) => {
+                    self.mcp_signing.remove(name);
+                    self.notices.push(s(e, "message"));
+                }
+                None => {
+                    if let Some(url) = f.pointer("/value/url").and_then(Value::as_str) {
+                        self.to_browse.push(url.to_string());
+                    }
+                }
+            }
+            return;
+        }
+        if id == "app.mcp_signed_in" {
+            self.mcp_signing.clear();
+            match f.get("error") {
+                Some(e) => self.notices.push(s(e, "message")),
+                None => {
+                    let server = f
+                        .pointer("/value/server")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default();
+                    self.mcp_tests.remove(server);
+                    self.notices.push(format!("Signed in to {server}"));
+                }
+            }
+            self.mcp_stale = true;
             return;
         }
         if let Some(conversation) = id.strip_prefix("app.queue:") {
@@ -4823,6 +4942,18 @@ impl Model {
                 pinned: false,
             });
         }
+        // A sign-in card says Signed in once the person has.
+        for m in out.iter_mut() {
+            for b in m.blocks.iter_mut() {
+                if let Some(Card {
+                    body: CardBody::SignIn { server, signed },
+                    ..
+                }) = b.card.as_mut()
+                {
+                    *signed = self.mcp_signed_in(server);
+                }
+            }
+        }
         out
     }
 
@@ -5414,6 +5545,26 @@ impl Model {
     pub fn delete_mcp(&mut self, name: &str) -> Value {
         let id = self.id("app.mcp_delete");
         json!({"t": "cmd", "id": id, "name": "mcp.delete", "args": {"name": name}})
+    }
+
+    /// Asks the instance where to sign in to the MCP server `name`, with the browser
+    /// coming back to `redirect`; the answer's address goes to `to_browse`.
+    pub fn sign_in_mcp(&mut self, name: &str, redirect: &str) -> Value {
+        self.mcp_signing.insert(name.to_string());
+        json!({"t": "cmd", "id": format!("app.mcp_sign_in:{name}"), "name": "mcp.sign_in", "args": {"name": name, "redirect": redirect}})
+    }
+
+    pub fn sign_out_mcp(&mut self, name: &str) -> Value {
+        self.mcp_tests.remove(name);
+        let id = self.id("app.mcp_sign_out");
+        json!({"t": "cmd", "id": id, "name": "mcp.sign_out", "args": {"name": name}})
+    }
+
+    /// Whether the person is signed in to their MCP server `name`.
+    pub fn mcp_signed_in(&self, name: &str) -> bool {
+        self.mcp_servers
+            .iter()
+            .any(|m| m.name == name && matches!(m.sign_in, SignIn::SignedIn(_)))
     }
 
     pub fn put_secret(&mut self, name: &str, value: &str) -> Value {
@@ -6222,6 +6373,90 @@ mod tests {
         m.file_came(&json!({"id": id, "file": {"id": "f1", "name": "notes.txt", "size": 3}}));
         m.unpark_attachments(&parked);
         assert!(m.parked.is_empty() && m.attachments.len() == 1 && m.attachments[0].file.is_some());
+    }
+
+    #[test]
+    fn an_mcp_server_that_signs_in() {
+        let mut m = Model::new();
+        m.take(&json!({"t": "result", "id": "app.mcp_list1", "ok": true, "value": {"servers": [
+            {"name": "acta", "url": "https://acta.example/api/mcp", "headers": {}, "sign_in": "signed_in", "signed_in_as": "ada@example.com"},
+            {"name": "fixed", "url": "https://x.example/mcp", "headers": {}, "sign_in": "needed", "client_id": "c1", "client_secret": {"secret": "X_SECRET"}},
+            {"name": "local", "command": "npx", "args": ["-y", "thing"], "env": {}}
+        ]}}));
+        assert_eq!(
+            m.mcp_servers[0].sign_in,
+            SignIn::SignedIn("ada@example.com".into())
+        );
+        assert_eq!(m.mcp_servers[1].sign_in, SignIn::Needed);
+        assert_eq!(m.mcp_servers[1].client_id, "c1");
+        assert_eq!(
+            m.mcp_servers[1].client_secret.as_deref(),
+            Some("secret:X_SECRET")
+        );
+        assert_eq!(m.mcp_servers[2].sign_in, SignIn::No);
+        assert!(m.mcp_signed_in("acta") && !m.mcp_signed_in("fixed"));
+
+        // Sign in: the address goes to the browser, and the answer reloads the list.
+        let f = m.sign_in_mcp("fixed", "http://127.0.0.1:47251/callback");
+        assert_eq!(f["name"], "mcp.sign_in");
+        assert_eq!(f["args"]["redirect"], "http://127.0.0.1:47251/callback");
+        assert!(m.mcp_signing.contains("fixed"));
+        m.take(&json!({"t": "result", "id": "app.mcp_sign_in:fixed", "ok": true, "value": {"server": "fixed", "url": "https://x.example/authorize?state=s"}}));
+        assert_eq!(
+            m.to_browse,
+            vec![String::from("https://x.example/authorize?state=s")]
+        );
+        assert!(m.to_open.is_empty(), "it isn't a file to open");
+        m.take(&json!({"t": "result", "id": "app.mcp_signed_in", "ok": true, "value": {"server": "fixed"}}));
+        assert!(
+            m.mcp_signing.is_empty()
+                && m.notices.last().map(String::as_str) == Some("Signed in to fixed")
+        );
+        assert_eq!(
+            signed_in_frame("code=a&state=b")["args"]["query"],
+            "code=a&state=b"
+        );
+
+        // Test says whether it's signed in, or that it needs a sign-in.
+        m.take(&json!({"t": "result", "id": "app.mcp_test:acta", "ok": true, "value": {"tools": ["a", "b"], "signed_in": true, "signed_in_as": "ada@example.com"}}));
+        assert_eq!(
+            m.mcp_tests["acta"].said(),
+            "Signed in as ada@example.com · 2 tools: a, b"
+        );
+        m.take(&json!({"t": "result", "id": "app.mcp_test:fixed", "ok": false, "error": {"code": "sign_in_needed", "message": "fixed needs you to sign in."}}));
+        assert_eq!(m.mcp_tests["fixed"], McpTest::NeedsSignIn);
+        assert_eq!(m.mcp_tests["fixed"].said(), "Needs you to sign in");
+
+        // The form's client goes with a server over HTTP only, and an empty secret stays.
+        let put = with_client(
+            server_args("fixed", "https://x.example/mcp", ""),
+            "c1",
+            "secret:X",
+        );
+        assert_eq!(put["client_id"], "c1");
+        assert_eq!(put["client_secret"], json!({"secret": "X"}));
+        let kept = with_client(server_args("fixed", "https://x.example/mcp", ""), "c1", "");
+        assert!(kept.get("client_secret").is_none());
+        let local = with_client(server_args("local", "npx thing", ""), "c1", "s");
+        assert!(local.get("client_id").is_none());
+    }
+
+    #[test]
+    fn a_sign_in_card_says_once_its_person_signed_in() {
+        let card = Card::of(&json!({"id": "sign_in_acta", "type": "sign_in", "title": "acta needs you to sign in", "server": "acta"})).unwrap();
+        assert_eq!(
+            card.body,
+            CardBody::SignIn {
+                server: "acta".into(),
+                signed: false
+            }
+        );
+        let mut m = Model::new();
+        m.take(&json!({"t": "card", "run": "run_1", "message": "msg_1", "block": 0, "card": {"id": "sign_in_acta", "type": "sign_in", "title": "acta needs you to sign in", "server": "acta"}}));
+        assert!(
+            m.mcp_stale,
+            "the servers are loaded, for whether it's signed in"
+        );
     }
 
     fn with_panel() -> Model {

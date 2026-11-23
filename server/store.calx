@@ -92,6 +92,11 @@ CREATE TABLE IF NOT EXISTS secrets (
 CREATE TABLE IF NOT EXISTS mcp_servers (
     user TEXT NOT NULL REFERENCES users(id), name TEXT NOT NULL, json TEXT NOT NULL,
     at INTEGER NOT NULL, PRIMARY KEY (user, name));
+CREATE TABLE IF NOT EXISTS mcp_auth (
+    user TEXT NOT NULL REFERENCES users(id), name TEXT NOT NULL, nonce TEXT NOT NULL,
+    sealed TEXT NOT NULL, due INTEGER NOT NULL DEFAULT 0, at INTEGER NOT NULL,
+    PRIMARY KEY (user, name));
+CREATE INDEX IF NOT EXISTS mcp_auth_due ON mcp_auth (due);
 CREATE TABLE IF NOT EXISTS skills (
     user TEXT NOT NULL REFERENCES users(id), name TEXT NOT NULL, description TEXT NOT NULL,
     body TEXT NOT NULL, at INTEGER NOT NULL, PRIMARY KEY (user, name));
@@ -1577,6 +1582,36 @@ impl Store {
         return try self.db.execute(String("DELETE FROM mcp_servers WHERE user = ? AND name = ?"), [t(user), t(name)]) > 0
     }
 
+    // A sign-in to a person's MCP server (PLAN.md, "Signing in to MCP
+    // servers"), as the instance sealed it: its nonce and sealed JSON, in hex,
+    // and when its token is next renewed (0 for never).
+    pub fn put_mcp_auth(self, user: String, name: String, nonce: String, sealed: String, due: i64) ! Error {
+        _ = try self.db.execute(String("INSERT INTO mcp_auth (user, name, nonce, sealed, due, at) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT (user, name) DO UPDATE SET nonce = excluded.nonce, sealed = excluded.sealed, due = excluded.due, at = excluded.at"), [t(user), t(name), t(nonce), t(sealed), Value.Int(due), Value.Int(now())])
+    }
+
+    pub fn mcp_auth(self, user: String, name: String) -> (String, String)? ! Error {
+        let r = try self.db.query_one(String("SELECT nonce, sealed FROM mcp_auth WHERE user = ? AND name = ?"), [t(user), t(name)]) else return none
+        return some((text(r[0].copy()), text(r[1].copy())))
+    }
+
+    pub fn delete_mcp_auth(self, user: String, name: String) -> bool ! Error {
+        return try self.db.execute(String("DELETE FROM mcp_auth WHERE user = ? AND name = ?"), [t(user), t(name)]) > 0
+    }
+
+    // Sign-ins whose tokens are due to be renewed by `at`: each person and server.
+    pub fn mcp_auth_due(self, at: i64) -> List<(String, String)> ! Error {
+        var out = List<(String, String)>()
+        for r in try self.db.query(String("SELECT user, name FROM mcp_auth WHERE due > 0 AND due <= ? ORDER BY due LIMIT 50"), [Value.Int(at)]) {
+            out.push((text(r[0].copy()), text(r[1].copy())))
+        }
+        return out
+    }
+
+    // Puts off renewing a sign-in's token until `due`.
+    pub fn put_off_mcp_auth(self, user: String, name: String, due: i64) ! Error {
+        _ = try self.db.execute(String("UPDATE mcp_auth SET due = ? WHERE user = ? AND name = ?"), [Value.Int(due), t(user), t(name)])
+    }
+
     // --- Secrets (PLAN.md, "Accounts and invites") ---
 
     // A secret as the instance sealed it: its nonce and the sealed bytes, in
@@ -2156,7 +2191,7 @@ impl Store {
 
     fn remove_rows(self, user: String) ! Error {
         _ = try self.db.execute(String("DELETE FROM sent WHERE device IN (SELECT id FROM devices WHERE user = ?)"), [t(user.copy())])
-        for table in ["push_tokens", "link_codes", "script_grants", "resets", "agent_revisions", "agents", "activity", "secrets", "mcp_servers", "skills", "messages", "conversations", "runs", "queue", "tasks", "sides", "branches", "routine_threads", "events", "acp_sessions", "files", "profiles", "defaults", "rules", "routine_runs", "routines", "flows", "plugin_data", "plugin_revisions", "plugins", "usage", "memories", "memories_fts", "messages_fts", "shared_rows", "shared_tables", "script_tokens", "status_tokens", "imported", "recordings", "proposals", "devices"] {
+        for table in ["push_tokens", "link_codes", "script_grants", "resets", "agent_revisions", "agents", "activity", "secrets", "mcp_auth", "mcp_servers", "skills", "messages", "conversations", "runs", "queue", "tasks", "sides", "branches", "routine_threads", "events", "acp_sessions", "files", "profiles", "defaults", "rules", "routine_runs", "routines", "flows", "plugin_data", "plugin_revisions", "plugins", "usage", "memories", "memories_fts", "messages_fts", "shared_rows", "shared_tables", "script_tokens", "status_tokens", "imported", "recordings", "proposals", "devices"] {
             _ = try self.db.execute("DELETE FROM {table} WHERE user = ?", [t(user.copy())])
         }
         _ = try self.db.execute(String("DELETE FROM invites WHERE by = ?"), [t(user.copy())])

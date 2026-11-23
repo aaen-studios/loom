@@ -118,6 +118,21 @@ pub fn card_of(args: Json, id: String) -> (Json, String) {
     return (card.done(), String())
 }
 
+// The card loom itself puts in a reply when the agent found that one of its
+// MCP servers needs its person to sign in (PLAN.md, "Signing in to MCP
+// servers"): the apps draw it with Sign in. Agents can't make one with
+// show_card, whose types don't have it.
+pub fn sign_in_card(server: String) -> Json {
+    return Obj.new().s("id", "sign_in_{server}").s("type", String("sign_in")).s("title", tidy("{server} needs you to sign in", TITLE_MOST)).s("server", server).done()
+}
+
+@test
+fn makes_the_sign_in_card() {
+    assert("{sign_in_card(String("acta"))}" == "\{\"id\":\"sign_in_acta\",\"type\":\"sign_in\",\"title\":\"acta needs you to sign in\",\"server\":\"acta\"\}")
+    let (_, why) = card_of(Obj.new().s("type", String("sign_in")).s("server", String("acta")).done(), String("card_1"))
+    assert(why.starts_with("type is \"sign_in\""))
+}
+
 @test
 fn checks_and_tidies() {
     let (c, why) = card_of(Obj.new().s("type", String("choices")).s("title", String(" Which one? ")).j("options", Json.Array([Json.Str(String("Red")), Json.Str(String("  ")), Json.Int(2)])).done(), String("card_1"))
