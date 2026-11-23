@@ -1,0 +1,55 @@
+module tests.bench.noise
+
+// How long a phone's request takes over Noise (protocol.md, "Over Noise"): through
+// a core's relay (core/relay.calx), the instance's bridge (server/noise.calx) and
+// back, against the same request straight to the instance.
+//
+//     calx run --release tests/bench/noise.calx -- [requests]
+import std.bytes
+import std.env
+import std.time.{Instant}
+import shared.obj.{Obj, at, int_at, str_at}
+import core.relay
+import shared.client.{Session}
+import tests.kit.{Instance, fetch}
+
+fn ms(a: Instant, b: Instant) -> f64 {
+    return f64.nearest(b.nanos_since(a)) / 1000000.0
+}
+
+// `n` requests for /api/info at `base`, one after another: the average and the slowest, in ms.
+fn time(base: String, n: i64) -> (f64, f64) ! Error {
+    var slowest = 0.0
+    let first = unsafe { Instant.now() }
+    for _ in 0..n {
+        let a = unsafe { Instant.now() }
+        let (status, _, _) = try fetch(base.copy(), String(), String("/api/info"))
+        if status != 200 { fail "/api/info gave {status}" }
+        let took = ms(a, unsafe { Instant.now() })
+        if took > slowest { slowest = took }
+    }
+    return (ms(first, unsafe { Instant.now() }) / f64.nearest(n), slowest)
+}
+
+fn main() ! Error {
+    let args = env.args()
+    let n = if args.len() > 0 { i64.parse(args[0].copy()) ?? 200 } else { 200 }
+    let inst = try Instance.start_with([String("--lan")])
+    var app = try Session.connect(inst.base.copy(), inst.token.copy(), 0)
+    let on = at(try app.cmd("q_1", "instance.phones", Obj.new().b("on", true).done()), "value")
+    app.close()
+    let port = int_at(on.copy(), "port") ?? 0
+    let key = bytes.from_base64(str_at(on, "key") ?? String()) ?? List<u8>()
+    let (t, stop, url) = try relay.start(relay.Place { key: key, addresses: ["127.0.0.1:{port}"] })
+    var stopping = stop
+    // The first opens the tunnel and does the handshake.
+    _ = try time(url[7..].copy(), 5)
+    _ = try time(inst.base.copy(), 5)
+    let (direct, direct_max) = try time(inst.base.copy(), n)
+    let (over, over_max) = try time(url[7..].copy(), n)
+    println("direct     {n} requests, {direct:.2} ms each, slowest {direct_max:.2} ms")
+    println("noise      {n} requests, {over:.2} ms each, slowest {over_max:.2} ms (relay and bridge add {over - direct:.2} ms)")
+    stopping.send(true)
+    t.join()
+    inst.stop()
+}

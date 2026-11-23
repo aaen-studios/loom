@@ -31,6 +31,7 @@ import core.pushbox
 import core.update.{Updater}
 import core.updates.{Hub}
 import shared.release.{newer}
+import shared.stop.{Stop}
 import core.device.{Device}
 import std.fs
 
@@ -144,7 +145,7 @@ pub struct Conn {
     following: Request?   // GET <follow_to>/api/info, for its key
     follow_at: Instant?   // when it last asked, so it asks again 2 s later while the new place isn't answering
     relay: Thread?        // the relay to a place over Noise (core/relay.calx), while there's one
-    stop_relay: Sender<bool>?
+    stop_relay: Stop?
     relay_place: String   // the place it goes to
     relay_url: String     // and where it listens
     push_relay: String?   // the push relay's key, base64, from welcome, when the instance pushes through one

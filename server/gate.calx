@@ -12,8 +12,10 @@ module server.gate
 import std.http.{Header, Request, get, post}
 import std.http.server.{Response, Server}
 import std.http.server
+import std.net.{Waker}
 import std.thread.{Task}
 import shared.obj.{Obj}
+import shared.stop.{Stop}
 
 // How long a tool call may take (one that asks the person first waits for them),
 // and the longest answer.
@@ -31,6 +33,7 @@ struct Gate {
     port: u16                  // the port to try
     instance: u16              // the instance's port on 127.0.0.1
     ready: Sender<String>
+    wakers: Sender<Waker>      // its loop's, sent before ready, for what stops it
     stop: Receiver<bool>
     calls: List<Call>
     asked: Map<i64, server.Request>    // call -> what the sandbox asked, to answer
@@ -39,15 +42,17 @@ struct Gate {
 
 // Starts the gate, for the instance on `instance`, on `host` at `port` or, if that's
 // taken (or 0), one the system picks. Gives its thread, what stops it, and its port.
-pub fn start(host: String, port: u16, instance: u16) -> (Thread, Sender<bool>, u16) ! Error {
+pub fn start(host: String, port: u16, instance: u16) -> (Thread, Stop, u16) ! Error {
     var ready = Receiver<String>()
+    var wakers = Receiver<Waker>()
     let stop = Receiver<bool>()
     let stop_to = stop.sender()
-    let t = unsafe { Thread.spawn(Gate { host: host.copy(), port: port, instance: instance, ready: ready.sender(), stop: stop, calls: List<Call>(), asked: Map<i64, server.Request>(), next: 0 }) }
+    let t = unsafe { Thread.spawn(Gate { host: host.copy(), port: port, instance: instance, ready: ready.sender(), wakers: wakers.sender(), stop: stop, calls: List<Call>(), asked: Map<i64, server.Request>(), next: 0 }) }
     let said = unsafe { ready.wait_for(10000000000) } else { fail "the sandboxes' gate didn't start" }
     if said.starts_with("error:") { fail "the sandboxes' gate can't listen: {said[6..]}" }
     let p = u16.parse(said) else { fail "the sandboxes' gate said {said}" }
-    return (t, stop_to, p)
+    let w = wakers.next() else { fail "the sandboxes' gate can't be stopped" }
+    return (t, Stop.new(stop_to, w), p)
 }
 
 fn refuse(message: str) -> Response {
@@ -68,10 +73,20 @@ impl Task for Gate {
             },
         }
         listening.log = false
+        // The instance's answers wake the loop, and so does what stops it, so a tool
+        // call's answer goes back at once rather than at the next 10 ms look.
+        let w = match listening.waker() {
+            ok(w) => w,
+            err(e) => {
+                g.ready.send("error:{e}")
+                return
+            },
+        }
+        g.wakers.send(w)
         g.ready.send("{listening.port}")
         loop {
             if g.stop.next() != none { break }
-            match listening.next_event(10) {
+            match listening.next_event() {
                 some(Request(req)) => {
                     let reads = req.method == "GET" and (req.path == "/api/mcp/tools" or req.path == "/api/mcp/servers" or req.path == "/api/mcp/deno")
                     let call = req.method == "POST" and (req.path == "/api/mcp/call" or req.path == "/api/mcp/allow" or req.path == "/api/mcp/done")
@@ -85,6 +100,7 @@ impl Task for Gate {
                     }
                     let url = "http://127.0.0.1:{g.instance}{req.path}"
                     let out = if call { post(url, headers, req.body.copy(), CALL_MS, CALL_LIMIT) } else { get(url, headers, CALL_MS, CALL_LIMIT) }
+                    out.wake_on(w)
                     g.next += 1
                     g.calls.push(Call { id: g.next, req: out })
                     g.asked.insert(g.next, req)
