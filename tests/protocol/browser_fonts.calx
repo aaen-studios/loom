@@ -1,0 +1,97 @@
+module tests.protocol.browser_fonts
+
+// The fonts a Linux browser's start looks for (PLAN.md, "The agent's browser"):
+// with a stand-in for fc-list on the instance's PATH (tests/fake_fc_list) that
+// counts its runs, each start lists the fonts once, one run for each of its
+// three patterns, and the next start, after the turn closed the browser, once
+// more. Elsewhere, or without Chrome or Chromium, it says it was skipped.
+//
+//     calx tests/protocol/browser_fonts.calx
+import std.env
+import std.fs
+import std.process.{Command, exit}
+import shared.obj.{Obj, at, bool_at, str_at}
+import server.browser
+import shared.client.{Session, reply_text}
+import tests.kit.{Instance, calx, check, loom, remove_scratch}
+
+fn say(app: mut Session, conversation: String, cid: str, text: String) -> String ! Error {
+    try app.send(Obj.new().s("t", String("send")).s("cid", String(cid)).s("conversation", conversation.copy()).s("text", text).done())
+    loop {
+        let created = try app.until("event", "message.created", 30000)
+        let m = at(created, "message")
+        if str_at(m.copy(), "role") == some(String("agent")) and str_at(m.copy(), "conversation") == some(conversation.copy()) { return reply_text(m) }
+    }
+}
+
+// Waits for browser.state to say `agent`'s browser is closed.
+fn until_closed(app: mut Session, agent: String) ! Error {
+    loop {
+        let state = try app.until("browser.state", "", 30000)
+        if str_at(state.copy(), "agent") == some(agent.copy()) and bool_at(state, "open") == some(false) { return }
+    }
+}
+
+// check that the stand-in in `dir` has counted `want` fc-list runs, saying how
+// many it counted when it hasn't.
+fn runs_are(dir: String, want: usize, what: str) ! Error {
+    let text = match fs.read_text("{dir}/runs") {
+        ok(t) => t ?? String(),
+        err(_) => String(),
+    }
+    let got = text.lines().len()
+    if got != want { fail "failed: {what}: fc-list ran {got} times, not {want}:\n{text}" }
+    println("ok    {what}")
+}
+
+fn run(i: Instance, dir: String) ! Error {
+    var app = try Session.connect(i.base.copy(), i.token.copy(), 0)
+    let made = try app.cmd("q_1", "agent.create", Obj.new().s("name", String("Fonts")).s("acp_agent", String("fake")).s("instructions", String("You are a test.")).done())
+    let agent = str_at(at(at(made, "value"), "agent"), "id") ?? String()
+    let c = try app.cmd("q_2", "conversation.create", Obj.new().s("agent", agent.copy()).done())
+    let conversation = str_at(at(c, "value"), "conversation") ?? String()
+
+    let first = try say(mut app, conversation.copy(), "m_1", String(#"/mcp browser_open {"url":"about:blank"}"#))
+    try check(first.starts_with("browser_open: Page: "), "the browser opens")
+    try runs_are(dir.copy(), 3, "its start lists the fonts once, with fc-list's three patterns")
+    try until_closed(mut app, agent.copy())
+    let second = try say(mut app, conversation.copy(), "m_2", String(#"/mcp browser_open {"url":"about:blank"}"#))
+    try check(second.starts_with("browser_open: Page: "), "it opens again after the turn closed it")
+    try runs_are(dir.copy(), 6, "and that start lists them once more")
+
+    _ = try app.cmd("q_3", "agent.delete", Obj.new().s("agent", agent).done())
+    app.close()
+}
+
+fn main() ! Error {
+    if env.os() != "linux" {
+        println("browser_fonts: skipped, only Linux lists fonts with fc-list")
+        return
+    }
+    if browser.find() == none {
+        println("browser_fonts: skipped, there's no Chrome or Chromium here")
+        return
+    }
+    // The stand-in, built into a folder of its own that's first on the instance's PATH.
+    let dir = try fs.absolute(try fs.temp_dir())
+    let built = try Command.new(calx()).args([String("build"), String("tests/fake_fc_list/main.calx"), String("-o"), "{dir}/fc-list"]).output()
+    if not built.status.success() { fail "the stand-in for fc-list didn't build: {built.error_text()}" }
+    let data = try fs.temp_dir()
+    let agent = try fs.absolute(String("tests/fake_agent/main.calx"))
+    let added = try loom(data.copy(), [String("acp"), String("add"), String("fake"), calx(), agent]).output()
+    if not added.status.success() { fail "loom acp add failed: {added.error_text()}" }
+    let path = env.variable(String("PATH")) ?? String()
+    let cmd = loom(data.copy(), [String("serve"), String("--port"), String("0"), String("--allow-root")]).env(String("PATH"), "{dir}:{path}")
+    let inst = try Instance.launch(data, cmd)
+    let failure: String? = match run(inst.copy(), dir.copy()) {
+        ok => none,
+        err(e) => some("{e}"),
+    }
+    inst.stop()
+    remove_scratch(dir)
+    if let f = failure {
+        eprintln("\n{f}")
+        exit(1)
+    }
+    println("\nbrowser_fonts: all good")
+}

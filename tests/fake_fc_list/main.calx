@@ -1,0 +1,26 @@
+module tests.fake_fc_list.main
+
+// A stand-in for fontconfig's `fc-list`, for counting how often the instance
+// lists the fonts (tests/protocol/browser_fonts.calx). It adds a line with its
+// arguments to `runs` beside it, and lists a font for each pattern the
+// instance asks for, so nothing seems missing and no fonts are fetched.
+//
+//     fc-list :lang=zh family
+import std.env
+import std.fs
+import std.process.{current_exe}
+
+fn main() ! Error {
+    let args = env.args()
+    let me = current_exe()
+    let dir = if let cut = me.find_last("/") { me[..cut].copy() } else { String(".") }
+    try fs.append_text("{dir}/runs", "{args.join(" ")}\n")
+    let pattern = if args.len() > 0 { args[0].copy() } else { String(":") }
+    if pattern == ":lang=zh" {
+        println("Noto Sans CJK SC")
+    } else if pattern == ":charset=1f600" {
+        println("Noto Color Emoji")
+    } else {
+        println("DejaVu Sans")
+    }
+}

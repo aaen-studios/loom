@@ -660,14 +660,19 @@ impl Worker {
         return (what, bool_at(v, "secret") ?? false)
     }
 
-    // Starts the browser, and opens the DevTools connection to its page.
-    fn open_browser(w: mut Worker) ! Error {
+    // Starts the browser, and opens the DevTools connection to its page. Gives
+    // the fonts it still lacks, on Linux before the agent's been told of them,
+    // and none otherwise.
+    fn open_browser(w: mut Worker) -> List<String> ! Error {
         let exe = try w.program()
         // Fonts the server lacks are fetched before the browser starts, which reads them only then.
+        var gaps = List<String>()
         if env.os() == "linux" and not w.told_fonts {
-            let gaps = font_gaps(fonts(w.data.copy()))
+            gaps = font_gaps(fonts(w.data.copy()))
             if gaps.len() > 0 {
-                if let err(e) = chrome.fetch_fonts(w.data.copy(), gaps) { eprintln("loom: fetching fonts for the agents' browser: {e}") }
+                if let err(e) = chrome.fetch_fonts(w.data.copy(), gaps.copy()) { eprintln("loom: fetching fonts for the agents' browser: {e}") }
+                // Only a fetch changes what's there, so only then is it listed again.
+                gaps = font_gaps(fonts(w.data.copy()))
             }
         }
         try fs.make_dir_all(w.profile.copy())
@@ -712,6 +717,7 @@ impl Worker {
         }
         w.back.send(Back.Open(w.key.copy(), true))
         w.cast()
+        return gaps
     }
 
     // The browser to start: the computer's own, or on a Linux server without one,
@@ -966,10 +972,9 @@ impl Worker {
         w.loaded = false
         var note = String()
         if w.page == none {
-            try w.open_browser()
+            let gaps = try w.open_browser()
             if env.os() == "linux" and not w.told_fonts {
                 w.told_fonts = true
-                let gaps = font_gaps(fonts(w.data.copy()))
                 if gaps.len() > 0 { eprintln("loom: {missing_text(gaps)}") }
                 // Without any font, a picture of a page has no words in it, though its outline does.
                 if gaps.len() > 0 and gaps[0] == "fonts" { note = "[loom: {missing_text(gaps)} Until then, pictures of pages show no text: read pages with browser_snapshot.]" }
