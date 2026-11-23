@@ -449,7 +449,8 @@ final class Model {
     private func delta(_ f: JSON) {
         let message = f["message"].text
         let block = f["block"].int ?? 0
-        var blocks = live[message] ?? []
+        // Taken out while it changes, so appending to its text doesn't copy it first.
+        var blocks = live.removeValue(forKey: message) ?? []
         while blocks.count <= block {
             blocks.append(.text(f["kind"].text, ""))
         }
@@ -514,6 +515,8 @@ final class Model {
                 Message(id: m["id"].text, role: m["role"].text, at: m["at"].int ?? 0, blocks: m["blocks"].array.map(Block.of), from: from(m["from"].text))
             }
             placeQueued()
+            // The tool calls these messages name.
+            dirty.insert(.tools)
         }
     }
 
@@ -577,6 +580,11 @@ final class Model {
                     continue
                 }
                 out.append(["t": "core.get", "id": "app.messages", "what": "messages", "conversation": JSON(conversation), "limit": 200])
+            } else if l == .tools {
+                // Only the calls the shown chat's blocks name, and the runs going on: a
+                // heavy user has tens of thousands of calls, and this comes at each one.
+                let calls = messages.flatMap(\.blocks).compactMap(\.call)
+                out.append(["t": "core.get", "id": "app.tools", "what": "tools", "calls": JSON(calls), "runs": JSON(runs.map(\.id))])
             } else {
                 out.append(["t": "core.get", "id": JSON("app.\(l.rawValue)"), "what": JSON(l.rawValue)])
             }
