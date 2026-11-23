@@ -6435,12 +6435,21 @@ ACTA_KEY=secret:ACTA_KEY",
                 .child(Icon::new(icon).small())
         };
         let picture = match path {
-            Some(path) => img(std::path::PathBuf::from(path))
-                .image_cache(&kept_images(cx).1)
-                .max_w(px((w - 160.0).max(100.0)))
-                .max_h(px((h - 140.0).max(100.0)))
-                .rounded(px(radius::ROW))
-                .into_any_element(),
+            Some(path) => {
+                // Sized here, as in the chat (`file_view`): a most alone let a tall
+                // picture draw past the window.
+                let (most_w, most_h) = ((w - 160.0).max(100.0), (h - 140.0).max(100.0));
+                let (pw, ph) = match picture_size(&path) {
+                    Some((iw, ih)) => fit(iw, ih, most_w, most_h),
+                    None => (most_w, most_h),
+                };
+                img(std::path::PathBuf::from(path))
+                    .image_cache(&kept_images(cx).1)
+                    .w(px(pw))
+                    .h(px(ph))
+                    .rounded(px(radius::ROW))
+                    .into_any_element()
+            }
             None => div()
                 .size(px(160.0))
                 .rounded(px(radius::ROW))
@@ -13274,6 +13283,7 @@ fn person(
                 f,
                 files,
                 format!("{}/{i}", m.id),
+                room,
                 this.clone(),
             ));
         }
@@ -13340,6 +13350,7 @@ fn file_view(
     f: &model::FileRef,
     files: &HashMap<String, String>,
     key: String,
+    room: i32,
     this: WeakEntity<Loom>,
 ) -> AnyElement {
     let file = f.clone();
@@ -13391,17 +13402,29 @@ fn file_view(
         let open = move |_: &ClickEvent, _: &mut Window, cx: &mut App| {
             let _ = this.update(cx, |loom, cx| loom.view(&file, cx));
         };
+        // Its own place in the message, sized before it's drawn: scaled down to fit the
+        // column and PICTURE_H, its shape kept. A size given only as a most (max_w,
+        // max_h) let a tall one draw past its place, over the words under it.
+        let most_w = PICTURE_W
+            .min(room as f32 - 2.0 * space::XL)
+            .max(PICTURE_LEAST);
         let picture = match files.get(&format!("{}.thumb", f.file)) {
-            Some(path) => img(std::path::PathBuf::from(path))
-                .when_some(chat_images(), |i, c| i.image_cache(&c))
-                .max_w(px(320.0))
-                .max_h(px(240.0))
-                .rounded(px(radius::BUBBLE))
-                .into_any_element(),
+            Some(path) => {
+                let (w, h) = match picture_size(path) {
+                    Some((w, h)) => fit(w, h, most_w, PICTURE_H),
+                    None => PICTURE_UNKNOWN,
+                };
+                img(std::path::PathBuf::from(path))
+                    .when_some(chat_images(), |i, c| i.image_cache(&c))
+                    .w(px(w))
+                    .h(px(h))
+                    .rounded(px(radius::BUBBLE))
+                    .into_any_element()
+            }
             // Until the thumbnail is here, a place of about its size.
             None => div()
-                .w(px(240.0))
-                .h(px(160.0))
+                .w(px(PICTURE_UNKNOWN.0))
+                .h(px(PICTURE_UNKNOWN.1))
                 .rounded(px(radius::BUBBLE))
                 .bg(p.bubble)
                 .into_any_element(),
@@ -13451,6 +13474,40 @@ fn file_view(
                 ),
         )
         .into_any_element()
+}
+
+/// The most room a picture in a message takes, wide and tall.
+const PICTURE_W: f32 = 360.0;
+const PICTURE_H: f32 = 400.0;
+/// The least it's given across, in a narrow column.
+const PICTURE_LEAST: f32 = 120.0;
+/// The place a picture takes while its size isn't known.
+const PICTURE_UNKNOWN: (f32, f32) = (240.0, 160.0);
+
+/// The size to draw a `w` × `h` picture at, at most `most_w` × `most_h`: scaled down to
+/// fit both, its shape kept, and never up.
+fn fit(w: u32, h: u32, most_w: f32, most_h: f32) -> (f32, f32) {
+    let (w, h) = (w.max(1) as f32, h.max(1) as f32);
+    let k = (most_w / w).min(most_h / h).min(1.0);
+    ((w * k).round().max(1.0), (h * k).round().max(1.0))
+}
+
+/// A picture's size in pixels, from its file's header, kept by path: a file's path is
+/// its SHA-256, so what's there doesn't change shape.
+fn picture_size(path: &str) -> Option<(u32, u32)> {
+    thread_local! {
+        static SIZES: std::cell::RefCell<HashMap<String, Option<(u32, u32)>>> =
+            std::cell::RefCell::new(HashMap::new());
+    }
+    if let Some(kept) = SIZES.with(|s| s.borrow().get(path).copied()) {
+        return kept;
+    }
+    let size = image::ImageReader::open(path)
+        .and_then(|r| r.with_guessed_format())
+        .ok()
+        .and_then(|r| r.into_dimensions().ok());
+    SIZES.with(|s| s.borrow_mut().insert(path.to_string(), size));
+    size
 }
 
 /// What a reply shows as it's drawn, from the person's prefs.
@@ -14160,7 +14217,7 @@ impl ReplyDraw<'_> {
                 .child(b.text.clone())
                 .into_any_element(),
             "file" => match &b.file {
-                Some(f) => file_view(p, f, self.files, key, self.this.clone()),
+                Some(f) => file_view(p, f, self.files, key, show.room, self.this.clone()),
                 None => div().into_any_element(),
             },
             "card" => match &b.card {
@@ -14570,6 +14627,38 @@ mod command_tests {
         );
         assert_eq!(readable_name("notes.md"), "notes.md");
         assert_eq!(readable_name("Made Button"), "Made Button");
+    }
+}
+
+#[cfg(test)]
+mod picture_tests {
+    use super::{fit, picture_size, PICTURE_H, PICTURE_W};
+
+    #[test]
+    fn a_picture_keeps_its_shape_inside_its_place() {
+        // A tall screenshot, as a 512 px thumbnail: as tall as the place lets it be.
+        assert_eq!(fit(307, 512, PICTURE_W, PICTURE_H), (240.0, 400.0));
+        assert_eq!(fit(1170, 2532, PICTURE_W, PICTURE_H), (185.0, 400.0));
+        // A wide one fills the width, and a small one keeps its own size.
+        assert_eq!(fit(2000, 600, PICTURE_W, PICTURE_H), (360.0, 108.0));
+        assert_eq!(fit(60, 40, PICTURE_W, PICTURE_H), (60.0, 40.0));
+        // A narrow column takes it down further, and a broken size still has a place.
+        assert_eq!(fit(512, 512, 200.0, PICTURE_H), (200.0, 200.0));
+        assert_eq!(fit(0, 0, PICTURE_W, PICTURE_H), (1.0, 1.0));
+    }
+
+    #[test]
+    fn a_pictures_size_is_read_from_its_file() {
+        let dir = std::env::temp_dir().join(format!("loom-picture-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        // Kept as a thumbnail is, with no extension to say what it is.
+        let path = dir.join("tall.thumb");
+        image::RgbImage::new(30, 50)
+            .save_with_format(&path, image::ImageFormat::Png)
+            .unwrap();
+        assert_eq!(picture_size(&path.to_string_lossy()), Some((30, 50)));
+        assert_eq!(picture_size(&dir.join("gone").to_string_lossy()), None);
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }
 
