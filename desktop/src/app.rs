@@ -6310,6 +6310,7 @@ ACTA_KEY=secret:ACTA_KEY",
         };
         let picture = match path {
             Some(path) => img(std::path::PathBuf::from(path))
+                .image_cache(&kept_images(cx).1)
                 .max_w(px((w - 160.0).max(100.0)))
                 .max_h(px((h - 140.0).max(100.0)))
                 .rounded(px(radius::ROW))
@@ -6723,6 +6724,7 @@ ACTA_KEY=secret:ACTA_KEY",
         let view = match &self.chat_view {
             Some(v) => v.clone(),
             None => {
+                kept_images(cx);
                 let scroller = self.scroller.clone();
                 let this = this.clone();
                 let v = cx.new(|_| ChatList {
@@ -6788,6 +6790,7 @@ ACTA_KEY=secret:ACTA_KEY",
                         .when(going_up, |d| d.opacity(0.6))
                         .child(
                             img(std::path::PathBuf::from(&a.path))
+                                .image_cache(&kept_images(cx).0)
                                 .size_full()
                                 .object_fit(ObjectFit::Cover),
                         )
@@ -13258,6 +13261,7 @@ fn file_view(
         };
         let picture = match files.get(&format!("{}.thumb", f.file)) {
             Some(path) => img(std::path::PathBuf::from(path))
+                .when_some(chat_images(), |i, c| i.image_cache(&c))
                 .max_w(px(320.0))
                 .max_h(px(240.0))
                 .rounded(px(radius::BUBBLE))
@@ -13582,6 +13586,90 @@ thread_local! {
     /// view was parsed again from the start, and a long one drew empty first.
     static TEXTS: std::cell::RefCell<(KeptStates, u64)> =
         std::cell::RefCell::new((HashMap::new(), 0));
+    /// The pictures the chat and the composer show, and the one the viewer shows
+    /// (`kept_images`).
+    static IMAGES: std::cell::RefCell<Option<(Entity<KeptImages>, Entity<KeptImages>)>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Pictures kept decoded: the `most` drawn last. GPUI's own cache keeps every picture
+/// it has loaded, in memory and on the GPU, until the app ends; one that leaves this
+/// one loads again if it's drawn again.
+struct KeptImages {
+    most: usize,
+    tick: u64,
+    items: HashMap<u64, (ImageCacheItem, u64)>,
+}
+
+impl KeptImages {
+    fn new(most: usize, cx: &mut App) -> Entity<Self> {
+        let e = cx.new(|_| KeptImages {
+            most,
+            tick: 0,
+            items: HashMap::new(),
+        });
+        cx.observe_release(&e, |c, cx| {
+            for (_, (item, _)) in c.items.drain() {
+                if let Some(Ok(image)) = item.get() {
+                    cx.drop_image(image, None);
+                }
+            }
+        })
+        .detach();
+        e
+    }
+}
+
+impl ImageCache for KeptImages {
+    fn load(
+        &mut self,
+        resource: &Resource,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Option<Result<Arc<RenderImage>, ImageCacheError>> {
+        use std::hash::{Hash as _, Hasher as _};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        resource.hash(&mut h);
+        let key = h.finish();
+        self.tick += 1;
+        let tick = self.tick;
+        if let std::collections::hash_map::Entry::Vacant(v) = self.items.entry(key) {
+            v.insert((ImageCacheItem::new(resource, cx), tick));
+            if self.items.len() > self.most {
+                let oldest = self
+                    .items
+                    .iter()
+                    .filter(|(k, _)| **k != key)
+                    .min_by_key(|(_, (_, t))| *t)
+                    .map(|(k, _)| *k);
+                if let Some(Ok(image)) = oldest
+                    .and_then(|k| self.items.remove(&k))
+                    .and_then(|(item, _)| item.get())
+                {
+                    cx.drop_image(image, Some(window));
+                }
+            }
+        }
+        let entry = self.items.get_mut(&key)?;
+        entry.1 = tick;
+        entry.0.use_image(window)
+    }
+}
+
+/// The chat's pictures (up to 40 thumbnails, about 25 MB) and the viewer's (the last 3),
+/// made the first time.
+fn kept_images(cx: &mut App) -> (Entity<KeptImages>, Entity<KeptImages>) {
+    if let Some(both) = IMAGES.with(|c| c.borrow().clone()) {
+        return both;
+    }
+    let both = (KeptImages::new(40, cx), KeptImages::new(3, cx));
+    IMAGES.with(|c| *c.borrow_mut() = Some(both.clone()));
+    both
+}
+
+/// The chat's pictures, once `kept_images` has made them.
+fn chat_images() -> Option<Entity<KeptImages>> {
+    IMAGES.with(|c| c.borrow().as_ref().map(|(chat, _)| chat.clone()))
 }
 
 /// A message's text, drawn from the state kept for `key`.
