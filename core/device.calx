@@ -12,6 +12,7 @@ import std.crypto.{Ed25519Key, Ed25519PublicKey}
 import std.env
 import std.fs
 import std.json.{Json, parse}
+import std.net.{Waker}
 import std.process.{Child, Command, Stdio}
 import std.text.utf8.{decode_lossy_unicode}
 import shared.obj.{Obj, at, bool_at, int_at, str_at}
@@ -61,6 +62,7 @@ pub struct Device {
     scan_ssh: List<String>    // what the ssh config named, meanwhile
     scan_out: List<u8>    // what Tailscale said so far
     installs: List<Install>    // loom going onto the person's hosts (core/install.calx)
+    pub waker: Waker?    // the core's loop's, which commands, the scan and installs wake
 }
 
 fn hex(b: List<u8>) -> String {
@@ -115,7 +117,7 @@ impl Device {
     }
 
     fn with_key(key: own Ed25519Key, id: own String) -> Device {
-        return Device { key: key, modes: Map<String, String>(), done: List<String>(), running: List<Running>(), asked: List<String>(), id: id, hosts: List<Host>(), ssh: [String("ssh")], tailscale: [hosts.tailscale_program()], ssh_config: hosts.ssh_config_path(), scan: none, scan_ssh: List<String>(), scan_out: List<u8>(), installs: List<Install>() }
+        return Device { key: key, modes: Map<String, String>(), done: List<String>(), running: List<Running>(), asked: List<String>(), id: id, hosts: List<Host>(), ssh: [String("ssh")], tailscale: [hosts.tailscale_program()], ssh_config: hosts.ssh_config_path(), scan: none, scan_ssh: List<String>(), scan_out: List<u8>(), installs: List<Install>(), waker: none }
     }
 
     pub fn public_key(self) -> String {
@@ -199,6 +201,7 @@ impl Device {
         }
         match c.arg(String("status")).arg(String("--json")).stdout(Stdio.Pipe).stderr(Stdio.Null).timeout(SCAN_MS).spawn() {
             ok(child) => {
+                if let w = self.waker { child.wake_on(w) }
                 self.scan = some(child)
                 self.scan_out = List<u8>()
             },
@@ -342,7 +345,7 @@ impl Device {
             let (plan, why) = install_plan(args)
             if why.len() > 0 { return some(refused(call, why)) }
             let h = host else return some(refused(call, "This device has no host {host_name}."))
-            let (i, first) = Install.start(call, h, plan, self.ssh.copy())
+            let (i, first) = Install.start(call, h, plan, self.ssh.copy(), self.waker)
             if not i.done() { self.installs.push(i) }
             return some(first)
         }
@@ -351,7 +354,10 @@ impl Device {
             if command.len() == 0 { return some(refused(call, String("command is empty."))) }
             let run = if let h = host { hosts.ssh_command(self.ssh.copy(), h.target.copy(), command) } else { shell(command) }
             match run.stdin(Stdio.Null).stdout(Stdio.Pipe).stderr(Stdio.Stdout).timeout(COMMAND_MS).spawn() {
-                ok(child) => self.running.push(Running { call: call, child: child, out: List<u8>() }),
+                ok(child) => {
+                    if let w = self.waker { child.wake_on(w) }
+                    self.running.push(Running { call: call, child: child, out: List<u8>() })
+                },
                 err(e) => return some(refused(call, "It didn't start: {e}")),
             }
             return none
@@ -428,6 +434,18 @@ impl Device {
         }
         self.running = still
         return out
+    }
+
+    /// How long until `poll` has something to do that nothing wakes the core for, in ms:
+    /// an install's next look at its new server. None when there's nothing.
+    pub fn due_ms(self, now_ms: i64) -> i64? {
+        var soonest: i64? = none
+        for i in self.installs {
+            if let ms = i.due_ms(now_ms) {
+                if soonest == none or ms < (soonest ?? 0) { soonest = some(ms) }
+            }
+        }
+        return soonest
     }
 }
 

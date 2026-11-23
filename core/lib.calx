@@ -13,7 +13,7 @@ module core.lib
 import std.crypto.{PasswordHasher}
 import std.fs
 import std.json.{Json, parse}
-import std.http.websocket.{Waker}
+import std.net.{Waker}
 import std.thread.{Task}
 import shared.obj.{Obj, bool_at, str_at}
 import core.cache.{Cache, own_folder}
@@ -137,8 +137,8 @@ fn local_config(data: String, port: u16, version: String) -> Config {
 /// What the app holds between calls.
 struct Core {
     to_core: Sender<String>?
-    wakers: Receiver<Waker>    // each connection's, as it opens
-    waker: Waker?              // the newest, woken after each send so the core takes it at once
+    wakers: Receiver<Waker>    // the core loop's, once it runs
+    waker: Waker?              // which each send wakes, so the core takes it at once
     conn: Thread?
     relay: Thread?
 }

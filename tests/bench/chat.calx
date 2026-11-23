@@ -13,7 +13,8 @@ module tests.bench.chat
 import std.env
 import std.fs
 import std.json.{Json}
-import std.process.{Child, Command, Stdio, exit}
+import std.net.{Waker}
+import std.process.{Child, Command, Stdio, cpu_time, exit}
 import std.thread.{sleep}
 import std.time.{Instant}
 import shared.obj.{Obj, at, str_at}
@@ -127,19 +128,32 @@ fn run(server: Child, base: String, token: String, deltas: usize, turns: usize) 
     let inbox = Receiver<String>()
     var to_core = inbox.sender()
     var from_core = Receiver<String>()
-    let conn = Conn.new(some("http://{base}"), some(token.copy()), String("loom-bench"), try Cache.open("{cache_dir}/core.db"), inbox, from_core.sender())
+    var conn = Conn.new(some("http://{base}"), some(token.copy()), String("loom-bench"), try Cache.open("{cache_dir}/core.db"), inbox, from_core.sender())
+    // As the app has it: its sends wake the core.
+    var wakers = Receiver<Waker>()
+    conn.wakers_to = some(wakers.sender())
     let t8 = unsafe { Instant.now() }
     let thread = unsafe { Thread.spawn(conn) }
     var events: usize = 0
+    var told: usize = 0
     loop {
         let m = unsafe { from_core.wait_for(120000000000) } else { fail "the core didn't sync in 2 minutes" }
+        told += 1
         if m.starts_with(#"{"t":"event""#) { events += 1 }
         if m.starts_with(#"{"t":"synced""#) { break }
     }
     let t9 = unsafe { Instant.now() }
+    println("core       caught up on {seq} events into its cache in {ms(t8, t9):.0} ms ({ms(t8, t9) * 1000.0 / f64.nearest(seq):.0} us an event), telling the app {told} frames, {events} of them events")
+    // --- The core, connected and idle: the CPU this process uses is its loop's ---
+    let p0 = unsafe { cpu_time() }
+    unsafe { sleep(10000000000) }
+    let p1 = unsafe { cpu_time() }
+    println("core idle  CPU {f64.nearest(p1 - p0) / 10000000.0:.2} ms a second")
     to_core.send(String(#"{"t":"core.stop"}"#))
+    var waker: Waker? = none
+    while let w = wakers.next() { waker = some(w) }
+    if let w = waker { w.wake() }
     thread.join()
-    println("core       caught up on {events} events into its cache in {ms(t8, t9):.0} ms ({ms(t8, t9) * 1000.0 / f64.nearest(events):.0} us an event)")
     remove_scratch(cache_dir)
 
     // --- Idle ---

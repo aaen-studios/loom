@@ -13,6 +13,7 @@ import std.bytes
 import std.fs
 import std.image.{Color, Image, Kind}
 import std.json.{Json, parse}
+import std.net.{Waker}
 import std.process.{exit}
 import std.random.{Random}
 import std.time.{Instant}
@@ -26,6 +27,8 @@ import tests.kit.{Instance, check, device}
 struct Core {
     to_core: Sender<String>
     from_core: Receiver<String>
+    wakers: Receiver<Waker>    // as in the app, each send wakes the core's loop
+    waker: Waker?
     thread: Thread?
 }
 
@@ -35,13 +38,21 @@ impl Core {
         let to_core = inbox.sender()
         let from_core = Receiver<String>()
         var random = Random.system()
-        let conn = Conn.new(some("http://{base}"), some(token.copy()), "loom-test-{random.next_u32()}", try Cache.open(cache), inbox, from_core.sender())
+        var conn = Conn.new(some("http://{base}"), some(token.copy()), "loom-test-{random.next_u32()}", try Cache.open(cache), inbox, from_core.sender())
+        let wakers = Receiver<Waker>()
+        conn.wakers_to = some(wakers.sender())
         let t = unsafe { Thread.spawn(conn) }
-        return Core { to_core: to_core, from_core: from_core, thread: some(t) }
+        return Core { to_core: to_core, from_core: from_core, wakers: wakers, waker: none, thread: some(t) }
+    }
+
+    fn tell(mut self, text: own String) {
+        self.to_core.send(text)
+        while let w = self.wakers.next() { self.waker = some(w) }
+        if let w = self.waker { w.wake() }
     }
 
     fn send(mut self, frame: Json) {
-        self.to_core.send("{frame}")
+        self.tell("{frame}")
     }
 
     // Reads what the core says until a frame whose `t` is `t` and whose `field`
@@ -59,7 +70,7 @@ impl Core {
     }
 
     fn stop(mut self) {
-        self.to_core.send(String(#"{"t":"core.stop"}"#))
+        self.tell(String(#"{"t":"core.stop"}"#))
         if let t = self.thread.take() {
             t.join()
         }

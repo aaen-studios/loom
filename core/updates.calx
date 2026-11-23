@@ -138,6 +138,16 @@ impl Hub {
         return out
     }
 
+    /// How long until `poll` gives up waiting for the servers, in ms, or none when it
+    /// waits for nothing: what they say comes from the app, which wakes the core.
+    pub fn due_ms(self) -> i64? {
+        if not self.app_after { return none }
+        let since = self.since else return some(0)
+        let gone = unsafe { Instant.now() }.nanos_since(since)
+        if gone >= SERVERS_WAIT_NS { return some(0) }
+        return some(i64.wrap((SERVERS_WAIT_NS - gone) / 1000000 + 1))
+    }
+
     /// Once the servers "update everything" waits for have gone far enough, or two minutes
     /// have passed, the app goes: `core.restart` with its setup.
     pub fn poll(mut self) -> Json? {

@@ -555,6 +555,14 @@ final class Model {
         case "synced":
             synced = true
             dirty.formUnion(CoreList.allCases)
+            // The core tells what catching up brought here, not an event at a time
+            // (core/README.md): the text of replies that ended meanwhile goes, and an
+            // agent whose last run failed shows it.
+            let going = Set(f["runs"].array.map { $0["message"].text })
+            live = live.filter { going.contains($0.key) }
+            for e in f["held"]["ended"].array {
+                failed[e["agent"].text] = e["status"].text == "failed" ? .now : nil
+            }
         case "core.data":
             data(f)
         case "core.filled":
