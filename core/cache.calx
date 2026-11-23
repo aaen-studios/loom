@@ -315,8 +315,10 @@ impl Cache {
     }
 
     /// The tool calls, so a reply's tool blocks can show what ran. They stay after their run.
+    /// Only what a block shows comes, each call's call, run, title and status: a call's
+    /// input and output can be many KB, and the apps ask again at every tool event.
     pub fn tools(self) -> List<Json> ! Error {
-        return try self.all("SELECT json FROM tools ORDER BY rowid", List<Value>())
+        return try self.all("SELECT json_object('call', call, 'run', run, 'title', json_extract(json, '$.title'), 'status', json_extract(json, '$.status')) FROM tools ORDER BY rowid", List<Value>())
     }
 
     /// The questions nobody has answered, as their approval.needed events.
