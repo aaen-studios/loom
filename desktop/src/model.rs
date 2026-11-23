@@ -2826,6 +2826,7 @@ impl Model {
             if l == List::Messages {
                 let Some(conversation) = self.conversation() else {
                     self.messages.clear();
+                    self.messages_for = None;
                     continue;
                 };
                 // Named by its conversation, so a page that comes after the chat changed
@@ -2926,6 +2927,7 @@ impl Model {
             self.open_task = task;
             self.open_branch = None;
             self.messages.clear();
+            self.messages_for = None;
             self.dirty.insert(List::Messages);
             self.queue_stale = true;
             self.pins.clear();
@@ -2947,6 +2949,7 @@ impl Model {
             self.open_task = None;
             self.open_branch = branch;
             self.messages.clear();
+            self.messages_for = None;
             self.dirty.insert(List::Messages);
             self.queue_stale = true;
             self.pins.clear();
@@ -3045,6 +3048,7 @@ impl Model {
             self.open_task = None;
             self.open_branch = None;
             self.messages.clear();
+            self.messages_for = None;
             self.dirty.insert(List::Messages);
             self.queue_stale = true;
             self.pins.clear();
@@ -6891,6 +6895,9 @@ mod tests {
         assert!(!m.chat_known() && m.messages.is_empty());
         m.take(&page("app.messages:c_2", "two"));
         assert!(m.chat_known() && m.messages[0].blocks[0].text == "two");
+        // Back to a chat read before: it waits for its page again, as it was cleared.
+        m.select(Some("a_1".into()));
+        assert!(!m.chat_known() && m.messages.is_empty());
         // An agent with no chat yet is known to be empty at once.
         m.select(Some("a_3".into()));
         assert!(m.chat_known());
