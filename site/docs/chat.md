@@ -14,6 +14,8 @@ An agent can put cards in its reply, drawn in the chat's own look:
 
 A card can change while the agent works: a checklist ticks itself off, and a bar fills. The finished reply keeps each card as it was last.
 
+When one of the agent's MCP servers needs you to sign in, loom puts its own card in the reply, "acta needs you to sign in", with **Sign in** ([MCP servers and secrets](agents.md#mcp-servers-and-secrets)). The agent is told to wait for you rather than try to sign in itself.
+
 Anything bigger, such as a report or a chart, comes as a page in the chat instead, which opens beside it.
 
 ## How an agent uses its tools

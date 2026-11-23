@@ -1,0 +1,375 @@
+module tests.fake_oauth.main
+
+// A fake MCP server over HTTP that asks for a sign-in, with the authorization
+// servers it signs in at, for testing loom's sign-in to MCP servers (PLAN.md,
+// "Signing in to MCP servers") without a real one. It listens on 127.0.0.1 and
+// prints `fake oauth: http://127.0.0.1:PORT` once it does.
+//
+//     /mcp      an MCP server whose 401 names its metadata, and whose
+//               authorization server, at the root, lets apps sign up (RFC 7591)
+//     /mcp2     one whose 401 says nothing more, so its metadata is found at its
+//               well-known place, and whose authorization server, /as2, lets no
+//               app sign up: only the client `fixed-client`, with the secret
+//               `fixed-secret`, sent with HTTP Basic
+//
+// Both offer one tool, `whoami`, to a request with a live access token for
+// them, and answer 401 to any other. Signing in checks what OAuth 2.1 and MCP
+// ask: a known client and its redirect, a PKCE challenge (S256) that the code's
+// verifier matches, the server as `resource`, a code used once. Its consent
+// page is a link to the redirect, for a test to follow as the person's
+// browser would. Tokens last an hour, or what /test/life?s=N says for those
+// issued after it; a refresh token is used once and replaced.
+//
+// For tests: GET /test/stats gives what happened, with every token issued;
+// /test/expire ends every access token there is; /test/life?s=N.
+//
+//     calx tests/fake_oauth/main.calx
+import std.bytes
+import std.crypto.{random_bytes}
+import std.hash.{sha256}
+import std.http.server.{Request, Response, Server}
+import std.io
+import std.json.{Json, parse}
+import std.time.{Timestamp}
+import std.url
+
+struct Client {
+    secret: String
+    redirects: List<String>
+}
+
+struct Code {
+    client: String
+    redirect: String
+    challenge: String
+    resource: String
+    used: bool
+}
+
+struct Token {
+    client: String
+    resource: String
+    ends: i64
+    live: bool
+}
+
+struct Fake {
+    base: String
+    clients: Map<String, Client>
+    codes: Map<String, Code>
+    access: Map<String, Token>
+    refreshes: Map<String, Token>
+    life: i64
+    registered: i64
+    refreshed: i64
+    revoked: i64
+    unauthorized: i64
+    issued: List<String>
+}
+
+fn now() -> i64 {
+    return unsafe { Timestamp.now() }.unix_ms
+}
+
+fn text(s: str) -> Json {
+    return Json.Str(String(s))
+}
+
+fn object(pairs: List<(str, Json)>) -> Json {
+    var m = LinkedMap<String, Json>()
+    for (k, v) in pairs {
+        m.insert(String(k), v.copy())
+    }
+    return Json.Object(m)
+}
+
+fn strings(xs: List<str>) -> Json {
+    var out = List<Json>()
+    for x in xs {
+        out.push(text(x))
+    }
+    return Json.Array(out)
+}
+
+fn str_of(j: Json, key: str) -> String {
+    return (j.get(String(key)) ?? Json.Null).as_str() ?? String()
+}
+
+fn json(status: u16, body: Json) -> Response {
+    return Response.new(status, String("application/json"), "{body}".to_bytes())
+}
+
+fn oauth_error(status: u16, code: str, why: String) -> Response {
+    return json(status, object([("error", text(code)), ("error_description", Json.Str(why.copy()))]))
+}
+
+fn form(req: Request) -> Map<String, String> {
+    var out = Map<String, String>()
+    for (k, v) in url.form_decode(req.text() ?? String()) {
+        out.insert(k.copy(), v.copy())
+    }
+    return out
+}
+
+fn query(req: Request) -> Map<String, String> {
+    var out = Map<String, String>()
+    for (k, v) in url.form_decode(req.query.copy()) {
+        out.insert(k.copy(), v.copy())
+    }
+    return out
+}
+
+fn field(m: Map<String, String>, key: str) -> String {
+    if let v = m.find(String(key)) { return v.copy() }
+    return String()
+}
+
+fn fresh() -> String {
+    return bytes.hex(random_bytes(16))
+}
+
+impl Fake {
+    // --- The MCP servers ---
+
+    fn mcp(self: mut Fake, req: Request) -> Response {
+        let resource = "{self.base}{req.path}"
+        let auth = req.header(String("Authorization")) ?? String()
+        let token = if auth.starts_with("Bearer ") { auth[7..].copy() } else { String() }
+        var good = false
+        if let t = self.access.find(token.copy()) { good = t.live and t.ends > now() and t.resource == resource }
+        if not good {
+            self.unauthorized += 1
+            let challenge = if req.path == "/mcp" { "Bearer realm=\"fake\", resource_metadata=\"{self.base}/.well-known/oauth-protected-resource/mcp\"" } else { String("Bearer realm=\"fake\"") }
+            return oauth_error(401, "invalid_token", String("Sign in, or send a token.")).with_header(String("WWW-Authenticate"), challenge)
+        }
+        let m = match parse(req.text() ?? String()) {
+            ok(j) => j,
+            err(_) => return Response.error(400),
+        }
+        let method = str_of(m.copy(), "method")
+        let id = m.get(String("id")) ?? Json.Null
+        if id == Json.Null { return Response.new(202, String("application/json"), List<u8>()) }
+        var result = object(List<(str, Json)>())
+        if method == "initialize" {
+            result = object([("protocolVersion", text("2025-06-18")), ("capabilities", object([("tools", object(List<(str, Json)>()))])), ("serverInfo", object([("name", text("fake-oauth")), ("version", text("1"))]))])
+        } else if method == "tools/list" {
+            let whoami = object([("name", text("whoami")), ("description", text("Says who signed in.")), ("inputSchema", object([("type", text("object")), ("properties", object(List<(str, Json)>()))])), ("annotations", object([("readOnlyHint", Json.Bool(true))]))])
+            result = object([("tools", Json.Array([whoami]))])
+        } else if method == "tools/call" {
+            result = object([("content", Json.Array([object([("type", text("text")), ("text", text("ada"))])]))])
+        }
+        return json(200, object([("jsonrpc", text("2.0")), ("id", id), ("result", result)]))
+    }
+
+    // --- Metadata ---
+
+    fn resource_metadata(self, path: str, server: String) -> Response {
+        return json(200, object([("resource", Json.Str("{self.base}{path}")), ("authorization_servers", Json.Array([Json.Str(server.copy())])), ("scopes_supported", strings(["tools"]))]))
+    }
+
+    fn server_metadata(issuer: String, sign_up: bool) -> Response {
+        var m = LinkedMap<String, Json>()
+        m.insert(String("issuer"), Json.Str(issuer.copy()))
+        m.insert(String("authorization_endpoint"), Json.Str("{issuer}/authorize"))
+        m.insert(String("token_endpoint"), Json.Str("{issuer}/token"))
+        m.insert(String("code_challenge_methods_supported"), strings(["S256"]))
+        m.insert(String("scopes_supported"), strings(["tools", "offline_access"]))
+        if sign_up {
+            m.insert(String("registration_endpoint"), Json.Str("{issuer}/register"))
+            m.insert(String("revocation_endpoint"), Json.Str("{issuer}/revoke"))
+            m.insert(String("token_endpoint_auth_methods_supported"), strings(["none"]))
+        } else {
+            m.insert(String("token_endpoint_auth_methods_supported"), strings(["client_secret_basic"]))
+        }
+        return json(200, Json.Object(m))
+    }
+
+    // --- Signing up, signing in and tokens ---
+
+    fn register(self: mut Fake, req: Request) -> Response {
+        let body = match parse(req.text() ?? String()) {
+            ok(j) => j,
+            err(_) => return oauth_error(400, "invalid_client_metadata", String("The body isn't JSON.")),
+        }
+        var redirects = List<String>()
+        if let Json.Array(rs) = body.get(String("redirect_uris")) ?? Json.Null {
+            for r in rs {
+                if let s = r.as_str() { redirects.push(s) }
+            }
+        }
+        if redirects.len() == 0 { return oauth_error(400, "invalid_redirect_uri", String("No redirect_uris.")) }
+        let id = "client-{fresh()}"
+        self.clients.insert(id.copy(), Client { secret: String(), redirects: redirects.copy() })
+        self.registered += 1
+        var uris = List<Json>()
+        for r in redirects {
+            uris.push(Json.Str(r.copy()))
+        }
+        return json(201, object([("client_id", Json.Str(id)), ("redirect_uris", Json.Array(uris)), ("token_endpoint_auth_method", text("none"))]))
+    }
+
+    fn authorize(self: mut Fake, req: Request, issuer: String, resource: String) -> Response {
+        let q = query(req)
+        let client = field(q.copy(), "client_id")
+        let redirect = field(q.copy(), "redirect_uri")
+        var known = false
+        if let c = self.clients.find(client.copy()) { known = c.redirects.contains(redirect.copy()) or (c.redirects.len() == 0 and redirect.starts_with("http://127.0.0.1:")) }
+        if not known { return Response.error(400, String("unknown client or redirect")) }
+        if field(q.copy(), "response_type") != "code" { return Response.error(400, String("response_type isn't code")) }
+        if field(q.copy(), "code_challenge_method") != "S256" or field(q.copy(), "code_challenge").len() == 0 { return Response.error(400, String("no S256 challenge")) }
+        if field(q.copy(), "resource") != resource { return Response.error(400, "resource isn't {resource}") }
+        let state = field(q.copy(), "state")
+        if state.len() == 0 { return Response.error(400, String("no state")) }
+        let code = fresh()
+        self.codes.insert(code.copy(), Code { client: client, redirect: redirect.copy(), challenge: field(q, "code_challenge"), resource: resource.copy(), used: false })
+        let back = url.form_encode([(String("code"), code), (String("state"), state), (String("iss"), issuer.copy())])
+        return Response.html("<p>Sign in to fake as ada?</p><a id=\"allow\" href=\"{redirect}?{back}\">Allow</a>")
+    }
+
+    // The client the request authenticates as: by HTTP Basic, or its id in the form.
+    fn client_of(self, req: Request, f: Map<String, String>) -> String? {
+        var id = field(f.copy(), "client_id")
+        var secret = field(f.copy(), "client_secret")
+        let auth = req.header(String("Authorization")) ?? String()
+        if auth.starts_with("Basic ") {
+            let raw = bytes.from_base64(auth[6..].copy()) ?? List<u8>()
+            let pair = String.from_utf8(raw) ?? String()
+            let colon = pair.find(":") ?? pair.len()
+            id = url.decode_plus(pair[..colon].copy())
+            secret = if colon < pair.len() { url.decode_plus(pair[colon + 1..].copy()) } else { String() }
+        }
+        let c = self.clients.find(id.copy()) else return none
+        if c.secret != secret { return none }
+        return some(id)
+    }
+
+    fn tokens(self: mut Fake, client: String, resource: String) -> Response {
+        let access = "at-{fresh()}"
+        let refresh = "rt-{fresh()}"
+        self.access.insert(access.copy(), Token { client: client.copy(), resource: resource.copy(), ends: now() + self.life * 1000, live: true })
+        self.refreshes.insert(refresh.copy(), Token { client: client.copy(), resource: resource.copy(), ends: 0, live: true })
+        self.issued.push(access.copy())
+        self.issued.push(refresh.copy())
+        let claims = bytes.base64_url("{object([("email", text("ada@example.com"))])}".to_bytes())
+        return json(200, object([("access_token", Json.Str(access)), ("token_type", text("Bearer")), ("expires_in", Json.Int(self.life)), ("refresh_token", Json.Str(refresh)), ("scope", text("tools")), ("id_token", Json.Str("e30.{claims}.x"))]))
+    }
+
+    fn token(self: mut Fake, req: Request) -> Response {
+        let f = form(req.copy())
+        let client = self.client_of(req, f.copy()) else return oauth_error(401, "invalid_client", String("That client isn't known here."))
+        let kind = field(f.copy(), "grant_type")
+        if kind == "authorization_code" {
+            let code = field(f.copy(), "code")
+            var resource = String()
+            var problem = String()
+            if let c = mut self.codes.find(code.copy()) {
+                let verifier = field(f.copy(), "code_verifier")
+                if c.used {
+                    problem = String("the code was used")
+                } else if c.client != client {
+                    problem = String("the code is another client's")
+                } else if c.redirect != field(f.copy(), "redirect_uri") {
+                    problem = String("redirect_uri isn't the one signed in with")
+                } else if c.resource != field(f.copy(), "resource") {
+                    problem = String("resource isn't the one signed in for")
+                } else if bytes.base64_url(sha256(verifier.to_bytes())) != c.challenge {
+                    problem = String("code_verifier doesn't match the challenge")
+                }
+                c.used = true
+                resource = c.resource.copy()
+            } else {
+                problem = String("there's no such code")
+            }
+            if problem.len() > 0 { return oauth_error(400, "invalid_grant", problem) }
+            return self.tokens(client, resource)
+        }
+        if kind == "refresh_token" {
+            let old = field(f.copy(), "refresh_token")
+            var resource = String()
+            var good = false
+            if let t = mut self.refreshes.find(old.copy()) {
+                good = t.live and t.client == client
+                t.live = false
+                resource = t.resource.copy()
+            }
+            if not good { return oauth_error(400, "invalid_grant", String("That refresh token isn't live.")) }
+            let asked = field(f, "resource")
+            if asked.len() > 0 and asked != resource { return oauth_error(400, "invalid_target", String("That resource isn't the one signed in for.")) }
+            self.refreshed += 1
+            return self.tokens(client, resource)
+        }
+        return oauth_error(400, "unsupported_grant_type", String("Only codes and refresh tokens."))
+    }
+
+    fn revoke(self: mut Fake, req: Request) -> Response {
+        let f = form(req)
+        let token = field(f, "token")
+        var client = String()
+        if let t = mut self.refreshes.find(token.copy()) {
+            t.live = false
+            client = t.client.copy()
+        }
+        if let t = mut self.access.find(token.copy()) {
+            t.live = false
+            client = t.client.copy()
+        }
+        if client.len() > 0 {
+            self.revoked += 1
+            for t in mut self.access.values() {
+                if t.client == client { t.live = false }
+            }
+        }
+        return json(200, object(List<(str, Json)>()))
+    }
+
+    fn handle(self: mut Fake, req: Request) -> Response {
+        let p = req.path.copy()
+        let issuer2 = "{self.base}/as2"
+        if req.method == "POST" and (p == "/mcp" or p == "/mcp2") { return self.mcp(req) }
+        if p == "/.well-known/oauth-protected-resource/mcp" { return self.resource_metadata("/mcp", self.base.copy()) }
+        if p == "/.well-known/oauth-protected-resource/mcp2" { return self.resource_metadata("/mcp2", issuer2) }
+        if p == "/.well-known/oauth-authorization-server" { return Fake.server_metadata(self.base.copy(), true) }
+        if p == "/.well-known/oauth-authorization-server/as2" { return Fake.server_metadata(issuer2, false) }
+        if p == "/register" and req.method == "POST" { return self.register(req) }
+        let base = self.base.copy()
+        if p == "/authorize" { return self.authorize(req, base.copy(), "{base}/mcp") }
+        if p == "/as2/authorize" { return self.authorize(req, issuer2, "{base}/mcp2") }
+        if (p == "/token" or p == "/as2/token") and req.method == "POST" { return self.token(req) }
+        if p == "/revoke" and req.method == "POST" { return self.revoke(req) }
+        if p == "/test/stats" {
+            var issued = List<Json>()
+            for t in self.issued {
+                issued.push(Json.Str(t.copy()))
+            }
+            return json(200, object([("registered", Json.Int(self.registered)), ("refreshed", Json.Int(self.refreshed)), ("revoked", Json.Int(self.revoked)), ("unauthorized", Json.Int(self.unauthorized)), ("issued", Json.Array(issued))]))
+        }
+        if p == "/test/expire" {
+            for t in mut self.access.values() {
+                t.ends = 0
+            }
+            return json(200, object(List<(str, Json)>()))
+        }
+        if p == "/test/life" {
+            self.life = i64.parse(field(query(req), "s")) ?? 3600
+            return json(200, object(List<(str, Json)>()))
+        }
+        return Response.error(404)
+    }
+}
+
+fn main() ! Error {
+    var server = try Server.listen(0)
+    server.log = false
+    let base = server.url().trim_suffix("/").copy()
+    var clients = Map<String, Client>()
+    clients.insert(String("fixed-client"), Client { secret: String("fixed-secret"), redirects: List<String>() })
+    var fake = Fake { base: base.copy(), clients: clients, codes: Map<String, Code>(), access: Map<String, Token>(), refreshes: Map<String, Token>(), life: 3600, registered: 0, refreshed: 0, revoked: 0, unauthorized: 0, issued: List<String>() }
+    println("fake oauth: {base}")
+    io.flush()
+    loop {
+        if let req = server.next() {
+            let res = fake.handle(req.copy())
+            server.respond(req, res)
+        }
+    }
+}

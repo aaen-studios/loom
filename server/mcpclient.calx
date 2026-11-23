@@ -17,6 +17,8 @@ const PROTOCOL: str = "2025-06-18"
 const START_MS: u64 = 60000
 // A call may take a while: a build, a search across a mailbox.
 pub const CALL_MS: u64 = 600000
+// What a request to a server over HTTP that answers 401 fails with.
+const SIGN_IN: str = "it asks for a sign-in"
 const ANSWER_MOST: usize = 67108864
 
 pub struct Server {
@@ -97,6 +99,16 @@ impl Server {
         return try self.request("tools/call", Obj.new().s("name", name).j("arguments", arguments).done(), CALL_MS)
     }
 
+    // Sends `token` as its bearer token from now on, in place of the one it had.
+    pub fn bearer(self: mut Server, token: String) {
+        var kept = List<Header>()
+        for h in self.headers {
+            if h.name.to_lower_root() != "authorization" { kept.push(h.copy()) }
+        }
+        kept.push(Header { name: String("Authorization"), value: "Bearer {token}" })
+        self.headers = kept
+    }
+
     pub fn stop(self: Server) {
         if let c = self.child {
             var running = c
@@ -172,10 +184,19 @@ impl Server {
         }
         if id < 0 { return Json.Null }
         let text = String.from_utf8(r.body.copy()) ?? String()
+        // A server that wants a sign-in, or a new token, says 401 (PLAN.md,
+        // "Signing in to MCP servers").
+        if r.status == 401 { fail "{self.name} answered 401: {SIGN_IN}" }
         if r.status != 200 { fail "{self.name} answered {r.status}: {text.trim()}" }
         if not kind.contains("text/event-stream") { return try parse(text) }
         return answer_in_stream(text, id) ?? { fail "{self.name}'s event stream had no answer" }
     }
+}
+
+// Whether `e`, from starting a server or calling it, is a 401: it wants a
+// sign-in, or the token it had is over.
+pub fn asks_sign_in(e: String) -> bool {
+    return e.ends_with(": {SIGN_IN}")
 }
 
 // The message with `id` among a server-sent event stream's events: each

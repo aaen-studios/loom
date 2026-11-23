@@ -4,20 +4,32 @@ module server.mcptest
 // an agent's session would start it, with its secrets filled in, asked for its
 // tools, and stopped. It runs on a thread of its own, since a server may take
 // up to a minute to start, and the instance's loop never waits.
+//
+// A server the person signed in to (PLAN.md, "Signing in to MCP servers") is
+// sent its access token. One that ends soon is renewed first, and so is one the
+// server answers 401 to, once; the renewed grant comes back for the instance
+// to keep.
 import std.json.{Json}
 import std.thread.{Task}
 import shared.obj.{str_at}
 import server.mcpclient
+import server.oauth
+import server.oauth.{Refreshed}
+import server.store.{now}
 
 pub struct Job {
     pub id: i64
     pub spec: Json    // as ACP's session/new takes it, with its secrets filled in
+    pub grant: Json    // the person's sign-in to it, or null
 }
 
 pub struct Done {
     pub id: i64
     pub tools: List<String>    // the tools' names, when it worked
     pub error: String    // why it didn't, or ""
+    pub sign_in: bool    // it answered 401, with no token, or none that it took
+    pub grant: Json    // the sign-in, renewed, or null when it wasn't
+    pub ended: bool    // the sign-in couldn't be renewed: the person signs in again
 }
 
 struct Worker {
@@ -29,11 +41,7 @@ impl Task for Worker {
     fn run(own self) {
         var w = self
         while let job = w.jobs.wait() {
-            let id = job.id
-            match test(job.spec) {
-                ok(tools) => w.done.send(Done { id: id, tools: tools, error: String() }),
-                err(e) => w.done.send(Done { id: id, tools: List<String>(), error: "{e}" }),
-            }
+            w.done.send(test(job))
         }
     }
 }
@@ -46,8 +54,75 @@ pub fn start() -> (Sender<Job>, Receiver<Done>) {
     return (to, done)
 }
 
+// The job's spec with `token` as its bearer token.
+fn with_token(spec: Json, token: String) -> Json {
+    var headers = List<Json>()
+    if let Json.Array(given) = spec.get(String("headers")) ?? Json.Null {
+        for h in given {
+            if (str_at(h.copy(), "name") ?? String()).to_lower_root() != "authorization" { headers.push(h.copy()) }
+        }
+    }
+    var m = LinkedMap<String, Json>()
+    if let Json.Object(o) = spec {
+        for (k, v) in o {
+            m.insert(k.copy(), v.copy())
+        }
+    }
+    var auth = LinkedMap<String, Json>()
+    auth.insert(String("name"), Json.Str(String("Authorization")))
+    auth.insert(String("value"), Json.Str("Bearer {token}"))
+    headers.push(Json.Object(auth))
+    m.insert(String("headers"), Json.Array(headers))
+    return Json.Object(m)
+}
+
+fn renewed(grant: Json) -> (Json, String, bool) {
+    return match oauth.refresh(grant) {
+        Refreshed.Fresh(g) => (g, String(), false),
+        Refreshed.Ended(why) => (Json.Null, why, true),
+        Refreshed.Failed(why) => (Json.Null, why, false),
+    }
+}
+
+fn test(job: Job) -> Done {
+    let id = job.id
+    var grant = job.grant.copy()
+    var fresh = Json.Null
+    // A token that's over, or nearly, is renewed before it's sent.
+    let due = oauth.due(grant.copy())
+    if oauth.signed_in(grant.copy()) and due > 0 and due <= now() {
+        let (g, why, ended) = renewed(grant.copy())
+        if g == Json.Null {
+            return Done { id: id, tools: List<String>(), error: "The sign-in couldn't be renewed: {why}", sign_in: ended, grant: Json.Null, ended: ended }
+        }
+        grant = g.copy()
+        fresh = g
+    }
+    let signed = oauth.signed_in(grant.copy())
+    let spec = if signed { with_token(job.spec.copy(), str_at(grant.copy(), "access") ?? String()) } else { job.spec.copy() }
+    match names(spec) {
+        ok(tools) => return Done { id: id, tools: tools, error: String(), sign_in: false, grant: fresh, ended: false },
+        err(e) => {
+            let failed = "{e}"
+            if not mcpclient.asks_sign_in(failed.copy()) or not signed {
+                return Done { id: id, tools: List<String>(), error: failed.copy(), sign_in: mcpclient.asks_sign_in(failed), grant: fresh, ended: false }
+            }
+        },
+    }
+    // A 401 with a token: it's renewed, and the server asked again, once.
+    let (g, why, ended) = renewed(grant)
+    if g == Json.Null {
+        return Done { id: id, tools: List<String>(), error: "The sign-in couldn't be renewed: {why}", sign_in: ended, grant: Json.Null, ended: ended }
+    }
+    let again = with_token(job.spec, str_at(g.copy(), "access") ?? String())
+    return match names(again) {
+        ok(tools) => Done { id: id, tools: tools, error: String(), sign_in: false, grant: g, ended: false },
+        err(e) => Done { id: id, tools: List<String>(), error: "{e}", sign_in: mcpclient.asks_sign_in("{e}"), grant: g, ended: false },
+    }
+}
+
 // The names of the tools the server at `spec` offers.
-fn test(spec: Json) -> List<String> ! Error {
+fn names(spec: Json) -> List<String> ! Error {
     var server = try mcpclient.start(spec)
     let (listed, failed) = match server.tools() {
         ok(l) => (l, String()),
@@ -55,9 +130,9 @@ fn test(spec: Json) -> List<String> ! Error {
     }
     server.stop()
     if failed.len() > 0 { fail "{failed}" }
-    var names = List<String>()
+    var out = List<String>()
     for t in listed {
-        if let n = str_at(t, "name") { names.push(n) }
+        if let n = str_at(t, "name") { out.push(n) }
     }
-    return names
+    return out
 }

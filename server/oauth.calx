@@ -1,0 +1,639 @@
+module server.oauth
+
+// Signing in to an MCP server that asks for it (PLAN.md, "Signing in to MCP
+// servers"), as MCP's authorization says (2025-06-18 and on): OAuth 2.1 with
+// PKCE. A server that wants a sign-in answers 401 with a WWW-Authenticate
+// challenge. Its Protected Resource Metadata (RFC 9728) names its
+// authorization server, whose metadata (RFC 8414, or OpenID Connect's
+// discovery) gives where to sign in and where tokens come from. Loom signs up
+// there as a client by itself (RFC 7591) when it may, or uses the client id
+// the person gave, sends the person's browser to sign in with a PKCE
+// challenge (S256) and the server as `resource` (RFC 8707), and swaps the
+// code that comes back for tokens.
+//
+// What a sign-in keeps, its grant, is one JSON object, which the instance
+// seals as the person's (server/store.calx, `mcp_auth`): where to sign in and
+// get tokens, the client, and the tokens with when the access token ends. The
+// network work here runs on a thread of its own (`start`), since the
+// instance's loop never waits, and in mcptest's and loom mcp's own threads.
+// No token is ever put in an error, so none reaches a log.
+import std.bytes
+import std.crypto.{random_bytes}
+import std.hash.{sha256}
+import std.http.{Header, get, post}
+import std.json.{Json, parse}
+import std.thread.{Task}
+import std.time.{Timestamp}
+import std.url
+import std.url.{Url}
+import shared.obj.{Obj, at, bool_at, int_at, merge, str_at}
+
+const WAIT: u32 = 30000
+const MOST: usize = 1048576
+const PROTOCOL: str = "2025-06-18"
+// A token is renewed this long before it ends at the most, or halfway
+// through its life when that's shorter.
+const EARLY_MS: i64 = 300000
+
+fn now() -> i64 {
+    return unsafe { Timestamp.now() }.unix_ms
+}
+
+// --- Reading what a server says ---
+
+// One of a challenge's or a redirect's parameters.
+pub fn param(m: Map<String, String>, key: str) -> String? {
+    if let v = m.find(String(key)) { return some(v.copy()) }
+    return none
+}
+
+// The parameters of a WWW-Authenticate challenge, by lowercase name:
+// `Bearer realm="x", resource_metadata="https://…", scope="a b"`.
+pub fn challenge_params(header: String) -> Map<String, String> {
+    var out = Map<String, String>()
+    let text = header.trim().copy()
+    let space = text.find(" ") else return out
+    var name = String()
+    var value = String()
+    var in_value = false
+    var quoted = false
+    var escaped = false
+    for r in text[space + 1..].runes() {
+        if in_value {
+            if quoted {
+                if escaped {
+                    value.push(r)
+                    escaped = false
+                } else if r == '\\' {
+                    escaped = true
+                } else if r == '"' {
+                    quoted = false
+                } else {
+                    value.push(r)
+                }
+                continue
+            }
+            if r == '"' and value.trim().len() == 0 {
+                quoted = true
+                continue
+            }
+            if r == ',' {
+                out.insert(name.trim().to_lower_root(), value.trim().copy())
+                name = String()
+                value = String()
+                in_value = false
+                continue
+            }
+            value.push(r)
+            continue
+        }
+        if r == '=' {
+            in_value = true
+        } else if r == ',' {
+            name = String()
+        } else {
+            name.push(r)
+        }
+    }
+    if in_value { out.insert(name.trim().to_lower_root(), value.trim().copy()) }
+    return out
+}
+
+// `address`'s origin, `https://host:port`, and its path without a last /.
+fn split(address: String) -> (String, String) ! Error {
+    let parsed = match Url.parse(address.copy()) {
+        ok(p) => p,
+        err(why) => {
+            fail "{address} isn't an address: {why}"
+        },
+    }
+    let host = parsed.host.copy() ?? String()
+    if host.len() == 0 { fail "{address} has no host" }
+    let origin = if let p = parsed.port { "{parsed.scheme}://{host}:{p}" } else { "{parsed.scheme}://{host}" }
+    return (origin, parsed.path.trim_suffix("/").copy())
+}
+
+// Where a server's Protected Resource Metadata may be, when its challenge
+// doesn't say: under its path first, then at its root (RFC 9728, 3.1).
+pub fn resource_metadata_at(address: String) -> List<String> ! Error {
+    let (origin, path) = try split(address)
+    var out = List<String>()
+    if path.len() > 0 { out.push("{origin}/.well-known/oauth-protected-resource{path}") }
+    out.push("{origin}/.well-known/oauth-protected-resource")
+    return out
+}
+
+// Where an authorization server's metadata may be, in the order MCP gives:
+// OAuth's, then OpenID Connect's, with an issuer's path after the well-known
+// part, then OpenID Connect's after the issuer's path.
+pub fn server_metadata_at(issuer: String) -> List<String> ! Error {
+    let (origin, path) = try split(issuer)
+    if path.len() == 0 { return ["{origin}/.well-known/oauth-authorization-server", "{origin}/.well-known/openid-configuration"] }
+    return ["{origin}/.well-known/oauth-authorization-server{path}", "{origin}/.well-known/openid-configuration{path}", "{origin}{path}/.well-known/openid-configuration"]
+}
+
+// Whether `address` may be reached: for a sandboxed person's server, only
+// over HTTPS, so their sign-in can't have the instance reach its own
+// machine's plain services.
+fn reachable(address: String, https_only: bool) ! Error {
+    if address.starts_with("https://") { return }
+    if address.starts_with("http://") and not https_only { return }
+    fail "{address} isn't an https:// address"
+}
+
+// A JSON object at `address`, or none when there's none there. Only not
+// reaching it at all is an error.
+fn object_at(address: String, https_only: bool) -> Json? ! Error {
+    try reachable(address.copy(), https_only)
+    var req = get(address, [Header { name: String("Accept"), value: String("application/json") }], WAIT, MOST)
+    let r = try req.wait()
+    if r.status != 200 { return none }
+    let found = match parse(String.from_utf8(r.body) ?? String()) {
+        ok(j) => j,
+        err(_) => return none,
+    }
+    if let Json.Object(_) = found.copy() { return some(found) }
+    return none
+}
+
+// What the server answers an initialize without a token: its status, and
+// its WWW-Authenticate when it asks for a sign-in.
+fn probe(address: String, https_only: bool) -> (u32, String) ! Error {
+    try reachable(address.copy(), https_only)
+    let info = Obj.new().s("name", String("loom")).s("version", String("1")).done()
+    let m = Obj.new().s("jsonrpc", String("2.0")).i("id", 1).s("method", String("initialize")).j("params", Obj.new().s("protocolVersion", String(PROTOCOL)).j("capabilities", Obj.new().done()).j("clientInfo", info).done()).done()
+    let headers: List<Header> = [Header { name: String("Content-Type"), value: String("application/json") }, Header { name: String("Accept"), value: String("application/json, text/event-stream") }, Header { name: String("MCP-Protocol-Version"), value: String(PROTOCOL) }]
+    var req = post(address, headers, "{m}".to_bytes(), WAIT, MOST)
+    let r = try req.wait()
+    return (r.status, r.header(String("WWW-Authenticate")) ?? String())
+}
+
+fn strings(list: Json) -> List<String> {
+    var out = List<String>()
+    if let Json.Array(xs) = list {
+        for x in xs {
+            if let s = x.as_str() { out.push(s) }
+        }
+    }
+    return out
+}
+
+// The resource a server's metadata names for `address`: the same address,
+// or one it's under.
+fn resource_for(address: String, named: String) -> bool {
+    let a = address.trim_suffix("/").copy()
+    let n = named.trim_suffix("/").copy()
+    return n.len() > 0 and (a == n or a.starts_with("{n}/"))
+}
+
+// Finds where and how to sign in to the MCP server at `address`: the
+// beginnings of its grant, with `resource`, `issuer`, `authorize`, `token`,
+// `register` and `revoke` (the last two empty when there's none), `scope`
+// and `methods`, the ways its token endpoint takes a client's secret.
+pub fn discover(address: String, https_only: bool) -> Json ! Error {
+    let (status, asked) = try probe(address.copy(), https_only)
+    let said = challenge_params(asked)
+    var places = List<String>()
+    if let m = said.find(String("resource_metadata")) {
+        if m.len() > 0 { places.push(m.copy()) }
+    }
+    places.extend(try resource_metadata_at(address.copy()))
+    var meta = Json.Null
+    for p in places {
+        if let found = try object_at(p, https_only) {
+            meta = found
+            break
+        }
+    }
+    if status != 401 and meta == Json.Null { fail "It doesn't ask anyone to sign in." }
+    var resource = address.copy()
+    var issuer = String()
+    var scope = String()
+    if let s = said.find(String("scope")) { scope = s.copy() }
+    if meta != Json.Null {
+        let named = str_at(meta.copy(), "resource") ?? String()
+        if not resource_for(address.copy(), named.copy()) { fail "Its metadata is for {named}, not for {address}." }
+        resource = named
+        let servers = strings(at(meta.copy(), "authorization_servers"))
+        if servers.len() == 0 { fail "Its metadata names no place to sign in." }
+        issuer = servers[0].copy()
+        if scope.len() == 0 { scope = strings(at(meta, "scopes_supported")).join(" ") }
+    } else {
+        // Before Protected Resource Metadata, the server's own origin signed in.
+        let (origin, _) = try split(address.copy())
+        issuer = origin
+    }
+    var server = Json.Null
+    for p in try server_metadata_at(issuer.copy()) {
+        if let found = try object_at(p, https_only) {
+            server = found
+            break
+        }
+    }
+    if server == Json.Null { fail "It asks for a sign-in, but {issuer} says nowhere how." }
+    let authorize = str_at(server.copy(), "authorization_endpoint") ?? String()
+    let token = str_at(server.copy(), "token_endpoint") ?? String()
+    if authorize.len() == 0 or token.len() == 0 { fail "{issuer} doesn't say where to sign in and get tokens." }
+    if not strings(at(server.copy(), "code_challenge_methods_supported")).contains(String("S256")) {
+        fail "{issuer} doesn't say it checks a PKCE challenge (S256), so loom doesn't sign in there."
+    }
+    // A refresh token, where scopes ask for one.
+    if strings(at(server.copy(), "scopes_supported")).contains(String("offline_access")) and not scope.split(" ").contains(String("offline_access")) {
+        scope = if scope.len() > 0 { "{scope} offline_access" } else { String("offline_access") }
+    }
+    let methods = strings(at(server.copy(), "token_endpoint_auth_methods_supported")).join(" ")
+    return Obj.new().s("resource", resource).s("issuer", str_at(server.copy(), "issuer") ?? issuer).s("authorize", authorize).s("token", token).s("register", str_at(server.copy(), "registration_endpoint") ?? String()).s("revoke", str_at(server, "revocation_endpoint") ?? String()).s("scope", scope).s("methods", methods).b("https_only", https_only).done()
+}
+
+// How a client with a secret sends it to the token endpoint: in the form,
+// unless the server takes only HTTP Basic.
+fn method_for(methods: String, secret: String) -> String {
+    if secret.len() == 0 { return String("none") }
+    let taken = methods.split(" ")
+    if taken.contains(String("client_secret_basic")) and not taken.contains(String("client_secret_post")) { return String("client_secret_basic") }
+    return String("client_secret_post")
+}
+
+// Signs loom up at the authorization server as a client, for `redirect`.
+fn sign_up(grant: Json, redirect: String) -> Json ! Error {
+    let endpoint = str_at(grant.copy(), "register") ?? String()
+    try reachable(endpoint.copy(), bool_at(grant.copy(), "https_only") ?? false)
+    let kinds = Json.Array([Json.Str(String("authorization_code")), Json.Str(String("refresh_token"))])
+    let body = Obj.new().s("client_name", String("loom")).j("redirect_uris", Json.Array([Json.Str(redirect.copy())])).j("grant_types", kinds).j("response_types", Json.Array([Json.Str(String("code"))])).s("token_endpoint_auth_method", String("none")).done()
+    let headers: List<Header> = [Header { name: String("Content-Type"), value: String("application/json") }, Header { name: String("Accept"), value: String("application/json") }]
+    var req = post(endpoint, headers, "{body}".to_bytes(), WAIT, MOST)
+    let r = try req.wait()
+    let answer = match parse(String.from_utf8(r.body) ?? String()) {
+        ok(j) => j,
+        err(_) => Json.Null,
+    }
+    let issuer = str_at(grant.copy(), "issuer") ?? String()
+    if r.status != 200 and r.status != 201 { fail "{issuer} didn't let loom sign up ({r.status}{said_why(answer)})." }
+    let id = str_at(answer.copy(), "client_id") else { fail "{issuer} signed loom up without a client id." }
+    let secret = str_at(answer.copy(), "client_secret") ?? String()
+    let method = str_at(answer, "token_endpoint_auth_method") ?? method_for(str_at(grant.copy(), "methods") ?? String(), secret.copy())
+    return merge(grant, Obj.new().s("client_id", id).s("client_secret", secret).s("auth_method", method).b("registered", true).s("redirect", redirect).done())
+}
+
+// What an OAuth error body says, after a colon, or nothing.
+fn said_why(answer: Json) -> String {
+    let code = str_at(answer.copy(), "error") ?? String()
+    let about = str_at(answer, "error_description") ?? String()
+    if code.len() == 0 and about.len() == 0 { return String() }
+    if about.len() == 0 { return ": {code}" }
+    if code.len() == 0 { return ": {about}" }
+    return ": {code}, {about}"
+}
+
+// Everything a sign-in needs before the person's browser goes: where, and
+// the client. `client_id` (with `client_secret`) is the person's own, for a
+// server that doesn't let apps sign up; `had` is the last grant, whose
+// client is used again when it's for the same place and return address.
+pub fn begin(address: String, redirect: String, client_id: String, client_secret: String, had: Json, https_only: bool) -> Json ! Error {
+    let found = try discover(address, https_only)
+    if client_id.len() > 0 {
+        let method = method_for(str_at(found.copy(), "methods") ?? String(), client_secret.copy())
+        return merge(found, Obj.new().s("client_id", client_id).s("client_secret", client_secret).s("auth_method", method).b("registered", false).s("redirect", redirect).done())
+    }
+    let same = str_at(had.copy(), "issuer") == str_at(found.copy(), "issuer") and bool_at(had.copy(), "registered") == some(true) and str_at(had.copy(), "redirect") == some(redirect.copy())
+    if same {
+        if let id = str_at(had.copy(), "client_id") {
+            return merge(found, Obj.new().s("client_id", id).s("client_secret", str_at(had.copy(), "client_secret") ?? String()).s("auth_method", str_at(had, "auth_method") ?? String("none")).b("registered", true).s("redirect", redirect).done())
+        }
+    }
+    if (str_at(found.copy(), "register") ?? String()).len() == 0 {
+        fail "{str_at(found, "issuer") ?? String()} doesn't let apps sign up by themselves: it needs a client ID from it, added to the server in loom."
+    }
+    return try sign_up(found, redirect)
+}
+
+// --- PKCE and the browser's trip ---
+
+// A PKCE verifier: 32 random bytes, as base64url (RFC 7636).
+pub fn new_verifier() -> String {
+    return bytes.base64_url(random_bytes(32))
+}
+
+// Its S256 challenge.
+pub fn challenge_of(pkce: String) -> String {
+    return bytes.base64_url(sha256(pkce.to_bytes()))
+}
+
+// A sign-in's state: 16 random bytes, in hex.
+pub fn new_state() -> String {
+    return bytes.hex(random_bytes(16))
+}
+
+// The address the person's browser opens to sign in.
+pub fn authorize_url(grant: Json, sent: String, pkce_challenge: String) -> String {
+    var pairs: List<(String, String)> = [(String("response_type"), String("code")), (String("client_id"), str_at(grant.copy(), "client_id") ?? String()), (String("redirect_uri"), str_at(grant.copy(), "redirect") ?? String()), (String("code_challenge"), pkce_challenge.copy()), (String("code_challenge_method"), String("S256")), (String("state"), sent.copy()), (String("resource"), str_at(grant.copy(), "resource") ?? String())]
+    let scope = str_at(grant.copy(), "scope") ?? String()
+    if scope.len() > 0 { pairs.push((String("scope"), scope)) }
+    let endpoint = str_at(grant, "authorize") ?? String()
+    let joiner = if endpoint.contains("?") { "&" } else { "?" }
+    return "{endpoint}{joiner}{url.form_encode(pairs)}"
+}
+
+// What came back to the redirect, from its query: `code`, `state`, `iss`,
+// and `error` with its description when the sign-in didn't go.
+pub fn returned(query: String) -> Map<String, String> {
+    var out = Map<String, String>()
+    let q = if query.starts_with("?") { query[1..].copy() } else { query.copy() }
+    for (k, v) in url.form_decode(q) {
+        if not out.contains(k.copy()) { out.insert(k.copy(), v.copy()) }
+    }
+    return out
+}
+
+// --- Tokens ---
+
+// The name or address an OpenID Connect id_token says the person is, for
+// "Signed in as". It isn't checked: it's only shown.
+pub fn who(id_token: String) -> String? {
+    let parts = id_token.split(".")
+    if parts.len() < 2 { return none }
+    let raw = bytes.from_base64_url(parts[1].copy()) else return none
+    let claims = match parse(String.from_utf8(raw) ?? String()) {
+        ok(j) => j,
+        err(_) => return none,
+    }
+    for key in ["email", "preferred_username", "name"] {
+        if let s = str_at(claims.copy(), key) {
+            if s.len() > 0 { return some(s) }
+        }
+    }
+    return none
+}
+
+// The client's part of a token request: its id (and secret) in the form, or
+// HTTP Basic's header value, as its method says (RFC 6749, 2.3.1).
+fn client_part(grant: Json) -> (List<(String, String)>, String) {
+    let id = str_at(grant.copy(), "client_id") ?? String()
+    let secret = str_at(grant.copy(), "client_secret") ?? String()
+    let method = str_at(grant, "auth_method") ?? String("none")
+    if secret.len() > 0 and method == "client_secret_basic" {
+        return (List<(String, String)>(), bytes.base64("{url.encode_plus(id)}:{url.encode_plus(secret)}".to_bytes()))
+    }
+    var pairs: List<(String, String)> = [(String("client_id"), id)]
+    if secret.len() > 0 { pairs.push((String("client_secret"), secret)) }
+    return (pairs, String())
+}
+
+// Asks the token endpoint: its status and answer.
+fn ask_token(grant: Json, pairs: List<(String, String)>) -> (u32, Json) ! Error {
+    let endpoint = str_at(grant.copy(), "token") ?? String()
+    try reachable(endpoint.copy(), bool_at(grant.copy(), "https_only") ?? false)
+    let (client, basic) = client_part(grant)
+    var all = pairs.copy()
+    all.extend(client)
+    var headers: List<Header> = [Header { name: String("Content-Type"), value: String("application/x-www-form-urlencoded") }, Header { name: String("Accept"), value: String("application/json") }]
+    if basic.len() > 0 { headers.push(Header { name: String("Authorization"), value: "Basic {basic}" }) }
+    var req = post(endpoint, headers, url.form_encode(all).to_bytes(), WAIT, MOST)
+    let r = try req.wait()
+    let answer = match parse(String.from_utf8(r.body) ?? String()) {
+        ok(j) => j,
+        err(_) => Json.Null,
+    }
+    return (r.status, answer)
+}
+
+// The grant with the tokens of a token endpoint's answer in it.
+fn with_tokens(grant: Json, answer: Json, at_ms: i64) -> Json ! Error {
+    let access = str_at(answer.copy(), "access_token") else { fail "it gave no access token" }
+    let kind = (str_at(answer.copy(), "token_type") ?? String("Bearer")).to_lower_root()
+    if kind != "bearer" { fail "it gave a {kind} token, and MCP servers take only bearer tokens" }
+    let life = int_at(answer.copy(), "expires_in") ?? 0
+    var out = merge(grant, Obj.new().s("access", access).i("expires_at", if life > 0 { at_ms + life * 1000 } else { 0 }).i("issued_at", at_ms).done())
+    if let r = str_at(answer.copy(), "refresh_token") { out = merge(out, Obj.new().s("refresh", r).done()) }
+    if let w = who(str_at(answer, "id_token") ?? String()) { out = merge(out, Obj.new().s("who", w).done()) }
+    return out
+}
+
+// Swaps the code the browser brought back for tokens, with the verifier
+// only loom holds.
+pub fn exchange(grant: Json, code: String, pkce: String) -> Json ! Error {
+    let pairs: List<(String, String)> = [(String("grant_type"), String("authorization_code")), (String("code"), code.copy()), (String("redirect_uri"), str_at(grant.copy(), "redirect") ?? String()), (String("code_verifier"), pkce.copy()), (String("resource"), str_at(grant.copy(), "resource") ?? String())]
+    let (status, answer) = try ask_token(grant.copy(), pairs)
+    if status != 200 { fail "{str_at(grant.copy(), "issuer") ?? String()} didn't give tokens ({status}{said_why(answer)})." }
+    let tokens = match with_tokens(grant, answer, now()) {
+        ok(t) => t,
+        err(e) => {
+            fail "The sign-in's answer wasn't what MCP needs: {e}."
+        },
+    }
+    return merge(tokens, Obj.new().i("at", now()).done())
+}
+
+pub enum Refreshed {
+    Fresh(Json)    // the grant with new tokens
+    Ended(String)    // the server won't renew it: the person signs in again
+    Failed(String)    // it couldn't be reached, or answered oddly: try later
+}
+
+// Renews the grant's access token with its refresh token.
+pub fn refresh(grant: Json) -> Refreshed {
+    let token = str_at(grant.copy(), "refresh") ?? String()
+    if token.len() == 0 { return Refreshed.Ended(String("There's no refresh token.")) }
+    var pairs: List<(String, String)> = [(String("grant_type"), String("refresh_token")), (String("refresh_token"), token), (String("resource"), str_at(grant.copy(), "resource") ?? String())]
+    let scope = str_at(grant.copy(), "scope") ?? String()
+    if scope.len() > 0 { pairs.push((String("scope"), scope)) }
+    let (status, answer) = match ask_token(grant.copy(), pairs) {
+        ok(got) => got,
+        err(e) => return Refreshed.Failed("{e}"),
+    }
+    if status == 400 or status == 401 { return Refreshed.Ended("It didn't renew the sign-in ({status}{said_why(answer)}).") }
+    if status != 200 { return Refreshed.Failed("It answered {status}{said_why(answer)}.") }
+    return match with_tokens(grant, answer, now()) {
+        ok(t) => Refreshed.Fresh(t),
+        err(e) => Refreshed.Failed("{e}"),
+    }
+}
+
+// Tells the authorization server the grant's tokens aren't wanted any more
+// (RFC 7009), as well as it can. Nothing comes of a failure.
+pub fn revoke(grant: Json) {
+    let endpoint = str_at(grant.copy(), "revoke") ?? String()
+    if endpoint.len() == 0 { return }
+    if let err(_) = reachable(endpoint.copy(), bool_at(grant.copy(), "https_only") ?? false) { return }
+    let refresh_token = str_at(grant.copy(), "refresh") ?? String()
+    let (token, hint) = if refresh_token.len() > 0 { (refresh_token, "refresh_token") } else { (str_at(grant.copy(), "access") ?? String(), "access_token") }
+    if token.len() == 0 { return }
+    let (client, basic) = client_part(grant)
+    var pairs: List<(String, String)> = [(String("token"), token), (String("token_type_hint"), String(hint))]
+    pairs.extend(client)
+    var headers: List<Header> = [Header { name: String("Content-Type"), value: String("application/x-www-form-urlencoded") }]
+    if basic.len() > 0 { headers.push(Header { name: String("Authorization"), value: "Basic {basic}" }) }
+    var req = post(endpoint, headers, url.form_encode(pairs).to_bytes(), WAIT, MOST)
+    match req.wait() {
+        ok(_) => {},
+        err(_) => {},
+    }
+}
+
+// Whether the grant has an access token.
+pub fn signed_in(grant: Json) -> bool {
+    return (str_at(grant, "access") ?? String()).len() > 0
+}
+
+// The grant as a sign-out leaves it: its client, to sign in with again,
+// without its tokens.
+pub fn signed_out(grant: Json) -> Json {
+    var m = LinkedMap<String, Json>()
+    if let Json.Object(o) = grant {
+        for (k, v) in o {
+            if k != "access" and k != "refresh" and k != "expires_at" and k != "issued_at" and k != "who" and k != "at" { m.insert(k.copy(), v.copy()) }
+        }
+    }
+    return Json.Object(m)
+}
+
+// When the grant's access token should be renewed, or 0 for never: shortly
+// before it ends, when there's a refresh token to do it with.
+pub fn due(grant: Json) -> i64 {
+    let ends = int_at(grant.copy(), "expires_at") ?? 0
+    if ends == 0 or (str_at(grant.copy(), "refresh") ?? String()).len() == 0 { return 0 }
+    let issued = int_at(grant, "issued_at") ?? ends
+    let half = (ends - issued) / 2
+    let early = if half > 0 and half < EARLY_MS { half } else { EARLY_MS }
+    return ends - early
+}
+
+// --- The thread ---
+
+pub enum Work {
+    Begin(String, String, String, String, Json, bool)    // address, redirect, client id, client secret, the last grant, https only
+    Exchange(Json, String, String)    // the grant so far, the code, the verifier
+    Refresh(Json)
+    Revoke(Json)
+}
+
+pub struct Job {
+    pub id: i64
+    pub work: Work
+}
+
+pub struct Done {
+    pub id: i64
+    pub grant: Json    // what came of it, or null
+    pub error: String    // why it didn't, or ""
+    pub ended: bool    // a refresh the server refused: the person signs in again
+}
+
+struct Worker {
+    jobs: Receiver<Job>
+    done: Sender<Done>
+}
+
+impl Task for Worker {
+    fn run(own self) {
+        var w = self
+        while let job = w.jobs.wait() {
+            let id = job.id
+            let d = match job.work {
+                Work.Begin(address, redirect, client_id, client_secret, had, https_only) => match begin(address, redirect, client_id, client_secret, had, https_only) {
+                    ok(g) => Done { id: id, grant: g, error: String(), ended: false },
+                    err(e) => Done { id: id, grant: Json.Null, error: "{e}", ended: false },
+                },
+                Work.Exchange(grant, code, v) => match exchange(grant, code, v) {
+                    ok(g) => Done { id: id, grant: g, error: String(), ended: false },
+                    err(e) => Done { id: id, grant: Json.Null, error: "{e}", ended: false },
+                },
+                Work.Refresh(grant) => match refresh(grant) {
+                    Refreshed.Fresh(g) => Done { id: id, grant: g, error: String(), ended: false },
+                    Refreshed.Ended(why) => Done { id: id, grant: Json.Null, error: why, ended: true },
+                    Refreshed.Failed(why) => Done { id: id, grant: Json.Null, error: why, ended: false },
+                },
+                Work.Revoke(grant) => {
+                    revoke(grant)
+                    Done { id: id, grant: Json.Null, error: String(), ended: false }
+                },
+            }
+            w.done.send(d)
+        }
+    }
+}
+
+pub fn start() -> (Sender<Job>, Receiver<Done>) {
+    let jobs = Receiver<Job>()
+    let to = jobs.sender()
+    let done = Receiver<Done>()
+    _ = unsafe { Thread.spawn(Worker { jobs: jobs, done: done.sender() }) }
+    return (to, done)
+}
+
+@test
+fn reads_a_challenge() {
+    let c = challenge_params(String(#"Bearer realm="acta", resource_metadata="https://acta.example/.well-known/oauth-protected-resource/api/mcp", scope="user:read account:read""#))
+    assert(param(c.copy(), "realm") == some(String("acta")))
+    assert(param(c.copy(), "resource_metadata") == some(String("https://acta.example/.well-known/oauth-protected-resource/api/mcp")))
+    assert(param(c.copy(), "scope") == some(String("user:read account:read")))
+    let plain = challenge_params(String(#"Bearer error="invalid_token", error_description="No \"authorization\" provided""#))
+    assert(param(plain, "error_description") == some(String(#"No "authorization" provided"#)))
+    assert(challenge_params(String("Bearer")).len() == 0)
+}
+
+@test
+fn finds_the_well_known_places() {
+    let r = resource_metadata_at(String("https://acta.example/api/mcp"))!
+    assert(r == [String("https://acta.example/.well-known/oauth-protected-resource/api/mcp"), String("https://acta.example/.well-known/oauth-protected-resource")])
+    let root = resource_metadata_at(String("https://mcp.example.com/"))!
+    assert(root == [String("https://mcp.example.com/.well-known/oauth-protected-resource")])
+    let plain = server_metadata_at(String("https://auth.example:8443"))!
+    assert(plain == [String("https://auth.example:8443/.well-known/oauth-authorization-server"), String("https://auth.example:8443/.well-known/openid-configuration")])
+    let tenant = server_metadata_at(String("https://auth.example/tenant1"))!
+    assert(tenant == [String("https://auth.example/.well-known/oauth-authorization-server/tenant1"), String("https://auth.example/.well-known/openid-configuration/tenant1"), String("https://auth.example/tenant1/.well-known/openid-configuration")])
+}
+
+@test
+fn matches_a_resource() {
+    assert(resource_for(String("https://mcp.vercel.com"), String("https://mcp.vercel.com/")))
+    assert(resource_for(String("https://acta.example/api/mcp"), String("https://acta.example/api/mcp")))
+    assert(resource_for(String("https://acta.example/api/mcp"), String("https://acta.example")))
+    assert(not resource_for(String("https://acta.example/api/mcp"), String("https://other.example")))
+    assert(not resource_for(String("https://acta.example.evil/x"), String("https://acta.example")))
+}
+
+@test
+fn makes_a_pkce_pair() {
+    // RFC 7636, appendix B.
+    assert(challenge_of(String("dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk")) == "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM")
+    let v = new_verifier()
+    assert(v.len() == 43 and v != new_verifier())
+}
+
+@test
+fn builds_the_sign_in_address() {
+    let g = Obj.new().s("authorize", String("https://auth.example/authorize")).s("client_id", String("c 1")).s("redirect", String("http://127.0.0.1:4000/callback")).s("resource", String("https://mcp.example/mcp")).s("scope", String("read write")).done()
+    let u = authorize_url(g, String("st"), String("ch"))
+    assert(u == "https://auth.example/authorize?response_type=code&client_id=c+1&redirect_uri=http%3A%2F%2F127.0.0.1%3A4000%2Fcallback&code_challenge=ch&code_challenge_method=S256&state=st&resource=https%3A%2F%2Fmcp.example%2Fmcp&scope=read+write")
+    let back = returned(String("?code=abc&state=st&iss=https%3A%2F%2Fauth.example"))
+    assert(param(back.copy(), "code") == some(String("abc")) and param(back.copy(), "iss") == some(String("https://auth.example")))
+}
+
+@test
+fn reads_tokens() {
+    let id_token = "x.{bytes.base64_url("{Obj.new().s("email", String("ada@example.com")).done()}".to_bytes())}.y"
+    let answer = Obj.new().s("access_token", String("A")).s("token_type", String("bearer")).i("expires_in", 3600).s("refresh_token", String("R")).s("id_token", id_token).done()
+    let g = with_tokens(Obj.new().s("client_id", String("c")).done(), answer, 1000)!
+    assert(str_at(g.copy(), "access") == some(String("A")) and str_at(g.copy(), "refresh") == some(String("R")) and int_at(g.copy(), "expires_at") == some(3601000))
+    assert(str_at(g.copy(), "who") == some(String("ada@example.com")))
+    assert(signed_in(g.copy()) and due(g.copy()) == 3601000 - EARLY_MS)
+    let short = merge(g.copy(), Obj.new().i("expires_at", 5000).done())
+    assert(due(short) == 3000)
+    let out = signed_out(g)
+    assert(not signed_in(out.copy()) and str_at(out.copy(), "client_id") == some(String("c")) and str_at(out, "refresh") == none)
+    let mac = match with_tokens(Json.Null, Obj.new().s("access_token", String("A")).s("token_type", String("mac")).done(), 0) {
+        ok(_) => false,
+        err(_) => true,
+    }
+    assert(mac)
+}
+
+@test
+fn sends_a_secret_as_the_server_takes_it() {
+    assert(method_for(String("client_secret_basic"), String("s")) == "client_secret_basic")
+    assert(method_for(String("client_secret_basic client_secret_post"), String("s")) == "client_secret_post")
+    assert(method_for(String(""), String("s")) == "client_secret_post" and method_for(String("client_secret_basic"), String()) == "none")
+    let (form, basic) = client_part(Obj.new().s("client_id", String("a b")).s("client_secret", String("p:w")).s("auth_method", String("client_secret_basic")).done())
+    assert(form.len() == 0 and basic == bytes.base64("a+b:p%3Aw".to_bytes()))
+}

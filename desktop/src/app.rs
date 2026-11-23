@@ -17,7 +17,9 @@ use gpui_kit::*;
 use serde_json::Value;
 
 use crate::core::Core;
-use crate::model::{self, Approval, Conn, ImportSource, Message, Model, Mood, Offer, ServerUpdate};
+use crate::model::{
+    self, Approval, Conn, ImportSource, Message, Model, Mood, Offer, ServerUpdate, SignIn,
+};
 use crate::motion::{self, SoftHover};
 use crate::prefs::{Prefs, Text, Theme, Thoughts, Tools, Width};
 use crate::shell;
@@ -376,6 +378,9 @@ pub struct Loom {
     mcp_name_in: Entity<InputState>,
     mcp_cmd_in: Entity<InputState>,
     mcp_settings_in: Entity<TextareaState>,
+    /// A client of the person's own, for a server whose sign-in lets no app sign up.
+    mcp_client_in: Entity<InputState>,
+    mcp_client_secret_in: Entity<InputState>,
     /// The Rules page's form for a new rule, while it's open: what it does, what it's on,
     /// what it matches, what the action does, who started the turn, and whose it is.
     rule_open: bool,
@@ -863,6 +868,19 @@ impl Loom {
 ACTA_KEY=secret:ACTA_KEY",
             )
         });
+        // A server over HTTP shows its client's fields as soon as its address is typed.
+        cx.subscribe_in(
+            &mcp_cmd_in,
+            window,
+            |_: &mut Loom, _, event: &InputEvent, _, cx| {
+                if let InputEvent::Change = event {
+                    cx.notify();
+                }
+            },
+        )
+        .detach();
+        let mcp_client_in = input(window, cx, "Only if its sign-in asks for one", false);
+        let mcp_client_secret_in = input(window, cx, "secret:KEY, or the secret", true);
         let set_value_in = input(window, cx, "Its value", true);
         let share_in = input(window, cx, "Tokens", false);
         let skill_desc_in = input(window, cx, "When it's for, in one sentence", false);
@@ -1017,6 +1035,14 @@ ACTA_KEY=secret:ACTA_KEY",
                     loom.route_updates(cx);
                     loom.fetch();
                     loom.open_fetched(cx);
+                    // A sign-in page, in the person's own browser.
+                    let mut to_browse = std::mem::take(&mut loom.model.to_browse);
+                    for a in &mut loom.away {
+                        to_browse.append(&mut a.model.to_browse);
+                    }
+                    for url in to_browse {
+                        cx.open_url(&url);
+                    }
                     // A frame is decoded off this thread, and drawn once it is.
                     if std::mem::take(&mut loom.model.page_moved) {
                         loom.decode_frame(cx);
@@ -1250,6 +1276,8 @@ ACTA_KEY=secret:ACTA_KEY",
             mcp_name_in,
             mcp_cmd_in,
             mcp_settings_in,
+            mcp_client_in,
+            mcp_client_secret_in,
             rule_open: false,
             rule_then: "deny",
             rule_on: "command",
@@ -9478,6 +9506,69 @@ ACTA_KEY=secret:ACTA_KEY",
             .soft_hover(transparent_black(), p.hover, None)
     }
 
+    /// Signs in to the person's MCP server `name` (PLAN.md, "Signing in to MCP servers"):
+    /// a listener on loopback waits for the browser, the instance gives the server's
+    /// sign-in page, which opens in the person's own browser, and what the browser brings
+    /// back goes to the instance, which swaps it for tokens. The same server's core gets
+    /// it, whichever is on screen by then.
+    fn sign_in_mcp(&mut self, name: &str, cx: &mut Context<Self>) {
+        let catcher = match crate::signin::listen() {
+            Ok(c) => c,
+            Err(e) => {
+                self.model
+                    .notices
+                    .push(format!("Couldn't wait for the sign-in: {e}"));
+                cx.notify();
+                return;
+            }
+        };
+        let f = self.model.sign_in_mcp(name, &catcher.redirect);
+        self.send(f);
+        let dir = self.here.clone();
+        let back = catcher.back;
+        cx.spawn(async move |this, cx| loop {
+            match back.try_recv() {
+                Ok(query) => {
+                    let _ = this.update(cx, |loom, cx| {
+                        loom.send_to(&dir, &model::signed_in_frame(&query));
+                        cx.notify();
+                    });
+                    return;
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => {
+                    cx.background_executor()
+                        .timer(Duration::from_millis(250))
+                        .await;
+                }
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    // Ten minutes and the browser didn't come back.
+                    let _ = this.update(cx, |loom, cx| {
+                        loom.model.mcp_signing.clear();
+                        cx.notify();
+                    });
+                    return;
+                }
+            }
+        })
+        .detach();
+        cx.notify();
+    }
+
+    /// Sign in, for an MCP server that needs it: "Signing in…" while the browser is away.
+    fn sign_in_button(&self, name: &str, cx: &mut Context<Self>) -> Stateful<Div> {
+        let signing = self.model.mcp_signing.contains(name);
+        let server = name.to_string();
+        self.small_button(
+            format!("sign-in-mcp-{name}"),
+            if signing { "Signing in…" } else { "Sign in" },
+            true,
+        )
+        .on_click(cx.listener(move |this, _, _, cx| {
+            cx.stop_propagation();
+            this.sign_in_mcp(&server, cx);
+        }))
+    }
+
     /// The MCP servers page: the person's servers, which each agent gets if it has them,
     /// and the keys their settings name.
     fn mcp_page(&mut self, cx: &mut Context<Self>) -> Div {
@@ -9495,9 +9586,13 @@ ACTA_KEY=secret:ACTA_KEY",
                         cx.notify();
                         return;
                     }
-                    let f = this
-                        .model
-                        .put_mcp(crate::model::server_args(&name, &line, &settings));
+                    let client = this.mcp_client_in.read(cx).value().to_string();
+                    let secret = this.mcp_client_secret_in.read(cx).value().to_string();
+                    let f = this.model.put_mcp(crate::model::with_client(
+                        crate::model::server_args(&name, &line, &settings),
+                        &client,
+                        &secret,
+                    ));
                     this.send(f);
                     this.mcp_open = None;
                     cx.notify();
@@ -9517,19 +9612,22 @@ ACTA_KEY=secret:ACTA_KEY",
                         cx.notify();
                     }))
             });
-            let groups = vec![
-                self.group(
-                    None,
-                    vec![
-                        self.field_row("Name", Input::new(&self.mcp_name_in)),
-                        self.field_row("Command or URL", Input::new(&self.mcp_cmd_in)),
-                        self.text_row(
-                            "Settings",
-                            Some("NAME=value, one a line. NAME=secret:KEY uses one of your keys"),
-                            Textarea::new(&self.mcp_settings_in),
-                        ),
-                    ],
+            let mut fields = vec![
+                self.field_row("Name", Input::new(&self.mcp_name_in)),
+                self.field_row("Command or URL", Input::new(&self.mcp_cmd_in)),
+                self.text_row(
+                    "Settings",
+                    Some("NAME=value, one a line. NAME=secret:KEY uses one of your keys"),
+                    Textarea::new(&self.mcp_settings_in),
                 ),
+            ];
+            if self.mcp_cmd_in.read(cx).value().trim().starts_with("http") {
+                fields.push(self.field_row("Client ID", Input::new(&self.mcp_client_in)));
+                fields
+                    .push(self.field_row("Client secret", Input::new(&self.mcp_client_secret_in)));
+            }
+            let groups = vec![
+                self.group(None, fields),
                 self.form_actions(delete, cancel, save),
             ];
             let title = if open.is_some() {
@@ -9542,7 +9640,12 @@ ACTA_KEY=secret:ACTA_KEY",
         let new_server = |this: &Self, cx: &mut Context<Self>, primary: bool| {
             this.small_button("new-mcp", "New server", primary)
                 .on_click(cx.listener(|this, _, window, cx| {
-                    for s in [&this.mcp_name_in, &this.mcp_cmd_in] {
+                    for s in [
+                        &this.mcp_name_in,
+                        &this.mcp_cmd_in,
+                        &this.mcp_client_in,
+                        &this.mcp_client_secret_in,
+                    ] {
                         s.update(cx, |s, cx| s.set_value("", window, cx));
                     }
                     this.mcp_settings_in
@@ -9589,9 +9692,15 @@ ACTA_KEY=secret:ACTA_KEY",
                 } else {
                     m.url.clone()
                 };
-                // Its last test, in place of what it runs, once there's been one.
+                // Its last test, in place of what it runs, once there's been one, or
+                // whom it's signed in as.
                 let tested = self.model.mcp_tests.get(&m.name).cloned();
-                let sub = tested.as_ref().map(|t| t.said()).unwrap_or(what);
+                let signed = match &m.sign_in {
+                    SignIn::SignedIn(who) if who.is_empty() => Some("Signed in".to_string()),
+                    SignIn::SignedIn(who) => Some(format!("Signed in as {who}")),
+                    _ => None,
+                };
+                let sub = tested.as_ref().map(|t| t.said()).or(signed).unwrap_or(what);
                 let testing = tested == Some(crate::model::McpTest::Testing);
                 let test_name = m.name.clone();
                 let test = self
@@ -9611,11 +9720,48 @@ ACTA_KEY=secret:ACTA_KEY",
                         this.send(f);
                         cx.notify();
                     }));
+                // Sign in, for a server that needs it, in place of the error; Sign out
+                // once signed in.
+                let needs = m.sign_in == SignIn::Needed
+                    || tested == Some(crate::model::McpTest::NeedsSignIn);
+                let account = match &m.sign_in {
+                    SignIn::SignedIn(_) => {
+                        let out_name = m.name.clone();
+                        Some(
+                            self.small_button(
+                                format!("sign-out-mcp-{}", m.name),
+                                "Sign out",
+                                false,
+                            )
+                            .on_click(cx.listener(
+                                move |this, _, _, cx| {
+                                    cx.stop_propagation();
+                                    let f = this.model.sign_out_mcp(&out_name);
+                                    this.send(f);
+                                    cx.notify();
+                                },
+                            )),
+                        )
+                    }
+                    _ if needs => Some(self.sign_in_button(&m.name, cx)),
+                    _ => None,
+                };
+                let actions = div()
+                    .flex()
+                    .items_center()
+                    .gap(px(space::S))
+                    .children(account)
+                    .child(test);
+                let sub = if needs && tested.is_none() {
+                    "Needs you to sign in".to_string()
+                } else {
+                    sub
+                };
                 let row = self.row(
                     Some(self.tile(Ico::Plug)),
                     m.name.clone(),
                     Some(sub),
-                    Some(test.into_any_element()),
+                    Some(actions.into_any_element()),
                 );
                 rows.push(
                     self.link_row(SharedString::from(format!("mcp-{}", m.name)), row)
@@ -9635,6 +9781,14 @@ ACTA_KEY=secret:ACTA_KEY",
                                 .update(cx, |s, cx| s.set_value(line, window, cx));
                             this.mcp_settings_in
                                 .update(cx, |s, cx| s.set_value(settings, window, cx));
+                            let (client, secret) = (
+                                m.client_id.clone(),
+                                m.client_secret.clone().unwrap_or_default(),
+                            );
+                            this.mcp_client_in
+                                .update(cx, |s, cx| s.set_value(client, window, cx));
+                            this.mcp_client_secret_in
+                                .update(cx, |s, cx| s.set_value(secret, window, cx));
                             this.mcp_open = Some(Some(name));
                             cx.notify();
                         }))
@@ -14357,6 +14511,33 @@ fn card_view(
             table
         }
         CardBody::Choices(_) => div(),
+        // Loom's own card for an MCP server that needs the person to sign in: Sign in
+        // opens its sign-in page in their browser, and once they have, it says so.
+        CardBody::SignIn { signed: true, .. } => div()
+            .text_size(px(size::SMALL * scale))
+            .text_color(p.ink_3)
+            .child("Signed in"),
+        CardBody::SignIn { server, .. } => {
+            let this = this.clone();
+            let server = server.clone();
+            div().flex().child(
+                div()
+                    .id(SharedString::from(format!("sign-in-{key}")))
+                    .px(px(space::M))
+                    .py(px(space::XS + 2.0))
+                    .rounded(px(radius::BUBBLE))
+                    .border_1()
+                    .border_color(tint.opacity(0.55))
+                    .text_size(px(size::SMALL * scale))
+                    .text_color(p.ink)
+                    .cursor_pointer()
+                    .soft_hover(p.raised, motion::mix(p.raised, tint, 0.14), None)
+                    .on_click(move |_, _, cx| {
+                        let _ = this.update(cx, |loom, cx| loom.sign_in_mcp(&server, cx));
+                    })
+                    .child("Sign in"),
+            )
+        }
     };
     div()
         .w_full()

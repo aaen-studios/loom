@@ -45,6 +45,7 @@ import server.importer
 import server.hashing.{Done, Job}
 import server.installer
 import server.mcptest
+import server.oauth
 import server.move
 import server.noise
 import server.plugins
@@ -348,7 +349,13 @@ pub struct Instance {
     install_done: Receiver<installer.Done>
     mcp_test_to: Sender<mcptest.Job>    // the thread that tests an MCP server
     mcp_test_done: Receiver<mcptest.Done>
-    mcp_tests: Map<i64, Waiter>    // the command waiting on each test
+    mcp_tests: Map<i64, McpTest>    // the command waiting on each test
+    oauth_to: Sender<oauth.Job>    // the thread that signs in to MCP servers and renews their tokens
+    oauth_done: Receiver<oauth.Done>
+    oauth_jobs: Map<i64, OauthJob>
+    sign_ins: Map<String, SignIn>    // a sign-in's state -> what it's for, while the person's browser is away
+    renewing: Map<String, i64>    // user/server -> the job renewing its token
+    next_renewal: i64    // when sign-ins due to be renewed are next looked for
     fetching: List<Waiter>    // commands waiting on the registry
     installs: Map<i64, Install>    // installs on the installer's thread
     deno_job: i64    // the installer's job fetching Deno for Code Mode, or 0
@@ -473,6 +480,36 @@ struct Fill {
 struct Waiter {
     socket: ServerSocket?
     id: String
+}
+
+// An MCP server's test under way: who waits, and whose server it is.
+struct McpTest {
+    waiter: Waiter
+    user: String
+    server: String
+    own_auth: bool    // its headers have an Authorization of the person's own, so a 401 isn't a sign-in
+}
+
+// Work on the sign-in thread (server/oauth.calx) for one of a person's MCP
+// servers: `begin` (mcp.sign_in), `exchange` (mcp.signed_in), `renew` or
+// `revoke`.
+struct OauthJob {
+    kind: String
+    user: String
+    server: String
+    waiter: Waiter?
+    waiting: List<Request>    // loom mcp's asks for a new token, answered once it's renewed
+    used: String    // the refresh token a renewal used
+}
+
+// A sign-in whose browser is away: what it's for, and the PKCE verifier only
+// the instance holds.
+struct SignIn {
+    user: String
+    server: String
+    grant: Json
+    verifier: String
+    at: i64
 }
 
 // A run a routine started: whose, and which routine.
@@ -1048,6 +1085,22 @@ fn secret_aad(user: String, name: String) -> List<u8> {
     return "loom secret {user}/{name}".to_bytes()
 }
 
+// What a sign-in to a person's MCP server is sealed with, bound to them and it.
+fn sign_in_aad(user: String, name: String) -> List<u8> {
+    return "loom mcp sign-in {user}/{name}".to_bytes()
+}
+
+// Whether an MCP server's headers give an Authorization of the person's own,
+// a key, so it's never signed in to.
+fn own_auth(server: Json) -> bool {
+    if let Json.Object(m) = at(server, "headers") {
+        for (k, _) in m {
+            if k.to_lower_root() == "authorization" { return true }
+        }
+    }
+    return false
+}
+
 // A secret's name: letters, digits, _, - and ., up to 64.
 fn valid_secret(name: String) -> bool {
     if name.len() == 0 or name.len() > 64 { return false }
@@ -1288,6 +1341,7 @@ impl Instance {
         let dummy = "$argon2id$v=19$m={h.memory_kib},t={h.iterations},p={h.parallelism}${bytes.base64(random_bytes(h.salt_len)).replace("=", "")}${bytes.base64(random_bytes(h.hash_len)).replace("=", "")}"
         let (install_to, install_done) = installer.start()
         let (mcp_test_to, mcp_test_done) = mcptest.start()
+        let (oauth_to, oauth_done) = oauth.start()
         let (push_to, push_gone) = push.start(config.apns.copy())
         let (move_to, move_done) = move.start()
         let (update_to, update_back) = update.start()
@@ -1300,7 +1354,7 @@ impl Instance {
         let search_to = searcher.start("{config.data}/loom.db", search_done.sender(), waker)
         let browser_done = Receiver<browser.Back>()
         let browser_to = browser_done.sender()
-        var i = Instance { release: config.release.copy(), host: update.host(config.in_app), exe: current_exe(), mcp_exe: config.mcp.copy(), update_to: update_to, update_back: update_back, updating: no_update(), next_update_check: 0, last_busy: now(), restart_stops: List<String>(), restart: false, told_update: Json.Null, told_update_at: 0, browsers: LinkedMap<String, Browser>(), watchers: Map<u32, String>(), followers: List<u32>(), browser_pages: Map<String, String>(), browsers_to_check: List<String>(), browser_done: browser_done, browser_to: browser_to, stopped_browsers: Map<u64, Thread>(), closing_browsers: Map<String, u64>(), next_browser: 0, fills: Map<String, Fill>(), turns_ended: List<(String, String, String)>(), next_browser_sweep: 0, task_stops: Map<String, String>(), resumes: List<(String, String)>(), push_to: push_to, push_gone: push_gone, move_to: move_to, move_done: move_done, lan: config.lan, bridge: none, stop_bridge: none, lan_port: 0, announcer: none, stop_announcer: none, to_close: List<ServerSocket>(), boxes: none, gate: none, stop_gate: none, checkpointer: some(checkpointer), stop_checkpoints: stop_checkpoints, wal_big: wal_big, search_to: search_to, search_done: search_done, searches: Map<String, Waiter>(), next_search: 0, disk_used: Map<String, (i64, i64)>(), doors: LinkedMap<String, egress.Door>(), moving: String(), move_waiters: List<Waiter>(), moved: moved, version: config.version.copy(), store: store, server: server, waker: waker, data: config.data.copy(), sessions: Map<u32, Session>(), runs: LinkedMap<String, Run>(), procs: LinkedMap<String, Proc>(), approvals: LinkedMap<String, Approval>(), lines: lines, lines_to: to, stopped_to: stopped_to, stopped: stopped, stopping: 0, hash_to: hash_to, hash_done: hash_done, next_job: 0, auths: Map<i64, Auth>(), dummy_hash: dummy, ready_now: String(), open_secrets: Map<String, List<(String, String)>>(), failures: LinkedMap<String, List<i64>>(), thumbs: files.start(), events: config.events, next_prune: 0, next_proc_sweep: 0, grants: Map<String, Grant>(), calls: Map<String, Request>(), context: Map<String, (i64, i64)>(), registry_at: config.registry.copy(), registry: Json.Null, registry_time: 0, registry_fetching: false, install_to: install_to, install_done: install_done, mcp_test_to: mcp_test_to, mcp_test_done: mcp_test_done, mcp_tests: Map<i64, Waiter>(), fetching: List<Waiter>(), installs: Map<i64, Install>(), deno_job: 0, deno_waiters: List<Request>(), tools_body: String(), follows: Map<i64, (String, String)>(), next_follow: 0, code_acts: Map<i64, String>(), leftovers: List<String>(), next_sweep: 0, device_calls: Map<String, DeviceCall>(), setups: Map<String, Setup>(), minute_ms: config.minute_ms, next_due: 0, routine_runs: Map<String, RoutineRun>(), routines_waiting: List<WaitingRoutine>(), routine_marks: Map<String, (String, String)>(), quiet_turns: Map<String, QuietTurn>(), run_chains: Map<String, List<String>>(), panel_calls: Map<String, Waiter>(), script_calls: Map<String, Request>(), running_flows: LinkedMap<String, flows.Flow>(), flow_steps: Map<String, (String, usize)>(), advancing: List<String>(), flow_results: List<(String, usize, bool, String)>(), flows_due: List<String>(), slow_calls: Map<String, String>(), acting: 0, call_actions: Map<String, i64>(), tool_actions: Map<String, i64>(), sealer: try secret_key(config.data.copy()) }
+        var i = Instance { release: config.release.copy(), host: update.host(config.in_app), exe: current_exe(), mcp_exe: config.mcp.copy(), update_to: update_to, update_back: update_back, updating: no_update(), next_update_check: 0, last_busy: now(), restart_stops: List<String>(), restart: false, told_update: Json.Null, told_update_at: 0, browsers: LinkedMap<String, Browser>(), watchers: Map<u32, String>(), followers: List<u32>(), browser_pages: Map<String, String>(), browsers_to_check: List<String>(), browser_done: browser_done, browser_to: browser_to, stopped_browsers: Map<u64, Thread>(), closing_browsers: Map<String, u64>(), next_browser: 0, fills: Map<String, Fill>(), turns_ended: List<(String, String, String)>(), next_browser_sweep: 0, task_stops: Map<String, String>(), resumes: List<(String, String)>(), push_to: push_to, push_gone: push_gone, move_to: move_to, move_done: move_done, lan: config.lan, bridge: none, stop_bridge: none, lan_port: 0, announcer: none, stop_announcer: none, to_close: List<ServerSocket>(), boxes: none, gate: none, stop_gate: none, checkpointer: some(checkpointer), stop_checkpoints: stop_checkpoints, wal_big: wal_big, search_to: search_to, search_done: search_done, searches: Map<String, Waiter>(), next_search: 0, disk_used: Map<String, (i64, i64)>(), doors: LinkedMap<String, egress.Door>(), moving: String(), move_waiters: List<Waiter>(), moved: moved, version: config.version.copy(), store: store, server: server, waker: waker, data: config.data.copy(), sessions: Map<u32, Session>(), runs: LinkedMap<String, Run>(), procs: LinkedMap<String, Proc>(), approvals: LinkedMap<String, Approval>(), lines: lines, lines_to: to, stopped_to: stopped_to, stopped: stopped, stopping: 0, hash_to: hash_to, hash_done: hash_done, next_job: 0, auths: Map<i64, Auth>(), dummy_hash: dummy, ready_now: String(), open_secrets: Map<String, List<(String, String)>>(), failures: LinkedMap<String, List<i64>>(), thumbs: files.start(), events: config.events, next_prune: 0, next_proc_sweep: 0, grants: Map<String, Grant>(), calls: Map<String, Request>(), context: Map<String, (i64, i64)>(), registry_at: config.registry.copy(), registry: Json.Null, registry_time: 0, registry_fetching: false, install_to: install_to, install_done: install_done, mcp_test_to: mcp_test_to, mcp_test_done: mcp_test_done, mcp_tests: Map<i64, McpTest>(), oauth_to: oauth_to, oauth_done: oauth_done, oauth_jobs: Map<i64, OauthJob>(), sign_ins: Map<String, SignIn>(), renewing: Map<String, i64>(), next_renewal: 0, fetching: List<Waiter>(), installs: Map<i64, Install>(), deno_job: 0, deno_waiters: List<Request>(), tools_body: String(), follows: Map<i64, (String, String)>(), next_follow: 0, code_acts: Map<i64, String>(), leftovers: List<String>(), next_sweep: 0, device_calls: Map<String, DeviceCall>(), setups: Map<String, Setup>(), minute_ms: config.minute_ms, next_due: 0, routine_runs: Map<String, RoutineRun>(), routines_waiting: List<WaitingRoutine>(), routine_marks: Map<String, (String, String)>(), quiet_turns: Map<String, QuietTurn>(), run_chains: Map<String, List<String>>(), panel_calls: Map<String, Waiter>(), script_calls: Map<String, Request>(), running_flows: LinkedMap<String, flows.Flow>(), flow_steps: Map<String, (String, usize)>(), advancing: List<String>(), flow_results: List<(String, usize, bool, String)>(), flows_due: List<String>(), slow_calls: Map<String, String>(), acting: 0, call_actions: Map<String, i64>(), tool_actions: Map<String, i64>(), sealer: try secret_key(config.data.copy()) }
         if config.sandboxes.len() > 0 and not i.lan { try i.sandboxes_on(config.sandboxes.copy(), config.sandbox_image.copy()) }
         // An action the last run of the instance left started, it never finished.
         try i.store.settle_cut_short()
@@ -1983,13 +2037,22 @@ impl Instance {
                 }
             }
             while let d = i.mcp_test_done.next() {
-                let w = i.mcp_tests.remove(d.id) else continue
-                let answer = if d.error.len() > 0 { Answer.Refused(String("mcp_failed"), d.error) } else {
-                    var names = List<Json>()
-                    for n in d.tools { names.push(Json.Str(n.copy())) }
-                    Answer.Value(Obj.new().j("tools", Json.Array(names)).done())
+                match i.mcp_tested(d) {
+                    ok => {},
+                    err(e) => eprintln("loom: testing an MCP server: {e}"),
                 }
-                i.answer_cmd(w, answer)
+            }
+            while let d = i.oauth_done.next() {
+                match i.oauth_finished(d) {
+                    ok => {},
+                    err(e) => eprintln("loom: signing in to an MCP server: {e}"),
+                }
+            }
+            if now() >= i.next_renewal {
+                match i.renew_due() {
+                    ok => {},
+                    err(e) => eprintln("loom: renewing MCP sign-ins: {e}"),
+                }
             }
             while let d = i.move_done.next() {
                 match i.move_finished(d) {
@@ -3048,13 +3111,300 @@ impl Instance {
             i.answer_cmd(w, Answer.Refused(String("mcp_failed"), "It uses {if missing.len() == 1 { "a secret" } else { "secrets" }} you don't have: {missing.join(", ")}. Add {if missing.len() == 1 { "it" } else { "them" }} under Keys on the MCP servers page."))
             return
         }
-        let spec = i.session_server(user, server, true) else {
+        let keyed = own_auth(server.copy())
+        let spec = i.session_server(user.copy(), server, true) else {
             i.answer_cmd(w, Answer.Refused(String("mcp_failed"), String("It can't be started as it's set.")))
             return
         }
+        let grant = if keyed { Json.Null } else { i.grant_of(user.copy(), server_name.copy()) }
         i.next_job += 1
-        i.mcp_tests.insert(i.next_job, w.copy())
-        i.mcp_test_to.send(mcptest.Job { id: i.next_job, spec: spec })
+        i.mcp_tests.insert(i.next_job, McpTest { waiter: w.copy(), user: user.copy(), server: server_name.copy(), own_auth: keyed })
+        i.mcp_test_to.send(mcptest.Job { id: i.next_job, spec: spec, grant: grant })
+    }
+
+    // A test's answer: the tools, and whether it's signed in, or why it didn't
+    // start. A 401 from a server with no key of the person's own is a sign-in
+    // it needs, which the MCP servers page then offers.
+    fn mcp_tested(i: mut Instance, d: mcptest.Done) ! Error {
+        let t = i.mcp_tests.remove(d.id) else return
+        if d.grant != Json.Null { try i.keep_grant(t.user.copy(), t.server.copy(), d.grant.copy()) }
+        if d.ended { try i.needs_sign_in(t.user.copy(), t.server.copy()) }
+        if d.error.len() > 0 {
+            if d.sign_in and not t.own_auth {
+                try i.needs_sign_in(t.user.copy(), t.server.copy())
+                i.answer_cmd(t.waiter, Answer.Refused(String("sign_in_needed"), "{t.server} needs you to sign in."))
+                return
+            }
+            i.answer_cmd(t.waiter, Answer.Refused(String("mcp_failed"), d.error.copy()))
+            return
+        }
+        var names = List<Json>()
+        for n in d.tools { names.push(Json.Str(n.copy())) }
+        var value = Obj.new().j("tools", Json.Array(names))
+        let grant = if t.own_auth { Json.Null } else { i.grant_of(t.user.copy(), t.server.copy()) }
+        if oauth.signed_in(grant.copy()) { value = value.b("signed_in", true).maybe("signed_in_as", str_at(grant, "who")) }
+        i.answer_cmd(t.waiter, Answer.Value(value.done()))
+    }
+
+    // --- Signing in to MCP servers (PLAN.md, "Signing in to MCP servers") ---
+
+    // The person's sign-in to their MCP server `name`, opened, or null.
+    fn grant_of(i: Instance, user: String, name: String) -> Json {
+        let found = match i.store.mcp_auth(user.copy(), name.copy()) {
+            ok(some(f)) => f,
+            _ => return Json.Null,
+        }
+        let (nonce, sealed) = found
+        let n = bytes.from_hex(nonce) else return Json.Null
+        let s = bytes.from_hex(sealed) else return Json.Null
+        let opened = i.sealer.decrypt(n, s, sign_in_aad(user, name.copy())) else {
+            eprintln("loom: the sign-in to {name} doesn't open with this instance's key")
+            return Json.Null
+        }
+        return match parse(String.from_utf8(opened) ?? String()) {
+            ok(j) => j,
+            err(_) => Json.Null,
+        }
+    }
+
+    // Keeps `grant` sealed as the person's, bound to them and the server, with
+    // when its token is next renewed.
+    fn keep_grant(i: Instance, user: String, name: String, grant: Json) ! Error {
+        let nonce = random_bytes(24)
+        let sealed = i.sealer.encrypt(nonce.copy(), "{grant}".to_bytes(), sign_in_aad(user.copy(), name.copy()))
+        try i.store.put_mcp_auth(user, name, bytes.hex(nonce), bytes.hex(sealed), oauth.due(grant))
+    }
+
+    // Marks the server as one that needs a sign-in: its tokens go, and its
+    // client stays, for the next.
+    fn needs_sign_in(i: Instance, user: String, name: String) ! Error {
+        let had = i.grant_of(user.copy(), name.copy())
+        try i.keep_grant(user, name, if had == Json.Null { Obj.new().b("needed", true).done() } else { oauth.signed_out(had) })
+    }
+
+    // The person's MCP servers as mcp.list gives them: each over HTTP with
+    // `sign_in`, `needed` or `signed_in` (with `signed_in_as` when the sign-in
+    // said who, and `signed_in_at`), once loom knows it signs in, and a
+    // `client_secret` given as text only as `client_secret_set`.
+    fn listed_servers(i: Instance, user: String) -> List<Json> ! Error {
+        var out = List<Json>()
+        for s in try i.store.mcp_servers(user.copy()) {
+            var shown = s.copy()
+            if let secret = at(s.copy(), "client_secret").as_str() {
+                shown = merge(without(shown, "client_secret"), Obj.new().b("client_secret_set", secret.len() > 0).done())
+            }
+            if str_at(s.copy(), "url") != none and not own_auth(s.copy()) {
+                let g = i.grant_of(user.copy(), str_at(s, "name") ?? String())
+                if oauth.signed_in(g.copy()) {
+                    shown = merge(shown, Obj.new().s("sign_in", String("signed_in")).maybe("signed_in_as", str_at(g.copy(), "who")).i("signed_in_at", int_at(g, "at") ?? 0).done())
+                } else if g != Json.Null {
+                    shown = merge(shown, Obj.new().s("sign_in", String("needed")).done())
+                }
+            }
+            out.push(shown)
+        }
+        return out
+    }
+
+    // mcp.sign_in: finds where the server signs in, signs loom up there when
+    // it must, and answers with the address the person's browser opens. The
+    // browser comes back to `redirect`, which the device that asked catches,
+    // and that device sends what came back with mcp.signed_in.
+    fn sign_in(i: mut Instance, w: Waiter, user: String, args: Json) ! Error {
+        let name = str_at(args.copy(), "name") ?? String()
+        let redirect = (str_at(args, "redirect") ?? String()).trim().copy()
+        let server = try i.store.mcp_server(user.copy(), name.copy()) else {
+            i.answer_cmd(w, Answer.Refused(String("not_found"), "There's no MCP server {name}."))
+            return
+        }
+        let address = str_at(server.copy(), "url") else {
+            i.answer_cmd(w, Answer.Refused(String("bad_request"), "{name} is a program loom starts: it has nothing to sign in to."))
+            return
+        }
+        if own_auth(server.copy()) {
+            i.answer_cmd(w, Answer.Refused(String("bad_request"), "{name} sends a key of yours as its Authorization header, so it doesn't sign in."))
+            return
+        }
+        if not redirect.starts_with("http://127.0.0.1:") and not redirect.starts_with("http://localhost:") and not redirect.starts_with("https://") and not redirect.starts_with("loom:") {
+            i.answer_cmd(w, Answer.Refused(String("bad_request"), String("redirect is where the browser comes back to: http://127.0.0.1:PORT/…, https://… or loom:…")))
+            return
+        }
+        let client_id = str_at(server.copy(), "client_id") ?? String()
+        let client_secret = i.value_of(user.copy(), at(server, "client_secret")) ?? String()
+        let had = i.grant_of(user.copy(), name.copy())
+        i.next_job += 1
+        i.oauth_jobs.insert(i.next_job, OauthJob { kind: String("begin"), user: user.copy(), server: name, waiter: some(w.copy()), waiting: List<Request>(), used: String() })
+        i.oauth_to.send(oauth.Job { id: i.next_job, work: oauth.Work.Begin(address, redirect, client_id, client_secret, had, i.sandboxed(user)) })
+    }
+
+    // mcp.signed_in: what the browser brought back to the redirect, as its
+    // query. The code is swapped for tokens with the verifier only the
+    // instance holds, and the tokens are kept sealed.
+    fn signed_in(i: mut Instance, w: Waiter, user: String, args: Json) ! Error {
+        let back = oauth.returned(str_at(args, "query") ?? String())
+        let state = oauth.param(back.copy(), "state") ?? String()
+        var mine = false
+        if let p = i.sign_ins.find(state.copy()) { mine = p.user == user }
+        if not mine {
+            i.answer_cmd(w, Answer.Refused(String("sign_in_failed"), String("That sign-in isn't one loom started, or it's over: sign in again.")))
+            return
+        }
+        let p = i.sign_ins.remove(state) else return
+        if let e = oauth.param(back.copy(), "error") {
+            let about = oauth.param(back.copy(), "error_description") ?? e
+            i.answer_cmd(w, Answer.Refused(String("sign_in_failed"), "{p.server} didn't sign you in: {about}"))
+            return
+        }
+        // The answer's issuer, when it says one, is the one loom sent the browser to (RFC 9207).
+        if let iss = oauth.param(back.copy(), "iss") {
+            if iss != (str_at(p.grant.copy(), "issuer") ?? String()) {
+                i.answer_cmd(w, Answer.Refused(String("sign_in_failed"), "The sign-in came back from {iss}, not from where {p.server} signs in."))
+                return
+            }
+        }
+        let code = oauth.param(back, "code") ?? String()
+        if code.len() == 0 {
+            i.answer_cmd(w, Answer.Refused(String("sign_in_failed"), "{p.server} sent no code back: sign in again."))
+            return
+        }
+        i.next_job += 1
+        i.oauth_jobs.insert(i.next_job, OauthJob { kind: String("exchange"), user: p.user.copy(), server: p.server.copy(), waiter: some(w.copy()), waiting: List<Request>(), used: String() })
+        i.oauth_to.send(oauth.Job { id: i.next_job, work: oauth.Work.Exchange(p.grant, code, p.verifier) })
+    }
+
+    // mcp.sign_out: the tokens go at once, and the place that gave them is
+    // told, as well as it can be, on the sign-in thread.
+    fn sign_out(i: mut Instance, user: String, name: String) -> Answer ! Error {
+        let g = i.grant_of(user.copy(), name.copy())
+        if not oauth.signed_in(g.copy()) { return Answer.Refused(String("not_found"), "You aren't signed in to {name}.") }
+        try i.keep_grant(user.copy(), name.copy(), oauth.signed_out(g.copy()))
+        i.revoke_sign_in(user.copy(), name, g)
+        i.stop_idle_of(user)
+        return Answer.Value(Obj.new().done())
+    }
+
+    fn revoke_sign_in(i: mut Instance, user: String, name: String, grant: Json) {
+        if not oauth.signed_in(grant.copy()) { return }
+        i.next_job += 1
+        i.oauth_jobs.insert(i.next_job, OauthJob { kind: String("revoke"), user: user.copy(), server: name.copy(), waiter: none, waiting: List<Request>(), used: String() })
+        i.oauth_to.send(oauth.Job { id: i.next_job, work: oauth.Work.Revoke(grant.copy()) })
+    }
+
+    // Renews the token of `user`'s server `name` on the sign-in thread, unless
+    // that's under way already; `req`, loom mcp's ask for it, gets the new one.
+    fn renew(i: mut Instance, user: String, name: String, req: Request?) {
+        let key = "{user}/{name}"
+        if let job = i.renewing.find(key.copy()) {
+            if let r = req {
+                if let o = mut i.oauth_jobs.find(job) { o.waiting.push(r.copy()) }
+            }
+            return
+        }
+        let g = i.grant_of(user.copy(), name.copy())
+        var waiting = List<Request>()
+        if let r = req { waiting.push(r.copy()) }
+        i.next_job += 1
+        i.renewing.insert(key, i.next_job)
+        i.oauth_jobs.insert(i.next_job, OauthJob { kind: String("renew"), user: user.copy(), server: name.copy(), waiter: none, waiting: waiting, used: str_at(g.copy(), "refresh") ?? String() })
+        i.oauth_to.send(oauth.Job { id: i.next_job, work: oauth.Work.Refresh(g) })
+    }
+
+    // Sign-ins whose tokens end soon are renewed, a second at a time, and
+    // sign-ins whose browser never came back are dropped after 15 minutes.
+    fn renew_due(i: mut Instance) ! Error {
+        i.next_renewal = now() + 1000
+        for (user, name) in try i.store.mcp_auth_due(now()) {
+            if i.renewing.contains("{user}/{name}") { continue }
+            i.renew(user.copy(), name.copy(), none)
+        }
+        var gone = List<String>()
+        for (state, p) in i.sign_ins {
+            if now() - p.at > 900000 { gone.push(state.copy()) }
+        }
+        for state in gone { _ = i.sign_ins.remove(state) }
+    }
+
+    // What the sign-in thread did.
+    fn oauth_finished(i: mut Instance, d: oauth.Done) ! Error {
+        let job = i.oauth_jobs.remove(d.id) else return
+        if job.kind == "begin" {
+            let w = job.waiter else return
+            if d.error.len() > 0 {
+                i.answer_cmd(w, Answer.Refused(String("sign_in_failed"), "{job.server} can't be signed in to: {d.error}"))
+                return
+            }
+            // Its client is kept now, so the next sign-in uses it again.
+            let had = i.grant_of(job.user.copy(), job.server.copy())
+            if not oauth.signed_in(had) { try i.keep_grant(job.user.copy(), job.server.copy(), d.grant.copy()) }
+            let pkce = oauth.new_verifier()
+            let state = oauth.new_state()
+            let address = oauth.authorize_url(d.grant.copy(), state.copy(), oauth.challenge_of(pkce.copy()))
+            i.sign_ins.insert(state, SignIn { user: job.user.copy(), server: job.server.copy(), grant: d.grant.copy(), verifier: pkce, at: now() })
+            i.answer_cmd(w, Answer.Value(Obj.new().s("server", job.server).s("url", address).done()))
+            return
+        }
+        if job.kind == "exchange" {
+            let w = job.waiter else return
+            if d.error.len() > 0 {
+                i.answer_cmd(w, Answer.Refused(String("sign_in_failed"), d.error.copy()))
+                return
+            }
+            try i.keep_grant(job.user.copy(), job.server.copy(), d.grant.copy())
+            // Agents that aren't answering start again with it at their next message.
+            i.stop_idle_of(job.user.copy())
+            i.answer_cmd(w, Answer.Value(Obj.new().s("server", job.server).maybe("signed_in_as", str_at(d.grant, "who")).done()))
+            return
+        }
+        if job.kind != "renew" { return }
+        _ = i.renewing.remove("{job.user}/{job.server}")
+        var token = String()
+        let now_had = i.grant_of(job.user.copy(), job.server.copy())
+        if d.grant != Json.Null {
+            // Signed out, or in again, while it was renewed: what's there now stays.
+            if oauth.signed_in(now_had.copy()) and (str_at(now_had.copy(), "refresh") ?? String()) == job.used {
+                try i.keep_grant(job.user.copy(), job.server.copy(), d.grant.copy())
+                token = str_at(d.grant, "access") ?? String()
+            } else if oauth.signed_in(now_had.copy()) {
+                token = str_at(now_had, "access") ?? String()
+            }
+        } else if d.ended {
+            // Unless another renewal won, with the refresh token this one used, it's over.
+            if (str_at(now_had.copy(), "refresh") ?? String()) == job.used {
+                if oauth.signed_in(now_had) { try i.needs_sign_in(job.user.copy(), job.server.copy()) } else { try i.store.put_off_mcp_auth(job.user.copy(), job.server.copy(), 0) }
+            } else if oauth.signed_in(now_had.copy()) {
+                token = str_at(now_had, "access") ?? String()
+            }
+        } else {
+            eprintln("loom: the sign-in to {job.server} wasn't renewed: {d.error}")
+            try i.store.put_off_mcp_auth(job.user.copy(), job.server.copy(), now() + 60000)
+            if oauth.signed_in(now_had.copy()) { token = str_at(now_had, "access") ?? String() }
+        }
+        let answer = if token.len() > 0 { Obj.new().j("headers", Json.Array([Obj.new().s("name", String("Authorization")).s("value", "Bearer {token}").done()])).done() } else { Obj.new().b("sign_in", true).done() }
+        for r in job.waiting {
+            i.server.respond(r, json_response(200, answer.copy()))
+        }
+    }
+
+    // A card in the agent's reply that says the server needs its person to
+    // sign in, with Sign in, once a reply.
+    fn sign_in_card(i: mut Instance, g: Grant, server: String) {
+        let run_id = i.calling_run(g)
+        if run_id.len() == 0 { return }
+        let card = cards.sign_in_card(server)
+        let id = str_at(card.copy(), "id") ?? String()
+        var frame = Json.Null
+        var user = String()
+        if let r = mut i.runs.find(run_id) {
+            for b in r.blocks {
+                if b.kind == "card" and str_at(b.card.copy(), "id") == some(id.copy()) { return }
+            }
+            var b = new_block("card")
+            b.card = card.copy()
+            r.blocks.push(b)
+            frame = Obj.new().s("t", String("card")).s("run", r.id.copy()).s("message", r.message.copy()).i("block", i64.wrap(u64(r.blocks.len() - 1))).j("card", card).done()
+            user = r.user.copy()
+        }
+        if user.len() > 0 { i.publish(user, frame) }
     }
 
     // Agents an import made before it gave them the MCP servers it brought have
@@ -3112,8 +3462,20 @@ impl Instance {
                 eprintln("loom: the MCP server {name} is over HTTP, which this agent program can't use")
                 return none
             }
-            let headers = i.pairs(user, at(server, "headers")) else return none
-            return some(Obj.new().s("type", String("http")).s("name", name).s("url", address).j("headers", headers).done())
+            let headers = i.pairs(user.copy(), at(server.copy(), "headers")) else return none
+            // The person's sign-in, as its bearer token.
+            var given = headers
+            if not own_auth(server) {
+                let g = i.grant_of(user, name.copy())
+                if oauth.signed_in(g.copy()) {
+                    if let Json.Array(list) = given.copy() {
+                        var with = list.copy()
+                        with.push(Obj.new().s("name", String("Authorization")).s("value", "Bearer {str_at(g, "access") ?? String()}").done())
+                        given = Json.Array(with)
+                    }
+                }
+            }
+            return some(Obj.new().s("type", String("http")).s("name", name).s("url", address).j("headers", given).done())
         }
         let env = i.pairs(user, at(server.copy(), "env")) else return none
         let args = if at(server.copy(), "args") == Json.Null { Json.Array(List<Json>()) } else { at(server.copy(), "args") }
@@ -3332,7 +3694,7 @@ impl Instance {
             if i.tools_body.len() == 0 { i.tools_body = "{Obj.new().j("tools", Json.Array(tools.all())).done()}" }
             return some(Response.new(200, String("application/json"), i.tools_body.to_bytes()))
         }
-        for path in ["/api/mcp/servers", "/api/mcp/deno", "/api/mcp/allow", "/api/mcp/done"] {
+        for path in ["/api/mcp/servers", "/api/mcp/deno", "/api/mcp/allow", "/api/mcp/done", "/api/mcp/token", "/api/mcp/sign_in"] {
             if req.path == path { return try i.code_route(req, grant, token) }
         }
         if req.path != "/api/mcp/call" or req.method != "POST" {
@@ -3424,6 +3786,28 @@ impl Instance {
                 i.settle(act, String(if bool_at(body.copy(), "ok") == some(true) { "done" } else { "failed" }), str_at(body, "why") ?? String())
             }
             return some(json_response(200, Obj.new().done()))
+        }
+        // A server that answered 401 (PLAN.md, "Signing in to MCP servers"):
+        // `token` renews the person's sign-in and gives the new header, or
+        // says they must sign in; `sign_in` shows them a card for it in the
+        // agent's reply.
+        if req.path == "/api/mcp/token" or req.path == "/api/mcp/sign_in" {
+            let name = str_at(body, "server") ?? String()
+            let server = try i.store.mcp_server(g.user.copy(), name.copy()) else return some(http_error(404, "not_found", "There's no MCP server {name}."))
+            if str_at(server.copy(), "url") == none or own_auth(server) { return some(http_error(400, "bad_request", "{name} doesn't sign in.")) }
+            if req.path == "/api/mcp/sign_in" {
+                // A sign-in that can be renewed was, before loom mcp says this,
+                // so only one that can't is dropped: an agent can't sign its
+                // person out of one that's good.
+                let had = i.grant_of(g.user.copy(), name.copy())
+                if (str_at(had, "refresh") ?? String()).len() == 0 { try i.needs_sign_in(g.user.copy(), name.copy()) }
+                i.sign_in_card(g, name)
+                return some(json_response(200, Obj.new().done()))
+            }
+            let had = i.grant_of(g.user.copy(), name.copy())
+            if not oauth.signed_in(had.copy()) or (str_at(had, "refresh") ?? String()).len() == 0 { return some(json_response(200, Obj.new().b("sign_in", true).done())) }
+            i.renew(g.user, name, some(req.copy()))
+            return none
         }
         let server = str_at(body.copy(), "server") ?? String()
         let tool = str_at(body.copy(), "tool") ?? String()
@@ -9117,6 +9501,14 @@ impl Instance {
             try i.test_mcp(Waiter { socket: some(s), id: id }, user, args)
             return
         }
+        if name == "mcp.sign_in" {
+            try i.sign_in(Waiter { socket: some(s), id: id }, user, args)
+            return
+        }
+        if name == "mcp.signed_in" {
+            try i.signed_in(Waiter { socket: some(s), id: id }, user, args)
+            return
+        }
         if name == "chat.ask" {
             try i.side_question(Waiter { socket: some(s), id: id }, user, device, args)
             return
@@ -10069,7 +10461,7 @@ impl Instance {
             return Answer.Value(empty)
         }
         if name == "mcp.list" {
-            return Answer.Value(Obj.new().j("servers", Json.Array(try i.store.mcp_servers(user))).done())
+            return Answer.Value(Obj.new().j("servers", Json.Array(try i.listed_servers(user))).done())
         }
         if name == "mcp.put" {
             let server_name = str_at(args.copy(), "name") ?? String()
@@ -10090,16 +10482,49 @@ impl Instance {
                 server = server.s("command", command).j("args", Json.Array(list)).j("env", env)
             } else {
                 let headers = settings_of(at(args.copy(), "headers")) else return Answer.Refused(String("bad_request"), String(#"Each value in headers is text, or {"secret": NAME}."#))
-                server = server.s("url", address).j("headers", headers)
+                server = server.s("url", address.copy()).j("headers", headers)
+                // A client of the person's own, for a server whose sign-in
+                // doesn't let apps sign up by themselves. Its secret, left
+                // out, stays as it was.
+                let client_id = (str_at(args.copy(), "client_id") ?? String()).trim().copy()
+                if client_id.len() > 0 {
+                    server = server.s("client_id", client_id.copy())
+                    var secret = at(args.copy(), "client_secret")
+                    if secret == Json.Null {
+                        if let had = try i.store.mcp_server(user.copy(), server_name.copy()) {
+                            if str_at(had.copy(), "client_id") == some(client_id.copy()) { secret = at(had, "client_secret") }
+                        }
+                    }
+                    if secret != Json.Null and secret != Json.Str(String()) {
+                        let one = settings_of(Obj.new().j("s", secret).done()) else return Answer.Refused(String("bad_request"), String(#"client_secret is text, or {"secret": NAME}."#))
+                        server = server.j("client_secret", at(one, "s"))
+                    }
+                }
             }
             let done = server.done()
+            // A sign-in is for one address: a server moved elsewhere signs in again.
+            if let had = try i.store.mcp_server(user.copy(), server_name.copy()) {
+                if str_at(had, "url") != str_at(done.copy(), "url") {
+                    let g = i.grant_of(user.copy(), server_name.copy())
+                    _ = try i.store.delete_mcp_auth(user.copy(), server_name.copy())
+                    i.revoke_sign_in(user.copy(), server_name.copy(), g)
+                }
+            }
             try i.store.put_mcp_server(user, done.copy())
-            return Answer.Value(Obj.new().j("server", done).done())
+            var shown = done.copy()
+            if let secret = at(done, "client_secret").as_str() { shown = merge(without(shown, "client_secret"), Obj.new().b("client_secret_set", secret.len() > 0).done()) }
+            return Answer.Value(Obj.new().j("server", shown).done())
         }
         if name == "mcp.delete" {
             let server_name = str_at(args, "name") ?? String()
-            if not try i.store.delete_mcp_server(user, server_name.copy()) { return Answer.Refused(String("not_found"), "There's no MCP server {server_name}.") }
+            if not try i.store.delete_mcp_server(user.copy(), server_name.copy()) { return Answer.Refused(String("not_found"), "There's no MCP server {server_name}.") }
+            let g = i.grant_of(user.copy(), server_name.copy())
+            _ = try i.store.delete_mcp_auth(user.copy(), server_name.copy())
+            i.revoke_sign_in(user, server_name, g)
             return Answer.Value(empty)
+        }
+        if name == "mcp.sign_out" {
+            return try i.sign_out(user, str_at(args, "name") ?? String())
         }
         if name == "skill.list" {
             return Answer.Value(Obj.new().j("skills", Json.Array(try i.store.skills(user, bool_at(args, "bodies") ?? false))).done())

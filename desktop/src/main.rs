@@ -16,6 +16,7 @@ mod place;
 mod prefs;
 mod rail;
 mod shell;
+mod signin;
 mod single;
 mod smooth;
 mod thread;
