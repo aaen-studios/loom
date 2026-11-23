@@ -106,17 +106,23 @@ impl Transfer {
             }
             return answer(id).j("file", file).done()
         }
+        // A picture whose thumbnail isn't made yet comes whole: it's shown, but not
+        // kept as the thumbnail, so the next time asks again.
+        var dest = self.dest.copy()
+        for h in r.headers {
+            if h.name.to_lower_root() == "x-loom-thumb" and h.value == "not-yet" { dest = "{dest}.not-yet" }
+        }
         // Written beside, then moved, so a half-written file is never shown.
-        let part = "{self.dest}.part"
-        match fs.write(part.copy(), r.body.copy()) {
+        let part = "{dest}.part"
+        match fs.write(part.copy(), r.body) {
             ok => {},
             err(e) => return refused(id, "cache", "can't write {part}: {e}"),
         }
-        match fs.rename(part, self.dest.copy()) {
+        match fs.rename(part, dest.copy()) {
             ok => {},
-            err(e) => return refused(id, "cache", "can't write {self.dest}: {e}"),
+            err(e) => return refused(id, "cache", "can't write {dest}: {e}"),
         }
-        return at_path(id, self.dest.copy())
+        return at_path(id, dest)
     }
 }
 

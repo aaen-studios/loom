@@ -4454,13 +4454,35 @@ impl Model {
             .any(|a| a.file.is_none() && a.error.is_none())
     }
 
+    /// The blocks of the shown chat, in order, as `shown` has them but without copying
+    /// any: its stored messages, then what its runs are streaming.
+    fn shown_blocks(&self) -> Vec<&Block> {
+        let conversation = self.conversation();
+        let mut out: Vec<&Block> = self
+            .messages
+            .iter()
+            .filter(|m| !m.is_empty_reply())
+            .flat_map(|m| m.blocks.iter())
+            .collect();
+        for r in &self.runs {
+            if Some(&r.conversation) != conversation.as_ref()
+                || self.messages.iter().any(|m| m.id == r.message)
+            {
+                continue;
+            }
+            if let Some(blocks) = self.live.get(&r.message) {
+                out.extend(blocks.iter());
+            }
+        }
+        out
+    }
+
     /// The thumbnails the shown chat needs and doesn't have yet.
     pub fn file_fetches(&mut self) -> Vec<Value> {
         let mut out = Vec::new();
         let wanted: Vec<String> = self
-            .shown()
-            .iter()
-            .flat_map(|m| m.blocks.iter())
+            .shown_blocks()
+            .into_iter()
             .filter_map(|b| b.file.as_ref())
             .filter(|f| f.image())
             .map(|f| f.file.clone())
@@ -4519,9 +4541,8 @@ impl Model {
 
     /// The pictures in the chat on screen, in order, for the viewer to step through.
     pub fn pictures(&self) -> Vec<FileRef> {
-        self.shown()
-            .iter()
-            .flat_map(|m| m.blocks.iter())
+        self.shown_blocks()
+            .into_iter()
             .filter_map(|b| b.file.clone())
             .filter(FileRef::image)
             .collect()

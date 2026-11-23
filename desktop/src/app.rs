@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 use gpui_kit::assets::IconName as Ico;
 use gpui_kit::component::input::{Input, InputEvent, InputState, Paste, Textarea, TextareaState};
 use gpui_kit::component::message_scroller::{MessageScroller, MessageScrollerState};
-use gpui_kit::component::text::TextView;
+use gpui_kit::component::text::{TextView, TextViewState};
 use gpui_kit::component::{Icon, IconName, Sizable as _, TitleBar};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
@@ -92,7 +92,7 @@ impl Render for AgentDrag {
 }
 
 /// The colours of one theme.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq)]
 pub struct Palette {
     pub dark: bool,
     pub bg: Hsla,
@@ -426,6 +426,8 @@ pub struct Loom {
     page_tried: u64,
     /// What the composer says while it's empty, as last set.
     composer_placeholder: String,
+    /// The chat's list, as a view of its own (`ChatList`).
+    chat_view: Option<Entity<ChatList>>,
     /// Where the page is drawn, for turning a click on it into the page's own pixels.
     page_bounds: Rc<std::cell::Cell<Option<Bounds<Pixels>>>>,
     /// Whether the watched browser fills the panel beside the chat. Otherwise it's
@@ -1112,6 +1114,7 @@ ACTA_KEY=secret:ACTA_KEY",
             page_decoding: false,
             page_tried: 0,
             composer_placeholder: String::new(),
+            chat_view: None,
             page_bounds: Rc::new(std::cell::Cell::new(None)),
             browser_docked: false,
             browser_shut: None,
@@ -6675,253 +6678,55 @@ ACTA_KEY=secret:ACTA_KEY",
         let this = cx.entity().downgrade();
         let new_line = self.model.new_line.clone();
         let column = self.prefs.column();
-        let list = MessageScroller::new("chat", self.scroller.clone(), move |ix, _, _| {
-            let Some(row) = rows.get(ix) else {
-                return div().into_any_element();
-            };
-            // Above the first reply that came while the chat was shut: a line, NEW
-            // in the agent's colour.
-            let is_new =
-                matches!(row, Row::Message(m) if new_line.as_deref() == Some(m.id.as_str()));
-            let divider = div()
-                .w_full()
-                .max_w(px(column))
-                .flex()
-                .items_center()
-                .gap(px(space::S))
-                .pt(px(space::S))
-                .child(div().flex_1().h(px(1.0)).bg(tint.opacity(0.5)))
-                .child(
-                    div()
-                        .text_size(px(size::CAPTION))
-                        .font_weight(FontWeight::MEDIUM)
-                        .text_color(tint)
-                        .child("NEW"),
-                );
-            let here = flow.get(ix).copied().unwrap_or_default();
-            let joined = here.joined;
-            // Across the chat where it paused, or on a new day: when it went on.
-            let time_line = match row {
-                Row::Message(m) if here.line => Some(
-                    div()
-                        .w_full()
-                        .max_w(px(column))
-                        .flex()
-                        .justify_center()
-                        .pt(px(if ix == 0 { space::S } else { space::L }))
-                        .pb(px(space::XS))
-                        .text_size(px(size::CAPTION))
-                        .text_color(p.ink_3)
-                        .child(line_of(m.at, chrono::Local::now())),
-                ),
-                _ => None,
-            };
-            let inner = match row {
-                Row::Message(m) if m.role == "person" => person(
-                    p,
-                    m,
-                    &files,
-                    show.text_scale,
-                    show.room,
-                    joined,
-                    this.clone(),
-                ),
-                Row::Message(m) => reply(
-                    p,
-                    m,
-                    &name,
-                    tint,
-                    if m.live { mood } else { Mood::Idle },
-                    here.head,
-                    &open,
-                    &tools,
-                    &files,
-                    Show {
-                        newest: newest.as_deref() == Some(m.id.as_str()),
-                        ..show
-                    },
-                    this.clone(),
-                ),
-                Row::Approval(a) => approval(p, a, this.clone()),
-            };
-            // A message's pin, just outside its corner: there while it's pinned, and
-            // on hover to pin it.
-            let pin = match row {
-                Row::Message(m) if !m.live && !m.queued => Some((m.id.clone(), m.pinned)),
-                _ => None,
-            };
-            // Under it, a link to each branch that goes on from it; and beside it, on
-            // hover, a way to branch there.
-            let gone_on = match row {
-                Row::Message(m) => branches.get(&m.id).cloned().unwrap_or_default(),
-                _ => Vec::new(),
-            };
-            let branch_at = pin.as_ref().map(|(id, _)| id.clone());
-            // Its time, just outside its left edge while the pointer is over it. Time
-            // lines show only where the chat paused.
-            let when = match row {
-                Row::Message(m) if !m.live && !m.queued => {
-                    Some(when_sent(m.at, chrono::Local::now())).filter(|w| !w.is_empty())
-                }
-                _ => None,
-            };
-            let this = this.clone();
-            let to_branch = this.clone();
-            let mut links = div().flex().flex_col().gap(px(2.0)).pt(px(if joined.below {
-                0.0
-            } else {
-                space::XS
-            }));
-            for (i, (id, title)) in gone_on.into_iter().enumerate() {
-                let this = this.clone();
-                links = links.child(
-                    div()
-                        .id(SharedString::from(format!("branch-link-{ix}-{i}")))
-                        .flex()
-                        .items_center()
-                        .gap(px(space::XS))
-                        .text_size(px(size::CAPTION))
-                        .text_color(p.ink_3)
-                        .cursor_pointer()
-                        .soft_ink(p.ink_3, p.ink)
-                        .child(Icon::new(Ico::GitBranch).xsmall())
-                        .child(title)
-                        .on_click(move |_, _, cx| {
-                            let _ =
-                                this.update(cx, |loom, cx| loom.open_branch(Some(id.clone()), cx));
-                        }),
-                );
-            }
-            // A right-click on a kept message: Copy, Pin and Branch from here.
-            let on_right = branch_at.clone().map(|id| {
-                let this = this.clone();
-                move |e: &MouseDownEvent, _: &mut Window, cx: &mut App| {
-                    let _ = this.update(cx, |loom, cx| {
-                        loom.open_ctx(e.position, Ctx::Message(id.clone()), cx)
-                    });
-                }
-            });
-            div()
-                .w_full()
-                .flex()
-                .flex_col()
-                .items_center()
-                .px(px(space::XL))
-                .when_some(on_right, |d, f| d.on_mouse_down(MouseButton::Right, f))
-                .when(is_new, |d| d.child(divider))
-                .children(time_line)
-                .child(
-                    div()
-                        .w_full()
-                        // The hover reaches the strip either side where its time and
-                        // buttons are, so moving on to them keeps them there.
-                        .max_w(px(column + 2.0 * HOVER_REACH))
-                        .mx(px(-HOVER_REACH))
-                        .px(px(HOVER_REACH))
-                        // Messages stand a little apart, and bubbles that join sit
-                        // close, as they do in a reply. The list's own gap under each
-                        // row is taken off (`with_row_style`), so it's here instead.
-                        .pt(px(if joined.above { 0.0 } else { space::XS }))
-                        .pb(px(if joined.below { space::XS } else { space::S }))
-                        .relative()
-                        .group("row")
-                        .when_some(when, |d, when| {
-                            d.child(
-                                div()
-                                    .absolute()
-                                    .top(px(if joined.above { 0.0 } else { space::XS } + 4.0))
-                                    .right(relative(1.0))
-                                    .mr(px(-HOVER_REACH))
-                                    .pr(px(space::M))
-                                    .whitespace_nowrap()
-                                    .text_size(px(size::CAPTION))
-                                    .text_color(p.ink_3)
-                                    .opacity(0.0)
-                                    .group_hover("row", |s| s.opacity(1.0))
-                                    .child(when),
-                            )
-                        })
-                        .child(inner)
-                        .child(links)
-                        .when_some(branch_at, |d, id| {
-                            d.child(
-                                div()
-                                    .id(SharedString::from(format!("branch-row-{id}")))
-                                    .absolute()
-                                    .top(px(space::XS + 28.0))
-                                    .right(px(HOVER_REACH - 30.0))
-                                    .size(px(24.0))
-                                    .flex()
-                                    .items_center()
-                                    .justify_center()
-                                    .rounded(px(radius::ROW))
-                                    .cursor_pointer()
-                                    .text_color(p.ink_3)
-                                    .opacity(0.0)
-                                    .group_hover("row", |s| s.opacity(1.0))
-                                    .soft_hover(
-                                        transparent_black(),
-                                        p.hover,
-                                        Some((p.ink_3, p.ink)),
-                                    )
-                                    .tooltip(tip("Branch from here"))
-                                    .child(Icon::new(Ico::GitBranch).xsmall())
-                                    .on_click(move |_, _, cx| {
-                                        let _ = to_branch.update(cx, |loom, _| {
-                                            let f = loom.model.branch(&id);
-                                            loom.send(f);
-                                        });
-                                    }),
-                            )
-                        })
-                        .when_some(pin, |d, (id, pinned)| {
-                            d.child(
-                                div()
-                                    .id(SharedString::from(format!("pin-row-{id}")))
-                                    .absolute()
-                                    .top(px(space::XS))
-                                    .right(px(HOVER_REACH - 30.0))
-                                    .size(px(24.0))
-                                    .flex()
-                                    .items_center()
-                                    .justify_center()
-                                    .rounded(px(radius::ROW))
-                                    .cursor_pointer()
-                                    .text_color(if pinned { p.ink_2 } else { p.ink_3 })
-                                    .when(!pinned, |d| {
-                                        d.opacity(0.0).group_hover("row", |s| s.opacity(1.0))
-                                    })
-                                    .soft_hover(
-                                        transparent_black(),
-                                        p.hover,
-                                        Some((if pinned { p.ink_2 } else { p.ink_3 }, p.ink)),
-                                    )
-                                    .tooltip(tip(if pinned { "Unpin" } else { "Pin" }))
-                                    .child(Icon::new(Ico::Pin).xsmall())
-                                    .on_click(move |_, _, cx| {
-                                        let _ = this.update(cx, |loom, _| {
-                                            let f = loom.model.pin(&id, !pinned);
-                                            loom.send(f);
-                                        });
-                                    }),
-                            )
-                        }),
-                )
-                .into_any_element()
-        })
-        .with_row_style(StyleRefinement::default().pb(px(0.0)))
-        .with_bottom_fade(p.bg)
-        // The last message scrolls up clear of the small browser window.
-        .when(mini.is_some(), |l| {
+        // Clear of the small browser window, while it shows.
+        let pad = mini.is_some().then(|| {
             let (fw, fh) = self
                 .model
                 .frame
                 .as_ref()
                 .map_or((1280.0, 800.0), |f| (f.width.max(1.0), f.height.max(1.0)));
-            let mut s = StyleRefinement::default();
-            s.padding.bottom = Some(px(28.0 + mini_page_height(fw, fh) + space::L).into());
-            l.with_list_style(s)
+            28.0 + mini_page_height(fw, fh) + space::L
         });
+        let inputs = ChatInputs {
+            rows,
+            flow,
+            tools,
+            files,
+            branches,
+            name,
+            tint,
+            mood,
+            open,
+            show,
+            newest,
+            new_line,
+            column,
+            p,
+            pad,
+        };
+        // The list is a view of its own, drawn again only when what it shows changes:
+        // a frame that only moves a thread elsewhere uses it as it was.
+        let view = match &self.chat_view {
+            Some(v) => v.clone(),
+            None => {
+                let scroller = self.scroller.clone();
+                let this = this.clone();
+                let v = cx.new(|_| ChatList {
+                    scroller,
+                    this,
+                    inputs: None,
+                });
+                self.chat_view = Some(v.clone());
+                v
+            }
+        };
+        view.update(cx, |v, cx| {
+            if !v.inputs.as_ref().is_some_and(|o| o.same(&inputs)) {
+                v.inputs = Some(inputs);
+                cx.notify();
+            }
+        });
+        let list = AnyView::from(view).cached(StyleRefinement::default().size_full());
 
         let empty = self.rows.is_empty();
         // A task or a branch shows its strip over the list, even before it has messages.
@@ -13361,11 +13166,11 @@ fn person(
                 .text_size(px(size::BODY * scale))
                 .text_color(p.ink)
                 .when(m.queued, |d| d.opacity(0.6))
-                .child(
-                    TextView::markdown(SharedString::from(format!("m-{}-{room}", m.id)), words)
-                        .selectable(true)
-                        .on_link_click(on_link),
-                ),
+                .child(KeptText::new(
+                    SharedString::from(format!("m-{}-{room}", m.id)),
+                    words,
+                    move |v| v.selectable(true).on_link_click(on_link),
+                )),
         )
     })
     .when(m.queued, |d| {
@@ -13498,7 +13303,7 @@ fn file_view(
 }
 
 /// What a reply shows as it's drawn, from the person's prefs.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq)]
 struct Show {
     tools: Tools,
     thoughts: Thoughts,
@@ -13750,6 +13555,82 @@ fn tool_line(p: Palette, b: &model::Block, tools: &model::Tools) -> Div {
         .child(div().text_color(color).child(mark))
 }
 
+/// How many message texts stay parsed while out of view.
+const KEPT_TEXTS: usize = 300;
+
+/// Each kept text state by its key, with when it was last drawn.
+type KeptStates = HashMap<SharedString, (Entity<TextViewState>, u64)>;
+
+thread_local! {
+    /// Each message text's parsed state, by its key, with when it was last drawn. A
+    /// TextView's own state goes once its row isn't drawn, so a row scrolled back into
+    /// view was parsed again from the start, and a long one drew empty first.
+    static TEXTS: std::cell::RefCell<(KeptStates, u64)> =
+        std::cell::RefCell::new((HashMap::new(), 0));
+}
+
+/// A message's text, drawn from the state kept for `key`.
+#[derive(IntoElement)]
+struct KeptText {
+    key: SharedString,
+    text: SharedString,
+    style: Box<dyn FnOnce(TextView) -> TextView>,
+}
+
+impl KeptText {
+    fn new(
+        key: SharedString,
+        text: impl Into<SharedString>,
+        style: impl FnOnce(TextView) -> TextView + 'static,
+    ) -> Self {
+        KeptText {
+            key,
+            text: text.into(),
+            style: Box::new(style),
+        }
+    }
+}
+
+impl RenderOnce for KeptText {
+    fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
+        let kept = TEXTS.with(|t| {
+            let mut t = t.borrow_mut();
+            t.1 += 1;
+            let now = t.1;
+            t.0.get_mut(&self.key).map(|(state, used)| {
+                *used = now;
+                state.clone()
+            })
+        });
+        let state = match kept {
+            Some(state) => {
+                state.update(cx, |s, cx| s.set_text(&self.text, cx));
+                state
+            }
+            None => {
+                let text = self.text.clone();
+                let state = cx.new(|cx| TextViewState::markdown(&text, cx));
+                TEXTS.with(|t| {
+                    let mut t = t.borrow_mut();
+                    let now = t.1;
+                    t.0.insert(self.key.clone(), (state.clone(), now));
+                    // The least recently drawn go, a batch at a time.
+                    if t.0.len() > KEPT_TEXTS + KEPT_TEXTS / 4 {
+                        let mut by_use: Vec<(u64, SharedString)> =
+                            t.0.iter().map(|(k, (_, u))| (*u, k.clone())).collect();
+                        by_use.sort_unstable();
+                        for (_, k) in by_use.into_iter().take(KEPT_TEXTS / 4) {
+                            t.0.remove(&k);
+                        }
+                    }
+                });
+                state
+            }
+        };
+        (self.style)(TextView::new(&state))
+    }
+}
+
 /// What drawing one reply's parts needs (`model::parts`).
 struct ReplyDraw<'a> {
     p: Palette,
@@ -13800,13 +13681,11 @@ impl ReplyDraw<'_> {
                 .text_size(px(size::REPLY * show.text_scale))
                 .line_height(relative(line::REPLY))
                 .text_color(p.ink)
-                .child(
-                    TextView::markdown(
-                        SharedString::from(format!("r-{}-{}", self.key(i), show.room)),
-                        self.m.blocks[i].text.clone(),
-                    )
-                    .selectable(true),
-                );
+                .child(KeptText::new(
+                    SharedString::from(format!("r-{}-{}", self.key(i), show.room)),
+                    self.m.blocks[i].text.clone(),
+                    |v| v.selectable(true),
+                ));
             group = group.child(if show.bubbles {
                 // A bubble with a breath of the agent's colour, its corner by the
                 // thread squared off as a speech bubble's tail, and smaller where it
@@ -15326,4 +15205,324 @@ mod side_tests {
                 < side_width(true, window, layout::SIDEBAR, None)
         );
     }
+}
+
+/// What the chat's list is drawn from (`chat_list`).
+#[derive(Clone)]
+struct ChatInputs {
+    rows: Rc<Vec<Row>>,
+    flow: Rc<Vec<model::Flow>>,
+    tools: Rc<model::Tools>,
+    files: Rc<HashMap<String, String>>,
+    branches: Rc<HashMap<String, Vec<(String, String)>>>,
+    name: String,
+    tint: Hsla,
+    mood: Mood,
+    open: HashSet<String>,
+    show: Show,
+    newest: Option<String>,
+    new_line: Option<String>,
+    column: f32,
+    p: Palette,
+    pad: Option<f32>,
+}
+
+impl ChatInputs {
+    /// Whether the list would be drawn the same from `o`. The rows, their flow, the
+    /// tools and the files are made anew whenever they change, so their pointers say.
+    fn same(&self, o: &Self) -> bool {
+        Rc::ptr_eq(&self.rows, &o.rows)
+            && Rc::ptr_eq(&self.flow, &o.flow)
+            && Rc::ptr_eq(&self.tools, &o.tools)
+            && Rc::ptr_eq(&self.files, &o.files)
+            && self.branches == o.branches
+            && self.name == o.name
+            && self.tint == o.tint
+            && self.mood == o.mood
+            && self.open == o.open
+            && self.show == o.show
+            && self.newest == o.newest
+            && self.new_line == o.new_line
+            && self.column == o.column
+            && self.p == o.p
+            && self.pad == o.pad
+    }
+}
+
+/// The chat's list, as a view of its own.
+struct ChatList {
+    scroller: Entity<MessageScrollerState>,
+    this: WeakEntity<Loom>,
+    inputs: Option<ChatInputs>,
+}
+
+impl Render for ChatList {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        let Some(i) = self.inputs.clone() else {
+            return div().into_any_element();
+        };
+        chat_list(i, self.scroller.clone(), self.this.clone()).into_any_element()
+    }
+}
+
+/// The chat's messages, as its list draws them.
+fn chat_list(
+    i: ChatInputs,
+    scroller: Entity<MessageScrollerState>,
+    this: WeakEntity<Loom>,
+) -> MessageScroller {
+    let ChatInputs {
+        rows,
+        flow,
+        tools,
+        files,
+        branches,
+        name,
+        tint,
+        mood,
+        open,
+        show,
+        newest,
+        new_line,
+        column,
+        p,
+        pad,
+    } = i;
+    MessageScroller::new("chat", scroller, move |ix, _, _| {
+        let Some(row) = rows.get(ix) else {
+            return div().into_any_element();
+        };
+        // Above the first reply that came while the chat was shut: a line, NEW
+        // in the agent's colour.
+        let is_new = matches!(row, Row::Message(m) if new_line.as_deref() == Some(m.id.as_str()));
+        let divider = div()
+            .w_full()
+            .max_w(px(column))
+            .flex()
+            .items_center()
+            .gap(px(space::S))
+            .pt(px(space::S))
+            .child(div().flex_1().h(px(1.0)).bg(tint.opacity(0.5)))
+            .child(
+                div()
+                    .text_size(px(size::CAPTION))
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(tint)
+                    .child("NEW"),
+            );
+        let here = flow.get(ix).copied().unwrap_or_default();
+        let joined = here.joined;
+        // Across the chat where it paused, or on a new day: when it went on.
+        let time_line = match row {
+            Row::Message(m) if here.line => Some(
+                div()
+                    .w_full()
+                    .max_w(px(column))
+                    .flex()
+                    .justify_center()
+                    .pt(px(if ix == 0 { space::S } else { space::L }))
+                    .pb(px(space::XS))
+                    .text_size(px(size::CAPTION))
+                    .text_color(p.ink_3)
+                    .child(line_of(m.at, chrono::Local::now())),
+            ),
+            _ => None,
+        };
+        let inner = match row {
+            Row::Message(m) if m.role == "person" => person(
+                p,
+                m,
+                &files,
+                show.text_scale,
+                show.room,
+                joined,
+                this.clone(),
+            ),
+            Row::Message(m) => reply(
+                p,
+                m,
+                &name,
+                tint,
+                if m.live { mood } else { Mood::Idle },
+                here.head,
+                &open,
+                &tools,
+                &files,
+                Show {
+                    newest: newest.as_deref() == Some(m.id.as_str()),
+                    ..show
+                },
+                this.clone(),
+            ),
+            Row::Approval(a) => approval(p, a, this.clone()),
+        };
+        // A message's pin, just outside its corner: there while it's pinned, and
+        // on hover to pin it.
+        let pin = match row {
+            Row::Message(m) if !m.live && !m.queued => Some((m.id.clone(), m.pinned)),
+            _ => None,
+        };
+        // Under it, a link to each branch that goes on from it; and beside it, on
+        // hover, a way to branch there.
+        let gone_on = match row {
+            Row::Message(m) => branches.get(&m.id).cloned().unwrap_or_default(),
+            _ => Vec::new(),
+        };
+        let branch_at = pin.as_ref().map(|(id, _)| id.clone());
+        // Its time, just outside its left edge while the pointer is over it. Time
+        // lines show only where the chat paused.
+        let when = match row {
+            Row::Message(m) if !m.live && !m.queued => {
+                Some(when_sent(m.at, chrono::Local::now())).filter(|w| !w.is_empty())
+            }
+            _ => None,
+        };
+        let this = this.clone();
+        let to_branch = this.clone();
+        let mut links =
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(2.0))
+                .pt(px(if joined.below { 0.0 } else { space::XS }));
+        for (i, (id, title)) in gone_on.into_iter().enumerate() {
+            let this = this.clone();
+            links = links.child(
+                div()
+                    .id(SharedString::from(format!("branch-link-{ix}-{i}")))
+                    .flex()
+                    .items_center()
+                    .gap(px(space::XS))
+                    .text_size(px(size::CAPTION))
+                    .text_color(p.ink_3)
+                    .cursor_pointer()
+                    .soft_ink(p.ink_3, p.ink)
+                    .child(Icon::new(Ico::GitBranch).xsmall())
+                    .child(title)
+                    .on_click(move |_, _, cx| {
+                        let _ = this.update(cx, |loom, cx| loom.open_branch(Some(id.clone()), cx));
+                    }),
+            );
+        }
+        // A right-click on a kept message: Copy, Pin and Branch from here.
+        let on_right = branch_at.clone().map(|id| {
+            let this = this.clone();
+            move |e: &MouseDownEvent, _: &mut Window, cx: &mut App| {
+                let _ = this.update(cx, |loom, cx| {
+                    loom.open_ctx(e.position, Ctx::Message(id.clone()), cx)
+                });
+            }
+        });
+        div()
+            .w_full()
+            .flex()
+            .flex_col()
+            .items_center()
+            .px(px(space::XL))
+            .when_some(on_right, |d, f| d.on_mouse_down(MouseButton::Right, f))
+            .when(is_new, |d| d.child(divider))
+            .children(time_line)
+            .child(
+                div()
+                    .w_full()
+                    // The hover reaches the strip either side where its time and
+                    // buttons are, so moving on to them keeps them there.
+                    .max_w(px(column + 2.0 * HOVER_REACH))
+                    .mx(px(-HOVER_REACH))
+                    .px(px(HOVER_REACH))
+                    // Messages stand a little apart, and bubbles that join sit
+                    // close, as they do in a reply. The list's own gap under each
+                    // row is taken off (`with_row_style`), so it's here instead.
+                    .pt(px(if joined.above { 0.0 } else { space::XS }))
+                    .pb(px(if joined.below { space::XS } else { space::S }))
+                    .relative()
+                    .group("row")
+                    .when_some(when, |d, when| {
+                        d.child(
+                            div()
+                                .absolute()
+                                .top(px(if joined.above { 0.0 } else { space::XS } + 4.0))
+                                .right(relative(1.0))
+                                .mr(px(-HOVER_REACH))
+                                .pr(px(space::M))
+                                .whitespace_nowrap()
+                                .text_size(px(size::CAPTION))
+                                .text_color(p.ink_3)
+                                .opacity(0.0)
+                                .group_hover("row", |s| s.opacity(1.0))
+                                .child(when),
+                        )
+                    })
+                    .child(inner)
+                    .child(links)
+                    .when_some(branch_at, |d, id| {
+                        d.child(
+                            div()
+                                .id(SharedString::from(format!("branch-row-{id}")))
+                                .absolute()
+                                .top(px(space::XS + 28.0))
+                                .right(px(HOVER_REACH - 30.0))
+                                .size(px(24.0))
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .rounded(px(radius::ROW))
+                                .cursor_pointer()
+                                .text_color(p.ink_3)
+                                .opacity(0.0)
+                                .group_hover("row", |s| s.opacity(1.0))
+                                .soft_hover(transparent_black(), p.hover, Some((p.ink_3, p.ink)))
+                                .tooltip(tip("Branch from here"))
+                                .child(Icon::new(Ico::GitBranch).xsmall())
+                                .on_click(move |_, _, cx| {
+                                    let _ = to_branch.update(cx, |loom, _| {
+                                        let f = loom.model.branch(&id);
+                                        loom.send(f);
+                                    });
+                                }),
+                        )
+                    })
+                    .when_some(pin, |d, (id, pinned)| {
+                        d.child(
+                            div()
+                                .id(SharedString::from(format!("pin-row-{id}")))
+                                .absolute()
+                                .top(px(space::XS))
+                                .right(px(HOVER_REACH - 30.0))
+                                .size(px(24.0))
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .rounded(px(radius::ROW))
+                                .cursor_pointer()
+                                .text_color(if pinned { p.ink_2 } else { p.ink_3 })
+                                .when(!pinned, |d| {
+                                    d.opacity(0.0).group_hover("row", |s| s.opacity(1.0))
+                                })
+                                .soft_hover(
+                                    transparent_black(),
+                                    p.hover,
+                                    Some((if pinned { p.ink_2 } else { p.ink_3 }, p.ink)),
+                                )
+                                .tooltip(tip(if pinned { "Unpin" } else { "Pin" }))
+                                .child(Icon::new(Ico::Pin).xsmall())
+                                .on_click(move |_, _, cx| {
+                                    let _ = this.update(cx, |loom, _| {
+                                        let f = loom.model.pin(&id, !pinned);
+                                        loom.send(f);
+                                    });
+                                }),
+                        )
+                    }),
+            )
+            .into_any_element()
+    })
+    .with_row_style(StyleRefinement::default().pb(px(0.0)))
+    .with_bottom_fade(p.bg)
+    // The last message scrolls up clear of the small browser window.
+    .when_some(pad, |l, pad| {
+        let mut s = StyleRefinement::default();
+        s.padding.bottom = Some(px(pad).into());
+        l.with_list_style(s)
+    })
 }
