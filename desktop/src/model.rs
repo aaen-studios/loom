@@ -1742,6 +1742,39 @@ pub fn copy_text(m: &Message, tools: &Tools) -> String {
         .join("\n\n")
 }
 
+/// Markdown as a screen reader should say it: its words, without the marks around
+/// them, and a link as its words alone.
+pub fn spoken(md: &str) -> String {
+    let mut out = String::with_capacity(md.len());
+    for (n, line) in md.lines().enumerate() {
+        if n > 0 {
+            out.push('\n');
+        }
+        let line = line.trim_start();
+        let line = line.trim_start_matches('#').trim_start_matches('>');
+        let mut rest = line.trim_start();
+        while let Some(c) = rest.chars().next() {
+            // [words](address), or ![words](address) for a picture: the words.
+            let link = rest.strip_prefix("![").or_else(|| rest.strip_prefix('['));
+            if let Some((words, after)) = link.and_then(|r| r.split_once("](")) {
+                if let Some((_, tail)) = after.split_once(')') {
+                    out.push_str(words);
+                    rest = tail;
+                    continue;
+                }
+            }
+            if !matches!(c, '*' | '`' | '~') && !rest.starts_with("__") {
+                out.push(c);
+            }
+            rest = &rest[c.len_utf8()..];
+            if c == '_' && rest.starts_with('_') {
+                rest = &rest[1..];
+            }
+        }
+    }
+    out
+}
+
 /// A tool call's title, as its agent named it.
 pub fn tool_title(call: Option<&String>, tools: &Tools) -> String {
     call.and_then(|c| tools.get(c))
@@ -6554,6 +6587,23 @@ mod tests {
             "done",
         );
         assert_eq!(copy_text(&reply, &Tools::default()), "Here it is.");
+    }
+
+    #[test]
+    fn a_screen_reader_hears_the_words_without_their_marks() {
+        assert_eq!(
+            spoken("## Found\nhere is **what I found** in `notes/hours.md`, with a [link](https://example.com)."),
+            "Found\nhere is what I found in notes/hours.md, with a link."
+        );
+        assert_eq!(
+            spoken("> __bold__ and ![a chart](x.png)"),
+            "bold and a chart"
+        );
+        assert_eq!(
+            spoken("snake_case [stays] ~~gone~~"),
+            "snake_case [stays] gone"
+        );
+        assert_eq!(spoken("日本語の*テスト*"), "日本語のテスト");
     }
 
     #[test]
