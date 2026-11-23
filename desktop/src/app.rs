@@ -1527,7 +1527,10 @@ ACTA_KEY=secret:ACTA_KEY",
             cx.notify();
             return;
         }
-        LOCAL.store(if local { 1 } else { 2 }, std::sync::atomic::Ordering::Relaxed);
+        LOCAL.store(
+            if local { 1 } else { 2 },
+            std::sync::atomic::Ordering::Relaxed,
+        );
         // The choice is the first server's.
         self.show_server("", cx);
         self.model = Model::new();
