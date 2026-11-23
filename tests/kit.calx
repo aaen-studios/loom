@@ -92,16 +92,17 @@ impl Instance {
         if not added.status.success() { fail "loom acp add failed: {added.error_text()}" }
     }
 
-    /// Stops the instance and starts it again on the same data, as after a
-    /// restart. The token still works; the address is a new one.
+    /// Kills the instance, as a crash would, and starts it again on the same data.
+    /// The token still works; the address is a new one.
     pub fn restart(own self) -> Instance ! Error {
         return try self.restart_with(List<String>(), 0)
     }
 
     /// The same, with `extra` options for `loom serve`, after `off_ms` stopped.
     pub fn restart_with(own self, extra: List<String>, off_ms: i64) -> Instance ! Error {
+        // With all it started, its agents among it, which a killed instance leaves.
         var old = self.server
-        old.kill()
+        old.kill_tree()
         _ = old.wait()
         if off_ms > 0 { unsafe { sleep(u64.wrap(off_ms) * 1000000) } }
         var args: List<String> = [String("serve"), String("--port"), String("0"), String("--allow-root")]
