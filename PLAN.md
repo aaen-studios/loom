@@ -106,7 +106,7 @@ People who don't want a server run their instance in the desktop app. On first s
 - **Just you, no password.** Your account on the computer is the lock. A desktop instance is for its owner and their own devices. To share it with other people, move it to a server.
 - **Agents work on your computer.** They're the ACP agents installed there, with your own logins, and their commands run in PowerShell on Windows and zsh on macOS.
 - **The `loom` program comes along.** The app installs the same `loom` program a server runs, beside itself. ACP agents need it for `loom mcp`, and it gives the desktop instance the same command line as a server.
-- **It keeps running.** The app starts when you log in and lives in the tray, so routines run while the window is closed. Quitting from the tray stops the instance. Routines missed while it was off run when it starts again, or are skipped, as each routine says.
+- **It keeps running.** The app starts when you log in and lives in the tray, so routines run while the window is closed. There's one loom to a person: starting it again while it runs, in the tray or after an update, brings that loom's window forward instead of starting another. Quitting from the tray stops the instance. Routines missed while it was off run when it starts again, or are skipped, as each routine says.
 - **Your phone** connects to it by scanning a QR code in the desktop app ([below](#connecting-devices)). An iPhone can't run an instance itself, since iOS stops apps in the background.
 - **Moving.** A desktop instance moves to a server, or back, whenever you like ([Moving an instance](#moving-an-instance)).
 

@@ -454,24 +454,33 @@ pub fn first_start(data: &str) {
 static MAXIMIZE_WHEN_SHOWN: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
-/// Hides and shows the window, which GPUI can't do itself on Windows.
+/// Hides and shows the window, which GPUI can't do itself on Windows. Shown, it comes
+/// forward, out of the tray or the taskbar.
 #[cfg(windows)]
 pub fn show_window(hwnd: isize, show: bool) {
     use std::sync::atomic::Ordering;
     use windows_sys::Win32::UI::WindowsAndMessaging::{
-        SetForegroundWindow, ShowWindow, SW_HIDE, SW_SHOW, SW_SHOWMAXIMIZED,
+        IsIconic, SetForegroundWindow, ShowWindow, SW_HIDE, SW_RESTORE, SW_SHOW, SW_SHOWMAXIMIZED,
+        SW_SHOWNA,
     };
+    // A build for measuring shows its window behind what the person is doing (main.rs).
+    let measuring = cfg!(feature = "perf");
     let how = if !show {
         SW_HIDE
+    } else if measuring {
+        SW_SHOWNA
     } else if MAXIMIZE_WHEN_SHOWN.swap(false, Ordering::Relaxed) {
         SW_SHOWMAXIMIZED
+    // SAFETY: IsIconic only reads the window's state.
+    } else if unsafe { IsIconic(hwnd as _) } != 0 {
+        SW_RESTORE
     } else {
         SW_SHOW
     };
     // SAFETY: hwnd is the app's own window, which lives as long as the app.
     unsafe {
         ShowWindow(hwnd as _, how);
-        if show {
+        if show && !measuring {
             SetForegroundWindow(hwnd as _);
         }
     }
