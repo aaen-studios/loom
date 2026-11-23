@@ -429,7 +429,7 @@ An agent's browser opened or closed, was taken over or handed back, or is asking
 
 ### `browser.frame`
 
-A picture of the page, to each session watching that agent's browser: `agent`, `data` (a JPEG, base64), `width` and `height` (the page's pixels, which `browser.input`'s `x` and `y` are in). They come as the page changes, at most about twelve a second.
+A picture of the page, to each session watching that agent's browser: `agent`, `data` (a JPEG, base64), `width` and `height` (the page's pixels, which `browser.input`'s `x` and `y` are in). They come as the page changes, at most about twelve a second. The JPEG is as the browser wrote it: Chrome on Linux writes a scan for each of its three colors, which an app's decoder has to read as well as a JPEG in one scan.
 
 ### `instance.update`
 
