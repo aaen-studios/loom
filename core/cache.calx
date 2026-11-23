@@ -397,15 +397,15 @@ impl Cache {
     /// already keeps the run.started it came with.
     pub fn keep_runs(self, runs: Json) ! Error {
         let Json.Array(going) = runs else return
-        try self.step()
+        let began = try self.step()
         match self.put_runs(going) {
             ok => {},
             err(e) => {
-                self.undo()
+                self.undo(began)
                 fail e
             },
         }
-        try self.step_done()
+        try self.step_done(began)
     }
 
     fn put_runs(self, going: List<Json>) ! Error {
