@@ -49,6 +49,7 @@ const LAUNCH_MS: i64 = 60000
 // How much of a page's outline goes to the agent.
 const OUTLINE_MOST: usize = 40000
 const FRAME_GAP_MS: i64 = 80    // the least time between the frames the page sends
+const NAVIGATION_LOOK_MS: i64 = 120    // how long after an act a new page may still be asked for
 
 // A tool call for the browser: browser_open's name is "open", and so on.
 pub struct Op {
@@ -97,6 +98,8 @@ struct Worker {
     told_fonts: bool    // whether the agent's been told the computer has no fonts
     ack: i64       // the last frame's session, to answer
     ack_at: i64    // when to answer it, or 0
+    navigating: bool    // a new page has been asked for since the act began
+    loaded: bool        // and has loaded
 }
 
 impl Task for Worker {
@@ -155,7 +158,7 @@ impl Task for Worker {
 pub fn start(key: String, data: String, profile: String, guarded: bool, proxy: u16, reopen: String, back: Sender<Back>) -> (Sender<In>, Thread) {
     let inbox = Receiver<In>()
     let to = inbox.sender()
-    let t = unsafe { Thread.spawn(Worker { key: key.copy(), data: data.copy(), profile: profile.copy(), guarded: guarded, proxy: proxy, inbox: inbox, back: back.copy(), child: none, page: none, port: String(), next_id: 0, refs: Map<String, i64>(), hidden: List<(String, String)>(), watched: false, casting: false, recording: false, steps: List<Json>(), last_url: String(), was_on: String(), reopen: reopen.copy(), told_fonts: false, ack: 0, ack_at: 0 }) }
+    let t = unsafe { Thread.spawn(Worker { key: key.copy(), data: data.copy(), profile: profile.copy(), guarded: guarded, proxy: proxy, inbox: inbox, back: back.copy(), child: none, page: none, port: String(), next_id: 0, refs: Map<String, i64>(), hidden: List<(String, String)>(), watched: false, casting: false, recording: false, steps: List<Json>(), last_url: String(), was_on: String(), reopen: reopen.copy(), told_fonts: false, ack: 0, ack_at: 0, navigating: false, loaded: false }) }
     return (to, t)
 }
 
@@ -427,7 +430,11 @@ impl Worker {
     // An event from the page. A frame goes to the loop, and the page is told
     // it came, so it sends the next.
     fn event(w: mut Worker, e: Json) {
-        if str_at(e.copy(), "method") != some(String("Page.screencastFrame")) { return }
+        let method = str_at(e.copy(), "method") ?? String()
+        // What settle waits on: a new page asked for or loading, and loaded.
+        if method == "Page.frameRequestedNavigation" or method == "Page.frameStartedLoading" { w.navigating = true }
+        if method == "Page.loadEventFired" { w.loaded = true }
+        if method != "Page.screencastFrame" { return }
         let params = at(e, "params")
         // The page sends the next frame once this one is answered, so answering
         // a little later keeps them to about twelve a second: a page that moves
@@ -653,6 +660,7 @@ impl Worker {
         let agent = (str_at(version, "userAgent") ?? String()).replace("HeadlessChrome", "Chrome")
         _ = try w.call("Emulation.setUserAgentOverride", Obj.new().s("userAgent", agent).done())
         _ = try w.call("Page.setDownloadBehavior", Obj.new().s("behavior", String("deny")).done())
+        _ = try w.call("Page.enable", Obj.new().done())
         if w.guarded {
             var blocked = List<Json>()
             for p in guarded_patterns() { blocked.push(Json.Str(p.copy())) }
@@ -775,15 +783,46 @@ impl Worker {
 
     // Waits for the page to finish loading, after something that may have
     // started a new one.
+    //
+    // The page says when a new one is asked for, so an act that started none
+    // is done after a short look, and one that did is done once it has loaded.
+    // Until a new page has been asked for, the old one says it's complete, so
+    // readyState is asked only once one has, or once the old wait has passed.
     fn settle(w: mut Worker) {
-        unsafe { sleep(300000000) }
-        let until = now() + LOAD_MS
-        while now() < until {
-            match w.call("Runtime.evaluate", Obj.new().s("expression", String("document.readyState")).b("returnByValue", true).done()) {
-                ok(r) => if str_at(at(r, "result"), "value") == some(String("complete")) { return },
-                err(_) => {},
+        let started = now()
+        while not w.navigating and now() - started < NAVIGATION_LOOK_MS {
+            w.pump(started + NAVIGATION_LOOK_MS - now())
+        }
+        if w.navigating {
+            let until = now() + LOAD_MS
+            var asked: i64 = 0
+            while now() < until and not w.loaded {
+                w.pump(100)
+                if w.loaded { break }
+                if now() - started < 300 or now() - asked < 100 { continue }
+                asked = now()
+                match w.call("Runtime.evaluate", Obj.new().s("expression", String("document.readyState")).b("returnByValue", true).done()) {
+                    ok(r) => if str_at(at(r, "result"), "value") == some(String("complete")) { break },
+                    err(_) => {},
+                }
             }
-            unsafe { sleep(200000000) }
+        }
+        w.navigating = false
+        w.loaded = false
+    }
+
+    // Takes the page's events for up to `ms` milliseconds.
+    fn pump(w: mut Worker, ms: i64) {
+        if ms <= 0 { return }
+        w.ack_frame()
+        let m = match w.receive(u32.wrap(ms)) {
+            ok(some(m)) => m,
+            _ => return,
+        }
+        if let Message.Text(t) = m {
+            if let ok(e) = parse(t) {
+                if e.get(String("method")) != none { w.event(e) }
+            }
         }
     }
 
@@ -879,6 +918,9 @@ impl Worker {
     // after it closed opens the page it was on first, unless the call opens
     // another, and the result says so.
     fn op(w: mut Worker, name: String, args: Json) -> Json ! Error {
+        // What the page did before this call isn't what settle waits on.
+        w.navigating = false
+        w.loaded = false
         var note = String()
         if w.page == none {
             try w.open_browser()
