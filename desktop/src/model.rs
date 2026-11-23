@@ -978,6 +978,64 @@ impl Routine {
     }
 }
 
+/// One of a routine's runs, as `routine.runs` gives it: when it ran, how it ended, and
+/// what its agent posted and answered.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct RoutineRun {
+    pub run: String,
+    pub at: i64,
+    /// running, done, quiet, failed, limit or cancelled.
+    pub status: String,
+    pub error: String,
+    pub said: String,
+    pub posted: Vec<String>,
+}
+
+impl RoutineRun {
+    fn of(v: &Value) -> RoutineRun {
+        RoutineRun {
+            run: s(v, "run"),
+            at: v.get("at").and_then(Value::as_i64).unwrap_or(0),
+            status: s(v, "status"),
+            error: s(v, "error"),
+            said: s(v, "said"),
+            posted: v
+                .get("posted")
+                .and_then(Value::as_array)
+                .map(|a| {
+                    a.iter()
+                        .filter_map(Value::as_str)
+                        .map(String::from)
+                        .collect()
+                })
+                .unwrap_or_default(),
+        }
+    }
+
+    /// How it ended, in a few words.
+    pub fn outcome(&self) -> String {
+        match self.status.as_str() {
+            "running" => "Running".into(),
+            "quiet" => "Nothing new".into(),
+            "done" if !self.posted.is_empty() => "Posted".into(),
+            "done" => "Done".into(),
+            "cancelled" => "Stopped".into(),
+            _ if self.error.is_empty() => "Failed".into(),
+            _ => format!("Failed: {}", self.error),
+        }
+    }
+
+    /// What it posted, or else what its agent answered, on one line.
+    pub fn words(&self) -> String {
+        let text = self
+            .posted
+            .first()
+            .cloned()
+            .unwrap_or_else(|| self.said.clone());
+        text.split_whitespace().collect::<Vec<_>>().join(" ")
+    }
+}
+
 /// What the routine form says, to save.
 #[derive(Clone, Debug, Default)]
 pub struct RoutineForm {
@@ -2021,6 +2079,9 @@ pub struct Run {
     pub conversation: String,
     pub agent: String,
     pub message: String,
+    /// A routine's quiet run, or a step of its flow: the chat shows only what its agent
+    /// posts, never the run itself.
+    pub quiet: bool,
 }
 
 /// What an agent's thread shows.
@@ -2301,6 +2362,9 @@ pub struct Model {
     /// The person's routines, oldest first.
     pub routines: Vec<Routine>,
     routines_stale: bool,
+    /// The open routine's runs, newest first, and which routine they're for.
+    pub routine_runs: Vec<RoutineRun>,
+    routine_runs_for: Option<String>,
     /// The routine flows running.
     pub flows: Vec<RunningFlow>,
     /// The person's tasks, newest first.
@@ -2502,6 +2566,12 @@ fn host_entry(typed: &str) -> Option<String> {
     (!h.is_empty()).then_some(h)
 }
 
+/// A routine's prompt that an instance kept in the chat before routines ran quietly
+/// (PLAN.md, "Routines"): stored, but not shown.
+fn routine_prompt(m: &Value) -> bool {
+    s(m, "role") == "person" && s(m, "from").starts_with("rt_")
+}
+
 fn blocks_of(v: &Value) -> Vec<Block> {
     v.get("blocks")
         .and_then(Value::as_array)
@@ -2560,6 +2630,9 @@ impl Model {
         if std::mem::take(&mut self.routines_stale) {
             out.push(self.load_routines());
             out.push(self.load_flows());
+            if let Some(routine) = self.routine_runs_for.clone() {
+                out.extend(self.load_routine_runs(Some(&routine)));
+            }
         }
         if std::mem::take(&mut self.plugins_stale) {
             out.push(self.load_plugins());
@@ -2845,26 +2918,16 @@ impl Model {
             pinned: m.get("pinned").is_some_and(|p| !p.is_null()),
             mentions: mentions_of(m),
             status: s(m, "status"),
-            // `from` is a device, the agent that sent it, or a routine.
-            from_agent: m.get("from").and_then(Value::as_str).and_then(|f| {
-                if f.starts_with("a_") {
-                    Some(
-                        self.agent(f)
-                            .map(|a| a.name.clone())
-                            .unwrap_or_else(|| "Another agent".into()),
-                    )
-                } else if f.starts_with("rt_") {
-                    Some(
-                        self.routines
-                            .iter()
-                            .find(|r| r.id == f)
-                            .map(|r| format!("the routine {}", r.name))
-                            .unwrap_or_else(|| "a routine".into()),
-                    )
-                } else {
-                    None
-                }
-            }),
+            // `from` is a device, or the agent that sent it.
+            from_agent: m
+                .get("from")
+                .and_then(Value::as_str)
+                .filter(|f| f.starts_with("a_"))
+                .map(|f| {
+                    self.agent(f)
+                        .map(|a| a.name.clone())
+                        .unwrap_or_else(|| "Another agent".into())
+                }),
         }
     }
 
@@ -3144,7 +3207,7 @@ impl Model {
                     if kind == "message.deleted" {
                         let gone = message.as_str().unwrap_or_default();
                         self.messages.retain(|m| m.queued || m.id != gone);
-                    } else {
+                    } else if !routine_prompt(&message) {
                         let m = self.message_of(&message);
                         if let Some(old) =
                             self.messages.iter_mut().find(|o| !o.queued && o.id == m.id)
@@ -3883,6 +3946,12 @@ impl Model {
                 .map(|rs| rs.iter().map(Routine::of).collect())
                 .unwrap_or_default();
             self.dirty.insert(List::Messages);
+        } else if id.starts_with("app.runs_of_routine") {
+            self.routine_runs = f
+                .pointer("/value/runs")
+                .and_then(Value::as_array)
+                .map(|rs| rs.iter().map(RoutineRun::of).collect())
+                .unwrap_or_default();
         } else if id.starts_with("app.routine_") {
             if let Some(e) = f.get("error") {
                 self.notices.push(s(e, "message"));
@@ -4252,6 +4321,7 @@ impl Model {
                         conversation: s(r, "conversation"),
                         agent: s(r, "agent"),
                         message: s(r, "message"),
+                        quiet: !s(r, "routine").is_empty(),
                     })
                     .collect();
             }
@@ -4297,7 +4367,11 @@ impl Model {
             }
             List::Messages => {
                 self.more_messages = f.get("more").and_then(Value::as_bool).unwrap_or(false);
-                let messages: Vec<Message> = items.iter().map(|m| self.message_of(m)).collect();
+                let messages: Vec<Message> = items
+                    .iter()
+                    .filter(|m| !routine_prompt(m))
+                    .map(|m| self.message_of(m))
+                    .collect();
                 self.messages = messages;
                 self.place_queued();
                 // The tool calls these messages name.
@@ -4347,7 +4421,8 @@ impl Model {
             .collect();
         let conversation = self.conversation();
         for r in &self.runs {
-            if Some(&r.conversation) != conversation.as_ref() {
+            // A routine's quiet run shows only what its agent posts, which comes as messages.
+            if r.quiet || Some(&r.conversation) != conversation.as_ref() {
                 continue;
             }
             if out.iter().any(|m| m.id == r.message) {
@@ -5466,6 +5541,18 @@ impl Model {
         json!({"t": "cmd", "id": cmd, "name": "routine.stop", "args": {"id": id}})
     }
 
+    /// Asks for routine `id`'s runs, and keeps them fresh while it's open; `None` when
+    /// no routine is open, which forgets them.
+    pub fn load_routine_runs(&mut self, id: Option<&str>) -> Option<Value> {
+        if self.routine_runs_for.as_deref() != id {
+            self.routine_runs.clear();
+        }
+        self.routine_runs_for = id.map(String::from);
+        let id = id?;
+        let cmd = self.id("app.runs_of_routine");
+        Some(json!({"t": "cmd", "id": cmd, "name": "routine.runs", "args": {"id": id}}))
+    }
+
     pub fn run_routine(&mut self, id: &str) -> Value {
         let cmd = self.id("app.routine_run");
         json!({"t": "cmd", "id": cmd, "name": "routine.run", "args": {"id": id}})
@@ -5707,15 +5794,20 @@ impl Model {
 
     pub fn cancel(&self) -> Option<Value> {
         let conversation = self.conversation()?;
-        let run = self.runs.iter().find(|r| r.conversation == conversation)?;
+        let run = self
+            .runs
+            .iter()
+            .find(|r| !r.quiet && r.conversation == conversation)?;
         Some(json!({"t": "cancel", "run": run.id}))
     }
 
+    /// Whether the agent is answering in the shown chat, so the button stops it. A
+    /// routine's quiet run isn't shown, so it isn't stopped from here.
     pub fn busy(&self) -> bool {
         let conversation = self.conversation();
         self.runs
             .iter()
-            .any(|r| Some(&r.conversation) == conversation.as_ref())
+            .any(|r| !r.quiet && Some(&r.conversation) == conversation.as_ref())
     }
 }
 
@@ -6385,6 +6477,7 @@ mod tests {
             conversation: "c_1".into(),
             agent: "a_1".into(),
             message: "msg_1".into(),
+            quiet: false,
         }];
         let delta = |block: u64, kind: &str, text: &str| json!({"t": "delta", "run": "run_1", "message": "msg_1", "block": block, "kind": kind, "pos": 0, "text": text});
         m.take(&delta(
@@ -6452,6 +6545,7 @@ mod tests {
             conversation: "c_1".into(),
             agent: "a_1".into(),
             message: "msg_1".into(),
+            quiet: false,
         }];
         let delta = |block: u64, kind: &str, text: &str| json!({"t": "delta", "run": "run_1", "message": "msg_1", "block": block, "kind": kind, "pos": 0, "text": text});
         m.take(&delta(1, "thought", "Five entries."));
@@ -6526,6 +6620,40 @@ mod tests {
                 Part::Bubbles(vec![5]),
             ]
         );
+    }
+
+    #[test]
+    fn a_routines_quiet_run_shows_only_what_it_posts() {
+        let mut m = Model::new();
+        m.conversations = vec![Conversation {
+            id: "c_1".into(),
+            agent: "a_1".into(),
+            task: None,
+            side: false,
+            branch_of: None,
+            branch_at: None,
+            routine: None,
+            program: None,
+            title: String::new(),
+        }];
+        m.select(Some("a_1".into()));
+        m.runs = vec![Run {
+            id: "run_1".into(),
+            conversation: "c_1".into(),
+            agent: "a_1".into(),
+            message: "msg_2".into(),
+            quiet: true,
+        }];
+        m.take(&json!({"t": "delta", "run": "run_1", "message": "msg_2", "block": 0, "kind": "text", "pos": 0, "text": "Nothing new."}));
+        assert!(m.shown().is_empty() && !m.busy() && m.cancel().is_none());
+        // A prompt kept in the chat before routines ran quietly isn't shown; a post is.
+        m.take(&json!({"t": "event", "kind": "message.created", "conversation": "c_1", "message":
+            {"id": "msg_1", "conversation": "c_1", "role": "person", "from": "rt_1", "at": 1, "blocks": [{"kind": "text", "text": "Check for a new release."}]}}));
+        m.take(&json!({"t": "event", "kind": "message.created", "conversation": "c_1", "message":
+            {"id": "msg_3", "conversation": "c_1", "role": "agent", "agent": "a_1", "routine": "rt_1", "at": 2, "status": "done", "blocks": [{"kind": "text", "text": "26.4 is out."}]}}));
+        let shown = m.shown();
+        assert_eq!(shown.len(), 1);
+        assert_eq!(shown[0].id, "msg_3");
     }
 
     #[test]

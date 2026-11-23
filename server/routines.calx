@@ -134,6 +134,87 @@ pub fn after_run(s: Schedule, tz: String, due: i64, now: i64, minute_ms: i64) ->
     return next(s, tz, now, minute_ms)
 }
 
+// What a routine's agent is told with each run's prompt, and each step's of
+// its flow (PLAN.md, "Routines"): that the turn is quiet, so nothing of it
+// reaches the person but what it posts with routine_post. `flow` says whether
+// its answer goes on to steps of the routine's flow.
+pub fn quiet_note(flow: bool) -> String {
+    let on = if flow { " Your answer goes on to the routine's next steps, which the person doesn't see either." } else { "" }
+    return "[loom: Your person sees nothing of this turn: not this message, nor what you answer. When there's something worth telling them, post it with routine_post: it goes in your chat with them as your message, and they're notified. With nothing new, just finish, or end with routine_quiet. If it can't be done, say why with routine_failed, which they're told.{on}]"
+}
+
+// How much of what a run's agent answered, and of each thing it posted, the
+// routine's runs keep, in bytes.
+pub const SAID_MOST: usize = 4000
+
+// The start of `text`, up to about `most` bytes and with … where it was cut,
+// its lines as they were.
+pub fn cut(text: String, most: usize) -> String {
+    let t = text.trim()
+    if t.len() <= most { return t.copy() }
+    var out = String()
+    for r in t.runes() {
+        if out.len() >= most { break }
+        out.push(r)
+    }
+    return "{out}…"
+}
+
+// A prompt with OpenBot's routine tools named as loom's (PLAN.md, "Importing
+// from OpenBot and Grok Bot"): openbot.routine_no_update is routine_quiet, and
+// openbot.routine_report_failure is routine_failed.
+pub fn loom_tools(prompt: String) -> String {
+    return prompt.replace("openbot.routine_no_update", "routine_quiet").replace("openbot.routine_report_failure", "routine_failed")
+}
+
+// How a routine run went, from how its turn ended (`status`, with `error`), what
+// its agent said with routine_failed or routine_quiet (`mark`, with `why`),
+// whether it posted, and whether the routine has a flow: done (it posted, or
+// its answer goes on to the flow), quiet (nothing to say), failed with why, or
+// how the turn ended when it didn't end by itself.
+pub fn outcome(status: String, error: String?, mark: String, why: String, posted: bool, flow: bool) -> (String, String?) {
+    if status != "done" { return (status.copy(), error.copy()) }
+    if mark == "failed" { return (String("failed"), some(why.copy())) }
+    if posted { return (String("done"), none) }
+    if mark == "quiet" or not flow { return (String("quiet"), none) }
+    return (String("done"), none)
+}
+
+@test
+fn a_run_is_quiet_unless_it_posts() {
+    let none_given: String? = none
+    assert(outcome(String("done"), none_given.copy(), String(), String(), false, false) == (String("quiet"), none_given.copy()))
+    assert(outcome(String("done"), none_given.copy(), String(), String(), true, false) == (String("done"), none_given.copy()))
+    // Posted, then said it was quiet: the person saw it, so it's done.
+    assert(outcome(String("done"), none_given.copy(), String("quiet"), String(), true, false) == (String("done"), none_given.copy()))
+    // A flow's routine hands its answer on, unless it said there's nothing.
+    assert(outcome(String("done"), none_given.copy(), String(), String(), false, true) == (String("done"), none_given.copy()))
+    assert(outcome(String("done"), none_given.copy(), String("quiet"), String(), false, true) == (String("quiet"), none_given.copy()))
+    assert(outcome(String("done"), none_given.copy(), String("failed"), String("the shop was down"), true, false) == (String("failed"), some(String("the shop was down"))))
+    assert(outcome(String("failed"), some(String("it crashed")), String("quiet"), String(), false, false) == (String("failed"), some(String("it crashed"))))
+    assert(outcome(String("cancelled"), none_given.copy(), String(), String(), false, false) == (String("cancelled"), none_given))
+}
+
+@test
+fn what_a_run_said_is_cut_with_its_lines() {
+    assert(cut(String(" one\ntwo "), 10) == "one\ntwo")
+    assert(cut(String("abcdef"), 3) == "abc…")
+}
+
+@test
+fn openbot_tools_are_loom_tools() {
+    let p = String("3. If both are false, report nothing; call openbot.routine_no_update.\n4. Call openbot.routine_report_failure if the error looks permanent.")
+    assert(loom_tools(p) == "3. If both are false, report nothing; call routine_quiet.\n4. Call routine_failed if the error looks permanent.")
+    assert(loom_tools(String("check the build")) == "check the build")
+}
+
+@test
+fn the_agent_is_told_the_run_is_quiet() {
+    let told = quiet_note(false)
+    assert(told.starts_with("[loom: ") and told.contains("routine_post") and told.contains("routine_quiet") and told.contains("routine_failed") and not told.contains("next steps"))
+    assert(quiet_note(true).contains("next steps"))
+}
+
 @test
 fn reads_a_gap_in_minutes() {
     assert(read(parse(#"{"every":30}"#)!) != none)

@@ -40,6 +40,12 @@ A message to an agent that's busy waits its turn, in a queue above the composer,
 
 To have every message steer at once, set **A message while it answers** on the agent's edit page, or on the Defaults page for every agent.
 
+## Routines in the chat
+
+A routine runs out of sight: its prompt and the agent's answer stay out of the chat. The agent posts in the chat only when there's something to tell you, and with **Notify me** on, the post comes as a notification too. A run that fails shows the agent's answer, so you see why.
+
+Each routine's **Runs**, on its page under **Routines**, say how every run ended (posted, nothing new, or failed) and what the agent posted or answered.
+
 ## A backup program
 
 An agent runs on an agent program, its brain. When that program runs out of usage or hits a rate limit, or doesn't start, a backup program can take the turn over. The reply says so first, in one line, such as "Claude Code ran out of usage, so Codex answers this chat now."

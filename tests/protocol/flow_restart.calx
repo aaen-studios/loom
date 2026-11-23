@@ -48,7 +48,7 @@ fn before(i: Instance) -> (i64, String) ! Error {
     for (q, name) in [("q_1", "Main"), ("q_2", "Slow")] {
         _ = try app.cmd(q, "agent.create", Obj.new().s("name", String(name)).s("acp_agent", String("fake")).s("instructions", String("Test.")).done())
     }
-    let flow = Json.Array([step_after("slow", "Slow", "/sleep 3000\nslow done", "routine"), step_after("last", "Main", "last done", "slow")])
+    let flow = Json.Array([step_after("slow", "Slow", "/sleep 3000\n/mcp routine_post \{\"text\": \"slow done\"\}", "routine"), step_after("last", "Main", "last done", "slow")])
     let put = try app.cmd("q_3", "routine.put", Obj.new().s("name", String("Chain")).s("agent", String("Main")).s("prompt", String("started")).j("schedule", Obj.new().i("every", 600).done()).j("flow", flow).done())
     let routine = str_at(at(at(put, "value"), "routine"), "id") ?? String()
     _ = try app.cmd("q_4", "routine.run", Obj.new().s("id", routine.copy()).done())
@@ -67,7 +67,7 @@ fn after_restart(i: Instance, seq: i64, routine: String) ! Error {
         let m = at(f.copy(), "message")
         if str_at(f.copy(), "kind") == some(String("message.created")) and str_at(m.copy(), "role") == some(String("agent")) and "{at(m, "blocks")}".contains("slow done") { answered = true }
     }
-    try check(answered, "and its agent answers")
+    try check(answered, "and its agent posts what it has to say")
     app.close()
 }
 

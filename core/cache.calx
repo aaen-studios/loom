@@ -612,7 +612,7 @@ fn applies_events_with_the_cursor() ! Error {
     assert(cs.len() == 1 and str_at(cs[0].copy(), "title") == some(String("CI")) and str_at(cs[0].copy(), "agent") == some(String("a_1")))
     let (ms, more) = try c.messages(String("c_1"), none, 50)
     assert(ms.len() == 1 and not more)
-    // A routine run that ended quietly takes its message back.
+    // A message that's gone goes from the cache too.
     _ = try c.apply(ev(4, "message.deleted", Obj.new().s("conversation", String("c_1")).s("message", String("msg_1")).done()))
     let (left, _) = try c.messages(String("c_1"), none, 50)
     assert(left.len() == 0)

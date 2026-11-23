@@ -27,6 +27,25 @@ fn reply_in(app: mut Session, conversation: String) -> String ! Error {
     }
 }
 
+// What the agent answered in run `run` of routine `id`, once the run has
+// ended, as routine.runs keeps it: its runs are quiet, so it isn't in the chat.
+fn said_in(app: mut Session, q: str, id: String, which: String) -> String ! Error {
+    var ended = false
+    for f in app.frames {
+        if str_at(f.copy(), "kind") == some(String("run.finished")) and str_at(f.copy(), "run") == some(which.copy()) { ended = true }
+    }
+    while not ended {
+        let e = try app.until("event", "run.finished")
+        if str_at(e, "run") == some(which.copy()) { ended = true }
+    }
+    if let Json.Array(runs) = at(at(try app.cmd(q, "routine.runs", Obj.new().s("id", id).done()), "value"), "runs") {
+        for r in runs {
+            if str_at(r.copy(), "run") == some(which.copy()) { return str_at(r, "said") ?? String() }
+        }
+    }
+    fail "routine.runs doesn't have {which}"
+}
+
 // Posts `body` to `path` with `headers`, and gives the status and what came back.
 fn hook(base: String, path: String, headers: List<Header>, body: str) -> (u32, Json) ! Error {
     var all: List<Header> = [Header { name: String("Content-Type"), value: String("application/json") }]
@@ -46,7 +65,7 @@ fn run(i: Instance) ! Error {
 
     let neither = try app.cmd("q_2", "routine.put", Obj.new().s("name", String("Build")).s("agent", String("Main")).s("prompt", String("hi")).done())
     try check(bool_at(neither, "ok") == some(false), "a routine with no schedule and no webhook is refused")
-    let put = try app.cmd("q_3", "routine.put", Obj.new().s("name", String("Build")).s("agent", String("Main")).s("prompt", String("/context\nSay what broke.")).b("webhook", true).b("notify", true).done())
+    let put = try app.cmd("q_3", "routine.put", Obj.new().s("name", String("Build")).s("agent", String("Main")).s("prompt", String("/mcp routine_post \{\"text\": \"The build broke.\"\}\n/context\nSay what broke.")).b("webhook", true).b("notify", true).done())
     let r = at(at(put, "value"), "routine")
     let id = str_at(r.copy(), "id") ?? String()
     let path = "/hooks/{str_at(r.copy(), "hook") ?? String()}"
@@ -68,13 +87,14 @@ fn run(i: Instance) ! Error {
     try check(status == 202 and str_at(ran, "run") != none, "a post signed as GitHub signs runs the routine")
     let started = try app.until("event", "conversation.created")
     let conversation = str_at(at(started, "conversation"), "id") ?? String()
-    let said = try reply_in(mut app, conversation.copy())
-    try check(said.contains("run by its webhook") and said.contains("a GitHub workflow_run event") and said.contains(#""conclusion":"failure""#), "its agent gets what was sent, and knows the webhook sent it")
+    let posted = try reply_in(mut app, conversation.copy())
     let notified = try app.until("event", "notify")
-    try check(str_at(notified, "title") == some(String("Build")), "and the person is notified")
+    try check(posted == "The build broke." and str_at(notified, "title") == some(String("Build")), "what its agent posts is in the chat, and the person is notified")
+    let said = try said_in(mut app, "q_3a", id.copy(), str_at(ran, "run") ?? String())
+    try check(said.contains("run by its webhook") and said.contains("a GitHub workflow_run event") and said.contains(#""conclusion":"failure""#), "its agent gets what was sent, and knows the webhook sent it")
 
-    let (bearer, _) = try hook(i.base.copy(), path.copy(), header("Authorization", "Bearer {secret}"), #"{"hello":"there"}"#)
-    try check(bearer == 202 and (try reply_in(mut app, conversation.copy())).contains(#""hello":"there""#), "the secret as a bearer token runs it too")
+    let (bearer, by_bearer) = try hook(i.base.copy(), path.copy(), header("Authorization", "Bearer {secret}"), #"{"hello":"there"}"#)
+    try check(bearer == 202 and (try said_in(mut app, "q_3b", id.copy(), str_at(by_bearer, "run") ?? String())).contains(#""hello":"there""#), "the secret as a bearer token runs it too")
 
     _ = try app.cmd("q_4", "routine.put", Obj.new().s("id", id.copy()).b("on", false).done())
     let (paused, _) = try hook(i.base.copy(), path.copy(), header("Authorization", "Bearer {secret}"), FAILED)
