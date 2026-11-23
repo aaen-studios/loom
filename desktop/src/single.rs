@@ -11,7 +11,8 @@
 //! shown: it waits for the folder and runs, or ends if another loom keeps it.
 //!
 //! Elsewhere a lock on `loom.lock` in the data folder keeps the one loom, and the
-//! system brings the running app forward itself (macOS reopens it).
+//! system brings the running app forward itself: macOS opens the loom running rather
+//! than another, and tells it it was opened again (`reopened`), even from the menu bar.
 
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -97,6 +98,18 @@ pub fn asked_to_show() -> bool {
         .ok()
         .and_then(|o| o.as_ref().map(Owner::asked_to_show))
         .unwrap_or(false)
+}
+
+/// loom was opened again while it runs, as from the Dock or Finder on a Mac: the person
+/// wants its window, as when a second start asks on Windows.
+#[cfg(target_os = "macos")]
+pub fn reopened() {
+    if let Ok(o) = OWNER.lock() {
+        if let Some(o) = o.as_ref() {
+            o.shown.store(true, Ordering::Relaxed);
+        }
+    }
+    crate::wake::wake();
 }
 
 /// Lets go of the folder, as loom quits.
@@ -333,6 +346,8 @@ mod tests {
         let mut slash = d.clone().into_os_string();
         slash.push(std::path::MAIN_SEPARATOR_STR);
         assert_eq!(name(Path::new(&slash)), plain);
+        // A folder that's there, as macOS reads `..` only through one.
+        std::fs::create_dir_all(d.join("sub")).unwrap();
         assert_eq!(name(&d.join("sub").join("..")), plain);
         if cfg!(windows) {
             let upper = d.to_string_lossy().to_uppercase();

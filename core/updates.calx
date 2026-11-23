@@ -38,6 +38,7 @@ pub struct Hub {
     app_after: bool          // and then the app goes
     since: Instant?          // when it started waiting
     told: String             // the last core.updates, so only a change is said
+    app_why: String          // why the app can't update itself where it runs, as a Mac's from its disk image; empty when it can
 }
 
 /// Whether a server's update has gone far enough to finish on its own: downloaded and
@@ -53,7 +54,14 @@ fn going(state: String) -> bool {
 
 impl Hub {
     pub fn new(version: own String) -> Hub {
-        return Hub { version: version, ready: String(), path: String(), servers: List<Server>(), pending: List<String>(), app_after: false, since: none, told: String() }
+        return Hub { version: version, ready: String(), path: String(), servers: List<Server>(), pending: List<String>(), app_after: false, since: none, told: String(), app_why: String() }
+    }
+
+    /// The hub for an app that can't update itself where it runs, and says `why`.
+    pub fn cant_update(own self, why: String) -> Hub {
+        var h = self
+        h.app_why = why.copy()
+        return h
     }
 
     /// A newer app is ready, from the updater's `core.update`.
@@ -91,8 +99,11 @@ impl Hub {
         var devices = List<Json>()
         var any = false
         if self.ready.len() > 0 {
-            devices.push(Obj.new().s("device", String("app")).s("kind", String("app")).s("version", self.version.copy()).s("latest", self.ready.copy()).b("may", true).b("can", true).s("state", if self.app_after { String("asked") } else { String() }).done())
-            any = true
+            let can = self.app_why.len() == 0
+            var d = Obj.new().s("device", String("app")).s("kind", String("app")).s("version", self.version.copy()).s("latest", self.ready.copy()).b("may", true).b("can", can).s("state", if self.app_after { String("asked") } else { String() })
+            if not can { d = d.s("why", self.app_why.copy()) }
+            devices.push(d.done())
+            if can { any = true }
         }
         for s in self.servers {
             if not s.behind and s.state.len() == 0 { continue }
@@ -130,7 +141,7 @@ impl Hub {
             self.servers[k].error = String()
             if all and self.ready.len() > 0 and self.pending.position(|d| d == s.dir) == none { self.pending.push(s.dir.copy()) }
         }
-        if self.ready.len() > 0 and (all or one == "app") {
+        if self.ready.len() > 0 and self.app_why.len() == 0 and (all or one == "app") {
             self.app_after = true
             self.since = some(unsafe { Instant.now() })
             if let r = self.poll() { out.push(r) }
@@ -216,6 +227,17 @@ fn the_app_alone_goes_at_once_and_a_server_alone_leaves_the_app() {
     assert(server.len() == 1 and str_at(server[0].copy(), "t") == some(String("core.relay")))
     let app = h.run(some(String("app")))
     assert(app.len() == 1 and str_at(app[0].copy(), "t") == some(String("core.restart")))
+}
+
+@test
+fn an_app_that_cant_update_where_it_runs_says_why_and_isnt_restarted() {
+    var h = Hub.new(String("0.2.5")).cant_update(String("loom is running from its disk image."))
+    h.app_ready(String("0.2.6"), String("/update/0.2.6/loom-mac.dmg"))
+    let v = h.view()
+    assert("{v}".contains("disk image") and "{v}".contains("0.2.6"))
+    assert(bool_at(v, "all") == some(false))
+    assert(h.run(none).len() == 0 and h.run(some(String("app"))).len() == 0)
+    assert(h.poll() == none)
 }
 
 @test

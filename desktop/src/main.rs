@@ -7,6 +7,8 @@
 
 mod app;
 mod core;
+#[cfg(target_os = "macos")]
+mod mac;
 mod model;
 mod motion;
 mod panel;
@@ -19,6 +21,8 @@ mod shell;
 mod signin;
 mod single;
 mod smooth;
+#[cfg(any(target_os = "macos", test))]
+mod swap;
 mod thread;
 #[path = "../../design/generated/tokens.rs"]
 #[allow(dead_code)]
@@ -93,6 +97,9 @@ pub const VERSION: &str = match option_env!("LOOM_VERSION") {
 };
 
 fn main() {
+    // Opened from the Finder or the Dock, a Mac app has only the system's own PATH.
+    #[cfg(target_os = "macos")]
+    mac::take_login_path();
     perf::start();
     // Started by an agent of the instance in this app, for loom's own tools.
     if std::env::args().nth(1).as_deref() == Some("mcp") {
@@ -106,6 +113,11 @@ fn main() {
         panel_test::run(out.into());
         return;
     }
+    // A Mac update: this new loom puts itself in the old one's place (swap.rs).
+    #[cfg(target_os = "macos")]
+    if std::env::args().nth(1).as_deref() == Some("--swap") {
+        std::process::exit(swap::run());
+    }
     // One loom to a data folder: started again, it shows the loom running and ends.
     let background = std::env::args().any(|a| a == "--background");
     let data = app::data_dir();
@@ -114,7 +126,11 @@ fn main() {
         single::Start::Running => return,
     }
     app::start_first_core();
-    gpui_kit::application().with_assets(AppAssets).run(|cx| {
+    let application = gpui_kit::application().with_assets(AppAssets);
+    // Opened again from the Dock or Finder while it runs: the window comes back.
+    #[cfg(target_os = "macos")]
+    application.on_reopen(|_| single::reopened());
+    application.run(|cx| {
         gpui_kit::init(cx);
         // A loom started while this one stops runs as soon as this one has let go.
         cx.on_app_quit(|_| {
@@ -122,6 +138,9 @@ fn main() {
             async {}
         })
         .detach();
+        shell::hear_notifications(cx);
+        #[cfg(target_os = "macos")]
+        menus::set(cx);
         let fonts: Vec<Cow<'static, [u8]>> = FONTS.iter().map(|f| Cow::Borrowed(*f)).collect();
         if let Err(e) = cx.text_system().add_fonts(fonts) {
             eprintln!("loom: the fonts didn't load: {e}");
@@ -142,14 +161,18 @@ fn main() {
                 window_min_size: Some(size(px(tokens::layout::RAIL + app::CHAT_LEAST), px(480.))),
                 titlebar: Some(TitlebarOptions {
                     title: Some("loom".into()),
+                    // A Mac's traffic lights, in the middle of the title bar's height
+                    // (app.rs, LIGHTS). Windows has none.
+                    traffic_light_position: Some(point(px(app::LIGHTS.0), px(app::LIGHTS.1))),
                     ..TitleBar::title_bar_options()
                 }),
                 app_owns_titlebar_drag: true,
                 // A build for measuring opens hidden, and shows itself off screen
                 // behind what the person is doing (app.rs): GPUI centers a window
-                // whose place is off every screen.
-                focus: !cfg!(feature = "perf"),
-                show: !cfg!(feature = "perf"),
+                // whose place is off every screen. On a Mac, loom started at login
+                // opens hidden too, in the menu bar.
+                focus: !cfg!(feature = "perf") && !hidden_at_start(),
+                show: !cfg!(feature = "perf") && !hidden_at_start(),
                 ..Default::default()
             },
             cx,
@@ -164,10 +187,84 @@ fn main() {
         window
             .update(cx, |_, window, cx| window.bounds_changed(cx))
             .ok();
-        if !cfg!(feature = "perf") {
+        if !cfg!(feature = "perf") && !hidden_at_start() {
             cx.activate(true);
         }
     });
+}
+
+/// Whether the window starts hidden: on a Mac, loom started at login or by an update
+/// in the background, which goes straight to the menu bar. Windows hides its window
+/// once it's made (app.rs).
+fn hidden_at_start() -> bool {
+    cfg!(target_os = "macos") && std::env::args().any(|a| a == "--background")
+}
+
+/// A Mac's menus, and their keys: loom's (hide, quit), Edit for the composer and
+/// fields, and Window. ⌘W closes the window as its red button does, into the menu bar.
+#[cfg(target_os = "macos")]
+mod menus {
+    use super::shell;
+    use gpui_kit::component::input::{Copy, Cut, Paste, Redo, SelectAll, Undo};
+    use gpui_kit::{App, KeyBinding, Menu, MenuItem, OsAction, Window};
+
+    gpui_kit::actions!(
+        loom,
+        [Quit, Hide, HideOthers, ShowAll, Close, Minimize, Zoom]
+    );
+
+    fn on_window(cx: &mut App, f: fn(&mut Window)) {
+        if let Some(w) = cx.active_window() {
+            let _ = w.update(cx, |_, window, _| f(window));
+        }
+    }
+
+    pub fn set(cx: &mut App) {
+        cx.on_action(|_: &Quit, cx| cx.quit());
+        cx.on_action(|_: &Hide, cx| cx.hide());
+        cx.on_action(|_: &HideOthers, cx| cx.hide_other_apps());
+        cx.on_action(|_: &ShowAll, cx| cx.unhide_other_apps());
+        cx.on_action(|_: &Close, cx| {
+            if !shell::keeps_in_tray() {
+                cx.quit();
+                return;
+            }
+            on_window(cx, |w| shell::show_window(shell::hwnd(w), false));
+        });
+        cx.on_action(|_: &Minimize, cx| on_window(cx, |w| w.minimize_window()));
+        cx.on_action(|_: &Zoom, cx| on_window(cx, |w| w.zoom_window()));
+        cx.bind_keys([
+            KeyBinding::new("cmd-q", Quit, None),
+            KeyBinding::new("cmd-h", Hide, None),
+            KeyBinding::new("alt-cmd-h", HideOthers, None),
+            KeyBinding::new("cmd-w", Close, None),
+            KeyBinding::new("cmd-m", Minimize, None),
+        ]);
+        cx.set_menus([
+            Menu::new("loom").items([
+                MenuItem::action("Hide loom", Hide),
+                MenuItem::action("Hide Others", HideOthers),
+                MenuItem::action("Show All", ShowAll),
+                MenuItem::separator(),
+                MenuItem::action("Quit loom", Quit),
+            ]),
+            Menu::new("Edit").items([
+                MenuItem::os_action("Undo", Undo, OsAction::Undo),
+                MenuItem::os_action("Redo", Redo, OsAction::Redo),
+                MenuItem::separator(),
+                MenuItem::os_action("Cut", Cut, OsAction::Cut),
+                MenuItem::os_action("Copy", Copy, OsAction::Copy),
+                MenuItem::os_action("Paste", Paste, OsAction::Paste),
+                MenuItem::os_action("Select All", SelectAll, OsAction::SelectAll),
+            ]),
+            Menu::new("Window").items([
+                MenuItem::action("Minimize", Minimize),
+                MenuItem::action("Zoom", Zoom),
+                MenuItem::separator(),
+                MenuItem::action("Close", Close),
+            ]),
+        ]);
+    }
 }
 
 // The icons loom uses beyond GPUI Kit's own, from the same Lucide set.
