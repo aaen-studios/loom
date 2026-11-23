@@ -432,6 +432,8 @@ pub struct Loom {
     composer_placeholder: String,
     /// Counts the search box's changes, so only the last one, once typing pauses, asks.
     search_gen: u64,
+    /// A redraw is on its way for the agents' threads, which tick at 30 frames a second.
+    thread_tick: bool,
     /// Counts the window's moves and resizes, so its place is kept once it stops.
     place_gen: u64,
     /// The core's frames changed what the chat shows: its rows are made again once,
@@ -1171,6 +1173,7 @@ ACTA_KEY=secret:ACTA_KEY",
             page_tried: 0,
             composer_placeholder: String::new(),
             search_gen: 0,
+            thread_tick: false,
             place_gen: 0,
             rows_dirty: false,
             wheel: ((0.0, 0.0), 0.0, false),
@@ -14651,12 +14654,12 @@ impl Render for Loom {
             self.profile_in
                 .update(cx, |s, cx| s.set_value(text, window, cx));
         }
-        if self
+        let threads_move = self
             .model
             .agents
             .iter()
-            .any(|a| thread::moves(self.model.mood(&a.id), self.model.finished_at(&a.id)))
-            || self.model.conn == Some(Conn::SignedOut)
+            .any(|a| thread::moves(self.model.mood(&a.id), self.model.finished_at(&a.id)));
+        if self.model.conn == Some(Conn::SignedOut)
             || (self.screen == Screen::Chat && self.model.agents.is_empty())
             || self.screen == Screen::NewAgent
             || self.make.step == Step::Weaving
@@ -14686,6 +14689,22 @@ impl Render for Loom {
         {
             crate::perf::count("want:app");
             window.request_animation_frame();
+        } else if threads_move && !self.thread_tick {
+            // Only agents' threads move, small ones beside their names: 30 frames a second
+            // is as smooth for them, and the window isn't drawn again at the screen's
+            // 144–240 Hz while an agent works in a chat that isn't open.
+            self.thread_tick = true;
+            crate::perf::count("want:threads");
+            cx.spawn(async move |this, cx| {
+                cx.background_executor()
+                    .timer(Duration::from_millis(33))
+                    .await;
+                let _ = this.update(cx, |loom, cx| {
+                    loom.thread_tick = false;
+                    cx.notify();
+                });
+            })
+            .detach();
         }
         let h = window.viewport_size().height.as_f32();
         let splash = self.splash(h);

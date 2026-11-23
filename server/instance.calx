@@ -231,6 +231,7 @@ struct Proc {
     waiting: List<String>
     key: String    // its key in `procs`: proc_key(agent, program)
     stopped: bool    // whether it was told to stop, so it's let go of
+    used: i64    // when it last said something, for stopping it once it has been idle a while
 }
 
 impl Proc {
@@ -267,6 +268,7 @@ pub struct Instance {
     thumbs: Sender<Thumb>
     events: EventLife
     next_prune: i64
+    next_proc_sweep: i64    // when idle agent programs are next looked for
     grants: Map<String, Grant>    // token -> whose tools
     calls: Map<String, Request>    // run -> a message_agent call waiting on it
     context: Map<String, (i64, i64)>    // ACP session -> the tokens in its context, and its window, as usage_update last said
@@ -424,6 +426,7 @@ const EVENTS_PAGE: usize = 500
 const SNAPSHOT_PAST: i64 = 10000
 const SNAPSHOT_REPLAY: i64 = 5000
 const FIRES_A_PASS: i64 = 5    // routines fired in one pass of the loop, at most
+const IDLE_PROC_MS: i64 = 1800000    // an agent program unused this long, 30 minutes, is stopped
 const SIDE_TRANSCRIPT_MOST: usize = 24000
 
 // How full a session's context may get, in percent of its window, before the
@@ -1155,7 +1158,7 @@ impl Instance {
         let search_to = searcher.start("{config.data}/loom.db", search_done.sender(), waker)
         let browser_done = Receiver<browser.Back>()
         let browser_to = browser_done.sender()
-        var i = Instance { release: config.release.copy(), host: update.host(config.in_app), exe: current_exe(), update_to: update_to, update_back: update_back, updating: no_update(), next_update_check: 0, last_busy: now(), restart_stops: List<String>(), restart: false, told_update: Json.Null, told_update_at: 0, browsers: LinkedMap<String, Browser>(), watchers: Map<u32, String>(), followers: List<u32>(), browser_pages: Map<String, String>(), browsers_to_check: List<String>(), browser_done: browser_done, browser_to: browser_to, stopped_browsers: Map<u64, Thread>(), next_browser: 0, fills: Map<String, Fill>(), turns_ended: List<(String, String, String)>(), next_browser_sweep: 0, task_stops: Map<String, String>(), resumes: List<(String, String)>(), push_to: push_to, push_gone: push_gone, move_to: move_to, move_done: move_done, lan: config.lan, bridge: none, stop_bridge: none, lan_port: 0, announcer: none, stop_announcer: none, to_close: List<ServerSocket>(), boxes: none, gate: none, stop_gate: none, checkpointer: some(checkpointer), stop_checkpoints: stop_checkpoints, wal_big: wal_big, search_to: search_to, search_done: search_done, searches: Map<String, Waiter>(), next_search: 0, disk_used: Map<String, (i64, i64)>(), doors: LinkedMap<String, egress.Door>(), moving: String(), move_waiters: List<Waiter>(), moved: moved, version: config.version.copy(), store: store, server: server, waker: waker, data: config.data.copy(), sessions: Map<u32, Session>(), runs: LinkedMap<String, Run>(), procs: LinkedMap<String, Proc>(), approvals: LinkedMap<String, Approval>(), lines: lines, lines_to: to, hash_to: hash_to, hash_done: hash_done, next_job: 0, auths: Map<i64, Auth>(), dummy_hash: dummy, ready_now: String(), open_secrets: Map<String, List<(String, String)>>(), failures: LinkedMap<String, List<i64>>(), thumbs: files.start(), events: config.events, next_prune: 0, grants: Map<String, Grant>(), calls: Map<String, Request>(), context: Map<String, (i64, i64)>(), registry_at: config.registry.copy(), registry: Json.Null, registry_time: 0, registry_fetching: false, install_to: install_to, install_done: install_done, mcp_test_to: mcp_test_to, mcp_test_done: mcp_test_done, mcp_tests: Map<i64, Waiter>(), fetching: List<Waiter>(), installs: Map<i64, Install>(), deno_job: 0, deno_waiters: List<Request>(), code_acts: Map<i64, String>(), leftovers: List<String>(), next_sweep: 0, device_calls: Map<String, DeviceCall>(), setups: Map<String, Setup>(), minute_ms: config.minute_ms, next_due: 0, routine_runs: Map<String, RoutineRun>(), routine_marks: Map<String, (String, String)>(), run_chains: Map<String, List<String>>(), panel_calls: Map<String, Waiter>(), script_calls: Map<String, Request>(), running_flows: LinkedMap<String, flows.Flow>(), flow_steps: Map<String, (String, usize)>(), advancing: List<String>(), flow_results: List<(String, usize, bool, String)>(), flows_due: List<String>(), slow_calls: Map<String, String>(), acting: 0, call_actions: Map<String, i64>(), tool_actions: Map<String, i64>(), sealer: try secret_key(config.data.copy()) }
+        var i = Instance { release: config.release.copy(), host: update.host(config.in_app), exe: current_exe(), update_to: update_to, update_back: update_back, updating: no_update(), next_update_check: 0, last_busy: now(), restart_stops: List<String>(), restart: false, told_update: Json.Null, told_update_at: 0, browsers: LinkedMap<String, Browser>(), watchers: Map<u32, String>(), followers: List<u32>(), browser_pages: Map<String, String>(), browsers_to_check: List<String>(), browser_done: browser_done, browser_to: browser_to, stopped_browsers: Map<u64, Thread>(), next_browser: 0, fills: Map<String, Fill>(), turns_ended: List<(String, String, String)>(), next_browser_sweep: 0, task_stops: Map<String, String>(), resumes: List<(String, String)>(), push_to: push_to, push_gone: push_gone, move_to: move_to, move_done: move_done, lan: config.lan, bridge: none, stop_bridge: none, lan_port: 0, announcer: none, stop_announcer: none, to_close: List<ServerSocket>(), boxes: none, gate: none, stop_gate: none, checkpointer: some(checkpointer), stop_checkpoints: stop_checkpoints, wal_big: wal_big, search_to: search_to, search_done: search_done, searches: Map<String, Waiter>(), next_search: 0, disk_used: Map<String, (i64, i64)>(), doors: LinkedMap<String, egress.Door>(), moving: String(), move_waiters: List<Waiter>(), moved: moved, version: config.version.copy(), store: store, server: server, waker: waker, data: config.data.copy(), sessions: Map<u32, Session>(), runs: LinkedMap<String, Run>(), procs: LinkedMap<String, Proc>(), approvals: LinkedMap<String, Approval>(), lines: lines, lines_to: to, hash_to: hash_to, hash_done: hash_done, next_job: 0, auths: Map<i64, Auth>(), dummy_hash: dummy, ready_now: String(), open_secrets: Map<String, List<(String, String)>>(), failures: LinkedMap<String, List<i64>>(), thumbs: files.start(), events: config.events, next_prune: 0, next_proc_sweep: 0, grants: Map<String, Grant>(), calls: Map<String, Request>(), context: Map<String, (i64, i64)>(), registry_at: config.registry.copy(), registry: Json.Null, registry_time: 0, registry_fetching: false, install_to: install_to, install_done: install_done, mcp_test_to: mcp_test_to, mcp_test_done: mcp_test_done, mcp_tests: Map<i64, Waiter>(), fetching: List<Waiter>(), installs: Map<i64, Install>(), deno_job: 0, deno_waiters: List<Request>(), code_acts: Map<i64, String>(), leftovers: List<String>(), next_sweep: 0, device_calls: Map<String, DeviceCall>(), setups: Map<String, Setup>(), minute_ms: config.minute_ms, next_due: 0, routine_runs: Map<String, RoutineRun>(), routine_marks: Map<String, (String, String)>(), run_chains: Map<String, List<String>>(), panel_calls: Map<String, Waiter>(), script_calls: Map<String, Request>(), running_flows: LinkedMap<String, flows.Flow>(), flow_steps: Map<String, (String, usize)>(), advancing: List<String>(), flow_results: List<(String, usize, bool, String)>(), flows_due: List<String>(), slow_calls: Map<String, String>(), acting: 0, call_actions: Map<String, i64>(), tool_actions: Map<String, i64>(), sealer: try secret_key(config.data.copy()) }
         if config.sandboxes.len() > 0 and not i.lan { try i.sandboxes_on(config.sandboxes.copy(), config.sandbox_image.copy()) }
         // An action the last run of the instance left started, it never finished.
         try i.store.settle_cut_short()
@@ -1703,6 +1706,7 @@ impl Instance {
                 none => {
                     if signal.take() != none { break }
                     i.prune()
+                    if now() >= i.next_proc_sweep { i.stop_idle_procs() }
                     if i.leftovers.len() > 0 and now() >= i.next_sweep { i.sweep() }
                 },
                 _ => {},
@@ -6630,7 +6634,7 @@ impl Instance {
         }
         i.write_skills(user.copy(), agent)
         let to = try acp.start(key.copy(), command, args, settings, folder, i.lines_to.copy(), i.waker)
-        var p = Proc { agent: id.copy(), user: user.copy(), to: to, ready: false, images: false, program: program.copy(), resume: false, load: false, mcp_http: false, boxed: boxed, shared: shared, next_id: 1, pending: Map<i64, Pending>(), sessions: Map<String, String>(), told: Map<String, String>(), profiled: Map<String, i64>(), configs: Map<String, Json>(), waiting: List<String>(), key: key.copy(), stopped: false }
+        var p = Proc { agent: id.copy(), user: user.copy(), to: to, ready: false, images: false, program: program.copy(), resume: false, load: false, mcp_http: false, boxed: boxed, shared: shared, next_id: 1, pending: Map<i64, Pending>(), sessions: Map<String, String>(), told: Map<String, String>(), profiled: Map<String, i64>(), configs: Map<String, Json>(), waiting: List<String>(), key: key.copy(), stopped: false, used: now() }
         p.pending.insert(1, Pending.Init)
         p.to.send(Out.Send(acp.request(1, "initialize", acp.initialize_params())))
         i.procs.insert(key, p)
@@ -6999,6 +7003,7 @@ impl Instance {
             }
             return
         }
+        p.used = now()
         let m = match parse(text.copy()) {
             ok(j) => j,
             err(_) => {
@@ -8531,6 +8536,30 @@ impl Instance {
         var idle = List<String>()
         for (key, p) in i.procs {
             if p.user != user { continue }
+            var busy = false
+            for (_, r) in i.runs {
+                if r.proc == key { busy = true }
+            }
+            if not busy { idle.push(key.copy()) }
+        }
+        for key in idle {
+            if let p = i.procs.remove(key) {
+                var to = p.to.copy()
+                to.send(Out.Stop)
+            }
+        }
+    }
+
+    // Stops the agent programs that have had no run and said nothing for IDLE_PROC_MS,
+    // as the browser closes when unused (PLAN.md, "It runs only while it's used"): each
+    // holds a program, and for a Node agent 60-200 MB, for as long as loom runs. The
+    // next message starts it again and picks its session up.
+    fn stop_idle_procs(i: mut Instance) {
+        let t = now()
+        i.next_proc_sweep = t + 60000
+        var idle = List<String>()
+        for (key, p) in i.procs {
+            if t - p.used < IDLE_PROC_MS or p.pending.len() > 0 or p.waiting.len() > 0 { continue }
             var busy = false
             for (_, r) in i.runs {
                 if r.proc == key { busy = true }
