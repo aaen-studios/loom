@@ -92,10 +92,45 @@ impl Cache {
         _ = try self.db.execute(String("DELETE FROM meta WHERE key = 'cursor'"))
     }
 
+    // One step of changes that land together or not at all: a savepoint, which is a
+    // transaction of its own outside `hold`, and part of the held one inside it.
+    fn step(self) ! Error {
+        _ = try self.db.execute(String("SAVEPOINT step"))
+    }
+
+    fn step_done(self) ! Error {
+        _ = try self.db.execute(String("RELEASE step"))
+    }
+
     fn undo(self) {
-        match self.db.rollback() {
-            ok => {},
+        match self.db.execute(String("ROLLBACK TO step")) {
+            ok(_) => {},
+            err(_) => {},
+        }
+        match self.db.execute(String("RELEASE step")) {
+            ok(_) => {},
             err(_) => {},    // the transaction ends with the connection anyway
+        }
+    }
+
+    /// Keeps what's applied from here on in one transaction until `let_go`, so a burst
+    /// of events, such as catching up, is written once rather than once an event.
+    pub fn hold(self) ! Error {
+        if not self.db.in_transaction() { try self.db.begin() }
+    }
+
+    /// Saves what was applied since `hold`.
+    pub fn let_go(self) ! Error {
+        if not self.db.in_transaction() { return }
+        match self.db.commit() {
+            ok => {},
+            err(e) => {
+                match self.db.rollback() {
+                    ok => {},
+                    err(_) => {},
+                }
+                fail e
+            },
         }
     }
 
@@ -104,9 +139,9 @@ impl Cache {
     /// Applies an event and moves the cursor to its seq, together. An event at or before
     /// the cursor was applied already, and is skipped. Gives whether it was applied.
     pub fn apply(self, event: Json) -> bool ! Error {
-        let seq = int_at(event.copy(), "seq") ?? 0
+        let seq = int_at(event, "seq") ?? 0
         if seq <= try self.cursor() { return false }
-        try self.db.begin()
+        try self.step()
         match self.change(event) {
             ok => {},
             err(e) => {
@@ -121,7 +156,7 @@ impl Cache {
                 fail e
             },
         }
-        try self.db.commit()
+        try self.step_done()
         return true
     }
 
@@ -187,7 +222,7 @@ impl Cache {
     /// Replaces everything with a snapshot, after a welcome with reset, and moves the
     /// cursor to its seq.
     pub fn replace(self, snapshot: Json) ! Error {
-        try self.db.begin()
+        try self.step()
         match self.fill(snapshot) {
             ok => {},
             err(e) => {
@@ -195,7 +230,7 @@ impl Cache {
                 fail e
             },
         }
-        try self.db.commit()
+        try self.step_done()
     }
 
     fn fill(self, s: Json) ! Error {
@@ -280,8 +315,10 @@ impl Cache {
     }
 
     /// The tool calls, so a reply's tool blocks can show what ran. They stay after their run.
+    /// Only what a block shows comes, each call's call, run, title and status: a call's
+    /// input and output can be many KB, and the apps ask again at every tool event.
     pub fn tools(self) -> List<Json> ! Error {
-        return try self.all("SELECT json FROM tools ORDER BY rowid", List<Value>())
+        return try self.all("SELECT json_object('call', call, 'run', run, 'title', json_extract(json, '$.title'), 'status', json_extract(json, '$.status')) FROM tools ORDER BY rowid", List<Value>())
     }
 
     /// The questions nobody has answered, as their approval.needed events.
@@ -432,4 +469,19 @@ fn a_snapshot_replaces_everything_but_the_outbox() ! Error {
     assert((try c.outbox()).len() == 1)
     try c.sent(String("m_1"))
     assert((try c.outbox()).len() == 0)
+}
+
+@test
+fn a_held_burst_is_saved_together() ! Error {
+    let c = try Cache.open(String(":memory:"))
+    try c.hold()
+    _ = try c.apply(ev(1, "agent.created", Obj.new().j("agent", Obj.new().s("id", String("a_1")).done()).done()))
+    try c.replace(Obj.new().s("t", String("snapshot")).i("seq", 5).j("agents", Json.Array([Obj.new().s("id", String("a_2")).done()])).done())
+    _ = try c.apply(ev(6, "agent.created", Obj.new().j("agent", Obj.new().s("id", String("a_3")).done()).done()))
+    try c.let_go()
+    assert(try c.cursor() == 6)
+    assert((try c.agents()).len() == 2)
+    // Nothing held: each event is its own transaction, as before.
+    _ = try c.apply(ev(7, "agent.deleted", Obj.new().s("agent", String("a_2")).done()))
+    assert(try c.cursor() == 7 and (try c.agents()).len() == 1)
 }

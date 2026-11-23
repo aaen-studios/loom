@@ -452,13 +452,18 @@ pub struct Loom {
 }
 
 pub fn data_dir() -> String {
-    if let Ok(dir) = std::env::var("LOOM_DATA") {
-        return dir;
-    }
-    let base = std::env::var("APPDATA").unwrap_or_else(|_| ".".into());
-    let dir = std::path::Path::new(&base).join("Loom");
-    let _ = std::fs::create_dir_all(&dir);
-    dir.to_string_lossy().into_owned()
+    // Worked out once: frames ask for it, and making the folder is a trip to the disk.
+    static DIR: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    DIR.get_or_init(|| {
+        if let Ok(dir) = std::env::var("LOOM_DATA") {
+            return dir;
+        }
+        let base = std::env::var("APPDATA").unwrap_or_else(|_| ".".into());
+        let dir = std::path::Path::new(&base).join("Loom");
+        let _ = std::fs::create_dir_all(&dir);
+        dir.to_string_lossy().into_owned()
+    })
+    .clone()
 }
 
 /// A server the app is signed in to besides the one on screen: its own core, with a
@@ -1522,6 +1527,10 @@ ACTA_KEY=secret:ACTA_KEY",
             cx.notify();
             return;
         }
+        LOCAL.store(
+            if local { 1 } else { 2 },
+            std::sync::atomic::Ordering::Relaxed,
+        );
         // The choice is the first server's.
         self.show_server("", cx);
         self.model = Model::new();
@@ -14513,8 +14522,13 @@ impl Render for Loom {
                         | Screen::Aside
                 )
             ) && self.screen == Screen::Chat
-            // Someone typing to an agent, whose thread thinks along.
-            || self.screen == Screen::Chat && !self.composer.read(cx).value().trim().is_empty()
+            // Someone typing to an agent, whose thread thinks along: only on the empty
+            // chat's hero, where that thread is drawn.
+            || self.screen == Screen::Chat
+                && self.rows.is_empty()
+                && self.model.task_open().is_none()
+                && self.model.open_branch.is_none()
+                && !self.composer.read(cx).value().trim().is_empty()
         {
             crate::perf::count("want:app");
             window.request_animation_frame();
@@ -14996,9 +15010,22 @@ fn program_title(name: &str) -> String {
 }
 
 /// Whether this computer runs its own instance, as the person chose on the first start.
+/// Whether the first server is the instance on this computer: the `mode` file, read
+/// once, since a frame asks several times. 0 is not read yet, 1 local, 2 not.
+static LOCAL: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
 fn local_mode() -> bool {
-    std::fs::read_to_string(std::path::Path::new(&data_dir()).join("mode"))
-        .is_ok_and(|m| m.trim() == "local")
+    use std::sync::atomic::Ordering;
+    match LOCAL.load(Ordering::Relaxed) {
+        1 => true,
+        2 => false,
+        _ => {
+            let local = std::fs::read_to_string(std::path::Path::new(&data_dir()).join("mode"))
+                .is_ok_and(|m| m.trim() == "local");
+            LOCAL.store(if local { 1 } else { 2 }, Ordering::Relaxed);
+            local
+        }
+    }
 }
 
 /// The core's config (core/README.md, "Config"), for the server whose folder is `dir`

@@ -1572,6 +1572,22 @@ impl Instance {
         try i.run(some(stop))
     }
 
+    // One frame's writes, or one burst of agent lines', go in one transaction: a turn
+    // writes a dozen times, and each write on its own is a commit.
+    fn hold(i: Instance) {
+        match i.store.hold() {
+            ok => {},
+            err(e) => eprintln("loom: database: {e}"),
+        }
+    }
+
+    fn let_go(i: Instance) {
+        match i.store.let_go() {
+            ok => {},
+            err(e) => eprintln("loom: database: {e}"),
+        }
+    }
+
     fn run(i: mut Instance, until: own Receiver<bool>?) ! Error {
         var stop = until
         loop {
@@ -1600,6 +1616,7 @@ impl Instance {
                     }
                 },
                 some(Message(s, Text(text))) => {
+                    i.hold()
                     match i.frame(s, text) {
                         ok => {},
                         err(e) => {
@@ -1607,6 +1624,7 @@ impl Instance {
                             _ = i.server.send_text(s, error_frame("internal", String("Something went wrong in the instance."), none))
                         },
                     }
+                    i.let_go()
                 },
                 some(Message(s, Binary(_))) => i.server.close_socket(s, protocol.CLOSE_PROTOCOL, String("binary frames aren't used")),
                 some(Closed(s, _, _)) => {
@@ -1628,12 +1646,18 @@ impl Instance {
             // While an update stops what runs, nothing new starts: the restart picks it all up.
             let holding = i.holding()
             if now() >= i.next_due and not holding { i.due() }
+            var held = false
             while let line = i.lines.next() {
+                if not held {
+                    i.hold()
+                    held = true
+                }
                 match i.agent_line(line) {
                     ok => {},
                     err(e) => eprintln("loom: agent: {e}"),
                 }
             }
+            if held { i.let_go() }
             while let d = i.install_done.next() {
                 match i.installed(d) {
                     ok => {},
@@ -2319,7 +2343,10 @@ impl Instance {
     // --- Sending ---
 
     fn publish(i: Instance, user: String, event: Json) {
-        let text = "{event}"
+        i.publish_text(user, "{event}")
+    }
+
+    fn publish_text(i: Instance, user: String, text: String) {
         for (_, s) in i.sessions {
             if s.live and s.user == user {
                 _ = i.server.send_text(s.socket, text.copy())
@@ -6831,7 +6858,7 @@ impl Instance {
                 return
             },
         }
-        let method = str_at(m.copy(), "method")
+        let method = str_at(m, "method")
         let id = m.get(String("id"))
         match method {
             some(name) => {
@@ -7078,13 +7105,13 @@ impl Instance {
     // A session/update: streamed text and thoughts become deltas, tool calls
     // tool.* events, and a plan the plan block.
     fn update(i: mut Instance, params: Json) ! Error {
-        let run_id = i.run_for_session(str_at(params.copy(), "sessionId") ?? String()) else return
+        let run_id = i.run_for_session(str_at(params, "sessionId") ?? String()) else return
         var r = i.runs.remove(run_id.copy()) else return
         let u = at(params, "update")
-        let kind = str_at(u.copy(), "sessionUpdate") ?? String()
+        let kind = str_at(u, "sessionUpdate") ?? String()
         if kind == "agent_message_chunk" or kind == "agent_thought_chunk" {
             let content = at(u, "content")
-            if (str_at(content.copy(), "type") ?? String()) == "text" {
+            if (str_at(content, "type") ?? String()) == "text" {
                 let piece = str_at(content, "text") ?? String()
                 let block_kind = if kind == "agent_message_chunk" { String("text") } else { String("thought") }
                 var n = r.blocks.len()
@@ -7095,8 +7122,11 @@ impl Instance {
                 }
                 let pos = r.blocks[n - 1].text.len()
                 r.blocks[n - 1].text.push_str(piece.copy())
-                let delta = Obj.new().s("t", String("delta")).s("run", r.id.copy()).s("message", r.message.copy()).i("block", i64.wrap(u64(n - 1))).s("kind", block_kind).i("pos", i64.wrap(u64(pos))).s("text", piece).done()
-                i.publish(r.user.copy(), delta)
+                // A frame a word, so it's written as text, and only for someone looking.
+                if i.looking(r.user.copy()) {
+                    let delta = #"{"t":"delta","run":#{Json.Str(r.id.copy())},"message":#{Json.Str(r.message.copy())},"block":#{n - 1},"kind":"#{block_kind}","pos":#{pos},"text":#{Json.Str(piece)}}"#
+                    i.publish_text(r.user.copy(), delta)
+                }
             } else if kind == "agent_message_chunk" {
                 // A file the agent sends back: an image, or a link to a file it made.
                 if let file = try i.file_from_agent(r.user.copy(), r.agent.copy(), content) {
