@@ -36,7 +36,7 @@ Nothing is installed unless it's signed with loom's release key. `scripts/releas
 
 `cargo build --release` here builds the setup's program, which carries nothing yet: on its own it says it can't install loom. To try one end to end without the release key, build it with `LOOM_SETUP_TEST_KEY` set to a test key's public half, and pack it with `LOOM_PACK_TEST_SEED` set to that key's seed (`scripts/release.calx` prints the public half for you).
 
-- `LOCALAPPDATA` and `APPDATA` say where it installs, and `LOOM_SETUP_SANDBOX` keeps its registry keys under `Software\loom-setup-sandbox`, so pointing the first two into a folder of their own and setting the third leaves the computer's own loom alone.
+- `LOCALAPPDATA` and `APPDATA` say where it installs, and `LOOM_SETUP_SANDBOX` keeps its registry keys under `Software\loom-setup-sandbox`, so pointing the first two into a folder of their own and setting the third leaves the computer's own loom alone. The loom it starts then doesn't turn starting at login on either.
 - `LOOM_THEME` (`dark` or `light`) picks the theme instead of following the system, as in the app, and `LOOM_SETUP_NO_FOCUS` opens the window off screen and without taking the focus, for tests that capture it with PrintWindow.
 
 [`tests/setup/e2e.calx`](../../tests/setup/e2e.calx) does all of that: it installs, rolls back an update that can't start, updates, refuses a setup signed with another key, uninstalls, and has v0.1 hand over, in a folder of its own. CI runs it on Windows.
