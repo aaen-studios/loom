@@ -8,6 +8,10 @@ import UniformTypeIdentifiers
 struct ChatView: View {
     @Environment(Session.self) private var session
     let agentId: String
+    /// Drawn once, hidden, before any chat is opened, so the first one opened doesn't
+    /// pay for building the screen the first time (AgentsView's `Warmup`). It selects
+    /// nothing and fetches nothing.
+    var warming = false
     @State private var atBottom = true
     @State private var openThoughts: Set<String> = []
     /// A message's text open to select from.
@@ -68,14 +72,18 @@ struct ChatView: View {
             } action: { _, near in
                 atBottom = near
             }
-            .onChange(of: Follow(messages: messages, approvals: approvals.count)) {
+            .onChange(of: Follow(messages: messages, approvals: approvals.count)) { before, _ in
                 // Follow a reply as it's written, unless the person scrolled up to read.
-                if atBottom {
+                // A chat's first page opens at its end by itself (defaultScrollAnchor), so
+                // it isn't scrolled to as well: that laid out its rows a second time while
+                // the chat was sliding in.
+                if atBottom && !before.messages.isEmpty {
                     withAnimation(.easeOut(duration: 0.15)) { proxy.scrollTo("end", anchor: .bottom) }
                 }
             }
             .overlay {
-                if messages.isEmpty && approvals.isEmpty && model.selected == agentId {
+                // Only once its messages have come, not while it opens.
+                if messages.isEmpty && approvals.isEmpty && model.selected == agentId && model.messagesCame {
                     Text("Nothing here yet. Say hello.")
                         .font(Fonts.body).foregroundStyle(P.ink3)
                 }
@@ -115,7 +123,7 @@ struct ChatView: View {
             }
         }
         .toolbarBackground(P.bg, for: .navigationBar)
-        .quickLookPreview(Bindable(model).toOpen)
+        .quickLookPreview(warming ? .constant(nil) : Bindable(model).toOpen)
         .sheet(item: $reading) { r in
             NavigationStack {
                 SelectableText(text: r.text)
@@ -130,6 +138,7 @@ struct ChatView: View {
             .presentationDetents([.medium, .large])
         }
         .onAppear {
+            guard !warming else { return }
             model.select(agentId)
             session.flush()
         }

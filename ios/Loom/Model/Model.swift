@@ -399,6 +399,8 @@ final class Model {
     var devices: [Device] = []
     /// The selected agent's messages, oldest first, with the queued ones last.
     var messages: [Message] = []
+    /// Whether the selected chat's messages have come since it was selected.
+    var messagesCame = false
     var moreMessages = false
     var selected: String?
     /// This device's id and the account's, from `welcome`.
@@ -523,6 +525,7 @@ final class Model {
         guard selected != agent else { return }
         selected = agent
         messages = []
+        messagesCame = false
         dirty.insert(.messages)
     }
 
@@ -700,6 +703,7 @@ final class Model {
             devices = items.map { Device(id: $0["id"].text, name: $0["name"].text, kind: $0["kind"].text) }
         case .messages:
             moreMessages = f["more"].bool ?? false
+            messagesCame = true
             messages = items.filter { !routinePrompt($0) }.map { m in
                 Message(id: m["id"].text, role: m["role"].text, at: m["at"].int ?? 0, blocks: m["blocks"].array.map(Block.of), from: from(m["from"].text), status: m["status"].text)
             }
@@ -763,7 +767,9 @@ final class Model {
         for l in CoreList.allCases where lists.contains(l) {
             if l == .messages {
                 guard let conversation else {
+                    // No chat yet: there's nothing to come.
                     messages = []
+                    messagesCame = selected != nil
                     placeQueued()
                     continue
                 }
