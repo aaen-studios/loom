@@ -3250,7 +3250,8 @@ impl Model {
                         let at = Instant::now();
                         if s(f, "status") == "failed" {
                             self.failed.insert(r.agent.clone(), at);
-                        } else {
+                        } else if !r.quiet {
+                            // A routine's quiet run never showed working, so it doesn't snap.
                             self.finished.insert(r.agent.clone(), at);
                         }
                         // What streamed, for a reply that never comes as message.created,
@@ -4462,13 +4463,16 @@ impl Model {
 
     /// What an agent's thread shows now.
     pub fn mood(&self, agent: &str) -> Mood {
-        let runs: Vec<&Run> = self.runs.iter().filter(|r| r.agent == agent).collect();
-        if runs
+        let all: Vec<&Run> = self.runs.iter().filter(|r| r.agent == agent).collect();
+        // A question waits for the person whoever's run asked, a routine's quiet one too.
+        if all
             .iter()
             .any(|r| self.approvals.iter().any(|a| a.run == r.id))
         {
             return Mood::Waiting;
         }
+        // Otherwise a routine's quiet run isn't shown as working.
+        let runs: Vec<&Run> = all.into_iter().filter(|r| !r.quiet).collect();
         if runs.iter().any(|r| {
             self.tools
                 .iter()
@@ -4504,15 +4508,20 @@ impl Model {
 
     /// The newest text of an agent's chat, for the sidebar.
     pub fn preview(&self, agent: &Agent) -> String {
-        let Some(r) = self.runs.iter().find(|r| r.agent == agent.id) else {
+        // A question from any of its runs, a routine's quiet one too.
+        if let Some(a) = self.approvals.iter().find(|a| {
+            self.runs
+                .iter()
+                .any(|r| r.agent == agent.id && r.id == a.run)
+        }) {
+            return format!("Wants to {}", mid_sentence(&a.title));
+        }
+        let Some(r) = self.runs.iter().find(|r| r.agent == agent.id && !r.quiet) else {
             return match self.mood(&agent.id) {
                 Mood::Failed => "Couldn't finish".into(),
                 _ => String::new(),
             };
         };
-        if let Some(a) = self.approvals.iter().find(|a| a.run == r.id) {
-            return format!("Wants to {}", mid_sentence(&a.title));
-        }
         if let Some(t) = self
             .tools
             .iter()
@@ -4614,7 +4623,8 @@ impl Model {
             .flat_map(|m| m.blocks.iter())
             .collect();
         for r in &self.runs {
-            if Some(&r.conversation) != conversation.as_ref()
+            if r.quiet
+                || Some(&r.conversation) != conversation.as_ref()
                 || self.messages.iter().any(|m| m.id == r.message)
             {
                 continue;
@@ -6646,6 +6656,8 @@ mod tests {
         }];
         m.take(&json!({"t": "delta", "run": "run_1", "message": "msg_2", "block": 0, "kind": "text", "pos": 0, "text": "Nothing new."}));
         assert!(m.shown().is_empty() && !m.busy() && m.cancel().is_none());
+        // Nor is it the agent working, in the sidebar.
+        assert_eq!(m.mood("a_1"), Mood::Idle);
         // A prompt kept in the chat before routines ran quietly isn't shown; a post is.
         m.take(&json!({"t": "event", "kind": "message.created", "conversation": "c_1", "message":
             {"id": "msg_1", "conversation": "c_1", "role": "person", "from": "rt_1", "at": 1, "blocks": [{"kind": "text", "text": "Check for a new release."}]}}));

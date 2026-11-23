@@ -390,7 +390,7 @@ Catch-up is over. Everything after this is live.
 { "t": "synced", "seq": 1046, "runs": [ { "run": "run_77", "conversation": "c_9", "agent": "a_2", "message": "msg_311", "answering": "msg_310" } ] }
 ```
 
-`runs` is every one of the person's runs still going, as `run.started` gave each (without `revision`). The app's cache makes its runs exactly these, so a run whose `run.started` or `run.finished` it never kept (the event was pruned, came before a snapshot's, or the cache couldn't write it) shows as it is: an agent shows it's working for as long as its turn goes, and stops once it's over.
+`runs` is every one of the person's runs still going, as `run.started` gave each (without `revision`), with `routine` for a routine's quiet run, which the apps don't show as working. The app's cache makes its runs exactly these, so a run whose `run.started` or `run.finished` it never kept (the event was pruned, came before a snapshot's, or the cache couldn't write it) shows as it is: an agent shows it's working for as long as its turn goes, and stops once it's over.
 
 ### `ack`
 
