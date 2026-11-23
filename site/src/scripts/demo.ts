@@ -153,7 +153,7 @@ export function play(app: HTMLElement) {
 		};
 	}
 
-	/** Words that came before the answer, among the steps, plain as the answer is. */
+	/** Words that came before the answer, among the steps, smaller and quieter than it. */
 	function words(steps: HTMLElement, text: string) {
 		const said = tpl('demo-said');
 		const p = document.createElement('p');

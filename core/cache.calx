@@ -26,7 +26,7 @@ CREATE TABLE IF NOT EXISTS messages (
 CREATE INDEX IF NOT EXISTS messages_by_conversation ON messages (conversation, at);
 CREATE TABLE IF NOT EXISTS devices (id TEXT PRIMARY KEY, json TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS runs (id TEXT PRIMARY KEY, conversation TEXT NOT NULL, json TEXT NOT NULL);
-CREATE TABLE IF NOT EXISTS calls (call TEXT PRIMARY KEY, run TEXT NOT NULL, title TEXT, status TEXT);
+CREATE TABLE IF NOT EXISTS calls (call TEXT PRIMARY KEY, run TEXT NOT NULL, title TEXT, status TEXT, block INTEGER);
 CREATE INDEX IF NOT EXISTS calls_by_run ON calls (run);
 CREATE TABLE IF NOT EXISTS approvals (call TEXT PRIMARY KEY, run TEXT NOT NULL, json TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS outbox (
@@ -41,11 +41,13 @@ const AGENTS: str = "SELECT json FROM agents ORDER BY rowid"
 const CONVERSATIONS: str = "SELECT json FROM conversations ORDER BY last DESC, rowid DESC"
 const DEVICES: str = "SELECT json FROM devices ORDER BY rowid"
 const RUNS: str = "SELECT json FROM runs ORDER BY rowid"
-// What a tool block shows of each call: its call, run, title and status, which is all
-// the cache keeps of it. A call's input and output can be many KB, no app reads them
-// from here, and the apps ask again at every tool event.
-const TOOLS_FOR: str = "SELECT json_object('call', call, 'run', run, 'title', title, 'status', status) FROM calls WHERE call IN (SELECT value FROM json_each(?)) OR run IN (SELECT value FROM json_each(?)) ORDER BY rowid"
-const TOOLS: str = "SELECT json_object('call', call, 'run', run, 'title', title, 'status', status) FROM calls ORDER BY rowid"
+// What a tool block shows of each call: its call, run, title and status, and its block in
+// a reply still being written, which is all the cache keeps of it. A call's input and
+// output can be many KB, no app reads them from here, and the apps ask again at every
+// tool event. A call with no block (from an instance before tool.started gave one) has
+// none in its JSON.
+const TOOLS_FOR: str = "SELECT json_patch(json_object('call', call, 'run', run, 'title', title, 'status', status), json_object('block', block)) FROM calls WHERE call IN (SELECT value FROM json_each(?)) OR run IN (SELECT value FROM json_each(?)) ORDER BY rowid"
+const TOOLS: str = "SELECT json_patch(json_object('call', call, 'run', run, 'title', title, 'status', status), json_object('block', block)) FROM calls ORDER BY rowid"
 
 // A cache from before calls and the conversations' agent column: what it had is moved over.
 const FROM_TOOLS: str = #"
@@ -63,6 +65,8 @@ UPDATE conversations SET agent = json_extract(json, '$.agent'),
     chat = (json_extract(json, '$.task') IS NULL AND json_extract(json, '$.side') IS NULL AND json_extract(json, '$.branch_of') IS NULL AND json_extract(json, '$.routine') IS NULL);
 COMMIT;
 "#
+// A cache from before calls kept their block.
+const BLOCK_COLUMN: str = "ALTER TABLE calls ADD COLUMN block INTEGER;"
 // Each agent's chat, newest first, for `conversation_for` at a send.
 const CHATS_BY_AGENT: str = "CREATE INDEX IF NOT EXISTS chats_by_agent ON conversations (agent, last DESC) WHERE chat = 1;"
 const APPROVALS: str = "SELECT json FROM approvals ORDER BY rowid"
@@ -153,6 +157,9 @@ impl Cache {
         }
         if try db.query_one(String("SELECT 1 FROM pragma_table_info('conversations') WHERE name = 'agent'"), List<Value>()) == none {
             try db.execute_script(String(AGENT_COLUMN))
+        }
+        if try db.query_one(String("SELECT 1 FROM pragma_table_info('calls') WHERE name = 'block'"), List<Value>()) == none {
+            try db.execute_script(String(BLOCK_COLUMN))
         }
         try db.execute_script(String(CHATS_BY_AGENT))
         return Cache { db: db, stop_checkpoints: stop, big: big }
@@ -328,7 +335,8 @@ impl Cache {
         } else if kind == "tool.started" {
             let call = str_at(e, "call") ?? String()
             let run = str_at(e, "run") ?? String()
-            _ = try self.db.execute(String("INSERT OR REPLACE INTO calls (call, run, title, status) VALUES (?, ?, ?, ?)"), [t(call), t(run), maybe(str_at(e, "title")), maybe(str_at(e, "status"))])
+            let block = if let b = int_at(e, "block") { Value.Int(b) } else { Value.Null }
+            _ = try self.db.execute(String("INSERT OR REPLACE INTO calls (call, run, title, status, block) VALUES (?, ?, ?, ?, ?)"), [t(call), t(run), maybe(str_at(e, "title")), maybe(str_at(e, "status")), block])
         } else if kind == "tool.updated" or kind == "tool.finished" {
             // Only what changed, set in place: no stored JSON read, merged and written back.
             let call = str_at(e, "call") ?? String()
@@ -744,6 +752,16 @@ fn tools_come_for_the_calls_and_runs_asked() ! Error {
         panic("not an array")
     }
     assert(try c.tools_text(String("null"), String("[]")) == "[]")
+}
+
+@test
+fn a_tool_keeps_its_place_in_the_reply() ! Error {
+    // So a reply still being written draws the call between the words before and after it.
+    let c = try Cache.open(String(":memory:"))
+    _ = try c.apply(ev(1, "tool.started", Obj.new().s("run", String("run_1")).s("call", String("tc_1")).i("block", 1).s("title", String("ls")).done()))
+    _ = try c.apply(ev(2, "tool.updated", Obj.new().s("call", String("tc_1")).s("title", String("List the folder")).done()))
+    _ = try c.apply(ev(3, "tool.started", Obj.new().s("run", String("run_1")).s("call", String("tc_2")).s("title", String("cat")).done()))
+    assert(try c.tools_text(String("[]"), String(#"["run_1"]"#)) == #"[{"call":"tc_1","run":"run_1","title":"List the folder","status":null,"block":1},{"call":"tc_2","run":"run_1","title":"cat","status":null}]"#)
 }
 
 @test

@@ -1930,12 +1930,49 @@ pub fn flow(rows: &[Option<&Message>], day: impl Fn(i64) -> i64) -> Vec<Flow> {
     out
 }
 
+/// A reply still being written: its run's tool calls among the blocks the deltas built.
+/// A delta for a block past the end fills the gap with empty blocks, so the words after a
+/// call come at their own place; each call goes in its gap, at the block tool.started
+/// named, and words written after it come after it. A call with no block, from an older
+/// instance, or whose place has something else, goes on the end.
+fn place_tools<'a>(blocks: &mut Vec<Block>, tools: impl Iterator<Item = &'a Tool>) {
+    let mut have: HashSet<String> = blocks.iter().filter_map(|b| b.call.clone()).collect();
+    for t in tools {
+        if !have.insert(t.call.clone()) {
+            continue;
+        }
+        let mut b = Block::text("tool", String::new());
+        b.call = Some(t.call.clone());
+        match t.block {
+            Some(i) => {
+                while blocks.len() <= i {
+                    blocks.push(Block::text("", String::new()));
+                }
+                let gap = &blocks[i];
+                if gap.call.is_none()
+                    && gap.card.is_none()
+                    && gap.file.is_none()
+                    && gap.text.is_empty()
+                {
+                    blocks[i] = b;
+                } else {
+                    blocks.push(b);
+                }
+            }
+            None => blocks.push(b),
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct Tool {
     pub call: String,
     pub run: String,
     pub title: String,
     pub status: Option<String>,
+    /// Its block in the reply, as tool.started says: where a reply still being written
+    /// draws it among its words.
+    pub block: Option<usize>,
 }
 
 /// The tool calls, in order, and found by call: a reply's tool blocks look theirs up
@@ -4226,6 +4263,7 @@ impl Model {
                         run: s(t, "run"),
                         title: s(t, "title"),
                         status: t.get("status").and_then(Value::as_str).map(str::to_string),
+                        block: t.get("block").and_then(Value::as_u64).map(|b| b as usize),
                     })
                     .collect();
                 // A tool call in another chat asks again too: the chat keeps what it
@@ -4316,14 +4354,7 @@ impl Model {
                 continue;
             }
             let mut blocks = self.live.get(&r.message).cloned().unwrap_or_default();
-            let mut have: HashSet<String> = blocks.iter().filter_map(|b| b.call.clone()).collect();
-            for t in self.tools.iter().filter(|t| t.run == r.id) {
-                if have.insert(t.call.clone()) {
-                    let mut b = Block::text("tool", String::new());
-                    b.call = Some(t.call.clone());
-                    blocks.push(b);
-                }
-            }
+            place_tools(&mut blocks, self.tools.iter().filter(|t| t.run == r.id));
             out.push(Message {
                 id: r.message.clone(),
                 role: "agent".into(),
@@ -5921,6 +5952,7 @@ mod tests {
             run: "run_1".into(),
             title: title.into(),
             status: Some("done".into()),
+            block: None,
         };
         Tools::new(vec![tool("tc_1", "Search the web"), tool("tc_2", "ls")])
     }
@@ -6365,6 +6397,7 @@ mod tests {
             run: "run_1".into(),
             title: "Search the web".into(),
             status: Some("running".into()),
+            block: None,
         }]));
         let now = |m: &Model| {
             let shown = m.shown();
@@ -6394,6 +6427,105 @@ mod tests {
         // Stopped, it keeps both, as one group.
         m.messages = vec![m.message_of(&kept("cancelled"))];
         assert_eq!(now(&m), vec![Part::Bubbles(vec![0, 2])]);
+    }
+
+    #[test]
+    fn words_after_a_tool_call_come_after_it_while_the_reply_is_written() {
+        // A turn as Claude's adapter plays one: a command, a thought, a command, a few
+        // words, a command that saves a memory, then the answer. The calls don't stream,
+        // so the deltas skip their blocks.
+        let mut m = Model::new();
+        m.conversations = vec![Conversation {
+            id: "c_1".into(),
+            agent: "a_1".into(),
+            task: None,
+            side: false,
+            branch_of: None,
+            branch_at: None,
+            routine: None,
+            program: None,
+            title: String::new(),
+        }];
+        m.select(Some("a_1".into()));
+        m.runs = vec![Run {
+            id: "run_1".into(),
+            conversation: "c_1".into(),
+            agent: "a_1".into(),
+            message: "msg_1".into(),
+        }];
+        let delta = |block: u64, kind: &str, text: &str| json!({"t": "delta", "run": "run_1", "message": "msg_1", "block": block, "kind": kind, "pos": 0, "text": text});
+        m.take(&delta(1, "thought", "Five entries."));
+        m.take(&delta(3, "text", "Now save this as a standing rule."));
+        m.take(&delta(5, "text", "Noted: your spoons are always heaped."));
+        let tool = |call: &str, title: &str, block: usize| Tool {
+            call: call.into(),
+            run: "run_1".into(),
+            title: title.into(),
+            status: Some("done".into()),
+            block: Some(block),
+        };
+        m.tools = Rc::new(Tools::new(vec![
+            tool("tc_1", "Read the food log", 0),
+            tool("tc_2", "Find the spoon entries", 2),
+            tool("tc_3", "Save a memory", 4),
+        ]));
+        let shown = m.shown();
+        let kinds: Vec<&str> = shown[0].blocks.iter().map(|b| b.kind.as_str()).collect();
+        assert_eq!(kinds, ["tool", "thought", "tool", "text", "tool", "text"]);
+        // The line the turn shows is its newest words, not the call before them, and
+        // opened, the steps are in the order they came.
+        assert_eq!(
+            parts(&shown[0], &m.tools, EVERYTHING),
+            vec![fold(
+                "Noted: your spoons are always heaped.",
+                true,
+                vec![
+                    Part::Tools(vec![0]),
+                    Part::Block(1),
+                    Part::Tools(vec![2]),
+                    Part::Bubbles(vec![3]),
+                    Part::Tools(vec![4]),
+                    Part::Bubbles(vec![5]),
+                ]
+            )]
+        );
+        // A call the instance gave no place, or one whose place has words, goes on the end.
+        let mut old = vec![Block::text("text", "Hi.".into())];
+        let unplaced = Tool {
+            block: None,
+            ..tool("tc_9", "ls", 0)
+        };
+        place_tools(&mut old, [unplaced, tool("tc_8", "cat", 0)].iter());
+        let calls: Vec<Option<&str>> = old.iter().map(|b| b.call.as_deref()).collect();
+        assert_eq!(calls, [None, Some("tc_9"), Some("tc_8")]);
+        // Kept, the answer is its own bubble, out of the steps.
+        let kept = json!({"id": "msg_1", "conversation": "c_1", "role": "agent", "agent": "a_1", "run": "run_1", "at": 2, "status": "done", "blocks": [
+            {"kind": "tool", "call": "tc_1"},
+            {"kind": "thought", "text": "Five entries."},
+            {"kind": "tool", "call": "tc_2"},
+            {"kind": "text", "text": "Now save this as a standing rule."},
+            {"kind": "tool", "call": "tc_3"},
+            {"kind": "text", "text": "Noted: your spoons are always heaped."}]});
+        m.take(&json!({"t": "event", "kind": "message.created", "conversation": "c_1", "message": kept}));
+        let shown = m.shown();
+        assert_eq!(shown.len(), 1);
+        assert_eq!(
+            parts(&shown[0], &m.tools, EVERYTHING),
+            vec![
+                fold(
+                    "5 steps",
+                    false,
+                    vec![
+                        Part::Tools(vec![0]),
+                        Part::Block(1),
+                        Part::Tools(vec![2]),
+                        Part::Bubbles(vec![3]),
+                        Part::Tools(vec![4]),
+                    ]
+                ),
+                Part::Bubbles(vec![5]),
+            ]
+        );
     }
 
     #[test]

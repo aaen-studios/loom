@@ -14276,11 +14276,36 @@ impl ReplyDraw<'_> {
                 .border_l_1()
                 .border_color(p.line_strong);
             for part in parts {
-                list = list.child(self.part(part));
+                list = list.child(match part {
+                    model::Part::Bubbles(run) => self.said_on_the_way(run),
+                    _ => self.part(part),
+                });
             }
             out = out.child(list);
         }
         out.into_any_element()
+    }
+
+    /// Words the agent wrote on its way to the answer, among the steps: smaller and quieter
+    /// than the answer, and never a bubble whatever the person's prefs, so they don't read
+    /// as a message in the chat, its or the person's.
+    fn said_on_the_way(&self, run: &[usize]) -> AnyElement {
+        let (p, show) = (self.p, self.show);
+        let mut group = div().flex().flex_col().gap(px(space::XS));
+        for &i in run {
+            group = group.child(
+                div()
+                    .text_size(px(size::SMALL * show.text_scale))
+                    .line_height(relative(line::REPLY))
+                    .text_color(p.ink_2)
+                    .child(KeptText::new(
+                        SharedString::from(format!("w-{}-{}", self.key(i), show.room)),
+                        self.m.blocks[i].text.clone(),
+                        |v| v.selectable(true),
+                    )),
+            );
+        }
+        group.into_any_element()
     }
 
     /// A block on its own: a thought, a plan, a notice, a file or a card.

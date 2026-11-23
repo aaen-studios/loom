@@ -234,6 +234,30 @@ fn run(server: Child, data: String) ! Error {
     if let Json.Array(ms) = at(at(listed, "value"), "messages") { count = ms.len() }
     try check(count == 2 and back.seq == before, "and makes no message and no event")
 
+    // --- Tool calls among the words ---
+    // A shell command as Claude's adapter plays it: titled "Terminal", then the whole
+    // command, heredoc and all, as its title, with Claude's few words in rawInput.
+    let saved = #"{"command":"M=/srv/memory; cat > $M/spoons.md <<'EOF'\n---\nname: spoons\n---\nEOF","description":"Save a memory"}"#
+    let bare = #"{"command":"cat > notes.md <<'EOF'\nheaped\nEOF"}"#
+    try back.send(Obj.new().s("t", String("send")).s("cid", String("m_shell")).s("conversation", conversation.copy()).s("text", "Checking.\n/shell {saved}\n/selfprompt\nNow save this as a rule.\n/shell {bare}\nNoted.").done())
+    let first_call = try back.until("event", "tool.started")
+    let named = try back.until("event", "tool.updated")
+    let second_call = try back.until("event", "tool.started")
+    let second_named = try back.until("event", "tool.updated")
+    try check(int_at(first_call, "block") == some(1) and int_at(second_call, "block") == some(3), "tool.started says each call's place among the words")
+    try check(str_at(named, "title") == some(String("Save a memory")), "a shell command is titled with the few words its agent gave it")
+    try check(str_at(second_named, "title") == some(String("cat > notes.md <<'EOF'…")), "and without them, with its first line")
+    var shelled = try back.until("event", "message.created")
+    while str_at(at(shelled.copy(), "message"), "role") != some(String("agent")) { shelled = try back.until("event", "message.created") }
+    var kinds = List<String>()
+    if let Json.Array(blocks) = at(at(shelled, "message"), "blocks") {
+        for b in blocks { kinds.push(str_at(b, "kind") ?? String()) }
+    }
+    try check(kinds.join(" ") == "text tool text tool text", "the reply keeps its words and calls in the order they came")
+    _ = try back.until("event", "run.finished")
+    let listed_now = try back.cmd("q_shell", "messages.list", Obj.new().s("conversation", conversation.copy()).done())
+    try check(not "{at(at(listed_now, "value"), "messages")}".contains("Look into the spoons."), "a prompt the agent program gives itself is never a message")
+
     // --- An approval ---
     // What a turn used, as its program reports it.
     try back.send(Obj.new().s("t", String("send")).s("cid", String("m_tokens")).s("conversation", conversation.copy()).s("text", String("/tokens 41\ncounted")).done())
