@@ -37,6 +37,7 @@ pub struct Flow {
     pub id: String
     pub user: String
     pub routine: String
+    pub run: String    // the routine's run it goes on from, whose runs keep its steps
     pub name: String    // the routine's
     pub steps: List<Step>    // the routine first
     pub stopped: bool
@@ -70,7 +71,7 @@ pub fn kept(f: Flow) -> Json {
         for a in s.after { after.push(Json.Str(a.copy())) }
         steps.push(Obj.new().s("name", s.name.copy()).s("agent", s.agent.copy()).s("prompt", s.prompt.copy()).j("after", Json.Array(after)).s("state", state_name(s.state)).s("answer", s.answer.copy()).s("run", s.run.copy()).done())
     }
-    return Obj.new().s("id", f.id.copy()).s("user", f.user.copy()).s("routine", f.routine.copy()).s("name", f.name.copy()).j("steps", Json.Array(steps)).b("stopped", f.stopped).s("told", f.told.copy()).done()
+    return Obj.new().s("id", f.id.copy()).s("user", f.user.copy()).s("routine", f.routine.copy()).s("run", f.run.copy()).s("name", f.name.copy()).j("steps", Json.Array(steps)).b("stopped", f.stopped).s("told", f.told.copy()).done()
 }
 
 // A flow the store kept, picked up again after a restart: a step whose run
@@ -92,7 +93,7 @@ pub fn picked_up(j: Json) -> Flow {
             steps.push(Step { name: str_at(s.copy(), "name") ?? String(), agent: str_at(s.copy(), "agent") ?? String(), prompt: str_at(s.copy(), "prompt") ?? String(), after: after, state: state, answer: str_at(s.copy(), "answer") ?? String(), run: run })
         }
     }
-    return Flow { id: str_at(j.copy(), "id") ?? String(), user: str_at(j.copy(), "user") ?? String(), routine: str_at(j.copy(), "routine") ?? String(), name: str_at(j.copy(), "name") ?? String(), steps: steps, stopped: bool_at(j.copy(), "stopped") ?? false, told: str_at(j, "told") ?? String() }
+    return Flow { id: str_at(j.copy(), "id") ?? String(), user: str_at(j.copy(), "user") ?? String(), routine: str_at(j.copy(), "routine") ?? String(), run: str_at(j.copy(), "run") ?? String(), name: str_at(j.copy(), "name") ?? String(), steps: steps, stopped: bool_at(j.copy(), "stopped") ?? false, told: str_at(j, "told") ?? String() }
 }
 
 // A routine's `flow` as routine.put takes it: a list of steps, each `name`,
@@ -228,6 +229,15 @@ pub fn inputs_for(f: Flow, k: usize, names: Map<String, String>) -> String {
     return "[loom: {block}]"
 }
 
+// Whether any step comes after step `k`, so its answer goes on.
+pub fn has_after(f: Flow, k: usize) -> bool {
+    let name = f.steps[k].name.copy()
+    for s in f.steps {
+        if s.after.contains(name.copy()) { return true }
+    }
+    return false
+}
+
 fn flow_of(after: List<List<str>>, states: List<State>) -> Flow {
     var steps = List<Step>()
     for k in 0usize..after.len() {
@@ -236,7 +246,7 @@ fn flow_of(after: List<List<str>>, states: List<State>) -> Flow {
         let name = if k == 0 { String("routine") } else { "s{k}" }
         steps.push(Step { name: name, agent: "a_{k}", prompt: String("go"), after: a, state: states[k], answer: "answer {k}", run: String() })
     }
-    return Flow { id: String("f_1"), user: String("u_1"), routine: String("rt_1"), name: String("Morning"), steps: steps, stopped: false, told: String() }
+    return Flow { id: String("f_1"), user: String("u_1"), routine: String("rt_1"), run: String("run_1"), name: String("Morning"), steps: steps, stopped: false, told: String() }
 }
 
 @test
@@ -264,6 +274,7 @@ fn steps_wait_for_every_input() {
     let asked = inputs_for(f.copy(), 3, Map<String, String>())
     assert(asked.starts_with("[loom: This is step s3") and asked.contains("From step s1 (a_1):\nanswer 1") and asked.contains("These failed, so their answers aren't here: step s2 (a_2)."))
     assert(not finished(f.copy()))
+    assert(has_after(f.copy(), 0) and has_after(f.copy(), 2) and not has_after(f.copy(), 3))
 }
 
 @test
@@ -271,7 +282,7 @@ fn a_kept_flow_is_picked_up_with_a_cut_short_step_waiting() {
     var f = flow_of([List<str>(), ["routine"], ["s1"]], [State.Done, State.Running, State.Waiting])
     f.steps[1].run = String("run_9")
     let back = picked_up(kept(f.copy()))
-    assert(back.id == f.id and back.routine == f.routine and back.steps.len() == 3 and back.steps[2].after == [String("s1")])
+    assert(back.id == f.id and back.routine == f.routine and back.run == f.run and back.steps.len() == 3 and back.steps[2].after == [String("s1")])
     assert(back.steps[0].state == State.Done and back.steps[0].answer == f.steps[0].answer)
     assert(back.steps[1].state == State.Waiting and back.steps[1].run.len() == 0)
 }

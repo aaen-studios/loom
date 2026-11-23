@@ -44,7 +44,7 @@ INSERT INTO projection_thread_messages VALUES ('th_main', 'm3', 't1', 'system', 
 INSERT INTO projection_thread_messages VALUES ('th_side', 's1', 't2', 'user', 'done', 'message', '2026-01-02T03:05:30.000Z', 1, '{"id":"s1","author":"user","text":"Do the side job","source":"user"}', 1);
 INSERT INTO projection_pinned_thread_messages VALUES ('th_main', 'm2', '2026-01-02T04:00:00.000Z', 'person', NULL, NULL);
 INSERT INTO projection_agent_memories VALUES ('mem1', 'ag_main', 'Elliot likes short answers', 'elliot likes short answers', 'manual', NULL, '2026-01-01T10:00:00.000Z', '2026-01-01T10:00:00.000Z', 1, NULL);
-INSERT INTO projection_agent_routines VALUES ('rt1', 'ag_main', 'Morning brief', 'Write the morning brief', 1, 'Europe/Oslo', '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z', 1, 'wait', 'run-once', 'chat');
+INSERT INTO projection_agent_routines VALUES ('rt1', 'ag_main', 'Morning brief', 'Write the morning brief. With nothing new, call openbot.routine_no_update.', 1, 'Europe/Oslo', '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z', 1, 'wait', 'run-once', 'chat');
 INSERT INTO projection_routine_triggers VALUES ('tr1', 'rt1', '{"kind":"daily","time":"07:30"}', '2026-01-03T06:30:00.000Z', '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z', 1);
 INSERT INTO projection_agent_routines VALUES ('rt2', 'ag_main', 'Weekly review', 'Review the week', 0, 'Europe/Oslo', '2026-01-01T00:00:01.000Z', '2026-01-01T00:00:01.000Z', 1, 'wait', 'skip', 'thread');
 INSERT INTO projection_routine_triggers VALUES ('tr2', 'rt2', '{"kind":"weekly","weekday":5,"time":"16:00"}', '2026-01-09T15:00:00.000Z', '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z', 1);
@@ -216,6 +216,7 @@ fn run(inst: Instance) ! Error {
     try check(notes.contains("Elliot likes short answers") and notes.contains("import:openbot"), "memories come, each its agent's")
     let rs = "{value(try app.cmd("q_6", "routine.list", Obj.new().done()))}"
     try check(rs.contains(#""daily":"07:30""#) and rs.contains(#""daily":"16:00""#) and rs.contains("Europe/Oslo") and rs.contains(#""post":"thread""#), "routines come on loom's schedules, in their time zone")
+    try check(rs.contains("With nothing new, call routine_quiet.") and not rs.contains("openbot.routine"), "naming loom's routine tools where they named OpenBot's")
     let skill = value(try app.cmd("q_7", "skill.get", Obj.new().s("name", String("weekly-report")).done()))
     try check((str_at(at(skill, "skill"), "body") ?? String()).contains("Gather the week"), "a skill comes from its bundle")
     let mcp = "{value(try app.cmd("q_8", "mcp.list", Obj.new().done()))}"

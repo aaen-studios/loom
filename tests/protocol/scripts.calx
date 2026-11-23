@@ -87,10 +87,13 @@ fn run(i: Instance) ! Error {
 
     // A routine, run by name.
     let routine = try app.cmd("q_7", "routine.put", Obj.new().s("name", String("Morning")).s("agent", agent.copy()).s("prompt", String("good morning")).j("schedule", Obj.new().s("daily", String("07:00")).done()).done())
-    let (ran, _) = try call(i.base.copy(), token.copy(), "routine", some(Obj.new().s("routine", String("morning")).done()), List<Header>())
+    let (ran, ran_body) = try call(i.base.copy(), token.copy(), "routine", some(Obj.new().s("routine", String("morning")).done()), List<Header>())
     try check(str_at(at(at(routine, "value"), "routine"), "name") == some(String("Morning")) and ran == 200, "a script runs a routine by its name")
-    // Its answer, before the command line asks in the same chat.
-    _ = try app.reply()
+    // Its quiet run ends before the command line asks in the same chat.
+    loop {
+        let ended = try app.until("event", "run.finished")
+        if str_at(ended, "run") == str_at(ran_body.copy(), "run") { break }
+    }
 
     // loom's command line.
     let url = "http://{i.base}"

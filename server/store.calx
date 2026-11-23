@@ -157,6 +157,11 @@ CREATE TABLE IF NOT EXISTS routines (
     id TEXT PRIMARY KEY, user TEXT NOT NULL REFERENCES users(id), json TEXT NOT NULL,
     next INTEGER NOT NULL);
 CREATE INDEX IF NOT EXISTS routines_by_next ON routines (next);
+-- Each routine's runs, which its person sees in place of the chat: the newest of each kept.
+CREATE TABLE IF NOT EXISTS routine_runs (
+    id TEXT PRIMARY KEY, user TEXT NOT NULL REFERENCES users(id), routine TEXT NOT NULL,
+    json TEXT NOT NULL, at INTEGER NOT NULL);
+CREATE INDEX IF NOT EXISTS routine_runs_newest ON routine_runs (user, routine, at);
 CREATE TABLE IF NOT EXISTS flows (
     id TEXT PRIMARY KEY, user TEXT NOT NULL REFERENCES users(id), json TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS link_codes (
@@ -224,6 +229,9 @@ CREATE TABLE IF NOT EXISTS imported (
 /// What search marks a matched word with, before and after.
 pub const MARK_START: str = "\u{2}"
 pub const MARK_END: str = "\u{3}"
+
+// How many of each routine's runs are kept, the newest.
+const ROUTINE_RUNS_KEPT: i64 = 100
 
 pub fn now() -> i64 {
     return unsafe { Timestamp.now() }.unix_ms
@@ -1343,14 +1351,6 @@ impl Store {
 
     // Puts a message's words in the search index: its text, and its files' names.
     // A message's row there has the message's rowid, so storing it again replaces it.
-    // Deletes `user`'s message `id`, and its words from the search. False if
-    // there was no such message.
-    pub fn delete_message(self, user: String, id: String) -> bool ! Error {
-        let row = try self.db.query_one(String("SELECT rowid FROM messages WHERE id = ? AND user = ?"), [t(id), t(user)]) else return false
-        _ = try self.db.execute(String("DELETE FROM messages_fts WHERE rowid = ?"), [row[0].copy()])
-        _ = try self.db.execute(String("DELETE FROM messages WHERE rowid = ?"), [row[0].copy()])
-        return true
-    }
 
     fn index_message(self, user: String, message: Json) ! Error {
         let id = (message.get(String("id")) ?? Json.Null).as_str() ?? String()
@@ -1865,7 +1865,42 @@ impl Store {
     }
 
     pub fn delete_routine(self, user: String, id: String) -> bool ! Error {
+        _ = try self.db.execute(String("DELETE FROM routine_runs WHERE routine = ? AND user = ?"), [t(id.copy()), t(user.copy())])
         return try self.db.execute(String("DELETE FROM routines WHERE id = ? AND user = ?"), [t(id), t(user)]) > 0
+    }
+
+    // Keeps one of routine `routine`'s runs, as JSON with its `run` and `at`, or
+    // changes it, and lets the oldest go past the newest ROUTINE_RUNS_KEPT.
+    pub fn put_routine_run(self, user: String, routine: String, run: Json) ! Error {
+        let id = (run.get(String("run")) ?? Json.Null).as_str() ?? String()
+        let at = (run.get(String("at")) ?? Json.Null).as_i64() ?? now()
+        _ = try self.db.execute(String("INSERT INTO routine_runs (id, user, routine, json, at) VALUES (?, ?, ?, ?, ?) ON CONFLICT (id) DO UPDATE SET json = excluded.json"), [t(id), t(user.copy()), t(routine.copy()), t("{run}"), Value.Int(at)])
+        _ = try self.db.execute(String("DELETE FROM routine_runs WHERE user = ?1 AND routine = ?2 AND id NOT IN (SELECT id FROM routine_runs WHERE user = ?1 AND routine = ?2 ORDER BY at DESC, rowid DESC LIMIT ?3)"), [t(user), t(routine), Value.Int(ROUTINE_RUNS_KEPT)])
+    }
+
+    // One of routine `routine`'s runs, by its run id.
+    pub fn routine_run(self, user: String, routine: String, run: String) -> Json? ! Error {
+        let r = try self.db.query_one(String("SELECT json FROM routine_runs WHERE id = ? AND user = ? AND routine = ?"), [t(run), t(user), t(routine)]) else return none
+        return some(try parse(text(r[0].copy())))
+    }
+
+    // Up to `limit` of routine `routine`'s runs, newest first, before the run
+    // `before` when it's given.
+    pub fn routine_runs(self, user: String, routine: String, before: String?, limit: i64) -> List<Json> ! Error {
+        var rows = List<List<Value>>()
+        if let b = before {
+            rows = try self.db.query(String("SELECT json FROM routine_runs WHERE user = ?1 AND routine = ?2 AND rowid < (SELECT rowid FROM routine_runs WHERE id = ?3 AND user = ?1) ORDER BY at DESC, rowid DESC LIMIT ?4"), [t(user), t(routine), t(b), Value.Int(limit)])
+        } else {
+            rows = try self.db.query(String("SELECT json FROM routine_runs WHERE user = ? AND routine = ? ORDER BY at DESC, rowid DESC LIMIT ?"), [t(user), t(routine), Value.Int(limit)])
+        }
+        var out = List<Json>()
+        for r in rows { out.push(try parse(text(r[0].copy()))) }
+        return out
+    }
+
+    // Routine runs a crash or a restart cut short are failed, saying so.
+    pub fn fail_running_routine_runs(self) ! Error {
+        _ = try self.db.execute(String("UPDATE routine_runs SET json = json_set(json, '$.status', 'failed', '$.error', 'The instance restarted.') WHERE json_extract(json, '$.status') = 'running'"))
     }
 
     // --- Routine flows that are running (PLAN.md, "Routine flows") ---
@@ -2063,7 +2098,7 @@ impl Store {
 
     fn remove_rows(self, user: String) ! Error {
         _ = try self.db.execute(String("DELETE FROM sent WHERE device IN (SELECT id FROM devices WHERE user = ?)"), [t(user.copy())])
-        for table in ["push_tokens", "link_codes", "script_grants", "resets", "agent_revisions", "agents", "activity", "secrets", "mcp_servers", "skills", "messages", "conversations", "runs", "queue", "tasks", "sides", "branches", "routine_threads", "events", "acp_sessions", "files", "profiles", "defaults", "rules", "routines", "flows", "plugin_data", "plugin_revisions", "plugins", "usage", "memories", "memories_fts", "messages_fts", "shared_rows", "shared_tables", "script_tokens", "status_tokens", "imported", "recordings", "proposals", "devices"] {
+        for table in ["push_tokens", "link_codes", "script_grants", "resets", "agent_revisions", "agents", "activity", "secrets", "mcp_servers", "skills", "messages", "conversations", "runs", "queue", "tasks", "sides", "branches", "routine_threads", "events", "acp_sessions", "files", "profiles", "defaults", "rules", "routine_runs", "routines", "flows", "plugin_data", "plugin_revisions", "plugins", "usage", "memories", "memories_fts", "messages_fts", "shared_rows", "shared_tables", "script_tokens", "status_tokens", "imported", "recordings", "proposals", "devices"] {
             _ = try self.db.execute("DELETE FROM {table} WHERE user = ?", [t(user.copy())])
         }
         _ = try self.db.execute(String("DELETE FROM invites WHERE by = ?"), [t(user.copy())])
@@ -2638,6 +2673,27 @@ fn messages_page_newest_last() {
     assert("{page[1]}".contains("msg_5") and "{page[0]}".contains("msg_4"))
     let (older, more2) = s.messages(a.id.copy(), String("c_1"), some(String("msg_4")), 10)!
     assert(not more2 and older.len() == 3 and "{older[0]}".contains("msg_1"))
+}
+
+@test
+fn a_routines_runs_are_kept_newest_first_and_go_with_it() {
+    let s = test_store()
+    let a = s.add_user(String("a"), String("password1"), "owner")!
+    let b = s.add_user(String("b"), String("password2"), "member")!
+    for n in 1i64..4 {
+        s.put_routine_run(a.id.copy(), String("rt_1"), Obj.new().s("run", "run_{n}").i("at", n).s("status", String("running")).done())!
+    }
+    s.put_routine_run(a.id.copy(), String("rt_1"), Obj.new().s("run", String("run_3")).i("at", 3).s("status", String("quiet")).done())!
+    let runs = s.routine_runs(a.id.copy(), String("rt_1"), none, 10)!
+    assert(runs.len() == 3 and "{runs[0]}".contains("run_3") and "{runs[0]}".contains("quiet") and "{runs[2]}".contains("run_1"))
+    let older = s.routine_runs(a.id.copy(), String("rt_1"), some(String("run_3")), 1)!
+    assert(older.len() == 1 and "{older[0]}".contains("run_2"))
+    assert(s.routine_runs(b.id.copy(), String("rt_1"), none, 10)!.len() == 0 and s.routine_run(b.id.copy(), String("rt_1"), String("run_1"))! == none)
+    // A restart fails the ones it cut short.
+    s.fail_running_routine_runs()!
+    assert("{s.routine_run(a.id.copy(), String("rt_1"), String("run_2"))!}".contains("The instance restarted."))
+    s.put_routine(a.id.copy(), Obj.new().s("id", String("rt_1")).done())!
+    assert(s.delete_routine(a.id.copy(), String("rt_1"))! and s.routine_runs(a.id.copy(), String("rt_1"), none, 10)!.len() == 0)
 }
 
 fn text_message(id: str, conversation: String, agent: str, words: str, at: i64) -> Json {

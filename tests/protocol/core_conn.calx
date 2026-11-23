@@ -205,6 +205,20 @@ fn run(server: mut Child, data: String) ! Error {
     app.send(Obj.new().s("t", String("send")).s("agent", other).s("text", String("tell me when you're done")).done())
     let note = try app.until("core.notify", "kind", String("run.finished"), 20000)
     try check(str_at(note.copy(), "title") == some(String("Other")) and (str_at(note, "body") ?? String()).len() > 0, "a reply that's done while the app isn't looked at becomes a notification")
+    // A routine's quiet run that posts nothing isn't one: only a post, or a failure, is.
+    app.send(Obj.new().s("t", String("cmd")).s("id", String("q_r1")).s("name", String("routine.put")).j("args", Obj.new().s("name", String("Check")).s("agent", other.copy()).s("prompt", String("nothing new")).j("schedule", Obj.new().i("every", 600).done()).done()).done())
+    let routine = str_at(at(at(try app.until("result", "id", "q_r1", 5000), "value"), "routine"), "id") ?? String()
+    app.send(Obj.new().s("t", String("cmd")).s("id", String("q_r2")).s("name", String("routine.run")).j("args", Obj.new().s("id", routine).done()).done())
+    let routine_run = str_at(at(try app.until("result", "id", "q_r2", 5000), "value"), "run") ?? String()
+    var told_quiet = false
+    loop {
+        let m = unsafe { app.from_core.wait_for(20000 * 1000000) } else { fail "the routine's run didn't finish" }
+        let f = try parse(m)
+        let t = str_at(f.copy(), "t") ?? String()
+        if t == "core.notify" { told_quiet = true }
+        if t == "event" and str_at(f.copy(), "kind") == some(String("run.finished")) and str_at(f, "run") == some(routine_run.copy()) { break }
+    }
+    try check(not told_quiet, "a routine's quiet run that posts nothing isn't a notification")
     app.send(Obj.new().s("t", String("app.active")).b("active", true).done())
 
     // --- The instance goes away and comes back ---

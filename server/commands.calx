@@ -25,7 +25,7 @@ struct Command {
     does: str
 }
 
-const COMMANDS: [Command; 89] = [
+const COMMANDS: [Command; 90] = [
     Command { name: "conversation.create", args: "agent, title?", does: "Makes a conversation with an agent." },
     Command { name: "conversation.rename", args: "conversation, title", does: "Renames a conversation." },
     Command { name: "conversation.branch", args: "message, title?", does: "Branches a chat at a message: a new conversation that goes on from there, apart from the chat." },
@@ -62,6 +62,7 @@ const COMMANDS: [Command; 89] = [
     Command { name: "routine.list", args: "", does: "Routines, with when each runs next and how it last went." },
     Command { name: "routine.put", args: #"name, agent, prompt, schedule ({every: minutes}, {daily: HH:MM} or {weekdays: HH:MM}), tz?, notify?, on?, catch_up?, webhook?, flow? (steps of name, agent, prompt and after: the steps each waits for); or id and what changes"#, does: "Makes or changes a routine." },
     Command { name: "routine.run", args: "id", does: "Runs a routine now." },
+    Command { name: "routine.runs", args: "id, before? (a run id), limit? (1 to 100, 20 if left out)", does: "A routine's runs, newest first: when each ran, how it ended, what its agent answered and what it posted." },
     Command { name: "routine.stop", args: "id", does: "Stops the flow a routine has running: its steps that have not started never do." },
     Command { name: "flow.list", args: "", does: "The routine flows running, with how far each has got." },
     Command { name: "routine.delete", args: "id", does: "Deletes a routine." },
@@ -127,7 +128,7 @@ pub fn access(name: String) -> Access {
     if name.starts_with("browser.") { return Access.Never(String("Use your browser_ tools.")) }
     if name == "queue.steer" { return Access.Never(String("Steering is your person's: it stops the turn that's running.")) }
     if name.starts_with("scripts.") { return Access.Never(String("Scripts are your person's own: they turn them on in the app.")) }
-    let runs = ["conversation.create", "conversation.rename", "conversation.branch", "conversation.move", "messages.list", "messages.search", "messages.pinned", "message.pin", "agent.create", "agent.update", "agent.revisions", "agent.rollback", "activity.list", "memory.list", "memory.put", "table.list", "table.create", "table.write", "table.rows", "table.delete_rows", "profile.get", "profile.put", "defaults.get", "rule.list", "rule.check", "routine.list", "routine.put", "routine.run", "routine.stop", "flow.list", "task.list", "task.start", "task.pause", "task.resume", "task.cancel", "task.retry", "queue.list", "queue.edit", "queue.order", "queue.drop", "skill.list", "skill.get", "skill.put", "plugin.list", "plugin.get", "plugin.put", "plugin.revisions", "mcp.list", "mcp.test", "secret.list", "acp.list", "acp.registry"]
+    let runs = ["conversation.create", "conversation.rename", "conversation.branch", "conversation.move", "messages.list", "messages.search", "messages.pinned", "message.pin", "agent.create", "agent.update", "agent.revisions", "agent.rollback", "activity.list", "memory.list", "memory.put", "table.list", "table.create", "table.write", "table.rows", "table.delete_rows", "profile.get", "profile.put", "defaults.get", "rule.list", "rule.check", "routine.list", "routine.put", "routine.run", "routine.runs", "routine.stop", "flow.list", "task.list", "task.start", "task.pause", "task.resume", "task.cancel", "task.retry", "queue.list", "queue.edit", "queue.order", "queue.drop", "skill.list", "skill.get", "skill.put", "plugin.list", "plugin.get", "plugin.put", "plugin.revisions", "mcp.list", "mcp.test", "secret.list", "acp.list", "acp.registry"]
     if name.starts_with("proposal.") { return Access.Never(String("Proposals are your person's to keep or drop, in the app. Use propose_skill or propose_note to make one.")) }
     for r in runs {
         if name == r { return Access.Runs }
@@ -174,7 +175,7 @@ fn reading_runs_and_harm_asks() {
     for c in COMMANDS {
         if let Access.Never(_) = access(String(c.name)) { panic("{c.name} is listed but never runs") }
     }
-    assert(catalog().len() == 89)
+    assert(catalog().len() == 90 and access(String("routine.runs")) == Access.Runs)
     assert(access(String("mcp.test")) == Access.Runs)
     assert(access(String("rule.list")) == Access.Runs and access(String("rule.check")) == Access.Runs)
     assert(access(String("rule.put")) == Access.Asks(String("other")) and access(String("rule.delete")) == Access.Asks(String("delete")))

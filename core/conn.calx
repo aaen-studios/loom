@@ -520,6 +520,9 @@ impl Conn {
             ok(some(r)) => r,
             _ => return,
         }
+        // A routine's quiet run is told by the instance, with notify, when its agent
+        // posts or it fails (PLAN.md, "Routines"), never as a reply.
+        if kind == "run.finished" and str_at(run.copy(), "routine") != none { return }
         let agent_id = str_at(run.copy(), "agent") ?? String()
         let conversation = str_at(run, "conversation") ?? String()
         let name = match self.cache.agent(agent_id.copy()) {

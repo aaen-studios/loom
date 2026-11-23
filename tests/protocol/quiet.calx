@@ -1,12 +1,14 @@
 module tests.protocol.quiet
 
-// Routines that say when there's nothing to say (PLAN.md, "Routines say when
-// there's nothing to say"). A run whose agent calls routine_quiet leaves
-// nothing in the chat: its answer isn't kept, the routine's message goes
-// (message.deleted), and no one is notified. routine_failed makes the run a
-// failure with why, and five in a row turn the routine off with a notice.
-// pause_routine pauses it and tells the person. Outside a routine run, the
-// three are refused.
+// Routines run quietly (PLAN.md, "Routines"). A run's prompt is never a
+// message in the chat, and neither is its agent's answer: with nothing posted,
+// nothing reaches the chat and no one is notified, and the run ends quiet.
+// What the agent posts with routine_post is its message in the chat, and a
+// notification. routine_quiet ends a run quiet; routine_failed makes it a
+// failure with why, which the person sees and is told, and five in a row
+// turn the routine off with a notice. pause_routine pauses it and tells the
+// person. A prompt still naming OpenBot's tools reaches them as loom's.
+// Outside a routine run, they're refused. routine.runs keeps each run.
 //
 //     calx tests/protocol/quiet.calx
 import std.json.{Json}
@@ -49,38 +51,67 @@ fn kinds(frames: List<Json>, kind: str) -> List<Json> {
     return out
 }
 
+// The messages that came, as their role and text.
+fn shown(frames: List<Json>) -> List<String> {
+    var out = List<String>()
+    for f in kinds(frames, "message.created") {
+        let m = at(f, "message")
+        out.push("{str_at(m.copy(), "role") ?? String()}: {reply_text(m)}")
+    }
+    return out
+}
+
 fn run(i: Instance) ! Error {
     var app = try Session.connect(i.base.copy(), i.token.copy(), 0)
     _ = try app.cmd("q_a", "agent.create", Obj.new().s("name", String("Main")).s("acp_agent", String("fake")).s("instructions", String("Test.")).done())
 
-    // Quiet: nothing is left in the chat, and no one hears.
-    let quiet = try put(mut app, "q_1", "Watch", #"/mcp routine_quiet {}"#)
-    let (q, frames) = try run_once(mut app, "q_2", quiet.copy())
-    try check(str_at(at(q.copy(), "last"), "status") == some(String("quiet")), "a run that calls routine_quiet ends quiet")
-    var prompt_id = String()
-    var answered = false
-    for f in kinds(frames.copy(), "message.created") {
-        let m = at(f, "message")
-        if str_at(m.copy(), "from") == some(quiet.copy()) { prompt_id = str_at(m.copy(), "id") ?? String() }
-        if str_at(m, "role") == some(String("agent")) { answered = true }
-    }
-    let deleted = kinds(frames.copy(), "message.deleted")
-    try check(prompt_id.len() > 0 and deleted.len() == 1 and str_at(deleted[0].copy(), "message") == some(prompt_id.copy()), "the routine's message is taken back")
-    try check(not answered and kinds(frames.copy(), "notify").len() == 0, "and there's no answer and no notification")
-    let conversation = str_at(q, "conversation") ?? String()
+    // Nothing to say: nothing reaches the chat, and no one hears.
+    let silent = try put(mut app, "q_1", "Watch", "No new release since the last check.")
+    let (s, s_frames) = try run_once(mut app, "q_2", silent.copy())
+    try check(str_at(at(s.copy(), "last"), "status") == some(String("quiet")), "a run that posts nothing ends quiet")
+    try check(shown(s_frames.copy()).len() == 0 and kinds(s_frames.copy(), "notify").len() == 0, "and leaves nothing in the chat, its prompt and its answer, and notifies no one")
+    var started = Json.Null
+    for f in kinds(s_frames, "run.started") { started = f.copy() }
+    try check(str_at(started, "routine") == some(silent.copy()), "its run.started says it's the routine's")
+    let conversation = str_at(s, "conversation") ?? String()
     let listed = "{try app.cmd("q_3", "messages.list", Obj.new().s("conversation", conversation.copy()).done())}"
-    try check(not listed.contains(prompt_id.copy()), "messages.list doesn't have it either")
+    try check(not listed.contains("No new release"), "messages.list doesn't have it either")
+
+    // routine_quiet ends it quiet too.
+    let quiet = try put(mut app, "q_4", "Hush", #"/mcp routine_quiet {}"#)
+    let (q, q_frames) = try run_once(mut app, "q_5", quiet.copy())
+    try check(str_at(at(q, "last"), "status") == some(String("quiet")) and shown(q_frames).len() == 0, "a run that calls routine_quiet ends quiet")
+
+    // Something to say: the post is the agent's message, and a notification.
+    let news = try put(mut app, "q_6", "News", "/mcp routine_post \{\"text\": \"26.4 is out.\"\}\nI posted it.")
+    let (n, n_frames) = try run_once(mut app, "q_7", news.copy())
+    let notified = kinds(n_frames.copy(), "notify")
+    try check(str_at(at(n.copy(), "last"), "status") == some(String("done")) and shown(n_frames.copy()) == [String("agent: 26.4 is out.")], "a post is the only message the run leaves")
+    var posted = Json.Null
+    for f in kinds(n_frames, "message.created") { posted = at(f.copy(), "message") }
+    try check(str_at(posted.copy(), "routine") == some(news.copy()) and str_at(posted.copy(), "conversation") == some(conversation.copy()) and str_at(posted, "agent") != none, "in the agent's chat, as its message, marked with the routine")
+    try check(notified.len() == 1 and str_at(notified[0].copy(), "title") == some(String("News")) and str_at(notified[0].copy(), "body") == some(String("26.4 is out.")) and str_at(notified[0].copy(), "conversation") == some(conversation.copy()), "and its person is notified with it")
+    let runs = at(at(try app.cmd("q_8", "routine.runs", Obj.new().s("id", news.copy()).done()), "value"), "runs")
+    var last_run = Json.Null
+    if let Json.Array(rs) = runs.copy() { if rs.len() > 0 { last_run = rs[0].copy() } }
+    try check(str_at(last_run.copy(), "status") == some(String("done")) and at(last_run.copy(), "posted") == Json.Array([Json.Str(String("26.4 is out."))]) and (str_at(last_run.copy(), "said") ?? String()).contains("I posted it.") and (int_at(last_run, "ended") ?? 0) > 0, "routine.runs keeps the run: how it ended, what it posted and what its agent answered")
+
+    // OpenBot's names for the tools, in a prompt imported before they changed on the way.
+    let imported = try put(mut app, "q_9", "Imported", #"/mcp openbot.routine_no_update {}"#)
+    let (im, _) = try run_once(mut app, "q_10", imported)
+    try check(str_at(at(im, "last"), "status") == some(String("quiet")), "a prompt naming openbot.routine_no_update calls routine_quiet")
 
     // Failed: with why, and five in a row turn it off.
-    let failing = try put(mut app, "q_4", "Prices", #"/mcp routine_failed {"why": "the shop was down"}"#)
-    let (f1, f1_frames) = try run_once(mut app, "q_5", failing.copy())
-    let notified = kinds(f1_frames, "notify")
+    let failing = try put(mut app, "q_11", "Prices", #"/mcp routine_failed {"why": "the shop was down"}"#)
+    let (f1, f1_frames) = try run_once(mut app, "q_12", failing.copy())
+    let told = kinds(f1_frames.copy(), "notify")
     try check(str_at(at(f1.copy(), "last"), "status") == some(String("failed")) and str_at(at(f1.copy(), "last"), "error") == some(String("the shop was down")) and int_at(f1, "failures") == some(1), "routine_failed makes the run a failure, with why")
-    try check(notified.len() == 1 and (str_at(notified[0].copy(), "body") ?? String()).contains("the shop was down"), "and its person is told why")
+    try check(told.len() == 1 and (str_at(told[0].copy(), "body") ?? String()).contains("the shop was down"), "and its person is told why")
+    try check(shown(f1_frames).len() == 1, "and sees its agent's answer in the chat")
     var last = Json.Null
     var last_frames = List<Json>()
     for k in 0..4 {
-        let (r, fs) = try run_once(mut app, if k == 0 { "q_6" } else if k == 1 { "q_7" } else if k == 2 { "q_8" } else { "q_9" }, failing.copy())
+        let (r, fs) = try run_once(mut app, if k == 0 { "q_13" } else if k == 1 { "q_14" } else if k == 2 { "q_15" } else { "q_16" }, failing.copy())
         last = r
         last_frames = fs
     }
@@ -89,16 +120,17 @@ fn run(i: Instance) ! Error {
     try check(off_notice.len() == 1 and (str_at(off_notice[0].copy(), "body") ?? String()).contains("failed 5 times in a row"), "with one notice that says so")
 
     // Pause: the routine pauses itself, and the person is told.
-    let pausing = try put(mut app, "q_10", "Sale", #"/mcp pause_routine {"why": "the sale is over"}"#)
-    let (p, p_frames) = try run_once(mut app, "q_11", pausing)
+    let pausing = try put(mut app, "q_17", "Sale", #"/mcp pause_routine {"why": "the sale is over"}"#)
+    let (p, p_frames) = try run_once(mut app, "q_18", pausing)
     let paused = kinds(p_frames, "notify")
-    try check(bool_at(p.copy(), "on") == some(false) and str_at(at(p, "last"), "status") == some(String("done")), "pause_routine pauses its own routine")
+    try check(bool_at(p.copy(), "on") == some(false) and str_at(at(p, "last"), "status") == some(String("quiet")), "pause_routine pauses its own routine")
     try check(paused.len() >= 1 and str_at(paused[0].copy(), "title") == some(String("Main paused Sale")) and str_at(paused[0].copy(), "body") == some(String("the sale is over")), "and tells the person why")
 
     // Outside a routine run, they're refused.
-    try app.send(Obj.new().s("t", String("send")).s("cid", String("c_1")).s("conversation", conversation).s("text", String(#"/mcp routine_quiet {}"#)).done())
+    try app.send(Obj.new().s("t", String("send")).s("cid", String("c_1")).s("conversation", conversation.copy()).s("text", String("/mcp routine_quiet \{\}\n/mcp routine_post \{\"text\": \"hi\"\}")).done())
     let said = reply_text(try app.reply())
     try check(said.contains("routine_quiet failed: ") and said.contains("You aren't answering for a routine now."), "outside a routine run, routine_quiet is refused")
+    try check(said.contains("routine_post failed: "), "and so is routine_post")
     app.close()
 }
 

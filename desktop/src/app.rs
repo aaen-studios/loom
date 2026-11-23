@@ -1444,6 +1444,7 @@ ACTA_KEY=secret:ACTA_KEY",
                 let f = self.model.load_routines();
                 self.send(f);
                 self.routine_open = None;
+                _ = self.model.load_routine_runs(None);
             }
             Screen::Tasks => {
                 let f = self.model.load_tasks();
@@ -10349,6 +10350,7 @@ ACTA_KEY=secret:ACTA_KEY",
 
     /// Opens the routine form, empty, for a new one.
     fn new_routine(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        _ = self.model.load_routine_runs(None);
         self.routine_name_in
             .update(cx, |s, cx| s.set_value("", window, cx));
         self.routine_at_in
@@ -10504,6 +10506,9 @@ ACTA_KEY=secret:ACTA_KEY",
                     this.routine_thread = r.post == "thread";
                     this.routine_webhook = !r.hook.is_empty();
                     this.set_routine_flow(&r.flow, window, cx);
+                    if let Some(f) = this.model.load_routine_runs(Some(&r.id)) {
+                        this.send(f);
+                    }
                     this.routine_open = Some(Some(r.id.clone()));
                     cx.notify();
                 }))
@@ -10690,6 +10695,32 @@ ACTA_KEY=secret:ACTA_KEY",
         }
         groups.push(self.group(Some("Options"), options));
         groups.push(self.routine_flow_group(cx));
+        // Its runs, which leave nothing in the chat but what they post: how each ended,
+        // and what its agent posted or answered.
+        if open.is_some() && !self.model.routine_runs.is_empty() {
+            let now = chrono::Local::now();
+            let runs = self
+                .model
+                .routine_runs
+                .iter()
+                .map(|r| {
+                    let words = r.words();
+                    let when = div()
+                        .text_size(px(size::CAPTION))
+                        .text_color(p.ink_3)
+                        .child(when_sent(r.at, now))
+                        .into_any_element();
+                    self.row(
+                        None,
+                        r.outcome(),
+                        (!words.is_empty()).then_some(words),
+                        Some(when),
+                    )
+                    .into_any_element()
+                })
+                .collect();
+            groups.push(self.group(Some("Runs"), runs));
+        }
         let editing = open.clone().unwrap_or_default();
         let save = self
             .small_button("save-routine", "Save", true)
