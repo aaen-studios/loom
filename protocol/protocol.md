@@ -674,7 +674,7 @@ A run is one turn of an agent, answering one message.
 
 | Kind | Fields | When |
 |---|---|---|
-| `tool.started` | `run`, `call`, `tool` (a kind: `read`, `edit`, `delete`, `move`, `search`, `execute`, `think`, `fetch`, `other`), `title`, `input` (each string in it cut at 65,536 bytes, with "…", here and in `approval.needed`'s `detail`, so a big one can't make a frame past 1 MiB), `locations` (files and lines it touches) | The agent started a tool |
+| `tool.started` | `run`, `call`, `block` (its `tool` block in the reply, counted as deltas count, so an app draws it there among the words while the reply is written, and the words after it after it), `tool` (a kind: `read`, `edit`, `delete`, `move`, `search`, `execute`, `think`, `fetch`, `other`), `title` (a few words on one line: [How ACP maps onto loom](#how-acp-maps-onto-loom)), `input` (each string in it cut at 65,536 bytes, with "…", here and in `approval.needed`'s `detail`, so a big one can't make a frame past 1 MiB), `locations` (files and lines it touches) | The agent started a tool |
 | `tool.updated` | `call`, and what changed: `title`, `output`, `locations` | The agent reported progress |
 | `tool.finished` | `call`, `status` (`done`, `failed`, `denied`), `output` (blocks, kept short: long output is cut, with `cut: true`) | The tool ended |
 
@@ -985,8 +985,9 @@ Inside the instance, each agent runs as an ACP agent program ([PLAN.md](../PLAN.
 | `session/update`, `agent_message_chunk` | `delta` with `kind: "text"` |
 | `session/update`, `agent_thought_chunk` | `delta` with `kind: "thought"` |
 | `session/update`, `agent_message_chunk` with an `image`, a `resource` with a `blob`, or a `resource_link` to a `file://` on the instance's machine | a `file` block: the file is kept as the person's, as if they'd uploaded it |
-| `session/update`, `tool_call` | a `tool` block, and `tool.started` |
-| `session/update`, `tool_call_update` | `tool.updated`, or `tool.finished` when its status is `completed` or `failed` |
+| `session/update`, `tool_call` | a `tool` block, and `tool.started` (one that asked permission first keeps the block and the call its request made). Its `title` is a few words on one line: `rawInput.description` where there is one (the few words Claude writes for a shell command, which Claude's adapter titles with the whole command), or else the title's first line, cut at 100 bytes with "…" when there's more, or with no title, its kind and the file it touches ("Edit food-log.csv", "Run a command"). The command itself stays in `input` |
+| `session/update`, `tool_call_update` | `tool.updated` (its `title` made as `tool.started`'s, when the update has a title or a description), or `tool.finished` when its status is `completed` or `failed` |
+| `session/update`, `user_message_chunk` | nothing: only the person's own messages are theirs, and a prompt the program gives itself or a subagent never shows as one |
 | `session/update`, `plan` | a `plan` block (replaced whole each time) |
 | `session/request_permission` | First the person's rules on what it touches ([Rules on what's touched](#rules-on-whats-touched)): a deny or an allow answers it at once, with `approval.answered` `by: "rule"`. Then `approval.needed`, or answered at once by the agent's permission mode, with `approval.answered` `by: "auto"`. A rule that asks asks even where the mode allows |
 | The person's `approve` | the permission request's answer, with the `allow_once`, `allow_always`, `reject_once` or `reject_always` option that matches `allow` and `always` |

@@ -220,6 +220,110 @@ pub fn tool_kind(kind: String) -> String {
     return String("other")
 }
 
+// The most bytes of a tool call's title the apps are given, before "…".
+const TITLE_MOST: usize = 100
+
+// A tool call's title as the apps show it: a few words on one line. Claude's
+// adapter titles a shell call with the command itself, heredoc and all, and
+// gives the few words Claude wrote for it as rawInput's `description`, so
+// those come first. Then the title's first line (without the backticks an
+// older adapter put round a command), and with no title, what kind of call it
+// is and the file it touches. The command stays in the call's `input`.
+pub fn tool_title(call: Json) -> String {
+    if let said = str_at(at(call.copy(), "rawInput"), "description") {
+        let line = first_line(said)
+        if line.len() > 0 { return line }
+    }
+    let title = first_line(str_at(call.copy(), "title") ?? String())
+    if title.len() > 0 { return title }
+    let file = first_file(at(call.copy(), "locations"))
+    let kind = tool_kind(str_at(call, "kind") ?? String())
+    let what = if kind == "read" { "Read" } else if kind == "edit" { "Edit" } else if kind == "delete" { "Delete" } else if kind == "move" { "Move" } else { "" }
+    if what.len() > 0 { return if file.len() > 0 { "{what} {file}" } else { "{what} a file" } }
+    if kind == "execute" { return String("Run a command") }
+    if kind == "search" { return String("Search") }
+    if kind == "fetch" { return String("Fetch a page") }
+    if kind == "think" { return String("Think") }
+    return String("Use a tool")
+}
+
+// Whether a tool call update says anything of the title: a title, or a
+// shell command's description.
+pub fn names_tool(call: Json) -> bool {
+    return str_at(call.copy(), "title") != none or str_at(at(call, "rawInput"), "description") != none
+}
+
+// The first line of `text` with words on it, trimmed, cut at TITLE_MOST bytes,
+// with "…" when there's more after it.
+fn first_line(text: String) -> String {
+    var all = text.trim().copy()
+    if all.len() > 1 and all.starts_with("`") and all.ends_with("`") and not all.starts_with("```") {
+        all = all[1..all.len() - 1].trim().copy()
+    }
+    var line = String()
+    var more = false
+    for l in all.split("\n") {
+        let t = l.trim()
+        if t.len() == 0 { continue }
+        if line.len() > 0 {
+            more = true
+            break
+        }
+        line = t.copy()
+    }
+    var out = String()
+    for r in line.runes() {
+        if out.len() >= TITLE_MOST {
+            more = true
+            break
+        }
+        out.push(r)
+    }
+    if more { out.push_str("…") }
+    return out
+}
+
+// The name of the first file in a tool call's locations, or "".
+fn first_file(locations: Json) -> String {
+    if let Json.Array(list) = locations {
+        for l in list {
+            let path = (str_at(l, "path") ?? String()).replace("\\", "/")
+            let name = match path.find_last("/") {
+                some(i) => path[i + 1..].copy(),
+                none => path.copy(),
+            }
+            if name.len() > 0 { return name }
+        }
+    }
+    return String()
+}
+
+@test
+fn a_tool_call_is_titled_in_a_few_words_on_one_line() {
+    // Claude's Bash: the command as the title, its few words in rawInput.
+    let heredoc = "M=/var/lib/loom/.claude/projects/x/memory; cat > $M/spoons.md <<'EOF'\n---\nname: spoons\n---\nEOF"
+    let bash = Obj.new().s("title", String(heredoc)).s("kind", String("execute")).j("rawInput", Obj.new().s("command", String(heredoc)).s("description", String("Save a memory about spoons")).done()).done()
+    assert(tool_title(bash) == "Save a memory about spoons")
+    assert(names_tool(Obj.new().j("rawInput", Obj.new().s("description", String("x")).done()).done()))
+    assert(not names_tool(Obj.new().s("status", String("completed")).done()))
+    // Without one, the command's first line, marked as cut.
+    let plain = Obj.new().s("title", String(heredoc)).s("kind", String("execute")).j("rawInput", Obj.new().s("command", String(heredoc)).done()).done()
+    assert(tool_title(plain) == "M=/var/lib/loom/.claude/projects/x/memory; cat > $M/spoons.md <<'EOF'…")
+    assert(not tool_title(plain).contains("\n"))
+    // An older adapter's backticks go, a short title stays as it is.
+    assert(tool_title(Obj.new().s("title", String("`ls -la`")).done()) == "ls -la")
+    assert(tool_title(Obj.new().s("title", String("rm -rf build")).done()) == "rm -rf build")
+    assert(tool_title(Obj.new().s("title", String("\n\n  Read notes.md  \n")).done()) == "Read notes.md")
+    // A long line is cut.
+    let long = tool_title(Obj.new().s("title", "x".repeat(300)).done())
+    assert(long.len() == TITLE_MOST + "…".len() and long.ends_with("…"))
+    // No title: its kind, and the file it touches.
+    let edit = Obj.new().s("kind", String("edit")).j("locations", Json.Array([Obj.new().s("path", String("/home/e/food-log.csv")).done()])).done()
+    assert(tool_title(edit) == "Edit food-log.csv")
+    assert(tool_title(Obj.new().s("kind", String("execute")).done()) == "Run a command")
+    assert(tool_title(Obj.new().s("title", String("  ")).done()) == "Use a tool")
+}
+
 // What the `auto` permission mode allows without asking: tools that only look.
 pub const SAFE_KINDS: str = "read search think fetch"
 

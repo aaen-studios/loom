@@ -164,6 +164,18 @@ fn new_block(kind: str) -> Block {
     return Block { kind: String(kind), text: String(), call: String(), entries: Json.Null, file: Json.Null, card: Json.Null }
 }
 
+// Where a reply's tool block for `call` is, counted from 0 as deltas count, so
+// the apps draw the call there among the words while the reply is written
+// (tool.started's `block`). Past the end when it has none.
+fn tool_place(blocks: List<Block>, call: String) -> i64 {
+    var n: i64 = 0
+    for b in blocks {
+        if b.kind == "tool" and b.call == call { return n }
+        n += 1
+    }
+    return n
+}
+
 struct Run {
     id: String
     user: String
@@ -7403,12 +7415,18 @@ impl Instance {
             let size = int_at(u, "size") ?? 0
             if size > 0 { i.context.insert(r.session.copy(), (used, size)) }
         } else if kind == "tool_call" {
-            let call = try i.store.new_id("tc")
-            r.tools.insert(str_at(u.copy(), "toolCallId") ?? String(), call.copy())
-            var b = new_block("tool")
-            b.call = call.copy()
-            r.blocks.push(b)
-            try i.event(r.user.copy(), "tool.started", Obj.new().s("run", r.id.copy()).s("call", call.copy()).s("tool", acp.tool_kind(str_at(u.copy(), "kind") ?? String())).s("title", str_at(u.copy(), "title") ?? String()).j("input", cut_input(at(u.copy(), "rawInput"))).j("locations", at(u.copy(), "locations")).done())
+            // Its block, where it came in the reply: a new one, or the one its
+            // permission request made first.
+            let acp_call = str_at(u.copy(), "toolCallId") ?? String()
+            var call = if let c = r.tools.find(acp_call.copy()) { c.copy() } else { String() }
+            if call.len() == 0 {
+                call = try i.store.new_id("tc")
+                r.tools.insert(acp_call, call.copy())
+                var b = new_block("tool")
+                b.call = call.copy()
+                r.blocks.push(b)
+            }
+            try i.event(r.user.copy(), "tool.started", Obj.new().s("run", r.id.copy()).s("call", call.copy()).i("block", tool_place(r.blocks, call.copy())).s("tool", acp.tool_kind(str_at(u.copy(), "kind") ?? String())).s("title", acp.tool_title(u.copy())).j("input", cut_input(at(u.copy(), "rawInput"))).j("locations", at(u.copy(), "locations")).done())
             i.record_tool(r.user.copy(), r.agent.copy(), call.copy(), u.copy())
             let status = str_at(u.copy(), "status") ?? String()
             if status == "completed" or status == "failed" {
@@ -7422,7 +7440,7 @@ impl Instance {
                 try i.tool_finished(r, call, status, at(u, "content"))
             } else {
                 var fields = Obj.new().s("call", call)
-                if let title = str_at(u.copy(), "title") { fields = fields.s("title", title) }
+                if acp.names_tool(u.copy()) { fields = fields.s("title", acp.tool_title(u.copy())) }
                 if let Json.Array(_) = at(u.copy(), "content") { fields = fields.j("output", output_blocks(at(u.copy(), "content"))) }
                 try i.event(r.user.copy(), "tool.updated", fields.done())
             }
@@ -7496,9 +7514,7 @@ impl Instance {
     // says it's starting it, or asks permission for it, whichever is first.
     fn record_tool(i: mut Instance, user: String, agent: String, call: String, tool_call: Json) {
         if let _ = i.tool_actions.find(call.copy()) { return }
-        let title = str_at(tool_call.copy(), "title") ?? String()
-        let what = if title.len() > 0 { title } else { acp.tool_kind(str_at(tool_call.copy(), "kind") ?? String()) }
-        let act = i.record(user, agent, "tool", what, at(tool_call, "rawInput"), String())
+        let act = i.record(user, agent, "tool", acp.tool_title(tool_call.copy()), at(tool_call, "rawInput"), String())
         if act > 0 { i.tool_actions.insert(call.copy(), act) }
     }
 
@@ -7566,7 +7582,7 @@ impl Instance {
         let mode = defaults.mode_of(agent.copy(), try i.store.defaults(user.copy()))
         let kind = acp.tool_kind(str_at(tool_call.copy(), "kind") ?? String())
         let run = run_id.copy()
-        let title = str_at(tool_call.copy(), "title") ?? String()
+        let title = acp.tool_title(tool_call.copy())
         // The person's rules on what it touches come first: deny, then ask, then allow.
         let v = try i.judge(user.copy(), p.agent.copy(), run.copy(), rules.of_tool_call(tool_call.copy(), kind.copy(), i.agent_folder(user.copy(), agent)))
         if v.then == "deny" {
@@ -7593,8 +7609,8 @@ impl Instance {
         }
         // A yes for always would let the program stop asking, past the rule that asked.
         let can_always = v.then != "ask" and acp.pick_option(options.copy(), true, true) != acp.pick_option(options.copy(), true, false)
-        i.approvals.insert(call.copy(), Approval { call: call.copy(), run: run.copy(), agent: p.agent.copy(), rpc: rpc.copy(), options: options, title: str_at(tool_call.copy(), "title") ?? String(), action: Json.Null, proc: p.key.copy() })
-        try i.event(user, "approval.needed", Obj.new().s("run", run).s("call", call).s("tool", kind).s("title", str_at(tool_call.copy(), "title") ?? String()).j("detail", cut_input(at(tool_call, "rawInput"))).b("can_always", can_always).maybe("rule", str_at(v.rule, "id")).done())
+        i.approvals.insert(call.copy(), Approval { call: call.copy(), run: run.copy(), agent: p.agent.copy(), rpc: rpc.copy(), options: options, title: title.copy(), action: Json.Null, proc: p.key.copy() })
+        try i.event(user, "approval.needed", Obj.new().s("run", run).s("call", call).s("tool", kind).s("title", title).j("detail", cut_input(at(tool_call, "rawInput"))).b("can_always", can_always).maybe("rule", str_at(v.rule, "id")).done())
     }
 
     fn approve(i: mut Instance, s: ServerSocket, user: String, device: String, f: Json) ! Error {
@@ -7705,12 +7721,14 @@ impl Instance {
             (String("read"), "Read on {device_name}: {what}")
         }
         if run_id.len() > 0 {
+            var place: i64 = 0
             if let r = mut i.runs.find(run_id.copy()) {
                 var b = new_block("tool")
                 b.call = call.copy()
                 r.blocks.push(b)
+                place = tool_place(r.blocks, call.copy())
             }
-            try i.event(g.user.copy(), "tool.started", Obj.new().s("run", run_id.copy()).s("call", call.copy()).s("tool", kind.copy()).s("title", title.copy()).j("input", Obj.new().s("device", device_name.copy()).s("tool", tool_name.copy()).j("args", cut_input(at(args, "args"))).done()).j("locations", Json.Null).done())
+            try i.event(g.user.copy(), "tool.started", Obj.new().s("run", run_id.copy()).s("call", call.copy()).i("block", place).s("tool", kind.copy()).s("title", title.copy()).j("input", Obj.new().s("device", device_name.copy()).s("tool", tool_name.copy()).j("args", cut_input(at(args, "args"))).done()).j("locations", Json.Null).done())
         }
         i.hold_call(call.copy(), req.copy())
         i.device_calls.insert(call.copy(), DeviceCall { user: g.user.copy(), device: device.copy(), agent: g.agent.copy(), title: title.copy() })
@@ -7768,12 +7786,14 @@ impl Instance {
         let importing = import_command(plan.copy())
         if importing.len() > 0 { runs_there.push(Json.Str(importing)) }
         let detail = Obj.new().s("host", host.copy()).s("through", through).j("plan", plan).j("commands", Json.Array(runs_there)).done()
+        var place: i64 = 0
         if let r = mut i.runs.find(run_id.copy()) {
             var b = new_block("tool")
             b.call = call.copy()
             r.blocks.push(b)
+            place = tool_place(r.blocks, call.copy())
         }
-        try i.event(g.user.copy(), "tool.started", Obj.new().s("run", run_id.copy()).s("call", call.copy()).s("tool", String("execute")).s("title", title.copy()).j("input", detail.copy()).j("locations", Json.Null).done())
+        try i.event(g.user.copy(), "tool.started", Obj.new().s("run", run_id.copy()).s("call", call.copy()).i("block", place).s("tool", String("execute")).s("title", title.copy()).j("input", detail.copy()).j("locations", Json.Null).done())
         i.hold_call(call.copy(), req.copy())
         i.device_calls.insert(call.copy(), DeviceCall { user: g.user.copy(), device: device.copy(), agent: g.agent.copy(), title: title.copy() })
         i.setups.insert(call.copy(), Setup { run: run_id.copy(), card: card, host: host.copy(), steps: steps })
@@ -8190,12 +8210,14 @@ impl Instance {
         let run_id = i.calling_run(g.copy())
         if run_id.len() == 0 { return some(rule_refusal("needs-a-chat", String("That needs your person's yes, and they can only give it during a chat with you."))) }
         let call = try i.store.new_id("tc")
+        var place: i64 = 0
         if let r = mut i.runs.find(run_id.copy()) {
             var b = new_block("tool")
             b.call = call.copy()
             r.blocks.push(b)
+            place = tool_place(r.blocks, call.copy())
         }
-        try i.event(g.user.copy(), "tool.started", Obj.new().s("run", run_id.copy()).s("call", call.copy()).s("tool", String(kind)).s("title", title.copy()).j("input", cut_input(at(action.copy(), "args"))).j("locations", Json.Null).done())
+        try i.event(g.user.copy(), "tool.started", Obj.new().s("run", run_id.copy()).s("call", call.copy()).i("block", place).s("tool", String(kind)).s("title", title.copy()).j("input", cut_input(at(action.copy(), "args"))).j("locations", Json.Null).done())
         i.approvals.insert(call.copy(), Approval { call: call.copy(), run: run_id.copy(), agent: g.agent.copy(), rpc: Json.Null, options: Json.Null, title: title.copy(), action: action.copy(), proc: String() })
         i.hold_call(call.copy(), req.copy())
         try i.event(g.user, "approval.needed", Obj.new().s("run", run_id).s("call", call).s("tool", String(kind)).s("title", title).j("detail", cut_input(at(action, "args"))).b("can_always", false).done())

@@ -176,7 +176,7 @@ const [claude] = await brains(['claude-acp']);
 	</div>
 </template>
 <template id="demo-said">
-	<div class="said"></div>
+	<div class="on-the-way"></div>
 </template>
 <template id="demo-tool">
 	<div class="tool-line"><span class="prompt">›_</span><span class="title"></span><span class="mark">…</span></div>
@@ -786,6 +786,14 @@ const [claude] = await brains(['claude-acp']);
 	}
 	.tool-line.denied .mark {
 		color: var(--bad);
+	}
+	/* Words the agent wrote on its way to the answer, among the steps: smaller and quieter
+	   than the answer, so they don't read as a message in the chat. */
+	.on-the-way {
+		font-size: var(--size-small);
+		line-height: var(--line-reply);
+		color: var(--ink-2);
+		overflow-wrap: anywhere;
 	}
 	/* The answer: plain text in the column. */
 	.said {

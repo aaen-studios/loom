@@ -14,6 +14,11 @@ module tests.fake_agent.main
 //     /ask TITLE          a command (kind execute) that asks permission first,
 //                         and runs or fails by the answer
 //     /read TITLE         the same for a tool that only reads (kind read)
+//     /shell JSON         a shell command as Claude's adapter plays one: a tool call
+//                         titled "Terminal", then an update with JSON as its
+//                         rawInput and its "command" as the title, then completed
+//     /selfprompt         a user_message_chunk, "Look into the spoons.", as a prompt
+//                         the program gives itself or a subagent
 //     /act KIND JSON      a tool call of KIND (execute, edit, fetch, ...) that asks
 //                         permission first, with JSON as its rawInput, its
 //                         locations from the JSON's "path", and its title from its
@@ -96,6 +101,8 @@ pub enum Step {
     Tool(String)
     Ask(String, String)
     Act(String, String)    // a kind, and the rawInput as JSON
+    Shell(String)    // the rawInput as JSON
+    SelfPrompt
     Slow(u64)
     Sleep(u64)
     Stop(String)
@@ -145,6 +152,10 @@ pub fn script(text: String) -> List<Step> {
         } else if word == "/act" {
             let (kind, input) = split_word(rest.copy())
             steps.push(Step.Act(kind, if input.len() > 0 { input } else { String(#"{}"#) }))
+        } else if word == "/selfprompt" {
+            steps.push(Step.SelfPrompt)
+        } else if word == "/shell" {
+            steps.push(Step.Shell(rest))
         } else if word == "/read" {
             steps.push(Step.Ask(String("read"), rest))
         } else if word == "/slow" {
@@ -684,6 +695,22 @@ impl Agent {
                     let tool = a.tool_call(session.copy(), String("execute"), title.copy())
                     tool_update(session.copy(), tool.copy(), "in_progress", String())
                     tool_update(session.copy(), tool, "completed", "ran: {title}")
+                },
+                Step.SelfPrompt => chunk(session.copy(), "user_message_chunk", String("Look into the spoons.")),
+                Step.Shell(input) => {
+                    let raw = match parse(input.copy()) {
+                        ok(j) => j,
+                        err(_) => Json.Null,
+                    }
+                    let tool = a.tool_call(session.copy(), String("execute"), String("Terminal"))
+                    var u = LinkedMap<String, Json>()
+                    u.insert("sessionUpdate", js(String("tool_call_update")))
+                    u.insert("toolCallId", js(tool.copy()))
+                    u.insert("title", js((raw.get(String("command")) ?? Json.Null).as_str() ?? String("Terminal")))
+                    u.insert("kind", js(String("execute")))
+                    u.insert("rawInput", raw)
+                    update(session.copy(), u)
+                    tool_update(session.copy(), tool, "completed", String("ran"))
                 },
                 Step.Ask(kind, title) => {
                     let tool = a.tool_call(session.copy(), kind.copy(), title.copy())
