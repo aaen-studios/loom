@@ -34,9 +34,9 @@ fn say(app: mut Session, conversation: String, cid: str, text: String) -> String
     return try reply_in(mut app, conversation)
 }
 
-// An html_preview turn, waited on past the browser's 30 s for a call, so a picture that
-// never came says so rather than timing the test out first.
-fn preview(app: mut Session, conversation: String, cid: String, text: String) -> String ! Error {
+// A turn waited on past the browser's 30 s for a call, so a call that never came back
+// says what the browser said rather than timing the test out first.
+fn say_long(app: mut Session, conversation: String, cid: String, text: String) -> String ! Error {
     try app.send(Obj.new().s("t", String("send")).s("cid", cid).s("conversation", conversation.copy()).s("text", text).done())
     return try reply_in(mut app, conversation, 60000)
 }
@@ -130,16 +130,16 @@ fn run(i: Instance) ! Error {
     // slow one says what the browser said, and each must be quick.
     var slowest: i64 = 0
     var started = now()
-    let previewed = try preview(mut app, conversation.copy(), String("m_p1"), "/mcp html_preview {Obj.new().s("html", card.copy()).i("width", 640).i("height", 480).done()}")
+    let previewed = try say_long(mut app, conversation.copy(), String("m_p1"), "/mcp html_preview {Obj.new().s("html", card.copy()).i("width", 640).i("height", 480).done()}")
     slowest = slowest.max(now() - started)
     try see(previewed.starts_with("html_preview: [image image/jpeg] The page, at 640 × 480. Its console said:") and previewed.contains("log: drawn 2") and previewed.contains("error: oops") and previewed.contains("missing is not defined"), "html_preview gives a picture of the page and what its console said", previewed.copy())
     started = now()
-    let whole = try preview(mut app, conversation.copy(), String("m_p2"), "/mcp html_preview {Obj.new().s("html", String(#"<!doctype html><div style="height:3000px">tall</div>"#)).i("width", 400).b("full_page", true).done()}")
+    let whole = try say_long(mut app, conversation.copy(), String("m_p2"), "/mcp html_preview {Obj.new().s("html", String(#"<!doctype html><div style="height:3000px">tall</div>"#)).i("width", 400).b("full_page", true).done()}")
     slowest = slowest.max(now() - started)
     try see(whole.contains("The page, at 400 × 30") and whole.contains("the whole page. Its console said nothing."), "and of the whole page, past the window", whole.copy())
     for n in 0..4 {
         started = now()
-        let again = try preview(mut app, conversation.copy(), "m_pa{n}", "/mcp html_preview {Obj.new().s("html", "<!doctype html><h1>Again {n}</h1>").b("full_page", n % 2 == 0).done()}")
+        let again = try say_long(mut app, conversation.copy(), "m_pa{n}", "/mcp html_preview {Obj.new().s("html", "<!doctype html><h1>Again {n}</h1>").b("full_page", n % 2 == 0).done()}")
         slowest = slowest.max(now() - started)
         try see(again.starts_with("html_preview: [image image/jpeg] The page, at "), "a preview again gives a picture", again.copy())
     }
@@ -240,6 +240,12 @@ fn run(i: Instance) ! Error {
     try see(not fresh.contains("had closed") and not fresh.contains("Second page"), "and the next call starts it on a blank page", fresh.copy())
     let none_open = try say(mut app, conversation.copy(), "m_c3", String("/mcp browser_snapshot\n/mcp browser_close\n/mcp browser_close"))
     try see(none_open.contains("browser_close: Closed your browser.") and none_open.contains("browser_close: Your browser wasn't open."), "closing one that isn't open says so", none_open.copy())
+    // One started on the profile while the last is still closing on it waits for it,
+    // rather than finding the profile in use and stopping.
+    for n in 0..3 {
+        let reopened_now = try say_long(mut app, conversation.copy(), "m_c4{n}", "/mcp browser_open \{\"url\":\"{file_url("{pages}/shop.html")}\"\}\n/mcp browser_close\n/mcp browser_open \{\"url\":\"{file_url("{pages}/second.html")}\"\}")
+        try see(reopened_now.contains("Page: Second") and not reopened_now.contains("didn't start"), "a browser opened again right after it closed starts", reopened_now.copy())
+    }
 
     // An app's small window only follows the agent's browsing, which keeps it open no longer than the turn.
     _ = try app.cmd("q_f1", "browser.watch", Obj.new().s("agent", agent.copy()).b("on", true).b("follow", true).done())

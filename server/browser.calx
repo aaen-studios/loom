@@ -152,6 +152,7 @@ struct Worker {
     ack_at: i64    // when to answer it, or 0
     navigating: bool    // a new page has been asked for since the act began
     loaded: bool        // and has loaded
+    before: Thread?    // the thread of the agent's browser before this one, still closing on the profile, which its first start waits for
 }
 
 impl Task for Worker {
@@ -208,10 +209,12 @@ impl Task for Worker {
 // for itself go (server/chrome.calx). What it has to say comes to `back`. The thread ends once it's
 // sent Stop, with its browser stopped, and said Stopped with `n`. `reopen` is the page it was on when it
 // last closed, or "", which its first call that isn't browser_open opens again.
-pub fn start(n: u64, key: String, data: String, profile: String, guarded: bool, proxy: u16, reopen: String, back: BackTo) -> (Sender<In>, Thread) {
+// `before` is the thread of the agent's browser before, while it's still closing, which the
+// browser waits for before it first starts, since that one holds the profile until it ends.
+pub fn start(n: u64, key: String, data: String, profile: String, guarded: bool, proxy: u16, reopen: String, before: own Thread?, back: BackTo) -> (Sender<In>, Thread) {
     let inbox = Receiver<In>()
     let to = inbox.sender()
-    let t = unsafe { Thread.spawn(Worker { n: n, key: key.copy(), data: data.copy(), profile: profile.copy(), guarded: guarded, proxy: proxy, inbox: inbox, back: back.copy(), child: none, page: none, port: String(), next_id: 0, refs: Map<String, i64>(), hidden: List<(String, String)>(), watch: unwatched(), casting: false, cast_width: 0, cast_height: 0, recording: false, steps: List<Json>(), last_url: String(), was_on: String(), reopen: reopen.copy(), told_fonts: false, ack: 0, ack_at: 0, navigating: false, loaded: false }) }
+    let t = unsafe { Thread.spawn(Worker { n: n, key: key.copy(), data: data.copy(), profile: profile.copy(), guarded: guarded, proxy: proxy, inbox: inbox, back: back.copy(), child: none, page: none, port: String(), next_id: 0, refs: Map<String, i64>(), hidden: List<(String, String)>(), watch: unwatched(), casting: false, cast_width: 0, cast_height: 0, recording: false, steps: List<Json>(), last_url: String(), was_on: String(), reopen: reopen.copy(), told_fonts: false, ack: 0, ack_at: 0, navigating: false, loaded: false, before: before }) }
     return (to, t)
 }
 
@@ -730,6 +733,8 @@ impl Worker {
             }
         }
         try fs.make_dir_all(w.profile.copy())
+        // The agent's browser before this one may still be closing on the profile.
+        if let t = w.before.take() { t.join() }
         let port = match w.launch(exe.copy(), true) {
             ok(p) => p,
             err(e) => {
