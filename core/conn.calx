@@ -1571,6 +1571,25 @@ impl Conn {
     }
 }
 
+// What the app said while the core was busy, such as catching up, with each read of the
+// cache that's asked again later left out: the app asks for a list each time it hears
+// it changed, and only the last answer counts. They come last first, to be popped.
+fn only_last_reads(waiting: List<String>) -> List<String> {
+    var later = Map<String, bool>()
+    var kept = List<String>()
+    var n = waiting.len()
+    while n > 0 {
+        n -= 1
+        let text = waiting[n].copy()
+        if text.contains(#""t":"core.get""#) {
+            if later.contains(text.copy()) { continue }
+            later.insert(text.copy(), true)
+        }
+        kept.push(text)
+    }
+    return kept
+}
+
 impl Task for Conn {
     fn run(own self) {
         var c = self
@@ -1584,10 +1603,14 @@ impl Task for Conn {
             c.poll_follow()
             c.tick()
             if let m = unsafe { c.inbox.wait_for(TICK_NS) } {
-                var going = c.from_app(m)
-                while going {
-                    let more = c.inbox.next() else break
-                    going = c.from_app(more)
+                var waiting = List<String>()
+                waiting.push(m)
+                while let more = c.inbox.next() { waiting.push(more) }
+                var going = true
+                var kept = only_last_reads(waiting)
+                while let text = kept.pop() {
+                    going = c.from_app(text)
+                    if not going { break }
                 }
                 if not going { break }
             }
@@ -1650,4 +1673,13 @@ fn summary(message: Json) -> String {
         cut.push(if r == '\n' { ' ' } else { r })
     }
     return cut
+}
+
+@test
+fn a_read_asked_again_is_answered_once() {
+    let read = String(#"{"id":"app.conversations","t":"core.get","what":"conversations"}"#)
+    let send = String(#"{"t":"send","cid":"m_1","text":"hi"}"#)
+    let other = String(#"{"id":"app.agents","t":"core.get","what":"agents"}"#)
+    let kept = only_last_reads([read.copy(), send.copy(), other.copy(), read.copy()])
+    assert(kept.len() == 3 and kept[2] == send and kept[1] == other and kept[0] == read)
 }
