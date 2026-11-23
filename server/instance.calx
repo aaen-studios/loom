@@ -1896,7 +1896,7 @@ impl Instance {
             let reopen = if let p = i.browser_pages.find(key.copy()) { p.copy() } else { String() }
             i.next_browser += 1
             let n = i.next_browser
-            let (to, thread) = browser.start(n, key.copy(), try fs.absolute(i.data.copy()), profile, i.isolated(g.user.copy(), agent), proxy, reopen, i.browser_to.copy())
+            let (to, thread) = browser.start(n, key.copy(), try fs.absolute(i.data.copy()), profile, i.isolated(g.user.copy(), agent), proxy, reopen, browser.BackTo { to: i.browser_to.copy(), waker: i.waker.copy() })
             i.browsers.insert(key.copy(), Browser { to: to, thread: thread, n: n, busy: 0, used: now(), open: false, person: false, asked: String(), asks: List<String>(), held: List<browser.Op>(), actions: 0, secret_ask: Json.Null, site: String(), recording: false, steps: 0, record_by: String(), told: String() })
             i.watch_changed(key.copy())
         }
